@@ -16,7 +16,7 @@ import '../helpers/real-web-standard'
 import http from 'node:http'
 import type { AddressInfo } from 'node:net'
 
-import { SseReader, connectingFetch, describeError, parseArgs, pendingApproval, qualify, toolData } from '@/scripts/qualify-region'
+import { SseReader, connectingFetch, describeError, parseArgs, pendingApproval, qualify, toolBody, toolData } from '@/scripts/qualify-region'
 
 const PROJECT = '0b9e3a52-7a5d-4c1e-9a2b-1f2e3d4c5b6a'
 const ENV = {
@@ -85,6 +85,31 @@ describe('arguments', () => {
     expect(() => parseArgs(swap('--project', 'not-a-uuid'), ENV)).toThrow(/--project/)
     expect(() => parseArgs([...ARGV, '--connect', 'host-without-target'], ENV)).toThrow(/host=target/)
     expect(() => parseArgs([...ARGV, '--surprise', 'x'], ENV)).toThrow(/unknown option/)
+  })
+
+  it('runs the rollback drills, with what each needs from the run', () => {
+    const plain = parseArgs(ARGV, ENV)
+    // Without a member or a kill command those two drills are not run, and say so.
+    expect(plain).toMatchObject({ freshnessSeconds: 30, skipDeletionDrill: false, member: null, killCommand: null, killAfterSeconds: 8, settleWaitMinutes: 30 })
+
+    expect(parseArgs([...ARGV, '--freshness-seconds', '45'], ENV).freshnessSeconds).toBe(45)
+    expect(() => parseArgs([...ARGV, '--freshness-seconds', '0'], ENV)).toThrow(/--freshness-seconds/)
+    expect(parseArgs([...ARGV, '--skip-deletion-drill'], ENV).skipDeletionDrill).toBe(true)
+
+    // The member's password, like the operator's, comes from the environment only.
+    const member = [...ARGV, '--member', 'qualify-member@example.com']
+    const memberEnv = { ...ENV, BACKENLY_QUALIFY_MEMBER_PASSWORD: 'not-a-real-member-password' }
+    expect(parseArgs(member, memberEnv).member).toEqual({ email: 'qualify-member@example.com', password: memberEnv.BACKENLY_QUALIFY_MEMBER_PASSWORD, totp: null })
+    expect(() => parseArgs(member, ENV)).toThrow(/BACKENLY_QUALIFY_MEMBER_PASSWORD must/)
+    expect(() => parseArgs([...member, '--member-password', 'x'], memberEnv)).toThrow(/BACKENLY_QUALIFY_MEMBER_PASSWORD only/)
+    expect(() => parseArgs([...ARGV, '--member', 'qualify-operator@example.com'], memberEnv)).toThrow(/must not be the operator/)
+    expect(() => parseArgs([...ARGV, '--member', 'not-an-email'], memberEnv)).toThrow(/--member takes an email/)
+    expect(parseArgs(member, { ...memberEnv, BACKENLY_QUALIFY_MEMBER_TOTP: '654321' }).member?.totp).toBe('654321')
+
+    const kill = parseArgs([...ARGV, '--kill-command', 'aws ecs stop-task --cluster c --task t', '--kill-after-seconds', '5', '--settle-wait-minutes', '40'], ENV)
+    expect(kill).toMatchObject({ killCommand: 'aws ecs stop-task --cluster c --task t', killAfterSeconds: 5, settleWaitMinutes: 40 })
+    expect(() => parseArgs([...ARGV, '--kill-after-seconds', '0'], ENV)).toThrow(/--kill-after-seconds/)
+    expect(() => parseArgs([...ARGV, '--settle-wait-minutes', '0'], ENV)).toThrow(/--settle-wait-minutes/)
   })
 })
 
@@ -162,6 +187,13 @@ describe('tool answers', () => {
     expect(toolData({ text: 'Approval 1234… is pending.', structured: null })).toBeNull()
     expect(toolData({ text: '', structured: { ok: true, summary: 'Done.' } })).toBeNull()
   })
+
+  it('reads a refused call\'s whole body, where its code and the change it recorded are', () => {
+    const refused = { ok: false, code: 'MIGRATION_FAILED', recovered: true, change: { seq: 7, status: 'recovered' } }
+    expect(toolBody({ text: 'Migration failed part-way', structured: refused })).toEqual(refused)
+    expect(toolBody({ text: JSON.stringify(refused), structured: null })).toEqual(refused)
+    expect(toolBody({ text: 'not JSON', structured: null })).toBeNull()
+  })
 })
 
 describe('a failure in the report', () => {
@@ -213,11 +245,18 @@ describe('a region that cannot be reached', () => {
     expect(status('table')).toBe('skip')
     expect(status('v1-own-rows-only')).toBe('skip')
     // Recovery and rollback are skipped as unproven, never passed.
-    for (const check of ['change', 'undone', 'snapshot', 'download-from-region', 'restore', 'serves-after-restore', 'functions-after-restore']) {
+    for (const check of [
+      'change', 'undone', 'snapshot', 'download-from-region', 'restore', 'serves-after-restore', 'functions-after-restore',
+      'nothing-waiting', 'recovered-after-failing-part-way', 'recovered-after-failing-verification', 'served-after-a-change',
+      'agent-asks-a-person-decides', 'restore-needs-a-person', 'restored-with-acknowledgement', 'reapplied-and-served',
+      'restore-refused-under-a-later-change', 'drill-tables-removed', 'deleted-with-its-history',
+    ]) {
       expect([check, status(check)]).toEqual([check, 'skip'])
     }
     expect(results.filter((r) => r.status === 'pass')).toEqual([])
     expect(lines.join('\n')).toContain('REGION NOT QUALIFIED')
+    // The drills a run was not given what they need for are named, not passed.
+    expect(lines.join('\n')).toMatch(/Not run here: .*--member not given.*--kill-command not given/)
     // No key or password ever reaches the output.
     expect(lines.join('\n')).not.toMatch(/mcp_live_test|proj_live_test|not-a-real-operator-password/)
   }, 60_000)

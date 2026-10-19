@@ -19,7 +19,17 @@
  *     --operator <the probe project's owner, by email> \
  *     [--connect us-east-1.api.staging.backenly.com=<regional ALB DNS>,staging.backenly.com=<home ALB DNS>] \
  *     [--report qualify-us-east-1.json] [--skip-revocation] [--approval-wait-minutes 10] \
- *     [--job-wait-minutes 15] [--repair-wait-minutes 6]
+ *     [--job-wait-minutes 15] [--repair-wait-minutes 6] [--freshness-seconds 30] \
+ *     [--member <a developer or viewer of the probe project, by email>] \
+ *     [--kill-command '<kills the process serving the control plane>'] [--kill-after-seconds 8] \
+ *     [--settle-wait-minutes 30] [--skip-deletion-drill]
+ *
+ * The member's password comes from BACKENLY_QUALIFY_MEMBER_PASSWORD (and its
+ * current two-factor code, if it has two-factor sign-in, from
+ * BACKENLY_QUALIFY_MEMBER_TOTP). The kill command is run with a shell while the
+ * drill's governed changes are applying: an ECS stop-task of the web tasks, for
+ * instance. Without --member or --kill-command those two drills are reported
+ * as not run.
  *
  * --connect is for hosts not in public DNS (staging): the TCP connection goes to
  * the named target while TLS (SNI, certificate validation) and the Host header
@@ -63,19 +73,43 @@
  *              instead proves nothing about the region and fails the check.
  *              The changes the drill made are then restored from the console,
  *              newest first
+ *   rollback drills
+ *              Backenly puts a change back on its own when it fails part-way
+ *              (a migration whose second statement cannot apply) and when it
+ *              fails its verification (a rename that would break end-user
+ *              sign-in). A coding agent's request to restore a change waits for
+ *              a person, who declines it. A restore that would set rows aside
+ *              names them and is refused without a person's acknowledgement,
+ *              then runs with it, verified; reapplying brings the table and its
+ *              rows back. A restore is refused, changing nothing, while a later
+ *              change depends on what it would undo. PostgREST at the region
+ *              serves a new table, stops serving a restored one and serves a
+ *              reapplied one within --freshness-seconds, each timed
  *   recovery   the console asks for a snapshot and home queues it for the
  *              region, which takes it; its download link is the region's own
  *              bucket, never the home host; rows changed after it are put back
  *              by a restore the region carries out, and both users then see
  *              exactly their rows from the snapshot, on /api/v1 and PostgREST.
- *              Each wait is timed, from the request to the job's end
+ *              Each wait is timed, from the request to the job's end. With
+ *              --member, a member without the administer role is refused the
+ *              snapshot restore (403) and a change's restore
  *              The autonomy status the control plane reports closes the phase
+ *   process kill
+ *              with --kill-command: the process serving the control plane is
+ *              killed while the drill's governed changes apply; the change it
+ *              cut off is settled by the region's scheduler as needing a person
+ *              within --settle-wait-minutes, and the change lock is free again
+ *   deletion   unless --skip-deletion-drill: a project of the drill's own, in
+ *              the region, with a governed change, the vault its restore kept
+ *              the table in and a preview branch, is deleted, and is gone at
+ *              home and in the region
  *   revocation a throwaway key is revoked (a person approves it in the Review
  *              Queue, by design) and the region refuses it; the wait is timed
  * Not here, and reported as not run: the infrastructure failure drills
  * (projection lag, blocked peering, a database failover, killed PostgREST
- * tasks). Those need a fault made inside the region's infrastructure and are
- * qualification steps of their own.
+ * tasks), which need a fault made inside the region's infrastructure and are
+ * qualification steps of their own, and a restore refused because its restore
+ * point was altered, which needs database access.
  *
  * The fixtures stay for the next run; this run's rows and file are removed, and
  * so is the table the rollback check adds. Its two end users stay, with random
@@ -84,6 +118,7 @@
  * retention.
  */
 
+import { spawnSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import dns from 'node:dns'
 import fs from 'node:fs'
@@ -117,6 +152,25 @@ export interface QualifyArgs {
   operatorPassword: string
   /** The operator's current two-factor code, when the account has two-factor sign-in. */
   operatorTotp: string | null
+  /** The longest PostgREST at the region may take to serve a schema change, or to stop serving what a restore removed. */
+  freshnessSeconds: number
+  /** Skip the drill that creates, changes, restores and deletes a project of its own in the region. */
+  skipDeletionDrill: boolean
+  /**
+   * A member of the probe project WITHOUT its administer role (a developer or a
+   * viewer), who must be refused a snapshot restore. Null: that drill is not run.
+   */
+  member: { email: string; password: string; totp: string | null } | null
+  /**
+   * A shell command that kills the process serving the control plane while a
+   * governed change is applying (an ECS stop-task, for instance). Null: the
+   * mid-change process kill is not run.
+   */
+  killCommand: string | null
+  /** How long after the drill's changes start the kill command runs. */
+  killAfterSeconds: number
+  /** How long the region's scheduler is given to settle a change whose process died. */
+  settleWaitMinutes: number
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -126,12 +180,15 @@ export function parseArgs(argv: string[], env: Record<string, string | undefined
   const switches = new Set<string>()
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
-    if (arg === '--skip-revocation') {
+    if (arg === '--skip-revocation' || arg === '--skip-deletion-drill') {
       switches.add(arg)
       continue
     }
     if (/^--(mcp-key|project-key|key)/.test(arg)) {
       throw new Error('keys are read from BACKENLY_QUALIFY_MCP_KEY and BACKENLY_QUALIFY_PROJECT_KEY only, never from the command line')
+    }
+    if (/^--member-password/.test(arg)) {
+      throw new Error('the member\'s password is read from BACKENLY_QUALIFY_MEMBER_PASSWORD only, never from the command line')
     }
     if (/^--(operator-password|password|token|session)/.test(arg)) {
       throw new Error('the operator\'s password is read from BACKENLY_QUALIFY_OPERATOR_PASSWORD only, never from the command line')
@@ -139,7 +196,11 @@ export function parseArgs(argv: string[], env: Record<string, string | undefined
     if (!arg.startsWith('--') || argv[i + 1] === undefined) throw new Error(`unexpected argument: ${arg}`)
     flags.set(arg, argv[++i])
   }
-  const known = ['--project', '--region', '--api', '--home', '--connect', '--report', '--approval-wait-minutes', '--job-wait-minutes', '--repair-wait-minutes', '--operator']
+  const known = [
+    '--project', '--region', '--api', '--home', '--connect', '--report', '--approval-wait-minutes', '--job-wait-minutes',
+    '--repair-wait-minutes', '--operator', '--freshness-seconds', '--member', '--kill-command', '--kill-after-seconds',
+    '--settle-wait-minutes',
+  ]
   for (const f of flags.keys()) if (!known.includes(f)) throw new Error(`unknown option: ${f}`)
 
   const project = flags.get('--project') ?? ''
@@ -198,6 +259,31 @@ export function parseArgs(argv: string[], env: Record<string, string | undefined
     throw new Error('BACKENLY_QUALIFY_OPERATOR_TOTP, when set, must hold the operator\'s current six-digit code')
   }
 
+  const freshness = Number(flags.get('--freshness-seconds') ?? '30')
+  if (!Number.isFinite(freshness) || freshness <= 0 || freshness > 600) throw new Error('--freshness-seconds must be between 0 and 600')
+
+  let member: QualifyArgs['member'] = null
+  const memberEmail = flags.get('--member')?.trim()
+  if (memberEmail !== undefined) {
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(memberEmail)) throw new Error('--member takes an email: a member of the probe project without its administer role')
+    if (memberEmail.toLowerCase() === operator.toLowerCase()) throw new Error('--member must not be the operator, who administers the project')
+    const memberPassword = env.BACKENLY_QUALIFY_MEMBER_PASSWORD ?? ''
+    if (!memberPassword) throw new Error('BACKENLY_QUALIFY_MEMBER_PASSWORD must hold the member\'s password')
+    const memberTotp = env.BACKENLY_QUALIFY_MEMBER_TOTP?.trim() || null
+    if (memberTotp !== null && !/^\d{6}$/.test(memberTotp)) {
+      throw new Error('BACKENLY_QUALIFY_MEMBER_TOTP, when set, must hold the member\'s current six-digit code')
+    }
+    member = { email: memberEmail, password: memberPassword, totp: memberTotp }
+  }
+
+  const killCommand = flags.get('--kill-command')?.trim() || null
+  const killAfter = Number(flags.get('--kill-after-seconds') ?? '8')
+  if (!Number.isFinite(killAfter) || killAfter < 1 || killAfter > 120) throw new Error('--kill-after-seconds must be between 1 and 120')
+  // A change counts as interrupted 15 minutes after it began (RECOVERY_LEASE_MS),
+  // and the region's scheduler settles such changes every 10 minutes.
+  const settleWait = Number(flags.get('--settle-wait-minutes') ?? '30')
+  if (!Number.isFinite(settleWait) || settleWait <= 0 || settleWait > 120) throw new Error('--settle-wait-minutes must be between 0 and 120')
+
   return {
     project,
     region,
@@ -214,6 +300,12 @@ export function parseArgs(argv: string[], env: Record<string, string | undefined
     operator,
     operatorPassword,
     operatorTotp,
+    freshnessSeconds: freshness,
+    skipDeletionDrill: switches.has('--skip-deletion-drill'),
+    member,
+    killCommand,
+    killAfterSeconds: killAfter,
+    settleWaitMinutes: settleWait,
   }
 }
 
@@ -372,14 +464,24 @@ class Mcp {
   }
 
   async call(name: string, args: Record<string, unknown>): Promise<ToolOutcome> {
+    const outcome = await this.attempt(name, args)
+    if (!outcome.ok) throw new Error(`${name}: ${outcome.text.slice(0, 500)}`)
+    return outcome
+  }
+
+  /**
+   * A call whose refusal is the point: the tool's answer either way, with `ok`
+   * false where `call` would throw. A refused tool's structured result is its
+   * whole body ({ ok: false, code, ... }).
+   */
+  async attempt(name: string, args: Record<string, unknown>): Promise<ToolOutcome & { ok: boolean }> {
     const result = (await this.client.callTool({ name, arguments: args })) as {
       content?: Array<{ type: string; text?: string }>
       structuredContent?: unknown
       isError?: boolean
     }
     const text = (result.content ?? []).filter((c) => c.type === 'text').map((c) => c.text ?? '').join('\n')
-    if (result.isError) throw new Error(`${name}: ${text.slice(0, 500)}`)
-    return { text, structured: result.structuredContent ?? null }
+    return { ok: !result.isError, text, structured: result.structuredContent ?? null }
   }
 
   async close(): Promise<void> {
@@ -406,7 +508,23 @@ const SANDBOX_FUNCTION = 'qualify-count'
 
 const NOT_RUN = [
   'the infrastructure failure drills: projection lag, blocked peering, a database failover, killed PostgREST tasks',
+  // A checkpoint or a vault can only be altered with database access, which a
+  // qualification run does not have. Pinned instead by
+  // tests/integration/change-restore-point-unavailable.spec.ts and
+  // tests/integration/change-ledger-residency.spec.ts.
+  'a restore refused because its restore point was altered (needs database access)',
 ]
+
+/** The answer of a tool call, refused or not: its structured result, or the JSON its text carries. */
+export function toolBody<T = Record<string, unknown>>(outcome: ToolOutcome): T | null {
+  if (outcome.structured && typeof outcome.structured === 'object') return outcome.structured as T
+  try {
+    const parsed = JSON.parse(outcome.text)
+    return parsed && typeof parsed === 'object' ? (parsed as T) : null
+  } catch {
+    return null
+  }
+}
 
 /** How often a queued snapshot or restore is looked at while it waits for its region. */
 const JOB_POLL_MS = 5_000
@@ -417,6 +535,8 @@ function percentile(sorted: number[], p: number): number {
 
 export async function qualify(args: QualifyArgs, log: (line: string) => void = console.log): Promise<{ ok: boolean; results: Result[] }> {
   const results: Result[] = []
+  /** What this run did not do, beside what no run here does: the report says so rather than passing it. */
+  const notRun = [...NOT_RUN]
   const run = randomBytes(4).toString('hex')
   const theFetch = Object.keys(args.connect).length ? connectingFetch(args.connect) : globalThis.fetch
   // The SDK uses the global fetch; route it the same way.
@@ -471,6 +591,8 @@ export async function qualify(args: QualifyArgs, log: (line: string) => void = c
 
   /** The operator's session at the home host, once signed in. Never printed. */
   let session: { token: string; refreshToken: string | null } | null = null
+  /** The operator's user id, from the sign-in: a new project's body names its owner. */
+  let operatorId: string | null = null
   const asOperator = (init: RequestInit = {}): RequestInit => ({
     ...init,
     headers: { 'content-type': 'application/json', authorization: `Bearer ${session!.token}` },
@@ -486,8 +608,9 @@ export async function qualify(args: QualifyArgs, log: (line: string) => void = c
     id: string
     seq: number
     touched: string[]
+    actor: { type: string }
     outcome: { state: string }
-    action: { kind: string; available: boolean; reason?: string } | null
+    action: { kind: string; available: boolean; reason?: string; recordId?: string } | null
   }>> {
     const { changes } = await operatorJson(`/api/projects/${args.project}/changes?limit=50`)
     return ((changes ?? []) as Array<{ seq: number }>).filter((c) => c.seq > seq) as any
@@ -618,6 +741,7 @@ export async function qualify(args: QualifyArgs, log: (line: string) => void = c
       )
       must(res.status === 200 && typeof body.token === 'string', `the sign-in at the home host answered ${res.status}`)
       session = { token: body.token, refreshToken: typeof body.refreshToken === 'string' ? body.refreshToken : null }
+      operatorId = typeof body.user?.id === 'string' ? body.user.id : null
       await operatorJson(`/api/projects/${args.project}/schema-versions`)
       return `${args.operator} signed in at the home host and can open the probe project`
     })
@@ -1020,6 +1144,228 @@ export async function qualify(args: QualifyArgs, log: (line: string) => void = c
       return `restored the state before ${done.join(', then ')}: ${probeColumn} and its index are gone`
     })
 
+    // ── rollback drills ──────────────────────────────────────────────────────
+    // The rollback check above restores a change a person chose to restore,
+    // losslessly. These are the other ways rollback has to hold up in a region:
+    // Backenly putting a failed change back on its own, a restore that needs a
+    // person because it sets rows aside, one refused because a later change
+    // depends on what it would undo, and how soon PostgREST at the region
+    // serves what each of them did.
+    log('\n── rollback drills (recovery on its own, recovery that needs a person, recovery refused)')
+    /** The newest change before the drills, so the drills' changes are told apart from older ones. */
+    let seqBeforeDrills = 0
+
+    /** A table's columns in the region's catalog; null when the table does not exist. */
+    const columnsOf = async (table: string): Promise<string[] | null> => {
+      const out = await mcp!.attempt('get_table_schema', { tableName: table })
+      if (!out.ok) {
+        if (/does not exist/i.test(out.text)) return null
+        throw new Error(`get_table_schema ${table}: ${out.text.slice(0, 200)}`)
+      }
+      return (toolData<{ columns?: Array<{ name?: string }> }>(out)?.columns ?? []).map((c) => String(c.name))
+    }
+
+    /** The newest governed change after `seq` that touched `table`. */
+    const changeTouching = async (table: string, seq: number) => {
+      const found = (await changesSince(seq)).find((c) => c.touched.includes(table))
+      must(found, `no governed change was recorded for ${table}`)
+      return found!
+    }
+
+    /** What PostgREST at the region answers when a table is read with the probe project's publishable key. */
+    const servedStatus = async (table: string): Promise<number> =>
+      (await theFetch(apiUrl(`/api/v2/${args.project}/${table}?select=*&limit=1`), { headers: { 'x-api-key': args.projectKey } })).status
+
+    /**
+     * Milliseconds from `since` until PostgREST at the region serves `table` (a
+     * 200), or stops serving it, within --freshness-seconds. PostgREST answers
+     * from a schema cache, so this is how long a change, a restore or a reapply
+     * takes to reach an app.
+     */
+    const untilServed = async (table: string, want: 'served' | 'gone', since: number): Promise<number> => {
+      const bound = since + args.freshnessSeconds * 1_000
+      for (;;) {
+        const status = await servedStatus(table)
+        if (want === 'served' ? status === 200 : status !== 200) return Date.now() - since
+        if (Date.now() > bound) {
+          throw new Error(
+            `PostgREST at the region was ${want === 'served' ? 'still not serving' : 'still serving'} ${table} ` +
+              `${args.freshnessSeconds} s after the change (it answered ${status})`,
+          )
+        }
+        await new Promise((r) => setTimeout(r, 250))
+      }
+    }
+
+    /** One change's preview or restore from the console, as the operator. */
+    const changeCall = async (projectId: string, changeId: string, what: 'preview' | 'restore', body: unknown) => {
+      const res = await theFetch(
+        homeUrl(`/api/projects/${projectId}/changes/${changeId}/${what}`),
+        asOperator({ method: 'POST', body: JSON.stringify(body) }),
+      )
+      return { status: res.status, body: await json(res) }
+    }
+
+    await check('rollback-drills', 'nothing-waiting', ['sign-in', 'connect'], async () => {
+      const recent = await changesSince(0)
+      // Backenly does not put a change back on its own while another one waits
+      // for a person (recoverAutomatically), so a drill would read as a failure.
+      const waiting = recent.filter((c) => c.outcome.state === 'needs_attention' || c.outcome.state === 'in_progress')
+      must(
+        waiting.length === 0,
+        `${waiting.map((c) => `#${c.seq}`).join(', ')} waits for a person or is in progress, and Backenly recovers nothing on its own ` +
+          'meanwhile: settle them in the console (Restore previous state, or Keep) and run again',
+      )
+      seqBeforeDrills = recent[0]?.seq ?? 0
+      return 'no change waits for a person, so Backenly may recover on its own'
+    })
+
+    await check('rollback-drills', 'recovered-after-failing-part-way', ['nothing-waiting', 'insert-a'], async () => {
+      // The first statement takes; the second cannot, because this run's rows in
+      // TABLE are longer than it allows. The new table is empty, so putting the
+      // state back loses nothing and Backenly does it without asking.
+      const made = `qualify_partway_${run}`
+      const out = await mcp!.attempt('apply_migration', {
+        sql: `CREATE TABLE ${made} (note text);\nALTER TABLE ${TABLE} ADD CONSTRAINT qualify_tight_${run} CHECK (length(body) < 3)`,
+      })
+      const body = toolBody<{ code?: string; recovered?: boolean; change?: { seq?: number; status?: string } }>(out)
+      must(!out.ok && body?.code === 'MIGRATION_FAILED', `the migration did not fail part-way, as the drill needs: ${out.text.slice(0, 200)}`)
+      must(
+        body?.recovered === true && body.change?.status === 'recovered',
+        `Backenly did not put the state back on its own: ${JSON.stringify(body?.change ?? null).slice(0, 200)}`,
+      )
+      must((await columnsOf(made)) === null, `${made} is still in the region's schema after the recovery`)
+      const listed = (await changesSince(seqBeforeDrills)).find((c) => c.seq === body!.change!.seq)
+      must(listed?.outcome.state === 'recovered', `the console lists change #${body!.change!.seq} as ${listed?.outcome.state ?? 'missing'}, not recovered`)
+      return `change #${body!.change!.seq} failed part-way, and Backenly put the state before it back on its own: ${made} is gone`
+    })
+
+    await check('rollback-drills', 'recovered-after-failing-verification', ['nothing-waiting', 'sign-up-a'], async () => {
+      // A rename of a column end-user sign-in needs applies cleanly and fails
+      // Backenly's own verification, since sign-in would break. Renaming it back
+      // loses nothing, so Backenly does it without asking.
+      const out = await mcp!.attempt('apply_migration', { sql: 'ALTER TABLE users RENAME COLUMN email TO login_email' })
+      const body = toolBody<{ code?: string; recovered?: boolean; change?: { seq?: number; status?: string; reason?: string } }>(out)
+      must(!out.ok && body?.code === 'VERIFICATION_FAILED', `the rename did not fail verification, as the drill needs: ${out.text.slice(0, 200)}`)
+      must(
+        body?.recovered === true && body.change?.status === 'recovered',
+        `Backenly did not put users back on its own: ${JSON.stringify(body?.change ?? null).slice(0, 200)}`,
+      )
+      const columns = await columnsOf('users')
+      must(columns?.includes('email') && !columns.includes('login_email'), `users is not as it was after the recovery: ${columns?.join(', ')}`)
+      return `change #${body!.change!.seq} failed verification (${String(body!.change!.reason ?? 'sign-in would break').slice(0, 120)}), and Backenly renamed the column back on its own`
+    })
+
+    const keptTable = `qualify_kept_${run}`
+    let kept: { id: string; seq: number } | null = null
+    await check('rollback-drills', 'served-after-a-change', ['nothing-waiting'], async () => {
+      const started = Date.now()
+      await fixture('apply_migration', { sql: `CREATE TABLE ${keptTable} (note text)` })
+      const applied = Date.now()
+      const made = await changeTouching(keptTable, seqBeforeDrills)
+      must(made.outcome.state === 'healthy', `the change that created ${keptTable} is ${made.outcome.state}, not applied and verified`)
+      kept = { id: made.id, seq: made.seq }
+      const ms = await untilServed(keptTable, 'served', applied)
+      return `change #${made.seq} applied and verified in ${seconds(applied - started)}; PostgREST at the region served ${keptTable} ${seconds(ms)} later`
+    })
+
+    await check('rollback-drills', 'agent-asks-a-person-decides', ['served-after-a-change'], async () => {
+      for (const n of [1, 2, 3]) await fixture('db_insert', { table: keptTable, row: { note: `${run}-${n}` } })
+      // A coding agent may ask for a restore; only a person can let it run.
+      const asked = await mcp!.attempt('deploy', { action: 'revert_change', changeId: kept!.id })
+      const approvalId = pendingApproval(asked)
+      must(approvalId, `the agent's request to restore #${kept!.seq} was not parked for a person: ${asked.text.slice(0, 200)}`)
+      must((await columnsOf(keptTable)) !== null, `${keptTable} changed while the agent's request waited for a person`)
+      // The operator declines it here; the restore below is the operator's own.
+      const declined = await theFetch(
+        homeUrl(`/api/projects/${args.project}/agent-approvals`),
+        asOperator({ method: 'POST', body: JSON.stringify({ approvalId, decision: 'reject' }) }),
+      )
+      must(declined.ok, `declining the agent's request answered ${declined.status}`)
+      must((await columnsOf(keptTable)) !== null, `${keptTable} changed when the agent's request was declined`)
+      return `the agent asked to restore #${kept!.seq}; the request waited for a person (${approvalId}), who declined it, and nothing changed`
+    })
+
+    let acknowledgement: Record<string, number> | null = null
+    await check('rollback-drills', 'restore-needs-a-person', ['agent-asks-a-person-decides'], async () => {
+      const preview = (await changeCall(args.project, kept!.id, 'preview', {})).body.preview
+      must(
+        preview?.safety === 'needs_approval',
+        `restoring #${kept!.seq} is ${preview?.safety ?? 'not previewed'}, not needs_approval: ${String(preview?.reason ?? '').slice(0, 200)}`,
+      )
+      acknowledgement = (preview.acknowledgement ?? null) as Record<string, number> | null
+      const setAside = Object.entries(acknowledgement ?? {}).find(([key]) => key.startsWith('rows_set_aside:') && key.includes(keptTable))
+      must(setAside?.[1] === 3, `the preview measured ${JSON.stringify(acknowledgement)}, not the 3 rows this run wrote to ${keptTable}`)
+      const refused = await changeCall(args.project, kept!.id, 'restore', { seq: kept!.seq })
+      must(
+        refused.status === 409 && refused.body.code === 'NEEDS_APPROVAL',
+        `a restore without the acknowledgement answered ${refused.status} ${refused.body.code ?? ''}, not 409 NEEDS_APPROVAL`,
+      )
+      must((await columnsOf(keptTable)) !== null, `${keptTable} changed although the restore was refused`)
+      return 'the preview names the 3 rows the restore would set aside; without a person acknowledging them the restore was refused, and nothing changed'
+    })
+
+    let recoveryRecord: string | null = null
+    await check('rollback-drills', 'restored-with-acknowledgement', ['restore-needs-a-person'], async () => {
+      const asked = Date.now()
+      const res = await changeCall(args.project, kept!.id, 'restore', { seq: kept!.seq, acknowledged: acknowledgement })
+      must(res.status === 200 && res.body.status === 'restored', `the acknowledged restore answered ${res.status}: ${String(res.body.error ?? '').slice(0, 200)}`)
+      must(res.body.verification?.outcome === 'confirmed', `#${kept!.seq} was restored but not verified against its restore point`)
+      recoveryRecord = typeof res.body.recoveryId === 'string' ? res.body.recoveryId : null
+      must((await columnsOf(keptTable)) === null, `${keptTable} is still in the region's schema after the restore`)
+      const ms = await untilServed(keptTable, 'gone', asked)
+      return `restored as #${res.body.recoverySeq} and verified, its 3 rows kept aside; PostgREST at the region stopped serving ${keptTable} ${seconds(ms)} after the restore was asked for`
+    })
+
+    await check('rollback-drills', 'reapplied-and-served', ['restored-with-acknowledgement'], async () => {
+      // Reapplying restores the restore: the table comes back, with its rows.
+      must(recoveryRecord, 'the restore named no recovery record to reapply')
+      const preview = (await changeCall(args.project, recoveryRecord!, 'preview', {})).body.preview
+      must(
+        preview?.action === 'reapply' && preview.safety === 'lossless',
+        `reapplying #${kept!.seq} is ${preview?.safety ?? 'not previewed'}: ${String(preview?.reason ?? '').slice(0, 200)}`,
+      )
+      const asked = Date.now()
+      const res = await changeCall(args.project, recoveryRecord!, 'restore', { seq: preview.seq })
+      must(res.status === 200 && res.body.verification?.outcome === 'confirmed', `the reapply answered ${res.status}: ${String(res.body.error ?? '').slice(0, 200)}`)
+      const ms = await untilServed(keptTable, 'served', asked)
+      const rows = toolData<{ rows?: unknown[] }>(await mcp!.call('db_query', { table: keptTable, limit: 10 }))?.rows ?? []
+      must(rows.length === 3, `${keptTable} came back with ${rows.length} rows, not its 3`)
+      return `reapplied and verified, with its 3 rows; PostgREST at the region served ${keptTable} again ${seconds(ms)} after the reapply was asked for`
+    })
+
+    const parentTable = `qualify_parent_${run}`
+    await check('rollback-drills', 'restore-refused-under-a-later-change', ['nothing-waiting'], async () => {
+      await fixture('apply_migration', { sql: `CREATE TABLE ${parentTable} (note text)` })
+      const first = await changeTouching(parentTable, seqBeforeDrills)
+      await fixture('apply_migration', { sql: `ALTER TABLE ${parentTable} ADD COLUMN later text` })
+      const second = await changeTouching(parentTable, first.seq)
+      const preview = (await changeCall(args.project, first.id, 'preview', {})).body.preview
+      must(preview?.safety === 'blocked', `restoring #${first.seq} with #${second.seq} in effect is ${preview?.safety ?? 'not previewed'}, not blocked`)
+      must(
+        ((preview.blockedBy ?? []) as Array<{ seq?: number }>).some((b) => b.seq === second.seq),
+        `the preview does not name #${second.seq} as what blocks it: ${JSON.stringify(preview.blockedBy ?? []).slice(0, 200)}`,
+      )
+      const refused = await changeCall(args.project, first.id, 'restore', { seq: first.seq })
+      must(refused.status === 409 && refused.body.code === 'CONFLICT', `the restore answered ${refused.status} ${refused.body.code ?? ''}, not 409 CONFLICT`)
+      must((await columnsOf(parentTable))?.includes('later'), `${parentTable} changed although the restore was refused`)
+      // Newest first, both can go.
+      const undone = [`#${second.seq} ${await restoreFromConsole(second)}`, `#${first.seq} ${await restoreFromConsole(first)}`]
+      must((await columnsOf(parentTable)) === null, `${parentTable} is still in the region's schema after both restores`)
+      return `restoring #${first.seq} was refused while #${second.seq} depends on it, and nothing changed; newest first, both were restored: ${undone.join(', then ')}`
+    })
+
+    await check('rollback-drills', 'drill-tables-removed', ['reapplied-and-served'], async () => {
+      // keptTable is back after the reapply: restoring its change again, with
+      // the person's acknowledgement of its rows, leaves the project as it was.
+      const preview = (await changeCall(args.project, kept!.id, 'preview', {})).body.preview
+      must(preview?.acknowledgement, `restoring #${kept!.seq} again asked for no acknowledgement: ${preview?.safety ?? 'not previewed'}`)
+      const res = await changeCall(args.project, kept!.id, 'restore', { seq: kept!.seq, acknowledged: preview.acknowledgement })
+      must(res.status === 200 && res.body.status === 'restored', `the final restore answered ${res.status}: ${String(res.body.error ?? '').slice(0, 200)}`)
+      must((await columnsOf(keptTable)) === null, `${keptTable} is still in the region's schema`)
+      return `${keptTable} is gone again, its rows kept aside in the restore's vault`
+    })
+
     // ── recovery ─────────────────────────────────────────────────────────────
     log('\n── recovery (a snapshot, taken and restored in the region)')
     let snapshotId: string | null = null
@@ -1100,6 +1446,51 @@ export async function qualify(args: QualifyArgs, log: (line: string) => void = c
       return `${SANDBOX_FUNCTION} still reads the restored table (${count![1]} rows)`
     })
 
+    // A snapshot restore rewrites the whole database: only the project's
+    // administrators may ask for one, whatever else a member may do.
+    if (!args.member) {
+      notRun.push('a snapshot restore refused to a project member without the administer role (--member not given)')
+    } else {
+      await check('recovery', 'restore-refused-to-a-non-administrator', ['snapshot'], async () => {
+        const m = args.member!
+        const signIn = await theFetch(homeUrl('/api/auth/login'), {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ email: m.email, password: m.password, ...(m.totp ? { totpCode: m.totp } : {}) }),
+        })
+        const signedIn = await json(signIn)
+        must(signedIn.code !== 'TOTP_REQUIRED', 'the member account has two-factor sign-in: set BACKENLY_QUALIFY_MEMBER_TOTP to its current code')
+        must(signIn.status === 200 && typeof signedIn.token === 'string', `the member's sign-in at the home host answered ${signIn.status}`)
+        const asMember = (init: RequestInit = {}): RequestInit => ({
+          ...init,
+          headers: { 'content-type': 'application/json', authorization: `Bearer ${signedIn.token}` },
+        })
+        try {
+          // The member can open the project, so a refusal is about the role, not access.
+          const listed = await theFetch(homeUrl(`/api/projects/${args.project}/changes?limit=1`), asMember())
+          must(listed.status === 200, `${m.email} cannot open the probe project (${listed.status}): make it a developer or viewer of the project`)
+          const restore = await theFetch(homeUrl(snapshotsPath), asMember({ method: 'PUT', body: JSON.stringify({ backupId: snapshotId }) }))
+          const refused = await json(restore)
+          must(
+            restore.status === 403 && refused.code === 'PROJECT_ROLE_INSUFFICIENT',
+            `a snapshot restore by ${m.email} answered ${restore.status} ${refused.code ?? ''}, not 403 PROJECT_ROLE_INSUFFICIENT`,
+          )
+          // Nor may the member restore a governed change: those routes do not exist for anyone below an administrator.
+          const latest = ((await json(listed)).changes ?? [])[0] as { id?: string } | undefined
+          if (latest?.id) {
+            const preview = await theFetch(homeUrl(`/api/projects/${args.project}/changes/${latest.id}/preview`), asMember({ method: 'POST', body: '{}' }))
+            must(preview.status === 404, `a change's restore preview answered ${preview.status} to ${m.email}, not 404`)
+          }
+          return `${m.email}, a member without the administer role, was refused the snapshot restore (403 PROJECT_ROLE_INSUFFICIENT)${latest?.id ? ' and a change\'s restore' : ''}`
+        } finally {
+          await theFetch(homeUrl('/api/auth/logout'), {
+            method: 'POST',
+            headers: { authorization: `Bearer ${signedIn.token}`, ...(signedIn.refreshToken ? { cookie: `refresh-token=${signedIn.refreshToken}` } : {}) },
+          }).catch(() => log(`  note  ${m.email} could not be signed out; sign out of every device in the console`))
+        }
+      })
+    }
+
     // ── autonomy ─────────────────────────────────────────────────────────────
     log('\n── autonomy')
     await check('autonomy', 'status', ['connect'], async () => {
@@ -1107,6 +1498,158 @@ export async function qualify(args: QualifyArgs, log: (line: string) => void = c
       must(status.text.length > 0, 'the control plane reported nothing')
       return status.text.replace(/\s+/g, ' ').slice(0, 200)
     })
+
+    // ── a change whose process dies ──────────────────────────────────────────
+    // The process applying a governed change can die mid-change: a deploy, a
+    // crash, a task the platform replaces. The change must not stay "in
+    // progress" forever, holding its project's change lock: the region's
+    // scheduler settles it as needing a person, from its record and the
+    // region's catalog.
+    log('\n── a change whose process dies')
+    if (!args.killCommand) {
+      notRun.push('a governed change whose process is killed while it applies (--kill-command not given)')
+    } else {
+      await check('rollback-drills', 'settled-after-its-process-died', ['nothing-waiting'], async () => {
+        const before = (await changesSince(0))[0]?.seq ?? 0
+        const made: string[] = []
+        let stop = false
+        // One change after another, so one is applying when the kill lands.
+        const stream = (async () => {
+          for (let i = 0; !stop && i < 100; i++) {
+            const table = `qualify_kill${i}_${run}`
+            made.push(table)
+            await mcp!.attempt('apply_migration', { sql: `CREATE TABLE ${table} (note text)` }).catch(() => undefined)
+          }
+        })()
+        await new Promise((r) => setTimeout(r, args.killAfterSeconds * 1_000))
+        log(`        running the kill command, ${args.killAfterSeconds} s into the drill's changes`)
+        const killed = spawnSync(args.killCommand!, { shell: true, encoding: 'utf8', timeout: 180_000 })
+        stop = true
+        await stream
+        must(killed.status === 0, `the kill command exited ${killed.status ?? killed.signal}: ${String(killed.stderr ?? '').trim().slice(0, 200)}`)
+        // MCP was served by the process that died: connect again, to whatever serves it now.
+        await mcp!.close()
+        const reconnectBy = Date.now() + 5 * 60_000
+        for (;;) {
+          try {
+            mcp = await Mcp.connect(args.home, args.mcpKey, theFetch)
+            break
+          } catch (err) {
+            if (Date.now() > reconnectBy) throw new Error(`the control plane did not come back within 5 minutes of the kill: ${describeError(err)}`)
+            await new Promise((r) => setTimeout(r, 5_000))
+          }
+        }
+        const killedAt = Date.now()
+        // Every change the drill made ends in a final state; one the kill cut off
+        // is settled by the region's scheduler.
+        const deadline = killedAt + args.settleWaitMinutes * 60_000
+        for (;;) {
+          const mine = (await changesSince(before)).filter((c) => c.actor?.type === 'agent')
+          const open = mine.filter((c) => c.outcome.state === 'in_progress')
+          if (open.length === 0) {
+            const cutOff: Array<{ id: string; seq: number }> = []
+            for (const c of mine.filter((x) => x.outcome.state === 'needs_attention')) {
+              const { change } = await operatorJson(`/api/projects/${args.project}/changes/${c.id}`)
+              if (/stopped before it finished/i.test(String(change?.error ?? ''))) cutOff.push(c)
+            }
+            must(
+              cutOff.length > 0,
+              `no change was applying when the process died (${mine.length} changes, each finished): run again with another --kill-after-seconds`,
+            )
+            // A change cut off has no restore point it can vouch for: keep it, and
+            // restore the drill's finished changes, newest first.
+            for (const c of cutOff) {
+              await theFetch(homeUrl(`/api/projects/${args.project}/changes/${c.id}/keep`), asOperator({ method: 'POST', body: JSON.stringify({ seq: c.seq }) }))
+            }
+            for (const c of mine.filter((x) => x.outcome.state === 'healthy')) {
+              await restoreFromConsole(c).catch((err: unknown) => log(`  note  could not restore drill change #${c.seq}: ${describeError(err)}`))
+            }
+            for (const table of made) {
+              if ((await columnsOf(table)) !== null) log(`  note  ${table} is still in the schema; remove it from the console`)
+            }
+            // The change lock is free: a governed change applies again.
+            const after = await mcp!.attempt('apply_migration', { sql: `CREATE TABLE qualify_after_kill_${run} (note text)` })
+            must(after.ok, `a governed change after the drill was refused: ${after.text.slice(0, 200)}`)
+            await restoreFromConsole(await changeTouching(`qualify_after_kill_${run}`, before))
+            return `#${cutOff.map((c) => c.seq).join(', #')} was cut off by the kill and settled as needing a person within ` +
+              `${seconds(Date.now() - killedAt)}; the change lock was free again afterwards`
+          }
+          if (Date.now() > deadline) {
+            throw new Error(
+              `#${open.map((c) => c.seq).join(', #')} is still in progress ${args.settleWaitMinutes} minutes after the process died: ` +
+                `the region's scheduler did not settle it (a change counts as interrupted 15 minutes after it began)`,
+            )
+          }
+          await new Promise((r) => setTimeout(r, 15_000))
+        }
+      })
+    }
+
+    // ── project deletion ─────────────────────────────────────────────────────
+    // Deleting a project removes its change history, the vaults its restores
+    // kept data in and its preview branches, in the region, under the change
+    // ledger's guard. A project of the drill's own, never the probe project.
+    log('\n── project deletion (a project with a change history, a vault and a preview branch)')
+    if (args.skipDeletionDrill) {
+      results.push({ phase: 'deletion', check: 'deleted-with-its-history', status: 'skip', detail: '--skip-deletion-drill', ms: 0 })
+      log('  skip  deletion/deleted-with-its-history: --skip-deletion-drill')
+    } else {
+      await check('deletion', 'deleted-with-its-history', ['sign-in'], async () => {
+        must(operatorId, 'the sign-in did not say who the operator is')
+        const created = await theFetch(
+          homeUrl('/api/projects'),
+          asOperator({ method: 'POST', body: JSON.stringify({ name: `qualify-delete-${run}`, userId: operatorId, region: args.region }) }),
+        )
+        const made = await json(created)
+        must(created.status === 201 && typeof made.data?.id === 'string', `creating a project in ${args.region} answered ${created.status}: ${String(made.error ?? '').slice(0, 200)}`)
+        must(made.data.region === args.region, `the new project is in ${made.data.region}, not ${args.region}`)
+        const doomed = made.data.id as string
+        const doomedKey = typeof made.apiKey === 'string' ? made.apiKey : null
+        let deleted = false
+        try {
+          // A governed change from the console: a table.
+          const table = await theFetch(
+            homeUrl(`/api/database/create-table?projectId=${doomed}`),
+            asOperator({ method: 'POST', body: JSON.stringify({ tableName: 'qualify_doomed' }) }),
+          )
+          must(table.ok, `creating a table in the new project answered ${table.status}: ${JSON.stringify(await json(table)).slice(0, 200)}`)
+          const { changes } = await operatorJson(`/api/projects/${doomed}/changes?limit=10`)
+          const change = ((changes ?? []) as Array<{ id: string; seq: number; touched: string[] }>).find((c) => c.touched.includes('qualify_doomed'))
+          must(change, 'creating the table recorded no governed change')
+          // Its restore keeps the table in the restore's vault.
+          const restored = await changeCall(doomed, change!.id, 'restore', { seq: change!.seq })
+          must(restored.status === 200 && restored.body.status === 'restored', `restoring the new project's change answered ${restored.status}: ${String(restored.body.error ?? '').slice(0, 200)}`)
+          // A preview branch, with its own schema.
+          const branch = await theFetch(homeUrl(`/api/projects/${doomed}/branches`), asOperator({ method: 'POST', body: JSON.stringify({ name: 'qualify' }) }))
+          const branched = await json(branch)
+          must(branch.status === 200 && branched.success === true, `creating a branch answered ${branch.status}: ${String(branched.error ?? '').slice(0, 200)}`)
+          // Deleted, with all of it.
+          const del = await theFetch(homeUrl(`/api/projects/${doomed}`), asOperator({ method: 'DELETE' }))
+          const gone = await json(del)
+          must(del.status === 200 && gone.success === true, `deleting the project answered ${del.status}: ${String(gone.error ?? gone.message ?? '').slice(0, 200)}`)
+          deleted = true
+          const after = await theFetch(homeUrl(`/api/projects/${doomed}/changes?limit=1`), asOperator())
+          must(after.status === 404 || after.status === 403, `the deleted project's changes still answer ${after.status} at home`)
+          if (doomedKey) {
+            // The region stops serving the project once the deletion reaches it.
+            const deadline = Date.now() + 120_000
+            for (;;) {
+              const status = (await theFetch(apiUrl(`/api/v1/${doomed}/healthz`), { headers: { 'x-api-key': doomedKey } })).status
+              if (status !== 200) break
+              if (Date.now() > deadline) throw new Error(`${args.region} still served the deleted project 120 s after its deletion`)
+              await new Promise((r) => setTimeout(r, 2_000))
+            }
+          }
+          return `a project in ${args.region} with a governed change, its restore's vault and a preview branch was deleted, ` +
+            `and is gone at home${doomedKey ? ' and in the region' : ''}`
+        } finally {
+          if (!deleted) {
+            const del = await theFetch(homeUrl(`/api/projects/${doomed}`), asOperator({ method: 'DELETE' })).catch(() => null)
+            if (del?.status !== 200) log(`  note  qualify-delete-${run} (${doomed}) may still exist; delete it from the console`)
+          }
+        }
+      })
+    }
 
     // ── revocation ───────────────────────────────────────────────────────────
     log('\n── revocation')
@@ -1172,6 +1715,14 @@ export async function qualify(args: QualifyArgs, log: (line: string) => void = c
     if (drilled && !probeGone) {
       log(`  note  ${TABLE} may still have the column qualify_probe_${run}_id; roll it back from the console`)
     }
+    const passed = (check: string) => results.find((r) => r.phase === 'rollback-drills' && r.check === check)?.status === 'pass'
+    const ran = (check: string) => results.some((r) => r.phase === 'rollback-drills' && r.check === check && r.status !== 'skip')
+    if (passed('served-after-a-change') && !passed('drill-tables-removed')) {
+      log(`  note  qualify_kept_${run} may still exist, with its rows; restore its change from the console`)
+    }
+    if (ran('restore-refused-under-a-later-change') && !passed('restore-refused-under-a-later-change')) {
+      log(`  note  qualify_parent_${run} may still exist; restore its two changes from the console, newest first`)
+    }
     if (mcp) await (mcp as Mcp).close()
     // Signed out with both of the session's tokens, so neither outlives the run.
     if (session) {
@@ -1184,15 +1735,16 @@ export async function qualify(args: QualifyArgs, log: (line: string) => void = c
     globalThis.fetch = originalFetch
   }
 
-  const ok = results.every((r) => r.status === 'pass' || (r.status === 'skip' && r.detail === '--skip-revocation'))
+  const optedOut = new Set(['--skip-revocation', '--skip-deletion-drill'])
+  const ok = results.every((r) => r.status === 'pass' || (r.status === 'skip' && optedOut.has(r.detail)))
   log(`\n${ok ? 'REGION QUALIFIED' : 'REGION NOT QUALIFIED'}: ${results.filter((r) => r.status === 'pass').length} passed, ${results.filter((r) => r.status === 'fail').length} failed, ${results.filter((r) => r.status === 'skip').length} skipped`)
-  log(`Not run here: ${NOT_RUN.join('; ')}.`)
+  log(`Not run here: ${notRun.join('; ')}.`)
 
   if (args.report) {
     fs.writeFileSync(
       args.report,
       JSON.stringify(
-        { region: args.region, project: args.project, api: args.api.origin, home: args.home.origin, run, at: new Date().toISOString(), ok, results, notRun: NOT_RUN },
+        { region: args.region, project: args.project, api: args.api.origin, home: args.home.origin, run, at: new Date().toISOString(), ok, results, notRun },
         null,
         2,
       ) + '\n',
