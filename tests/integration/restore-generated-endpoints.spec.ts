@@ -45,7 +45,7 @@ import { withGovernedChange } from '@/lib/changes/ledger'
 import { generatedEndpointsFollow, recoverChange } from '@/lib/changes/recovery'
 import { closeChangeLockPool } from '@/lib/changes/lock'
 import { executeAction } from '@/lib/ai/minimal-executor'
-import { registerDomainEndpoints, removeDomainEndpoints } from '@/lib/services/domain-endpoints'
+import { deleteGeneratedEndpoints, generatedEndpointsOf, registerDomainEndpoints, removeDomainEndpoints } from '@/lib/services/domain-endpoints'
 import { installChangeLedgerGuard } from '../helpers/change-ledger-guard'
 
 let ownerId: string
@@ -245,16 +245,32 @@ describe('removing them only where a copy is kept, and only what is still genera
     expect((await functions()).map((f) => f.name)).toContain('widgets-schema')
   }, 60_000)
 
-  it('leaves the code an agent deployed over a generated row while it was being removed', async () => {
+  it('leaves the code an agent deployed over a generated row after it was selected, and does not record it', async () => {
     await registerDomainEndpoints(projectId, 'gadgets', ['gadgets'])
-    await removeDomainEndpoints(projectId, ['gadgets'], [], async () => {
-      // Between the selection and the delete, as an agent's deploy can land.
-      await prisma.aiFunction.updateMany({
-        where: { projectId, name: 'gadgets-schema' },
-        data: { codeOrigin: 'agent', generatedCode: 'export default async function () { return "deployed meanwhile" }' },
-      })
+    const rows = await generatedEndpointsOf(projectId, ['gadgets'], [])
+    // Between the selection and the delete, as an agent's deploy can land.
+    await prisma.aiFunction.updateMany({
+      where: { projectId, name: 'gadgets-schema' },
+      data: { codeOrigin: 'agent', generatedCode: 'export default async function () { return "deployed meanwhile" }' },
     })
+    const recorded: string[] = []
+    await deleteGeneratedEndpoints(projectId, rows, async (removed) => { recorded.push(...removed.map((r) => r.name)) })
     expect((await named('gadgets-schema'))?.generatedCode).toMatch(/deployed meanwhile/)
+    expect(recorded).toEqual([])
+  }, 60_000)
+
+  it('removes a row whose function only ran since it was selected, and records it as it is', async () => {
+    await registerDomainEndpoints(projectId, 'doohickeys', ['doohickeys'])
+    const rows = await generatedEndpointsOf(projectId, ['doohickeys'], [])
+    // A live app calling the endpoint meanwhile: only the run's bookkeeping moves.
+    await prisma.aiFunction.updateMany({
+      where: { projectId, name: 'doohickeys-schema' },
+      data: { runCount: { increment: 1 }, lastRun: new Date(), lastError: null },
+    })
+    const recorded: Array<{ name: string; runCount: number }> = []
+    await deleteGeneratedEndpoints(projectId, rows, async (removed) => { recorded.push(...removed) })
+    expect(await named('doohickeys-schema')).toBeUndefined()
+    expect(recorded.map((r) => [r.name, r.runCount])).toEqual([['doohickeys-schema', 1]])
   }, 60_000)
 
   it('leaves the endpoints of a removed table where no restore record can keep them', async () => {

@@ -1030,10 +1030,11 @@ export async function generatedEndpointsFollow(
     if (gone.length > 0 && !restoreId) {
       console.warn(`[Recovery] project=${projectId}: left the generated endpoints of ${gone.join(', ')}, with no restore record to keep them on`)
     } else if (gone.length > 0) {
-      // Kept on the record first, and written directly: recordEvent swallows a
-      // failure, and a row whose copy was not kept must not be removed.
-      await endpoints.removeDomainEndpoints(projectId, gone, Object.keys(live.tables), async (functions) => {
-        await prisma.backendChangeEvent.create({
+      // Recorded in the removal's own transaction, exactly the rows removed, and
+      // written directly: recordEvent swallows a failure, and a row whose copy
+      // was not kept must not be removed.
+      await endpoints.removeDomainEndpoints(projectId, gone, Object.keys(live.tables), async (functions, tx) => {
+        await tx.backendChangeEvent.create({
           data: { changeId: restoreId!, projectId, type: 'generated_endpoints_removed', data: { functions } as unknown as Prisma.InputJsonValue },
         })
       })
