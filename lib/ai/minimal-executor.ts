@@ -13,7 +13,6 @@ import { getActiveGraph, saveNewGraph } from '@/lib/orchestration/graph-pointer'
 import { withTimeout } from './with-timeout'
 import { trackAction } from './execution-timeline'
 import { classifyErrorCode } from '@/lib/errors/taxonomy'
-import { generateDomainEndpoints as _generateDomainEndpoints } from './build-runtime/domain-business-logic'
 import { USER_ROLE_ID_BASES as _SEMANTIC_USER_ROLE_ID_BASES, USER_SEMANTIC_COLS as _SEMANTIC_USER_COLS } from './semantic-relations'
 import { writeDecisionEntry, extractFkInferences } from '@/lib/memory/decision-memory'
 import { riskLevelForExecutorAction, queuePendingActionFinding } from '@/lib/operational-memory/ledger'
@@ -5166,46 +5165,14 @@ async function executeGenerateAPI(
     // so the project gets real endpoints like POST /jobs/:id/cancel, not just
     // generic CRUD.  These use pre-written TypeScript templates (no extra
     // OpenAI call) so they are fast and deterministic.
+    // Registered in one place (lib/services/domain-endpoints.ts), because a
+    // restore or reapply registers and removes them as well.
     const _allProjectTables = await prisma.table.findMany({ where: { projectId }, select: { name: true } })
       .then(rows => rows.map(r => r.name)).catch(() => [])
-    const domainEndpoints = _generateDomainEndpoints(tableName, projectId, _allProjectTables)
+    const { registerDomainEndpoints } = await import('@/lib/services/domain-endpoints')
+    const domainEndpoints = await registerDomainEndpoints(projectId, tableName, _allProjectTables, { replace: true })
     if (domainEndpoints.length > 0) {
-      console.log(`[AI Executor] 🎯 Registering ${domainEndpoints.length} domain endpoints for "${tableName}"`)
-      const { prisma: prismaDyn } = await import('@/lib/db')
-      for (const ep of domainEndpoints) {
-        try {
-          const existing = await prismaDyn.aiFunction.findFirst({
-            where: { projectId, name: ep.name },
-            select: { id: true },
-          })
-          if (existing) {
-            await prismaDyn.aiFunction.update({
-              where: { id: existing.id },
-              data: {
-                description: ep.description,
-                generatedCode: ep.code,
-                triggerType: 'manual',
-                triggerTable: `${ep.method} /api/v1/${projectId}/fn/${ep.name}`,
-                status: 'active',
-              },
-            })
-          } else {
-            await prismaDyn.aiFunction.create({
-              data: {
-                projectId,
-                name: ep.name,
-                description: ep.description,
-                generatedCode: ep.code,
-                triggerType: 'manual',
-                triggerTable: `${ep.method} /api/v1/${projectId}/fn/${ep.name}`,
-                status: 'active',
-              },
-            })
-          }
-        } catch (epErr: any) {
-          console.warn(`[AI Executor] Could not register domain endpoint "${ep.name}":`, epErr.message)
-        }
-      }
+      console.log(`[AI Executor] 🎯 Registered ${domainEndpoints.length} domain endpoints for "${tableName}"`)
     }
     // ── END domain endpoints ──────────────────────────────────────────────────
 

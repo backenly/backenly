@@ -1244,6 +1244,7 @@ tests/integration/auth-projection-confirm.spec.ts
 # write-once evidence and append-only events are enforced by the database's own
 # guard trigger. Real catalog, DDL, transactions and triggers are the property.
 tests/integration/change-recovery.spec.ts
+tests/integration/restore-generated-endpoints.spec.ts
 
 # Protected verification and automatic recovery: a change that breaks
 # production without being asked to (RLS off, a CASCADE, a step that did not

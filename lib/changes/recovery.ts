@@ -618,7 +618,7 @@ export async function recoverChange(projectId: string, changeId: string, opts: R
           checkedAt: new Date().toISOString(),
           checks,
         }
-        await restorePlatformRecords(projectId, open.schema, change.footprint, change.checkpoint, after)
+        await restorePlatformRecords(projectId, open.schema, change, after)
       }),
     )
     if (!closed || !restoreRecord) throw new Error('The recovery was not recorded.')
@@ -882,7 +882,7 @@ export async function reconcileChange(projectId: string, changeId: string, now =
         // table repair re-creates. Whatever was found, the schema may have
         // changed, so every view of it is refreshed.
         if (released && restored) {
-          await restorePlatformRecords(projectId, schema, change.footprint, change.checkpoint, live)
+          await restorePlatformRecords(projectId, schema, change, live)
           await supersedeRestoredIntents(projectId, change)
         }
         if (released) await refreshSchemaViews(projectId, tablesTouched(change.footprint))
@@ -960,13 +960,13 @@ export async function reconcileChanges(projectId: string, now = new Date()): Pro
 async function restorePlatformRecords(
   projectId: string,
   schema: string,
-  footprint: TableChange[],
-  checkpoint: StoredSnapshot,
+  change: Pick<LoadedChange, 'footprint' | 'checkpoint' | 'resultState'>,
   live: CatalogSnapshot,
 ): Promise<void> {
-  const platform = checkpoint.platform
+  await generatedEndpointsFollow(projectId, tablesTouched(change.footprint), change.resultState, live)
+  const platform = change.checkpoint.platform
   if (!platform) return
-  const touched = new Set(tablesTouched(footprint))
+  const touched = new Set(tablesTouched(change.footprint))
   const registeredBefore = new Set(platform.registered)
 
   for (const name of touched) {
@@ -990,6 +990,38 @@ async function restorePlatformRecords(
       })),
       skipDuplicates: true,
     })
+  }
+}
+
+/**
+ * The functions Backenly generated for a table follow it as its registry row
+ * does (lib/services/domain-endpoints.ts). A table the restore removed takes
+ * its generated endpoints with it, and one it brought back, which is what a
+ * reapply does, has them generated again as creating it made them. Left
+ * behind, they were callable routes over a table that was gone, and every
+ * description of the backend still listed them.
+ *
+ * `before` is what the restore started from: the change's result, since a
+ * later change to the same tables refuses the restore. Best-effort, as the
+ * rest of the platform's records are: the schema is already restored and
+ * verified.
+ */
+async function generatedEndpointsFollow(
+  projectId: string,
+  touched: string[],
+  before: CatalogSnapshot,
+  live: CatalogSnapshot,
+): Promise<void> {
+  const tables = Object.keys(live.tables)
+  const gone = touched.filter((t) => !live.tables[t])
+  const back = touched.filter((t) => live.tables[t] && !before.tables[t])
+  if (gone.length === 0 && back.length === 0) return
+  try {
+    const { registerDomainEndpoints, removeDomainEndpoints } = await import('@/lib/services/domain-endpoints')
+    await removeDomainEndpoints(projectId, gone, tables)
+    for (const t of back) await registerDomainEndpoints(projectId, t, tables, { replace: false })
+  } catch (err) {
+    console.warn(`[Recovery] project=${projectId}: generated endpoints were not brought in step:`, err instanceof Error ? err.message : err)
   }
 }
 
