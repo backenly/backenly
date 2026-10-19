@@ -35,7 +35,7 @@ import {
 } from './autonomy-level'
 import { checkBreaker } from './circuit-breaker'
 import { classifyFix } from '@/lib/core/fix-classifier'
-import { computeHealthSignal } from './telemetry'
+import { heldForIncident } from './change-freeze'
 import { LOOP_TICK_ACTIONS } from './loop-tick'
 import { recordSensorState } from './sensor-state'
 import { runAutoFix } from '@/lib/core/auto-fix-engine'
@@ -785,28 +785,8 @@ export async function runReconcilerLive(projectId: string): Promise<LiveReconcil
     }
 
     // ── Change freeze during an active incident ──────────────────────────────
-    const health = await computeHealthSignal(projectId).catch(() => null)
-    if (health?.state === 'anomalous') {
-      await prisma.auditLog.create({
-        data: {
-          projectId,
-          action: 'AUTONOMY_CHANGE_FREEZE',
-          type: 'autonomy',
-          metadata: principalsToMetadata(
-            await loopPrincipals(prisma, projectId, 'reconciler'),
-          ) as any,
-          details: JSON.stringify({
-            reason: 'project is mid-incident — autonomous changes frozen this tick',
-            health: health.reasons,
-            wouldHaveApplied: toApply.length,
-          }),
-          timestamp: new Date(),
-        },
-      }).catch(() => {})
-      console.warn(
-        `[Reconciler:live] FROZEN project=${projectId} — anomaly active, ` +
-        `${toApply.length} auto-fixes deferred. ${health.reasons.join(' ')}`,
-      )
+    // The same check every autonomous repair path asks (lib/autonomy/change-freeze.ts).
+    if (await heldForIncident(projectId, { loop: 'reconciler', wouldHaveApplied: toApply.length })) {
       return { ...base, frozen: true, attempted: 0, applied: 0, escalated: 0, deferred: 0 }
     }
 

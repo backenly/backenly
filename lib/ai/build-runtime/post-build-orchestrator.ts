@@ -6,37 +6,20 @@
  * Pipeline (all fire-and-forget, never blocks the build response):
  *
  *   Build complete
- *     → Schema reconciliation    — compare desired vs actual, auto-fix safe drift
- *     → Multi-agent health scan  — security, performance, migration, repair agents
- *       → Auto-fix safe issues   — immediate execution
- *       → Queue dangerous issues — stored as HealthFindings for user approval
+ *     → Schema reconciliation    — the live schema against its last snapshot;
+ *                                  drift is reported, never applied
+ *     → Multi-agent health scan  — the canonical loop, which repairs through
+ *                                  the governed kernel
  *       → Notify user            — "while you were away" banner
- *
- * This is the "backend runs itself" layer. The reconciler is the Kubernetes-style
- * controller: desired state = BackendGraph/ProductBlueprint, actual state = live DB.
  *
  * Rules:
  *   - Never throws — one failure must not prevent others
  *   - Never blocks the build SSE response — always fire-and-forget
- *   - Only auto-fixes SAFE operations (add index, enable RLS, add missing column)
- *   - NEVER auto-drops tables or removes data — always queues for approval
+ *   - Changes no schema itself: every autonomous repair is the repair loop's,
+ *     a governed change in the change ledger, held during an incident
  */
 
 import type { BuildResponse } from './types'
-
-// ── Drift severity tiers ───────────────────────────────────────────────────────
-
-/** Safe to auto-fix immediately — additive, never destructive. */
-const AUTO_FIX_DRIFT_TYPES = new Set([
-  'missing_index',
-  'missing_rls',
-  'missing_column',  // additive — new nullable column
-])
-
-// The dangerous tier (missing_table, type_mismatch, extra_table, extra_column)
-// is intentionally NOT applied or persisted here — see the comment in
-// _runReconciliation below for why the finding used to be recorded in this
-// function and no longer is.
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
@@ -72,8 +55,8 @@ async function _runOrchestration(
 
   console.log(`[PostBuildOrchestrator] Starting for project ${projectId} (${builtCount} nodes built)`)
 
-  // Step 1: Schema reconciliation — run immediately, apply safe fixes
-  await _runReconciliation(projectId).catch((err) => {
+  // Step 1: Schema reconciliation — report drift; nothing is applied here
+  await reportSchemaDrift(projectId).catch((err) => {
     console.warn(`[PostBuildOrchestrator] Reconciliation failed for ${projectId}:`, err?.message)
   })
 
@@ -101,8 +84,24 @@ async function _runOrchestration(
 
 // ── Step 1: Schema reconciliation ────────────────────────────────────────────
 
-async function _runReconciliation(projectId: string): Promise<void> {
-  const { detectSchemaDrift, applyReconciliationMigrations } = await import('@/lib/ai/schema-reconciler')
+/**
+ * Report how the live schema differs from its last snapshot, and apply none
+ * of it. Exported for its test.
+ *
+ * The snapshot is the live catalog as captured before a build's tables are
+ * created and after every governed change and restore
+ * (lib/services/workspace-schema-snapshot.ts, lib/changes/freshness.ts), never
+ * what a build declared. So drift is a difference from that capture: a column,
+ * an index or row-level security that existed then and is gone now. Re-adding
+ * it here, as this pass did for the "safe" kinds, undid whatever removed it (a
+ * direct drop, the repair loop's removal of an unused index, the owner opening
+ * a table), as raw DDL outside the change ledger, with no breaker and through
+ * an incident freeze. The kinds of drift that are a repair are the repair
+ * loop's, governed; the rest are the owner's to decide (intent drift, external
+ * schema changes).
+ */
+export async function reportSchemaDrift(projectId: string): Promise<void> {
+  const { detectSchemaDrift } = await import('@/lib/ai/schema-reconciler')
 
   const report = await detectSchemaDrift(projectId)
 
@@ -113,21 +112,10 @@ async function _runReconciliation(projectId: string): Promise<void> {
 
   console.log(
     `[Reconciler] Project ${projectId}: ${report.drifts.length} drift items ` +
-    `(critical=${report.hasCritical}, warnings=${report.hasWarnings})`
+    `(critical=${report.hasCritical}, warnings=${report.hasWarnings}): ` +
+    report.drifts.slice(0, 10).map((d) => `${d.type} ${d.tableName ?? ''}${d.columnName ? `.${d.columnName}` : ''}`).join(', ') +
+    ' (reported, not applied)'
   )
-
-  // Apply the safe tier immediately — additive, no data risk.
-  const safeMigrations = report.drifts
-    .filter((d) => AUTO_FIX_DRIFT_TYPES.has(d.type) && d.migration)
-    .map((d) => d.migration!)
-
-  if (safeMigrations.length > 0) {
-    const result = await applyReconciliationMigrations(projectId, safeMigrations)
-    console.log(
-      `[Reconciler] Project ${projectId}: applied ${result.applied}/${safeMigrations.length} safe migrations` +
-      (result.failed > 0 ? `, ${result.failed} failed: ${result.errors.join('; ')}` : '')
-    )
-  }
 
   // The dangerous tier (missing_table, type_mismatch, extra_table, extra_column)
   // used to be persisted here too, as a single 'schema_drift' HealthFinding type

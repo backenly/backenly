@@ -136,7 +136,7 @@ describe('the loop selects built, serving, active projects and nothing else', ()
 // ── Every repair answers to the owner's dial ─────────────────────────────────
 
 import { runObserverForProject } from '@/lib/services/workspace-observer'
-import { permitInlineRepair } from '@/lib/authority/gate'
+import { repairRefusal } from '@/lib/authority/gate'
 
 describe("every autonomous repair answers to the owner's dial", () => {
   const saved = {
@@ -157,21 +157,19 @@ describe("every autonomous repair answers to the owner's dial", () => {
     }
   })
 
-  it('permits by flag, then dial, then tier', async () => {
+  it('refuses by flag, then dial, then tier', async () => {
     const p = await project({ built: true })
     try {
       await prisma.project.update({ where: { id: p.projectId }, data: { autonomyLevel: 'AGGRESSIVE' } as any })
-      expect((await permitInlineRepair(p.projectId, 'missing_rls', 1)).allowed).toBe(true)
-      expect((await permitInlineRepair(p.projectId, 'missing_fk', 2)).allowed).toBe(false)
+      expect(await repairRefusal(p.projectId, 1)).toBeNull()
+      expect(await repairRefusal(p.projectId, 2)).toMatch(/does not apply tier 2/)
 
       await prisma.project.update({ where: { id: p.projectId }, data: { autonomyLevel: 'OFF' } as any })
-      expect((await permitInlineRepair(p.projectId, 'infra_hot_table', 0)).allowed).toBe(false)
+      expect(await repairRefusal(p.projectId, 0)).not.toBeNull()
 
       await prisma.project.update({ where: { id: p.projectId }, data: { autonomyLevel: 'AGGRESSIVE' } as any })
       process.env.ENABLE_AUTONOMY_LIVE_EXECUTION = 'false'
-      const refused = await permitInlineRepair(p.projectId, 'infra_hot_table', 0)
-      expect(refused.allowed).toBe(false)
-      expect(refused.reason).toMatch(/live execution/)
+      expect(await repairRefusal(p.projectId, 0)).toMatch(/live execution/)
     } finally {
       await drop(p)
     }

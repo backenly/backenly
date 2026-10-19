@@ -479,7 +479,7 @@ async function observeProject(projectId: string, result: ObserverResult): Promis
   // Only these can reach the owner's inbox (see notifyCritical).
   const outstandingCritical: Array<{ finding: RawFinding; firstDetectedAt: Date }> = []
 
-  // Process each finding: auto-fix safe ones, queue others for approval
+  // Record each finding: the repair loop repairs the safe ones, a person the rest
   for (const finding of allFindings) {
     // Pillar 5.3: If this finding type was previously fixed and has re-appeared,
     // escalate severity rather than repeating the same auto-fix loop.
@@ -658,15 +658,34 @@ async function observeProject(projectId: string, result: ObserverResult): Promis
   // whose stored code re-validates clean and whose error matches a known
   // runner-contract bug are restored outright (no LLM); genuinely broken code
   // is regenerated through the validated fixers, LLM-budget-capped per scan.
+  //
+  // Rewriting a project's function is an autonomous repair like any other, so
+  // it asks what every repair asks: the deployment's flags and the owner's
+  // dial (repairRefusal, tier 1: it changes behaviour) and the incident freeze
+  // (lib/autonomy/change-freeze.ts). It used to run whatever the dial said,
+  // even at Off. A function is not schema, so the change ledger has no record
+  // of it; the function keeps its own.
   try {
-    const { healErroredAiFunctions } = await import('@/lib/services/ai-functions/executor')
-    const healed = await healErroredAiFunctions(projectId)
-    if (healed.restored > 0 || healed.regenerated > 0) {
-      result.autoFixed += healed.restored + healed.regenerated
-      console.log(
-        `[WorkspaceObserver] healed AI functions for ${projectId}: ` +
-        `${healed.restored} restored, ${healed.regenerated} regenerated, ${healed.failed} unfixable`
-      )
+    const errored = await prisma.aiFunction.count({ where: { projectId, status: 'error', lastError: { not: null } } })
+    if (errored > 0) {
+      const [{ repairRefusal }, { heldForIncident }] = await Promise.all([
+        import('@/lib/authority/gate'),
+        import('@/lib/autonomy/change-freeze'),
+      ])
+      const refusal = await repairRefusal(projectId, 1)
+      if (refusal) {
+        console.log(`[WorkspaceObserver] not healing ${errored} errored function(s) for ${projectId}: ${refusal}`)
+      } else if (!(await heldForIncident(projectId, { loop: 'maintenance', via: 'function_heal', wouldHaveApplied: errored }))) {
+        const { healErroredAiFunctions } = await import('@/lib/services/ai-functions/executor')
+        const healed = await healErroredAiFunctions(projectId)
+        if (healed.restored > 0 || healed.regenerated > 0) {
+          result.autoFixed += healed.restored + healed.regenerated
+          console.log(
+            `[WorkspaceObserver] healed AI functions for ${projectId}: ` +
+            `${healed.restored} restored, ${healed.regenerated} regenerated, ${healed.failed} unfixable`
+          )
+        }
+      }
     }
   } catch { /* best-effort — a failed heal must never fail the scan */ }
 
@@ -858,7 +877,7 @@ async function writeFinding(
   // failure would fight over a single row and recovery would clear the wrong
   // one. Add a type to this map whenever a detector can emit concurrent,
   // separately-resolvable instances.
-  const DISCRIMINATOR: Record<string, string> = {
+  const DISCRIMINATOR: Record<string, string | string[]> = {
     verification_failed: 'scenarioId',
     contract_surface_broken: 'surface',
     // One row per SUBSYSTEM, keyed on the membership snapshot rather than the
@@ -871,23 +890,28 @@ async function writeFinding(
     // One row per drifted column (`table.column`): two missing columns are two
     // repairs, and each one's proposal is bound to its own finding.
     intent_drift: 'location',
+    // The gaps the repair loop repairs: one row per gap, keyed as the loop keys
+    // its own (gapIdentity, lib/autonomy/desired-state.ts), so the row the
+    // observer records is the one the loop acts on. Keyed by type alone, one
+    // gap's details were written over another gap's row.
+    missing_fk_index: ['tableName', 'columnName'],
+    missing_rls: 'tableName',
+    rls_denies_everything: 'tableName',
   }
 
-  const discriminatorKey = DISCRIMINATOR[finding.type]
-  const discriminatorValue = discriminatorKey
-    ? (finding.details as Record<string, unknown>)[discriminatorKey] as string | undefined
-    : undefined
+  const discriminator = ([] as string[])
+    .concat(DISCRIMINATOR[finding.type] ?? [])
+    .map((key) => ({ key, value: (finding.details as Record<string, unknown>)[key] as string | undefined }))
+  const keyed = discriminator.length > 0 && discriminator.every((d) => d.value !== undefined)
 
   const existing = await prisma.healthFinding.findFirst({
     where: {
       projectId,
       type: finding.type,
       status: { in: ['open', 'pending_approval'] },
-      ...(discriminatorKey !== undefined && discriminatorValue !== undefined
-        ? { details: { path: [discriminatorKey], equals: discriminatorValue } }
-        : {}),
+      ...(keyed ? { AND: discriminator.map((d) => ({ details: { path: [d.key], equals: d.value as string } })) } : {}),
     },
-    select: { id: true, details: true },
+    select: { id: true, status: true, details: true },
   })
 
   // `detectedAt` moves on every write, so it cannot say how long a problem
@@ -901,12 +925,17 @@ async function writeFinding(
   finding.details = { ...finding.details, firstDetectedAt: firstDetectedAt.toISOString() }
 
   if (existing) {
+    // A row waiting for a person stays theirs. The repair loop moved it there
+    // (its repair failed, or did not hold), and the observer seeing the gap
+    // again is no reason to hand it back: reopened, it was retried at once,
+    // skipping the loop's backoff, and lost the reason it was escalated.
+    const escalated = existing.status === 'pending_approval' && status === 'open'
     await prisma.healthFinding.update({
       where: { id: existing.id },
       data: {
         severity: finding.severity,
-        details: finding.details as any,
-        status,
+        details: (escalated ? { ...((existing.details ?? {}) as Record<string, unknown>), ...finding.details } : finding.details) as any,
+        status: escalated ? 'pending_approval' : status,
         autoFixed,
         fixAppliedAt: fixAppliedAt ?? null,
         detectedAt: new Date(),
@@ -1068,11 +1097,11 @@ export async function notifyCritical(
 
 /**
  * Detect tables that have a user_id column but no RLS enabled.
- * Auto-fixable: applies the 'own_rows' policy automatically.
+ * Auto-fixable: the repair loop applies the derived policy, governed.
  */
 // Exported so the declarative desired-state spec (lib/autonomy/desired-state.ts)
-// can reuse the canonical RLS probe read-only. Calling this never mutates —
-// the `fix` closure on each finding is lazy and only the observer loop invokes it.
+// can reuse the canonical RLS probe read-only. Calling this never mutates, and
+// its findings carry no fix of their own: the repair loop repairs them.
 /**
  * The tables whose latest Backenly RLS template is all-access: their owner (or
  * an agent acting for them) chose to leave every row open. Template rows are
