@@ -329,8 +329,9 @@ export function parseArgs(argv: string[], env: Record<string, string | undefined
   const killCommand = flags.get('--kill-command')?.trim() || null
   const killAfter = Number(flags.get('--kill-after-seconds') ?? '8')
   if (!Number.isFinite(killAfter) || killAfter < 1 || killAfter > 120) throw new Error('--kill-after-seconds must be between 1 and 120')
-  // A web target group drains for its deregistration delay (30 s; infra #57 sets
-  // staging home's to 5 s), and the process exits on the SIGTERM that follows:
+  // A web target group drains for its deregistration delay (30 s by default; an
+  // operator may shorten it on a qualification environment), and the process
+  // exits on the SIGTERM that follows:
   // its own handlers (lib/db/mongodb.ts, lib/services/workspaceDatabase.ts)
   // call process.exit. 70 s also covers one that waited out the 30 s stop timeout.
   const killDrain = Number(flags.get('--kill-drain-seconds') ?? '70')
