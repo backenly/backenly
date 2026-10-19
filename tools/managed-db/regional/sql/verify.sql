@@ -202,7 +202,7 @@ BEGIN
 
   -- ── Event triggers: PostgREST registration and sync, and DDL capture ──────
   FOREACH rname IN ARRAY ARRAY['backenly_pgrst_schema_create', 'backenly_pgrst_schema_drop', 'backenly_pgrst_ddl_sync',
-                               'backenly_ddl_watch', 'backenly_drop_watch'] LOOP
+                               'backenly_pgrst_drop_sync', 'backenly_ddl_watch', 'backenly_drop_watch'] LOOP
     SELECT evtenabled::text AS enabled INTO r FROM pg_event_trigger WHERE evtname = rname;
     IF NOT FOUND THEN
       problems := problems || format('event trigger %s is missing', rname);

@@ -70,7 +70,7 @@ do
   fi
 done
 
-for trg in backenly_pgrst_schema_drop backenly_pgrst_ddl_sync
+for trg in backenly_pgrst_schema_drop backenly_pgrst_ddl_sync backenly_pgrst_drop_sync
 do
   if [ "$(db_admin_psql -tAqc "SELECT count(*) FROM pg_event_trigger WHERE evtname = '$trg'" | tr -d '[:space:]')" = "0" ]; then
     echo "  MISSING event trigger: $trg"

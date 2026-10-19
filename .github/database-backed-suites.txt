@@ -1322,3 +1322,11 @@ tests/integration/workspace-sql-cached-plan.spec.ts
 # executeWithUserContext, and its record must carry that statement. The change
 # ledger, its lock and its record are the property, so it needs a real Postgres.
 tests/integration/home-workspace-sql-recorded.spec.ts
+
+# PostgREST forgets what a statement dropped or moved into a vault: with the
+# real registry and DDL sync files installed in a database of their own, a
+# DROP TABLE, DROP VIEW or DROP FUNCTION in a served schema and a move into
+# that schema's vault each notify pgrst to reload its schema cache, nothing is
+# granted in the vault, and DDL outside served schemas notifies nothing. Event
+# triggers and notifications are the property, so it needs a real Postgres.
+tests/integration/postgrest-reload-on-drop.spec.ts
