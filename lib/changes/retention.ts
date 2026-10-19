@@ -5,9 +5,10 @@
  * the project's restore window plus a grace week (lib/changes/policy.ts), then
  * dropped here. A restore that needs a purged vault says so: the restore point
  * reports what can no longer come back (lib/changes/impact.ts), it never
- * claims more. This and the archive-cleanup cron that calls it are the only
- * places the change ledger deletes data for good, and only a schema that is
- * provably one of this project's vaults, by name, is ever dropped.
+ * claims more. This is the only place the change ledger deletes data for good,
+ * called by each region's scheduler for its own projects (lib/changes/upkeep.ts)
+ * and by the archive-cleanup cron, and only a schema that is provably one of
+ * this project's vaults, by name, is ever dropped.
  */
 
 import { Prisma } from '@prisma/client'

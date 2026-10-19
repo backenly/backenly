@@ -20,6 +20,10 @@
  *   approval_request    a call an agent parked for a human: the agent's request,
  *                       its target and its exact arguments
  *                       (lib/mcp/approval-request-bodies.ts)
+ *   change_catalog      a governed change's catalogs with their definitions:
+ *                       function bodies, view queries, CHECK, policy and default
+ *                       expressions, comments and enum labels, which its
+ *                       record keeps only as digests (lib/changes/residency.ts)
  *
  * For a project in the home region all of it stays on the platform rows, as
  * it always has. For a project in another region it never leaves that region
@@ -54,6 +58,7 @@ export type BodyKind =
   | 'storage_file'
   | 'held_action'
   | 'approval_request'
+  | 'change_catalog'
 
 /** How long a region keeps a log body (PRUNED_KINDS) after its last change. */
 export const REGIONAL_BODY_RETENTION_DAYS = 30
@@ -66,7 +71,8 @@ export const REGIONAL_BODY_RETENTION_DAYS = 30
  * is needed only while its chain of batches runs, minutes or hours. A file's
  * names last as long as its row, and so do a held action's target and arguments
  * and an approval request's words and call, which the daily cleanup deletes
- * with the request (lib/queue/worker.ts).
+ * with the request (lib/queue/worker.ts). A change's catalogs last as long as
+ * its record, which is how long it can be restored and audited.
  */
 const PRUNED_KINDS: BodyKind[] = ['webhook', 'trigger', 'function_run', 'function_error', 'backfill_cursor']
 

@@ -628,6 +628,16 @@ tests/integration/migration-ownership-recovery.spec.ts
 # a superuser, like the RDS master, then owns what was installed, and the
 # application's own paths run against it. Needs PostgreSQL 16 server binaries
 # (PG_BINDIR) and, in CI, pgvector; it fails rather than skips without them.
+# It also pins the region's snapshots: a project the application makes there
+# without direct access is dumped and restored by the real snapshot job as
+# backenly_backup, and a workspace made before that fails pg_dump and verify.sql
+# until the procedure is applied again. A check on its own fails on a step that
+# changed and does not verify yet; only the check a launcher runs before its own
+# apply (BOOTSTRAP_PRE_APPLY) reports it without failing. Mutation-checked: the
+# previous code and SQL fail nine of those ten tests, with the exact "permission
+# denied for schema" pg_dump error seen in us-east-1 (the tenth passes on the old
+# verify.sql, which is the gap), and a check that tolerates every changed step
+# fails the three that pin the strict check and the signal.
 tests/integration/regional-bootstrap.spec.ts
 
 # ── Credential rotation ─────────────────────────────────────────────────────
@@ -868,11 +878,17 @@ __tests__/storage/signed-cdn.test.ts
 # lock semantics are the property under test, so it needs a real Postgres.
 tests/integration/scheduler-leader-lock.spec.ts
 
-# A table a developer creates over a READ_WRITE direct connection belongs to a
-# role the backup role's default privileges never named, so pg_dump failed for
-# that project on every run. backenly_direct_sync_schema now grants the backup
-# role (or backenly.backup_role) read on the schema it syncs, and never write.
-# Mutation-checked: the previous function fails the two grant tests.
+# The backup role reads every workspace schema, so pg_dump works for every
+# project. backenly_direct_sync_schema returned before its backup grant for a
+# workspace with no direct-access role, so every snapshot of a project without
+# direct access failed "permission denied for schema". It now grants every
+# workspace, read only, and sets default privileges for the roles that create
+# tables (the application, and a READ_WRITE developer before adoption).
+# Provisioning and the application's sync call it for every project, and
+# installing scripts/setup-direct-access.sql converges existing workspaces.
+# Mutation-checked: the previous SQL and application code fail seven of nine
+# tests; without the default privileges two fail, without the converge one,
+# without the provisioning grant one.
 tests/integration/direct-access-backup-grants.spec.ts
 
 # Both storage drivers apply one per-file rule: the bucket's own limit under the
@@ -1237,6 +1253,11 @@ tests/integration/change-recovery.spec.ts
 # restart interrupted is settled from the catalog. Real locks and approvals.
 tests/integration/change-verification-recovery.spec.ts
 
+# Change metrics name the project, the region and the change, never row data;
+# a change that needs a person writes one BACKENLY_CHANGE_NEEDS_PERSON line with
+# ids only, for an operator's log alarm.
+tests/integration/change-observability.spec.ts
+
 # An agent can ask for a restore and only a person can approve one: the agent's
 # migration is its governed change, nothing it sends weakens verification,
 # revert_change parks with only Backenly's numbers, the direct tool and the
@@ -1251,6 +1272,12 @@ tests/integration/agent-rollback-approval.spec.ts
 # was written after the restore. Real catalog, helper functions and triggers.
 tests/integration/change-classes-executor.spec.ts
 
+# Every view of a project's schema is current once a change or restore settles:
+# the REST API is asked to reload, the reconciler's baseline follows, validators
+# see a table another process changed, a restore supersedes the request behind
+# what it removed, and a restore the reconciler finds done drops its declarations.
+tests/integration/schema-freshness.spec.ts
+
 # A branch merge is one governed change: checkpointed, verified, restorable
 # with what was written since kept, recovered automatically when the merged
 # result fails verification or the replay fails part-way, and the branch stays
@@ -1263,6 +1290,11 @@ tests/integration/branch-merge-governed.spec.ts
 # window and the grace week, marks the record, and touches nothing younger, the
 # workspace or another project. Real schemas, vaults and purges.
 tests/integration/change-restore-point-unavailable.spec.ts
+
+# Each region's scheduler settles its own projects' interrupted changes and drops
+# their vaults past the window, and leaves another region's projects to that
+# region; a region it cannot reach is skipped and the skip recorded.
+tests/integration/change-upkeep.spec.ts
 
 # The undo routes that worked outside the change ledger (graph-pointer undo and
 # restore, the archive and approved-fix rollbacks) answer 410 MOVED to the
@@ -1306,6 +1338,16 @@ tests/integration/workspace-sql-cached-plan.spec.ts
 # executeWithUserContext, and its record must carry that statement. The change
 # ledger, its lock and its record are the property, so it needs a real Postgres.
 tests/integration/home-workspace-sql-recorded.spec.ts
+
+# A regional project's change record keeps structure at home and its
+# definitions in its region: no function body, view query, CHECK, policy,
+# default or generation expression, index or trigger statement, comment or
+# enum label of a regional change, its restore or an interrupted one is on its
+# home rows; the region keeps them under the change; a restore puts every
+# definition back exactly from the region's copy, and refuses a copy altered or
+# missing. A home project's record keeps its definitions as before. A second
+# database stands in for the region, so it needs a real Postgres.
+tests/integration/change-ledger-residency.spec.ts
 
 # A project with a change history is deleted with the change ledger's guard
 # installed as production has it: before the deletion the guard refuses

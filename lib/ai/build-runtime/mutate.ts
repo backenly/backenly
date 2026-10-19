@@ -132,11 +132,11 @@ export async function runMutation<T>(
     if (kind === 'build' || kind === 'modify') {
       snapshotProjectDbStorage(projectId).catch(() => {})
 
-      // ── 6b. Direct-access grants sync ────────────────────────────────────
-      // If the project has external DB credentials (bkn_ro_/bkn_rw_ roles),
-      // re-apply grants + RLS pass-through so tables this mutation just
-      // created are immediately visible over psql/BI connections. No-op (one
-      // indexed query) when the project never provisioned direct access.
+      // ── 6b. Grants sync ──────────────────────────────────────────────────
+      // Every project: the backup role's read on any table this mutation just
+      // created, so the next snapshot can dump it. With external DB
+      // credentials (bkn_ro_/bkn_rw_ roles) also grants + RLS pass-through,
+      // so those tables are immediately visible over psql/BI connections.
       import('@/lib/services/direct-access')
         .then(m => m.syncDirectAccessGrants(projectId))
         .catch(() => {})
