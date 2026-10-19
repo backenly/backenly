@@ -1011,8 +1011,9 @@ async function restorePlatformRecords(
  * `change.resultState` is what the restore started from, since a later change
  * to the same tables refuses the restore. Best-effort, as the rest of the
  * platform's records are: the schema is already restored and verified.
+ * Exported for its test.
  */
-async function generatedEndpointsFollow(
+export async function generatedEndpointsFollow(
   projectId: string,
   change: Pick<LoadedChange, 'id' | 'kind' | 'footprint' | 'resultState'>,
   live: CatalogSnapshot,
@@ -1039,7 +1040,7 @@ async function generatedEndpointsFollow(
     }
     if (back.length > 0) {
       const kept = await prisma.backendChangeEvent.findMany({
-        where: { changeId: change.id, type: 'generated_endpoints_removed' },
+        where: { changeId: change.id, projectId, type: 'generated_endpoints_removed' },
         orderBy: { at: 'asc' },
         select: { data: true },
       })

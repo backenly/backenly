@@ -111,7 +111,23 @@ export async function removeDomainEndpoints(
     createdAt: r.createdAt.toISOString(),
   }))
   if (keep) await keep(kept)
-  await prisma.aiFunction.deleteMany({ where: { id: { in: generated.map((r) => r.id) } } })
+  // Removed only if each row is still exactly as selected: generated, on its
+  // route, untouched since. An agent deploying over one in between (its code
+  // becomes codeOrigin 'agent', and its updatedAt moves) keeps its code. The
+  // record then holds that row's generated version as well, which a reapply
+  // skips, because the name is still in use.
+  await prisma.aiFunction.deleteMany({
+    where: {
+      projectId,
+      OR: generated.map((r) => ({
+        id: r.id,
+        codeOrigin: 'generated',
+        triggerType: 'manual',
+        triggerTable: r.triggerTable,
+        updatedAt: r.updatedAt,
+      })),
+    },
+  })
   return kept
 }
 

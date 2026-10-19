@@ -42,7 +42,7 @@ import { prisma } from '@/lib/db/prisma'
 import { createProvisionedProject } from '@/lib/projects/provision'
 import { withChangeAttribution } from '@/lib/changes/attribution'
 import { withGovernedChange } from '@/lib/changes/ledger'
-import { recoverChange } from '@/lib/changes/recovery'
+import { generatedEndpointsFollow, recoverChange } from '@/lib/changes/recovery'
 import { closeChangeLockPool } from '@/lib/changes/lock'
 import { executeAction } from '@/lib/ai/minimal-executor'
 import { registerDomainEndpoints, removeDomainEndpoints } from '@/lib/services/domain-endpoints'
@@ -233,5 +233,38 @@ describe('removing the endpoints of a table that is gone', () => {
     for (const name of shared) expect(left).toContain(name)
     expect(left).toContain('users-schema')
     expect(left).not.toContain('accounts-schema')
+  }, 60_000)
+})
+
+describe('removing them only where a copy is kept, and only what is still generated', () => {
+  it('removes nothing when the copy cannot be kept', async () => {
+    await registerDomainEndpoints(projectId, 'widgets', ['widgets'])
+    await expect(
+      removeDomainEndpoints(projectId, ['widgets'], [], async () => { throw new Error('the record could not be written') }),
+    ).rejects.toThrow(/could not be written/)
+    expect((await functions()).map((f) => f.name)).toContain('widgets-schema')
+  }, 60_000)
+
+  it('leaves the code an agent deployed over a generated row while it was being removed', async () => {
+    await registerDomainEndpoints(projectId, 'gadgets', ['gadgets'])
+    await removeDomainEndpoints(projectId, ['gadgets'], [], async () => {
+      // Between the selection and the delete, as an agent's deploy can land.
+      await prisma.aiFunction.updateMany({
+        where: { projectId, name: 'gadgets-schema' },
+        data: { codeOrigin: 'agent', generatedCode: 'export default async function () { return "deployed meanwhile" }' },
+      })
+    })
+    expect((await named('gadgets-schema'))?.generatedCode).toMatch(/deployed meanwhile/)
+  }, 60_000)
+
+  it('leaves the endpoints of a removed table where no restore record can keep them', async () => {
+    await registerDomainEndpoints(projectId, 'sprockets', ['sprockets'])
+    await generatedEndpointsFollow(
+      projectId,
+      { id: crypto.randomUUID(), kind: 'change', footprint: [{ kind: 'added', before: null, after: 'sprockets', details: [] }], resultState: { tables: { sprockets: {} } } as any },
+      { tables: {} } as any,
+      null,
+    )
+    expect((await functions()).map((f) => f.name)).toContain('sprockets-schema')
   }, 60_000)
 })
