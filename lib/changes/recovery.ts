@@ -61,6 +61,7 @@ import {
   withGovernedChange,
   type StoredSnapshot,
 } from './ledger'
+import { refreshSchemaViews, tablesTouched } from './freshness'
 import { claimRecovery, recordEvent, recordTiming, releaseRecovery, RECOVERY_LEASE_MS, transition } from './lifecycle'
 import { ChangeInProgressError, readCatalogOn, withChangeLock } from './lock'
 import { createVaultStatements, qualified, vaultSchemaName } from './names'
@@ -676,6 +677,8 @@ export async function recoverChange(projectId: string, changeId: string, opts: R
     }
     // After COMMIT: the restore took effect and could not be confirmed. The
     // claim stays, with its lease, for the reconciler to settle from the catalog.
+    // The schema changed either way, so every view of it is refreshed now.
+    await refreshSchemaViews(projectId, tablesTouched(change.footprint))
     await recordEvent(change.id, projectId, 'recovery_failed', { phase: 'after_commit', error: keptText(String(err?.message ?? err), await quotesKeptHere(projectId)).slice(0, 500) })
     return fail('RECOVERY_FAILED', `The restore was applied but could not be confirmed (${err?.message ?? err}). Backenly will check it again.`, { status: 'recovering' })
   }
@@ -832,8 +835,18 @@ export async function reconcileChange(projectId: string, changeId: string, now =
         if (restored) to = info.mode === 'automatic' ? 'recovered' : 'restored'
         else if (untouched && info.mode !== 'automatic' && info.from) to = info.from
         else to = 'manual_intervention_required'
-        await releaseRecovery(changeId, change.recoveryClaim, to, restored && record ? { recoveredById: record.id, recoveredAt: now } : {})
+        const released = await releaseRecovery(changeId, change.recoveryClaim, to, restored && record ? { recoveredById: record.id, recoveredAt: now } : {})
         await recordEvent(changeId, projectId, 'reconciled', { found: restored ? 'restored' : untouched ? 'not_restored' : 'neither', to })
+        // Found restored, the platform's records of its tables follow the
+        // schema as a confirmed restore's do: left alone, a table the restore
+        // removed would still be declared, and declared-but-missing is what the
+        // table repair re-creates. Whatever was found, the schema may have
+        // changed, so every view of it is refreshed.
+        if (released && restored) {
+          await restorePlatformRecords(projectId, schema, change.footprint, change.checkpoint, live)
+          await supersedeRestoredIntents(projectId, change)
+        }
+        if (released) await refreshSchemaViews(projectId, tablesTouched(change.footprint))
         return to
       }
 
@@ -850,7 +863,11 @@ export async function reconcileChange(projectId: string, changeId: string, now =
           : 'The process applying this change stopped before it finished, and later changes have landed since.',
         completedAt: now,
       })
-      if (moved) await recordEvent(changeId, projectId, 'reconciled', { found: 'interrupted', objects: footprint?.length ?? null })
+      if (moved) {
+        await recordEvent(changeId, projectId, 'reconciled', { found: 'interrupted', objects: footprint?.length ?? null })
+        // Whatever it got through is in the catalog: every view of it is refreshed.
+        await refreshSchemaViews(projectId, footprint ? tablesTouched(footprint) : [])
+      }
       return moved ? 'manual_intervention_required' : null
     }, { waitMs: 2_000 })
   } catch (err) {
@@ -895,7 +912,7 @@ async function restorePlatformRecords(
 ): Promise<void> {
   const platform = checkpoint.platform
   if (!platform) return
-  const touched = new Set(footprint.filter((c) => !c.object).flatMap((c) => [c.before, c.after]).filter((n): n is string => !!n))
+  const touched = new Set(tablesTouched(footprint))
   const registeredBefore = new Set(platform.registered)
 
   for (const name of touched) {
@@ -922,6 +939,32 @@ async function restorePlatformRecords(
   }
 }
 
+/**
+ * After a confirmed restore, the requests behind what it took away are
+ * superseded, as a governed drop's are (lib/autonomy/intent-conformance.ts).
+ * Left standing, the drift detector would report the column or table missing
+ * and a proposal would offer to put it back. Only what the restored change
+ * itself left and the restore removed: confirmed, the schema matches the
+ * checkpoint, so that is what the change's result has and its checkpoint does
+ * not. A request that was already unmet before the change stays as evidence.
+ */
+async function supersedeRestoredIntents(projectId: string, change: LoadedChange): Promise<void> {
+  const { supersedeSchemaIntent } = await import('@/lib/autonomy/intent-conformance')
+  for (const name of tablesTouched(change.footprint)) {
+    const left = change.resultState.tables[name]
+    if (!left) continue
+    const back = change.checkpoint.tables[name]
+    if (!back) {
+      await supersedeSchemaIntent(projectId, { kind: 'drop_table', tableName: name })
+      continue
+    }
+    const present = new Set(back.columns.map((c) => c.name))
+    for (const column of left.columns) {
+      if (!present.has(column.name)) await supersedeSchemaIntent(projectId, { kind: 'drop_column', tableName: name, columnName: column.name })
+    }
+  }
+}
+
 async function audit(projectId: string, userId: string | null, action: string, details: Record<string, unknown>) {
   await prisma.auditLog.create({
     data: { projectId, userId, action, type: 'schema', details: JSON.stringify({ ...details, at: new Date().toISOString() }), timestamp: new Date() },
@@ -929,23 +972,13 @@ async function audit(projectId: string, userId: string | null, action: string, d
 }
 
 async function afterRecovery(projectId: string, change: LoadedChange, recoverySeq: number, opts: RecoveryOptions, reapply: boolean): Promise<void> {
-  const tables = new Set(change.footprint.filter((c) => !c.object).flatMap((c) => [c.before, c.after]).filter((n): n is string => !!n))
+  const tables = new Set(tablesTouched(change.footprint))
 
-  // Caches that describe tables.
-  await import('@/lib/ai/execution-cache').then(({ invalidateSchemaCache }) => invalidateSchemaCache(projectId)).catch(() => {})
-  await import('@/lib/services/workspace-validator')
-    .then(({ invalidateSchemaCache }) => { for (const t of tables) invalidateSchemaCache(projectId, t) })
-    .catch(() => {})
-  await import('@/lib/services/workspace-table-stats')
-    .then(({ invalidateTableStats }) => { for (const t of tables) invalidateTableStats(projectId, t) })
-    .catch(() => {})
-
-  // A new baseline. The schema reconciler compares the live schema with the
-  // latest snapshot and repairs what it reads as drift; measured against the
-  // pre-recovery snapshot, it would re-create what was just restored.
-  await import('@/lib/services/workspace-schema-snapshot')
-    .then(({ captureSchemaSnapshot }) => captureSchemaSnapshot(projectId, 'post_migration'))
-    .catch(() => {})
+  // The REST API's schema cache, a new baseline (measured against the
+  // pre-recovery snapshot, the schema reconciler would re-create what was just
+  // restored) and the table caches (lib/changes/freshness.ts).
+  await refreshSchemaViews(projectId, tables)
+  await supersedeRestoredIntents(projectId, change)
 
   // The Autonomy page's activity feed and its "Rolled back" count read these.
   // A reapply undoes a restore: it is not counted as a rollback.

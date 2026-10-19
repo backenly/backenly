@@ -1246,6 +1246,12 @@ tests/integration/agent-rollback-approval.spec.ts
 # was written after the restore. Real catalog, helper functions and triggers.
 tests/integration/change-classes-executor.spec.ts
 
+# Every view of a project's schema is current once a change or restore settles:
+# the REST API is asked to reload, the reconciler's baseline follows, validators
+# see a table another process changed, a restore supersedes the request behind
+# what it removed, and a restore the reconciler finds done drops its declarations.
+tests/integration/schema-freshness.spec.ts
+
 # A branch merge is one governed change: checkpointed, verified, restorable
 # with what was written since kept, recovered automatically when the merged
 # result fails verification or the replay fails part-way, and the branch stays

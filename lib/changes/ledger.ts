@@ -45,6 +45,7 @@ import { pickTables, type CatalogSnapshot } from './catalog'
 import { currentAttribution, type ChangeAttribution } from './attribution'
 import { describeChange } from './describe'
 import { diffCatalogs, footprintObjects, footprintTables } from './diff'
+import { refreshSchemaViews, tablesTouched } from './freshness'
 import { resultDataFor } from './impact'
 import { checkpointHash } from './integrity'
 import { recordEvent, transition } from './lifecycle'
@@ -417,6 +418,14 @@ export async function withGovernedChange<T>(
         status === 'healthy' ? 'verified' : status === 'unverified' ? 'verification_inconclusive' : 'verification_failed',
         { checks: verification.checks.length, ...(failing.length ? { failing } : {}) },
       )
+    }
+
+    // Whatever its outcome, a change that touched the schema leaves every
+    // cached view of it behind: the REST API's, the reconciler's baseline, this
+    // process's table caches (lib/changes/freshness.ts). A recovery refreshes
+    // them again where it settles.
+    if (kind === 'change' && (footprint.length > 0 || change.preserved.length > 0)) {
+      await refreshSchemaViews(projectId, tablesTouched(footprint))
     }
 
     const closed: ClosedChange = { id: change.id, seq: change.seq, status, summary, footprint, verification }
