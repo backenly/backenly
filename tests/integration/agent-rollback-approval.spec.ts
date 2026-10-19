@@ -10,7 +10,9 @@
  *   nothing the agent adds to its arguments skips or weakens verification;
  *   the agent reads the history with deploy { action: "changes" };
  *   deploy { action: "revert_change" } parks a request carrying only what
- *   Backenly measured, never what the agent sent, and changes nothing;
+ *   Backenly measured, never what the agent sent, and changes nothing; so does
+ *   a restore parked through any other door, a brain run's call included, and
+ *   one that cannot happen is refused there too, with nothing queued;
  *   calling the restore tool directly is refused, and the routes that decide
  *   or run a restore do not accept an agent's key at all;
  *   a person approves, and the restore runs, verified, recorded as the
@@ -48,7 +50,7 @@ import { createProvisionedProject } from '@/lib/projects/provision'
 import { POST } from '@/app/api/mcp/tool/route'
 import { POST as DECIDE } from '@/app/api/projects/[id]/agent-approvals/route'
 import { POST as RESTORE } from '@/app/api/projects/[id]/changes/[changeId]/restore/route'
-import { decideApproval } from '@/lib/mcp/approvals'
+import { createApprovalRequest, decideApproval, RestoreRequestRefusedError } from '@/lib/mcp/approvals'
 import { listChanges } from '@/lib/changes/history'
 import { closeChangeLockPool } from '@/lib/changes/lock'
 import { forgetProtection } from '@/lib/branches/protection'
@@ -168,6 +170,39 @@ describe('an agent migration, restored on a person\'s say-so', () => {
     expect(parked.target).toContain(`Restore the state before change #${changeSeq}`)
     expect(parked.target).toContain('2 rows in invoices')
     expect(await tableExists('invoices')).toBe(true)
+  }, 60_000)
+
+  it('parks a restore asked for through any other door, a brain run included, with the same measurement', async () => {
+    // backend_chat queues the model's own call as it issued it: the counts of
+    // what to set aside that the model wrote must not reach the request.
+    const row = await createApprovalRequest({
+      projectId,
+      userId: ownerId,
+      apiKeyId: keyId,
+      message: 'Restore the invoices change.',
+      danger: { tool: 'revert_schema_change', target: 'what the model said it would do', rowCount: null, reversible: false },
+      toolArgs: { changeId, acknowledged: { 'rows_set_aside:invoices:': 1_000_000 }, mode: 'automatic', origin: 'backenly' },
+    })
+    expect(row).toMatchObject({ tool: 'revert_schema_change', rowCount: 2, reversible: true })
+    expect(row.toolArgs).toEqual({ changeId, acknowledged: { 'rows_set_aside:invoices:': 2 } })
+    expect(row.target).toContain(`Restore the state before change #${changeSeq}`)
+    expect(row.target).toContain('2 rows in invoices')
+    // One request waits for the decision below.
+    await prisma.agentApprovalRequest.delete({ where: { id: row.id } })
+  }, 60_000)
+
+  it('refuses a restore that cannot happen, whichever door asks, and queues nothing', async () => {
+    const before = await prisma.agentApprovalRequest.count({ where: { projectId } })
+    const refused = await createApprovalRequest({
+      projectId,
+      userId: ownerId,
+      message: 'Restore a change.',
+      danger: { tool: 'revert_schema_change', target: 'a change', rowCount: null, reversible: false },
+      toolArgs: { changeId: crypto.randomUUID(), acknowledged: { 'rows_set_aside:invoices:': 5 } },
+    }).then(() => null, (e: unknown) => e)
+    expect(refused).toBeInstanceOf(RestoreRequestRefusedError)
+    expect(refused).toMatchObject({ status: 404, code: 'CHANGE_NOT_FOUND' })
+    expect(await prisma.agentApprovalRequest.count({ where: { projectId } })).toBe(before)
   }, 60_000)
 
   it('refuses the restore tool when the agent calls it directly', async () => {

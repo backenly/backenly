@@ -29,6 +29,7 @@ import { currentEdition } from '@/lib/edition'
 import { generateUniqueSlug } from '@/lib/utils/slug'
 import { regionRawClient } from '@/lib/data-plane/regional'
 import { HOME_REGION, type CloudRegionId } from '@/lib/regions'
+import { grantWorkspaceBackupAccess } from '@/lib/services/direct-access'
 
 export class ProjectCreationUnsupportedError extends Error {
   readonly code = 'PROJECT_CREATION_UNSUPPORTED'
@@ -88,7 +89,8 @@ export interface ProvisionedProject {
  *      first because that database is the one this sequence may be unable to
  *      reach: a region can be configured here and still not answer, and then
  *      the creation fails with nothing written at home. The id is fresh, so
- *      `CREATE SCHEMA IF NOT EXISTS` makes a new, empty schema.
+ *      `CREATE SCHEMA IF NOT EXISTS` makes a new, empty schema. The backup
+ *      role is given read on it there and then (see below).
  *   2. The project row, its backend graph and its workspace row, in one home
  *      transaction, so a project is never listed without the state the brain
  *      and the autonomy loop reconcile against, or without the workspace that
@@ -126,6 +128,21 @@ export async function createProvisionedProject(input: ProvisionInput): Promise<P
     }))
 
   await db.$executeRawUnsafe(`CREATE SCHEMA IF NOT EXISTS ${quoteIdent(postgresSchema)}`)
+
+  // Snapshots dump the schema as the backup role, and nothing else grants it
+  // read on a project without direct access: every snapshot of such a project
+  // failed "permission denied for schema". The grant also sets the default
+  // privileges that cover each table the application adds later. Not fatal,
+  // like the registration below: the project works without it, and the next
+  // sync of its grants (syncDirectAccessGrants) makes it again.
+  try {
+    await grantWorkspaceBackupAccess(region, postgresSchema)
+  } catch (err) {
+    console.warn(
+      `[provision] the backup role was not granted read on ${postgresSchema} in ${region}: ` +
+        `${(err as Error)?.message ?? err}. Its snapshots fail until its grants are synced.`
+    )
+  }
 
   try {
     await prisma.$transaction(async tx => {

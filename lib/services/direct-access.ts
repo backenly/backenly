@@ -338,12 +338,15 @@ export async function getDirectAccessStatus(projectId: string): Promise<DirectAc
   }
 }
 
-// ── Grants sync — the hook the kernel calls after every DDL mutation ─────────
+// ── Grants sync — the hook called after DDL, for every project ───────────────
 //
-// Idempotent and cheap when the project has no direct-access credentials (one
-// indexed query, then return). With credentials it re-applies grants, ownership
-// normalization, and RLS pass-through policies for any table created since the
-// last sync — whichever side (platform or external) created it.
+// For EVERY project, with or without direct-access credentials, because the
+// sync is also where the backup role gets read on the workspace: snapshots run
+// pg_dump as that role, and a schema it cannot use fails every one of them.
+// With credentials it re-applies grants, ownership normalization, and RLS
+// pass-through policies for any table created since the last sync — whichever
+// side (platform or external) created it. Without them it grants the backup
+// role only, and nothing at all on a database without the helpers.
 
 export async function syncDirectAccessGrants(projectId: string): Promise<void> {
   try {
@@ -355,7 +358,13 @@ export async function syncDirectAccessGrants(projectId: string): Promise<void> {
     where: { projectId },
     select: { mode: true, roleName: true },
   }).catch(() => [])
-  if (rows.length === 0) return
+
+  // The grants are on the project's database, in its region, where its roles are.
+  const region = await projectRegion(projectId)
+  // Credentials were provisioned through the helpers, so they are there. With
+  // none, the database may be one that never installed them (they are optional
+  // on a self-hosted install), and then there is nothing to sync.
+  if (rows.length === 0 && !(await syncHelperInstalled(region))) return
 
   const names = directAccessRoleNames(projectId)
   const ro = rows.find(r => r.mode === 'READ_ONLY')?.roleName ?? null
@@ -363,7 +372,35 @@ export async function syncDirectAccessGrants(projectId: string): Promise<void> {
   const owner = rw ? names.owner : null
   const schema = await resolveWorkspaceSchema(projectId)
 
-  // The grants are on the project's database, in its region, where its roles are.
-  const db = await workspaceRawClient(projectId)
+  const db = regionRawClient(region, projectId)
   await db.$queryRaw`SELECT public.backenly_direct_sync_schema(${schema}, ${ro}, ${rw}, ${owner})`
+}
+
+/**
+ * The backup role's read on a workspace schema just created, from its first
+ * moment, so its first snapshot works. lib/projects/provision.ts calls this
+ * right after CREATE SCHEMA, before the project's row exists: the caller names
+ * the region, because projectRegion() reads a project with no row as home.
+ * The sync also sets the default privileges that cover each table the
+ * application adds to the schema later.
+ *
+ * Returns false, having granted nothing, on a database without the helpers.
+ */
+export async function grantWorkspaceBackupAccess(region: CloudRegionId, schema: string): Promise<boolean> {
+  if (!(await syncHelperInstalled(region))) return false
+  // No direct-access role: the call syncDirectAccessGrants makes for a project
+  // without credentials.
+  await regionRawClient(region).$queryRaw`SELECT public.backenly_direct_sync_schema(${schema}, NULL, NULL, NULL)`
+  return true
+}
+
+/**
+ * Whether the region's database has backenly_direct_sync_schema. Asked rather
+ * than called and caught, because a failed query is logged at error level
+ * before the caller sees it (see directAccessHelpersInstalled).
+ */
+async function syncHelperInstalled(region: CloudRegionId): Promise<boolean> {
+  const rows = await regionRawClient(region).$queryRaw<Array<{ present: boolean }>>`
+    SELECT to_regprocedure('public.backenly_direct_sync_schema(text,text,text,text)') IS NOT NULL AS present`
+  return rows[0]?.present === true
 }

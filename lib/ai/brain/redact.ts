@@ -43,13 +43,26 @@ function escapeForRegex(s: string): string {
 }
 
 /**
+ * Also the start of a token: right after an escape such as the "\n" of JSON
+ * text. There the character before a key is the escape's letter, which a guard
+ * against starting inside a word reads as part of one, so a key on its own
+ * line in a stored JSON blob was kept.
+ */
+const AFTER_ESCAPE = String.raw`(?<=\\[bfnrt])|(?<=\\u[0-9A-Fa-f]{4})`
+
+/** `re` with its start-of-token guard also met right after an escape. */
+function startingAfterEscapes(re: RegExp): RegExp {
+  return new RegExp(re.source.replace(/^\(\?<!(\[[^\]]+\])\)/, `(?:(?<!$1)|${AFTER_ESCAPE})`), re.flags)
+}
+
+/**
  * A Backenly key: a known prefix at the start of a token, followed by its
  * random body (minted as 48-64 hex characters). The 24-character floor and the
  * start-of-token anchor keep ordinary identifiers that happen to share a
  * prefix (a table named `proj_live_metrics`) out of it.
  */
 const BACKENLY_KEY_RE = new RegExp(
-  `(?<![A-Za-z0-9_])(${BACKENLY_PREFIXES.map(escapeForRegex).join('|')})[A-Za-z0-9]{24,}`,
+  `(?:(?<![A-Za-z0-9_])|${AFTER_ESCAPE})(${BACKENLY_PREFIXES.map(escapeForRegex).join('|')})[A-Za-z0-9]{24,}`,
   'g',
 )
 
@@ -71,7 +84,7 @@ const PROVIDER_PATTERNS: readonly RegExp[] = [
   /(?<![A-Za-z0-9_])SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}/g, // SendGrid
   /(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, // JWT
   /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, // PEM
-]
+].map(startingAfterEscapes)
 
 /** The password segment of a URL-style connection string. */
 const CONNECTION_STRING_RE =
