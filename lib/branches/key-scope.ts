@@ -30,6 +30,7 @@
 
 import { createHash } from 'crypto'
 import { prisma } from '@/lib/db/prisma'
+import { answersFromCopy, authorizingKeyByHash } from '@/lib/auth-projection/read'
 
 export const BRANCH_SURFACE_UNAVAILABLE = 'BRANCH_SURFACE_UNAVAILABLE'
 
@@ -153,11 +154,19 @@ export async function branchBoundToKey(rawKey: string): Promise<BoundBranch | nu
   const hit = cache.get(keyHash)
   if (hit && now - hit.at < CACHE_TTL_MS) return hit.branch
 
-  const row = await prisma.apiKey.findFirst({
-    where: { keyHash },
-    select: { branch: { select: { id: true, name: true, status: true } } },
-  })
-  const branch = row?.branch ?? null
+  // From the region's copy where this process answers from it (lib/auth-projection/read.ts), as the key itself is:
+  // the copy while it is fresh, home otherwise.
+  let branch: BoundBranch | null
+  if (answersFromCopy()) {
+    const copied = (await authorizingKeyByHash(keyHash))?.branch ?? null
+    branch = copied ? { id: copied.id, name: copied.name, status: copied.status } : null
+  } else {
+    const row = await prisma.apiKey.findFirst({
+      where: { keyHash },
+      select: { branch: { select: { id: true, name: true, status: true } } },
+    })
+    branch = row?.branch ?? null
+  }
 
   if (cache.size >= CACHE_CEILING) cache.clear()
   cache.set(keyHash, { branch, at: now })

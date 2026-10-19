@@ -16,7 +16,19 @@ import '../helpers/real-web-standard'
 import http from 'node:http'
 import type { AddressInfo } from 'node:net'
 
-import { SseReader, connectingFetch, describeError, parseArgs, pendingApproval, qualify, toolBody, toolData } from '@/scripts/qualify-region'
+import {
+  SseReader,
+  clockOffsetFromDate,
+  connectingFetch,
+  describeError,
+  describesTable,
+  generatedFunctionsFor,
+  parseArgs,
+  pendingApproval,
+  qualify,
+  toolBody,
+  toolData,
+} from '@/scripts/qualify-region'
 
 const PROJECT = '0b9e3a52-7a5d-4c1e-9a2b-1f2e3d4c5b6a'
 const ENV = {
@@ -223,6 +235,58 @@ describe('tool answers', () => {
   })
 })
 
+describe('what an agent reads about a table', () => {
+  // The schema section as staging answered it after a restore removed
+  // qualify_kept_4e3a9bbd: the table is gone, its generated endpoint is not.
+  const afterRestore = {
+    projectId: '13eab7a0-5e15-4714-b3c5-aba760004421',
+    tables: [{ name: 'qualify_notes', recordCount: 5 }, { name: 'users', recordCount: 2 }],
+    relationships: [],
+    realtime: { tables: ['qualify_notes'] },
+    functions: { count: 3, names: ['qualify-ping', 'qualify_notes-schema', 'qualify_kept_4e3a9bbd-schema'] },
+  }
+
+  it('describes a table only where the table itself is named, never by a function named after it', () => {
+    expect(describesTable(afterRestore, 'qualify_notes')).toBe(true)
+    expect(describesTable(afterRestore, 'qualify_kept_4e3a9bbd')).toBe(false)
+  })
+
+  it('still sees a table that lingers in relationships or realtime', () => {
+    expect(describesTable({ ...afterRestore, realtime: { tables: ['qualify_kept_4e3a9bbd'] } }, 'qualify_kept_4e3a9bbd')).toBe(true)
+    expect(
+      describesTable(
+        { ...afterRestore, relationships: [{ from: 'qualify_kept_4e3a9bbd', column: 'note_id', to: 'qualify_notes', toColumn: 'id' }] },
+        'qualify_kept_4e3a9bbd',
+      ),
+    ).toBe(true)
+  })
+
+  it('matches whole names: a table is not described by another whose name starts the same', () => {
+    expect(describesTable({ tables: [{ name: 'qualify_kept_4e3a9bbd_old' }] }, 'qualify_kept_4e3a9bbd')).toBe(false)
+  })
+
+  it('lists the functions generated for a table, and only those', () => {
+    expect(generatedFunctionsFor(afterRestore, 'qualify_kept_4e3a9bbd')).toEqual(['qualify_kept_4e3a9bbd-schema'])
+    expect(generatedFunctionsFor(afterRestore, 'qualify')).toEqual(['qualify-ping'])
+    expect(generatedFunctionsFor(afterRestore, 'users')).toEqual([])
+    expect(generatedFunctionsFor({ tables: [] }, 'users')).toEqual([])
+  })
+})
+
+describe('the service clock', () => {
+  it('measures how far this machine is behind the service from its Date header', () => {
+    // A machine 3.5 min slow: the header says 19:05:30, the request took 200 ms.
+    const sent = Date.parse('2026-10-19T19:02:00.000Z')
+    const offset = clockOffsetFromDate('Mon, 19 Oct 2026 19:05:30 GMT', sent, sent + 200)
+    expect(offset).toBe(210_000 + 500 - 100)
+  })
+
+  it('leaves this machine in charge when the header is missing or unreadable', () => {
+    expect(clockOffsetFromDate(null, 1_000, 1_200)).toBe(0)
+    expect(clockOffsetFromDate('soon', 1_000, 1_200)).toBe(0)
+  })
+})
+
 describe('a failure in the report', () => {
   it('keeps an error\'s code and status beside its message', () => {
     const err = Object.assign(new Error('Executable files are not allowed.'), { code: 'VALIDATION_ERROR', status: 400 })
@@ -279,6 +343,8 @@ describe('a region that cannot be reached', () => {
       'restore-refused-under-a-later-change', 'drill-tables-removed', 'deleted-with-its-history',
       // What a coding agent reads of the schema, after each of them.
       'described-after-undo', 'described-after-a-change', 'described-after-acknowledged-restore', 'described-after-reapply',
+      // And the functions generated for a table: gone when a restore removed it, back when a reapply returned it.
+      'functions-after-undo', 'functions-after-acknowledged-restore', 'functions-after-reapply', 'functions-after-drill-restores',
     ]) {
       expect([check, status(check)]).toEqual([check, 'skip'])
     }
