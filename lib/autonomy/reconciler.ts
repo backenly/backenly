@@ -42,6 +42,7 @@ import { runAutoFix } from '@/lib/core/auto-fix-engine'
 import { FLAGS } from '@/lib/config/flags'
 import { loopPrincipals, principalsToMetadata } from '@/lib/principal'
 import { canReach } from './region-skip'
+import { quotedError, quotesKeptHere } from '@/lib/data-plane/residency'
 
 export type ReconcileAction =
   | 'WOULD_AUTO_APPLY'     // tier within dial + breaker budget available
@@ -460,6 +461,9 @@ async function reopenIfRetryable(
   // Not an error and not a stall — the next tick re-reads whatever it became.
   if (!updated) return { findingId: null, skip: 'retry_backoff' }
 
+  // The failure is the executor's or PostgreSQL's own words, copied only as an
+  // error code for a project kept in another region (lib/data-plane/residency.ts).
+  const quote = await quotesKeptHere(projectId)
   await prisma.auditLog
     .create({
       data: {
@@ -474,7 +478,7 @@ async function reopenIfRetryable(
           attempt: decision.attempt,
           maxAttempts: ESCALATION_RETRY_BACKOFF_HOURS.length,
           priorFailure:
-            typeof escalation.reason === 'string' ? escalation.reason.slice(0, 300) : null,
+            typeof escalation.reason === 'string' ? quotedError(escalation.reason, quote).slice(0, 300) : null,
         }),
         timestamp: new Date(),
       },

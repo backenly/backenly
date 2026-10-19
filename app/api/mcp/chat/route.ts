@@ -207,6 +207,9 @@ export async function POST(request: NextRequest) {
     // no exact operation to approve.
     let approval: { id: string; status: string; poll: string; note: string } | null = null
     const queued: Array<{ id: string; tool: string; target: string }> = []
+    // Stopped calls whose request could not be created, for example because a
+    // regional project's region could not keep it: nothing is waiting for them.
+    const notQueued: Array<{ tool: string; target: string }> = []
     for (const blocked of result.blockedCalls ?? []) {
       try {
         const row = await createApprovalRequest({
@@ -225,6 +228,7 @@ export async function POST(request: NextRequest) {
         queued.push({ id: row.id, tool: blocked.tool, target: blocked.target })
       } catch (e) {
         console.error('[MCP Chat] Failed to create approval request:', e)
+        notQueued.push({ tool: blocked.tool, target: blocked.target })
       }
     }
     if (queued.length > 0) {
@@ -262,12 +266,28 @@ export async function POST(request: NextRequest) {
     // A parked operation is a successful call whose result is "waiting on a
     // human". Say that, and give the agent the id to poll.
     const escalated = approval !== null
-    const summary = escalated
-      ? `${result.summary}\n\n⏸ This operation needs a human's approval, so Backenly did not run it. ` +
-        `It is waiting, exactly as requested, in the project's Review Queue (Autonomy page). ` +
-        `Poll \`check_approval\` with id "${approval!.id}" until the status is executed, rejected or expired. ` +
-        `Nothing has changed yet.`
-      : result.summary
+    // ── A stopped call that could not be queued is waiting nowhere ─────────────
+    //
+    // The model wrote its summary after the gate told it every stopped call
+    // would be queued, so the summary can say so for a call whose request could
+    // not be created. Say plainly that it was not, and that it did not run. The
+    // rest of the turn keeps its own answer, what it applied and any code the
+    // brain gave it: only a turn that did nothing else is answered as this
+    // failure, rather than as a success.
+    const notQueuedNote = notQueued.length
+      ? `Not queued, and not run: ${notQueued.map((q) => `${q.tool} on ${q.target}`).join('; ')}. ` +
+        `${notQueued.length === 1 ? 'It needs' : 'They need'} a human's approval, but the request for ` +
+        `${notQueued.length === 1 ? 'it' : 'them'} could not be created, so nothing is waiting in the ` +
+        `Review Queue. Send the request again.`
+      : ''
+    const onlyNotQueued = notQueued.length > 0 && !escalated && !result.applied?.length && !result.failureCode
+    const summary =
+      (escalated
+        ? `${result.summary}\n\n⏸ This operation needs a human's approval, so Backenly did not run it. ` +
+          `It is waiting, exactly as requested, in the project's Review Queue (Autonomy page). ` +
+          `Poll \`check_approval\` with id "${approval!.id}" until the status is executed, rejected or expired. ` +
+          `Nothing has changed yet.`
+        : result.summary) + (notQueuedNote ? `\n\n${notQueuedNote}` : '')
 
     // ── A budget stop that VERIFIED is a partial success, not a failure ───────
     //
@@ -278,7 +298,7 @@ export async function POST(request: NextRequest) {
     const budgetPartial = !!result.budgetStopped && (result.applied?.length ?? 0) > 0
 
     const body = {
-      ok: escalated || budgetPartial ? true : result.success,
+      ok: onlyNotQueued ? false : escalated || budgetPartial ? true : result.success,
       /** Set only on escalation, so an agent can branch without parsing prose. */
       ...(escalated ? { status: 'awaiting_approval' as const } : {}),
       ...(budgetPartial
@@ -293,6 +313,8 @@ export async function POST(request: NextRequest) {
       approval,
       /** Every operation queued this turn; `approval` is the first of them. */
       ...(queued.length > 1 ? { approvals: queued } : {}),
+      /** Operations that need approval but could not be queued: nothing is waiting for them. */
+      ...(notQueued.length ? { notQueued } : {}),
       iterations: result.iterations,
       toolsRun: result.toolsRun,
       // ── The failure classification, at the TOP LEVEL ─────────────────────────
@@ -305,13 +327,17 @@ export async function POST(request: NextRequest) {
       // `code` is the stable slug, `retryable` says whether an identical retry is
       // worth making, and `applied` lists what DID land — the fact that decides
       // whether retrying is safe or duplicates work.
-      ...(escalated || budgetPartial || result.success ? {} : {
-        code: result.failureCode ?? 'BRAIN_FAILED',
-        retryable: !!result.retryable,
-        ...(result.retryable
-          ? { retryAfterMs: result.failureCode === 'RATE_LIMITED' ? 30_000 : 5_000 }
-          : {}),
-      }),
+      // A turn that did nothing but stop calls it could not queue takes the code
+      // the typed door gives the same failure.
+      ...(onlyNotQueued
+        ? { code: 'APPROVAL_FAILED', retryable: true }
+        : escalated || budgetPartial || result.success ? {} : {
+          code: result.failureCode ?? 'BRAIN_FAILED',
+          retryable: !!result.retryable,
+          ...(result.retryable
+            ? { retryAfterMs: result.failureCode === 'RATE_LIMITED' ? 30_000 : 5_000 }
+            : {}),
+        }),
       ...(result.applied?.length ? { applied: result.applied } : {}),
       // ── What did NOT land, on a call that otherwise succeeded ───────────────
       //

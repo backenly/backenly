@@ -24,6 +24,7 @@ import {
   failPurgeJob,
   failRegionalJob,
 } from './index'
+import type { Prisma } from '@prisma/client'
 import { emit } from '@/lib/events/bus'
 import { prisma } from '@/lib/db/prisma'
 import { serviceRegion } from '@/lib/data-plane/serving'
@@ -86,6 +87,25 @@ export function retentionPurgeMode(raw: string | undefined = process.env.BACKENL
   return value === 'off' || value === 'enforce' ? value : 'dry-run'
 }
 
+/**
+ * Delete the approval requests `where` selects, after what a regional
+ * project's request keeps in its region (lib/mcp/approval-request-bodies.ts):
+ * the request's words and exact call, which last exactly as long as its row. A
+ * request whose region cannot be reached keeps its row until a later run can
+ * reach it, so no record outlives the row that names it. Returns how many rows
+ * were deleted.
+ */
+async function deleteApprovalRequests(where: Prisma.AgentApprovalRequestWhereInput): Promise<number> {
+  const keptInRegion = await prisma.agentApprovalRequest.findMany({
+    where: { AND: [where, { toolArgs: { path: ['keptInRegion'], equals: true } }] },
+    select: { id: true, projectId: true },
+  })
+  const { forgetApprovalRequests } = await import('@/lib/mcp/approval-request-bodies')
+  const unreached = keptInRegion.length > 0 ? await forgetApprovalRequests(keptInRegion) : []
+  const deletable = unreached.length > 0 ? { AND: [where, { id: { notIn: unreached } }] } : where
+  return prisma.agentApprovalRequest.deleteMany({ where: deletable }).then(r => r.count)
+}
+
 export async function handleCleanupJob(payload: any): Promise<Record<string, any>> {
   const { cleanupType } = payload
   const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) // 30 days
@@ -117,7 +137,7 @@ export async function handleCleanupJob(payload: any): Promise<Record<string, any
         .catch(() => 0), // intentLog may not exist in all environments
       retentionMode === 'enforce'
         ? Promise.all([
-            prisma.agentApprovalRequest.deleteMany({ where: approvalsPastRetention }).then(r => r.count),
+            deleteApprovalRequests(approvalsPastRetention),
             prisma.securityEvent.deleteMany({ where: eventsPastRetention }).then(r => r.count),
           ])
         : retentionMode === 'dry-run'

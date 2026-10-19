@@ -13,10 +13,15 @@
  * itself, against a real PostgreSQL, is tests/integration/regional-bootstrap.spec.ts.
  */
 
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+
 import {
   ROLES,
   Refusal,
   auditReport,
+  awsCli,
   connectionString,
   launch,
   loadConfig,
@@ -98,9 +103,18 @@ class FakeAws {
     const [service, command] = args
     if (service === 'ecs' && command === 'list-tasks') return JSON.stringify({ taskArns: this.running })
     if (service === 'ecs' && command === 'run-task') {
-      const request = JSON.parse(stdin!)
+      // The identifiers as arguments and only the overrides on standard input:
+      // the real CLI reads --cli-input-json twice, so from a pipe it is empty.
+      expect(args).not.toContain('--cli-input-json')
+      expect(flag('--cluster')).toBe(CONFIG.cluster)
+      expect(flag('--task-definition')).toBe(CONFIG.taskDefinition)
+      expect(flag('--overrides')).toBe('file:///dev/stdin')
+      expect(JSON.parse(flag('--network-configuration')!).awsvpcConfiguration).toEqual({
+        subnets: CONFIG.subnets, securityGroups: [CONFIG.securityGroup], assignPublicIp: 'DISABLED',
+      })
+      const overrides = JSON.parse(stdin!)
       const env: Record<string, string> = { BOOTSTRAP_MODE: 'check' }
-      for (const e of request.overrides.containerOverrides[0].environment) env[e.name] = e.value
+      for (const e of overrides.containerOverrides[0].environment) env[e.name] = e.value
       const taskArn = `arn:aws:ecs:${REGION}:123456789012:task/backenly-region/task${++this.n}`
       this.tasks.set(taskArn, { env, polls: 0, ...this.procedure(env) })
       return JSON.stringify({ tasks: [{ taskArn }], failures: [] })
@@ -211,7 +225,7 @@ function verifies(password: string, verifier: string): boolean {
 
 const runTasks = (fake: FakeAws) => fake.calls.filter((c) => c.args[0] === 'ecs' && c.args[1] === 'run-task')
 const envOf = (call: Call): Record<string, string> =>
-  Object.fromEntries(JSON.parse(call.stdin!).overrides.containerOverrides[0].environment.map((e: { name: string; value: string }) => [e.name, e.value]))
+  Object.fromEntries(JSON.parse(call.stdin!).containerOverrides[0].environment.map((e: { name: string; value: string }) => [e.name, e.value]))
 
 // ── The runs ─────────────────────────────────────────────────────────────────
 
@@ -254,6 +268,8 @@ describe('a first apply', () => {
     const applyEnv = envOf(runTasks(fake)[1])
     for (const role of ALL_ROLES) expect(applyEnv[ROLES[role].verifier]).toMatch(/^SCRAM-SHA-256\$4096:/)
     expect(applyEnv.BOOTSTRAP_ROTATE).toBeUndefined()
+    // ...on standard input only: no verifier is ever an argument (the process list).
+    for (const call of fake.calls) expect(call.args.join(' ')).not.toContain('SCRAM-SHA-256')
   })
 
   it('leaves no current credential when the procedure fails', async () => {
@@ -419,5 +435,27 @@ describe('arguments and configuration', () => {
     )
     expect(() => loadConfig(JSON.stringify({ ...CONFIG, subnets: [] }))).toThrow(/subnets/)
     expect(() => loadConfig('not json')).toThrow(/terraform output -json/)
+  })
+})
+
+describe('the AWS CLI it calls', () => {
+  // The CLI reads file:///dev/stdin by opening that path. On Linux the standard
+  // input Node gives a child is a socket, which /dev/stdin cannot open (ENXIO):
+  // the first run against a real region failed that way before starting
+  // anything. A stand-in `aws` on PATH that reads /dev/stdin as the CLI does.
+  const unix = process.platform === 'win32' ? it.skip : it
+
+  unix('hands the CLI a standard input it can open as /dev/stdin, without an argument or a file', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fake-aws-'))
+    fs.writeFileSync(path.join(dir, 'aws'), '#!/bin/sh\ncat /dev/stdin\nprintf " args:%s" "$*"\n', { mode: 0o755 })
+    // Passed as the CLI's environment: jest's sandboxed process.env does not
+    // reach a child, which would then find a real `aws` on the runner instead.
+    const env = { ...process.env, PATH: `${dir}${path.delimiter}${process.env.PATH}` }
+    try {
+      const out = await awsCli(REGION, env)(['secretsmanager', 'put-secret-value', '--secret-string', 'file:///dev/stdin'], 'kept-off-the-process-list')
+      expect(out).toBe(`kept-off-the-process-list args:secretsmanager put-secret-value --secret-string file:///dev/stdin --region ${REGION} --output json`)
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
   })
 })

@@ -42,7 +42,7 @@
 import { prisma } from '@/lib/db'
 import { regionRawClient, workspaceRawClient, type WorkspaceRawClient } from '@/lib/data-plane/regional'
 import { HOME_REGION, type CloudRegionId } from '@/lib/regions'
-import { projectIdOfWorkspaceSchema, workspaceSchemaName } from '@/lib/security/workspace-schema'
+import { isChangeVaultSchema, projectIdOfWorkspaceSchema, workspaceSchemaName } from '@/lib/security/workspace-schema'
 
 /**
  * The database a schema is registered in: its project's, in that project's
@@ -285,7 +285,9 @@ export async function unregisteredSchemas(region: CloudRegionId = HOME_REGION): 
       WHERE schema_name LIKE 'workspace\\_%'`,
   )
 
-  return existing.map(e => e.schema_name).filter(s => !registered.has(s))
+  // A change vault is unregistered by design (lib/changes/preserve.ts): it
+  // keeps what a schema change removed and is never served.
+  return existing.map(e => e.schema_name).filter(s => !registered.has(s) && !isChangeVaultSchema(s))
 }
 
 /**

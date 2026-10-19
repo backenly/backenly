@@ -189,13 +189,18 @@ export const DOMAIN_TOOLS: DomainTool[] = [
   {
     name: 'deploy',
     title: 'Deploy',
-    summary: 'Publishing and rolling back. Both change what production serves, so both wait for a human.',
+    summary:
+      'Publishing, the change history, and restoring the state before a change. Every schema change to production ' +
+      'is checkpointed and verified by Backenly, and recovered automatically when that check fails; anything that ' +
+      'changes what production serves waits for a human.',
     actions: {
       status: { tool: 'get_deploy_status', gloss: 'the live version, when it shipped and its state' },
       history: { tool: 'list_deploy_versions', gloss: 'every published version, which one is serving, and which can be rolled back to' },
       readiness: { tool: 'get_readiness', gloss: 'the 0-100 readiness score with blockers; fixes nothing unless autoFix is true', readGloss: 'the 0-100 readiness score with its blockers' },
       deploy: { tool: 'trigger_deploy', gloss: 'publish the current backend' },
       rollback: { tool: 'rollback_deploy', gloss: 'mark an earlier published version as current (version bookkeeping; the live backend is unchanged)' },
+      changes: { tool: 'list_schema_changes', gloss: 'every schema change to production, newest first: its changeId, who made it, what it did, whether it was verified, and whether the state before it can be restored' },
+      revert_change: { tool: 'revert_schema_change', gloss: 'ask to restore the state before one change (changeId); a person approves it, and data written since is never dropped silently' },
     },
   },
   {

@@ -265,7 +265,7 @@ describe('the tool route', () => {
     const body = await res.json()
     expect(res.status).toBe(400)
     expect(body.code).toBe('UNKNOWN_ACTION')
-    expect(body.supported).toEqual(['status', 'history', 'readiness', 'deploy', 'rollback'])
+    expect(body.supported).toEqual(['status', 'history', 'readiness', 'deploy', 'rollback', 'changes', 'revert_change'])
   })
 
   it('does not offer an alert action while nothing evaluates alerts', () => {
@@ -310,7 +310,7 @@ describe('the tool route', () => {
     mockReadOnly = true
     const res = await call('deploy', { action: 'yolo' })
     const body = await res.json()
-    expect(body.supported).toEqual(['status', 'history', 'readiness'])
+    expect(body.supported).toEqual(['status', 'history', 'readiness', 'changes'])
   })
 
   it('never parks a request from a read-only key either', async () => {

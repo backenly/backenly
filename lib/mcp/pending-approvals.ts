@@ -24,10 +24,18 @@ export async function countPendingAgentApprovals(projectId: string): Promise<num
 }
 
 export async function listPendingAgentApprovals(projectId: string, take = 10) {
-  return prisma.agentApprovalRequest.findMany({
+  const rows = await prisma.agentApprovalRequest.findMany({
     where: waiting(projectId),
     orderBy: { createdAt: 'desc' },
     take,
-    select: { id: true, tool: true, target: true, createdAt: true, expiresAt: true },
+    select: { id: true, tool: true, target: true, toolArgs: true, createdAt: true, expiresAt: true },
   })
+  // A regional project's targets are kept in its region and read back here,
+  // or left as their stand-ins when it cannot be read. The call is selected
+  // only to tell which rows those are, and is not returned
+  // (lib/mcp/approval-request-bodies.ts). Imported on use: only the count above
+  // is read by the health route and the top bar's poll.
+  const { withApprovalRequests } = await import('@/lib/mcp/approval-request-bodies')
+  const shown = await withApprovalRequests(projectId, rows)
+  return shown.map(({ toolArgs: _call, readable: _readable, ...row }) => row)
 }

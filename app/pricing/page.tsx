@@ -139,7 +139,7 @@ const included: { icon: LucideIcon; label: string; body: string }[] = [
   { icon: UploadCloud, label: 'Storage', body: 'Buckets, uploads, metadata and signed URLs.' },
   { icon: Radio, label: 'Realtime', body: 'SSE subscriptions, presence and broadcast channels.' },
   { icon: Zap, label: 'Triggers', body: 'Event workflows for inserts, updates, schedules and integrations. On Pro and Enterprise.' },
-  { icon: RefreshCcw, label: 'Rollback', body: 'Deployment history and restore paths when changes need reversing.' },
+  { icon: RefreshCcw, label: 'Rollback', body: 'Every schema change made through Backenly is checkpointed and verified, and a change that fails its checks is recovered automatically when that is safe. Agents can ask for a restore; only a person approves one.' },
   { icon: Bot, label: 'Autonomy', body: 'Watches your live backend every minute and repairs what is safe to repair. On every plan.' },
   { icon: Terminal, label: 'Bring your own agent', body: 'Drive the backend from Claude Code or Cursor over MCP. Typed tools carry no AI charge.' },
 ]
@@ -184,6 +184,10 @@ function comparisonGroups(published: boolean): MatrixGroup[] {
         { label: 'API requests', hint: 'No cap and no per-request fee on any plan', cells: ['Unlimited', 'Unlimited', 'Unlimited'] },
         { label: 'Daily backups', cells: ['7 days kept', '7 days kept', '7 days kept'] },
         { label: 'Direct Postgres access and pg_dump export', cells: [true, true, true] },
+        // How long a change's restore point is kept follows log retention
+        // (lib/changes/policy.ts). Whether a given change can still be restored
+        // is decided per change, so this is retention, not a promise.
+        { label: 'Schema change restore points kept', hint: 'Each change shows whether the state before it can still be restored', cells: ['7 days', '30 days', '90 days'] },
         { label: 'Deployment history and rollback', cells: [false, 'Full history', 'Full history'] },
       ],
     },

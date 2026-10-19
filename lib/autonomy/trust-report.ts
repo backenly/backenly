@@ -14,6 +14,7 @@
  */
 
 import { redactSecretParams } from '@/lib/mcp/withhold-secrets'
+import { withHeldActions } from '@/lib/operational-memory/held-action-targets'
 import { prisma } from '@/lib/db/prisma'
 import { AUTONOMOUS_AUDIT_ACTIONS } from './circuit-breaker'
 import {
@@ -274,7 +275,8 @@ function classify(action: string): ActivityItem['kind'] {
   // as a completed fix.
   if (action === 'HEALTH_FIX_UNVERIFIED') return 'applied_unverified'
   if ((AUTONOMOUS_AUDIT_ACTIONS as readonly string[]).includes(action)) return 'auto_fix'
-  if (action === 'HEALTH_FIX_ESCALATED') return 'escalation'
+  // A governed change whose recovery waits for a person is held back the same way.
+  if (action === 'HEALTH_FIX_ESCALATED' || action.startsWith('CHANGE_RECOVERY_')) return 'escalation'
   if (action === 'AUTONOMY_CIRCUIT_OPEN') return 'breaker'
   if (action.startsWith(ROLLBACK_PREFIX) || action === 'HEALTH_FIX_ROLLED_BACK') return 'rollback'
   if (action === 'AUTONOMY_SHADOW_DECISION') return 'shadow'
@@ -310,6 +312,7 @@ function humanize(action: string, details: string | null): string {
       // none, so they read as what they were.
       return `${explainAutonomyEvent(d).full}${isVerifiedFix(d.verification) ? '' : ' (it ran, but could not be confirmed)'}`
     case 'escalation':
+      if (!d.findingType && typeof d.summary === 'string' && d.summary) return d.summary
       // Never the raw type. `Held back for your approval: rls_expression_invalid`
       // told the user nothing they could act on, and every escalation on a
       // different table produced a byte-identical row — six lines that looked
@@ -342,6 +345,8 @@ function humanize(action: string, details: string | null): string {
       if (action === 'HEALTH_FIX_ROLLED_BACK') {
         return d.findingType ? `You undid a fix: ${summariseFinding(d.findingType, d)}` : 'You undid a fix'
       }
+      // A governed change's recovery writes its own sentence (lib/changes/recovery.ts).
+      if (typeof d.summary === 'string' && d.summary) return d.summary
       return `Rolled back a previous change${d.findingType ? `: ${d.findingType.replace(/_/g, ' ')}` : ''}`
     case 'shadow':
       return d.summary ?? 'Evaluated what it would do (shadow mode)'
@@ -363,6 +368,8 @@ function humanize(action: string, details: string | null): string {
       // beside it. Kept in the feed (it is a real thing a human did, and the
       // audit row exists so History can show who asked) but given the subject
       // that makes it worth a line.
+      // Governed-change rows write their own sentence (lib/changes/recovery.ts).
+      if (action.startsWith('CHANGE_') && typeof d.summary === 'string' && d.summary) return d.summary
       if (action === 'HEALTH_FIX_REQUESTED') {
         return d.findingType
           ? `You asked Backenly to fix: ${summariseFinding(d.findingType, d)}`
@@ -486,18 +493,23 @@ export async function buildTrustReport(
         OR: [
           { type: { in: ['autonomy', 'health'] } },
           { action: { startsWith: ROLLBACK_PREFIX } },
+          // Governed changes: a recovery waiting for a person, one that needs
+          // attention, one kept as it is, one reapplied (lib/changes/recovery.ts).
+          { action: { startsWith: 'CHANGE_' } },
         ],
       },
       orderBy: { timestamp: 'desc' },
       take: 25,
       select: { action: true, details: true, timestamp: true },
     }),
+    // A regional project's held actions with the target and arguments the
+    // approver reads, from its region (lib/operational-memory/held-action-targets.ts).
     prisma.healthFinding.findMany({
       where: { projectId, status: 'pending_approval' },
       orderBy: [{ severity: 'asc' }, { detectedAt: 'desc' }],
       take: 25,
       select: { id: true, type: true, severity: true, detectedAt: true, details: true },
-    }),
+    }).then(rows => withHeldActions(projectId, rows)),
     // Ordered by fixAppliedAt, not detectedAt: a finding raised last week and
     // healed a minute ago belongs at the top of "what just changed".
     // `nulls: 'last'` keeps legacy rows (fixed before the column was stamped)
@@ -510,7 +522,7 @@ export async function buildTrustReport(
         id: true, type: true, severity: true,
         detectedAt: true, fixAppliedAt: true, details: true,
       },
-    }),
+    }).then(rows => withHeldActions(projectId, rows)),
     prisma.auditLog.findFirst({
       where: { projectId, action: 'AUTONOMY_SHADOW_DECISION' },
       orderBy: { timestamp: 'desc' },

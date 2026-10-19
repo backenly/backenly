@@ -49,13 +49,33 @@ describe('revertEligibility — pure verdicts', () => {
     expect(e.reason).toMatch(/no pre-fix snapshot/i)
   })
 
-  test('a format-2 index fix is revertible with one click', () => {
+  // Its only way back was restoring the whole schema to a snapshot, which also
+  // undid every change made since. Refused, with the reason.
+  test('a schema-touching format-2 fix is not revertible, and says why', () => {
     const e = revertEligibility('missing_fk_index', {
       tableName: 'orders',
       rollbackData: { rollbackFormat: 2, schemaTouching: true, snapshotId: 'snap-1' },
     })
+    expect(e.revertible).toBe(false)
+    expect(e.reason).toMatch(/every change made since/i)
+  })
+
+  test('a format-3 index fix with its recorded changes is revertible with one click', () => {
+    const e = revertEligibility('missing_fk_index', {
+      tableName: 'orders',
+      rollbackData: { rollbackFormat: 3, schemaTouching: true, changeIds: ['c1'], statements: [{ sql: 'CREATE INDEX …' }] },
+    })
     expect(e.revertible).toBe(true)
     expect(e.requiresConfirmation).toBe(false)
+  })
+
+  test('a format-3 fix that ran statements but recorded no change is not revertible', () => {
+    const e = revertEligibility('missing_fk_index', {
+      tableName: 'orders',
+      rollbackData: { rollbackFormat: 3, schemaTouching: true, changeIds: [], statements: [{ sql: 'CREATE INDEX …' }] },
+    })
+    expect(e.revertible).toBe(false)
+    expect(e.reason).toMatch(/not recorded as a change/i)
   })
 
   test('metadata-only fixes need no snapshot to be revertible', () => {
@@ -73,7 +93,7 @@ describe('revertEligibility — pure verdicts', () => {
     (type) => {
       const e = revertEligibility(type, {
         tableName: 'posts',
-        rollbackData: { rollbackFormat: 2, schemaTouching: true, snapshotId: 'snap-1' },
+        rollbackData: { rollbackFormat: 3, schemaTouching: true, changeIds: ['c1'] },
       })
       expect(e.revertible).toBe(true)
       expect(e.requiresConfirmation).toBe(true)
@@ -86,7 +106,7 @@ describe('revertEligibility — pure verdicts', () => {
     // and hand out silent one-click RLS removal.
     const e = revertEligibility('missing_rls_posts', {
       tableName: 'posts',
-      rollbackData: { rollbackFormat: 2, schemaTouching: true, snapshotId: 'snap-1' },
+      rollbackData: { rollbackFormat: 3, schemaTouching: true, changeIds: ['c1'] },
     })
     expect(e.requiresConfirmation).toBe(true)
   })
@@ -171,7 +191,7 @@ describe('revertAutoFix — engine agrees with the predicate', () => {
   test('a revertible RLS fix asks for confirmation before acting', async () => {
     const id = await seed('missing_rls', {
       tableName: 'posts',
-      rollbackData: { rollbackFormat: 2, schemaTouching: true, snapshotId: 'snap-missing' },
+      rollbackData: { rollbackFormat: 3, schemaTouching: true, changeIds: ['change-missing'] },
     })
     const res = await revertAutoFix(id, projectId)
     expect(res.success).toBe(false)

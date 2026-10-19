@@ -69,11 +69,19 @@ export function createSuccessResponse<T>(
 }
 
 /**
- * Handle Zod validation errors
+ * Handle validation errors: a ZodError keeps its per-field detail, and the
+ * message validateRequestBody already built (what the v1 data routes pass) is
+ * answered as it is. Both are a 400. A string used to reach `error.errors`,
+ * which a string does not have, so every invalid request to those routes
+ * answered 500 "Failed to execute database query" instead.
  */
-export function handleValidationError(error: ZodError): NextResponse<ApiError> {
+export function handleValidationError(error: ZodError | string): NextResponse<ApiError> {
+  if (typeof error === 'string') {
+    return createErrorResponse('VALIDATION_ERROR', error || 'Request validation failed', 400)
+  }
+
   const details: Record<string, string[]> = {}
-  
+
   error.errors.forEach((err) => {
     const path = err.path.join('.')
     if (!details[path]) {

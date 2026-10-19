@@ -62,3 +62,29 @@ export function normalizeError(error: any): BackenlyError {
 
   return new BackenlyError('An unexpected error occurred')
 }
+
+/**
+ * The error for a response that did not succeed, built from its body.
+ *
+ * client.request() and the storage upload both build their errors here, so
+ * each keeps the API's own message, code and details, plus the HTTP status.
+ * The upload used to build its own from `body.error`, which in the API's error
+ * shape (`{ error: { code, message, details } }`) is an object, so the thrown
+ * message read "[object Object]".
+ *
+ * A body with no `error` but a `message` gives that message. One that is not a
+ * JSON object, or carries neither, gives "<what> failed with status <n>".
+ */
+export async function errorFromResponse(response: Response, what = 'Request'): Promise<BackenlyError> {
+  const body: any = await response.json().catch(() => null)
+  const isObject = body !== null && typeof body === 'object' && !Array.isArray(body)
+  const shaped = isObject && body.error
+    ? body
+    : {
+        error: isObject && typeof body.message === 'string' && body.message
+          ? body.message
+          : `${what} failed with status ${response.status}`,
+        code: isObject && typeof body.code === 'string' ? body.code : undefined,
+      }
+  return normalizeError({ ...shaped, status: response.status })
+}

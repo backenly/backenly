@@ -7,10 +7,15 @@ export const dynamic = 'force-dynamic'
  *   List requests (newest first) for the Review Queue.
  *
  * POST /api/projects/[id]/agent-approvals
- *   Body: { approvalId: string, decision: 'approve' | 'reject' }
+ *   Body: { approvalId: string, decision: 'approve' | 'reject', shownDigest?: string }
  *   Approving executes the parked operation immediately — the exact tool and
  *   arguments recorded on the request, verbatim, with no model involved — and
  *   returns the outcome. A request without an exact call is closed unrun.
+ *   `shownDigest` is the listed request's own, sent back with an approval: a
+ *   regional project's request runs only with it, and only while it still
+ *   matches (409 otherwise, nothing run, the request still waiting). 503 when
+ *   the project's region, which keeps the request's call, cannot be reached:
+ *   nothing ran, and the request is still waiting.
  *
  * Auth: platform JWT + project ownership (withProjectAccess). Scoped agent
  * keys can create and poll requests over MCP but can never decide them —
@@ -39,7 +44,7 @@ export const POST = withProjectAccess(async (req: NextRequest, { user, projectId
     )
   }
 
-  let body: { approvalId?: string; decision?: string }
+  let body: { approvalId?: string; decision?: string; shownDigest?: unknown }
   try {
     body = await req.json()
   } catch {
@@ -59,10 +64,22 @@ export const POST = withProjectAccess(async (req: NextRequest, { user, projectId
     approvalId,
     approverUserId: user.userId,
     decision,
+    shownDigest: typeof body.shownDigest === 'string' ? body.shownDigest : undefined,
   })
 
   if (!result.ok && result.status === 'missing') {
     return NextResponse.json({ success: false, error: result.error }, { status: 404 })
+  }
+  if (!result.ok && result.status === 'forbidden') {
+    return NextResponse.json({ success: false, error: result.error }, { status: 403 })
+  }
+  if (result.regionUnavailable) {
+    // The project's region, which keeps the request's exact call, could not be
+    // reached: nothing ran, and the request is still waiting to be approved again.
+    return NextResponse.json(
+      { success: false, error: result.error, status: result.status, retryable: true },
+      { status: 503 },
+    )
   }
   if (!result.ok && result.error && result.status !== 'failed') {
     // Already decided / expired — tell the truth, not a 500.

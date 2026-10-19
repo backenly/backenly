@@ -15,9 +15,10 @@
  * session, so there is no working install this breaks.
  *
  * `unsealParams` answers null for anything it cannot open — absent, corrupt,
- * or written under another deployment's secret — and the replay then falls
- * back to the stored display copy, which is exactly what legacy rows (sealed
- * copy absent, params unredacted) need to keep approving.
+ * or written under another deployment's secret. Only a legacy row (sealed copy
+ * absent, params unredacted) then replays its stored params; a row whose sealed
+ * copy cannot be opened runs nothing (lib/core/fix-actions.ts heldArguments),
+ * since its display copy has the secret values withheld.
  */
 
 import crypto from 'crypto'

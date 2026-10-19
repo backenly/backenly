@@ -31,6 +31,9 @@
  * once in the console). The operator is the account that owns the probe
  * project: it signs in at the home host for what only the console does
  * (snapshots, restores and schema rollback), and signs out when the run ends.
+ * The probe project's production must not be protected (Settings, or
+ * PUT /api/projects/<id>/protection): the run changes its schema directly, and
+ * a new Cloud project starts protected.
  *
  * What it checks, in order:
  *   region     the region's host answers health; it serves no console path;
@@ -49,16 +52,17 @@
  *   functions  the HTTP function answers at the region's host; the sandboxed
  *              one reads the region's table
  *   latency    p50 and p95 of 20 reads through the region's host
- *   rollback   a table added over MCP is rolled back from the console to the
- *              restore point recorded before it; the fixtures and their rows
- *              are left as they were
+ *   rollback   a table added over MCP is a governed change, verified; the
+ *              console restores the state before it (Restore previous state),
+ *              verified; the fixtures and their rows are left as they were
  *   autonomy   a fault the region repairs on its own: a reference column added
  *              over MCP with a DEFAULT, a path that creates no index, is
  *              indexed by the region's repair loop without anyone asking
  *              (missing_fk_index, Tier 0), confirmed by its HEALTH_AUTO_FIXED
  *              record and by the table's own indexes. A repair made from home
  *              instead proves nothing about the region and fails the check.
- *              The column is then rolled back from the console
+ *              The changes the drill made are then restored from the console,
+ *              newest first
  *   recovery   the console asks for a snapshot and home queues it for the
  *              region, which takes it; its download link is the region's own
  *              bucket, never the home host; rows changed after it are put back
@@ -335,6 +339,24 @@ export function toolData<T>(outcome: ToolOutcome): T | null {
   return null
 }
 
+/**
+ * A failed call's text for the report. The SDK throws BackenlyError (an Error
+ * with code and status beside its message); anything else is shown as JSON, so
+ * an object never reads "[object Object]".
+ */
+export function describeError(err: unknown): string {
+  if (err instanceof Error) {
+    const { code, status } = err as Error & { code?: unknown; status?: unknown }
+    const extra = [code, status].filter((v) => v !== undefined && v !== null && v !== '').join(' ')
+    return extra ? `${err.message} (${extra})` : err.message
+  }
+  try {
+    return JSON.stringify(err) ?? String(err)
+  } catch {
+    return String(err)
+  }
+}
+
 class Mcp {
   private constructor(private readonly client: Client) {}
 
@@ -417,7 +439,7 @@ export async function qualify(args: QualifyArgs, log: (line: string) => void = c
       log(`  ok    ${phase}/${name}: ${detail}`)
       return true
     } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err)
+      const detail = describeError(err)
       results.push({ phase, check: name, status: 'fail', detail, ms: Date.now() - started })
       log(`  FAIL  ${phase}/${name}: ${detail}`)
       failed.add(name)
@@ -458,6 +480,42 @@ export async function qualify(args: QualifyArgs, log: (line: string) => void = c
     must(res.status === 200, `GET ${path} at the home host answered ${res.status}`)
     return json(res)
   }
+
+  /** The project's governed changes newer than `seq`, newest first, as the console lists them. */
+  async function changesSince(seq: number): Promise<Array<{
+    id: string
+    seq: number
+    touched: string[]
+    outcome: { state: string }
+    action: { kind: string; available: boolean; reason?: string } | null
+  }>> {
+    const { changes } = await operatorJson(`/api/projects/${args.project}/changes?limit=50`)
+    return ((changes ?? []) as Array<{ seq: number }>).filter((c) => c.seq > seq) as any
+  }
+
+  /**
+   * Restore previous state, as the console does it: the preview's four checks,
+   * then the restore, which must come back restored and verified. Only a
+   * lossless restore is run here; one that would set data aside needs a person
+   * reading what it would set aside, which a qualification run is not.
+   */
+  async function restoreFromConsole(change: { id: string; seq: number }): Promise<string> {
+    const base = `/api/projects/${args.project}/changes/${change.id}`
+    const preview = await json(await theFetch(homeUrl(`${base}/preview`), asOperator({ method: 'POST', body: '{}' })))
+    must(preview.preview, `the preview of #${change.seq} answered: ${String(preview.error ?? '').slice(0, 200)}`)
+    must(
+      preview.preview.safety === 'lossless',
+      `restoring #${change.seq} is ${preview.preview.safety}, not lossless: ${String(preview.preview.reason ?? '').slice(0, 200)}`,
+    )
+    const res = await theFetch(homeUrl(`${base}/restore`), asOperator({ method: 'POST', body: JSON.stringify({ seq: change.seq }) }))
+    const body = await json(res)
+    must(
+      res.status === 200 && body.success === true && body.status === 'restored',
+      `restoring #${change.seq} answered ${res.status}: ${String(body.error ?? '').slice(0, 200)}`,
+    )
+    must(body.verification?.outcome === 'confirmed', `#${change.seq} was restored but not verified against its restore point`)
+    return `verified, as #${body.recoverySeq}`
+  }
   const snapshotsPath = `/api/projects/${args.project}/backup`
   const seconds = (ms: number) => `${(ms / 1000).toFixed(1)} s`
 
@@ -493,7 +551,12 @@ export async function qualify(args: QualifyArgs, log: (line: string) => void = c
 
   /** A fixture call, waiting out an approval if the control plane parks it. */
   async function fixture(name: string, toolArgs: Record<string, unknown>): Promise<ToolOutcome> {
-    const outcome = await mcp!.call(name, toolArgs)
+    const outcome = await mcp!.call(name, toolArgs).catch((err: unknown) => {
+      if (describeError(err).includes('BRANCH_REQUIRED')) {
+        throw new Error(`${name}: the probe project's production is protected; turn protection off in its Settings, since the run changes its schema directly`)
+      }
+      throw err
+    })
     const approval = pendingApproval(outcome)
     if (approval) await untilApproved(approval, name)
     return outcome
@@ -647,7 +710,7 @@ export async function qualify(args: QualifyArgs, log: (line: string) => void = c
     }
     await check('rls', 'v1-own-rows-only', ['insert-a', 'insert-b'], async () => {
       for (const who of ['a', 'b'] as const) {
-        const rows: Array<{ owner_id: string; body: string }> = await users[who]!.client[TABLE].list({ limit: 1000 })
+        const rows: Array<{ owner_id: string; body: string }> = await users[who]!.client[TABLE].list({ limit: 100 })
         must(rows.length > 0, `user ${who} sees none of its rows`)
         must(rows.every((r) => r.owner_id === users[who]!.id), `user ${who} sees another user's row`)
         must(rows.some((r) => r.body === `${run}-${who}`), `user ${who} does not see this run's row`)
@@ -788,9 +851,10 @@ export async function qualify(args: QualifyArgs, log: (line: string) => void = c
     log('\n── storage')
     await check('storage', 'round-trip', ['bucket', 'sign-up-a'], async () => {
       const a = users.a!.client
-      const bytes = randomBytes(2048)
-      const file = new File([bytes], `qualify-${run}.bin`, { type: 'application/octet-stream' })
-      const up = await a.storage.upload(file, `qualify/${run}.bin`, { bucket: BUCKET })
+      // Plain text: the upload route refuses executable extensions (.bin among them).
+      const bytes = Buffer.from(randomBytes(1024).toString('hex'))
+      const file = new File([bytes], `qualify-${run}.txt`, { type: 'text/plain' })
+      const up = await a.storage.upload(file, `qualify/${run}.txt`, { bucket: BUCKET })
       must(up?.id && up?.url, 'the upload returned no file')
       try {
         const down = await theFetch(new URL(up.url, args.api).toString(), {
@@ -809,7 +873,9 @@ export async function qualify(args: QualifyArgs, log: (line: string) => void = c
     await check('functions', 'http-at-region', ['functions'], async () => {
       const res = await theFetch(apiUrl(`/api/v1/${args.project}/fn/${HTTP_FUNCTION}`), { headers: { 'x-api-key': args.projectKey } })
       const body = await json(res)
-      must(res.status === 200 && body.ok === true, `the function answered ${res.status} ${JSON.stringify(body).slice(0, 200)}`)
+      // The runtime answers with the function's own status and keeps its
+      // envelope: { success, name, result: { status, body }, logs, durationMs }.
+      must(res.status === 200 && body.success === true && body.result?.body?.ok === true, `the function answered ${res.status} ${JSON.stringify(body).slice(0, 200)}`)
       return `${HTTP_FUNCTION} answered at the region's host`
     })
     await check('functions', 'sandbox-reads-region', ['functions', 'insert-a'], async () => {
@@ -836,31 +902,30 @@ export async function qualify(args: QualifyArgs, log: (line: string) => void = c
     })
 
     // ── rollback ─────────────────────────────────────────────────────────────
-    log('\n── rollback (a governed change, undone from the console)')
+    log('\n── rollback (a governed change, restored from the console)')
     const rollbackTable = `qualify_rollback_${run}`
-    let restorePoint: { id: string; versionNum: number } | null = null
+    let restorable: { id: string; seq: number } | null = null
     await check('rollback', 'change', ['table', 'sign-in'], async () => {
       await fixture('apply_migration', { sql: `CREATE TABLE ${rollbackTable} (note text)` })
-      const { versions } = await operatorJson(`/api/projects/${args.project}/schema-versions`)
-      // Every schema change records the schema as it was just before it.
-      const before = (versions ?? []).find((v: { description?: string }) => v.description?.includes(rollbackTable))
-      must(before, `no restore point was recorded before ${rollbackTable} was created`)
-      restorePoint = { id: before.id, versionNum: before.versionNum }
-      return `${rollbackTable} created over MCP, after restore point v${before.versionNum}`
+      // Every schema change is a governed change: checkpointed, applied, and
+      // verified by Backenly in the region it ran in.
+      const changes = await changesSince(0)
+      const made = changes.find((c) => c.touched.includes(rollbackTable))
+      must(made, `no governed change was recorded for ${rollbackTable}`)
+      must(made.outcome.state === 'healthy', `the change that created ${rollbackTable} is ${made.outcome.state}, not applied and verified`)
+      restorable = { id: made.id, seq: made.seq }
+      return `${rollbackTable} created over MCP as change #${made.seq}, applied and verified`
     })
-    await check('rollback', 'undone', ['change'], async () => {
-      const res = await theFetch(
-        homeUrl(`/api/projects/${args.project}/schema-versions`),
-        asOperator({ method: 'POST', body: JSON.stringify({ versionId: restorePoint!.id }) }),
-      )
-      const body = await json(res)
-      must(res.status === 200 && body.success === true, `the rollback answered ${res.status}: ${String(body.message ?? body.error ?? '').slice(0, 200)}`)
-      const state = await mcp!.call('read_backend_state', { section: 'schema' })
-      must(!state.text.includes(rollbackTable), `${rollbackTable} is still in the schema after the rollback`)
-      must(state.text.includes(TABLE), `the rollback removed ${TABLE}, which the restore point recorded`)
-      const rows: Array<{ body: string }> = await users.a!.client[TABLE].list({ limit: 1000 })
-      must(rows.some((r) => r.body === `${run}-a`), `user a no longer sees its row in ${TABLE} after the rollback`)
-      return `rolled back to v${restorePoint!.versionNum}: ${rollbackTable} is gone; ${TABLE} and its rows are as they were`
+    await check('rollback', 'undone', ['change', 'insert-a'], async () => {
+      const restored = await restoreFromConsole(restorable!)
+      // The region's live catalog: the restore runs on the region's database.
+      const gone = await mcp!.call('get_table_schema', { tableName: rollbackTable }).then((o) => o.text, (err: unknown) => describeError(err))
+      must(/does not exist/i.test(gone), `${rollbackTable} is still in the region's schema after the restore: ${gone.slice(0, 160)}`)
+      const tables = await mcp!.call('read_backend_state', { section: 'tables' })
+      must(tables.text.includes(TABLE), `the restore removed ${TABLE}, which was there before the change`)
+      const rows: Array<{ body: string }> = await users.a!.client[TABLE].list({ limit: 100 })
+      must(rows.some((r) => r.body === `${run}-a`), `user a no longer sees its row in ${TABLE} after the restore`)
+      return `restored the state before #${restorable!.seq} (${restored}): ${rollbackTable} is gone; ${TABLE} and its rows are as they were`
     })
 
     // ── autonomy: a fault the region repairs on its own ──────────────────────
@@ -868,8 +933,8 @@ export async function qualify(args: QualifyArgs, log: (line: string) => void = c
     // back (it does not change a backend whose error rate is high).
     log('\n── autonomy (a fault the region repairs without being asked)')
     const probeColumn = `qualify_probe_${run}_id`
-    const versionsPath = `/api/projects/${args.project}/schema-versions`
-    let versionsBeforeFault: Set<string> | null = null
+    /** The newest change before the drill: everything after it is the drill's to restore. */
+    let seqBeforeFault: number | null = null
     /** The definition of an index on TABLE that leads with `column`, or null. */
     const indexLeadingWith = async (column: string): Promise<string | null> => {
       const schema = await mcp!.call('get_table_schema', { tableName: TABLE })
@@ -890,7 +955,7 @@ export async function qualify(args: QualifyArgs, log: (line: string) => void = c
       return strings.find((s) => /CREATE (UNIQUE )?INDEX/.test(s) && leads.test(s)) ?? null
     }
     await check('autonomy', 'repaired-in-region', ['table', 'sign-in'], async () => {
-      versionsBeforeFault = new Set(((await operatorJson(versionsPath)).versions ?? []).map((v: { id: string }) => v.id))
+      seqBeforeFault = (await changesSince(0))[0]?.seq ?? 0
       // The region's repair loop runs at the top of each minute, and home's
       // observer looks at a project 60 s after an MCP change to it. A fault made
       // at second 40 or later reaches the region's loop first.
@@ -939,22 +1004,20 @@ export async function qualify(args: QualifyArgs, log: (line: string) => void = c
       }
     })
     await check('autonomy', 'probe-rolled-back', ['repaired-in-region'], async () => {
-      // The first restore point recorded after the drill began is the one taken
-      // just before the probe column was added.
-      const recorded = (((await operatorJson(versionsPath)).versions ?? []) as Array<{ id: string; versionNum: number }>)
-        .filter((v) => !versionsBeforeFault!.has(v.id))
-        .sort((a, b) => a.versionNum - b.versionNum)
-      must(recorded.length > 0, `no restore point was recorded before ${probeColumn} was added`)
-      const res = await theFetch(homeUrl(versionsPath), asOperator({ method: 'POST', body: JSON.stringify({ versionId: recorded[0].id }) }))
-      const body = await json(res)
-      must(res.status === 200 && body.success === true, `rolling ${probeColumn} back answered ${res.status}: ${String(body.message ?? body.error ?? '').slice(0, 200)}`)
-      must(!(await indexLeadingWith(probeColumn)), `${probeColumn}'s index is still there after the rollback`)
+      // The drill made two changes to TABLE: the probe column (over MCP), then
+      // its index (the region's repair loop). A later change to a table blocks
+      // restoring an earlier one, so they are restored newest first.
+      const drill = (await changesSince(seqBeforeFault!)).filter((c) => c.action?.kind === 'restore' && c.touched.includes(TABLE))
+      must(drill.length > 0, `no governed change was recorded for ${probeColumn}`)
+      const done: string[] = []
+      for (const c of drill) done.push(`#${c.seq} ${await restoreFromConsole({ id: c.id, seq: c.seq })}`)
+      must(!(await indexLeadingWith(probeColumn)), `${probeColumn}'s index is still there after the restore`)
       // The table's own columns: read_backend_state's schema section counts columns and never names them.
       const described = toolData<{ columns?: Array<{ name?: string }> }>(await mcp!.call('get_table_schema', { tableName: TABLE }))
       const columns = (described?.columns ?? []).map((c) => c.name)
       must(columns.length > 0, `get_table_schema listed no columns for ${TABLE}`)
-      must(!columns.includes(probeColumn), `${probeColumn} is still in the schema after the rollback`)
-      return `rolled back to v${recorded[0].versionNum}: ${probeColumn} and its index are gone`
+      must(!columns.includes(probeColumn), `${probeColumn} is still in the schema after the restore`)
+      return `restored the state before ${done.join(', then ')}: ${probeColumn} and its index are gone`
     })
 
     // ── recovery ─────────────────────────────────────────────────────────────
@@ -962,7 +1025,7 @@ export async function qualify(args: QualifyArgs, log: (line: string) => void = c
     let snapshotId: string | null = null
     const atSnapshot: Record<'a' | 'b', string[]> = { a: [], b: [] }
     const idsOf = async (who: 'a' | 'b') =>
-      ((await users[who]!.client[TABLE].list({ limit: 1000 })) as Array<{ id: string }>).map((r) => r.id).sort()
+      ((await users[who]!.client[TABLE].list({ limit: 100 })) as Array<{ id: string }>).map((r) => r.id).sort()
     await check('recovery', 'snapshot', ['sign-in', 'insert-a', 'insert-b'], async () => {
       for (const who of ['a', 'b'] as const) atSnapshot[who] = await idsOf(who)
       const known = new Set(((await operatorJson(snapshotsPath)).data ?? []).map((s: { id: string }) => s.id))
@@ -1051,23 +1114,37 @@ export async function qualify(args: QualifyArgs, log: (line: string) => void = c
       results.push({ phase: 'revocation', check: 'revoked-key-refused', status: 'skip', detail: '--skip-revocation', ms: 0 })
       log('  skip  revocation/revoked-key-refused: --skip-revocation')
     } else {
-      await check('revocation', 'revoked-key-refused', ['connect', 'project-health'], async () => {
+      await check('revocation', 'revoked-key-refused', ['connect', 'project-health', 'functions'], async () => {
         const minted = await mcp!.call('connect', { action: 'create_api_key', description: `qualify ${run} (revoked by this run)` })
         // The whole key is data.apiKey (its prefix and 64 hex characters, lib/auth/key-prefix.ts).
         const created = toolData<{ apiKey?: unknown; keyId?: unknown }>(minted)
         const key = typeof created?.apiKey === 'string' ? created.apiKey : undefined
         const keyId = typeof created?.keyId === 'string' ? created.keyId : undefined
         must(key && keyId, 'create_api_key returned no key or id')
-        const probe = () => theFetch(apiUrl(`/api/v1/${args.project}/healthz`), { headers: { 'x-api-key': key! } })
-        must((await probe()).status === 200, 'the new key was not accepted')
+        // One key-checked endpoint per serving tier: the web tier's storage list
+        // (without a bucket it answers 400 once the key is accepted) and the
+        // runtime's HTTP function. /healthz takes no key, so it proves nothing.
+        const probes: Record<string, () => Promise<Response>> = {
+          web: () => theFetch(apiUrl(`/api/v1/${args.project}/storage/files`), { headers: { 'x-api-key': key! } }),
+          runtime: () => theFetch(apiUrl(`/api/v1/${args.project}/fn/${HTTP_FUNCTION}`), { headers: { 'x-api-key': key! } }),
+        }
+        const refused = (status: number) => status === 401 || status === 403
+        for (const [tier, probe] of Object.entries(probes)) {
+          const status = (await probe()).status
+          must(!refused(status), `the new key was refused by the ${tier} tier (${status}) before it was revoked`)
+        }
         const revoke = await mcp!.call('connect', { action: 'revoke_api_key', keyId })
         const approval = pendingApproval(revoke)
         if (approval) await untilApproved(approval, 'revoke_api_key')
         const revokedAt = Date.now()
+        const refusedAfter: Record<string, number> = {}
         for (;;) {
-          const status = (await probe()).status
-          if (status === 401 || status === 403) return `refused (${status}) ${Date.now() - revokedAt} ms after the revocation ran`
-          if (Date.now() - revokedAt > 120_000) throw new Error(`the revoked key was still accepted (${status}) 120 s after the revocation`)
+          for (const [tier, probe] of Object.entries(probes)) {
+            if (refusedAfter[tier] === undefined && refused((await probe()).status)) refusedAfter[tier] = Date.now() - revokedAt
+          }
+          const waiting = Object.keys(probes).filter((tier) => refusedAfter[tier] === undefined)
+          if (waiting.length === 0) return `refused by the web tier ${refusedAfter.web} ms and the runtime ${refusedAfter.runtime} ms after the revocation ran`
+          if (Date.now() - revokedAt > 120_000) throw new Error(`the revoked key was still accepted 120 s after the revocation by: ${waiting.join(', ')}`)
           await new Promise((r) => setTimeout(r, 1_000))
         }
       })

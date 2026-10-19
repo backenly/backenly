@@ -6,7 +6,8 @@
  * THE one autonomy surface (2026-07-18): what's waiting on you right now
  * (ReviewQueuePanel, folded in from the deleted /review-queue page), the mode,
  * what is always gated, a trust scoreboard, the changes Backenly made with
- * their way back, the recent-activity feed and restore points.
+ * their way back and the recent-activity feed. Restoring the state before any
+ * change is Database → Changes.
  *
  * Rebuilt 2026-10-02 on the console kit: a document page with the standard
  * header, the mode as two radio cards, the scoreboard as one stat strip and
@@ -16,7 +17,7 @@
 
 import { useEffect, useState, useCallback } from 'react'
 import Link from 'next/link'
-import { Activity, AlertTriangle, CheckCircle2, Lock, RefreshCw, ShieldCheck, Undo2 } from 'lucide-react'
+import { Activity, AlertTriangle, CheckCircle2, Lock, RefreshCw, ShieldCheck } from 'lucide-react'
 import {
   EmptyState,
   KIT,
@@ -34,7 +35,6 @@ import {
 } from '@/components/inspector/kit'
 import { EDGE, FOCUS, PAGE_GUTTER, PAGE_WIDTH, RULE, R_PANEL } from '@/components/console/tokens'
 import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
-import { VersionHistory } from '@/components/workspace/VersionHistory'
 import { ReviewQueuePanel } from '@/components/ReviewQueuePanel'
 import { DetectedFindingsPanel } from '@/components/DetectedFindingsPanel'
 import { AppliedChangesPanel, type AppliedChange } from '@/components/AppliedChangesPanel'
@@ -450,27 +450,15 @@ export function AutonomyGuardrailsSettings({ projectId }: { projectId: string })
           )}
         </KitCard>
 
-        {/* ── Restore points ──────────────────────────────────────── */}
-        <KitCard className="overflow-hidden">
-          <KitCardHeader
-            title={
-              <span className="flex items-center gap-2">
-                <Undo2 className="h-4 w-4 text-zinc-500" strokeWidth={1.75} />
-                Restore points
-              </span>
-            }
-            description="Roll the backend back to a saved version: tables, columns, APIs, storage buckets and base auth. Resources added since are kept. OAuth providers and functions need to be reconnected by hand."
-          />
-          <VersionHistory projectId={projectId} />
-        </KitCard>
-
-        {/* Says what the engine can actually back up: a fix whose pre-fix
-            snapshot capture failed is not reversible, and the Changes panel
-            names each of those instead of the footer implying they cannot exist. */}
+        {/* There is no "Restore points" panel here any more: it moved the active
+            version and re-created what that version named, and removed nothing.
+            Restoring is one thing now, the state before a governed change, from
+            Database → Changes. The footer says what is actually reversible: a
+            repair's own changes, while their restore point is still usable. */}
         <p className="flex items-start gap-2 text-[12.5px] leading-[18px] text-zinc-500">
           <Lock className="mt-[2px] h-3.5 w-3.5 flex-shrink-0 text-zinc-600" />
-          Every autonomous action is written to the audit log and snapshotted before it runs. Changes that captured a
-          snapshot can be undone above.
+          Every autonomous action is written to the audit log. Its repairs are recorded as changes with a restore point:
+          while one can still be restored, it can be undone above or from Database → Changes.
         </p>
       </div>
     </Shell>

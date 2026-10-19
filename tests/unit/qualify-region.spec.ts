@@ -16,7 +16,7 @@ import '../helpers/real-web-standard'
 import http from 'node:http'
 import type { AddressInfo } from 'node:net'
 
-import { SseReader, connectingFetch, parseArgs, pendingApproval, qualify, toolData } from '@/scripts/qualify-region'
+import { SseReader, connectingFetch, describeError, parseArgs, pendingApproval, qualify, toolData } from '@/scripts/qualify-region'
 
 const PROJECT = '0b9e3a52-7a5d-4c1e-9a2b-1f2e3d4c5b6a'
 const ENV = {
@@ -161,6 +161,20 @@ describe('tool answers', () => {
   it('answers null when there is no data object', () => {
     expect(toolData({ text: 'Approval 1234… is pending.', structured: null })).toBeNull()
     expect(toolData({ text: '', structured: { ok: true, summary: 'Done.' } })).toBeNull()
+  })
+})
+
+describe('a failure in the report', () => {
+  it('keeps an error\'s code and status beside its message', () => {
+    const err = Object.assign(new Error('Executable files are not allowed.'), { code: 'VALIDATION_ERROR', status: 400 })
+    expect(describeError(err)).toBe('Executable files are not allowed. (VALIDATION_ERROR 400)')
+    expect(describeError(new Error('plain'))).toBe('plain')
+  })
+
+  it('shows anything that is not an Error as JSON, never "[object Object]"', () => {
+    expect(describeError({ error: { code: 'VALIDATION_ERROR' } })).toBe('{"error":{"code":"VALIDATION_ERROR"}}')
+    expect(describeError('text')).toBe('"text"')
+    expect(describeError(undefined)).toBe('undefined')
   })
 })
 

@@ -62,7 +62,7 @@ describe('every surface states the true model', () => {
     const src = read('lib/deployment/rollback.ts')
     expect(src).toContain('does NOT change the live schema')
     expect(src).toContain('version bookkeeping, not a restore')
-    expect(src).toContain("schema History")
+    expect(src).toContain("Database → Changes")
   })
 
   it('the brain tool description tells the agent what rollback really does', () => {

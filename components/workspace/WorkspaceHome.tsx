@@ -845,7 +845,7 @@ function LoopPanel({
             className={`group/all flex w-full items-center justify-between border-t ${HAIRLINE} px-5 py-3 text-left transition-colors hover:bg-white/[0.02] sm:px-7 ${FOCUS_INSET}`}
           >
             <span className="text-[12.5px] font-medium text-zinc-400 transition-colors group-hover/all:text-zinc-100">
-              Full guardrail log, restore points and approvals
+              Full guardrail log, repairs and approvals
             </span>
             <ChevronRight className="h-4 w-4 text-zinc-600 transition-all group-hover/all:translate-x-0.5 group-hover/all:text-zinc-300" />
           </button>

@@ -5,7 +5,7 @@ import { RealtimeModule } from './realtime.js'
 import type { BroadcastCallback, Unsubscribe } from './realtime.js'
 import { PresenceModule } from './presence.js'
 import type { BackenlyConfig } from './types.js'
-import { BackenlyError, normalizeError } from './errors.js'
+import { BackenlyError, errorFromResponse, normalizeError } from './errors.js'
 
 /**
  * BackenlyClient
@@ -359,15 +359,10 @@ export class BackenlyClient {
       })
 
       if (!response.ok) {
-        const body = await response.json().catch(() => ({
-          error: `Request failed with status ${response.status}`,
-        }))
-        // Stamp the HTTP status onto the body so normalizeError can pass it
-        // through to BackenlyError. Without this the SDK silently dropped
-        // status from every error, making 401s indistinguishable from 500s
-        // in caller catch blocks.
-        ;(body as any).status = response.status
-        throw normalizeError(body)
+        // The HTTP status rides along into BackenlyError. Without it the SDK
+        // silently dropped status from every error, making 401s
+        // indistinguishable from 500s in caller catch blocks.
+        throw await errorFromResponse(response)
       }
 
       return response.json()

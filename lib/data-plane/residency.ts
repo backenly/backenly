@@ -21,6 +21,7 @@ import { isIP } from 'net'
 import { HOME_REGION } from '@/lib/regions'
 import { projectRegion } from '@/lib/data-plane/regional'
 import { servedHere } from '@/lib/data-plane/serving'
+import type { RecordedStatement } from '@/lib/execution/sql-recorder'
 
 /**
  * Whether platform rows may quote a project's requests, replies, arguments,
@@ -57,25 +58,52 @@ export function quotedError(message: string, quote: boolean): string {
 }
 
 /**
+ * Where a finding's details carry an executor's or PostgreSQL's own words: why
+ * a repair failed, why the loop gave it back to a person, why the check that
+ * would confirm it could not run, and why the state before it could not be read.
+ */
+const FINDING_ERROR_TEXTS: Array<{ path: [string] | [string, string]; what: string }> = [
+  { path: ['fixError'], what: 'repair failed' },
+  { path: ['escalation', 'reason'], what: 'repair escalated' },
+  { path: ['appliedUnverified', 'verifierError'], what: 'repair check failed' },
+  // A proposal run's message (lib/autonomy/ai-proposals.ts), when a row carrying it comes through here.
+  { path: ['appliedUnverified', 'reason'], what: 'repair check failed' },
+  { path: ['rollbackData', 'baselineError'], what: 'repair baseline failed' },
+]
+
+function textAt(details: Record<string, unknown>, [field, sub]: [string] | [string, string]): unknown {
+  const value = details?.[field]
+  return sub === undefined ? value : (value as Record<string, unknown> | null | undefined)?.[sub]
+}
+
+/**
  * A finding's details as the platform row may keep them. This row is in the
- * home region; for a project kept in another region a failed repair's message
- * is kept only when it is an error code (lib/data-plane/residency.ts), since
- * PostgreSQL can fill a message with the offending values. The full message
- * goes to this process's log only when this process serves the project's
- * region, so it stays there too.
+ * home region; for a project kept in another region each error text it carries
+ * (FINDING_ERROR_TEXTS) is kept only when it is an error code, since PostgreSQL
+ * can fill a message with the offending values. The full text goes to this
+ * process's log only when this process serves the project's region, so it
+ * stays there too.
  */
 export async function findingDetailsKeptHere(
   projectId: string,
   type: string,
   details: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
-  const message = details?.fixError
-  if (typeof message !== 'string' || (await quotesKeptHere(projectId))) return details
-  const kept = quotedError(message, false)
-  if (kept !== message && (await servedHere(projectId).catch(() => false))) {
-    console.warn(`[autonomy] ${type} repair failed on project ${projectId}: ${message}`)
+  const texts = FINDING_ERROR_TEXTS.filter(({ path }) => typeof textAt(details, path) === 'string')
+  if (texts.length === 0 || (await quotesKeptHere(projectId))) return details
+  const logHere = await servedHere(projectId).catch(() => false)
+  let kept = details
+  for (const { path, what } of texts) {
+    const message = textAt(details, path) as string
+    const quoted = quotedError(message, false)
+    if (quoted === message) continue
+    if (logHere) console.warn(`[autonomy] ${type} ${what} on project ${projectId}: ${message}`)
+    const [field, sub] = path
+    kept = sub === undefined
+      ? { ...kept, [field]: quoted }
+      : { ...kept, [field]: { ...(kept[field] as Record<string, unknown>), [sub]: quoted } }
   }
-  return { ...details, fixError: kept }
+  return kept
 }
 
 /** Argument names whose values are a project's structure, not its data. */
@@ -115,6 +143,69 @@ export function argumentShape(args: Record<string, unknown> | null | undefined):
     else shape[key] = `[${typeof value}]`
   }
   return shape
+}
+
+/**
+ * What a repair's records keep of it. A repair is recorded on its finding
+ * (rollbackData, or appliedUnverified when its check could not run) and on its
+ * audit row, and each record keeps:
+ *   - for a project kept in the home region, the call, its result and the
+ *     statements it ran, as they were;
+ *   - for a project kept in another region, the action's name, its arguments'
+ *     shape, the statements' text and whether it succeeded.
+ * An action held for approval keeps the same as a project kept in another
+ * region, in every region: its arguments are its caller's own values, a secret
+ * among them (SET_ENV_VAR), which its finding keeps sealed or in the project's
+ * region; the statements replaying it bind them (BLOCK_USER binds the end
+ * user's email); and its result can carry a value its approver is shown once
+ * (ROTATE_KEY answers with the new key).
+ * Undo reads none of these: it restores the pre-fix snapshot and preMetadata
+ * (revertAutoFix in lib/core/auto-fix-engine.ts).
+ */
+export interface RepairRecordKeeping {
+  /** quotesKeptHere for the repair's project. */
+  quote: boolean
+  /** The repair replays an action held for approval (an `ai_action_pending` finding). */
+  held: boolean
+}
+
+/** A repair's call as its records keep it: in full, or its action and its arguments' shape. */
+export function recordedFixAction<A extends { action: string; params?: Record<string, unknown> | null }>(
+  fixAction: A,
+  { quote, held }: RepairRecordKeeping,
+): A | { action: A['action']; params: Record<string, unknown> } {
+  return quote && !held ? fixAction : { action: fixAction.action, params: argumentShape(fixAction.params) }
+}
+
+/** The statements a repair ran as its records keep them: with their bound values, or their text only. */
+export function recordedStatements(
+  statements: readonly RecordedStatement[],
+  { quote, held }: RepairRecordKeeping,
+): RecordedStatement[] {
+  return quote && !held ? [...statements] : statements.map(({ sql }) => ({ sql }))
+}
+
+/**
+ * A repair's result as its records keep it: the executor's message and data,
+ * which can quote rows, for a project kept in the home region; for a project
+ * kept in another region or an action held for approval, only whether it
+ * succeeded.
+ */
+export function recordedFixResult(
+  result: { success: boolean; message?: string; data?: unknown },
+  { quote, held }: RepairRecordKeeping,
+): Record<string, unknown> {
+  return quote && !held ? { message: result.message, data: result.data } : { success: result.success }
+}
+
+/**
+ * A repair's result message as its audit row keeps it: for an action held for
+ * approval, only that the action ran, by the platform's own name for it;
+ * otherwise the executor's message. Either is then kept as quotedError keeps an
+ * executor's words for the project's region.
+ */
+export function recordedResultMessage(message: string, action: string, { quote, held }: RepairRecordKeeping): string {
+  return quotedError(held ? `Ran ${action}` : message, quote)
 }
 
 /**

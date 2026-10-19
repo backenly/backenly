@@ -1,126 +1,16 @@
 /**
- * Non-Destructive Rollback System
- * 
- * PHILOSOPHY: NEVER DELETE USER DATA
- * 
- * ═══════════════════════════════════════════════════════════════════════
- * TRUST-PRESERVING RESTORE
- * ═══════════════════════════════════════════════════════════════════════
- * 
- * REQUIREMENTS:
- * - Never DROP TABLE in production
- * - On restore: Rename tables (e.g., users__archived__timestamp)
- * - Keep all data intact
- * - Implement PITR using database snapshots
- * - Restore switches pointers, not deletes data
- * 
- * CONSTRAINTS:
- * - No restore options exposed to users
- * - No warnings shown (automatic safety)
- * 
- * SUCCESS:
- * - Restore is reversible
- * - No user data is ever destroyed automatically
- * - All destructive operations converted to renames/soft deletes
+ * Expiring the table archives the old rollback system left behind.
+ *
+ * That system renamed a dropped table to <name>__archived__<time> and wrote a
+ * TableArchive row; restoring meant renaming it back or asking for a
+ * point-in-time snapshot, which was never implemented. Nothing archives tables
+ * that way now: data a change removes is kept in that change's vault and comes
+ * back by restoring the state before the change (lib/changes). What is left is
+ * the cron that drops archives once their retention has passed.
  */
 
 import { prisma } from '@/lib/db/prisma'
-import { ExecutionContext } from '@/lib/context/execution-context'
-import { BackendStateGraph } from '@/lib/orchestration/backend-state-graph'
 import { workspaceRawClient } from '@/lib/data-plane/regional'
-
-/**
- * Archive Strategy
- * 
- * Instead of DROP TABLE:
- * - Rename to {table}__archived__{timestamp}
- * - Update graph to point to new active tables
- * - Preserve all data for potential recovery
- */
-export interface ArchiveOperation {
-  originalTable: string
-  archivedTable: string
-  archivedAt: Date
-  projectId: string
-  canRestore: boolean
-}
-
-/**
- * Point-in-Time Restore Snapshot
- * 
- * Captures complete state at specific moment
- * Allows reverting restore operations
- */
-export interface PITRSnapshot {
-  id: string
-  projectId: string
-  capturedAt: Date
-  graphState: BackendStateGraph
-  schemaState: {
-    tables: string[]
-    archivedTables: string[]
-  }
-  canRestoreTo: boolean
-}
-
-// archiveTable, restoreArchivedTable and createPITRSnapshot were removed when
-// projects moved into regions. None had a caller. The first two renamed a
-// workspace table and wrote the platform's archive record in ONE transaction,
-// which cannot span the two databases a project in another region uses, and
-// all three read the workspace through the platform database.
-
-/**
- * Restore to PITR snapshot
- * 
- * Reverses a previous restore operation
- * All changes are pointer switches, no data deletion
- */
-export async function restoreToPITRSnapshot(
-  context: ExecutionContext,
-  snapshotId: string
-): Promise<{
-  success: boolean
-  tablesRestored: string[]
-  tablesArchived: string[]
-}> {
-  console.log(`[PITR] Restoring to snapshot: ${snapshotId}`)
-  
-  // TODO: Fix Prisma client generation for PITRSnapshot model
-  throw new Error('PITR restore temporarily disabled - Prisma client generation issue')
-}
-
-/**
- * List available PITR snapshots
- */
-export async function listPITRSnapshots(
-  projectId: string
-): Promise<PITRSnapshot[]> {
-  // TODO: Fix Prisma client generation for PITRSnapshot model
-  return []
-}
-
-/**
- * List archived tables for recovery
- */
-export async function listArchivedTables(
-  projectId: string
-): Promise<ArchiveOperation[]> {
-  const archives = await prisma.tableArchive.findMany({
-    where: {
-      projectId,
-      canRestore: true,
-    },
-    orderBy: { archivedAt: 'desc' },
-  })
-  
-  return archives.map(a => ({
-    originalTable: a.originalName,
-    archivedTable: a.archivedName,
-    archivedAt: a.archivedAt,
-    projectId: a.projectId,
-    canRestore: a.canRestore,
-  }))
-}
 
 /**
  * Permanently delete old archives (>90 days)

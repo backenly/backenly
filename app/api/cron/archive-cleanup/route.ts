@@ -11,6 +11,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
 import { cleanupOldArchives } from '@/lib/rollback/non-destructive-restore'
+import { purgeExpiredVaults } from '@/lib/changes/retention'
+import { reconcileChanges } from '@/lib/changes/recovery'
 import { getFleetScheduler } from '@/lib/edition'
 
 export const dynamic = 'force-dynamic'
@@ -70,6 +72,24 @@ export async function POST(request: NextRequest) {
     for (const project of projects) {
       try {
         const result = await cleanupOldArchives(project.id, 90)
+
+        // Governed changes a process stopped working on (a recovery whose lease
+        // ran out, a change that never closed): settled from the catalog, never
+        // re-run (lib/changes/recovery.ts).
+        const settled = await reconcileChanges(project.id).catch((err) => {
+          console.error(`[Archive Cleanup] Change reconciliation failed for project ${project.id}:`, err)
+          return 0
+        })
+        if (settled > 0) console.log(`[Archive Cleanup] Project ${project.name}: settled ${settled} interrupted change(s)`)
+
+        // Change vaults past their retention window (lib/changes/retention.ts).
+        const vaults = await purgeExpiredVaults(project.id).catch((err) => {
+          console.error(`[Archive Cleanup] Vault purge failed for project ${project.id}:`, err)
+          return { purged: [] as string[] }
+        })
+        if (vaults.purged.length > 0) {
+          console.log(`[Archive Cleanup] Project ${project.name}: purged ${vaults.purged.length} expired change vault(s)`)
+        }
 
         if (result.deletedTables > 0) {
           console.log(

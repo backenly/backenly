@@ -746,6 +746,9 @@ tests/integration/apply-migration-existing-table.spec.ts
 # Failed migration DDL preserves PostgreSQL data and stops without asking the
 # model to substitute a different action. Uses real projects, rows and catalogs.
 tests/integration/apply-migration-dispatch.spec.ts
+# A foreign key is installed exactly as the migration declares it: its actions,
+# referenced column and name, read back from the catalog and checked by deletes.
+tests/integration/apply-migration-foreign-keys.spec.ts
 # MCP acceptance (scripts/mcp-acceptance/cases.ts): two agent workflows, twice
 # each, and the acceptance cases no other suite covered. Real MCP route, real
 # keys, provisioned projects, runtime engine mode.
@@ -1212,8 +1215,72 @@ tests/integration/auth-rate-windows.spec.ts
 # Both databases and the real SQL are the property, so it needs a real Postgres.
 tests/integration/auth-projection-confirm.spec.ts
 
+# Governed changes and restoring them: every class of schema change (additive,
+# destructive, rename, retype, data rewrite) is checkpointed, applied and
+# verified; restoring one is lossless or waits for approval of exactly what it
+# would set aside, keeps what it removes for a reapply, refuses a tampered
+# restore point, and a later change to the same table blocks it. Status edges,
+# write-once evidence and append-only events are enforced by the database's own
+# guard trigger. Real catalog, DDL, transactions and triggers are the property.
+tests/integration/change-recovery.spec.ts
+
+# Protected verification and automatic recovery: a change that breaks
+# production without being asked to (RLS off, a CASCADE, a step that did not
+# take effect, a part-way failure) is recovered on the spot when that is
+# lossless; otherwise it waits in the approvals inbox with Backenly's measured
+# impact; a failed recovery stops automation until a person decides; work a
+# restart interrupted is settled from the catalog. Real locks and approvals.
+tests/integration/change-verification-recovery.spec.ts
+
+# An agent can ask for a restore and only a person can approve one: the agent's
+# migration is its governed change, nothing it sends weakens verification,
+# revert_change parks with only Backenly's numbers, the direct tool and the
+# decision routes refuse its key, and approval runs it verified and records
+# whose decision it was. Real MCP route, keys and approvals.
+tests/integration/agent-rollback-approval.spec.ts
+
+# Every class of schema change through the real executor (apply_migration's
+# parser, the typed actions, the dashboard's column delete, an approved drop):
+# each is one governed change, its restore puts back the exact prior structure
+# with every row, and reapplying brings it back exactly, counting only what
+# was written after the restore. Real catalog, helper functions and triggers.
+tests/integration/change-classes-executor.spec.ts
+
+# A branch merge is one governed change: checkpointed, verified, restorable
+# with what was written since kept, recovered automatically when the merged
+# result fails verification or the replay fails part-way, and the branch stays
+# open. Real branch schemas, replay and approvals.
+tests/integration/branch-merge-governed.spec.ts
+
+# A restore point that cannot bring everything back says so: kept data lost
+# outside Backenly makes a restore need a person who approves exactly what comes
+# back empty, never a lossless one; retention purges a vault only past the
+# window and the grace week, marks the record, and touches nothing younger, the
+# workspace or another project. Real schemas, vaults and purges.
+tests/integration/change-restore-point-unavailable.spec.ts
+
+# The undo routes that worked outside the change ledger (graph-pointer undo and
+# restore, the archive and approved-fix rollbacks) answer 410 MOVED to the
+# project admin and 404 to anyone else, and change nothing.
+tests/integration/retired-undo-routes.spec.ts
+
 # The SDK's data routes (/database/insert, update, delete and query) bind each
 # value as its column's type: a uuid, timestamp, numeric, integer, boolean and
 # jsonb column are written and filtered through each route. What PostgreSQL
 # accepts is the property, so it needs a real Postgres.
 tests/integration/v1-database-typed-columns.spec.ts
+
+# A project is recorded at home only once its workspace schema exists: a region
+# whose database is configured but unreachable refuses the project and leaves
+# no project, graph or workspace row; a home project gets every row and its
+# schema; a second database standing in for a region gets the schema and
+# nothing else, and drops it again when the home rows are refused. Rows,
+# schemas and both databases are the property, so it needs a real Postgres.
+tests/integration/project-creation-order.spec.ts
+
+# The SDK's create, get, list, count, update, delete and query builder return
+# the row and the results their documentation promises: all of them through the
+# Next data routes, and create, list and a multi-row insert through the
+# runtime's. Each server's insert answer is pinned. Real tables behind both
+# servers are the property, so it needs a real Postgres.
+tests/integration/sdk-data-routes.spec.ts

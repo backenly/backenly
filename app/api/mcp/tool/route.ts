@@ -41,6 +41,7 @@ import { createHash } from 'crypto'
 import { DOCS_MAX_CHARS } from '@/lib/mcp/docs-limit'
 import { AGENT_DOCS_URL, AGENT_DOC_TOPICS, agentDocPublicPath, resolveDocTopic } from '@/lib/mcp/agent-docs'
 import { readOnlyView, resolveDomainAction, type DomainResolution } from '@/lib/mcp/domains'
+import { withChangeAttribution } from '@/lib/changes/ledger'
 
 /**
  * Tools on this route that are model work from their first step, refused up
@@ -90,6 +91,15 @@ export async function POST(request: NextRequest) {
   if (guard.response) return withCors(guard.response)
   const auth = guard.auth!
 
+  // Every schema change this call makes is recorded as this agent's, on its
+  // owner's authority, in the change ledger the owner rolls back from.
+  return withChangeAttribution(
+    { source: 'mcp', actorUserId: auth.userId, apiKeyId: auth.keyId },
+    () => handleCall(request, auth, startedAt),
+  )
+}
+
+async function handleCall(request: NextRequest, auth: McpGuardAuth, startedAt: number): Promise<NextResponse> {
   // Parse + validate body.
   let parsed: z.infer<typeof RequestSchema>
   try {
@@ -477,7 +487,7 @@ export async function POST(request: NextRequest) {
         {
           statusCode: 400,
           tool,
-          mutation: fail.code === 'MIGRATION_FAILED',
+          mutation: fail.code === 'MIGRATION_FAILED' || fail.code === 'VERIFICATION_FAILED',
           error: fail.code,
           ...('detail' in fail ? { summary: fail.detail } : {}),
         },
@@ -500,11 +510,15 @@ export async function POST(request: NextRequest) {
     )
     return withCors(NextResponse.json(jsonSafe({
       ok: true,
-      summary: success.summary,
+      summary: success.change
+        ? `${success.summary} Recorded as change #${success.change.seq}: checkpointed, applied and ${success.change.verified ? 'verified' : 'not verified (a check could not run)'}.`
+        : success.summary,
       data: {
         applied: success.applied,
         ...(success.notes.length ? { notes: success.notes } : {}),
         ...(success.branch ? { branch: success.branch, recorded: success.recorded ?? [] } : {}),
+        // The id a restore is requested by: deploy { action: "revert_change", changeId }.
+        ...(success.change ? { change: success.change } : {}),
       },
       needsUser: false,
       timing: { ms: Date.now() - startedAt, heavy: true },
@@ -962,7 +976,33 @@ async function parkForApproval(
   const callLabel = `${resolution.domain.name}.${resolution.action}`
   const scopeNote =
     resolution.target === 'disable_realtime' ? await describeRealtimeDisableScope(auth.projectId, args) : ''
-  const described = describeCall(resolution, args) + scopeNote
+  let described = describeCall(resolution, args) + scopeNote
+  let reversible = false
+  let rowCount: number | null = null
+  let toolArgs: Record<string, unknown> = args
+  // A restore request names the change and exactly what restoring it would do,
+  // measured by Backenly now; one that cannot happen (unknown id, already
+  // restored, a later change in the way, expired) is answered now rather than
+  // parked for a person to approve into a failure. The parked call carries
+  // only what Backenly computed: nothing else the agent sent reaches it.
+  if (resolution.target === 'revert_schema_change') {
+    const { describeRestoreRequest } = await import('@/lib/changes/recovery')
+    const d = await describeRestoreRequest(auth.projectId, String(args.changeId ?? '').trim())
+    if (!d.ok) {
+      const refused = d as Extract<typeof d, { ok: false }>
+      recordMcpCall({ ...auth, endpoint: ENDPOINT, startedAt }, { statusCode: refused.status, tool: callLabel, error: refused.code })
+      return NextResponse.json(
+        { ok: false, error: refused.error, code: refused.code, hint: 'deploy { action: "changes" } lists each change with its changeId and whether its previous state can be restored.' },
+        { status: refused.status },
+      )
+    }
+    const ok = d as Extract<typeof d, { ok: true }>
+    described = ok.target
+    rowCount = ok.rowCount
+    toolArgs = ok.toolArgs
+    // A restore keeps what it removes and is itself recorded: it can be reapplied.
+    reversible = true
+  }
   try {
     const { createApprovalRequest } = await import('@/lib/mcp/approvals')
     const row = await createApprovalRequest({
@@ -970,8 +1010,8 @@ async function parkForApproval(
       userId: auth.userId,
       apiKeyId: auth.keyId,
       message: `Requested by an agent over MCP: ${described}`,
-      danger: { tool: resolution.target, target: described, rowCount: null, reversible: false },
-      toolArgs: args,
+      danger: { tool: resolution.target, target: described, rowCount, reversible },
+      toolArgs,
     })
     recordMcpCall(
       { ...auth, endpoint: ENDPOINT, startedAt },
@@ -988,7 +1028,10 @@ async function parkForApproval(
         status: 'pending',
         poll: `check_approval with { "id": "${row.id}" }`,
         note:
-          'The exact call you sent runs verbatim once a human approves it. Tell your human it is waiting, ' +
+          (resolution.target === 'revert_schema_change'
+            ? 'Backenly recorded the restore with what it measured it would do; a person approves exactly that, ' +
+              'and it runs only if the data still matches. Tell your human it is waiting, '
+            : 'The exact call you sent runs verbatim once a human approves it. Tell your human it is waiting, ') +
           'then poll check_approval every 15-30s until it is executed, rejected, failed or expired (24h).',
       },
       needsUser: true,

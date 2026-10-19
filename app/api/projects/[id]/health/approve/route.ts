@@ -22,6 +22,9 @@ import { withProjectAccess } from '@/lib/auth/route-protection'
 import { canWriteProject } from '@/lib/edition/guard'
 import { prisma } from '@/lib/db/prisma'
 import { executeApprovedFix, revertAutoFix } from '@/lib/core/auto-fix-engine'
+import { quotedError, quotesKeptHere, recordedResultMessage, recordedStatements } from '@/lib/data-plane/residency'
+import type { RecordedStatement } from '@/lib/execution/sql-recorder'
+import { heldActionRecord } from '@/lib/operational-memory/held-action-targets'
 import { resolvePendingActionMemory } from '@/lib/operational-memory/ledger'
 
 // ── POST — approve and execute ────────────────────────────────────────────────
@@ -124,6 +127,11 @@ export const POST = withProjectAccess(async (req: NextRequest, { user, project, 
   // Execute the fix (bypasses the classification gate — user already approved)
   const result = await executeApprovedFix(findingId, projectId)
 
+  // The approver reads the outcome in full in this response. What is stored
+  // keeps an executor's or PostgreSQL's words only as an error code for a
+  // project kept in another region (lib/data-plane/residency.ts).
+  const quote = await quotesKeptHere(projectId)
+
   if (!result.success) {
     // Approval recorded but execution failed — leave as pending_approval
     await prisma.auditLog.create({
@@ -133,7 +141,7 @@ export const POST = withProjectAccess(async (req: NextRequest, { user, project, 
         userEmail: user.email,
         action: 'HEALTH_FIX_EXECUTION_FAILED',
         type: 'health',
-        details: JSON.stringify({ findingId, findingType: finding.type, error: result.message }),
+        details: JSON.stringify({ findingId, findingType: finding.type, error: quotedError(result.message, quote) }),
         timestamp: new Date(),
       },
     })
@@ -149,12 +157,19 @@ export const POST = withProjectAccess(async (req: NextRequest, { user, project, 
       lower.includes('needs your manual review') ||
       lower.includes('needs your api key')
 
-    const statusCode = isLockContention ? 409 : needsUserAction ? 422 : 500
+    // 503: the project's region, which keeps what a held action replays, could
+    // not be reached, so nothing ran.
+    const statusCode = result.regionUnavailable ? 503 : isLockContention ? 409 : needsUserAction ? 422 : 500
     return NextResponse.json({ success: false, error: result.message }, { status: statusCode })
   }
 
   // Persist the fixed state + rollback payload
   const details = (finding.details ?? {}) as Record<string, unknown>
+  // What the records keep of the run (lib/data-plane/residency.ts). A held
+  // action's result can carry a value its approver is shown once, in this
+  // response (ROTATE_KEY's new key), so its records say only that it ran.
+  const keep = { quote, held: finding.type === 'ai_action_pending' }
+  const action = typeof details.executorAction === 'string' ? details.executorAction : finding.type
   await prisma.healthFinding.update({
     where: { id: findingId },
     data: {
@@ -183,13 +198,17 @@ export const POST = withProjectAccess(async (req: NextRequest, { user, project, 
       details: JSON.stringify({
         findingId,
         findingType: finding.type,
-        message: result.message,
+        message: recordedResultMessage(result.message, action, keep),
         snapshotId: result.snapshotId ?? null,
         // The statements the approved fix actually ran, captured at the driver
-        // (lib/execution/sql-recorder.ts). The audit row outlives the finding,
-        // so the record of what was executed belongs here as well as in
-        // finding.details.rollbackData.
-        statements: (result.rollbackData as Record<string, unknown> | undefined)?.statements ?? [],
+        // (lib/execution/sql-recorder.ts), without their bound values for a held
+        // action or a project kept in another region (lib/data-plane/residency.ts).
+        // The audit row outlives the finding, so the record of what was executed
+        // belongs here as well as in finding.details.rollbackData.
+        statements: recordedStatements(
+          ((result.rollbackData as Record<string, unknown> | undefined)?.statements ?? []) as RecordedStatement[],
+          keep,
+        ),
         // Drives the ledger copy: only 'confirmed' may claim re-verification.
         verification: result.verification ?? 'unverified',
         // Only 'ran' may claim nothing else broke.
@@ -218,7 +237,9 @@ export const POST = withProjectAccess(async (req: NextRequest, { user, project, 
       findingType: finding.type as any,
       findingSeverity: finding.severity as any,
       status: 'auto_fixed',
-      details,
+      // A held action's target and arguments stay out of the history of a
+      // project kept in another region (lib/operational-memory/held-action-targets.ts).
+      details: quote || finding.type !== 'ai_action_pending' ? details : heldActionRecord(details),
       resolution: buildResolutionText(finding.type as any, details, false),
       automatic: false,
     })

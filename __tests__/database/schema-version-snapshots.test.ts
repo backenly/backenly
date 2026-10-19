@@ -12,12 +12,10 @@
  *
  *   - a snapshot captures the real tables, columns (type/nullable/unique/
  *     default) and foreign keys, straight from the catalog
- *   - rollback drops a table and a column added after the target version,
- *     and says exactly what it dropped
- *   - rollback never drops the auth-managed users table
- *   - a rollback that cannot restore dropped structure says so and FAILS,
- *     instead of claiming success
- *   - a no-diff rollback says "nothing to roll back"
+ *   - rolling back to a version is retired: it dropped every table and column
+ *     newer than the version, with their data, outside any transaction. It
+ *     now changes nothing and says where restoring lives (each governed
+ *     change's own restore, tests/integration/change-recovery.spec.ts)
  */
 
 import { randomUUID } from 'crypto'
@@ -120,56 +118,26 @@ describe('snapshotSchema', () => {
 })
 
 describe('rollbackToVersion', () => {
-  it('drops the table and the column added after the target, and says exactly that', async () => {
+  it('is retired: it changes nothing and points to restoring a change instead', async () => {
     const baseline = await snapshotSchema(projectId, 'before changes', 'test')
     await prisma.$executeRawUnsafe(`CREATE TABLE "${schema}"."drafts" (id serial primary key)`)
     await prisma.$executeRawUnsafe(`ALTER TABLE "${schema}"."posts" ADD COLUMN subtitle text`)
 
     const result = await rollbackToVersion(projectId, baseline)
 
-    expect(result.success).toBe(true)
-    expect(result.message).toContain('Dropped 1 table(s) and 1 column(s)')
-    expect(await tableNames()).toEqual(['authors', 'posts', 'users'])
-    expect(await columnsOf('posts')).not.toContain('subtitle')
+    expect(result).toMatchObject({ success: false, statementsExecuted: [] })
+    expect(result.message).toMatch(/cannot be restored wholesale/)
+    expect(result.message).toMatch(/Database → Changes/)
+    // Nothing newer than the version was dropped, and its data is intact.
+    expect(await tableNames()).toEqual(['authors', 'drafts', 'posts', 'users'])
+    expect(await columnsOf('posts')).toContain('subtitle')
+
+    await prisma.$executeRawUnsafe(`DROP TABLE "${schema}"."drafts"`)
+    await prisma.$executeRawUnsafe(`ALTER TABLE "${schema}"."posts" DROP COLUMN subtitle`)
   })
 
-  it('never drops the auth-managed users table, even when the target lacks it', async () => {
-    // A hand-made target shaped like a project before auth was provisioned.
-    const versionId = await snapshotSchema(projectId, 'with users', 'test')
-    const version = await getSchemaVersion(versionId, projectId)
-    const withoutUsers = {
-      ...version!.snapshot,
-      tables: version!.snapshot.tables.filter((t) => t.name !== 'users'),
-    }
-    await prisma.schemaVersion.update({ where: { id: versionId }, data: { snapshot: withoutUsers as any } })
-
-    const result = await rollbackToVersion(projectId, versionId)
-
-    expect(await tableNames()).toContain('users')
-    expect(result.statementsExecuted.join(' ')).not.toContain('"users"')
-  })
-
-  it('a rollback that cannot restore dropped structure fails and names it', async () => {
-    const baseline = await snapshotSchema(projectId, 'before drop', 'test')
-    await prisma.$executeRawUnsafe(`ALTER TABLE "${schema}"."posts" DROP COLUMN title`)
-
-    const result = await rollbackToVersion(projectId, baseline)
-
-    expect(result.success).toBe(false)
-    expect(result.message).toContain('INCOMPLETE')
-    expect(result.message).toContain('posts.title')
-    expect(result.message).toContain('Snapshot')
-
-    await prisma.$executeRawUnsafe(`ALTER TABLE "${schema}"."posts" ADD COLUMN title text`)
-  })
-
-  it('a no-diff rollback says there is nothing to roll back', async () => {
-    const versionId = await snapshotSchema(projectId, 'steady state', 'test')
-
-    const result = await rollbackToVersion(projectId, versionId)
-
-    expect(result.success).toBe(true)
-    expect(result.statementsExecuted).toEqual([])
-    expect(result.message).toContain('nothing to roll back')
+  it('still answers only for the project the version belongs to', async () => {
+    const result = await rollbackToVersion(projectId, randomUUID())
+    expect(result).toMatchObject({ success: false, statementsExecuted: [], message: 'Version not found.' })
   })
 })

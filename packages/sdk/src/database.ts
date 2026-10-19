@@ -71,7 +71,7 @@ export class TableClient<T = any> {
         method: 'POST',
         body: JSON.stringify({ table: this.tableName, data }),
       })
-      return response.data ?? response
+      return rowsIn(resultOf(response))
     } catch (error) {
       throw normalizeError(error)
     }
@@ -105,13 +105,13 @@ export class TableClient<T = any> {
         method: 'POST',
         body: JSON.stringify({ table: this.tableName, data, where: { id } }),
       })
-      return response.data ?? response
+      return rowsIn(resultOf(response))
     } catch (error) {
       throw normalizeError(error)
     }
   }
 
-  /** Deletes a record by id */
+  /** Deletes a record by id. Resolves `{ success: true, deleted }`, the number of rows deleted. */
   async delete(id: string): Promise<{ success: boolean }> {
     try {
       const projectId = this.client.getProjectId()
@@ -119,7 +119,7 @@ export class TableClient<T = any> {
         method: 'POST',
         body: JSON.stringify({ table: this.tableName, where: { id } }),
       })
-      return response
+      return resultOf(response)
     } catch (error) {
       throw normalizeError(error)
     }
@@ -170,11 +170,41 @@ export class TableClient<T = any> {
   }
 }
 
+// ── Reading a data route's answer ────────────────────────────────────────────
+//
+// Each data route answers `{ data: <result> }`, and each result is an object
+// that carries its rows under a `data` of its own:
+//
+//   POST /database/query   { data: { data: rows, count }, meta }
+//   POST /database/insert  { data: { data: row | rows } }
+//   POST /database/update  { data: { data: row | rows, updated } }
+//   POST /database/delete  { data: { success, deleted } }
+//
+// The Next routes (app/api/v1/[projectId]/database/*) and the runtime's twin
+// (server/routes/database.ts) answer alike, and
+// tests/integration/sdk-data-routes.spec.ts pins it. list() and get() always
+// read the rows from inside the result, and count() its count. create() and
+// update() returned the result itself, so `(await create(...)).id` was
+// undefined, and delete() and the query builder returned the whole answer.
+// They read through these two now.
+
+/** The result inside a route's `{ data: <result> }` answer. */
+function resultOf(response: any): any {
+  return isRecord(response) && 'data' in response ? response.data : response
+}
+
+/** The row, or rows, a result carries under its own `data`. */
+function rowsIn(result: any): any {
+  return isRecord(result) && 'data' in result ? result.data : result
+}
+
+function isRecord(value: unknown): value is Record<string, any> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
 function unwrapRows<T>(response: any): T[] {
-  if (Array.isArray(response)) return response
-  if (Array.isArray(response?.data)) return response.data
-  if (Array.isArray(response?.data?.data)) return response.data.data
-  return []
+  const rows = rowsIn(resultOf(response))
+  return Array.isArray(rows) ? rows : []
 }
 
 export class QueryBuilder<T = any> {
@@ -354,6 +384,11 @@ export class QueryBuilder<T = any> {
     return { [this.orderByColumn]: this.orderDirection }
   }
 
+  /**
+   * Resolves the route's result, not its whole answer: `{ data: rows, count }`
+   * for a select, `{ data: row | rows }` for an insert, `{ data, updated }` for
+   * an update and `{ success, deleted }` for a delete.
+   */
   async execute(): Promise<QueryResponse<T> | InsertResponse<T> | UpdateResponse<T> | DeleteResponse> {
     try {
       const projectId = this.client.getProjectId()
@@ -371,7 +406,7 @@ export class QueryBuilder<T = any> {
             include: this.includeSpec,
           }),
         })
-        return response
+        return resultOf(response)
       }
 
       if (this.operation === 'insert') {
@@ -382,7 +417,7 @@ export class QueryBuilder<T = any> {
             data: this.insertData,
           }),
         })
-        return response
+        return resultOf(response)
       }
 
       if (this.operation === 'update') {
@@ -394,7 +429,7 @@ export class QueryBuilder<T = any> {
             where: this.buildWhereClause(),
           }),
         })
-        return response
+        return resultOf(response)
       }
 
       if (this.operation === 'delete') {
@@ -405,7 +440,7 @@ export class QueryBuilder<T = any> {
             where: this.buildWhereClause(),
           }),
         })
-        return response
+        return resultOf(response)
       }
 
       throw new Error('Invalid operation')

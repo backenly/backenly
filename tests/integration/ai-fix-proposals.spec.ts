@@ -26,6 +26,7 @@ import { approveProposal, proposeRepair } from '@/lib/autonomy/ai-proposals'
 import { PROMOTED_AI_REPAIR_CLASSES } from '@/lib/autonomy/ai-promotion'
 import { resolveFindingFromChat, revertAutoFix } from '@/lib/core/auto-fix-engine'
 import { buildTrustReport } from '@/lib/autonomy/trust-report'
+import { closeChangeLockPool } from '@/lib/changes/lock'
 
 let ownerId: string
 let projectId: string
@@ -65,7 +66,13 @@ const answerProposing = (paramsJson = JSON.stringify(ADD)) =>
     }),
   })
 
+const originalEngineMode = process.env.ENGINE_MODE
+
 beforeAll(async () => {
+  // The executor as production runs it: real DDL, each change governed
+  // (lib/changes/ledger.ts), which is what Undo restores. jest.setup.js points
+  // the executor at an in-memory graph, where nothing is recorded.
+  process.env.ENGINE_MODE = 'runtime'
   ownerId = (await prisma.user.create({
     data: { email: `proposals-${crypto.randomBytes(6).toString('hex')}@example.test`, password: 'not-a-real-hash', name: 'approver' },
   })).id
@@ -92,11 +99,18 @@ afterEach(() => {
 })
 
 afterAll(async () => {
+  const vaults = await prisma.$queryRawUnsafe<Array<{ nspname: string }>>(
+    `SELECT nspname FROM pg_namespace WHERE nspname LIKE $1`, `workspace_${projectId}_r%`,
+  ).catch(() => [])
+  for (const v of vaults) await prisma.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${v.nspname}" CASCADE`).catch(() => {})
   await prisma.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`).catch(() => {})
   await prisma.auditLog.deleteMany({ where: { projectId } }).catch(() => {})
   await prisma.schemaIntent.deleteMany({ where: { projectId } }).catch(() => {})
   await prisma.project.deleteMany({ where: { userId: ownerId } }).catch(() => {})
   await prisma.user.delete({ where: { id: ownerId } }).catch(() => {})
+  await closeChangeLockPool()
+  if (originalEngineMode === undefined) delete process.env.ENGINE_MODE
+  else process.env.ENGINE_MODE = originalEngineMode
 }, 60_000)
 
 describe('the first AI repair class: add the column the intent recorded', () => {
@@ -145,7 +159,8 @@ describe('the first AI repair class: add the column the intent recorded', () => 
     const fixed = await prisma.healthFinding.findUniqueOrThrow({ where: { id: finding.id } })
     expect(fixed.status).toBe('auto_fixed')
     expect((fixed.details as any).rollbackData).toMatchObject({
-      source: 'ai_proposal', verification: 'confirmed', regressionCheck: 'ran', postcondition: 'confirmed', rollbackFormat: 2,
+      source: 'ai_proposal', verification: 'confirmed', regressionCheck: 'ran', postcondition: 'confirmed', rollbackFormat: 3,
+      changeIds: [expect.any(String)],
     })
     expect(await prisma.auditLog.count({ where: { projectId, action: 'HEALTH_FIX_APPROVED' } })).toBe(1)
 

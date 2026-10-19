@@ -445,14 +445,14 @@ await backend.auth.signIn({ email, password })
     summary:
       'Autonomy keeps checking your backend after your agent’s session ends. It finds problems such as a missing index or a table without row-level security, fixes the safe ones on its own if you allow it, and holds everything else for your approval.',
     metaDescription:
-      'What Autonomy does: checks the running backend every minute, fixes safe and reversible problems on its own in Autopilot, holds risky changes in a review queue, and keeps restore points.',
+      'What Autonomy does: checks the running backend every minute, fixes safe and reversible problems on its own in Autopilot, holds risky changes in a review queue, and records every schema change it makes with a restore point.',
     why:
       'A backend keeps changing after launch: new tables, more traffic, a column someone added by hand. Problems show up when nobody is looking, and the usual answer is a person on call. Autonomy takes the first part of that job. It checks every minute, shows the evidence for what it finds, and never applies a change it cannot undo without asking you first.',
     examples: [
       'A foreign key with no index starts slowing a page down. Autonomy adds the index and records what it did.',
       'A new table holds user data without row-level security. Autonomy flags it and shows you why.',
       'Your agent asks to drop a table. The request waits in the review queue until you approve or reject it.',
-      'A change went wrong, and you roll the backend back to a saved restore point.',
+      'A change went wrong, and you restore the state before it from Database → Changes.',
     ],
     how: [
       {
@@ -469,7 +469,7 @@ await backend.auth.signIn({ email, password })
       },
       {
         title: 'Everything leaves a record',
-        body: 'Each fix shows what was found, what changed and how it was checked. Restore points roll tables, columns, APIs, storage buckets and base auth back to a saved version.',
+        body: 'Each fix shows what was found, what changed and how it was checked. Its schema changes keep a restore point, so the state before them can be put back from Database → Changes.',
       },
     ],
     prompts: [
@@ -480,7 +480,7 @@ await backend.auth.signIn({ email, password })
       'No mode can apply auth, destructive or irreversible changes on its own. That floor is not a setting.',
       'Routine checks and safe repairs are deterministic and use no AI credits. When those checks cannot explain a finding, an AI investigation can gather read-only evidence and suggest a typed repair. Its explanation is labelled as a hypothesis, and any proposed repair waits for a person’s approval. On Cloud, Backenly pays for these investigations.',
       'A project with no traffic, no changes and no other activity for 30 days is not checked until activity returns.',
-      'Rolling back to a restore point keeps anything added since. OAuth providers and functions have to be reconnected by hand.',
+      'Restoring the state before a change undoes only that change, and data written since is never dropped without your approval. A restore point covers the database schema; functions and auth settings are not in it.',
     ],
   },
   {
@@ -600,7 +600,7 @@ await backend.auth.signIn({ email, password })
       },
       {
         title: 'Roll back if you need to',
-        body: 'Pick an earlier version to mark it current in the history. This is bookkeeping: the live schema and data are unchanged. To restore structure, use the Database page schema History or a Snapshot.',
+        body: 'Pick an earlier version to mark it current in the history. This is bookkeeping: the live schema and data are unchanged. To restore structure, use Database → Changes or a Snapshot.',
       },
     ],
     prompts: ['Is my backend ready to publish? List anything that is blocking it.'],

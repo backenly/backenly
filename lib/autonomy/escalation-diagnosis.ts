@@ -37,6 +37,7 @@ import { summariseFinding } from '@/lib/core/finding-summaries'
 import { classifyFix } from '@/lib/core/fix-classifier'
 import { resolveWorkspaceSchema } from '@/lib/services/workspace-pool'
 import { workspaceRawClient, type WorkspaceRawClient } from '@/lib/data-plane/regional'
+import { quotesKeptHere } from '@/lib/data-plane/residency'
 import { investigateFinding, type CatalogTable, type Investigation } from './investigator'
 import { evidenceFingerprint } from './finding-fingerprint'
 import { proposableFor, proposeRepair } from './ai-proposals'
@@ -152,11 +153,18 @@ export async function diagnoseEscalatedFindings(projectId: string): Promise<numb
       orderBy: { detectedAt: 'desc' },
       take: 20,
     })
+    // A held action of a project kept in another region keeps its target and
+    // arguments there (lib/operational-memory/held-action-targets.ts). Its
+    // diagnosis would be written here, by a model that may run outside the
+    // region, about an action the owner asked for and only has to decide on,
+    // so it is not investigated (lib/data-plane/residency.ts).
+    const quote = await quotesKeptHere(projectId)
     const candidates = rows.filter(
       (f) =>
-        f.status === 'pending_approval' ||
-        f.severity === 'critical' ||
-        classifyFix(f.type, (f.details ?? {}) as Record<string, unknown>).decision !== 'auto',
+        (quote || f.type !== 'ai_action_pending') &&
+        (f.status === 'pending_approval' ||
+          f.severity === 'critical' ||
+          classifyFix(f.type, (f.details ?? {}) as Record<string, unknown>).decision !== 'auto'),
     )
     const due = candidates
       .map((f) => {

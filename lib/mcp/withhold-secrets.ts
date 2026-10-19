@@ -20,6 +20,9 @@ import { sanitizeMessageForStorage } from '@/lib/ai/api-key-detector'
 
 const PLACEHOLDER = '[withheld]'
 
+/** What a withheld value reads as on a stored or served copy. */
+export const WITHHELD = PLACEHOLDER
+
 /** Field names whose string values are credentials. */
 const SECRET_FIELD = /^(apiKey|newKey|secret|webhookSecret|signingSecret|password|connectionString|psqlCommand|pgDumpCommand|token|accessToken|refreshToken|clientSecret)$/i
 

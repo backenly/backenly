@@ -38,7 +38,24 @@ Each project gets its own PostgreSQL schema: `workspace_{projectId}`.
 - The platform's own data lives in the `public` schema (managed by Prisma).
 - Key files: `lib/tenant/isolation.ts`, `lib/services/workspaceDatabase.ts`
 
-### 3. Feature Placement Rule (Do Not Violate)
+### 3. Every Production Change Is Governed
+
+A change to a project's workspace runs inside `withGovernedChange`
+(`lib/changes/ledger.ts`): checkpoint → apply → protected verification →
+healthy, or automatic recovery when that is proven safe, otherwise a person
+decides through the existing approval queue. Status moves only along the
+edges in `lib/changes/lifecycle.ts`, which a database trigger also enforces, and
+every step is an append-only `backend_change_events` row. Recovery plans,
+impact measurement and the restore itself are `lib/changes/recovery.ts`; the
+design is `docs/CHANGE_RECOVERY.md`.
+
+- An executor action that runs DDL belongs in `SCHEMA_CHANGE_ACTIONS` in `lib/ai/minimal-executor.ts`.
+- Anything that destroys data in a schema change (drop a table or column, a lossy retype, a data rewrite) goes through `lib/changes/preserve.ts`, so the data moves into the change's vault instead.
+- Verification is Backenly's (`lib/changes/verify.ts`), never the caller's: nothing an agent passes can skip or weaken it.
+- A restore never silently removes or overwrites data written since the change. If it would, it waits for a person, who approves exactly the measured effect.
+- Agents can request a restore (`deploy { action: "revert_change" }`); only a person approves one.
+
+### 4. Feature Placement Rule (Do Not Violate)
 
 > Only the **Database Management** section creates new backend reality (tables, APIs). All other sections (monitoring, auth settings, billing) manage *existing* reality.
 
@@ -487,6 +504,7 @@ public-tree credential/host hygiene checks.
 
 - **Never** add create/generate features outside the Database/AI chat section
 - **Never** expose SQL **writes** or DDL — mutations go through typed actions so they stay planned, verified and reversible. SQL **reads** are supported and first-class (see below); do not "restore" a blanket raw-SQL ban.
+- **Never** run DDL against a production workspace schema outside the change ledger, or destroy data in a schema change without preserving it (`lib/changes/preserve.ts`)
 - **Never** let a SQL parser be the tenant boundary — read-only SQL runs as the project's SELECT-only `bkn_ro_` role so Postgres grants do the enforcing (`lib/mcp/read-query.ts`)
 - **Never** mix platform user auth with end-user auth
 - **Never** write directly to `workspace_{projectId}` schemas from platform Prisma — use `lib/services/workspaceDatabase.ts`

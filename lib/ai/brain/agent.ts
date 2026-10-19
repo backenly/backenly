@@ -1092,8 +1092,12 @@ function renderVerificationBlock(result: FixLoopResult): string {
  * Describe a blocked destructive tool for the chat's danger card. Best-effort
  * row count via the workspace-table-stats kernel (cached COUNT — cheap).
  * Honesty rules baked in:
- *   • Structure (tables/columns/buckets) can be rebuilt from a restore point,
- *     but ROW DATA cannot — `reversible` is true only for pure-structure loss.
+ *   • A dropped table or column is reversible because its data is not
+ *     destroyed: inside a recorded change it moves into the change's vault and
+ *     rolling the change back restores it (lib/changes/preserve.ts). Only while
+ *     the ledger is on; without it the old answer, irreversible, is the true one.
+ *   • Truncation deletes rows, which are data rather than schema, and nothing
+ *     keeps them, so it stays irreversible.
  *   • The confirm phrase must satisfy the execute route's confirmation gate
  *     using the current destructive-action confirmation flow.
  */
@@ -1122,13 +1126,16 @@ async function describeDanger(
     } catch { rowCount = null }
   }
 
+  const { ledgerEnabled } = await import('@/lib/changes/ledger')
+  const kept = ledgerEnabled(projectId)
+
   switch (tool) {
     case 'drop_table':
       return {
         tool,
         target: `the \`${tableName ?? 'unknown'}\` table`,
         rowCount,
-        reversible: false, // rows are gone forever; only the empty structure restores
+        reversible: kept, // its rows move into the change's vault
         confirmPhrase: `Confirm — drop the ${tableName ?? ''} table`.trim(),
       }
     case 'truncate_table':
@@ -1144,9 +1151,25 @@ async function describeDanger(
         tool,
         target: `column \`${columnName ?? 'unknown'}\` on \`${tableName ?? 'unknown'}\``,
         rowCount,
-        reversible: false, // column values are unrecoverable
+        reversible: kept, // its values are copied into the change's vault first
         confirmPhrase: `Confirm — drop the ${columnName ?? ''} column`.trim(),
       }
+    case 'revert_schema_change': {
+      const change = await import('@/lib/db/prisma')
+        .then(({ prisma }) => prisma.backendChange.findFirst({
+          where: { id: String(args.changeId ?? ''), projectId },
+          select: { seq: true, summary: true, title: true },
+        }))
+        .catch(() => null)
+      return {
+        tool,
+        target: change ? `the state before change #${change.seq} (${change.summary ?? change.title})` : 'the state before a change',
+        rowCount: null,
+        // A restore keeps what it removes and is itself recorded: it can be reapplied.
+        reversible: true,
+        confirmPhrase: `Confirm — restore the state before change #${change?.seq ?? ''}`.trim(),
+      }
+    }
     case 'delete_bucket':
       return { tool, target: `the \`${namedThing ?? 'unknown'}\` bucket and every file in it`, rowCount: null, reversible: false, confirmPhrase: `Confirm — delete the ${namedThing ?? ''} bucket`.trim() }
     case 'delete_file':

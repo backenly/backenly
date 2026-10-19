@@ -23,7 +23,24 @@
 
 import { normalizeFindingType } from './types'
 import type { AIAction } from '@/lib/ai/minimal-executor'
+import { WITHHELD } from '@/lib/mcp/withhold-secrets'
 import { unsealParams } from '@/lib/operational-memory/sealed-params'
+
+/**
+ * The exact arguments a held action was held with, or null when they cannot be
+ * known, in which case nothing may run. A row with a sealed copy replays only
+ * from it: when that copy cannot be opened (corrupt, or sealed under another
+ * deployment's JWT_SECRET), the display copy is no substitute, since its
+ * secret-named values read WITHHELD and replaying them would run something
+ * nobody approved. A legacy row, from before the split, has no sealed copy and
+ * kept the raw arguments, which still replay; a copy carrying WITHHELD never does.
+ */
+function heldArguments(details: Record<string, unknown>): Record<string, unknown> | null {
+  const sealed = details.executorParamsSealed
+  if (sealed !== undefined && sealed !== null) return unsealParams(sealed)
+  const raw = (details.executorParams as Record<string, unknown> | undefined) ?? {}
+  return JSON.stringify(raw).includes(WITHHELD) ? null : raw
+}
 
 // ── Data-plane outage discrimination ─────────────────────────────────────────
 
@@ -374,13 +391,17 @@ export function buildFixAction(
     case 'ai_action_pending': {
       const executorAction = rawDetails.executorAction as string | undefined
       if (!executorAction) return null
+      // A project kept in another region keeps the target and arguments there,
+      // and its row only their shape and `keptInRegion`
+      // (lib/operational-memory/held-action-targets.ts). Approval reads them
+      // back before it gets here; a row still marked was not read back, and
+      // replaying the shape, or nothing, would run something nobody approved.
+      if (rawDetails.keptInRegion === true) return null
       // The sealed copy carries the exact arguments; the stored executorParams
-      // are the DISPLAY copy with secret fields redacted. Legacy rows predate
-      // the split and stored the raw params with no sealed copy, so the
-      // fallback keeps them approvable.
-      const executorParams =
-        unsealParams(rawDetails.executorParamsSealed) ??
-        ((rawDetails.executorParams as Record<string, unknown>) ?? {})
+      // are the DISPLAY copy with secret fields withheld. Without arguments
+      // that can be known exactly, nothing runs (heldArguments).
+      const executorParams = heldArguments(rawDetails)
+      if (!executorParams) return null
       return {
         action: executorAction as AIAction['action'],
         params: { ...executorParams, confirmed: true },
@@ -668,6 +689,15 @@ If the column is deliberately different now, tell your coding agent to rebuild i
     // Without that payload there is nothing to re-run, and inventing one from
     // the type would execute something the user never approved.
     case 'ai_action_pending':
+      // Recorded, but in the project's region, which this view could not read.
+      if (details?.keptInRegion === true) {
+        return 'This change’s target and arguments are kept in your project’s region, which could not be read just now. It stays queued: reload to review and approve it once the region answers.'
+      }
+      // Recorded, but its exact arguments cannot be opened: nothing ran, and
+      // the withheld display copy is never replayed in their place.
+      if (details?.executorAction && !heldArguments(details)) {
+        return 'The exact arguments of this held change could not be opened, so nothing was run: the copy shown here has its secret values withheld and is never replayed in their place. Dismiss it and ask your agent to make the change again; it will be held again for your approval.'
+      }
       return 'The details of this queued change were not recorded, so it cannot be replayed automatically. Dismiss it and ask the AI chat to make the change again — it will re-queue with a full record.'
 
     // Surface probes that are NOT a data-plane outage. Named per surface,

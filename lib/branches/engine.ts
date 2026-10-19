@@ -412,24 +412,74 @@ async function replayMerge(projectId: string, userId: string, branchId: string, 
 
   const branch = await prisma.workspaceBranch.findFirst({ where: { id: branchId, projectId }, select: { schemaName: true } })
   const { replayOntoMain } = await import('./migrate')
-  const replay = await replayOntoMain(projectId, userId, d.migrations)
+  // One merge is one governed change with one checkpoint. A merge that fails
+  // part-way, or applies and then fails protected verification, is restored to
+  // the checkpoint when that is provably lossless: production gets all of the
+  // branch, verified, or none of it. lib/changes/ledger.ts.
+  const { withChangeAttribution, withGovernedChange } = await import('@/lib/changes/ledger')
+  const count = d.migrations.length
+  const { result: replay, change } = await withChangeAttribution({ source: 'branch_merge', actorUserId: userId }, () =>
+    withGovernedChange(
+      { projectId, title: `Merge branch "${d.branch}" (${count} statement${count === 1 ? '' : 's'})` },
+      () => replayOntoMain(projectId, userId, d.migrations),
+      (r) => {
+        const fail = r as Extract<typeof r, { ok: false }>
+        return {
+          ok: r.ok,
+          ...(r.ok ? {} : { error: `${fail.failedAt}: ${fail.detail}` }),
+          steps: [
+            ...r.applied.map((stmt) => ({ statement: stmt, ok: true })),
+            ...(r.ok ? [] : [{ statement: fail.failedAt, summary: fail.detail, ok: false }]),
+          ],
+        }
+      },
+    ),
+  )
+  const recorded = change ? { change: { id: change.id, seq: change.seq, status: change.status } } : {}
+  const recovered = change?.status === 'recovered'
+
+  if (replay.ok && change?.recovery) {
+    const failing = change.verification?.checks.find((c) => c.outcome === 'contradicted')
+    await audit(projectId, userId, 'BRANCH_MERGE_FAILED', {
+      branch: d.branch, applied: replay.applied.length, verificationFailed: true, recovered,
+    })
+    return {
+      ok: false as const,
+      code: 'MERGE_FAILED',
+      error:
+        `Merge of "${d.branch}" applied, then failed production verification` +
+        `${failing ? ` (${failing.label.toLowerCase()}: ${failing.detail})` : ''}. ` +
+        (recovered
+          ? `Nothing reached production: Backenly restored the state before it and verified it (change #${change.seq}). `
+          : `It is still in effect: ${change.recovery.explanation} `) +
+        'The branch stays open.',
+      applied: recovered ? [] : replay.applied,
+      remaining: [],
+      ...recorded,
+    }
+  }
 
   if (!replay.ok) {
     const fail = replay as Extract<typeof replay, { ok: false }>
     await audit(projectId, userId, 'BRANCH_MERGE_FAILED', {
-      branch: d.branch, applied: fail.applied.length, failedAt: fail.failedAt,
+      branch: d.branch, applied: fail.applied.length, failedAt: fail.failedAt, recovered,
     })
     return {
       ok: false as const,
       code: 'MERGE_FAILED',
       error:
         `Merge of "${d.branch}" stopped at: ${fail.failedAt} (${fail.detail}). ` +
-        (fail.applied.length
-          ? `${fail.applied.length} statement(s) before it DID reach production: ${fail.applied.join('; ')}. `
-          : 'Nothing reached production. ') +
+        (fail.applied.length === 0
+          ? 'Nothing reached production. '
+          : recovered
+            ? `Nothing reached production: the ${fail.applied.length} statement(s) applied before it were restored ` +
+              `to the checkpoint automatically (change #${change!.seq}). `
+            : `${fail.applied.length} statement(s) before it DID reach production: ${fail.applied.join('; ')}. ` +
+              (change?.recovery ? `${change.recovery.explanation} ` : '')) +
         'The branch stays open.',
-      applied: fail.applied,
+      applied: recovered ? [] : fail.applied,
       remaining: fail.remaining,
+      ...recorded,
     }
   }
 
@@ -448,6 +498,7 @@ async function replayMerge(projectId: string, userId: string, branchId: string, 
     applied: replay.applied.map((s) => `Applied to production: ${s}`),
     review: [] as string[],
     fullyMerged: true,
+    ...recorded,
   }
 }
 

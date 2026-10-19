@@ -123,6 +123,8 @@ export type ToolName =
   | 'list_request_logs'
   // Deploy history
   | 'list_deploy_versions'
+  | 'list_schema_changes'
+  | 'revert_schema_change'
   // Integrations: what each can do, and whether its key still works
   | 'list_integration_capabilities'
   | 'verify_integration_key'
@@ -212,6 +214,10 @@ const DESTRUCTIVE_TOOLS = new Set<ToolName>([
   // ROLLBACK" prompt — brain DESTRUCTIVE gate is the first-line check).
   'trigger_deploy',
   'rollback_deploy',
+  // Restores production to the state before a change. Nothing is destroyed
+  // (what the change added is kept in a vault) but every client of those
+  // tables sees the old shape, so a person decides. lib/changes/recovery.ts.
+  'revert_schema_change',
   // Breaks live API consumers
   'revoke_api_key',
   'rotate_api_key',
@@ -283,6 +289,7 @@ export const READ_ONLY_TOOLS = new Set<ToolName>([
   'list_ai_function_logs',
   'list_request_logs',
   'list_deploy_versions',
+  'list_schema_changes',
   'list_integration_capabilities',
   'get_connection_identity',
   'get_auth_email_settings',
@@ -909,6 +916,16 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
     'Every published version, newest first: id, version number, change summary, when it was published, which one is serving, and which can be rolled back to (rollback_deploy takes the version or its id).',
     {},
     []),
+  fn('list_schema_changes',
+    'The change history: every governed change to the production backend, newest first, with its changeId and number, who made it (a coding agent, a person, Backenly autonomy), what it did, and how its lifecycle ended: applied and verified; recovered automatically after it failed verification; restored by a person; waiting for a person to approve its recovery; or needing attention. Also whether restoring the state before it is available. Every apply_migration, typed schema tool, approved drop and branch merge is recorded here, with the checkpoint taken before it. Side-effect free.',
+    { limit: { type: 'integer', minimum: 1, maximum: 50, description: 'How many changes, newest first (default 15).' } },
+    []),
+  fn('revert_schema_change',
+    'DESTRUCTIVE: waits for a person to approve. Ask for the backend to be restored to its state before one governed change. Backenly checks first: a restore that is impossible (a later change touched the same tables, its restore point expired) is answered at once; one that would set aside data written since the change says exactly what, and the person approves exactly that. The restore keeps everything it removes, runs in one transaction, and is verified against the restore point. You cannot run or approve it yourself. Take changeId from list_schema_changes or from the `change` an apply_migration response carries.',
+    {
+      changeId: { type: 'string', description: 'The change whose previous state to restore (its id, from list_schema_changes).' },
+    },
+    ['changeId']),
   // ── Integrations: capabilities and a key re-check ─────────────────────────
   fn('list_integration_capabilities',
     'What a function can call on each integration (the exact ctx.integrations.<id> method signatures), whether it is connected, and what its provider said about the key. For Stripe also the receiver URL and whether the signing secret is stored. Never returns a key.',
@@ -1189,6 +1206,22 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
           'constraints never collide.',
       },
       referencedTable: { type: 'string', description: 'For FOREIGN KEY: the table being referenced.' },
+      references: {
+        type: 'object',
+        description:
+          'For FOREIGN KEY: the key exactly as declared, { table, column?, onDelete, onUpdate, name? }, each action one of ' +
+          'NO ACTION, RESTRICT, CASCADE, SET NULL, SET DEFAULT, and no column meaning the table\'s primary key. Given, ' +
+          'the key is installed exactly so; without it Backenly picks the referenced column (id) and the actions. ' +
+          'apply_migration sends it for every FOREIGN KEY.',
+        properties: {
+          table: { type: 'string' },
+          column: { type: 'string' },
+          onDelete: { type: 'string', enum: ['NO ACTION', 'RESTRICT', 'CASCADE', 'SET NULL', 'SET DEFAULT'] },
+          onUpdate: { type: 'string', enum: ['NO ACTION', 'RESTRICT', 'CASCADE', 'SET NULL', 'SET DEFAULT'] },
+          name: { type: 'string' },
+        },
+        required: ['table', 'onDelete', 'onUpdate'],
+      },
     },
     ['tableName', 'constraintType']),
 
@@ -1540,6 +1573,8 @@ export const TOOL_TO_ACTION: Record<string, (args: any) => AIAction> = {
       expression: a.expression,
       constraintName: a.constraintName,
       referencedTable: a.referencedTable,
+      // A foreign key exactly as declared (lib/db/declared-foreign-key.ts).
+      references: a.references,
     },
   }),
   generate_api: (a) => ({ action: 'GENERATE_API', params: { tableName: a.tableName } }),
@@ -2164,6 +2199,9 @@ export async function dispatchTool(
         '- These never execute directly. Ask for them with their domain tool and the exact call is parked for a human on the project\'s Autonomy page: `deploy { action: "deploy" }`, `deploy { action: "rollback" }`, `functions { action: "delete" }`, `storage { action: "delete_bucket" }`, `connect { action: "revoke_api_key" }` and the others each tool\'s description marks. The response carries an `approval` id; poll `check_approval { id }` until it reports executed or rejected. Once approved, the call you sent runs verbatim.',
         '- Dropping a table or column, truncating a table and discarding a branch have no domain action: describe them to `backend_chat`, which parks them the same way.',
         '- The operation DOES happen — a human just confirms it first. You can request it; you cannot approve it.',
+        '- **Every change is governed**, whoever made it: Backenly takes a checkpoint first, applies it, then runs protected verification you cannot skip or change. A change that fails verification is recovered automatically when that is provably lossless, and otherwise waits for a person. The `change` in an apply_migration response says which (its status is healthy, recovered, awaiting approval or needing a person), with the reason.',
+        '- `deploy { action: "changes" }` lists changes and how each ended. To ask for the state before one, `deploy { action: "revert_change", changeId }`: a person approves it, and sees exactly what it would set aside first. You cannot run or approve a restore yourself.',
+        '- A migration on production applies completely or not at all. If a statement fails after others ran, those are rolled back automatically: `applied` in the response is what is live, `rolledBack` is what ran and was undone. Fix the failing statement and send the whole migration again.',
         '',
         '## 6. Ship',
         '- `read_backend_state { section: "readiness" }` first — the behavioural + security scorecard, with the exact blockers. Publishing runs this gate anyway and refuses on blockers, so reading it first saves a round trip.',
@@ -3189,7 +3227,7 @@ export async function dispatchTool(
         lines.push('', `${driftPending} schema change(s) arrived over a direct DB connection — call adopt_external_schema to fold them into the contract, or review under Autonomy.`)
       }
       if (snapshot) {
-        lines.push('', `Latest restore point: v${snapshot.versionNum} (${snapshot.tableCount} tables, ${snapshot.createdAt.toISOString()}). Rollback is available from Autonomy → Restore points.`)
+        lines.push('', `Latest restore point: v${snapshot.versionNum} (${snapshot.tableCount} tables, ${snapshot.createdAt.toISOString()}). To restore the state before a change: Database → Changes, or ask with deploy { action: "revert_change", changeId } (a person approves it).`)
       }
       if (openRows.length === 0 && approvals.length === 0 && driftPending === 0) {
         // An empty queue is evidence only for the checks that ran. Say which
@@ -3324,16 +3362,91 @@ export async function dispatchTool(
       })
     }
 
+    // ── Change history and recovery (lib/changes) ─────────────────────────
+    if (name === 'list_schema_changes') {
+      const { listChanges } = await import('@/lib/changes/history')
+      const limit = Math.max(1, Math.min(50, Number(args.limit ?? 15) || 15))
+      const { changes, windowDays } = await listChanges(ctx.projectId, { limit })
+      if (changes.length === 0) {
+        return finalize({ ok: true, summary: 'No changes recorded yet. Every governed change to the production backend is recorded here, with a checkpoint, from the first one on.', data: { changes: [], windowDays } })
+      }
+      const OUTCOME: Record<string, string> = {
+        healthy: 'applied and verified',
+        unverified: 'applied, not verified',
+        recovered: 'failed verification, recovered automatically',
+        restored: 'restored to the state before it',
+        awaiting_approval: 'failed verification, recovery waiting for a person',
+        kept: 'failed verification, kept as it is by a person',
+        needs_attention: 'failed, needs a person',
+        in_progress: 'in progress',
+      }
+      const lines = changes.map((c) => {
+        const restore = c.action?.available ? `${c.action.kind} available` : c.action?.reason ?? 'no restore available'
+        return `• #${c.seq} (${c.id}) ${c.summary} · ${OUTCOME[c.outcome.state] ?? c.outcome.state} · ${c.actor.label} · ${c.createdAt}` +
+          `${c.outcome.note ? `\n  ${c.outcome.note}` : ''}\n  ${restore}`
+      })
+      return finalize({
+        ok: true,
+        summary: `Changes, newest first:\n${lines.join('\n')}\n\n` +
+          'To ask for the state before one, use deploy { action: "revert_change", changeId }: a person approves it.',
+        data: {
+          windowDays,
+          changes: changes.map((c) => ({
+            changeId: c.id, seq: c.seq, summary: c.summary, outcome: c.outcome.state, note: c.outcome.note,
+            actor: c.actor.label, createdAt: c.createdAt, touched: c.touched,
+            canRestore: !!c.action?.available && c.action.kind === 'restore',
+            ...(c.action && !c.action.available ? { whyNot: c.action.reason } : {}),
+          })),
+        },
+      })
+    }
+
+    if (name === 'revert_schema_change') {
+      // Reached only once a person has decided: over MCP the call is parked
+      // for approval, and in a brain run the destructive gate stops it first.
+      // What the person approved travels in `acknowledged`, computed by
+      // Backenly when the request was made, never taken from the agent.
+      const changeId = String(args.changeId ?? '').trim()
+      if (!changeId) return finalize({ ok: false, summary: '`changeId` is required. list_schema_changes gives each change\'s id.' })
+      if (!ctx.destructiveConfirmed) {
+        return finalize({ ok: false, summary: 'A restore runs only once a person approves it.', code: 'DESTRUCTIVE_NEEDS_APPROVAL' })
+      }
+      const { recoverChange } = await import('@/lib/changes/recovery')
+      const acknowledged = (args.acknowledged && typeof args.acknowledged === 'object' ? args.acknowledged : null) as Record<string, number> | null
+      const out = await recoverChange(ctx.projectId, changeId, {
+        mode: 'approved',
+        actorUserId: ctx.userId ?? null,
+        acknowledged,
+      })
+      if (!out.ok) {
+        // This tsconfig does not narrow on a boolean discriminant.
+        const fail = out as Extract<typeof out, { ok: false }>
+        const blocked = fail.blockedBy?.length ? ` Restore ${fail.blockedBy.map((b) => `#${b.seq}`).join(', ')} first.` : ''
+        return finalize({ ok: false, summary: `${fail.error}${blocked}`, code: fail.code, data: fail })
+      }
+      const done = out as Extract<typeof out, { ok: true }>
+      const kept = done.impact.items.filter((i) => i.needsApproval)
+      return finalize({
+        ok: true,
+        summary:
+          `Restored the state before this change, and verified it (recorded as #${done.recoverySeq}).` +
+          (kept.length ? ` Kept in a recovery snapshot, as approved: ${kept.map((i) => i.detail).join(' ')}` : ''),
+        data: done,
+      })
+    }
+
     // ── Rollback ──────────────────────────────────────────────────────────
     if (name === 'rollback') {
       const steps = Math.max(1, Math.min(10, Number(args.steps ?? 1)))
-      // Rollback is plumbed through the existing execution journal; for now
-      // we surface that the agent should fix-forward and call out the limit.
+      // There is no undo of "the last N steps of this turn". Schema changes are
+      // recorded and rolled back as whole changes, by a person, which is what
+      // this points at instead of promising something that does not exist.
       return finalize({
         ok: false,
         summary:
-          `Rollback of ${steps} step(s) requested. The brain does not auto-rollback yet — use fix_backend or drop_table to undo manually, or ask the user for confirmation before destructive cleanup.`,
-        data: { stepsRequested: steps, supported: false },
+          `Rolling back ${steps} step(s) of this turn is not how undo works here. Every governed change is recorded with a ` +
+          'checkpoint: list_schema_changes shows them, and revert_schema_change { changeId } asks for the state before one; a person approves it.',
+        data: { stepsRequested: steps, supported: false, use: ['list_schema_changes', 'revert_schema_change'] },
       })
     }
 
@@ -3585,6 +3698,8 @@ export function humanTitle(name: string, args: Record<string, unknown>): string 
     case 'disconnect_frontend': return `Disconnecting frontend ${args.url ?? ''}`.trim()
     case 'trigger_deploy': return args.force ? 'Publishing backend' : 'Previewing deploy'
     case 'rollback_deploy': return args.version ? `Rolling back to v${args.version}` : 'Rolling back deployment'
+    case 'list_schema_changes': return 'Reading the change history'
+    case 'revert_schema_change': return 'Restoring the state before a change'
     case 'get_readiness': return 'Reading deploy readiness'
     case 'set_env_var': return `Saving env var ${args.key ?? ''}`.trim()
     case 'list_env_vars': return 'Listing project env vars'

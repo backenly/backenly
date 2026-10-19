@@ -56,6 +56,7 @@ let progress: RestoreProgress
 let projectId = ''
 let userId = ''
 let schemaName = ''
+let vaultName = ''
 let sourceUserCount = 0
 let sourceStorage = ''
 let targetStorage = ''
@@ -122,6 +123,18 @@ beforeAll(async () => {
   )
   await prisma.$executeRawUnsafe(
     `INSERT INTO "${schemaName}"."notes" (body) VALUES ('a row the data plane should serve')`,
+  )
+  // A change vault: what a recorded schema change removed, kept so that change
+  // can be rolled back (lib/changes/preserve.ts). Tenant data, so the bundle
+  // carries it; never served, so the restore must not try to register it - the
+  // registry refuses the name, and a restore that asked aborted halfway.
+  vaultName = `workspace_${projectId}_r1`
+  await prisma.$executeRawUnsafe(`CREATE SCHEMA IF NOT EXISTS "${vaultName}"`)
+  await prisma.$executeRawUnsafe(
+    `CREATE TABLE IF NOT EXISTS "${vaultName}"."notes" (id integer PRIMARY KEY, body text)`,
+  )
+  await prisma.$executeRawUnsafe(
+    `INSERT INTO "${vaultName}"."notes" (id, body) VALUES (1, 'a row a rollback can bring back')`,
   )
   await prisma.$executeRawUnsafe(`
     CREATE TABLE IF NOT EXISTS "${schemaName}"."_token_blacklist" (
@@ -230,6 +243,9 @@ afterAll(async () => {
   if (schemaName) {
     await prisma.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schemaName}" CASCADE`).catch(() => {})
   }
+  if (vaultName) {
+    await prisma.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${vaultName}" CASCADE`).catch(() => {})
+  }
   if (projectId) await prisma.project.delete({ where: { id: projectId } }).catch(() => {})
   if (userId) await prisma.user.delete({ where: { id: userId } }).catch(() => {})
   await onAdmin(`DROP OWNED BY "${APP_ROLE}" CASCADE`).catch(() => {})
@@ -290,6 +306,22 @@ describe('the clean machine now holds the deployment', () => {
       [schemaName],
     )
     expect(rows).toHaveLength(1)
+  })
+
+  test('the change vault came back with what it keeps', async () => {
+    // Without it, every rollback that would bring dropped data back finds its
+    // vault gone and can only re-create empty structure.
+    const rows = await onTarget<{ body: string }>(`SELECT body FROM "${vaultName}"."notes"`)
+    expect(rows.map(r => r.body)).toEqual(['a row a rollback can bring back'])
+  })
+
+  test('and is still not served by the data plane', async () => {
+    const rows = await onTarget<{ list: string | null }>(
+      'SELECT public.backenly_pgrst_current_schemas() AS list',
+    )
+    const served = (rows[0].list ?? '').split(',')
+    expect(served).toContain(schemaName)
+    expect(served).not.toContain(vaultName)
   })
 })
 

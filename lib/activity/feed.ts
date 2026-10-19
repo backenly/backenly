@@ -194,6 +194,14 @@ function labelForAudit(
     if (a === 'agent_approval_rejected') {
       return { kind: 'general', label: target ? `You rejected the agent's change to ${target}` : "You rejected your coding agent's request" }
     }
+    // Approved, but nothing ran (lib/mcp/approvals.ts): these must never read
+    // as a change the agent made.
+    if (a === 'agent_approval_unreadable_refused') {
+      return { kind: 'general', label: 'An agent request was not run: its exact call could not be read' }
+    }
+    if (a === 'agent_approval_unbound_refused') {
+      return { kind: 'general', label: 'An agent request was not run: it named no exact call' }
+    }
     const summary = typeof d.summary === 'string' && d.summary.trim() ? d.summary.trim() : null
     return {
       kind: 'general',

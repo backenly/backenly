@@ -249,6 +249,7 @@ model Project {
   maintenanceApprovals   MaintenanceApproval[]
   ownershipIntents       OwnershipIntent[]
   authorityGrants        AuthorityGrant[]
+  backendChanges         BackendChange[]
 
   @@index([userId])
   @@index([updatedAt])
@@ -2071,6 +2072,95 @@ model WorkspaceBranchMigration {
 
   @@unique([branchId, seq])
   @@map("workspace_branch_migrations")
+}
+
+// One governed change to a project's production backend: the checkpoint taken
+// before it, the protected verification after it, and its recovery
+// (lib/changes, docs/CHANGE_RECOVERY.md).
+//
+// Every path that changes production schema opens one: an agent's
+// apply_migration, a typed tool from backend_chat, a person in the dashboard,
+// an approved destructive operation, a branch merge, an autonomy repair. A
+// recovery (Backenly restoring the state before a failed change, or a person
+// restoring it later) is a change of its own, kind = recovery, so the state it
+// replaces is protected the same way.
+//
+// `resources` names what the checkpoint covers. Only "database" is captured
+// and recovered today; the shape leaves room for functions and auth policy
+// without claiming to cover them.
+//
+// Rows are permanent and their evidence write-once. A trigger installed by the
+// migration refuses edits to identity, attribution and evidence, and moves
+// status only along the lifecycle in lib/changes/lifecycle.ts.
+model BackendChange {
+  id                 String               @id @default(uuid())
+  projectId          String
+  // Per project, never reused: "change #12".
+  seq                Int
+  // change | recovery
+  kind               String               @default("change")
+  resources          String[]             @default(["database"])
+  // mcp | agent_chat | approval | dashboard | branch_merge | autonomy | system
+  source             String
+  // What was asked for, as the caller put it.
+  title              String
+  // What it did, in one plain sentence, derived from the footprint.
+  summary            String?
+  // additive | transforming | destructive | data_rewrite
+  risk               String?
+  // The person on whose authority it ran; for an agent key, the key's owner.
+  actorUserId        String?
+  // The API key a coding agent used, when an agent made the change.
+  apiKeyId           String?
+  // Several changes made for one request, e.g. an autonomy repair's finding.
+  groupId            String?
+  // The change before this one in the project's order.
+  parentId           String?
+  // lib/changes/lifecycle.ts
+  status             String               @default("applying")
+  error              String?
+  steps              Json? // what was asked for and what took effect, in order
+  statements         Json? // the SQL that actually ran, as captured from the connection
+  checkpoint         Json // { database: catalog snapshot + platform rows }, trimmed to what changed
+  resultState        Json? // what the change touched, as it left it
+  footprint          Json? // per-object summary of what changed
+  preserved          Json? // data moved into this change's vault instead of destroyed
+  checkpointHash     String? // sha256 over checkpoint, resultState and footprint, set at close
+  verification       Json? // protected verification of this change
+  recoversId         String? // kind = recovery: the change whose previous state it restored
+  recoveredById      String? // the recovery that restored this change's previous state
+  recoveredAt        DateTime?
+  recoveryClaim      String? // the recovery that owns this change right now (compare-and-set)
+  recoveryLeaseUntil DateTime?
+  createdAt          DateTime             @default(now())
+  completedAt        DateTime?
+  project            Project              @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  events             BackendChangeEvent[]
+
+  @@unique([projectId, seq])
+  @@index([projectId, createdAt])
+  @@index([projectId, status])
+  @@index([groupId])
+  @@index([recoversId])
+  @@map("backend_changes")
+}
+
+// The lifecycle of a governed change, one row per transition, with the
+// principals involved (lib/principal). Append-only: a trigger refuses UPDATE,
+// and DELETE except together with the change's project.
+model BackendChangeEvent {
+  id        String        @id @default(uuid())
+  changeId  String
+  projectId String
+  // lib/changes/lifecycle.ts: checkpointed, applied, verified, verification_failed, ...
+  type      String
+  data      Json?
+  at        DateTime      @default(now())
+  change    BackendChange @relation(fields: [changeId], references: [id], onDelete: Cascade)
+
+  @@index([changeId, at])
+  @@index([projectId, at])
+  @@map("backend_change_events")
 }
 
 // Revocable public-share token for read-only report pages (/report/[token]).

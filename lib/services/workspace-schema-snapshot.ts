@@ -11,12 +11,14 @@
  *  - Snapshots the real PostgreSQL DDL (not the AI graph representation) after every change
  *  - Stores column types, constraints, indexes, foreign keys — the full live schema
  *  - Provides diff between any two snapshots (shows exactly what changed)
- *  - Provides one-click rollback to any previous snapshot (runs the actual DDL delta)
+ *
+ * It is a record, not a way back. Snapshot-to-snapshot rollback (which replayed
+ * a DDL delta and dropped whatever was newer) is retired: a change is undone by
+ * restoring its own checkpoint, through lib/changes/recovery.ts.
  *
  * Rules:
  *  - captureSchemaSnapshot() is called by schema-migration-engine before and after every migration
  *  - Snapshots are read-only records — never mutated after creation
- *  - Rollback uses add-new/rename-old strategy — never DROP without archiving
  *  - Diffs are structural (column-level), not just raw DDL string diffs
  */
 
@@ -39,8 +41,8 @@ export interface IndexSnapshot {
   definition: string
   /**
    * True when the index is owned by a constraint (PRIMARY KEY / UNIQUE). Such
-   * indexes can never be dropped via DROP INDEX — the rollback DDL engine must
-   * skip them (their lifecycle belongs to the constraint diff). Optional:
+   * indexes can never be dropped via DROP INDEX — anything diffing snapshots
+   * must skip them (their lifecycle belongs to the constraint diff). Optional:
    * snapshots captured before this field existed lack it.
    */
   constraintBacked?: boolean
@@ -80,7 +82,7 @@ export interface TableSnapshot {
    * RLS / policy / trigger state — the exact objects the autonomy loop's
    * Tier 0/1 fixes create (SET_PERMISSION, FIX_REALTIME). Optional: snapshots
    * captured before these fields existed lack them, and every consumer must
-   * treat `undefined` as "state unknown" and emit NO rollback DDL for that
+   * treat `undefined` as "state unknown" and draw no conclusion for that
    * dimension — never as "RLS off" / "no triggers".
    */
   rlsEnabled?: boolean
@@ -119,14 +121,6 @@ export interface SchemaDiff {
   }>
   isEmpty: boolean
   summary: string
-}
-
-export interface SchemaRollbackResult {
-  success: boolean
-  appliedSteps: number
-  error?: string
-  durationMs: number
-  rollbackDdl: string
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -309,72 +303,6 @@ export async function diffCurrentVsVersion(
   return computeDiff(historicSnapshot.tables, currentTables, compareToVersion, -1)
 }
 
-/**
- * Roll back the workspace schema to a previous snapshot.
- *
- * Strategy:
- *  - Added tables (tables that exist now but not in target) → RENAME to _archived_{name}_{ts}
- *  - Dropped tables (tables that existed in target but not now) → RECREATE from snapshot DDL
- *  - Modified columns → ALTER TABLE to restore previous types, defaults, constraints
- *  - Indexes → DROP new / RECREATE old
- *
- * Non-destructive: tables are never DROPped — only renamed (preserving data for manual recovery).
- */
-export async function rollbackToSchemaVersion(
-  projectId: string,
-  targetVersionNum: number,
-): Promise<SchemaRollbackResult> {
-  const start = Date.now()
-
-  try {
-    // The rollback DDL runs on the database holding the project's data, in its region.
-    const { workspaceRawClient } = await import('@/lib/data-plane/regional')
-    const db = await workspaceRawClient(projectId)
-    const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
-
-    const targetSnapshot = await getSchemaSnapshot(projectId, targetVersionNum)
-    if (!targetSnapshot) {
-      return {
-        success: false,
-        appliedSteps: 0,
-        error: `Version ${targetVersionNum} not found`,
-        durationMs: Date.now() - start,
-        rollbackDdl: '',
-      }
-    }
-
-    // Snapshot current state before rollback (for safety)
-    await captureSchemaSnapshot(projectId, 'pre_migration')
-
-    const currentTables = await readLiveSchema(projectId, postgresSchema)
-    const rollbackSteps = computeRollbackDdl(currentTables, targetSnapshot.tables, postgresSchema)
-
-    let appliedSteps = 0
-    for (const sql of rollbackSteps) {
-      await db.$executeRawUnsafe(sql)
-      appliedSteps++
-    }
-
-    // Snapshot after rollback
-    await captureSchemaSnapshot(projectId, 'post_migration')
-
-    return {
-      success: true,
-      appliedSteps,
-      durationMs: Date.now() - start,
-      rollbackDdl: rollbackSteps.join('\n'),
-    }
-  } catch (err) {
-    return {
-      success: false,
-      appliedSteps: 0,
-      error: String(err),
-      durationMs: Date.now() - start,
-      rollbackDdl: '',
-    }
-  }
-}
-
 // ── Live schema reader ────────────────────────────────────────────────────────
 
 async function readLiveSchema(
@@ -443,7 +371,7 @@ async function readLiveSchema(
     )
 
     // Indexes owned by a constraint (PK/UNIQUE) — DROP INDEX cannot touch
-    // these, so the rollback DDL engine needs to know which they are.
+    // these, so a consumer of the snapshot needs to know which they are.
     const conIdxRows = await db.$queryRawUnsafe<Array<{ relname: string }>>(
       `SELECT ci.relname FROM pg_constraint con
        JOIN pg_class ci ON ci.oid = con.conindid
@@ -508,7 +436,7 @@ async function readLiveSchema(
     )
     // reltuples::bigint comes back as a JS BigInt — Math.max(0, bigint) throws
     // "Cannot convert a BigInt value to a number", which failed the whole
-    // pre-fix rollback snapshot. Coerce to Number first.
+    // pre-fix snapshot. Coerce to Number first.
     const rowEstimate = Math.max(0, Number(countRows[0]?.reltuples ?? 0))
 
     // ── RLS state + policies ──────────────────────────────────────────────
@@ -686,197 +614,6 @@ function buildDiffSummary(
     parts.push(`${t.tableName}: ${changes.join(', ')}`)
   }
   return parts.join(' | ')
-}
-
-// ── Rollback DDL generator ────────────────────────────────────────────────────
-
-function computeRollbackDdl(
-  currentTables: TableSnapshot[],
-  targetTables: TableSnapshot[],
-  schema: string,
-): string[] {
-  const steps: string[] = [`SET search_path TO "${schema}", public;`]
-  const ts = Date.now()
-
-  const currentMap = new Map(currentTables.map(t => [t.name, t]))
-  const targetMap = new Map(targetTables.map(t => [t.name, t]))
-
-  // Tables that exist now but not in target → RENAME (non-destructive)
-  for (const [name] of currentMap) {
-    if (!targetMap.has(name)) {
-      steps.push(`ALTER TABLE "${schema}"."${name}" RENAME TO "_archived_${name}_${ts}";`)
-    }
-  }
-
-  // Tables that existed in target but not now → RECREATE from target DDL
-  for (const [name, table] of targetMap) {
-    if (!currentMap.has(name)) {
-      const colDefs = table.columns.map(c => {
-        const nullable = c.nullable ? '' : ' NOT NULL'
-        const def = c.default ? ` DEFAULT ${c.default}` : ''
-        const pk = c.isPrimary ? ' PRIMARY KEY' : ''
-        return `  "${c.name}" ${c.type}${pk}${nullable}${def}`
-      }).join(',\n')
-      steps.push(`CREATE TABLE IF NOT EXISTS "${schema}"."${name}" (\n${colDefs}\n);`)
-    }
-  }
-
-  // Modified tables → restore columns
-  for (const [name, currentTable] of currentMap) {
-    const target = targetMap.get(name)
-    if (!target) continue
-
-    const currentColMap = new Map(currentTable.columns.map(c => [c.name, c]))
-    const targetColMap = new Map(target.columns.map(c => [c.name, c]))
-
-    // Columns in target but not in current → ADD
-    for (const [colName, col] of targetColMap) {
-      if (!currentColMap.has(colName)) {
-        const nullable = col.nullable ? '' : ' NOT NULL'
-        const def = col.default ? ` DEFAULT ${col.default}` : ''
-        steps.push(`ALTER TABLE "${schema}"."${name}" ADD COLUMN IF NOT EXISTS "${colName}" ${col.type}${nullable}${def};`)
-      }
-    }
-
-    // Columns in current but not in target → RENAME to archived (non-destructive)
-    for (const [colName] of currentColMap) {
-      if (!targetColMap.has(colName)) {
-        steps.push(`ALTER TABLE "${schema}"."${name}" RENAME COLUMN "${colName}" TO "_archived_${colName}_${ts}";`)
-      }
-    }
-
-    // Modified columns → ALTER to restore
-    for (const [colName, currentCol] of currentColMap) {
-      const targetCol = targetColMap.get(colName)
-      if (!targetCol) continue
-
-      if (currentCol.type !== targetCol.type) {
-        steps.push(`ALTER TABLE "${schema}"."${name}" ALTER COLUMN "${colName}" TYPE ${targetCol.type};`)
-      }
-      if (currentCol.nullable !== targetCol.nullable) {
-        if (targetCol.nullable) {
-          steps.push(`ALTER TABLE "${schema}"."${name}" ALTER COLUMN "${colName}" DROP NOT NULL;`)
-        } else {
-          steps.push(`ALTER TABLE "${schema}"."${name}" ALTER COLUMN "${colName}" SET NOT NULL;`)
-        }
-      }
-      if (currentCol.default !== targetCol.default) {
-        if (targetCol.default) {
-          steps.push(`ALTER TABLE "${schema}"."${name}" ALTER COLUMN "${colName}" SET DEFAULT ${targetCol.default};`)
-        } else {
-          steps.push(`ALTER TABLE "${schema}"."${name}" ALTER COLUMN "${colName}" DROP DEFAULT;`)
-        }
-      }
-    }
-
-    // Restore dropped indexes
-    const currentIdxNames = new Set(currentTable.indexes.map(i => i.name))
-    for (const idx of target.indexes) {
-      if (!currentIdxNames.has(idx.name) && !idx.definition.includes('PRIMARY KEY')) {
-        steps.push(`${idx.definition};`)
-      }
-    }
-
-    // Drop indexes ADDED since the target — the missing branch that made a
-    // reverted CREATE_INDEX fix survive its own undo. Constraint-backed
-    // indexes are skipped: DROP INDEX cannot touch them, and their lifecycle
-    // belongs to the constraint diff below.
-    const targetIdxNames = new Set(target.indexes.map(i => i.name))
-    for (const idx of currentTable.indexes) {
-      if (
-        !targetIdxNames.has(idx.name) &&
-        !idx.constraintBacked &&
-        !idx.definition.includes('PRIMARY KEY')
-      ) {
-        steps.push(`DROP INDEX IF EXISTS "${schema}"."${idx.name}";`)
-      }
-    }
-
-    // Foreign-key constraints — both directions. FKs were captured in every
-    // snapshot since v1 but never diffed, so ADD_CONSTRAINT fixes were
-    // irreversible via snapshots.
-    const currentFks = new Map(currentTable.foreignKeys.map(f => [f.constraintName, f]))
-    const targetFks = new Map((target.foreignKeys ?? []).map(f => [f.constraintName, f]))
-    for (const [fkName] of currentFks) {
-      if (!targetFks.has(fkName)) {
-        steps.push(`ALTER TABLE "${schema}"."${name}" DROP CONSTRAINT IF EXISTS "${fkName}";`)
-      }
-    }
-    for (const [fkName, fk] of targetFks) {
-      if (!currentFks.has(fkName)) {
-        steps.push(
-          `ALTER TABLE "${schema}"."${name}" ADD CONSTRAINT "${fkName}" ` +
-          `FOREIGN KEY ("${fk.column}") REFERENCES "${schema}"."${fk.referencedTable}"("${fk.referencedColumn}") ` +
-          `ON DELETE ${fk.onDelete};`,
-        )
-      }
-    }
-
-    // RLS + policies — ONLY when the target snapshot RECORDED this state.
-    // Snapshots captured before policies existed leave RLS untouched: "state
-    // unknown" must never be treated as "RLS off" (that would strip protection
-    // as a side effect of an unrelated rollback).
-    if (target.rlsEnabled !== undefined && target.policies !== undefined) {
-      const currentPolicies = new Map((currentTable.policies ?? []).map(p => [p.name, p]))
-      const targetPolicies = new Map(target.policies.map(p => [p.name, p]))
-
-      // Enable first so recreated policies land on an RLS-enabled table.
-      if (target.rlsEnabled && currentTable.rlsEnabled === false) {
-        steps.push(`ALTER TABLE "${schema}"."${name}" ENABLE ROW LEVEL SECURITY;`)
-      }
-
-      for (const [polName, cur] of currentPolicies) {
-        const tgt = targetPolicies.get(polName)
-        if (!tgt) {
-          steps.push(`DROP POLICY IF EXISTS "${polName}" ON "${schema}"."${name}";`)
-        } else if (cur.using !== tgt.using || cur.withCheck !== tgt.withCheck || cur.cmd !== tgt.cmd) {
-          // Policy body changed — recreate from the target definition.
-          steps.push(`DROP POLICY IF EXISTS "${polName}" ON "${schema}"."${name}";`)
-          steps.push(buildCreatePolicyDdl(schema, name, tgt))
-        }
-      }
-      for (const [polName, tgt] of targetPolicies) {
-        if (!currentPolicies.has(polName)) {
-          steps.push(buildCreatePolicyDdl(schema, name, tgt))
-        }
-      }
-
-      // Disable last, after added policies have been dropped.
-      if (!target.rlsEnabled && currentTable.rlsEnabled === true) {
-        steps.push(`ALTER TABLE "${schema}"."${name}" DISABLE ROW LEVEL SECURITY;`)
-      }
-    }
-
-    // Triggers — same "recorded state only" rule as RLS. This is what makes a
-    // FIX_REALTIME (NOTIFY trigger) fix reversible.
-    if (target.triggers !== undefined) {
-      const currentTrgs = new Map((currentTable.triggers ?? []).map(t => [t.name, t]))
-      const targetTrgs = new Map(target.triggers.map(t => [t.name, t]))
-      for (const [trgName] of currentTrgs) {
-        if (!targetTrgs.has(trgName)) {
-          steps.push(`DROP TRIGGER IF EXISTS "${trgName}" ON "${schema}"."${name}";`)
-        }
-      }
-      for (const [trgName, trg] of targetTrgs) {
-        if (!currentTrgs.has(trgName)) {
-          steps.push(`${trg.definition};`)
-        }
-      }
-    }
-  }
-
-  return steps
-}
-
-/** Reconstruct a CREATE POLICY statement from a captured PolicySnapshot. */
-function buildCreatePolicyDdl(schema: string, table: string, p: PolicySnapshot): string {
-  const roles = p.roles.length > 0
-    ? p.roles.map(r => (r === 'public' ? 'public' : `"${r}"`)).join(', ')
-    : 'public'
-  const asClause = p.permissive ? 'PERMISSIVE' : 'RESTRICTIVE'
-  const usingClause = p.using ? ` USING (${p.using})` : ''
-  const checkClause = p.withCheck ? ` WITH CHECK (${p.withCheck})` : ''
-  return `CREATE POLICY "${p.name}" ON "${schema}"."${table}" AS ${asClause} FOR ${p.cmd} TO ${roles}${usingClause}${checkClause};`
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

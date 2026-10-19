@@ -321,10 +321,13 @@ export async function notifyDeployComplete(
  * a day. Nothing else announced it: it appeared only in the Review Queue on the
  * Autonomy page, so a request nobody happened to look for simply ran out
  * (AUT-08).
+ *
+ * `target` is null for a project kept in another region: its notice names the
+ * action only (lib/data-plane/residency.ts).
  */
 export async function notifyApprovalRequested(
   userId: string,
-  request: { projectId: string; projectName: string; approvalId: string; tool: string; target: string; expiresAt: Date },
+  request: { projectId: string; projectName: string; approvalId: string; tool: string; target: string | null; expiresAt: Date },
 ): Promise<void> {
   const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'https://backenly.com'
   await createPlatformNotification({
@@ -332,13 +335,13 @@ export async function notifyApprovalRequested(
     type: 'approval_requested',
     title: `Your agent is waiting for your approval in "${request.projectName}"`,
     body:
-      `It asked to run ${request.tool} on ${request.target}. Approve or reject it in the Review Queue on the ` +
-      `Autonomy page. Nothing runs until you do, and the request expires ${request.expiresAt.toUTCString()}.`,
+      `It asked to run ${request.tool}${request.target ? ` on ${request.target}` : ''}. Approve or reject it in the ` +
+      `Review Queue on the Autonomy page. Nothing runs until you do, and the request expires ${request.expiresAt.toUTCString()}.`,
     metadata: {
       projectId: request.projectId,
       approvalId: request.approvalId,
       tool: request.tool,
-      target: request.target,
+      ...(request.target ? { target: request.target } : {}),
       expiresAt: request.expiresAt.toISOString(),
       actionUrl: `${appUrl}/app/projects/${request.projectId}/autonomy`,
     },

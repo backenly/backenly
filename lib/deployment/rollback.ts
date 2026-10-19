@@ -158,7 +158,7 @@ export async function rollbackDeploy(
         `• To:   v${toVersion} — ${target.changeSummary || 'Published'}\n\n` +
         `This moves the version history's pointer. It does NOT change the live schema, ` +
         `data, RLS or functions — the API keeps serving exactly what is there now. ` +
-        `To restore structure, use the Database page's schema History or restore a Snapshot.\n\n` +
+        `To restore structure, use Database → Changes or restore a Snapshot.\n\n` +
         `Type ROLLBACK to confirm.`,
     }
   }
@@ -239,7 +239,7 @@ export async function rollbackDeploy(
     message:
       `Recorded v${toVersion} as the current version. The live schema, data, RLS ` +
       `and functions are unchanged — this is version bookkeeping, not a restore. ` +
-      `To restore structure, use the Database page's schema History or a Snapshot.`,
+      `To restore structure, use Database → Changes or a Snapshot.`,
     fromVersion,
     toVersion,
   }

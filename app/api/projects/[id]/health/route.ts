@@ -10,6 +10,7 @@ export const dynamic = 'force-dynamic'
 import { NextRequest, NextResponse } from 'next/server'
 import { withProjectValidation } from '@/lib/middleware/projectValidation'
 import { redactSecretParams } from '@/lib/mcp/withhold-secrets'
+import { withHeldActions } from '@/lib/operational-memory/held-action-targets'
 import { prisma } from '@/lib/db/prisma'
 import { sanitizeDiagnostic } from '@/lib/errors/diagnostic-sanitize'
 import { resolvePendingActionMemory } from '@/lib/operational-memory/ledger'
@@ -55,6 +56,15 @@ function withServableDetails<T extends { details: unknown }>(row: T): T {
     ...row,
     details: { ...det, executorParams: redactSecretParams(det.executorParams), executorParamsSealed: undefined },
   }
+}
+
+/**
+ * Findings as they may be served, with a regional project's held actions read
+ * back from its region: their target and arguments are what the approver
+ * decides on (lib/operational-memory/held-action-targets.ts).
+ */
+async function servable<T extends { id: string; details: unknown }>(projectId: string, rows: T[]): Promise<T[]> {
+  return (await withHeldActions(projectId, rows)).map(withServableDetails)
 }
 
 export async function GET(request: NextRequest, props: { params: Promise<{ id: string }> }) {
@@ -115,7 +125,7 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
             details: true,
             detectedAt: true,
           },
-        }).then(rows => rows.map(withServableDetails)),
+        }).then(rows => servable(projectId, rows)),
         prisma.platformNotification.findMany({
           where: {
             metadata: { path: ['projectId'], equals: projectId },
@@ -147,7 +157,7 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
           status: true,
           detectedAt: true,
         },
-      }).then(rows => rows.map(withServableDetails)),
+      }).then(rows => servable(projectId, rows)),
       // Repairs in the last 7 days, split by whether a re-check confirmed them.
       // Only the confirmed ones may be called fixed.
       countRepairs(projectId, new Date(Date.now() - WEEK_MS)),
@@ -264,7 +274,7 @@ export async function PATCH(request: NextRequest, props: { params: Promise<{ id:
         where: { projectId, status: { in: ['open', 'pending_approval'] } },
         orderBy: [{ severity: 'asc' }, { detectedAt: 'desc' }],
         select: { id: true, type: true, severity: true, details: true, status: true, detectedAt: true },
-      }).then(rows => rows.map(withServableDetails)),
+      }).then(rows => servable(projectId, rows)),
       countRepairs(projectId, new Date(Date.now() - WEEK_MS)),
       recentlyResolved(projectId, new Date(Date.now() - RESOLVED_WINDOW_MS)),
       loadSensorState(projectId),
