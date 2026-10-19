@@ -1253,6 +1253,11 @@ tests/integration/change-recovery.spec.ts
 # restart interrupted is settled from the catalog. Real locks and approvals.
 tests/integration/change-verification-recovery.spec.ts
 
+# Change metrics name the project, the region and the change, never row data;
+# a change that needs a person writes one BACKENLY_CHANGE_NEEDS_PERSON line with
+# ids only, for an operator's log alarm.
+tests/integration/change-observability.spec.ts
+
 # An agent can ask for a restore and only a person can approve one: the agent's
 # migration is its governed change, nothing it sends weakens verification,
 # revert_change parks with only Backenly's numbers, the direct tool and the
@@ -1267,6 +1272,12 @@ tests/integration/agent-rollback-approval.spec.ts
 # was written after the restore. Real catalog, helper functions and triggers.
 tests/integration/change-classes-executor.spec.ts
 
+# Every view of a project's schema is current once a change or restore settles:
+# the REST API is asked to reload, the reconciler's baseline follows, validators
+# see a table another process changed, a restore supersedes the request behind
+# what it removed, and a restore the reconciler finds done drops its declarations.
+tests/integration/schema-freshness.spec.ts
+
 # A branch merge is one governed change: checkpointed, verified, restorable
 # with what was written since kept, recovered automatically when the merged
 # result fails verification or the replay fails part-way, and the branch stays
@@ -1279,6 +1290,11 @@ tests/integration/branch-merge-governed.spec.ts
 # window and the grace week, marks the record, and touches nothing younger, the
 # workspace or another project. Real schemas, vaults and purges.
 tests/integration/change-restore-point-unavailable.spec.ts
+
+# Each region's scheduler settles its own projects' interrupted changes and drops
+# their vaults past the window, and leaves another region's projects to that
+# region; a region it cannot reach is skipped and the skip recorded.
+tests/integration/change-upkeep.spec.ts
 
 # The undo routes that worked outside the change ledger (graph-pointer undo and
 # restore, the archive and approved-fix rollbacks) answer 410 MOVED to the
@@ -1322,6 +1338,24 @@ tests/integration/workspace-sql-cached-plan.spec.ts
 # executeWithUserContext, and its record must carry that statement. The change
 # ledger, its lock and its record are the property, so it needs a real Postgres.
 tests/integration/home-workspace-sql-recorded.spec.ts
+
+# A regional project's change record keeps structure at home and its
+# definitions in its region: no function body, view query, CHECK, policy,
+# default or generation expression, index or trigger statement, comment or
+# enum label of a regional change, its restore or an interrupted one is on its
+# home rows; the region keeps them under the change; a restore puts every
+# definition back exactly from the region's copy, and refuses a copy altered or
+# missing. A home project's record keeps its definitions as before. A second
+# database stands in for the region, so it needs a real Postgres.
+tests/integration/change-ledger-residency.spec.ts
+
+# A project with a change history is deleted with the change ledger's guard
+# installed as production has it: before the deletion the guard refuses
+# deleting the changes or their events on their own; deleteProjectCompletely
+# then removes the project, every change and event, the restore's vault and a
+# preview branch, and leaves no schema in the project's namespace. The guard's
+# triggers and the schemas are the property, so it needs a real Postgres.
+tests/integration/project-deletion-change-ledger.spec.ts
 
 # PostgREST forgets what a statement dropped or moved into a vault: with the
 # real registry and DDL sync files installed in a database of their own, a

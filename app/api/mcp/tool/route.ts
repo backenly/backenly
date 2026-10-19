@@ -980,6 +980,7 @@ async function parkForApproval(
   let reversible = false
   let rowCount: number | null = null
   let toolArgs: Record<string, unknown> = args
+  let restore: import('@/lib/changes/recovery').RestoreRequest | undefined
   // A restore request names the change and exactly what restoring it would do,
   // measured by Backenly now; one that cannot happen (unknown id, already
   // restored, a later change in the way, expired) is answered now rather than
@@ -997,9 +998,10 @@ async function parkForApproval(
       )
     }
     const ok = d as Extract<typeof d, { ok: true }>
+    restore = { target: ok.target, rowCount: ok.rowCount, toolArgs: ok.toolArgs }
     described = ok.target
     rowCount = ok.rowCount
-    toolArgs = ok.toolArgs
+    toolArgs = { ...ok.toolArgs }
     // A restore keeps what it removes and is itself recorded: it can be reapplied.
     reversible = true
   }
@@ -1012,6 +1014,7 @@ async function parkForApproval(
       message: `Requested by an agent over MCP: ${described}`,
       danger: { tool: resolution.target, target: described, rowCount, reversible },
       toolArgs,
+      restore,
     })
     recordMcpCall(
       { ...auth, endpoint: ENDPOINT, startedAt },
