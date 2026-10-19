@@ -760,17 +760,20 @@ async function escalate(projectId: string, change: LoadedChange, explanation: st
   if (project?.userId) {
     const { createApprovalRequest } = await import('@/lib/mcp/approvals')
     const rows = impact?.items.filter((i) => i.needsApproval).reduce((n, i) => n + i.count, 0) ?? null
+    // The impact this recovery just measured is the request; there is nothing
+    // to gain from previewing the same change again inside its own lock.
+    const restore: RestoreRequest = {
+      target: `Restore the state before change #${change.seq}: ${change.summary}`,
+      rowCount: rows,
+      toolArgs: { changeId: change.id, acknowledged: impact ? acknowledgementOf(impact) : {}, origin: 'backenly' },
+    }
     const row = await createApprovalRequest({
       projectId,
       userId: project.userId,
       message: `Change #${change.seq} (${change.summary}) failed verification. ${keptText(explanation, quote)}`,
-      danger: {
-        tool: 'revert_schema_change',
-        target: `Restore the state before change #${change.seq}: ${change.summary}`,
-        rowCount: rows,
-        reversible: true,
-      },
-      toolArgs: { changeId: change.id, acknowledged: impact ? acknowledgementOf(impact) : {}, origin: 'backenly' },
+      danger: { tool: 'revert_schema_change', target: restore.target, rowCount: rows, reversible: true },
+      toolArgs: { ...restore.toolArgs },
+      restore,
     })
     approvalId = row.id
   }
@@ -859,16 +862,24 @@ export async function reconcileChange(projectId: string, changeId: string, now =
   }
 }
 
-/** Every stale change in a project. Run by the maintenance cron. */
+/**
+ * Changes a process stopped working on: a recovery whose lease ran out, or a
+ * change still applying or verifying long after it began. reconcileChange
+ * settles each; lib/changes/upkeep.ts finds the projects that have any.
+ */
+export function interruptedChangesWhere(now: Date): Prisma.BackendChangeWhereInput {
+  return {
+    OR: [
+      { status: 'recovering', recoveryLeaseUntil: { lt: now } },
+      { status: { in: ['applying', 'verifying'] }, createdAt: { lt: new Date(now.getTime() - RECOVERY_LEASE_MS) } },
+    ],
+  }
+}
+
+/** Every stale change in a project. Run by each region's scheduler (lib/changes/upkeep.ts). */
 export async function reconcileChanges(projectId: string, now = new Date()): Promise<number> {
   const stale = await prisma.backendChange.findMany({
-    where: {
-      projectId,
-      OR: [
-        { status: 'recovering', recoveryLeaseUntil: { lt: now } },
-        { status: { in: ['applying', 'verifying'] }, createdAt: { lt: new Date(now.getTime() - RECOVERY_LEASE_MS) } },
-      ],
-    },
+    where: { projectId, ...interruptedChangesWhere(now) },
     select: { id: true },
     take: 50,
   })
@@ -1053,6 +1064,25 @@ export async function keepChange(
 
 // ── An agent's request ───────────────────────────────────────────────────────
 
+/** The exact call a restore approval runs: the change, and what Backenly measured. */
+export interface RestoreRequestArgs {
+  changeId: string
+  acknowledged: AcknowledgedImpact
+  /** Set when Backenly itself asked, recovering a change that failed verification. */
+  origin?: 'backenly'
+}
+
+/**
+ * A restore request as a person is asked to approve it. Only Backenly's own
+ * code builds one, from its own measurement: describeRestoreRequest below, or
+ * a recovery escalating what it measured. Never from an agent's arguments.
+ */
+export interface RestoreRequest {
+  target: string
+  rowCount: number | null
+  toolArgs: RestoreRequestArgs
+}
+
 /**
  * What an agent's request to restore a change will ask a person to approve,
  * proven now: an impossible request is answered at once instead of parked for
@@ -1062,10 +1092,7 @@ export async function keepChange(
 export async function describeRestoreRequest(
   projectId: string,
   changeId: string,
-): Promise<
-  | { ok: true; target: string; rowCount: number | null; toolArgs: { changeId: string; acknowledged: AcknowledgedImpact } }
-  | { ok: false; status: number; code: string; error: string }
-> {
+): Promise<({ ok: true } & RestoreRequest) | { ok: false; status: number; code: string; error: string }> {
   if (!changeId) return { ok: false, status: 400, code: 'CHANGE_ID_REQUIRED', error: 'revert_change needs { changeId }.' }
   let preview: RecoveryPreview | null
   try {

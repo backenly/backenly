@@ -157,7 +157,9 @@ describe('the execution timeline', () => {
     expect(mockTimelineUpdates[0].errorMessage).toContain(EMAIL)
   })
 
-  it('keeps a regional project’s argument shape and no message, success or failure', async () => {
+  // A home project's success is pinned the same way in
+  // tests/integration/execution-timeline-outcomes.spec.ts.
+  it('keeps a regional project’s argument shape and no failure message, and a success keeps no message in any region', async () => {
     await trackAction('p-virginia', 'run-2', insert, async () => ({ success: false, error: `Key (email)=(${EMAIL}) already exists` }))
     await trackAction('p-virginia', 'run-3', insert, async () => ({ success: true, message: `Inserted ${EMAIL}` }))
     await expect(
@@ -170,7 +172,7 @@ describe('the execution timeline', () => {
       { table: 'customers', rows: { count: 1 } },
       { table: 'customers', rows: { count: 1 } },
     ])
-    expect(mockTimelineUpdates.map((update) => update.errorMessage)).toEqual([NOT_QUOTED, NOT_QUOTED, NOT_QUOTED])
+    expect(mockTimelineUpdates.map((update) => update.errorMessage)).toEqual([NOT_QUOTED, null, NOT_QUOTED])
     expect(JSON.stringify([mockTimelineRows, mockTimelineUpdates])).not.toContain(EMAIL)
   })
 

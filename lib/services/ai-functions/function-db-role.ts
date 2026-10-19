@@ -26,6 +26,7 @@
 import { createHash, createHmac } from 'crypto'
 import { PrismaClient } from '@prisma/client'
 import { projectDatabaseUrl, regionRawClient, workspaceRawClient } from '@/lib/data-plane/regional'
+import { withoutStatementCache } from '@/lib/data-plane/statement-cache'
 import { HOME_REGION, type CloudRegionId } from '@/lib/regions'
 import { resolveWorkspaceSchema } from '@/lib/services/workspace-pool'
 
@@ -69,9 +70,13 @@ export function functionRolePassword(schema: string): string {
  * The project's own database URL (lib/data-plane/regional.ts) with the function
  * login swapped in and a small pool. The base is required: a default would be
  * the home region's database, which holds no schema for a project elsewhere.
+ *
+ * Prisma's statement cache is off, as on every client that runs workspace SQL:
+ * function code reads whole rows of tables whose columns change
+ * (lib/data-plane/statement-cache.ts).
  */
 export function functionDatabaseUrl(role: string, password: string, base: string): string {
-  const url = new URL(base)
+  const url = new URL(withoutStatementCache(base))
   url.username = role
   url.password = password
   url.searchParams.set('connection_limit', '2')

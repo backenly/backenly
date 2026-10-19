@@ -49,6 +49,7 @@ import { PrismaClient } from '@prisma/client'
 import { Pool, type PoolConfig } from 'pg'
 import { prisma } from '@/lib/db/prisma'
 import { HOME_REGION, findRegion, type CloudRegionId } from '@/lib/regions'
+import { withoutStatementCache } from './statement-cache'
 
 /**
  * Which credential a caller needs. Each region has its own of every kind, for
@@ -338,13 +339,49 @@ export type WorkspaceRawClient = Pick<
   '$queryRaw' | '$queryRawUnsafe' | '$executeRaw' | '$executeRawUnsafe' | '$transaction'
 >
 
-const regionalClients = new Map<CloudRegionId, PrismaClient>()
+/**
+ * Each region's workspace client, the home region's included. Kept on
+ * globalThis, as the shared client is (lib/db/postgres.ts), so a development
+ * server that reloads this module does not open another pool each time.
+ */
+const globalForWorkspace = globalThis as unknown as {
+  backenlyWorkspaceClients?: Map<CloudRegionId, PrismaClient>
+}
+const workspaceClients = (globalForWorkspace.backenlyWorkspaceClients ??= new Map<CloudRegionId, PrismaClient>())
 
 /**
- * Raw SQL against a region's database: the shared client in the home region,
- * exactly as before; one client per other region, created on first use. The
- * region's connection is checked on every call, so an unconfigured region is
- * refused even after a client exists.
+ * The home workspace client's pool size when DATABASE_URL names none. That
+ * client shares the home database with the platform client, so its pool is a
+ * small fixed number rather than Prisma's default, which grows with the host's
+ * cores. A connection_limit in DATABASE_URL is the operator's size for a pool
+ * and is kept.
+ */
+const HOME_WORKSPACE_CONNECTION_LIMIT = 5
+
+/**
+ * The connection string a region's workspace client opens: the region's own,
+ * with Prisma's statement cache off (statement-cache.ts). In the home region
+ * the pool is also bounded, because the platform client's pool is on the same
+ * database.
+ */
+export function workspaceClientUrl(region: CloudRegionId, url: string): string {
+  const parsed = new URL(withoutStatementCache(url))
+  if (region === HOME_REGION && !parsed.searchParams.has('connection_limit')) {
+    parsed.searchParams.set('connection_limit', String(HOME_WORKSPACE_CONNECTION_LIMIT))
+  }
+  return parsed.toString()
+}
+
+/**
+ * Raw SQL against a region's database, on that region's workspace client: one
+ * per region, the home region's included, created on first use. The region's
+ * connection is checked on every call, so an unconfigured region is refused
+ * even after a client exists.
+ *
+ * In the home region this is not the shared platform client, although it
+ * connects with the same DATABASE_URL. Workspace SQL needs Prisma's statement
+ * cache off, because the tables it reads change shape (statement-cache.ts);
+ * the platform's own queries keep the cache.
  *
  * For work about a region rather than one project, such as reading its
  * PostgREST registry. A project's own queries go through workspaceRawClient.
@@ -355,14 +392,12 @@ export function regionRawClient(region: CloudRegionId, projectId?: string): Work
 
 /** The full client for a region's database. Private: see WorkspaceRawClient. */
 function regionClient(region: CloudRegionId, projectId?: string): PrismaClient {
-  if (region === HOME_REGION) return prisma
-
   const url = requireRegionDatabaseUrl(region, 'app', { projectId })
-  const existing = regionalClients.get(region)
+  const existing = workspaceClients.get(region)
   if (existing) return existing
 
-  const client = new PrismaClient({ datasourceUrl: url, log: ['error'] })
-  regionalClients.set(region, client)
+  const client = new PrismaClient({ datasourceUrl: workspaceClientUrl(region, url), log: ['error'] })
+  workspaceClients.set(region, client)
   return client
 }
 
@@ -381,14 +416,16 @@ export async function workspaceRawClient(projectId: string): Promise<WorkspaceRa
  * (founders, 2026-10-16: the events stay there). The regional table is created
  * by scripts/sql/schema-drift-events.sql, kept identical to the Prisma model, so
  * the model's accessor reads it as it reads the home one. No other model may be
- * reached on a regional client.
+ * reached on a regional client. In the home region the table is the platform's
+ * own and is read on the shared platform client, as it always was.
  */
 export function regionDriftEvents(region: CloudRegionId): PrismaClient['schemaDriftEvent'] {
-  return regionClient(region).schemaDriftEvent
+  return region === HOME_REGION ? prisma.schemaDriftEvent : regionClient(region).schemaDriftEvent
 }
 
 export async function projectDriftEvents(projectId: string): Promise<PrismaClient['schemaDriftEvent']> {
-  return regionClient(await projectRegion(projectId), projectId).schemaDriftEvent
+  const region = await projectRegion(projectId)
+  return region === HOME_REGION ? prisma.schemaDriftEvent : regionClient(region, projectId).schemaDriftEvent
 }
 
 /** The PostgREST serving a region's projects, and the secret its tokens are signed with. */
@@ -417,10 +454,13 @@ export async function projectPostgrest(projectId: string): Promise<RegionPostgre
   return regionPostgrest(await projectRegion(projectId))
 }
 
-/** Close every regional client. The home client is the shared one and stays. */
+/**
+ * Close every workspace client, the home region's included, and every regional
+ * pool. The shared platform client is not one of them and stays open.
+ */
 export async function disconnectRegionalClients(): Promise<void> {
-  const clients = [...regionalClients.values()]
-  regionalClients.clear()
+  const clients = [...workspaceClients.values()]
+  workspaceClients.clear()
   const pools = [...regionPools.values()]
   regionPools.clear()
   await Promise.all([

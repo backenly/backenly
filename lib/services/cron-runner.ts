@@ -224,6 +224,29 @@ export async function runRegionalSystemTasks(now: Date = new Date()): Promise<vo
     }
   }
 
+  // Governed changes a process stopped working on are settled from the
+  // catalog, and change vaults past their retention window are dropped, for
+  // this region's projects only: their catalog and vaults are in its database
+  // (lib/changes/upkeep.ts).
+  if (now.getTime() - lastChangeSettleAt >= CHANGE_SETTLE_INTERVAL_MS) {
+    lastChangeSettleAt = now.getTime()
+    await import('@/lib/changes/upkeep')
+      .then(({ settleInterruptedChangesHere }) => settleInterruptedChangesHere(now))
+      .then((r) => {
+        if (r.done > 0 || r.failed > 0) console.log(`[SystemTasks] settled ${r.done} interrupted change(s) in ${r.projects} project(s), ${r.failed} failed`)
+      })
+      .catch(err => console.error('[SystemTasks] change settling failed:', err?.message))
+  }
+  if (now.getTime() - lastVaultPurgeAt >= VAULT_PURGE_INTERVAL_MS) {
+    lastVaultPurgeAt = now.getTime()
+    await import('@/lib/changes/upkeep')
+      .then(({ purgeExpiredVaultsHere }) => purgeExpiredVaultsHere(now))
+      .then((r) => {
+        if (r.done > 0 || r.failed > 0) console.log(`[SystemTasks] dropped ${r.done} expired change vault(s) in ${r.projects} project(s), ${r.failed} failed`)
+      })
+      .catch(err => console.error('[SystemTasks] vault purge failed:', err?.message))
+  }
+
   // Snapshots taken or restored for this region's projects at another
   // region's request (the console and MCP run at home): a project's data is
   // dumped and restored only where it is kept (lib/queue/worker.ts
@@ -235,6 +258,16 @@ export async function runRegionalSystemTasks(now: Date = new Date()): Promise<vo
 
 const BODY_PRUNE_INTERVAL_MS = 60 * 60 * 1000
 let lastBodyPruneAt = 0
+
+// A change interrupted mid-flight reads as still in progress until it is
+// settled, so this runs often; finding none is a single small query.
+const CHANGE_SETTLE_INTERVAL_MS = 10 * 60 * 1000
+let lastChangeSettleAt = 0
+
+// Retention is counted in days; four passes a day drop a vault within hours of
+// its window closing.
+const VAULT_PURGE_INTERVAL_MS = 6 * 60 * 60 * 1000
+let lastVaultPurgeAt = 0
 
 const RATE_WINDOW_PRUNE_INTERVAL_MS = 24 * 60 * 60 * 1000
 let lastRateWindowPruneAt = 0

@@ -628,6 +628,16 @@ tests/integration/migration-ownership-recovery.spec.ts
 # a superuser, like the RDS master, then owns what was installed, and the
 # application's own paths run against it. Needs PostgreSQL 16 server binaries
 # (PG_BINDIR) and, in CI, pgvector; it fails rather than skips without them.
+# It also pins the region's snapshots: a project the application makes there
+# without direct access is dumped and restored by the real snapshot job as
+# backenly_backup, and a workspace made before that fails pg_dump and verify.sql
+# until the procedure is applied again. A check on its own fails on a step that
+# changed and does not verify yet; only the check a launcher runs before its own
+# apply (BOOTSTRAP_PRE_APPLY) reports it without failing. Mutation-checked: the
+# previous code and SQL fail nine of those ten tests, with the exact "permission
+# denied for schema" pg_dump error seen in us-east-1 (the tenth passes on the old
+# verify.sql, which is the gap), and a check that tolerates every changed step
+# fails the three that pin the strict check and the signal.
 tests/integration/regional-bootstrap.spec.ts
 
 # ── Credential rotation ─────────────────────────────────────────────────────
@@ -868,11 +878,17 @@ __tests__/storage/signed-cdn.test.ts
 # lock semantics are the property under test, so it needs a real Postgres.
 tests/integration/scheduler-leader-lock.spec.ts
 
-# A table a developer creates over a READ_WRITE direct connection belongs to a
-# role the backup role's default privileges never named, so pg_dump failed for
-# that project on every run. backenly_direct_sync_schema now grants the backup
-# role (or backenly.backup_role) read on the schema it syncs, and never write.
-# Mutation-checked: the previous function fails the two grant tests.
+# The backup role reads every workspace schema, so pg_dump works for every
+# project. backenly_direct_sync_schema returned before its backup grant for a
+# workspace with no direct-access role, so every snapshot of a project without
+# direct access failed "permission denied for schema". It now grants every
+# workspace, read only, and sets default privileges for the roles that create
+# tables (the application, and a READ_WRITE developer before adoption).
+# Provisioning and the application's sync call it for every project, and
+# installing scripts/setup-direct-access.sql converges existing workspaces.
+# Mutation-checked: the previous SQL and application code fail seven of nine
+# tests; without the default privileges two fail, without the converge one,
+# without the provisioning grant one.
 tests/integration/direct-access-backup-grants.spec.ts
 
 # Both storage drivers apply one per-file rule: the bucket's own limit under the
@@ -947,6 +963,11 @@ tests/integration/trigger-webhooks-console.spec.ts
 # approved, and narrows with a before/after receipt. Real key rows are the
 # property.
 tests/integration/key-lifecycle-honesty.spec.ts
+
+# The execution timeline keeps how an action went, not what it handed back: a
+# success keeps no message, a failure its error with credential shapes withheld,
+# as do retries, stored arguments and operational memory. Real rows.
+tests/integration/execution-timeline-outcomes.spec.ts
 # The integrations connect door keeps its contract: unknown provider ids are
 # refused with the served list, any alias or casing stores under the one
 # canonical id everything looks up, disconnect clears what the console reads
@@ -1264,6 +1285,11 @@ tests/integration/branch-merge-governed.spec.ts
 # workspace or another project. Real schemas, vaults and purges.
 tests/integration/change-restore-point-unavailable.spec.ts
 
+# Each region's scheduler settles its own projects' interrupted changes and drops
+# their vaults past the window, and leaves another region's projects to that
+# region; a region it cannot reach is skipped and the skip recorded.
+tests/integration/change-upkeep.spec.ts
+
 # The undo routes that worked outside the change ledger (graph-pointer undo and
 # restore, the archive and approved-fix rollbacks) answer 410 MOVED to the
 # project admin and 404 to anyone else, and change nothing.
@@ -1289,3 +1315,20 @@ tests/integration/project-creation-order.spec.ts
 # runtime's. Each server's insert answer is pinned. Real tables behind both
 # servers are the property, so it needs a real Postgres.
 tests/integration/sdk-data-routes.spec.ts
+
+# Workspace SQL after a table's columns change. Prisma reused a prepared
+# statement per pooled connection, and PostgreSQL refuses to run one whose
+# result columns changed (0A000), so after an ALTER TABLE the v1 query and
+# insert routes failed until the connection was replaced. Each case runs a
+# statement, changes the table, and runs it again on the same client: the home
+# and a regional client (a second database), executeWithUserContext, and a
+# route-module function on its own login. What PostgreSQL refuses is the
+# property, so it needs a real Postgres.
+tests/integration/workspace-sql-cached-plan.spec.ts
+
+# A home project's governed change records the statements it ran. Its
+# workspace SQL runs on the home workspace client, not the platform client, so
+# the SQL recorder has to be on that client too: a change runs its DDL through
+# executeWithUserContext, and its record must carry that statement. The change
+# ledger, its lock and its record are the property, so it needs a real Postgres.
+tests/integration/home-workspace-sql-recorded.spec.ts
