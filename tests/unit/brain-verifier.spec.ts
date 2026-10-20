@@ -128,7 +128,7 @@ describe('run_test get', () => {
     ['refuses the anon key', { status: 403, body: { error: 'Forbidden' } }],
     [
       'is blocked by row-level security',
-      { status: 500, body: { error: 'Raw query failed. Code: `42501`. permission denied for table posts' } },
+      { status: 500, body: { error: 'Raw query failed. Code: `42501`. new row violates row-level security policy for table "posts"' } },
     ],
     ['returns a row with no id', listOf([{ title: 'a table without an id column' }])],
   ])('does not pass when the list %s', async (_why, answer) => {

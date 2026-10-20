@@ -360,13 +360,30 @@ async function requestEndpoint(input: EndpointTestInput, rowId?: string): Promis
       failureKind: 'bad_request',
     }
   }
-  // 5xx → broken… UNLESS the body says it's an RLS / permission-denied
-  // failure. Postgres returns code 42501 ("INSUFFICIENT_PRIVILEGE") when an
-  // RLS policy refuses the row; the runtime currently wraps that as a 500.
-  // RLS doing its job is the OPPOSITE of "broken" — it proves the table is
-  // wired AND correctly secured. Treat it as PASS.
+  // 5xx → broken… UNLESS the body says it's an RLS policy denial.
+  // Postgres returns code 42501 ("INSUFFICIENT_PRIVILEGE") for both RLS
+  // denials and missing GRANTs.
+  // - A missing grant (permission denied for table/schema/...) is a broken
+  //   backend and must fail as server_error naming the missing grant.
+  // - A true RLS policy denial proves the table is wired AND secured, so it
+  //   passes.
+  // - A bare 42501 with no RLS wording is treated as a server error.
   if (status >= 500) {
-    const rlsBlocked = looksLikeRlsDenied(excerpt)
+    const bodyToCheck = text || excerpt
+    const missingGrant = extractMissingGrant(bodyToCheck)
+    if (missingGrant) {
+      return {
+        ok: false,
+        summary: `${method} ${path} → ${status}. A database grant is missing (${missingGrant}). The endpoint threw a server error because the database role lacks required permissions.${degradedNote}`,
+        endpoint: path,
+        method,
+        statusCode: status,
+        bodyExcerpt: excerpt,
+        failureKind: 'server_error',
+      }
+    }
+
+    const rlsBlocked = looksLikeRlsDenied(bodyToCheck)
     if (rlsBlocked) {
       return {
         ok: true,
@@ -401,26 +418,48 @@ async function requestEndpoint(input: EndpointTestInput, rowId?: string): Promis
 }
 
 /**
- * Recognise an RLS / permission-denied error inside a 500 body. The runtime
- * sometimes lifts the underlying Postgres error through prisma.$queryRawUnsafe,
- * producing bodies like:
+ * Detect a Postgres missing-grant error inside a 500 body.
+ *
+ * Postgres raises SQLSTATE 42501 (insufficient_privilege) for both RLS denials
+ * AND missing GRANTs. But a missing grant means the runtime role cannot use the
+ * table/schema at all — that is a broken backend, not a secured one.
+ *
+ * Matches errors like:
+ *   permission denied for schema workspace_p1
+ *   permission denied for table posts
+ *   permission denied for sequence posts_id_seq
+ *   permission denied for function my_func
+ */
+export function extractMissingGrant(body: string): string | null {
+  if (!body) return null
+  const match =
+    body.match(/permission denied for (?:table|schema|sequence|function|relation|view|database|foreign table)\s+([^\s"',;\\}]+|"(?:\\.|[^"\\])*"|\\"(?:\\.|[^"\\])*\\")/i) ||
+    body.match(/permission denied for (?:table|schema|sequence|function|relation|view|database|foreign table)/i)
+  if (!match) return null
+  return match[0].replace(/\\"/g, '"').trim()
+}
+
+/**
+ * Recognise an RLS policy denial inside a 500 body. The runtime sometimes
+ * lifts the underlying Postgres error through prisma.$queryRawUnsafe, producing
+ * bodies like:
  *
  *   {"error":"... Raw query failed. Code: `42501`. Message: `ERROR: new row
  *    violates row-level security policy ...`"}
  *
- * We match on both the Postgres SQLSTATE code (42501) and the human message
- * so neither a code-only nor a message-only excerpt slips through. Anything
- * matching is RLS doing its job — not a real server error.
+ * Pass ONLY on RLS-specific phrasing (e.g. `violates row-level security policy`
+ * or `new row violates row-level security policy`).
+ *
+ * Missing grants (e.g. `permission denied for schema/table`) and bare 42501
+ * codes without RLS wording do NOT qualify as an RLS pass.
  */
-function looksLikeRlsDenied(body: string): boolean {
+export function looksLikeRlsDenied(body: string): boolean {
   if (!body) return false
-  const lower = body.toLowerCase()
+  if (extractMissingGrant(body)) return false
+
   return (
-    /\b42501\b/.test(body) ||
     /row[-\s]?level security/i.test(body) ||
-    /violates row[-\s]?level security policy/i.test(body) ||
-    /permission denied/i.test(lower) ||
-    /insufficient[_\s]?privilege/i.test(lower)
+    /violates row[-\s]?level security policy/i.test(body)
   )
 }
 
