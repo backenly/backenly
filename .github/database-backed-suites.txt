@@ -830,6 +830,15 @@ tests/integration/brain-mutation-accounting.spec.ts
 # conversation, so it needs a real Postgres.
 tests/integration/brain-question-tools.spec.ts
 
+# "continue" after an agent-loop turn that stopped unfinished resumes its saved
+# request with what already landed, carries both across a second stop, survives
+# a read-only question, clears when a new change finishes and expires after 30
+# minutes; with nothing saved it still says nothing is waiting, and a project
+# kept in another region stores neither its request nor what landed in the home
+# database. It reads and writes the projects, a workspace schema, the
+# conversation and the saved resume point, so it needs a real Postgres.
+tests/integration/brain-continue-resume.spec.ts
+
 # /v1/{projectId}/ai/generate: model names resolve to the deployment's aliases,
 # the output is capped, the project's credits gate and pay for it, and a provider
 # failure answers with a code and plain words. It reads the project and writes
