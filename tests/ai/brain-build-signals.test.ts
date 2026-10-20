@@ -58,7 +58,9 @@ describe('looksLikeBuildDescription — a long, imperative-free description stil
   it('accepts declarative phrasing without a "build"/"create" verb', () => {
     // The exact failure mode: no imperative verb, just "users can …".
     expect(
-      looksLikeBuildDescription('Users can post recipes with photos and ingredients, follow each other, and save their favorites.'),
+      looksLikeBuildDescription(
+        'Users can post recipes with photos and ingredients, follow each other, and save their favorites.'
+      )
     ).toBe(true)
   })
 
@@ -66,7 +68,37 @@ describe('looksLikeBuildDescription — a long, imperative-free description stil
     // A long message that happens to start with a question word but actually
     // describes an app should still reach the architect.
     expect(
-      looksLikeBuildDescription('Can users of my app post recipes, follow each other, comment on posts, and save favorites for later?'),
+      looksLikeBuildDescription(
+        'Can users of my app post recipes, follow each other, comment on posts, and save favorites for later?'
+      )
     ).toBe(true)
+  })
+})
+
+describe('looksLikeBuildDescription — distinguishes questions from build requests', () => {
+  it('rejects a long authentication question', () => {
+    expect(
+      looksLikeBuildDescription(
+        'How do I add authentication to my app so users can sign in with Google?'
+      )
+    ).toBe(false)
+  })
+
+  it('rejects a long question about RLS templates', () => {
+    expect(
+      looksLikeBuildDescription(
+        'What is the difference between owner_read_write and participants RLS templates?'
+      )
+    ).toBe(false)
+  })
+
+  it('accepts a polite recipe app build request', () => {
+    expect(
+      looksLikeBuildDescription('Can you build me a recipe app where users share photos?')
+    ).toBe(true)
+  })
+
+  it('accepts a polite CRM build request', () => {
+    expect(looksLikeBuildDescription('Could you please create a CRM for my gym?')).toBe(true)
   })
 })

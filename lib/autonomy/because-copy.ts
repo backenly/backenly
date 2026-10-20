@@ -369,15 +369,20 @@ export function shortHeadline(details: AutonomyEventDetails | null | undefined):
 }
 
 /**
- * A pass on which the repair loop held its repairs back because the project
- * was mid-incident (AUTONOMY_CHANGE_FREEZE, lib/autonomy/reconciler.ts). Its
- * details carry how many it would have applied and the health signals that
- * declared the incident.
+ * Repairs held back because the project was mid-incident
+ * (lib/autonomy/change-freeze.ts): the repair loop's own pass, or, with `via`,
+ * another path's. The details carry how many would have run and the health
+ * signals that declared the incident.
  */
-export function explainHeldBack(details: { wouldHaveApplied?: unknown; health?: unknown } | null | undefined): BecauseSentence {
+export function explainHeldBack(details: { wouldHaveApplied?: unknown; health?: unknown; via?: unknown } | null | undefined): BecauseSentence {
   const n = Number(details?.wouldHaveApplied) || 0
   const signals = Array.isArray(details?.health) ? details!.health.map(String).filter(Boolean) : []
-  const what = `Backenly held back ${n === 1 ? 'a repair' : n > 1 ? `${n} repairs` : 'its repairs'}`
+  const what =
+    details?.via === 'agentic_fix_loop'
+      ? `Backenly held back its fixes${n > 0 ? ` for ${n === 1 ? 'a failing check' : `${n} failing checks`}` : ''}`
+      : details?.via === 'function_heal'
+        ? `Backenly held back repairing ${n === 1 ? 'a function' : n > 1 ? `${n} functions` : 'its functions'}`
+        : `Backenly held back ${n === 1 ? 'a repair' : n > 1 ? `${n} repairs` : 'its repairs'}`
   const why =
     'the project is mid-incident, and changing a backend that is already failing can make it worse.' +
     (signals.length > 0 ? ` ${signals.join(' ')}` : '')

@@ -798,6 +798,15 @@ __tests__/usage/usage-ledger.test.ts
 # unknown. Row locks are the property, so it needs a real Postgres.
 tests/integration/ai-spend-ledger.spec.ts
 
+# A project whose backend state could not be read is not taken for a new one:
+# with collectProof failing, the classifier is not told nothing is built, a
+# BUILD goes to the agent loop with the state marked unread, and neither a
+# description the classifier hedged on nor a "go ahead" whose plan was lost is
+# handed to the architect; a state read as empty is still new. It reads and
+# writes the projects, their workspace schemas and their conversations, so it
+# needs a real Postgres.
+tests/integration/brain-unread-state.spec.ts
+
 # The brain on the AI gateway, end to end with a scripted model: what each call
 # sends, every tool call answered in one turn with thinking carried back, credits
 # in cost-weighted tokens, usage rows per call, and the approval gate, cut-off,
@@ -805,11 +814,34 @@ tests/integration/ai-spend-ledger.spec.ts
 # workspace schema and its conversation, so it needs a real Postgres.
 tests/integration/brain-on-gateway.spec.ts
 
+# A brain turn reports as applied only what changed: listing the derived
+# columns, a dry-run data migration and a readiness read change nothing, are
+# not listed and send no finish back for verification, while a readiness call
+# that applies the safe fixes is listed and verified. It reads and writes the
+# project, its workspace schema and a table's rows, so it needs a real
+# Postgres.
+tests/integration/brain-mutation-accounting.spec.ts
+
+# A QUESTION turn is offered the reads and the tools that end a turn, nothing
+# that changes the backend, and a call outside them that a model sends anyway
+# (a readiness fix, an unoffered create_table) is refused and changes nothing
+# while the turn still answers; a request for a change is still offered the
+# whole catalog. It reads the project, its workspace schema and its
+# conversation, so it needs a real Postgres.
+tests/integration/brain-question-tools.spec.ts
+
 # /v1/{projectId}/ai/generate: model names resolve to the deployment's aliases,
 # the output is capped, the project's credits gate and pay for it, and a provider
 # failure answers with a code and plain words. It reads the project and writes
 # its usage row, so it needs a real Postgres.
 tests/integration/runtime-generate.spec.ts
+
+# BrainResult.iterations, which /api/mcp/chat returns to agents, is the number
+# of model calls the agent loop got an answer to: 1 for a turn answered at
+# once, 2 for a tool call and a reply, 12 when the step budget runs out, and a
+# call that failed is not counted. It reads and writes the project, its
+# workspace schema and its conversation, so it needs a real Postgres.
+tests/integration/brain-iterations.spec.ts
 
 # Escalated findings: the deterministic investigation first, then the model
 # investigator with real read-only probes, a checked hypothesis stored as one,
@@ -836,6 +868,14 @@ tests/integration/ai-lab-arm.spec.ts
 # take the last credits, released on settle, stale after a crash, never a
 # charge. The row and the race are real, so it needs a real Postgres.
 tests/integration/ai-credit-holds.spec.ts
+
+# The calls that only route a brain turn are recorded like every other model
+# call: the classifier and the answer of a CHAT turn, the classifier and the
+# clarifying question of an UNCLEAR one, each reserved, settled and written to
+# the project's usage log under its own name, while the turn charges no AI
+# credits for them. It reads and writes the project, its workspace schema, its
+# conversation and its usage rows, so it needs a real Postgres.
+tests/integration/brain-classify-clarify-spend.spec.ts
 
 # Every meter measures what lib/usage/axes.ts says: streamed egress bytes once and
 # never for internal traffic, MAU once per user per month, database size including
@@ -1018,6 +1058,14 @@ tests/integration/storage-agent-truth.spec.ts
 # frontend origin says the CORS allowlist is now exclusive. Real OAuth config,
 # end-user, finding and ConnectedApp rows are the property.
 tests/integration/agent-doors-agree.spec.ts
+# A brain tool call cut off at the output limit, or whose arguments are not an
+# object, runs nothing and reaches no approval as `{}` or half its arguments:
+# each call of the answer goes back to the model as not run, naming its tool,
+# and the call it sends again runs. One cut off by a full context window runs
+# nothing and ends the turn. It creates tables in the project's workspace
+# schema and reads its conversation, so it needs a real Postgres.
+tests/integration/brain-cut-off-tool-calls.spec.ts
+
 # A parked executor action is pollable: the APPROVAL_REQUIRED refusal carries
 # the Review Queue finding's id and the poll call, check_approval resolves
 # parked findings alongside destructive-gate approvals with one status
@@ -1151,6 +1199,12 @@ tests/integration/regional-bodies.spec.ts
 # never handed to a model for a different action. Real route, key, holds, vault
 # and usage rows are the property, so it needs a real Postgres.
 tests/integration/model-spend-on-every-tool.spec.ts
+# A CHAT answer is sent the conversation it follows: the earlier turns, clipped
+# the way the classifier clips them, ahead of a follow-up like "why the first
+# one?", with a key pasted earlier arriving redacted. The turns are saved to and
+# loaded from the project's real conversation log, so it needs a real Postgres.
+tests/integration/brain-chat-follow-up.spec.ts
+
 # Function runs say what they do: an HTTP function's creation check asks a GET
 # handler for its contract instead of running it, and every check is recorded
 # in the function's run log; ctx.db.query pages with an explicit limit, offset
@@ -1201,6 +1255,13 @@ tests/integration/dashboard-stats-counts.spec.ts
 # routes answer 404, and the approval card names the trigger. Real trigger and
 # approval rows are the property, so it needs a real Postgres.
 tests/integration/delete-trigger-scope.spec.ts
+# The Review Queue entry for delete_webhook and remove_auth_smtp, through a real
+# brain turn: a webhook in the project is named with its event and target URL,
+# another project's webhook is reported as not in this project without its URL
+# reaching the entry or the model, the SMTP entry says where auth email goes
+# next, and the gate deletes nothing. Real webhook, delivery and SMTP rows are
+# the property, so it needs a real Postgres.
+tests/integration/approval-target-names.spec.ts
 # Regional jobs: a snapshot or restore of a project kept in another region,
 # asked for at home and carried out in that region. No generic worker can claim
 # one, each region claims its own, a run past its timeout counts as an attempt,

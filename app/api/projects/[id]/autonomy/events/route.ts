@@ -24,11 +24,12 @@ import { withProjectValidation } from '@/lib/middleware/projectValidation'
 import { prisma } from '@/lib/db/prisma'
 import { AUTONOMOUS_AUDIT_ACTIONS } from '@/lib/autonomy/circuit-breaker'
 import { explainAutonomyEvent, explainHeldBack } from '@/lib/autonomy/because-copy'
+import { LOOP_HELD, REPAIR_HELD } from '@/lib/autonomy/change-freeze'
 
 const MAX_LIMIT = 50
 
-/** The repair loop's record of a pass it held back during an incident (lib/autonomy/reconciler.ts). */
-const HELD_BACK = 'AUTONOMY_CHANGE_FREEZE'
+/** Repairs held back during an incident: the repair loop's own pass, and any other path's (lib/autonomy/change-freeze.ts). */
+const HELD_BACK: string[] = [LOOP_HELD, REPAIR_HELD]
 
 export async function GET(
   request: NextRequest,
@@ -61,7 +62,7 @@ export async function GET(
     // minute it lasts. Asked for, a repair that waited out an incident is not
     // read as one that never came.
     const held = url.searchParams.get('include') === 'held'
-    const actions: string[] = [...AUTONOMOUS_AUDIT_ACTIONS, ...(held ? [HELD_BACK] : [])]
+    const actions: string[] = [...AUTONOMOUS_AUDIT_ACTIONS, ...(held ? HELD_BACK : [])]
 
     const rows = await prisma.auditLog.findMany({
       where: {
@@ -79,7 +80,7 @@ export async function GET(
       try {
         d = r.details ? JSON.parse(r.details) : {}
       } catch { /* legacy free-text */ }
-      if (r.action === HELD_BACK) {
+      if (HELD_BACK.includes(r.action)) {
         const explained = explainHeldBack(d)
         return {
           id: r.id,

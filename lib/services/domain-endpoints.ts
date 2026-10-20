@@ -11,6 +11,7 @@
  * that restore puts them back (lib/changes/recovery.ts).
  */
 
+import type { Prisma } from '@prisma/client'
 import { prisma } from '@/lib/db/prisma'
 import { generateDomainEndpoints, type GeneratedEndpoint } from '@/lib/ai/build-runtime/domain-business-logic'
 
@@ -61,42 +62,13 @@ export interface RemovedEndpoint {
   createdAt: string
 }
 
-/**
- * Remove the endpoints generated for tables that are gone, and return each row
- * as it was, so undoing the restore can put back exactly those rows: switched
- * off, rewritten or not. `keep` is handed the rows before anything is removed,
- * and if it throws nothing is.
- *
- * A name a remaining table also generates stays: the auth and admin endpoints
- * belong to every auth table. So does a row that is no longer as GENERATE_API
- * registered it: code an agent deployed over it (codeOrigin 'agent'), or a
- * different trigger or route.
- */
-export async function removeDomainEndpoints(
-  projectId: string,
-  removed: string[],
-  remaining: string[],
-  keep?: (rows: RemovedEndpoint[]) => Promise<void>,
-): Promise<RemovedEndpoint[]> {
-  if (removed.length === 0) return []
-  const allTables = [...new Set([...removed, ...remaining])]
-  const stillGenerated = new Set(
-    remaining.flatMap((t) => generateDomainEndpoints(t, projectId, allTables).map((ep) => ep.name)),
-  )
-  const routes = new Map<string, string>()
-  for (const t of removed) {
-    for (const ep of generateDomainEndpoints(t, projectId, allTables)) {
-      if (!stillGenerated.has(ep.name)) routes.set(ep.name, routeOf(projectId, ep))
-    }
-  }
-  if (routes.size === 0) return []
+type AiFunctionRow = Awaited<ReturnType<typeof prisma.aiFunction.findMany>>[number]
 
-  const rows = await prisma.aiFunction.findMany({
-    where: { projectId, name: { in: [...routes.keys()] }, codeOrigin: 'generated', triggerType: 'manual' },
-  })
-  const generated = rows.filter((r) => r.triggerTable === routes.get(r.name))
-  if (generated.length === 0) return []
-  const kept: RemovedEndpoint[] = generated.map((r) => ({
+/** Writes the rows a removal took, in the removal's own transaction. */
+export type RecordRemoved = (rows: RemovedEndpoint[], tx: Prisma.TransactionClient) => Promise<void>
+
+function asRemoved(r: AiFunctionRow): RemovedEndpoint {
+  return {
     id: r.id,
     name: r.name,
     description: r.description,
@@ -109,10 +81,73 @@ export async function removeDomainEndpoints(
     lastError: r.lastError,
     runCount: r.runCount,
     createdAt: r.createdAt.toISOString(),
-  }))
-  if (keep) await keep(kept)
-  await prisma.aiFunction.deleteMany({ where: { id: { in: generated.map((r) => r.id) } } })
-  return kept
+  }
+}
+
+/**
+ * The endpoints generated for tables that are gone, as they are now.
+ *
+ * A name a remaining table also generates is not among them: the auth and
+ * admin endpoints belong to every auth table. Nor is a row that is no longer
+ * as GENERATE_API registered it: code an agent deployed over it (codeOrigin
+ * 'agent'), or a different trigger or route.
+ */
+export async function generatedEndpointsOf(projectId: string, removed: string[], remaining: string[]): Promise<AiFunctionRow[]> {
+  if (removed.length === 0) return []
+  const allTables = [...new Set([...removed, ...remaining])]
+  const stillGenerated = new Set(
+    remaining.flatMap((t) => generateDomainEndpoints(t, projectId, allTables).map((ep) => ep.name)),
+  )
+  const routes = new Map<string, string>()
+  for (const t of removed) {
+    for (const ep of generateDomainEndpoints(t, projectId, allTables)) {
+      if (!stillGenerated.has(ep.name)) routes.set(ep.name, routeOf(projectId, ep))
+    }
+  }
+  if (routes.size === 0) return []
+  const rows = await prisma.aiFunction.findMany({
+    where: { projectId, name: { in: [...routes.keys()] }, codeOrigin: 'generated', triggerType: 'manual' },
+  })
+  return rows.filter((r) => r.triggerTable === routes.get(r.name))
+}
+
+/**
+ * Remove these rows, each only while it is still the code Backenly generated:
+ * codeOrigin 'generated', its route, the same code. A row an agent deployed
+ * over meanwhile keeps its code; a function's own runs touch only its
+ * bookkeeping (runs, last run, last error), which does not count. `record` is
+ * handed exactly the rows removed, as they were, in the same transaction: if
+ * it cannot be written, nothing is removed.
+ */
+export async function deleteGeneratedEndpoints(projectId: string, rows: AiFunctionRow[], record?: RecordRemoved): Promise<RemovedEndpoint[]> {
+  if (rows.length === 0) return []
+  return prisma.$transaction(async (tx) => {
+    const taken: RemovedEndpoint[] = []
+    for (const r of rows) {
+      const still = { id: r.id, projectId, codeOrigin: 'generated', triggerType: 'manual', triggerTable: r.triggerTable, generatedCode: r.generatedCode }
+      const now = await tx.aiFunction.findFirst({ where: still })
+      if (!now) continue
+      // The same condition again, so a deploy committed after that read is not removed either.
+      const { count } = await tx.aiFunction.deleteMany({ where: still })
+      if (count > 0) taken.push(asRemoved(now))
+    }
+    if (taken.length > 0 && record) await record(taken, tx)
+    return taken
+  })
+}
+
+/**
+ * Remove the endpoints generated for tables that are gone, and return each row
+ * as it was, so undoing the restore can put back exactly those rows: switched
+ * off, rewritten or not (generatedEndpointsOf, deleteGeneratedEndpoints).
+ */
+export async function removeDomainEndpoints(
+  projectId: string,
+  removed: string[],
+  remaining: string[],
+  record?: RecordRemoved,
+): Promise<RemovedEndpoint[]> {
+  return deleteGeneratedEndpoints(projectId, await generatedEndpointsOf(projectId, removed, remaining), record)
 }
 
 /**
