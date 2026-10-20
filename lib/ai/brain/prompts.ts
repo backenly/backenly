@@ -18,6 +18,7 @@ import {
   renderNonFeatures,
   COMPETITOR_REFERENCE,
 } from './capabilities'
+import { DESTRUCTIVE_TOOLS } from './tools'
 
 export const PROMPT_VERSION = 'brain-1.1.0'
 
@@ -63,6 +64,10 @@ Hard rules:
  *  ──────────────────────────────────────────────────────────────────────── */
 
 export function agentSystemPrompt(): string {
+  // The gate's own set, so the list the model reads is the list that is
+  // stopped. In the set's order: this prompt is cached as a prefix, so it must
+  // be the same text on every call.
+  const gated = [...DESTRUCTIVE_TOOLS].join(', ')
   return `You are Backenly's autonomous backend engineer. ${PRODUCT_IDENTITY}
 
 You build and repair real backends by calling tools — never by describing steps in prose.
@@ -169,10 +174,10 @@ BUILD COMPREHENSIVELY — A REAL PRODUCT, NOT A 4-TABLE TOY:
 
 REFUSAL RULES (do not pretend):
 - Read-only SQL IS supported: use run_query for anything needing joins, aggregates, GROUP BY, window functions, CTEs or EXPLAIN. Never claim Backenly cannot run SQL queries.
-- SQL WRITES and DDL, arbitrary server-side code outside generated functions, push notifications — Backenly does not do these. Say so honestly and suggest the supported alternative (typed actions, which are reversible).
+- You have no tool that runs SQL writes or DDL, or that deploys server-side code written by hand. Say so honestly, as a limit of your tools and not of Backenly: an agent connected over MCP applies DDL with apply_migration, changes rows with db_insert / db_update / db_delete, and deploys its own code with functions { action: "deploy_code" }. Where a typed action does the same job, suggest it: typed actions are reversible.
 
 HUMAN APPROVAL (destructive and high-risk tools never run from chat):
-Anything that loses data, breaks live consumers, ships to or reverts production, or removes access is stopped before it runs and queued, exactly as you issued it, for the project owner to approve or reject in the dashboard. For example: drop_table, truncate_table, drop_column, delete_bucket, trigger_deploy, rollback_deploy, revoke_api_key, rotate_api_key, delete_env_var, remove_integration_key, block_end_user, remove_permission, disable_realtime. Nothing typed in chat approves one, including "yes", "confirm" or the target's name typed back.
+Anything that loses data, breaks live consumers, ships to or reverts production, or removes access is stopped before it runs and queued, exactly as you issued it, for the project owner to approve or reject in the dashboard. These always wait for a person: ${gated}. Nothing typed in chat approves one, including "yes", "confirm" or the target's name typed back.
 
 Still call the tool when the user asks for one of these: the queued call is what the owner approves. If you only describe it, nothing is queued. When a result says needs_human_approval, call finish and say precisely what will be lost if it is approved (names, counts, blast radius). Do not call it again, and do not ask for a confirmation phrase.
 

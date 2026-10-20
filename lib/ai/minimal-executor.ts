@@ -10065,11 +10065,12 @@ async function executeCreateTrigger(params: any, projectId: string): Promise<Exe
   // A webhook trigger without a destination used to be CREATED and reported as
   // "calls your webhook at `undefined`"; every later matching write then threw
   // 'webhook trigger requires webhookUrl' and logged a DEAD delivery. Refuse
-  // at creation, where the caller can still fix it.
-  if (actionType === 'webhook' && !(typeof webhookUrl === 'string' && /^https?:\/\//i.test(webhookUrl.trim()))) {
+  // at creation, where the caller can still fix it. https only: each delivery
+  // carries the row that fired it.
+  if (actionType === 'webhook' && !(typeof webhookUrl === 'string' && /^https:\/\//i.test(webhookUrl.trim()))) {
     return {
       success: false,
-      message: 'A webhook trigger needs webhookUrl — the http(s) endpoint it calls. Pass webhookUrl, or use create_webhook for a signed row webhook.',
+      message: 'A webhook trigger needs webhookUrl — the https:// endpoint it calls. Pass webhookUrl, or use create_webhook for a signed row webhook.',
     }
   }
 
@@ -10084,8 +10085,23 @@ async function executeCreateTrigger(params: any, projectId: string): Promise<Exe
     // per source table.
     const existing = await prisma.appTrigger.findFirst({
       where: { projectId, name },
-      select: { id: true, name: true, sourceTable: true, event: true },
+      select: { id: true, name: true, sourceTable: true, event: true, webhookUrl: true },
     }).catch(() => null)
+    // The name comes from the table and the event, so asking again with a
+    // different URL lands here too. "Nothing to do" kept the old destination,
+    // or none for a trigger stored before the URL was required, while the
+    // caller believed the new one was set.
+    if (existing && actionType === 'webhook' && (existing.webhookUrl ?? '').trim() !== webhookUrl.trim()) {
+      return {
+        success: false,
+        message:
+          `Trigger "${existing.name}" already exists on \`${existing.sourceTable}.${existing.event}\` and calls ` +
+          `${existing.webhookUrl ? `\`${existing.webhookUrl}\`` : 'no URL'}, not \`${webhookUrl}\`. Nothing was changed. ` +
+          'To send these events to the new URL, delete it with delete_trigger and create it again.',
+        code: 'TRIGGER_CONFLICT',
+        data: { triggerId: existing.id, name: existing.name, existingWebhookUrl: existing.webhookUrl, requestedWebhookUrl: webhookUrl },
+      }
+    }
     if (existing) {
       return {
         success: true,
@@ -10133,7 +10149,12 @@ async function executeListTriggers(projectId: string): Promise<ExecutionResult> 
     }
 
     const lines = triggers.map(t => {
-      const arrow = t.actionType === 'webhook' ? `→ webhook` : `→ ${t.actionType} in ${t.targetTable || '?'}`
+      // Where a webhook trigger posts is what there is to check, and the
+      // brain's model reads this text, not `data`: without the URL, a trigger
+      // calling the wrong address, or none, read the same as a working one.
+      const arrow = t.actionType === 'webhook'
+        ? `→ webhook ${t.webhookUrl ? `\`${t.webhookUrl}\`` : '(no URL, so nothing is delivered)'}`
+        : `→ ${t.actionType} in ${t.targetTable || '?'}`
       const status = t.enabled ? '✅' : '⏸️'
       return `${status} **${t.name}**: \`${t.sourceTable}.${t.event}\` ${arrow}`
     })

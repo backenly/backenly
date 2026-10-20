@@ -1040,3 +1040,9 @@ html {
 .slide-in-from-bottom {
   animation-name: slideInFromBottom;
 }
+
+/* When database schema diagram is expanded to full screen, hide sidebar & top header chrome */
+body.schema-fullscreen-active aside[aria-label="Sidebar"],
+body.schema-fullscreen-active header {
+  display: none !important;
+}

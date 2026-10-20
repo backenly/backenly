@@ -76,9 +76,9 @@ const VALID_INTENTS: readonly BrainIntent[] = [
 ]
 
 /**
- * The classification's shape, as structured output: the intent is one of the
- * known values and every field is present, so a reply can only fail to parse
- * by being cut off.
+ * The classification's shape, as structured output: where the provider
+ * enforces it, the intent is one of the known values and every field is
+ * present, so a reply can only fail to parse by being cut off.
  */
 const CLASSIFICATION_SCHEMA = {
   type: 'object',
@@ -112,7 +112,7 @@ export async function classify(ctx: ClassifierContext): Promise<Classification> 
     content: turn.content.length > 600 ? turn.content.slice(0, 600) + '…' : turn.content,
   }))
 
-  let parsed: { intent?: string; confidence?: number; reasoning?: string } | null
+  let parsed: { intent?: unknown; confidence?: unknown; reasoning?: unknown } | null
   try {
     const reply = await generate({
       purpose: 'brain.classify',
@@ -139,11 +139,16 @@ export async function classify(ctx: ClassifierContext): Promise<Classification> 
     }
   }
 
-  let intent: BrainIntent = (VALID_INTENTS as readonly string[]).includes(parsed.intent)
-    ? (parsed.intent as BrainIntent)
+  // OpenAI is sent the schema with strict: false, so it does not enforce it:
+  // "build" or a confidence of "0.92" can still arrive, and read strictly,
+  // either one turned a clear request into a clarifying question.
+  const named = String(parsed.intent ?? '').trim().toUpperCase()
+  let intent: BrainIntent = (VALID_INTENTS as readonly string[]).includes(named)
+    ? (named as BrainIntent)
     : 'UNCLEAR'
 
-  const confidence = Number.isFinite(parsed.confidence) ? Math.max(0, Math.min(1, parsed.confidence)) : 0
+  const stated = Number(parsed.confidence)
+  const confidence = Number.isFinite(stated) ? Math.max(0, Math.min(1, stated)) : 0
   const reasoning = typeof parsed.reasoning === 'string' ? parsed.reasoning.slice(0, 200) : ''
 
   // Hard floor: never trust BUILD/MODIFY/DESTRUCTIVE at low confidence — that

@@ -111,7 +111,7 @@ export const TOOL_CAPABILITIES: Capability[] = [
   {
     id: 'drop_column',
     name: 'Drop a column (destructive)',
-    what: 'Permanently drop a column and all of its data. Reserved columns (id, createdAt, updatedAt) cannot be dropped. The table\'s REST API is regenerated so the column disappears from CRUD payloads. Reversible via the version history. Requires explicit user confirmation.',
+    what: 'Drop a column from a table. Reserved columns (id, createdAt, updatedAt) cannot be dropped. The table\'s REST API is regenerated so the column disappears from CRUD payloads. Its values are kept: restoring the state before the change (Database → Changes) brings the column back with them. Requires explicit user confirmation.',
     tool: 'drop_column',
   },
   {
@@ -119,6 +119,30 @@ export const TOOL_CAPABILITIES: Capability[] = [
     name: 'List tables (read)',
     what: 'Read the current set of tables with column and row counts.',
     tool: 'list_tables',
+  },
+  {
+    id: 'read_backend_state',
+    name: 'Read the backend state (read)',
+    what: 'Read the live backend in one call: tables, REST APIs, auth, storage buckets, RLS policies, integrations and realtime tables.',
+    tool: 'read_backend_state',
+  },
+  {
+    id: 'get_backend_metadata',
+    name: 'Map the whole backend (read)',
+    what: 'Every table with its record count, column count and RLS state, every foreign-key relationship, and the auth, storage, realtime and function state, in one structured answer.',
+    tool: 'get_backend_metadata',
+  },
+  {
+    id: 'get_table_schema',
+    name: 'Read one table\'s schema (read)',
+    what: 'One table in full from the live catalog: columns, keys, indexes, CHECK constraints with their allowed values, triggers, and its row-level security policies.',
+    tool: 'get_table_schema',
+  },
+  {
+    id: 'run_query',
+    name: 'Run read-only SQL (read)',
+    what: 'Run one read-only SQL statement over this project\'s tables, with joins, aggregates, window functions, CTEs and EXPLAIN, as a SELECT-only role. Results are capped, and password, token and key columns come back redacted.',
+    tool: 'run_query',
   },
   {
     id: 'create_index',
@@ -139,6 +163,12 @@ export const TOOL_CAPABILITIES: Capability[] = [
     tool: 'generate_api',
   },
   {
+    id: 'list_apis',
+    name: 'List REST endpoints (read)',
+    what: 'List the REST endpoints the project serves: one CRUD API per table, at /api/v1/{projectId}/db/{table}.',
+    tool: 'list_apis',
+  },
+  {
     id: 'enable_auth',
     name: 'Enable authentication',
     what: 'Turn on email + password auth for end-users of the project, with JWT issuance and password hashing handled internally.',
@@ -151,6 +181,12 @@ export const TOOL_CAPABILITIES: Capability[] = [
     tool: 'add_oauth_provider',
   },
   {
+    id: 'disable_oauth_provider',
+    name: 'Turn off an OAuth provider (destructive)',
+    what: 'Turn off one OAuth sign-in provider, so end-users who sign in with it no longer can. Its stored client id and secret are kept. Requires confirmation.',
+    tool: 'disable_oauth_provider',
+  },
+  {
     id: 'create_bucket',
     name: 'Create storage buckets',
     what: 'Create a file storage bucket (public or private) for uploads. Files served via signed URLs.',
@@ -161,6 +197,12 @@ export const TOOL_CAPABILITIES: Capability[] = [
     name: 'Flip bucket public/private',
     what: 'Toggle a bucket between public and private. Effect is immediate for all files in the bucket.',
     tool: 'set_bucket_public',
+  },
+  {
+    id: 'set_bucket_policy',
+    name: 'Set a bucket\'s access policy',
+    what: 'Set the access policy storage enforces for a bucket: public_read, cdn_cacheable (public, cached aggressively), private (signed URLs only) or owner_only (each file readable only by the end-user who uploaded it).',
+    tool: 'set_bucket_policy',
   },
   {
     id: 'list_buckets',
@@ -199,10 +241,40 @@ export const TOOL_CAPABILITIES: Capability[] = [
     tool: 'add_rls',
   },
   {
+    id: 'set_rls',
+    name: 'Row-level security as exact SQL',
+    what: 'Install row-level security exactly as written, one rule per command (select, insert, update, delete), read back from PostgreSQL before it reports success. Commands it is not given are left as they are.',
+    tool: 'set_rls',
+  },
+  {
     id: 'create_trigger',
     name: 'Event triggers',
     what: 'Run a webhook or NOTIFY event whenever rows are inserted, updated, or deleted on a table.',
     tool: 'create_trigger',
+  },
+  {
+    id: 'sync_column',
+    name: 'Keep a derived column in sync',
+    what: 'Keep a parent column in step with its child rows from inside the database (a latest value, a count, or a sum, max or min, such as posts.comment_count or orders.total), recomputed on every child insert, update and delete. Existing rows are back-filled.',
+    tool: 'sync_column',
+  },
+  {
+    id: 'list_synced_columns',
+    name: 'List synced columns (read)',
+    what: 'List every derived column the database is keeping in sync.',
+    tool: 'list_synced_columns',
+  },
+  {
+    id: 'remove_sync_column',
+    name: 'Stop syncing a column',
+    what: 'Stop maintaining a derived column. The column and its current values stay; they stop updating.',
+    tool: 'remove_sync_column',
+  },
+  {
+    id: 'run_data_migration',
+    name: 'Migrate existing data',
+    what: 'Transform existing rows: backfill a column, split or merge columns, cast a column to a new type converting its data, or normalize values with a mapping. A dry run reports the affected-row counts and changes nothing; a real run asks for confirmation, checkpoints each affected table and applies everything in one transaction.',
+    tool: 'run_data_migration',
   },
   {
     id: 'get_realtime_status',
@@ -289,6 +361,54 @@ export const TOOL_CAPABILITIES: Capability[] = [
     tool: 'replay_webhook_delivery',
   },
   {
+    id: 'create_webhook',
+    name: 'Create a webhook endpoint',
+    what: 'Send signed POSTs to an https URL on one event: a row inserted, updated or deleted, or an end-user signing up. The signing secret is returned once; on Backenly Cloud, webhooks are a Pro plan feature.',
+    tool: 'create_webhook',
+  },
+  {
+    id: 'list_webhooks',
+    name: 'List webhook endpoints (read)',
+    what: 'List the project\'s webhook endpoints with their event, target URL, on/off state, delivery count and whether row-event capture is healthy. Secrets are never returned.',
+    tool: 'list_webhooks',
+  },
+  {
+    id: 'update_webhook',
+    name: 'Change a webhook endpoint',
+    what: 'Change an endpoint\'s target URL or event, or switch it off without deleting it.',
+    tool: 'update_webhook',
+  },
+  {
+    id: 'delete_webhook',
+    name: 'Delete a webhook endpoint (destructive)',
+    what: 'Delete an endpoint and its delivery history. Requires confirmation.',
+    tool: 'delete_webhook',
+  },
+  {
+    id: 'test_webhook',
+    name: 'Test a webhook endpoint',
+    what: 'Send one real, signed test delivery to an endpoint now and report what its receiver answered. It carries no project data.',
+    tool: 'test_webhook',
+  },
+  {
+    id: 'list_webhook_logs',
+    name: 'Webhook endpoint deliveries (read)',
+    what: 'One endpoint\'s deliveries, newest first: status, HTTP code, attempts, error, the receiver\'s response and the payload.',
+    tool: 'list_webhook_logs',
+  },
+  {
+    id: 'rotate_webhook_endpoint_secret',
+    name: 'Rotate a webhook endpoint\'s secret',
+    what: 'Issue a new signing secret for an endpoint, returned once. Its receiver rejects deliveries until it has the new one.',
+    tool: 'rotate_webhook_endpoint_secret',
+  },
+  {
+    id: 'replay_webhook_log',
+    name: 'Resend a webhook endpoint delivery',
+    what: 'Send a FAILED or DEAD_LETTER delivery of an endpoint again, signed with the current secret, as one new logged attempt.',
+    tool: 'replay_webhook_log',
+  },
+  {
     id: 'fix_backend',
     name: 'Repair broken subsystems',
     what: 'Diagnose and repair auth, API generation, table state, deploy issues, realtime, storage, integrations, or workflows when something is broken.',
@@ -323,12 +443,6 @@ export const TOOL_CAPABILITIES: Capability[] = [
     name: 'Answer capability and concept questions',
     what: 'Answer questions about what Backenly is, what it can/cannot do, how it compares to other platforms, and general backend concepts — without building anything.',
     tool: 'answer_question',
-  },
-  {
-    id: 'rollback',
-    name: 'Roll back recent changes',
-    what: 'Undo the last N agent actions when verification fails or the user asks. Drops created tables, removes generated APIs, etc.',
-    tool: 'rollback',
   },
 
   // ── Connect Frontend ─────────────────────────────────────────────────────
@@ -371,10 +485,28 @@ export const TOOL_CAPABILITIES: Capability[] = [
     tool: 'get_deploy_status',
   },
   {
+    id: 'list_deploy_versions',
+    name: 'Published versions (read)',
+    what: 'Every published version, newest first, with its change summary, which one is serving and which can be rolled back to.',
+    tool: 'list_deploy_versions',
+  },
+  {
     id: 'rollback_deploy',
     name: 'Roll back the deploy (destructive)',
     what: 'Mark a previous published version as current in the version history. Bookkeeping only: the live schema, data, RLS and functions do not change. It waits for a person: the call is queued for the project owner to approve, and the approved call runs exactly as made.',
     tool: 'rollback_deploy',
+  },
+  {
+    id: 'list_schema_changes',
+    name: 'Schema change history (read)',
+    what: 'Every governed change to the production backend, newest first: who made it (a coding agent, a person, Backenly autonomy), what it did, how it ended (verified, recovered, restored, waiting for a person) and whether the state before it can be restored.',
+    tool: 'list_schema_changes',
+  },
+  {
+    id: 'revert_schema_change',
+    name: 'Restore the state before a change (destructive)',
+    what: 'Ask for the backend to be restored to its state before one governed change. Backenly says first exactly what data written since would be set aside, a person approves it, and the restore keeps what it removes and is verified.',
+    tool: 'revert_schema_change',
   },
   {
     id: 'set_env_var',
@@ -393,6 +525,44 @@ export const TOOL_CAPABILITIES: Capability[] = [
     name: 'Delete a project env var (destructive)',
     what: 'Permanently delete a saved env var. AI functions reading ctx.env.<KEY> will get undefined on next invocation. Confirmation required.',
     tool: 'delete_env_var',
+  },
+
+  // ── Preview branches (Backenly Cloud) ─────────────────────────────────────
+  {
+    id: 'create_branch',
+    name: 'Create a preview branch',
+    what: 'Copy the schema into an isolated branch with its own RLS policies and sequences, empty unless its data is asked for, and return its preview endpoint with a key bound to it. Up to 5 active.',
+    tool: 'create_branch',
+  },
+  {
+    id: 'connect_branch',
+    name: 'Issue a branch key',
+    what: 'Issue another key for an active branch: a client key by default, or a server-side service-role key that bypasses RLS on that branch only.',
+    tool: 'connect_branch',
+  },
+  {
+    id: 'list_branches',
+    name: 'List preview branches (read)',
+    what: 'List the project\'s preview branches with their status and schema.',
+    tool: 'list_branches',
+  },
+  {
+    id: 'diff_branch',
+    name: 'Diff a branch against production (read)',
+    what: 'What a merge would bring to production: the migrations applied on the branch, the tables and columns they change, and any table production has changed since the branch was cut, which blocks the merge.',
+    tool: 'diff_branch',
+  },
+  {
+    id: 'merge_branch',
+    name: 'Merge a branch into production (destructive)',
+    what: 'Replay the branch\'s migrations onto production through the governed path once a person approves it. Refused while production has changed a table the migrations touch.',
+    tool: 'merge_branch',
+  },
+  {
+    id: 'discard_branch',
+    name: 'Discard a branch (destructive)',
+    what: 'Drop a preview branch and everything in it; production is untouched. Requires confirmation.',
+    tool: 'discard_branch',
   },
 
   // ── Auth lifecycle ────────────────────────────────────────────────────────
@@ -415,6 +585,12 @@ export const TOOL_CAPABILITIES: Capability[] = [
     tool: 'block_end_user',
   },
   {
+    id: 'unblock_end_user',
+    name: 'Unblock an end-user',
+    what: 'Lift a block so the end-user can sign in again (resolved by email or userId).',
+    tool: 'unblock_end_user',
+  },
+  {
     id: 'list_permissions',
     name: 'List RLS policies (read)',
     what: 'Read every row-level-security policy in the project (table → template).',
@@ -425,6 +601,48 @@ export const TOOL_CAPABILITIES: Capability[] = [
     name: 'Remove all RLS from a table (destructive)',
     what: 'Strip ALL row-level-security policies from a table. After this the table is unprotected until a new policy is set. Requires confirmation.',
     tool: 'remove_permission',
+  },
+  {
+    id: 'get_auth_email_settings',
+    name: 'Auth email settings (read)',
+    what: 'How verification, password-reset and magic-link emails are sent: the SMTP sender in use (never its password), whether the last test send worked, and each template with the variables it may use.',
+    tool: 'get_auth_email_settings',
+  },
+  {
+    id: 'set_auth_smtp',
+    name: 'Set the auth email sender (SMTP)',
+    what: 'Save the SMTP server auth emails are sent through; the password is stored encrypted and never returned. The settings are unproven until test_auth_smtp succeeds.',
+    tool: 'set_auth_smtp',
+  },
+  {
+    id: 'test_auth_smtp',
+    name: 'Send a test auth email',
+    what: 'Send one real test email through the settings a send would use now, and record whether it worked.',
+    tool: 'test_auth_smtp',
+  },
+  {
+    id: 'remove_auth_smtp',
+    name: 'Remove the SMTP settings (destructive)',
+    what: 'Remove the project\'s SMTP settings. Auth emails then fall back to the deployment\'s sender if it has one, and otherwise stop. Requires confirmation.',
+    tool: 'remove_auth_smtp',
+  },
+  {
+    id: 'set_auth_email_template',
+    name: 'Brand an auth email',
+    what: 'Replace the default verification, password_reset or magic_link email with the app\'s own subject and HTML. It must include {{ctaUrl}} and may use {{appName}}, {{email}} and {{expiry}}.',
+    tool: 'set_auth_email_template',
+  },
+  {
+    id: 'reset_auth_email_template',
+    name: 'Restore a default auth email',
+    what: 'Go back to Backenly\'s default template for one auth email.',
+    tool: 'reset_auth_email_template',
+  },
+  {
+    id: 'set_auth_email_policy',
+    name: 'Auth email policy',
+    what: 'Set the app name and URL auth emails use, whether sign-in requires a verified email, and whether magic links are on. Requiring verification needs a working sender first, and existing users are recorded as verified when it is turned on.',
+    tool: 'set_auth_email_policy',
   },
 
   // ── IAM (platform API keys) ───────────────────────────────────────────────
@@ -439,6 +657,12 @@ export const TOOL_CAPABILITIES: Capability[] = [
     name: 'List API keys (read)',
     what: 'List active platform API keys (id, label, permissions, created at). Secrets are never returned.',
     tool: 'list_api_keys',
+  },
+  {
+    id: 'get_connection_identity',
+    name: 'Connection identity (read)',
+    what: 'Which project this connection is bound to (name, published, paused) and which key or OAuth connection is calling, including whether it is read-only or bound to a preview branch.',
+    tool: 'get_connection_identity',
   },
   {
     id: 'set_key_permissions',
@@ -459,6 +683,20 @@ export const TOOL_CAPABILITIES: Capability[] = [
     tool: 'revoke_api_key',
   },
 
+  // ── Direct database access ────────────────────────────────────────────────
+  {
+    id: 'get_database_credentials',
+    name: 'Postgres connection string',
+    what: 'A real PostgreSQL connection string for this project\'s schema, for psql, ORMs, BI tools or your own migrations. Read-only is issued on demand; read-write only after the owner arms it under Connect → Direct.',
+    tool: 'get_database_credentials',
+  },
+  {
+    id: 'adopt_external_schema',
+    name: 'Adopt schema changes made directly',
+    what: 'Fold schema changes made over a direct connection into Backenly: new tables get their REST API, RLS and realtime, altered ones are refreshed and dropped ones pruned.',
+    tool: 'adopt_external_schema',
+  },
+
   // ── Integrations ──────────────────────────────────────────────────────────
   {
     id: 'store_integration_key',
@@ -471,6 +709,18 @@ export const TOOL_CAPABILITIES: Capability[] = [
     name: 'List integrations (read)',
     what: 'List which integrations have credentials configured. Secrets are never returned.',
     tool: 'list_integration_keys',
+  },
+  {
+    id: 'list_integration_capabilities',
+    name: 'What each integration can do (read)',
+    what: 'The exact ctx.integrations.<provider> methods a function can call for each integration, whether it is connected, and what the provider said about its key; for Stripe also the receiver URL and whether the signing secret is stored.',
+    tool: 'list_integration_capabilities',
+  },
+  {
+    id: 'verify_integration_key',
+    name: 'Re-check an integration key',
+    what: 'Ask the provider again whether the stored key works and record the answer: verified, rejected, unverifiable or unreachable. A key revoked in the provider\'s dashboard is only caught this way.',
+    tool: 'verify_integration_key',
   },
   {
     id: 'remove_integration_key',
@@ -497,6 +747,24 @@ export const TOOL_CAPABILITIES: Capability[] = [
     name: 'List AI/serverless functions (read)',
     what: 'List functions in the project — name, trigger type, active flag.',
     tool: 'list_ai_functions',
+  },
+  {
+    id: 'get_ai_function',
+    name: 'Read one function (read)',
+    what: 'One function in full: its code, trigger, HTTP endpoint, on/off state, run count and last error.',
+    tool: 'get_ai_function',
+  },
+  {
+    id: 'invoke_ai_function',
+    name: 'Run a function now',
+    what: 'Run a function once as the owner\'s test and return its response, return value and log lines; it counts as one invocation. A failure is reported, never auto-repaired, and a switched-off function is refused.',
+    tool: 'invoke_ai_function',
+  },
+  {
+    id: 'list_ai_function_logs',
+    name: 'Function runs (read)',
+    what: 'Recent runs from every trigger, newest first, for all functions or one: success or failure, error, ctx.log lines and duration. Kept 30 days.',
+    tool: 'list_ai_function_logs',
   },
   {
     id: 'toggle_ai_function',
@@ -537,6 +805,12 @@ export const TOOL_CAPABILITIES: Capability[] = [
     tool: 'get_errors',
   },
   {
+    id: 'list_request_logs',
+    name: 'Request log (read)',
+    what: 'The requests the project\'s runtime API served, newest first: method, path, status, latency and time, filtered by method, minimum status, path prefix or time window. Production traffic only, unless a preview branch is named.',
+    tool: 'list_request_logs',
+  },
+  {
     id: 'get_usage',
     name: 'Read usage + quota burn',
     what: 'Read AI credits used, storage MB, request count, and plan limits. Use for "how close am I to my plan?".',
@@ -558,6 +832,30 @@ export const TOOL_CAPABILITIES: Capability[] = [
     what: 'Change how much the autonomy loop is allowed to self-apply. Tier-2+ (auth, external, destructive) is NEVER auto at any level. Clamped to the project\'s plan ceiling.',
     tool: 'set_autonomy_level',
   },
+  {
+    id: 'get_pending_incidents',
+    name: 'Backend briefing (read)',
+    what: 'What Backenly\'s autonomous operator detected, fixed or queued while nobody was watching: open findings with evidence, changes waiting for a person, fixes applied in the last 24 hours, schema drift waiting to be adopted, and the latest restore point.',
+    tool: 'get_pending_incidents',
+  },
+  {
+    id: 'list_findings',
+    name: 'List health findings (read)',
+    what: 'Open and pending health findings the platform detected (a missing foreign key or RLS policy, an unreachable integration, …), each with its id, type, severity, target and reason.',
+    tool: 'list_findings',
+  },
+  {
+    id: 'resolve_finding',
+    name: 'Fix a health finding',
+    what: 'Resolve a detected finding through the governed fix engine. Safe, additive fixes (foreign keys, RLS, indexes, APIs) are applied and verified; auth, destructive and irreversible ones wait for a person\'s approval in the Review Queue.',
+    tool: 'resolve_finding',
+  },
+  {
+    id: 'get_maintenance_ladder',
+    name: 'Pending schema maintenance (read)',
+    what: 'The structural maintenance plan waiting for a decision: the diagnosis behind it, each step with its tier and whether it can be undone, and whether anyone has consented. A person approves it on the Autonomy page.',
+    tool: 'get_maintenance_ladder',
+  },
 ]
 
 /** ──────────────────────────────────────────────────────────────────────────
@@ -574,7 +872,7 @@ export const MANUAL_CAPABILITIES: Capability[] = [
   {
     id: 'mcp_connect',
     name: 'Connect an AI coding agent over MCP (top-bar "Connect agent" button)',
-    what: 'Backenly ships a native MCP server (`@backenly/mcp-server` on npm) so Claude Code, Cursor, Codex, or ANY MCP-compatible host can drive this backend directly — this IS the "Connect agent" button in the top bar, which reads "Agent connected" once their agent is (both open the Connect page). Setup: (1) open Connect and generate a project-scoped MCP key, (2) for Claude Code run `claude mcp add backenly -- npx -y @backenly/mcp-server --project <projectId> --key <mcpKey>` (other hosts get a copy-paste config snippet on the same page), (3) open a new conversation in the host — Backenly appears as `backenly` in its tool list; an agent that installed it mid-conversation keeps working through `npx -y @backenly/cli@latest call <tool>` until then, and should not stop to ask for a restart. The connected agent gets the same governed vocabulary as this chat (read backend state, build tables/APIs/RLS/realtime, run brain chat); destructive ops like drop_table and delete_bucket are deliberately NOT exposed over MCP and stay confirmation-gated in the dashboard. When a user asks how to connect Claude Code, Cursor, or "their AI assistant", give these steps — NEVER say Backenly has no Claude Code / MCP integration.',
+    what: 'Backenly ships a native MCP server (`@backenly/mcp-server` on npm) so Claude Code, Cursor, Codex, or ANY MCP-compatible host can drive this backend directly — this IS the "Connect agent" button in the top bar, which reads "Agent connected" once their agent is (both open the Connect page). Setup: (1) open Connect and generate a project-scoped MCP key, (2) for Claude Code run `claude mcp add backenly -- npx -y @backenly/mcp-server --project <projectId> --key <mcpKey>` (other hosts get a copy-paste config snippet on the same page), (3) open a new conversation in the host — Backenly appears as `backenly` in its tool list; an agent that installed it mid-conversation keeps working through `npx -y @backenly/cli@latest call <tool>` until then, and should not stop to ask for a restart. The connected agent gets the same governed vocabulary as this chat (read backend state, build tables/APIs/RLS/realtime, run brain chat); destructive ops like drop_table and delete_bucket never run on its word: it can ask for one, and the exact call waits in the Review Queue until a person approves it. When a user asks how to connect Claude Code, Cursor, or "their AI assistant", give these steps — NEVER say Backenly has no Claude Code / MCP integration.',
     manualOnly: true,
   },
   {
@@ -592,7 +890,7 @@ export const MANUAL_CAPABILITIES: Capability[] = [
   {
     id: 'history',
     name: 'Change history',
-    what: 'Every mutation is journaled. The History tab shows what changed, when, and supports rollback per change. The chat agent can roll back this turn (via rollback) but does not manage the history view itself.',
+    what: 'Every mutation is journaled. Database → Changes lists every schema change with its checks and offers Restore previous state for each, which a person runs; there is no undo of a whole turn. The chat agent can ask for a restore with revert_schema_change, which waits for a person\'s approval, but does not manage the history view itself.',
     manualOnly: true,
   },
   {
@@ -617,16 +915,12 @@ export const NON_FEATURES = [
     why: 'Mutations go through typed actions so every change is planned, verified and reversible. Reading is different: run_query executes read-only SQL — joins, aggregates, window functions, EXPLAIN — as a SELECT-only role scoped to this project.',
   },
   {
-    pattern: 'Manual schema editing',
-    why: 'There is no SQL editor. Schema changes happen through the AI agent or the Tables UI, never as raw DDL.',
+    pattern: 'Schema edits in the SQL editor',
+    why: 'The Database page\'s SQL tab is read-only. Schema changes go through typed tools, the Tables UI, or a coding agent\'s apply_migration, which turns ordinary DDL into the same governed, reversible changes; DDL run over a direct read-write connection, which only the owner can arm, is observed as drift and adopted afterwards.',
   },
   {
-    pattern: 'Custom server-side code that is not a generated function',
-    why: 'Backend logic is built through the AI agent\'s tool calls. Arbitrary handwritten Node.js code is not deployed by the platform.',
-  },
-  {
-    pattern: 'Webhooks as a manual config surface',
-    why: 'Webhooks are emitted by triggers and consumed by integrations. There is no separate "create a webhook URL" surface — describe the event source instead.',
+    pattern: 'Hosting a long-running server process',
+    why: 'Server-side code runs as Backenly functions: generate_function writes one from a description, and a coding agent can deploy code it wrote with deploy_function_code (an HTTP route module, or a sandboxed body for any other trigger). There is no host for an arbitrary server.',
   },
   {
     pattern: 'Email sending without a configured provider',

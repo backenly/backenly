@@ -136,7 +136,7 @@ export function annotationsFor(name: string): McpToolAnnotations {
  *   - propose_plan / ask_user / answer_question / finish — terminal control,
  *     meaningful only when the LLM is steering the agent loop. From an MCP
  *     host's perspective, the host is doing the steering.
- *   - run_test / rollback — internal verifier hooks. The host LLM can call
+ *   - run_test — an internal verifier hook. The host LLM can call
  *     `get_metrics` or `get_errors` to verify itself.
  *   - fix_backend / apply_proposal — assume a backenly-resident agent context
  *     that doesn't exist on an MCP call.
@@ -150,7 +150,6 @@ const MCP_EXCLUDE = new Set<string>([
   'answer_question',
   'finish',
   'run_test',
-  'rollback',
   'fix_backend',
   'apply_proposal',
   // Credential-gated tools — call backend_chat instead so brain can ask user.

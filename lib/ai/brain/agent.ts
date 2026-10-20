@@ -1,20 +1,29 @@
 /**
  * BRAIN AGENT — the loop
  * ======================
- * The single entry point for the new agentic chat path. Replaces the 25-stage
- * regex pipeline and the legacy `agent-loop-v2`. The shape is the same one
- * Cursor / Replit / Lovable use:
+ * The single entry point for a natural-language turn. Its caller is MCP
+ * `backend_chat` (app/api/mcp/chat/route.ts), which queues every call the
+ * approval gate stops in the Review Queue; an approved call later runs
+ * verbatim through dispatchTool (lib/mcp/approvals.ts), not through this loop.
+ * Replaces the 25-stage regex pipeline and the legacy `agent-loop-v2`. The
+ * shape is the same one Cursor / Replit / Lovable use:
  *
  *   load memory → classify intent → route → (loop tool-use) → verify → finish
  *
  * Routing decisions per intent (made BEFORE the agent loop runs):
- *   CHAT            → call answer_question tool once, return.
- *   UNCLEAR         → call ask_user once, return.
- *   APPLY_PROPOSAL  → call apply_proposal once, return.
- *   CONFIRM         → resume any pending plan (currently surfaced via context;
- *                     the agent prompt is told the prior plan exists).
- *   BUILD / MODIFY / FIX / QUESTION / DESTRUCTIVE → enter the agent loop with
- *                     intent-specific hints in the system prompt.
+ *   CHAT            → call answer_question once, return.
+ *   UNCLEAR         → ask one clarifying question (ask_user), return. On an
+ *                     empty project, a message that reads like an app
+ *                     description goes to the architect first, as a BUILD.
+ *   BUILD / APPLY_PROPOSAL on an empty project
+ *                   → propose a blueprint (curated, or the architect's design)
+ *                     and save it as the pending plan; ask_user when the
+ *                     request is too vague to design.
+ *   CONFIRM         → run the pending blueprint plan, else the resume queue,
+ *                     else the original build request, re-architected. With
+ *                     nothing pending at all, say so and change nothing.
+ *   anything else, or a route above with nothing to run
+ *                   → the agent loop, with an intent-specific hint.
  *
  * This is what makes "give me competitors" NEVER trigger a build:
  *   1. The LLM classifier returns CHAT with high confidence.
@@ -40,6 +49,7 @@ import { classify, type BrainIntent, type Classification } from './classifier'
 import {
   BRAIN_MODEL_TOOLS,
   dispatchTool,
+  isReadOnlyCall,
   isReadOnlyTool,
   humanTitle,
   type ToolDispatchContext,
@@ -88,12 +98,22 @@ export interface BlockedCall {
 
 /**
  * Control-flow tools — neither mutations nor reads of backend state.
- * (Reads are tracked in tools.READ_ONLY_TOOLS; mutations are everything else.)
+ * (Reads are tracked in tools.READ_ONLY_TOOLS, per call by tools.isReadOnlyCall;
+ * mutations are everything else.)
  */
 const CONTROL_TOOLS = new Set<string>([
   'finish', 'propose_plan', 'ask_user', 'answer_question',
-  'apply_proposal', 'run_test', 'rollback',
+  'apply_proposal', 'run_test',
 ])
+
+/**
+ * Whether one call can change the backend: what lists it in the turn's
+ * `applied` and sends a later finish back for verification. Exported so
+ * tests/unit/brain-mutation-accounting.spec.ts can list every tool it counts.
+ */
+export function isMutationCall(name: string, args: Record<string, unknown>): boolean {
+  return !CONTROL_TOOLS.has(name) && !isReadOnlyCall(name, args)
+}
 
 /**
  * Tools that read their own result back out of the live catalog before they
@@ -121,9 +141,9 @@ export interface BrainInput {
   // verbatim (lib/mcp/approvals.ts runApprovedCall). Approval is a decision a
   // person makes in the dashboard, never something a message can carry.
   /**
-   * Per-turn idempotency key (UUID) passed down to `saveTurn`/`saveMessages`
-   * so the conversation log dedups
-   * cleanly across writers (route handler, brain terminal paths, retries).
+   * Per-turn idempotency key (UUID) passed down to `saveTurn`/`saveMessages`,
+   * so a turn written twice, by a retry say, is logged once. backend_chat
+   * sends none.
    */
   requestId?: string | null
   /** The caller that opened this turn. Unlike `surface`, this is not page context. */
@@ -148,8 +168,8 @@ export interface BrainInput {
    * (see `verifyWithinBudget`). Verification is no longer a step the model may or
    * may not reach; it is a budget line item that is spent first from the end.
    *
-   * Omit it and the loop behaves exactly as before — the dashboard has no hard
-   * cap, only the MCP transport does.
+   * Omit it and the loop has no wall clock of its own. backend_chat always
+   * passes one, from its 90s cap.
    */
   deadlineAt?: number
   /**
@@ -179,10 +199,10 @@ export type BrainEvent =
   | { type: 'tool_done'; tool: string; title: string; detail?: string }
   | { type: 'tool_fail'; tool: string; title: string; detail?: string }
   /**
-   * A destructive tool was blocked pending explicit user confirmation. Carries
-   * everything the chat needs to render a structured danger card: what would
-   * be destroyed, how many live rows are at stake (best-effort COUNT), and the
-   * exact phrase the user must provide to confirm the destructive action.
+   * A call the approval gate stopped: it did not run, and the caller queues it
+   * for a person from BrainResult.blockedCalls. This names the same target and
+   * live row count (best-effort COUNT). No message approves a call, so
+   * `confirmPhrase` is a label, not something to type.
    */
   | {
       type: 'danger'
@@ -202,6 +222,7 @@ export interface BrainResult {
   success: boolean
   summary: string
   needsUser: boolean
+  /** Agent-loop model calls that came back with an answer; a turn that skips the loop counts its steps. */
   iterations: number
   toolsRun: string[]
   classification: Classification
@@ -209,9 +230,7 @@ export interface BrainResult {
   tokensUsed: number
   /**
    * True when this turn already ran the behavioral fix-loop against the live
-   * runtime (the deterministic blueprint executor does). The execute route
-   * checks this to avoid running a SECOND, redundant verification pass — which
-   * would double the time budget and sign up throwaway end-users twice.
+   * runtime (the deterministic blueprint executor does).
    */
   verifiedInline?: boolean
   /**
@@ -380,16 +399,12 @@ const ARCHITECT_HEARTBEAT_MESSAGES = [
 ] as const
 
 /**
- * Run `work` while emitting a keep-alive progress event every `intervalMs`.
+ * Run `work` while emitting a progress event every `intervalMs`.
  *
- * WHY THIS EXISTS: the execute route arms a 90s idle watchdog that closes the
- * SSE stream if the brain stops sending updates for too long.
  * The LLM architect is a SINGLE 30–180s design call that emits nothing on its
- * own — and `architectBackend` deliberately budgets up to 180s per attempt.
- * Without a heartbeat, any healthy big-spec design that runs past 90s is killed
- * mid-generation and the whole build collapses into the fragile agent loop —
- * the exact failure behind the Founder Outreach "continue" loop. Each emitted
- * event resets the route's idle timer, so a legitimately long design survives.
+ * own (`architectBackend` budgets up to 180s per attempt), so these lines are
+ * all the turn's events show meanwhile; backend_chat returns them in `events`.
+ * They extend nothing: backend_chat's 90s cap is a hard wall clock.
  */
 async function withHeartbeat<T>(
   emit: (e: BrainEvent) => void,
@@ -411,8 +426,8 @@ async function withHeartbeat<T>(
 }
 
 /**
- * Resolve a Blueprint for a prompt, keeping the SSE stream alive during the
- * long architect call. Never throws — a failure resolves to null so the caller
+ * Resolve a Blueprint for a prompt, emitting progress during the long
+ * architect call. Never throws — a failure resolves to null so the caller
  * falls back to the agent loop exactly as it does today.
  */
 async function resolveBlueprintWithHeartbeat(
@@ -467,8 +482,14 @@ export async function runBrain(
   // message that describes an app is unambiguously a BUILD, never a
   // clarification. Also used later to route BUILD through the architect and to
   // keep the CONFIRM re-architect fallback from firing on a MODIFY confirm.
+  //
+  // Only a state that was read and is empty is fresh. A failed read leaves no
+  // proof, and counting that as empty made a project with 30 tables look brand
+  // new, so its next BUILD had the architect design a whole new backend. An
+  // unread state takes a built project's path, and the understanding block
+  // says the state could not be read.
   const proof = memory.understanding.proof
-  const isFreshProject = !proof || proof.nothingBuilt || (proof.tables?.length ?? 0) === 0
+  const isFreshProject = !!proof && (proof.nothingBuilt || (proof.tables?.length ?? 0) === 0)
 
   // ── CLASSIFY ────────────────────────────────────────────────────────────
   emit({ type: 'phase', phase: 'classify' })
@@ -553,6 +574,8 @@ export async function runBrain(
     sessionToken: input.sessionToken,
     userMessage: input.message,
     understandingBlock,
+    // The turns the classifier is given, so an answer can place a follow-up.
+    recentHistory: recent,
     // A coding agent over MCP: the protected-production gate applies.
     agentSurface: isAgentDoor(input.door),
     // A failed action is reported to the agent as it failed. The loop does not
@@ -659,8 +682,8 @@ export async function runBrain(
 
     // No stored plan at all — but the user is confirming/continuing a build.
     // This is the state that produced the endless "continue" loop: the
-    // architect had failed on the original turn (e.g. the idle watchdog killed
-    // it, or a transient model error), so no pending plan was ever saved, and
+    // architect had failed on the original turn (e.g. the time limit cut it
+    // off, or a transient model error), so no pending plan was ever saved, and
     // the build fell into the agent loop — which cannot finish a 40-operation
     // spec in 12 iterations and just re-derives partial work on every retry.
     //
@@ -971,8 +994,8 @@ async function blueprintExecuteTurn(
         },
       })
       // Prose summary + the structured evidence fence. The fence rides inside
-      // the persisted message, so the chat renders a real evidence card (per
-      // check: what was exercised, what came back) on live stream AND refresh.
+      // the summary, so backend_chat's caller and the saved conversation both
+      // get each check's evidence (what was exercised, what came back).
       const { buildVerificationFence } = await import('../verification-evidence')
       const fence = buildVerificationFence(fixResult)
       verificationBlock = [renderVerificationBlock(fixResult), fence].filter(Boolean).join('\n\n')
@@ -1040,8 +1063,6 @@ async function blueprintExecuteTurn(
     toolsRun,
     classification,
     tokensUsed,
-    // The behavioral fix-loop already ran above — tell the route not to run it
-    // a second time (see BrainResult.verifiedInline).
     verifiedInline: succeededSteps.length > 0,
   }
 }
@@ -1080,8 +1101,9 @@ function renderVerificationBlock(result: FixLoopResult): string {
 }
 
 /**
- * Describe a blocked destructive tool for the chat's danger card. Best-effort
- * row count via the workspace-table-stats kernel (cached COUNT — cheap).
+ * Describe a call the approval gate stopped, for the Review Queue request the
+ * caller files from it (BlockedCall). Best-effort row count via the
+ * workspace-table-stats kernel (cached COUNT — cheap).
  * Honesty rules baked in:
  *   • A dropped table or column is reversible because its data is not
  *     destroyed: inside a recorded change it moves into the change's vault and
@@ -1089,8 +1111,6 @@ function renderVerificationBlock(result: FixLoopResult): string {
  *     the ledger is on; without it the old answer, irreversible, is the true one.
  *   • Truncation deletes rows, which are data rather than schema, and nothing
  *     keeps them, so it stays irreversible.
- *   • The confirm phrase must satisfy the execute route's confirmation gate
- *     using the current destructive-action confirmation flow.
  */
 async function describeDanger(
   projectId: string,
@@ -1216,12 +1236,55 @@ async function describeDanger(
       return { tool, target: `the scheduled job \`${namedThing ?? 'unknown'}\``, rowCount: null, reversible: false, confirmPhrase: 'Confirm — delete the scheduled job' }
     case 'remove_integration_key':
       return { tool, target: `the ${namedThing ?? ''} integration (functions calling it will fail)`.trim(), rowCount: null, reversible: false, confirmPhrase: 'Confirm — disconnect the integration' }
+    case 'delete_webhook': {
+      // The card names the endpoint the person is approving. The call carries
+      // only an id, and a bare `delete_webhook` did not say which receiver
+      // stops getting events.
+      const webhookId = str('webhookId')
+      let target = webhookId ? `the webhook \`${webhookId}\` and its delivery history` : 'no webhook (the call names none)'
+      if (webhookId) {
+        try {
+          const { prisma } = await import('@/lib/db')
+          const found = await prisma.webhook.findFirst({ where: { id: webhookId, projectId }, select: { eventType: true, targetUrl: true } })
+          target = found
+            ? `the webhook \`${webhookId}\` (${found.eventType} → ${found.targetUrl}) and its delivery history`
+            : `the webhook \`${webhookId}\` (no such webhook in this project)`
+        } catch { /* keep the id */ }
+      }
+      return {
+        tool,
+        target,
+        rowCount: null,
+        // Its signing secret goes with it: an endpoint created again signs with
+        // a new one, which the receiver does not have.
+        reversible: false,
+        confirmPhrase: 'Confirm — delete the webhook',
+      }
+    }
     case 'block_end_user':
       return { tool, target: `the end-user ${namedThing ?? ''} (they lose access immediately)`.trim(), rowCount: null, reversible: true, confirmPhrase: 'Confirm — block the user' }
     case 'remove_permission':
       return { tool, target: 'a row-level security policy (data exposure may widen)', rowCount: null, reversible: true, confirmPhrase: 'Confirm — remove the permission' }
     case 'disable_oauth_provider':
       return { tool, target: `${namedThing ?? 'an OAuth'} sign-in (end-users on this provider cannot log in)`, rowCount: null, reversible: true, confirmPhrase: 'Confirm — disable the provider' }
+    case 'remove_auth_smtp': {
+      // The card says where auth email goes once the settings are gone: through
+      // the deployment's SMTP when its environment has one, and otherwise
+      // nowhere (resolveProjectSmtp, lib/email/project-smtp.ts).
+      const { readEnvSmtpCredentials } = await import('@/lib/email/smtp-transport')
+      const after = readEnvSmtpCredentials()
+        ? "go out through the deployment's SMTP instead"
+        : 'stop: this deployment has no SMTP to fall back to'
+      return {
+        tool,
+        target: `this project's SMTP settings (verification, password-reset and magic-link emails then ${after})`,
+        rowCount: null,
+        // The stored password is deleted with them, so putting them back means
+        // entering it again.
+        reversible: false,
+        confirmPhrase: 'Confirm — remove the SMTP settings',
+      }
+    }
     case 'merge_branch':
     case 'discard_branch': {
       // The approval card is the only thing the human reads before a branch
@@ -1302,11 +1365,11 @@ async function singleToolTurn(
   //   • Read / chat / clarification tools (answer_question, ask_user,
   //     read_*, get_*, list_*) — no model spend worth billing → 0.
   //   • Direct dispatch of a mutation tool (apply_proposal, generate_function,
-  //     fix_backend, etc. — used when the user pre-confirmed and we skip
-  //     the agent loop entirely) — these do real internal LLM + DB work,
-  //     so bill the proxy. Without this, the same operation through the
-  //     deterministic shortcut would be free; through the agent loop
-  //     it would cost — a meter the user can game by phrasing differently.
+  //     fix_backend, etc.; runBrain sends none here today) — these do real
+  //     internal LLM + DB work, so bill the proxy. Without this, the same
+  //     operation through the deterministic shortcut would be free; through
+  //     the agent loop it would cost — a meter the user can game by phrasing
+  //     differently.
   const tokensUsed = isReadOnlyTool(tool) || CONTROL_TOOLS.has(tool)
     ? 0
     : proxyTokensForSteps([tool])
@@ -1459,6 +1522,10 @@ async function runAgentLoop(
   /** Set when the loop stopped to protect its verification reserve. */
   let budgetStopped = false
 
+  // Model calls that came back with an answer, which BrainResult.iterations
+  // reports. Not `iter`: every exit but running out of steps is a break, which
+  // skips `iter++`, so a turn the model answered at once reported 0.
+  let modelCalls = 0
   let iter = 0
   agentLoop: for (; iter < MAX_ITERATIONS; iter++) {
     // ── Spend the verification reserve BEFORE it can be taken ────────────────
@@ -1531,19 +1598,54 @@ async function runAgentLoop(
       clearTimeout(reserveTimer)
     }
 
+    modelCalls++
     spend(effectiveTokensOf(reply.model, reply.usage))
 
     const text = textOf(reply.message)
     if (text) emit({ type: 'thinking', text: text.slice(0, 320) })
 
+    const toolCalls = toolUsesOf(reply.message)
+
     // Cut off at the output ceiling: the last block may be a half-written tool
-    // call, so nothing in this answer is run.
+    // call, so nothing in this answer is run. What its stream had parsed can
+    // mean far more than was asked: disable_realtime with no tableName is every
+    // table. Each call is answered as cut off and the turn goes on, so the
+    // model can send it again shorter. Ending the turn here told it nothing,
+    // and a retry could write the same call again.
     if (reply.message.stop_reason === 'max_tokens') {
-      modelFailure = { code: 'MODEL_ERROR', reason: "the AI model's answer was cut off at its output limit", retryable: true }
+      if (toolCalls.length === 0) {
+        modelFailure = { code: 'MODEL_ERROR', reason: "the AI model's answer was cut off at its output limit", retryable: true }
+        break
+      }
+      console.log(`[Brain] answer cut off at the output limit, not run: ${toolCalls.map((c) => c.name).join(', ')}`)
+      messages.push({ role: 'assistant', content: reply.message.content })
+      messages.push({
+        role: 'user',
+        content: toolCalls.map((c) =>
+          toolResultBlock(
+            c.id,
+            {
+              ok: false,
+              summary:
+                `\`${c.name}\` was NOT run: your answer was cut off at the output limit, so this call may be ` +
+                `incomplete. Send it again with shorter arguments, or split the work into smaller calls.`,
+            },
+            true,
+          ),
+        ),
+      })
+      continue
+    }
+
+    // Cut off because this turn filled the model's context window: the last
+    // call may be half-written here too, but answering it would only add to a
+    // context that is already full. Nothing in this answer is run and the turn
+    // ends; a new turn starts from a fresh context, so it can be retried.
+    if (reply.message.stop_reason === 'model_context_window_exceeded') {
+      modelFailure = { code: 'MODEL_ERROR', reason: "the AI model's answer was cut off when this turn filled its context window", retryable: true }
       break
     }
 
-    const toolCalls = toolUsesOf(reply.message)
     if (toolCalls.length === 0) {
       // Preserve a no-tool reply too. When it follows a mutation, the next
       // model call must see the answer it is being asked to substantiate.
@@ -1585,7 +1687,6 @@ async function runAgentLoop(
     const verificationTurn = verificationSteered && mutated && !verifiedAfterMutation
     for (const toolCall of toolCalls) {
       const toolName = toolCall.name as ToolName
-      const args = (toolCall.input && typeof toolCall.input === 'object' ? toolCall.input : {}) as Record<string, unknown>
 
       // The verifier has one bounded turn. Never let a model response in that
       // turn replay or extend a mutation before the requested catalog read has
@@ -1598,10 +1699,48 @@ async function runAgentLoop(
         success = false
         break agentLoop
       }
+
+      // Arguments that are not an object (a string, when a model encodes them
+      // twice and the OpenAI adapter parses them once) are nothing this tool
+      // can take, and running it with `{}` instead can mean far more than was
+      // asked. The call is answered, not run, so the model can send it again.
+      if (!toolCall.input || typeof toolCall.input !== 'object' || Array.isArray(toolCall.input)) {
+        console.log(`[Brain] tool=${toolName} not run: its arguments were not an object`)
+        results.push(
+          toolResultBlock(
+            toolCall.id,
+            {
+              ok: false,
+              summary:
+                `\`${toolName}\` was NOT run: its arguments were not a JSON object. ` +
+                `Send the call again with its arguments as one JSON object.`,
+            },
+            true,
+          ),
+        )
+        continue
+      }
+      const args = toolCall.input as Record<string, unknown>
+
       // Set this before dispatch. If the catalog read throws or returns an
       // unsuccessful ToolResult, a later model iteration must not reopen the
       // bounded verification attempt.
       if (verificationTurn) verificationReadAttempted = true
+
+      // A question only reads. Its list offers nothing else, but a model can
+      // send a tool it was not offered or ask a read to write (get_readiness
+      // with autoFix), so a call that is neither a read nor one of the tools
+      // that end the turn is answered here: not run, counted or queued. That
+      // is wider than isMutationCall, which counts no control tool, because
+      // apply_proposal and run_test write too.
+      if (classification.intent === 'QUESTION' && !isReadOnlyCall(toolName, args) && !QUESTION_CONTROL_TOOLS.has(toolName)) {
+        results.push(toolResultBlock(toolCall.id, {
+          ok: false,
+          blocked: 'read_only_turn',
+          summary: `\`${toolName}\` was NOT run: this turn answers a question and only reads. Finish with the answer, and say in it what would need to change.`,
+        }, true))
+        continue
+      }
 
       // Approval gate — one rule for every door. `needsApproval` is the same
       // judgement the MCP tool route uses: the brain's destructive set OR an
@@ -1635,10 +1774,11 @@ async function runAgentLoop(
       if (toolName === 'read_backend_state' && mutated) verifiedAfterMutation = result.ok
       if (toolName === 'run_test' && mutated) verifiedAfterMutation = true
       // Allowlist-driven: a mutation is anything that is NOT a control tool and
-      // NOT a read-only tool. Adding a new read tool to tools.READ_ONLY_TOOLS
-      // (or a control tool to CONTROL_TOOLS above) keeps this honest without
-      // editing this branch every time.
-      const isMutation = !isReadOnlyTool(toolName) && !CONTROL_TOOLS.has(toolName)
+      // NOT a read. Adding a new read tool to tools.READ_ONLY_TOOLS (or a
+      // control tool to CONTROL_TOOLS above) keeps this honest without editing
+      // this branch every time; a tool whose arguments decide, like a dry-run
+      // migration, has its rule in tools.READ_ONLY_WHEN.
+      const isMutation = isMutationCall(toolName, args)
       if (isMutation) {
         mutated = true
         verificationSteered = false
@@ -1814,7 +1954,7 @@ async function runAgentLoop(
     success,
     summary: finalSummary,
     needsUser,
-    iterations: iter,
+    iterations: modelCalls,
     toolsRun,
     classification,
     tokensUsed,
@@ -1848,6 +1988,17 @@ async function runAgentLoop(
 const CONFIRM_TOOL_BLOCKLIST = new Set<string>(['propose_plan'])
 
 /**
+ * What a QUESTION turn is offered besides the reads (tools.READ_ONLY_TOOLS):
+ * the tools that end it with an answer or a question back. The hint's "Do NOT
+ * mutate anything" was all that stood between a question and create_table or
+ * drop_table. As with CONFIRM_TOOL_BLOCKLIST, the model picks from what it is
+ * offered, and the loop refuses any call it sends anyway that is neither a
+ * read nor one of these. The shorter list is also cheaper and faster on every
+ * question.
+ */
+const QUESTION_CONTROL_TOOLS = new Set<string>(['finish', 'ask_user', 'answer_question'])
+
+/**
  * The catalog as the brain's model is offered it, translated once at load so
  * every call sends byte-identical tools and the cached prefix holds across
  * turns. BRAIN_MODEL_TOOLS, not BRAIN_TOOLS: tools only an MCP agent calls are
@@ -1855,9 +2006,14 @@ const CONFIRM_TOOL_BLOCKLIST = new Set<string>(['propose_plan'])
  */
 const MODEL_TOOLS: Anthropic.Tool[] = BRAIN_MODEL_TOOLS.map(toModelTool)
 const CONFIRM_MODEL_TOOLS: Anthropic.Tool[] = MODEL_TOOLS.filter((t) => !CONFIRM_TOOL_BLOCKLIST.has(t.name))
+const QUESTION_MODEL_TOOLS: Anthropic.Tool[] = MODEL_TOOLS.filter(
+  (t) => isReadOnlyTool(t.name) || QUESTION_CONTROL_TOOLS.has(t.name),
+)
 
 function toolsForIntent(intent: BrainIntent): Anthropic.Tool[] {
-  return intent === 'CONFIRM' ? CONFIRM_MODEL_TOOLS : MODEL_TOOLS
+  if (intent === 'CONFIRM') return CONFIRM_MODEL_TOOLS
+  if (intent === 'QUESTION') return QUESTION_MODEL_TOOLS
+  return MODEL_TOOLS
 }
 
 /** "I stopped before changing anything because …", ending with what can be done next. */
@@ -1916,7 +2072,7 @@ function buildIntentHint(intent: BrainIntent): string {
         'No message approves it, including a "yes" or "confirm" in this turn or the next. Describing the operation without calling the tool queues nothing, so the owner has nothing to approve.',
       ].join(' ')
     case 'QUESTION':
-      return 'Hint: this is a QUESTION about the project state. Call read_backend_state and then finish with the answer. Do NOT mutate anything.'
+      return 'Hint: this is a QUESTION about the project state. Call read_backend_state and then finish with the answer. Do NOT mutate anything: this turn is offered only the read tools, so if something should change, say what in your answer.'
     case 'CONFIRM':
       return [
         'Hint: the user has CONFIRMED the plan you proposed in the previous assistant turn (e.g. "go ahead", "yes", "do it").',
