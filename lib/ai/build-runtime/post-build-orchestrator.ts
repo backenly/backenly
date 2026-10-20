@@ -19,6 +19,7 @@
  *     a governed change in the change ledger, held during an incident
  */
 
+import type { ReconciliationReport } from '@/lib/ai/schema-reconciler'
 import type { BuildResponse } from './types'
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -100,14 +101,14 @@ async function _runOrchestration(
  * loop's, governed; the rest are the owner's to decide (intent drift, external
  * schema changes).
  */
-export async function reportSchemaDrift(projectId: string): Promise<void> {
+export async function reportSchemaDrift(projectId: string): Promise<ReconciliationReport> {
   const { detectSchemaDrift } = await import('@/lib/ai/schema-reconciler')
 
   const report = await detectSchemaDrift(projectId)
 
   if (report.drifts.length === 0) {
     console.log(`[Reconciler] Project ${projectId}: no drift detected`)
-    return
+    return report
   }
 
   console.log(
@@ -132,6 +133,7 @@ export async function reportSchemaDrift(projectId: string): Promise<void> {
   // unregistered tables (orphan_table), columns missing or retyped against what
   // was requested (intent_drift), and DDL over a direct connection
   // (external_schema_change). See docs/autonomy-orchestrator-parity.md.
+  return report
 }
 
 // ── Step 2: Health scan (the canonical loop) ─────────────────────────────────

@@ -34,7 +34,7 @@ jest.mock('@/lib/services/ai-functions/executor', () => {
 import { PrismaClient } from '@prisma/client'
 import { randomUUID } from 'crypto'
 
-import { heldForIncident } from '@/lib/autonomy/change-freeze'
+import { LOOP_HELD, REPAIR_HELD, heldForIncident } from '@/lib/autonomy/change-freeze'
 import { runReconcilerLive } from '@/lib/autonomy/reconciler'
 import { reportSchemaDrift } from '@/lib/ai/build-runtime/post-build-orchestrator'
 import { runAndStoreFrontendCoevolution } from '@/lib/ai/frontend-coevolution'
@@ -81,9 +81,10 @@ async function columns(schema: string, table: string): Promise<string[]> {
   return rows.map((r) => r.column_name)
 }
 
+/** Every held pass recorded for the project, the loop's own and other paths', with which it was. */
 const freezes = async (projectId: string) =>
-  (await prisma.auditLog.findMany({ where: { projectId, action: 'AUTONOMY_CHANGE_FREEZE' }, select: { details: true } }))
-    .map((r) => JSON.parse(String(r.details)))
+  (await prisma.auditLog.findMany({ where: { projectId, action: { in: [LOOP_HELD, REPAIR_HELD] } }, select: { action: true, details: true } }))
+    .map((r) => ({ action: r.action, ...JSON.parse(String(r.details)) }))
 
 beforeAll(async () => {
   userId = randomUUID()
@@ -105,9 +106,10 @@ afterAll(async () => {
     await prisma.aiFunction.deleteMany({ where: { projectId } }).catch(() => {})
     await prisma.table.deleteMany({ where: { projectId } }).catch(() => {})
     await prisma.workspaceSchemaSnapshot.deleteMany({ where: { projectId } }).catch(() => {})
-    await prisma.platformNotification.deleteMany({ where: { projectId } }).catch(() => {})
     await prisma.project.deleteMany({ where: { id: projectId } }).catch(() => {})
   }
+  // A notification is the owner's, not the project's.
+  await prisma.platformNotification.deleteMany({ where: { userId } }).catch(() => {})
   await prisma.subscription.deleteMany({ where: { userId } }).catch(() => {})
   await prisma.plan.deleteMany({ where: { id: planId } }).catch(() => {})
   await prisma.user.deleteMany({ where: { id: userId } }).catch(() => {})
@@ -122,8 +124,9 @@ describe('the change freeze', () => {
 
     mockAnomalous.add(projectId)
     expect(await heldForIncident(projectId, { loop: 'maintenance', via: 'function_heal', wouldHaveApplied: 2 })).toBe(true)
+    // Another path's hold is not one of the loop's ticks, so it is recorded apart from them.
     expect(await freezes(projectId)).toEqual([
-      expect.objectContaining({ loop: 'maintenance', via: 'function_heal', wouldHaveApplied: 2, health: ['Response time spiked to 480ms (p95).'] }),
+      expect.objectContaining({ action: REPAIR_HELD, loop: 'maintenance', via: 'function_heal', wouldHaveApplied: 2, health: ['Response time spiked to 480ms (p95).'] }),
     ])
   })
 
@@ -136,7 +139,7 @@ describe('the change freeze', () => {
     const res = await runReconcilerLive(projectId)
     expect(res?.frozen).toBe(true)
     expect(await indexed(schema, 'line_items', 'order_id')).toBe(false)
-    expect((await freezes(projectId)).map((d) => d.loop)).toEqual(['reconciler'])
+    expect((await freezes(projectId)).map((d) => [d.action, d.loop])).toEqual([[LOOP_HELD, 'reconciler']])
   }, 180_000)
 })
 
@@ -149,7 +152,12 @@ describe('the post-build pass', () => {
     // Removed after the snapshot, as a direct drop or an unrecorded change would.
     await q(`ALTER TABLE "${schema}"."notes" DROP COLUMN author_note`)
 
-    await reportSchemaDrift(projectId)
+    const report = await reportSchemaDrift(projectId)
+    // Seen and reported…
+    expect(report.drifts).toEqual(
+      expect.arrayContaining([expect.objectContaining({ type: 'missing_column', tableName: 'notes', columnName: 'author_note' })]),
+    )
+    // …and not put back.
     expect(await columns(schema, 'notes')).toEqual(['body', 'id'])
   }, 120_000)
 })

@@ -925,17 +925,18 @@ async function writeFinding(
   finding.details = { ...finding.details, firstDetectedAt: firstDetectedAt.toISOString() }
 
   if (existing) {
-    // A row waiting for a person stays theirs. The repair loop moved it there
-    // (its repair failed, or did not hold), and the observer seeing the gap
-    // again is no reason to hand it back: reopened, it was retried at once,
-    // skipping the loop's backoff, and lost the reason it was escalated.
-    const escalated = existing.status === 'pending_approval' && status === 'open'
+    // A row waiting for a person stays theirs, with what the repair loop wrote
+    // on it. The loop moved it there (its repair failed, or did not hold), and
+    // the observer seeing the gap again, or escalating it itself, is no reason
+    // to hand it back or wipe that record: reopened, it was retried at once,
+    // and with its details replaced the loop's retry backoff started over.
+    const waiting = existing.status === 'pending_approval'
     await prisma.healthFinding.update({
       where: { id: existing.id },
       data: {
         severity: finding.severity,
-        details: (escalated ? { ...((existing.details ?? {}) as Record<string, unknown>), ...finding.details } : finding.details) as any,
-        status: escalated ? 'pending_approval' : status,
+        details: (waiting ? { ...((existing.details ?? {}) as Record<string, unknown>), ...finding.details } : finding.details) as any,
+        status: waiting && status === 'open' ? 'pending_approval' : status,
         autoFixed,
         fixAppliedAt: fixAppliedAt ?? null,
         detectedAt: new Date(),

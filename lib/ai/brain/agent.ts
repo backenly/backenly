@@ -1075,7 +1075,10 @@ function renderVerificationBlock(result: FixLoopResult): string {
   return [
     `**Verification** · ${passed.length}/${ran.length} runtime checks passed${repairNote} — ${failedChecks.length} still failing:`,
     ...failedChecks.slice(0, 5).map(c => `• ${c.name}${c.error ? ` — ${c.error.slice(0, 120)}` : ''}`),
-    `These are tracked as open findings — say "fix the failing checks" or review them on the dashboard.`,
+    // Held for an incident, asking for the fixes again would be held again.
+    result.reason === 'held_for_incident'
+      ? result.summary
+      : `These are tracked as open findings — say "fix the failing checks" or review them on the dashboard.`,
   ].join('\n')
 }
 
