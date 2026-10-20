@@ -13,9 +13,16 @@
  * Storage: ProjectPreference (type='pending_plan', key='loop_resume'), one per
  * project, with the same 30-minute TTL as the other resumable states so a stale
  * "continue" the next day cannot pick up work the person has forgotten.
+ *
+ * That row is in the home region's platform database. A project kept in another
+ * region keeps its words there (lib/data-plane/residency.ts), so its marker
+ * stores neither the request nor the applied titles, which can name an end
+ * user; the resumed turn finds both in the conversation, which stays in the
+ * project's region.
  */
 
 import { prisma } from '@/lib/db/prisma'
+import { quotesKeptHere } from '@/lib/data-plane/residency'
 
 const PREF_TYPE = 'pending_plan'
 const PREF_KEY = 'loop_resume'
@@ -25,10 +32,12 @@ const MAX_REQUEST_CHARS = 8000
 const MAX_APPLIED = 200
 
 export interface LoopResume {
-  /** The request the stopped turn was working on, as the person put it. */
+  /** The request the stopped turn was working on, as the person put it. Empty when kept in its region. */
   request: string
-  /** Titles of the changes that already landed, across every turn of this request. */
+  /** Titles of the changes that already landed, across every turn of this request. Empty when kept in its region. */
   applied: string[]
+  /** Set for a project kept in another region: the request and titles stayed out of this row. */
+  keptInRegion?: true
   /** Why the turn stopped, for the model's context. */
   reason: string
   createdAt: string
@@ -50,9 +59,11 @@ export async function saveLoopResume(
   stop: LoopStop,
 ): Promise<void> {
   const now = Date.now()
+  const quote = await quotesKeptHere(projectId)
   const marker: LoopResume = {
-    request: request.slice(0, MAX_REQUEST_CHARS),
-    applied: applied.slice(-MAX_APPLIED),
+    request: quote ? request.slice(0, MAX_REQUEST_CHARS) : '',
+    applied: quote ? applied.slice(-MAX_APPLIED) : [],
+    ...(quote ? {} : { keptInRegion: true as const }),
     reason: STOP_REASON[stop],
     createdAt: new Date(now).toISOString(),
     expiresAt: new Date(now + TTL_MS).toISOString(),
@@ -71,7 +82,8 @@ export async function loadLoopResume(projectId: string): Promise<LoopResume | nu
   if (!pref) return null
   try {
     const m = JSON.parse(pref.value) as LoopResume
-    if (typeof m.request !== 'string' || !m.request.trim()) return null
+    if (typeof m.request !== 'string') return null
+    if (!m.request.trim() && m.keptInRegion !== true) return null
     if (!Array.isArray(m.applied)) m.applied = []
     if (Date.parse(m.expiresAt) < Date.now()) return null
     return m
@@ -92,6 +104,14 @@ export async function clearLoopResume(projectId: string): Promise<void> {
  * person's own message is still what is stored in the conversation.
  */
 export function resumePrompt(marker: LoopResume, said: string): string {
+  if (marker.keptInRegion) {
+    return (
+      `The person said "${said.trim().slice(0, 200)}" to continue their previous request, which stopped unfinished because ${marker.reason}. ` +
+      `That request and the changes it already made are in the conversation above; they stay in this project's region, so they are not repeated here.\n\n` +
+      `Read the live backend state, then finish only what is still missing and verify it. ` +
+      `Do not redo what is already there, and do not start a different task.`
+    )
+  }
   const applied = marker.applied.length
     ? `ALREADY APPLIED — do not redo any of it:\n${marker.applied.map((t) => `  • ${t}`).join('\n')}`
     : 'Nothing was applied before it stopped.'

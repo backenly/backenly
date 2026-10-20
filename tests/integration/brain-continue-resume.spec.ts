@@ -155,6 +155,40 @@ describe('"continue" with nothing saved', () => {
   })
 })
 
+// The marker lives in the home region's platform database. A project kept in
+// another region keeps its words there (lib/data-plane/residency.ts), so its
+// marker holds neither the request nor the applied titles, and the resumed turn
+// is pointed at the conversation, which stays in the region.
+describe('a project kept in another region', () => {
+  let regionalId: string
+
+  beforeAll(async () => {
+    regionalId = (await prisma.project.create({
+      data: { name: 'brain-continue-regional', userId: ownerId, region: 'us-east-1' },
+      select: { id: true },
+    })).id
+  })
+
+  afterAll(async () => {
+    await prisma.projectPreference.deleteMany({ where: { projectId: regionalId } }).catch(() => {})
+  })
+
+  it('stores neither the request nor what landed in the home database, and can still be resumed', async () => {
+    await saveLoopResume(regionalId, 'block alice@example.com and add her to the audit table', ['Blocking alice@example.com'], 'step_budget')
+
+    const row = await prisma.projectPreference.findFirstOrThrow({ where: { projectId: regionalId, key: 'loop_resume' } })
+    expect(row.value).not.toContain('alice@example.com')
+    expect(row.value).not.toContain('audit table')
+
+    const marker = await loadLoopResume(regionalId)
+    expect(marker).toMatchObject({ request: '', applied: [], keptInRegion: true, reason: 'it ran out of steps' })
+
+    const prompt = resumePrompt(marker!, 'continue')
+    expect(prompt).toMatch(/in the conversation above/)
+    expect(prompt).not.toMatch(/ORIGINAL REQUEST/)
+  })
+})
+
 describe('resumePrompt', () => {
   it('names the request, lists what landed, and says when nothing did', () => {
     const base = { request: 'add a posts table', reason: 'it ran out of steps', createdAt: '', expiresAt: '' }
