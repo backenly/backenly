@@ -25,6 +25,16 @@
 
 import { runReconciler } from './reconciler'
 import { FLAGS } from '@/lib/config/flags'
+import { outsideAnyChange } from '@/lib/changes/context'
+
+/**
+ * A timer whose work is its own actor (lib/changes/context.ts). The kick comes
+ * from inside an agent's mutation, often inside its governed change, and a
+ * plain timer would carry that change and the agent's key into what it runs.
+ */
+function later(fn: () => void, ms: number): ReturnType<typeof setTimeout> {
+  return outsideAnyChange(() => setTimeout(fn, ms))
+}
 
 /**
  * Mutations that typically open a Tier-0 / Tier-1 invariant gap the reconciler
@@ -99,7 +109,7 @@ export function kickReconciler(projectId: string, reason: string): void {
   if (existing) {
     existing.reasons.push(reason)
     clearTimeout(existing.timer)
-    existing.timer = setTimeout(() => runKick(projectId), DEBOUNCE_MS)
+    existing.timer = later(() => runKick(projectId), DEBOUNCE_MS)
     return
   }
 
@@ -116,7 +126,7 @@ export function kickReconciler(projectId: string, reason: string): void {
 
   const entry: Pending = {
     reasons: [reason],
-    timer: setTimeout(() => runKick(projectId), DEBOUNCE_MS),
+    timer: later(() => runKick(projectId), DEBOUNCE_MS),
   }
   pending.set(projectId, entry)
 }
@@ -138,7 +148,7 @@ function scheduleSettledObserverPass(projectId: string): void {
   const existing = settling.get(projectId)
   if (existing) clearTimeout(existing)
   else if (settling.size >= MAX_PENDING) return
-  const timer = setTimeout(() => {
+  const timer = later(() => {
     settling.delete(projectId)
     import('@/lib/services/workspace-observer')
       .then(m => m.runObserverForProject(projectId))

@@ -36,7 +36,6 @@
  * caller can claim to be someone else.
  */
 
-import { AsyncLocalStorage } from 'async_hooks'
 import { randomUUID } from 'crypto'
 import type { PoolClient } from 'pg'
 import { Prisma } from '@prisma/client'
@@ -44,6 +43,7 @@ import { prisma } from '@/lib/db/prisma'
 import { installSqlRecorder, withSqlCapture, type RecordedStatement } from '@/lib/execution/sql-recorder'
 import { pickTables, type CatalogSnapshot } from './catalog'
 import { currentAttribution, type ChangeAttribution } from './attribution'
+import { openChangeContext, type ChangeContext } from './context'
 import { describeChange } from './describe'
 import { diffCatalogs, footprintObjects, footprintTables } from './diff'
 import { refreshSchemaViews, tablesTouched } from './freshness'
@@ -72,8 +72,7 @@ export { withChangeAttribution, currentAttribution, type ChangeAttribution } fro
 
 // ── The open change ──────────────────────────────────────────────────────────
 
-export interface OpenChange {
-  projectId: string
+export interface OpenChange extends ChangeContext {
   id: string
   seq: number
   kind: ChangeKind
@@ -96,12 +95,15 @@ export interface OpenChange {
   vaultCreated: boolean
 }
 
-const open = new AsyncLocalStorage<OpenChange>()
-
-/** The change open for this project in the current async context, if any. */
+/**
+ * The change open for this project in the current async context, if any. Never
+ * one whose work is over: a timer or promise started inside a change still
+ * carries it after it closes, and work joined to it then is recorded nowhere.
+ */
 export function currentChange(projectId: string): OpenChange | null {
-  const c = open.getStore()
-  return c && c.projectId === projectId ? c : null
+  // The ledger is the only writer of this context, and it writes OpenChanges.
+  const c = openChangeContext.getStore() as OpenChange | undefined
+  return c && c.projectId === projectId && !c.finished ? c : null
 }
 
 /** Create the change's vault on first use and return its name. */
@@ -360,18 +362,22 @@ export async function withGovernedChange<T>(
       statements: [],
       expectations: [],
       vaultCreated: false,
+      finished: false,
     }
 
     let result: T | undefined
     let thrown: unknown = null
     let captured: RecordedStatement[] = []
     try {
-      const out = await withSqlCapture(() => open.run(change, fn))
+      const out = await withSqlCapture(() => openChangeContext.run(change, fn))
       result = out.result
       captured = out.statements
     } catch (err) {
       thrown = err
     }
+    // Its work is over. Anything it started that is still running (a timer, an
+    // unawaited promise) still carries it, and must open a change of its own.
+    change.finished = true
 
     if (thrown instanceof AbandonChange) {
       await discard()

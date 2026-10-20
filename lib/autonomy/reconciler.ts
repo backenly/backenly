@@ -43,6 +43,7 @@ import { FLAGS } from '@/lib/config/flags'
 import { loopPrincipals, principalsToMetadata } from '@/lib/principal'
 import { canReach } from './region-skip'
 import { quotedError, quotesKeptHere } from '@/lib/data-plane/residency'
+import { outsideAnyChange } from '@/lib/changes/context'
 
 export type ReconcileAction =
   | 'WOULD_AUTO_APPLY'     // tier within dial + breaker budget available
@@ -999,6 +1000,14 @@ export async function runReconcilerLive(projectId: string): Promise<LiveReconcil
 export async function runReconciler(
   projectId: string,
 ): Promise<ReconciliationPlan | LiveReconcileResult | null> {
+  // The loop is its own actor, whatever started it. The post-mutation kick and
+  // a post-build pass start it from inside an agent's request, even from inside
+  // its governed change: run there, its repairs joined that change after it had
+  // closed, were recorded nowhere, and carried the agent's key.
+  return outsideAnyChange(() => reconcile(projectId))
+}
+
+async function reconcile(projectId: string): Promise<ReconciliationPlan | LiveReconcileResult | null> {
   if (!FLAGS.ENABLE_AUTONOMY_RECONCILER) return null
 
   // Every way in — the fleet schedulers, the post-mutation kick, the HTTP cron
