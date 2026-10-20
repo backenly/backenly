@@ -1458,3 +1458,33 @@ tests/integration/sdk-filters-both-servers.spec.ts
 # where skipping it widened a service-role update or delete. What PostgreSQL
 # matches is the property, so it needs a real Postgres.
 tests/integration/mcp-filters-never-widen.spec.ts
+# Where runBrain sends a turn, and every way its agent loop ends (#246): CONFIRM
+# with nothing pending, the blueprint propose, execute and resume routes, a lost
+# plan designed again, APPLY_PROPOSAL, no model configured, and the plain-text,
+# needs-user, refused, rate-limited and timed-out exits. Run on the shared
+# harness (tests/helpers/brain-harness.ts) with only the model scripted: the
+# pending-plan store, conversation log and the tables a plan builds are real, so
+# it needs a real Postgres.
+tests/integration/brain-routing.spec.ts
+# The brain's approval gate, run through the real loop for every tool it stops:
+# each call is held exactly as issued, never run, and described on the card the
+# approver reads (target, live row count, reversibility, the trigger or webhook
+# it resolves), including a call repeated or issued beside a read. The rows
+# counted and the trigger and webhook rows resolved are real, so it needs a real
+# Postgres.
+tests/integration/brain-approval-targets.spec.ts
+# The blueprint turns of runBrain, whole: the proposal card for every kind of
+# step, a plan's run (seeding, a step that throws, a destructive step it may not
+# run, the resume queue), the post-build check's report in each of its outcomes,
+# the requirements a person wrote reconciled against what was planned and built,
+# and stored plans that are corrupt, expired or from before a field existed. The
+# workspace tables a plan builds and the stored plans are real, so it needs a
+# real Postgres.
+tests/integration/brain-blueprint-turns.spec.ts
+# The edges of a runBrain turn: what the classifier is told and how its answer is
+# read, what each intent's loop is offered, every stop and the resume point it
+# saves, billing of a call that ran before it failed, and what a turn writes down
+# (conversation, receipts, a summary once the log is long). The conversation log,
+# stored resume rows, receipts and workspace tables are real, so it needs a real
+# Postgres.
+tests/integration/brain-loop-edges.spec.ts
