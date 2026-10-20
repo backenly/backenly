@@ -156,10 +156,12 @@ describe('infra-intelligence pg_stat queries', () => {
  * GENERATED SQL referencing a column the target table does not have.
  *
  * detectHotTables emitted `CREATE INDEX ... (created_at DESC)` for every hot
- * table unconditionally. On a table without created_at that raises 42703 inside
- * _applyAutoFixes, whose catch logs "Auto-fix failed (non-fatal)" and continues.
- * It fired nine times per pass in production — an auto-fix that had never once
- * applied, visible only as a warning.
+ * table unconditionally. On a table without created_at that raised 42703 inside
+ * the pass's own auto-apply step, whose catch logged "Auto-fix failed
+ * (non-fatal)" and continued. It fired nine times per pass in production — an
+ * auto-fix that had never once applied, visible only as a warning. The pass no
+ * longer applies anything (a hot-table index is applied from its finding,
+ * through the governed kernel), but the SQL it suggests must still run.
  */
 describe('infra-intelligence — created_at index suggestion', () => {
   const pool = new Pool({ connectionString: CONN, max: 2 })

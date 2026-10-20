@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto'
 import { prisma } from '@/lib/db'
 import { quotesKeptHere } from '@/lib/data-plane/residency'
+import { redactSecretParams, withholdSecrets } from '@/lib/mcp/withhold-secrets'
 import { keepHeldAction, storedHeldTarget } from '@/lib/operational-memory/held-action-targets'
 import type { ExecutionChange } from '@/lib/orchestration/atomic-executor'
 import { recordPattern, resolveProjectType, patternTypeForEventType } from '@/lib/patterns/cross-project-learning'
@@ -397,7 +398,8 @@ export async function recordBackendExecutionMemory(input: RecordExecutionMemoryI
   )
   // A project kept in another region: what changed, never the request or the
   // intent parsed from it, which can quote its data (lib/data-plane/residency.ts).
-  const request = (await quotesKeptHere(input.projectId)) ? input.userMessage : null
+  // Elsewhere both are kept with credentials withheld (lib/mcp/withhold-secrets.ts).
+  const request = (await quotesKeptHere(input.projectId)) ? withholdSecrets(input.userMessage) : null
 
   const events = []
 
@@ -408,7 +410,7 @@ export async function recordBackendExecutionMemory(input: RecordExecutionMemoryI
     actorId: input.actorId,
     summary: request === null ? 'User asked for a backend change.' : `User asked: "${truncate(request)}"`,
     beforeState: input.beforeState,
-    afterState: request === null ? undefined : input.canonicalIntent,
+    afterState: request === null ? undefined : redactSecretParams(input.canonicalIntent),
     reason: 'Captured as the source requirement for this backend change.',
     riskLevel: 'low',
     status: 'applied',
@@ -489,8 +491,10 @@ export async function recordToolExecutionMemory(input: RecordToolExecutionMemory
   )
   // A project kept in another region: which tools ran, never the request or
   // the agent's result, which can quote its data (lib/data-plane/residency.ts).
+  // Elsewhere both are kept with credentials withheld (lib/mcp/withhold-secrets.ts).
   const quote = await quotesKeptHere(input.projectId)
-  const request = quote ? input.userMessage : null
+  const request = quote ? withholdSecrets(input.userMessage) : null
+  const result = quote && input.summary ? withholdSecrets(input.summary) : undefined
 
   const events = []
   events.push(await createBackendEvent({
@@ -525,7 +529,7 @@ export async function recordToolExecutionMemory(input: RecordToolExecutionMemory
     projectId: input.projectId,
     eventIds: events.map(event => event.id),
     title: receiptTitleForTools(eventfulTools),
-    summary: receiptSummaryForTools(eventfulTools, request, quote ? input.summary : undefined),
+    summary: receiptSummaryForTools(eventfulTools, request, result),
     resourcesChanged: {
       tools: eventfulTools,
       total: eventfulTools.length,

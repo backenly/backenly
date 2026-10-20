@@ -1,6 +1,6 @@
 import type { BackenlyClient } from './client.js'
 import type { QueryResponse, InsertResponse, UpdateResponse, DeleteResponse, OrderByOptions, QueryFilter, CountResponse } from './types.js'
-import { normalizeError } from './errors.js'
+import { BackenlyError, normalizeError } from './errors.js'
 import type { RealtimeCallback, Unsubscribe } from './realtime.js'
 
 /**
@@ -347,36 +347,83 @@ export class QueryBuilder<T = any> {
   }
 
   // EXECUTION
+  /**
+   * The `where` the servers read: one entry per column, holding every filter
+   * on it. `.gte('age', 18).lt('age', 65)` sends `{ age: { gte: 18, lt: 65 } }`.
+   * Each filter used to replace the one before it on the same column, so that
+   * range sent only `{ lt: 65 }`, and a ranged update() or delete() reached
+   * every row below 65. Two filters that cannot be sent together on one
+   * column (eq() or isNull() with any other, or one operator twice) throw
+   * before anything is sent, and so does a value JSON cannot carry: an
+   * undefined value left its filter out of the request altogether, and NaN
+   * or Infinity arrived as null.
+   */
   private buildWhereClause(): any {
     if (this.filters.length === 0) return undefined
 
-    const where: any = {}
-    for (const filter of this.filters) {
-      if (filter.operator === 'eq') {
-        where[filter.column] = filter.value
-      } else if (filter.operator === 'in') {
-        where[filter.column] = { in: filter.value }
-      } else if (filter.operator === 'gt') {
-        where[filter.column] = { gt: filter.value }
-      } else if (filter.operator === 'gte') {
-        where[filter.column] = { gte: filter.value }
-      } else if (filter.operator === 'lt') {
-        where[filter.column] = { lt: filter.value }
-      } else if (filter.operator === 'lte') {
-        where[filter.column] = { lte: filter.value }
-      } else if (filter.operator === 'neq') {
-        where[filter.column] = { not: filter.value }
-      } else if (filter.operator === 'like') {
-        where[filter.column] = { contains: filter.value }
-      } else if (filter.operator === 'ilike') {
-        where[filter.column] = { contains: filter.value, mode: 'insensitive' }
-      } else if (filter.operator === 'isNull') {
-        where[filter.column] = null
-      } else if (filter.operator === 'isNotNull') {
-        where[filter.column] = { not: null }
+    const where = new Map<string, unknown>()
+    const comparedWhole = new Set<string>()
+    const refuse = (message: string) => new BackenlyError(message, 'VALIDATION_ERROR')
+    /** The methods that write each operator, as the caller wrote them. */
+    const METHODS: Record<string, string> = {
+      in: 'in()', gt: 'gt()', gte: 'gte()', lt: 'lt()', lte: 'lte()', not: 'neq() or isNotNull()', contains: 'like() or ilike()',
+    }
+    const conflict = (column: string, what: string, hint: string) =>
+      refuse(`Two filters on "${column}" cannot be sent together: ${what}. ${hint}`)
+    // A value JSON sends as it is. JSON leaves out undefined, a function or a
+    // symbol, and turns NaN, Infinity and an invalid Date into null; inside an
+    // array each of those becomes null. A bigint cannot be sent at all.
+    const carried = (v: unknown): boolean => {
+      let json: string | undefined
+      try {
+        json = JSON.stringify(v)
+      } catch {
+        return false
+      }
+      if (json === undefined || (json === 'null' && v !== null)) return false
+      return !Array.isArray(v) || v.every(carried)
+    }
+    const describe = (v: unknown): string => {
+      try {
+        return typeof v === 'object' && v !== null && !Array.isArray(v) ? Object.prototype.toString.call(v) : String(v)
+      } catch {
+        return typeof v
       }
     }
-    return where
+    const sendable = (column: string, value: unknown): void => {
+      if (!carried(value)) throw refuse(`The filter on "${column}" has a value JSON cannot send as it is (${describe(value)}).`)
+    }
+    // A value compared whole: eq(), isNull().
+    const compare = (column: string, value: unknown) => {
+      sendable(column, value)
+      if (where.has(column)) throw conflict(column, 'eq() or isNull() with another filter', 'For several values, use in().')
+      comparedWhole.add(column)
+      where.set(column, value)
+    }
+    // One operator among the column's others.
+    const operator = (column: string, key: string, operand: unknown, extra: Record<string, unknown> = {}) => {
+      sendable(column, operand)
+      if (comparedWhole.has(column)) throw conflict(column, 'eq() or isNull() with another filter', 'For several values, use in().')
+      const operators = (where.get(column) as Record<string, unknown> | undefined) ?? {}
+      if (Object.prototype.hasOwnProperty.call(operators, key)) throw conflict(column, `${METHODS[key] ?? key} twice`, 'Keep one of them.')
+      where.set(column, { ...operators, [key]: operand, ...extra })
+    }
+
+    for (const filter of this.filters) {
+      const { column, value } = filter
+      if (filter.operator === 'eq') compare(column, value)
+      else if (filter.operator === 'isNull') compare(column, null)
+      else if (filter.operator === 'in') operator(column, 'in', value)
+      else if (filter.operator === 'gt') operator(column, 'gt', value)
+      else if (filter.operator === 'gte') operator(column, 'gte', value)
+      else if (filter.operator === 'lt') operator(column, 'lt', value)
+      else if (filter.operator === 'lte') operator(column, 'lte', value)
+      else if (filter.operator === 'neq') operator(column, 'not', value)
+      else if (filter.operator === 'isNotNull') operator(column, 'not', null)
+      else if (filter.operator === 'like') operator(column, 'contains', value)
+      else if (filter.operator === 'ilike') operator(column, 'contains', value, { mode: 'insensitive' })
+    }
+    return Object.fromEntries(where)
   }
 
   private buildOrderByClause(): any {

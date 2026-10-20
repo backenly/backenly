@@ -17,6 +17,7 @@
  */
 
 import { sanitizeMessageForStorage } from '@/lib/ai/api-key-detector'
+import { ISSUED_PREFIX, LEGACY_PREFIXES } from '@/lib/auth/key-prefix'
 
 const PLACEHOLDER = '[withheld]'
 
@@ -26,13 +27,20 @@ export const WITHHELD = PLACEHOLDER
 /** Field names whose string values are credentials. */
 const SECRET_FIELD = /^(apiKey|newKey|secret|webhookSecret|signingSecret|password|connectionString|psqlCommand|pgDumpCommand|token|accessToken|refreshToken|clientSecret)$/i
 
-/** Credential shapes Backenly issues. */
+/**
+ * Credential shapes Backenly issues, found wherever they sit. A word boundary
+ * missed two common places: after an escaped newline in JSON text, where
+ * "\nproj_live_…" has no boundary between the "n" and the key, and before an
+ * underscore or other word character right after a key, where the match
+ * cannot end on a boundary inside the key.
+ */
 const ISSUED_SHAPES: RegExp[] = [
-  /\b(?:proj|svc|mcp|bkn)_(?:live|test)_[A-Za-z0-9]{16,}\b/g,
-  // Rotated API keys, until rotation mints the project prefixes too.
-  /\bsk_(?:live|test)_[0-9a-f]{32,}\b/g,
-  /\bwhsec_[A-Za-z0-9+/=_-]{16,}/g,
-  /\bbk_admin_[A-Za-z0-9_-]{16,}/g,
+  /(?:proj|svc|mcp|bkn)_(?:live|test)_[A-Za-z0-9]{16,}/g,
+  // Every prefix a key is or was minted with, dashboard, preview-branch and
+  // legacy keys among them, followed by the hex it is minted with.
+  new RegExp(`(?:${[...Object.values(ISSUED_PREFIX), ...LEGACY_PREFIXES].join('|')})[0-9a-f]{32,}`, 'gi'),
+  /whsec_[A-Za-z0-9+/=_-]{16,}/g,
+  /bk_admin_[A-Za-z0-9_-]{16,}/g,
 ]
 
 /** A password inside a connection string, keeping the rest readable. */

@@ -13,15 +13,23 @@
  * functions, through the same cast table.
  */
 
+import type { QueryContext } from '@/lib/db/query-errors'
 import { castTarget, coerceValue } from '@/lib/mcp/runtime-db'
 
 export interface TypedParams {
   /** The bound values, in placeholder order, for executeWithUserContext. */
   readonly values: unknown[]
+  /** The column each value was bound for, in the same order ('' for a raw one). */
+  readonly columns: string[]
   /** The placeholder for `value` written to or compared with `column`. */
   bind(column: string, value: unknown): string
   /** The placeholder for `value` bound as it is, with no cast (an ILIKE pattern). */
   raw(value: unknown): string
+  /**
+   * What was bound, for explaining a refusal (lib/api/v1/data-errors.ts):
+   * PostgreSQL names the type and value it could not read, not the column.
+   */
+  context(table: string): QueryContext
 }
 
 /**
@@ -31,17 +39,24 @@ export interface TypedParams {
  */
 export function typedParams(types: Map<string, string>): TypedParams {
   const values: unknown[] = []
+  const columns: string[] = []
   return {
     values,
+    columns,
     bind(column, value) {
       const type = types.get(column)
       values.push(coerceValue(type, value))
+      columns.push(column)
       const target = castTarget(type)
       return target ? `$${values.length}::${target}` : `$${values.length}`
     },
     raw(value) {
       values.push(value)
+      columns.push('')
       return `$${values.length}`
+    },
+    context(table) {
+      return { table, columns, values, types }
     },
   }
 }

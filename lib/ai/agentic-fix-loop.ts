@@ -68,7 +68,7 @@ export type FixLoopEvent =
       type: 'fix_loop_complete'
       success: boolean
       rounds: number
-      reason: 'passed' | 'no_progress' | 'max_rounds' | 'cancelled' | 'no_initial_failures'
+      reason: FixLoopTerminalReason
       summary: string
     }
 
@@ -87,6 +87,8 @@ export type FixLoopTerminalReason =
   | 'max_rounds'
   | 'cancelled'
   | 'no_initial_failures'
+  /** The project was mid-incident, so no fix was applied (lib/autonomy/change-freeze.ts). */
+  | 'held_for_incident'
 
 export interface FixLoopResult {
   passed: boolean
@@ -162,6 +164,19 @@ export async function runAgenticFixLoop(
       const summary = `Cancelled at round ${round - 1}. Applied ${appliedTotal} fix(es) so far.`
       emit({ type: 'fix_loop_complete', success: false, rounds: round - 1, reason: 'cancelled', summary })
       return { passed: false, rounds: round - 1, reason: 'cancelled' as const, finalCheckSnapshot: snapshot, appliedFixes: appliedTotal, summary }
+    }
+
+    // Nothing is repaired while the project is mid-incident: the freeze every
+    // autonomous repair path honours (lib/autonomy/change-freeze.ts). Its fixes
+    // run as the repair loop's (processOpenFindings), so they are held as its are.
+    // The checks have run, so the snapshot still says what is failing.
+    const { heldForIncident } = await import('@/lib/autonomy/change-freeze')
+    if (await heldForIncident(projectId, { loop: 'reconciler', via: 'agentic_fix_loop', wouldHaveApplied: countFailures(snapshot.checks) })) {
+      const summary =
+        `Held back at round ${round}: the project is mid-incident, so no fix was applied` +
+        `${appliedTotal > 0 ? ` after the ${appliedTotal} already applied` : ''}. Run it again once the incident is over.`
+      emit({ type: 'fix_loop_complete', success: false, rounds: round - 1, reason: 'held_for_incident', summary })
+      return { passed: false, rounds: round - 1, reason: 'held_for_incident' as const, finalCheckSnapshot: snapshot, appliedFixes: appliedTotal, summary }
     }
 
     // ── Phase A: drain HealthFindings queue (existing finding-based fixes) ──

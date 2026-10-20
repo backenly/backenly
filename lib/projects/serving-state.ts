@@ -193,15 +193,20 @@ export function createServingStateReader(options: ServingStateReaderOptions): Se
 }
 
 // The region's copy while it is fresh, home otherwise (lib/auth-projection/read.ts).
-// An answer from the copy is cached only for what is left of the bound after the
-// copy's own age, so the two never add up past it. When neither can answer the
-// loader throws, and the reader fails closed as above.
+// Any answer is cached only for what is left of the bound after its own age: the
+// copy's watermark age, or 0 when home answered. So a lock or pause reaches every
+// request within the bound however it was read, in a region running below 15 s
+// (staging, 10) as at home (the 15 s ceiling, which is FRESH_MS). When neither can
+// answer the loader throws, and the reader fails closed as above.
+export function withStalenessBound<T extends object>(
+  answer: { row: T | null; ageMs: number },
+  boundMs: number = authMaxStalenessMs(),
+): (T & { freshForMs: number }) | null {
+  return answer.row ? { ...answer.row, freshForMs: boundMs - answer.ageMs } : null
+}
+
 const reader = createServingStateReader({
-  load: async projectId => {
-    const { row, ageMs } = await authorizingProjectWithAge(projectId)
-    if (!row) return null
-    return ageMs > 0 ? { ...row, freshForMs: authMaxStalenessMs() - ageMs } : row
-  },
+  load: async projectId => withStalenessBound(await authorizingProjectWithAge(projectId)),
 })
 
 export function getProjectServingState(projectId: string): Promise<ProjectServingState> {

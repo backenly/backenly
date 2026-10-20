@@ -19,7 +19,7 @@ import { AiError, setProviderForTests } from '@/lib/ai/llm'
 import { scriptedMessage, scriptedProvider, type ScriptedProvider } from '@/lib/ai/llm/providers/scripted'
 import { memorySpendLedger, setSpendLedgerForTests, type MemorySpendLedger } from '@/lib/ai/llm/spend'
 import { classifierPrompt } from '@/lib/ai/brain/prompts'
-import { BRAIN_MODEL_TOOLS } from '@/lib/ai/brain/tools'
+import { BRAIN_MODEL_TOOLS, isReadOnlyTool } from '@/lib/ai/brain/tools'
 import { runBrain, type BrainEvent, type BrainInput } from '@/lib/ai/brain/agent'
 import { collectProof } from '@/lib/ai/proof-system'
 
@@ -125,11 +125,15 @@ describe('a turn on the gateway', () => {
     expect(classify.output_config?.format).toMatchObject({ type: 'json_schema' })
     expect(classify.thinking).toBeUndefined()
 
-    // The loop: the catalog translated once with its last tool cached, the
-    // stable prompt cached ahead of the turn's own context, thinking on, and
-    // the conversation cached at its last block.
+    // The loop: a question's share of the catalog (the reads and the tools that
+    // end a turn) translated once with its last tool cached, the stable prompt
+    // cached ahead of the turn's own context, thinking on, and the conversation
+    // cached at its last block.
     const first = provider.calls[1].params
-    expect(first.tools!.map((t) => (t as Anthropic.Tool).name)).toEqual(BRAIN_MODEL_TOOLS.map((t) => t.function.name))
+    expect(first.tools!.map((t) => (t as Anthropic.Tool).name)).toEqual(
+      BRAIN_MODEL_TOOLS.map((t) => t.function.name)
+        .filter((name) => isReadOnlyTool(name) || ['finish', 'ask_user', 'answer_question'].includes(name)),
+    )
     expect((first.tools!.at(-1) as Anthropic.Tool).cache_control).toEqual({ type: 'ephemeral' })
     const system = first.system as Anthropic.TextBlockParam[]
     expect(system[0].cache_control).toEqual({ type: 'ephemeral' })
@@ -209,13 +213,13 @@ describe('a turn on the gateway', () => {
     expect(JSON.parse(answered[0].content as string)).toMatchObject({ ok: false, blocked: 'needs_human_approval' })
   }, 60_000)
 
-  it('runs none of the calls in an answer cut off at its output limit', async () => {
+  // A cut-off answer with calls in it goes back to the model, each call
+  // answered as not run (brain-cut-off-tool-calls.spec.ts). One with no call
+  // has nothing to answer, so the turn stops.
+  it('stops on an answer cut off at its output limit before it called anything', async () => {
     const provider = scriptedProvider([
       classified('MODIFY'),
-      scriptedMessage({
-        toolUse: [{ id: 'toolu_create', name: 'create_table', input: { tableName: 'half_written', columns: [] } }],
-        stopReason: 'max_tokens',
-      }),
+      scriptedMessage({ text: 'I will add a half_written table with', stopReason: 'max_tokens' }),
     ])
 
     const { result } = await turn(provider, 'add a half_written table')

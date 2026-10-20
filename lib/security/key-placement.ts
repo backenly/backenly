@@ -38,6 +38,7 @@
 
 import { createHash } from 'crypto'
 import { prisma } from '@/lib/db/prisma'
+import { answersFromCopy, authorizingKeyByHash } from '@/lib/auth-projection/read'
 import { presentedApiKey } from '@/lib/branches/key-scope'
 import {
   SERVICE_ROLE_IN_BROWSER,
@@ -140,10 +141,15 @@ async function placementFacts(rawKey: string): Promise<PlacementFacts | null> {
   const hit = cache.get(keyHash)
   if (hit && now - hit.at < CACHE_TTL_MS) return hit.facts
 
-  const row = await prisma.apiKey.findFirst({
-    where: { keyHash },
-    select: { id: true, name: true, keyPrefix: true, projectId: true, scope: true, keyType: true, serviceRole: true },
-  })
+  // Where this process answers from its region's copy, so does this gate: the copy while it is fresh, home otherwise
+  // (lib/auth-projection/read.ts). A regional request then reads nothing in Mumbai before its response, and keeps
+  // being served while home cannot answer. An MCP or service-role key is never copied, so home still answers for it.
+  const row = answersFromCopy()
+    ? await authorizingKeyByHash(keyHash)
+    : await prisma.apiKey.findFirst({
+        where: { keyHash },
+        select: { id: true, name: true, keyPrefix: true, projectId: true, scope: true, keyType: true, serviceRole: true },
+      })
   const facts: PlacementFacts | null = row
     ? {
         id: row.id,

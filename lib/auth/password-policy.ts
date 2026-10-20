@@ -11,8 +11,8 @@
  * imports nothing, so it is safe in a client bundle, which lib/auth/password.ts
  * (bcrypt, crypto) is not.
  *
- * Platform accounts only. End-user auth inside a project has its own policy in
- * lib/services/workspaceAuth.ts.
+ * Platform accounts only. End-user auth inside a project has its own rules in
+ * lib/services/end-user-auth-flows.ts.
  */
 
 export const PASSWORD_MIN_LENGTH = 12

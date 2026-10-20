@@ -258,9 +258,14 @@ export async function PATCH(request: NextRequest, props: { params: Promise<{ id:
   const params = await props.params
   return withProjectValidation<any>(request, async (validated) => {
     const { projectId } = validated
+    let skipped: { reason: 'served-elsewhere' | 'unreachable'; region: string | null } | null = null
     try {
       const { runObserverForProject } = await import('@/lib/services/workspace-observer')
-      await runObserverForProject(projectId)
+      const observed = await runObserverForProject(projectId)
+      // A project another region serves is checked by that region's worker on
+      // its schedule, and one this process cannot reach is not checked at all:
+      // nothing was scanned now, and the answer says so instead of a scan time.
+      if (observed.skipped) skipped = { reason: observed.skipped, region: observed.region ?? null }
     } catch (err: any) {
       return NextResponse.json(
         { success: false, error: sanitizeDiagnostic(err) || 'Health scan failed' },
@@ -291,8 +296,9 @@ export async function PATCH(request: NextRequest, props: { params: Promise<{ id:
     return NextResponse.json({
       success: true,
       data: {
-        scannedAt: new Date().toISOString(),
-        lastCheckedAt: project?.lastObservedAt ?? new Date().toISOString(),
+        scannedAt: skipped ? null : new Date().toISOString(),
+        lastCheckedAt: project?.lastObservedAt ?? (skipped ? null : new Date().toISOString()),
+        ...(skipped ? { notScanned: skipped } : {}),
         lastReconciledAt: lastLoopTick ? lastLoopTick.toISOString() : null,
         autoFixedThisWeek: repairs.verified,
         unverifiedRepairsThisWeek: repairs.unverified,

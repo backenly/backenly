@@ -2,11 +2,12 @@ export const dynamic = 'force-dynamic'
 
 import { NextRequest } from 'next/server'
 import { v1ApiMiddleware, requirePermission, requireCapability } from '@/lib/api/v1/middleware'
-import { createErrorResponse, createSuccessResponse, handleValidationError, ErrorCodes } from '@/lib/api/v1/errors'
+import { createErrorResponse, createSuccessResponse, handleValidationError, ErrorCodes, regionErrorResponse, dataRefusalResponse } from '@/lib/api/v1/errors'
 import { insertSchema } from '@/lib/api/v1/schemas'
 import { typedParams } from '@/lib/api/v1/typed-params'
 import { validateRequestBody } from '@/lib/validation/schemas'
 import { prisma } from '@/lib/db'
+import type { QueryContext } from '@/lib/db/query-errors'
 import { columnTypes } from '@/lib/mcp/runtime-db'
 import { executeWithUserContext } from '@/lib/services/workspace-rls'
 import { validateInsertPayload } from '@/lib/services/workspace-validator'
@@ -19,6 +20,8 @@ import { projectRestriction, restrictionDetails, restrictionMessage } from '@/li
  */
 async function handlePOST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
   const params = await props.params;
+  // What was bound, so a refusal can name its column (lib/api/v1/data-errors.ts).
+  let refusal: QueryContext | undefined
   try {
     const middleware = await v1ApiMiddleware(request, params)
     if (middleware.response) {
@@ -88,6 +91,7 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
 
       const colList = cols.map(c => `"${c}"`).join(', ')
       const bound = typedParams(types)
+      refusal = bound.context(tableName)
       const placeholders = cols.map(c => bound.bind(c, row[c])).join(', ')
 
       const sql = `INSERT INTO "${schemaName}"."${tableName}" (${colList}) VALUES (${placeholders}) RETURNING *`
@@ -128,8 +132,10 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
 
     return createSuccessResponse({ data: inserted.length === 1 ? inserted[0] : inserted })
   } catch (error: any) {
+    const refused = dataRefusalResponse(error, refusal)
+    if (refused) return refused
     console.error('Database insert error:', error)
-    return createErrorResponse(ErrorCodes.INTERNAL_ERROR, 'Failed to insert data', 500)
+    return regionErrorResponse(error) ?? createErrorResponse(ErrorCodes.INTERNAL_ERROR, 'Failed to insert data', 500)
   }
 }
 

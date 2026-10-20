@@ -171,6 +171,39 @@ function queryOrderBy(orderBy: unknown): string {
   return parts.length ? `ORDER BY ${parts.join(', ')} ` : ''
 }
 
+/**
+ * A ctx.db table or column name, exactly as written, or refused. These helpers
+ * used to strip what was not a name character from a table or a query's column,
+ * and to drop such a column from an update's or a delete's `where`: "items-old"
+ * reached the table items, and a key like "id; --" compared another column or
+ * none, so an update or delete reached every row the other conditions left, as
+ * the function's role (the service role, unless it runs for an end user).
+ */
+function plainName(name: unknown, what: string): string {
+  if (typeof name !== 'string' || !/^[a-z_][a-z0-9_]*$/i.test(name)) {
+    throw new Error(`${what}: ${JSON.stringify(name)} is not a table or column name`)
+  }
+  return name
+}
+
+/**
+ * The columns of a ctx.db `where`, which matches by equality: each a plain name
+ * with a value. An undefined value is refused rather than compared as NULL,
+ * which matches nothing and so hid the caller's mistake.
+ */
+function whereColumns(where: unknown, what: string): string[] {
+  if (where === undefined || where === null) return []
+  // A plain object only: a Map or a Date has no entries, and an unfiltered read would follow.
+  if (Object.prototype.toString.call(where) !== '[object Object]') {
+    throw new Error(`${what}: where must be an object of column names and values`)
+  }
+  return Object.entries(where as Record<string, unknown>).map(([column, value]) => {
+    plainName(column, what)
+    if (value === undefined) throw new Error(`${what}: the value for "${column}" in where is undefined`)
+    return column
+  })
+}
+
 function buildDbProxy(projectId: string, caller: FunctionCallerContext = {}) {
   const schemaName = `workspace_${projectId}`
   const serviceRole = caller.serviceRole ?? true
@@ -179,7 +212,8 @@ function buildDbProxy(projectId: string, caller: FunctionCallerContext = {}) {
 
   return {
     async 'db.query'([table, where, opts]: [string, Record<string, any> | undefined, { limit?: unknown; offset?: unknown; orderBy?: unknown } | undefined]) {
-      const safeName = table.replace(/[^a-z0-9_]/gi, '')
+      const safeName = plainName(table, 'ctx.db.query')
+      const keys = whereColumns(where, 'ctx.db.query')
       // An explicit page. This used to be a silent, fixed LIMIT 100, so a job
       // "deleting every stale session" saw 100 arbitrary rows per run and
       // reported success (FN-14). The default stays 100 rows; up to 1000 per
@@ -189,17 +223,15 @@ function buildDbProxy(projectId: string, caller: FunctionCallerContext = {}) {
       const limit = Math.min(Math.max(Math.trunc(Number(opts?.limit ?? 100)) || 100, 1), 1000)
       const offset = Math.max(Math.trunc(Number(opts?.offset ?? 0)) || 0, 0)
       const page = `${queryOrderBy(opts?.orderBy)}LIMIT ${limit} OFFSET ${offset}`
-      if (where && Object.keys(where).length > 0) {
-        const keys = Object.keys(where).map(k => k.replace(/[^a-z0-9_]/gi, ''))
-        const raw = Object.keys(where)
+      if (where && keys.length > 0) {
         const types = await columnTypes(projectId, schemaName, safeName)
-        const conditions = keys.map((c, i) => `"${c}" = ${dbCast(types.get(c), where[raw[i]], i + 1)}`).join(' AND ')
+        const conditions = keys.map((c, i) => `"${c}" = ${dbCast(types.get(c), where[c], i + 1)}`).join(' AND ')
         return executeWithUserContext<any>(
           projectId,
           endUserId,
           serviceRole,
           `SELECT * FROM "${schemaName}"."${safeName}" WHERE ${conditions} ${page}`,
-          keys.map((c, i) => coerceValue(types.get(c), where[raw[i]])),
+          keys.map((c) => coerceValue(types.get(c), where[c])),
           endUserRole
         )
       }
@@ -214,8 +246,9 @@ function buildDbProxy(projectId: string, caller: FunctionCallerContext = {}) {
     },
 
     async 'db.insert'([table, data]: [string, Record<string, any>]) {
-      const safeName = table.replace(/[^a-z0-9_]/gi, '')
-      const cols = Object.keys(data).filter(c => /^[a-z_][a-z0-9_]*$/i.test(c))
+      const safeName = plainName(table, 'ctx.db.insert')
+      // A column that is not a name is refused, not left out of the row.
+      const cols = Object.keys(data ?? {}).map((c) => plainName(c, 'ctx.db.insert'))
       if (cols.length === 0) throw new Error('No valid columns to insert')
       const colList = cols.map(c => `"${c}"`).join(', ')
       const types = await columnTypes(projectId, schemaName, safeName)
@@ -232,9 +265,9 @@ function buildDbProxy(projectId: string, caller: FunctionCallerContext = {}) {
     },
 
     async 'db.update'([table, where, data]: [string, Record<string, any>, Record<string, any>]) {
-      const safeName = table.replace(/[^a-z0-9_]/gi, '')
-      const setCols = Object.keys(data).filter(c => /^[a-z_][a-z0-9_]*$/i.test(c))
-      const whereCols = Object.keys(where).filter(c => /^[a-z_][a-z0-9_]*$/i.test(c))
+      const safeName = plainName(table, 'ctx.db.update')
+      const setCols = Object.keys(data ?? {}).map((c) => plainName(c, 'ctx.db.update'))
+      const whereCols = whereColumns(where, 'ctx.db.update')
       if (setCols.length === 0) throw new Error('No valid columns to update')
       if (whereCols.length === 0) throw new Error('WHERE clause required for update')
       const types = await columnTypes(projectId, schemaName, safeName)
@@ -254,8 +287,8 @@ function buildDbProxy(projectId: string, caller: FunctionCallerContext = {}) {
     },
 
     async 'db.delete'([table, where]: [string, Record<string, any>]) {
-      const safeName = table.replace(/[^a-z0-9_]/gi, '')
-      const cols = Object.keys(where).filter(c => /^[a-z_][a-z0-9_]*$/i.test(c))
+      const safeName = plainName(table, 'ctx.db.delete')
+      const cols = whereColumns(where, 'ctx.db.delete')
       if (cols.length === 0) throw new Error('WHERE clause required for delete')
       const types = await columnTypes(projectId, schemaName, safeName)
       const conditions = cols.map((c, i) => `"${c}" = ${dbCast(types.get(c), where[c], i + 1)}`).join(' AND ')

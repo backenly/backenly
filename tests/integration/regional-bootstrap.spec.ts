@@ -50,9 +50,11 @@ import path from 'path'
 import { Client } from 'pg'
 
 import { disconnectRegionalClients } from '@/lib/data-plane/regional'
+import { prisma } from '@/lib/db/prisma'
 import { driftCaptureHealth, driftEventBacklog } from '@/lib/autonomy/drift-event-upkeep'
 import { hasCapability, resetCapabilityCache } from '@/lib/autonomy/platform-capabilities'
-import { directAccessRoleNames } from '@/lib/services/direct-access'
+import { createProvisionedProject } from '@/lib/projects/provision'
+import { directAccessRoleNames, syncDirectAccessGrants } from '@/lib/services/direct-access'
 import { generatePassword, scramSha256Verifier } from '@/tools/managed-db/regional/scram'
 
 jest.setTimeout(300_000)
@@ -495,6 +497,207 @@ describe('the application, against the database the procedure built', () => {
   })
 })
 
+/** Every table and sequence in `schema` the backup role cannot read: what fails pg_dump. */
+async function unreadableByBackup(schema: string): Promise<string[]> {
+  const found = await rows<{ relname: string }>(
+    superUrl(),
+    `SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = $1 AND c.relkind IN ('r', 'p', 'S')
+        AND NOT has_table_privilege('backenly_backup', c.oid, 'SELECT')
+      ORDER BY 1`,
+    [schema],
+  )
+  return found.map((r) => r.relname)
+}
+
+async function backupCanUse(schema: string): Promise<boolean> {
+  const [{ usable }] = await rows<{ usable: boolean }>(
+    superUrl(),
+    `SELECT has_schema_privilege('backenly_backup', $1, 'USAGE') AS usable`,
+    [schema],
+  )
+  return usable
+}
+
+/** pg_dump of one workspace as the backup login, the way the snapshot job runs it. */
+function dumpAsBackup(schema: string): { status: number; stdout: string; stderr: string } {
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^PG/i.test(key))) as NodeJS.ProcessEnv
+  const result = spawnSync(
+    exe('pg_dump'),
+    ['--host', '127.0.0.1', '--port', String(port), '--username', 'backenly_backup', '--dbname', DB,
+     '--no-password', '--schema', schema, '--no-privileges', '--no-owner'],
+    { encoding: 'utf8', env: { ...env, PGPASSWORD: passwords.backenly_backup }, timeout: 60_000 },
+  )
+  return { status: result.status ?? 1, stdout: result.stdout ?? '', stderr: result.stderr ?? '' }
+}
+
+describe('a project without direct access, which the application makes in the region', () => {
+  // Every snapshot of such a project failed in pg_dump, as backenly_backup, with
+  // "permission denied for schema": the backup role was given read on a
+  // workspace only by the direct-access sync, and only for a project with a
+  // direct-access role.
+  const REGION = 'us-east-1'
+  const saved = {
+    edition: process.env.BACKENLY_EDITION,
+    backupDir: process.env.BACKUP_DIR,
+    path: process.env.PATH,
+  }
+  let ownerId = ''
+  let projectId = ''
+  let schema = ''
+
+  beforeAll(async () => {
+    process.env.DATABASE_URL_US_EAST_1 = loginUrl('backenly_app')
+    // Project creation is refused on a single-tenant deployment, the default.
+    process.env.BACKENLY_EDITION = 'cloud'
+    // workspace-backup reads it when it loads, which is lazily, below.
+    process.env.BACKUP_DIR = path.join(work, 'backups')
+    ownerId = (
+      await prisma.user.create({
+        data: { email: `regional-backups-${randomUUID()}@example.test`, name: 'regional backups fixture' },
+        select: { id: true },
+      })
+    ).id
+  })
+
+  afterAll(async () => {
+    for (const [key, value] of [
+      ['BACKENLY_EDITION', saved.edition],
+      ['BACKUP_DIR', saved.backupDir],
+      ['PATH', saved.path],
+    ] as const) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+    delete process.env.BACKUP_DATABASE_URL_US_EAST_1
+    delete process.env.BACKENLY_SERVICE_REGION
+    if (projectId) await prisma.workspaceBackup.deleteMany({ where: { projectId } }).catch(() => {})
+    if (ownerId) {
+      await prisma.project.deleteMany({ where: { userId: ownerId } }).catch(() => {})
+      await prisma.user.deleteMany({ where: { id: ownerId } }).catch(() => {})
+    }
+  })
+
+  it('is readable by the backup role from the moment the application creates it', async () => {
+    const created = await createProvisionedProject({ name: `regional backups ${randomUUID()}`, userId: ownerId, region: REGION })
+    projectId = created.id
+    schema = created.postgresSchema
+    expect(await backupCanUse(schema)).toBe(true)
+    // And nothing else: the schema is still the application's, with no direct-access role.
+    expect(await rows(superUrl(), `SELECT pg_get_userbyid(nspowner) AS owner FROM pg_namespace WHERE nspname = $1`, [schema])).toEqual([
+      { owner: 'backenly_app' },
+    ])
+  })
+
+  it('stays readable as the application adds tables, with no sync after them', async () => {
+    // Over the application's own login, as every platform path runs its DDL
+    // (typed actions, migrations, imports, branch merges): its default privilege
+    // covers each table from the moment it exists.
+    await rows(
+      loginUrl('backenly_app'),
+      `CREATE TABLE "${schema}".orders (id serial PRIMARY KEY, total integer);
+       CREATE TABLE "${schema}".customers (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, name text)`,
+    )
+    expect(await unreadableByBackup(schema)).toEqual([])
+    const relations = await rows<{ relname: string }>(
+      superUrl(),
+      `SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 ORDER BY 1`,
+      [schema],
+    )
+    expect(relations.map((r) => r.relname)).toEqual(expect.arrayContaining(['customers', 'customers_id_seq', 'orders', 'orders_id_seq']))
+  })
+
+  it('is synced after DDL that no default privilege covers, though it has no direct-access credentials', async () => {
+    // A table made by hand as the administrator: neither the application nor a developer.
+    await rows(adminUrl(), `CREATE TABLE "${schema}".by_hand (id serial PRIMARY KEY)`)
+    expect(await unreadableByBackup(schema)).toEqual(['by_hand', 'by_hand_id_seq'])
+
+    await syncDirectAccessGrants(projectId)
+
+    expect(await unreadableByBackup(schema)).toEqual([])
+  })
+
+  it('is dumped by the snapshot job as the backup role, restored, and dumped again', async () => {
+    // As us-east-1's own process, with the region's backup credential, and this
+    // cluster's own pg_dump and psql.
+    process.env.BACKENLY_SERVICE_REGION = REGION
+    process.env.BACKUP_DATABASE_URL_US_EAST_1 = loginUrl('backenly_backup')
+    process.env.PATH = `${bin}${path.delimiter}${saved.path ?? ''}`
+    const backups = await import('@/lib/services/workspace-backup')
+
+    expect(await backups.backupWorkspace(projectId)).toMatchObject({ success: true })
+    // The replay makes the schema anew, without the grants the old one held.
+    expect(await backups.restoreWorkspace(projectId)).toMatchObject({ success: true })
+    expect(await backupCanUse(schema)).toBe(true)
+    expect(await unreadableByBackup(schema)).toEqual([])
+    expect(await backups.backupWorkspace(projectId)).toMatchObject({ success: true })
+    expect(await prisma.workspaceBackup.count({ where: { projectId, status: 'completed' } })).toBe(2)
+  })
+
+  it('passes the procedure’s verification', async () => {
+    const result = bootstrap({ DATABASE_URL: adminUrl(), BOOTSTRAP_MODE: 'check', EXPECT_DATABASE: DB })
+    expect(result.output).toContain('Check only: nothing was written. Every step is recorded, and the database verifies.')
+    expect(result.status).toBe(0)
+  })
+})
+
+describe('a workspace made before the backup role was given every one', () => {
+  // As the region's existing projects were: a schema the application made, and
+  // a table in it, with nothing granted to the backup role.
+  const schema = `workspace_${randomUUID()}`
+
+  it('cannot be dumped, and fails the procedure’s verification', async () => {
+    await rows(loginUrl('backenly_app'), `CREATE SCHEMA "${schema}"`)
+    await rows(loginUrl('backenly_app'), `CREATE TABLE "${schema}".probe (id serial PRIMARY KEY, note text)`)
+
+    const dump = dumpAsBackup(schema)
+    expect(dump.stderr).toMatch(/permission denied for schema/)
+    expect(dump.status).not.toBe(0)
+
+    const result = bootstrap({ DATABASE_URL: adminUrl(), BOOTSTRAP_MODE: 'check', EXPECT_DATABASE: DB })
+    expect(result.output).toContain(`backenly_backup cannot use workspace schema ${schema}, so its snapshots fail`)
+    expect(result.status).not.toBe(0)
+  })
+
+  it('fails a check on its own of a region whose step files changed, as a release gate reads it', async () => {
+    // As a region that applied an earlier setup-direct-access.sql.
+    await rows(superUrl(), `UPDATE backenly_meta.bootstrap_steps SET checksum = 'an earlier file' WHERE step = 'direct-access'`)
+    const result = bootstrap({ DATABASE_URL: adminUrl(), BOOTSTRAP_MODE: 'check', EXPECT_DATABASE: DB })
+    expect(result.output).toContain('step direct-access: changed (applied, but its files have changed since)')
+    expect(result.output).toContain(`backenly_backup cannot use workspace schema ${schema}, so its snapshots fail`)
+    expect(result.output).toContain('Check only: nothing was written. 1 step(s) changed since applied, and the database does not verify.')
+    expect(result.status).not.toBe(0)
+  })
+
+  it('is reported, without refusing it, by the check a launcher runs before its own apply', async () => {
+    // launch.ts checks before it applies, so failing this check would refuse
+    // the very apply that converges the workspace.
+    const result = bootstrap({ DATABASE_URL: adminUrl(), BOOTSTRAP_MODE: 'check', BOOTSTRAP_PRE_APPLY: 'true', EXPECT_DATABASE: DB })
+    expect(result.output).toContain('step direct-access: changed (applied, but its files have changed since)')
+    expect(result.output).toContain(`backenly_backup cannot use workspace schema ${schema}, so its snapshots fail`)
+    expect(result.output).toContain('Check only: nothing was written. 1 step(s) changed since applied: the apply that follows converges what does not verify.')
+    expect(result.status).toBe(0)
+  })
+
+  it('is converged by applying the procedure again, which then verifies', async () => {
+    const result = bootstrap({ DATABASE_URL: superUrl(), BOOTSTRAP_MODE: 'apply', EXPECT_DATABASE: DB })
+    expect(result.output).toContain('step direct-access: applied')
+    expect(result.output).toContain('Regional database initialised and verified.')
+    expect(result.status).toBe(0)
+
+    expect(await unreadableByBackup(schema)).toEqual([])
+    const dump = dumpAsBackup(schema)
+    // The whole result on a failure, so pg_dump's own error is in the report.
+    expect(dump).toMatchObject({ status: 0 })
+    expect(dump.stdout).toContain(`CREATE TABLE "${schema}".probe`)
+
+    // The launcher's closing check: every step current, and the database verifies.
+    const check = bootstrap({ DATABASE_URL: adminUrl(), BOOTSTRAP_MODE: 'check', EXPECT_DATABASE: DB })
+    expect(check.output).toContain('Check only: nothing was written. Every step is recorded, and the database verifies.')
+    expect(check.status).toBe(0)
+  })
+})
+
 describe('the procedure refuses', () => {
   it('to replace a live credential it was not asked to, and changes nothing', async () => {
     const before = await catalog()
@@ -515,6 +718,15 @@ describe('the procedure refuses', () => {
     const wrong = bootstrap({ DATABASE_URL: superUrl(), BOOTSTRAP_MODE: 'check', EXPECT_DATABASE: 'backenly' })
     expect(wrong.status).toBe(2)
     expect(wrong.output).toContain(`refusing: connected database is "${DB}", expected "backenly"`)
+  })
+
+  it('a pre-apply signal on anything but a check, or one it does not understand', async () => {
+    const onApply = bootstrap({ DATABASE_URL: superUrl(), BOOTSTRAP_MODE: 'apply', BOOTSTRAP_PRE_APPLY: 'true' })
+    expect(onApply.status).toBe(2)
+    expect(onApply.output).toContain('refusing: BOOTSTRAP_PRE_APPLY marks the check a launcher runs before its own apply, never the apply')
+    const unknown = bootstrap({ DATABASE_URL: adminUrl(), BOOTSTRAP_MODE: 'check', BOOTSTRAP_PRE_APPLY: 'yes' })
+    expect(unknown.status).toBe(2)
+    expect(unknown.output).toContain('refusing: BOOTSTRAP_PRE_APPLY must be true or false, not "yes"')
   })
 
   it('but rotates exactly the credential it is asked to', async () => {

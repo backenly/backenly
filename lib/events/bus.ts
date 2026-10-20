@@ -264,8 +264,9 @@ on('deploy.complete', async (e) => {
 async function triggerObserverForProject(projectId: string, reason: string): Promise<void> {
   try {
     const { runObserverForProject } = await import('@/lib/services/workspace-observer')
-    await runObserverForProject(projectId)
-    console.log(`[EventBus] WorkspaceObserver triggered by ${reason} for project=${projectId}`)
+    // A project another region serves is left to that region's worker.
+    const result = await runObserverForProject(projectId)
+    if (!result.skipped) console.log(`[EventBus] WorkspaceObserver triggered by ${reason} for project=${projectId}`)
   } catch (err: any) {
     console.error(`[EventBus] Observer trigger failed (${reason}):`, err?.message)
   }

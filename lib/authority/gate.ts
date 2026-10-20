@@ -337,39 +337,28 @@ export async function enforceLegacyCompatibility(
 }
 
 /**
- * The one check for repairs that do not yet run through `runAutoFix`: the
- * observer's inline fixes, infra intelligence's hot-table indexes and
- * coevolution's filtered-column indexes.
+ * Why the deployment's flags or the owner's dial hold back a repair of this
+ * tier, or null when they let it run. It asks exactly what `runReconciler`
+ * asks, in the same order (flags, then dial), and then whether the dial allows
+ * the tier. It records nothing, so a caller that only reports the answer, as
+ * the observer does, leaves no trace of a repair that never ran.
  *
- * Each of those used to mutate a customer's schema on its own schedule with no
- * reference to the deployment's live-execution flag or the owner's dial, so
- * setting a project to Off stopped the reconciler and left three other writers
- * running, and `resolveExecutionMode` told the owner nothing was being
- * repaired. This asks exactly what `runReconciler` asks, in the same order
- * (flag, then dial), and then whether the dial allows the repair's tier.
- *
- * Only executions are recorded, as legacy-compatibility use. A refusal is not:
- * infra intelligence runs every minute and its counters keep a repaired table
- * flagged for a long time, so auditing refusals would write one row per project
- * per minute and say nothing the open finding does not.
+ * It replaced `permitInlineRepair`, the check three writers made before
+ * changing a schema on their own, outside `runAutoFix`: the observer's inline
+ * fixes, infra intelligence's hot-table indexes and coevolution's
+ * filtered-column indexes. None of them changes a schema any more; every
+ * autonomous repair runs through the governed kernel, held during an incident
+ * (lib/autonomy/change-freeze.ts).
  */
-export async function permitInlineRepair(
-  projectId: string,
-  findingType: string,
-  tier: AutonomyTier,
-): Promise<{ allowed: boolean; reason: string | null }> {
+export async function repairRefusal(projectId: string, tier: AutonomyTier): Promise<string | null> {
   const { resolveExecutionMode } = await import('@/lib/autonomy/execution-mode')
   const level = await projectLevel(projectId)
   const mode = resolveExecutionMode(level)
-  if (!mode.repairsAreApplied) return { allowed: false, reason: mode.explanation }
+  if (!mode.repairsAreApplied) return mode.explanation
   if (!isTierAutoAllowed(level, tier)) {
-    return {
-      allowed: false,
-      reason: `The ${level} autonomy mode does not apply tier ${tier} repairs on its own, so this is waiting for you.`,
-    }
+    return `The ${level} autonomy mode does not apply tier ${tier} repairs on its own, so this is waiting for you.`
   }
-  await recordCompatibilityUse(projectId, findingType, 'permitted', null)
-  return { allowed: true, reason: null }
+  return null
 }
 
 /**

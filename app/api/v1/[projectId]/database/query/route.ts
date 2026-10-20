@@ -2,12 +2,14 @@ export const dynamic = 'force-dynamic'
 
 import { NextRequest } from 'next/server'
 import { v1ApiMiddleware, requirePermission, requireCapability } from '@/lib/api/v1/middleware'
-import { createErrorResponse, createSuccessResponse, handleValidationError, ErrorCodes, regionErrorResponse } from '@/lib/api/v1/errors'
+import { createErrorResponse, createSuccessResponse, handleValidationError, ErrorCodes, regionErrorResponse, dataRefusalResponse } from '@/lib/api/v1/errors'
 import { querySchema, PAGINATION_DEFAULT_LIMIT, PAGINATION_MAX_LIMIT } from '@/lib/api/v1/schemas'
 import { typedParams } from '@/lib/api/v1/typed-params'
+import { whereConditions } from '@/lib/api/v1/where'
 import { validateRequestBody } from '@/lib/validation/schemas'
 import { prisma } from '@/lib/db'
 import { workspaceRawClient } from '@/lib/data-plane/regional'
+import type { QueryContext } from '@/lib/db/query-errors'
 import { columnTypes } from '@/lib/mcp/runtime-db'
 import { executeWithUserContext } from '@/lib/services/workspace-rls'
 import { recordedV1 } from '@/lib/traffic/recorded-v1'
@@ -18,6 +20,8 @@ import { recordedV1 } from '@/lib/traffic/recorded-v1'
  */
 async function handleGET(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
   const params = await props.params;
+  // What was bound, so a refusal can name its column (lib/api/v1/data-errors.ts).
+  let refusal: QueryContext | undefined
   try {
     const middleware = await v1ApiMiddleware(request, params)
     if (middleware.response) return middleware.response
@@ -82,6 +86,7 @@ async function handleGET(request: NextRequest, props: { params: Promise<{ projec
     const RESERVED_PARAMS = new Set(['table', 'limit', 'offset', 'page', 'sort', 'order'])
     const filterParts: string[] = []
     const bound = typedParams(types)
+    refusal = bound.context(tableName)
     for (const [key, val] of searchParams.entries()) {
       if (RESERVED_PARAMS.has(key)) continue
       if (!/^[a-z_][a-z0-9_]*$/i.test(key)) continue
@@ -155,6 +160,8 @@ async function handleGET(request: NextRequest, props: { params: Promise<{ projec
       }
     )
   } catch (error: any) {
+    const refused = dataRefusalResponse(error, refusal)
+    if (refused) return refused
     console.error('Database query GET error:', error)
     return regionErrorResponse(error) ?? createErrorResponse(ErrorCodes.INTERNAL_ERROR, 'Failed to execute database query', 500)
   }
@@ -166,6 +173,8 @@ async function handleGET(request: NextRequest, props: { params: Promise<{ projec
  */
 async function handlePOST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
   const params = await props.params;
+  // What was bound, so a refusal can name its column (lib/api/v1/data-errors.ts).
+  let refusal: QueryContext | undefined
   try {
     const middleware = await v1ApiMiddleware(request, params)
     if (middleware.response) {
@@ -207,32 +216,12 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
       return createErrorResponse(ErrorCodes.NOT_FOUND, `Table '${table}' not found in this project`, 404)
     }
 
-    // Build WHERE clause from filter object. Each value is cast to its
-    // column's type (lib/api/v1/typed-params.ts); a `contains` pattern is not.
-    const whereParts: string[] = []
-    const bound = typedParams(await columnTypes(context.projectId, schemaName, tableName))
-
-    if (where && typeof where === 'object') {
-      for (const [col, val] of Object.entries(where)) {
-        // Sanitize column name (only allow alphanumeric + underscore)
-        if (!/^[a-z_][a-z0-9_]*$/i.test(col)) continue
-        if (val !== null && typeof val === 'object') {
-          const op = val as any
-          if (op.gt !== undefined)  whereParts.push(`"${col}" > ${bound.bind(col, op.gt)}`)
-          if (op.gte !== undefined) whereParts.push(`"${col}" >= ${bound.bind(col, op.gte)}`)
-          if (op.lt !== undefined)  whereParts.push(`"${col}" < ${bound.bind(col, op.lt)}`)
-          if (op.lte !== undefined) whereParts.push(`"${col}" <= ${bound.bind(col, op.lte)}`)
-          if (op.not !== undefined) whereParts.push(`"${col}" != ${bound.bind(col, op.not)}`)
-          if (op.contains !== undefined) whereParts.push(`"${col}" ILIKE ${bound.raw(`%${op.contains}%`)}`)
-          if (op.in !== undefined && Array.isArray(op.in)) {
-            const placeholders = op.in.map((v: unknown) => bound.bind(col, v)).join(', ')
-            whereParts.push(`"${col}" IN (${placeholders})`)
-          }
-        } else {
-          whereParts.push(`"${col}" = ${bound.bind(col, val)}`)
-        }
-      }
-    }
+    // The filter's conditions, each value cast to its column's type
+    // (lib/api/v1/where.ts).
+    const types = await columnTypes(context.projectId, schemaName, tableName)
+    const bound = typedParams(types)
+    refusal = bound.context(tableName)
+    const whereParts = whereConditions(where, bound, types)
 
     // Auto-exclude soft-deleted rows (tables with deleted_at column) unless caller explicitly filters on it
     const callerFilteredDeletedAt = whereParts.some(p => p.includes('"deleted_at"'))
@@ -280,6 +269,8 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
       { limit, page: Math.floor(offset / limit), total, hasMore: offset + rows.length < total }
     )
   } catch (error: any) {
+    const refused = dataRefusalResponse(error, refusal)
+    if (refused) return refused
     console.error('Database query error:', error)
     return regionErrorResponse(error) ?? createErrorResponse(ErrorCodes.INTERNAL_ERROR, 'Failed to execute database query', 500)
   }

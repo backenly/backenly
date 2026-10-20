@@ -163,3 +163,49 @@ describe('autonomy digest and events', () => {
     for (const e of confirmed) expect(e.what).not.toMatch(/could not be confirmed/)
   }, 30_000)
 })
+
+describe('the event feed and an incident freeze', () => {
+  beforeAll(async () => {
+    // As the repair loop writes it when it holds a pass back (lib/autonomy/reconciler.ts).
+    await audit('AUTONOMY_CHANGE_FREEZE', {
+      reason: 'project is mid-incident — autonomous changes frozen this tick',
+      health: ['Response time spiked to 480ms (p95).'],
+      wouldHaveApplied: 1,
+      loop: 'reconciler',
+    })
+    // As another path writes it when it holds back: the fix loop here
+    // (lib/autonomy/change-freeze.ts).
+    await audit('AUTONOMY_REPAIR_HELD', {
+      reason: 'project is mid-incident — autonomous changes frozen this tick',
+      health: ['Error rate rose to 12%.'],
+      wouldHaveApplied: 3,
+      loop: 'reconciler',
+      via: 'agentic_fix_loop',
+    })
+  }, 30_000)
+
+  it('shows a held-back pass only when asked, and never as a fix', async () => {
+    const since = encodeURIComponent(new Date(Date.now() - 60 * 60 * 1000).toISOString())
+    const plain = await (await eventsGET(req(`/autonomy/events?since=${since}`), params())).json()
+    expect(plain.events.some((e: any) => e.kind === 'held_back')).toBe(false)
+
+    const asked = await (await eventsGET(req(`/autonomy/events?since=${since}&include=held`), params())).json()
+    const held = asked.events.filter((e: any) => e.action === 'AUTONOMY_CHANGE_FREEZE')
+    expect(held).toHaveLength(1)
+    expect(held[0]).toMatchObject({ kind: 'held_back', verified: false, tableName: null })
+    expect(held[0].full).toMatch(/^Backenly held back a repair because the project is mid-incident/)
+    expect(held[0].full).toMatch(/Response time spiked to 480ms \(p95\)\./)
+    // Everything else in the feed is as it was.
+    expect(asked.events.length - asked.events.filter((e: any) => e.kind === 'held_back').length).toBe(plain.events.length)
+  }, 30_000)
+
+  it("says which path held back, when it was not the repair loop's own pass", async () => {
+    const since = encodeURIComponent(new Date(Date.now() - 60 * 60 * 1000).toISOString())
+    const asked = await (await eventsGET(req(`/autonomy/events?since=${since}&include=held`), params())).json()
+    const held = asked.events.filter((e: any) => e.action === 'AUTONOMY_REPAIR_HELD')
+    expect(held).toHaveLength(1)
+    expect(held[0]).toMatchObject({ kind: 'held_back', verified: false, tableName: null })
+    expect(held[0].full).toMatch(/^Backenly held back its fixes for 3 failing checks because the project is mid-incident/)
+    expect(held[0].full).toMatch(/Error rate rose to 12%\./)
+  }, 30_000)
+})

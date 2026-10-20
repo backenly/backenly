@@ -396,7 +396,10 @@ async function currentState(tx: Tx, region: CloudRegionId, changes: PendingChang
       ? []
       : await tx.$queryRaw<KeyState[]>`
           SELECT k."id", k."projectId", k."keyHash", k."name", k."keyPrefix", k."userId", k."role",
-                 k."permissions", k."capabilities", k."expiresAt", k."rateLimit", k."rateLimitWindow",
+                 -- A list a key was created without is NULL in the column, which Prisma and this platform read as
+                 -- empty (no capabilities listed = every capability). The region's copy requires a list.
+                 COALESCE(k."permissions", '{}'::text[]) AS "permissions",
+                 COALESCE(k."capabilities", '{}'::text[]) AS "capabilities", k."expiresAt", k."rateLimit", k."rateLimitWindow",
                  k."scope", k."keyType", k."serviceRole", k."branchId"
             FROM "api_keys" k JOIN "projects" p ON p."id" = k."projectId"
            WHERE k."id" = ANY(${keyIds}::text[]) AND p."region" = ${region}

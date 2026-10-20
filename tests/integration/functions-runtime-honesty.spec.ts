@@ -204,3 +204,50 @@ describe('FN-14: ctx.db.query pages explicitly', () => {
     expect(prompt).toContain('page with opts.offset under one fixed opts.orderBy')
   })
 })
+
+// ctx.db stripped what was not a name character from a table or a query's
+// column, and dropped such a column from an update's or a delete's where, so
+// "item-s" reached items and { id: 1, 'label; --': … } deleted every row the
+// rest of the where left, as the service role. A name is now used exactly as
+// written or refused, and so is an undefined value in a where.
+describe('ctx.db uses every name and condition as written, or refuses', () => {
+  async function run(name: string, lines: string[]) {
+    const fn = await prisma.aiFunction.create({
+      data: { projectId, name, description: name, triggerType: 'manual', status: 'active', generatedCode: lines.join('\n') },
+      select: { id: true },
+    })
+    return executeAiFunction(fn.id, projectId, { type: 'manual', data: {} }, { selfHeal: false })
+  }
+  const labels = () =>
+    prisma.$queryRawUnsafe<Array<{ n: number; changed: number }>>(
+      `SELECT count(*)::int AS n, count(*) FILTER (WHERE label NOT LIKE 'item-%')::int AS changed FROM "workspace_${projectId}"."items"`,
+    )
+
+  it('a where key, table or column that is not a name is refused, and nothing changes', async () => {
+    const before = await labels()
+    for (const [name, line, error] of [
+      ['bad-where-delete', "return await ctx.db.delete('items', { id: 1, 'label; --': 'x' })", 'is not a table or column name'],
+      ['bad-where-update', "return await ctx.db.update('items', { 'id-x': 1 }, { label: 'changed' })", 'is not a table or column name'],
+      ['bad-table-delete', "return await ctx.db.delete('item-s', { id: 1 })", 'is not a table or column name'],
+      ['bad-set-column', "return await ctx.db.update('items', { id: 1 }, { 'label-x': 'changed' })", 'is not a table or column name'],
+      ['bad-insert-column', "return await ctx.db.insert('items', { label: 'item-new', 'oops-x': 1 })", 'is not a table or column name'],
+      ['undefined-where', "return await ctx.db.delete('items', { id: undefined, label: 'item-1' })", 'is undefined'],
+      ['bad-query-column', "return await ctx.db.query('items', { 'id; --': 1 })", 'is not a table or column name'],
+      ['map-where', "return await ctx.db.query('items', new Map([['id', 1]]))", 'where must be an object'],
+    ] as const) {
+      const out = await run(name, [line])
+      expect({ name, success: out.success, error: String(out.error ?? '').includes(error) }).toEqual({ name, success: false, error: true })
+    }
+    expect(await labels()).toEqual(before)
+  }, 180_000)
+
+  it('a where of plain names and values still applies exactly', async () => {
+    const out = await run('good-update', [
+      "const rows = await ctx.db.update('items', { id: 2 }, { label: 'renamed-2' })",
+      "const back = await ctx.db.update('items', { id: 2 }, { label: 'item-2' })",
+      'return { first: rows.length, back: back.length, label: rows[0].label }',
+    ])
+    expect(out.success).toBe(true)
+    expect(out.returnValue).toEqual({ first: 1, back: 1, label: 'renamed-2' })
+  }, 120_000)
+})

@@ -118,11 +118,11 @@ afterAll(async () => {
   await new Promise<void>((resolve) => (server ? server.close(() => resolve()) : resolve()))
 }, 120_000)
 
-const queryNotes = async (token: string) => {
+const queryNotes = async (token: string, where?: Record<string, unknown>) => {
   const res = await fetch(`${base}/api/v1/${projectId}/database/query`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-api-key': publicKey, 'x-user-token': token },
-    body: JSON.stringify({ table: 'notes' }),
+    body: JSON.stringify({ table: 'notes', ...(where ? { where } : {}) }),
   })
   return { status: res.status, body: await res.json().catch(() => ({})) }
 }
@@ -157,6 +157,8 @@ describe('AUTH-F4: a blocked user is refused at request time', () => {
     const out = await queryNotes(token)
     expect(out.status).toBe(403)
     expect(JSON.stringify(out.body)).toContain('blocked')
+    // Refused before anything in the request is read, a filter the route would refuse included.
+    expect((await queryNotes(token, { title: { equals: 'x' } })).status).toBe(403)
   }, 60_000)
 
   it('unblocking restores the same token', async () => {

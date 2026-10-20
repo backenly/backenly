@@ -114,3 +114,21 @@ describe('instrumentation.ts', () => {
     expect(code).toMatch(/catch \(err\) \{\s+console\.error\(`\[CronScheduler\] NOT scheduling/)
   })
 })
+
+describe('runRegionalSystemTasks', () => {
+  // The share every region's scheduler runs for its own projects. Settling
+  // interrupted governed changes and dropping expired vaults used to run only
+  // from a Vercel cron route, which nothing on AWS calls.
+  const runner = fs
+    .readFileSync(path.join(process.cwd(), 'lib/services/cron-runner.ts'), 'utf8')
+    .replace(/\/\/[^\n]*/g, '')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+  const start = runner.indexOf('export async function runRegionalSystemTasks(')
+  const body = runner.slice(start, runner.indexOf('\n}\n', start))
+
+  it('settles this region\'s interrupted governed changes and drops its expired change vaults', () => {
+    expect(start).toBeGreaterThan(0)
+    expect(body).toContain('settleInterruptedChangesHere(now)')
+    expect(body).toContain('purgeExpiredVaultsHere(now)')
+  })
+})

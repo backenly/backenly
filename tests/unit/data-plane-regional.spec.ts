@@ -16,8 +16,10 @@ import {
   regionPostgrest,
   regionSetting,
   requireRegionDatabaseUrl,
+  workspaceClientUrl,
   type DataPlaneRole,
 } from '@/lib/data-plane/regional'
+import { withoutStatementCache } from '@/lib/data-plane/statement-cache'
 import { CLOUD_REGIONS, HOME_REGION } from '@/lib/regions'
 import { projectIdOfWorkspaceSchema } from '@/lib/security/workspace-schema'
 
@@ -209,6 +211,44 @@ describe('regionApiOrigin', () => {
     expect(() => regionApiOrigin('eu-central-1', HOME, { env: API_ENV })).toThrow(RegionNotConfiguredError)
     expect(() => regionApiOrigin('eu-central-1', HOME, { env: { PUBLIC_API_ORIGIN_EU_CENTRAL_1: 'ftp://x.test' } }))
       .toThrow(/not an http\(s\) URL/)
+  })
+})
+
+// Workspace SQL runs with Prisma's statement cache off, because the tables it
+// reads change shape (lib/data-plane/statement-cache.ts). What PostgreSQL does
+// with and without it is proven in
+// tests/integration/workspace-sql-cached-plan.spec.ts.
+describe('the workspace client connection string', () => {
+  const params = (url: string) => Object.fromEntries(new URL(url).searchParams)
+
+  it('turns the statement cache off and keeps everything else', () => {
+    const url = withoutStatementCache('postgresql://app:p%40ss@db.example.test:5432/backenly?sslmode=require')
+    expect(params(url)).toEqual({ sslmode: 'require', statement_cache_size: '0' })
+    expect(url).toContain('app:p%40ss@db.example.test:5432/backenly')
+  })
+
+  it('turns it off even when the connection string asks for one', () => {
+    expect(params(withoutStatementCache('postgresql://h.test/db?statement_cache_size=100'))).toEqual({
+      statement_cache_size: '0',
+    })
+  })
+
+  it('gives the home client a small pool of its own beside the platform client', () => {
+    expect(params(workspaceClientUrl(HOME_REGION, ENV.DATABASE_URL))).toEqual({
+      statement_cache_size: '0',
+      connection_limit: '5',
+    })
+  })
+
+  it('keeps a pool size the home connection string sets', () => {
+    expect(params(workspaceClientUrl(HOME_REGION, `${ENV.DATABASE_URL}?connection_limit=12`))).toEqual({
+      connection_limit: '12',
+      statement_cache_size: '0',
+    })
+  })
+
+  it("leaves a region's pool as its connection string sizes it", () => {
+    expect(params(workspaceClientUrl('us-east-1', ENV.DATABASE_URL_US_EAST_1))).toEqual({ statement_cache_size: '0' })
   })
 })
 

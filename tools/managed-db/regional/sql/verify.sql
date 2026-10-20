@@ -202,7 +202,7 @@ BEGIN
 
   -- ── Event triggers: PostgREST registration and sync, and DDL capture ──────
   FOREACH rname IN ARRAY ARRAY['backenly_pgrst_schema_create', 'backenly_pgrst_schema_drop', 'backenly_pgrst_ddl_sync',
-                               'backenly_ddl_watch', 'backenly_drop_watch'] LOOP
+                               'backenly_pgrst_drop_sync', 'backenly_ddl_watch', 'backenly_drop_watch'] LOOP
     SELECT evtenabled::text AS enabled INTO r FROM pg_event_trigger WHERE evtname = rname;
     IF NOT FOUND THEN
       problems := problems || format('event trigger %s is missing', rname);
@@ -271,6 +271,34 @@ BEGIN
       END IF;
     END IF;
   END LOOP;
+
+  -- ── Workspaces: the backup role can dump every one ────────────────────────
+  -- Snapshots run pg_dump --schema workspace_<id> as backenly_backup. It locks
+  -- every table, which needs USAGE on the schema and SELECT on the table, and
+  -- reads every sequence, so one object it cannot read fails every snapshot of
+  -- that project. backenly_direct_sync_schema grants it for each workspace the
+  -- application creates or changes, and the direct-access step converges those
+  -- that already exist. The schemas are the ones that sync accepts.
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'backenly_backup') THEN
+    FOR r IN
+      SELECT n.nspname::text AS workspace,
+             has_schema_privilege('backenly_backup', n.oid, 'USAGE') AS usable,
+             array(SELECT c.relname::text FROM pg_class c
+                    WHERE c.relnamespace = n.oid AND c.relkind IN ('r', 'p', 'S')
+                      AND NOT has_table_privilege('backenly_backup', c.oid, 'SELECT')
+                    ORDER BY 1) AS unreadable
+        FROM pg_namespace n
+       WHERE n.nspname ~ '^workspace_[0-9a-fA-F][0-9a-fA-F-]{10,60}$'
+       ORDER BY 1
+    LOOP
+      IF NOT r.usable THEN
+        problems := problems || format('backenly_backup cannot use workspace schema %s, so its snapshots fail', r.workspace);
+      ELSIF cardinality(r.unreadable) > 0 THEN
+        problems := problems || format('backenly_backup cannot read %s in workspace schema %s, so its snapshots fail',
+                                       array_to_string(r.unreadable, ', '), r.workspace);
+      END IF;
+    END LOOP;
+  END IF;
 
   -- ── Extensions: installed in public, and working ──────────────────────────
   -- The probes are tools/managed-db/extension-spec.ts operationalProbe, verbatim.

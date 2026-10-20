@@ -603,6 +603,21 @@ export async function restoreWorkspace(
     await fs.promises.unlink(/*turbopackIgnore: true*/ sqlPath).catch(() => {})
     if (fromS3) await fs.promises.unlink(/*turbopackIgnore: true*/ gzPath).catch(() => {})
 
+    // The replay created the schema anew, without the grants the old one held
+    // (the dump carries none): the backup role's, so the next snapshot would
+    // fail, and any direct-access role's. The sync makes them again. Caught
+    // here and never rethrown: the old copy is gone, and the rollback below
+    // would drop the restored data.
+    try {
+      const { syncDirectAccessGrants } = await import('@/lib/services/direct-access')
+      await syncDirectAccessGrants(projectId)
+    } catch (grantErr: any) {
+      console.warn(
+        `[Restore] Restored ${projectId}, but its grants were not made again: ` +
+          `${sanitizeError(grantErr?.message ?? '')}. Its snapshots fail until they are synced.`
+      )
+    }
+
     console.log(`[Restore] Restored ${projectId} from ${backup.filename} (${count} relations)`)
 
     return { success: true, restoredFrom: backup.filename }
