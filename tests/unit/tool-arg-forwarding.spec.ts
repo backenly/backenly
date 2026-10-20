@@ -23,6 +23,13 @@
  * A schema-shape test cannot catch these; the shapes were right. What was wrong
  * was the WIRING. So this drives each mapper with a unique sentinel per declared
  * property and asserts every sentinel comes out the other side.
+ *
+ * The same bug runs the other way too. `create_trigger`'s mapper forwarded
+ * `webhookUrl`, which its schema did not declare (#235). A model sends only what
+ * it is offered, so the field was always undefined and every webhook trigger was
+ * stored with no destination and reported as created. Starting from the declared
+ * properties cannot see a field that is not among them, so each mapper also runs
+ * with its arguments behind a proxy, and every property it reads must be declared.
  */
 
 import { BRAIN_TOOLS, TOOL_TO_ACTION } from '@/lib/ai/brain/tools'
@@ -128,6 +135,74 @@ describe('declared tool arguments reach the executor', () => {
       }
 
       expect({ tool: toolName, dropped }).toEqual({ tool: toolName, dropped: [] })
+    })
+  }
+})
+
+/**
+ * Tools whose mapper deliberately reads a property its schema does not declare.
+ *
+ * The same rule as TRANSFORMS: each entry names its reason, and an unexplained
+ * addition is the bug re-entering.
+ */
+const UNDECLARED_READS: Record<string, Record<string, string>> = {
+  add_column: {
+    // The executor's own flat shape. Callers that know the executor still send
+    // it through this door (tests/integration/db-doors-agree.spec.ts does), and
+    // it is read only when the declared `column` object does not carry the
+    // value, so a caller following the schema never needs it.
+    columnName: 'fallback behind column.name for the flat { columnName, columnType } shape',
+    columnType: 'fallback behind column.type for the same shape',
+  },
+}
+
+/**
+ * Every argument a mapper reads, over each shape that sends it down a different
+ * branch: every declared property set, each other enum value in turn (kind or
+ * trigger picks the branch), and no arguments at all, so a fallback behind a
+ * declared field runs too.
+ */
+function argumentsRead(toolName: string): string[] {
+  const tool = BRAIN_TOOLS.find((t) => t.function?.name === toolName)!
+  const props = ((tool.function?.parameters ?? {}) as { properties?: Record<string, { enum?: unknown[] }> }).properties ?? {}
+  const full = sentinelArgs(toolName)
+  const shapes: Record<string, unknown>[] = [full, {}]
+  for (const [key, spec] of Object.entries(props)) {
+    for (const value of spec?.enum?.slice(1) ?? []) shapes.push({ ...full, [key]: value })
+  }
+
+  const read = new Set<string>()
+  // An inherited method (toString, hasOwnProperty) is not an argument.
+  const note = (key: string | symbol) => {
+    if (typeof key === 'string' && !(key in Object.prototype)) read.add(key)
+  }
+  for (const shape of shapes) {
+    TOOL_TO_ACTION[toolName](new Proxy(shape, {
+      get(target, key, receiver) {
+        note(key)
+        return Reflect.get(target, key, receiver)
+      },
+      has(target, key) {
+        note(key)
+        return Reflect.has(target, key)
+      },
+    }))
+  }
+  return [...read]
+}
+
+describe('a mapper reads only the arguments its schema declares (#235)', () => {
+  const mapped = Object.keys(TOOL_TO_ACTION).filter((name) =>
+    BRAIN_TOOLS.some((t) => t.function?.name === name),
+  )
+
+  for (const toolName of mapped) {
+    it(`${toolName} reads no undeclared property`, () => {
+      const declared = new Set(declaredProps(toolName))
+      const undeclared = argumentsRead(toolName).filter(
+        (key) => !declared.has(key) && !UNDECLARED_READS[toolName]?.[key],
+      )
+      expect({ tool: toolName, undeclared }).toEqual({ tool: toolName, undeclared: [] })
     })
   }
 })
