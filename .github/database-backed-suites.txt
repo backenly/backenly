@@ -921,3 +921,4 @@ tests/integration/approval-binding.spec.ts
 # never returns a credential; an unknown account is reported plainly. Real
 # workspace users tables are the property, so it needs a real Postgres.
 tests/integration/reset-password-sends-link.spec.ts
+tests/blueprints/resume-store.test.ts
