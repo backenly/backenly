@@ -136,8 +136,8 @@
  *              graceful stop lets a change shorter than that finish, so when no
  *              change was cut off the drill is reported as not exercised, never
  *              as passed: it needs a change that outlasts the drain and the
- *              stop timeout (a regional project's several tables, applied from
- *              home, can) or an abrupt kill
+ *              stop timeout (a regional project's change of several tables is
+ *              meant to) or an abrupt kill
  *   deletion   unless --skip-deletion-drill: a project of the drill's own, in
  *              the region, with a governed change, the vault its restore kept
  *              the table in and a preview branch, is deleted, and is gone at
@@ -218,9 +218,10 @@ export interface QualifyArgs {
   killDrainSeconds: number
   /**
    * How many tables each of the drill's governed changes creates, in one
-   * migration. One table at home is a fraction of a second; in a region each is
-   * a round trip from home, so several make one change that outlasts the drain
-   * and the stop timeout, and the kill lands in it.
+   * migration. A change's work grows with the tables it touches, and in a
+   * region that work reaches across from home, so several tables make one
+   * change long enough to outlast the drain and the stop timeout, and the kill
+   * lands in it. A home project's change stays too short either way.
    */
   killChangeTables: number
   /** How long the region's scheduler is given to settle a change whose process died. */
@@ -340,14 +341,16 @@ export function parseArgs(argv: string[], env: Record<string, string | undefined
   const killCommand = flags.get('--kill-command')?.trim() || null
   const killAfter = Number(flags.get('--kill-after-seconds') ?? '8')
   if (!Number.isFinite(killAfter) || killAfter < 1 || killAfter > 120) throw new Error('--kill-after-seconds must be between 1 and 120')
-  // A web target group drains for its deregistration delay (30 s by default; an
-  // operator may shorten it on a qualification environment). The process then
-  // gets SIGTERM and, still running at the stop timeout (30 s by default), is
-  // killed. 70 s covers both.
+  // A web target group drains for its deregistration delay, which the operator
+  // sets (AWS's own default is 300 s; a qualification environment is usually
+  // shortened). The process then gets SIGTERM and, still running at the stop
+  // timeout (30 s by default on ECS), is killed. 70 s covers a 30 s drain and
+  // that stop timeout; pass the environment's own drain plus the stop timeout.
   const killDrain = Number(flags.get('--kill-drain-seconds') ?? '70')
   if (!Number.isFinite(killDrain) || killDrain < 0 || killDrain > 600) throw new Error('--kill-drain-seconds must be between 0 and 600')
-  // Four regional tables take about two minutes, longer than a 30 s drain and a
-  // 30 s stop timeout together.
+  // An estimate, not a measurement: four tables are meant to make one regional
+  // change outlast a 30 s drain and a 30 s stop timeout. When the drill reports
+  // not exercised, raise it.
   const killTables = Number(flags.get('--kill-change-tables') ?? '4')
   if (!Number.isInteger(killTables) || killTables < 1 || killTables > 20) throw new Error('--kill-change-tables must be a whole number from 1 to 20')
   // A change counts as interrupted 15 minutes after it began (RECOVERY_LEASE_MS),
