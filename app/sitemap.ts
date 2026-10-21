@@ -39,8 +39,6 @@ export default function sitemap(): MetadataRoute.Sitemap {
     })),
   ]
 
-  // ── Use Cases ──────────────────────────────────────────────────────────────
-
   // ── Comparisons ───────────────────────────────────────────────────────────
   //
   // Derived from the comparison data rather than hand-listed. The two used to be

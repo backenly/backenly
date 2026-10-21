@@ -39,8 +39,6 @@ import { CONTAINER, DISPLAY, PRIMARY_CTA, SECONDARY_CTA, useOnScreen } from './s
    the founders' own paragraph (public/llms.txt): the agent builds it over
    MCP; Backenly then maintains it, within what it can verify and undo.
 
-   The stills hero is backed up at F:/landing-v7/alt-hero/HeroV7.stills-round17.tsx,
-   the centred round-2 hero at F:/landing-v7/alt-hero/HeroV7.centered-round2.tsx.
 ───────────────────────────────────────────────────────────── */
 
 /** What each chapter shows, for screen readers: the console itself is drawn, not read. */
@@ -174,14 +172,16 @@ function Showcase() {
   /** Time left on a paused beat, so a pause resumes where it stopped. */
   const left = useRef<{ frame: number; ms: number } | null>(null)
 
-  // Reduced motion: no story, each chapter shown as its finished state.
-  const shown = quiet ? CHAPTER_SPAN[FRAMES[frame].chapter].last : frame
+  // Reduced motion: no story, each chapter shown as one still frame.
+  const shown = quiet ? CHAPTER_SPAN[FRAMES[frame].chapter].still : frame
   const chapter = FRAMES[shown].chapter
   const span = CHAPTER_SPAN[chapter]
   const view = FRAMES[shown].view
   // A chosen chapter plays once and holds on its last beat.
   const held = manual && frame === span.last
-  const running = !quiet && !hover && onScreen && !held
+  // A mouse resting on the console pauses the autoplay so it can be read; a
+  // chapter someone chose plays through regardless.
+  const running = !quiet && onScreen && !held && !(hover && !manual)
 
   useEffect(() => {
     if (!running) return
@@ -199,7 +199,7 @@ function Showcase() {
   const choose = (i: number, focus = false) => {
     setManual(true)
     setNonce((n) => n + 1)
-    setFrame(quiet ? CHAPTER_SPAN[i].last : CHAPTER_SPAN[i].first)
+    setFrame(quiet ? CHAPTER_SPAN[i].still : CHAPTER_SPAN[i].first)
     if (focus) tabs.current[i]?.focus()
   }
 
@@ -214,20 +214,21 @@ function Showcase() {
   }
 
   return (
-    <div
-      ref={screenRef}
-      className="relative"
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
-    >
+    <div ref={screenRef} className="relative">
       <div role="tabpanel" id="v7-stage-panel" aria-labelledby={`v7-stage-${CHAPTERS[chapter].id}`}>
         <p className="sr-only">{CHAPTER_ALT[chapter]}</p>
-        <div aria-hidden className={`relative isolate aspect-[4/3.3] w-full sm:aspect-[16/10.4] md:aspect-[16/9.4] ${FEATHER_SIZE}`}>
+        {/* Only a mouse over the stage pauses it: a tap is not a hover, and
+            nothing would ever end it on a touch screen. */}
+        <div
+          aria-hidden
+          onPointerEnter={(e) => e.pointerType === 'mouse' && setHover(true)}
+          onPointerLeave={(e) => e.pointerType === 'mouse' && setHover(false)}
+          className={`relative isolate aspect-[4/3.3] w-full sm:aspect-[16/10.4] md:aspect-[16/9.4] ${FEATHER_SIZE}`}
+        >
           {/* The field's own light on the page, as the live HeroFilm casts it: a
               blurred copy past every edge, so the feathered field fades into
-              violet rather than into black. The blur is baked into the image
-              (F:/landing-v7/tools/soft-ambient.py): a live CSS blur(72px) was
-              re-applied on every scroll frame. */}
+              violet rather than into black. The blur is baked into the image: a
+              live CSS blur(72px) was re-applied on every scroll frame. */}
           {/* eslint-disable-next-line @next/next/no-img-element -- decorative light */}
           <img
             src="/media/v7/field-ambient-soft.webp"
@@ -344,7 +345,7 @@ function Showcase() {
       </div>
 
       {/* Below lg the four names fit but four paragraphs do not: the lit chapter's sentence sits under them. */}
-      <p aria-live="polite" className="mt-[14px] min-h-[44px] text-[14px] leading-[1.55] tracking-[-0.006em] text-zinc-400 lg:hidden">
+      <p aria-live={manual ? 'polite' : 'off'} className="mt-[14px] min-h-[44px] text-[14px] leading-[1.55] tracking-[-0.006em] text-zinc-400 lg:hidden">
         {CHAPTERS[chapter].caption}
       </p>
     </div>

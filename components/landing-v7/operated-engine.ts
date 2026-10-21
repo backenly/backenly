@@ -1,7 +1,7 @@
 /* ─────────────────────────────────────────────────────────────
    The "operated backend" scene, second design (founders, 2026-10-14: "really
    good ... but feels like ai generated slop ... make it professional like a
-   real graphics designer designed it"). First design: F:/landing-v7/alt-scene-v1.
+   real graphics designer designed it").
 
    What changed from the first cut, and why:
      camera      a static isometric (orthographic) view, the convention of

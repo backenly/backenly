@@ -6,7 +6,7 @@
    Drawn the way cobe draws its globe, in one sphere shader: every fragment
    finds its nearest point on a hexagonal dot lattice, looks up whether that
    point is land in an equirectangular mask (Natural Earth 1:110m land,
-   public domain, rasterized by F:/landing-v7/tools/landmask.py), and draws a
+   public domain, rasterized to public/media/v7/land-mask.png), and draws a
    round dot there. So dots foreshorten with the curve and stay sharp at any
    size, and the whole globe is one draw call.
 

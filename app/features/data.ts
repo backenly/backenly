@@ -468,7 +468,7 @@ export const ATLAS: AtlasGroup[] = [
   {
     id: 'governance',
     title: 'Safe changes',
-    lede: 'Every change is checked and recorded, and can be undone. Destructive ones wait for a person.',
+    lede: 'Every schema change is checked and recorded, and the state before it can be restored. Destructive ones wait for a person.',
     items: [
       { icon: Hand, name: 'Review queue' },
       { icon: Camera, name: 'Restore points' },

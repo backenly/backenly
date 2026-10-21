@@ -90,7 +90,7 @@ const SHOW_DISCORD = true
 const SHOW_LAUNCH_BAR = true
 
 const NAV_LINKS = [
-  { label: 'Product', href: '/#capabilities', activePath: '/' },
+  { label: 'Product', href: '/#platform', activePath: '/' },
   { label: 'Docs', href: ROUTES.docs, activePath: '/docs' },
   { label: 'Pricing', href: ROUTES.pricing, activePath: ROUTES.pricing },
   { label: 'Contact', href: ROUTES.contact, activePath: ROUTES.contact },

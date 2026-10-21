@@ -47,7 +47,7 @@ import {
  * The page's <main>: the ground and the skip-link target. No film grain: the
  * landing dropped its page-wide blended grain on 2026-10-14 because a fixed
  * mix-blend layer over the whole page cost scroll frames
- * (F:/landing-v7/tools/scroll-bench.mjs), and the subpages follow it.
+ * (a wheel-scroll frame-timing benchmark), and the subpages follow it.
  */
 export function Page({ children, className = '' }: { children: ReactNode; className?: string }) {
   return (

@@ -24,18 +24,14 @@ import { SelfHealV7 } from './SelfHealV7'
      5. FAQ           the live FAQ, answers corrected where the code disagrees
      6. Closing       the live ask over the horizon arc, into the footer
 
-   The Connect and Restructuring sections added the same day were removed
-   at the founders' request; they are backed up at
-   F:/landing-v7/alt-connect-evolve/. The stills hero and the composition
-   before that day are at F:/landing-v7/alt-hero/. The "Governed changes"
-   section (removed 2026-10-14) is at F:/landing-v7/alt-governed/, the
-   closing billboard at F:/landing-v7/alt-closing/.
+   The Connect and Restructuring sections added the same day, the
+   "Governed changes" section and the closing billboard were all removed at
+   the founders' request.
 
    No page-wide film grain: its mix-blend overlay made the compositor re-blend
    the whole viewport on every scroll frame (the largest single cost the scroll
    benchmark found). The hero field carries its own dither.
 
-   A copy, not a replacement: the live page is origin/main app/page.tsx.
 ───────────────────────────────────────────────────────────── */
 
 export function LandingV7() {

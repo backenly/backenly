@@ -170,12 +170,17 @@ export const CHAPTERS = [
   { id: 'watch', label: 'Watch', caption: 'Then it keeps checking, every minute. Each fix keeps its Undo.' },
 ] as const
 
-/** First frame and total length of each chapter. */
+/**
+ * First and last frame and total length of each chapter, and the frame shown
+ * still under reduced motion: the chapter's end, except Build, whose end has
+ * the agent session gone; it holds on the session's "Done." instead.
+ */
 export const CHAPTER_SPAN = CHAPTERS.map((_, c) => {
   const first = FRAMES.findIndex((f) => f.chapter === c)
   const ms = FRAMES.filter((f) => f.chapter === c).reduce((sum, f) => sum + f.hold, 0)
   const last = first + FRAMES.filter((f) => f.chapter === c).length - 1
-  return { first, last, ms }
+  const done = FRAMES.findIndex((f) => f.chapter === c && f.view.term === 8)
+  return { first, last, ms, still: c === 0 && done >= 0 ? done : last }
 })
 
 const useIsoLayoutEffect = typeof window === 'undefined' ? useEffect : useLayoutEffect
@@ -705,7 +710,7 @@ function OverviewPage({ view, quiet }: { view: View; quiet: boolean }) {
             )
           })}
           <div className="flex h-[37px] items-center justify-between border-t border-white/[0.07] px-[19px] text-[12.5px] text-zinc-400">
-            Full guardrail log, restore points and approvals
+            Full guardrail log, repairs and approvals
             <ChevronRight className="h-[13px] w-[13px]" />
           </div>
         </div>

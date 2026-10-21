@@ -147,7 +147,7 @@ export function useOnScreen<T extends Element>(margin = '0px') {
 }
 
 /* ── Scroll performance (founders, 2026-10-14: "make the scrolling fast and
-      professional"). Measured with F:/landing-v7/tools/scroll-bench.mjs: the
+      professional"). Measured with a wheel-scroll frame-timing benchmark: the
       page-wide blended grain, live blurs, a scroll-linked parallax, framer's
       per-frame JavaScript entrances and three.js booting mid-scroll each cost
       frames. Nothing on this page may run JavaScript per scroll frame.

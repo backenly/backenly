@@ -14,8 +14,7 @@ import { CONTAINER, DISPLAY, PRIMARY_CTA, SECONDARY_CTA } from './shared'
    the ask and answering the violet field the hero opens on. It owns the
    bottom of the page, so the footer meets the arc.
 
-   Not the billboard removed in round 7 (backed up at
-   F:/landing-v7/alt-closing/); this is the live page's own ending. One word
+   Not the billboard removed in round 7; this is the live page's own ending. One word
    differs: "Talk to the founders", because Backenly has two.
 ───────────────────────────────────────────────────────────── */
 

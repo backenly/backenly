@@ -62,7 +62,7 @@ const faqs = [
   },
   {
     q: 'What does it cost?',
-    a: 'Self-hosting is free under Apache-2.0: you bring the servers, and an AI provider key (Claude or OpenAI) only for the features that use a model, such as the natural-language build tools. The self-healing fixes themselves are rule-based. On Backenly Cloud, the Free plan is genuinely free, with no credit card, and includes a real, permanent backend plus the self-healing loop every minute. Pro is $25/month and raises capacity and how much autonomy may fix per window, not the cadence; Enterprise is custom. Driving the backend from your own coding agent through the typed MCP tools is never metered as AI, and autonomy is included on every Cloud tier.',
+    a: 'Self-hosting is free under Apache-2.0: you bring the servers, and an AI provider key (Claude or OpenAI) only for the features that use a model, such as the natural-language build tools. The self-healing fixes themselves are rule-based. On Backenly Cloud, the Free plan is genuinely free, with no credit card, and includes a real, permanent backend plus the self-healing loop every minute. Pro is $25/month and raises capacity, not the self-healing, which is never capped on any plan; Enterprise is custom. Driving the backend from your own coding agent through the typed MCP tools is never metered as AI, and autonomy is included on every Cloud tier.',
   },
   {
     q: 'If my agent does the building, what is the dashboard for?',
