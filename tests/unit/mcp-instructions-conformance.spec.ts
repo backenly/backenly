@@ -167,20 +167,27 @@ describe('get_instructions deployment URLs', () => {
 })
 
 /**
- * The unregistered-schema fault must be auto-repaired, not merely noticed.
+ * The unregistered-schema fault must come with a repair, not merely be noticed.
  *
  * The registration itself is now enforced in three places, but the reason this
  * shipped was not that a mechanism failed — it was that nothing was asking the
  * question. A probe classified `notify_only` would restore only half of that:
- * the platform would know a customer's data plane was dead and wait for a human
- * to read a dashboard.
+ * the platform would know a customer's data plane was dead and have nothing to
+ * offer.
+ *
+ * This asserted that the loop repairs it without a human. REGISTER_SCHEMA runs
+ * outside the change ledger, so History cannot undo it, and the loop now parks
+ * the finding for a person instead: rated `approval`, with the real repair
+ * behind the approve button. The request path still re-registers a schema the
+ * first time PostgREST answers PGRST106 (server/routes/postgrest-handler.ts).
  */
-describe('schema_not_registered is a first-class, auto-healed finding', () => {
-  it('is classified auto, so the loop repairs it without a human', async () => {
+describe('schema_not_registered is a first-class finding with a repair behind approval', () => {
+  it('is classified approval, with REGISTER_SCHEMA behind the button', async () => {
     const { classifyFix } = await import('@/lib/core/fix-classifier')
+    const { buildFixAction } = await import('@/lib/core/fix-actions')
     const c = classifyFix('schema_not_registered', { reason: 'x' } as any)
-    expect(c.decision).toBe('auto')
-    expect(c.suggestedAction).toBeTruthy()
+    expect(c.decision).toBe('approval')
+    expect(buildFixAction('schema_not_registered', { reason: 'x' })).toMatchObject({ action: 'REGISTER_SCHEMA' })
   })
 
   it('survives finding-type normalization as itself', async () => {

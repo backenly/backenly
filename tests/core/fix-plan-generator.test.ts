@@ -220,10 +220,14 @@ describe('generateFixPlansFromRawFindings', () => {
     expect(plans[0].requiresApproval).toBe(true)
   })
 
-  test('api_drift → autoFixable (generate_api)', () => {
+  // This asserted autoFixable=true. The plan's rating comes from the classifier,
+  // and api_drift's repair (FIX_API) runs outside the change ledger, so History
+  // cannot undo it and the classifier now gates it on approval. The plan follows.
+  test('api_drift → generate_api, gated on approval (repair runs outside the change ledger)', () => {
     const plans = generateFixPlansFromRawFindings([makeRaw('api_drift')])
     expect(plans[0].action).toBe('generate_api')
-    expect(plans[0].autoFixable).toBe(true)
+    expect(plans[0].autoFixable).toBe(false)
+    expect(plans[0].requiresApproval).toBe(true)
   })
 
   // Updated 2026-07-30. This asserted autoFixable=true, which contradicts the

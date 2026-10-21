@@ -4,7 +4,7 @@ Index: https://backenly.com/llms.txt
 
 ## The loop
 
-A Monitor → Analyze → Plan → Execute loop watches every project. It applies on its own only additive, snapshotted changes in the reversible safe band (missing indexes, drift it can reconcile, broken triggers). Anything it will not apply lands on the project's **Autonomy** page as a finding with a receipt, for a human to approve or reject. Auth, external credentials, destructive and irreversible changes always wait for a human. The loop runs no model, so it never draws AI credits.
+A Monitor → Analyze → Plan → Execute loop watches every project. It applies on its own only additive, snapshotted changes in the reversible safe band (missing indexes, broken triggers). Anything it will not apply lands on the project's **Autonomy** page as a finding with a receipt, for a human to approve or reject. Auth, external credentials, destructive and irreversible changes always wait for a human. The loop runs no model, so it never draws AI credits.
 
 ## Actions
 

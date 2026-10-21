@@ -205,6 +205,27 @@ afterAll(() => { process.env.JWT_SECRET = savedSecret })
 
 const loop = { actor: { kind: 'autonomous' as const, loop: 'reconciler' as const }, skipCooldown: true }
 
+/**
+ * User data with no policy, which the loop repairs on its own (SET_PERMISSION,
+ * through the legacy bridge). The loop's cases used the broken workflow until
+ * FIX_WORKFLOW moved to approval: it runs outside the change ledger, so the
+ * loop now parks it, and it stays the fixture for the approved repair below.
+ */
+const UNPROTECTED = { tableName: 'messages', userIdColumn: 'user_id', reason: 'Table "messages" stores user data (has user_id column) but has no RLS permission policy' }
+/** The RLS repair's call in full, as a JSON row keeps it. */
+const RLS_CALL = JSON.parse(JSON.stringify(buildFixAction('unprotected_user_data', UNPROTECTED)))
+/** The same call as its action and its arguments' shape: the table name is structure, the rest only its kind. */
+const RLS_SHAPE = { action: 'SET_PERMISSION', params: { tableName: 'messages', template: '[string]', userIdColumn: '[string]' } }
+
+function unprotectedUserData(projectId: string, region: string | null) {
+  mockRegions.set(projectId, region)
+  const id = `rls-${projectId}`
+  mockFindings.set(id, {
+    id, projectId, type: 'unprotected_user_data', severity: 'critical', status: 'open', detectedAt: new Date(), details: { ...UNPROTECTED },
+  })
+  return id
+}
+
 function brokenWorkflow(projectId: string, region: string | null, status: 'open' | 'pending_approval' = 'open') {
   mockRegions.set(projectId, region)
   const id = `wf-${projectId}`
@@ -253,42 +274,44 @@ describe('what a repair\'s record keeps', () => {
 
 describe('the loop\'s repair', () => {
   it('keeps the call, its result and the bound values for a home project, on the finding and the audit row', async () => {
-    const id = brokenWorkflow('p-home-loop', null)
+    const id = unprotectedUserData('p-home-loop', null)
     expect((await runAutoFix(id, 'p-home-loop', loop)).outcome).toBe('auto_fixed')
 
     const record = mockFindings.get(id).details.rollbackData
-    expect(record.fixAction).toEqual(WORKFLOW_CALL)
-    expect(record.fixResult).toEqual(RESULT('FIX_WORKFLOW'))
+    expect(record.fixAction).toEqual(RLS_CALL)
+    expect(record.fixResult).toEqual(RESULT('SET_PERMISSION'))
     expect(record.statements).toEqual(CAPTURED)
 
     const audit = auditOf('p-home-loop', 'HEALTH_AUTO_FIXED')
-    expect(audit.fixAction).toEqual(WORKFLOW_CALL)
+    expect(audit.fixAction).toEqual(RLS_CALL)
     expect(audit.statements).toEqual(CAPTURED)
-    expect(audit.message).toBe(RESULT('FIX_WORKFLOW').message)
+    expect(audit.message).toBe(RESULT('SET_PERMISSION').message)
   })
 
   it('keeps only names and shapes for a regional project, on the finding and the audit row', async () => {
-    const id = brokenWorkflow('p-use1-loop', 'us-east-1')
+    const id = unprotectedUserData('p-use1-loop', 'us-east-1')
     expect((await runAutoFix(id, 'p-use1-loop', loop)).outcome).toBe('auto_fixed')
 
     const row = mockFindings.get(id)
-    expect(row.details.rollbackData.fixAction).toEqual(WORKFLOW_SHAPE)
+    expect(row.details.rollbackData.fixAction).toEqual(RLS_SHAPE)
     expect(row.details.rollbackData.fixResult).toEqual({ success: true })
     expect(row.details.rollbackData.statements).toEqual(TEXT_ONLY)
     expect(row.details.rollbackData).toMatchObject({ rollbackFormat: 3, changeIds: ['chg-fix'], schemaTouching: true, snapshotId: 'snap-pre_migration' })
     expect(JSON.stringify(row)).not.toContain(ALICE)
 
     const audit = auditOf('p-use1-loop', 'HEALTH_AUTO_FIXED')
-    expect(audit.fixAction).toEqual(WORKFLOW_SHAPE)
+    expect(audit.fixAction).toEqual(RLS_SHAPE)
     expect(audit.statements).toEqual(TEXT_ONLY)
     expect(audit.message).toBe(NOT_QUOTED)
     expect(JSON.stringify(auditsOf('p-use1-loop'))).not.toContain(ALICE)
   })
 
   it('is undone from a regional project\'s record', async () => {
-    const id = brokenWorkflow('p-use1-undo', 'us-east-1')
+    const id = unprotectedUserData('p-use1-undo', 'us-east-1')
     expect((await runAutoFix(id, 'p-use1-undo', loop)).outcome).toBe('auto_fixed')
-    expect(await revertAutoFix(id, 'p-use1-undo')).toMatchObject({ success: true, appliedSteps: 1 })
+    // Undoing an RLS repair takes its protection away, so it asks first
+    // (revertEligibility); the person's confirmation is given here.
+    expect(await revertAutoFix(id, 'p-use1-undo', { confirmed: true })).toMatchObject({ success: true, appliedSteps: 1 })
     expect(recoverChange).toHaveBeenLastCalledWith('p-use1-undo', 'chg-fix', expect.objectContaining({ mode: 'manual' }))
   })
 })
@@ -299,30 +322,30 @@ describe('a repair whose check could not run', () => {
   afterEach(() => { mockLoop.outcome = saved })
 
   it('keeps the call and the bound values for a home project', async () => {
-    const id = brokenWorkflow('p-home-unv', null)
+    const id = unprotectedUserData('p-home-unv', null)
     expect((await runAutoFix(id, 'p-home-unv', loop)).outcome).toBe('applied_unverified')
 
     const applied = mockFindings.get(id).details.appliedUnverified
-    expect(applied.fixAction).toEqual(WORKFLOW_CALL)
+    expect(applied.fixAction).toEqual(RLS_CALL)
     expect(applied.statements).toEqual(CAPTURED)
 
     const audit = auditOf('p-home-unv', 'HEALTH_FIX_UNVERIFIED')
-    expect(audit.fixAction).toEqual(WORKFLOW_CALL)
+    expect(audit.fixAction).toEqual(RLS_CALL)
     expect(audit.statements).toEqual(CAPTURED)
   })
 
   it('keeps only names and shapes for a regional project', async () => {
-    const id = brokenWorkflow('p-use1-unv', 'us-east-1')
+    const id = unprotectedUserData('p-use1-unv', 'us-east-1')
     expect((await runAutoFix(id, 'p-use1-unv', loop)).outcome).toBe('applied_unverified')
 
     const row = mockFindings.get(id)
-    expect(row.details.appliedUnverified.fixAction).toEqual(WORKFLOW_SHAPE)
+    expect(row.details.appliedUnverified.fixAction).toEqual(RLS_SHAPE)
     expect(row.details.appliedUnverified.statements).toEqual(TEXT_ONLY)
     expect(row.details.appliedUnverified.verifierError).toBe(NOT_QUOTED)
     expect(JSON.stringify(row)).not.toContain(ALICE)
 
     const audit = auditOf('p-use1-unv', 'HEALTH_FIX_UNVERIFIED')
-    expect(audit.fixAction).toEqual(WORKFLOW_SHAPE)
+    expect(audit.fixAction).toEqual(RLS_SHAPE)
     expect(audit.statements).toEqual(TEXT_ONLY)
     expect(JSON.stringify(auditsOf('p-use1-unv'))).not.toContain(ALICE)
   })

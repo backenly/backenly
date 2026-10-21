@@ -31,6 +31,7 @@ import { withBuildLock } from '@/lib/ai/build-runtime/build-lock'
 import { FLAGS } from '@/lib/config/flags'
 import { authorFixForCheck, MAX_AUTHORED_FIXES_PER_BUILD } from './agentic-fix-author'
 import { harvestScanFixes } from './scan/scan-to-fixes'
+import { runsOutsideChangeLedger } from '@/lib/core/fix-actions'
 
 // ── Public types ─────────────────────────────────────────────────────────────
 
@@ -289,7 +290,10 @@ export async function runAgenticFixLoop(
     for (const fix of dedupedCandidates) {
       if (signal?.aborted) break
 
-      if (fix.requiresApproval) {
+      // A repair that runs outside the change ledger waits for a person even
+      // when whatever proposed it did not say so: three sources propose
+      // candidates, one of them a model, and the rule is the loop's to keep.
+      if (fix.requiresApproval || runsOutsideChangeLedger(fix.action)) {
         emit({
           type: 'fix_loop_fix_needs_approval',
           round,

@@ -54,6 +54,11 @@ const MAX_REASON_LEN = 220
  *
  * Anything outside this list → reject + fall through. The deterministic
  * fix-loop still gets to report the failure to the user.
+ *
+ * FIX_API is not on it. It runs outside the change ledger, so the fix loop
+ * never applies it without a person (lib/core/fix-actions.ts), and the author
+ * spending its one proposal for a check on a repair that cannot run would
+ * leave that check with none.
  */
 const AUTHORED_ACTION_WHITELIST: AIAction['action'][] = [
   // Schema repair
@@ -71,7 +76,6 @@ const AUTHORED_ACTION_WHITELIST: AIAction['action'][] = [
   'CREATE_TRIGGER',
   // Self-repair (these route to FIX_* handlers which are themselves safe)
   'FIX_AUTH',
-  'FIX_API',
   'FIX_TABLE',
   'FIX_REALTIME',
   'FIX_STORAGE',
@@ -237,7 +241,7 @@ You are NEVER allowed to:
 Allowed actions (whitelist):
   ADD_COLUMN, CREATE_INDEX, ADD_CONSTRAINT, CREATE_JUNCTION_TABLE,
   GENERATE_API, ENABLE_AUTH, SET_PERMISSION, ENABLE_REALTIME,
-  CREATE_TRIGGER, FIX_AUTH, FIX_API, FIX_TABLE, FIX_REALTIME,
+  CREATE_TRIGGER, FIX_AUTH, FIX_TABLE, FIX_REALTIME,
   FIX_STORAGE, FIX_INTEGRATION, GENERATE_HEALTH_CHECK
 
 Output JSON only:

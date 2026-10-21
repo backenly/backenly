@@ -204,8 +204,8 @@ export function DirectDatabasePanel({ projectId }: { projectId: string }) {
           <KitCardBody className="space-y-3">
             <p className="text-[12px] leading-relaxed text-zinc-500">
               Full DML + in-schema DDL from your own tools. Schema changes are{' '}
-              <span className="text-zinc-300">observed, not blocked</span>. Autonomy adopts them into your APIs,
-              or asks you first.
+              <span className="text-zinc-300">observed, not blocked</span>. Autonomy asks you before it adopts them
+              into your APIs.
             </p>
             {has('READ_WRITE') ? (
               <>
