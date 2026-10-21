@@ -40,23 +40,6 @@ export default function sitemap(): MetadataRoute.Sitemap {
   ]
 
   // ── Use Cases ──────────────────────────────────────────────────────────────
-  const useCaseSlugs = [
-    'ai-assisted-developers',
-    'founders',
-    'migrate-from-supabase',
-    'ai-product-backends',
-    'multi-tenant-saas',
-  ]
-
-  const useCases: MetadataRoute.Sitemap = [
-    { url: `${APP_URL}/use-cases`,           lastModified: now, changeFrequency: 'monthly', priority: 0.85 },
-    ...useCaseSlugs.map((slug) => ({
-      url: `${APP_URL}/use-cases/${slug}`,
-      lastModified: now,
-      changeFrequency: 'monthly' as const,
-      priority: 0.75,
-    })),
-  ]
 
   // ── Comparisons ───────────────────────────────────────────────────────────
   //
@@ -81,8 +64,9 @@ export default function sitemap(): MetadataRoute.Sitemap {
   //
   // Derived from the docs content, like comparisons above, so a section page
   // can never be live and missing from here, or retired and still listed.
+  // /docs itself is not listed: it has no page since 2026-10-15 and redirects
+  // to the first section (next.config.js).
   const docs: MetadataRoute.Sitemap = [
-    { url: `${APP_URL}/docs`,                lastModified: now, changeFrequency: 'weekly',  priority: 0.82 },
     ...DOC_SLUGS.map((slug) => ({
       url: `${APP_URL}/docs/${slug}`,
       lastModified: now,
@@ -91,5 +75,5 @@ export default function sitemap(): MetadataRoute.Sitemap {
     })),
   ]
 
-  return [...core, ...features, ...useCases, ...comparisons, ...docs]
+  return [...core, ...features, ...comparisons, ...docs]
 }

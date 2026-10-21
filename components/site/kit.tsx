@@ -31,42 +31,29 @@ import {
      renders at 81% (`text-sm` is 11.4px). See components/site/tokens.ts.
    - No uppercase, wide-tracked eyebrow over a headline. A subpage hero says
      where you are with a breadcrumb trail instead, in sentence case.
-   - Violet is the only colour, and it is used as light: the key light and the
-     horizon under every hero, the arc at the close, the focus ring.
+   - Violet is the only colour, and it is used sparingly: the arc at the
+     close and the focus ring.
    - One radius per job: 16px panels, 8px controls, 6px chips.
 
    The signature, repeated on purpose: every page opens under the landing's
-   top-left key light, its hero ends on a lit horizon the page's content sits
-   on, and every page closes on the landing's rising arc.
+   top-left key light, its hero ends on a hairline the page's content sits
+   on, and every page closes on the landing's rising arc. Since 2026-10-14
+   there is no grain and no section entrance, matching the landing.
 ───────────────────────────────────────────────────────────── */
 
 /* ── Frame ───────────────────────────────────────────────────────────────── */
 
-/** The page's <main>: the ground, the grain, and the skip-link target. */
+/**
+ * The page's <main>: the ground and the skip-link target. No film grain: the
+ * landing dropped its page-wide blended grain on 2026-10-14 because a fixed
+ * mix-blend layer over the whole page cost scroll frames
+ * (F:/landing-v7/tools/scroll-bench.mjs), and the subpages follow it.
+ */
 export function Page({ children, className = '' }: { children: ReactNode; className?: string }) {
   return (
     <main id="main-content" className={`relative overflow-x-clip ${GROUND} ${className}`}>
-      <Grain />
       {children}
     </main>
-  )
-}
-
-/**
- * Film grain over the whole page, identical to the landing's. Fixed and
- * pointer-events-none, so it costs one composited layer instead of repainting
- * with the scroll. It breaks the banding in the large gradients.
- */
-export function Grain() {
-  return (
-    <div
-      aria-hidden
-      className="pointer-events-none fixed inset-0 z-30 opacity-[0.035] mix-blend-overlay"
-      style={{
-        backgroundImage:
-          "url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>\")",
-      }}
-    />
   )
 }
 
@@ -149,14 +136,16 @@ export function PageHero({
   /** `compact` for documents (legal, guides), where the title is a label. */
   size?: 'default' | 'compact'
 }) {
-  // A headline is two lines at most. Beside an aside the column is narrower,
-  // so the same words step down a size rather than wrapping to a third line.
+  // A page header, not a banner (founders, 2026-10-15: "no big banners").
+  // The title is a label for the page at the size of a landing section title,
+  // two lines at most; beside an aside the same words step down a size rather
+  // than wrapping to a third line.
   const headline =
     size === 'compact'
-      ? 'max-w-[22ch] text-[36px] sm:text-[44px] md:text-[52px]'
+      ? 'max-w-[26ch] text-[30px] sm:text-[34px] md:text-[38px]'
       : aside
-        ? 'max-w-[18ch] text-[40px] sm:text-[48px] md:text-[54px] xl:text-[60px]'
-        : 'max-w-[20ch] text-[40px] sm:text-[52px] md:text-[60px] xl:text-[68px]'
+        ? 'max-w-[20ch] text-[32px] sm:text-[38px] md:text-[42px]'
+        : 'max-w-[24ch] text-[34px] sm:text-[40px] md:text-[46px]'
 
   return (
     <section className="relative isolate">
@@ -166,7 +155,7 @@ export function PageHero({
         className="pointer-events-none absolute -top-[260px] left-[-12%] -z-10 h-[820px] w-[1100px] max-w-none bg-[radial-gradient(closest-side,rgba(255,255,255,0.07),transparent)]"
       />
       <div
-        className={`${CONTAINER} pb-[64px] pt-[40px] md:pb-[88px] md:pt-[64px] ${
+        className={`${CONTAINER} pb-[40px] pt-[32px] md:pb-[56px] md:pt-[48px] ${
           aside ? 'grid gap-12 lg:grid-cols-[minmax(0,1fr)_minmax(0,440px)] lg:items-end lg:gap-16' : ''
         }`}
       >
@@ -176,19 +165,19 @@ export function PageHero({
             // One vertical falloff across the whole headline, white to a cool
             // grey, the way a lit object reads. Never a second colour on one
             // phrase: that is the most common tell of a generated hero.
-            className={`hero-enter hero-enter-1 ${trail ? 'mt-7' : ''} bg-gradient-to-b from-white from-40% to-zinc-400 bg-clip-text pb-2 text-transparent [text-wrap:balance] ${headline} ${DISPLAY}`}
+            className={`hero-enter hero-enter-1 ${trail ? 'mt-[20px]' : ''} bg-gradient-to-b from-white from-40% to-zinc-400 bg-clip-text pb-[4px] text-transparent [text-wrap:balance] ${headline} ${DISPLAY}`}
           >
             {title}
           </h1>
           {lede && (
             <p
-              className={`hero-enter hero-enter-2 mt-6 max-w-[58ch] text-[17px] text-zinc-400 [text-wrap:pretty] md:text-[19px] ${LEDE}`}
+              className={`hero-enter hero-enter-2 mt-[14px] max-w-[60ch] text-[16px] text-zinc-400 [text-wrap:pretty] md:text-[17px] ${LEDE}`}
             >
               {lede}
             </p>
           )}
           {actions && (
-            <div className="hero-enter hero-enter-3 mt-9 flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center">
+            <div className="hero-enter hero-enter-3 mt-[24px] flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center">
               {actions}
             </div>
           )}
@@ -202,15 +191,15 @@ export function PageHero({
 }
 
 /**
- * The lit edge the page's content sits on. A hairline that brightens toward
- * the middle, with the light it casts falling onto whatever comes next. The
- * same line the landing's hero film sits on.
+ * The edge the page's content sits on: one neutral hairline. It used to be lit
+ * violet with a glow falling under it; the landing keeps violet below the hero
+ * for what Backenly itself does (founders, 2026-10-14), so a decorative glow on
+ * every subpage went.
  */
 export function Horizon() {
   return (
     <div aria-hidden className={`pointer-events-none relative ${CONTAINER}`}>
-      <div className="h-px bg-[linear-gradient(to_right,transparent,rgba(196,181,253,0.35)_22%,rgba(255,255,255,0.65)_50%,rgba(196,181,253,0.35)_78%,transparent)]" />
-      <div className="absolute left-1/2 top-0 -z-10 h-[160px] w-[76%] -translate-x-1/2 bg-[radial-gradient(50%_100%_at_50%_0%,rgba(139,92,246,0.13),transparent)]" />
+      <div className="h-px bg-white/[0.07]" />
     </div>
   )
 }
@@ -264,10 +253,13 @@ export function SectionHead({
   children?: ReactNode
 }) {
   const centered = align === 'center'
+  // The default is the landing's section-title type (components/landing-v7/
+  // shared.tsx TITLE_TYPE), so a subpage section reads like a landing section.
+  // A title may carry its own grey continuation: <span className="text-zinc-500">.
   const heading =
     size === 'sm'
       ? 'max-w-[26ch] text-[26px] md:text-[34px]'
-      : 'max-w-[22ch] text-[32px] md:text-[46px]'
+      : 'max-w-[28ch] text-[30px] sm:text-[36px] md:text-[42px]'
 
   return (
     <div className={`${centered ? 'mx-auto flex flex-col items-center text-center' : ''} ${className}`}>

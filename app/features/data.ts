@@ -23,7 +23,6 @@ import {
   Hand,
   HardDrive,
   KeyRound,
-  Layers,
   Link2,
   ListChecks,
   LockKeyhole,
@@ -99,9 +98,9 @@ const FEATURE_LIST: FeatureData[] = [
     metaTitle: 'AI Backend Generation: A Real Backend, Built by Your Coding Agent',
     metaDescription:
       'Backenly turns a description into a running backend: PostgreSQL schema, REST APIs, authentication and storage, planned as typed actions, applied with approvals and restore points, and verified against the live runtime.',
-    headline: 'Your agent asks. Backenly builds it right.',
+    headline: 'Agent-built backends',
     subheadline:
-      'Tables, relations, APIs, auth and access rules, planned as typed actions, applied as one governed change and verified against the running backend.',
+      'Your agent describes what it needs. Backenly creates the tables, APIs, auth and access rules, then checks them against the running backend.',
     what: 'Backenly turns a description of what your product needs into a running backend. Your coding agent reaches it over MCP, either through typed tools that compile straight to SQL, or by describing the change in natural language and letting Backenly plan it. Either way the result is the same kind of object: ordinary PostgreSQL tables with real relations, served as REST, protected by row-level security, with auth and storage wired in.',
     how: 'Take a description like "an e-commerce app with products, orders and customers, where each order belongs to a customer and holds several products." Backenly extracts the entities and how they relate, chooses column types, adds foreign keys and indexes, and derives access policies from any rules you stated. All of it becomes a plan of typed actions that says what each step touches. Additive work applies as one atomic change behind a restore point; anything destructive waits for a person. Every new table is served as an API the moment it exists.',
     why: 'An agent can write backend code well. What it cannot do is remember the schema after the session ends, notice that a policy is wrong, or stop itself from dropping a table on a bad turn. Building inside a governed platform keeps what an agent is good at and removes what it is not: the schema persists, every change is checked against the running backend, and nothing destructive happens without you.',
@@ -148,7 +147,7 @@ const FEATURE_LIST: FeatureData[] = [
     metaTitle: 'Automatic Database Setup: A PostgreSQL Schema Designed for You',
     metaDescription:
       'Backenly designs and applies a production PostgreSQL schema from a description: tables, relations, indexes and row-level security, in a schema isolated to your project, with direct connection strings and pg_dump exports.',
-    headline: 'Real PostgreSQL, designed for you',
+    headline: 'A real PostgreSQL database',
     subheadline:
       'Describe the data model. Backenly creates the tables, relations, indexes and row-level security, in a schema that belongs to your project alone.',
     what: 'Backenly designs and applies a complete PostgreSQL schema from a description of your data: the tables, columns and types, the foreign keys between them, the indexes and the row-level security policies. No schema design sessions and no hand-written migration files. What you get is ordinary PostgreSQL. Query it with standard SQL, or through the same PostgREST grammar Supabase serves, with embedded resources and the full filter vocabulary. The generation replaces the design work, not the API you already know.',
@@ -246,7 +245,7 @@ const FEATURE_LIST: FeatureData[] = [
     metaTitle: 'Instant REST API on PostgREST: The API Is Your Schema',
     metaDescription:
       'Every table in Backenly is served by PostgREST, the same engine Supabase runs, reading straight from the PostgreSQL catalog. Filters, ordering, pagination and embedded resources, with authorization enforced by Postgres grants and RLS.',
-    headline: 'The API is your schema',
+    headline: 'REST APIs from your schema',
     subheadline:
       'Every table is served by PostgREST, straight from the PostgreSQL catalog. Nothing to regenerate: a table created a second ago is queryable now.',
     what: 'Every table in your project is served by PostgREST, the same engine Supabase runs, reading directly from the PostgreSQL catalog. There is no separate API registry to generate, deploy or keep in sync. The API is the schema, so a table created a second ago is queryable immediately, and a column renamed a second ago is reflected without a rebuild. You get filtering, ordering, pagination, full-text search and embedded resources, across two surfaces that share one engine and one authorization path.',
@@ -256,7 +255,7 @@ const FEATURE_LIST: FeatureData[] = [
       'Every endpoint is testable from the dashboard the moment it exists. The APIs view lists each route per table, and an inline tester sends real requests to your live backend: type a JSON body into POST /auth/signup, send it, read the actual HTTP response, then open the users table and see the row it created. From code, the SDK mirrors the API: backend.tasks.list({ where: { status: \'todo\' }, orderBy: \'due_date\', limit: 25 }) for filtered queries, backend.projects.list({ include: [\'tasks\'] }) to resolve relations server-side in one request, and backend.tasks.count(...) when you need numbers without rows. Because row-level security lives in the database, all of these return only what the calling user may see. There is no authorization check to forget in client code.',
     details: [
       {
-        title: 'Two surfaces, one engine',
+        title: 'Two API versions, one engine',
         body: '/api/v1 is Backenly\'s stable REST contract, with typed responses. /api/v2 is PostgREST\'s native grammar, passed through untouched. Both read the same catalog and share one authorization path.',
       },
       {
@@ -299,7 +298,7 @@ const FEATURE_LIST: FeatureData[] = [
     metaTitle: 'Deployment-Ready Backends: Live Immediately, Operated Every Minute',
     metaDescription:
       'Backenly runs your backend on managed infrastructure. No Docker, no Kubernetes, no cloud console: a rollback snapshot before every deploy, and a self-healing loop that watches the live backend every minute on every plan.',
-    headline: 'Live at once, operated every minute',
+    headline: 'Live at once, checked every minute',
     subheadline:
       'No Docker, no Kubernetes, no cloud console. Backenly runs the backend, snapshots before every deploy, and watches it every minute once it is live.',
     what: 'Backenly deploys your backend as part of building it. When the schema and APIs exist, the backend is live at a public URL, with no deployment step on your part: no containers to build, no infrastructure to provision, no manifests to write. And it does not stop at deploy. A resident loop keeps operating the backend afterwards.',
@@ -321,7 +320,7 @@ const FEATURE_LIST: FeatureData[] = [
         body: 'Request metrics, schema integrity, auth configuration and security policies, checked continuously, with the safe fixes applied and the rest reported.',
       },
       {
-        title: 'Nothing behind your back',
+        title: 'Nothing changes quietly',
         body: 'You never patch servers or babysit the database, and anything that needs a risky change is queued for your approval rather than done quietly.',
       },
     ],
@@ -348,21 +347,21 @@ export const FEATURE_SLUGS = FEATURE_LIST.map((f) => f.slug)
 
 /* ── The catalog on /features ────────────────────────────────────────────── */
 
-export type Capability = { icon: LucideIcon; name: string; body: string }
+/**
+ * One capability, as a chip on /features. `plan` names the plan a capability
+ * needs, shown on the chip itself, so nobody reads a Pro feature as a Free one.
+ * The longer explanations live on the deep-dive pages and in the docs
+ * (founders, 2026-10-15: the catalog shows names, not paragraphs).
+ */
+export type Capability = { icon: LucideIcon; name: string; plan?: 'Pro' | 'Enterprise' }
 
 /** Which drawing a group carries. Resolved to a component in the page. */
-export type AtlasVisual =
-  | 'connect'
-  | 'database'
-  | 'rest'
-  | 'auth'
-  | 'storage'
-  | 'realtime'
-  | 'functions'
+export type AtlasVisual = 'database' | 'rest' | 'auth' | 'storage' | 'realtime' | 'functions'
 
 export type AtlasGroup = {
   id: string
   title: string
+  /** One short sentence, in plain words. */
   lede: string
   items: Capability[]
   visual?: AtlasVisual
@@ -373,139 +372,137 @@ export const ATLAS: AtlasGroup[] = [
   {
     id: 'agents',
     title: 'Build with your agent',
-    lede: 'Your coding agent is the builder. It reaches the backend over MCP, with a key scoped to one project.',
-    visual: 'connect',
+    lede: 'Your coding agent builds the backend over MCP, with a key scoped to one project.',
     deepDive: { slug: 'ai-backend-generation', label: 'How agent-built backends work' },
     items: [
-      { icon: Plug, name: 'MCP server', body: 'Typed tools for schema, data, auth, storage and functions, local over stdio or remote over HTTP.' },
-      { icon: KeyRound, name: 'Scoped, revocable keys', body: 'One key per project, revocable from the dashboard, and mintable as read-only.' },
-      { icon: Hand, name: 'Requests, never approvals', body: 'An agent key can ask for a destructive change. Only a person can approve one.' },
-      { icon: Terminal, name: 'CLI', body: 'Schema, generated types, CI drift checks, logs and read-only SQL, with zero dependencies.' },
-      { icon: BookOpen, name: 'Agent skill', body: 'A canonical skill at backenly.com/skill.md, so an agent learns the platform first.' },
-      { icon: FileText, name: 'llms.txt and fetch_docs', body: 'The complete reference in one file, also fetchable by an agent at run time.' },
+      { icon: Plug, name: 'MCP server' },
+      { icon: KeyRound, name: 'Scoped, revocable keys' },
+      { icon: Hand, name: 'Approval for destructive changes' },
+      { icon: Terminal, name: 'CLI' },
+      { icon: BookOpen, name: 'Agent skill' },
+      { icon: FileText, name: 'llms.txt' },
     ],
   },
   {
     id: 'database',
     title: 'Database',
-    lede: 'Standard PostgreSQL in a schema of your own. Isolation is a Postgres grant, not a WHERE clause.',
+    lede: 'Standard PostgreSQL, in a schema of your own.',
     visual: 'database',
     deepDive: { slug: 'database-setup', label: 'The database in depth' },
     items: [
-      { icon: Table2, name: 'Tables and relations', body: 'Columns, foreign keys with their delete behaviour, indexes and CHECK constraints.' },
-      { icon: Boxes, name: 'pgvector', body: 'Store embeddings beside the rows they describe, and query both in SQL.' },
-      { icon: Link2, name: 'Direct connections', body: 'Read-only on demand, read-write when you arm it. psql, ORMs, any BI tool.' },
-      { icon: SearchCode, name: 'Read-only SQL', body: 'Joins, aggregates, CTEs and EXPLAIN, run as a SELECT-only role from the CLI or MCP.' },
-      { icon: DatabaseBackup, name: 'Daily backups', body: 'Taken every day and kept for seven days, on every plan.' },
-      { icon: Download, name: 'pg_dump exports', body: 'A full export that restores on any Postgres, Free plan included.' },
+      { icon: Table2, name: 'Tables and relations' },
+      { icon: Boxes, name: 'pgvector' },
+      { icon: Link2, name: 'Direct connections' },
+      { icon: SearchCode, name: 'Read-only SQL' },
+      { icon: DatabaseBackup, name: 'Daily backups' },
+      { icon: Download, name: 'pg_dump exports' },
     ],
   },
   {
     id: 'apis',
     title: 'REST APIs',
-    lede: 'PostgREST serves every table from the catalog. A table created a second ago is queryable now.',
+    lede: 'Every table is served by PostgREST the moment it exists.',
     visual: 'rest',
     deepDive: { slug: 'api-generation', label: 'The REST API in depth' },
     items: [
-      { icon: Filter, name: 'Filters and pagination', body: 'The full PostgREST grammar: operators, or-groups, ordering, ranges and full-text search.' },
-      { icon: Network, name: 'Embedded resources', body: '`?select=*,author(*)` returns a row and its relations in one round trip.' },
-      { icon: Layers, name: 'Two surfaces, one engine', body: '/api/v1 is the stable contract; /api/v2 passes PostgREST through untouched.' },
-      { icon: FileJson, name: 'OpenAPI and typed clients', body: 'Generated from the live schema by the CLI, never written by hand.' },
-      { icon: GitCompare, name: 'A drift gate for CI', body: '`backenly diff` fails the build when committed types drift from the schema.' },
-      { icon: Package, name: 'JavaScript SDK', body: 'CRUD, auth, storage and realtime from one typed client.' },
+      { icon: Filter, name: 'Filters and pagination' },
+      { icon: Network, name: 'Embedded resources' },
+      { icon: FileJson, name: 'OpenAPI and typed clients' },
+      { icon: GitCompare, name: 'Type checks in CI' },
+      { icon: Package, name: 'JavaScript SDK' },
     ],
   },
   {
     id: 'auth',
     title: 'Auth',
-    lede: 'Sign-up and sign-in for your users, isolated per project and signed with the project\'s own secret.',
+    lede: 'Sign-up and sign-in for your users, separate for every project.',
     visual: 'auth',
     deepDive: { slug: 'authentication', label: 'Authentication in depth' },
     items: [
-      { icon: Mail, name: 'Email and password', body: 'Sign-up, sign-in, sessions and refresh, from two SDK calls.' },
-      { icon: LogIn, name: 'Google sign-in', body: 'OAuth for your users, alongside email and password.' },
-      { icon: Wand2, name: 'Magic links and verification', body: 'Passwordless sign-in and verified emails, with hosted pages and branded mail.' },
-      { icon: Fingerprint, name: 'A secret per project', body: 'Tokens from one project are never accepted by another.' },
-      { icon: Shield, name: 'Row-level security by description', body: 'Say who can read and write what. Backenly writes and enforces the policies.' },
-      { icon: Building2, name: 'Teams for your product', body: 'Organizations, members and invitations for your own customers, scoped by policy.' },
+      { icon: Mail, name: 'Email and password' },
+      { icon: LogIn, name: 'Google sign-in' },
+      { icon: Wand2, name: 'Magic links and verification' },
+      { icon: Fingerprint, name: 'A secret per project' },
+      { icon: Shield, name: 'Row-level security' },
+      { icon: Building2, name: 'Organizations for your users' },
     ],
   },
   {
     id: 'storage',
     title: 'Storage',
-    lede: 'Buckets and files with their metadata, served publicly or through URLs that expire.',
+    lede: 'Buckets and files, public or shared through links that expire.',
     visual: 'storage',
     items: [
-      { icon: FolderOpen, name: 'Public and private buckets', body: 'Public files load anywhere; private ones need a session or a signed URL.' },
-      { icon: Upload, name: 'Uploads and metadata', body: 'Upload from the SDK, and every file keeps its metadata beside it.' },
-      { icon: Timer, name: 'Expiring signed URLs', body: 'Share a private file for a limited time, then never again.' },
-      { icon: HardDrive, name: 'Local disk or S3', body: 'Self-hosted installs choose local storage or any S3-compatible provider.' },
+      { icon: FolderOpen, name: 'Public and private buckets' },
+      { icon: Upload, name: 'Uploads and metadata' },
+      { icon: Timer, name: 'Expiring signed URLs' },
+      { icon: HardDrive, name: 'Local disk or S3 when self-hosted' },
     ],
   },
   {
     id: 'realtime',
     title: 'Realtime',
-    lede: 'Inserts, updates and deletes as they land, over server-sent events. No socket server to run.',
+    lede: 'Database changes, presence and broadcast, over server-sent events.',
     visual: 'realtime',
     items: [
-      { icon: Radio, name: 'Database changes', body: 'Subscribe to a table and receive every committed change as it lands.' },
-      { icon: Users, name: 'Presence', body: 'Who is online right now, with a sixty-second activity window.' },
-      { icon: Megaphone, name: 'Broadcast', body: 'Ephemeral messages between clients, up to 6 KB each.' },
-      { icon: RefreshCw, name: 'Automatic reconnect', body: 'The SDK reconnects by itself after a dropped connection.' },
+      { icon: Radio, name: 'Database changes' },
+      { icon: Users, name: 'Presence' },
+      { icon: Megaphone, name: 'Broadcast' },
+      { icon: RefreshCw, name: 'Automatic reconnect' },
     ],
   },
   {
     id: 'functions',
-    title: 'Functions and events',
-    lede: 'Run TypeScript when rows change, when a user signs up, on a schedule, or at a public HTTPS endpoint.',
+    title: 'Functions',
+    lede: 'TypeScript that runs on row changes, sign-ups, a schedule or an HTTPS call.',
     visual: 'functions',
     items: [
-      { icon: Code2, name: 'Serverless TypeScript', body: 'Your code, run by the platform, with no server to deploy.' },
-      { icon: Zap, name: 'Event triggers', body: 'Insert, update, delete and signup events call your function. Pro and Enterprise.' },
-      { icon: CalendarClock, name: 'Cron schedules', body: 'Run a function on a schedule you write as a cron expression.' },
-      { icon: Webhook, name: 'Outbound webhooks', body: 'Tell other systems when your data changes. Pro and Enterprise.' },
-      { icon: Activity, name: 'Rate limits', body: 'Built in, so one noisy caller cannot exhaust the rest.' },
-      { icon: Globe, name: 'Public endpoints', body: 'Expose a function at an HTTPS endpoint of its own.' },
+      { icon: Code2, name: 'Serverless TypeScript' },
+      { icon: Zap, name: 'Event triggers', plan: 'Pro' },
+      { icon: CalendarClock, name: 'Cron schedules' },
+      { icon: Webhook, name: 'Outbound webhooks', plan: 'Pro' },
+      { icon: Activity, name: 'Rate limits' },
+      { icon: Globe, name: 'Public endpoints' },
     ],
   },
   {
     id: 'governance',
-    title: 'Governed change',
-    lede: 'Every change, from you, your agent or the autonomy loop, goes through one path that plans it, gates it, applies it, verifies it and records it.',
+    title: 'Safe changes',
+    lede: 'Every change is checked and recorded, and can be undone. Destructive ones wait for a person.',
     items: [
-      { icon: ListChecks, name: 'Typed actions', body: 'Ordinary SQL becomes named actions that say exactly what each one touches.' },
-      { icon: Hand, name: 'Review Queue', body: 'Destructive work waits for a person, with the live row count beside it.' },
-      { icon: Camera, name: 'Restore points', body: 'Captured before the first write, then the plan commits atomically.' },
-      { icon: BadgeCheck, name: 'Behavioural verification', body: 'Real requests as a stranger and as a signed-in user, with the evidence kept.' },
-      { icon: ScrollText, name: 'Change ledger', body: 'Every change with its actor, its diff and a way back.' },
-      { icon: GitBranch, name: 'Branches', body: 'Clone the backend, let your agent experiment, review the diff, merge what works.' },
+      { icon: Hand, name: 'Review queue' },
+      { icon: Camera, name: 'Restore points' },
+      { icon: BadgeCheck, name: 'Checks after every build' },
+      { icon: ScrollText, name: 'Change history' },
+      { icon: GitBranch, name: 'Branches' },
+      { icon: ListChecks, name: 'All or nothing' },
     ],
   },
   {
     id: 'autonomy',
-    title: 'Autonomy and operations',
-    lede: 'A resident loop checks every project every minute, fixes what is safe to fix, verifies the fix, and leaves you a receipt.',
-    deepDive: { slug: 'deployment-ready-backends', label: 'Operations and autonomy in depth' },
+    title: 'Self-healing',
+    lede: 'Backenly checks every project every minute, fixes what is safe and records every fix.',
+    deepDive: { slug: 'deployment-ready-backends', label: 'Operations and self-healing in depth' },
     items: [
-      { icon: Timer, name: 'Every minute, every plan', body: 'The same loop on Free as on Enterprise, never metered.' },
-      { icon: Cpu, name: 'No model calls', body: 'Repairs are deterministic, so healing never spends AI credits.' },
-      { icon: Camera, name: 'Snapshot first', body: 'Only reversible fixes apply on their own. The rest become proposals.' },
-      { icon: SlidersHorizontal, name: 'Your autonomy level', body: 'Review-only, or apply safe fixes and read about them afterwards.' },
-      { icon: Activity, name: 'Traffic watched', body: 'Requests, latency and error rates, checked for anomalies.' },
-      { icon: Receipt, name: 'Receipts', body: 'What was detected, what changed, and how the fix was verified.' },
+      { icon: Timer, name: 'Every minute, on every plan' },
+      { icon: Cpu, name: 'Never uses AI credits' },
+      { icon: Camera, name: 'Restore point before each fix' },
+      { icon: SlidersHorizontal, name: 'Your choice of autonomy level' },
+      { icon: Activity, name: 'Traffic and error monitoring' },
+      { icon: Receipt, name: 'A record of every fix' },
     ],
   },
   {
     id: 'platform',
-    title: 'Teams, security and hosting',
-    lede: 'The questions a company asks before it trusts a backend with production.',
+    title: 'Teams and hosting',
+    lede: 'Roles for your team, logs, custom domains, single sign-on and self-hosting.',
     items: [
-      { icon: Users, name: 'Organizations and roles', body: 'Invite teammates with roles. Free includes two seats and Pro five.' },
-      { icon: Globe, name: 'Custom domains', body: 'Serve your backend from your own domain on Pro and Enterprise.' },
-      { icon: ScrollText, name: 'Logs', body: 'Kept for 7 days on Free, 30 on Pro and 90 on Enterprise.' },
-      { icon: LockKeyhole, name: 'Single sign-on', body: 'OIDC sign-on for your team, on Enterprise.' },
-      { icon: Github, name: 'Open source', body: 'The platform is Apache-2.0; the SDK, CLI, MCP server and skill are MIT.' },
-      { icon: Server, name: 'Self-host or Cloud', body: 'One codebase either way, with pg_dump to move between them.' },
+      { icon: Users, name: 'Organizations and roles' },
+      { icon: Globe, name: 'Custom domains', plan: 'Pro' },
+      { icon: ScrollText, name: 'Logs for 7, 30 or 90 days' },
+      { icon: LockKeyhole, name: 'Single sign-on', plan: 'Enterprise' },
+      { icon: Github, name: 'Open source' },
+      { icon: Server, name: 'Self-host or Cloud' },
     ],
   },
 ]

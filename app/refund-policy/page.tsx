@@ -79,7 +79,7 @@ export default function RefundPolicyPage() {
           lede="Straightforward billing terms for Backenly subscriptions: cancel anytime, keep access through the paid period, and contact us if something looks wrong."
         >
           <p className="mt-7 text-[14px] text-zinc-500">
-            Last updated <span className="text-zinc-300">March 28, 2026</span>
+            Last updated <span className="text-zinc-300">August 21, 2026</span>
           </p>
         </PageHero>
 

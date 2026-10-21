@@ -28,7 +28,7 @@ export function LegalBody({
   children: ReactNode
 }) {
   return (
-    <div className={`${CONTAINER} relative pb-[120px] pt-[56px] md:pt-[80px]`}>
+    <div className={`${CONTAINER} relative pb-[120px] pt-[40px] md:pt-[56px]`}>
       <div className="grid gap-12 lg:grid-cols-[240px_minmax(0,1fr)] lg:gap-16 xl:gap-24">
         <aside className="hidden lg:block">
           <div className="sticky top-[100px]">

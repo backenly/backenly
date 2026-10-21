@@ -141,12 +141,12 @@ export const DOC_SECTIONS: DocSection[] = [
       'A task app stores projects and the tasks inside them, and each user sees only their own.',
       'A shop stores products, orders and order items, linked by foreign keys.',
       'A chat app stores conversations and messages that only the two people in the conversation can read.',
-      'You answer a question about your data with a read-only SQL query, without any risk of changing it.',
+      'You answer a question about your data with a read-only SQL query, which cannot change anything.',
     ],
     how: [
       {
         title: 'Your agent asks for the change',
-        body: 'With ordinary PostgreSQL DDL through `apply_migration`, or by describing the tables to `backend_chat`. Either way Backenly turns the request into typed actions rather than running raw SQL, and refuses anything it cannot map.',
+        body: 'With ordinary PostgreSQL DDL through `apply_migration`, or by describing the tables to `backend_chat`. Either way, Backenly translates the request into its own fixed set of actions instead of running the SQL as written, and refuses anything it cannot translate.',
       },
       {
         title: 'Backenly applies the checked steps',
@@ -417,7 +417,7 @@ await backend.auth.signIn({ email, password })
       },
       {
         title: 'Your agent builds it',
-        body: 'Over MCP it creates the tables, functions and webhook receivers the feature needs, through the same governed path as every other change.',
+        body: 'Over MCP it creates the tables, functions and webhook receivers the feature needs, with the same checks and approvals as any other change.',
       },
       {
         title: 'Functions use the key on the server',
@@ -447,7 +447,7 @@ await backend.auth.signIn({ email, password })
     metaDescription:
       'What Autonomy does: checks the running backend every minute, fixes safe and reversible problems on its own in Autopilot, holds risky changes in a review queue, and records every schema change it makes with a restore point.',
     why:
-      'A backend keeps changing after launch: new tables, more traffic, a column someone added by hand. Problems show up when nobody is looking, and the usual answer is a person on call. Autonomy takes the first part of that job. It checks every minute, shows the evidence for what it finds, and never applies a change it cannot undo without asking you first.',
+      'A backend keeps changing after launch: new tables, more traffic, a column someone added by hand. Problems show up when nobody is looking, and the usual answer is a person on call. Autonomy does the first part of that job: it checks every minute, shows the evidence for what it finds, and never applies a change it cannot undo without asking you first.',
     examples: [
       'A foreign key with no index starts slowing a page down. Autonomy adds the index and records what it did.',
       'A new table holds user data without row-level security. Autonomy flags it and shows you why.',
@@ -461,7 +461,7 @@ await backend.auth.signIn({ email, password })
       },
       {
         title: 'It sorts fixes by risk',
-        body: 'Additive, reversible fixes are the safe band. Auth changes, credentials, anything destructive and anything irreversible always wait for a person.',
+        body: 'A fix that only adds something and can be undone counts as safe. Auth changes, credentials, anything destructive and anything irreversible always wait for a person.',
       },
       {
         title: 'You choose the mode',
@@ -477,8 +477,8 @@ await backend.auth.signIn({ email, password })
       'Show me the open health findings in my backend, with their evidence.',
     ],
     notes: [
-      'No mode can apply auth, destructive or irreversible changes on its own. That floor is not a setting.',
-      'Routine checks and safe repairs are deterministic and use no AI credits. When those checks cannot explain a finding, an AI investigation can gather read-only evidence and suggest a typed repair. Its explanation is labelled as a hypothesis, and any proposed repair waits for a person’s approval. On Cloud, Backenly pays for these investigations.',
+      'No mode can apply auth, destructive or irreversible changes on its own, and no setting changes that.',
+      'Routine checks and safe repairs follow fixed rules and use no AI credits. When those checks cannot explain a finding, an AI investigation can gather read-only evidence and suggest one of the repairs Backenly lists for that kind of finding, never raw SQL. Its explanation is labelled as a hypothesis, and any proposed repair waits for a person’s approval. On Cloud, Backenly pays for these investigations.',
       'A project with no traffic, no changes and no other activity for 30 days is not checked until activity returns.',
       'Restoring the state before a change undoes only that change, and data written since is never dropped without your approval. A restore point covers the database schema; functions and auth settings are not in it.',
     ],
@@ -624,7 +624,7 @@ await backend.auth.signIn({ email, password })
     metaDescription:
       'How to connect Claude Code, Cursor, Codex or another coding agent to Backenly over MCP with a scoped key, and how your app and database tools connect directly.',
     why:
-      'Backenly has no chat box for building. The agent you already use, such as Claude Code, Cursor or Codex, is how you build: it reads your live schema, makes changes through governed tools and shows you the results. Connect gives it the one command and the scoped key it needs. The same page holds what your frontend and other tools need: the API address, generated types and database credentials.',
+      'Backenly has no chat box for building. The agent you already use, such as Claude Code, Cursor or Codex, is how you build: it reads your live schema, makes changes through Backenly’s tools and shows you the results. Connect gives it the one command and the scoped key it needs. The same page holds what your frontend and other tools need: the API address, generated types and database credentials.',
     examples: [
       'You add Backenly to Claude Code with one command and start a new conversation.',
       'A contractor’s agent gets a read-only key that can inspect the project and change nothing.',
@@ -736,7 +736,7 @@ export function isFromBackenly(rawBody, signatureHeader, secret) {
     metaDescription:
       'What project Settings covers: the project id and API base URL, API keys with Admin, Write, Read only and Client roles, revoking keys, and who can open the project.',
     why:
-      'Every app that talks to your backend needs a key, and different callers need different powers: a browser should never hold a key that can administer the project. Settings is the one place keys are created, scoped and revoked, next to the identifiers your code needs and the controls for the project as a whole.',
+      'Every app that talks to your backend needs a key, and different callers need different powers: a browser should never hold a key that can administer the project. Settings is where keys are created, scoped and revoked, next to the identifiers your code needs and the controls for the project as a whole.',
     examples: [
       'You copy the project id and API base URL into your frontend’s environment variables.',
       'You create a Client key for the browser and an Admin key for a server-side job.',

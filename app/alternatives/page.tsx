@@ -1,6 +1,8 @@
 import type { Metadata } from 'next'
+import { Check, Minus } from 'lucide-react'
 import { safeJsonLd } from '@/lib/security/safe-jsonld'
 import { SiteShell } from '@/components/site/SiteShell'
+import { BentoCell, CellBody, CellTitle } from '@/components/landing-v7/shared'
 import {
   ArrowLink,
   ButtonLink,
@@ -11,21 +13,19 @@ import {
   PageHero,
   Section,
   SectionHead,
-  withCode,
 } from '@/components/site/kit'
 import { Faq } from '@/components/site/Faq'
-import { Reveal } from '@/components/site/Reveal'
 import { StartButton } from '@/components/site/StartButton'
-import { HEADING, PANEL, TITLE } from '@/components/site/tokens'
+import { HEADING, TITLE } from '@/components/site/tokens'
 import { COMPARISON_LIST } from '../comparisons/data'
-import { CRITERIA, DO_NOT_SWITCH, FAQ, NOT_FOR, REASONS_TEAMS_LOOK, SWITCHING_COSTS } from './data'
+import { CRITERIA, DO_NOT_SWITCH, FAQ, NOT_FOR, SWITCHING_COSTS } from './data'
 
 const APP_URL = 'https://backenly.com'
 
 export const metadata: Metadata = {
   title: 'Backend platform alternatives: how to evaluate one, and when to stay',
   description:
-    'The criteria that actually decide a backend platform: data model, who applies schema changes, who operates it after launch, agent blast radius, exit path, and billing shape. Includes where Backenly does not fit.',
+    'Six questions that decide a backend platform: the data model, schema changes, upkeep after launch, agent access, leaving, and pricing. Includes where Backenly does not fit.',
   keywords: [
     'backend platform alternatives',
     'Supabase alternative',
@@ -48,13 +48,21 @@ export const metadata: Metadata = {
 }
 
 /* ─────────────────────────────────────────────────────────────
-   /alternatives: for the reader who is earlier than a shortlist.
+   /alternatives (2026-10-15, founders: "no jargon, no lots of text, no big
+   banners, clean and professional"). For the reader who is earlier than a
+   shortlist.
 
-   The centrepiece is the six criteria, each set as a row: the question on the
-   left, why it binds, and on the right where Backenly lands, in a lit panel so
-   the answer is easy to find and impossible to mistake for the question. The
-   rows are numbered because the data file orders them by how early they bind.
+   One job: how to evaluate a platform, and who should not switch. Six
+   questions, each a bento cell with Backenly's answer under a hairline; where
+   Backenly does not fit; what a move costs; a short FAQ. The essay on why
+   teams start looking is gone.
+
+   The cells are the landing's (components/landing-v7). Violet marks only
+   Backenly's own answers.
 ───────────────────────────────────────────────────────────── */
+
+/** The gap between a section title and its first cell. */
+const BODY_GAP = 'mt-[40px] md:mt-[56px]'
 
 export default function AlternativesPage() {
   /** Mirrors the FAQ rendered near the foot of this page, and nothing else. */
@@ -74,153 +82,118 @@ export default function AlternativesPage() {
       <Page>
         <PageHero
           trail={[{ label: 'Home', href: '/' }, { label: 'Alternatives' }]}
-          title="Choosing a backend platform, including when not to"
-          lede="What actually decides it, where Backenly lands on each criterion, and the cases where you should stay on what you have."
-          actions={
-            <>
-              <StartButton />
-              <ButtonLink href="/comparisons" variant="secondary">
-                See comparisons
-              </ButtonLink>
-            </>
-          }
+          title="Choosing a backend platform"
+          lede="Six questions to ask any platform, this one included, and when to stay where you are."
         />
 
-        <Section flush aria-labelledby="why-look">
-          <div className="grid gap-10 lg:grid-cols-[minmax(0,4fr)_minmax(0,8fr)] lg:gap-16">
-            <Reveal className="lg:sticky lg:top-28 lg:self-start">
-              <SectionHead
-                id="why-look"
-                title="Why teams start looking"
-                lede="Worth being precise about the trigger, because two of these five are not problems a different platform solves."
-              />
-            </Reveal>
-            <Reveal delay={0.06}>
-              <ul className="flex flex-col">
-                {REASONS_TEAMS_LOOK.map((reason, index) => (
-                  <li key={reason.title} className={`py-7 ${index === 0 ? 'pt-0 lg:pt-2' : 'border-t border-white/[0.08]'}`}>
-                    <h3 className={`text-[18px] text-white ${HEADING}`}>{reason.title}</h3>
-                    <p className="mt-2 max-w-[64ch] text-[15px] leading-[1.7] text-zinc-400 [text-wrap:pretty]">
-                      {withCode(reason.body)}
-                    </p>
-                  </li>
-                ))}
-              </ul>
-            </Reveal>
-          </div>
-        </Section>
-
-        <Section aria-labelledby="criteria">
-          <Reveal>
-            <SectionHead
-              id="criteria"
-              title="What actually decides it"
-              lede="Six questions, roughly in the order they tend to bind. Ask them of any platform you are considering, this one included. Each carries where Backenly lands, stated plainly enough to check."
-            />
-          </Reveal>
-          <ol className="mt-14">
+        <Section flush aria-labelledby="criteria">
+          <SectionHead
+            id="criteria"
+            title={
+              <>
+                Six questions to ask. <span className="text-zinc-500">With Backenly&apos;s answers.</span>
+              </>
+            }
+          />
+          <ol className={`${BODY_GAP} grid gap-[12px] md:grid-cols-2 lg:grid-cols-3`}>
             {CRITERIA.map((criterion, index) => (
-              <Reveal
-                as="li"
-                key={criterion.question}
-                className="grid gap-6 border-t border-white/[0.08] py-10 lg:grid-cols-[48px_minmax(0,6fr)_minmax(0,5fr)] lg:gap-10"
-              >
-                <span aria-hidden className="text-[15px] font-medium tabular-nums text-zinc-600">
-                  {index + 1}
-                </span>
-                <div className="min-w-0">
-                  <h3 className={`max-w-[34ch] text-[20px] text-white [text-wrap:balance] md:text-[22px] ${HEADING}`}>
-                    {criterion.question}
-                  </h3>
-                  <p className="mt-3 max-w-[60ch] text-[15px] leading-[1.7] text-zinc-400 [text-wrap:pretty]">
-                    {withCode(criterion.why)}
-                  </p>
-                </div>
-                <div className={`relative self-start overflow-hidden p-5 md:p-6 ${PANEL}`}>
-                  <span
-                    aria-hidden
-                    className="pointer-events-none absolute inset-y-0 left-0 w-px bg-[linear-gradient(to_bottom,rgba(196,181,253,0.7),rgba(196,181,253,0.05))]"
-                  />
-                  <p className="text-[13px] font-medium text-violet-300">Where Backenly lands</p>
-                  <p className="mt-2 text-[15px] leading-[1.7] text-zinc-300 [text-wrap:pretty]">
-                    {withCode(criterion.backenly)}
-                  </p>
-                </div>
-              </Reveal>
+              <li key={criterion.question} className="min-w-0">
+                <BentoCell bare className="h-full">
+                  <div className="flex h-full flex-col p-[20px] md:p-[26px]">
+                    <span aria-hidden className="font-mono text-[11px] tabular-nums tracking-tight text-zinc-500">
+                      {String(index + 1).padStart(2, '0')}
+                    </span>
+                    <h3 className={`mt-[14px] text-[18px] text-white [text-wrap:balance] ${HEADING}`}>
+                      {criterion.question}
+                    </h3>
+                    <p className="mt-[10px] text-[15px] leading-[1.65] tracking-[-0.004em] text-zinc-400 [text-wrap:pretty]">
+                      {criterion.why}
+                    </p>
+                    <div className="mt-auto pt-[24px]">
+                      <div className="border-t border-white/[0.07] pt-[16px]">
+                        <p className="text-[13px] font-medium text-violet-300">Backenly</p>
+                        <p className="mt-[6px] text-[14px] leading-[1.65] text-zinc-300 [text-wrap:pretty]">
+                          {criterion.backenly}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                </BentoCell>
+              </li>
             ))}
           </ol>
         </Section>
 
-        <Section aria-label="Where Backenly does not fit">
-          <Reveal>
-            <p className="max-w-[62ch] text-[17px] leading-[1.7] text-zinc-400">
-              Each of these is a real boundary rather than a roadmap item. If one is load-bearing for
-              your product, that settles it, and the rest of this page is academic.
-            </p>
-          </Reveal>
-          <div className="mt-12 grid gap-12 lg:grid-cols-2 lg:gap-16">
-            <BoundaryColumn id="not-for" title="What Backenly is not for" items={NOT_FOR} />
-            <BoundaryColumn id="do-not-switch" title="Who should not switch" items={DO_NOT_SWITCH} delay={0.06} />
+        <Section aria-labelledby="not-a-fit">
+          <SectionHead
+            id="not-a-fit"
+            title={
+              <>
+                Where Backenly does not fit. <span className="text-zinc-500">If one applies, that settles it.</span>
+              </>
+            }
+          />
+          <div className={`${BODY_GAP} grid gap-[12px] lg:grid-cols-2`}>
+            <LimitCell title="Not built for" items={NOT_FOR} />
+            <LimitCell title="Do not switch if" items={DO_NOT_SWITCH} />
           </div>
         </Section>
 
         <Section aria-labelledby="switching-costs">
-          <div className="grid gap-10 lg:grid-cols-[minmax(0,4fr)_minmax(0,8fr)] lg:gap-16">
-            <Reveal className="lg:sticky lg:top-28 lg:self-start">
-              <SectionHead
-                id="switching-costs"
-                title="What switching actually costs"
-                lede="There is no migration service on any plan. This is the real list of what you would be taking on."
-              />
-              <ArrowLink href="/use-cases/migrate-from-supabase" className="mt-8">
-                Moving from Supabase, in detail
-              </ArrowLink>
-            </Reveal>
-            <Reveal delay={0.06}>
-              <dl className="flex flex-col">
-                {SWITCHING_COSTS.map((cost, index) => (
-                  <div key={cost.item} className={`py-6 ${index === 0 ? 'pt-0 lg:pt-2' : 'border-t border-white/[0.08]'}`}>
-                    <dt className={`text-[17px] text-white ${HEADING}`}>{cost.item}</dt>
-                    <dd className="mt-2 max-w-[64ch] text-[15px] leading-[1.7] text-zinc-400 [text-wrap:pretty]">
-                      {withCode(cost.detail)}
-                    </dd>
-                  </div>
-                ))}
-              </dl>
-            </Reveal>
+          <SectionHead
+            id="switching-costs"
+            title={
+              <>
+                What switching costs. <span className="text-zinc-500">Most of it is your work.</span>
+              </>
+            }
+          >
+            <ArrowLink href="/comparisons/backenly-vs-supabase">Moving from Supabase, in detail</ArrowLink>
+          </SectionHead>
+          <ul className={`${BODY_GAP} grid gap-[12px] md:grid-cols-2 lg:grid-cols-3`}>
+            {SWITCHING_COSTS.map((cost) => {
+              const Glyph = cost.cheap ? Check : Minus
+              return (
+                <li key={cost.item} className="min-w-0">
+                  <BentoCell className="h-full">
+                    <Glyph
+                      aria-hidden
+                      strokeWidth={2}
+                      className={`h-[18px] w-[18px] ${cost.cheap ? 'text-violet-300' : 'text-zinc-500'}`}
+                    />
+                    <div className="mt-[16px]">
+                      <CellTitle>{cost.item}</CellTitle>
+                    </div>
+                    <CellBody>{cost.detail}</CellBody>
+                  </BentoCell>
+                </li>
+              )
+            })}
+          </ul>
+        </Section>
+
+        <Section aria-labelledby="switching-faq">
+          <div className="grid gap-[40px] lg:grid-cols-[minmax(0,4fr)_minmax(0,7fr)] lg:gap-[64px]">
+            <div className="lg:sticky lg:top-[112px] lg:self-start">
+              <SectionHead id="switching-faq" title="Questions about switching" />
+            </div>
+            <Faq items={FAQ} />
           </div>
         </Section>
 
         <Section aria-labelledby="detailed-comparisons">
-          <Reveal>
-            <SectionHead
-              id="detailed-comparisons"
-              title="Comparisons against specific platforms"
-              lede="Once you know which criterion binds, the detailed pages go capability by capability and say where each alternative is stronger."
-            />
-          </Reveal>
-          <Reveal delay={0.06}>
-            <NextLinks
-              className="mt-10"
-              items={COMPARISON_LIST.map((c) => ({ href: `/comparisons/${c.slug}`, meta: c.category, title: c.headline }))}
-            />
-          </Reveal>
-        </Section>
-
-        <Section aria-labelledby="switching-faq">
-          <div className="grid gap-10 lg:grid-cols-[minmax(0,4fr)_minmax(0,7fr)] lg:gap-16">
-            <Reveal className="lg:sticky lg:top-28 lg:self-start">
-              <SectionHead id="switching-faq" title="Questions about switching" />
-            </Reveal>
-            <Reveal delay={0.06}>
-              <Faq items={FAQ} />
-            </Reveal>
-          </div>
+          <h2 id="detailed-comparisons" className={`text-[22px] text-white md:text-[26px] ${TITLE}`}>
+            Compare against a specific platform
+          </h2>
+          <NextLinks
+            className="mt-[28px]"
+            items={COMPARISON_LIST.map((c) => ({ href: `/comparisons/${c.slug}`, meta: c.category, title: c.headline }))}
+          />
         </Section>
 
         <HorizonClose
-          title="Test it on something real"
-          lede="One free project, kept permanently. Rebuild a non-critical part of your schema and see whether the workflow suits you."
+          title="Try it on something real"
+          lede="One free project, kept permanently. Start with a non-critical part of your schema."
         >
           <StartButton />
           <ButtonLink href="/pricing" variant="secondary">
@@ -232,32 +205,28 @@ export default function AlternativesPage() {
   )
 }
 
-function BoundaryColumn({
-  id,
-  title,
-  items,
-  delay = 0,
-}: {
-  id: string
-  title: string
-  items: { title: string; body: string }[]
-  delay?: number
-}) {
+/**
+ * A titled list of limits: a dash for each, its name, and one sentence. Dashes
+ * because these are what Backenly does not do; never a check.
+ */
+function LimitCell({ title, items }: { title: string; items: { title: string; body: string }[] }) {
   return (
-    <Reveal delay={delay}>
-      <h2 id={id} className={`text-[24px] text-white md:text-[30px] ${TITLE}`}>
-        {title}
-      </h2>
-      <ul className="mt-8 flex flex-col">
+    <BentoCell className="h-full">
+      <CellTitle>{title}</CellTitle>
+      <ul className="mt-[18px] flex flex-col">
         {items.map((item) => (
-          <li key={item.title} className="border-t border-white/[0.08] py-6">
-            <h3 className={`text-[17px] text-white ${HEADING}`}>{item.title}</h3>
-            <p className="mt-2 max-w-[58ch] text-[15px] leading-[1.7] text-zinc-400 [text-wrap:pretty]">
-              {withCode(item.body)}
-            </p>
+          <li
+            key={item.title}
+            className="flex gap-[12px] border-t border-white/[0.07] py-[14px] first:border-t-0 first:pt-0 last:pb-0"
+          >
+            <Minus aria-hidden strokeWidth={2} className="mt-[3px] h-4 w-4 shrink-0 text-zinc-500" />
+            <div className="min-w-0">
+              <p className={`text-[15px] text-zinc-100 ${HEADING}`}>{item.title}</p>
+              <p className="mt-[4px] text-[14px] leading-[1.6] text-zinc-400 [text-wrap:pretty]">{item.body}</p>
+            </div>
           </li>
         ))}
       </ul>
-    </Reveal>
+    </BentoCell>
   )
 }

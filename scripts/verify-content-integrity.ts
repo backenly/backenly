@@ -1,6 +1,6 @@
 /**
- * Content integrity gate for /docs, /use-cases, /comparisons,
- * /alternatives and /privacy.
+ * Content integrity gate for /docs, /comparisons, /alternatives and
+ * /privacy. (/use-cases was removed 2026-10-15.)
  *
  * WHY THIS EXISTS
  * ---------------
@@ -66,7 +66,6 @@ import fs from 'fs'
 import path from 'path'
 import { DOC_GROUPS, DOC_SECTIONS, DOC_SLUGS, DOCS_BY_SLUG } from '../app/docs/content'
 import { DOC_VIDEOS } from '../app/docs/videos'
-import { USE_CASE_LIST, USE_CASES } from '../app/use-cases/data'
 import { COMPARISON_LIST, COMPARISON_SLUGS } from '../app/comparisons/data'
 import {
   CRITERIA,
@@ -154,26 +153,6 @@ for (const [slug, video] of Object.entries(DOC_VIDEOS)) {
       fail(`docs/videos/${slug}: ${file} does not exist under public/`)
     }
   }
-}
-
-// ── 2. Use-case shape: the fields that keep a use case honest ────────────────
-
-for (const uc of USE_CASE_LIST) {
-  if (uc.workflow.length < 3) fail(`use-cases/${uc.slug}: workflow has only ${uc.workflow.length} steps`)
-  if (uc.limitations.length < 3) fail(`use-cases/${uc.slug}: only ${uc.limitations.length} limitations — a use case that cannot say where it stops is a brochure`)
-  if (uc.capabilities.length < 3) fail(`use-cases/${uc.slug}: only ${uc.capabilities.length} named capabilities`)
-  if (uc.responsibility.you.length < 3) fail(`use-cases/${uc.slug}: "you own" list is too thin to be honest`)
-  if (uc.responsibility.platform.length < 3) fail(`use-cases/${uc.slug}: "platform does" list is too thin`)
-  if (uc.faq.length < 3) fail(`use-cases/${uc.slug}: only ${uc.faq.length} FAQ entries`)
-
-  const stepTitles = uc.workflow.map((s) => s.title)
-  if (new Set(stepTitles).size !== stepTitles.length) fail(`use-cases/${uc.slug}: duplicate workflow step titles (React key collision)`)
-  const capNames = uc.capabilities.map((c) => c.name)
-  if (new Set(capNames).size !== capNames.length) fail(`use-cases/${uc.slug}: duplicate capability names (React key collision)`)
-}
-
-if (Object.keys(USE_CASES).length !== USE_CASE_LIST.length) {
-  fail('use-cases: the slug map and the list disagree — a duplicate slug is shadowing an entry')
 }
 
 // ── 2b. Comparison shape: the fields that keep a comparison honest ───────────
@@ -449,12 +428,12 @@ const compare = (label: string, prefix: string, real: string[]) => {
 }
 
 const docCount = compare('docs', '/docs/', [...DOC_SLUGS])
-const useCaseCount = compare('use-case', '/use-cases/', USE_CASE_LIST.map((u) => u.slug))
 const comparisonCount = compare('comparison', '/comparisons/', [...COMPARISON_SLUGS])
 
 // The index routes are hand-listed in the sitemap rather than derived, so they
-// are the ones that can silently go missing.
-for (const index of ['/docs', '/comparisons', '/alternatives', '/privacy']) {
+// are the ones that can silently go missing. /docs is not one: since
+// 2026-10-15 it has no page and redirects to the first section.
+for (const index of ['/comparisons', '/alternatives', '/privacy']) {
   if (!urls.includes(index)) fail(`${index} exists but is missing from the sitemap`)
 }
 
@@ -486,12 +465,11 @@ async function checkRedirects(): Promise<void> {
   }
 
   // A retired slug must not still be served: if a page exists at the source, the
-  // redirect never fires and the rule is a lie. /docs itself counts: it was a
-  // redirect to /resources before it became the docs home.
-  const liveDocs = new Set(['/docs', ...DOC_SLUGS.map((s) => `/docs/${s}`)])
-  const liveUseCases = new Set(USE_CASE_LIST.map((u) => `/use-cases/${u.slug}`))
+  // redirect never fires and the rule is a lie. /docs itself is not in this
+  // set: since 2026-10-15 it has no page and redirects to the first section.
+  const liveDocs = new Set(DOC_SLUGS.map((s) => `/docs/${s}`))
   for (const r of rules) {
-    if (liveDocs.has(r.source) || liveUseCases.has(r.source)) {
+    if (liveDocs.has(r.source)) {
       fail(`redirect ${r.source} → ${r.destination} is dead: a page still exists at that slug`)
     }
   }
@@ -499,9 +477,6 @@ async function checkRedirects(): Promise<void> {
   // Every internal redirect destination must resolve to something real.
   for (const r of rules) {
     if ((r.destination === '/docs' || r.destination.startsWith('/docs/')) && !liveDocs.has(r.destination)) {
-      fail(`redirect ${r.source} points at ${r.destination}, which does not exist`)
-    }
-    if (r.destination.startsWith('/use-cases/') && !liveUseCases.has(r.destination)) {
       fail(`redirect ${r.source} points at ${r.destination}, which does not exist`)
     }
   }
@@ -515,9 +490,9 @@ async function checkRedirects(): Promise<void> {
 // noticed — the reader just landed somewhere other than the page they were
 // promised, one hop later.
 //
-// A filesystem check alone would not have caught it, because
-// app/use-cases/[slug]/page.tsx exists and matches any slug. So a link into one
-// of the three dynamic families is validated against that family's actual data,
+// A filesystem check alone would not have caught it, because a dynamic
+// [slug]/page.tsx matches any slug. So a link into one
+// of the dynamic families is validated against that family's actual data,
 // and every link is checked against the redirect table. Static routes fall
 // through to the router's own resolution rules.
 
@@ -533,7 +508,6 @@ const SURFACE_FILES = [
   'app/privacy/data.ts',
   // The docs pages and their navigation. Links inside the docs content itself
   // are written as [label](/path) and checked separately below.
-  'app/docs/page.tsx',
   'app/docs/[slug]/page.tsx',
   'components/docs/DocsNav.tsx',
 ]
@@ -567,7 +541,6 @@ async function checkInternalLinks(): Promise<void> {
 
   const dynamicFamilies: Record<string, Set<string>> = {
     '/comparisons/': new Set(COMPARISON_SLUGS),
-    '/use-cases/': new Set(USE_CASE_LIST.map((u) => u.slug)),
     '/docs/': new Set<string>(DOC_SLUGS),
   }
 
@@ -641,8 +614,8 @@ checkRedirects()
       process.exit(1)
     }
     console.log(
-      `✓ Content integrity: ${DOC_SECTIONS.length} docs pages + ${USE_CASE_LIST.length} use cases + ` +
-        `${COMPARISON_LIST.length} comparisons · ${docCount} + ${useCaseCount} + ` +
+      `✓ Content integrity: ${DOC_SECTIONS.length} docs pages + ` +
+        `${COMPARISON_LIST.length} comparisons · ${docCount} + ` +
         `${comparisonCount} sitemap URLs match · redirects unchained · internal links resolve · ` +
         `every comparison concedes a case · competitor facts sourced · keys unique · ` +
         `privacy: ${PRIVACY_SECTIONS.length} sections, ${PROVIDERS.length} providers disclosed, ` +

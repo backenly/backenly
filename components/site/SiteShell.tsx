@@ -28,9 +28,11 @@ export const ROUTES = {
   // the marketing site to /app.
   startups: '/startups',
   features: '/features',
-  useCases: '/use-cases',
   comparisons: '/comparisons',
-  docs: '/docs',
+  // The first docs section: the docs have no index page (2026-10-15), and
+  // /docs redirects here, so links skip the hop. Keep it equal to the first
+  // section in app/docs/content.ts.
+  docs: '/docs/database',
   alternatives: '/alternatives',
   privacy: '/privacy',
   terms: '/terms',
@@ -89,8 +91,7 @@ const SHOW_LAUNCH_BAR = true
 
 const NAV_LINKS = [
   { label: 'Product', href: '/#capabilities', activePath: '/' },
-  { label: 'Docs', href: ROUTES.docs, activePath: ROUTES.docs },
-  { label: 'Use cases', href: ROUTES.useCases, activePath: ROUTES.useCases },
+  { label: 'Docs', href: ROUTES.docs, activePath: '/docs' },
   { label: 'Pricing', href: ROUTES.pricing, activePath: ROUTES.pricing },
   { label: 'Contact', href: ROUTES.contact, activePath: ROUTES.contact },
 ] as const
@@ -455,7 +456,6 @@ export function SiteFooter() {
     { label: 'Features', href: ROUTES.features },
     { label: 'Pricing', href: ROUTES.pricing },
     { label: 'Startup program', href: ROUTES.startups },
-    { label: 'Use cases', href: ROUTES.useCases },
     { label: 'Comparisons', href: ROUTES.comparisons },
     { label: 'Alternatives', href: ROUTES.alternatives },
   ]
@@ -469,7 +469,7 @@ export function SiteFooter() {
   ]
   const company = [
     { label: 'Contact', href: ROUTES.contact },
-    { label: 'Talk to the founder', href: ROUTES.founder },
+    { label: 'Talk to the founders', href: ROUTES.founder },
     { label: 'Privacy Policy', href: ROUTES.privacy },
     { label: 'Terms of Service', href: ROUTES.terms },
     { label: 'Refund Policy', href: ROUTES.refund },

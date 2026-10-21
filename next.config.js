@@ -85,13 +85,15 @@ const nextConfig = {
       // Audience repositioning 2026-07-18: marketing slugs renamed away from
       // "vibe coders" / "non-technical founders" to agent-era audience names.
       // Old URLs are indexed — keep permanent redirects.
-      { source: '/use-cases/vibe-coders', destination: '/use-cases/ai-assisted-developers', permanent: true },
-      { source: '/use-cases/non-technical-founders', destination: '/use-cases/founders', permanent: true },
+      // Repointed 2026-10-15, when the use-case pages were removed (see the
+      // block at the end of this list): each goes to its final page directly.
+      { source: '/use-cases/vibe-coders', destination: '/docs/connect', permanent: true },
+      { source: '/use-cases/non-technical-founders', destination: '/', permanent: true },
       // Repointed 2026-08-29: this used to land on
       // /resources/full-stack-development-with-ai-coding-agents, which is now
       // itself redirected. Chaining two 301s costs a round trip and dilutes the
       // signal, so it goes straight to the final destination.
-      { source: '/resources/how-vibe-coders-can-build-full-stack-apps-faster', destination: '/use-cases/ai-assisted-developers', permanent: true },
+      { source: '/resources/how-vibe-coders-can-build-full-stack-apps-faster', destination: '/docs/connect', permanent: true },
 
       // ── Resources rebuilt as documentation 2026-08-29 ──────────────────────
       //
@@ -108,8 +110,8 @@ const nextConfig = {
       { source: '/resources/what-is-ai-backend-generation', destination: '/features/ai-backend-generation', permanent: true },
       { source: '/resources/how-to-build-a-backend-without-coding', destination: '/docs/database', permanent: true },
       { source: '/resources/best-backend-tools-for-non-technical-founders', destination: '/comparisons', permanent: true },
-      { source: '/resources/full-stack-development-with-ai-coding-agents', destination: '/use-cases/ai-assisted-developers', permanent: true },
-      { source: '/resources/backend-development-for-ai-app-builders', destination: '/use-cases/ai-product-backends', permanent: true },
+      { source: '/resources/full-stack-development-with-ai-coding-agents', destination: '/docs/connect', permanent: true },
+      { source: '/resources/backend-development-for-ai-app-builders', destination: '/', permanent: true },
 
       // ── /resources became /docs 2026-10-11 ─────────────────────────────────
       //
@@ -120,26 +122,40 @@ const nextConfig = {
       // question; self-hosting has no console section and was already covered
       // by the repository README, so it goes there. The catch-all keeps any
       // other /resources link from landing on a 404.
-      { source: '/resources', destination: '/docs', permanent: true },
+      //
+      // The docs have no index page since 2026-10-15 (founders: Docs in the
+      // navbar opens straight onto a section, the way the article view reads).
+      // /docs goes to the first section in sidebar order, Database, and is a
+      // temporary redirect so the first section can change without browsers
+      // caching the old one. The /resources rules point at the same page
+      // directly, so none of them chains through /docs.
+      { source: '/docs', destination: '/docs/database', permanent: false },
+      { source: '/resources', destination: '/docs/database', permanent: true },
       { source: '/resources/connect-your-coding-agent', destination: '/docs/connect', permanent: true },
       { source: '/resources/your-first-backend', destination: '/docs/database', permanent: true },
       { source: '/resources/the-data-api', destination: '/docs/database', permanent: true },
       { source: '/resources/access-control-and-rls', destination: '/docs/database', permanent: true },
-      { source: '/resources/how-backenly-works', destination: '/docs', permanent: true },
+      { source: '/resources/how-backenly-works', destination: '/docs/database', permanent: true },
       { source: '/resources/after-you-launch', destination: '/docs/autonomy', permanent: true },
       { source: '/resources/self-hosting', destination: 'https://github.com/backenly/backenly#self-hosted', permanent: true },
-      { source: '/resources/:path*', destination: '/docs', permanent: true },
+      { source: '/resources/:path*', destination: '/docs/database', permanent: true },
 
-      // ── Use cases became workflows, not audience segments 2026-08-29 ───────
+      // ── Use cases removed 2026-10-15 ───────────────────────────────────────
       //
-      // "Startup MVPs" and "Side projects" are demographics, not use cases, and
-      // could only ever be filled with adjectives. They have no single honest
-      // successor, so they land on the index rather than being pointed at a
-      // workflow the visitor may not have come for. "AI app builders" does have
-      // a 1:1 replacement.
-      { source: '/use-cases/ai-app-builders', destination: '/use-cases/ai-product-backends', permanent: true },
-      { source: '/use-cases/startup-mvps', destination: '/use-cases', permanent: true },
-      { source: '/use-cases/side-projects', destination: '/use-cases', permanent: true },
+      // The founders dropped the use-case section and its navbar entry. Each
+      // page goes to its nearest real successor: the agent workflow to the
+      // Connect docs, the Supabase move to the Supabase comparison, the rest
+      // to the home page. The three slugs retired 2026-08-29 (startup-mvps,
+      // side-projects, ai-app-builders) stay permanent; the pages removed now
+      // are temporary while the site is still being reshaped, so a browser
+      // does not cache a decision that may change.
+      { source: '/use-cases/ai-app-builders', destination: '/', permanent: true },
+      { source: '/use-cases/startup-mvps', destination: '/', permanent: true },
+      { source: '/use-cases/side-projects', destination: '/', permanent: true },
+      { source: '/use-cases/ai-assisted-developers', destination: '/docs/connect', permanent: false },
+      { source: '/use-cases/migrate-from-supabase', destination: '/comparisons/backenly-vs-supabase', permanent: false },
+      { source: '/use-cases', destination: '/', permanent: false },
+      { source: '/use-cases/:path*', destination: '/', permanent: false },
     ]
   },
 

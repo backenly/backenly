@@ -3,9 +3,8 @@ import Link from 'next/link'
 import { ArrowRight } from 'lucide-react'
 import { safeJsonLd } from '@/lib/security/safe-jsonld'
 import { SiteShell } from '@/components/site/SiteShell'
-import { ButtonLink, HorizonClose, JsonLd, NextLinks, Page, PageHero, Section, SectionHead } from '@/components/site/kit'
-import { Reveal } from '@/components/site/Reveal'
-import { SpotlightPanel } from '@/components/site/SpotlightPanel'
+import { BentoCell } from '@/components/landing-v7/shared'
+import { ArrowLink, ButtonLink, HorizonClose, JsonLd, Page, PageHero, Section } from '@/components/site/kit'
 import { StartButton } from '@/components/site/StartButton'
 import { TITLE } from '@/components/site/tokens'
 import { COMPARISON_LIST } from './data'
@@ -37,15 +36,23 @@ export const metadata: Metadata = {
   alternates: { canonical: `${APP_URL}/comparisons` },
 }
 
-/** "Backenly vs. no-code app builders" -> "No-code app builders". */
-function opponent(headline: string) {
-  const name = headline.replace(/^Backenly vs\.\s*/, '')
-  return name.charAt(0).toUpperCase() + name.slice(1)
-}
+/* ─────────────────────────────────────────────────────────────
+   /comparisons (2026-10-15, founders: "no jargon, no lots of text, no big
+   banners, clean and professional").
+
+   One job: pick a comparison. A short header, then one bento cell per
+   comparison: the name, its category as a chip, one line, and the whole cell
+   is the link. The essay on what is different is gone; each comparison page
+   says it in its own table.
+───────────────────────────────────────────────────────────── */
+
+/** The landing bento's fact chip, restated: strings from its client module arrive here as client references. */
+const CHIP =
+  'inline-flex items-center rounded-[6px] border border-white/[0.08] bg-white/[0.03] px-[10px] py-[5px] text-[13px] text-zinc-300'
 
 export default function ComparisonsPage() {
   /**
-   * An ItemList of exactly the four cards rendered below. No product, offer, or
+   * An ItemList of exactly the cards rendered below. No product, offer, or
    * rating schema: none of it would correspond to anything on this page.
    */
   const itemListSchema = {
@@ -66,95 +73,49 @@ export default function ComparisonsPage() {
       <Page>
         <PageHero
           trail={[{ label: 'Home', href: '/' }, { label: 'Comparisons' }]}
-          title="How Backenly differs from other backend platforms"
-          lede="Four comparisons, each written to be useful to someone who might not pick us. Every page says where the other option is stronger."
-          actions={
-            <>
-              <StartButton />
-              <ButtonLink href="/alternatives" variant="secondary">
-                How to evaluate an alternative
-              </ButtonLink>
-            </>
-          }
+          title="Comparisons"
+          lede="How Backenly compares with the main alternatives, including when to pick them instead."
         />
 
-        <Section flush aria-label="Comparison pages">
-          <ul className="grid gap-3 md:grid-cols-2">
-            {COMPARISON_LIST.map((c, index) => (
-              <Reveal as="li" key={c.slug} delay={(index % 2) * 0.06} className="h-full">
-                <SpotlightPanel className="h-full">
-                  <Link
-                    href={`/comparisons/${c.slug}`}
-                    className="group flex h-full flex-col p-7 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-violet-300 md:p-9"
-                  >
-                    <span className="text-[14px] text-zinc-500">Backenly vs.</span>
-                    <span className={`mt-2 block text-[32px] text-white md:text-[40px] ${TITLE}`}>{opponent(c.headline)}</span>
-                    <span className="mt-2 block text-[14px] text-zinc-500">{c.category}</span>
-                    <span className="mt-8 block max-w-[52ch] flex-1 text-[16px] leading-[1.7] text-zinc-400 [text-wrap:pretty]">
+        <Section flush aria-label="Comparisons">
+          <ul className="grid gap-[12px] md:grid-cols-2">
+            {COMPARISON_LIST.map((c) => (
+              <li key={c.slug} className="min-w-0">
+                <BentoCell bare className="h-full">
+                  <div className="flex h-full flex-col p-[20px] md:p-[26px]">
+                    <h2 className={`text-white ${TITLE}`}>
+                      {/* The link's box covers the whole cell, so the cell is the target. */}
+                      <Link
+                        href={`/comparisons/${c.slug}`}
+                        className="block after:absolute after:inset-0 after:rounded-2xl focus-visible:outline-none focus-visible:after:ring-2 focus-visible:after:ring-inset focus-visible:after:ring-violet-300"
+                      >
+                        <span className="block text-[14px] font-normal tracking-[-0.006em] text-zinc-500">Backenly vs.</span>{' '}
+                        <span className="mt-[6px] block text-[28px] md:text-[32px]">{c.competitor}</span>
+                      </Link>
+                    </h2>
+                    <span className={`mt-[16px] self-start ${CHIP}`}>{c.category}</span>
+                    <p className="mt-[20px] max-w-[46ch] flex-1 text-[15px] leading-[1.7] tracking-[-0.004em] text-zinc-400 [text-wrap:pretty]">
                       {c.positioning}
-                    </span>
-                    <span className="mt-8 inline-flex items-center gap-1.5 text-[15px] font-medium text-zinc-300 transition-colors duration-200 group-hover:text-white">
+                    </p>
+                    <span
+                      aria-hidden
+                      className="mt-[28px] inline-flex items-center gap-[6px] self-start text-[14px] font-medium text-zinc-300 transition-colors duration-200 group-hover:text-white"
+                    >
                       Read the comparison
-                      <ArrowRight aria-hidden className="h-4 w-4 transition-transform duration-200 group-hover:translate-x-0.5" />
+                      <ArrowRight className="h-4 w-4 transition-transform duration-200 group-hover:translate-x-0.5" />
                     </span>
-                  </Link>
-                </SpotlightPanel>
-              </Reveal>
+                  </div>
+                </BentoCell>
+              </li>
             ))}
           </ul>
+
+          <ArrowLink href="/alternatives" className="mt-[28px]">
+            How to evaluate an alternative, and when to stay
+          </ArrowLink>
         </Section>
 
-        <Section aria-labelledby="actually-different">
-          <div className="grid gap-10 lg:grid-cols-[minmax(0,4fr)_minmax(0,8fr)] lg:gap-16">
-            <Reveal>
-              <SectionHead id="actually-different" title="What is actually different" />
-            </Reveal>
-            <Reveal delay={0.06} className="flex max-w-[68ch] flex-col gap-6 text-[17px] leading-[1.75] tracking-[-0.008em] text-zinc-400 [text-wrap:pretty]">
-              <p>
-                Backenly is a backend platform on PostgreSQL: a database, a REST API, authentication,
-                file storage, realtime and functions. That list is fairly ordinary for this category,
-                and it is not where the difference is.
-              </p>
-              <p className="text-zinc-200">
-                The difference is what happens around those parts. Structural changes go through one
-                audited path that records what changed and takes a restore point before
-                schema-touching work. Destructive operations stop for human approval rather than
-                executing on request. A loop reconciles the running backend against a set of declared
-                invariants on a schedule, repairing a narrow class of problems automatically and
-                reporting the rest with their evidence.
-              </p>
-              <p>
-                That is a trade rather than an upgrade. It suits a team that would rather not own
-                migrations, policy review and incident response. It suits a team that wants direct
-                control over all three considerably less well. The pages above are written on that
-                basis.
-              </p>
-            </Reveal>
-          </div>
-        </Section>
-
-        <Section aria-labelledby="earlier-than-that">
-          <Reveal>
-            <SectionHead
-              id="earlier-than-that"
-              title="Not sure what you are comparing against?"
-              lede="These pages assume a shortlist. If you are earlier than that, deciding whether to move at all, start with the criteria that decide it, where Backenly does not fit, and when the right answer is to stay where you are."
-            />
-          </Reveal>
-          <Reveal delay={0.06}>
-            <NextLinks
-              className="mt-10"
-              items={[
-                { href: '/alternatives', title: 'How to evaluate an alternative', body: 'The six questions that decide it, and who should not switch.' },
-                { href: '/use-cases', title: 'Use cases', body: 'Five workflows, with what Backenly does and what stays yours.' },
-                { href: '/features', title: 'Every feature', body: 'The whole product, capability by capability.' },
-                { href: '/pricing', title: 'Pricing', body: 'Free, Pro at $25 a month, and Enterprise.' },
-              ]}
-            />
-          </Reveal>
-        </Section>
-
-        <HorizonClose title="Try Backenly yourself" lede="One free project, kept permanently. No credit card.">
+        <HorizonClose title="Try Backenly free" lede="One free project, kept permanently. No credit card.">
           <StartButton />
           <ButtonLink href="/pricing" variant="secondary">
             See pricing
