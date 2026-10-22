@@ -10,10 +10,14 @@
  *   • Command bar    Name — nothing else. The top bar owns all global actions
  *                    (Assistant, review inbox, Connect agent), so the page
  *                    header carries zero duplicate buttons (§6.2).
- *   • Agent panel    What the agent has to say right now, in its own voice,
- *                    with the single next action. Right: the mode dial, what
- *                    that mode permits in plain English, and the promise no
- *                    mode overrides.
+ *   • Agent panel    Only while something waits on the user, or while the
+ *                    page cannot vouch for the backend: what the agent has to
+ *                    say, in its own voice, with the single next action.
+ *                    Right: the mode dial, what that mode permits in plain
+ *                    English, and the promise no mode overrides. With nothing
+ *                    to say it is not rendered (2026-10-22): "Built and
+ *                    standing by" and "No issues detected" restated what the
+ *                    loop below already shows.
  *   • Loop panel     THE hero surface (promoted out of the agent panel's
  *                    footer, 2026-07-21). The closed circuit — Observe →
  *                    Detect → Propose → Apply → Verify, and a drawn RETURN
@@ -81,7 +85,6 @@ import { FOCUS, FOCUS_INSET } from '@/components/console/tokens'
 import {
   levelLabel, useAutonomyStatus, type AutonomyLastAction,
 } from '@/lib/hooks/useAutonomyStatus'
-import { useAgentConnection } from '@/lib/hooks/useAgentConnection'
 import { type GroupableFinding } from '@/lib/core/finding-groups'
 import { freshlyVerifiedRepairs, quietState as quietStateFor, type SensorSummary } from '@/components/workspace/health-state'
 import { ObservabilityStrip } from '@/components/workspace/ObservabilityStrip'
@@ -213,7 +216,6 @@ export function WorkspaceHome({
   const [health, setHealth]     = useState<HealthData | null>(null)
   const [stats, setStats]       = useState<DashboardStats | null>(null)
   const { status: autonomy, refresh: refreshAutonomy } = useAutonomyStatus(hasBackend ? projectId : null)
-  const agentConnection = useAgentConnection(projectId)
 
   // Whether the last /health read failed. Without it a failed load looked like
   // "nothing is wrong", and the headline below would have said all clear.
@@ -399,18 +401,18 @@ export function WorkspaceHome({
   })
 
   // ── Agent panel state — one headline, one action, in the agent's voice ───
+  //
+  // null renders no panel. A backend with nothing waiting and checks that ran
+  // has nothing to report beyond what the loop already prints, so only a
+  // caveat from the quiet state (a failed load, a stale pass, a blind check)
+  // still earns the panel when nothing waits.
   const autonomyPending = heldFindings ?? autonomy?.pendingCount ?? 0
   // Calls the user's coding agent parked for approval. They come first: they
   // expire unanswered. They are not the loop's findings, so the loop rail
   // below does not count them; this panel was the one place left to say so,
   // and it said "No issues detected" over a parked drop (OV-1).
   const agentWaiting = health?.agentApprovalsPending ?? 0
-  const agent: {
-    headline: string
-    body: string
-    cta?: { label: string; onClick: () => void }
-    quiet?: { label: string; onClick: () => void }
-  } =
+  const agent: AgentReport | null =
     agentWaiting > 0 ? {
       headline: 'Your agent is waiting on you',
       body:
@@ -439,17 +441,8 @@ export function WorkspaceHome({
       body: 'Backenly flagged some issues while checking the runtime. Auto-fix them here, or hand them to your coding agent.',
       cta: { label: 'Review in Autonomy', onClick: () => router.push(`/app/projects/${projectId}/autonomy`) },
     }
-    : verdict === 'structure_ready' ? (agentConnection.connected ? {
-      headline: 'Built and standing by',
-      body: 'Your backend is ready and your agent is connected. Backenly watches every change it makes, live: schema, APIs, auth, storage.',
-    } : {
-      headline: 'Built and standing by',
-      body: 'Your backend is ready. Point your coding agent at it and Backenly starts watching every change live: schema, APIs, auth, storage.',
-      cta: agentConnection.needsConnect
-        ? { label: 'Connect your agent', onClick: () => router.push(`/app/projects/${projectId}/connect`) }
-        : undefined,
-    })
-    : quietState
+    : quietState.caveat ? quietState
+    : null
 
   // ── Loop phase (derived from real state, never animated fiction) ─────────
   const autonomyOff = autonomy?.level === 'OFF'
@@ -536,12 +529,14 @@ export function WorkspaceHome({
           </h1>
         </header>
 
-        <AgentPanel
-          agent={agent}
-          autonomy={autonomy}
-          autonomyOff={!!autonomyOff}
-          onOpenAutonomy={() => router.push(`/app/projects/${projectId}/autonomy`)}
-        />
+        {agent && (
+          <AgentPanel
+            agent={agent}
+            autonomy={autonomy}
+            autonomyOff={!!autonomyOff}
+            onOpenAutonomy={() => router.push(`/app/projects/${projectId}/autonomy`)}
+          />
+        )}
 
         {/* The loop is the page's centrepiece: a closed circuit whose readings
             are the same numbers the Autonomy page computes, and whose return
@@ -667,10 +662,18 @@ const MODE_MEANING: Record<string, string> = {
   Off:          'The loop watches and records, but changes nothing.',
 }
 
+/** What the agent panel says: a headline, its body and at most one next step. */
+interface AgentReport {
+  headline: string
+  body: string
+  cta?: { label: string; onClick: () => void }
+  quiet?: { label: string; onClick: () => void }
+}
+
 function AgentPanel({
   agent, autonomy, autonomyOff, onOpenAutonomy,
 }: {
-  agent: { headline: string; body: string; cta?: { label: string; onClick: () => void }; quiet?: { label: string; onClick: () => void } }
+  agent: AgentReport
   autonomy: ReturnType<typeof useAutonomyStatus>['status']
   autonomyOff: boolean
   onOpenAutonomy: () => void

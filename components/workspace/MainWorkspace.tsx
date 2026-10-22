@@ -186,8 +186,9 @@ export function MainWorkspace({ projectId, projectName }: MainWorkspaceProps) {
         {/* ── Backend overview ────────────────────────────── */}
         {hasContent && (
           <div>
-            {/* WorkspaceHome — full project home: agent panel + self-healing
-                loop, 24h observability, and the four resource cards. */}
+            {/* WorkspaceHome — full project home: the agent panel while
+                something waits, the self-healing loop, 24h observability,
+                and the four resource cards. */}
             <WorkspaceHome
               projectId={projectId}
               projectName={projectName ?? null}
@@ -206,12 +207,16 @@ export function MainWorkspace({ projectId, projectName }: MainWorkspaceProps) {
   )
 }
 
-/** The Overview's shape while /state loads: name, agent panel, loop, strip. */
+/**
+ * The Overview's shape while /state loads: name, then the loop. No agent-panel
+ * block: the panel renders only while something waits on the user or the page
+ * cannot vouch for the backend, so on a quiet project a placeholder for it
+ * vanished on load and the loop jumped up by its height.
+ */
 function OverviewSkeleton() {
   return (
     <div aria-busy="true" aria-label="Loading overview" className="space-y-3">
       <Skeleton className="mb-6 h-[28px] w-56" />
-      <Skeleton className="h-[168px] w-full rounded-[10px]" />
       <Skeleton className="h-[300px] w-full rounded-[10px]" />
     </div>
   )

@@ -113,6 +113,7 @@ describe('quietState', () => {
     const s = quietState({ health: null, healthError: true, autonomyOff: false, now, formatAgo: ago })
     expect(s.headline).toBe('Can’t confirm health right now')
     expect(`${s.headline} ${s.body}`).not.toMatch(/healthy|all clear|no issues/i)
+    expect(s.caveat).toBe(true)
   })
 
   it('never vouches for an earlier payload once the latest load failed', () => {
@@ -133,6 +134,7 @@ describe('quietState', () => {
       const s = quietState({ health: { lastReconciledAt, sensors: sensors() }, healthError: false, autonomyOff: false, now, formatAgo: ago })
       expect(s.headline).toBe('No recent check to report')
       expect(`${s.headline} ${s.body}`).not.toMatch(/healthy|all clear|no issues detected/i)
+      expect(s.caveat).toBe(true)
     }
   })
 
@@ -140,6 +142,7 @@ describe('quietState', () => {
     const s = quietState({ health: { lastReconciledAt: fresh, sensors: sensors(2) }, healthError: false, autonomyOff: false, now, formatAgo: ago })
     expect(s.headline).toBe('2 checks could not run')
     expect(s.body).toMatch(/Check 0, Check 1/)
+    expect(s.caveat).toBe(true)
   })
 
   it('reports exactly what ran when every check could see', () => {
@@ -148,6 +151,11 @@ describe('quietState', () => {
     expect(s.body).toMatch(/the 10 checks/)
     expect(s.body).toMatch(/1 more is off on this install/)
     expect(`${s.headline} ${s.body}`).not.toMatch(/healthy|all clear/i)
+    expect(s.caveat).toBe(false)
+  })
+
+  it('has no caveat while the first load is still in flight', () => {
+    expect(quietState({ health: null, healthError: false, autonomyOff: false, now, formatAgo: ago }).caveat).toBe(false)
   })
 
   it('does not promise repairs when self-healing is off', () => {
