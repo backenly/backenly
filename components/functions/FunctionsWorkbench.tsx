@@ -23,13 +23,14 @@ import Link from 'next/link'
 import {
   Play, Trash2, Power, Clock, Check, AlertCircle, Database,
   UserPlus, RefreshCw, MousePointerClick, Globe, Zap, ChevronRight,
-  AlertTriangle, Info, Search, Link2, KeyRound, ChevronLeft, Plus, Cable, X,
+  AlertTriangle, Info, Search, Link2, KeyRound, ChevronLeft, Plus, X,
 } from 'lucide-react'
 import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
 import {
   AgentPrompt, BarDivider, CommandBar, CopyField, EmptyState, IconButton, INPUT_BASE, KIT, KitButton,
   KitConfirmDialog, KitModal, KitTab, KitTabs, NoticeStrip, Spinner, StatusDot,
 } from '@/components/inspector/kit'
+import { AgentEmptyState, ConnectAgentLink } from '@/components/inspector/AgentEmptyState'
 import { FOCUS_INSET } from '@/components/console/tokens'
 import { useAgentConnection } from '@/lib/hooks/useAgentConnection'
 
@@ -131,7 +132,7 @@ function getTriggerStyle(kind: string): string {
 const STATUS_TONE = { active: 'operational', inactive: 'paused', error: 'failed' } as const
 const STATUS_LABEL = { active: 'Active', inactive: 'Disabled', error: 'Errored' } as const
 
-/** Prompts for the New function dialog: what people actually ask for first. */
+/** Requests for the empty state and New function: what people actually ask for first. */
 const EXAMPLE_PROMPTS = [
   'When a user signs up, send them a welcome email.',
   'Add POST /checkout that validates the cart, creates an order and returns its id.',
@@ -827,10 +828,12 @@ export function FunctionsWorkbench({ projectId }: { projectId: string }) {
                   ))}
                 </div>
               ) : functions.length === 0 ? (
+                // From md up the detail pane carries the empty state, so the
+                // rail only says so.
                 <div className="px-4 py-5">
-                  <p className="text-[13px] font-medium text-zinc-200">No functions yet</p>
-                  <p className="mt-1 text-[12.5px] leading-[19px] text-zinc-500">
-                    Tell your coding agent what should happen and Backenly wires it up.
+                  <p className="text-[13px] font-medium text-zinc-200 md:text-[12.5px] md:font-normal md:text-zinc-500">No functions yet</p>
+                  <p className="mt-1 text-[12.5px] leading-[19px] text-zinc-500 md:hidden">
+                    Your agent writes a function when your app needs server-side logic, and it runs without a deploy.
                   </p>
                 </div>
               ) : visibleFunctions.length === 0 ? (
@@ -890,31 +893,22 @@ export function FunctionsWorkbench({ projectId }: { projectId: string }) {
           <div className={`min-w-0 flex-1 flex-col ${mobilePane === 'detail' ? 'flex' : 'hidden md:flex'}`}>
             {!selected ? (
               <div className="flex h-full flex-col items-center justify-center overflow-y-auto px-6">
-                <EmptyState
-                  icon={Zap}
-                  title={functions.length === 0 ? 'No functions yet' : 'Select a function'}
-                  description={
-                    functions.length === 0
-                      ? 'Functions run your backend logic: a welcome email on signup, a webhook on new orders, an endpoint your app calls. Your coding agent writes them; they run without a deploy.'
-                      : 'Pick a function to see its trigger, endpoint and invocation history.'
-                  }
-                  action={
-                    functions.length === 0 ? (
-                      <div className="flex w-full flex-col items-center gap-4">
-                        <AgentPrompt prompt={EXAMPLE_PROMPTS[0]} />
-                        {agent.needsConnect && (
-                          <Link
-                            href={`/app/projects/${projectId}/connect`}
-                            className="inline-flex h-[32px] items-center gap-1.5 rounded-[7px] border border-white/[0.10] bg-white/[0.04] px-3 text-[13px] font-medium text-zinc-100 transition-colors hover:bg-white/[0.08]"
-                          >
-                            <Cable className="h-3.5 w-3.5" />
-                            Connect your agent
-                          </Link>
-                        )}
-                      </div>
-                    ) : undefined
-                  }
-                />
+                {functions.length === 0 ? (
+                  <AgentEmptyState
+                    projectId={projectId}
+                    icon={Zap}
+                    title="No functions yet"
+                    description="Server-side logic for your app: endpoints, scheduled jobs and code that runs when data changes. Your agent writes them, and they go live without a deploy."
+                    prompt={EXAMPLE_PROMPTS[0]}
+                    docs="functions"
+                  />
+                ) : (
+                  <EmptyState
+                    icon={Zap}
+                    title="Select a function"
+                    description="Choose a function to see its trigger, endpoint and invocation history."
+                  />
+                )}
               </div>
             ) : (
               <>
@@ -1068,28 +1062,16 @@ export function FunctionsWorkbench({ projectId }: { projectId: string }) {
         open={showNew}
         onClose={() => setShowNew(false)}
         title="New function"
-        description="Functions are written by your coding agent and run without a deploy. Describe what should happen; these are good first asks."
+        description="Functions are written by your agent and go live without a deploy. Send it one of these requests, or describe what should happen in your own words."
         width="max-w-lg"
         footer={
           <>
             <KitButton variant={agent.needsConnect ? 'ghost' : 'secondary'} onClick={() => setShowNew(false)}>Close</KitButton>
-            {agent.needsConnect && (
-              <Link
-                href={`/app/projects/${projectId}/connect`}
-                className="inline-flex h-[32px] items-center gap-1.5 rounded-[7px] bg-white px-3 text-[13px] font-medium text-zinc-950 transition-colors hover:bg-zinc-200"
-              >
-                <Cable className="h-3.5 w-3.5" />
-                Connect your agent
-              </Link>
-            )}
+            {agent.needsConnect && <ConnectAgentLink projectId={projectId} />}
           </>
         }
       >
-        <div className="space-y-2">
-          {EXAMPLE_PROMPTS.map((p) => (
-            <AgentPrompt key={p} prompt={p} />
-          ))}
-        </div>
+        <AgentPrompt prompt={EXAMPLE_PROMPTS} />
       </KitModal>
 
       {/* Dialogs */}

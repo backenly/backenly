@@ -259,8 +259,8 @@ export function MonitoringWorkbench({ projectId }: { projectId: string }) {
       <div className="flex h-full w-full flex-col items-center justify-center overflow-y-auto px-6">
         <EmptyState
           icon={BarChart3}
-          title="Nothing to watch yet"
-          description="Traffic, errors and slow endpoints appear here as soon as something calls this backend. Publishing gives your app a stable URL to call."
+          title="No traffic yet"
+          description="Requests, errors and slow endpoints appear here as soon as your app or your agent calls this backend’s API."
           action={
             <KitButton variant="primary" icon={Rocket} onClick={() => router.push(`/app/projects/${projectId}/deploy`)}>
               Publish
@@ -284,8 +284,8 @@ export function MonitoringWorkbench({ projectId }: { projectId: string }) {
             <div className="flex min-h-full flex-col items-center justify-center px-6">
               <EmptyState
                 icon={BarChart3}
-                title="Nothing to measure yet"
-                description="Once requests arrive, each endpoint gets its own traffic, speed and error rate here."
+                title="No endpoint data yet"
+                description="Once requests arrive, each endpoint gets its own volume, latency and error rate here."
               />
             </div>
           ) : (
@@ -378,8 +378,8 @@ export function MonitoringWorkbench({ projectId }: { projectId: string }) {
           <div className="flex-shrink-0 border-b border-white/[0.06] py-6">
             <EmptyState
               icon={Activity}
-              title="Quiet so far"
-              description="Charts draw once there is enough traffic in this window to plot."
+              title="Not enough traffic to chart"
+              description="Charts appear once this time window has enough requests to plot."
             />
           </div>
         )}

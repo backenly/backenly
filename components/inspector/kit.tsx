@@ -401,9 +401,9 @@ export function EmptyState({ icon: Icon, title, description, action, className =
       >
         <Icon className="h-[18px] w-[18px] text-zinc-400" strokeWidth={1.75} />
       </span>
-      <h3 className="text-[14px] font-semibold leading-[20px] tracking-[-0.01em] text-zinc-100">{title}</h3>
-      <p className="mt-1.5 max-w-[46ch] text-[13px] leading-[20px] text-zinc-400 [text-wrap:pretty]">{description}</p>
-      {action && <div className="mt-5 flex flex-wrap items-center justify-center gap-2">{action}</div>}
+      <h3 className="text-[15px] font-semibold leading-[22px] tracking-[-0.012em] text-zinc-100 [text-wrap:balance]">{title}</h3>
+      <p className="mt-1.5 max-w-[50ch] text-[13px] leading-[20px] text-zinc-400 [text-wrap:pretty]">{description}</p>
+      {action && <div className="mt-6 flex w-full flex-wrap items-center justify-center gap-2">{action}</div>}
     </div>
   )
 }
@@ -1098,18 +1098,33 @@ export function CopyField({ value, display, className = '' }: { value: string; d
 /**
  * The console's empty-state next step. Building happens through the user's
  * coding agent, so the most useful thing an empty section can offer is the
- * sentence to send it: shown as a prompt, one click to copy.
+ * request to send it, one click to copy. Pass several to offer a choice.
+ *
+ * A request is prose, so it is set in Geist. It used to be mono behind a `›`
+ * glyph, which read as a terminal the user could type into, and broke the
+ * rule that mono is for machine text.
  */
-export function AgentPrompt({ prompt, className = '' }: { prompt: string; className?: string }) {
+export function AgentPrompt({
+  prompt,
+  label = 'Ask your agent',
+  className = '',
+}: {
+  prompt: string | readonly string[]
+  label?: string
+  className?: string
+}) {
+  const prompts = typeof prompt === 'string' ? [prompt] : prompt
   return (
-    <div
-      className={`group flex w-full max-w-[520px] items-start gap-3 ${R_CONTROL} border ${EDGE} ${WELL} py-2.5 pl-3.5 pr-1.5 text-left ${className}`}
-    >
-      <span aria-hidden className="mt-[1px] select-none font-mono text-[12px] leading-[20px] text-violet-300/80">
-        ›
-      </span>
-      <p className="min-w-0 flex-1 font-mono text-[12px] leading-[20px] text-zinc-300">{prompt}</p>
-      <CopyButton value={prompt} label="Copy prompt" />
+    <div className={`w-full overflow-hidden ${R_PANEL} border ${EDGE} ${WELL} text-left ${className}`}>
+      <p className={`border-b ${RULE} px-3.5 py-2 text-[12px] leading-[16px] text-zinc-500`}>{label}</p>
+      <ul className={`divide-y ${KIT.divide}`}>
+        {prompts.map((p) => (
+          <li key={p} className="flex items-start gap-3 py-2 pl-3.5 pr-1.5">
+            <p className="min-w-0 flex-1 py-[3px] text-[13px] leading-[20px] text-zinc-200 [text-wrap:pretty]">{p}</p>
+            <CopyButton value={p} label="Copy prompt" />
+          </li>
+        ))}
+      </ul>
     </div>
   )
 }

@@ -26,7 +26,7 @@ import { useRouter } from 'next/navigation'
 import {
   Upload, Download, Trash2, Copy, Search, Folder, File, Lock,
   Image as ImageIcon, FileText, AlertTriangle, Check,
-  HardDrive, RefreshCw, Plus, X, Loader2, Sparkles, CheckSquare, Square,
+  HardDrive, RefreshCw, Plus, X, Loader2, CheckSquare, Square,
   ChevronLeft,
 } from 'lucide-react'
 import { Tooltip } from '@/components/ui/Tooltip'
@@ -39,13 +39,13 @@ import {
 import { getCurrentProjectId } from '@/lib/api/client'
 import { getProject, type Project } from '@/lib/api/projects'
 import {
-  AgentPrompt, CommandBar, EmptyState, IconButton, INPUT_BASE, KIT, KitButton, KitConfirmDialog, KitField,
+  CommandBar, EmptyState, IconButton, INPUT_BASE, KIT, KitButton, KitConfirmDialog, KitField,
   KitInput, KitModal, KitNote,
 } from '@/components/inspector/kit'
+import { AgentEmptyState } from '@/components/inspector/AgentEmptyState'
 import { FOCUS_INSET } from '@/components/console/tokens'
 import { POLICY_LABELS, type AccessPolicy } from '@/lib/storage/access-policy'
 import { BucketPolicyDialog } from '@/components/storage/BucketPolicyDialog'
-import { useAgentConnection } from '@/lib/hooks/useAgentConnection'
 
 const ALL_BUCKETS = '__all__'
 /** Rows fetched per page — the route clamps at 500. */
@@ -123,7 +123,6 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
   const [uploading, setUploading] = useState(false)
   const [projectId, setProjectId] = useState<string | null>(projectIdProp ?? null)
   const [project, setProject] = useState<Project | null>(null)
-  const agent = useAgentConnection(projectId)
 
   const [actionError, setActionError] = useState<string | null>(null)
   const [copiedUrl, setCopiedUrl] = useState<string | null>(null)
@@ -486,9 +485,11 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
                   <Loader2 className="h-4 w-4 animate-spin text-white/30" />
                 </div>
               ) : buckets.length === 0 ? (
+                // From md up the object pane carries the empty state, so the
+                // rail only says so.
                 <div className="px-4 py-5">
-                  <p className="text-[13px] font-medium text-zinc-200">No buckets yet</p>
-                  <p className="mt-1 text-[12.5px] leading-[19px] text-zinc-500">
+                  <p className="text-[13px] font-medium text-zinc-200 md:text-[12.5px] md:font-normal md:text-zinc-500">No buckets yet</p>
+                  <p className="mt-1 text-[12.5px] leading-[19px] text-zinc-500 md:hidden">
                     Your agent creates a bucket when your app needs uploads, with the read rule you ask for.
                   </p>
                 </div>
@@ -669,38 +670,28 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
                 </div>
               ) : filteredFiles.length === 0 ? (
                 <div className="flex h-full flex-col items-center justify-center px-8">
-                  <EmptyState
-                    icon={File}
-                    title={
-                      searchQuery
-                        ? 'Nothing matches'
-                        : totalBuckets === 0
-                        ? 'No storage yet'
-                        : 'Empty bucket'
-                    }
-                    description={
-                      searchQuery
-                        ? 'Clear the search or try a different term.'
-                        : totalBuckets === 0
-                        ? 'Ask your coding agent for file uploads and Backenly sets up a bucket with governed access.'
-                        : 'Drop files anywhere on this page, or use Upload.'
-                    }
-                    action={
-                      totalBuckets === 0 ? (
-                        <div className="flex w-full flex-col items-center gap-4">
-                          <AgentPrompt prompt="Add profile photo uploads: a private bucket, and only the owner can read their files." />
-                          {agent.needsConnect && (
-                            <KitButton
-                              icon={Sparkles}
-                              onClick={() => router.push(projectId ? `/app/projects/${projectId}/connect` : '/app')}
-                            >
-                              Connect your agent
-                            </KitButton>
-                          )}
-                        </div>
-                      ) : undefined
-                    }
-                  />
+                  {searchQuery ? (
+                    <EmptyState
+                      icon={Search}
+                      title="No matching objects"
+                      description={`No object name here contains “${searchQuery.trim()}”.`}
+                    />
+                  ) : totalBuckets === 0 ? (
+                    <AgentEmptyState
+                      projectId={projectId}
+                      icon={HardDrive}
+                      title="No buckets yet"
+                      description="Buckets hold your app’s files, each with its own read rule. Ask your agent for uploads and it creates the bucket."
+                      prompt="Add profile photo uploads: a private bucket, and only the owner can read their files."
+                      docs="storage"
+                    />
+                  ) : (
+                    <EmptyState
+                      icon={File}
+                      title={selectedBucket === ALL_BUCKETS ? 'No files yet' : 'This bucket is empty'}
+                      description="Drop files anywhere on this page, or use Upload."
+                    />
+                  )}
                 </div>
               ) : (
                 <div className="min-w-full overflow-x-auto">
