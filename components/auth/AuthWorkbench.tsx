@@ -19,15 +19,15 @@
  */
 
 import { useCallback, useEffect, useState } from 'react'
-import { useRouter, useSearchParams } from 'next/navigation'
+import { useSearchParams } from 'next/navigation'
 import { SlidersHorizontal, Users, Search, RefreshCw, X, Mail } from 'lucide-react'
 import { AuthConfiguration } from '@/components/auth/AuthConfiguration'
 import { EmailSettingsPanel } from '@/components/auth/EmailSettingsPanel'
 import {
-  AgentPrompt, CommandBar, CopyField, EmptyState, IconButton, INPUT_BASE, KIT, KitTab, KitTabs, Spinner, Tag,
+  CommandBar, CopyField, EmptyState, IconButton, INPUT_BASE, KIT, KitTab, KitTabs, Spinner, Tag,
 } from '@/components/inspector/kit'
+import { AgentEmptyState } from '@/components/inspector/AgentEmptyState'
 import { FOCUS_INSET } from '@/components/console/tokens'
-import { useAgentConnection } from '@/lib/hooks/useAgentConnection'
 
 interface EndUser {
   id: string
@@ -150,8 +150,6 @@ function UsersGrid({
   loading: boolean
   onRefresh: () => void
 }) {
-  const router = useRouter()
-  const agent = useAgentConnection(projectId)
   const [query, setQuery] = useState('')
   const [selectedId, setSelectedId] = useState<string | null>(null)
 
@@ -206,31 +204,22 @@ function UsersGrid({
             </div>
           ) : filtered.length === 0 ? (
             <div className="flex min-h-full flex-col items-center justify-center px-6">
-              <EmptyState
-                icon={query ? Search : Users}
-                title={query ? 'No users match' : 'No users yet'}
-                description={
-                  query
-                    ? `Nothing matches “${query.trim()}”. Search covers email and sign-in provider.`
-                    : 'Accounts created in your app land here as they sign up, with how they signed in and when they were last active.'
-                }
-                action={
-                  !query ? (
-                    <div className="flex w-full flex-col items-center gap-4">
-                      <AgentPrompt prompt="Add email and password sign-up and sign-in to the app, with password reset." />
-                      {agent.needsConnect && (
-                        <button
-                          type="button"
-                          onClick={() => router.push(`/app/projects/${projectId}/connect`)}
-                          className="text-[13px] font-medium text-zinc-300 underline decoration-white/20 underline-offset-4 transition-colors hover:text-zinc-50 hover:decoration-white/50"
-                        >
-                          Connect your agent
-                        </button>
-                      )}
-                    </div>
-                  ) : undefined
-                }
-              />
+              {query ? (
+                <EmptyState
+                  icon={Search}
+                  title="No users match"
+                  description={`Nothing matches “${query.trim()}”. Search covers email and sign-in provider.`}
+                />
+              ) : (
+                <AgentEmptyState
+                  projectId={projectId}
+                  icon={Users}
+                  title="No users yet"
+                  description="People who sign up through your app appear here, with how they signed in and when they were last active."
+                  prompt="Add email and password sign-up and sign-in to the app, with password reset."
+                  docs="auth"
+                />
+              )}
             </div>
           ) : (
             <div className="min-w-full overflow-x-auto">

@@ -10,8 +10,8 @@ import {
 } from 'lucide-react'
 import { EnvVarsPanel } from '@/components/inspector/EnvVarsPanel'
 import { FrontendConnectionPill } from '@/components/inspector/FrontendConnectionPill'
+import { AgentEmptyState } from '@/components/inspector/AgentEmptyState'
 import {
-  AgentPrompt,
   BUTTON_BASE,
   BUTTON_SIZES,
   BUTTON_VARIANTS,
@@ -622,21 +622,13 @@ export default function PublishPage() {
         {/* ── PRIVATE, nothing built ───────────────────────────── */}
         {status === 'PRIVATE' && !hasRealBackend && (
           <KitCard>
-            <EmptyState
+            <AgentEmptyState
+              projectId={projectId}
               icon={Layers}
               title="Nothing to publish yet"
-              description="Describe your app to your coding agent. Once it has built tables, auth or storage, publishing gives the backend a stable, versioned endpoint."
-              action={
-                <div className="flex w-full flex-col items-center gap-3">
-                  <AgentPrompt prompt="Build the backend for a task tracker: projects, tasks with a status and a due date, and email sign-in. Only a task's owner can edit it." />
-                  {agent.needsConnect && (
-                    <Link href={`/app/projects/${projectId}/connect`} className={`${BUTTON_BASE} ${BUTTON_SIZES.md} ${BUTTON_VARIANTS.primary}`}>
-                      <Cable className="h-[15px] w-[15px]" strokeWidth={2} />
-                      Connect your agent
-                    </Link>
-                  )}
-                </div>
-              }
+              description="Publishing runs readiness checks, then records your backend as a numbered version. Ask your agent to build tables, auth or storage first."
+              prompt="Build the backend for a task tracker: projects, tasks with a status and a due date, and email sign-in. Only a task's owner can edit it."
+              docs="deploy"
             />
           </KitCard>
         )}
@@ -712,14 +704,14 @@ export default function PublishPage() {
               title="Live, but empty"
               description={
                 agent.connected
-                  ? 'This project is published, but there is nothing to serve yet. Ask your agent to build the backend first.'
-                  : 'This project is published, but there is nothing to serve yet. Connect your coding agent and build the backend first.'
+                  ? 'This project is marked live, but it has no tables, auth or storage to serve yet. Ask your agent to build the backend.'
+                  : 'This project is marked live, but it has no tables, auth or storage to serve yet. Connect your agent to build the backend.'
               }
               action={
                 agent.needsConnect ? (
                   <Link href={`/app/projects/${projectId}/connect`} className={`${BUTTON_BASE} ${BUTTON_SIZES.md} ${BUTTON_VARIANTS.secondary}`}>
                     <Cable className="h-[15px] w-[15px]" strokeWidth={2} />
-                    Connect your agent
+                    Connect agent
                   </Link>
                 ) : undefined
               }

@@ -19,9 +19,10 @@ import { Radio, WifiOff, Circle, RefreshCw, AlertTriangle, Trash2, ChevronLeft }
 import { getAuthToken } from '@/lib/api/auth'
 import { getProject } from '@/lib/api/projects'
 import {
-  AgentPrompt, CommandBar, CopyField, EmptyState, IconButton, KIT, KitButton, NoticeStrip, StatusDot,
+  CommandBar, CopyField, EmptyState, IconButton, KIT, KitButton, NoticeStrip, StatusDot,
   type StatusTone,
 } from '@/components/inspector/kit'
+import { AgentEmptyState } from '@/components/inspector/AgentEmptyState'
 import { FOCUS_INSET } from '@/components/console/tokens'
 
 interface RealtimeStatusData {
@@ -354,12 +355,12 @@ export function RealtimeWorkbench({ projectId }: { projectId: string }) {
         return triggeredCount === 0
           ? {
               icon: Radio,
-              title: 'Connected, nothing streaming',
-              description: 'Realtime is opt-in per table. Once a table streams, every insert, update and delete on it appears here as it happens.',
+              title: 'Nothing is streaming yet',
+              description: 'Realtime is opt-in per table. Once a table streams, its inserts, updates and deletes appear here as they happen.',
             }
           : {
               icon: Radio,
-              title: 'Listening',
+              title: 'Listening for changes',
               description: 'The stream is open. Inserts, updates, deletes and broadcasts appear here as they happen.',
             }
       case 'reconnecting':
@@ -465,9 +466,11 @@ export function RealtimeWorkbench({ projectId }: { projectId: string }) {
 
             <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden py-1.5">
               {activeTables.length === 0 ? (
+                // From md up the stream beside this carries the empty state,
+                // so the rail only says so.
                 <div className="px-4 py-4">
-                  <p className="text-[13px] font-medium text-zinc-200">No tables streaming</p>
-                  <p className="mt-1 text-[12.5px] leading-[19px] text-zinc-500">
+                  <p className="text-[13px] font-medium text-zinc-200 md:text-[12.5px] md:font-normal md:text-zinc-500">No tables streaming</p>
+                  <p className="mt-1 text-[12.5px] leading-[19px] text-zinc-500 md:hidden">
                     Realtime is opt-in. Ask your agent to turn it on for the tables your app listens to.
                   </p>
                 </div>
@@ -550,16 +553,18 @@ export function RealtimeWorkbench({ projectId }: { projectId: string }) {
             <div className="min-h-0 flex-1 overflow-y-auto" aria-live="polite" aria-relevant="additions">
               {visibleEvents.length === 0 ? (
                 <div className="flex min-h-full flex-col items-center justify-center px-6">
-                  <EmptyState
-                    icon={emptyState.icon}
-                    title={emptyState.title}
-                    description={emptyState.description}
-                    action={
-                      connState === 'connected' && triggeredCount === 0 && !tableFilter ? (
-                        <AgentPrompt prompt="Enable realtime on the orders table so the app gets live updates." />
-                      ) : undefined
-                    }
-                  />
+                  {connState === 'connected' && triggeredCount === 0 && !tableFilter ? (
+                    <AgentEmptyState
+                      projectId={projectId}
+                      icon={emptyState.icon}
+                      title={emptyState.title}
+                      description={emptyState.description}
+                      prompt="Turn on realtime for the orders table so the app gets live updates."
+                      docs="realtime"
+                    />
+                  ) : (
+                    <EmptyState icon={emptyState.icon} title={emptyState.title} description={emptyState.description} />
+                  )}
                 </div>
               ) : (
                 <div className="min-w-full overflow-x-auto">

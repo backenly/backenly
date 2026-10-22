@@ -39,7 +39,6 @@ import {
 } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
-  AgentPrompt,
   CommandBar,
   EmptyState,
   IconButton,
@@ -58,6 +57,7 @@ import {
   Spinner,
   Tag,
 } from '@/components/inspector/kit'
+import { AgentEmptyState } from '@/components/inspector/AgentEmptyState'
 import { EDGE, FOCUS, FOCUS_INSET, RULE, R_CONTROL, R_PANEL, R_TAG } from '@/components/console/tokens'
 import {
   getSchemas,
@@ -149,7 +149,7 @@ export default function ProjectDatabasePage() {
   
   // Resolve the definitive project ID - prioritize URL param, fallback to current session project
   const resolvedProjectId = urlProjectId || currentProjectId
-  // The empty states offer "Connect your agent" only until it is connected.
+  // The empty states offer "Connect agent" only until it is connected.
   const agent = useAgentConnection(resolvedProjectId)
 
   const [activeDb, setActiveDb] = useState<DatabaseType>('postgresql')
@@ -1332,12 +1332,14 @@ export default function ProjectDatabasePage() {
                     ))}
                   </div>
                 ) : tables.length === 0 ? (
+                  // From md up the pane beside this carries the empty state and
+                  // the command bar carries New table, so the rail only says so.
                   <div className="px-4 py-5">
-                    <p className="text-[13px] font-medium text-zinc-200">No tables yet</p>
-                    <p className="mt-1 text-[12.5px] leading-[19px] text-zinc-500">
+                    <p className="text-[13px] font-medium text-zinc-200 md:text-[12.5px] md:font-normal md:text-zinc-500">No tables yet</p>
+                    <p className="mt-1 text-[12.5px] leading-[19px] text-zinc-500 md:hidden">
                       Your coding agent creates tables as it builds. You can also add one by hand.
                     </p>
-                    <KitButton size="sm" icon={Plus} onClick={openCreateTable} disabled={!selectedSchema} className="mt-3">
+                    <KitButton size="sm" icon={Plus} onClick={openCreateTable} disabled={!selectedSchema} className="mt-3 md:hidden">
                       New table
                     </KitButton>
                   </div>
@@ -1628,7 +1630,7 @@ export default function ProjectDatabasePage() {
                         <EmptyState
                           icon={Table2}
                           title="No rows yet"
-                          description="Rows appear here the moment your app, your agent or a function writes to this table."
+                          description="Rows appear here as soon as your app, your agent or a function writes to this table."
                           action={
                             <>
                               <KitButton size="sm" icon={Plus} onClick={handleAddRow}>
@@ -1641,7 +1643,7 @@ export default function ProjectDatabasePage() {
                                   icon={Cable}
                                   onClick={() => router.push(`/app/projects/${resolvedProjectId}/connect`)}
                                 >
-                                  Connect your agent
+                                  Connect agent
                                 </KitButton>
                               )}
                             </>
@@ -1998,37 +2000,21 @@ export default function ProjectDatabasePage() {
                   </div>
                 )}
               </>
+            ) : tables.length === 0 ? (
+              <AgentEmptyState
+                projectId={resolvedProjectId}
+                icon={DatabaseIcon}
+                title="No tables yet"
+                description="Ask your agent for the data your app needs. Each table it creates comes with REST endpoints, row-level security and a reversible change record."
+                prompt="Add a products table with a name, a price in cents and a stock count. Anyone can read it; only admins can write."
+                docs="database"
+                className="h-full"
+              />
             ) : (
               <EmptyState
                 icon={DatabaseIcon}
-                title={tables.length === 0 ? 'No tables yet' : 'Pick a table'}
-                description={
-                  tables.length === 0
-                    ? 'Ask your coding agent for the data your app needs. Each table it creates comes with REST endpoints, row-level security and a reversible change record.'
-                    : 'Choose a table on the left to browse its rows and structure.'
-                }
-                action={
-                  tables.length === 0 ? (
-                    <div className="flex w-full flex-col items-center gap-3">
-                      <AgentPrompt prompt="Add a products table with a name, a price in cents and a stock count. Anyone can read it; only admins can write." />
-                      <div className="flex flex-wrap items-center justify-center gap-2">
-                        {agent.needsConnect && (
-                          <KitButton
-                            variant="primary"
-                            size="sm"
-                            icon={Cable}
-                            onClick={() => router.push(`/app/projects/${resolvedProjectId}/connect`)}
-                          >
-                            Connect your agent
-                          </KitButton>
-                        )}
-                        <KitButton size="sm" icon={Plus} onClick={openCreateTable} disabled={!selectedSchema}>
-                          New table
-                        </KitButton>
-                      </div>
-                    </div>
-                  ) : undefined
-                }
+                title="Select a table"
+                description="Choose a table on the left to browse its rows and structure."
                 className="h-full"
               />
             )}

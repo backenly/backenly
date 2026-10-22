@@ -3,7 +3,7 @@
  */
 
 /**
- * "Connect your agent" is offered until the user's coding agent is connected,
+ * "Connect agent" is offered until the user's coding agent is connected,
  * and not after. A customer whose VS Code agent was already connected over MCP
  * was still sent to Connect from every section, because the top bar's primary
  * action and each empty state asked unconditionally. These render the real
@@ -68,21 +68,22 @@ describe('Functions (the reported surface)', () => {
   it('sends a user without a connected agent to Connect', async () => {
     render(<FunctionsWorkbench projectId="p1" />)
     await settle()
-    expect(screen.getByRole('link', { name: /Connect your agent/ })).toHaveAttribute('href', '/app/projects/p1/connect')
+    expect(screen.getByRole('link', { name: /Connect agent/ })).toHaveAttribute('href', '/app/projects/p1/connect')
+    expect(screen.getByRole('link', { name: /View docs/ })).toHaveAttribute('href', '/docs/functions')
 
     const dialog = await openNewFunction()
-    expect(within(dialog).getByRole('link', { name: /Connect your agent/ })).toHaveAttribute('href', '/app/projects/p1/connect')
+    expect(within(dialog).getByRole('link', { name: /Connect agent/ })).toHaveAttribute('href', '/app/projects/p1/connect')
   })
 
   it('does not ask a user whose agent is connected, and still hands over the asks', async () => {
     agentAnswer = CONNECTED
     render(<FunctionsWorkbench projectId="p1" />)
     await settle()
-    expect(screen.queryByRole('link', { name: /Connect your agent/ })).toBeNull()
+    expect(screen.queryByRole('link', { name: /Connect agent/ })).toBeNull()
     expect(screen.getByText('When a user signs up, send them a welcome email.')).toBeInTheDocument()
 
     const dialog = await openNewFunction()
-    expect(within(dialog).queryByRole('link', { name: /Connect your agent/ })).toBeNull()
+    expect(within(dialog).queryByRole('link', { name: /Connect agent/ })).toBeNull()
     expect(within(dialog).getAllByRole('button', { name: 'Copy prompt' }).length).toBeGreaterThan(0)
     expect(within(dialog).getAllByRole('button', { name: 'Close' }).length).toBeGreaterThan(0)
   })
@@ -92,9 +93,12 @@ describe('Overview of an empty project', () => {
   it('asks a user without a connected agent to connect it', async () => {
     render(<MainWorkspace projectId="p1" projectName="shop" />)
     await settle()
-    expect(screen.getByRole('heading', { name: 'Connect your coding agent' })).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: /Connect your agent/ }))
-    expect(push).toHaveBeenCalledWith('/app/projects/p1/connect')
+    expect(screen.getByRole('heading', { name: 'shop' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Your backend is ready to build' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /Connect agent/ })).toHaveAttribute('href', '/app/projects/p1/connect')
+    // Step 1 is done on any project; step 2 is not until the agent connects.
+    expect(screen.getByRole('heading', { name: 'Done: Create a project' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Step 2: Connect your coding agent' })).toBeInTheDocument()
   })
 
   it('tells a connected user so, and hands over the first ask instead', async () => {
@@ -102,8 +106,10 @@ describe('Overview of an empty project', () => {
     render(<MainWorkspace projectId="p1" projectName="shop" />)
     await settle()
     expect(screen.getByRole('heading', { name: 'Your agent is connected' })).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: /Connect your agent/ })).toBeNull()
-    expect(screen.getByText(/Build a backend for my app/)).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: /Connect agent/ })).toBeNull()
+    expect(screen.getByRole('heading', { name: 'Done: Connect your coding agent' })).toBeInTheDocument()
+    expect(screen.getByText(/Connected through Visual Studio Code, last call just now/)).toBeInTheDocument()
+    expect(screen.getByText(/Build the backend for a task tracker/)).toBeInTheDocument()
   })
 })
 
@@ -111,14 +117,14 @@ describe('Auth & Users with no users yet', () => {
   it('offers Connect only until the agent is connected', async () => {
     const { unmount } = render(<AuthWorkbench projectId="p1" />)
     await settle()
-    expect(screen.getByRole('button', { name: 'Connect your agent' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Connect agent' })).toHaveAttribute('href', '/app/projects/p1/connect')
     unmount()
 
     clearAgentConnectionCache()
     agentAnswer = CONNECTED
     render(<AuthWorkbench projectId="p1" />)
     await settle()
-    expect(screen.queryByRole('button', { name: 'Connect your agent' })).toBeNull()
+    expect(screen.queryByRole('link', { name: 'Connect agent' })).toBeNull()
     expect(screen.getByText(/Add email and password sign-up/)).toBeInTheDocument()
   })
 })
