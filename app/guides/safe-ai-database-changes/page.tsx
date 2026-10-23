@@ -275,6 +275,12 @@ export default function SafeChangesGuide() {
                   title: 'Autonomy',
                   body: 'What Backenly fixes on its own, and what waits for your approval.',
                 },
+                {
+                  href: '/guides/best-backend-for-claude-code',
+                  meta: 'Guide',
+                  title: 'Best backend for Claude Code',
+                  body: 'What to check before an agent writes to production.',
+                },
               ]}
             />
           </Part>

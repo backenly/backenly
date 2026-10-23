@@ -37,6 +37,8 @@ import sitemap from '@/app/sitemap'
 import { COMPARISON_SLUGS } from '@/app/comparisons/data'
 import { DOC_SLUGS, DOCS_UPDATED } from '@/app/docs/content'
 import { FEATURE_SLUGS } from '@/app/features/data'
+import * as safeChangesGuide from '@/app/guides/safe-ai-database-changes/content'
+import * as bestBackendGuide from '@/app/guides/best-backend-for-claude-code/content'
 import { OG_IMAGE, SITE_URL } from '@/lib/seo/metadata'
 import { LOGO_URL, graph, organizationNode, softwareNode, websiteNode } from '@/lib/seo/schema'
 
@@ -154,6 +156,13 @@ describe('sitemap.xml', () => {
     for (const slug of FEATURE_SLUGS) expect(sitemapUrls).toContain(`${SITE_URL}/features/${slug}`)
     for (const slug of COMPARISON_SLUGS) expect(sitemapUrls).toContain(`${SITE_URL}/comparisons/${slug}`)
     for (const slug of DOC_SLUGS) expect(sitemapUrls).toContain(`${SITE_URL}/docs/${slug}`)
+  })
+
+  it('lists each guide, dated from the last edit its content records', () => {
+    for (const guide of [safeChangesGuide, bestBackendGuide]) {
+      const entry = entries.find((e) => e.url === `${SITE_URL}${guide.GUIDE_PATH}`)
+      expect(entry?.lastModified).toBe(guide.GUIDE_UPDATED)
+    }
   })
 
   it('dates a page only from a date its content records, never the build', () => {

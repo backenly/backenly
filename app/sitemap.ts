@@ -4,7 +4,8 @@ import { DOC_SLUGS, DOCS_UPDATED } from './docs/content'
 import { EFFECTIVE_DATE as PRIVACY_EFFECTIVE_DATE } from './privacy/data'
 import { absoluteUrl } from '@/lib/seo/metadata'
 import { FEATURE_SLUGS } from './features/data'
-import { GUIDE_PATH, GUIDE_UPDATED } from './guides/safe-ai-database-changes/content'
+import * as safeChangesGuide from './guides/safe-ai-database-changes/content'
+import * as bestBackendGuide from './guides/best-backend-for-claude-code/content'
 import { AGENT_SLUGS, AGENTS_UPDATED } from './agents/data'
 
 /**
@@ -60,7 +61,11 @@ export default function sitemap(): MetadataRoute.Sitemap {
   const docs: MetadataRoute.Sitemap = DOC_SLUGS.map((slug) => page(`/docs/${slug}`, DOCS_UPDATED.iso))
 
   // ── Guides ────────────────────────────────────────────────────────────────
-  const guides: MetadataRoute.Sitemap = [page(GUIDE_PATH, GUIDE_UPDATED)]
+  //
+  // Each guide is dated from the last real edit its own content records.
+  const guides: MetadataRoute.Sitemap = [safeChangesGuide, bestBackendGuide].map((guide) =>
+    page(guide.GUIDE_PATH, guide.GUIDE_UPDATED),
+  )
 
   // ── Agents ────────────────────────────────────────────────────────────────
   //
