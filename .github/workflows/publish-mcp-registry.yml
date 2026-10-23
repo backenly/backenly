@@ -1,0 +1,58 @@
+name: Publish to the MCP Registry
+
+# Publishes server.json to the official MCP Registry
+# (registry.modelcontextprotocol.io) as io.github.backenly/backenly.
+#
+# Why a workflow: the registry grants io.github.<org>/* to a GitHub Actions
+# OIDC token from a repository the org owns, with no secret to store. The
+# interactive `mcp-publisher login github` cannot publish to an org namespace
+# (modelcontextprotocol/registry#1468), and the alternative is an owner's
+# personal token, which can publish and overwrite anything under the org's
+# namespace.
+#
+# Why it is guarded: with OIDC, anyone who can run a workflow here could
+# publish under the org. So it runs only when a person starts it, only from
+# main, and through the `mcp-registry` environment, where a required reviewer
+# can be set (Settings → Environments). Each published version is immutable:
+# server.json's version must exist on npm (tests/unit/mcp-server-registry-
+# metadata.spec.ts keeps the two in step), and a new listing needs a new
+# version.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: publish-mcp-registry
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: mcp-registry
+    env:
+      # A release more than two weeks old, verified against the release's own
+      # checksums before it runs. Bump both together.
+      MCP_PUBLISHER_VERSION: v1.8.1
+      MCP_PUBLISHER_SHA256: a06c9096dcb9727c13555b6be26c7effa707b01f06a4c561ba7a3635443cf2cc
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mcp-publisher
+        run: |
+          curl -fsSL -o mcp-publisher.tar.gz \
+            "https://github.com/modelcontextprotocol/registry/releases/download/${MCP_PUBLISHER_VERSION}/mcp-publisher_linux_amd64.tar.gz"
+          echo "${MCP_PUBLISHER_SHA256}  mcp-publisher.tar.gz" | sha256sum --check --strict
+          tar -xzf mcp-publisher.tar.gz mcp-publisher
+
+      - name: Validate server.json against the live registry
+        run: ./mcp-publisher validate
+
+      - name: Sign in with this repository's OIDC identity
+        run: ./mcp-publisher login github-oidc
+
+      - name: Publish
+        run: ./mcp-publisher publish
