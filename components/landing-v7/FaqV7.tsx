@@ -2,11 +2,10 @@
 
 import { useId, useState } from 'react'
 import Link from 'next/link'
-import { AnimatePresence, motion } from 'framer-motion'
 import { ArrowRight, Plus } from 'lucide-react'
 import { ROUTES } from '@/components/site/SiteShell'
 import { BODY, HEADING, MEASURE } from '@/components/site/tokens'
-import { useSettledReducedMotion } from '@/lib/hooks/useSettledReducedMotion'
+import { safeJsonLd } from '@/lib/security/safe-jsonld'
 import { CONTAINER, SECTION, TEXT_LINK, TITLE_TYPE } from './shared'
 
 /* ─────────────────────────────────────────────────────────────
@@ -32,8 +31,6 @@ import { CONTAINER, SECTION, TEXT_LINK, TITLE_TYPE } from './shared'
        restore points.
    "The person who built it" became "the people": Backenly has two founders.
 ───────────────────────────────────────────────────────────── */
-
-const EASE_OUT = [0.16, 1, 0.3, 1] as const
 
 const faqs = [
   {
@@ -86,7 +83,7 @@ export function FaqV7() {
   return (
     // font-light: the live page's body copy inherits SiteShell's weight 300.
     <section id="faq" aria-labelledby="faq-heading" className={`${SECTION} scroll-mt-[92px] font-light`}>
-      <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(faqSchema) }} />
+      <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: safeJsonLd(faqSchema) }} />
       <div className={`${CONTAINER} grid gap-10 lg:grid-cols-[minmax(0,4fr)_minmax(0,7fr)] lg:gap-16`}>
         <div className="lg:sticky lg:top-28 lg:self-start">
           <h2 id="faq-heading" className={`max-w-[14ch] [text-wrap:balance] ${TITLE_TYPE}`}>
@@ -132,7 +129,6 @@ function FaqItem({
   onToggle: () => void
 }) {
   const panelId = useId()
-  const quiet = useSettledReducedMotion()
 
   return (
     <div className="border-b border-white/[0.08]">
@@ -161,20 +157,20 @@ function FaqItem({
           </span>
         </button>
       </h3>
-      <AnimatePresence initial={false}>
-        {open && (
-          <motion.div
-            id={panelId}
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: 'auto', opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: quiet ? 0 : 0.32, ease: EASE_OUT }}
-            className="overflow-hidden"
-          >
-            <p className={`${MEASURE} pb-7 pr-12 ${BODY} text-zinc-400 [text-wrap:pretty]`}>{faq.a}</p>
-          </motion.div>
-        )}
-      </AnimatePresence>
+      {/* Every answer stays in the DOM, collapsed rather than unmounted, as in
+          components/site/Faq.tsx: the FAQPage data above describes all eight
+          answers, and a crawler only reads the ones on the page. Closed is
+          `invisible`, so it is also out of the accessibility tree and tab order. */}
+      <div
+        id={panelId}
+        className={`grid transition-[grid-template-rows,opacity,visibility] duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] motion-reduce:transition-none ${
+          open ? 'visible grid-rows-[1fr] opacity-100' : 'invisible grid-rows-[0fr] opacity-0'
+        }`}
+      >
+        <div className="overflow-hidden">
+          <p className={`${MEASURE} pb-7 pr-12 ${BODY} text-zinc-400 [text-wrap:pretty]`}>{faq.a}</p>
+        </div>
+      </div>
     </div>
   )
 }
