@@ -74,8 +74,9 @@ export type DocSection = {
   summary: string
   /**
    * The search-result title, before " | Backenly Docs": the section and what
-   * it covers, in the words people search with. At most 44 characters, so the
-   * whole title fits in a result (tests/unit/seo-crawl-surface.spec.ts).
+   * it covers, in the words people search with. Results usually show about 60
+   * characters in all, so about 44 here; scripts/verify-content-integrity.ts
+   * warns past that rather than failing.
    */
   metaTitle: string
   metaDescription: string

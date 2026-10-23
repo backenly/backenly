@@ -67,6 +67,7 @@ import path from 'path'
 import { DOC_GROUPS, DOC_SECTIONS, DOC_SLUGS, DOCS_BY_SLUG } from '../app/docs/content'
 import { DOC_VIDEOS } from '../app/docs/videos'
 import { COMPARISON_LIST, COMPARISON_SLUGS } from '../app/comparisons/data'
+import { FEATURES, FEATURE_SLUGS } from '../app/features/data'
 import {
   CRITERIA,
   DO_NOT_SWITCH,
@@ -446,6 +447,35 @@ for (const index of ['/comparisons', '/alternatives', '/privacy']) {
   if (/['"]\/privacy\/?['"]/.test(disallow)) {
     fail('robots.ts disallows /privacy, which is linked from signup as the policy users must accept')
   }
+}
+
+// ── 3b. Search-result titles and descriptions (guidance, never a failure) ────
+//
+// Around 60 characters of title and 150-160 of description is what a result
+// usually shows before it is cut. That is an editorial guideline, not a ranking
+// rule: a clear, distinctive title that runs 64 characters is better than a
+// vague one that fits, and Google rewrites snippets as it sees fit. So these
+// only warn, for the pages whose copy lives in data files, and a reviewer
+// decides. The structural rules (canonical, share card, one brand mention,
+// no duplicates) are tests: tests/unit/seo-crawl-surface.spec.ts.
+
+{
+  const TITLE_GUIDE = 60
+  const DESCRIPTION_GUIDE = { min: 110, max: 160 }
+  const check = (page: string, title: string, description: string) => {
+    if (title.length > TITLE_GUIDE) {
+      warn(`${page}: title is ${title.length} characters; results usually show about ${TITLE_GUIDE}`)
+    }
+    if (description.length > DESCRIPTION_GUIDE.max || description.length < DESCRIPTION_GUIDE.min) {
+      warn(`${page}: description is ${description.length} characters; ${DESCRIPTION_GUIDE.min}-${DESCRIPTION_GUIDE.max} usually shows whole`)
+    }
+  }
+  for (const slug of FEATURE_SLUGS) {
+    const f = FEATURES[slug]
+    check(`features/${slug}`, `${f.metaTitle} | Backenly`, f.metaDescription)
+  }
+  for (const c of COMPARISON_LIST) check(`comparisons/${c.slug}`, c.metaTitle, c.metaDescription)
+  for (const d of DOC_SECTIONS) check(`docs/${d.slug}`, `${d.metaTitle} | Backenly Docs`, d.metaDescription)
 }
 
 // ── 4. Redirect hygiene ──────────────────────────────────────────────────────

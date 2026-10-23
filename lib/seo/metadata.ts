@@ -40,7 +40,7 @@ export type PageSeo = {
    * with it ("Backenly vs Supabase: …"), in which case it is used as is.
    */
   title: string
-  /** 120-160 characters: Google cuts a longer snippet off mid-sentence. */
+  /** What the page answers, in the searcher's words. About 150-160 characters usually shows whole; clarity matters more than the count. */
   description: string
   /** The page's path, e.g. `/pricing`. Becomes the canonical and og:url. */
   path: string

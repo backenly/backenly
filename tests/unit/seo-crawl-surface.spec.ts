@@ -11,13 +11,14 @@
  * - The root layout's canonical (the home page) was inherited by any page that
  *   set none, and a page that set its own Open Graph block lost the share
  *   image, so only the home page previewed with a card.
- * - Titles ran to 92 characters and named the brand twice; descriptions ran to
- *   238 and were cut off in results.
+ * - Titles named the brand twice ("Auth & Users: Backenly docs | Backenly").
  * - www.backenly.com served a second copy of the site, and a mistyped URL was
  *   answered with a sign-in redirect instead of a 404.
  *
- * Length limits are what Google shows before cutting text off: about 60
- * characters of title and 160 of description on desktop.
+ * Lengths are deliberately not asserted here. About 60 characters of title and
+ * 150-160 of description is what a result usually shows, which makes it a
+ * guideline for whoever writes the copy, not a rule a build should enforce:
+ * scripts/verify-content-integrity.ts warns about it instead.
  */
 
 import '@/tests/helpers/real-web-standard'
@@ -38,10 +39,6 @@ import { DOC_SLUGS, DOCS_UPDATED } from '@/app/docs/content'
 import { FEATURE_SLUGS } from '@/app/features/data'
 import { OG_IMAGE, SITE_URL } from '@/lib/seo/metadata'
 import { LOGO_URL, graph, organizationNode, softwareNode, websiteNode } from '@/lib/seo/schema'
-
-const TITLE_MAX = 60
-const DESCRIPTION_MIN = 70
-const DESCRIPTION_MAX = 160
 
 // ── Metadata, page by page ────────────────────────────────────────────────────
 
@@ -90,16 +87,12 @@ describe.each(pages)('%s', (path, url) => {
     expect(meta.twitter?.card).toBe('summary_large_image')
   })
 
-  it(`has a title of at most ${TITLE_MAX} characters that names the brand once`, () => {
-    const title = renderedTitle(meta)
-    expect(title.length).toBeLessThanOrEqual(TITLE_MAX)
-    expect(title.match(/Backenly/g)).toHaveLength(1)
+  it('has a title that names the brand once', () => {
+    expect(renderedTitle(meta).match(/Backenly/g)).toHaveLength(1)
   })
 
-  it(`has a description of ${DESCRIPTION_MIN}-${DESCRIPTION_MAX} characters`, () => {
-    const description = meta.description as string
-    expect(description.length).toBeGreaterThanOrEqual(DESCRIPTION_MIN)
-    expect(description.length).toBeLessThanOrEqual(DESCRIPTION_MAX)
+  it('has a description of its own', () => {
+    expect((meta.description as string).trim().length).toBeGreaterThan(0)
   })
 })
 
