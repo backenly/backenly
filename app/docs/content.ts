@@ -638,7 +638,7 @@ await backend.auth.signIn({ email, password })
     purpose: 'Connect your coding agent over MCP, and your app over the API.',
     summary:
       'Connect is how things reach your backend. Your coding agent connects over MCP with a scoped key and builds through it. Your app connects through the REST API or the SDK, and tools such as psql can connect to PostgreSQL directly.',
-    metaTitle: 'Connect Claude Code, Cursor or Codex',
+    metaTitle: 'Connect Claude Code, Cursor or Codex over MCP',
     metaDescription:
       'How to connect Claude Code, Cursor, Codex or another coding agent to Backenly over MCP with a scoped key, and how your app and database tools connect directly.',
     why:

@@ -116,7 +116,7 @@ const LIST: ComparisonData[] = [
     slug: 'backenly-vs-supabase',
     competitor: 'Supabase',
     category: 'Open-source Postgres platform',
-    metaTitle: 'Backenly vs Supabase: an open-source Supabase alternative',
+    metaTitle: 'Backenly vs Supabase: same Postgres, different workflow',
     metaDescription:
       'Both serve PostgreSQL through PostgREST, so queries look the same. The difference: who writes schema changes and access rules, and who looks after the backend.',
     positioning:
@@ -329,7 +329,7 @@ const LIST: ComparisonData[] = [
     slug: 'backenly-vs-firebase',
     competitor: 'Firebase',
     category: 'Google mobile and app platform',
-    metaTitle: 'Backenly vs Firebase: an open-source Firebase alternative',
+    metaTitle: 'Backenly vs Firebase: Postgres or a document database',
     metaDescription:
       'Firebase is a document database with mature mobile SDKs. Backenly is relational PostgreSQL with every structural change recorded. Choose the data model first.',
     positioning: 'Documents and strong mobile SDKs, or relational Postgres. The data model decides most of it.',
