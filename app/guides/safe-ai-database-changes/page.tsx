@@ -238,6 +238,16 @@ export default function SafeChangesGuide() {
               <Source href={SOURCES.acceptanceRecord}>docs/maintenance-production-acceptance.md</Source>. The ladder’s
               steps: <Source href={SOURCES.ladder}>lib/autonomy/maintenance/step.ts</Source>.
             </GuideSourceLine>
+
+            <GuideSubHeading>Where it stands today</GuideSubHeading>
+            <p className={READ}>
+              The rule got stricter after this run. Since 21 September, Backenly schedules a ladder only if it can
+              perform the undo of every step in the deployment it runs on, not merely describe one. The constraint step
+              above has no undo yet, so this ladder is shown with that reason and not offered for approval until one
+              exists. The restructuring offered today consolidates a table’s fragmented access policies, and its undo puts
+              back the exact policy set that was there before. The rule is{' '}
+              <Source href={SOURCES.rollbackCapability}>lib/autonomy/maintenance/rollback-capability.ts</Source>.
+            </p>
           </Part>
 
           <Part id="limits">

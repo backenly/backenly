@@ -7,11 +7,19 @@
  *   ladder steps          lib/autonomy/maintenance/step.ts   EXECUTOR_CAPABILITY
  *   production figures    docs/maintenance-production-acceptance.md
  *   destructive refusal   lib/mcp/migration-parser.ts   DESTRUCTIVE_REFUSED
+ *   what is offered today lib/autonomy/maintenance/plan.ts + rollback-capability.ts
+ *
+ * The last one is the claim most likely to go stale in the good direction: the
+ * day a constraint can be undone, the duplicated-column ladder becomes
+ * schedulable and "Where it stands today" (and the Autonomy docs note) must
+ * say so. This test fails that day.
  */
 
 import fs from 'fs'
 import path from 'path'
 import { EXECUTOR_CAPABILITY } from '@/lib/autonomy/maintenance/step'
+import { buildMaintenancePlan } from '@/lib/autonomy/maintenance/plan'
+import { canRollback } from '@/lib/autonomy/maintenance/rollback-capability'
 import { CHANGE_STEPS, LADDER_RUN, READER_HASHES, RECOVERY_SAFETY } from '@/app/guides/safe-ai-database-changes/content'
 
 const read = (file: string) => fs.readFileSync(path.join(process.cwd(), file), 'utf8')
@@ -54,5 +62,31 @@ describe('the production case study quotes the acceptance record', () => {
   it('uses the record’s code hashes, and the revert matches the original', () => {
     for (const r of READER_HASHES) expect(RECORD).toContain(r.hash)
     expect(READER_HASHES[2].hash).toBe(READER_HASHES[0].hash)
+  })
+
+  it('says which restructuring is offered today: policies yes, the duplicated column not yet', () => {
+    // The same minimal diagnosis tests/core/rollback-capability-is-real.test.ts plans from.
+    const planFor = (id: string) =>
+      buildMaintenancePlan({
+        findingId: 'f1',
+        diagnosis: {
+          kind: 'structural_cause_identified',
+          hypothesis: { id },
+          confidence: 0.71,
+          coverage: { sampleSufficient: true, largestSampleRows: 80, notes: [] },
+          blockedBy: [],
+          raisedOnly: [],
+          reason: 'ok',
+          trail: [],
+          report: { observations: [], unavailable: [], verdict: { kind: 'conclusive' } },
+        } as any,
+        subsystem: { fingerprint: 'sessions', membership: ['sessions', 'users'] },
+        catalogFingerprint: 'cat-v1',
+      })
+    expect(canRollback('drop_constraint')).toBe(false)
+    expect(planFor('duplicated_lifecycle_state').validity).toBe('blocked_by_capability')
+    expect(planFor('duplicated_lifecycle_state').blockedReasons.join(' ')).toMatch(/carry_constraints/)
+    expect(canRollback('restore_policies')).toBe(true)
+    expect(planFor('policy_fragmentation').validity).toBe('executable')
   })
 })

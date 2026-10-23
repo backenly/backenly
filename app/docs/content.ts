@@ -487,7 +487,7 @@ await backend.auth.signIn({ email, password })
       },
       {
         title: 'Restructuring waits for your consent',
-        body: 'When repairs in one area keep failing because of the schema itself, such as two columns holding the same state, Autonomy proposes an expand/contract plan: add the new column, write to both, backfill, check they agree, then switch the readers. It runs only if every step can be undone, and only after you approve that exact plan on the Autonomy page. Dropping the old column is always yours to do.',
+        body: 'When repairs in one area keep failing because of the schema itself, Autonomy works out a restructuring plan in steps that can each be undone, such as moving two columns that hold the same state onto one. It is offered to you only if Backenly can undo every step, and it runs only after you approve that exact plan on the Autonomy page. Dropping the old column is always yours to do.',
       },
     ],
     prompts: [
@@ -499,7 +499,7 @@ await backend.auth.signIn({ email, password })
       'Routine checks and safe repairs follow fixed rules and use no AI credits. When those checks cannot explain a finding, an AI investigation can gather read-only evidence and suggest one of the repairs Backenly lists for that kind of finding, never raw SQL. Its explanation is labelled as a hypothesis, and any proposed repair waits for a person’s approval. On Cloud, Backenly pays for these investigations.',
       'A project with no traffic, no changes and no other activity for 30 days is not checked until activity returns.',
       'Restoring the state before a change undoes only that change, and data written since is never dropped without your approval. A restore point covers the database schema; functions and auth settings are not in it.',
-      'Restructuring plans run on Backenly Cloud. A self-hosted instance runs them only when its operator turns on the maintenance scheduler. A plan approved for one version of the schema stops applying when the schema changes, and the new plan needs a new approval. One ran in production: [Safe database changes](/guides/safe-ai-database-changes#case).',
+      'Restructuring needs the maintenance scheduler: on for Backenly Cloud, off by default when self-hosting. A plan with a step Backenly cannot undo yet is shown with the reason and not offered; today that includes merging a duplicated column, whose constraint step has no undo yet. A plan approved for one version of the schema stops applying when the schema changes. How the steps behaved in a production run: [Safe database changes](/guides/safe-ai-database-changes#case).',
     ],
   },
   {

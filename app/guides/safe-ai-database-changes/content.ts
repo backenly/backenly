@@ -25,6 +25,7 @@ export const SOURCES = {
   preserve: `${GITHUB}/lib/changes/preserve.ts`,
   migrationParser: `${GITHUB}/lib/mcp/migration-parser.ts`,
   ladder: `${GITHUB}/lib/autonomy/maintenance/step.ts`,
+  rollbackCapability: `${GITHUB}/lib/autonomy/maintenance/rollback-capability.ts`,
 } as const
 
 export const AUTHORITIES = [
