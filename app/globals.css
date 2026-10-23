@@ -963,6 +963,14 @@ html {
   }
 }
 
+/* The top bar is fixed, so anything scrolled into view (a field focused by
+   Tab or by a form pointing at its first error, an anchor) stops below it
+   instead of under it (WCAG 2.4.11). Only on console pages: the marketing
+   site has its own header. */
+html:has(#console-main) {
+  scroll-padding-top: calc(var(--console-bar) + 16px);
+}
+
 /* The canvas's minimum height, so short pages still read as one sheet. */
 .console-canvas-min {
   min-height: calc(100vh - var(--console-bar));

@@ -30,6 +30,7 @@ import {
   type ComponentType,
   type KeyboardEvent as ReactKeyboardEvent,
 } from 'react'
+import Link from 'next/link'
 import { Check, ChevronRight, Copy, Info, MoreHorizontal, X, type LucideIcon } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
@@ -97,7 +98,7 @@ export const KIT = {
   text:        'text-zinc-50',
   textMute:    'text-zinc-300',
   textDim:     'text-zinc-400',
-  textFaint:   'text-zinc-500',
+  textFaint:   'text-faint',
 
   radius:      R_PANEL,
   radiusSm:    R_CONTROL,
@@ -146,7 +147,7 @@ export function KitCardHeader({
     <div className={`flex items-center justify-between gap-3 border-b ${RULE} px-4 py-3 ${className}`}>
       <div className="min-w-0">
         <h3 className="text-[13px] font-medium leading-[20px] tracking-[-0.006em] text-zinc-100">{title}</h3>
-        {description && <p className="mt-0.5 text-[12px] leading-[17px] text-zinc-500">{description}</p>}
+        {description && <p className="mt-0.5 text-[12px] leading-[17px] text-faint">{description}</p>}
       </div>
       {actions && <div className="flex flex-shrink-0 items-center gap-2">{actions}</div>}
     </div>
@@ -164,7 +165,7 @@ export function KitCardBody({ children, className = '' }: { children: ReactNode;
  * tracked micro-label; those are gone from the console by rule.
  */
 export function SectionLabel({ children, className = '' }: { children: ReactNode; className?: string }) {
-  return <p className={`text-[12px] font-medium leading-[16px] text-zinc-500 ${className}`}>{children}</p>
+  return <p className={`text-[12px] font-medium leading-[16px] text-faint ${className}`}>{children}</p>
 }
 
 export function SectionTitle({
@@ -210,7 +211,7 @@ const DOT: Record<StatusTone, string> = {
 const DOT_TEXT: Record<StatusTone, string> = {
   operational: 'text-zinc-300',
   managed:     'text-zinc-400',
-  paused:      'text-zinc-500',
+  paused:      'text-faint',
   attention:   'text-amber-200',
   failed:      'text-rose-300',
   beta:        'text-violet-200',
@@ -301,7 +302,7 @@ const TONE_ICON = {
 export function StatTile({ label, value, delta, tone = 'neutral', loading }: StatTileProps) {
   return (
     <div className={`${PLATE} border ${EDGE} ${R_PANEL} px-4 py-3.5`}>
-      <p className="text-[12px] leading-[16px] text-zinc-500">{label}</p>
+      <p className="text-[12px] leading-[16px] text-faint">{label}</p>
       <div className="mt-2 flex items-baseline gap-2">
         {loading ? (
           <Skeleton className="h-[22px] w-16" />
@@ -317,7 +318,7 @@ export function StatTile({ label, value, delta, tone = 'neutral', loading }: Sta
 }
 
 function Delta({ value, suffix }: { value: number; suffix?: string }) {
-  if (!value) return <span className="text-[12px] tabular-nums text-zinc-600">±0%</span>
+  if (!value) return <span className="text-[12px] tabular-nums text-faint">±0%</span>
   const up = value > 0
   return (
     <span className={`text-[12px] font-medium tabular-nums ${up ? 'text-emerald-300' : 'text-rose-300'}`}>
@@ -364,7 +365,7 @@ export function Stat({
     tone === 'good' ? 'text-emerald-300' : tone === 'warn' ? 'text-amber-200' : tone === 'bad' ? 'text-rose-300' : 'text-zinc-50'
   return (
     <div className={`${PLATE} min-w-0 px-4 py-3.5`}>
-      <p className="truncate text-[12px] leading-[16px] text-zinc-500">{label}</p>
+      <p className="truncate text-[12px] leading-[16px] text-faint">{label}</p>
       {loading ? (
         <Skeleton className="mt-2 h-[22px] w-14" />
       ) : (
@@ -372,7 +373,7 @@ export function Stat({
           {value}
         </p>
       )}
-      {hint && <p className="mt-0.5 truncate text-[12px] leading-[16px] text-zinc-500">{hint}</p>}
+      {hint && <p className="mt-0.5 truncate text-[12px] leading-[16px] text-faint">{hint}</p>}
     </div>
   )
 }
@@ -523,6 +524,43 @@ export function KitButton({
   )
 }
 
+/**
+ * Navigation that looks like a KitButton. It stays a real link (prefetch,
+ * Cmd-click, one focus stop) instead of a button inside an anchor, which is
+ * invalid markup and a double tab stop for keyboard users.
+ */
+export function KitButtonLink({
+  href,
+  children,
+  variant = 'secondary',
+  size = 'md',
+  icon: Icon,
+  external = false,
+  className = '',
+}: {
+  href: string
+  children: ReactNode
+  variant?: keyof typeof BUTTON_VARIANTS
+  size?: keyof typeof BUTTON_SIZES
+  icon?: IconLike
+  /** Opens in a new tab, and says so to screen readers. */
+  external?: boolean
+  className?: string
+}) {
+  const iconSize = size === 'sm' ? 'h-3.5 w-3.5' : 'h-[15px] w-[15px]'
+  return (
+    <Link
+      href={href}
+      {...(external ? { target: '_blank', rel: 'noopener noreferrer' } : {})}
+      className={`${BUTTON_BASE} ${BUTTON_SIZES[size]} ${BUTTON_VARIANTS[variant]} ${className}`}
+    >
+      {Icon && <Icon aria-hidden className={iconSize} strokeWidth={2} />}
+      {children}
+      {external && <span className="sr-only">(opens in a new tab)</span>}
+    </Link>
+  )
+}
+
 /** An icon-only button. `label` is required: it is the accessible name and the tooltip. */
 export function IconButton({
   icon: Icon,
@@ -595,13 +633,13 @@ export function KitTab({
       aria-selected={active}
       onClick={onClick}
       className={`group relative -mb-px flex h-[40px] flex-shrink-0 items-center whitespace-nowrap px-2.5 text-[13px] font-medium transition-colors duration-150 ${FOCUS_INSET} ${
-        active ? 'text-zinc-50' : 'text-zinc-500 hover:text-zinc-200'
+        active ? 'text-zinc-50' : 'text-faint hover:text-zinc-200'
       }`}
     >
       <span className="flex items-center gap-1.5 [&_svg]:h-[15px] [&_svg]:w-[15px]">
         {children}
         {typeof count === 'number' && (
-          <span className={`text-[12px] font-normal tabular-nums ${active ? 'text-zinc-400' : 'text-zinc-600'}`}>
+          <span className={`text-[12px] font-normal tabular-nums ${active ? 'text-zinc-400' : 'text-faint'}`}>
             {count}
           </span>
         )}
@@ -657,7 +695,7 @@ export function Segmented<T extends string>({
             className={`inline-flex items-center gap-1.5 rounded-[5px] font-medium transition-[background-color,color] duration-150 ${h} ${FOCUS_INSET} ${
               on
                 ? 'bg-white/[0.09] text-zinc-50 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]'
-                : 'text-zinc-500 hover:text-zinc-200'
+                : 'text-faint hover:text-zinc-200'
             }`}
           >
             {OptIcon && <OptIcon className="h-3.5 w-3.5" strokeWidth={1.75} />}
@@ -695,7 +733,7 @@ export function ListRow({ icon: Icon, iconTone = 'neutral', title, subtitle, rig
       {Icon && <Icon className={`h-4 w-4 flex-shrink-0 ${TONE_ICON[iconTone]}`} strokeWidth={1.75} />}
       <div className="min-w-0 flex-1">
         <div className="truncate text-[13px] font-medium text-zinc-200">{title}</div>
-        {subtitle && <div className="mt-0.5 truncate text-[12px] text-zinc-500">{subtitle}</div>}
+        {subtitle && <div className="mt-0.5 truncate text-[12px] text-faint">{subtitle}</div>}
       </div>
       {right && <div className="flex flex-shrink-0 items-center gap-2">{right}</div>}
     </Wrapper>
@@ -722,6 +760,7 @@ export function PageHeader({
   actions,
   meta,
   tabs,
+  breadcrumb,
   className = '',
 }: {
   title: ReactNode
@@ -729,10 +768,13 @@ export function PageHeader({
   actions?: ReactNode
   meta?: ReactNode
   tabs?: ReactNode
+  /** A <Breadcrumbs> trail above the title, for a page one level down. */
+  breadcrumb?: ReactNode
   className?: string
 }) {
   return (
     <header className={`${PAGE_WIDTH} ${PAGE_GUTTER} pt-7 sm:pt-9 ${className}`}>
+      {breadcrumb && <div className="mb-3">{breadcrumb}</div>}
       <div className={`flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between ${tabs ? 'pb-5' : 'pb-6'}`}>
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
@@ -772,10 +814,45 @@ export function CommandBar({
     >
       <div className="flex min-w-0 items-center gap-3">
         <h1 className="truncate text-[15px] font-semibold leading-[22px] tracking-[-0.014em] text-zinc-50">{title}</h1>
-        {context && <div className="flex min-w-0 items-center gap-3 text-[12px] text-zinc-500">{context}</div>}
+        {context && <div className="flex min-w-0 items-center gap-3 text-[12px] text-faint">{context}</div>}
       </div>
       {children && <div className="flex flex-shrink-0 flex-wrap items-center gap-2">{children}</div>}
     </div>
+  )
+}
+
+/**
+ * Where a page sits, for one level down (Support / Case #1). Every crumb but
+ * the last is a real link; the last is the page itself, marked current.
+ */
+export function Breadcrumbs({ items }: { items: Array<{ label: ReactNode; href?: string }> }) {
+  return (
+    <nav aria-label="Breadcrumb">
+      <ol className="flex min-w-0 flex-wrap items-center gap-1.5 text-[12.5px] leading-[18px]">
+        {items.map((item, i) => {
+          const last = i === items.length - 1
+          return (
+            <li key={i} className="flex min-w-0 items-center gap-1.5">
+              {item.href && !last ? (
+                <Link
+                  href={item.href}
+                  className={`${R_TAG} truncate text-faint transition-colors duration-150 hover:text-zinc-100 ${FOCUS}`}
+                >
+                  {item.label}
+                </Link>
+              ) : (
+                <span aria-current={last ? 'page' : undefined} className="truncate text-zinc-300">
+                  {item.label}
+                </span>
+              )}
+              {!last && (
+                <ChevronRight aria-hidden className="h-3.5 w-3.5 flex-shrink-0 text-zinc-600" strokeWidth={1.75} />
+              )}
+            </li>
+          )
+        })}
+      </ol>
+    </nav>
   )
 }
 
@@ -865,7 +942,7 @@ export function SettingsCard({
             danger ? 'border-rose-400/20 bg-rose-500/[0.04]' : `${RULE} bg-white/[0.015]`
           }`}
         >
-          <div className="min-w-0 text-[12.5px] leading-[18px] text-zinc-500">{footer}</div>
+          <div className="min-w-0 text-[12.5px] leading-[18px] text-faint">{footer}</div>
           {actions && <div className="flex flex-shrink-0 items-center gap-2">{actions}</div>}
         </div>
       )}
@@ -984,17 +1061,40 @@ export function KitChecklist({ items }: { items: string[] }) {
 
 // ─── Fields ──────────────────────────────────────────────────────────────────
 
-export function KitField({ label, hint, children }: { label: ReactNode; hint?: ReactNode; children: ReactNode }) {
+/**
+ * A labelled control. Pass `htmlFor` (the control's id) so the label names the
+ * control for assistive tech and a click on it focuses the control; pass
+ * `hintId` and point the control's aria-describedby at it to have the hint read.
+ */
+export function KitField({
+  label,
+  hint,
+  htmlFor,
+  hintId,
+  children,
+}: {
+  label: ReactNode
+  hint?: ReactNode
+  htmlFor?: string
+  hintId?: string
+  children: ReactNode
+}) {
   return (
     <div>
-      <label className="mb-1.5 block text-[12.5px] font-medium leading-[18px] text-zinc-300">{label}</label>
+      <label htmlFor={htmlFor} className="mb-1.5 block text-[12.5px] font-medium leading-[18px] text-zinc-300">
+        {label}
+      </label>
       {children}
-      {hint && <p className="mt-1.5 text-[12px] leading-[17px] text-zinc-500">{hint}</p>}
+      {hint && (
+        <p id={hintId} className="mt-1.5 text-[12px] leading-[17px] text-faint">
+          {hint}
+        </p>
+      )}
     </div>
   )
 }
 
-export const INPUT_BASE = `w-full ${WELL} border ${EDGE} ${R_CONTROL} text-[16px] text-zinc-100 placeholder:text-zinc-600 shadow-[inset_0_1px_2px_rgba(0,0,0,0.35)] transition-[border-color,box-shadow] duration-150 hover:border-white/[0.12] focus:border-violet-300/50 focus:outline-none focus:ring-[3px] focus:ring-violet-400/15 disabled:opacity-50 sm:text-[13px]`
+export const INPUT_BASE = `w-full ${WELL} border ${EDGE} ${R_CONTROL} text-[16px] text-zinc-100 placeholder:text-zinc-500 shadow-[inset_0_1px_2px_rgba(0,0,0,0.35)] transition-[border-color,box-shadow] duration-150 hover:border-white/[0.12] focus:border-violet-300/50 focus:outline-none focus:ring-[3px] focus:ring-violet-400/15 disabled:opacity-50 sm:text-[13px]`
 
 export const KitInput = forwardRef<HTMLInputElement, React.InputHTMLAttributes<HTMLInputElement>>(function KitInput(
   props,
@@ -1116,7 +1216,7 @@ export function AgentPrompt({
   const prompts = typeof prompt === 'string' ? [prompt] : prompt
   return (
     <div className={`w-full overflow-hidden ${R_PANEL} border ${EDGE} ${WELL} text-left ${className}`}>
-      <p className={`border-b ${RULE} px-3.5 py-2 text-[12px] leading-[16px] text-zinc-500`}>{label}</p>
+      <p className={`border-b ${RULE} px-3.5 py-2 text-[12px] leading-[16px] text-faint`}>{label}</p>
       <ul className={`divide-y ${KIT.divide}`}>
         {prompts.map((p) => (
           <li key={p} className="flex items-start gap-3 py-2 pl-3.5 pr-1.5">

@@ -27,7 +27,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
 import { AnimatePresence, motion } from 'framer-motion'
-import { LogOut, Menu, Search, Settings, X, type LucideIcon } from 'lucide-react'
+import { ArrowUpRight, LogOut, Menu, Search, Settings, X, type LucideIcon } from 'lucide-react'
 import { Logo } from '@/components/Logo'
 import { signOut } from '@/lib/api/auth'
 import { useMobileNavStore } from '@/lib/stores/use-mobile-nav-store'
@@ -223,7 +223,7 @@ export function SearchTrigger() {
       type="button"
       onClick={openCommandPalette}
       aria-label="Search and jump to"
-      className={`group hidden h-[30px] items-center gap-2 ${R_CONTROL} border border-white/[0.08] bg-white/[0.03] pl-2.5 pr-1.5 text-[12.5px] text-zinc-500 transition-colors hover:border-white/[0.13] hover:text-zinc-300 lg:inline-flex ${FOCUS}`}
+      className={`group hidden h-[30px] items-center gap-2 ${R_CONTROL} border border-white/[0.08] bg-white/[0.03] pl-2.5 pr-1.5 text-[12.5px] text-faint transition-colors hover:border-white/[0.13] hover:text-zinc-300 lg:inline-flex ${FOCUS}`}
     >
       <Search className="h-3.5 w-3.5" strokeWidth={2} />
       <span className="pr-6">Search</span>
@@ -371,7 +371,7 @@ export function AccountMenu() {
             {user && (
               <div className="px-2.5 pb-2 pt-1.5">
                 <p className="truncate text-[13px] font-medium text-zinc-100">{user.name ?? displayNameOf(user)}</p>
-                <p className="truncate text-[12px] text-zinc-500">{user.email}</p>
+                <p className="truncate text-[12px] text-faint">{user.email}</p>
               </div>
             )}
             {user && <MenuSeparator />}
@@ -417,7 +417,7 @@ export function SidebarNav({ children, footer }: { children: ReactNode; footer?:
 export function NavGroup({ label, children, first = false }: { label?: string; children: ReactNode; first?: boolean }) {
   return (
     <div className={first ? '' : label ? 'mt-5' : 'mt-3'}>
-      {label && <p className="mb-1 px-2.5 text-[12px] font-medium leading-[20px] text-zinc-600">{label}</p>}
+      {label && <p className="mb-1 px-2.5 text-[12px] font-medium leading-[20px] text-faint">{label}</p>}
       <ul className="space-y-px">{children}</ul>
     </div>
   )
@@ -430,6 +430,7 @@ export function NavItem({
   active,
   trailing,
   tourTarget,
+  external = false,
 }: {
   href: string
   icon: LucideIcon
@@ -437,6 +438,8 @@ export function NavItem({
   active: boolean
   trailing?: ReactNode
   tourTarget?: string
+  /** Opens in a new tab (the docs), and says so to sighted and screen-reader users alike. */
+  external?: boolean
 }) {
   return (
     <li>
@@ -444,9 +447,10 @@ export function NavItem({
         href={href}
         data-tour={tourTarget}
         aria-current={active ? 'page' : undefined}
+        {...(external ? { target: '_blank', rel: 'noopener noreferrer' } : {})}
         className={`group flex h-[36px] items-center gap-2.5 rounded-[7px] px-2.5 text-[13px] font-medium transition-[background-color,color] duration-150 md:h-[30px] ${FOCUS} ${
           active
-            ? 'bg-white/[0.07] text-zinc-50 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]'
+            ? 'bg-white/[0.07] text-zinc-50 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.045),inset_0_1px_0_rgba(255,255,255,0.05)]'
             : 'text-zinc-400 hover:bg-white/[0.04] hover:text-zinc-100'
         }`}
       >
@@ -457,15 +461,50 @@ export function NavItem({
           strokeWidth={1.75}
         />
         <span className="min-w-0 flex-1 truncate">{label}</span>
+        {external && (
+          <>
+            <ArrowUpRight
+              aria-hidden
+              className="h-3.5 w-3.5 flex-shrink-0 text-zinc-600 transition-colors duration-150 group-hover:text-zinc-400"
+              strokeWidth={1.75}
+            />
+            <span className="sr-only">(opens in a new tab)</span>
+          </>
+        )}
         {trailing}
       </Link>
     </li>
   )
 }
 
+/**
+ * The plan at the foot of the account sidebar. On Free it says what upgrading
+ * buys and links to Billing; on a paid plan it is absent, because the bar's
+ * scope chip already names the plan. Cloud only (a self-hosted build has no
+ * plans), and silent until the plan is known, so it never flashes a guess.
+ */
+export function SidebarPlan({ billingHref }: { billingHref: string }) {
+  const plan = usePlanName()
+  if (!CLOUD_CONTROL_PLANE || plan !== 'Free') return null
+  return (
+    <div className="mb-2 rounded-[10px] border border-white/[0.07] bg-white/[0.025] p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]">
+      <p className="text-[12.5px] font-medium leading-[18px] text-zinc-100">Free plan</p>
+      <p className="mt-0.5 text-[12px] leading-[17px] text-faint [text-wrap:pretty]">
+        Upgrade for production-severity support and higher limits.
+      </p>
+      <Link
+        href={billingHref}
+        className={`mt-2.5 inline-flex h-[26px] items-center ${R_CONTROL} border border-white/[0.10] bg-white/[0.05] px-2.5 text-[12px] font-medium text-zinc-100 transition-[background-color,border-color] duration-150 hover:border-white/[0.16] hover:bg-white/[0.08] ${FOCUS}`}
+      >
+        Upgrade
+      </Link>
+    </div>
+  )
+}
+
 /** Trailing count on a nav item: plain tabular text, not a pill. */
 export function NavCount({ value }: { value: number }) {
-  return <span className="text-[12px] font-normal tabular-nums text-zinc-600">{value}</span>
+  return <span className="text-[12px] font-normal tabular-nums text-faint">{value}</span>
 }
 
 /** Trailing tag on a nav item (e.g. MCP). */
@@ -473,7 +512,7 @@ export function NavTag({ children, active }: { children: ReactNode; active?: boo
   return (
     <span
       className={`rounded-[4px] border px-1 text-[10.5px] font-medium leading-[16px] ${
-        active ? 'border-violet-300/25 text-violet-200' : 'border-white/[0.08] text-zinc-500'
+        active ? 'border-violet-300/25 text-violet-200' : 'border-white/[0.08] text-faint'
       }`}
     >
       {children}
