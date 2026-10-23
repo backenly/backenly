@@ -286,17 +286,22 @@ export default function McpPage() {
             items={[
               { href: '/docs/connect', meta: 'Docs', title: 'Connect', body: 'The setup for each client, step by step.' },
               {
+                href: '/agents/claude-code',
+                meta: 'Claude Code',
+                title: 'Backenly in Claude Code',
+                body: 'Three ways to connect, and what to do before the tools load.',
+              },
+              {
+                href: '/agents/cursor',
+                meta: 'Cursor',
+                title: 'Backenly in Cursor',
+                body: 'The mcp.json block, and why it belongs in your user config.',
+              },
+              {
                 href: '/guides/safe-ai-database-changes',
                 meta: 'Guide',
                 title: 'Safe database changes with AI agents',
                 body: 'How a change is checked, verified and restored, with a production run.',
-              },
-              { href: '/docs/database', meta: 'Docs', title: 'Database', body: 'Tables, the REST API and row-level security.' },
-              {
-                href: '/docs/autonomy',
-                meta: 'Docs',
-                title: 'Autonomy',
-                body: 'What Backenly fixes on its own, and what waits for your approval.',
               },
             ]}
           />

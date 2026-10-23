@@ -5,6 +5,7 @@ import { EFFECTIVE_DATE as PRIVACY_EFFECTIVE_DATE } from './privacy/data'
 import { absoluteUrl } from '@/lib/seo/metadata'
 import { FEATURE_SLUGS } from './features/data'
 import { GUIDE_PATH, GUIDE_UPDATED } from './guides/safe-ai-database-changes/content'
+import { AGENT_SLUGS, AGENTS_UPDATED } from './agents/data'
 
 /**
  * Every indexable page, and when its content last changed where that is known.
@@ -61,5 +62,10 @@ export default function sitemap(): MetadataRoute.Sitemap {
   // ── Guides ────────────────────────────────────────────────────────────────
   const guides: MetadataRoute.Sitemap = [page(GUIDE_PATH, GUIDE_UPDATED)]
 
-  return [...core, ...features, ...comparisons, ...docs, ...guides]
+  // ── Agents ────────────────────────────────────────────────────────────────
+  //
+  // One page per coding agent (app/agents). There is no /agents index.
+  const agents: MetadataRoute.Sitemap = AGENT_SLUGS.map((slug) => page(`/agents/${slug}`, AGENTS_UPDATED))
+
+  return [...core, ...features, ...comparisons, ...docs, ...guides, ...agents]
 }

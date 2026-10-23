@@ -83,6 +83,7 @@ import {
   PRIVACY_SUMMARY,
   PROVIDERS,
 } from '../app/privacy/data'
+import { AGENTS, AGENT_SLUGS } from '../app/agents/data'
 import sitemap from '../app/sitemap'
 
 const failures: string[] = []
@@ -431,6 +432,20 @@ const compare = (label: string, prefix: string, real: string[]) => {
 const docCount = compare('docs', '/docs/', [...DOC_SLUGS])
 const comparisonCount = compare('comparison', '/comparisons/', [...COMPARISON_SLUGS])
 
+// The agent pages are static routes, one directory each under app/agents, and
+// their content is keyed by slug in app/agents/data.ts. A page without content,
+// content without a page, or either missing from the sitemap is a failure.
+{
+  const agentsDir = path.join(process.cwd(), 'app/agents')
+  const onDisk = fs
+    .readdirSync(agentsDir, { withFileTypes: true })
+    .filter((e) => e.isDirectory() && fs.existsSync(path.join(agentsDir, e.name, 'page.tsx')))
+    .map((e) => e.name)
+  for (const slug of onDisk) if (!AGENT_SLUGS.includes(slug as never)) fail(`app/agents/${slug} has a page but no entry in app/agents/data.ts`)
+  for (const slug of AGENT_SLUGS) if (!onDisk.includes(slug)) fail(`app/agents/data.ts has "${slug}" but app/agents/${slug}/page.tsx does not exist`)
+  compare('agent', '/agents/', onDisk)
+}
+
 // The index routes are hand-listed in the sitemap rather than derived, so they
 // are the ones that can silently go missing. /docs is not one: since
 // 2026-10-15 it has no page and redirects to the first section.
@@ -476,6 +491,7 @@ for (const index of ['/comparisons', '/alternatives', '/privacy']) {
   }
   for (const c of COMPARISON_LIST) check(`comparisons/${c.slug}`, c.metaTitle, c.metaDescription)
   for (const d of DOC_SECTIONS) check(`docs/${d.slug}`, `${d.metaTitle} | Backenly Docs`, d.metaDescription)
+  for (const slug of AGENT_SLUGS) check(`agents/${slug}`, `${AGENTS[slug].metaTitle} | Backenly`, AGENTS[slug].metaDescription)
 }
 
 // ── 4. Redirect hygiene ──────────────────────────────────────────────────────
@@ -540,6 +556,11 @@ const SURFACE_FILES = [
   // are written as [label](/path) and checked separately below.
   'app/docs/[slug]/page.tsx',
   'components/docs/DocsNav.tsx',
+  // The agent pages link to the docs, /mcp, the guide and each other.
+  'app/agents/data.ts',
+  'app/agents/shared.tsx',
+  'app/agents/claude-code/page.tsx',
+  'app/agents/cursor/page.tsx',
 ]
 
 /** Resolve a static pathname against the App Router directory layout. */

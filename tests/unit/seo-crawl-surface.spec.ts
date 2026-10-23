@@ -54,6 +54,7 @@ async function metadataFor(path: string): Promise<Meta> {
   if (slug && section === 'comparisons') return require('@/app/comparisons/[slug]/page').generateMetadata(params(slug))
   if (slug && section === 'docs') return require('@/app/docs/[slug]/page').generateMetadata(params(slug))
   if (slug && section === 'guides') return require(`@/app/guides/${slug}/page`).metadata
+  if (slug && section === 'agents') return require(`@/app/agents/${slug}/page`).metadata
   const fromLayout = ['pricing', 'privacy', 'terms', 'refund-policy']
   return require(`@/app/${section}/${fromLayout.includes(section) ? 'layout' : 'page'}`).metadata
 }
