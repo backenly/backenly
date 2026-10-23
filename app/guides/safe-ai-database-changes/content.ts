@@ -139,7 +139,6 @@ export const READER_HASHES = [
 ]
 
 export const NOT_AUTOMATED = [
-  'Changes outside the database (functions, auth providers, storage) are not in the checkpoint yet.',
   'Row data your application writes is not versioned; only data a change itself removed or rewrote is kept.',
   'A restore that crosses a later change to the same table is refused, not merged.',
   'A change interrupted by a crash is reconciled to “manual intervention required”, and a person decides.',
