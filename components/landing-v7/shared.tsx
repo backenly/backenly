@@ -159,17 +159,33 @@ export function useOnScreen<T extends Element>(margin = '0px') {
       order is the explanation. ── */
 
 /**
- * Run `fn` once the browser is idle after the page has loaded (or after
- * `timeout` ms at the latest), so heavy setup such as loading three.js and
- * compiling shaders happens while the visitor reads the hero, not in the middle
- * of a scroll. Returns a cancel function.
+ * How long after `load` the idle boot waits before asking for an idle slot.
+ *
+ * The scenes used to boot in the first idle slot after load, which on a phone
+ * is within half a second of the first paint: three.js (about 170 KB) and the
+ * shader compiles then competed with the page's first input, and Lighthouse
+ * counted the download inside the first screen's paint. Two and a half seconds
+ * later is still while the visitor reads the hero, which is what the idle boot
+ * is for, so the scenes are ready before anyone scrolls to them.
+ */
+const IDLE_BOOT_SETTLE_MS = 2500
+
+/**
+ * Run `fn` once the browser is idle, a moment after the page has loaded (or
+ * after `timeout` ms more at the latest), so heavy setup such as loading
+ * three.js and compiling shaders happens while the visitor reads the hero, not
+ * in the middle of a scroll and not on top of the first interaction. Returns a
+ * cancel function.
  */
 export function whenIdle(fn: () => void, timeout = 2500): () => void {
   let idle = 0
   let timer = 0
-  const go = () => {
+  const request = () => {
     if (typeof window.requestIdleCallback === 'function') idle = window.requestIdleCallback(fn, { timeout })
     else timer = window.setTimeout(fn, 400)
+  }
+  const go = () => {
+    timer = window.setTimeout(request, IDLE_BOOT_SETTLE_MS)
   }
   if (document.readyState === 'complete') go()
   else window.addEventListener('load', go, { once: true })
