@@ -95,9 +95,9 @@ const FEATURE_LIST: FeatureData[] = [
     slug: 'ai-backend-generation',
     name: 'Agent-built backends',
     icon: Sparkles,
-    metaTitle: 'AI Backend Generation: A Real Backend, Built by Your Coding Agent',
+    metaTitle: 'AI backend generation with your coding agent',
     metaDescription:
-      'Backenly turns a description into a running backend: PostgreSQL schema, REST APIs, authentication and storage, planned as typed actions, applied with approvals and restore points, and verified against the live runtime.',
+      'Backenly turns a description into a running backend: PostgreSQL schema, REST APIs, auth and storage, applied with approvals and restore points, then verified.',
     headline: 'Agent-built backends',
     subheadline:
       'Your agent describes what it needs. Backenly creates the tables, APIs, auth and access rules, then checks them against the running backend.',
@@ -144,9 +144,9 @@ const FEATURE_LIST: FeatureData[] = [
     slug: 'database-setup',
     name: 'Postgres database',
     icon: Database,
-    metaTitle: 'Automatic Database Setup: A PostgreSQL Schema Designed for You',
+    metaTitle: 'Automatic PostgreSQL schema design and setup',
     metaDescription:
-      'Backenly designs and applies a production PostgreSQL schema from a description: tables, relations, indexes and row-level security, in a schema isolated to your project, with direct connection strings and pg_dump exports.',
+      'Backenly designs and applies a PostgreSQL schema from a description: tables, relations, indexes and row-level security, isolated to your project and exportable.',
     headline: 'A real PostgreSQL database',
     subheadline:
       'Describe the data model. Backenly creates the tables, relations, indexes and row-level security, in a schema that belongs to your project alone.',
@@ -193,9 +193,9 @@ const FEATURE_LIST: FeatureData[] = [
     slug: 'authentication',
     name: 'Authentication',
     icon: KeyRound,
-    metaTitle: 'Built-in Authentication: User Auth for Your Backend, Isolated per Project',
+    metaTitle: 'Built-in user authentication for your backend',
     metaDescription:
-      'Backenly includes complete end-user authentication on every plan: email and password, Google sign-in, magic links, email verification and JWT sessions, signed with a per-project secret and enforced by row-level security.',
+      'Email and password, Google sign-in, magic links, email verification and JWT sessions on every plan, signed with a per-project secret and enforced by RLS.',
     headline: 'Auth for your users, built in',
     subheadline:
       'Sign-up, sign-in, sessions and access control on every plan, signed with a secret that belongs to your project alone.',
@@ -242,9 +242,9 @@ const FEATURE_LIST: FeatureData[] = [
     slug: 'api-generation',
     name: 'REST API',
     icon: Zap,
-    metaTitle: 'Instant REST API on PostgREST: The API Is Your Schema',
+    metaTitle: 'Instant REST API from your Postgres schema',
     metaDescription:
-      'Every table in Backenly is served by PostgREST, the same engine Supabase runs, reading straight from the PostgreSQL catalog. Filters, ordering, pagination and embedded resources, with authorization enforced by Postgres grants and RLS.',
+      'Every table is served by PostgREST, the engine Supabase runs: filters, ordering, pagination and embedded resources, with access enforced by grants and RLS.',
     headline: 'REST APIs from your schema',
     subheadline:
       'Every table is served by PostgREST, straight from the PostgreSQL catalog. Nothing to regenerate: a table created a second ago is queryable now.',
@@ -295,9 +295,9 @@ const FEATURE_LIST: FeatureData[] = [
     slug: 'deployment-ready-backends',
     name: 'Operations and autonomy',
     icon: Rocket,
-    metaTitle: 'Deployment-Ready Backends: Live Immediately, Operated Every Minute',
+    metaTitle: 'Deployment-ready backends, checked every minute',
     metaDescription:
-      'Backenly runs your backend on managed infrastructure. No Docker, no Kubernetes, no cloud console: a rollback snapshot before every deploy, and a self-healing loop that watches the live backend every minute on every plan.',
+      'Backenly runs your backend on managed infrastructure: no Docker, Kubernetes or cloud console, a rollback snapshot before every deploy, and a check every minute.',
     headline: 'Live at once, checked every minute',
     subheadline:
       'No Docker, no Kubernetes, no cloud console. Backenly runs the backend, snapshots before every deploy, and watches it every minute once it is live.',

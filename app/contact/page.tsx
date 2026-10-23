@@ -1,6 +1,7 @@
 import type { Metadata } from 'next'
 import { ArrowUpRight, Calendar, Mail, ShieldAlert, type LucideIcon } from 'lucide-react'
 import { safeJsonLd } from '@/lib/security/safe-jsonld'
+import { pageMetadata } from '@/lib/seo/metadata'
 import { SiteShell } from '@/components/site/SiteShell'
 import { ButtonLink, HorizonClose, JsonLd, Page } from '@/components/site/kit'
 import { SpotlightPanel } from '@/components/site/SpotlightPanel'
@@ -13,23 +14,17 @@ const FOUNDER_URL = 'https://calendly.com/adarsh-c-jose/30min'
 const DISCORD_URL = 'https://discord.gg/6cHeYXDAu3'
 const ISSUES_URL = 'https://github.com/backenly/backenly/issues'
 
-export const metadata: Metadata = {
-  title: 'Contact Backenly - Support, Sales, and Product Help',
+export const metadata: Metadata = pageMetadata({
+  title: 'Contact Backenly: support, sales and founder calls',
+  brandInTitle: true,
   description:
     'Contact Backenly for product support, billing questions, production issues, security reports, sales conversations, and founder calls.',
-  alternates: { canonical: `${APP_URL}/contact` },
-  openGraph: {
-    title: 'Contact Backenly',
-    description: 'Get help with Backenly support, billing, production issues, and onboarding.',
-    url: `${APP_URL}/contact`,
-    type: 'website',
-  },
-  twitter: {
-    card: 'summary_large_image',
+  path: '/contact',
+  social: {
     title: 'Contact Backenly',
     description: 'Support, billing, production help, and founder calls for Backenly.',
   },
-}
+})
 
 const contactSchema = {
   '@context': 'https://schema.org',

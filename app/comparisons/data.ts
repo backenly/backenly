@@ -116,9 +116,9 @@ const LIST: ComparisonData[] = [
     slug: 'backenly-vs-supabase',
     competitor: 'Supabase',
     category: 'Open-source Postgres platform',
-    metaTitle: 'Backenly vs. Supabase: same Postgres, different workflow',
+    metaTitle: 'Backenly vs Supabase: an open-source Supabase alternative',
     metaDescription:
-      'Both serve PostgreSQL through PostgREST, so queries are written the same way. The difference is who writes schema changes and access rules, and who looks after the backend after launch.',
+      'Both serve PostgreSQL through PostgREST, so queries look the same. The difference: who writes schema changes and access rules, and who looks after the backend.',
     positioning:
       'The same Postgres and query API. The difference is who handles schema changes, access rules and upkeep.',
     headline: 'Backenly vs. Supabase',
@@ -329,9 +329,9 @@ const LIST: ComparisonData[] = [
     slug: 'backenly-vs-firebase',
     competitor: 'Firebase',
     category: 'Google mobile and app platform',
-    metaTitle: 'Backenly vs. Firebase: document store and mobile SDKs vs. relational Postgres',
+    metaTitle: 'Backenly vs Firebase: an open-source Firebase alternative',
     metaDescription:
-      'Firebase is a document database with mature mobile SDKs. Backenly is relational PostgreSQL with every structural change recorded. The data model is the choice that is hardest to undo.',
+      'Firebase is a document database with mature mobile SDKs. Backenly is relational PostgreSQL with every structural change recorded. Choose the data model first.',
     positioning: 'Documents and strong mobile SDKs, or relational Postgres. The data model decides most of it.',
     headline: 'Backenly vs. Firebase',
     intro:
@@ -524,7 +524,7 @@ const LIST: ComparisonData[] = [
     competitor: 'No-code app builders',
     nameInSentence: 'no-code app builders',
     category: 'Integrated visual builders',
-    metaTitle: 'Backenly vs. no-code app builders: integrated builder or standalone backend',
+    metaTitle: 'Backenly vs no-code app builders: a standalone backend',
     metaDescription:
       'Visual app builders keep the frontend and the backend in one system. Backenly is backend only: standard PostgreSQL and a REST API that any frontend can use.',
     positioning: 'One tool for screens and data, or a separate backend that any frontend can use.',
@@ -668,9 +668,9 @@ const LIST: ComparisonData[] = [
     competitor: 'Your own backend',
     nameInSentence: 'your own backend',
     category: 'Custom-built backends',
-    metaTitle: 'Backenly vs. building your own backend: where a platform helps and where it stops',
+    metaTitle: 'Backenly vs building your own backend: what it covers',
     metaDescription:
-      'A hand-built backend has no limits and costs engineering time to build and run. Backenly covers the common parts and checks them for you. It does not replace engineering judgment.',
+      'A hand-built backend has no limits but costs engineering time to build and run. Backenly covers the common parts and checks them; design decisions stay yours.',
     positioning: 'Build every part yourself, or start from a platform that covers the common parts.',
     headline: 'Backenly vs. building your own backend',
     intro:

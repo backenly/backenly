@@ -3,6 +3,7 @@ import Link from 'next/link'
 import { notFound } from 'next/navigation'
 import { ArrowRight, ChevronRight } from 'lucide-react'
 import { safeJsonLd } from '@/lib/security/safe-jsonld'
+import { pageMetadata } from '@/lib/seo/metadata'
 import { SiteShell } from '@/components/site/SiteShell'
 import { BentoCell, CellBody, CellTitle } from '@/components/landing-v7/shared'
 import {
@@ -73,18 +74,15 @@ export async function generateMetadata(props: { params: Promise<{ slug: string }
   const c = COMPARISONS[params.slug]
   if (!c) return { title: 'Not Found' }
 
-  return {
+  // Every comparison title leads with "Backenly vs", so the template's suffix
+  // would only repeat the brand.
+  return pageMetadata({
     title: c.metaTitle,
+    brandInTitle: true,
     description: c.metaDescription,
-    openGraph: {
-      title: c.metaTitle,
-      description: c.metaDescription,
-      url: `${APP_URL}/comparisons/${c.slug}`,
-      type: 'article',
-    },
-    twitter: { card: 'summary_large_image', title: c.metaTitle, description: c.metaDescription },
-    alternates: { canonical: `${APP_URL}/comparisons/${c.slug}` },
-  }
+    path: `/comparisons/${c.slug}`,
+    type: 'article',
+  })
 }
 
 export default async function ComparisonSlugPage(props: { params: Promise<{ slug: string }> }) {

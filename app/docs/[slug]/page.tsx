@@ -4,6 +4,8 @@ import Link from 'next/link'
 import { ArrowLeft, ArrowRight } from 'lucide-react'
 import type { ReactNode } from 'react'
 import { safeJsonLd } from '@/lib/security/safe-jsonld'
+import { pageMetadata } from '@/lib/seo/metadata'
+import { ORGANIZATION_ID } from '@/lib/seo/schema'
 import { SiteShell } from '@/components/site/SiteShell'
 import { CodeBlock } from '@/components/site/CodeBlock'
 import { JsonLd, Page, Steps, Trail } from '@/components/site/kit'
@@ -32,20 +34,16 @@ export async function generateMetadata(props: { params: Promise<{ slug: string }
   const doc = findDoc(slug)
   if (!doc) return { title: 'Not Found' }
 
-  const url = `${APP_URL}/docs/${doc.slug}`
-  return {
-    title: `${doc.title}: Backenly docs`,
+  // "Database: Postgres tables, REST API and RLS | Backenly Docs": what the
+  // section covers first, then whose docs these are.
+  return pageMetadata({
+    title: `${doc.metaTitle} | Backenly Docs`,
+    brandInTitle: true,
     description: doc.metaDescription,
-    openGraph: {
-      title: `${doc.title}: Backenly docs`,
-      description: doc.metaDescription,
-      url,
-      type: 'article',
-      modifiedTime: DOCS_UPDATED.iso,
-    },
-    twitter: { card: 'summary_large_image', title: `${doc.title}: Backenly docs`, description: doc.metaDescription },
-    alternates: { canonical: url },
-  }
+    path: `/docs/${doc.slug}`,
+    type: 'article',
+    modifiedTime: DOCS_UPDATED.iso,
+  })
 }
 
 /** A small dot that marks a list item, aligned to the first line of 15-16px copy. */
@@ -114,13 +112,9 @@ export default async function DocPage(props: { params: Promise<{ slug: string }>
     headline: doc.title,
     description: doc.metaDescription,
     dateModified: DOCS_UPDATED.iso,
-    author: { '@type': 'Organization', name: 'Backenly', url: APP_URL },
-    publisher: {
-      '@type': 'Organization',
-      name: 'Backenly',
-      url: APP_URL,
-      logo: { '@type': 'ImageObject', url: `${APP_URL}/backenly-icon-hd.svg` },
-    },
+    // The organization node is the root layout's (lib/seo/schema.ts).
+    author: { '@id': ORGANIZATION_ID },
+    publisher: { '@id': ORGANIZATION_ID },
     url,
     mainEntityOfPage: { '@type': 'WebPage', '@id': url },
   }

@@ -2,6 +2,7 @@ import type { Metadata } from 'next'
 import type { ComponentType } from 'react'
 import { notFound } from 'next/navigation'
 import { safeJsonLd } from '@/lib/security/safe-jsonld'
+import { pageMetadata } from '@/lib/seo/metadata'
 import { SiteShell } from '@/components/site/SiteShell'
 import { CodeBlock } from '@/components/site/CodeBlock'
 import { AuthDiagram, DatabaseDiagram, RestApiDiagram } from '@/components/landing/CapabilityDiagrams'
@@ -50,13 +51,7 @@ export async function generateMetadata(props: { params: Promise<{ slug: string }
   const f = FEATURES[params.slug]
   if (!f) return { title: 'Not Found' }
 
-  return {
-    title: f.metaTitle,
-    description: f.metaDescription,
-    openGraph: { title: f.metaTitle, description: f.metaDescription, url: `${APP_URL}/features/${f.slug}`, type: 'website' },
-    twitter: { card: 'summary_large_image', title: f.metaTitle, description: f.metaDescription },
-    alternates: { canonical: `${APP_URL}/features/${f.slug}` },
-  }
+  return pageMetadata({ title: f.metaTitle, description: f.metaDescription, path: `/features/${f.slug}` })
 }
 
 /* ─────────────────────────────────────────────────────────────

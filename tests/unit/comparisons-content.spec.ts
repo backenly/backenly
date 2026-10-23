@@ -256,7 +256,9 @@ describe('route metadata', () => {
       const meta = await generateMetadata({ params: Promise.resolve({ slug }) })
       expect(meta.alternates.canonical).toBe(`${APP_URL}/comparisons/${slug}`)
       expect(meta.openGraph.url).toBe(`${APP_URL}/comparisons/${slug}`)
-      expect(typeof meta.title).toBe('string')
+      // Absolute: the title already leads with "Backenly vs", so the layout's
+      // " | Backenly" suffix would repeat the brand.
+      expect(meta.title.absolute).toMatch(/^Backenly vs /)
       expect((meta.description as string).length).toBeGreaterThan(50)
     }
   })

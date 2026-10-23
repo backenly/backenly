@@ -2,6 +2,7 @@ import type { Metadata } from 'next'
 import Link from 'next/link'
 import { ArrowRight } from 'lucide-react'
 import { safeJsonLd } from '@/lib/security/safe-jsonld'
+import { pageMetadata } from '@/lib/seo/metadata'
 import { SiteShell } from '@/components/site/SiteShell'
 import { BentoCell, CellBody, CellTitle } from '@/components/landing-v7/shared'
 import { ButtonLink, HorizonClose, JsonLd, Page, PageHero, Section } from '@/components/site/kit'
@@ -11,30 +12,17 @@ import { COMPARISON_LIST } from './data'
 
 const APP_URL = 'https://backenly.com'
 
-export const metadata: Metadata = {
-  title: 'Backenly comparisons: how it differs from other backend platforms',
+export const metadata: Metadata = pageMetadata({
+  title: 'Backenly comparisons: Supabase, Firebase and more',
+  brandInTitle: true,
   description:
-    'Four comparisons against Supabase, Firebase, integrated app builders, and building a backend yourself. Each one says where the other option is the better choice.',
-  keywords: [
-    'Backenly vs Supabase',
-    'Backenly vs Firebase',
-    'backend platform comparison',
-    'Postgres backend platform',
-  ],
-  openGraph: {
-    title: 'Backenly comparisons: how it differs from other backend platforms',
-    description:
-      'Comparisons against Supabase, Firebase, integrated app builders, and building it yourself. Each one says where the other option wins.',
-    url: `${APP_URL}/comparisons`,
-    type: 'website',
-  },
-  twitter: {
-    card: 'summary_large_image',
+    'How Backenly compares with Supabase, Firebase, no-code app builders and building your own backend, including when the other option is the better choice.',
+  path: '/comparisons',
+  social: {
     title: 'Backenly comparisons',
     description: 'How Backenly differs from Supabase, Firebase, app builders, and building it yourself.',
   },
-  alternates: { canonical: `${APP_URL}/comparisons` },
-}
+})
 
 /* ─────────────────────────────────────────────────────────────
    /comparisons (2026-10-15, founders: "no jargon, no lots of text, no big

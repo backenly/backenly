@@ -116,7 +116,7 @@ const warn = (m: string) => warnings.push(m)
   for (const d of DOC_SECTIONS) {
     const at = (m: string) => fail(`docs/${d.slug}: ${m}`)
     if (!DOC_GROUPS.some((g) => g.id === d.group)) at(`group "${d.group}" does not exist`)
-    for (const field of ['title', 'purpose', 'summary', 'metaDescription', 'why'] as const) {
+    for (const field of ['title', 'purpose', 'summary', 'metaTitle', 'metaDescription', 'why'] as const) {
       if (!d[field].trim()) at(`"${field}" is empty`)
     }
     if (d.examples.length < 3) at(`only ${d.examples.length} examples — a reader needs to recognise their own app`)

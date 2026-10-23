@@ -72,6 +72,12 @@ export type DocSection = {
   purpose: string
   /** The paragraph under the title: what it is, in concrete terms. */
   summary: string
+  /**
+   * The search-result title, before " | Backenly Docs": the section and what
+   * it covers, in the words people search with. At most 44 characters, so the
+   * whole title fits in a result (tests/unit/seo-crawl-surface.spec.ts).
+   */
+  metaTitle: string
   metaDescription: string
   /** The problem it solves. */
   why: string
@@ -133,8 +139,9 @@ export const DOC_SECTIONS: DocSection[] = [
     purpose: 'Your app’s data, in PostgreSQL tables, with an API for every table.',
     summary:
       'Database holds your app’s data in PostgreSQL tables: posts, orders, messages, anything your app needs to remember. Every table is served as a REST API the moment it exists, and row-level security decides which rows each signed-in user can read and change.',
+    metaTitle: 'Database: Postgres tables, REST API and RLS',
     metaDescription:
-      'What the Database section does: PostgreSQL tables your coding agent creates, a REST API for every table, row-level security, and how a schema change is planned, applied and rolled back.',
+      'The Database section: PostgreSQL tables your coding agent creates, a REST API for every table, row-level security, and how schema changes apply and roll back.',
     why:
       'Almost every app has to remember things between visits: who ordered what, which tasks are done, what a user wrote. That is the database. On Backenly you do not write the server code that usually sits in front of it. Your agent creates the tables, Backenly serves them as an API, and the access rules run inside PostgreSQL, so a filter forgotten on one screen cannot show one user another user’s data.',
     examples: [
@@ -189,8 +196,9 @@ await backend.tasks.create({ title: 'Ship onboarding', status: 'todo' })`,
     purpose: 'Sign-up and sign-in for the people who use your app.',
     summary:
       'Auth & Users lets people create an account in your app and sign in, with an email and password or a social provider. It issues the session tokens your database rules read, and lists everyone who signed up so you can reset a password or block an account.',
+    metaTitle: 'Auth & Users: sign-up, OAuth and sessions',
     metaDescription:
-      'What Auth & Users does: email and password sign-up, social sign-in with your own OAuth app, project-scoped session tokens, password reset emails, and managing the people who use your app.',
+      'Auth & Users: email and password sign-up, social sign-in with your own OAuth app, project-scoped session tokens, password reset emails, and managing your users.',
     why:
       'Most apps need to know who is asking before they show or change anything. Building that yourself means password hashing, sessions, reset emails and OAuth flows, and a mistake in any of them is a security problem rather than a bug. Auth & Users gives each project its own user system, separate from your Backenly account, and your [database](/docs/database) rules use its tokens to decide which rows each person can see.',
     examples: [
@@ -244,8 +252,9 @@ await backend.auth.signIn({ email, password })
     purpose: 'Files your app works with, like photos, PDFs and videos.',
     summary:
       'Storage keeps the files your app works with: profile photos, receipts, PDFs, videos. The database stores the record, Storage stores the file it points to, and files are private unless you make them public.',
+    metaTitle: 'Storage: file uploads and expiring links',
     metaDescription:
-      'What Storage does and why an app needs it: buckets for user uploads, private files with expiring links, public files with stable URLs, image resizing, and file-type rules.',
+      'Storage for your app: buckets for user uploads, private files with expiring links, public files with stable URLs, image resizing, and file-type rules.',
     why:
       'A database is built for rows of text and numbers, not for a 4 MB photo or a 200-page PDF. Putting files in tables makes every query slower and every backup larger. Storage gives files their own home, organised in buckets, and your database keeps only each file’s path. Private files are read through links that expire, so a file meant for one person does not end up public.',
     examples: [
@@ -298,8 +307,9 @@ await backend.auth.signIn({ email, password })
     purpose: 'Your own server-side code, run on an event, a schedule or an HTTP call.',
     summary:
       'Functions run your own code on Backenly’s servers instead of in the user’s browser. A function runs when something happens: a user signs up, a row changes, a schedule comes round, or your app calls its HTTP endpoint.',
+    metaTitle: 'Functions: server code, triggers and cron',
     metaDescription:
-      'What Functions are for: server-side code that keeps secret keys out of the browser, triggered by sign-ups, table changes, schedules or HTTP calls, with logs for every run.',
+      'Functions run server code that keeps secret keys out of the browser, triggered by sign-ups, table changes, schedules or HTTP calls, with a log of every run.',
     why:
       'Some work cannot run in the browser. A Stripe secret key or an email API key would be visible to anyone who opens the developer tools, and a browser tab cannot run a job at 3 a.m. or react when another user changes a row. Functions are where that code goes. It runs on the server, reads secrets your app never sees, and starts on its own when its trigger fires.',
     examples: [
@@ -343,6 +353,7 @@ await backend.auth.signIn({ email, password })
     purpose: 'Live updates in your app the moment data changes.',
     summary:
       'Realtime pushes changes to your app as they happen. When a row is inserted, updated or deleted in a table you stream, every screen subscribed to that table receives the change without refreshing.',
+    metaTitle: 'Realtime: live Postgres changes over SSE',
     metaDescription:
       'What Realtime does: live insert, update and delete events from your tables, delivered to the app over Server-Sent Events, plus presence and broadcast.',
     why:
@@ -396,8 +407,9 @@ await backend.auth.signIn({ email, password })
     purpose: 'Stripe, Resend, OpenAI, Anthropic and PostHog, connected with your own keys.',
     summary:
       'Integrations connect your backend to services you already use: Stripe for payments, Resend for email, OpenAI or Anthropic for AI features, and PostHog for analytics. You paste your own key once, and your agent builds the tables and functions that use it.',
+    metaTitle: 'Integrations: Stripe, Resend, OpenAI',
     metaDescription:
-      'What Integrations does: connect Stripe, Resend, OpenAI, Anthropic and PostHog with your own API keys, stored encrypted, and have your coding agent build the payments, email or AI features on top.',
+      'Connect Stripe, Resend, OpenAI, Anthropic and PostHog with your own API keys, stored encrypted, and have your coding agent build payments, email or AI features.',
     why:
       'Payments, email delivery and AI models are services you rent rather than build. Each needs a secret key that must never reach the browser, plus backend work around it: a checkout endpoint, a receiver that verifies Stripe’s webhook signature, a record of sent emails, a quota so a loop cannot drain your OpenAI credit. Integrations stores the key encrypted for the project and gives your agent a known starting point for that work.',
     examples: [
@@ -444,8 +456,9 @@ await backend.auth.signIn({ email, password })
     purpose: 'What Backenly fixes on its own, and what waits for your approval.',
     summary:
       'Autonomy keeps checking your backend after your agent’s session ends. It finds problems such as a missing index or a table without row-level security, fixes the safe ones on its own if you allow it, and holds everything else for your approval.',
+    metaTitle: 'Autonomy: self-healing checks every minute',
     metaDescription:
-      'What Autonomy does: checks the running backend every minute, fixes safe and reversible problems on its own in Autopilot, holds risky changes in a review queue, and records every schema change it makes with a restore point.',
+      'Autonomy checks the running backend every minute, fixes safe, reversible problems itself in Autopilot, holds risky changes for review, and records every change.',
     why:
       'A backend keeps changing after launch: new tables, more traffic, a column someone added by hand. Problems show up when nobody is looking, and the usual answer is a person on call. Autonomy does the first part of that job: it checks every minute, shows the evidence for what it finds, and never applies a change it cannot undo without asking you first.',
     examples: [
@@ -490,8 +503,9 @@ await backend.auth.signIn({ email, password })
     purpose: 'Traffic, speed and errors of the running backend.',
     summary:
       'Monitoring shows how your backend is behaving: how many requests it serves, how fast it answers and how often it fails. It breaks the numbers down by endpoint and keeps a searchable log of every request.',
+    metaTitle: 'Monitoring: request logs, latency and errors',
     metaDescription:
-      'What Monitoring shows: request volume, latency, success rate and reliability, per-endpoint p95 latency and error rates, system events, and a searchable request log.',
+      'Monitoring shows request volume, latency and success rate, per-endpoint p95 latency and error rates, system events, and a searchable log of every request.',
     why:
       'When a user says the app is slow or broken, you need to know whether the backend agrees: which endpoint, since when, and with what error. Without monitoring that means guessing, or adding logging after the fact and waiting for it to happen again. Monitoring records it from the first request, so the evidence is already there when you need it.',
     examples: [
@@ -532,8 +546,9 @@ await backend.auth.signIn({ email, password })
     purpose: 'A separate copy of your backend to try changes on first.',
     summary:
       'Branches give your agent its own copy of your backend’s schema to build against, the way a pull request lets you try code before merging it. Production keeps serving while the branch changes, and merging replays the changes onto production.',
+    metaTitle: 'Branches: preview copies of your schema',
     metaDescription:
-      'What Branches are for: an isolated copy of your schema where a coding agent can build and test a change, compare it with production, and merge it back or throw it away.',
+      'Branches give a coding agent an isolated copy of your schema to build and test a change, compare it with production, then merge it back or throw it away.',
     why:
       'Changing a live backend is risky: a new column or table can break the app your users have open right now. A branch lets your agent try the change somewhere that cannot affect them, test it against its own preview endpoint, and show you the difference before anything reaches production.',
     examples: [
@@ -575,6 +590,7 @@ await backend.auth.signIn({ email, password })
     purpose: 'Publish numbered versions of your backend, and roll back to an earlier one.',
     summary:
       'Deploy is where you publish your backend. Publishing runs readiness checks first, then records the backend as a numbered version and marks the project live. On Pro and higher you can roll back to an earlier published version.',
+    metaTitle: 'Deploy: versions, readiness and rollback',
     metaDescription:
       'What Deploy does: readiness checks before you publish, numbered versions of your backend, the history of what went live, and rollback to an earlier version.',
     why:
@@ -621,6 +637,7 @@ await backend.auth.signIn({ email, password })
     purpose: 'Connect your coding agent over MCP, and your app over the API.',
     summary:
       'Connect is how things reach your backend. Your coding agent connects over MCP with a scoped key and builds through it. Your app connects through the REST API or the SDK, and tools such as psql can connect to PostgreSQL directly.',
+    metaTitle: 'Connect Claude Code, Cursor or Codex',
     metaDescription:
       'How to connect Claude Code, Cursor, Codex or another coding agent to Backenly over MCP with a scoped key, and how your app and database tools connect directly.',
     why:
@@ -669,6 +686,7 @@ await backend.auth.signIn({ email, password })
     purpose: 'Signed events sent to your own services when data changes.',
     summary:
       'Webhooks send an HTTP request to a URL you choose when something happens in your backend: a row is inserted, updated or deleted, or a user signs up. Each request is signed, retried if it fails, and logged.',
+    metaTitle: 'Webhooks: signed HTTP events with retries',
     metaDescription:
       'What Webhooks do: signed HTTP requests to your own services when rows change or a user signs up, with HMAC signatures, automatic retries and a delivery log.',
     why:
@@ -733,8 +751,9 @@ export function isFromBackenly(rawBody, signatureHeader, secret) {
     purpose: 'Project details, API keys, and who has access.',
     summary:
       'Settings holds the project’s details, its API keys and its access list. It is where you find the project id and API address, create and revoke keys, and see who can open the project.',
+    metaTitle: 'Settings: API keys, roles and access',
     metaDescription:
-      'What project Settings covers: the project id and API base URL, API keys with Admin, Write, Read only and Client roles, revoking keys, and who can open the project.',
+      'Project Settings: the project id and API base URL, API keys with Admin, Write, Read only and Client roles, revoking keys, and who can open the project.',
     why:
       'Every app that talks to your backend needs a key, and different callers need different powers: a browser should never hold a key that can administer the project. Settings is where keys are created, scoped and revoked, next to the identifiers your code needs and the controls for the project as a whole.',
     examples: [

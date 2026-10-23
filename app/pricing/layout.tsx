@@ -1,32 +1,17 @@
 import { Metadata } from 'next'
+import { pageMetadata } from '@/lib/seo/metadata'
 
-export const metadata: Metadata = {
-  title: 'Pricing — Free, Pro & Enterprise Plans',
+export const metadata: Metadata = pageMetadata({
+  title: 'Pricing: Free, Pro and Enterprise plans',
   description:
-    'Backenly pricing: free forever plan (1 project, no credit card), Pro at $25/month, Enterprise custom. Every plan includes autonomous self-healing every minute, never billed to your AI credits.',
-  keywords: [
-    'Backenly pricing',
-    'AI backend pricing',
-    'backend as a service pricing',
-    'free backend hosting',
-    'BaaS free plan',
-  ],
-  openGraph: {
-    title: 'Backenly Pricing — Start Free, Scale When Ready',
+    'Start free with no credit card, upgrade to Pro at $25 a month, or ask about Enterprise. Self-healing runs every minute on every plan. Self-hosting is free.',
+  path: '/pricing',
+  social: {
+    title: 'Backenly Pricing: start free, scale when ready',
     description:
-      'No credit card required. One permanent free project. Upgrade to Pro at $25/month when your product grows — Enterprise for custom limits, SSO, and an SLA.',
-    url: 'https://backenly.com/pricing',
-    type: 'website',
+      'No credit card required. One permanent free project. Pro at $25/month when your product grows, and Enterprise for custom limits, SSO and an SLA.',
   },
-  twitter: {
-    card: 'summary_large_image',
-    title: 'Backenly Pricing — Start Free, Scale When Ready',
-    description: 'No credit card required. Free forever plan included.',
-  },
-  alternates: {
-    canonical: 'https://backenly.com/pricing',
-  },
-}
+})
 
 export default function PricingLayout({ children }: { children: React.ReactNode }) {
   return <>{children}</>

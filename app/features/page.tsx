@@ -1,6 +1,8 @@
 import type { Metadata } from 'next'
 import type { ComponentType } from 'react'
 import { safeJsonLd } from '@/lib/security/safe-jsonld'
+import { pageMetadata } from '@/lib/seo/metadata'
+import { graph, softwareNode } from '@/lib/seo/schema'
 import { SiteShell } from '@/components/site/SiteShell'
 import {
   AuthDiagram,
@@ -16,34 +18,17 @@ import { StartButton } from '@/components/site/StartButton'
 import { HEADING } from '@/components/site/tokens'
 import { ATLAS, type AtlasGroup, type AtlasVisual } from './data'
 
-const APP_URL = 'https://backenly.com'
-
-export const metadata: Metadata = {
-  title: 'Features: Every Capability of the Autonomous Backend',
+export const metadata: Metadata = pageMetadata({
+  title: 'Features: Postgres, APIs, auth, storage, realtime',
   description:
-    'Everything in Backenly: PostgreSQL with pgvector, PostgREST APIs, auth, storage, realtime, functions and triggers, governed change with approvals and restore points, and a self-healing loop that runs every minute on every plan.',
-  keywords: [
-    'AI backend features',
-    'MCP backend for coding agents',
-    'PostgreSQL backend platform',
-    'PostgREST REST API',
-    'backend authentication',
-    'realtime backend',
-  ],
-  openGraph: {
+    'Everything in Backenly: PostgreSQL with pgvector, PostgREST APIs, auth, storage, realtime, functions, governed changes with restore points, and self-healing.',
+  path: '/features',
+  social: {
     title: 'Backenly Features: the complete backend, operated for you',
     description:
       'Postgres, APIs, auth, storage, realtime and functions, built by your coding agent and kept healthy by Backenly after launch.',
-    url: `${APP_URL}/features`,
-    type: 'website',
   },
-  twitter: {
-    card: 'summary_large_image',
-    title: 'Backenly Features',
-    description: 'The complete backend, built by your agent and operated by Backenly.',
-  },
-  alternates: { canonical: `${APP_URL}/features` },
-}
+})
 
 /* ─────────────────────────────────────────────────────────────
    /features (2026-10-15, founders: "clean and professional, no jargon, no
@@ -72,16 +57,12 @@ const WIDE = new Set(['database', 'autonomy'])
 /** The bento's order, by group id. */
 const ORDER = ['database', 'agents', 'apis', 'auth', 'storage', 'realtime', 'functions', 'governance', 'autonomy', 'platform']
 
-const softwareSchema = {
-  '@context': 'https://schema.org',
-  '@type': 'SoftwareApplication',
-  name: 'Backenly',
-  url: APP_URL,
-  applicationCategory: 'DeveloperApplication',
-  operatingSystem: 'Web',
+// The home page's product node (same @id), with this page's full catalog as
+// its feature list.
+const softwareSchema = graph({
+  ...softwareNode,
   featureList: ATLAS.flatMap((group) => group.items.map((item) => item.name)),
-  offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD' },
-}
+})
 
 export default function FeaturesPage() {
   const groups = ORDER.map((id) => ATLAS.find((g) => g.id === id)).filter((g): g is AtlasGroup => Boolean(g))

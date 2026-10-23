@@ -2,6 +2,7 @@ import type { Metadata } from 'next'
 import Link from 'next/link'
 import { ArrowRight, Check, Minus } from 'lucide-react'
 import { safeJsonLd } from '@/lib/security/safe-jsonld'
+import { pageMetadata } from '@/lib/seo/metadata'
 import { SiteShell } from '@/components/site/SiteShell'
 import { BentoCell, CellBody, CellTitle } from '@/components/landing-v7/shared'
 import {
@@ -21,32 +22,17 @@ import { HEADING, TEXT_LINK, TITLE } from '@/components/site/tokens'
 import { COMPARISON_LIST } from '../comparisons/data'
 import { CRITERIA, DO_NOT_SWITCH, FAQ, NOT_FOR, SWITCHING_COSTS } from './data'
 
-const APP_URL = 'https://backenly.com'
-
-export const metadata: Metadata = {
-  title: 'Backend platform alternatives: how to evaluate one, and when to stay',
+export const metadata: Metadata = pageMetadata({
+  title: 'How to choose a backend platform and when to stay',
   description:
-    'Six questions that decide a backend platform: the data model, schema changes, upkeep after launch, agent access, leaving, and pricing. Includes where Backenly does not fit.',
-  keywords: [
-    'backend platform alternatives',
-    'Supabase alternative',
-    'Firebase alternative',
-    'backend as a service evaluation',
-  ],
-  openGraph: {
-    title: 'Backend platform alternatives: how to evaluate one, and when to stay',
-    description:
-      'The criteria that decide a backend platform, where Backenly fits, and when the right answer is to stay where you are.',
-    url: `${APP_URL}/alternatives`,
-    type: 'article',
-  },
-  twitter: {
-    card: 'summary_large_image',
+    'Six questions that decide a backend platform: the data model, schema changes, upkeep, agent access, leaving and pricing. Includes where Backenly does not fit.',
+  path: '/alternatives',
+  type: 'article',
+  social: {
     title: 'Backend platform alternatives',
     description: 'How to evaluate one, where Backenly fits, and when not to switch.',
   },
-  alternates: { canonical: `${APP_URL}/alternatives` },
-}
+})
 
 /* ─────────────────────────────────────────────────────────────
    /alternatives (2026-10-15, founders: "no jargon, no lots of text, no big
