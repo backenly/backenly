@@ -978,6 +978,12 @@ tests/integration/go-live-empty-guard.spec.ts
 # migration is applied, so a missing table never repeats the tour.
 tests/integration/tours-seen.spec.ts
 
+# A Google account's profile photo is one per user, replaced by the next
+# sign-in, forgotten when the account no longer has a photo of its own, gone
+# with the account, and quiet without its table, so a release ahead of its
+# migration never fails a sign-in or the profile request.
+tests/integration/user-avatar.spec.ts
+
 # The auth email policy is reachable from the agent's auth tool and from the
 # Auth page, through one service, and neither door can turn verification on
 # while no sender exists: real MCP keys, a real session cookie, real workspace

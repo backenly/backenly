@@ -29,7 +29,7 @@ import {
   INPUT_BASE, PageHeader, Skeleton, StatusDot, Tag,
 } from '@/components/inspector/kit'
 import { FLOAT, PAGE_GUTTER, PAGE_WIDTH, RAISE } from '@/components/console/tokens'
-import { usePlanName } from '@/components/shell/ConsoleChrome'
+import { Avatar, usePlanName } from '@/components/shell/ConsoleChrome'
 import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
 import { DeploymentRecoverySection } from '@/components/app/DeploymentRecoverySection'
 import { deleteAccount, signOut } from '@/lib/api/auth'
@@ -47,6 +47,7 @@ interface UserProfile {
   lastLogin?: string | null
   tier?: string
   projectsCount?: number
+  avatarUrl?: string | null
 }
 
 function providerLabel(p?: string): string {
@@ -270,10 +271,6 @@ export default function SettingsPage() {
     setTwoFABackupCodes(null)
   }
 
-  const initials = user?.name
-    ? user.name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2)
-    : user?.email?.[0]?.toUpperCase() ?? 'U'
-
   const TABS: { id: Section; label: string; icon: typeof User }[] = [
     { id: 'profile', label: 'Profile', icon: User },
     { id: 'security', label: 'Security', icon: Shield },
@@ -338,7 +335,6 @@ export default function SettingsPage() {
             {activeSection === 'profile' && (
               <ProfileSection
                 user={user}
-                initials={initials}
                 planLabel={CLOUD_CONTROL_PLANE ? planName ?? planLabelFor(user?.tier) : null}
                 editingName={editingName}
                 setEditingName={setEditingName}
@@ -531,10 +527,9 @@ export default function SettingsPage() {
 // ─── Profile ──────────────────────────────────────────────────────────────────
 
 function ProfileSection({
-  user, initials, planLabel, editingName, setEditingName, newName, setNewName, savingName, onSaveName,
+  user, planLabel, editingName, setEditingName, newName, setNewName, savingName, onSaveName,
 }: {
   user: UserProfile | null
-  initials: string
   planLabel: string | null
   editingName: boolean
   setEditingName: (v: boolean) => void
@@ -548,9 +543,7 @@ function ProfileSection({
       {/* Identity */}
       <KitCard>
         <div className="flex flex-wrap items-center gap-4 px-5 py-5">
-          <div className="flex h-[52px] w-[52px] items-center justify-center rounded-full bg-[linear-gradient(135deg,#27272a,#18181b)] text-[16px] font-semibold text-zinc-100 ring-1 ring-inset ring-white/[0.12]">
-            {initials}
-          </div>
+          <Avatar user={user} size={52} className="text-[16px]" />
           <div className="min-w-0 flex-1">
             <h2 className="text-[17px] font-semibold leading-[24px] tracking-[-0.014em] text-zinc-50">{user?.name || 'Unnamed user'}</h2>
             <p className="text-[13px] text-zinc-500">{user?.email}</p>

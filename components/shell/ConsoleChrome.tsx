@@ -241,8 +241,10 @@ export { useDismiss, MenuPanel, MenuItem, MenuSeparator } from '@/components/ins
 /* ── Account menu ──────────────────────────────────────────────────────── */
 
 export interface MeUser {
-  name?: string
+  name?: string | null
   email?: string
+  /** The Google account's own photo; null for every other account. */
+  avatarUrl?: string | null
 }
 
 let cachedUser: MeUser | null = null
@@ -269,18 +271,27 @@ export function useMe(): MeUser | null {
   return user
 }
 
+// Built at run time: the type-check target (ES5) refuses `u`-flag literals.
+const LETTER = new RegExp('\\p{L}', 'u')
+const ONE_CHARACTER_SCRIPTS = new RegExp('[\\p{Script=Han}\\p{Script=Hangul}\\p{Script=Hiragana}\\p{Script=Katakana}]', 'u')
+
+/**
+ * The avatar's letters: the first letter of the name's first two words, or one
+ * character for a Chinese, Japanese or Korean name, as Google draws it. Only
+ * the name itself counts: a Google Workspace name often carries a department
+ * after a bar ("Name | Department | School"), and the bar used to be drawn as
+ * an initial.
+ */
 export function initialsOf(user: MeUser | null): string {
   if (!user) return ''
-  if (user.name) {
-    return user.name
-      .split(' ')
-      .filter(Boolean)
-      .map((n) => n[0])
-      .join('')
-      .toUpperCase()
-      .slice(0, 2)
-  }
-  return user.email?.[0]?.toUpperCase() ?? ''
+  const name = (user.name ?? '').normalize('NFC').split(/[|(]/)[0]
+  const firsts = name
+    .split(/\s+/)
+    .map((word) => word.match(LETTER)?.[0])
+    .filter((letter): letter is string => !!letter)
+  if (firsts.length === 0) return user.email?.match(LETTER)?.[0].toUpperCase() ?? ''
+  if (ONE_CHARACTER_SCRIPTS.test(firsts[0])) return firsts[0]
+  return firsts.slice(0, 2).join('').toUpperCase()
 }
 
 export function displayNameOf(user: MeUser | null, fallback = 'Account'): string {
@@ -334,14 +345,43 @@ export function AccountScope({ className = '' }: { className?: string }) {
   )
 }
 
-export function Avatar({ user, size = 28 }: { user: MeUser | null; size?: number }) {
+/**
+ * The account's avatar: its Google photo when it has one of its own, otherwise
+ * its initials. A photo that fails to load (Google has since replaced it)
+ * falls back to the initials too.
+ */
+export function Avatar({
+  user,
+  size = 28,
+  className = 'text-[11px]',
+}: {
+  user: MeUser | null
+  size?: number
+  /** The initials' type size. */
+  className?: string
+}) {
+  const photo = user?.avatarUrl || null
+  const [failed, setFailed] = useState<string | null>(null)
   return (
     <span
       aria-hidden
       style={{ width: size, height: size }}
-      className="flex flex-shrink-0 items-center justify-center rounded-full bg-[linear-gradient(135deg,#27272a,#18181b)] text-[11px] font-semibold text-zinc-200 ring-1 ring-inset ring-white/[0.12]"
+      className={`relative flex flex-shrink-0 items-center justify-center overflow-hidden rounded-full bg-[linear-gradient(135deg,#27272a,#18181b)] font-semibold text-zinc-200 ${className}`}
     >
-      {initialsOf(user)}
+      {photo && failed !== photo ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src={photo}
+          alt=""
+          referrerPolicy="no-referrer"
+          onError={() => setFailed(photo)}
+          className="h-full w-full object-cover"
+        />
+      ) : (
+        initialsOf(user)
+      )}
+      {/* The hairline sits over the photo as well as the initials. */}
+      <span className="pointer-events-none absolute inset-0 rounded-full ring-1 ring-inset ring-white/[0.12]" />
     </span>
   )
 }

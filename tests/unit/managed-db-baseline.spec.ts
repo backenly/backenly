@@ -120,6 +120,7 @@ const FORWARD_MIGRATIONS = [
   '20261017120000_auth_projection',
   '20261018120000_backend_change_ledger',
   '20261023120000_support_ai_attempts',
+  '20261023130000_user_avatars',
 ]
 
 describe('the assembled migration workspace', () => {

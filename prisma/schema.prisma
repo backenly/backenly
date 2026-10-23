@@ -89,6 +89,8 @@ model User {
   projectMemberships      ProjectMember[]
   // Product tours this user has finished or skipped (lib/tours).
   toursSeen               UserTourSeen[]
+  // The Google account's own photo, for the console avatar (lib/auth/avatar.ts).
+  avatar                  UserAvatar?
 
   @@index([email])
   @@index([provider, providerId])
@@ -2856,6 +2858,24 @@ model UserTourSeen {
 
   @@id([userId, tourId])
   @@map("user_tours_seen")
+}
+
+// ============================================================================
+// PROFILE PHOTOS — the Google account's own photo, shown as the console avatar
+//
+// Written at each Google sign-in, and only when Google says the account has a
+// photo of its own rather than its generated letter (lib/auth/avatar.ts). An
+// account with no row shows its initials. Its own table for the same reason as
+// user_tours_seen: the session lookup loads the whole user row.
+// ============================================================================
+
+model UserAvatar {
+  userId    String   @id
+  url       String
+  updatedAt DateTime @updatedAt
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_avatars")
 }
 
 // ============================================================================
