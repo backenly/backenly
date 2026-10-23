@@ -36,12 +36,21 @@ export const ACCESSED = '2026-10-24'
 /** One statement, and the page it restates. */
 export type Claim = { text: string; source: string; accessed: string }
 
-export type OptionId = 'supabase' | 'neon' | 'convex' | 'appwrite' | 'firebase' | 'backenly'
+export type OptionId = 'supabase' | 'neon' | 'convex' | 'appwrite' | 'firebase' | 'insforge' | 'backenly'
 
-export type CriterionId = 'connect' | 'readOnly' | 'destructive' | 'verify' | 'restore' | 'model' | 'selfHost' | 'free'
+export type CriterionId =
+  | 'connect'
+  | 'readOnly'
+  | 'destructive'
+  | 'verify'
+  | 'restore'
+  | 'afterLaunch'
+  | 'model'
+  | 'selfHost'
+  | 'free'
 
 /** The guide's sections that compare the options, in order. */
-export type GroupId = 'agent' | 'changes' | 'platform'
+export type GroupId = 'agent' | 'changes' | 'running' | 'platform'
 
 const GITHUB = 'https://github.com/backenly/backenly'
 const backenlyFile = (path: string) => `${GITHUB}/blob/main/${path}`
@@ -56,12 +65,14 @@ export const SOURCES = {
   supabasePricing: { url: 'https://supabase.com/pricing', label: 'Pricing' },
   supabaseSelfHosting: { url: 'https://supabase.com/docs/guides/self-hosting', label: 'Self-hosting docs' },
   supabaseRepo: { url: 'https://github.com/supabase/supabase', label: 'Repository' },
+  supabaseAdvisors: { url: 'https://supabase.com/docs/guides/database/database-advisors', label: 'Advisors docs' },
 
   neonMcp: { url: 'https://neon.com/docs/ai/neon-mcp-server', label: 'MCP server docs' },
   neonMcpRepo: { url: 'https://github.com/neondatabase/mcp-server-neon', label: 'MCP server repository' },
   neonRestore: { url: 'https://neon.com/docs/introduction/branch-restore', label: 'Instant restore docs' },
   neonPricing: { url: 'https://neon.com/pricing', label: 'Pricing' },
   neonRepo: { url: 'https://github.com/neondatabase/neon', label: 'Repository' },
+  neonMonitoring: { url: 'https://neon.com/docs/introduction/monitoring', label: 'Monitoring docs' },
 
   convexMcp: { url: 'https://docs.convex.dev/ai/convex-mcp-server', label: 'MCP server docs' },
   convexSchemas: { url: 'https://docs.convex.dev/database/schemas', label: 'Schemas docs' },
@@ -69,6 +80,7 @@ export const SOURCES = {
   convexDatabase: { url: 'https://docs.convex.dev/database', label: 'Database docs' },
   convexSelfHosting: { url: 'https://docs.convex.dev/self-hosting', label: 'Self-hosting docs' },
   convexLimits: { url: 'https://docs.convex.dev/production/state/limits', label: 'Limits docs' },
+  convexHealth: { url: 'https://docs.convex.dev/dashboard/deployments/health', label: 'Health page docs' },
 
   appwriteMcp: { url: 'https://appwrite.io/docs/tooling/mcp', label: 'MCP server docs' },
   appwriteSelfHostedMcp: { url: 'https://appwrite.io/docs/advanced/self-hosting/mcp', label: 'Self-hosted MCP docs' },
@@ -87,6 +99,18 @@ export const SOURCES = {
   firebaseOffline: { url: 'https://firebase.google.com/docs/firestore/manage-data/enable-offline', label: 'Offline data docs' },
   firebaseEmulators: { url: 'https://firebase.google.com/docs/emulator-suite', label: 'Emulator Suite docs' },
   firebasePricing: { url: 'https://firebase.google.com/pricing', label: 'Pricing' },
+  firebaseQueryInsights: { url: 'https://firebase.google.com/docs/firestore/enterprise/query-insights', label: 'Query insights docs' },
+
+  insforgeMcp: { url: 'https://docs.insforge.dev/mcp-setup', label: 'MCP setup docs' },
+  insforgeCli: { url: 'https://docs.insforge.dev/agent-native/cli-harness', label: 'CLI docs' },
+  insforgeMigrations: { url: 'https://docs.insforge.dev/core-concepts/database/migrations', label: 'Migrations docs' },
+  insforgeDiagnostics: { url: 'https://docs.insforge.dev/agent-native/diagnostics', label: 'Diagnostics docs' },
+  insforgeBackups: { url: 'https://docs.insforge.dev/core-concepts/database/backups', label: 'Backups docs' },
+  insforgeBranching: { url: 'https://docs.insforge.dev/agent-native/branching', label: 'Branching docs' },
+  insforgeProducts: { url: 'https://docs.insforge.dev/products', label: 'Products docs' },
+  insforgeSelfHost: { url: 'https://docs.insforge.dev/deployment/deploy-to-aws-ec2', label: 'Self-hosting docs' },
+  insforgePricing: { url: 'https://insforge.dev/pricing', label: 'Pricing' },
+  insforgeRepo: { url: 'https://github.com/InsForge/InsForge', label: 'Repository' },
 
   backenlyMcp: { url: backenlyFile('app/mcp/data.ts'), label: 'app/mcp/data.ts' },
   backenlyVerify: { url: backenlyFile('lib/changes/verify.ts'), label: 'lib/changes/verify.ts' },
@@ -128,6 +152,7 @@ export const OPTIONS: Option[] = [
   { id: 'convex', name: 'Convex', hosts: ['docs.convex.dev', 'github.com/get-convex'] },
   { id: 'appwrite', name: 'Appwrite', hosts: ['appwrite.io', 'github.com/appwrite'] },
   { id: 'firebase', name: 'Firebase', hosts: ['firebase.google.com', 'github.com/firebase'] },
+  { id: 'insforge', name: 'InsForge', hosts: ['docs.insforge.dev', 'insforge.dev', 'github.com/InsForge'] },
   { id: 'backenly', name: 'Backenly', hosts: ['github.com/backenly/backenly'] },
 ]
 
@@ -170,6 +195,12 @@ export const CRITERIA: Criterion[] = [
     group: 'changes',
     title: 'Restore points and branches',
     why: 'When a change goes wrong: how far back you can go, what a restore does to data written since, and what the free plan includes.',
+  },
+  {
+    id: 'afterLaunch',
+    group: 'running',
+    title: 'What happens to problems after launch',
+    why: 'Most problems show up after the agent’s session ends: a slow query, a missing index, a table open to everyone. Check whether the platform only reports them, or also fixes the safe ones itself.',
   },
   {
     id: 'model',
@@ -228,6 +259,12 @@ export const COMPARISON: Record<OptionId, Record<CriterionId, Claim[]>> = {
       ),
       claim('supabasePricing', 'Free includes no automatic backups, point-in-time recovery or branching.'),
     ],
+    afterLaunch: [
+      claim(
+        'supabaseAdvisors',
+        'Advisors flag health, security and performance issues. The documented fixes are SQL or settings changes you run.',
+      ),
+    ],
     model: [claim('supabasePricing', 'PostgreSQL. Every project comes with its own Postgres instance.')],
     selfHost: [
       claim('supabaseRepo', 'Apache-2.0.'),
@@ -267,6 +304,12 @@ export const COMPARISON: Record<OptionId, Record<CriterionId, Claim[]>> = {
         'Instant restore returns a root branch to any point in its history window, and keeps the state before the restore as a backup branch.',
       ),
       claim('neonPricing', 'On Free the window is up to 6 hours or 1 GB of changes, with 10 branches per project and 1 snapshot.'),
+    ],
+    afterLaunch: [
+      claim(
+        'neonMonitoring',
+        'Monitoring, query performance and logs, plus Data API Advisors that detect security and performance issues. Fixes it applies itself: Not documented.',
+      ),
     ],
     model: [claim('neonMcp', 'PostgreSQL, organized in projects and branches.')],
     selfHost: [
@@ -314,6 +357,12 @@ export const COMPARISON: Record<OptionId, Record<CriterionId, Claim[]>> = {
         'Backups of table data: up to two per deployment on Free, scheduled daily or weekly on Pro. A restore wipes the existing data and replaces it with the backup’s.',
       ),
     ],
+    afterLaunch: [
+      claim(
+        'convexHealth',
+        'The Health page shows the failure rate and insights with suggestions to improve performance and reliability, each linking to how to resolve it. Fixes it applies itself: Not documented.',
+      ),
+    ],
     model: [claim('convexDatabase', 'A relational data model over JSON-like documents in tables, with or without a schema.')],
     selfHost: [
       claim(
@@ -341,6 +390,7 @@ export const COMPARISON: Record<OptionId, Record<CriterionId, Claim[]>> = {
     restore: [
       claim('appwriteBackups', 'Backups on Pro and Enterprise, with a daily backup policy on Pro. A restore creates a new database.'),
     ],
+    afterLaunch: [claim('appwriteDatabases', 'Not documented.')],
     model: [
       claim(
         'appwriteDatabases',
@@ -375,6 +425,12 @@ export const COMPARISON: Record<OptionId, Record<CriterionId, Claim[]>> = {
       ),
       claim('firebasePitr', 'Point-in-time recovery keeps up to 7 days and needs billing enabled.'),
     ],
+    afterLaunch: [
+      claim(
+        'firebaseQueryInsights',
+        'Query insights, in the Enterprise edition, shows query latency and reads for tuning. Fixes it applies itself: Not documented.',
+      ),
+    ],
     model: [
       claim('firebaseDataModel', 'Cloud Firestore: documents in collections, with no tables or rows.'),
       claim('firebaseSqlConnect', 'SQL Connect, formerly Data Connect, is a separate PostgreSQL service on Cloud SQL.'),
@@ -394,6 +450,55 @@ export const COMPARISON: Record<OptionId, Record<CriterionId, Claim[]>> = {
     ],
   },
 
+  insforge: {
+    connect: [
+      claim(
+        'insforgeMcp',
+        'Official MCP server for Claude Code, Cursor, Codex and other clients. Write and admin actions need your admin API key.',
+      ),
+      claim('insforgeCli', 'A CLI, `@insforge/cli`, gives the agent the schema, config, deploys and diagnostics as JSON.'),
+    ],
+    readOnly: [claim('insforgeMcp', 'Not documented. Write and admin actions need your admin API key.')],
+    destructive: [
+      claim(
+        'insforgeMcp',
+        '`run-raw-sql` runs raw SQL in strict mode with the admin key, with system tables and `auth.users` blocked. The tools include `delete-bucket` and `delete-function`. A step that waits for a person: Not documented.',
+      ),
+    ],
+    verify: [
+      claim(
+        'insforgeMigrations',
+        'Not documented as a check after a change. Migrations are forward-only SQL files the CLI applies in a transaction and records only on success.',
+      ),
+    ],
+    restore: [
+      claim(
+        'insforgeBackups',
+        'Daily backups on paid plans, kept 7 days, and manual backups: 1 slot on Free, 5 on paid plans. A restore replaces the database: the project goes offline, data created after the backup is lost, and the restore cannot be undone.',
+      ),
+      claim(
+        'insforgeBranching',
+        'A branch is a child project with its own Postgres, auth, storage and functions, merged back with a three-way diff or reset to its starting snapshot. Two active branches per parent.',
+      ),
+    ],
+    afterLaunch: [
+      claim(
+        'insforgeDiagnostics',
+        'An advisor scans for security, performance and health issues and writes a remediation for each. The agent fetches the findings and applies the fix itself.',
+      ),
+    ],
+    model: [claim('insforgeProducts', 'PostgreSQL for every project, with every table served as a typed REST and SDK surface.')],
+    selfHost: [
+      claim('insforgeRepo', 'Apache-2.0.'),
+      claim('insforgeSelfHost', 'Self-hosting with Docker Compose is documented.'),
+    ],
+    free: [
+      claim(
+        'insforgePricing',
+        '$0: a 500 MB database, 1 GB of file storage and 50,000 monthly active users. Free projects are paused after a week of inactivity.',
+      ),
+    ],
+  },
   backenly: {
     connect: [
       claim(
@@ -426,6 +531,12 @@ export const COMPARISON: Record<OptionId, Record<CriterionId, Claim[]>> = {
       ),
       claim('backenlyRecovery', 'A restore that would affect data written since the change waits for a person, who sees the impact first.'),
       claim('backenlyDocs', 'Branches, copies of the schema to try a change on first, are in beta on Backenly Cloud.'),
+    ],
+    afterLaunch: [
+      claim(
+        'backenlyDocs',
+        'Checked every minute on every plan, Free included. It applies a short list of safe, additive fixes itself, such as a missing index, verifies and records each one, and holds anything risky for a person.',
+      ),
     ],
     model: [claim('backenlyDocs', 'PostgreSQL. Each project has its own schema, and every table is served as a REST API.')],
     selfHost: [
@@ -503,6 +614,20 @@ export const ALTERNATIVES: Alternative[] = [
         'Firestore caches the data an app is using, so reads, writes and queries keep working offline and sync when the device reconnects. This is on by default on Android and Apple platforms.',
       ),
       claim('backenlyComparisons', 'Backenly has no offline layer.'),
+    ],
+  },
+  {
+    when: 'You want a model gateway, payments and site hosting in the same platform as the backend.',
+    claims: [
+      claim(
+        'insforgeProducts',
+        'InsForge ships ten products behind one MCP server and SDK, among them sites, a model gateway, analytics and payments.',
+      ),
+      claim(
+        'insforgeBranching',
+        'Its branches copy the whole backend, auth, storage and functions included.',
+      ),
+      claim('backenlyComparisons', 'Backenly’s branches cover data and the REST API; auth, functions and storage stay on main.'),
     ],
   },
   {

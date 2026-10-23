@@ -39,9 +39,9 @@ import {
    /guides/best-backend-for-claude-code
 
    A criteria-based guide for choosing the backend a coding agent builds on:
-   the questions that matter once an agent writes to production, what six
+   the questions that matter once an agent writes to production, what seven
    common choices document for each, and when Backenly is the wrong one.
-   Backenly wrote it and is one of the six, so every row restates and links
+   Backenly wrote it and is one of the seven, so every row restates and links
    its source: the vendor's own pages for the others, this repository for
    Backenly. The facts are ./content.ts, held to their sources by
    tests/unit/best-backend-guide-conformance.spec.ts.
@@ -51,7 +51,7 @@ import {
 
 const TITLE = 'Best backend for Claude Code: how to choose one'
 const DESCRIPTION =
-  'What to check before Claude Code changes your production backend, and what Supabase, Neon, Convex, Appwrite, Firebase and Backenly each document.'
+  'What to check before Claude Code changes your production backend, and what Supabase, Neon, Convex, Appwrite, Firebase, InsForge and Backenly each document.'
 
 export const metadata: Metadata = pageMetadata({
   title: TITLE,
@@ -68,6 +68,7 @@ const TOC: { id: string; label: string }[] = [
   { id: 'criteria', label: 'What to check' },
   { id: 'agent', label: 'Connecting the agent' },
   { id: 'changes', label: 'Changes and restores' },
+  { id: 'running', label: 'After the agent leaves' },
   { id: 'platform', label: 'The platform' },
   { id: 'other', label: 'When to pick something else' },
   { id: 'method', label: 'How this was checked' },
@@ -189,12 +190,12 @@ export default function BestBackendGuide() {
           icon={ListChecks}
           title={TITLE}
           crumb="Best backend for Claude Code"
-          summary="Claude Code can create tables, run migrations and delete rows through a backend’s MCP server, and the backend decides what happens when one of those calls is wrong. This guide sets out what to check, what Supabase, Neon, Convex, Appwrite, Firebase and Backenly document today, and when to pick something other than Backenly."
+          summary="Claude Code can create tables, run migrations and delete rows through a backend’s MCP server, and the backend decides what happens when one of those calls is wrong. This guide sets out what to check, what Supabase, Neon, Convex, Appwrite, Firebase, InsForge and Backenly document today, and when to pick something other than Backenly."
           meta={
             <>
               <span>Updated {guideDate(GUIDE_UPDATED)}</span>
               <GuideMetaDivider />
-              <span>Written by Backenly, one of the six options</span>
+              <span>Written by Backenly, one of the seven options</span>
               <GuideMetaDivider />
               <span>Every row links its source</span>
             </>
@@ -206,7 +207,7 @@ export default function BestBackendGuide() {
             <p className={READ}>
               Connected over MCP, Claude Code calls a backend’s tools itself: it reads the schema, writes a migration
               and runs it, often several calls in one turn. What matters most is what happens when one of those calls
-              is wrong. These are the eight questions this guide asks of each backend, and you can ask them of any
+              is wrong. These are the nine questions this guide asks of each backend, and you can ask them of any
               other.
             </p>
             <GuideRows
@@ -220,7 +221,7 @@ export default function BestBackendGuide() {
 
           <Part id="agent" title="Connecting the agent">
             <p className={READ}>
-              All six have an official MCP server. Where it runs decides whose credentials it acts with, and a
+              All seven have an official MCP server. Where it runs decides whose credentials it acts with, and a
               read-only mode decides whether a question about production can turn into a write.
             </p>
             {criteriaIn('agent').map((id) => (
@@ -250,6 +251,16 @@ export default function BestBackendGuide() {
             ))}
           </Part>
 
+          <Part id="running" title="After the agent leaves">
+            <p className={READ}>
+              Most problems show up when no agent is connected. What differs is whether a fix waits for you or your
+              agent to apply it, or the platform applies the safe ones itself.
+            </p>
+            {criteriaIn('running').map((id) => (
+              <Criterion key={id} id={id} />
+            ))}
+          </Part>
+
           <Part id="platform" title="The platform underneath">
             <p className={READ}>The last three questions decide whether the backend suits your app, not only your agent.</p>
             {criteriaIn('platform').map((id) => (
@@ -275,7 +286,7 @@ export default function BestBackendGuide() {
 
           <Part id="method">
             <p className={READ}>
-              Backenly wrote this guide, and Backenly is one of the six options in it. So every row about another
+              Backenly wrote this guide, and Backenly is one of the seven options in it. So every row about another
               product restates that vendor’s own documentation, pricing page or repository, read on{' '}
               {guideDate(ACCESSED)}, and links it. Nothing comes from reviews, benchmarks or memory, and nothing is
               ranked: which backend suits you depends on which rows matter for your app.
@@ -287,7 +298,7 @@ export default function BestBackendGuide() {
             <p className={READ}>
               Backenly’s rows link the code and docs in its public repository, and a test keeps them in line with that
               code: the tool counts, the refusal codes, the licences and the free plan. The same test fails if a claim
-              about another product loses its source. Other backends were not checked; the eight questions apply to
+              about another product loses its source. Other backends were not checked; the nine questions apply to
               them too.
             </p>
             <p className={READ}>
