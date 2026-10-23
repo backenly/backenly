@@ -177,6 +177,10 @@ export const FAQ = [
     a: 'Not on its own. apply_migration refuses DROP statements with DESTRUCTIVE_REFUSED and points at backend_chat, which parks the request for approval. Dropping or emptying a table, dropping a column, deleting files, revoking keys and the other actions listed above all wait for a person. Ordinary row inserts, updates and deletes run as normal.',
   },
   {
+    q: 'Can I undo what my agent did?',
+    a: 'Yes. Every change, whether your agent, Backenly or you made it, is one entry in the project’s History, which covers the schema, auth, storage, functions, webhooks, environment variables, keys and integrations. Restore one change, or everything back to a point; each restore is checked before it runs and verified after. Data your app wrote is never rewound, a restore that would affect it waits for your approval, and a secret or a revoked key never comes back. An agent can ask for a restore, but only a person approves it.',
+  },
+  {
     q: 'Can I give an agent read-only access?',
     a: `Yes. A read-only key or connection sees ${READ_ONLY_TOOL_COUNT} tools: the read tools, and each section tool narrowed to its read actions. A write called anyway is refused with READ_ONLY_KEY before it runs. A person chooses read-only when the key is issued, and an agent cannot upgrade its own key.`,
   },

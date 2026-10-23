@@ -173,6 +173,10 @@ export const CLAUDE_CODE: ClaudeCodePage = {
       a: 'Not on its own. apply_migration refuses DROP statements, and a request to drop or empty a table through backend_chat is parked until a person approves it on the Autonomy page. Row inserts, updates and deletes run as normal, and an update or delete needs a non-empty filter.',
     },
     {
+      q: 'Claude Code changed something I did not want. Can I undo it?',
+      a: 'Yes, from the project’s History: restore that one change, or everything back to a point. History covers the schema, auth, storage, functions, webhooks, environment variables, keys and integrations, and each restore is checked before it runs. Data your app wrote since is never rewound, and a restore that would affect it waits for your approval. Claude Code can ask for a restore, but only you can approve one.',
+    },
+    {
       q: 'Does it work with a self-hosted Backenly?',
       a: 'Yes. Use your instance’s /api/mcp as the remote URL, or add --endpoint with your instance’s address to the local command. Keys and projects come from your own dashboard.',
     },
@@ -327,6 +331,10 @@ export const CURSOR: CursorPage = {
     {
       q: 'What can the agent not do without me?',
       a: 'Anything destructive or irreversible. apply_migration refuses DROP statements. Dropping or emptying a table, deleting files or functions, deploying, rolling back and revoking keys are parked on the project’s Autonomy page until a person approves them. The agent can request and poll with check_approval; it cannot approve.',
+    },
+    {
+      q: 'Can I undo something the agent changed?',
+      a: 'Yes, from the project’s History: restore that one change, or everything back to a point. History covers the schema, auth, storage, functions, webhooks, environment variables, keys and integrations, and each restore is checked before it runs. Data your app wrote since is never rewound, and a restore that would affect it waits for your approval. The agent can ask for a restore, but only you can approve one.',
     },
   ],
 

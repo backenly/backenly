@@ -19,6 +19,7 @@
 jest.setTimeout(60_000)
 
 import '@/tests/helpers/real-web-standard'
+import { RESOURCE_ORDER } from '@/lib/changes/resources/core'
 
 // `jose` ships ESM-only and jest cannot parse it. No request below carries a
 // token, so the JWT branch never runs (as in seo-crawl-surface.spec.ts).
@@ -422,5 +423,13 @@ describe('the agent pages are public', () => {
   it('lists every agent page in the sitemap', () => {
     const urls = sitemap().map((e) => e.url)
     for (const slug of AGENT_SLUGS) expect(urls).toContain(`https://backenly.com/agents/${slug}`)
+  })
+
+  it.each(['claude-code', 'cursor'] as const)('%s: the undo answer names every part the one History records', (slug) => {
+    const words: Record<string, string> = { env: 'environment variables' }
+    const answer = AGENTS[slug].faq.find((f) => /undo/i.test(f.q))!.a
+    expect(answer).toMatch(/the schema/)
+    for (const part of RESOURCE_ORDER) expect([part, answer.includes(words[part] ?? part)]).toEqual([part, true])
+    expect(answer).toMatch(/only you can approve/)
   })
 })
