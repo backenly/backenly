@@ -23,7 +23,7 @@ export const organizationNode = {
   url: SITE_URL,
   logo: { '@type': 'ImageObject', url: LOGO_URL, width: 512, height: 512 },
   description:
-    'Backenly is an open-source autonomous backend platform. Coding agents build on it over MCP through governed, reversible changes, and it keeps the running backend healthy. Self-host it under Apache-2.0 or run it on Backenly Cloud.',
+    'Backenly is the open-source backend platform for AI coding agents. Agents build and change production backends over MCP; Backenly checkpoints and verifies each schema change, holds destructive operations for a person\'s approval, and monitors running projects. Self-host it under Apache-2.0 or use Backenly Cloud.',
   foundingDate: '2024',
   email: 'support@backenly.com',
   // Profiles that are Backenly's own, so a search engine can tie them to this
@@ -54,7 +54,7 @@ export const softwareNode = {
   applicationCategory: 'DeveloperApplication',
   operatingSystem: 'Web',
   description:
-    'Open-source backend platform for AI coding agents. Agents build PostgreSQL, REST APIs, auth, storage, realtime and functions over MCP, with every change planned, verified and reversible, and an autonomy loop that monitors and repairs the running backend. Self-host under Apache-2.0 or use Backenly Cloud.',
+    'Open-source backend platform for AI coding agents. Agents build PostgreSQL schemas, REST APIs, auth, storage, realtime and functions over MCP. Each schema change is checkpointed and verified against the live database, destructive operations wait for a person\'s approval, and an autonomy loop monitors running projects and applies on its own only fixes it can verify and undo. Self-host under Apache-2.0 or use Backenly Cloud.',
   license: 'https://www.apache.org/licenses/LICENSE-2.0',
   isAccessibleForFree: true,
   publisher: { '@id': ORGANIZATION_ID },
@@ -86,8 +86,8 @@ export const softwareNode = {
     'Realtime subscriptions over Server-Sent Events',
     'Event triggers, cron schedules, and webhooks',
     'Row-level security and permissions',
-    'Governed changes with approvals, verification, and rollback',
-    'Autonomous monitoring and self-repair',
+    'Governed schema changes: checkpoint, verification against the live database, approval for destructive operations',
+    'Monitoring every minute, with automatic fixes limited to ones it can verify and undo',
     'Database branches, teams, and organizations',
     'Direct Postgres connection strings and pg_dump export',
     'Open source under Apache-2.0 with free self-hosting (MIT SDK, CLI, and MCP server)',

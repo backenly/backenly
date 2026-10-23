@@ -4,7 +4,7 @@ import { pageMetadata } from '@/lib/seo/metadata'
 export const metadata: Metadata = pageMetadata({
   title: 'Pricing: Free, Pro and Enterprise plans',
   description:
-    'Start free with no credit card, upgrade to Pro at $25 a month, or ask about Enterprise. Self-healing runs every minute on every plan. Self-hosting is free.',
+    'Start free with no credit card, upgrade to Pro at $25 a month, or ask about Enterprise. Every plan includes monitoring every minute. Self-hosting is free.',
   path: '/pricing',
   social: {
     title: 'Backenly Pricing: start free, scale when ready',

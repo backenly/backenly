@@ -13,12 +13,12 @@ export const metadata: Metadata = pageMetadata({
   title: 'Backenly: the open-source backend for AI coding agents',
   brandInTitle: true,
   description:
-    'Claude Code, Cursor or Codex builds your backend over MCP: Postgres, REST APIs, auth, storage, realtime. Backenly verifies each change and keeps it running.',
+    'Claude Code, Cursor or Codex builds your backend over MCP: Postgres, REST APIs, auth, storage. Backenly verifies each schema change and monitors it after launch.',
   path: '/',
   social: {
     title: 'Backenly | The Autonomous Backend Platform',
     description:
-      'Your coding agent builds it. Backenly keeps it running. Real Postgres, REST APIs, auth, storage and realtime over MCP, with every change verified and reversible. Open source.',
+      'Your coding agent builds it. Backenly keeps it running. Real Postgres, REST APIs, auth, storage and realtime over MCP. Schema changes are verified, and destructive ones wait for you. Open source.',
   },
 })
 
