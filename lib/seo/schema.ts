@@ -23,7 +23,7 @@ export const organizationNode = {
   url: SITE_URL,
   logo: { '@type': 'ImageObject', url: LOGO_URL, width: 512, height: 512 },
   description:
-    'Backenly is the autonomous backend for AI coding agents. Agents build and change production backends over MCP; Backenly checkpoints and verifies each schema change, holds destructive operations for a person\'s approval, and fixes a short list of safe problems on its own. Self-host it under Apache-2.0 or use Backenly Cloud.',
+    'Backenly is the autonomous backend for AI coding agents. Agents build and change production backends over MCP; Backenly checkpoints and verifies each change, records every one in a History that can restore it alone or back to a point without rewinding the app\'s data, holds destructive operations for a person\'s approval, and fixes a short list of safe problems on its own. Self-host it under Apache-2.0 or use Backenly Cloud.',
   foundingDate: '2024',
   email: 'support@backenly.com',
   // Profiles that are Backenly's own, so a search engine can tie them to this
@@ -54,7 +54,7 @@ export const softwareNode = {
   applicationCategory: 'DeveloperApplication',
   operatingSystem: 'Web',
   description:
-    'The autonomous backend for AI coding agents. Agents build PostgreSQL schemas, REST APIs, auth, storage, realtime and functions over MCP. Each schema change is checkpointed and verified against the live database, and destructive operations wait for a person\'s approval. An autonomy loop checks running projects every minute and applies on its own only fixes it can verify and undo. Self-host under Apache-2.0 or use Backenly Cloud.',
+    'The autonomous backend for AI coding agents. Agents build PostgreSQL schemas, REST APIs, auth, storage, realtime and functions over MCP. Each change is checkpointed and verified, every change is one entry in a History that restores it alone or back to a point without rewinding the app\'s data, and destructive operations wait for a person\'s approval. An autonomy loop checks running projects every minute and applies on its own only fixes it can verify and undo. Self-host under Apache-2.0 or use Backenly Cloud.',
   license: 'https://www.apache.org/licenses/LICENSE-2.0',
   isAccessibleForFree: true,
   publisher: { '@id': ORGANIZATION_ID },

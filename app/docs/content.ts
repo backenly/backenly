@@ -498,7 +498,7 @@ await backend.auth.signIn({ email, password })
       'No mode can apply auth, destructive or irreversible changes on its own, and no setting changes that.',
       'Routine checks and safe repairs follow fixed rules and use no AI credits. When those checks cannot explain a finding, an AI investigation can gather read-only evidence and suggest one of the repairs Backenly lists for that kind of finding, never raw SQL. Its explanation is labelled as a hypothesis, and any proposed repair waits for a person’s approval. On Cloud, Backenly pays for these investigations.',
       'A project with no traffic, no changes and no other activity for 30 days is not checked until activity returns.',
-      'Restoring the state before a change undoes only that change, and data written since is never dropped without your approval. A restore point covers the database schema; functions and auth settings are not in it.',
+      'Restoring the state before a change, from History, undoes only that change, and data written since is never dropped without your approval. History covers the schema, auth, storage, functions, webhooks, environment variables, keys and integrations; a secret or a revoked key never comes back.',
       'Restructuring needs the maintenance scheduler: on for Backenly Cloud, off by default when self-hosting. A plan with a step Backenly cannot undo yet is shown with the reason and not offered; today that includes merging a duplicated column, whose constraint step has no undo yet. A plan approved for one version of the schema stops applying when the schema changes. How the steps behaved in a production run: [Safe database changes](/guides/safe-ai-database-changes#case).',
     ],
   },

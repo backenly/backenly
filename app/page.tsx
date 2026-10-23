@@ -13,7 +13,7 @@ export const metadata: Metadata = pageMetadata({
   title: 'Backenly: the autonomous backend for AI coding agents',
   brandInTitle: true,
   description:
-    'Claude Code, Cursor or Codex builds your Postgres backend over MCP. Backenly checks every schema change, holds destructive ones for you and repairs itself.',
+    'Claude Code, Cursor or Codex builds your Postgres backend over MCP. Backenly checks each change, can undo any one, holds risky ones for you and repairs itself.',
   path: '/',
   social: {
     title: 'Backenly: the autonomous backend for coding agents',

@@ -33,9 +33,11 @@
  * when an entry gets stale rather than failing the build.
  *
  * Backenly claims here stay inside the audited boundary. In particular: the
- * automatic repairs are a short, fixed list, snapshots cover the
- * schema-touching repair classes rather than every change, and rollback is
- * plan-gated. None of those may be widened in copy.
+ * automatic repairs are a short, fixed list, and rollback is plan-gated.
+ * Since #545 every change is one entry in History and can be restored, alone
+ * or back to a point, but data the app wrote is never rewound and a credential
+ * never comes back (docs/CHANGE_RECOVERY.md). None of those may be widened in
+ * copy.
  *
  * Two phrases are tied to code by the unit test and must stay: the advertised
  * MCP tool count ("twenty-three advertised", lib/mcp/catalog.ts) and the
@@ -156,7 +158,7 @@ const LIST: ComparisonData[] = [
       {
         aspect: 'Schema changes',
         competitor: 'Migrations you write and run',
-        backenly: 'Each change recorded on one path, with a restore point before schema changes',
+        backenly: 'Every change recorded in one History, restorable on its own or back to a point',
         practical: 'Supabase leaves every decision to you. Backenly keeps a record and a way back.',
       },
       {
@@ -168,7 +170,7 @@ const LIST: ComparisonData[] = [
       {
         aspect: 'Undoing a bad change',
         competitor: 'Restore a daily backup, or a point in time with the PITR add-on; the project is offline while it restores',
-        backenly: 'Restore the state before that change, checked first; anything that would touch later data waits for you',
+        backenly: 'Restore that one change from History, checked first; anything that would touch later data waits for you',
         practical: 'A backup takes the whole project back. Backenly undoes one change and leaves the rest as it is.',
       },
       {
@@ -239,7 +241,7 @@ const LIST: ComparisonData[] = [
     backenlyStrengths: [
       {
         title: 'One recorded path for every change',
-        body: 'Schema changes from the dashboard, an agent or self-healing all take the same path, which is what makes the history, restore points and approvals possible.',
+        body: 'Changes from the dashboard, an agent or self-healing, to the schema, auth, storage, functions or keys, all take the same path into one History, which is what makes restores and approvals possible.',
       },
       {
         title: 'Policies installed as written',
@@ -410,7 +412,7 @@ const LIST: ComparisonData[] = [
       {
         aspect: 'Undoing a bad change',
         competitor: 'Point-in-time recovery keeps 7 days: read past versions and write them back, or clone the database',
-        backenly: 'Restore the state before that change, checked first; anything that would touch later data waits for you',
+        backenly: 'Restore that one change from History, checked first; anything that would touch later data waits for you',
         practical: 'Firestore recovers documents. Backenly undoes one schema change and never drops later data without asking.',
       },
       {
@@ -749,7 +751,7 @@ const LIST: ComparisonData[] = [
       {
         aspect: 'Schema changes',
         competitor: 'Migrations you write, review and run',
-        backenly: 'Each change recorded on one path, with a restore point before schema changes',
+        backenly: 'Every change recorded in one History, restorable on its own or back to a point',
         practical: 'Both work. One puts the review in your pull request, the other in the platform.',
       },
       {

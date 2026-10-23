@@ -83,7 +83,7 @@ export const CRITERIA: Criterion[] = [
   {
     question: 'Who makes a schema change, and what if it is wrong?',
     why: 'Every platform can change a schema. What differs is who writes the change, what reviews it, whether it is recorded, and whether a drop can happen by accident.',
-    backenly: 'Every change goes through one recorded path, with a restore point before schema changes. Destructive ones wait for a person, with the target named.',
+    backenly: 'Every change is one entry in History, and any of them can be restored alone or with everything after it. Destructive ones wait for a person, with the target named.',
   },
   {
     question: 'Who looks after the backend after launch?',
