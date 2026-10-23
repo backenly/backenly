@@ -61,6 +61,10 @@ const nextConfig = {
       // claim nothing in the codebase provides, the superseded #080A0F
       // palette). The live plan chooser is the one in /app/billing.
       { source: '/app/pricing', destination: '/app/billing', permanent: true },
+      // The payment emails linked here, a path no page has ever served, so
+      // "Manage subscription" opened a 404 after sign-in. Emails already sent
+      // still carry it; the templates now link /app/billing directly.
+      { source: '/settings/billing', destination: '/app/billing', permanent: true },
       { source: `${P}/mcp`, destination: `${P}/connect`, permanent: true },
       { source: `${P}/inspector/connected-apps`, destination: `${P}/connect`, permanent: true },
       { source: `${P}/inspector/deployment-status`, destination: `${P}/deploy`, permanent: true },
