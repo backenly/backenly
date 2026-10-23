@@ -4,7 +4,7 @@ You are working against a **Backenly** backend: a governed, autonomous backend p
 
 ## The one rule that matters
 
-**Every structural change goes through a governed kernel.** Tables, columns, indexes, RLS policies and triggers are planned, applied, verified, snapshotted and reversible. Do not write migration files and do not look for a SQL editor: use `apply_migration`, or describe the outcome to `backend_chat`.
+**Every structural change goes through a governed kernel.** Tables, columns, indexes, RLS policies and triggers are planned, checkpointed, applied and verified. A restore that would affect data written since the change waits for a human. Do not write migration files and do not look for a SQL editor: use `apply_migration`, or describe the outcome to `backend_chat`.
 
 Reading is different. There are three legitimate read paths: `run_query` (read-only SQL as a SELECT-only role), the `/api/v2` PostgREST grammar, and a real Postgres connection string from `get_database_credentials`. DDL you run over a direct connection bypasses the kernel; reconcile it afterwards with `adopt_external_schema`.
 
@@ -83,6 +83,6 @@ Structured JSON: `{ ok: false, error, code }`. `RATE_LIMITED`: respect `retry-af
 
 ## Worth telling your human
 
-- Every change is verified, snapshotted and reversible; the History page is the audit trail and the Autonomy page is the approvals inbox.
+- Every schema change is checkpointed and verified, and a restore that would affect newer data waits for a human; the History page is the audit trail and the Autonomy page is the approvals inbox.
 - The backend is not static between sessions: the autonomy loop repairs what it safely can on every plan, so a gap you leave may already be closed next time.
 - Docs index: https://backenly.com/llms.txt; each topic is https://backenly.com/docs/agents/<topic>.md, or `fetch_docs { topic }` · this file: https://backenly.com/skill.md

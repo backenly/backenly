@@ -1,6 +1,6 @@
 # Backenly
 
-> Backenly is an autonomous backend platform built for coding agents. Coding agents can build a real production backend with Postgres, APIs, auth, storage, realtime and functions through MCP. Once it's built, Backenly autonomously maintains the backend, detects and fixes issues, and can restructure the system as it evolves, while keeping risky or destructive actions human-controlled, verified and reversible.
+> Backenly is an autonomous backend platform built for coding agents. Coding agents can build a real production backend with Postgres, APIs, auth, storage, realtime and functions through MCP. Once it's built, Backenly autonomously maintains the backend, detects and fixes issues, and can restructure the system as it evolves, while every schema change is checkpointed and verified, and risky or destructive actions wait for a human.
 
 ## What Backenly is
 

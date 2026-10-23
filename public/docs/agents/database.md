@@ -2,7 +2,7 @@
 
 Index: https://backenly.com/llms.txt
 
-Every table lives in the project's own PostgreSQL schema. Structure changes only through governed tools, so every change is planned, verified, snapshotted and reversible; reads are first-class.
+Every table lives in the project's own PostgreSQL schema. Structure changes only through governed tools, so every change is planned, checkpointed and verified, and a restore that would affect data written since waits for a human; reads are first-class.
 
 ## Read first
 
