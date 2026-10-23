@@ -40,6 +40,7 @@ import { createTokenScope, runInTokenScope } from '@/lib/ai/token-meter'
 import { createHash } from 'crypto'
 import { DOCS_MAX_CHARS } from '@/lib/mcp/docs-limit'
 import { AGENT_DOCS_URL, AGENT_DOC_TOPICS, agentDocPublicPath, resolveDocTopic } from '@/lib/mcp/agent-docs'
+import { readPublicDoc as readPublicFile } from '@/lib/mcp/public-docs'
 import { readOnlyView, resolveDomainAction, type DomainResolution } from '@/lib/mcp/domains'
 import { withChangeAttribution } from '@/lib/changes/ledger'
 
@@ -890,45 +891,13 @@ async function loadDocs(
 }
 
 /**
- * Load a file under public/ reliably. The previous implementation self-fetched
- * `request.nextUrl.origin/llms.txt`, which in the Next standalone server behind
- * nginx resolves to an internal origin that does NOT serve the static file — so
- * fetch_docs always returned the tiny fallback pointer instead of the real docs.
- * Try, in order: the file on disk (works in standalone + dev), the absolute app
- * URL, then the request origin. First hit wins. `publicPath` is only ever one of
- * the registry's own paths, never the caller's text.
+ * Load a file under public/ the one reliable way (lib/mcp/public-docs.ts: disk,
+ * then the absolute app URL), with this request's origin as the last resort.
+ * `publicPath` is only ever one of the registry's own paths, never the caller's
+ * text.
  */
-async function readPublicDoc(request: NextRequest, publicPath: string): Promise<string> {
-  // 1. Filesystem — public/ is copied next to the standalone server at build.
-  try {
-    const fs = await import('fs/promises')
-    const path = await import('path')
-    for (const p of [
-      path.join(process.cwd(), 'public', publicPath),
-      path.join(process.cwd(), '.next', 'standalone', 'public', publicPath),
-    ]) {
-      try {
-        const txt = await fs.readFile(/*turbopackIgnore: true*/ p, 'utf8')
-        if (txt && txt.trim()) return txt
-      } catch { /* try next path */ }
-    }
-  } catch { /* fs unavailable — fall through to HTTP */ }
-
-  // 2. Absolute app URL (nginx serves the static file here), then 3. origin.
-  const origins = [
-    process.env.NEXT_PUBLIC_APP_URL?.replace(/\/$/, ''),
-    request.nextUrl.origin,
-  ].filter(Boolean) as string[]
-  for (const origin of origins) {
-    try {
-      const res = await fetch(`${origin}/${publicPath}`, { cache: 'no-store' })
-      if (res.ok) {
-        const txt = await res.text()
-        if (txt && txt.trim()) return txt
-      }
-    } catch { /* try next origin */ }
-  }
-  return ''
+function readPublicDoc(request: NextRequest, publicPath: string): Promise<string> {
+  return readPublicFile(publicPath, [request.nextUrl.origin])
 }
 
 function clamp(s: string, url: string): string {

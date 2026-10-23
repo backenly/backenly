@@ -16,10 +16,14 @@ process.env.BACKENLY_EDITION = 'cloud'
 import { randomUUID } from 'crypto'
 import { prisma } from '@/lib/db/prisma'
 import { createSession } from '@/lib/auth/session'
-import { setProviderForTests } from '@/lib/ai/llm'
+import { AiError, setProviderForTests } from '@/lib/ai/llm'
 import { scriptedMessage, scriptedProvider } from '@/lib/ai/llm/providers/scripted'
 import { memorySpendLedger, setSpendLedgerForTests } from '@/lib/ai/llm/spend'
-import { runSupportFirstResponse, setSupportAiDispatchForTests } from '@/lib/support/ai'
+import {
+  runSupportFirstResponse,
+  setSupportAiDispatchForTests,
+  setSupportAiRetrySchedulerForTests,
+} from '@/lib/support/ai'
 import { listAllTickets, setTicketStatus, staffReply } from '@/lib/support/service'
 import { severityAllowedOnPlan } from '@/lib/support/constants'
 import { GET as listGET, POST as createPOST } from '@/app/api/support/tickets/route'
@@ -242,32 +246,51 @@ describe('reading and corresponding', () => {
 })
 
 describe('the AI first responder', () => {
-  beforeEach(() => setSpendLedgerForTests(memorySpendLedger()))
+  const scheduled: Array<{ id: string; delayMs: number }> = []
+
+  beforeEach(() => {
+    setSpendLedgerForTests(memorySpendLedger())
+    scheduled.length = 0
+    setSupportAiRetrySchedulerForTests((id, delayMs) => {
+      scheduled.push({ id, delayMs })
+    })
+  })
   afterEach(() => {
     setProviderForTests(null)
     setSpendLedgerForTests(null)
+    setSupportAiRetrySchedulerForTests(null)
     delete process.env.AI_PROVIDER
     delete process.env.OPENAI_API_KEY
+    delete process.env.AI_PLATFORM_MONTHLY_BUDGET_USD
   })
+
+  const configureProvider = () => {
+    process.env.AI_PROVIDER = 'openai'
+    process.env.OPENAI_API_KEY = 'test-key'
+  }
+
+  /** The scheduled retry's wait, elapsed: the case's next attempt is due now. */
+  const makeDue = (id: string) =>
+    prisma.supportTicket.update({ where: { id }, data: { aiNextAttemptAt: new Date(Date.now() - 1000) } })
 
   it('records "unavailable" when no provider is configured, and the case still stands', async () => {
     const ticket = await fileTicket(alice)
     expect(await runSupportFirstResponse(ticket.id)).toBe('unavailable')
     const row = await prisma.supportTicket.findUnique({ where: { id: ticket.id }, include: { messages: true } })
-    expect(row?.aiState).toBe('unavailable')
+    expect(row).toMatchObject({ aiState: 'unavailable', aiError: 'not_configured', aiAttempts: 1 })
     expect(row?.messages).toHaveLength(0)
+    expect(scheduled).toHaveLength(0)
   })
 
   it('writes the answer into the thread, platform-paid, and only once', async () => {
-    process.env.AI_PROVIDER = 'openai'
-    process.env.OPENAI_API_KEY = 'test-key'
+    configureProvider()
     setProviderForTests(scriptedProvider([scriptedMessage({ text: 'Rotate the key in Connect, then retry.' })]))
 
     const ticket = await fileTicket(alice)
     expect(await runSupportFirstResponse(ticket.id)).toBe('replied')
 
     const row = await prisma.supportTicket.findUnique({ where: { id: ticket.id }, include: { messages: true } })
-    expect(row).toMatchObject({ aiState: 'replied', lastMessageBy: 'ai' })
+    expect(row).toMatchObject({ aiState: 'replied', aiError: null, aiNextAttemptAt: null, lastMessageBy: 'ai' })
     expect(row?.messages).toHaveLength(1)
     expect(row?.messages[0]).toMatchObject({ author: 'ai', authorUserId: null })
     expect(row?.messages[0].body).toContain('Rotate the key')
@@ -277,16 +300,193 @@ describe('the AI first responder', () => {
     expect(await prisma.supportMessage.count({ where: { ticketId: ticket.id } })).toBe(1)
   })
 
-  it('records "failed" when the provider errors, instead of pretending', async () => {
-    process.env.AI_PROVIDER = 'openai'
-    process.env.OPENAI_API_KEY = 'test-key'
-    setProviderForTests({ id: 'scripted', send: async () => { throw new Error('boom') } } as any)
+  it('retries a transient failure twice on its own, then records "failed" with the reason', async () => {
+    configureProvider()
+    let calls = 0
+    setProviderForTests({ id: 'scripted', send: async () => { calls++; throw new Error('boom') } } as any)
+
+    const ticket = await fileTicket(alice)
+    expect(await runSupportFirstResponse(ticket.id)).toBe('retrying')
+    let row = await prisma.supportTicket.findUnique({ where: { id: ticket.id } })
+    // Still pending, so the case page keeps saying an answer is coming.
+    expect(row).toMatchObject({ aiState: 'none', aiError: 'unavailable', aiAttempts: 1 })
+    expect(row!.aiNextAttemptAt!.getTime()).toBeGreaterThan(Date.now())
+    expect(scheduled).toEqual([{ id: ticket.id, delayMs: 15_000 }])
+
+    // Not due yet: a dispatch that arrives early is skipped, not doubled.
+    expect(await runSupportFirstResponse(ticket.id)).toBe('skipped')
+
+    await makeDue(ticket.id)
+    expect(await runSupportFirstResponse(ticket.id)).toBe('retrying')
+    expect(scheduled[1]).toEqual({ id: ticket.id, delayMs: 45_000 })
+
+    await makeDue(ticket.id)
+    expect(await runSupportFirstResponse(ticket.id)).toBe('failed')
+    row = await prisma.supportTicket.findUnique({ where: { id: ticket.id }, include: { messages: true } })
+    expect(row).toMatchObject({ aiState: 'failed', aiError: 'unavailable', aiAttempts: 3, aiNextAttemptAt: null })
+    expect(row?.messages).toHaveLength(0)
+    expect(scheduled).toHaveLength(2)
+    expect(calls).toBe(3)
+  })
+
+  it('does not retry a failure that would happen again, and names it', async () => {
+    configureProvider()
+    setProviderForTests({
+      id: 'scripted',
+      send: async () => { throw new AiError('access_denied', 'AccessDeniedException', { consumption: 'none', status: 403 }) },
+    } as any)
 
     const ticket = await fileTicket(alice)
     expect(await runSupportFirstResponse(ticket.id)).toBe('failed')
-    const row = await prisma.supportTicket.findUnique({ where: { id: ticket.id }, include: { messages: true } })
-    expect(row?.aiState).toBe('failed')
-    expect(row?.messages).toHaveLength(0)
+    const row = await prisma.supportTicket.findUnique({ where: { id: ticket.id } })
+    expect(row).toMatchObject({ aiState: 'failed', aiError: 'access_denied', aiAttempts: 1 })
+    expect(scheduled).toHaveLength(0)
+  })
+
+  it('names a used-up platform AI budget, the limit support answers share with autonomy', async () => {
+    configureProvider()
+    process.env.AI_PLATFORM_MONTHLY_BUDGET_USD = '0'
+    const provider = scriptedProvider([scriptedMessage({ text: 'never sent' })])
+    setProviderForTests(provider)
+
+    const ticket = await fileTicket(alice)
+    expect(await runSupportFirstResponse(ticket.id)).toBe('failed')
+    const row = await prisma.supportTicket.findUnique({ where: { id: ticket.id } })
+    expect(row).toMatchObject({ aiState: 'failed', aiError: 'spend_limit' })
+    expect(provider.calls).toHaveLength(0)
+    expect(scheduled).toHaveLength(0)
+  })
+
+  it('lets exactly one of two racing attempts answer', async () => {
+    configureProvider()
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const provider = scriptedProvider([
+      async () => {
+        await gate
+        return scriptedMessage({ text: 'Start a new Claude Code session after adding the server.' })
+      },
+      scriptedMessage({ text: 'a second answer that must never be written' }),
+    ])
+    setProviderForTests(provider)
+
+    const ticket = await fileTicket(alice)
+    const first = runSupportFirstResponse(ticket.id)
+    const second = runSupportFirstResponse(ticket.id)
+    setTimeout(() => release(), 50)
+    expect((await Promise.all([first, second])).sort()).toEqual(['replied', 'skipped'])
+    expect(provider.calls).toHaveLength(1)
+    expect(await prisma.supportMessage.count({ where: { ticketId: ticket.id } })).toBe(1)
+  })
+
+  it('grounds the answer in the agent docs and the project’s MCP records, and cites the docs', async () => {
+    configureProvider()
+    const provider = scriptedProvider([scriptedMessage({ text: 'Your key has never reached Backenly.' })])
+    setProviderForTests(provider)
+    const project = await prisma.project.create({ data: { name: 'support-mcp', userId: alice.id }, select: { id: true } })
+    await prisma.apiKey.create({
+      data: {
+        name: 'Claude Code laptop', keyPrefix: 'mcp_live_test', keyHash: `support-test-${randomUUID()}`,
+        projectId: project.id, userId: alice.id, keyType: 'mcp', scope: 'mcp', mcpReadOnly: false,
+      },
+    })
+
+    const ticket = await fileTicket(alice, {
+      subject: 'not connecting to mcp coding agent??',
+      message: 'help me to solve this mcp not connecting to Claude code for backenly',
+      category: 'agent',
+      projectId: project.id,
+    })
+    expect(await runSupportFirstResponse(ticket.id)).toBe('replied')
+
+    const sent = provider.calls[0].params
+    expect(sent.model).toBeDefined()
+    const context = (sent.system as Array<{ text: string }>)[1].text
+    expect(context).toContain('claude mcp add --transport http backenly')
+    expect(context).toContain('INVALID_KEY')
+    expect(context).toContain('MCP access for this project: 1 agent key')
+    expect(context).toContain('None of them has ever made an MCP request')
+    expect(context).toContain(`id ${project.id}`)
+
+    const message = await prisma.supportMessage.findFirst({ where: { ticketId: ticket.id } })
+    expect(message?.body).toContain('Your key has never reached Backenly.')
+    expect(message?.body).toMatch(/Docs consulted: \[Connect\]\(https?:\/\/[^)]+\/docs\/connect\)$/)
+    await prisma.apiKey.deleteMany({ where: { projectId: project.id } })
+  })
+
+  it('says when there is no MCP key at all', async () => {
+    configureProvider()
+    const provider = scriptedProvider([scriptedMessage({ text: 'Create a key first.' })])
+    setProviderForTests(provider)
+    const ticket = await fileTicket(bob, { subject: 'Claude Code cannot see Backenly', message: 'The MCP tools never show up in Claude Code.', category: 'agent' })
+    expect(await runSupportFirstResponse(ticket.id)).toBe('replied')
+    const context = (provider.calls[0].params.system as Array<{ text: string }>)[1].text
+    expect(context).toContain('No project is attached to the case.')
+    expect(context).toContain('no agent key and no browser sign-in connection exists for any project of this account')
+  })
+})
+
+describe('asking the AI first responder again', () => {
+  beforeEach(() => setSupportAiRetrySchedulerForTests(() => {}))
+  afterEach(() => setSupportAiRetrySchedulerForTests(null))
+
+  const failWith = (id: string, aiError: string | null, aiAttempts = 3) =>
+    prisma.supportTicket.update({ where: { id }, data: { aiState: 'failed', aiError, aiAttempts, aiNextAttemptAt: null } })
+
+  it('queues one more attempt after a transient failure, for the owner only', async () => {
+    const ticket = await fileTicket(alice)
+    await failWith(ticket.id, 'rate_limited')
+    const before = dispatched.length
+
+    const theirs = await detailPATCH(req({ bearer: bob.token, method: 'PATCH', body: { action: 'retry_ai' } }), params(ticket.id))
+    expect(theirs.status).toBe(404)
+
+    const res = await detailPATCH(req({ bearer: alice.token, method: 'PATCH', body: { action: 'retry_ai' } }), params(ticket.id))
+    expect(res.status).toBe(200)
+    expect((await res.json()).ticket).toMatchObject({ aiState: 'none', aiAttempts: 3, aiError: null })
+    expect(dispatched.slice(before)).toEqual([ticket.id])
+
+    // Pending again, so a second click is refused rather than doubled.
+    const again = await detailPATCH(req({ bearer: alice.token, method: 'PATCH', body: { action: 'retry_ai' } }), params(ticket.id))
+    expect(again.status).toBe(409)
+    expect((await again.json()).code).toBe('AI_RETRY_UNAVAILABLE')
+  })
+
+  it('refuses after a failure that would happen again, and once the attempts are spent', async () => {
+    const budget = await fileTicket(alice)
+    await failWith(budget.id, 'spend_limit')
+    const refused = await detailPATCH(req({ bearer: alice.token, method: 'PATCH', body: { action: 'retry_ai' } }), params(budget.id))
+    expect(refused.status).toBe(409)
+
+    const spent = await fileTicket(alice)
+    await failWith(spent.id, 'timeout', 5)
+    const none = await detailPATCH(req({ bearer: alice.token, method: 'PATCH', body: { action: 'retry_ai' } }), params(spent.id))
+    expect(none.status).toBe(409)
+
+    // A case that failed before reasons were recorded gets the benefit of the doubt.
+    const legacy = await fileTicket(alice)
+    await failWith(legacy.id, null, 0)
+    const ok = await detailPATCH(req({ bearer: alice.token, method: 'PATCH', body: { action: 'retry_ai' } }), params(legacy.id))
+    expect(ok.status).toBe(200)
+  })
+
+  it('reading a case picks up a first response whose dispatch was lost', async () => {
+    const ticket = await fileTicket(alice)
+    const before = dispatched.length
+
+    // Just filed: the create route's own dispatch is still in flight.
+    await detailGET(req({ bearer: alice.token }), params(ticket.id))
+    expect(dispatched.length).toBe(before)
+
+    // Unclaimed long after filing: the dispatch was lost, so reading resumes it.
+    await prisma.supportTicket.update({ where: { id: ticket.id }, data: { createdAt: new Date(Date.now() - 60_000) } })
+    await detailGET(req({ bearer: alice.token }), params(ticket.id))
+    expect(dispatched.slice(before)).toEqual([ticket.id])
+
+    // A lease still running is left alone.
+    await prisma.supportTicket.update({ where: { id: ticket.id }, data: { aiNextAttemptAt: new Date(Date.now() + 60_000) } })
+    await detailGET(req({ bearer: alice.token }), params(ticket.id))
+    expect(dispatched.slice(before)).toEqual([ticket.id])
   })
 })
 

@@ -3701,10 +3701,21 @@ model SupportTicket {
   category   String   @default("other") // database | api | auth | storage | functions | realtime | deploy | agent | billing | account | security | other
   severity   String   @default("normal") // low | normal | high | urgent — high/urgent need a paid plan (lib/support/constants.ts)
   status     String   @default("open") // open | waiting_on_customer | resolved | closed (legacy "dismissed" rows were migrated to closed)
-  // What the AI first responder did: none (not attempted yet) | replied |
-  // unavailable (no provider configured) | failed (provider errored). Honesty
-  // field — the admin queue must know which tickets got no instant answer.
+  // What the AI first responder did: none (not answered yet: queued, running,
+  // or waiting to retry) | replied | unavailable (no provider configured) |
+  // failed (gave up). Honesty field — the admin queue must know which tickets
+  // got no instant answer.
   aiState    String   @default("none")
+  // Why the last attempt did not answer: an AiError kind (spend_limit,
+  // rate_limited, timeout, …) or "internal". Null once it answers. This is what
+  // says whether "the AI could not answer" was a blip or a configuration fault.
+  aiError    String?
+  // Attempts started, automatic and asked-for together (lib/support/ai.ts caps both).
+  aiAttempts Int      @default(0)
+  // The earliest an attempt may start. While one runs it is that attempt's
+  // lease, so two dispatches never both answer; after a transient failure it
+  // is when the retry is due.
+  aiNextAttemptAt DateTime?
   // Thread ordering and queue triage without joining messages.
   lastMessageAt     DateTime  @default(now())
   lastMessageBy     String    @default("user") // user | ai | staff
