@@ -83,8 +83,13 @@ export default function ComparisonsPage() {
             All comparisons
           </h2>
           <ul className="grid gap-3 md:grid-cols-2">
-            {COMPARISON_LIST.map((c) => (
-              <li key={c.slug} className="min-w-0">
+            {COMPARISON_LIST.map((c, i) => (
+              // An odd count leaves the last comparison alone in its row; it takes the
+              // row's full width, like the guide card below it, rather than half of it.
+              <li
+                key={c.slug}
+                className={`min-w-0 ${COMPARISON_LIST.length % 2 === 1 && i === COMPARISON_LIST.length - 1 ? 'md:col-span-2' : ''}`}
+              >
                 <BentoCell className="h-full">
                   <CellTitle>
                     <Link href={`/comparisons/${c.slug}`} className={CELL_LINK}>

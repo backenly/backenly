@@ -552,6 +552,216 @@ const LIST: ComparisonData[] = [
 
   // ───────────────────────────────────────────────────────────────────────────
   {
+    slug: 'backenly-vs-insforge',
+    competitor: 'InsForge',
+    category: 'Open-source agent backend',
+    metaTitle: 'Backenly vs InsForge: two backends for coding agents',
+    metaDescription:
+      'Both are open-source Postgres backends for coding agents. InsForge has more products; Backenly checks each change, holds destructive ones and can undo any one.',
+    positioning: 'Both are open-source backends built for coding agents. They differ in what happens when the agent gets a change wrong.',
+    headline: 'Backenly vs. InsForge',
+    intro:
+      'Both give a coding agent a Postgres backend over MCP and a CLI. The difference is what happens when the agent gets a change wrong, and who fixes problems after it leaves.',
+    summary:
+      'If you want the most products under one agent interface, InsForge has more of them. If you want each change checked, destructive calls held for a person and any one change undoable, that is what Backenly is built around.',
+    architecture: [
+      {
+        heading: 'Same starting point',
+        body: 'Both run PostgreSQL with every table served as a REST API, plus auth, storage, realtime and functions, all reached by the agent over MCP.',
+      },
+      {
+        heading: 'When a change is wrong',
+        body: 'InsForge restores a backup, which replaces the database and loses data written since. Backenly restores that one change from History and keeps what the app wrote.',
+      },
+      {
+        heading: 'After the agent leaves',
+        body: "InsForge's advisor writes a fix for the agent to apply. Backenly applies a short list of safe fixes itself and holds the rest for you.",
+      },
+    ],
+    table: [
+      {
+        aspect: 'Database',
+        competitor: 'PostgreSQL; every table becomes a typed REST and SDK surface',
+        backenly: 'PostgreSQL; every table is a REST API over PostgREST',
+        practical: 'No real difference in the data layer.',
+      },
+      {
+        aspect: 'Agent access',
+        competitor: 'MCP server and CLI; write and admin actions need the admin API key',
+        backenly: 'Twenty-three advertised tools; destructive actions wait for a person',
+        practical: 'Both connect the same agents. Only Backenly parks a destructive call until a person approves it.',
+      },
+      {
+        aspect: 'Raw SQL',
+        competitor: 'run-raw-sql in strict mode with the admin key; system tables and auth.users blocked',
+        backenly: 'Read-only SQL as a SELECT-only role; writes go through typed, checked actions',
+        practical: 'InsForge lets the agent write any SQL with the admin key. Backenly lets it read any SQL and write only through checked actions.',
+      },
+      {
+        aspect: 'Schema changes',
+        competitor: 'Forward-only SQL migrations the CLI applies in a transaction',
+        backenly: 'Each change checkpointed, applied and verified by Backenly, then recorded in History',
+        practical: "On InsForge a migration that runs is done. On Backenly a change is done when Backenly's own checks pass.",
+      },
+      {
+        aspect: 'Undoing a bad change',
+        competitor: 'Restore a backup: it replaces the database, takes the project offline and loses data created since',
+        backenly: 'Restore that one change from History, checked first; anything that would touch later data waits for you',
+        practical: 'A backup restore is all or nothing. Backenly undoes one change and leaves the rest as it is.',
+      },
+      {
+        aspect: 'Preview environments',
+        competitor: 'Branches copy the whole backend: Postgres, auth, storage and functions; two per project',
+        backenly: 'Data branches, up to five active, picked by API key',
+        practical: "InsForge branches more of the backend. Backenly's cover data and the REST API; auth, functions and storage stay on main.",
+      },
+      {
+        aspect: 'After launch',
+        competitor: 'An advisor writes a remediation for each issue; the agent applies it',
+        backenly: 'Checks every minute and applies a short list of safe fixes itself; risky ones wait for a person',
+        practical: "InsForge's fixes need an agent session. Backenly's safe fixes do not.",
+      },
+      {
+        aspect: 'Other products',
+        competitor: 'Sites, a model gateway, analytics and payments',
+        backenly: 'None of these; provider integrations for Stripe, Resend, OpenAI, Anthropic and PostHog',
+        practical: 'InsForge covers more of the stack. Backenly is the backend only.',
+      },
+      {
+        aspect: 'License',
+        competitor: 'Apache-2.0, self-hostable with Docker Compose',
+        backenly: 'Apache-2.0, self-hostable',
+        practical: 'The same on both. Neither locks you in.',
+      },
+      {
+        aspect: 'Pricing',
+        competitor: 'Free with a 500 MB database; Pro $25 a month, with metered usage above it',
+        backenly: 'Pro is $25 a month; quotas are hard caps unless you set a spend limit',
+        practical: 'The same starting price. Backenly bills nothing past $25 unless you set a limit.',
+      },
+    ],
+    competitorStrengths: [
+      {
+        title: 'More products in one place',
+        body: 'InsForge ships sites, a model gateway, analytics and payments behind the same MCP server and SDK. Backenly is the backend only.',
+      },
+      {
+        title: 'Branches of the whole backend',
+        body: 'An InsForge branch copies Postgres, auth, storage and functions and merges back with a three-way diff. Backenly branches cover data and the REST API.',
+      },
+      {
+        title: 'Settings as a config file',
+        body: 'InsForge keeps auth, SMTP, storage and deployment settings in an insforge.toml that the agent plans and applies, so they can be reviewed in a pull request.',
+      },
+      {
+        title: 'A larger community',
+        body: "InsForge's repository has about 13,000 stars, and its site offers templates, so there are more worked examples to start from.",
+      },
+    ],
+    backenlyStrengths: [
+      {
+        title: 'Destructive calls wait for a person',
+        body: 'apply_migration refuses DROP, and dropping a table, deleting files or revoking a key is parked until a person approves that exact call.',
+      },
+      {
+        title: 'Undo one change',
+        body: 'Every change is one entry in History. Restore it alone or everything back to a point, without rewinding what the app wrote.',
+      },
+      {
+        title: 'Checked by the platform',
+        body: 'Backenly verifies each schema change against the live database: every reported step happened and row-level security was not weakened.',
+      },
+      {
+        title: 'Fixes without an agent',
+        body: 'Checks run every minute on every plan, and a short list of safe fixes is applied without waiting for an agent session.',
+      },
+    ],
+    chooseBackenlyWhen: [
+      'Your agent works on a production backend and you want destructive calls held for you.',
+      'You want to undo one bad change without restoring a backup.',
+      'Nobody will start an agent session every time an advisor finds something.',
+    ],
+    chooseCompetitorWhen: [
+      'You want hosting, a model gateway or payments in the same platform as the backend.',
+      'You want branches that copy auth, storage and functions as well as data.',
+      'You want backend settings in a config file that is reviewed in pull requests.',
+    ],
+    faq: [
+      {
+        q: 'Are both open source?',
+        a: "Yes. Both platforms are Apache-2.0 and can be self-hosted. Backenly's SDK, CLI and MCP server are MIT.",
+      },
+      {
+        q: 'Do both work with Claude Code and Cursor?',
+        a: 'Yes. Both have an MCP server and a CLI, and both document setup for Claude Code, Cursor and other clients.',
+      },
+      {
+        q: 'What happens if my agent drops a table?',
+        a: "On InsForge, raw SQL runs with the admin key, and the documented way back is a backup restore, which replaces the whole database. On Backenly, apply_migration refuses DROP, a drop requested through backend_chat waits for a person, and the dropped table's data is kept in the change's vault.",
+      },
+      {
+        q: 'Which is cheaper?',
+        a: "Both start at $0 and both Pro plans are $25 a month. InsForge meters usage above the plan; Backenly's quotas are hard caps unless you set a spend limit.",
+      },
+    ],
+    facts: [
+      {
+        claim:
+          'The InsForge MCP server exposes get-table-schema, run-raw-sql and bulk-upsert for the database, plus delete-bucket and delete-function among others. Write and admin actions require the admin API key; raw SQL runs in strict mode with system tables and auth.users blocked.',
+        source: 'https://docs.insforge.dev/mcp-setup',
+        verifiedOn: '2026-10-24',
+      },
+      {
+        claim:
+          'InsForge migrations are timestamped SQL files applied forward-only by the CLI, each inside a transaction, recorded only on success.',
+        source: 'https://docs.insforge.dev/core-concepts/database/migrations',
+        verifiedOn: '2026-10-24',
+      },
+      {
+        claim:
+          'Restoring an InsForge backup replaces the current database: the project goes offline during the restore, data created after the backup is lost, and the restore cannot be undone. Backups cover the database only.',
+        source: 'https://docs.insforge.dev/core-concepts/database/backups',
+        verifiedOn: '2026-10-24',
+      },
+      {
+        claim:
+          'An InsForge branch is a child project with its own Postgres, auth config, storage and edge functions, merged with a three-way diff or reset. Two active branches per parent project.',
+        source: 'https://docs.insforge.dev/agent-native/branching',
+        verifiedOn: '2026-10-24',
+      },
+      {
+        claim:
+          "InsForge's advisor scans for security, performance and health issues and writes a remediation for each; the agent fetches the findings and applies the fix itself.",
+        source: 'https://docs.insforge.dev/agent-native/diagnostics',
+        verifiedOn: '2026-10-24',
+      },
+      {
+        claim:
+          'InsForge ships ten products, including Postgres, auth, storage, realtime, edge functions, sites, a model gateway, analytics and payments, behind one MCP server and SDK.',
+        source: 'https://docs.insforge.dev/products',
+        verifiedOn: '2026-10-24',
+      },
+      {
+        claim: 'InsForge manages auth, SMTP, storage and deployment settings from an insforge.toml with the CLI’s plan, apply and export workflow.',
+        source: 'https://docs.insforge.dev/agent-native/config-as-code',
+        verifiedOn: '2026-10-24',
+      },
+      {
+        claim: 'The InsForge/InsForge repository is licensed Apache-2.0, with about 13,000 stars; self-hosting with Docker Compose is documented.',
+        source: 'https://github.com/InsForge/InsForge',
+        verifiedOn: '2026-10-24',
+      },
+      {
+        claim:
+          'InsForge Free is $0 with a 500 MB database and 50,000 monthly active users; free projects pause after a week of inactivity. Pro is $25 a month ($20 billed yearly), with usage above the plan billed per unit.',
+        source: 'https://insforge.dev/pricing',
+        verifiedOn: '2026-10-24',
+      },
+    ],
+  },
+
+  // ───────────────────────────────────────────────────────────────────────────
+  {
     slug: 'backenly-vs-no-code-builders',
     competitor: 'No-code app builders',
     nameInSentence: 'no-code app builders',

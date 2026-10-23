@@ -40,10 +40,11 @@ import sitemap from '@/app/sitemap'
 const APP_URL = 'https://backenly.com'
 
 describe('the comparison set', () => {
-  it('has the four routes and no duplicates', () => {
+  it('has the five routes and no duplicates', () => {
     expect(COMPARISON_SLUGS).toEqual([
       'backenly-vs-supabase',
       'backenly-vs-firebase',
+      'backenly-vs-insforge',
       'backenly-vs-no-code-builders',
       'backenly-vs-traditional-backend-development',
     ])

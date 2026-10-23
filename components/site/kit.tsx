@@ -463,8 +463,16 @@ export function NextLinks({
   items: { href: string; title: ReactNode; body?: ReactNode; meta?: ReactNode }[]
   className?: string
 }) {
+  // Five go three to a row (3 + 2) rather than four (4 + 1), which strands the
+  // fifth. Every other count keeps the layout it had.
   const cols =
-    items.length >= 4 ? 'sm:grid-cols-2 lg:grid-cols-4' : items.length === 3 ? 'md:grid-cols-3' : 'sm:grid-cols-2'
+    items.length === 5
+      ? 'sm:grid-cols-2 lg:grid-cols-3'
+      : items.length >= 4
+        ? 'sm:grid-cols-2 lg:grid-cols-4'
+        : items.length === 3
+          ? 'md:grid-cols-3'
+          : 'sm:grid-cols-2'
 
   return (
     <ul className={`grid gap-3 ${cols} ${className}`}>
