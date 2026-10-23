@@ -1,10 +1,12 @@
 import type { Metadata } from 'next'
+import Link from 'next/link'
+import { ArrowRight } from 'lucide-react'
 import { safeJsonLd } from '@/lib/security/safe-jsonld'
 import { pageMetadata, SITE_URL } from '@/lib/seo/metadata'
 import { graph, ORGANIZATION_ID } from '@/lib/seo/schema'
 import { SiteShell } from '@/components/site/SiteShell'
 import { CodeBlock } from '@/components/site/CodeBlock'
-import { SpotlightPanel } from '@/components/site/SpotlightPanel'
+import { BentoCell, CellBody, CellTitle } from '@/components/landing-v7/shared'
 import {
   ButtonLink,
   DataTable,
@@ -20,7 +22,7 @@ import {
 } from '@/components/site/kit'
 import { Faq } from '@/components/site/Faq'
 import { StartButton } from '@/components/site/StartButton'
-import { HEADING, MEASURE } from '@/components/site/tokens'
+import { HEADING, MEASURE, TEXT_LINK, TITLE } from '@/components/site/tokens'
 import {
   ADVERTISED_TOOL_COUNT,
   APPROVAL_STEPS,
@@ -43,7 +45,19 @@ import {
 
    The content is app/mcp/data.ts, held to the catalog by
    tests/unit/mcp-page-conformance.spec.ts.
+
+   Set like the subpages rebuilt to match the landing (app/alternatives): the
+   landing's section titles with their grey continuation, its bento cells, the
+   landing FAQ's header, and next links that say what each page is. Violet is
+   not used here: nothing on the page is an answer set against another
+   platform's.
 ───────────────────────────────────────────────────────────── */
+
+/** The gap between a section title and its first cell, as on /alternatives. */
+const BODY_GAP = 'mt-[40px] md:mt-[56px]'
+
+/** The landing FAQ's founder link. Literal for the reason app/alternatives gives: keep it equal to ROUTES.founder. */
+const FOUNDERS_HREF = 'https://calendly.com/adarsh-c-jose/30min'
 
 export const metadata: Metadata = pageMetadata({
   title: 'MCP server for a production Postgres backend',
@@ -87,12 +101,23 @@ const structuredData = graph(
 
 const mono = (name: string) => <code className="font-mono text-[13px] text-zinc-200">{name}</code>
 
+/** Names as a comma list: a sentence of identifiers, not a cloud of chips. */
+function monoList(names: string[]) {
+  return names.map((name, i) => (
+    <span key={name}>
+      {i > 0 && <span className="text-zinc-500">, </span>}
+      {mono(name)}
+    </span>
+  ))
+}
+
 export default function McpPage() {
   return (
     <SiteShell>
       <JsonLd json={safeJsonLd(structuredData)} />
       <Page>
         <PageHero
+          readableTrail
           trail={[{ label: 'Home', href: '/' }, { label: 'MCP server' }]}
           title="The Backenly MCP server"
           lede="Your coding agent builds and runs a backend through it: PostgreSQL, REST APIs, auth, storage, realtime and functions in a Backenly project. Reads are open, schema changes are checked and verified, and anything destructive waits for you."
@@ -110,21 +135,26 @@ export default function McpPage() {
         <Section flush aria-labelledby="install">
           <SectionHead
             id="install"
-            size="sm"
-            title="Connect your agent"
-            lede="A scoped key comes from your project’s Connect page, under Agents. It is bound to one project, and you can revoke it there. The Connect page prints each block below with your project id and key filled in."
+            title={
+              <>
+                Connect your agent. <span className="text-zinc-500">One key, one project.</span>
+              </>
+            }
+            lede="The key comes from your project’s Connect page, under Agents, and you can revoke it there. That page prints each block below with your project id and key filled in."
           />
-          <div className="mt-[40px] grid gap-[12px] lg:grid-cols-2">
+          <div className={`${BODY_GAP} grid gap-3 lg:grid-cols-2`}>
             {INSTALLS.map((install) => (
-              <SpotlightPanel key={install.id} className="flex min-w-0 flex-col gap-[14px] p-[24px] md:p-[28px]">
-                <div>
-                  <p className="text-[13px] font-medium text-violet-300">{install.client}</p>
-                  <h3 className={`mt-1 text-[17px] text-white ${HEADING}`}>{install.title}</h3>
-                  <p className="mt-[8px] max-w-[60ch] text-[15px] leading-[1.7] text-zinc-400 [text-wrap:pretty]">{install.note}</p>
+              <BentoCell key={install.id} className="h-full">
+                <p className="text-[13px] font-medium text-zinc-500">{install.client}</p>
+                <div className="mt-2">
+                  <CellTitle>{install.title}</CellTitle>
                 </div>
+                <CellBody className="max-w-[60ch] [text-wrap:pretty]">{install.note}</CellBody>
                 {/* One-line commands wrap so the whole command is visible; JSON keeps its lines. */}
-                <CodeBlock code={install.code} language={install.language} wrap={install.language === 'bash'} />
-              </SpotlightPanel>
+                <div className="mt-6">
+                  <CodeBlock code={install.code} language={install.language} wrap={install.language === 'bash'} />
+                </div>
+              </BentoCell>
             ))}
           </div>
           <p className={`mt-[24px] ${MEASURE} text-[15px] leading-[1.7] text-zinc-400`}>
@@ -136,22 +166,22 @@ export default function McpPage() {
         <Section aria-labelledby="tools">
           <SectionHead
             id="tools"
-            size="sm"
-            title={`${ADVERTISED_TOOL_COUNT} tools, grouped by job`}
-            lede={`A read-write connection sees ${ADVERTISED_TOOL_COUNT}. A read-only key or sign-in sees ${READ_ONLY_TOOL_COUNT}: the read tools, and each section tool narrowed to its read actions.`}
+            title={
+              <>
+                {ADVERTISED_TOOL_COUNT} tools, grouped by job.{' '}
+                <span className="text-zinc-500">{READ_ONLY_TOOL_COUNT} on a read-only key.</span>
+              </>
+            }
+            lede="A read-only key or sign-in keeps the read tools and narrows each section tool to its read actions."
           />
-          <div className="mt-[40px]">
+          <div className={BODY_GAP}>
             <DataTable
               caption="The tools the Backenly MCP server advertises, by what they are for"
               columns={['What it is for', 'Tools', 'What they do']}
               minWidth="min-w-[760px]"
               rows={TOOL_GROUPS.map((group) => [
                 group.title,
-                <span key="t" className="flex flex-wrap gap-x-2 gap-y-1">
-                  {group.tools.map((tool) => (
-                    <span key={tool}>{mono(tool)}</span>
-                  ))}
-                </span>,
+                <span key="t">{monoList(group.tools)}</span>,
                 group.body,
               ])}
             />
@@ -159,36 +189,49 @@ export default function McpPage() {
         </Section>
 
         <Section aria-labelledby="approvals">
-          <div className="grid gap-[40px] lg:grid-cols-[minmax(0,5fr)_minmax(0,7fr)] lg:gap-[64px]">
-            <div>
-              <SectionHead
-                id="approvals"
-                size="sm"
-                title="What waits for you"
-                lede="Destructive or irreversible actions do not run from the call. Dropping or emptying a table, dropping a column and discarding a branch go through backend_chat, which parks them the same way. apply_migration refuses DROP statements outright and says so."
-              />
-              <div className="mt-[32px] flex flex-col gap-[10px]">
+          <SectionHead
+            id="approvals"
+            title={
+              <>
+                What waits for you. <span className="text-zinc-500">Destructive calls are parked, not run.</span>
+              </>
+            }
+            lede={withCode(
+              'Dropping or emptying a table, dropping a column and discarding a branch go through `backend_chat`, which parks them the same way. `apply_migration` refuses `DROP` statements outright and says so.',
+            )}
+          />
+          <div className={`${BODY_GAP} grid gap-3 lg:grid-cols-2`}>
+            <BentoCell className="h-full">
+              <CellTitle>Section actions that need a person</CellTitle>
+              <ul className="mt-[18px] flex flex-col">
                 {GATED_ACTIONS.map((section) => (
-                  <p key={section.tool} className="text-[15px] leading-[1.7] text-zinc-400">
-                    {mono(section.tool)}
-                    <span className="text-zinc-600"> · </span>
-                    {section.actions.map((action, i) => (
-                      <span key={action}>
-                        {i > 0 && ', '}
-                        {mono(action)}
-                      </span>
-                    ))}
-                  </p>
+                  <li
+                    key={section.tool}
+                    className="grid grid-cols-[104px_minmax(0,1fr)] gap-[12px] border-t border-white/[0.07] py-[12px] first:border-t-0 first:pt-0 last:pb-0"
+                  >
+                    <span className={`text-[15px] text-zinc-100 ${HEADING}`}>{section.tool}</span>
+                    <span className="text-[14px] leading-[1.7]">{monoList(section.actions)}</span>
+                  </li>
                 ))}
-              </div>
-            </div>
-            <Steps steps={APPROVAL_STEPS} />
+              </ul>
+            </BentoCell>
+            <BentoCell className="h-full">
+              <CellTitle>How an approval runs</CellTitle>
+              <Steps className="mt-[24px]" steps={APPROVAL_STEPS} />
+            </BentoCell>
           </div>
         </Section>
 
         <Section aria-labelledby="boundaries">
-          <SectionHead id="boundaries" size="sm" title="Where it stops" />
-          <div className="mt-[40px] grid gap-[12px] md:grid-cols-3">
+          <SectionHead
+            id="boundaries"
+            title={
+              <>
+                Where it stops. <span className="text-zinc-500">Limits an agent cannot change.</span>
+              </>
+            }
+          />
+          <div className={`${BODY_GAP} grid gap-3 md:grid-cols-3`}>
             {[
               {
                 title: 'One project per connection',
@@ -203,10 +246,10 @@ export default function McpPage() {
                 body: 'MCP keys are issued in the dashboard, and read-only is chosen there. The runtime API your app calls refuses an MCP key (`MCP_KEY_IN_APP`), and a service-role key is never issued to an agent.',
               },
             ].map((item) => (
-              <SpotlightPanel key={item.title} className="p-[24px] md:p-[28px]">
-                <h3 className={`text-[17px] text-white ${HEADING}`}>{item.title}</h3>
-                <p className="mt-[10px] text-[15px] leading-[1.7] text-zinc-400 [text-wrap:pretty]">{withCode(item.body)}</p>
-              </SpotlightPanel>
+              <BentoCell key={item.title} className="h-full">
+                <CellTitle>{item.title}</CellTitle>
+                <CellBody className="[text-wrap:pretty]">{withCode(item.body)}</CellBody>
+              </BentoCell>
             ))}
           </div>
         </Section>
@@ -214,20 +257,41 @@ export default function McpPage() {
         <Section aria-labelledby="mcp-faq">
           <div className="grid gap-[40px] lg:grid-cols-[minmax(0,4fr)_minmax(0,7fr)] lg:gap-[64px]">
             <div className="lg:sticky lg:top-[112px] lg:self-start">
-              <SectionHead id="mcp-faq" size="sm" title="Questions" />
+              <SectionHead id="mcp-faq" title="Questions about the MCP server" />
+              {/* The landing FAQ's own close to the header. */}
+              <p className="mt-5 max-w-[36ch] text-[15px] leading-[1.7] text-zinc-400">
+                Anything else, ask the people who built it.
+              </p>
+              <div className="mt-7 flex flex-wrap gap-x-6 gap-y-3">
+                <Link href="/docs/connect" className={TEXT_LINK}>
+                  Read the setup guide
+                  <ArrowRight aria-hidden className="h-4 w-4 transition-transform duration-200 group-hover:translate-x-0.5" />
+                </Link>
+                <a href={FOUNDERS_HREF} target="_blank" rel="noopener noreferrer" className={TEXT_LINK}>
+                  Book 30 minutes
+                  <ArrowRight aria-hidden className="h-4 w-4 transition-transform duration-200 group-hover:translate-x-0.5" />
+                </a>
+              </div>
             </div>
             <Faq items={FAQ} />
           </div>
         </Section>
 
         <Section aria-labelledby="mcp-next">
-          <SectionHead id="mcp-next" size="sm" title="Go further" />
+          <h2 id="mcp-next" className={`text-[22px] text-white md:text-[26px] ${TITLE}`}>
+            Read next
+          </h2>
           <NextLinks
-            className="mt-[32px]"
+            className="mt-[28px]"
             items={[
-              { href: '/docs/connect', title: 'Connect: the step-by-step guide' },
-              { href: '/docs/database', title: 'How a schema change is applied and checked' },
-              { href: '/docs/autonomy', title: 'Approvals and the maintenance loop' },
+              { href: '/docs/connect', meta: 'Docs', title: 'Connect', body: 'The setup for each client, step by step.' },
+              { href: '/docs/database', meta: 'Docs', title: 'Database', body: 'Tables, the REST API and row-level security.' },
+              {
+                href: '/docs/autonomy',
+                meta: 'Docs',
+                title: 'Autonomy',
+                body: 'What Backenly fixes on its own, and what waits for your approval.',
+              },
             ]}
           />
         </Section>
