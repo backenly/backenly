@@ -1,6 +1,7 @@
 import type { Metadata } from 'next'
+import Link from 'next/link'
 import { notFound } from 'next/navigation'
-import { ChevronRight } from 'lucide-react'
+import { ArrowRight, ChevronRight } from 'lucide-react'
 import { safeJsonLd } from '@/lib/security/safe-jsonld'
 import { SiteShell } from '@/components/site/SiteShell'
 import { BentoCell, CellBody, CellTitle } from '@/components/landing-v7/shared'
@@ -19,7 +20,7 @@ import {
 } from '@/components/site/kit'
 import { Faq } from '@/components/site/Faq'
 import { StartButton } from '@/components/site/StartButton'
-import { TITLE } from '@/components/site/tokens'
+import { TEXT_LINK, TITLE } from '@/components/site/tokens'
 import { COMPARISONS, COMPARISON_LIST, type ComparisonData, type ExternalFact } from '../data'
 
 const APP_URL = 'https://backenly.com'
@@ -36,6 +37,11 @@ const APP_URL = 'https://backenly.com'
    The competitor comes first wherever the two sit side by side, on the page
    as in the DOM. Violet marks only Backenly's own column and cell.
 
+   2026-10-23 (founders: match the landing and the rest of the site): the
+   header takes the feature pages' two actions, the questions take the
+   landing FAQ's own header (a line and two links under the title), and every
+   card under "More comparisons" says what is on the other side of it.
+
    The bento cells and fact chips are the landing's (components/landing-v7).
    Plain class strings are restated here rather than imported, because a
    string exported from that client module would arrive in this server page
@@ -45,6 +51,15 @@ const APP_URL = 'https://backenly.com'
 /** The landing bento's fact chip. */
 const CHIP =
   'inline-flex items-center rounded-[6px] border border-white/[0.08] bg-white/[0.03] px-[10px] py-[5px] text-[13px] text-zinc-300'
+
+/**
+ * The landing FAQ's two links. Literal here: SiteShell's ROUTES is a client
+ * module's export, and a server page that imports it receives a client
+ * reference rather than the string. Keep them equal to ROUTES.docs and
+ * ROUTES.founder.
+ */
+const DOCS_HREF = '/docs/database'
+const FOUNDERS_HREF = 'https://calendly.com/adarsh-c-jose/30min'
 
 /** The gap between a section title and its first cell. */
 const BODY_GAP = 'mt-[40px] md:mt-[56px]'
@@ -114,6 +129,7 @@ export default async function ComparisonSlugPage(props: { params: Promise<{ slug
       <JsonLd json={safeJsonLd(breadcrumbSchema)} />
       <Page>
         <PageHero
+          readableTrail
           trail={[
             { label: 'Home', href: '/' },
             { label: 'Comparisons', href: '/comparisons' },
@@ -121,6 +137,14 @@ export default async function ComparisonSlugPage(props: { params: Promise<{ slug
           ]}
           title={c.headline}
           lede={c.intro}
+          actions={
+            <>
+              <StartButton />
+              <ButtonLink href="/comparisons" variant="secondary">
+                All comparisons
+              </ButtonLink>
+            </>
+          }
         />
 
         {/* The difference in three short points, before any detail. */}
@@ -213,6 +237,20 @@ export default async function ComparisonSlugPage(props: { params: Promise<{ slug
           <div className="grid gap-[40px] lg:grid-cols-[minmax(0,4fr)_minmax(0,7fr)] lg:gap-[64px]">
             <div className="lg:sticky lg:top-[112px] lg:self-start">
               <SectionHead id="comparison-faq" title="Common questions" />
+              {/* The landing FAQ's own close to the header. */}
+              <p className="mt-5 max-w-[36ch] text-[15px] leading-[1.7] text-zinc-400">
+                Anything else, ask the people who built it.
+              </p>
+              <div className="mt-7 flex flex-wrap gap-x-6 gap-y-3">
+                <Link href={DOCS_HREF} className={TEXT_LINK}>
+                  Read the docs
+                  <ArrowRight aria-hidden className="h-4 w-4 transition-transform duration-200 group-hover:translate-x-0.5" />
+                </Link>
+                <a href={FOUNDERS_HREF} target="_blank" rel="noopener noreferrer" className={TEXT_LINK}>
+                  Book 30 minutes
+                  <ArrowRight aria-hidden className="h-4 w-4 transition-transform duration-200 group-hover:translate-x-0.5" />
+                </a>
+              </div>
             </div>
             <Faq items={c.faq} />
           </div>
@@ -225,8 +263,18 @@ export default async function ComparisonSlugPage(props: { params: Promise<{ slug
           <NextLinks
             className="mt-[28px]"
             items={[
-              ...others.map((x) => ({ href: `/comparisons/${x.slug}`, meta: x.category, title: x.headline })),
-              { href: '/alternatives', meta: 'Before a shortlist', title: 'How to evaluate an alternative' },
+              ...others.map((x) => ({
+                href: `/comparisons/${x.slug}`,
+                meta: x.category,
+                title: x.headline,
+                body: x.positioning,
+              })),
+              {
+                href: '/alternatives',
+                meta: 'Before a shortlist',
+                title: 'How to evaluate an alternative',
+                body: 'Six questions to ask any platform, and when to stay where you are.',
+              },
             ]}
           />
         </Section>
@@ -250,7 +298,7 @@ export default async function ComparisonSlugPage(props: { params: Promise<{ slug
 function Sources({ competitor, facts }: { competitor: string; facts: ExternalFact[] }) {
   return (
     <details className="group/sources mt-[20px]">
-      <summary className="inline-flex cursor-pointer list-none items-center gap-[6px] rounded-sm text-[14px] text-zinc-500 transition-colors duration-200 hover:text-zinc-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300 [&::-webkit-details-marker]:hidden">
+      <summary className="inline-flex cursor-pointer list-none items-center gap-[6px] rounded-sm text-[14px] text-zinc-400 transition-colors duration-200 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300 [&::-webkit-details-marker]:hidden">
         <ChevronRight
           aria-hidden
           className="h-[14px] w-[14px] transition-transform duration-200 group-open/sources:rotate-90"
@@ -259,13 +307,13 @@ function Sources({ competitor, facts }: { competitor: string; facts: ExternalFac
       </summary>
       <ul className="mt-[14px] flex max-w-[84ch] flex-col gap-[10px] pl-[20px]">
         {facts.map((fact) => (
-          <li key={fact.source} className="text-[13px] leading-[1.65] text-zinc-500 [text-wrap:pretty]">
+          <li key={fact.source} className="text-[13px] leading-[1.65] text-zinc-400 [text-wrap:pretty]">
             {fact.claim}{' '}
             <a
               href={fact.source}
               rel="noopener noreferrer nofollow"
               target="_blank"
-              className="break-words text-zinc-400 underline decoration-white/20 underline-offset-4 transition-colors duration-200 hover:text-white"
+              className="break-words text-zinc-300 underline decoration-white/20 underline-offset-4 transition-colors duration-200 hover:text-white"
             >
               {fact.source.replace(/^https:\/\//, '')}
             </a>{' '}

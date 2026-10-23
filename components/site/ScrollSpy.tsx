@@ -20,6 +20,7 @@ export function ScrollSpy({
   label,
   className = '',
   numbered = false,
+  readable = false,
 }: {
   items: SpyItem[]
   /** Accessible name of the navigation landmark. */
@@ -27,6 +28,13 @@ export function ScrollSpy({
   className?: string
   /** Prefix each entry with its position, for documents whose sections are numbered. */
   numbered?: boolean
+  /**
+   * Set the entries you are not reading at zinc-400 (7.8:1 on the ground)
+   * rather than zinc-500 (4.1:1, under WCAG AA for text this size). Opt-in
+   * since 2026-10-23, when the legal pages took it; the docs rail keeps its
+   * quieter tone until those pages are revisited.
+   */
+  readable?: boolean
 }) {
   const [active, setActive] = useState<string | null>(items[0]?.id ?? null)
 
@@ -68,10 +76,16 @@ export function ScrollSpy({
                 className={`-ml-px flex gap-3 border-l py-[7px] pl-4 text-[14px] leading-[1.45] tracking-[-0.006em] transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-violet-300 ${
                   current
                     ? 'border-violet-300 text-white'
-                    : 'border-transparent text-zinc-500 hover:border-white/25 hover:text-zinc-200'
+                    : readable
+                      ? 'border-transparent text-zinc-400 hover:border-white/25 hover:text-white'
+                      : 'border-transparent text-zinc-500 hover:border-white/25 hover:text-zinc-200'
                 }`}
               >
-                {numbered && <span className="w-5 shrink-0 tabular-nums text-zinc-600">{index + 1}</span>}
+                {numbered && (
+                  <span aria-hidden={readable || undefined} className={`w-5 shrink-0 tabular-nums ${readable ? 'text-zinc-400' : 'text-zinc-600'}`}>
+                    {index + 1}
+                  </span>
+                )}
                 <span className="min-w-0">{item.label}</span>
               </a>
             </li>

@@ -74,10 +74,28 @@ export type Crumb = { label: string; href?: string }
  * Where you are, in place of an eyebrow. The last crumb is the current page and
  * is not a link; on a top-level page the trail is a single quiet label.
  */
-export function Trail({ items, className = '' }: { items: Crumb[]; className?: string }) {
+export function Trail({
+  items,
+  className = '',
+  readable = false,
+}: {
+  items: Crumb[]
+  className?: string
+  /**
+   * zinc-400 crumbs (7.8:1 on the ground) instead of zinc-500 (4.1:1, under
+   * WCAG AA for 14px text). Opt-in since 2026-10-23, when the comparison,
+   * alternatives and legal pages took it; the rest keep the quieter tone until
+   * they are revisited.
+   */
+  readable?: boolean
+}) {
   return (
     <nav aria-label="Breadcrumb" className={className}>
-      <ol className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[14px] tracking-[-0.006em] text-zinc-500">
+      <ol
+        className={`flex flex-wrap items-center gap-x-2 gap-y-1 text-[14px] tracking-[-0.006em] ${
+          readable ? 'text-zinc-400' : 'text-zinc-500'
+        }`}
+      >
         {items.map((item, index) => {
           const last = index === items.length - 1
           return (
@@ -85,7 +103,9 @@ export function Trail({ items, className = '' }: { items: Crumb[]; className?: s
               {item.href && !last ? (
                 <Link
                   href={item.href}
-                  className="rounded-sm transition-colors duration-200 hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300"
+                  className={`rounded-sm transition-colors duration-200 ${
+                    readable ? 'hover:text-white' : 'hover:text-zinc-200'
+                  } focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300`}
                 >
                   {item.label}
                 </Link>
@@ -126,6 +146,7 @@ export function PageHero({
   aside,
   children,
   size = 'default',
+  readableTrail = false,
 }: {
   trail?: Crumb[]
   title: ReactNode
@@ -135,6 +156,8 @@ export function PageHero({
   children?: ReactNode
   /** `compact` for documents (legal, guides), where the title is a label. */
   size?: 'default' | 'compact'
+  /** Passes `readable` to the trail (see Trail). */
+  readableTrail?: boolean
 }) {
   // A page header, not a banner (founders, 2026-10-15: "no big banners").
   // The title is a label for the page at the size of a landing section title,
@@ -160,7 +183,7 @@ export function PageHero({
         }`}
       >
         <div className="min-w-0">
-          {trail && <Trail items={trail} className="hero-enter" />}
+          {trail && <Trail items={trail} readable={readableTrail} className="hero-enter" />}
           <h1
             // One vertical falloff across the whole headline, white to a cool
             // grey, the way a lit object reads. Never a second colour on one
