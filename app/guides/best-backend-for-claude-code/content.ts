@@ -526,6 +526,10 @@ export const COMPARISON: Record<OptionId, Record<CriterionId, Claim[]>> = {
     ],
     restore: [
       claim(
+        'backenlyRecovery',
+        'Every change, to the schema, auth, storage, functions, webhooks, environment variables, keys or integrations, is one entry in History. Restore it alone, or everything back to a point; data your app wrote is never rewound, and a secret never comes back.',
+      ),
+      claim(
         'backenlyPricing',
         'A restore point before each schema change, kept 7 days on Free and 30 on Pro; each change shows whether it can still be restored. Daily backups are kept 7 days.',
       ),
