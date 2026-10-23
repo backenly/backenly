@@ -247,9 +247,10 @@ async function loadFkReferences(projectId: string, schemaName: string, tableName
  * authoritative source — name-based heuristics ("does `user_id` map to `users.id`?")
  * are brittle for compound names like `created_by`, `author_id`, or non-default
  * referenced columns. The seeding code uses this map to insert parent rows with
- * the exact id that the FK will reference.
+ * the exact id that the FK will reference, as does run_test's create
+ * (lib/ai/brain/verify-create.ts).
  */
-interface FkColumnMapping {
+export interface FkColumnMapping {
   /** Column on the local table that holds the FK value */
   column: string
   /** Parent table name (without schema prefix) */
@@ -258,7 +259,7 @@ interface FkColumnMapping {
   foreignColumn: string
 }
 
-async function loadFkColumnMappings(
+export async function loadFkColumnMappings(
   projectId: string,
   schemaName: string,
   tableName: string,
@@ -301,9 +302,10 @@ async function loadFkColumnMappings(
 
 /**
  * Return a map of column_name → first valid string from its CHECK constraint.
- * Used to avoid inserting synthetic values that violate enum-style checks.
+ * Used to avoid inserting synthetic values that violate enum-style checks, here
+ * and by run_test's create (lib/ai/brain/verify-create.ts).
  */
-async function loadCheckConstraintValues(
+export async function loadCheckConstraintValues(
   projectId: string,
   schemaName: string,
   tableName: string,

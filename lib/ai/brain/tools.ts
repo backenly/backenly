@@ -1504,7 +1504,7 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
     { question: { type: 'string' } },
     ['question']),
   fn('run_test',
-    "Verify a generated REST endpoint actually works by calling it with a sample payload and asserting the response. Use after generate_api on tables where freshness matters. Returns ok:false with status code + body on failure. get lists one row and fetches it by id, so it needs a row to exist; on an empty table use list.",
+    "Verify a generated REST endpoint actually works by calling it and asserting the response. Use after generate_api on tables where freshness matters. Returns ok:false with status code + body on failure. create inserts a real row as a throwaway signed-in user and removes it again, and on failure names the database's reason. get lists one row and fetches it by id, so it needs a row to exist; on an empty table use list.",
     {
       tableName: { type: 'string' },
       operation: { type: 'string', enum: ['list', 'create', 'get'] },
@@ -2039,7 +2039,8 @@ function preflightValidate(
           ok: false,
           summary:
             `fix_backend rejected: \`${tn}\` was created in this same turn. ` +
-            `If run_test returned 401/403/permission_denied (Postgres code 42501), that is RLS doing its job — the table is healthy and the API is wired. Call finish with a truthful summary.`,
+            `If run_test's list or get returned 401/403/permission_denied (Postgres code 42501), that is RLS doing its job — the table is healthy and the API is wired. ` +
+            `If run_test's create failed, its summary names the cause: report it in a truthful finish summary rather than rebuilding the table.`,
         }
       }
       return null
