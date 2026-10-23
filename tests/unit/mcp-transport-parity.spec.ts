@@ -71,6 +71,21 @@ const mockChatAnswers: Record<string, Record<string, unknown>> = {
     events: [{ type: 'tool_ok', tool: 'create_table' }, { type: 'tool_fail', tool: 'create_table', error: 'rate limited' }],
     timing: { ms: 900 },
   },
+  // The 90-second cap fired while a change was running. It was left to finish,
+  // so it may take effect: not "Nothing was applied", and not a request to change.
+  'add a table at the cap': {
+    ok: false,
+    error: 'Brain run exceeded 90000ms. Nothing had finished, but Creating table posts was still running and was left to finish, so it may take effect. Nothing new was started. Check with read_backend_state before asking again.',
+    code: 'BRAIN_TIMEOUT',
+    retryable: false,
+    partial: false,
+    verified: false,
+    stillRunning: ['Creating table posts'],
+    toolsRun: [],
+    iterations: 1,
+    partialEvents: [{ type: 'tool_start', tool: 'create_table', title: 'Creating table posts' }],
+    timing: { ms: 90000 },
+  },
 }
 
 jest.mock('@/app/api/mcp/tool/route', () => ({
@@ -154,6 +169,7 @@ const CALLS: Array<[string, Record<string, unknown>]> = [
   ['no_such_tool', {}],
   ['backend_chat', { message: 'drop posts' }],
   ['backend_chat', { message: 'build a shop' }],
+  ['backend_chat', { message: 'add a table at the cap' }],
   ['backend_chat', {}],
 ]
 

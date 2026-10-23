@@ -265,10 +265,14 @@ export function shouldUseCuratedBlueprint(prompt: string): boolean {
  *   • Architect success   → { blueprint, match: { domain, confidence, matchedOn: 'llm-architect' } }
  *   • Architect VAGUE     → { vague: true, askUser }
  *   • Architect failure   → null  (caller falls back to the standard agent loop)
+ *
+ * `signal` cancels the architect's model call, and no attempt starts after it
+ * fires (the brain's turn clock, lib/ai/brain/turn-clock.ts).
  */
 export async function getBlueprintForPrompt(
   prompt: string,
   projectId: string,
+  signal?: AbortSignal,
 ): Promise<
   | { blueprint: Blueprint; match: BlueprintMatch; architectTokens: number }
   | { vague: true; askUser: string; architectTokens: number }
@@ -290,7 +294,7 @@ export async function getBlueprintForPrompt(
 
   // No curated hit → ask the LLM architect to design the backend.
   const { architectBackend } = await import('./architect')
-  const result = await architectBackend(prompt, projectId)
+  const result = await architectBackend(prompt, projectId, signal)
   if (!result) return null
   if ('vague' in result) {
     // Architect ran but returned a clarifying question — those tokens are still

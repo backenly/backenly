@@ -27,7 +27,9 @@ export const dynamic = 'force-dynamic'
  * chat"; it was not, and the claim is what hid the hole. Both halves are wired
  * now: the pre-gate below, and the charge after the brain returns.
  *
- * Hard wall-clock cap at 90s so an MCP host never hangs forever.
+ * Hard wall-clock cap at 90s so an MCP host never hangs forever. When it fires
+ * the route answers and stops the brain: nothing new starts after the answer,
+ * and a tool already running is left to finish and reported as still running.
  */
 
 import { NextRequest, NextResponse } from 'next/server'
@@ -157,9 +159,16 @@ export async function POST(request: NextRequest) {
     closeCreditTurn(creditAccount, creditScope, spentTokens).catch(() => {})
   }
 
+  // Answering at the cap used to leave the brain running: a model answer that
+  // came back late still had its tools dispatched, and a blueprint kept
+  // building, so changes landed after the agent had been told what happened
+  // (#247). The brain is told to stop when the cap fires, and stops starting
+  // work (lib/ai/brain/turn-clock.ts).
+  const stopBrain = new AbortController()
   const timeoutPromise = new Promise<never>((_, reject) => {
     setTimeout(() => {
       timedOut = true
+      stopBrain.abort()
       reject(new Error(`Brain run exceeded ${MAX_BRAIN_MS}ms`))
     }, MAX_BRAIN_MS).unref?.()
   })
@@ -184,6 +193,7 @@ export async function POST(request: NextRequest) {
           // "reached its time budget during final verification", i.e. the
           // operations that most needed proof were the only ones without any.
           deadlineAt: startedAt + MAX_BRAIN_MS,
+          signal: stopBrain.signal,
           onTokens: (n) => { spentTokens += n },
         },
         (e) => events.push(e),
@@ -410,13 +420,32 @@ export async function POST(request: NextRequest) {
     // exactly which tools ran, so read it.
     const toolsRun: string[] = []
     let anyFail = false
+    // ── A tool still running is not a tool that did nothing ───────────────────
+    //
+    // One that had started and not ended when the cap fired is left to finish
+    // (stopping DDL halfway is worse), so it may still take effect. Counting
+    // only finished tools answered "Nothing was applied" and `retryable: true`
+    // for a create_table about to land, and a retry ran it twice (#247).
+    const running: Array<{ tool: string; title: string }> = []
     for (const e of events) {
-      if ((e.type === 'tool_done' || e.type === 'tool_fail') && e.tool) toolsRun.push(e.tool)
+      if (e.type === 'tool_start') running.push({ tool: e.tool, title: e.title })
+      if ((e.type === 'tool_done' || e.type === 'tool_fail') && e.tool) {
+        toolsRun.push(e.tool)
+        const started = running.findIndex((r) => r.tool === e.tool)
+        if (started >= 0) running.splice(started, 1)
+      }
       if (e.type === 'tool_done' && e.tool && !NON_MUTATION.test(e.tool)) {
         applied.push(e.title || e.tool)
       }
       if (e.type === 'tool_fail') anyFail = true
     }
+    // Only the cap leaves a tool running: a brain that threw has stopped.
+    const stillRunning = timedOut
+      ? running.filter((r) => !NON_MUTATION.test(r.tool)).map((r) => r.title || r.tool)
+      : []
+    const stillRunningNote = stillRunning.length
+      ? `Still running when the time ran out, and left to finish, so it may take effect too: ${stillRunning.join('; ')}. `
+      : ''
     // One iteration per assistant turn that called at least one tool. `tool_start`
     // is emitted once per dispatch, so a lower bound of "at least as many
     // iterations as distinct tool batches" is the honest number available here.
@@ -425,8 +454,9 @@ export async function POST(request: NextRequest) {
     if (timedOut && applied.length > 0 && !anyFail) {
       const summary =
         `Applied ${applied.length} change(s): ${applied.join('; ')}. ` +
-        `The run then hit the transport's hard wall clock, so these changes are ` +
-        `reported UNVERIFIED — confirm with get_table_schema / read_backend_state. ` +
+        stillRunningNote +
+        `The run then hit the transport's hard wall clock and was stopped, so nothing new started after it, and ` +
+        `these changes are reported UNVERIFIED — confirm with get_table_schema / read_backend_state. ` +
         `Do NOT blindly retry; the changes above are already in place.`
       recordMcpCall(
         { ...auth, endpoint: ENDPOINT, startedAt },
@@ -444,9 +474,10 @@ export async function POST(request: NextRequest) {
         // instruction rather than an invitation to audit the whole backend —
         // which is what the previous message amounted to (defect #16).
         applied,
+        ...(stillRunning.length ? { stillRunning } : {}),
         toolsRun,
         iterations,
-        verifyWith: applied.map((a) => `get_table_schema / read_backend_state — confirm: ${a}`),
+        verifyWith: [...applied, ...stillRunning].map((a) => `get_table_schema / read_backend_state — confirm: ${a}`),
         timing: { ms: Date.now() - startedAt },
         events: events.map(condense),
       }))
@@ -460,26 +491,34 @@ export async function POST(request: NextRequest) {
     // the whole request. `applied` and `partial` are now reported on every
     // failure path that changed something.
     const partial = applied.length > 0
+    // Nothing finished, but a change may still land: neither "Nothing was
+    // applied" nor worth a retry, which could run it a second time.
+    const unsettled = stillRunning.length > 0
     recordMcpCall(
       { ...auth, endpoint: ENDPOINT, startedAt },
-      { statusCode: status, tool: 'backend_chat', mutation: partial, error: msg },
+      { statusCode: status, tool: 'backend_chat', mutation: partial || unsettled, error: msg },
     )
     return withCors(NextResponse.json(
       {
         ok: false,
         error: partial
           ? `${msg}. ${applied.length} change(s) DID take effect before this failed: ${applied.join('; ')}. ` +
+            stillRunningNote +
             `Do NOT replay the whole request — verify current state with read_backend_state and ask only ` +
             `for what is missing.`
-          : `${msg}. Nothing was applied.`,
+          : unsettled
+            ? `${msg}. Nothing had finished, but ${stillRunning.join('; ')} was still running and was left to finish, ` +
+              `so it may take effect. Nothing new was started. Check with read_backend_state before asking again.`
+            : `${msg}. Nothing was applied.`,
         code: timedOut ? 'BRAIN_TIMEOUT' : 'BRAIN_FAILED',
         // A timeout is worth one retry; an unclassified brain failure is not
         // assumed to be.
-        retryable: timedOut && !partial,
-        ...(timedOut && !partial ? { retryAfterMs: 5_000 } : {}),
+        retryable: timedOut && !partial && !unsettled,
+        ...(timedOut && !partial && !unsettled ? { retryAfterMs: 5_000 } : {}),
         partial,
         verified: false,
         ...(partial ? { applied } : {}),
+        ...(unsettled ? { stillRunning } : {}),
         toolsRun,
         iterations,
         partialEvents: events.map(condense),

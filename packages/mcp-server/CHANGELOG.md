@@ -2,6 +2,11 @@
 
 All notable changes to `@backenly/mcp-server` are documented here. Follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **A change still running when `backend_chat` hit its time limit is no longer "Nothing was applied."** Backenly now reports it as `stillRunning`: it was left to finish, so it may take effect. The guidance block says so and to check with `read_backend_state`, instead of telling the agent nothing was applied and to change the request, which could run the change twice.
+
 ## [0.4.0] — 2026-09-26
 
 ### Changed
