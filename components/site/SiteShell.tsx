@@ -461,7 +461,7 @@ export function SiteFooter() {
   ]
   const developers = [
     { label: 'GitHub', href: ROUTES.github },
-    { label: 'MCP server', href: 'https://www.npmjs.com/package/@backenly/mcp-server' },
+    { label: 'MCP server', href: '/mcp' },
     { label: 'CLI', href: 'https://www.npmjs.com/package/@backenly/cli' },
     { label: 'Agent skill', href: '/skill.md' },
     { label: 'llms.txt', href: '/llms.txt' },

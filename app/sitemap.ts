@@ -24,6 +24,7 @@ export default function sitemap(): MetadataRoute.Sitemap {
   const core: MetadataRoute.Sitemap = [
     page('/'),
     page('/pricing'),
+    page('/mcp'),
     // Served by the Backenly Cloud overlay, like the site this sitemap describes.
     page('/startups'),
     page('/alternatives'),

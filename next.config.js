@@ -79,11 +79,11 @@ const nextConfig = {
       // /mcp and /quickstart were two pages answering "how do I connect my
       // agent". /mcp was merged into /quickstart, then /quickstart itself was
       // removed — the connect flow lives in the product, not on a marketing
-      // page. Both URLs are indexed and still printed in older copies of the
-      // published @backenly/mcp-server and @backenly/sdk packages, so they must
-      // keep resolving. Permanent, pointing at the docs page that answers the
-      // same question.
-      { source: '/mcp', destination: '/docs/connect', permanent: true },
+      // page. /quickstart is indexed and still printed in older copies of the
+      // published @backenly/mcp-server and @backenly/sdk packages, so it keeps
+      // resolving, permanently, to the docs page that answers the same
+      // question. /mcp is a page again (app/mcp): what the MCP server is,
+      // which links to that guide.
       { source: '/quickstart', destination: '/docs/connect', permanent: true },
 
       // Audience repositioning 2026-07-18: marketing slugs renamed away from
