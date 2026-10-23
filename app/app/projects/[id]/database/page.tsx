@@ -1340,8 +1340,8 @@ export default function ProjectDatabasePage() {
                   // Shown only beside an error: an empty project's rail is
                   // hidden, and the pane carries the empty state.
                   <div className="px-4 py-5">
-                    <p className="text-[13px] font-medium text-zinc-200 md:text-[12.5px] md:font-normal md:text-zinc-500">No tables yet</p>
-                    <p className="mt-1 text-[12.5px] leading-[19px] text-zinc-500 md:hidden">
+                    <p className="text-[13px] font-medium text-zinc-200 md:text-[12.5px] md:font-normal md:text-faint">No tables yet</p>
+                    <p className="mt-1 text-[12.5px] leading-[19px] text-faint md:hidden">
                       Your coding agent creates tables as it builds. You can also add one by hand.
                     </p>
                     <KitButton size="sm" icon={Plus} onClick={openCreateTable} disabled={!selectedSchema} className="mt-3 md:hidden">
@@ -1349,7 +1349,7 @@ export default function ProjectDatabasePage() {
                     </KitButton>
                   </div>
                 ) : visibleTables.length === 0 ? (
-                  <p className="px-4 py-6 text-center text-[12.5px] leading-relaxed text-zinc-600">
+                  <p className="px-4 py-6 text-center text-[12.5px] leading-relaxed text-faint">
                     No table matches “{tableFilter}”.
                   </p>
                 ) : (
@@ -1380,7 +1380,7 @@ export default function ProjectDatabasePage() {
                               <span className="flex-1 truncate font-mono text-[12.5px]">{table.name}</span>
                               <span
                                 className={`flex-shrink-0 text-[12px] tabular-nums group-hover:opacity-0 group-focus-within:opacity-0 ${
-                                  active ? 'text-zinc-400' : 'text-zinc-600'
+                                  active ? 'text-zinc-400' : 'text-faint'
                                 }`}
                                 title={`${(table.rows ?? 0).toLocaleString()} rows`}
                               >
@@ -1410,7 +1410,7 @@ export default function ProjectDatabasePage() {
               </div>
 
               {tables.length > 0 && (
-                <div className={`flex h-[32px] flex-shrink-0 items-center border-t ${RULE} px-4 text-[12px] tabular-nums text-zinc-500`}>
+                <div className={`flex h-[32px] flex-shrink-0 items-center border-t ${RULE} px-4 text-[12px] tabular-nums text-faint`}>
                   {tableFilter.trim()
                     ? `${visibleTables.length} of ${tables.length}`
                     : `${tables.length} table${tables.length === 1 ? '' : 's'}`}
@@ -1476,7 +1476,7 @@ export default function ProjectDatabasePage() {
                     >
                       Schema graph
                     </h2>
-                    <span className="hidden truncate text-[12px] text-zinc-500 sm:inline">
+                    <span className="hidden truncate text-[12px] text-faint sm:inline">
                       {isVisualizationExpanded
                         ? `${tables.length} ${tables.length === 1 ? 'table' : 'tables'} · Foreign key relationships`
                         : 'Tables and the foreign keys between them'}
@@ -1535,7 +1535,7 @@ export default function ProjectDatabasePage() {
                       Tables
                     </button>
                     <h2 className="truncate font-mono text-[13px] font-medium text-zinc-100">{selectedTable}</h2>
-                    <span className="hidden whitespace-nowrap text-[12px] tabular-nums text-zinc-500 sm:inline">
+                    <span className="hidden whitespace-nowrap text-[12px] tabular-nums text-faint sm:inline">
                       {totalRows.toLocaleString()} {totalRows === 1 ? 'row' : 'rows'}
                       {columns.length > 0 && (
                         <>
@@ -1589,7 +1589,7 @@ export default function ProjectDatabasePage() {
                       <span className={`inline-flex h-[26px] items-center gap-1.5 ${R_TAG} border ${EDGE} bg-white/[0.03] pl-2 pr-1 text-[12px] text-zinc-400`}>
                         <ArrowUpDown className="h-3 w-3 text-zinc-500" />
                         Sorted by <span className="font-mono text-zinc-200">{sortColumn}</span>
-                        <span className="text-zinc-500">{sortDirection === 'asc' ? 'ascending' : 'descending'}</span>
+                        <span className="text-faint">{sortDirection === 'asc' ? 'ascending' : 'descending'}</span>
                         <button
                           type="button"
                           onClick={() => handleSort(sortColumn)}
@@ -1626,7 +1626,7 @@ export default function ProjectDatabasePage() {
                       {loading && rows.length === 0 ? (
                         <div className="flex h-full flex-col items-center justify-center gap-2">
                           <Spinner className="h-4 w-4 text-zinc-500" />
-                          <p className="text-[12.5px] text-zinc-500">Loading rows…</p>
+                          <p className="text-[12.5px] text-faint">Loading rows…</p>
                         </div>
                       ) : rows.length === 0 && committedSearch ? (
                         <EmptyState
@@ -1672,7 +1672,7 @@ export default function ProjectDatabasePage() {
                                   reading stays identifiable when scrolled wide. */}
                               <th
                                 scope="col"
-                                className={`sticky left-0 z-30 w-[56px] border-b border-r ${RULE} ${KIT.gridHead} px-3 py-2 text-right text-[12px] font-normal text-zinc-600`}
+                                className={`sticky left-0 z-30 w-[56px] border-b border-r ${RULE} ${KIT.gridHead} px-3 py-2 text-right text-[12px] font-normal text-faint`}
                               >
                                 <span className="sr-only">Row</span>#
                               </th>
@@ -1720,7 +1720,7 @@ export default function ProjectDatabasePage() {
                                           <ArrowUpDown className="h-3 w-3 text-zinc-600 opacity-0 transition-opacity group-hover/th:opacity-100" />
                                         )}
                                       </span>
-                                      <span className="font-mono text-[11px] text-zinc-600">{col.type}</span>
+                                      <span className="font-mono text-[11px] text-faint">{col.type}</span>
                                     </button>
                                   </th>
                                 )
@@ -1740,7 +1740,7 @@ export default function ProjectDatabasePage() {
                                 className={`group/row cursor-pointer transition-colors ${KIT.rowHoverOn} ${FOCUS_INSET}`}
                               >
                                 <td
-                                  className={`sticky left-0 z-10 border-b border-r border-white/[0.04] ${KIT.bg} px-3 py-[9px] text-right text-[12px] tabular-nums text-zinc-600 transition-colors ${KIT.rowHoverGroup} group-hover/row:text-zinc-400`}
+                                  className={`sticky left-0 z-10 border-b border-r border-white/[0.04] ${KIT.bg} px-3 py-[9px] text-right text-[12px] tabular-nums text-faint transition-colors ${KIT.rowHoverGroup} group-hover/row:text-zinc-400`}
                                 >
                                   {(currentPage - 1) * PAGE_SIZE + idx + 1}
                                 </td>
@@ -1761,7 +1761,7 @@ export default function ProjectDatabasePage() {
                                       <span
                                         title={displayValue}
                                         className={`block truncate font-mono text-[12px] ${
-                                          isNull ? 'italic text-zinc-600' : numeric ? 'tabular-nums text-zinc-200' : 'text-zinc-300'
+                                          isNull ? 'italic text-faint' : numeric ? 'tabular-nums text-zinc-200' : 'text-zinc-300'
                                         }`}
                                       >
                                         {displayValue}
@@ -1779,9 +1779,9 @@ export default function ProjectDatabasePage() {
                     {/* Pagination footer: only when there is at least one row */}
                     {totalRows > 0 && (
                       <div className={`flex h-[40px] flex-shrink-0 items-center justify-between gap-3 border-t ${RULE} px-3 sm:px-5`}>
-                        <span className="truncate text-[12px] tabular-nums text-zinc-500">
+                        <span className="truncate text-[12px] tabular-nums text-faint">
                           {`${(currentPage - 1) * PAGE_SIZE + 1}–${Math.min(currentPage * PAGE_SIZE, totalRows)} of ${totalRows.toLocaleString()}`}
-                          {committedSearch && <span className="ml-1.5 text-zinc-600">matching “{committedSearch}”</span>}
+                          {committedSearch && <span className="ml-1.5 text-faint">matching “{committedSearch}”</span>}
                         </span>
                         {totalPages > 1 && (
                           <div className="flex flex-shrink-0 items-center gap-1">
@@ -1794,7 +1794,7 @@ export default function ProjectDatabasePage() {
                             >
                               Previous
                             </KitButton>
-                            <span className="px-1.5 text-[12px] tabular-nums text-zinc-500">
+                            <span className="px-1.5 text-[12px] tabular-nums text-faint">
                               {currentPage} of {Math.max(1, totalPages)}
                             </span>
                             <KitButton
@@ -1818,7 +1818,7 @@ export default function ProjectDatabasePage() {
                       <div className="mb-3 flex items-center justify-between gap-3">
                         <h3 id="db-columns-title" className="flex items-baseline gap-2">
                           <span className="text-[14px] font-semibold tracking-[-0.01em] text-zinc-100">Columns</span>
-                          <span className="text-[12.5px] tabular-nums text-zinc-500">{columns.length}</span>
+                          <span className="text-[12.5px] tabular-nums text-faint">{columns.length}</span>
                         </h3>
                         <KitButton
                           size="sm"
@@ -1840,12 +1840,12 @@ export default function ProjectDatabasePage() {
                                 <th
                                   key={h}
                                   scope="col"
-                                  className={`border-b ${RULE} px-4 py-2 text-left text-[12px] font-normal text-zinc-500`}
+                                  className={`border-b ${RULE} px-4 py-2 text-left text-[12px] font-normal text-faint`}
                                 >
                                   {h}
                                 </th>
                               ))}
-                              <th scope="col" className={`w-[92px] border-b ${RULE} px-4 py-2 text-right text-[12px] font-normal text-zinc-500`}>
+                              <th scope="col" className={`w-[92px] border-b ${RULE} px-4 py-2 text-right text-[12px] font-normal text-faint`}>
                                 <span className="sr-only">Actions</span>
                               </th>
                             </tr>
@@ -1905,13 +1905,13 @@ export default function ProjectDatabasePage() {
                                   <span className="font-mono text-[12px] text-zinc-400">{col.type}</span>
                                 </td>
                                 <td className="border-b border-white/[0.04] px-4 py-2.5">
-                                  <span className={`text-[12.5px] ${col.nullable ? 'text-zinc-500' : 'text-zinc-300'}`}>
+                                  <span className={`text-[12.5px] ${col.nullable ? 'text-faint' : 'text-zinc-300'}`}>
                                     {col.nullable ? 'Yes' : 'No'}
                                   </span>
                                 </td>
                                 <td className="max-w-[240px] border-b border-white/[0.04] px-4 py-2.5">
                                   {col.default ? (
-                                    <span className="block truncate font-mono text-[12px] text-zinc-500" title={col.default}>
+                                    <span className="block truncate font-mono text-[12px] text-faint" title={col.default}>
                                       {col.default}
                                     </span>
                                   ) : (
@@ -1932,7 +1932,7 @@ export default function ProjectDatabasePage() {
                                 <td className="border-b border-white/[0.04] px-3 py-2 text-right">
                                   {isReservedColumn(col.name) ? (
                                     <span
-                                      className="text-[12px] text-zinc-600"
+                                      className="text-[12px] text-faint"
                                       title="Managed by Backenly. It cannot be renamed or dropped."
                                     >
                                       Managed
@@ -1973,7 +1973,7 @@ export default function ProjectDatabasePage() {
                       <section aria-labelledby="db-indexes-title" className="mt-8">
                         <h3 id="db-indexes-title" className="mb-3 flex items-baseline gap-2">
                           <span className="text-[14px] font-semibold tracking-[-0.01em] text-zinc-100">Indexes</span>
-                          <span className="text-[12.5px] tabular-nums text-zinc-500">{indexes.length}</span>
+                          <span className="text-[12.5px] tabular-nums text-faint">{indexes.length}</span>
                         </h3>
                         <div className={`overflow-x-auto border ${EDGE} ${R_PANEL}`}>
                           <table className="w-full min-w-[480px] border-separate border-spacing-0">
@@ -1983,7 +1983,7 @@ export default function ProjectDatabasePage() {
                                   <th
                                     key={h}
                                     scope="col"
-                                    className={`border-b ${RULE} px-4 py-2 text-left text-[12px] font-normal text-zinc-500`}
+                                    className={`border-b ${RULE} px-4 py-2 text-left text-[12px] font-normal text-faint`}
                                   >
                                     {h}
                                   </th>
@@ -2090,7 +2090,7 @@ export default function ProjectDatabasePage() {
           <span className="font-mono text-[12.5px] text-zinc-400">
             {selectedTable}
             {rowPkValue(editingRow) !== undefined && rowPkValue(editingRow) !== null && (
-              <span className="text-zinc-600"> · id {String(rowPkValue(editingRow))}</span>
+              <span className="text-faint"> · id {String(rowPkValue(editingRow))}</span>
             )}
           </span>
         }
@@ -2339,7 +2339,7 @@ export default function ProjectDatabasePage() {
               className="font-mono"
             />
           </KitField>
-          <KitField label={<>Description <span className="font-normal text-zinc-500">(optional)</span></>}>
+          <KitField label={<>Description <span className="font-normal text-faint">(optional)</span></>}>
             <KitInput
               value={newTableDescription}
               onChange={(e) => setNewTableDescription(e.target.value)}
@@ -2439,10 +2439,10 @@ function RowField({
   const label = (
     <span className="flex items-baseline gap-2">
       <span className="font-mono text-zinc-200">{column.name}</span>
-      <span className="font-mono text-[11.5px] font-normal text-zinc-600">{column.type}</span>
-      {readOnly && <span className="text-[11.5px] font-normal text-zinc-600">read-only</span>}
+      <span className="font-mono text-[11.5px] font-normal text-faint">{column.type}</span>
+      {readOnly && <span className="text-[11.5px] font-normal text-faint">read-only</span>}
       {required && (
-        <span className="text-[11.5px] font-normal text-zinc-500" aria-label="required">
+        <span className="text-[11.5px] font-normal text-faint" aria-label="required">
           required
         </span>
       )}
@@ -2452,8 +2452,8 @@ function RowField({
   if (readOnly) {
     return (
       <KitField label={label}>
-        <div className={`min-h-[32px] break-all ${R_CONTROL} border border-white/[0.05] bg-white/[0.02] px-3 py-1.5 font-mono text-[12px] text-zinc-500`}>
-          {value === '' ? <span className="italic text-zinc-600">null</span> : value}
+        <div className={`min-h-[32px] break-all ${R_CONTROL} border border-white/[0.05] bg-white/[0.02] px-3 py-1.5 font-mono text-[12px] text-faint`}>
+          {value === '' ? <span className="italic text-faint">null</span> : value}
         </div>
       </KitField>
     )

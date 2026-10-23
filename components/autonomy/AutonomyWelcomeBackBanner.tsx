@@ -105,7 +105,7 @@ export default function AutonomyWelcomeBackBanner() {
                   {data.examples.map(e => (
                     <li key={e.id} className="rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2">
                       <div className="text-[12.5px] font-medium text-zinc-200">{e.what}</div>
-                      <div className="mt-0.5 text-[12.5px] leading-relaxed text-zinc-500">Because {e.why}</div>
+                      <div className="mt-0.5 text-[12.5px] leading-relaxed text-faint">Because {e.why}</div>
                     </li>
                   ))}
                 </ul>

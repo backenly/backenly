@@ -429,7 +429,7 @@ export function AuthConfiguration() {
               </span>
               <div className="min-w-0 flex-1">
                 <p className="text-[13px] font-medium text-zinc-100">Email and password</p>
-                <p className="mt-0.5 text-[12.5px] leading-[18px] text-zinc-500">
+                <p className="mt-0.5 text-[12.5px] leading-[18px] text-faint">
                   {/* "Active" only once auth is genuinely on: the agent enabled
                       it, or real end users exist. A bare jwtSecret (seeded at
                       creation) is not activation. */}
@@ -452,7 +452,7 @@ export function AuthConfiguration() {
                   </span>
                   <div className="min-w-0 flex-1">
                     <p className="text-[13px] font-medium text-zinc-100">{meta.name}</p>
-                    <p className="mt-0.5 text-[12.5px] leading-[18px] text-zinc-500">{meta.tagline}</p>
+                    <p className="mt-0.5 text-[12.5px] leading-[18px] text-faint">{meta.tagline}</p>
                   </div>
                   <div className="flex flex-shrink-0 items-center gap-3">
                     {enabled && <StatusDot tone="operational" label="Connected" className="hidden sm:inline-flex" />}
@@ -477,7 +477,7 @@ export function AuthConfiguration() {
               )}
             </div>
             {recent.length === 0 ? (
-              <p className="rounded-[10px] border border-white/[0.07] bg-[#111214] px-4 py-5 text-[12.5px] leading-[19px] text-zinc-500">
+              <p className="rounded-[10px] border border-white/[0.07] bg-[#111214] px-4 py-5 text-[12.5px] leading-[19px] text-faint">
                 No one has signed up yet. The first account created from your app appears here straight away.
               </p>
             ) : (
@@ -489,7 +489,7 @@ export function AuthConfiguration() {
                     </span>
                     <span className="min-w-0 flex-1">
                       <span className="block truncate text-[13px] text-zinc-200">{u.email}</span>
-                      <span className="mt-0.5 flex items-center gap-3 text-[12px] tabular-nums text-zinc-500">
+                      <span className="mt-0.5 flex items-center gap-3 text-[12px] tabular-nums text-faint">
                         <ProviderLabel provider={u.provider} />
                         <span className="flex-shrink-0">{timeAgo(u.createdAt)}</span>
                       </span>
@@ -513,7 +513,7 @@ export function AuthConfiguration() {
                 ['Sign-out', 'Revokes the session on the server'],
               ].map(([label, value]) => (
                 <div key={label} className="flex items-baseline justify-between gap-4 px-4 py-2.5">
-                  <dt className="flex-shrink-0 text-[12.5px] text-zinc-500">{label}</dt>
+                  <dt className="flex-shrink-0 text-[12.5px] text-faint">{label}</dt>
                   <dd className="min-w-0 text-right text-[12.5px] text-zinc-300">{value}</dd>
                 </div>
               ))}
@@ -532,7 +532,7 @@ export function AuthConfiguration() {
         footer={
           modalProvider && modalMeta ? (
             <>
-              <span className="mr-auto hidden items-center gap-1.5 text-[12.5px] text-zinc-500 sm:inline-flex">
+              <span className="mr-auto hidden items-center gap-1.5 text-[12.5px] text-faint sm:inline-flex">
                 <KeyRound className="h-3.5 w-3.5" /> Encrypted at rest
               </span>
               <KitButton variant="ghost" onClick={() => setShowWorkspaceOAuthModal(null)}>
@@ -573,7 +573,7 @@ export function AuthConfiguration() {
               {apiBaseUrl ? (
                 <CopyField value={callbackUrl(modalProvider)} />
               ) : (
-                <span className="text-zinc-500">The project&apos;s address is not available. Reload the page to try again.</span>
+                <span className="text-faint">The project&apos;s address is not available. Reload the page to try again.</span>
               )}
             </OAuthStep>
             <OAuthStep n={3} title={`Paste the credentials ${modalMeta.name} gives you`}>

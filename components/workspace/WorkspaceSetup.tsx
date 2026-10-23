@@ -82,7 +82,7 @@ export function WorkspaceSetup({ projectId, projectName }: { projectId: string; 
               {projectName ?? 'Untitled project'}
             </h1>
             {project && (
-              <p className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12.5px] text-zinc-500">
+              <p className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12.5px] text-faint">
                 <StatusDot tone="paused" label="Not published" />
                 {CLOUD_CONTROL_PLANE && <span>{regionLabel(project.region)}</span>}
                 <span className="tabular-nums">Created {ago(String(project.createdAt))}</span>
@@ -91,7 +91,7 @@ export function WorkspaceSetup({ projectId, projectName }: { projectId: string; 
           </div>
           {apiBaseUrl && (
             <div className="w-full min-w-0 lg:w-[360px]">
-              <p className="mb-1.5 text-[12px] text-zinc-500">API endpoint</p>
+              <p className="mb-1.5 text-[12px] text-faint">API endpoint</p>
               <CopyField value={apiBaseUrl} />
             </div>
           )}
@@ -187,7 +187,7 @@ export function WorkspaceSetup({ projectId, projectName }: { projectId: string; 
                   strokeWidth={1.75}
                 />
               </span>
-              <span className="text-[13px] leading-[20px] text-zinc-500 [text-wrap:pretty]">{item.body}</span>
+              <span className="text-[13px] leading-[20px] text-faint [text-wrap:pretty]">{item.body}</span>
             </Link>
           ))}
         </div>
@@ -225,7 +225,7 @@ function Step({
             ? 'bg-emerald-400/15 text-emerald-300'
             : state === 'current'
             ? 'border border-white/[0.28] bg-[#0f1012] text-zinc-50'
-            : 'border border-white/[0.10] bg-[#0f1012] text-zinc-500'
+            : 'border border-white/[0.10] bg-[#0f1012] text-faint'
         }`}
       >
         {state === 'done' ? <Check className="h-3.5 w-3.5" strokeWidth={2.5} /> : n}

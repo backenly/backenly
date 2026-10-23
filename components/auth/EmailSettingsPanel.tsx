@@ -295,7 +295,7 @@ export function EmailSettingsPanel({ projectId }: { projectId: string }) {
 
   if (loading) {
     return (
-      <div className="mx-auto flex w-full max-w-[1200px] items-center gap-2 px-4 py-8 text-[13px] text-zinc-500 sm:px-6 lg:px-8">
+      <div className="mx-auto flex w-full max-w-[1200px] items-center gap-2 px-4 py-8 text-[13px] text-faint sm:px-6 lg:px-8">
         <Spinner />
         Loading mail settings…
       </div>
@@ -415,7 +415,7 @@ export function EmailSettingsPanel({ projectId }: { projectId: string }) {
             />
             <span className="min-w-0">
               <span className="block text-[13px] font-medium text-zinc-100">Send with these settings</span>
-              <span className="mt-0.5 block text-[12.5px] leading-[18px] text-zinc-500">
+              <span className="mt-0.5 block text-[12.5px] leading-[18px] text-faint">
                 {smtp?.deploymentFallbackAvailable
                   ? 'Unchecked, auth emails fall back to the deployment’s SMTP.'
                   : 'Unchecked, auth emails are only logged to the server console.'}
@@ -506,7 +506,7 @@ export function EmailSettingsPanel({ projectId }: { projectId: string }) {
                 />
                 <span className="min-w-0">
                   <span className="block text-[13px] font-medium text-zinc-100">Require a verified email to sign in</span>
-                  <span className="mt-0.5 block text-[12.5px] leading-[18px] text-zinc-500">
+                  <span className="mt-0.5 block text-[12.5px] leading-[18px] text-faint">
                     {smtp?.activeSource === 'none' && !policy.requireEmailVerification
                       ? 'Configure and test outgoing mail first: without a sender, every new user would wait for an email that never arrives.'
                       : 'Users who already exist are recorded as verified when this is turned on, so none of them are locked out.'}
@@ -522,7 +522,7 @@ export function EmailSettingsPanel({ projectId }: { projectId: string }) {
                 />
                 <span className="min-w-0">
                   <span className="block text-[13px] font-medium text-zinc-100">Offer magic-link sign-in</span>
-                  <span className="mt-0.5 block text-[12.5px] leading-[18px] text-zinc-500">
+                  <span className="mt-0.5 block text-[12.5px] leading-[18px] text-faint">
                     Passwordless sign-in by an emailed link. Off, the magic-link endpoint refuses.
                   </span>
                 </span>
@@ -557,7 +557,7 @@ export function EmailSettingsPanel({ projectId }: { projectId: string }) {
               <li key={t.kind} className="flex flex-wrap items-center gap-3 px-5 py-3.5 sm:px-6">
                 <div className="min-w-0 flex-1">
                   <p className="text-[13px] font-medium text-zinc-100">{t.title}</p>
-                  <p className="mt-0.5 text-[12.5px] leading-[18px] text-zinc-500">{t.sends}</p>
+                  <p className="mt-0.5 text-[12.5px] leading-[18px] text-faint">{t.sends}</p>
                 </div>
                 <StatusDot tone={t.customised ? 'beta' : 'neutral'} label={t.customised ? 'Customised' : 'Built-in'} />
                 <div className="flex items-center gap-1">
@@ -717,7 +717,7 @@ function TemplateEditor({
 
         {preview && (
           <div>
-            <p className="mb-2 text-[12.5px] text-zinc-500">
+            <p className="mb-2 text-[12.5px] text-faint">
               Preview. Subject: <span className="text-zinc-200">{preview.subject}</span>
             </p>
             {/* Sandboxed with NO tokens: no scripts, no same-origin. Operator

@@ -160,10 +160,10 @@ export function MonitoringWorkbench({ projectId }: { projectId: string }) {
     // Against a period with almost no traffic (a project in its first days)
     // the percentage is noise: "+36397% vs previous 7 days".
     if (change >= 1000) {
-      return <span className="text-zinc-500">Up from almost none the previous {rangeLabel}</span>
+      return <span className="text-faint">Up from almost none the previous {rangeLabel}</span>
     }
     return (
-      <span className={bad ? 'text-amber-200/80' : 'text-zinc-500'}>
+      <span className={bad ? 'text-amber-200/80' : 'text-faint'}>
         {up ? '+' : '−'}
         {Math.abs(change).toFixed(0)}% vs previous {rangeLabel}
       </span>
@@ -184,7 +184,7 @@ export function MonitoringWorkbench({ projectId }: { projectId: string }) {
           )
         }
       >
-        <span className="hidden text-[12px] text-zinc-600 md:inline">Refreshes every 30s</span>
+        <span className="hidden text-[12px] text-faint md:inline">Refreshes every 30s</span>
         <Segmented<TimeRange>
           label="Time range"
           size="sm"
@@ -467,7 +467,7 @@ export function MonitoringWorkbench({ projectId }: { projectId: string }) {
                         <td className={`${TD} text-right text-[12.5px] tabular-nums ${req.latency > 1000 ? 'text-amber-200' : 'text-zinc-300'}`}>
                           {req.latency} ms
                         </td>
-                        <td className={`${TD} text-right text-[12.5px] tabular-nums text-zinc-500`}>
+                        <td className={`${TD} text-right text-[12.5px] tabular-nums text-faint`}>
                           <time dateTime={new Date(req.timestamp).toISOString()} title={new Date(req.timestamp).toLocaleString()}>
                             {new Date(req.timestamp).toLocaleString(undefined, {
                               month: 'short',
@@ -501,7 +501,7 @@ export function MonitoringWorkbench({ projectId }: { projectId: string }) {
           <section>
             <h3 className="sr-only">System events</h3>
             {systemEvents.length === 0 ? (
-              <p className="px-4 pb-4 pt-1 text-[12.5px] leading-[19px] text-zinc-500">
+              <p className="px-4 pb-4 pt-1 text-[12.5px] leading-[19px] text-faint">
                 Deploys, incidents and significant changes land here as they happen.
               </p>
             ) : (
@@ -512,9 +512,9 @@ export function MonitoringWorkbench({ projectId }: { projectId: string }) {
                     <div className="min-w-0 flex-1">
                       <p className="text-[13px] leading-[19px] text-zinc-200 [overflow-wrap:break-word]">
                         {humanizeEvent(event.message)}
-                        {repeats > 1 && <span className="ml-1.5 text-[12px] tabular-nums text-zinc-500">×{repeats}</span>}
+                        {repeats > 1 && <span className="ml-1.5 text-[12px] tabular-nums text-faint">×{repeats}</span>}
                       </p>
-                      <p className="mt-0.5 text-[12px] tabular-nums text-zinc-500">
+                      <p className="mt-0.5 text-[12px] tabular-nums text-faint">
                         {new Date(event.timestamp).toLocaleString(undefined, {
                           month: 'short',
                           day: 'numeric',
@@ -557,7 +557,7 @@ function collapseEvents(events: any[]): Array<{ event: any; repeats: number }> {
   return out
 }
 
-const TH = 'h-[36px] whitespace-nowrap border-b border-white/[0.06] px-3 text-[12px] font-medium text-zinc-500'
+const TH = 'h-[36px] whitespace-nowrap border-b border-white/[0.06] px-3 text-[12px] font-medium text-faint'
 const TD = 'h-[36px] whitespace-nowrap border-b border-white/[0.04] px-3'
 
 const METHOD_TONE: Record<string, string> = {
@@ -587,9 +587,9 @@ function PaneHeader({ title, count, aside }: { title: string; count?: string; as
     <div className="flex h-[44px] flex-shrink-0 items-center justify-between gap-3 border-b border-white/[0.06] px-4">
       <div className="flex min-w-0 items-center gap-3">
         <h2 className="text-[13px] font-medium text-zinc-100">{title}</h2>
-        {count && <span className="whitespace-nowrap text-[12px] tabular-nums text-zinc-500">{count}</span>}
+        {count && <span className="whitespace-nowrap text-[12px] tabular-nums text-faint">{count}</span>}
       </div>
-      {aside && <span className="flex-shrink-0 text-[12px] text-zinc-600">{aside}</span>}
+      {aside && <span className="flex-shrink-0 text-[12px] text-faint">{aside}</span>}
     </div>
   )
 }
@@ -608,17 +608,17 @@ function Metric({
   title?: string
 }) {
   const valueTone = value === 'No data'
-    ? 'text-zinc-600'
+    ? 'text-faint'
     : tone === 'critical' ? 'text-rose-300' : tone === 'warning' ? 'text-amber-200' : 'text-zinc-50'
   return (
     <div className="min-w-0 bg-[#0c0d0f] px-4 py-3 sm:px-5" title={title}>
-      <p className="truncate text-[12px] text-zinc-500">{label}</p>
+      <p className="truncate text-[12px] text-faint">{label}</p>
       {value == null ? (
         <span className="mt-2 block h-[22px] w-16 animate-pulse rounded-[5px] bg-white/[0.06]" />
       ) : (
         <p className={`mt-1 truncate text-[20px] font-semibold leading-[28px] tracking-[-0.02em] tabular-nums ${valueTone}`}>{value}</p>
       )}
-      <p className="mt-0.5 h-[16px] truncate text-[12px] leading-[16px] text-zinc-500">{hint}</p>
+      <p className="mt-0.5 h-[16px] truncate text-[12px] leading-[16px] text-faint">{hint}</p>
     </div>
   )
 }
@@ -665,17 +665,17 @@ function Chart({
       <div className="mb-3 flex items-start justify-between gap-3">
         <div className="min-w-0">
           <h3 className="text-[13px] font-medium text-zinc-100">{title}</h3>
-          <p className="mt-0.5 text-[12px] text-zinc-500">{subtitle}</p>
+          <p className="mt-0.5 text-[12px] text-faint">{subtitle}</p>
         </div>
         <div className="flex-shrink-0 text-right">
           {latest != null && (
             <p className="text-[13px] font-medium tabular-nums text-zinc-100">
               {Math.round(latest).toLocaleString()}
-              <span className="text-zinc-500">{unit}</span>
+              <span className="text-faint">{unit}</span>
             </p>
           )}
           {threshold ? (
-            <p className={`mt-0.5 text-[12px] tabular-nums ${exceedsThreshold ? 'text-amber-200' : 'text-zinc-500'}`}>
+            <p className={`mt-0.5 text-[12px] tabular-nums ${exceedsThreshold ? 'text-amber-200' : 'text-faint'}`}>
               {thresholdLabel} {threshold}
               {unit}
             </p>
@@ -714,7 +714,7 @@ function Chart({
             vectorEffect="non-scaling-stroke"
           />
         </svg>
-        <div className="pointer-events-none absolute bottom-0 left-0 top-0 flex flex-col justify-between text-[11px] tabular-nums text-zinc-600">
+        <div className="pointer-events-none absolute bottom-0 left-0 top-0 flex flex-col justify-between text-[11px] tabular-nums text-faint">
           <span>{maxValue.toFixed(0)}</span>
           <span>{minValue.toFixed(0)}</span>
         </div>

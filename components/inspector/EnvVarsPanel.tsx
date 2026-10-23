@@ -114,11 +114,11 @@ export function EnvVarsPanel({ projectId }: EnvVarsPanelProps) {
       <div className="px-4 py-3 border-b border-white/[0.06] flex items-center justify-between">
         <div className="flex items-center gap-2">
           <KeyRound className="w-3 h-3 text-zinc-500" />
-          <p className="text-[12px] font-medium text-zinc-500">
+          <p className="text-[12px] font-medium text-faint">
             Project env vars
           </p>
           {vars.length > 0 && (
-            <span className="text-[12px] text-zinc-500 tabular-nums">{vars.length}</span>
+            <span className="text-[12px] text-faint tabular-nums">{vars.length}</span>
           )}
         </div>
         {!adding && (
@@ -136,7 +136,7 @@ export function EnvVarsPanel({ projectId }: EnvVarsPanelProps) {
       {adding && (
         <div className="px-4 py-4 border-b border-white/[0.06] space-y-3">
           <div>
-            <label className="block text-[12px] font-medium text-zinc-500 mb-1.5">Key</label>
+            <label className="block text-[12px] font-medium text-faint mb-1.5">Key</label>
             <KitInput
               type="text"
               value={keyInput}
@@ -147,7 +147,7 @@ export function EnvVarsPanel({ projectId }: EnvVarsPanelProps) {
             />
           </div>
           <div>
-            <label className="block text-[12px] font-medium text-zinc-500 mb-1.5">Value</label>
+            <label className="block text-[12px] font-medium text-faint mb-1.5">Value</label>
             <div className="relative">
               <KitInput
                 type={showValue ? 'text' : 'password'}
@@ -159,14 +159,14 @@ export function EnvVarsPanel({ projectId }: EnvVarsPanelProps) {
               <button
                 type="button"
                 onClick={() => setShowValue((s) => !s)}
-                className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-zinc-600 hover:text-zinc-300"
+                className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-zinc-500 hover:text-zinc-300"
               >
                 {showValue ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
               </button>
             </div>
           </div>
           <div>
-            <label className="block text-[12px] font-medium text-zinc-500 mb-1.5">Description (optional)</label>
+            <label className="block text-[12px] font-medium text-faint mb-1.5">Description (optional)</label>
             <KitInput
               type="text"
               value={descInput}
@@ -195,9 +195,9 @@ export function EnvVarsPanel({ projectId }: EnvVarsPanelProps) {
       {/* List */}
       <div className="px-1 py-1">
         {loading ? (
-          <p className="px-3 py-3 text-[12.5px] text-zinc-600">Loading…</p>
+          <p className="px-3 py-3 text-[12.5px] text-faint">Loading…</p>
         ) : vars.length === 0 ? (
-          <div className="px-3 py-3.5 text-[12px] text-zinc-500 leading-5">
+          <div className="px-3 py-3.5 text-[12px] text-faint leading-5">
             None yet. Save secrets like Stripe webhook signing keys or third-party API tokens here. They&apos;re encrypted at rest and available inside AI functions as <code className="font-mono text-violet-300">ctx.env.KEY</code>.
           </div>
         ) : (
@@ -210,10 +210,10 @@ export function EnvVarsPanel({ projectId }: EnvVarsPanelProps) {
                 <div className="min-w-0 flex-1 mr-3">
                   <div className="flex items-center gap-2.5">
                     <span className="text-[12px] font-mono text-zinc-200 truncate">{v.key}</span>
-                    <span className="font-mono text-[12px] text-zinc-600 flex-shrink-0">{v.preview}</span>
+                    <span className="font-mono text-[12px] text-faint flex-shrink-0">{v.preview}</span>
                   </div>
                   {v.description && (
-                    <p className="text-[12px] text-zinc-500 mt-0.5 truncate">{v.description}</p>
+                    <p className="text-[12px] text-faint mt-0.5 truncate">{v.description}</p>
                   )}
                 </div>
                 <button

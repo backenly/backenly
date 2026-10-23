@@ -280,7 +280,7 @@ export function DetectedFindingsPanel({
         <span className="text-[12px] font-medium tabular-nums text-violet-300">
           {openTotal}
           {groups.length < openTotal && (
-            <span className="ml-1.5 font-normal text-zinc-500">
+            <span className="ml-1.5 font-normal text-faint">
               in {groups.length} {groups.length === 1 ? 'issue' : 'issues'}
             </span>
           )}
@@ -295,7 +295,7 @@ export function DetectedFindingsPanel({
       </div>
 
       <div className="border-b border-white/[0.06] px-5 py-2.5">
-        <p className="text-[12.5px] leading-relaxed text-zinc-500">{dispositionCopy(level)}</p>
+        <p className="text-[12.5px] leading-relaxed text-faint">{dispositionCopy(level)}</p>
       </div>
 
       <ul className="divide-y divide-white/[0.04]">
@@ -314,7 +314,7 @@ export function DetectedFindingsPanel({
       {/* The preview cap is stated rather than hidden: a project over 50
           actionable rows would otherwise look like it had exactly 50. */}
       {openTotal > openFindings.length && (
-        <p className="border-t border-white/[0.06] px-5 py-2.5 text-[12px] tabular-nums text-zinc-500">
+        <p className="border-t border-white/[0.06] px-5 py-2.5 text-[12px] tabular-nums text-faint">
           Showing {openFindings.length} of {openTotal}. The rest appear as these clear.
         </p>
       )}
@@ -390,7 +390,7 @@ function DetectedRow({
               <button
                 onClick={() => setExpanded(v => !v)}
                 aria-expanded={expanded}
-                className="inline-flex items-center gap-1 text-[12.5px] font-medium text-zinc-500 transition-colors hover:text-zinc-300"
+                className="inline-flex items-center gap-1 text-[12.5px] font-medium text-faint transition-colors hover:text-zinc-300"
               >
                 {g.members.length} findings, one cause
                 <ChevronDown className={`size-3 transition-transform ${expanded ? 'rotate-180' : ''}`} />
@@ -398,7 +398,7 @@ function DetectedRow({
               {expanded && (
                 <ul className="mt-2 space-y-1 border-l border-white/[0.08] pl-3">
                   {g.members.map((m, i) => (
-                    <li key={m.id} className="font-mono text-[12px] leading-relaxed text-zinc-500">
+                    <li key={m.id} className="font-mono text-[12px] leading-relaxed text-faint">
                       {g.subjects[i] ?? m.type}
                     </li>
                   ))}

@@ -242,7 +242,7 @@ export function BranchesPanel({ projectId }: { projectId: string }) {
           <>
             <Tag tone="violet">Beta</Tag>
             {!loading && (
-              <span className="text-[13px] tabular-nums text-zinc-500">
+              <span className="text-[13px] tabular-nums text-faint">
                 {active.length} of {BRANCH_LIMIT} active
               </span>
             )}
@@ -269,7 +269,7 @@ export function BranchesPanel({ projectId }: { projectId: string }) {
             <p id="protected-production" className="text-[13px] font-medium leading-[20px] text-zinc-100">
               Protected production
             </p>
-            <p className="mt-0.5 max-w-[72ch] text-[12.5px] leading-[18px] text-zinc-500 [text-wrap:pretty]">
+            <p className="mt-0.5 max-w-[72ch] text-[12.5px] leading-[18px] text-faint [text-wrap:pretty]">
               {protectedProduction
                 ? 'Agents change the schema on a preview branch, and production gets it only through a merge you approve. Your own changes in the dashboard are not affected.'
                 : 'Agents can change production\'s schema directly. Turn on to require a branch and your approval for every agent schema change.'}
@@ -342,7 +342,7 @@ export function BranchesPanel({ projectId }: { projectId: string }) {
           />
           <KitCardBody>
             {openDiff.diff.identical ? (
-              <p className="text-[13px] text-zinc-500">No schema changes on this branch.</p>
+              <p className="text-[13px] text-faint">No schema changes on this branch.</p>
             ) : (
               <div className="space-y-4">
                 {openDiff.diff.addedTables.length > 0 && (
@@ -424,7 +424,7 @@ export function BranchesPanel({ projectId }: { projectId: string }) {
           title={
             <span className="flex items-baseline gap-2">
               Active branches
-              {!loading && <span className="text-[12px] font-normal tabular-nums text-zinc-500">{active.length}</span>}
+              {!loading && <span className="text-[12px] font-normal tabular-nums text-faint">{active.length}</span>}
             </span>
           }
           actions={<IconButton icon={RefreshCw} label="Refresh branches" onClick={load} />}
@@ -453,7 +453,7 @@ export function BranchesPanel({ projectId }: { projectId: string }) {
                 <GitBranch className="h-4 w-4 flex-shrink-0 text-zinc-500" strokeWidth={1.75} />
                 <div className="min-w-0 flex-1">
                   <p className="truncate font-mono text-[13px] text-zinc-100">{b.name}</p>
-                  <p className="text-[12px] text-zinc-500">Created {timeAgo(b.createdAt)}</p>
+                  <p className="text-[12px] text-faint">Created {timeAgo(b.createdAt)}</p>
                 </div>
                 <div className="flex flex-shrink-0 items-center gap-1.5">
                   {b.preview && (
@@ -489,7 +489,7 @@ export function BranchesPanel({ projectId }: { projectId: string }) {
             title={
               <span className="flex items-baseline gap-2">
                 Merged
-                <span className="text-[12px] font-normal tabular-nums text-zinc-500">{merged.length}</span>
+                <span className="text-[12px] font-normal tabular-nums text-faint">{merged.length}</span>
               </span>
             }
           />
@@ -498,7 +498,7 @@ export function BranchesPanel({ projectId }: { projectId: string }) {
               <li key={b.id} className="flex items-center gap-3 px-4 py-2.5">
                 <GitBranch className="h-4 w-4 flex-shrink-0 text-zinc-600" strokeWidth={1.75} />
                 <p className="min-w-0 flex-1 truncate font-mono text-[13px] text-zinc-400">{b.name}</p>
-                <span className="text-[12px] text-zinc-500">
+                <span className="text-[12px] text-faint">
                   Merged {b.mergedAt ? timeAgo(b.mergedAt) : ''}
                 </span>
               </li>
@@ -563,7 +563,7 @@ export function BranchesPanel({ projectId }: { projectId: string }) {
             />
             <span className="min-w-0">
               <span className="block text-[13px] font-medium text-zinc-100">Copy production rows</span>
-              <span className="mt-0.5 block text-[12.5px] leading-[18px] text-zinc-500">
+              <span className="mt-0.5 block text-[12.5px] leading-[18px] text-faint">
                 Only to reproduce a problem that depends on real data: the copy includes your end users&apos; records,
                 and anyone holding a key for this branch can read them.
               </span>

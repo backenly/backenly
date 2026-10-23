@@ -181,7 +181,7 @@ export function DirectDatabasePanel({ projectId }: { projectId: string }) {
             actions={has('READ_ONLY') ? <KitBadge tone="operational">Active</KitBadge> : undefined}
           />
           <KitCardBody className="space-y-3">
-            <p className="text-[12px] leading-relaxed text-zinc-500">
+            <p className="text-[12px] leading-relaxed text-faint">
               SELECT-only role scoped to this project&apos;s schema: inspect, run{' '}
               <span className="font-mono text-[12px]">EXPLAIN</span>, take backups. It structurally cannot write.
             </p>
@@ -211,7 +211,7 @@ export function DirectDatabasePanel({ projectId }: { projectId: string }) {
             actions={has('READ_WRITE') ? <KitBadge tone="operational">Active</KitBadge> : undefined}
           />
           <KitCardBody className="space-y-3">
-            <p className="text-[12px] leading-relaxed text-zinc-500">
+            <p className="text-[12px] leading-relaxed text-faint">
               Full DML + in-schema DDL from your own tools. Schema changes are{' '}
               <span className="text-zinc-300">observed, not blocked</span>. Autonomy asks you before it adopts them
               into your APIs.
@@ -355,7 +355,7 @@ function CredentialDetails({
         </button>
       </div>
 
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px] font-mono text-zinc-600">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px] font-mono text-faint">
         <span>{c.roleName}</span>
         <span>{c.host}:{c.port}/{c.database}</span>
         {c.rotatedAt && <span className="font-sans">Rotated {formatDay(c.rotatedAt)}</span>}

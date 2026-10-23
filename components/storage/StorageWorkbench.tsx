@@ -52,7 +52,7 @@ const ALL_BUCKETS = '__all__'
 /** Rows fetched per page — the route clamps at 500. */
 const FILE_PAGE_SIZE = 200
 
-const TH_BASE = 'h-[36px] whitespace-nowrap border-b border-white/[0.06] px-3 text-[12px] font-medium text-zinc-500'
+const TH_BASE = 'h-[36px] whitespace-nowrap border-b border-white/[0.06] px-3 text-[12px] font-medium text-faint'
 const TH = `${TH_BASE} text-left`
 const TD = 'h-[40px] whitespace-nowrap border-b border-white/[0.04] px-3'
 
@@ -378,7 +378,7 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
         <div className="hidden items-center gap-2.5 sm:flex" title={unlimitedStorage ? 'This deployment sets no storage limit' : undefined}>
           <span className="text-[12.5px] tabular-nums text-zinc-400">
             {formatFileSize(totalStorage)}
-            <span className="text-zinc-600">{unlimitedStorage ? ' used, no limit' : ` of ${formatFileSize(maxStorage)}`}</span>
+            <span className="text-faint">{unlimitedStorage ? ' used, no limit' : ` of ${formatFileSize(maxStorage)}`}</span>
           </span>
           {!unlimitedStorage && (
             <>
@@ -399,7 +399,7 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
               </div>
               <span
                 className={`text-[12.5px] tabular-nums ${
-                  isStorageCritical ? 'text-rose-300' : isStorageWarning ? 'text-amber-200' : 'text-zinc-500'
+                  isStorageCritical ? 'text-rose-300' : isStorageWarning ? 'text-amber-200' : 'text-faint'
                 }`}
               >
                 {storagePercentage.toFixed(storagePercentage < 10 ? 1 : 0)}%
@@ -434,7 +434,7 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
             actions={
               <button
                 onClick={() => setActionError(null)}
-                className={`rounded-[5px] text-[12px] font-medium text-zinc-500 transition-colors hover:text-zinc-200 ${FOCUS}`}
+                className={`rounded-[5px] text-[12px] font-medium text-faint transition-colors hover:text-zinc-200 ${FOCUS}`}
               >
                 Dismiss
               </button>
@@ -516,11 +516,11 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
                   >
                     <Folder className="h-3.5 w-3.5 flex-shrink-0 text-zinc-500" strokeWidth={1.75} />
                     <span className="flex-1 truncate text-[13px] font-medium">All buckets</span>
-                    <span className="flex-shrink-0 text-[12px] tabular-nums text-zinc-500">{totalFiles}</span>
+                    <span className="flex-shrink-0 text-[12px] tabular-nums text-faint">{totalFiles}</span>
                   </button>
 
                   {visibleBuckets.length === 0 ? (
-                    <p className="px-2.5 py-6 text-center text-[12.5px] leading-relaxed text-zinc-600">
+                    <p className="px-2.5 py-6 text-center text-[12.5px] leading-relaxed text-faint">
                       No bucket matches “{bucketFilter}”.
                     </p>
                   ) : (
@@ -552,14 +552,14 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
                               className={`flex-shrink-0 text-[11.5px] group-hover:opacity-0 group-focus-within:opacity-0 ${
                                 bucket.accessPolicy === 'public_read' || bucket.accessPolicy === 'cdn_cacheable'
                                   ? 'text-amber-200/80'
-                                  : 'text-zinc-600'
+                                  : 'text-faint'
                               }`}
                             >
                               {POLICY_LABELS[(bucket.accessPolicy ?? 'private') as AccessPolicy]?.title ?? bucket.accessPolicy}
                             </span>
                             <span
                               className={`flex-shrink-0 text-[12px] tabular-nums transition-opacity group-hover:opacity-0 group-focus-within:opacity-0 ${
-                                active ? 'text-zinc-400' : 'text-zinc-600'
+                                active ? 'text-zinc-400' : 'text-faint'
                               }`}
                             >
                               {countFor(bucket.name)}
@@ -592,7 +592,7 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
             </div>
 
             {buckets.length > 0 && (
-              <div className="flex h-[36px] flex-shrink-0 items-center border-t border-white/[0.06] px-4 text-[12px] tabular-nums text-zinc-500">
+              <div className="flex h-[36px] flex-shrink-0 items-center border-t border-white/[0.06] px-4 text-[12px] tabular-nums text-faint">
                 {bucketFilter.trim()
                   ? `${visibleBuckets.length} of ${buckets.length}`
                   : `${buckets.length} bucket${buckets.length === 1 ? '' : 's'}`}
@@ -619,7 +619,7 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
                   <h2 className={`truncate text-[13px] font-medium text-zinc-100 ${selectedBucket === ALL_BUCKETS ? '' : 'font-mono'}`}>
                     {selectedBucket === ALL_BUCKETS ? 'All buckets' : selectedBucket}
                   </h2>
-                  <span className="whitespace-nowrap text-[12px] tabular-nums text-zinc-500">
+                  <span className="whitespace-nowrap text-[12px] tabular-nums text-faint">
                     {files.length < serverTotal
                       ? `${filteredFiles.length.toLocaleString()} of ${(selectedBucket === ALL_BUCKETS ? serverTotal : countFor(selectedBucket)).toLocaleString()} loaded`
                       : `${filteredFiles.length.toLocaleString()} ${filteredFiles.length === 1 ? 'object' : 'objects'}`}
@@ -634,7 +634,7 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
                     </button>
                   )}
                   {selectedBucket !== ALL_BUCKETS && (
-                    <span className="hidden sm:inline whitespace-nowrap text-[12px] tabular-nums text-zinc-600">
+                    <span className="hidden sm:inline whitespace-nowrap text-[12px] tabular-nums text-faint">
                       {formatFileSize(toNum(sizeFor(selectedBucket)))}
                     </span>
                   )}
@@ -717,7 +717,7 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
                             aria-checked={selectedFiles.size === filteredFiles.length && filteredFiles.length > 0}
                             aria-label={selectedFiles.size === filteredFiles.length ? 'Deselect all objects' : 'Select all objects'}
                             onClick={handleSelectAll}
-                            className={`rounded-[4px] text-zinc-600 transition-colors hover:text-zinc-300 ${FOCUS_INSET}`}
+                            className={`rounded-[4px] text-zinc-500 transition-colors hover:text-zinc-300 ${FOCUS_INSET}`}
                           >
                             {selectedFiles.size === filteredFiles.length && filteredFiles.length > 0 ? (
                               <CheckSquare className="h-3.5 w-3.5 text-violet-300" />
@@ -784,10 +784,10 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
                               </button>
                             </td>
                             {selectedBucket === ALL_BUCKETS && (
-                              <td className={`${TD} font-mono text-[12px] text-zinc-500`}>{file.bucket}</td>
+                              <td className={`${TD} font-mono text-[12px] text-faint`}>{file.bucket}</td>
                             )}
                             {!selectedFile && (
-                              <td className={`${TD} hidden font-mono text-[12px] text-zinc-500 xl:table-cell`}>
+                              <td className={`${TD} hidden font-mono text-[12px] text-faint xl:table-cell`}>
                                 {shortType(file.mimeType)}
                               </td>
                             )}
@@ -795,12 +795,12 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
                               {formatFileSize(toNum(file.size))}
                             </td>
                             <td className={TD}>
-                              <span className={`text-[12.5px] ${file.isPublic ? 'text-amber-200/90' : 'text-zinc-500'}`}>
+                              <span className={`text-[12.5px] ${file.isPublic ? 'text-amber-200/90' : 'text-faint'}`}>
                                 {file.isPublic ? 'Public' : 'Private'}
                               </span>
                             </td>
                             {!selectedFile && (
-                              <td className={`${TD} hidden text-[12.5px] tabular-nums text-zinc-500 lg:table-cell`}>
+                              <td className={`${TD} hidden text-[12.5px] tabular-nums text-faint lg:table-cell`}>
                                 <time dateTime={new Date(file.createdAt).toISOString()} title={new Date(file.createdAt).toLocaleString()}>
                                   {timeAgo(file.createdAt)}
                                 </time>
@@ -846,7 +846,7 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
             {/* Grid footer: counts, and live upload progress in the same strip. */}
             {!noBuckets && (
             <div className="flex h-[36px] flex-shrink-0 items-center justify-between gap-4 border-t border-white/[0.06] px-4">
-              <span className="text-[12px] tabular-nums text-zinc-500">
+              <span className="text-[12px] tabular-nums text-faint">
                 {searchQuery.trim() && bucketFiles.length !== filteredFiles.length
                   ? `${filteredFiles.length.toLocaleString()} of ${bucketFiles.length.toLocaleString()} objects match`
                   : `${filteredFiles.length.toLocaleString()} ${filteredFiles.length === 1 ? 'object' : 'objects'}`}
@@ -854,7 +854,7 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
 
               {activeUploads.length > 0 && (
                 <div className="flex min-w-0 flex-1 items-center justify-end gap-3">
-                  <span className="truncate font-mono text-[12px] text-zinc-500">
+                  <span className="truncate font-mono text-[12px] text-faint">
                     Uploading {activeUploads.length} file{activeUploads.length === 1 ? '' : 's'}
                   </span>
                   <div className="h-[3px] w-32 overflow-hidden rounded-full bg-white/[0.06]">
@@ -909,7 +909,7 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
                       ['Uploaded', formatStamp(selectedFile.createdAt)],
                     ].map(([label, value]) => (
                       <div key={label} className="flex items-baseline justify-between gap-3 px-4 py-2.5">
-                        <dt className="flex-shrink-0 text-[12px] font-medium text-zinc-500">
+                        <dt className="flex-shrink-0 text-[12px] font-medium text-faint">
                           {label}
                         </dt>
                         <dd
@@ -926,14 +926,14 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
 
                   {/* URL */}
                   <div className="border-t border-white/[0.06] p-3">
-                    <p className="mb-1.5 text-[12px] font-medium text-zinc-500">URL</p>
+                    <p className="mb-1.5 text-[12px] font-medium text-faint">URL</p>
                     <div className="flex items-center gap-1.5">
                       <code className="min-w-0 flex-1 truncate rounded-md border border-white/[0.06] bg-[#08090a] px-2 py-1.5 font-mono text-[12px] text-zinc-400">
                         {selectedFile.url}
                       </code>
                       <button
                         onClick={() => handleCopyLink(selectedFile.url)}
-                        className="flex-shrink-0 rounded-md p-1.5 text-zinc-600 transition-colors hover:bg-white/[0.04] hover:text-zinc-100"
+                        className="flex-shrink-0 rounded-md p-1.5 text-zinc-500 transition-colors hover:bg-white/[0.04] hover:text-zinc-100"
                         title="Copy URL"
                       >
                         {copiedUrl === selectedFile.url ? (
@@ -981,7 +981,7 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
           <div className="rounded-xl border border-dashed border-violet-400/30 bg-[#0f1012] px-14 py-12 text-center">
             <Upload className="mx-auto mb-3 h-4 w-4 text-violet-300" />
             <p className="mb-1 text-[14px] font-semibold tracking-[-0.01em] text-zinc-50">Drop to upload</p>
-            <p className="text-[12px] text-zinc-500">
+            <p className="text-[12px] text-faint">
               {selectedBucket === ALL_BUCKETS ? 'Release to choose a bucket.' : `Release to upload to ${selectedBucket}.`}
             </p>
           </div>
@@ -1090,7 +1090,7 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
             >
               <Folder className="h-3.5 w-3.5 flex-shrink-0 text-zinc-600" />
               <span className="flex-1 truncate font-mono text-[12.5px] text-zinc-200">{b.name}</span>
-              <span className="text-[12px] tabular-nums text-zinc-600">{countFor(b.name)} files</span>
+              <span className="text-[12px] tabular-nums text-faint">{countFor(b.name)} files</span>
             </button>
           ))}
         </div>
@@ -1120,7 +1120,7 @@ function ObjectPreview({ file }: { file: StorageFile }) {
   return (
     <div className="flex h-28 flex-col items-center justify-center gap-2 rounded-[8px] border border-white/[0.06] bg-[#08090a]">
       <FileTypeIcon mimeType={file.mimeType} className="h-5 w-5 text-zinc-600" strokeWidth={1.5} />
-      <span className="text-[12px] text-zinc-600">{failed ? 'No preview available' : shortType(file.mimeType)}</span>
+      <span className="text-[12px] text-faint">{failed ? 'No preview available' : shortType(file.mimeType)}</span>
     </div>
   )
 }

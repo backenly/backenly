@@ -410,20 +410,20 @@ export default function PublishPage() {
                 <p className={`text-[13px] leading-[19px] ${check.status === 'pass' ? 'text-zinc-400' : 'text-zinc-100'}`}>{check.name}</p>
                 {/* A failing check states WHY inline, not in a title attribute nobody hovers. */}
                 {check.status !== 'pass' && check.message && (
-                  <p className="mt-0.5 text-[12.5px] leading-[18px] text-zinc-500">{check.message}</p>
+                  <p className="mt-0.5 text-[12.5px] leading-[18px] text-faint">{check.message}</p>
                 )}
               </div>
             </li>
           ))}
           {hiddenCheckCount > 0 && (
-            <li className="pl-6 text-[12.5px] text-zinc-500">
+            <li className="pl-6 text-[12.5px] text-faint">
               +{hiddenCheckCount} more passing {hiddenCheckCount === 1 ? 'check' : 'checks'}
             </li>
           )}
         </ul>
         {(fixableChecks.length > 0 || fixNote) && (
           <div className={`flex flex-wrap items-center justify-between gap-3 border-t ${RULE} px-4 py-2.5`}>
-            <p className="min-w-0 flex-1 text-[12.5px] leading-[18px] text-zinc-500">
+            <p className="min-w-0 flex-1 text-[12.5px] leading-[18px] text-faint">
               {fixNote ??
                 `${fixableChecks.length} ${fixableChecks.length === 1 ? 'item' : 'items'} Backenly can fix: ` +
                   `${fixableChecks.map(c => c.name).join(', ')}. This can turn on row-level security for tables ` +
@@ -530,7 +530,7 @@ export default function PublishPage() {
                     <KitCard className="overflow-hidden">
                       <KitCardHeader
                         title="Versions"
-                        actions={<span className="text-[12px] tabular-nums text-zinc-500">{publishedVersions.length}</span>}
+                        actions={<span className="text-[12px] tabular-nums text-faint">{publishedVersions.length}</span>}
                       />
                       {/* A version is "active" only while its snapshot still equals
                           the live graph (see app/api/projects/[id]/rollback). Every
@@ -550,10 +550,10 @@ export default function PublishPage() {
                         <table className="w-full min-w-[560px] border-separate border-spacing-0">
                           <thead>
                             <tr className={KIT.gridHead}>
-                              <th scope="col" className={`w-16 border-b ${RULE} px-4 py-2 text-left text-[12px] font-normal text-zinc-500`}>Version</th>
-                              <th scope="col" className={`border-b ${RULE} px-3 py-2 text-left text-[12px] font-normal text-zinc-500`}>Change</th>
-                              <th scope="col" className={`w-44 whitespace-nowrap border-b ${RULE} px-3 py-2 text-left text-[12px] font-normal text-zinc-500`}>Published</th>
-                              <th scope="col" className={`w-36 whitespace-nowrap border-b ${RULE} px-4 py-2 text-right text-[12px] font-normal text-zinc-500`}>
+                              <th scope="col" className={`w-16 border-b ${RULE} px-4 py-2 text-left text-[12px] font-normal text-faint`}>Version</th>
+                              <th scope="col" className={`border-b ${RULE} px-3 py-2 text-left text-[12px] font-normal text-faint`}>Change</th>
+                              <th scope="col" className={`w-44 whitespace-nowrap border-b ${RULE} px-3 py-2 text-left text-[12px] font-normal text-faint`}>Published</th>
+                              <th scope="col" className={`w-36 whitespace-nowrap border-b ${RULE} px-4 py-2 text-right text-[12px] font-normal text-faint`}>
                                 <span className="sr-only">State</span>
                               </th>
                             </tr>
@@ -569,9 +569,9 @@ export default function PublishPage() {
                                     </span>
                                   </td>
                                   <td className="border-b border-white/[0.04] px-3 py-2.5 text-[13px] text-zinc-300">{version.changeSummary}</td>
-                                  <td className="whitespace-nowrap border-b border-white/[0.04] px-3 py-2.5 text-[12.5px] tabular-nums text-zinc-500">
+                                  <td className="whitespace-nowrap border-b border-white/[0.04] px-3 py-2.5 text-[12.5px] tabular-nums text-faint">
                                     {formatDate(version.publishedAt)}
-                                    <span className="text-zinc-600"> · {formatTimeAgo(version.publishedAt)}</span>
+                                    <span className="text-faint"> · {formatTimeAgo(version.publishedAt)}</span>
                                   </td>
                                   <td className="whitespace-nowrap border-b border-white/[0.04] px-4 py-2 text-right">
                                     {version.isActive ? (
@@ -588,7 +588,7 @@ export default function PublishPage() {
                                         {isRollingBack ? 'Rolling back…' : 'Roll back'}
                                       </KitButton>
                                     ) : (
-                                      <span className="text-[12px] text-zinc-600">Archived</span>
+                                      <span className="text-[12px] text-faint">Archived</span>
                                     )}
                                   </td>
                                 </tr>
@@ -631,8 +631,8 @@ export default function PublishPage() {
                         <li key={label} className="flex items-center gap-3 px-4 py-2.5">
                           <Icon className={`h-4 w-4 flex-shrink-0 ${active ? 'text-zinc-400' : 'text-zinc-700'}`} strokeWidth={1.75} />
                           <div className="min-w-0 flex-1">
-                            <p className={`text-[13px] ${active ? 'text-zinc-100' : 'text-zinc-500'}`}>{label}</p>
-                            <p className="text-[12px] tabular-nums text-zinc-500">{sub}</p>
+                            <p className={`text-[13px] ${active ? 'text-zinc-100' : 'text-faint'}`}>{label}</p>
+                            <p className="text-[12px] tabular-nums text-faint">{sub}</p>
                           </div>
                           {active && <Check className="h-3.5 w-3.5 flex-shrink-0 text-emerald-400/80" strokeWidth={2} />}
                         </li>
@@ -747,7 +747,7 @@ export default function PublishPage() {
           </KitCard>
         )}
 
-        <p className="flex items-center gap-2 pt-2 text-[12.5px] text-zinc-500">
+        <p className="flex items-center gap-2 pt-2 text-[12.5px] text-faint">
           <Lock className="h-3.5 w-3.5 text-zinc-600" />
           Every change is planned, snapshotted and written to the audit log before it reaches production.
         </p>

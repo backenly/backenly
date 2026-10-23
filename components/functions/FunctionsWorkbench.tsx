@@ -258,9 +258,9 @@ function CodeTab({ code }: { code: string | null }) {
   return (
     <div className="space-y-3 px-4 py-5 sm:px-5">
       {sha && (
-        <p className="font-mono text-[12px] text-zinc-500">
+        <p className="font-mono text-[12px] text-faint">
           sha256 <span className="select-all text-zinc-300">{sha}</span>
-          <span className="ml-2 text-zinc-600">matches the deploy_code receipt when the stored code is what was deployed</span>
+          <span className="ml-2 text-faint">matches the deploy_code receipt when the stored code is what was deployed</span>
         </p>
       )}
       <pre className="overflow-x-auto rounded-[10px] border border-white/[0.07] bg-[#08090a] px-4 py-3 font-mono text-[12px] leading-[19px] text-zinc-300">
@@ -315,7 +315,7 @@ function InvocationsTab({ projectId, functionId }: { projectId: string; function
 
   return (
     <div>
-      <div className="grid h-[36px] grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-4 border-b border-white/[0.06] bg-[#0e0f11] px-5 text-[12px] font-medium text-zinc-500">
+      <div className="grid h-[36px] grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-4 border-b border-white/[0.06] bg-[#0e0f11] px-5 text-[12px] font-medium text-faint">
         <span>Result</span>
         <span className="w-16 text-right">Duration</span>
         <span className="w-44 text-right">When</span>
@@ -327,13 +327,13 @@ function InvocationsTab({ projectId, functionId }: { projectId: string; function
               <div className="flex min-w-0 items-center gap-3">
                 {/* The log records whether the handler returned, not its HTTP status. */}
                 <StatusDot tone={log.success ? 'operational' : 'failed'} label={log.success ? 'Completed' : 'Failed'} />
-                <span className="truncate font-mono text-[12px] text-zinc-500">{log.triggerType}</span>
+                <span className="truncate font-mono text-[12px] text-faint">{log.triggerType}</span>
               </div>
               <span className="w-16 whitespace-nowrap text-right text-[12.5px] tabular-nums text-zinc-300">{log.durationMs} ms</span>
               <time
                 dateTime={new Date(log.createdAt).toISOString()}
                 title={new Date(log.createdAt).toLocaleString()}
-                className="w-44 whitespace-nowrap text-right text-[12.5px] tabular-nums text-zinc-500"
+                className="w-44 whitespace-nowrap text-right text-[12.5px] tabular-nums text-faint"
               >
                 {new Date(log.createdAt).toLocaleString(undefined, {
                   month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit',
@@ -476,7 +476,7 @@ function ResultFrame({
       <div className="flex h-[40px] items-center justify-between gap-3 border-b border-white/[0.06] pl-4 pr-1.5">
         <div className="flex min-w-0 items-center gap-3">
           <StatusDot tone={tone} label={<span className="text-[13px] font-medium">{heading}</span>} />
-          {meta && <span className="text-[12px] tabular-nums text-zinc-500">{meta}</span>}
+          {meta && <span className="text-[12px] tabular-nums text-faint">{meta}</span>}
         </div>
         <IconButton icon={X} label="Dismiss result" onClick={onClose} />
       </div>
@@ -758,7 +758,7 @@ export function FunctionsWorkbench({ projectId }: { projectId: string }) {
           <strong>
             {schemaFns.length} auto-generated validation-schema {schemaFns.length === 1 ? 'endpoint' : 'endpoints'}.
           </strong>{' '}
-          <span className="text-zinc-500">Safe to keep: they serve live form-validation schemas to your frontend.</span>
+          <span className="text-faint">Safe to keep: they serve live form-validation schemas to your frontend.</span>
         </NoticeStrip>
       )}
 
@@ -812,11 +812,11 @@ export function FunctionsWorkbench({ projectId }: { projectId: string }) {
                         aria-checked={on}
                         onClick={() => setFilter(f.key)}
                         className={`inline-flex h-[24px] items-center gap-1.5 rounded-[6px] px-2 text-[12px] font-medium transition-colors ${FOCUS_INSET} ${
-                          on ? 'bg-white/[0.09] text-zinc-50' : 'text-zinc-500 hover:bg-white/[0.04] hover:text-zinc-200'
+                          on ? 'bg-white/[0.09] text-zinc-50' : 'text-faint hover:bg-white/[0.04] hover:text-zinc-200'
                         }`}
                       >
                         {f.label}
-                        <span className={`tabular-nums ${on ? 'text-zinc-400' : 'text-zinc-600'}`}>{count}</span>
+                        <span className={`tabular-nums ${on ? 'text-zinc-400' : 'text-faint'}`}>{count}</span>
                       </button>
                     )
                   })}
@@ -838,7 +838,7 @@ export function FunctionsWorkbench({ projectId }: { projectId: string }) {
                   ))}
                 </div>
               ) : functions.length === 0 ? null : visibleFunctions.length === 0 ? (
-                <p className="px-4 py-5 text-[12.5px] leading-[19px] text-zinc-500">
+                <p className="px-4 py-5 text-[12.5px] leading-[19px] text-faint">
                   No function matches{query.trim() ? ` “${query.trim()}”` : ' this filter'}.
                 </p>
               ) : (
@@ -860,12 +860,12 @@ export function FunctionsWorkbench({ projectId }: { projectId: string }) {
                           <span className="min-w-0 flex-1">
                             <span
                               className={`block truncate font-mono text-[12.5px] leading-[18px] ${
-                                active ? 'text-zinc-50' : fn.status === 'inactive' ? 'text-zinc-500' : 'text-zinc-200'
+                                active ? 'text-zinc-50' : fn.status === 'inactive' ? 'text-faint' : 'text-zinc-200'
                               }`}
                             >
                               {fn.name}
                             </span>
-                            <span className="mt-0.5 flex items-center gap-1.5 truncate text-[12px] leading-[16px] text-zinc-500">
+                            <span className="mt-0.5 flex items-center gap-1.5 truncate text-[12px] leading-[16px] text-faint">
                               <TriggerIcon kind={kind} className={`h-3 w-3 flex-shrink-0 ${getTriggerStyle(kind)}`} />
                               <span className="truncate">{getTriggerLabel(fn)}</span>
                             </span>
@@ -882,7 +882,7 @@ export function FunctionsWorkbench({ projectId }: { projectId: string }) {
             </div>
 
             {functions.length > 0 && (
-              <div className="flex h-[36px] flex-shrink-0 items-center border-t border-white/[0.06] px-4 text-[12px] tabular-nums text-zinc-500">
+              <div className="flex h-[36px] flex-shrink-0 items-center border-t border-white/[0.06] px-4 text-[12px] tabular-nums text-faint">
                 {query.trim() || filter !== 'all'
                   ? `${visibleFunctions.length} of ${functions.length}`
                   : `${functions.length} ${functions.length === 1 ? 'function' : 'functions'}`}
@@ -1024,7 +1024,7 @@ export function FunctionsWorkbench({ projectId }: { projectId: string }) {
                             key={label}
                             className={`grid grid-cols-[120px_minmax(0,1fr)] items-center gap-4 px-4 py-2.5 ${i > 0 ? 'border-t border-white/[0.05]' : ''}`}
                           >
-                            <dt className="text-[13px] text-zinc-500">{label}</dt>
+                            <dt className="text-[13px] text-faint">{label}</dt>
                             <dd className="min-w-0 truncate text-[13px] tabular-nums text-zinc-200">{value}</dd>
                           </div>
                         ))}
@@ -1044,7 +1044,7 @@ export function FunctionsWorkbench({ projectId }: { projectId: string }) {
                             }
                           />
                           {isAdminGated(selected) && (
-                            <p className="mt-2 text-[12.5px] leading-[19px] text-zinc-500">
+                            <p className="mt-2 text-[12.5px] leading-[19px] text-faint">
                               Admin-gated: send the project admin key as the{' '}
                               <code className="font-mono text-zinc-300">x-admin-key</code> header.
                             </p>

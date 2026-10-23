@@ -448,7 +448,7 @@ export function ConsoleTour() {
           <div className="flex items-center justify-between gap-3 border-t border-white/[0.06] px-4 py-3">
             <div className="flex items-center gap-2.5">
               <Progress count={steps.length} index={index} still={still} />
-              <span className="whitespace-nowrap text-[12px] tabular-nums text-zinc-500">
+              <span className="whitespace-nowrap text-[12px] tabular-nums text-faint">
                 {index + 1} of {steps.length}
               </span>
             </div>

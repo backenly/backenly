@@ -180,7 +180,7 @@ export function DatabaseSnapshots({ projectId }: { projectId: string }) {
         <div className="flex min-w-0 items-baseline gap-2">
           <h2 className="text-[13px] font-medium text-zinc-100">Snapshots</h2>
           {!loading && snapshots.length > 0 && (
-            <span className="text-[12px] tabular-nums text-zinc-500">{snapshots.length}</span>
+            <span className="text-[12px] tabular-nums text-faint">{snapshots.length}</span>
           )}
         </div>
         <KitButton size="sm" icon={Camera} onClick={takeSnapshot} loading={taking}>
@@ -248,7 +248,7 @@ export function DatabaseSnapshots({ projectId }: { projectId: string }) {
                     <p className="text-[13px] tabular-nums text-zinc-200">{formatWhen(snapshot.createdAt)}</p>
                     {snapshot.error && <p className="mt-0.5 text-[12px] text-rose-300/90">{snapshot.error}</p>}
                   </div>
-                  <span className="text-[12.5px] tabular-nums text-zinc-500">{formatBytes(snapshot.sizeBytes)}</span>
+                  <span className="text-[12.5px] tabular-nums text-faint">{formatBytes(snapshot.sizeBytes)}</span>
                   {ok && (
                     <KitButton
                       size="sm"

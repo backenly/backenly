@@ -230,7 +230,7 @@ export function AgentKeysPanel({
             <div className="overflow-hidden rounded-[10px] border border-white/[0.08] bg-[#0f1012]">
               <div className="flex items-center justify-between border-b border-white/[0.06] px-4 py-2.5">
                 <h3 className="text-[13px] font-medium text-zinc-100">Recent tool calls</h3>
-                <span className="text-[12px] tabular-nums text-zinc-500">{usage!.recent.length} events</span>
+                <span className="text-[12px] tabular-nums text-faint">{usage!.recent.length} events</span>
               </div>
               <ul
                 tabIndex={0}
@@ -253,11 +253,11 @@ export function AgentKeysPanel({
                           {!ok && <span className="text-[12px] tabular-nums text-rose-300">{r.statusCode}</span>}
                         </div>
                         {(r.summary || r.error) && (
-                          <div className="mt-0.5 truncate text-[12px] text-zinc-500">{plainText(r.error ?? r.summary ?? '')}</div>
+                          <div className="mt-0.5 truncate text-[12px] text-faint">{plainText(r.error ?? r.summary ?? '')}</div>
                         )}
                       </div>
-                      <div className="w-16 flex-shrink-0 text-right text-[12px] tabular-nums text-zinc-500">{r.ms ?? 0} ms</div>
-                      <div className="w-10 flex-shrink-0 text-right text-[12px] tabular-nums text-zinc-600">{timeAgo(r.timestamp)}</div>
+                      <div className="w-16 flex-shrink-0 text-right text-[12px] tabular-nums text-faint">{r.ms ?? 0} ms</div>
+                      <div className="w-10 flex-shrink-0 text-right text-[12px] tabular-nums text-faint">{timeAgo(r.timestamp)}</div>
                     </li>
                   )
                 })}
@@ -277,7 +277,7 @@ export function AgentKeysPanel({
           <div className="relative overflow-x-auto rounded-[10px] border border-white/[0.08] bg-[#0f1012]">
             <table className="w-full min-w-[520px] text-left">
               <thead>
-                <tr className="border-b border-white/[0.06] text-[12px] text-zinc-500">
+                <tr className="border-b border-white/[0.06] text-[12px] text-faint">
                   <th scope="col" className="h-[36px] whitespace-nowrap px-4 font-medium">Agent</th>
                   <th scope="col" className="h-[36px] whitespace-nowrap px-4 font-medium">Connected</th>
                   <th scope="col" className="h-[36px] whitespace-nowrap px-4 font-medium">Last used</th>
@@ -294,7 +294,7 @@ export function AgentKeysPanel({
                         <div className="mt-0.5 flex flex-wrap items-center gap-2">
                           {c.readOnly && <Tag tone="neutral">Read-only</Tag>}
                           {stat && stat.calls7d > 0 && (
-                            <span className="text-[12px] tabular-nums text-zinc-500">{stat.calls7d.toLocaleString()} calls this week</span>
+                            <span className="text-[12px] tabular-nums text-faint">{stat.calls7d.toLocaleString()} calls this week</span>
                           )}
                         </div>
                       </td>
@@ -302,7 +302,7 @@ export function AgentKeysPanel({
                         {formatDay(c.createdAt)}
                       </td>
                       <td className="whitespace-nowrap px-4 py-3 text-[13px] tabular-nums text-zinc-400">
-                        {c.lastUsed ? `${timeAgo(c.lastUsed)} ago` : <span className="text-zinc-600">Never</span>}
+                        {c.lastUsed ? `${timeAgo(c.lastUsed)} ago` : <span className="text-faint">Never</span>}
                       </td>
                       <td className="px-4 py-3 text-right">
                         <KitButton
@@ -392,7 +392,7 @@ export function AgentKeysPanel({
           <div className="relative overflow-x-auto rounded-[10px] border border-white/[0.08] bg-[#0f1012]">
             <table className="w-full min-w-[520px] text-left">
               <thead>
-                <tr className="border-b border-white/[0.06] text-[12px] text-zinc-500">
+                <tr className="border-b border-white/[0.06] text-[12px] text-faint">
                   <th scope="col" className="h-[36px] whitespace-nowrap px-4 font-medium">Key</th>
                   <th scope="col" className="h-[36px] whitespace-nowrap px-4 font-medium">Created</th>
                   <th scope="col" className="h-[36px] whitespace-nowrap px-4 font-medium">Last used</th>
@@ -407,10 +407,10 @@ export function AgentKeysPanel({
                       <td className="px-4 py-3">
                         <div className="truncate text-[13px] font-medium text-zinc-100">{k.label || k.name}</div>
                         <div className="mt-0.5 flex flex-wrap items-center gap-2">
-                          <code className="font-mono text-[12px] text-zinc-500">{k.masked}</code>
+                          <code className="font-mono text-[12px] text-faint">{k.masked}</code>
                           {k.readOnly && <Tag tone="neutral">Read-only</Tag>}
                           {stat && stat.calls7d > 0 && (
-                            <span className="text-[12px] tabular-nums text-zinc-500">{stat.calls7d.toLocaleString()} calls this week</span>
+                            <span className="text-[12px] tabular-nums text-faint">{stat.calls7d.toLocaleString()} calls this week</span>
                           )}
                         </div>
                       </td>
@@ -418,7 +418,7 @@ export function AgentKeysPanel({
                         {formatDay(k.createdAt)}
                       </td>
                       <td className="whitespace-nowrap px-4 py-3 text-[13px] tabular-nums text-zinc-400">
-                        {k.lastUsed ? `${timeAgo(k.lastUsed)} ago` : <span className="text-zinc-600">Never</span>}
+                        {k.lastUsed ? `${timeAgo(k.lastUsed)} ago` : <span className="text-faint">Never</span>}
                       </td>
                       <td className="px-4 py-3 text-right">
                         <KitButton
@@ -481,7 +481,7 @@ export function AgentKeysPanel({
           <div className="flex items-start justify-between gap-4 rounded-[8px] border border-white/[0.07] bg-white/[0.02] px-3.5 py-3">
             <span className="min-w-0">
               <span className="block text-[13px] font-medium text-zinc-100">Read-only</span>
-              <span className="mt-0.5 block text-[12.5px] leading-[18px] text-zinc-500">
+              <span className="mt-0.5 block text-[12.5px] leading-[18px] text-faint">
                 The agent can read the schema and data but cannot change anything.
               </span>
             </span>

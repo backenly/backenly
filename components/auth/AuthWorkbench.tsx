@@ -175,7 +175,7 @@ function UsersGrid({
         <div className="flex h-[44px] flex-shrink-0 items-center justify-between gap-3 border-b border-white/[0.06] px-3 sm:px-4">
           <div className="flex min-w-0 items-center gap-3">
             <h2 className="truncate text-[13px] font-medium text-zinc-100">All users</h2>
-            <span className="whitespace-nowrap text-[12px] tabular-nums text-zinc-500">
+            <span className="whitespace-nowrap text-[12px] tabular-nums text-faint">
               {query.trim() && filtered.length !== users.length
                 ? `${filtered.length.toLocaleString()} of ${users.length.toLocaleString()}`
                 : filtered.length.toLocaleString()}
@@ -263,7 +263,7 @@ function UsersGrid({
                           </span>
                         </td>
                         <td className={`${TD} hidden text-[12.5px] tabular-nums text-zinc-400 sm:table-cell`}>{formatDate(u.createdAt)}</td>
-                        <td className={`${TD} text-[12.5px] tabular-nums text-zinc-500`}>
+                        <td className={`${TD} text-[12.5px] tabular-nums text-faint`}>
                           {u.lastLogin ? formatDate(u.lastLogin) : 'Never'}
                         </td>
                       </tr>
@@ -311,7 +311,7 @@ function UsersGrid({
                   ['Last active', selected.lastLogin ? formatStamp(selected.lastLogin) : 'Never'],
                 ] as Array<[string, React.ReactNode]>).map(([label, value]) => (
                   <div key={label} className="flex items-baseline justify-between gap-3 px-4 py-2.5">
-                    <dt className="flex-shrink-0 text-[13px] text-zinc-500">{label}</dt>
+                    <dt className="flex-shrink-0 text-[13px] text-faint">{label}</dt>
                     <dd
                       className="min-w-0 truncate text-right text-[13px] tabular-nums text-zinc-200"
                       title={typeof value === 'string' ? value : undefined}
@@ -324,7 +324,7 @@ function UsersGrid({
               <div className="border-t border-white/[0.06] px-4 py-4">
                 <p className="mb-2 text-[13px] font-medium text-zinc-200">User ID</p>
                 <CopyField value={selected.id} />
-                <p className="mt-2 text-[12.5px] leading-[19px] text-zinc-500">
+                <p className="mt-2 text-[12.5px] leading-[19px] text-faint">
                   Use it in row-level policies, and as the foreign key from your own tables.
                 </p>
               </div>
@@ -336,5 +336,5 @@ function UsersGrid({
   )
 }
 
-const TH = 'h-[36px] whitespace-nowrap border-b border-white/[0.06] px-3 text-left text-[12px] font-medium text-zinc-500 first:pl-4'
+const TH = 'h-[36px] whitespace-nowrap border-b border-white/[0.06] px-3 text-left text-[12px] font-medium text-faint first:pl-4'
 const TD = 'h-[44px] whitespace-nowrap border-b border-white/[0.04] px-3 first:pl-4'

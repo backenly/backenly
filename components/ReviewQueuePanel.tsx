@@ -501,7 +501,7 @@ export function ReviewQueuePanel({ projectId }: { projectId: string }) {
       />
 
       <div className="border-b border-white/[0.06] px-5 py-2.5">
-        <p className="text-[12.5px] leading-relaxed text-zinc-500">
+        <p className="text-[12.5px] leading-relaxed text-faint">
           Backenly deliberately did not act on these. They need your call; everything else it handles itself.
           {' '}Once you decide, each change settles into the agent journal on{' '}
           <button
@@ -519,7 +519,7 @@ export function ReviewQueuePanel({ projectId }: { projectId: string }) {
           <p className="min-w-0 text-[12px] font-medium text-zinc-200">
             {banner.title}
             {banner.detail && (
-              <span className="ml-2 text-[12px] font-normal text-zinc-500">{banner.detail}</span>
+              <span className="ml-2 text-[12px] font-normal text-faint">{banner.detail}</span>
             )}
           </p>
         </div>
@@ -529,7 +529,7 @@ export function ReviewQueuePanel({ projectId }: { projectId: string }) {
         <div className="px-5 py-12 text-center">
           <CheckCircle2 className="mx-auto mb-3 size-5 text-emerald-400/70" />
           <p className="text-[13px] font-medium text-zinc-300">Nothing waiting on you</p>
-          <p className="mt-1 text-[12px] text-zinc-500">Risk-flagged changes show up here before they apply.</p>
+          <p className="mt-1 text-[12px] text-faint">Risk-flagged changes show up here before they apply.</p>
         </div>
       ) : (
         <ul className="divide-y divide-white/[0.04]">
@@ -600,7 +600,7 @@ function PanelHeader({
         <span className="text-[12px] font-medium tabular-nums text-amber-300">
           {count}
           {typeof groupCount === 'number' && groupCount < count && (
-            <span className="ml-1.5 font-normal text-zinc-500">
+            <span className="ml-1.5 font-normal text-faint">
               in {groupCount} {groupCount === 1 ? 'issue' : 'issues'}
             </span>
           )}
@@ -702,7 +702,7 @@ function AgentRequestRow({
               <>Your coding agent wants to run <span className="font-mono text-[12px] text-violet-200">{a.tool}</span> on <TextWithCode text={a.target} /></>
             )}
           </p>
-          <p className="mt-1 whitespace-pre-wrap break-words text-[12px] leading-relaxed text-zinc-500">
+          <p className="mt-1 whitespace-pre-wrap break-words text-[12px] leading-relaxed text-faint">
             {restore || fromBackenly ? shown : `“${shown}”`}
           </p>
           {long && (
@@ -739,7 +739,7 @@ function AgentRequestRow({
           {state.phase === 'error' && (
             <p className="mt-2 text-[12px] text-rose-300/90">
               {state.message}{' '}
-              <button onClick={onResetError} className="text-zinc-500 underline underline-offset-2 hover:text-zinc-300">retry</button>
+              <button onClick={onResetError} className="text-faint underline underline-offset-2 hover:text-zinc-300">retry</button>
             </p>
           )}
         </div>
@@ -880,13 +880,13 @@ function ApprovalRow({
               {heldKindLabel(head)}
             </p>
           )}
-          <p className="mt-1 text-[12.5px] leading-snug text-zinc-500">{reasonForApproval(head)}</p>
+          <p className="mt-1 text-[12.5px] leading-snug text-faint">{reasonForApproval(head)}</p>
           {(() => {
             const diag = diagnosisOf(head)
             if (!diag) return null
             return (
               <div className="mt-1.5 border-l border-white/[0.08] pl-3">
-                <p className="mb-0.5 text-[12px] font-medium text-zinc-500">
+                <p className="mb-0.5 text-[12px] font-medium text-faint">
                   {diag.provenance === 'investigation'
                     ? `Confirmed by investigation${diag.observations ? ` · ${diag.observations} observation${diag.observations === 1 ? '' : 's'}` : ''}`
                     : 'AI hypothesis · not verified'}
@@ -895,7 +895,7 @@ function ApprovalRow({
                   <p className="text-[12.5px] leading-snug text-zinc-400">{diag.rootCause}</p>
                 )}
                 {diag.recommendation && (
-                  <p className="mt-0.5 text-[12.5px] leading-snug text-zinc-500">
+                  <p className="mt-0.5 text-[12.5px] leading-snug text-faint">
                     <span className="text-zinc-400">Recommended:</span> {diag.recommendation}
                   </p>
                 )}
@@ -919,7 +919,7 @@ function ApprovalRow({
               <button
                 onClick={() => setExpanded(v => !v)}
                 aria-expanded={expanded}
-                className="inline-flex items-center gap-1 text-[12.5px] font-medium text-zinc-500 transition-colors hover:text-zinc-300"
+                className="inline-flex items-center gap-1 text-[12.5px] font-medium text-faint transition-colors hover:text-zinc-300"
               >
                 {g.members.length} findings, one cause
                 <ChevronDown className={`size-3 transition-transform ${expanded ? 'rotate-180' : ''}`} />
@@ -927,7 +927,7 @@ function ApprovalRow({
               {expanded && (
                 <ul className="mt-2 space-y-1 border-l border-white/[0.08] pl-3">
                   {g.members.map((m, i) => (
-                    <li key={m.id} className="font-mono text-[12px] leading-relaxed text-zinc-500">
+                    <li key={m.id} className="font-mono text-[12px] leading-relaxed text-faint">
                       {g.subjects[i] ?? m.resource ?? m.reason}
                     </li>
                   ))}
@@ -946,7 +946,7 @@ function ApprovalRow({
                 AI-proposed repair · needs your approval
               </p>
               <p className="text-[12.5px] leading-snug text-zinc-300">{proposal.summary}</p>
-              <p className="mt-0.5 text-[12px] leading-snug text-zinc-500">
+              <p className="mt-0.5 text-[12px] leading-snug text-faint">
                 Recorded as fixed only if it is in the catalog, the issue is gone on re-check and nothing else broke. Undo restores the state before it.
               </p>
             </div>

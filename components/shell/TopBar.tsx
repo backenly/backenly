@@ -152,7 +152,7 @@ export function TopBar() {
         <AnimatePresence>
           {projectMenu && (
             <MenuPanel width="w-[300px]">
-              <p className="px-2.5 pb-1 pt-1.5 text-[12px] font-medium text-zinc-500">Projects</p>
+              <p className="px-2.5 pb-1 pt-1.5 text-[12px] font-medium text-faint">Projects</p>
               <div className="max-h-[320px] overflow-y-auto">
                 {projects.map((p) => {
                   const active = p.id === projectId
@@ -168,7 +168,7 @@ export function TopBar() {
                         active ? (
                           <Check className="h-4 w-4 flex-shrink-0 text-zinc-200" strokeWidth={2} />
                         ) : (
-                          <span className="text-[12px] text-zinc-600">{STATUS_LABEL[s]}</span>
+                          <span className="text-[12px] text-faint">{STATUS_LABEL[s]}</span>
                         )
                       }
                     >

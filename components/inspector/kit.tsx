@@ -649,7 +649,7 @@ export function Tag({
  */
 export function MetaRow({ children, className = '' }: { children: ReactNode; className?: string }) {
   return (
-    <p className={`mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] leading-[16px] text-zinc-500 ${className}`}>
+    <p className={`mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] leading-[16px] text-faint ${className}`}>
       {children}
     </p>
   )
@@ -1495,7 +1495,7 @@ export function CopyButton({
       className={`inline-flex h-[26px] flex-shrink-0 items-center justify-center gap-1.5 ${R_CONTROL} ${
         showLabel ? 'px-2' : 'w-[26px]'
       } text-[12px] font-medium transition-colors duration-150 ${FOCUS} ${
-        copied ? 'text-emerald-300' : 'text-zinc-500 hover:bg-white/[0.06] hover:text-zinc-100'
+        copied ? 'text-emerald-300' : `${showLabel ? 'text-faint' : 'text-zinc-500'} hover:bg-white/[0.06] hover:text-zinc-100`
       } ${className}`}
     >
       {copied ? <Check className="h-3.5 w-3.5" strokeWidth={2.25} /> : <Copy className="h-3.5 w-3.5" strokeWidth={1.75} />}

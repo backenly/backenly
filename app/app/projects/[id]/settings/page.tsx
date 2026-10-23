@@ -268,7 +268,7 @@ function GeneralTab({ projectId, onDeleted }: { projectId: string; onDeleted: ()
             {apiBaseUrl ? (
               <CopyField value={apiBaseUrl} />
             ) : (
-              <span className="text-zinc-500">—</span>
+              <span className="text-faint">—</span>
             )}
           </DetailRow>
           <DetailRow label="Runs on">
@@ -417,7 +417,7 @@ function AccessTab({ projectId }: { projectId: string }) {
         }
       >
         {!data || data.members.length === 0 ? (
-          <p className="text-[13px] text-zinc-500">
+          <p className="text-[13px] text-faint">
             {data && !data.hasOrg
               ? 'This is a solo project; only you can open it. Invite teammates from the Members page to share access.'
               : "Couldn't load your organization roster. Manage people and roles on the Members page."}
@@ -432,9 +432,9 @@ function AccessTab({ projectId }: { projectId: string }) {
                     <div className="flex items-center gap-1.5">
                       <span className="truncate text-[13px] font-medium text-zinc-100">{m.name || m.email}</span>
                       {m.isOwner && <Crown className="h-3.5 w-3.5 flex-shrink-0 text-amber-300/80" aria-label="Owner" />}
-                      {m.userId === data.me?.userId && <span className="text-[12px] text-zinc-500">(you)</span>}
+                      {m.userId === data.me?.userId && <span className="text-[12px] text-faint">(you)</span>}
                     </div>
-                    {m.name && <p className="truncate text-[12px] text-zinc-500">{m.email}</p>}
+                    {m.name && <p className="truncate text-[12px] text-faint">{m.email}</p>}
                   </div>
                   <div className="flex flex-shrink-0 flex-wrap items-center gap-2.5">
                     {orgWide ? (
@@ -446,7 +446,7 @@ function AccessTab({ projectId }: { projectId: string }) {
                         <FolderLock className="h-3.5 w-3.5" /> This project
                       </span>
                     ) : (
-                      <span className="text-[12px] text-zinc-600">No access</span>
+                      <span className="text-[12px] text-faint">No access</span>
                     )}
 
                     {/* Grant / revoke for scoped members (owners/admins only) */}

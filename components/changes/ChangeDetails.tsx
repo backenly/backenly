@@ -20,7 +20,7 @@ import { EVENT, outcomeOf, when } from './present'
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <section className="space-y-2">
-      <h3 className="text-[12px] font-medium leading-[16px] text-zinc-500">{title}</h3>
+      <h3 className="text-[12px] font-medium leading-[16px] text-faint">{title}</h3>
       {children}
     </section>
   )
@@ -41,7 +41,7 @@ function CheckRow({ check }: { check: VerificationCheck }) {
       </span>
       <span className="min-w-0">
         <span className="block text-[13px] text-zinc-200">{check.label}</span>
-        {check.detail && <span className="block text-[12px] leading-[18px] text-zinc-500 [overflow-wrap:anywhere]">{check.detail}</span>}
+        {check.detail && <span className="block text-[12px] leading-[18px] text-faint [overflow-wrap:anywhere]">{check.detail}</span>}
       </span>
     </li>
   )
@@ -68,7 +68,7 @@ function Disclosure({ label, children }: { label: string; children: React.ReactN
 function Sql({ statements, quoted = true }: { statements: Array<{ sql: string }>; quoted?: boolean }) {
   if (statements.length === 0) {
     return (
-      <p className="text-[12.5px] text-zinc-500">
+      <p className="text-[12.5px] text-faint">
         {quoted ? 'No statements were recorded.' : 'Not recorded here: this project’s data, including the SQL that ran, stays in its own region.'}
       </p>
     )
@@ -152,9 +152,9 @@ export function ChangeDetails({
         d ? (
           <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
             <StatusDot tone={status!.tone} label={status!.label} />
-            <span className="text-zinc-600">·</span>
+            <span className="text-faint">·</span>
             <span>{d.actor.label}</span>
-            <span className="text-zinc-600">·</span>
+            <span className="text-faint">·</span>
             <span>{when(d.createdAt)}</span>
           </span>
         ) : undefined
@@ -194,14 +194,14 @@ export function ChangeDetails({
 
           <Section title="What changed">
             {d.footprint.length === 0 ? (
-              <p className="text-[13px] text-zinc-500">Nothing in the schema changed.</p>
+              <p className="text-[13px] text-faint">Nothing in the schema changed.</p>
             ) : (
               <ul className="space-y-3">
                 {d.footprint.map((t, i) => (
                   <li key={i}>
                     <p className="text-[13px] text-zinc-200">
                       <span className="font-mono text-[12.5px]">{t.after ?? t.before}</span>
-                      <span className="ml-2 text-[12px] text-zinc-500">
+                      <span className="ml-2 text-[12px] text-faint">
                         {t.object ? t.object.replace('_', ' ') : 'table'} {t.kind}
                         {t.before && t.after && t.before !== t.after ? ` (was ${t.before})` : ''}
                       </span>
@@ -225,7 +225,7 @@ export function ChangeDetails({
                 {d.verification.checks.map((c) => <CheckRow key={c.id} check={c} />)}
               </ul>
             ) : (
-              <p className="text-[13px] text-zinc-500">Not checked yet.</p>
+              <p className="text-[13px] text-faint">Not checked yet.</p>
             )}
           </Section>
 
@@ -234,7 +234,7 @@ export function ChangeDetails({
               {d.events.map((e, i) => (
                 <li key={i} className="flex items-baseline justify-between gap-3 text-[12.5px]">
                   <span className="text-zinc-300">{EVENT[e.type] ?? e.type}</span>
-                  <span className="flex-shrink-0 tabular-nums text-zinc-500">{when(e.at)}</span>
+                  <span className="flex-shrink-0 tabular-nums text-faint">{when(e.at)}</span>
                 </li>
               ))}
             </ol>
@@ -244,13 +244,13 @@ export function ChangeDetails({
             <p className="text-[12.5px] leading-[19px] text-zinc-400">
               {d.checkpoint.intact ? 'Taken before the change and intact.' : 'Failed its integrity check, so it cannot be used.'}
               {d.checkpoint.parentSeq !== null && ` Follows change #${d.checkpoint.parentSeq}.`}
-              {d.checkpoint.hash && <span className="ml-1 font-mono text-[11.5px] text-zinc-500">sha256:{d.checkpoint.hash.slice(0, 12)}</span>}
+              {d.checkpoint.hash && <span className="ml-1 font-mono text-[11.5px] text-faint">sha256:{d.checkpoint.hash.slice(0, 12)}</span>}
             </p>
             {d.action && !d.action.available && d.action.reason && (
-              <p className="text-[12.5px] text-zinc-500">{d.action.reason}</p>
+              <p className="text-[12.5px] text-faint">{d.action.reason}</p>
             )}
             {d.action?.available && d.action.expiresAt && (
-              <p className="text-[12.5px] text-zinc-500">Can be restored until {new Date(d.action.expiresAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}.</p>
+              <p className="text-[12.5px] text-faint">Can be restored until {new Date(d.action.expiresAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}.</p>
             )}
             {d.preserved && d.preserved.entries.length > 0 && (
               <div className="pt-1">
@@ -277,7 +277,7 @@ export function ChangeDetails({
               {r.preserved && r.preserved.entries.length > 0 && (
                 <ul className="space-y-0.5">
                   {r.preserved.entries.map((e, i) => (
-                    <li key={i} className="font-mono text-[11.5px] leading-[18px] text-zinc-500 [overflow-wrap:anywhere]">Kept: {keptLine(e)}</li>
+                    <li key={i} className="font-mono text-[11.5px] leading-[18px] text-faint [overflow-wrap:anywhere]">Kept: {keptLine(e)}</li>
                   ))}
                 </ul>
               )}

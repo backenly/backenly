@@ -229,21 +229,21 @@ export function ChangeHistory({ projectId }: { projectId: string }) {
                     aria-label={`Change #${c.seq}: ${c.summary}. ${s.label}`}
                     className={`grid cursor-pointer grid-cols-[2.75rem_minmax(0,1fr)_auto] items-start gap-x-2 px-4 py-3 pr-12 transition-colors hover:bg-white/[0.025] sm:px-5 sm:pr-14 ${FOCUS_INSET}`}
                   >
-                    <span className="pt-px font-mono text-[12.5px] tabular-nums text-zinc-500">#{c.seq}</span>
+                    <span className="pt-px font-mono text-[12.5px] tabular-nums text-faint">#{c.seq}</span>
                     <span className="min-w-0">
                       <span className="block truncate text-[13px] text-zinc-100" title={c.summary}>{c.summary}</span>
-                      <span className="mt-1 flex min-w-0 items-center gap-1.5 text-[12px] text-zinc-500">
+                      <span className="mt-1 flex min-w-0 items-center gap-1.5 text-[12px] text-faint">
                         <ActorIcon type={c.actor.type} />
                         <span className="truncate">{c.actor.label}</span>
                         {/* On a phone the status goes under the summary. */}
                         <span className="text-zinc-700 sm:hidden">·</span>
                         <StatusDot tone={s.tone} label={s.label} className="flex-shrink-0 sm:hidden" />
                       </span>
-                      {hasSecond && <span className="mt-1 block text-[12px] leading-[18px] text-zinc-500">{second}</span>}
+                      {hasSecond && <span className="mt-1 block text-[12px] leading-[18px] text-faint">{second}</span>}
                     </span>
                     <span className="flex items-center gap-4 pt-px">
                       <StatusDot tone={s.tone} label={s.label} className="hidden sm:inline-flex" />
-                      <span className="w-[56px] text-right text-[12px] tabular-nums text-zinc-600" title={new Date(c.createdAt).toLocaleString()}>
+                      <span className="w-[56px] text-right text-[12px] tabular-nums text-faint" title={new Date(c.createdAt).toLocaleString()}>
                         {ago(c.createdAt)}
                       </span>
                     </span>

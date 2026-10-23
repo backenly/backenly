@@ -125,7 +125,7 @@ function ActivityCard({ health, refreshing, onRefresh, onCopyFix, copiedIdx, for
 
       <div className="space-y-3 px-4 py-3.5">
         {!hasErrors && !hasTraffic && (
-          <p className="text-[13px] leading-[20px] text-zinc-500">
+          <p className="text-[13px] leading-[20px] text-faint">
             No SDK requests yet. Traffic and failures appear here once your app calls Backenly.
           </p>
         )}
@@ -134,7 +134,7 @@ function ActivityCard({ health, refreshing, onRefresh, onCopyFix, copiedIdx, for
           <>
             <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
               <StatusDot tone="operational" label="All clear" />
-              <span className="text-[12px] tabular-nums text-zinc-500">
+              <span className="text-[12px] tabular-nums text-faint">
                 {totals!.bootstraps24h.toLocaleString()} requests
                 {totals!.distinctOriginsConnected > 0 &&
                   ` from ${totals!.distinctOriginsConnected} ${totals!.distinctOriginsConnected === 1 ? 'origin' : 'origins'}`}
@@ -144,7 +144,7 @@ function ActivityCard({ health, refreshing, onRefresh, onCopyFix, copiedIdx, for
               {health!.successes.slice(0, 2).map((s) => (
                 <li key={s.origin} className="flex items-center justify-between gap-3 py-2 first:pt-0 last:pb-0">
                   <code className="min-w-0 truncate font-mono text-[12px] text-zinc-300">{s.origin}</code>
-                  <span className="flex-shrink-0 text-[12px] tabular-nums text-zinc-500">
+                  <span className="flex-shrink-0 text-[12px] tabular-nums text-faint">
                     {s.count.toLocaleString()}, {formatTimeAgo(s.lastSeen)}
                   </span>
                 </li>
@@ -161,7 +161,7 @@ function ActivityCard({ health, refreshing, onRefresh, onCopyFix, copiedIdx, for
                 <span className="text-[12px] tabular-nums text-rose-300">{totals!.failures1h} in the last hour</span>
               )}
               {hasTraffic && (
-                <span className="text-[12px] tabular-nums text-zinc-500">{totals!.bootstraps24h.toLocaleString()} succeeded</span>
+                <span className="text-[12px] tabular-nums text-faint">{totals!.bootstraps24h.toLocaleString()} succeeded</span>
               )}
             </div>
             {health!.failures.slice(0, 1).map((f, idx) => (
@@ -169,7 +169,7 @@ function ActivityCard({ health, refreshing, onRefresh, onCopyFix, copiedIdx, for
                 <div className="mb-1.5 flex items-center gap-2">
                   <AlertCircle className="h-3.5 w-3.5 flex-shrink-0 text-rose-300" strokeWidth={1.75} />
                   <code className="min-w-0 flex-1 truncate font-mono text-[12px] text-zinc-200">{f.origin}</code>
-                  <span className="flex-shrink-0 text-[12px] tabular-nums text-zinc-500">{formatTimeAgo(f.lastSeen)}</span>
+                  <span className="flex-shrink-0 text-[12px] tabular-nums text-faint">{formatTimeAgo(f.lastSeen)}</span>
                 </div>
                 <p className="mb-2.5 line-clamp-2 text-[12.5px] leading-[18px] text-zinc-400">{f.hint}</p>
                 <KitButton size="sm" icon={copiedIdx === idx ? Check : Copy} onClick={() => onCopyFix(f.fixPrompt, idx)}>
@@ -178,7 +178,7 @@ function ActivityCard({ health, refreshing, onRefresh, onCopyFix, copiedIdx, for
               </div>
             ))}
             {health!.failures.length > 1 && (
-              <p className="text-[12px] text-zinc-500">
+              <p className="text-[12px] text-faint">
                 {health!.failures.length - 1} more {health!.failures.length - 1 === 1 ? 'origin is' : 'origins are'} failing
               </p>
             )}
@@ -189,7 +189,7 @@ function ActivityCard({ health, refreshing, onRefresh, onCopyFix, copiedIdx, for
             public endpoint. Informational: real browser frontends always send
             an Origin header, so these never turn the card red. */}
         {(health?.probes?.count ?? 0) > 0 && (
-          <p className={`border-t ${KIT.hairline} pt-2.5 text-[12px] leading-[18px] text-zinc-500`}>
+          <p className={`border-t ${KIT.hairline} pt-2.5 text-[12px] leading-[18px] text-faint`}>
             {health!.probes!.count.toLocaleString()} {health!.probes!.count === 1 ? 'request' : 'requests'} without an Origin header
             {health!.probes!.lastSeen ? ` (last ${formatTimeAgo(health!.probes!.lastSeen)})` : ''} were rejected. These are
             usually bots, curl, or a server script missing its API key.
@@ -311,7 +311,7 @@ function RegisteredCard({
               </li>
             ))}
             {active.length > 3 && (
-              <li className="px-3 py-2 text-[12px] text-zinc-500">{active.length - 3} more</li>
+              <li className="px-3 py-2 text-[12px] text-faint">{active.length - 3} more</li>
             )}
           </ul>
         )}

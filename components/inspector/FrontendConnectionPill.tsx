@@ -38,12 +38,12 @@ const STATUS_STYLES: Record<ConnectionStatus, {
 }> = {
   loading: {
     dotClass: 'bg-zinc-600',
-    labelClass: 'text-zinc-500',
+    labelClass: 'text-faint',
     label: () => 'Checking frontend…',
   },
   idle: {
     dotClass: 'bg-zinc-600',
-    labelClass: 'text-zinc-500',
+    labelClass: 'text-faint',
     label: () => 'No frontend yet',
   },
   connected: {

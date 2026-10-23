@@ -201,7 +201,7 @@ function DirectTab({ projectId }: { projectId: string }) {
       >
         <DetailList>
           <DetailRow label="API base URL">
-            {apiBaseUrl ? <CopyField value={apiBaseUrl} /> : <span className="text-zinc-500">—</span>}
+            {apiBaseUrl ? <CopyField value={apiBaseUrl} /> : <span className="text-faint">—</span>}
           </DetailRow>
           <DetailRow label="Project ID">
             <CopyField value={projectId} />

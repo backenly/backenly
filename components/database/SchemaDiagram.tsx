@@ -405,7 +405,7 @@ function SchemaMinimap({
           <span>MiniMap</span>
         </div>
         <div className="flex items-center gap-1.5">
-          <span className="font-mono text-[10px] text-zinc-500 tabular-nums">
+          <span className="font-mono text-[10px] text-faint tabular-nums">
             {Math.round(zoom * 100)}%
           </span>
           <kbd
@@ -520,7 +520,7 @@ function SchemaMinimap({
       </div>
 
       {/* Mini Helper Footer */}
-      <div className="mt-1.5 flex items-center justify-between text-[9.5px] font-mono text-zinc-500">
+      <div className="mt-1.5 flex items-center justify-between text-[9.5px] font-mono text-faint">
         <span>Click to jump</span>
         <span>Drag to pan</span>
       </div>
@@ -1106,7 +1106,7 @@ export function SchemaDiagram({
     return (
       <div className="flex h-full min-h-[500px] w-full flex-col items-center justify-center gap-3 bg-[#0c0d0f]">
         <Spinner className="h-5 w-5 text-violet-400" />
-        <p className="font-mono text-[12px] text-zinc-500">Mapping relational schema graph…</p>
+        <p className="font-mono text-[12px] text-faint">Mapping relational schema graph…</p>
       </div>
     )
   }
@@ -1183,7 +1183,7 @@ export function SchemaDiagram({
               </button>
             </div>
           ) : (
-            <div className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 flex items-center gap-1 select-none font-mono text-[10.5px] text-zinc-500">
+            <div className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 flex items-center gap-1 select-none font-mono text-[10.5px] text-faint">
               <kbd className="inline-flex h-[18px] items-center justify-center rounded-[4px] border border-white/[0.10] bg-white/[0.04] px-1 font-mono text-[10px] text-zinc-400">
                 ⌘F
               </kbd>
@@ -1198,7 +1198,7 @@ export function SchemaDiagram({
         {filteredTableNames != null && (
           <span className="inline-flex h-[32px] items-center gap-1 rounded-[7px] border border-white/[0.08] bg-[#0f1012]/95 px-2.5 font-mono text-[11px] text-zinc-300 shadow-2xl backdrop-blur-md">
             <span className="font-semibold text-zinc-100">{filteredTableNames.size}</span>
-            <span className="text-zinc-500">table{filteredTableNames.size !== 1 ? 's' : ''} matched</span>
+            <span className="text-faint">table{filteredTableNames.size !== 1 ? 's' : ''} matched</span>
           </span>
         )}
 
@@ -1244,7 +1244,7 @@ export function SchemaDiagram({
         >
           <ZoomOut className="h-3.5 w-3.5" />
         </button>
-        <span className="px-1 font-mono text-[11px] text-zinc-500 tabular-nums">
+        <span className="px-1 font-mono text-[11px] text-faint tabular-nums">
           {Math.round(zoom * 100)}%
         </span>
         <div className="h-4 w-px bg-white/[0.08] mx-0.5" />
@@ -1506,7 +1506,7 @@ export function SchemaDiagram({
                 </div>
 
                 <div className="flex items-center gap-1.5 flex-shrink-0">
-                  <span className="text-[11px] tabular-nums text-zinc-500 bg-white/[0.04] px-1.5 py-0.5 rounded border border-white/[0.06]">
+                  <span className="text-[11px] tabular-nums text-faint bg-white/[0.04] px-1.5 py-0.5 rounded border border-white/[0.06]">
                     {table.rows?.toLocaleString() ?? 0}
                   </span>
                   {onOpenTableData && (
@@ -1528,7 +1528,7 @@ export function SchemaDiagram({
               {/* Column List */}
               <div className="divide-y divide-white/[0.04] py-0.5">
                 {columns.length === 0 ? (
-                  <div className="px-3 py-2 text-[11px] text-zinc-500 italic">No columns found</div>
+                  <div className="px-3 py-2 text-[11px] text-faint italic">No columns found</div>
                 ) : (
                   columns.map((col) => {
                     const isPk = !!col.primary
@@ -1595,8 +1595,8 @@ export function SchemaDiagram({
                         </div>
 
                         <div className="flex items-center gap-1.5 flex-shrink-0 text-[10.5px]">
-                          <span className="text-zinc-500 truncate max-w-[85px]">{col.type}</span>
-                          {col.nullable && <span className="text-zinc-600 text-[10px]" title="Nullable">?</span>}
+                          <span className="text-faint truncate max-w-[85px]">{col.type}</span>
+                          {col.nullable && <span className="text-faint text-[10px]" title="Nullable">?</span>}
                           {col.indexed && !isPk && (
                             <span
                               title="Indexed"
@@ -1613,7 +1613,7 @@ export function SchemaDiagram({
               </div>
 
               {/* Card Footer (Metadata) */}
-              <div className="flex h-[28px] items-center justify-between border-t border-white/[0.05] bg-[#111216] px-3 rounded-b-[9px] font-mono text-[10px] text-zinc-500">
+              <div className="flex h-[28px] items-center justify-between border-t border-white/[0.05] bg-[#111216] px-3 rounded-b-[9px] font-mono text-[10px] text-faint">
                 <span className="flex items-center gap-1">
                   <Shield className="h-2.5 w-2.5 text-emerald-400" />
                   <span>RLS active</span>
@@ -1667,7 +1667,7 @@ export function SchemaDiagram({
             </span>
           </div>
 
-          <span className="font-mono text-[10.5px] text-zinc-500 tabular-nums">
+          <span className="font-mono text-[10.5px] text-faint tabular-nums">
             {tables.length} tables · {relationships.length} rels
           </span>
 

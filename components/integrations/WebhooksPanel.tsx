@@ -339,7 +339,7 @@ export function WebhooksPanel({ projectId }: { projectId: string }) {
         description="Signed events to your own services when rows change or an end user signs up. Row events are captured in Postgres, so every writer triggers them: the REST API, functions and the table editor."
         meta={
           !loading && webhooks.length > 0 ? (
-            <span className="text-[13px] tabular-nums text-zinc-500">
+            <span className="text-[13px] tabular-nums text-faint">
               {webhooks.length} {webhooks.length === 1 ? 'endpoint' : 'endpoints'}
             </span>
           ) : undefined
@@ -415,7 +415,7 @@ export function WebhooksPanel({ projectId }: { projectId: string }) {
                       />
                       <span className="min-w-0 flex-1">
                         <span className="block truncate font-mono text-[12.5px] text-zinc-100">{webhook.targetUrl}</span>
-                        <span className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-zinc-500">
+                        <span className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-faint">
                           <Tag mono>{webhook.eventType}</Tag>
                           <span>{webhook.active ? 'Enabled' : 'Disabled'}</span>
                           <span className="tabular-nums">
@@ -461,14 +461,14 @@ export function WebhooksPanel({ projectId }: { projectId: string }) {
                           <Skeleton className="h-[16px] w-2/3" />
                         </div>
                       ) : (logs[webhook.id] ?? []).length === 0 ? (
-                        <p className="py-1 text-[13px] text-zinc-500">
+                        <p className="py-1 text-[13px] text-faint">
                           No deliveries recorded. This endpoint has not fired yet.
                         </p>
                       ) : (
                         <div className="overflow-x-auto">
                           <table className="w-full min-w-[620px] text-left text-[12.5px]">
                             <thead>
-                              <tr className="text-[12px] text-zinc-500">
+                              <tr className="text-[12px] text-faint">
                                 <th scope="col" className="pb-2 pr-4 font-medium">Status</th>
                                 <th scope="col" className="pb-2 pr-4 font-medium">Time</th>
                                 <th scope="col" className="pb-2 pr-4 font-medium">Response</th>
@@ -486,8 +486,8 @@ export function WebhooksPanel({ projectId }: { projectId: string }) {
                                     {when(log.createdAt)}
                                   </td>
                                   <td className="py-2 pr-4 align-top font-mono text-[12px] text-zinc-400">{log.statusCode ?? '—'}</td>
-                                  <td className="py-2 pr-4 align-top tabular-nums text-zinc-500">{log.attemptCount}</td>
-                                  <td className={`py-2 align-top ${log.status === 'CANCELLED' ? 'text-zinc-500' : 'text-rose-300/90'}`}>
+                                  <td className="py-2 pr-4 align-top tabular-nums text-faint">{log.attemptCount}</td>
+                                  <td className={`py-2 align-top ${log.status === 'CANCELLED' ? 'text-faint' : 'text-rose-300/90'}`}>
                                     {log.status === 'CANCELLED' && log.error === 'project_paused'
                                       ? 'Not sent: the project was paused'
                                       : log.error ?? ''}
@@ -530,7 +530,7 @@ export function WebhooksPanel({ projectId }: { projectId: string }) {
                   <span className={`h-[7px] w-[7px] flex-shrink-0 rounded-full ${t.enabled ? 'bg-emerald-400' : 'bg-zinc-600'}`} aria-hidden />
                   <span className="min-w-0 flex-1">
                     <span className="block truncate text-[13px] font-medium text-zinc-100">{t.name}</span>
-                    <span className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-zinc-500">
+                    <span className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-faint">
                       <Tag mono>{t.event} → {t.sourceTable}</Tag>
                       <span className="truncate font-mono text-[12px]">{t.webhookUrl ?? '—'}</span>
                       <span>{t.enabled ? 'Enabled' : 'Disabled'}</span>
@@ -545,7 +545,7 @@ export function WebhooksPanel({ projectId }: { projectId: string }) {
             <div className="mt-4 overflow-x-auto rounded-[10px] border border-white/[0.08] bg-[#0f1012] px-4 py-3">
               <table className="w-full min-w-[680px] text-left text-[12.5px]">
                 <thead>
-                  <tr className="text-[12px] text-zinc-500">
+                  <tr className="text-[12px] text-faint">
                     <th scope="col" className="pb-2 pr-4 font-medium">Status</th>
                     <th scope="col" className="pb-2 pr-4 font-medium">Trigger</th>
                     <th scope="col" className="pb-2 pr-4 font-medium">Event</th>
@@ -571,7 +571,7 @@ export function WebhooksPanel({ projectId }: { projectId: string }) {
                         {when(log.createdAt)}
                       </td>
                       <td className="py-2 pr-4 align-top font-mono text-[12px] text-zinc-400">{log.statusCode ?? '—'}</td>
-                      <td className="py-2 pr-4 align-top tabular-nums text-zinc-500">{log.attemptCount}</td>
+                      <td className="py-2 pr-4 align-top tabular-nums text-faint">{log.attemptCount}</td>
                       <td className="py-2 align-top">
                         {log.status === 'DEAD' && (
                           <KitButton
@@ -620,7 +620,7 @@ export function WebhooksPanel({ projectId }: { projectId: string }) {
         </div>
         <div className="overflow-hidden rounded-[10px] border border-white/[0.08] bg-[#08090a]">
           <div className="flex items-center justify-between border-b border-white/[0.06] px-4 py-2">
-            <span className="text-[12px] text-zinc-500">verify.js</span>
+            <span className="text-[12px] text-faint">verify.js</span>
             <CopyButton value={VERIFY_SNIPPET} label="Copy snippet" />
           </div>
           <pre className="overflow-x-auto px-4 py-3.5 font-mono text-[12px] leading-[20px] text-zinc-300">
@@ -661,7 +661,7 @@ export function WebhooksPanel({ projectId }: { projectId: string }) {
             </KitButton>
           }
         >
-          <p className="mb-2 truncate font-mono text-[12px] text-zinc-500">{revealedSecret.url}</p>
+          <p className="mb-2 truncate font-mono text-[12px] text-faint">{revealedSecret.url}</p>
           <div className="flex items-start gap-2 rounded-[8px] border border-white/[0.08] bg-[#08090a] p-3">
             <code className="min-w-0 flex-1 select-all break-all font-mono text-[12.5px] leading-[20px] text-zinc-100">
               {revealedSecret.secret}
@@ -815,7 +815,7 @@ function WebhookForm({
                 />
                 <span className="min-w-0">
                   <span className="block font-mono text-[12px] text-zinc-100">{type}</span>
-                  <span className="mt-0.5 block text-[12px] leading-[17px] text-zinc-500">
+                  <span className="mt-0.5 block text-[12px] leading-[17px] text-faint">
                     {EVENT_DESCRIPTIONS[type]}
                   </span>
                 </span>

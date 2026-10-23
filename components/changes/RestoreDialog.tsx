@@ -178,7 +178,7 @@ export function RestoreDialog({
           {['Restore point available', 'Current state protected', 'Recovery plan verified', 'No expected data loss'].map((label) => (
             <li key={label} className="flex items-center gap-2.5">
               <Skeleton className="h-4 w-4 rounded-full" />
-              <span className="text-[13px] text-zinc-500">{label}</span>
+              <span className="text-[13px] text-faint">{label}</span>
             </li>
           ))}
         </ul>
@@ -203,7 +203,7 @@ export function RestoreDialog({
                     </span>
                     <span className="min-w-0">
                       <span className="block text-[13px] text-zinc-100">{warn ? 'Data written since would be affected' : c.label}</span>
-                      {!c.ok && !warn && <span className="mt-0.5 block text-[12px] leading-[18px] text-zinc-500 [overflow-wrap:anywhere]">{c.detail}</span>}
+                      {!c.ok && !warn && <span className="mt-0.5 block text-[12px] leading-[18px] text-faint [overflow-wrap:anywhere]">{c.detail}</span>}
                     </span>
                   </li>
                 )
@@ -233,7 +233,7 @@ export function RestoreDialog({
                   <ul className="divide-y divide-white/[0.05]">
                     {affectedRows.map((i, n) => (
                       <li key={n} className="flex items-baseline gap-3 px-3 py-2 text-[12.5px]">
-                        <span className={`w-[11rem] flex-shrink-0 ${i.needsApproval ? 'text-zinc-200' : 'text-zinc-500'}`}>{EFFECT[i.effect] ?? i.effect}</span>
+                        <span className={`w-[11rem] flex-shrink-0 ${i.needsApproval ? 'text-zinc-200' : 'text-faint'}`}>{EFFECT[i.effect] ?? i.effect}</span>
                         <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-zinc-400" title={`${i.table}${i.column ? `.${i.column}` : ''}`}>
                           {i.table}{i.column ? `.${i.column}` : ''}
                         </span>
@@ -246,7 +246,7 @@ export function RestoreDialog({
                       <li key={`u${n}`} className="px-3 py-2 text-[12.5px] leading-[18px] text-zinc-300 [overflow-wrap:anywhere]">{u}</li>
                     ))}
                   </ul>
-                  <p className="border-t border-white/[0.05] bg-white/[0.015] px-3 py-2 text-[12px] leading-[17px] text-zinc-500">
+                  <p className="border-t border-white/[0.05] bg-white/[0.015] px-3 py-2 text-[12px] leading-[17px] text-faint">
                     Nothing is deleted. What is set aside is kept with this restore; reapplying the change brings it back.
                   </p>
                 </div>

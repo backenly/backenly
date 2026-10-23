@@ -241,7 +241,7 @@ export function ClientKeysPanel() {
         <div className="relative overflow-x-auto rounded-[10px] border border-white/[0.08] bg-[#0f1012]">
           <table className="w-full min-w-[840px] text-left">
             <thead>
-              <tr className="border-b border-white/[0.06] text-[12px] text-zinc-500">
+              <tr className="border-b border-white/[0.06] text-[12px] text-faint">
                 <th scope="col" className="h-[38px] whitespace-nowrap px-4 font-medium">Name</th>
                 <th scope="col" className="h-[38px] whitespace-nowrap px-4 font-medium">Key</th>
                 <th scope="col" className="h-[38px] whitespace-nowrap px-4 font-medium">Rate limit</th>
@@ -276,7 +276,7 @@ export function ClientKeysPanel() {
                           </Tag>
                         )}
                       </div>
-                      <p className="mt-0.5 max-w-[260px] truncate text-[12px] text-zinc-500">
+                      <p className="mt-0.5 max-w-[260px] truncate text-[12px] text-faint">
                         {key.serviceRole
                           ? 'Service role: bypasses row security, server-side only'
                           : key.capabilities && key.capabilities.length > 0
@@ -299,7 +299,7 @@ export function ClientKeysPanel() {
                             <CopyButton value={realKey} label="Copy key" />
                           </>
                         ) : (
-                          <span className="ml-1 inline-flex items-center gap-1 whitespace-nowrap text-[12px] text-zinc-600">
+                          <span className="ml-1 inline-flex items-center gap-1 whitespace-nowrap text-[12px] text-faint">
                             <Shield className="h-3 w-3" /> Shown once
                           </span>
                         )}
@@ -326,14 +326,14 @@ export function ClientKeysPanel() {
                           {formatDate(key.expiresAt)}
                         </span>
                       ) : (
-                        <span className="text-zinc-600">Never</span>
+                        <span className="text-faint">Never</span>
                       )}
                     </td>
                     <td className="whitespace-nowrap px-4 py-3 align-middle text-[13px] tabular-nums">
                       {key.lastUsed ? (
                         <span className="text-zinc-300">{formatDate(key.lastUsed)}</span>
                       ) : (
-                        <span className="text-zinc-600">Never</span>
+                        <span className="text-faint">Never</span>
                       )}
                     </td>
                     <td className="px-4 py-3 text-right align-middle">
@@ -412,7 +412,7 @@ export function ClientKeysPanel() {
                       {opt.label}
                       {on && <Check className="h-3.5 w-3.5 text-violet-200" strokeWidth={2.25} />}
                     </span>
-                    <span className="mt-0.5 text-[12px] leading-[17px] text-zinc-500">{opt.body}</span>
+                    <span className="mt-0.5 text-[12px] leading-[17px] text-faint">{opt.body}</span>
                   </label>
                 )
               })}
