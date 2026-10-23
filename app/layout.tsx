@@ -35,7 +35,7 @@ export const metadata: Metadata = {
     template: '%s | Backenly',
   },
   description:
-    'Your coding agent builds the backend over MCP; Backenly keeps it running: Postgres, REST APIs, auth, storage and realtime, with each schema change verified.',
+    'Your coding agent builds the backend over MCP. Backenly keeps it running: schema changes checked, destructive ones held for you, safe problems fixed on its own.',
   applicationName: SITE_NAME,
   authors: [{ name: SITE_NAME, url: SITE_URL }],
   creator: SITE_NAME,

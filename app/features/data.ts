@@ -295,9 +295,9 @@ const FEATURE_LIST: FeatureData[] = [
     slug: 'deployment-ready-backends',
     name: 'Operations and autonomy',
     icon: Rocket,
-    metaTitle: 'Deployment-ready backends, checked every minute',
+    metaTitle: 'Operations and self-healing, checked every minute',
     metaDescription:
-      'Backenly runs your backend on managed infrastructure: no Docker, Kubernetes or cloud console, a rollback snapshot before every deploy, and a check every minute.',
+      'Backenly checks your running backend every minute, fixes a short list of safe problems itself, verifies each fix and holds anything risky for your approval.',
     headline: 'Live at once, checked every minute',
     subheadline:
       'No Docker, no Kubernetes, no cloud console. Backenly runs the backend, snapshots before every deploy, and watches it every minute once it is live.',

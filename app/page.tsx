@@ -10,13 +10,13 @@ import { graph, softwareNode } from '@/lib/seo/schema'
 // metadata: a client page cannot export any, and the home page's canonical
 // used to sit on the root layout, where every other page inherited it.
 export const metadata: Metadata = pageMetadata({
-  title: 'Backenly: the open-source backend for AI coding agents',
+  title: 'Backenly: the autonomous backend for AI coding agents',
   brandInTitle: true,
   description:
-    'Claude Code, Cursor or Codex builds your backend over MCP: Postgres, REST APIs, auth, storage. Backenly verifies each schema change and monitors it after launch.',
+    'Claude Code, Cursor or Codex builds your Postgres backend over MCP. Backenly checks every schema change, holds destructive ones for you and repairs itself.',
   path: '/',
   social: {
-    title: 'Backenly | The Autonomous Backend Platform',
+    title: 'Backenly: the autonomous backend for coding agents',
     description:
       'Your coding agent builds it. Backenly keeps it running. Real Postgres, REST APIs, auth, storage and realtime over MCP. Schema changes are verified, and destructive ones wait for you. Open source.',
   },
