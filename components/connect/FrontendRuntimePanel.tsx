@@ -22,8 +22,18 @@
  */
 
 import { useEffect, useState } from 'react'
-import { Check, Copy, AlertCircle, RefreshCw, Link2, Trash2, X, Loader2 } from 'lucide-react'
-import { KIT, KitCard, KitBadge, KitInput, SectionLabel } from '@/components/inspector/kit'
+import { Check, Copy, AlertCircle, RefreshCw, Link2, Trash2, X } from 'lucide-react'
+import {
+  IconButton,
+  KIT,
+  KitButton,
+  KitCard,
+  KitCardHeader,
+  KitInput,
+  KitNote,
+  SectionTitle,
+  StatusDot,
+} from '@/components/inspector/kit'
 
 // ── Connection health types ───────────────────────────────────────────────────
 type FailureKind = 'missing' | 'placeholder' | 'malformed' | 'unknown_key' | 'expired' | 'unknown'
@@ -69,10 +79,11 @@ interface ConnectedApp {
 }
 
 // ── ActivityCard ──────────────────────────────────────────────────────────────
-// Compact card showing live SDK runtime telemetry. Three states:
-//   1. No data yet           → muted onboarding hint
-//   2. Successes, no errors  → emerald "All clear" + last seen origins
-//   3. Errors                → amber/red count + 1 expanded failure with Copy-fix
+// Live SDK runtime telemetry. Three states:
+//   1. No data yet           → a one-line hint
+//   2. Successes, no errors  → "All clear" and the origins seen
+//   3. Errors                → the failure count and the first failing origin,
+//                              with its copy-paste fix prompt
 
 interface ActivityCardProps {
   health: ConnectionHealth | null
@@ -94,113 +105,93 @@ function ActivityCard({ health, refreshing, onRefresh, onCopyFix, copiedIdx, for
   return (
     <KitCard
       className={
-        accent === 'red' ? '!border-rose-500/25' :
-        accent === 'amber' ? '!border-amber-500/25' : ''
+        accent === 'red' ? '!border-rose-400/25' :
+        accent === 'amber' ? '!border-amber-400/25' : ''
       }
     >
-      <div className={`px-4 py-2.5 border-b ${KIT.hairline} flex items-center justify-between`}>
-        <div className="flex items-center gap-2">
-          <span className={`h-[5px] w-[5px] rounded-full ${
-            accent === 'red' ? 'bg-rose-400' :
-            accent === 'amber' ? 'bg-amber-400' :
-            accent === 'ok' ? 'bg-emerald-400' :
-            'bg-zinc-600'
-          }`} />
-          <SectionLabel>Activity · 24h</SectionLabel>
-        </div>
-        <button
-          onClick={onRefresh}
-          disabled={refreshing}
-          className={`p-1 ${KIT.radiusXs} hover:bg-white/[0.04] disabled:opacity-40 focus:outline-none`}
-          title="Refresh"
-        >
-          <RefreshCw className={`w-3 h-3 text-zinc-500 ${refreshing ? 'animate-spin' : ''}`} />
-        </button>
-      </div>
+      <KitCardHeader
+        title="Activity"
+        description="SDK requests in the last 24 hours"
+        actions={
+          <IconButton
+            icon={RefreshCw}
+            label="Refresh activity"
+            onClick={onRefresh}
+            disabled={refreshing}
+            className={refreshing ? '[&_svg]:animate-spin' : ''}
+          />
+        }
+      />
 
-      <div className="px-4 py-3 space-y-2.5">
+      <div className="space-y-3 px-4 py-3.5">
         {!hasErrors && !hasTraffic && (
-          <p className="text-[12.5px] text-zinc-500 leading-relaxed">
+          <p className="text-[13px] leading-[20px] text-zinc-500">
             No SDK requests yet. Traffic and failures appear here once your app calls Backenly.
           </p>
         )}
 
         {!hasErrors && hasTraffic && (
           <>
-            <div className="flex items-center gap-2 text-[12.5px]">
-              <KitBadge tone="operational">All clear</KitBadge>
-              <span className="text-zinc-500 tabular-nums text-[12px]">· {totals!.bootstraps24h.toLocaleString()} req</span>
-              {totals!.distinctOriginsConnected > 0 && (
-                <span className="text-zinc-600 font-mono text-[12px]">· {totals!.distinctOriginsConnected} {totals!.distinctOriginsConnected === 1 ? 'origin' : 'origins'}</span>
-              )}
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+              <StatusDot tone="operational" label="All clear" />
+              <span className="text-[12px] tabular-nums text-zinc-500">
+                {totals!.bootstraps24h.toLocaleString()} requests
+                {totals!.distinctOriginsConnected > 0 &&
+                  ` from ${totals!.distinctOriginsConnected} ${totals!.distinctOriginsConnected === 1 ? 'origin' : 'origins'}`}
+              </span>
             </div>
-            {health!.successes.slice(0, 2).map(s => (
-              <div key={s.origin} className="flex items-center justify-between text-[12px]">
-                <code className="font-mono text-zinc-400 truncate">{s.origin}</code>
-                <div className="flex items-center gap-2 flex-shrink-0 tabular-nums">
-                  <span className="text-emerald-300/90">{s.count}</span>
-                  <span className="text-zinc-600">{formatTimeAgo(s.lastSeen)}</span>
-                </div>
-              </div>
-            ))}
+            <ul className={`divide-y ${KIT.divide}`}>
+              {health!.successes.slice(0, 2).map((s) => (
+                <li key={s.origin} className="flex items-center justify-between gap-3 py-2 first:pt-0 last:pb-0">
+                  <code className="min-w-0 truncate font-mono text-[12px] text-zinc-300">{s.origin}</code>
+                  <span className="flex-shrink-0 text-[12px] tabular-nums text-zinc-500">
+                    {s.count.toLocaleString()}, {formatTimeAgo(s.lastSeen)}
+                  </span>
+                </li>
+              ))}
+            </ul>
           </>
         )}
 
         {hasErrors && (
           <>
-            <div className="flex items-center gap-3 text-[12.5px] flex-wrap">
-              <span className="flex items-center gap-1.5">
-                <span className={`h-[5px] w-[5px] rounded-full ${accent === 'red' ? 'bg-rose-400' : 'bg-amber-400'}`} />
-                <span className="text-zinc-200 tabular-nums font-semibold">{totals!.failures24h}</span>
-                <span className="text-zinc-500">failed</span>
-                {totals!.failures1h > 0 && (
-                  <span className="text-rose-300 font-mono text-[12px]">({totals!.failures1h} in last hour)</span>
-                )}
-              </span>
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+              <StatusDot tone={accent === 'red' ? 'failed' : 'attention'} label={`${totals!.failures24h.toLocaleString()} failed`} />
+              {totals!.failures1h > 0 && (
+                <span className="text-[12px] tabular-nums text-rose-300">{totals!.failures1h} in the last hour</span>
+              )}
               {hasTraffic && (
-                <span className="flex items-center gap-1.5">
-                  <span className="h-[5px] w-[5px] rounded-full bg-emerald-400" />
-                  <span className="text-zinc-400 tabular-nums">{totals!.bootstraps24h}</span>
-                  <span className="text-zinc-600">ok</span>
-                </span>
+                <span className="text-[12px] tabular-nums text-zinc-500">{totals!.bootstraps24h.toLocaleString()} succeeded</span>
               )}
             </div>
             {health!.failures.slice(0, 1).map((f, idx) => (
-              <div
-                key={`${f.origin}-${idx}`}
-                className={`${KIT.radiusSm} border ${KIT.border} bg-[#08090a] px-3 py-2.5`}
-              >
-                <div className="flex items-center gap-2 mb-1.5">
-                  <AlertCircle className="w-3 h-3 text-rose-300 flex-shrink-0" />
-                  <code className="text-[12px] font-mono text-zinc-200 truncate flex-1">{f.origin}</code>
-                  <span className="text-[12px] text-zinc-600 font-mono flex-shrink-0">{formatTimeAgo(f.lastSeen)}</span>
+              <div key={`${f.origin}-${idx}`} className={`${KIT.radiusSm} border ${KIT.border} bg-[#08090a] px-3 py-2.5`}>
+                <div className="mb-1.5 flex items-center gap-2">
+                  <AlertCircle className="h-3.5 w-3.5 flex-shrink-0 text-rose-300" strokeWidth={1.75} />
+                  <code className="min-w-0 flex-1 truncate font-mono text-[12px] text-zinc-200">{f.origin}</code>
+                  <span className="flex-shrink-0 text-[12px] tabular-nums text-zinc-500">{formatTimeAgo(f.lastSeen)}</span>
                 </div>
-                <p className="text-[12px] text-zinc-400 leading-relaxed mb-2 line-clamp-2">{f.hint}</p>
-                <button
-                  onClick={() => onCopyFix(f.fixPrompt, idx)}
-                  className={`flex items-center gap-1 px-2 py-1 ${KIT.radiusXs} ${KIT.accentBg} hover:bg-white/[0.10] border ${KIT.accentBorder} ${KIT.accentText} text-[12px] font-semibold transition-colors focus:outline-none`}
-                >
-                  {copiedIdx === idx ? (
-                    <><Check className="w-2.5 h-2.5" /> Copied. Paste into your agent</>
-                  ) : (
-                    <><Copy className="w-2.5 h-2.5" /> Copy fix prompt</>
-                  )}
-                </button>
+                <p className="mb-2.5 line-clamp-2 text-[12.5px] leading-[18px] text-zinc-400">{f.hint}</p>
+                <KitButton size="sm" icon={copiedIdx === idx ? Check : Copy} onClick={() => onCopyFix(f.fixPrompt, idx)}>
+                  {copiedIdx === idx ? 'Copied. Paste it into your agent' : 'Copy fix prompt'}
+                </KitButton>
               </div>
             ))}
             {health!.failures.length > 1 && (
-              <p className="text-[12px] text-zinc-600">+{health!.failures.length - 1} more origin{health!.failures.length - 1 === 1 ? '' : 's'} failing</p>
+              <p className="text-[12px] text-zinc-500">
+                {health!.failures.length - 1} more {health!.failures.length - 1 === 1 ? 'origin is' : 'origins are'} failing
+              </p>
             )}
           </>
         )}
 
-        {/* Origin-less rejections — bots, curl, or server scripts probing the
+        {/* Origin-less rejections: bots, curl, or server scripts probing the
             public endpoint. Informational: real browser frontends always send
-            an Origin header, so these never flip the card red. */}
+            an Origin header, so these never turn the card red. */}
         {(health?.probes?.count ?? 0) > 0 && (
-          <p className={`text-[12px] text-zinc-600 leading-relaxed border-t ${KIT.hairline} pt-2`}>
-            {health!.probes!.count} unattributed request{health!.probes!.count === 1 ? '' : 's'} rejected
-            {health!.probes!.lastSeen ? ` · ${formatTimeAgo(health!.probes!.lastSeen)}` : ''} · no Origin header;
+          <p className={`border-t ${KIT.hairline} pt-2.5 text-[12px] leading-[18px] text-zinc-500`}>
+            {health!.probes!.count.toLocaleString()} {health!.probes!.count === 1 ? 'request' : 'requests'} without an Origin header
+            {health!.probes!.lastSeen ? ` (last ${formatTimeAgo(health!.probes!.lastSeen)})` : ''} were rejected. These are
             usually bots, curl, or a server script missing its API key.
           </p>
         )}
@@ -210,7 +201,7 @@ function ActivityCard({ health, refreshing, onRefresh, onCopyFix, copiedIdx, for
 }
 
 // ── RegisteredCard ────────────────────────────────────────────────────────────
-// CORS lock-down. Optional — when no URL is bound, any origin can call the SDK.
+// CORS lock-down. Optional: when no URL is bound, any origin can call the SDK.
 // Once at least one URL is bound, the allowlist becomes strict.
 
 interface RegisteredCardProps {
@@ -238,115 +229,118 @@ function RegisteredCard({
 
   return (
     <KitCard>
-      <div className={`px-4 py-2.5 border-b ${KIT.hairline} flex items-center justify-between`}>
-        <SectionLabel>Registered frontends</SectionLabel>
-        {active.length > 0 && (
-          <span className="text-[12px] text-zinc-600 tabular-nums">{active.length} active</span>
-        )}
-      </div>
+      <KitCardHeader
+        title="Allowed origins"
+        description={
+          active.length > 0
+            ? `${active.length} active. Only these origins can call the SDK.`
+            : 'Optional. Until you add one, any origin can call the SDK.'
+        }
+      />
 
-      <div className="px-4 py-3 space-y-2.5">
-        <div className="flex gap-1.5">
+      <div className="space-y-3 px-4 py-3.5">
+        <form
+          className="flex gap-2"
+          onSubmit={(e) => {
+            e.preventDefault()
+            onConnect(false)
+          }}
+        >
           <KitInput
-            type="text"
+            type="url"
+            inputMode="url"
+            name="frontend-origin"
+            autoComplete="off"
+            spellCheck={false}
+            aria-label="Frontend URL"
             value={urlInput}
             onChange={(e) => setUrlInput(e.target.value)}
             placeholder="https://your-app.vercel.app"
             disabled={busy || !!pendingConnect}
-            className="flex-1 min-w-0 disabled:opacity-50"
+            className="min-w-0 flex-1"
           />
-          <button
-            onClick={() => onConnect(false)}
+          <KitButton
+            type="submit"
+            icon={Link2}
+            loading={busy && !pendingConnect && !pendingDisconnect}
             disabled={!urlInput.trim() || busy || !!pendingConnect}
-            className={`flex items-center gap-1 px-2.5 h-8 ${KIT.accentBg} hover:bg-white/[0.10] border ${KIT.accentBorder} disabled:opacity-40 ${KIT.accentText} text-[12px] font-semibold ${KIT.radiusSm} transition-colors flex-shrink-0 focus:outline-none`}
           >
-            {busy ? <Loader2 className="w-3 h-3 animate-spin" /> : <Link2 className="w-3 h-3" />}
-            Bind
-          </button>
-        </div>
-
-        {!error && !pendingConnect && active.length === 0 && (
-          <p className="text-[12px] text-zinc-500 leading-snug">
-            Optional. Without a URL bound, any origin can call your SDK.
-          </p>
-        )}
+            Add
+          </KitButton>
+        </form>
 
         {error && (
-          <div className={`flex items-start gap-1.5 px-2.5 py-1.5 bg-rose-500/[0.06] border border-rose-500/20 ${KIT.radiusSm}`}>
-            <AlertCircle className="w-3 h-3 text-rose-300 flex-shrink-0 mt-0.5" />
-            <p className="text-[12px] text-rose-300/90 leading-snug whitespace-pre-line">{error}</p>
-          </div>
+          <KitNote tone="danger" icon={AlertCircle}>
+            <span className="whitespace-pre-line">{error}</span>
+          </KitNote>
         )}
 
         {pendingConnect && (
-          <div className={`bg-amber-500/[0.05] border border-amber-500/20 ${KIT.radiusSm} p-2.5 space-y-1.5`}>
-            <p className="text-[12px] text-amber-500/90 leading-snug whitespace-pre-line">{pendingConnect.message}</p>
-            <div className="flex gap-1.5">
+          <KitNote tone="warn" icon={AlertCircle} title="Confirm this origin">
+            <span className="block whitespace-pre-line">{pendingConnect.message}</span>
+            <span className="mt-2.5 flex gap-2">
               <KitInput
                 type="text"
+                aria-label="Type CONNECT to confirm"
+                autoComplete="off"
+                spellCheck={false}
                 value={confirmText}
                 onChange={(e) => setConfirmText(e.target.value)}
                 placeholder="Type CONNECT"
-                className="flex-1 min-w-0 focus:border-amber-500/50 focus:ring-amber-500/15"
+                className="min-w-0 flex-1 focus:border-amber-400/50 focus:ring-amber-400/15"
               />
-              <button
-                onClick={() => onConnect(true)}
-                disabled={confirmText !== 'CONNECT' || busy}
-                className={`px-2.5 h-8 bg-amber-500/[0.15] border border-amber-500/25 disabled:opacity-40 text-amber-500 text-[12px] font-semibold ${KIT.radiusSm} focus:outline-none`}
-              >
+              <KitButton onClick={() => onConnect(true)} disabled={confirmText !== 'CONNECT' || busy} loading={busy}>
                 Confirm
-              </button>
-              <button onClick={cancelConnect} className={`px-2 h-8 bg-white/[0.04] border border-white/10 text-zinc-400 hover:text-zinc-100 ${KIT.radiusSm} focus:outline-none`}>
-                <X className="w-3 h-3" />
-              </button>
-            </div>
-          </div>
+              </KitButton>
+              <IconButton icon={X} label="Cancel" onClick={cancelConnect} />
+            </span>
+          </KitNote>
         )}
 
         {active.length > 0 && (
-          <ul className={`${KIT.radiusSm} border ${KIT.hairline} bg-[#08090a] divide-y ${KIT.divide}`}>
+          <ul className={`overflow-hidden ${KIT.radiusSm} border ${KIT.border} bg-[#08090a] divide-y ${KIT.divide}`}>
             {active.slice(0, 3).map(app => (
-              <li key={app.id} className="flex items-center justify-between px-2.5 py-2 gap-2">
-                <code className="text-[12px] font-mono text-zinc-200 truncate flex-1">{app.origin}</code>
-                <button
+              <li key={app.id} className="flex items-center justify-between gap-2 py-1 pl-3 pr-1">
+                <code className="min-w-0 flex-1 truncate font-mono text-[12px] text-zinc-200">{app.origin}</code>
+                <IconButton
+                  icon={Trash2}
+                  label={`Remove ${app.origin}`}
                   onClick={() => onDisconnect(app.origin, false)}
                   disabled={busy}
-                  className="text-rose-300/70 hover:text-rose-300 disabled:opacity-40 p-0.5 flex-shrink-0 focus:outline-none"
-                  title="Disconnect"
-                >
-                  <Trash2 className="w-3 h-3" />
-                </button>
+                />
               </li>
             ))}
             {active.length > 3 && (
-              <li className="px-2.5 py-1.5 text-[12px] text-zinc-600">+{active.length - 3} more</li>
+              <li className="px-3 py-2 text-[12px] text-zinc-500">{active.length - 3} more</li>
             )}
           </ul>
         )}
 
         {pendingDisconnect && (
-          <div className={`bg-rose-500/[0.05] border border-rose-500/20 ${KIT.radiusSm} p-2.5 space-y-1.5`}>
-            <p className="text-[12px] text-rose-300/90 leading-snug whitespace-pre-line">{pendingDisconnect.message}</p>
-            <div className="flex gap-1.5">
+          <KitNote tone="danger" icon={AlertCircle} title="Confirm removing this origin">
+            <span className="block whitespace-pre-line">{pendingDisconnect.message}</span>
+            <span className="mt-2.5 flex gap-2">
               <KitInput
                 type="text"
+                aria-label="Type DISCONNECT to confirm"
+                autoComplete="off"
+                spellCheck={false}
                 value={confirmText}
                 onChange={(e) => setConfirmText(e.target.value)}
                 placeholder="Type DISCONNECT"
-                className="flex-1 min-w-0 focus:border-rose-500/50 focus:ring-rose-500/15"
+                className="min-w-0 flex-1 focus:border-rose-400/50 focus:ring-rose-400/15"
               />
-              <button
+              <KitButton
+                variant="danger"
                 onClick={() => onDisconnect(pendingDisconnect.origin, true)}
                 disabled={confirmText !== 'DISCONNECT' || busy}
-                className={`px-2.5 h-8 bg-rose-500/[0.15] border border-rose-500/25 disabled:opacity-40 text-rose-300 text-[12px] font-semibold ${KIT.radiusSm} focus:outline-none`}
+                loading={busy}
               >
                 Confirm
-              </button>
-              <button onClick={cancelDisconnect} className={`px-2 h-8 bg-white/[0.04] border border-white/10 text-zinc-400 hover:text-zinc-100 ${KIT.radiusSm} focus:outline-none`}>
-                <X className="w-3 h-3" />
-              </button>
-            </div>
-          </div>
+              </KitButton>
+              <IconButton icon={X} label="Cancel" onClick={cancelDisconnect} />
+            </span>
+          </KitNote>
         )}
       </div>
     </KitCard>
@@ -482,18 +476,27 @@ export function FrontendRuntimeCards({ projectId }: { projectId: string }) {
   }
 
   return (
-    <div className="mt-6">
-      <SectionLabel>Frontend clients</SectionLabel>
+    <section>
       {/* Pointed a human at llms.txt, which is written for their agent. A
           person reading this panel needs the docs hub. */}
-      <p className="mt-1.5 text-[12.5px] leading-relaxed text-zinc-500 max-w-2xl">
-        Live SDK traffic and the optional origin allowlist. Your agent wires the SDK — see{' '}
-        <a href="/docs/connect" target="_blank" rel="noreferrer" className="text-zinc-300 underline decoration-white/20 underline-offset-2 hover:text-zinc-100">
-          Documentation
-        </a>
-        .
-      </p>
-      <div className="mt-3 grid grid-cols-1 lg:grid-cols-2 gap-4 items-start">
+      <SectionTitle
+        title="Frontend clients"
+        description={
+          <>
+            Live SDK traffic and the optional origin allowlist. Your agent wires the SDK; the{' '}
+            <a
+              href="/docs/connect"
+              target="_blank"
+              rel="noreferrer"
+              className="text-zinc-300 underline decoration-white/20 underline-offset-2 hover:text-zinc-100"
+            >
+              Connect docs
+            </a>{' '}
+            cover the details.
+          </>
+        }
+      />
+      <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-2">
         <ActivityCard
           health={health}
           refreshing={healthRefreshing}
@@ -520,6 +523,6 @@ export function FrontendRuntimeCards({ projectId }: { projectId: string }) {
           />
         )}
       </div>
-    </div>
+    </section>
   )
 }

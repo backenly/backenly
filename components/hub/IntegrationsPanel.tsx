@@ -840,7 +840,7 @@ function ConnectorDetail({
               <StatusDot tone={keyVerificationBadge(provider.keyStatus).tone} label={keyVerificationBadge(provider.keyStatus).label} />
             </div>
           ) : (
-            <div className="rounded-[10px] border border-dashed border-white/[0.10]">
+            <div className="rounded-[10px] border border-white/[0.08] bg-[#0f1012]">
               <EmptyState
                 icon={KeyRound}
                 title="No key stored"
@@ -1049,7 +1049,7 @@ export function IntegrationsPanel() {
               ))}
             </div>
           ) : visible.length === 0 ? (
-            <div className="rounded-[10px] border border-dashed border-white/[0.10]">
+            <div className="rounded-[10px] border border-white/[0.08] bg-[#0f1012]">
               <EmptyState
                 icon={Search}
                 title="No connectors match"

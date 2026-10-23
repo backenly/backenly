@@ -25,8 +25,12 @@ import {
   type DataPoint, type MetricStats, type Incident, type PerformanceBreakdown,
 } from '@/lib/api/monitoring'
 import {
-  CommandBar, EmptyState, IconButton, KIT, KitButton, KitTab, KitTabs, NoticeStrip, Segmented, Spinner, StatusDot,
+  CommandBar, EmptyState, GhostPreview, IconButton, KIT, KitButton, KitTab, KitTabs, NoticeStrip, Segmented, Spinner,
+  StatusDot,
 } from '@/components/inspector/kit'
+import { AgentEmptyState } from '@/components/inspector/AgentEmptyState'
+import { FOCUS_INSET } from '@/components/console/tokens'
+import { plainText } from '@/components/console/format'
 import { LogsExplorer } from './LogsExplorer'
 
 type TimeRange = '1h' | '24h' | '7d' | '30d'
@@ -56,6 +60,9 @@ export function MonitoringWorkbench({ projectId }: { projectId: string }) {
   const [, setIncidents] = useState<Incident[]>([])
   const [performanceBreakdowns, setPerformanceBreakdowns] = useState<PerformanceBreakdown[]>([])
   const [isBackendLive, setIsBackendLive] = useState<boolean | null>(null)
+  // Built at all, published or not. An empty project has nothing to publish,
+  // so its empty state asks for the first build instead of a publish.
+  const [hasBackend, setHasBackend] = useState<boolean | null>(null)
   const [systemEvents, setSystemEvents] = useState<any[]>([])
   const [requestLog, setRequestLog] = useState<
     Array<{ id: string; method: string; path: string; status: number; latency: number; timestamp: string }>
@@ -71,6 +78,7 @@ export function MonitoringWorkbench({ projectId }: { projectId: string }) {
             (state.hasContent ?? false) ||
             (state.capabilities ?? []).some((c: { name: string }) => c.name === 'Authentication')
           setIsBackendLive(!!(state.isLive && hasContent))
+          setHasBackend(hasContent)
         } else {
           setIsBackendLive(false)
         }
@@ -149,6 +157,11 @@ export function MonitoringWorkbench({ projectId }: { projectId: string }) {
     if (!hasTraffic || !change || !Number.isFinite(change)) return undefined
     const up = change > 0
     const bad = invert ? up : !up
+    // Against a period with almost no traffic (a project in its first days)
+    // the percentage is noise: "+36397% vs previous 7 days".
+    if (change >= 1000) {
+      return <span className="text-zinc-500">Up from almost none the previous {rangeLabel}</span>
+    }
     return (
       <span className={bad ? 'text-amber-200/80' : 'text-zinc-500'}>
         {up ? '+' : '−'}
@@ -257,16 +270,30 @@ export function MonitoringWorkbench({ projectId }: { projectId: string }) {
   if (isBackendLive === false && !hasTraffic && requestLog.length === 0 && !loadFailed) {
     return shell(
       <div className="flex h-full w-full flex-col items-center justify-center overflow-y-auto px-6">
-        <EmptyState
-          icon={BarChart3}
-          title="No traffic yet"
-          description="Requests, errors and slow endpoints appear here as soon as your app or your agent calls this backend’s API."
-          action={
-            <KitButton variant="primary" icon={Rocket} onClick={() => router.push(`/app/projects/${projectId}/deploy`)}>
-              Publish
-            </KitButton>
-          }
-        />
+        {hasBackend === false ? (
+          // Nothing built: Publish led to a Deploy page with nothing to publish.
+          <AgentEmptyState
+            projectId={projectId}
+            icon={BarChart3}
+            preview="chart"
+            title="No traffic yet"
+            description="Latency, request volume and errors appear here as soon as your app or your agent calls this backend’s API."
+            prompt="Build the API my app needs, then call each endpoint once so I can see it in Monitoring."
+            docs="monitoring"
+          />
+        ) : (
+          <EmptyState
+            icon={BarChart3}
+            preview={<GhostPreview kind="chart" />}
+            title="No traffic yet"
+            description="Requests, errors and slow endpoints appear here as soon as your app or your agent calls this backend’s API."
+            action={
+              <KitButton variant="primary" icon={Rocket} onClick={() => router.push(`/app/projects/${projectId}/deploy`)}>
+                Publish
+              </KitButton>
+            }
+          />
+        )}
       </div>
     )
   }
@@ -279,7 +306,8 @@ export function MonitoringWorkbench({ projectId }: { projectId: string }) {
           count={`${performanceBreakdowns.length} ${performanceBreakdowns.length === 1 ? 'route' : 'routes'}`}
           aside={`Last ${rangeLabel}`}
         />
-        <div className="min-h-0 flex-1 overflow-auto">
+        {/* Focusable, so a keyboard can scroll a table with nothing to tab to. */}
+        <div tabIndex={0} role="region" aria-label="Endpoints" className={`min-h-0 flex-1 overflow-auto ${FOCUS_INSET}`}>
           {performanceBreakdowns.length === 0 ? (
             <div className="flex min-h-full flex-col items-center justify-center px-6">
               <EmptyState
@@ -372,7 +400,15 @@ export function MonitoringWorkbench({ projectId }: { projectId: string }) {
               thresholdLabel="Target"
               className="border-white/[0.06] lg:border-r"
             />
-            <Chart title="Request volume" subtitle="Requests per minute" data={requestVolumeData} unit="/min" />
+            {/* The series is counted per bucket, and the bucket grows with the
+                range (lib/services/metrics.ts): a minute at 1h, an hour at 24h,
+                a day at 7d and 30d. It was labelled per minute at every range. */}
+            <Chart
+              title="Request volume"
+              subtitle={`Requests per ${BUCKET_LABEL[timeRange]}`}
+              data={requestVolumeData}
+              unit={BUCKET_UNIT[timeRange]}
+            />
           </div>
         ) : (
           <div className="flex-shrink-0 border-b border-white/[0.06] py-6">
@@ -390,7 +426,7 @@ export function MonitoringWorkbench({ projectId }: { projectId: string }) {
           aside="Newest first"
         />
 
-        <div className="min-h-0 flex-1 overflow-auto">
+        <div tabIndex={0} role="region" aria-label="Recent requests" className={`min-h-0 flex-1 overflow-auto ${FOCUS_INSET}`}>
           {requestLog.length === 0 ? (
             <div className="flex min-h-full flex-col items-center justify-center px-6">
               <EmptyState
@@ -499,9 +535,13 @@ export function MonitoringWorkbench({ projectId }: { projectId: string }) {
 }
 
 /** Event codes such as DATA_PLANE_RESTART_UNCONFIGURED read as a sentence. */
+/** The bucket one point of the volume chart counts, per range. */
+const BUCKET_LABEL: Record<TimeRange, string> = { '1h': 'minute', '24h': 'hour', '7d': 'day', '30d': 'day' }
+const BUCKET_UNIT: Record<TimeRange, string> = { '1h': '/min', '24h': '/h', '7d': '/day', '30d': '/day' }
+
 function humanizeEvent(message: string): string {
   if (typeof message !== 'string') return String(message ?? '')
-  if (!/^[A-Z0-9_]+$/.test(message)) return message
+  if (!/^[A-Z0-9_]+$/.test(message)) return plainText(message)
   const words = message.toLowerCase().split('_').filter(Boolean).join(' ')
   return words.charAt(0).toUpperCase() + words.slice(1)
 }

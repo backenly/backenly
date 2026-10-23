@@ -35,10 +35,11 @@ import {
   CheckCircle2, AlertTriangle, ChevronRight, Pencil,
 } from 'lucide-react'
 import {
-  CopyButton, EmptyState, KitBadge, KitButton, KitConfirmDialog, KitField, KitInput, KitModal, KitNote,
+  CopyButton, EmptyState, GhostPreview, KitBadge, KitButton, KitConfirmDialog, KitField, KitInput, KitModal, KitNote,
   OverflowMenu, PageHeader, Skeleton, Tag,
 } from '@/components/inspector/kit'
 import { FOCUS, PAGE_GUTTER, PAGE_WIDTH } from '@/components/console/tokens'
+import { when } from '@/components/changes/present'
 import { WEBHOOK_EVENT_TYPES, EVENT_DESCRIPTIONS, type WebhookEventType } from '@/lib/webhooks/events'
 
 interface WebhookRow {
@@ -188,7 +189,7 @@ export function WebhooksPanel({ projectId }: { projectId: string }) {
       })
       const data = await res.json().catch(() => ({}))
       if (!res.ok) throw new Error(data.error ?? 'Replay failed')
-      setMessage({ tone: 'success', text: `Replayed the dead delivery to ${log.trigger.webhookUrl ?? 'its receiver'} — it answered this time.` })
+      setMessage({ tone: 'success', text: `Replayed the dead delivery to ${log.trigger.webhookUrl ?? 'its receiver'}, and it answered this time.` })
       await load()
     } catch (err) {
       setMessage({ tone: 'danger', text: err instanceof Error ? err.message : 'Replay failed' })
@@ -335,7 +336,7 @@ export function WebhooksPanel({ projectId }: { projectId: string }) {
       <PageHeader
         className="!px-0"
         title="Webhooks"
-        description="Send signed events to your own services when rows change or an end user signs up. Row events are captured in PostgreSQL, so they fire for every writer: the REST data plane, functions and the table editor alike."
+        description="Signed events to your own services when rows change or an end user signs up. Row events are captured in Postgres, so every writer triggers them: the REST API, functions and the table editor."
         meta={
           !loading && webhooks.length > 0 ? (
             <span className="text-[13px] tabular-nums text-zinc-500">
@@ -379,9 +380,10 @@ export function WebhooksPanel({ projectId }: { projectId: string }) {
             <Skeleton className="h-[64px] w-full rounded-[10px]" />
           </div>
         ) : webhooks.length === 0 ? (
-          <div className="rounded-[10px] border border-dashed border-white/[0.10]">
+          <div className="rounded-[10px] border border-white/[0.08] bg-[#0f1012]">
             <EmptyState
               icon={Webhook}
+              preview={<GhostPreview kind="list" />}
               title="No endpoints yet"
               description="Add a URL and Backenly POSTs a signed JSON body to it when the event happens, with retries and a delivery log."
               action={
@@ -481,7 +483,7 @@ export function WebhooksPanel({ projectId }: { projectId: string }) {
                                     <KitBadge tone={STATUS_TONE[log.status] ?? 'neutral'}>{STATUS_LABEL[log.status] ?? log.status}</KitBadge>
                                   </td>
                                   <td className="whitespace-nowrap py-2 pr-4 align-top tabular-nums text-zinc-400">
-                                    {new Date(log.createdAt).toLocaleString()}
+                                    {when(log.createdAt)}
                                   </td>
                                   <td className="py-2 pr-4 align-top font-mono text-[12px] text-zinc-400">{log.statusCode ?? '—'}</td>
                                   <td className="py-2 pr-4 align-top tabular-nums text-zinc-500">{log.attemptCount}</td>
@@ -566,7 +568,7 @@ export function WebhooksPanel({ projectId }: { projectId: string }) {
                         {log.eventType}{log.table ? ` → ${log.table}` : ''}
                       </td>
                       <td className="whitespace-nowrap py-2 pr-4 align-top tabular-nums text-zinc-400">
-                        {new Date(log.createdAt).toLocaleString()}
+                        {when(log.createdAt)}
                       </td>
                       <td className="py-2 pr-4 align-top font-mono text-[12px] text-zinc-400">{log.statusCode ?? '—'}</td>
                       <td className="py-2 pr-4 align-top tabular-nums text-zinc-500">{log.attemptCount}</td>

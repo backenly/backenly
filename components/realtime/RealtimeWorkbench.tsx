@@ -387,6 +387,9 @@ export function RealtimeWorkbench({ projectId }: { projectId: string }) {
   const anyTruncated = visibleEvents.some((e) => e.truncated)
   const breakdownMax = Math.max(1, ...breakdown.map((b) => b.count))
 
+  /** Loaded, connected or not, and no table streams and nothing has arrived. */
+  const nothingStreams = !loadingStatus && activeTables.length === 0 && events.length === 0
+
   const selectTable = (t: string | null) => {
     setTableFilter(t)
     setMobilePane('feed')
@@ -452,8 +455,16 @@ export function RealtimeWorkbench({ projectId }: { projectId: string }) {
       <div className="relative min-h-0 flex-1">
         <div className="absolute inset-0 flex">
 
-          {/* ── Streaming rail ─────────────────────────── */}
-          <div className={`w-full flex-shrink-0 flex-col border-r border-white/[0.06] md:w-[256px] ${KIT.rail} ${mobilePane === 'tables' ? 'flex' : 'hidden md:flex'}`}>
+          {/* ── Streaming rail ───────────────────────────
+              No rail at any width until a table streams: the stream pane
+              carries the empty state with its request and Connect, and the bar
+              and the session panel already count the tables, so the rail said
+              it a third time (on a phone, instead of the request). */}
+          <div
+            className={`w-full flex-shrink-0 flex-col border-r border-white/[0.06] md:w-[256px] ${KIT.rail} ${
+              nothingStreams ? 'hidden' : mobilePane !== 'tables' ? 'hidden md:flex' : 'flex'
+            }`}
+          >
             <div className="flex h-[44px] flex-shrink-0 items-center justify-between gap-2 border-b border-white/[0.06] pl-4 pr-2">
               <span className="text-[13px] font-medium text-zinc-200">Tables</span>
               <IconButton
@@ -466,8 +477,8 @@ export function RealtimeWorkbench({ projectId }: { projectId: string }) {
 
             <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden py-1.5">
               {activeTables.length === 0 ? (
-                // From md up the stream beside this carries the empty state,
-                // so the rail only says so.
+                // Events arrived (broadcasts, presence) with no table
+                // streaming: the rail is up and says so.
                 <div className="px-4 py-4">
                   <p className="text-[13px] font-medium text-zinc-200 md:text-[12.5px] md:font-normal md:text-zinc-500">No tables streaming</p>
                   <p className="mt-1 text-[12.5px] leading-[19px] text-zinc-500 md:hidden">
@@ -529,7 +540,8 @@ export function RealtimeWorkbench({ projectId }: { projectId: string }) {
           </div>
 
           {/* ── Event stream ───────────────────────────── */}
-          <div className={`min-w-0 flex-1 flex-col ${mobilePane === 'feed' ? 'flex' : 'hidden md:flex'}`}>
+          <div className={`min-w-0 flex-1 flex-col ${nothingStreams || mobilePane === 'feed' ? 'flex' : 'hidden md:flex'}`}>
+            {!nothingStreams && (
             <div className="flex h-[44px] flex-shrink-0 items-center justify-between gap-3 border-b border-white/[0.06] px-3 sm:px-4">
               <div className="flex min-w-0 items-center gap-3">
                 <button
@@ -547,8 +559,9 @@ export function RealtimeWorkbench({ projectId }: { projectId: string }) {
                   {visibleEvents.length} {visibleEvents.length === 1 ? 'event' : 'events'}
                 </span>
               </div>
-              <span className="flex-shrink-0 text-[12px] text-zinc-600">Newest first · last 100 kept</span>
+              <span className="flex-shrink-0 text-[12px] text-zinc-600">Newest first, last 100 kept</span>
             </div>
+            )}
 
             <div className="min-h-0 flex-1 overflow-y-auto" aria-live="polite" aria-relevant="additions">
               {visibleEvents.length === 0 ? (
@@ -561,6 +574,7 @@ export function RealtimeWorkbench({ projectId }: { projectId: string }) {
                       description={emptyState.description}
                       prompt="Turn on realtime for the orders table so the app gets live updates."
                       docs="realtime"
+                      preview="events"
                     />
                   ) : (
                     <EmptyState icon={emptyState.icon} title={emptyState.title} description={emptyState.description} />

@@ -1225,6 +1225,8 @@ export default function ProjectDatabasePage() {
   }
 
   const fkBlocked = !!newColumnReferences && !isForeignKeyShaped(newColumnName)
+  /** Loaded, nothing failed, and the project has no table yet: the first-run state. */
+  const noTables = !loading && tables.length === 0 && !error
 
   return (
     <div className={`console-fill flex flex-col overflow-hidden ${KIT.bg}`}>
@@ -1280,11 +1282,14 @@ export default function ProjectDatabasePage() {
       <div className="relative min-h-0 flex-1">
         <div className="absolute inset-0 flex">
           {/* Table rail: the Tables view only. On a phone it is the first
-              screen, and picking a table drills into it. */}
+              screen, and picking a table drills into it. A project with no
+              tables has no rail at any width: the pane carries the empty state
+              with its request and Connect, and a rail saying "No tables yet"
+              beside it said it twice (on a phone, instead of them). */}
           {showVisualization === 'tables' && (
             <div
               className={`w-full flex-shrink-0 flex-col border-r ${RULE} md:w-[248px] ${KIT.rail} ${
-                selectedTable ? 'hidden md:flex' : 'flex'
+                selectedTable ? 'hidden md:flex' : noTables ? 'hidden' : 'flex'
               }`}
             >
               <div className={`flex h-[44px] flex-shrink-0 items-center justify-between gap-2 border-b ${RULE} pl-4 pr-2`}>
@@ -1332,8 +1337,8 @@ export default function ProjectDatabasePage() {
                     ))}
                   </div>
                 ) : tables.length === 0 ? (
-                  // From md up the pane beside this carries the empty state and
-                  // the command bar carries New table, so the rail only says so.
+                  // Shown only beside an error: an empty project's rail is
+                  // hidden, and the pane carries the empty state.
                   <div className="px-4 py-5">
                     <p className="text-[13px] font-medium text-zinc-200 md:text-[12.5px] md:font-normal md:text-zinc-500">No tables yet</p>
                     <p className="mt-1 text-[12.5px] leading-[19px] text-zinc-500 md:hidden">
@@ -1353,34 +1358,35 @@ export default function ProjectDatabasePage() {
                       const active = selectedTable === table.name
                       return (
                         <li key={table.name}>
+                          {/* The row selects with its own button and deletes with a
+                              sibling one. The whole row was role="button" with the
+                              delete button inside it: one control nested in another,
+                              which assistive tech cannot operate as two. */}
                           <div
-                            role="button"
-                            tabIndex={0}
-                            aria-current={active ? 'true' : undefined}
-                            onClick={() => setSelectedTable(table.name)}
-                            onKeyDown={(e) => {
-                              if (e.key === 'Enter' || e.key === ' ') {
-                                e.preventDefault()
-                                setSelectedTable(table.name)
-                              }
-                            }}
-                            className={`group relative flex h-[32px] cursor-pointer items-center gap-2.5 rounded-[7px] px-2.5 transition-colors ${FOCUS_INSET} ${
+                            className={`group relative flex h-[32px] items-center rounded-[7px] transition-colors ${
                               active ? 'bg-white/[0.07] text-zinc-50' : 'text-zinc-400 hover:bg-white/[0.04] hover:text-zinc-100'
                             }`}
                           >
-                            <Table2
-                              className={`h-3.5 w-3.5 flex-shrink-0 ${active ? 'text-zinc-300' : 'text-zinc-600'}`}
-                              strokeWidth={1.75}
-                            />
-                            <span className="flex-1 truncate font-mono text-[12.5px]">{table.name}</span>
-                            <span
-                              className={`flex-shrink-0 text-[12px] tabular-nums group-hover:opacity-0 group-focus-within:opacity-0 ${
-                                active ? 'text-zinc-400' : 'text-zinc-600'
-                              }`}
-                              title={`${(table.rows ?? 0).toLocaleString()} rows`}
+                            <button
+                              type="button"
+                              aria-current={active ? 'true' : undefined}
+                              onClick={() => setSelectedTable(table.name)}
+                              className={`flex h-full min-w-0 flex-1 items-center gap-2.5 rounded-[7px] px-2.5 text-left ${FOCUS_INSET}`}
                             >
-                              {(table.rows ?? 0).toLocaleString()}
-                            </span>
+                              <Table2
+                                className={`h-3.5 w-3.5 flex-shrink-0 ${active ? 'text-zinc-300' : 'text-zinc-600'}`}
+                                strokeWidth={1.75}
+                              />
+                              <span className="flex-1 truncate font-mono text-[12.5px]">{table.name}</span>
+                              <span
+                                className={`flex-shrink-0 text-[12px] tabular-nums group-hover:opacity-0 group-focus-within:opacity-0 ${
+                                  active ? 'text-zinc-400' : 'text-zinc-600'
+                                }`}
+                                title={`${(table.rows ?? 0).toLocaleString()} rows`}
+                              >
+                                {(table.rows ?? 0).toLocaleString()}
+                              </span>
+                            </button>
                             <button
                               type="button"
                               onClick={(e) => {
@@ -1413,8 +1419,16 @@ export default function ProjectDatabasePage() {
             </div>
           )}
 
-          {/* ── Main pane ─────────────────────────────────────── */}
-          <div className="flex min-w-0 flex-1 flex-col">
+          {/* ── Main pane ───────────────────────────────────────
+              On a phone the table rail is the whole first screen, so the pane
+              beside it steps aside until a table is picked. Left in the row,
+              it was squeezed to no width and its text spilled past the
+              screen's edge. */}
+          <div
+            className={`min-w-0 flex-1 flex-col overflow-hidden ${
+              showVisualization === 'tables' && !selectedTable && !noTables ? 'hidden md:flex' : 'flex'
+            }`}
+          >
             {showVisualization === 'history' && resolvedProjectId ? (
               // Every governed change to production, checked after it applied,
               // with the way back in each row's menu.
@@ -2008,6 +2022,7 @@ export default function ProjectDatabasePage() {
                 description="Ask your agent for the data your app needs. Each table it creates comes with REST endpoints, row-level security and a reversible change record."
                 prompt="Add a products table with a name, a price in cents and a stock count. Anyone can read it; only admins can write."
                 docs="database"
+                preview="table"
                 className="h-full"
               />
             ) : (

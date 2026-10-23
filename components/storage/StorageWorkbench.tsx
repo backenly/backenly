@@ -26,7 +26,7 @@ import { useRouter } from 'next/navigation'
 import {
   Upload, Download, Trash2, Copy, Search, Folder, File, Lock,
   Image as ImageIcon, FileText, AlertTriangle, Check,
-  HardDrive, RefreshCw, Plus, X, Loader2, CheckSquare, Square,
+  HardDrive, RefreshCw, Plus, X, CheckSquare, Square,
   ChevronLeft,
 } from 'lucide-react'
 import { Tooltip } from '@/components/ui/Tooltip'
@@ -40,10 +40,11 @@ import { getCurrentProjectId } from '@/lib/api/client'
 import { getProject, type Project } from '@/lib/api/projects'
 import {
   CommandBar, EmptyState, IconButton, INPUT_BASE, KIT, KitButton, KitConfirmDialog, KitField,
-  KitInput, KitModal, KitNote,
+  KitInput, KitModal, KitNote, Skeleton,
 } from '@/components/inspector/kit'
 import { AgentEmptyState } from '@/components/inspector/AgentEmptyState'
-import { FOCUS_INSET } from '@/components/console/tokens'
+import { FOCUS, FOCUS_INSET } from '@/components/console/tokens'
+import { formatStamp } from '@/components/console/format'
 import { POLICY_LABELS, type AccessPolicy } from '@/lib/storage/access-policy'
 import { BucketPolicyDialog } from '@/components/storage/BucketPolicyDialog'
 
@@ -211,6 +212,8 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
   const totalStorage = toNum(stats?.totalSize) || files.reduce((sum, f) => sum + toNum(f.size), 0)
   const totalFiles = stats?.totalFiles ?? serverTotal
   const totalBuckets = buckets.length
+  /** Loaded, and the project has no bucket yet: the first-run state. */
+  const noBuckets = !loading && totalBuckets === 0
 
   const maxStorage = project?.storageLimit ? toNum(project.storageLimit) : 1 * 1024 * 1024 * 1024
   // lib/services/storageQuota.ts reports "no cap" (self-hosted, or a plan
@@ -404,17 +407,22 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
             </>
           )}
         </div>
-        <KitButton
-          variant="primary"
-          size="sm"
-          icon={Upload}
-          loading={uploading}
-          onClick={() => fileInputRef.current?.click()}
-          disabled={isStorageCritical || totalBuckets === 0}
-          title={totalBuckets === 0 ? 'Create a bucket first' : 'Upload files'}
-        >
-          {uploading ? 'Uploading…' : 'Upload'}
-        </KitButton>
+        {/* Buckets come from the agent, never from this page, so before the
+            first one exists Upload has nowhere to put a file and is left out
+            rather than shown dead with "Create a bucket first". */}
+        {!noBuckets && (
+          <KitButton
+            variant="primary"
+            size="sm"
+            icon={Upload}
+            loading={uploading}
+            onClick={() => fileInputRef.current?.click()}
+            disabled={isStorageCritical || totalBuckets === 0}
+            title={isStorageCritical ? 'Storage is full: free space to upload' : 'Upload files'}
+          >
+            {uploading ? 'Uploading…' : 'Upload'}
+          </KitButton>
+        )}
       </CommandBar>
 
       {/* Quota + action notices — flush strips, never floating cards. */}
@@ -426,7 +434,7 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
             actions={
               <button
                 onClick={() => setActionError(null)}
-                className="text-[12px] font-medium text-zinc-500 transition-colors hover:text-zinc-200 focus:outline-none"
+                className={`rounded-[5px] text-[12px] font-medium text-zinc-500 transition-colors hover:text-zinc-200 ${FOCUS}`}
               >
                 Dismiss
               </button>
@@ -454,8 +462,15 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
       <div className="relative min-h-0 flex-1">
         <div className="absolute inset-0 flex">
 
-          {/* ── Buckets rail (responsive drill-down on mobile) ── */}
-          <div className={`w-full md:w-[248px] flex-shrink-0 flex-col border-r border-white/[0.06] ${KIT.rail} ${mobilePane === 'buckets' ? 'flex' : 'hidden md:flex'}`}>
+          {/* ── Buckets rail (responsive drill-down on mobile) ──
+              A project with no buckets has no rail at any width: the pane
+              carries the empty state with its request and Connect, and the
+              rail only repeated "No buckets yet" (on a phone, instead of them). */}
+          <div
+            className={`w-full md:w-[248px] flex-shrink-0 flex-col border-r border-white/[0.06] ${KIT.rail} ${
+              noBuckets ? 'hidden' : mobilePane !== 'buckets' ? 'hidden md:flex' : 'flex'
+            }`}
+          >
             <div className="flex h-[44px] flex-shrink-0 items-center justify-between gap-2 border-b border-white/[0.06] pl-4 pr-2">
               <span className="text-[13px] font-medium text-zinc-200">Buckets</span>
               <div className="flex flex-shrink-0 items-center gap-0.5">
@@ -481,19 +496,12 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
 
             <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden py-1.5">
               {loading && buckets.length === 0 ? (
-                <div className="flex items-center justify-center py-8">
-                  <Loader2 className="h-4 w-4 animate-spin text-white/30" />
+                <div className="space-y-1.5 px-3 py-2" aria-hidden>
+                  {[0, 1, 2].map((i) => (
+                    <Skeleton key={i} className="h-[24px] w-full" />
+                  ))}
                 </div>
-              ) : buckets.length === 0 ? (
-                // From md up the object pane carries the empty state, so the
-                // rail only says so.
-                <div className="px-4 py-5">
-                  <p className="text-[13px] font-medium text-zinc-200 md:text-[12.5px] md:font-normal md:text-zinc-500">No buckets yet</p>
-                  <p className="mt-1 text-[12.5px] leading-[19px] text-zinc-500 md:hidden">
-                    Your agent creates a bucket when your app needs uploads, with the read rule you ask for.
-                  </p>
-                </div>
-              ) : (
+              ) : buckets.length === 0 ? null : (
                 <div className="space-y-px px-2">
                   {/* All buckets */}
                   <button
@@ -519,62 +527,57 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
                     visibleBuckets.map((bucket) => {
                       const active = selectedBucket === bucket.name
                       return (
+                        // Select with the row's own button; policy and delete are
+                        // siblings, not controls nested inside a role="button" row.
                         <div
                           key={bucket.id}
-                          role="button"
-                          tabIndex={0}
-                          aria-current={active ? 'true' : undefined}
-                          onClick={() => { setSelectedBucket(bucket.name); setSelectedBucketId(bucket.id); setMobilePane('objects') }}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter' || e.key === ' ') {
-                              e.preventDefault()
-                              setSelectedBucket(bucket.name); setSelectedBucketId(bucket.id); setMobilePane('objects')
-                            }
-                          }}
-                          className={`group relative flex h-[32px] cursor-pointer items-center gap-2.5 rounded-[7px] px-2.5 transition-colors ${FOCUS_INSET} ${
+                          className={`group relative flex h-[32px] items-center rounded-[7px] transition-colors ${
                             active ? 'bg-white/[0.07] text-zinc-50' : 'text-zinc-400 hover:bg-white/[0.04] hover:text-zinc-100'
                           }`}
                         >
-                          <Folder className={`h-3.5 w-3.5 flex-shrink-0 ${active ? 'text-zinc-300' : 'text-zinc-600'}`} strokeWidth={1.75} />
-                          <span className={`flex-1 truncate font-mono text-[12.5px] ${active ? 'text-zinc-50' : ''}`}>
-                            {bucket.name}
-                          </span>
-                          {/* The POLICY, not a derived boolean. `public` next to a
-                              bucket whose policy is `owner_only` would be telling
-                              the operator the opposite of what is enforced. */}
-                          <span
-                            className={`flex-shrink-0 text-[11.5px] group-hover:opacity-0 group-focus-within:opacity-0 ${
-                              bucket.accessPolicy === 'public_read' || bucket.accessPolicy === 'cdn_cacheable'
-                                ? 'text-amber-200/80'
-                                : 'text-zinc-600'
-                            }`}
-                          >
-                            {POLICY_LABELS[(bucket.accessPolicy ?? 'private') as AccessPolicy]?.title ?? bucket.accessPolicy}
-                          </span>
-                          <span
-                            className={`flex-shrink-0 text-[12px] tabular-nums transition-all group-hover:opacity-0 group-focus-within:opacity-0 ${
-                              active ? 'text-zinc-400' : 'text-zinc-600'
-                            }`}
-                          >
-                            {countFor(bucket.name)}
-                          </span>
                           <button
-                            onClick={(e) => {
-                              e.stopPropagation()
-                              setBucketPolicyTarget(bucket)
-                            }}
-                            className="absolute right-8 rounded-[5px] p-1 opacity-0 transition-all hover:bg-white/[0.08] focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100"
+                            type="button"
+                            aria-current={active ? 'true' : undefined}
+                            onClick={() => { setSelectedBucket(bucket.name); setSelectedBucketId(bucket.id); setMobilePane('objects') }}
+                            className={`flex h-full min-w-0 flex-1 items-center gap-2.5 rounded-[7px] px-2.5 text-left ${FOCUS_INSET}`}
+                          >
+                            <Folder className={`h-3.5 w-3.5 flex-shrink-0 ${active ? 'text-zinc-300' : 'text-zinc-600'}`} strokeWidth={1.75} />
+                            <span className={`flex-1 truncate font-mono text-[12.5px] ${active ? 'text-zinc-50' : ''}`}>
+                              {bucket.name}
+                            </span>
+                            {/* The POLICY, not a derived boolean. `public` next to a
+                                bucket whose policy is `owner_only` would be telling
+                                the operator the opposite of what is enforced. */}
+                            <span
+                              className={`flex-shrink-0 text-[11.5px] group-hover:opacity-0 group-focus-within:opacity-0 ${
+                                bucket.accessPolicy === 'public_read' || bucket.accessPolicy === 'cdn_cacheable'
+                                  ? 'text-amber-200/80'
+                                  : 'text-zinc-600'
+                              }`}
+                            >
+                              {POLICY_LABELS[(bucket.accessPolicy ?? 'private') as AccessPolicy]?.title ?? bucket.accessPolicy}
+                            </span>
+                            <span
+                              className={`flex-shrink-0 text-[12px] tabular-nums transition-opacity group-hover:opacity-0 group-focus-within:opacity-0 ${
+                                active ? 'text-zinc-400' : 'text-zinc-600'
+                              }`}
+                            >
+                              {countFor(bucket.name)}
+                            </span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setBucketPolicyTarget(bucket)}
+                            className={`absolute right-8 rounded-[5px] p-1 opacity-0 transition-[opacity,background-color] hover:bg-white/[0.08] focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100 ${FOCUS_INSET}`}
                             title="Who may read this bucket"
                             aria-label={`Read access for ${bucket.name}`}
                           >
                             <Lock className="h-3.5 w-3.5 text-zinc-400" />
                           </button>
                           <button
-                            onClick={(e) => {
-                              e.stopPropagation()
-                              setBucketToDelete({ id: bucket.id, name: bucket.name, fileCount: countFor(bucket.name) })
-                            }}
-                            className="absolute right-2 rounded-[5px] p-1 opacity-0 transition-all hover:bg-rose-500/15 focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100"
+                            type="button"
+                            onClick={() => setBucketToDelete({ id: bucket.id, name: bucket.name, fileCount: countFor(bucket.name) })}
+                            className={`absolute right-2 rounded-[5px] p-1 opacity-0 transition-[opacity,background-color] hover:bg-rose-500/15 focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100 ${FOCUS_INSET}`}
                             title="Delete bucket"
                             aria-label={`Delete ${bucket.name}`}
                           >
@@ -598,8 +601,10 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
           </div>
 
           {/* ── Object grid ────────────────────────────────── */}
-          <div className={`min-w-0 flex-1 flex-col ${mobilePane === 'objects' ? 'flex' : 'hidden md:flex'}`}>
-            {/* Toolbar */}
+          <div className={`min-w-0 flex-1 flex-col ${noBuckets || mobilePane === 'objects' ? 'flex' : 'hidden md:flex'}`}>
+            {/* Toolbar: there is nothing to name, count or search until a
+                bucket exists, so a new project's pane is the empty state alone. */}
+            {!noBuckets && (
             <div className="flex h-[44px] flex-shrink-0 items-center justify-between gap-2 border-b border-white/[0.06] px-3 sm:px-4 md:gap-3">
               <div className="flex min-w-0 items-center gap-2">
                 <button
@@ -661,12 +666,15 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
                 </div>
               </div>
             </div>
+            )}
 
             {/* Grid */}
             <div className="min-h-0 flex-1 overflow-auto">
               {loading && files.length === 0 ? (
-                <div className="flex h-full items-center justify-center">
-                  <Loader2 className="h-4 w-4 animate-spin text-white/30" />
+                <div className="space-y-px p-3" aria-busy="true" aria-label="Loading files">
+                  {[0, 1, 2, 3, 4, 5].map((i) => (
+                    <Skeleton key={i} className="h-[34px] w-full rounded-[6px]" />
+                  ))}
                 </div>
               ) : filteredFiles.length === 0 ? (
                 <div className="flex h-full flex-col items-center justify-center px-8">
@@ -684,6 +692,7 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
                       description="Buckets hold your app’s files, each with its own read rule. Ask your agent for uploads and it creates the bucket."
                       prompt="Add profile photo uploads: a private bucket, and only the owner can read their files."
                       docs="storage"
+                      preview="files"
                     />
                   ) : (
                     <EmptyState
@@ -834,7 +843,8 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
               )}
             </div>
 
-            {/* Grid footer — counts, and live upload progress in the same strip. */}
+            {/* Grid footer: counts, and live upload progress in the same strip. */}
+            {!noBuckets && (
             <div className="flex h-[36px] flex-shrink-0 items-center justify-between gap-4 border-t border-white/[0.06] px-4">
               <span className="text-[12px] tabular-nums text-zinc-500">
                 {searchQuery.trim() && bucketFiles.length !== filteredFiles.length
@@ -849,7 +859,7 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
                   </span>
                   <div className="h-[3px] w-32 overflow-hidden rounded-full bg-white/[0.06]">
                     <div
-                      className="h-full rounded-full bg-violet-400/60 transition-all duration-200"
+                      className="h-full rounded-full bg-violet-400/60 transition-[width] duration-200"
                       style={{
                         width: `${activeUploads.reduce((s, [, p]) => s + p, 0) / activeUploads.length}%`,
                       }}
@@ -858,6 +868,7 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
                 </div>
               )}
             </div>
+            )}
           </div>
 
           {/* ── Object detail ──────────────────────────────── */}
@@ -895,7 +906,7 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
                       ['Type', selectedFile.mimeType || 'Unknown'],
                       ['Bucket', selectedFile.bucket],
                       ['Access', selectedFile.isPublic ? 'Public' : 'Private'],
-                      ['Uploaded', new Date(selectedFile.createdAt).toLocaleString()],
+                      ['Uploaded', formatStamp(selectedFile.createdAt)],
                     ].map(([label, value]) => (
                       <div key={label} className="flex items-baseline justify-between gap-3 px-4 py-2.5">
                         <dt className="flex-shrink-0 text-[12px] font-medium text-zinc-500">

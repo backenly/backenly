@@ -106,11 +106,15 @@ export default function ProjectSettingsPage() {
   )
 }
 
-/** The settings column: one readable width, left-aligned under the header. */
+/**
+ * The settings body. Each card is split from lg up: what the setting is on
+ * the left, the control on the right. A single 760px column used to sit under
+ * a 1200px header and leave the right of a wide screen empty.
+ */
 function SettingsColumn({ children }: { children: React.ReactNode }) {
   return (
-    <div className={`${PAGE_WIDTH} ${PAGE_GUTTER} pt-6`}>
-      <div className="max-w-[760px] space-y-5">{children}</div>
+    <div className={`${PAGE_WIDTH} ${PAGE_GUTTER} pt-8`}>
+      <div className="space-y-10">{children}</div>
     </div>
   )
 }
@@ -192,8 +196,15 @@ function GeneralTab({ projectId, onDeleted }: { projectId: string; onDeleted: ()
   if (loading) {
     return (
       <SettingsColumn>
-        <Skeleton className="h-[236px] w-full rounded-[10px]" />
-        <Skeleton className="h-[180px] w-full rounded-[10px]" />
+        {['h-[160px]', 'h-[180px]'].map((h) => (
+          <div key={h} className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,280px)_minmax(0,1fr)] lg:gap-10" aria-hidden>
+            <div className="hidden space-y-2 lg:block lg:pt-1">
+              <Skeleton className="h-[18px] w-28" />
+              <Skeleton className="h-[14px] w-52" />
+            </div>
+            <Skeleton className={`${h} w-full rounded-[10px]`} />
+          </div>
+        ))}
       </SettingsColumn>
     )
   }
@@ -202,6 +213,7 @@ function GeneralTab({ projectId, onDeleted }: { projectId: string; onDeleted: ()
     <SettingsColumn>
       {/* Identity */}
       <SettingsCard
+        layout="split"
         title="Project"
         description="How this project is named across the console, the project list and every receipt."
         onSubmit={save}
@@ -247,7 +259,7 @@ function GeneralTab({ projectId, onDeleted }: { projectId: string; onDeleted: ()
       </SettingsCard>
 
       {/* Connection facts */}
-      <SettingsCard title="Connection" description="The coordinates your agent or app uses to reach this backend.">
+      <SettingsCard layout="split" title="Connection" description="The coordinates your agent or app uses to reach this backend.">
         <DetailList>
           <DetailRow label="Project ID">
             <CopyField value={projectId} />
@@ -270,6 +282,7 @@ function GeneralTab({ projectId, onDeleted }: { projectId: string; onDeleted: ()
 
       {/* Danger zone */}
       <SettingsCard
+        layout="split"
         danger
         title="Delete project"
         description={
@@ -389,6 +402,7 @@ function AccessTab({ projectId }: { projectId: string }) {
   return (
     <SettingsColumn>
       <SettingsCard
+        layout="split"
         title="Who can open this project"
         description={
           scopedCount > 0

@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback } from 'react'
 import { KeyRound, Plus, Trash2, Loader2, X, Check, AlertCircle, Eye, EyeOff } from 'lucide-react'
 import { KIT, KitButton, KitInput, KitConfirmDialog } from '@/components/inspector/kit'
+import { FOCUS } from '@/components/console/tokens'
 
 interface EnvVarSummary {
   id: string
@@ -216,11 +217,14 @@ export function EnvVarsPanel({ projectId }: EnvVarsPanelProps) {
                   )}
                 </div>
                 <button
+                  type="button"
                   onClick={() => setVarToDelete(v.key)}
                   disabled={deletingKey === v.key}
-                  className="flex items-center gap-1 p-1.5 text-zinc-600 hover:text-rose-300 hover:bg-rose-500/[0.08] rounded-md transition-colors"
+                  aria-label={`Delete ${v.key}`}
+                  title={`Delete ${v.key}`}
+                  className={`flex h-[28px] w-[28px] items-center justify-center rounded-[7px] text-zinc-500 transition-colors hover:bg-rose-500/[0.08] hover:text-rose-300 ${FOCUS}`}
                 >
-                  {deletingKey === v.key ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
+                  {deletingKey === v.key ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" strokeWidth={1.75} />}
                 </button>
               </li>
             ))}

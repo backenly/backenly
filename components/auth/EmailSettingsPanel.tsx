@@ -37,6 +37,8 @@ import {
 import {
   KitButton, KitNote, KitField, KitInput, KitTextarea, KitModal, KitConfirmDialog, SettingsCard, Spinner, StatusDot,
 } from '@/components/inspector/kit'
+import { formatStamp } from '@/components/console/format'
+import { ago } from '@/components/changes/present'
 
 interface SmtpView {
   configured: boolean
@@ -351,7 +353,7 @@ export function EmailSettingsPanel({ projectId }: { projectId: string }) {
             <div className="mb-5">
               {smtp.lastTestAt && !smtp.lastTestError && (
                 <KitNote icon={CheckCircle2} tone="success">
-                  Last test delivered on {new Date(smtp.lastTestAt).toLocaleString()}.
+                  Last test delivered <time dateTime={smtp.lastTestAt} title={formatStamp(smtp.lastTestAt)}>{ago(smtp.lastTestAt)}</time>.
                 </KitNote>
               )}
               {smtp.lastTestAt && smtp.lastTestError && (

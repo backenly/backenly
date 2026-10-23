@@ -14,8 +14,8 @@
  * with no marker. The only read-only path was the Cloud OAuth consent screen,
  * which a self-hosted install cannot even reach.
  *
- * Renders the real panel: the toggle sends readOnly, and a read-only key is
- * labelled in the list.
+ * Renders the real panel: the switch in the New key dialog sends readOnly, and a
+ * read-only key is labelled in the list.
  */
 
 import { act, fireEvent, render, screen } from '@testing-library/react'
@@ -52,12 +52,19 @@ beforeEach(() => {
   }) as any
 })
 
-it('the Read-only toggle issues a read-only key', async () => {
+// The label and the read-only choice live in the dialog behind New key.
+async function openNewKey() {
+  fireEvent.click(screen.getByText('New key'))
+  await act(async () => {})
+}
+
+it('the Read-only switch issues a read-only key', async () => {
   render(<AgentKeysPanel projectId="p1" />)
   await act(async () => {})
-  fireEvent.click(screen.getByLabelText(/read-only/i))
-  fireEvent.change(screen.getByPlaceholderText(/Label, e.g./), { target: { value: 'contractor agent' } })
-  fireEvent.click(screen.getByText('New key'))
+  await openNewKey()
+  fireEvent.click(screen.getByRole('switch', { name: /read-only/i }))
+  fireEvent.change(screen.getByPlaceholderText(/CI server/), { target: { value: 'contractor agent' } })
+  fireEvent.click(screen.getByText('Create key'))
   await act(async () => {})
   expect(posted).toHaveLength(1)
   expect(posted[0]).toMatchObject({ label: 'contractor agent', readOnly: true })
@@ -66,8 +73,9 @@ it('the Read-only toggle issues a read-only key', async () => {
 it('left off, the key is read-write as before', async () => {
   render(<AgentKeysPanel projectId="p1" />)
   await act(async () => {})
-  fireEvent.change(screen.getByPlaceholderText(/Label, e.g./), { target: { value: 'ci server' } })
-  fireEvent.click(screen.getByText('New key'))
+  await openNewKey()
+  fireEvent.change(screen.getByPlaceholderText(/CI server/), { target: { value: 'ci server' } })
+  fireEvent.click(screen.getByText('Create key'))
   await act(async () => {})
   expect(posted[0]).toMatchObject({ readOnly: false })
 })
@@ -79,7 +87,7 @@ it('a read-only key is labelled in the list, a read-write one is not', async () 
   ]
   render(<AgentKeysPanel projectId="p1" />)
   await act(async () => {})
-  expect(screen.getAllByText('Read-only')).toHaveLength(2) // the toggle + the one badge
+  expect(screen.getAllByText('Read-only')).toHaveLength(1) // the one badge; the switch is in the closed dialog
   expect(screen.getByText('inspector')).toBeTruthy()
   expect(screen.getByText('builder')).toBeTruthy()
 })

@@ -436,9 +436,18 @@ export function WorkspaceHome({
       body: 'Part of the build is waiting on a credential. Add it in Integrations and Backenly picks up exactly where it stopped.',
       cta: { label: "See what's blocked", onClick: () => router.push(`/app/projects/${projectId}/autonomy`) },
     }
+    // Counted, and true for a live backend too: this read "A few things to
+    // clear before launch" on projects that had launched weeks earlier, and
+    // offered to "auto-fix them here" from a panel whose only action leaves.
     : hasOpenWork ? {
-      headline: 'A few things to clear before launch',
-      body: 'Backenly flagged some issues while checking the runtime. Auto-fix them here, or hand them to your coding agent.',
+      headline:
+        actionableFindings != null && actionableFindings > 0
+          ? `${actionableFindings} ${actionableFindings === 1 ? 'issue' : 'issues'} to look at`
+          : 'Something needs a look',
+      body:
+        (actionableFindings ?? 0) > 1
+          ? 'Backenly found these while checking your backend. Fix them from Autonomy, or hand them to your coding agent.'
+          : 'Backenly found this while checking your backend. Fix it from Autonomy, or hand it to your coding agent.',
       cta: { label: 'Review in Autonomy', onClick: () => router.push(`/app/projects/${projectId}/autonomy`) },
     }
     : quietState.caveat ? quietState
@@ -740,7 +749,7 @@ function AgentPanel({
           >
             <span className="flex items-center justify-between">
               <span className="text-[12px] font-medium text-zinc-500">Autonomy mode</span>
-              <ChevronRight className="h-4 w-4 text-zinc-600 transition-all group-hover/mode:translate-x-0.5 group-hover/mode:text-zinc-300" />
+              <ChevronRight className="h-4 w-4 text-zinc-600 transition-[color,transform] duration-150 group-hover/mode:translate-x-0.5 group-hover/mode:text-zinc-300" />
             </span>
             <span className="mt-2 flex items-center gap-2.5">
               <span className={`text-[16px] font-semibold tracking-[-0.014em] ${autonomyOff ? 'text-zinc-400' : 'text-zinc-50'}`}>
@@ -850,7 +859,7 @@ function LoopPanel({
             <span className="text-[12.5px] font-medium text-zinc-400 transition-colors group-hover/all:text-zinc-100">
               Full guardrail log, repairs and approvals
             </span>
-            <ChevronRight className="h-4 w-4 text-zinc-600 transition-all group-hover/all:translate-x-0.5 group-hover/all:text-zinc-300" />
+            <ChevronRight className="h-4 w-4 text-zinc-600 transition-[color,transform] duration-150 group-hover/all:translate-x-0.5 group-hover/all:text-zinc-300" />
           </button>
         </div>
       )}
@@ -1032,7 +1041,7 @@ function SelfHealingLoop({
               const node = (
                 <>
                   <span
-                    className={`relative flex h-[46px] w-[46px] items-center justify-center rounded-xl border transition-all duration-300 select-none ${
+                    className={`relative flex h-[46px] w-[46px] items-center justify-center rounded-xl border transition-[border-color,background-color,box-shadow] duration-300 select-none ${
                       active
                         ? 'border-violet-300/70 bg-[#12131a] shadow-[0_0_24px_rgba(167,139,250,0.35)]'
                         : off ? 'border-white/[0.06] bg-[#101014]' : 'border-[#2D2D35] bg-[#101014]'
@@ -1159,7 +1168,7 @@ function SelfHealingLoop({
             ) : (
               <>
                 Verify feeds the next Observe
-                <span className="hidden lg:inline">. No human at the top of the loop</span>
+                <span className="hidden lg:inline">. The loop runs every minute</span>
               </>
             )
           }

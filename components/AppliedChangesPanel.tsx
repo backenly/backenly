@@ -44,7 +44,7 @@ import {
   History, Undo2, Loader2, XCircle, ShieldAlert, Lock, ChevronDown,
   ClipboardCopy, Check,
 } from 'lucide-react'
-import { KIT, KitButton } from '@/components/inspector/kit'
+import { KIT, KitButton, MetaCode, MetaRow, StatusDot } from '@/components/inspector/kit'
 
 export interface AppliedChange {
   findingId: string
@@ -223,7 +223,7 @@ function ChangeRow({
         <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-emerald-400" />
         <div className="min-w-0 flex-1">
           <p className="text-[12.5px] font-medium text-zinc-200">{c.summary}</p>
-          <p className="mt-1 font-mono text-[12px] text-zinc-500">{state.message}</p>
+          <p className="mt-1 text-[12px] leading-[18px] text-zinc-500">{state.message}</p>
         </div>
       </li>
     )
@@ -237,17 +237,17 @@ function ChangeRow({
         <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-zinc-600" />
         <div className="min-w-0 flex-1">
           <p className="text-[12.5px] leading-snug text-zinc-100">{c.summary}</p>
-          <p className="mt-1.5 font-mono text-[12px] text-zinc-600">
-            {c.type}
-            {c.resource && <> · <span className="text-zinc-500">{c.resource}</span></>}
-            {' · '}{timeAgo(c.at)}
-            {' · '}
+          <MetaRow>
+            <MetaCode>{c.type}</MetaCode>
+            {c.resource && <MetaCode>{c.resource}</MetaCode>}
+            <span className="tabular-nums">{timeAgo(c.at)}</span>
             {/* Never claim verification the kernel did not perform. Types no
                 probe can re-detect are recorded honestly as unchecked. */}
-            <span className={c.verified ? 'text-emerald-400/80' : 'text-zinc-600'}>
-              {c.verified ? 're-checked and confirmed' : 'not independently re-checked'}
-            </span>
-          </p>
+            <StatusDot
+              tone={c.verified ? 'operational' : 'neutral'}
+              label={c.verified ? 'Re-checked and confirmed' : 'Not independently re-checked'}
+            />
+          </MetaRow>
 
           {/* The exact statements, on demand. Collapsed by default because the
               summary above is what most people want; expanded it is the answer

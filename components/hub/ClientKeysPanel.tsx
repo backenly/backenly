@@ -18,6 +18,7 @@ import { KeyRound, Trash2, Plus, Check, Eye, EyeOff, AlertTriangle, Shield } fro
 import {
   CopyButton,
   EmptyState,
+  GhostPreview,
   IconButton,
   KitButton,
   KitConfirmDialog,
@@ -75,7 +76,7 @@ const ROLE_LABEL: Record<string, string> = {
 }
 
 const ROLE_OPTIONS: Array<{ value: NewRole; label: string; body: string }> = [
-  { value: 'admin', label: 'Admin', body: 'Full access, bypasses row security (svc_live_). Server-side only — the runtime refuses it from a browser.' },
+  { value: 'admin', label: 'Admin', body: 'Full access, bypasses row security (svc_live_). Server-side only: the runtime refuses it from a browser.' },
   { value: 'write', label: 'Write', body: 'Read and write data, no administration.' },
   { value: 'read-only', label: 'Read only', body: 'Reads data, changes nothing.' },
   { value: 'client', label: 'Client', body: 'Safe to embed in a frontend app.' },
@@ -223,9 +224,10 @@ export function ClientKeysPanel() {
           <Skeleton className="h-[52px] w-full rounded-[10px]" />
         </div>
       ) : apiKeys.length === 0 ? (
-        <div className="rounded-[10px] border border-dashed border-white/[0.10]">
+        <div className="rounded-[10px] border border-white/[0.08] bg-[#0f1012]">
           <EmptyState
             icon={KeyRound}
+            preview={<GhostPreview kind="list" />}
             title="No API keys yet"
             description="Create a key to make authenticated requests from your app, a script or a server."
             action={
@@ -236,7 +238,7 @@ export function ClientKeysPanel() {
           />
         </div>
       ) : (
-        <div className="overflow-x-auto rounded-[10px] border border-white/[0.08] bg-[#0f1012]">
+        <div className="relative overflow-x-auto rounded-[10px] border border-white/[0.08] bg-[#0f1012]">
           <table className="w-full min-w-[840px] text-left">
             <thead>
               <tr className="border-b border-white/[0.06] text-[12px] text-zinc-500">
@@ -276,7 +278,7 @@ export function ClientKeysPanel() {
                       </div>
                       <p className="mt-0.5 max-w-[260px] truncate text-[12px] text-zinc-500">
                         {key.serviceRole
-                          ? 'Service role — bypasses row security, server-side only'
+                          ? 'Service role: bypasses row security, server-side only'
                           : key.capabilities && key.capabilities.length > 0
                             ? key.capabilities.join(', ')
                             : key.permissions && key.permissions.length > 0

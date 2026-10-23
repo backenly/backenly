@@ -21,13 +21,14 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useSearchParams } from 'next/navigation'
 import { SlidersHorizontal, Users, Search, RefreshCw, X, Mail } from 'lucide-react'
-import { AuthConfiguration } from '@/components/auth/AuthConfiguration'
+import { AuthConfiguration, ProviderLabel } from '@/components/auth/AuthConfiguration'
 import { EmailSettingsPanel } from '@/components/auth/EmailSettingsPanel'
 import {
-  CommandBar, CopyField, EmptyState, IconButton, INPUT_BASE, KIT, KitTab, KitTabs, Spinner, Tag,
+  CommandBar, CopyField, EmptyState, IconButton, INPUT_BASE, KIT, KitTab, KitTabs, Spinner,
 } from '@/components/inspector/kit'
 import { AgentEmptyState } from '@/components/inspector/AgentEmptyState'
 import { FOCUS_INSET } from '@/components/console/tokens'
+import { formatStamp } from '@/components/console/format'
 
 interface EndUser {
   id: string
@@ -257,7 +258,9 @@ function UsersGrid({
                           </button>
                         </td>
                         <td className={TD}>
-                          <Tag mono>{u.provider}</Tag>
+                          <span className="text-[12.5px] text-zinc-300">
+                            <ProviderLabel provider={u.provider} />
+                          </span>
                         </td>
                         <td className={`${TD} hidden text-[12.5px] tabular-nums text-zinc-400 sm:table-cell`}>{formatDate(u.createdAt)}</td>
                         <td className={`${TD} text-[12.5px] tabular-nums text-zinc-500`}>
@@ -302,14 +305,17 @@ function UsersGrid({
                 <p className="min-w-0 break-all text-[13px] font-medium text-zinc-50">{selected.email}</p>
               </div>
               <dl className="divide-y divide-white/[0.05]">
-                {[
-                  ['Provider', selected.provider],
-                  ['Signed up', new Date(selected.createdAt).toLocaleString()],
-                  ['Last active', selected.lastLogin ? new Date(selected.lastLogin).toLocaleString() : 'Never'],
-                ].map(([label, value]) => (
+                {([
+                  ['Provider', <ProviderLabel key="p" provider={selected.provider} />],
+                  ['Signed up', formatStamp(selected.createdAt)],
+                  ['Last active', selected.lastLogin ? formatStamp(selected.lastLogin) : 'Never'],
+                ] as Array<[string, React.ReactNode]>).map(([label, value]) => (
                   <div key={label} className="flex items-baseline justify-between gap-3 px-4 py-2.5">
                     <dt className="flex-shrink-0 text-[13px] text-zinc-500">{label}</dt>
-                    <dd className="min-w-0 truncate text-right text-[13px] tabular-nums text-zinc-200" title={value}>
+                    <dd
+                      className="min-w-0 truncate text-right text-[13px] tabular-nums text-zinc-200"
+                      title={typeof value === 'string' ? value : undefined}
+                    >
                       {value}
                     </dd>
                   </div>

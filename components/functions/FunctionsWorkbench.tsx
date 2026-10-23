@@ -30,6 +30,7 @@ import {
   AgentPrompt, BarDivider, CommandBar, CopyField, EmptyState, IconButton, INPUT_BASE, KIT, KitButton,
   KitConfirmDialog, KitModal, KitTab, KitTabs, NoticeStrip, Spinner, StatusDot,
 } from '@/components/inspector/kit'
+import { formatStamp } from '@/components/console/format'
 import { AgentEmptyState, ConnectAgentLink } from '@/components/inspector/AgentEmptyState'
 import { FOCUS_INSET } from '@/components/console/tokens'
 import { useAgentConnection } from '@/lib/hooks/useAgentConnection'
@@ -423,7 +424,7 @@ function RunResult({ result, onClose }: { result: TestRunResult; onClose: () => 
       {client4xx && (
         <p className="mb-3 text-[13px] leading-[20px] text-zinc-400">
           {httpStatus === 400
-            ? 'The endpoint answered 400 to the empty test event. If its code validates input, it will answer normally when your app sends a real payload — read the response body below to see what it actually said.'
+            ? 'The endpoint answered 400 to the empty test event. If its code validates input, it will answer normally when your app sends a real payload. The response body below shows what it said.'
             : httpStatus === 401 || httpStatus === 403
             ? 'Test runs call the endpoint with your project’s admin credentials. This response means the endpoint also checks ownership of specific records, or a credential this run didn’t carry. The auth gate itself is working.'
             : httpStatus === 404
@@ -567,6 +568,8 @@ export function FunctionsWorkbench({ projectId }: { projectId: string }) {
 
   const selected = selectedId ? functions.find((f) => f.id === selectedId) ?? null : null
 
+  /** Loaded, and the project has no function yet: the first-run state. */
+  const noFunctions = !loading && functions.length === 0
   const activeFns = functions.filter((f) => f.status === 'active')
   const errorFns = functions.filter((f) => f.status === 'error')
   const totalRuns = functions.reduce((sum, f) => sum + f.runCount, 0)
@@ -739,9 +742,8 @@ export function FunctionsWorkbench({ projectId }: { projectId: string }) {
           <strong>
             {untestedActiveFns.length} active {untestedActiveFns.length === 1 ? 'function has' : 'functions have'} never run.
           </strong>{' '}
-          Run each once before your app depends on it. Test runs execute for real — database writes,
-          emails and quota all count. Event-triggered functions are skipped here; test those one at a
-          time from their own pane.
+          Run each once before your app depends on it. Test runs execute for real: database writes, emails
+          and quota all count. Event-triggered functions are skipped here; test each from its own pane.
         </NoticeStrip>
       )}
       {schemaFns.length > 0 && (
@@ -764,8 +766,16 @@ export function FunctionsWorkbench({ projectId }: { projectId: string }) {
       <div className="relative min-h-0 flex-1">
         <div className="absolute inset-0 flex">
 
-          {/* ── Rail ───────────────────────────────────── */}
-          <div className={`w-full flex-shrink-0 flex-col border-r border-white/[0.06] md:w-[288px] ${KIT.rail} ${mobilePane === 'list' ? 'flex' : 'hidden md:flex'}`}>
+          {/* ── Rail ─────────────────────────────────────
+              A project with no functions has no rail at any width: the pane
+              carries the empty state with its request and Connect, and the
+              rail only repeated "No functions yet" (on a phone, instead of
+              them). */}
+          <div
+            className={`w-full flex-shrink-0 flex-col border-r border-white/[0.06] md:w-[288px] ${KIT.rail} ${
+              noFunctions ? 'hidden' : mobilePane !== 'list' ? 'hidden md:flex' : 'flex'
+            }`}
+          >
             <div className="flex h-[44px] flex-shrink-0 items-center justify-between gap-2 border-b border-white/[0.06] pl-4 pr-2">
               <span className="text-[13px] font-medium text-zinc-200">All functions</span>
               <IconButton
@@ -827,16 +837,7 @@ export function FunctionsWorkbench({ projectId }: { projectId: string }) {
                     </div>
                   ))}
                 </div>
-              ) : functions.length === 0 ? (
-                // From md up the detail pane carries the empty state, so the
-                // rail only says so.
-                <div className="px-4 py-5">
-                  <p className="text-[13px] font-medium text-zinc-200 md:text-[12.5px] md:font-normal md:text-zinc-500">No functions yet</p>
-                  <p className="mt-1 text-[12.5px] leading-[19px] text-zinc-500 md:hidden">
-                    Your agent writes a function when your app needs server-side logic, and it runs without a deploy.
-                  </p>
-                </div>
-              ) : visibleFunctions.length === 0 ? (
+              ) : functions.length === 0 ? null : visibleFunctions.length === 0 ? (
                 <p className="px-4 py-5 text-[12.5px] leading-[19px] text-zinc-500">
                   No function matches{query.trim() ? ` “${query.trim()}”` : ' this filter'}.
                 </p>
@@ -890,7 +891,7 @@ export function FunctionsWorkbench({ projectId }: { projectId: string }) {
           </div>
 
           {/* ── Detail ─────────────────────────────────── */}
-          <div className={`min-w-0 flex-1 flex-col ${mobilePane === 'detail' ? 'flex' : 'hidden md:flex'}`}>
+          <div className={`min-w-0 flex-1 flex-col ${noFunctions || mobilePane === 'detail' ? 'flex' : 'hidden md:flex'}`}>
             {!selected ? (
               <div className="flex h-full flex-col items-center justify-center overflow-y-auto px-6">
                 {functions.length === 0 ? (
@@ -901,6 +902,7 @@ export function FunctionsWorkbench({ projectId }: { projectId: string }) {
                     description="Server-side logic for your app: endpoints, scheduled jobs and code that runs when data changes. Your agent writes them, and they go live without a deploy."
                     prompt={EXAMPLE_PROMPTS[0]}
                     docs="functions"
+                    preview="code"
                   />
                 ) : (
                   <EmptyState
@@ -962,7 +964,7 @@ export function FunctionsWorkbench({ projectId }: { projectId: string }) {
                       loading={running}
                       onClick={() => handleRun(selected)}
                       disabled={selected.status === 'inactive'}
-                      title={selected.status === 'inactive' ? 'Enable the function to run it' : 'Runs for real with an empty event — writes, emails and quota count'}
+                      title={selected.status === 'inactive' ? 'Enable the function to run it' : 'Runs for real with an empty event: writes, emails and quota count'}
                     >
                       {running ? 'Running…' : 'Test run'}
                     </KitButton>
@@ -979,7 +981,12 @@ export function FunctionsWorkbench({ projectId }: { projectId: string }) {
                 </KitTabs>
 
                 {/* Tab body */}
-                <div className="min-h-0 flex-1 overflow-y-auto">
+                <div
+                  tabIndex={0}
+                  role="region"
+                  aria-label={`${selected.name}, ${tab}`}
+                  className={`min-h-0 flex-1 overflow-y-auto ${FOCUS_INSET}`}
+                >
                   {tab === 'overview' ? (
                     <div className="max-w-[880px] space-y-6 px-4 py-5 sm:px-5">
                       {selected.description && (
@@ -1011,7 +1018,7 @@ export function FunctionsWorkbench({ projectId }: { projectId: string }) {
                           )],
                           ['Runs', selected.runCount.toLocaleString()],
                           ['Last run', formatRelativeTime(selected.lastRun)],
-                          ['Created', new Date(selected.createdAt).toLocaleString()],
+                          ['Created', formatStamp(selected.createdAt)],
                         ] as Array<[string, React.ReactNode]>).map(([label, value], i) => (
                           <div
                             key={label}

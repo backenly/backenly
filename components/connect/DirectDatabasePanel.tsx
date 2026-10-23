@@ -19,12 +19,14 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import {
-  Database, Copy, Check, Eye, EyeOff, RefreshCw, Trash2, Loader2,
+  Database, Copy, Check, Eye, EyeOff, RefreshCw, Trash2,
   Download, ShieldCheck, PencilRuler, Terminal, GitBranch,
 } from 'lucide-react'
 import { Toast } from '@/components/ui/Toast'
+import { formatDay } from '@/components/console/format'
 import {
-  KIT, KitButton, KitBadge, KitCard, KitCardHeader, KitCardBody, KitNote, KitConfirmDialog, SectionLabel,
+  BUTTON_BASE, BUTTON_SIZES, BUTTON_VARIANTS, KIT, KitButton, KitBadge, KitCard, KitCardHeader, KitCardBody, KitNote,
+  KitConfirmDialog, SectionTitle, Skeleton,
 } from '@/components/inspector/kit'
 
 interface Credential {
@@ -147,21 +149,28 @@ export function DirectDatabasePanel({ projectId }: { projectId: string }) {
 
   if (loading) {
     return (
-      <div className="flex items-center gap-2 py-10 justify-center text-zinc-500 text-[12px]">
-        <Loader2 className="w-3.5 h-3.5 animate-spin" /> Loading database access…
+      <div className="space-y-4" aria-busy="true" aria-label="Loading database access">
+        <Skeleton className="h-[22px] w-48" />
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+          <Skeleton className="h-[180px] w-full rounded-[10px]" />
+          <Skeleton className="h-[180px] w-full rounded-[10px]" />
+        </div>
       </div>
     )
   }
 
   return (
-    <div className="mt-10 space-y-4">
-      <div>
-        <SectionLabel>Your database, direct</SectionLabel>
-        <p className="mt-1.5 text-[12.5px] leading-relaxed text-zinc-500 max-w-2xl">
-          Standard PostgreSQL, and it&apos;s yours: real connection strings for psql, TablePlus, or any BI tool,
-          plus full <span className="font-mono text-[12.5px]">pg_dump</span> exports. No lock-in.
-        </p>
-      </div>
+    <section className="space-y-4">
+      <SectionTitle
+        className="!mb-0"
+        title="Postgres"
+        description={
+          <>
+            Standard PostgreSQL, and it&apos;s yours: real connection strings for psql, TablePlus or any BI tool, plus
+            full <span className="font-mono text-[12.5px]">pg_dump</span> exports.
+          </>
+        }
+      />
 
       {/* ── Credential cards ─────────────────────────────────────────────────── */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
@@ -169,7 +178,7 @@ export function DirectDatabasePanel({ projectId }: { projectId: string }) {
         <KitCard>
           <KitCardHeader
             title={<span className="inline-flex items-center gap-2"><ShieldCheck className="w-3.5 h-3.5 text-zinc-400" />Read-only access</span>}
-            actions={has('READ_ONLY') ? <KitBadge tone="operational">active</KitBadge> : undefined}
+            actions={has('READ_ONLY') ? <KitBadge tone="operational">Active</KitBadge> : undefined}
           />
           <KitCardBody className="space-y-3">
             <p className="text-[12px] leading-relaxed text-zinc-500">
@@ -199,7 +208,7 @@ export function DirectDatabasePanel({ projectId }: { projectId: string }) {
         <KitCard>
           <KitCardHeader
             title={<span className="inline-flex items-center gap-2"><PencilRuler className="w-3.5 h-3.5 text-zinc-400" />Read-write access</span>}
-            actions={has('READ_WRITE') ? <KitBadge tone="beta">active</KitBadge> : undefined}
+            actions={has('READ_WRITE') ? <KitBadge tone="operational">Active</KitBadge> : undefined}
           />
           <KitCardBody className="space-y-3">
             <p className="text-[12px] leading-relaxed text-zinc-500">
@@ -212,7 +221,7 @@ export function DirectDatabasePanel({ projectId }: { projectId: string }) {
                 {status!.pendingDriftEvents > 0 && (
                   <div className="flex items-center gap-2 text-[12.5px] text-amber-400/90">
                     <GitBranch className="w-3.5 h-3.5" />
-                    {status!.pendingDriftEvents} external schema change{status!.pendingDriftEvents === 1 ? '' : 's'} awaiting adoption · see Autonomy
+                    {status!.pendingDriftEvents} external schema change{status!.pendingDriftEvents === 1 ? '' : 's'} waiting for adoption in Autonomy
                   </div>
                 )}
                 <CredentialDetails
@@ -242,31 +251,49 @@ export function DirectDatabasePanel({ projectId }: { projectId: string }) {
           description="Standard pg_dump. Restores on any PostgreSQL."
         />
         <KitCardBody>
+          {/* Links styled as buttons: a button inside a link was two focus
+              stops for one download, and invalid HTML. */}
           <div className="flex flex-wrap items-center gap-2">
-            <a href={`/api/projects/${projectId}/export/database?mode=full`} download>
-              <KitButton variant="secondary" size="sm" icon={Database}>Full backup (.sql)</KitButton>
+            <a
+              href={`/api/projects/${projectId}/export/database?mode=full`}
+              download
+              className={`${BUTTON_BASE} ${BUTTON_SIZES.sm} ${BUTTON_VARIANTS.secondary}`}
+            >
+              <Database className="h-3.5 w-3.5" strokeWidth={2} />
+              Full backup (.sql)
             </a>
-            <a href={`/api/projects/${projectId}/export/database?mode=schema`} download>
-              <KitButton variant="ghost" size="sm">Schema only</KitButton>
+            <a
+              href={`/api/projects/${projectId}/export/database?mode=schema`}
+              download
+              className={`${BUTTON_BASE} ${BUTTON_SIZES.sm} ${BUTTON_VARIANTS.ghost}`}
+            >
+              Schema only
             </a>
-            <a href={`/api/projects/${projectId}/export/database?mode=data`} download>
-              <KitButton variant="ghost" size="sm">Data only</KitButton>
+            <a
+              href={`/api/projects/${projectId}/export/database?mode=data`}
+              download
+              className={`${BUTTON_BASE} ${BUTTON_SIZES.sm} ${BUTTON_VARIANTS.ghost}`}
+            >
+              Data only
             </a>
           </div>
         </KitCardBody>
       </KitCard>
 
-      {/* ── Honest notes ─────────────────────────────────────────────────────── */}
-      <div className="space-y-2">
-        <KitNote>
-          TLS required (<span className="font-mono text-[12px]">sslmode=require</span>), scoped to this project&apos;s
-          schema. Shared tier: catalogs can list other projects&apos; schema <em>names</em>, never their data.
-        </KitNote>
-        <KitNote>
-          Connections hit the live database your APIs serve. Every credential action is audit-logged.
-          Rotate immediately if a string leaks.
-        </KitNote>
-      </div>
+      {/* ── Honest notes: one block, not two boxes that read as disclaimers ── */}
+      <KitNote icon={ShieldCheck} title="Before you connect">
+        <ul className="list-disc space-y-1 pl-4 marker:text-zinc-600">
+          <li>
+            Connections hit the live database your APIs serve. Every credential action is audit-logged; rotate at once
+            if a string leaks.
+          </li>
+          <li>
+            TLS is required (<span className="font-mono text-[12px]">sslmode=require</span>) and access is scoped to
+            this project&apos;s schema. On the shared tier, catalogs can list other projects&apos; schema names, never
+            their data.
+          </li>
+        </ul>
+      </KitNote>
 
       {toast && <Toast message={toast.message} type={toast.type} isVisible onClose={() => setToast(null)} />}
 
@@ -282,7 +309,7 @@ export function DirectDatabasePanel({ projectId }: { projectId: string }) {
         confirmLabel="Revoke"
         danger
       />
-    </div>
+    </section>
   )
 }
 
@@ -331,7 +358,7 @@ function CredentialDetails({
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px] font-mono text-zinc-600">
         <span>{c.roleName}</span>
         <span>{c.host}:{c.port}/{c.database}</span>
-        {c.rotatedAt && <span>rotated {new Date(c.rotatedAt).toLocaleDateString()}</span>}
+        {c.rotatedAt && <span className="font-sans">Rotated {formatDay(c.rotatedAt)}</span>}
       </div>
 
       <div className="flex flex-wrap items-center gap-2">

@@ -397,7 +397,7 @@ function SchemaMinimap({
   }
 
   return (
-    <div className="w-[236px] rounded-xl border border-white/[0.08] bg-[#0f1012]/92 p-2.5 shadow-2xl backdrop-blur-md transition-all duration-200 select-none">
+    <div className="w-[236px] rounded-xl border border-white/[0.08] bg-[#0f1012]/92 p-2.5 shadow-2xl backdrop-blur-md transition-[opacity,transform] duration-200 select-none">
       {/* Header */}
       <div className="flex items-center justify-between pb-2 border-b border-white/[0.06] text-zinc-300">
         <div className="flex items-center gap-1.5 font-mono text-[11px] font-semibold text-zinc-200">
@@ -1157,7 +1157,7 @@ export function SchemaDiagram({
             type="text"
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
-            placeholder={isFieldSearch ? 'Filter columns...' : 'Search tables (⌘F)...'}
+            placeholder={isFieldSearch ? 'Filter columns…' : 'Search tables (⌘F)…'}
             className={`h-[32px] w-64 sm:w-72 rounded-[7px] border bg-[#08090a]/95 pl-8 ${
               searchTerm ? (isFieldSearch ? 'pr-20' : 'pr-8') : 'pr-24'
             } text-[13px] text-zinc-100 placeholder:text-zinc-500 shadow-[inset_0_1px_2px_rgba(0,0,0,0.35),0_8px_24px_rgba(0,0,0,0.4)] backdrop-blur-md transition-[border-color,box-shadow] ${

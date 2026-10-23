@@ -6,10 +6,10 @@ import { useParams } from 'next/navigation'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   AlertCircle, Cable, Check, CheckCircle2, Code2, Database, ExternalLink, Globe, HardDrive, Info, Layers, Loader2,
-  Lock, Rocket, RotateCcw, Shield, ShieldCheck,
+  Lock, Rocket, RotateCcw, Shield, ShieldCheck, Globe2,
 } from 'lucide-react'
 import { EnvVarsPanel } from '@/components/inspector/EnvVarsPanel'
-import { FrontendConnectionPill } from '@/components/inspector/FrontendConnectionPill'
+import { useConnectionHealth } from '@/lib/hooks/useConnectionHealth'
 import { AgentEmptyState } from '@/components/inspector/AgentEmptyState'
 import {
   BUTTON_BASE,
@@ -42,6 +42,10 @@ interface ProjectData {
   name: string
   projectStatus: ProjectStatus
   publicUrl?: string | null
+  /** Set only by an operator override. */
+  apiUrlProd?: string | null
+  /** The API address the server works out for the project's region. */
+  apiBaseUrl?: string | null
   deployedAt?: string | null
   deploymentError?: string | null
 }
@@ -82,6 +86,7 @@ export default function PublishPage() {
   const projectId = params.id as string
   // Nothing to publish is the agent's next job: offer Connect only until it is connected.
   const agent = useAgentConnection(projectId)
+  const frontend = useConnectionHealth(projectId)
 
   const [project, setProject] = useState<ProjectData | null>(null)
   const [publishedVersions, setPublishedVersions] = useState<PublishedVersion[]>([])
@@ -91,6 +96,8 @@ export default function PublishPage() {
   const [publishing, setPublishing] = useState(false)
   const [copied, setCopied] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // Rollback and loading fail here too; the note named every failure a publish.
+  const [errorTitle, setErrorTitle] = useState('The publish did not complete')
   const [successMsg, setSuccessMsg] = useState<string | null>(null)
   const [rollingBackId, setRollingBackId] = useState<string | null>(null)
   const [applyingFixes, setApplyingFixes] = useState(false)
@@ -169,6 +176,7 @@ export default function PublishPage() {
       }
     } catch (err) {
       console.error('Failed to fetch project:', err)
+      setErrorTitle('Couldn’t load this project')
       setError('Failed to load project data')
     } finally {
       setLoading(false)
@@ -219,6 +227,7 @@ export default function PublishPage() {
       setTimeout(() => setSuccessMsg(null), 4000)
       await fetchAll()
     } catch (err: any) {
+      setErrorTitle('The publish did not complete')
       setError(err.message || 'Publish failed')
       await fetchAll()
     } finally {
@@ -249,15 +258,22 @@ export default function PublishPage() {
       setTimeout(() => setSuccessMsg(null), 4000)
       await fetchAll()
     } catch (err: any) {
+      setErrorTitle('The rollback did not complete')
       setError(err.message || 'Rollback failed')
     } finally {
       setRollingBackId(null)
     }
   }
 
+  // The live endpoint. publicUrl comes back only from the publish call itself,
+  // never from GET /api/projects/[id], so a card keyed on it alone never showed
+  // after a reload; apiBaseUrl is the address the server works out for the
+  // project's region, and an operator override still wins.
+  const endpointUrl = project?.publicUrl || project?.apiUrlProd || project?.apiBaseUrl || null
+
   const handleCopyURL = () => {
-    if (project?.publicUrl) {
-      navigator.clipboard.writeText(project.publicUrl)
+    if (endpointUrl) {
+      navigator.clipboard.writeText(endpointUrl)
       setCopied(true)
       setTimeout(() => setCopied(false), 2000)
     }
@@ -449,7 +465,7 @@ export default function PublishPage() {
         <AnimatePresence>
           {error && (
             <motion.div key="err" initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}>
-              <KitNote tone="warn" icon={AlertCircle} title="The publish did not complete">
+              <KitNote tone="warn" icon={AlertCircle} title={errorTitle}>
                 <span className="whitespace-pre-line">{error}</span>
               </KitNote>
             </motion.div>
@@ -484,7 +500,7 @@ export default function PublishPage() {
             <KitColumns
               main={
                 <>
-                  {project.publicUrl && (
+                  {endpointUrl && (
                     <KitCard className="overflow-hidden">
                       <KitCardHeader
                         title={
@@ -496,9 +512,9 @@ export default function PublishPage() {
                         actions={<StatusDot tone="operational" label="Serving" />}
                       />
                       <div className="flex items-center gap-2 px-4 py-3.5">
-                        <CopyField value={project.publicUrl} className="flex-1" />
+                        <CopyField value={endpointUrl} className="flex-1" />
                         <a
-                          href={project.publicUrl}
+                          href={endpointUrl}
                           target="_blank"
                           rel="noopener noreferrer"
                           aria-label="Open the endpoint in a new tab"
@@ -597,6 +613,20 @@ export default function PublishPage() {
                         { icon: Code2, label: 'REST API', active: endpointCount > 0, sub: `${endpointCount} endpoints` },
                         { icon: Shield, label: 'Authentication', active: hasAuth, sub: hasAuth ? 'JWT sessions' : 'Not configured' },
                         { icon: HardDrive, label: 'File storage', active: hasStorage, sub: hasStorage ? 'Buckets provisioned' : 'Not configured' },
+                        // The frontend calling this API, from the same 24-hour
+                        // health the sidebar row reads. It was a badge floating
+                        // under the readiness card.
+                        {
+                          icon: Globe2,
+                          label: 'Frontend',
+                          active: frontend.status === 'connected',
+                          sub:
+                            frontend.status === 'connected' ? frontend.primaryOrigin ?? 'Connected'
+                            : frontend.status === 'degraded' ? `${frontend.primaryOrigin ?? 'Connected'}, with errors`
+                            : frontend.status === 'failing' ? 'Requests failing'
+                            : frontend.status === 'loading' ? 'Checking…'
+                            : 'No requests yet',
+                        },
                       ].map(({ icon: Icon, label, active, sub }) => (
                         <li key={label} className="flex items-center gap-3 px-4 py-2.5">
                           <Icon className={`h-4 w-4 flex-shrink-0 ${active ? 'text-zinc-400' : 'text-zinc-700'}`} strokeWidth={1.75} />
@@ -609,10 +639,7 @@ export default function PublishPage() {
                       ))}
                     </ul>
                   </KitCard>
-                  {readinessPanel('Runtime readiness')}
-                  <div className="hidden md:block">
-                    <FrontendConnectionPill projectId={projectId} variant="badge" />
-                  </div>
+                  {readinessPanel('Readiness')}
                 </>
               }
             />
@@ -629,6 +656,7 @@ export default function PublishPage() {
               description="Publishing runs readiness checks, then records your backend as a numbered version. Ask your agent to build tables, auth or storage first."
               prompt="Build the backend for a task tracker: projects, tasks with a status and a due date, and email sign-in. Only a task's owner can edit it."
               docs="deploy"
+              preview="list"
             />
           </KitCard>
         )}

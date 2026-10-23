@@ -23,6 +23,8 @@ import { useCallback, useEffect, useState } from 'react'
 import { AlertCircle, RefreshCw, Search, X } from 'lucide-react'
 import { EmptyState, IconButton, INPUT_BASE, KitButton, StatusDot } from '@/components/inspector/kit'
 import { FileText } from 'lucide-react'
+import { when } from '@/components/changes/present'
+import { FOCUS_INSET } from '@/components/console/tokens'
 
 type Severity = 'error' | 'warning' | 'info' | 'debug'
 
@@ -200,7 +202,7 @@ export function LogsExplorer({ projectId }: { projectId: string }) {
       </div>
 
       {/* ── Body ───────────────────────────────────────────── */}
-      <div className="min-h-0 flex-1 overflow-auto">
+      <div tabIndex={0} role="region" aria-label="Logs" className={`min-h-0 flex-1 overflow-auto ${FOCUS_INSET}`}>
         {error ? (
           <div className="flex h-full items-center justify-center px-8">
             <div className="max-w-md rounded-[10px] border border-rose-400/20 bg-rose-500/[0.05] px-4 py-3.5">
@@ -265,7 +267,7 @@ export function LogsExplorer({ projectId }: { projectId: string }) {
               {rows.map((r) => (
                 <tr key={r.id} className="transition-colors hover:bg-[#121316]">
                   <td className="whitespace-nowrap border-b border-white/[0.04] px-3 py-[9px] text-[12px] tabular-nums text-zinc-500">
-                    {new Date(r.timestamp).toLocaleString()}
+                    {when(r.timestamp)}
                   </td>
                   <td className="whitespace-nowrap border-b border-white/[0.04] px-3 py-[9px]">
                     <StatusDot tone={SEVERITY_DOT[r.severity] ?? 'neutral'} label={<span className={SEVERITY_TONE[r.severity] ?? 'text-zinc-400'}>{r.severity}</span>} />

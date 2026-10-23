@@ -20,7 +20,7 @@ import { EVENT, outcomeOf, when } from './present'
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <section className="space-y-2">
-      <h3 className="text-[11.5px] font-medium uppercase tracking-[0.06em] text-zinc-500">{title}</h3>
+      <h3 className="text-[12px] font-medium leading-[16px] text-zinc-500">{title}</h3>
       {children}
     </section>
   )

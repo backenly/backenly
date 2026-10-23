@@ -8,7 +8,8 @@
  * This used to be one centred icon, a sentence and a button on an otherwise
  * empty canvas, which read as a placeholder rather than a product. It now has
  * the built Overview's frame (the name, one panel, one block of cards) and
- * says two things:
+ * says two things, under the name's own facts (state, region, age) and the
+ * API endpoint an app needs first:
  *
  *   • Setup panel  Left, the next step: the first request to send the agent,
  *                  and Connect until it is connected. Right, the steps, which
@@ -22,14 +23,17 @@
  */
 
 import Link from 'next/link'
-import type { ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { ArrowUpRight, Braces, Check, Database, HardDrive, Users, type LucideIcon } from 'lucide-react'
-import { AgentPrompt, Tag } from '@/components/inspector/kit'
+import { AgentPrompt, CopyField, StatusDot, Tag } from '@/components/inspector/kit'
 import { ConnectAgentLink, DocsLink } from '@/components/inspector/AgentEmptyState'
 import { AGENT_ICON } from '@/components/connect/AgentBrandIcons'
 import { ago } from '@/components/changes/present'
 import { EDGE, FOCUS, PLATE, R_PANEL } from '@/components/console/tokens'
 import { useAgentConnection } from '@/lib/hooks/useAgentConnection'
+import { getProject, type Project } from '@/lib/api/projects'
+import { regionLabel } from '@/lib/regions'
+import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
 
 /** Concrete enough to show what one ask builds: tables, auth and a rule. */
 const FIRST_REQUEST =
@@ -53,6 +57,17 @@ const INCLUDED: Array<{ section: string; label: string; icon: LucideIcon; body: 
 export function WorkspaceSetup({ projectId, projectName }: { projectId: string; projectName: string | null }) {
   const agent = useAgentConnection(projectId)
   const connected = agent.connected
+  // The project's own facts, under its name: an empty project still has an
+  // address, a region and an age, and the address is what an app needs first.
+  const [project, setProject] = useState<Project | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    getProject(projectId)
+      .then((p) => { if (!cancelled) setProject(p) })
+      .catch(() => { /* the facts row stays empty; the page still works */ })
+    return () => { cancelled = true }
+  }, [projectId])
+  const apiBaseUrl = project?.apiUrlProd || project?.apiBaseUrl || null
   const via = [
     agent.client && `through ${agent.client}`,
     agent.lastSeenAt && `last call ${ago(agent.lastSeenAt)}`,
@@ -61,10 +76,25 @@ export function WorkspaceSetup({ projectId, projectName }: { projectId: string; 
   return (
     <div className="space-y-10">
       <div className="space-y-3">
-        <header className="min-w-0 pb-3">
-          <h1 className="truncate text-[26px] font-semibold leading-[32px] tracking-[-0.028em] text-zinc-50">
-            {projectName ?? 'Untitled project'}
-          </h1>
+        <header className="flex min-w-0 flex-col gap-4 pb-3 lg:flex-row lg:items-end lg:justify-between">
+          <div className="min-w-0">
+            <h1 className="truncate text-[26px] font-semibold leading-[32px] tracking-[-0.028em] text-zinc-50">
+              {projectName ?? 'Untitled project'}
+            </h1>
+            {project && (
+              <p className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12.5px] text-zinc-500">
+                <StatusDot tone="paused" label="Not published" />
+                {CLOUD_CONTROL_PLANE && <span>{regionLabel(project.region)}</span>}
+                <span className="tabular-nums">Created {ago(String(project.createdAt))}</span>
+              </p>
+            )}
+          </div>
+          {apiBaseUrl && (
+            <div className="w-full min-w-0 lg:w-[360px]">
+              <p className="mb-1.5 text-[12px] text-zinc-500">API endpoint</p>
+              <CopyField value={apiBaseUrl} />
+            </div>
+          )}
         </header>
 
         <section aria-labelledby="setup-heading" className={`overflow-hidden ${PLATE} border ${EDGE} ${R_PANEL}`}>

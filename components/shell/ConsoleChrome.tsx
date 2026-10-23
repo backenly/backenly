@@ -443,21 +443,31 @@ export function AccountMenu() {
 
 /* ── Sidebar navigation ────────────────────────────────────────────────── */
 
+/**
+ * The rail: the navigation list, then a footer pinned under it. The list is
+ * the part that scrolls. Fifteen project items fit a 13-inch laptop's browser
+ * (about 600px under the bar); below that the list scrolls, and its last
+ * 20px fade out so an item cut by the footer reads as "more below" rather than
+ * as the footer drawn over it, which is what a hard edge looked like.
+ */
 export function SidebarNav({ children, footer }: { children: ReactNode; footer?: ReactNode }) {
   return (
     <>
-      <nav aria-label="Primary" className="flex-1 overflow-y-auto overscroll-contain px-3 pb-3 pt-2">
+      <nav
+        aria-label="Primary"
+        className="flex-1 overflow-y-auto overscroll-contain px-3 pb-4 pt-2 [mask-image:linear-gradient(to_bottom,black_calc(100%-20px),transparent)]"
+      >
         {children}
       </nav>
-      {footer && <div className="flex-shrink-0 px-3 pb-3 pt-1">{footer}</div>}
+      {footer && <div className="flex-shrink-0 border-t border-white/[0.06] px-3 pb-2.5 pt-2">{footer}</div>}
     </>
   )
 }
 
 export function NavGroup({ label, children, first = false }: { label?: string; children: ReactNode; first?: boolean }) {
   return (
-    <div className={first ? '' : label ? 'mt-5' : 'mt-3'}>
-      {label && <p className="mb-1 px-2.5 text-[12px] font-medium leading-[20px] text-faint">{label}</p>}
+    <div className={first ? '' : label ? 'mt-4' : 'mt-3'}>
+      {label && <p className="mb-0.5 px-2.5 text-[12px] font-medium leading-[18px] text-faint">{label}</p>}
       <ul className="space-y-px">{children}</ul>
     </div>
   )
@@ -488,7 +498,7 @@ export function NavItem({
         data-tour={tourTarget}
         aria-current={active ? 'page' : undefined}
         {...(external ? { target: '_blank', rel: 'noopener noreferrer' } : {})}
-        className={`group flex h-[36px] items-center gap-2.5 rounded-[7px] px-2.5 text-[13px] font-medium transition-[background-color,color] duration-150 md:h-[30px] ${FOCUS} ${
+        className={`group flex h-[36px] items-center gap-2.5 rounded-[7px] px-2.5 text-[13px] font-medium transition-[background-color,color] duration-150 md:h-[28px] ${FOCUS} ${
           active
             ? 'bg-white/[0.07] text-zinc-50 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.045),inset_0_1px_0_rgba(255,255,255,0.05)]'
             : 'text-zinc-400 hover:bg-white/[0.04] hover:text-zinc-100'

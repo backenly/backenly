@@ -18,7 +18,15 @@
 import Link from 'next/link'
 import { ArrowUpRight, Cable, type LucideIcon } from 'lucide-react'
 import type { DocSlug } from '@/app/docs/content'
-import { AgentPrompt, BUTTON_BASE, BUTTON_SIZES, BUTTON_VARIANTS, EmptyState } from '@/components/inspector/kit'
+import {
+  AgentPrompt,
+  BUTTON_BASE,
+  BUTTON_SIZES,
+  BUTTON_VARIANTS,
+  EmptyState,
+  GhostPreview,
+  type GhostKind,
+} from '@/components/inspector/kit'
 import { useAgentConnection } from '@/lib/hooks/useAgentConnection'
 
 interface AgentEmptyStateProps {
@@ -30,6 +38,8 @@ interface AgentEmptyStateProps {
   prompt: string
   /** The /docs page for this section. */
   docs: DocSlug
+  /** The outline of what the section will hold, drawn above the title. */
+  preview?: GhostKind
   className?: string
 }
 
@@ -40,6 +50,7 @@ export function AgentEmptyState({
   description,
   prompt,
   docs,
+  preview,
   className = '',
 }: AgentEmptyStateProps) {
   const agent = useAgentConnection(projectId)
@@ -50,6 +61,7 @@ export function AgentEmptyState({
       icon={icon}
       title={title}
       description={description}
+      preview={preview ? <GhostPreview kind={preview} /> : undefined}
       className={`w-full ${className}`}
       action={
         <div className="flex w-full flex-col items-center gap-5">

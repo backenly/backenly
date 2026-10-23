@@ -142,7 +142,7 @@ export function TopBar() {
           onClick={() => setProjectMenu((o) => !o)}
           aria-haspopup="menu"
           aria-expanded={projectMenu}
-          className={`flex h-[32px] min-w-0 max-w-[160px] items-center gap-2 ${R_CONTROL} px-2 transition-colors hover:bg-white/[0.05] sm:max-w-[240px] ${FOCUS}`}
+          className={`flex h-[32px] min-w-0 max-w-[132px] items-center gap-2 ${R_CONTROL} px-2 transition-colors hover:bg-white/[0.05] sm:max-w-[240px] ${FOCUS}`}
         >
           <span className={`h-[7px] w-[7px] flex-shrink-0 rounded-full ${STATUS_DOT[status]}`} aria-hidden />
           <span className="truncate text-[13px] font-medium text-zinc-100">{currentProject?.name ?? 'Project'}</span>

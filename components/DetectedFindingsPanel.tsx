@@ -43,9 +43,9 @@ import {
   Radar, RefreshCw, CheckCircle2, Loader2, XCircle, ChevronDown,
   ClipboardCopy, Check,
 } from 'lucide-react'
-import { KIT, KitButton } from '@/components/inspector/kit'
+import { IconButton, KIT, KitButton, MetaCode, MetaRow } from '@/components/inspector/kit'
 import {
-  groupFindings, CATEGORY_LABEL, severityLabel, type FindingGroup,
+  groupFindings, CATEGORY_LABEL, severityLabel, severityWord, type FindingGroup,
 } from '@/lib/core/finding-groups'
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -98,12 +98,12 @@ function timeAgo(iso: string | null): string {
  */
 function dispositionCopy(level: Level | undefined): string {
   if (level === 'CONSERVATIVE') {
-    return 'Backenly found these and has not acted yet. On its next pass, Review-only applies the silent additive ones (indexes, API definitions) and raises everything else for your approval — or fix any of them now.'
+    return 'Backenly found these and has not acted yet. On its next pass, Review-only applies the silent additive ones (indexes, API definitions) and raises everything else for your approval. You can also fix any of them now.'
   }
   if (level === 'OFF') {
     return 'Backenly found these while checking the runtime. Autonomy is off, so nothing will be applied until you pick a mode or fix them here.'
   }
-  return 'Backenly found these and can fix them itself — they are queued for its next pass and need no approval from you. Fix now to skip the wait, or hand one to your coding agent.'
+  return 'Backenly found these and can fix them itself. They are queued for its next pass and need no approval from you. Fix now to skip the wait, or hand one to your coding agent.'
 }
 
 /** The prompt handed to the user's coding agent — same contract as the approval queue. */
@@ -285,14 +285,13 @@ export function DetectedFindingsPanel({
             </span>
           )}
         </span>
-        <button
+        <IconButton
+          icon={RefreshCw}
+          label="Refresh findings"
           onClick={() => fetchHealth(true)}
           disabled={refreshing}
-          className="ml-auto text-zinc-600 transition-colors hover:text-zinc-300 disabled:opacity-40"
-          aria-label="Refresh"
-        >
-          <RefreshCw className={`size-3.5 ${refreshing ? 'animate-spin' : ''}`} />
-        </button>
+          className={`ml-auto ${refreshing ? '[&_svg]:animate-spin' : ''}`}
+        />
       </div>
 
       <div className="border-b border-white/[0.06] px-5 py-2.5">
@@ -315,8 +314,8 @@ export function DetectedFindingsPanel({
       {/* The preview cap is stated rather than hidden: a project over 50
           actionable rows would otherwise look like it had exactly 50. */}
       {openTotal > openFindings.length && (
-        <p className="border-t border-white/[0.06] px-5 py-2.5 font-mono text-[12px] text-zinc-600">
-          showing {openFindings.length} of {openTotal} — the rest appear as these clear
+        <p className="border-t border-white/[0.06] px-5 py-2.5 text-[12px] tabular-nums text-zinc-500">
+          Showing {openFindings.length} of {openTotal}. The rest appear as these clear.
         </p>
       )}
     </section>
@@ -350,9 +349,10 @@ function DetectedRow({
         <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-emerald-400" />
         <div className="min-w-0 flex-1">
           <p className="text-[12.5px] font-medium text-zinc-200">{g.title}</p>
-          <p className="mt-1 font-mono text-[12px] text-zinc-500">
-            fixed{many ? ` · ${g.members.length} tables` : ''} · rollback snapshot captured
-          </p>
+          <MetaRow className="!mt-1">
+            <span>Fixed{many ? ` on ${g.members.length} tables` : ''}</span>
+            <span>Rollback snapshot captured</span>
+          </MetaRow>
         </div>
       </li>
     )
@@ -378,11 +378,12 @@ function DetectedRow({
         />
         <div className="min-w-0 flex-1">
           <p className="text-[12.5px] leading-snug text-zinc-100">{g.title}</p>
-          <p className="mt-1.5 font-mono text-[12px] text-zinc-600">
-            {head.type} · {g.severity}
-            {!many && g.subjects[0] && <> · <span className="text-zinc-500">{g.subjects[0]}</span></>}
-            {' · '}{timeAgo(head.detectedAt)}
-          </p>
+          <MetaRow>
+            <MetaCode>{head.type}</MetaCode>
+            <span>{severityWord(g.severity)}</span>
+            {!many && g.subjects[0] && <MetaCode>{g.subjects[0]}</MetaCode>}
+            <span className="tabular-nums">{timeAgo(head.detectedAt)}</span>
+          </MetaRow>
 
           {many && (
             <div className="mt-2">

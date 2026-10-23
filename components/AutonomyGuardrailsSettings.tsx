@@ -33,7 +33,7 @@ import {
   StatusDot,
   type StatusTone,
 } from '@/components/inspector/kit'
-import { EDGE, FOCUS, PAGE_GUTTER, PAGE_WIDTH, RULE, R_PANEL } from '@/components/console/tokens'
+import { EDGE, FOCUS, FOCUS_INSET, PAGE_GUTTER, PAGE_WIDTH, RULE, R_PANEL } from '@/components/console/tokens'
 import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
 import { ReviewQueuePanel } from '@/components/ReviewQueuePanel'
 import { DetectedFindingsPanel } from '@/components/DetectedFindingsPanel'
@@ -140,7 +140,7 @@ function Shell({ level, shadow, children }: { level?: Level; shadow?: boolean; c
         className="!px-0"
         title="Autonomy"
         meta={badge ? <StatusDot tone={badge.tone} label={badge.label} /> : undefined}
-        description="Your backend keeps working when nobody is asking. Choose what Backenly may change on its own and what always waits for you. The safety floor never moves, in any mode."
+        description="Choose what Backenly may fix on its own and what waits for your approval. Auth, destructive and irreversible changes always wait, in every mode."
       />
       {children}
     </div>
@@ -410,7 +410,7 @@ export function AutonomyGuardrailsSettings({ projectId }: { projectId: string })
           {data.recentActivity.length === 0 ? (
             <p className="px-4 py-8 text-center text-[13px] text-zinc-500">Nothing yet. Backenly has not needed to act.</p>
           ) : (
-            <div className="max-h-[380px] overflow-y-auto">
+            <div tabIndex={0} role="region" aria-label="Recent guardrail actions" className={`max-h-[380px] overflow-y-auto ${FOCUS_INSET}`}>
               <table className="w-full border-separate border-spacing-0">
                 <thead className="sticky top-0 z-10">
                   <tr className={KIT.gridHead}>
@@ -432,7 +432,7 @@ export function AutonomyGuardrailsSettings({ projectId }: { projectId: string })
                         {timeAgo(a.at)}
                       </td>
                       <td className="border-b border-white/[0.04] px-3 py-2.5 align-top">
-                        <span className="font-mono text-[12px] text-zinc-400">{a.kind || a.action || '—'}</span>
+                        <span className="text-[12.5px] text-zinc-400">{kindLabel(a.kind || a.action)}</span>
                       </td>
                       <td className="border-b border-white/[0.04] px-3 py-2.5 text-[13px] leading-[19px] text-zinc-300">
                         {a.summary}
@@ -463,4 +463,11 @@ export function AutonomyGuardrailsSettings({ projectId }: { projectId: string })
       </div>
     </Shell>
   )
+}
+
+/** An audit row's kind as words: "auto_fix" reads "Auto fix". */
+function kindLabel(kind: string | null | undefined): string {
+  if (!kind) return '—'
+  const words = kind.replace(/[_-]+/g, ' ').trim().toLowerCase()
+  return words.charAt(0).toUpperCase() + words.slice(1)
 }
