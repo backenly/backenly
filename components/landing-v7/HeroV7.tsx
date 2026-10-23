@@ -2,7 +2,6 @@
 
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react'
 import Link from 'next/link'
-import { motion, type Variants } from 'framer-motion'
 import { ArrowRight } from 'lucide-react'
 import { Icon } from '@iconify/react'
 import { AGENT_MARKS, AgentGlyph } from '@/components/landing/AgentMarks'
@@ -69,34 +68,22 @@ const FEATHER = {
 } as const
 const FEATHER_SIZE = '[--fx:7%] [--fb:16%] md:[--fx:9%] md:[--fb:26%]'
 
-const EASE_OUT = [0.16, 1, 0.3, 1] as const
-
-const heroItem: Variants = {
-  hidden: { opacity: 0, y: 14, filter: 'blur(8px)' },
-  visible: { opacity: 1, y: 0, filter: 'blur(0px)' },
-}
-
-/** The showcase rises without blur: a filter left on an ancestor costs every frame. */
-const heroFilm: Variants = {
-  hidden: { opacity: 0, y: 28 },
-  visible: { opacity: 1, y: 0 },
-}
-
+/*
+ * The entrance (headline, subline, buttons, then the showcase) is CSS:
+ * `landing-rise` and `landing-film-rise` in app/globals.css, the same
+ * curves, distances and 0.1s stagger the framer variants had. As variants
+ * the whole hero was server-rendered at opacity 0 and only began to appear
+ * once React had hydrated, so on a mid-range phone the first screen stayed
+ * blank for seconds: Lighthouse measured Largest Contentful Paint at 6.2s
+ * with GPU, 8.7s without. A CSS animation starts with the first paint.
+ * Reduced motion is the stylesheet's media query, so there is no hydration
+ * branch.
+ */
 export function HeroV7() {
-  const quiet = useSettledReducedMotion()
   const { isLoggedIn } = useUserSession()
 
   return (
-    <motion.section
-      aria-labelledby="hero-heading"
-      className="relative isolate pt-[56px] sm:pt-[72px] md:pt-[96px]"
-      initial="hidden"
-      animate="visible"
-      variants={{
-        hidden: {},
-        visible: { transition: { staggerChildren: quiet ? 0 : 0.1, delayChildren: quiet ? 0 : 0.05 } },
-      }}
-    >
+    <section aria-labelledby="hero-heading" className="relative isolate pt-[56px] sm:pt-[72px] md:pt-[96px]">
       <style>{'@keyframes v7-fill{from{transform:scaleX(0)}to{transform:scaleX(1)}}' + CONSOLE_KEYFRAMES}</style>
 
       {/* Key light, top left, behind the headline (as on the live page). */}
@@ -112,31 +99,25 @@ export function HeroV7() {
       />
 
       <div className={CONTAINER}>
-        <motion.h1
+        <h1
           id="hero-heading"
-          variants={heroItem}
-          transition={{ duration: quiet ? 0 : 0.95, ease: EASE_OUT }}
           // One vertical falloff across the whole headline, white to a cool grey (live page).
-          className={`bg-gradient-to-b from-white from-40% to-zinc-400 bg-clip-text pb-2 text-[38px] text-transparent [text-wrap:balance] sm:text-[60px] md:text-[76px] xl:text-[80px] ${DISPLAY}`}
+          className={`landing-rise [--enter-delay:50ms] bg-gradient-to-b from-white from-40% to-zinc-400 bg-clip-text pb-2 text-[38px] text-transparent [text-wrap:balance] sm:text-[60px] md:text-[76px] xl:text-[80px] ${DISPLAY}`}
         >
-          The autonomous backend
+          {/* The space keeps the two lines two words apart in the text a
+              crawler or screen reader reads; the block span breaks the line. */}
+          The autonomous backend{' '}
           <span className="block">built for coding agents</span>
-        </motion.h1>
+        </h1>
 
-        <motion.p
-          variants={heroItem}
-          transition={{ duration: quiet ? 0 : 0.95, ease: EASE_OUT }}
-          className={`relative z-10 mt-7 max-w-[56ch] text-[17px] font-light text-zinc-400 [text-wrap:pretty] md:mt-8 md:text-[20px] ${LEDE}`}
+        <p
+          className={`landing-rise [--enter-delay:150ms] relative z-10 mt-7 max-w-[56ch] text-[17px] font-light text-zinc-400 [text-wrap:pretty] md:mt-8 md:text-[20px] ${LEDE}`}
         >
           Your coding agent builds the backend over MCP. Backenly maintains it on its own, fixing what it can verify and undo,
           and holding anything risky for you.
-        </motion.p>
+        </p>
 
-        <motion.div
-          variants={heroItem}
-          transition={{ duration: quiet ? 0 : 0.95, ease: EASE_OUT }}
-          className="relative z-10 mt-9 flex flex-col gap-3 sm:flex-row sm:items-center"
-        >
+        <div className="landing-rise [--enter-delay:250ms] relative z-10 mt-9 flex flex-col gap-3 sm:flex-row sm:items-center">
           <Link href={isLoggedIn ? ROUTES.app : ROUTES.signup} className={PRIMARY_CTA}>
             {isLoggedIn ? 'Go to console' : 'Start free'}
             <ArrowRight aria-hidden className="h-4 w-4 transition-transform duration-200 group-hover:translate-x-0.5" />
@@ -145,19 +126,15 @@ export function HeroV7() {
             <Icon icon="ri:github-fill" width={18} aria-hidden />
             Star on GitHub
           </a>
-        </motion.div>
+        </div>
 
-        <motion.div
-          variants={heroFilm}
-          transition={{ duration: quiet ? 0 : 1.2, ease: EASE_OUT }}
-          className="relative mt-[56px] md:mt-[80px]"
-        >
+        <div className="landing-film-rise [--enter-delay:350ms] relative mt-[56px] md:mt-[80px]">
           <Showcase />
-        </motion.div>
+        </div>
       </div>
 
       <AgentBand />
-    </motion.section>
+    </section>
   )
 }
 

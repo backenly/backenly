@@ -204,12 +204,10 @@ export function NavBar() {
   }, [mobileOpen])
 
   return (
-    <motion.header
-      initial={{ opacity: 0, y: -18 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: reduceMotion ? 0 : 0.7, ease: [0.16, 1, 0.3, 1] }}
-      className="sticky top-0 z-40 w-full border-b border-white/[0.07] bg-[#08090a]/80 backdrop-blur-xl backdrop-saturate-150"
-    >
+    // The entrance is CSS (`nav-drop`, app/globals.css), as on the landing
+    // hero: as framer `initial` props the bar was rendered at opacity 0 and
+    // stayed blank until React hydrated, on every marketing page.
+    <header className="nav-drop sticky top-0 z-40 w-full border-b border-white/[0.07] bg-[#08090a]/80 backdrop-blur-xl backdrop-saturate-150">
       {/* Container tracks the landing's 100rem sections so the logo sits on
           the same left edge as the headline below it. */}
       <div className="mx-auto flex h-[68px] w-full max-w-[100rem] items-center justify-between px-5 sm:px-6">
@@ -229,28 +227,20 @@ export function NavBar() {
             plain text links (the floating pill container is gone), then the
             auth cluster. justify-between + one right group = right-aligned. */}
         <div className="hidden items-center gap-6 lg:flex">
-          <motion.nav
-            initial={{ opacity: 0, y: -8 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: reduceMotion ? 0 : 0.7, delay: reduceMotion ? 0 : 0.08, ease: [0.16, 1, 0.3, 1] }}
+          <nav
             // 16px, not 15px. Measured against the field on 2026-09-18:
             // Linear, Stripe, Supabase and Neon all set their marketing nav at
             // 16px. At 15px, next to an 18px wordmark, these read as secondary
             // captions rather than as the site's primary navigation.
-            className="flex items-center gap-0.5 text-[15px] font-medium tracking-[-0.006em] text-zinc-400"
+            className="nav-drop flex items-center gap-0.5 text-[15px] font-medium tracking-[-0.006em] text-zinc-400 [--enter-delay:80ms] [--nav-drop:-8px]"
           >
             {NAV_LINKS.map((link) => (
               <DesktopNavLink key={link.label} link={link} pathname={pathname} />
             ))}
-          </motion.nav>
+          </nav>
 
           {/* Desktop auth buttons */}
-          <motion.div
-            initial={{ opacity: 0, y: -8 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: reduceMotion ? 0 : 0.7, delay: reduceMotion ? 0 : 0.14, ease: [0.16, 1, 0.3, 1] }}
-            className="flex items-center gap-4"
-          >
+          <div className="nav-drop flex items-center gap-4 [--enter-delay:140ms] [--nav-drop:-8px]">
           <a
             href={ROUTES.github}
             target="_blank"
@@ -278,7 +268,7 @@ export function NavBar() {
           >
             {isLoggedIn ? 'Console' : 'Sign up'}
           </Link>
-          </motion.div>
+          </div>
         </div>
 
         {/* Mobile hamburger */}
@@ -357,7 +347,7 @@ export function NavBar() {
           </motion.div>
         )}
       </AnimatePresence>
-    </motion.header>
+    </header>
   )
 }
 
