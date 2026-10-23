@@ -4,6 +4,7 @@ import { DOC_SLUGS, DOCS_UPDATED } from './docs/content'
 import { EFFECTIVE_DATE as PRIVACY_EFFECTIVE_DATE } from './privacy/data'
 import { absoluteUrl } from '@/lib/seo/metadata'
 import { FEATURE_SLUGS } from './features/data'
+import { GUIDE_PATH, GUIDE_UPDATED } from './guides/safe-ai-database-changes/content'
 
 /**
  * Every indexable page, and when its content last changed where that is known.
@@ -57,5 +58,8 @@ export default function sitemap(): MetadataRoute.Sitemap {
   // to the first section (next.config.js).
   const docs: MetadataRoute.Sitemap = DOC_SLUGS.map((slug) => page(`/docs/${slug}`, DOCS_UPDATED.iso))
 
-  return [...core, ...features, ...comparisons, ...docs]
+  // ── Guides ────────────────────────────────────────────────────────────────
+  const guides: MetadataRoute.Sitemap = [page(GUIDE_PATH, GUIDE_UPDATED)]
+
+  return [...core, ...features, ...comparisons, ...docs, ...guides]
 }

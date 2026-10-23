@@ -285,6 +285,12 @@ export default function McpPage() {
             className="mt-[28px]"
             items={[
               { href: '/docs/connect', meta: 'Docs', title: 'Connect', body: 'The setup for each client, step by step.' },
+              {
+                href: '/guides/safe-ai-database-changes',
+                meta: 'Guide',
+                title: 'Safe database changes with AI agents',
+                body: 'How a change is checked, verified and restored, with a production run.',
+              },
               { href: '/docs/database', meta: 'Docs', title: 'Database', body: 'Tables, the REST API and row-level security.' },
               {
                 href: '/docs/autonomy',

@@ -86,6 +86,7 @@ const publicPathPrefixes = [
   '/.well-known/',  // security.txt etc.
   '/startups',      // Backenly for Startups application (Cloud overlay). Anyone
                     // can apply; signing in is a step inside the page
+  '/guides',        // technical guides (app/guides)
 ]
 
 // ✅ MARKETING SURFACES — the hosted service's shop window.
@@ -118,6 +119,7 @@ const marketingPrefixes = [
   '/mcp',
   '/quickstart',
   '/startups',
+  '/guides',
 ]
 
 // Served under a marketing prefix but not marketing. The published CLI and
