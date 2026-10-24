@@ -11,6 +11,9 @@
  *   analysis, the plan, the rehearsal, every rung, the backfill, reconciliation
  *   and undo                 read and write the regional database; the home
  *                            database never holds the project's schema
+ *   the start of a change    a regional job the region's own worker runs once a
+ *   a person approved        person approves it at home: the approving request
+ *                            runs nothing (across regions its rungs outlast it)
  *   the backfill             regional jobs, run by the region's own worker
  *                            (processRegionalJobs), never by the home queue;
  *                            each batch's starting key is kept in the region,
@@ -47,7 +50,7 @@ import { rollbackExtraction } from '@/lib/structural-evolution/rollback'
 import { readTableFacts } from '@/lib/structural-evolution/facts'
 import { workspaceAt } from '@/lib/structural-evolution/workspace'
 import { ladderNames, type ExtractionSpec } from '@/lib/structural-evolution/sql'
-import { advance, approveRequest, isApprovalRefusal, liveStatements, observe, undo } from '@/lib/evolution-engine/engine'
+import { advance, approveRequest, isApprovalRefusal, liveStatements, observe, startWhereTheTablesAre, undo } from '@/lib/evolution-engine/engine'
 import { ordersSql, proposeWhereItRuns, recordHistory, requestsOf, stateOf } from '../helpers/evolution-engine-fixture'
 
 jest.setTimeout(300_000)
@@ -355,17 +358,36 @@ describe('the engine, for a project kept in us-east-1', () => {
     expect(sql).toContain(`"${p.schema}"`)
   })
 
-  it('is approved, expanded and backfilled in the region, and its step ledger at home keeps no statement', async () => {
+  it('is approved at home and started by the region, never from the request that approved it', async () => {
+    // Across regions every statement of a rung is a round trip, and the rungs
+    // outlast the request (on staging the person saw a timeout and the change
+    // stopped at its rehearsal): the region's own worker starts it.
     const r = await approveRequest({ projectId: p.projectId, findingId, planVersion, userId: p.ownerId })
     if (isApprovalRefusal(r)) throw new Error(r.error)
-    expect(r.state).toBe('backfilling')
+    expect(r.state).toBe('approved')
+    expect(r.message).toMatch(/^Approved\. It runs in .*us-east-1.*, where this project's tables are, starting within a minute\./)
+    expect(await inRegion(`SELECT to_regclass($1) AS r`, [`"${p.schema}"."order_refunds"`])).toEqual([{ r: null }])
+    const started = await prisma.backgroundJob.findMany({ where: { projectId: p.projectId, type: 'evolution_advance' } })
+    expect(started).toHaveLength(1)
+    expect(started[0].status).toBe('regional_pending')
+    expect(started[0].payload).toMatchObject({ region: 'us-east-1', projectId: p.projectId, decisionId })
+    // A second press finds it queued.
+    expect((await startWhereTheTablesAre({ projectId: p.projectId, decisionId, actor: p.ownerId })).state).toBe('approved')
+    expect(await prisma.backgroundJob.count({ where: { projectId: p.projectId, type: 'evolution_advance' } })).toBe(1)
+  })
+
+  it('is expanded and backfilled in the region, and its step ledger at home keeps no statement', async () => {
+    // The region's worker starts it, then copies the rows, as its scheduler runs it every minute.
+    expect(await drainInRegion()).toBeGreaterThan(1)
+    const [started] = await prisma.backgroundJob.findMany({ where: { projectId: p.projectId, type: 'evolution_advance' } })
+    expect(started.status).toBe('completed')
+    expect(started.result).toMatchObject({ state: 'backfilling' })
     const steps = await prisma.maintenanceStepExecution.findMany({ where: { execution: { projectId: p.projectId } } })
     expect(steps.length).toBeGreaterThan(0)
     for (const st of steps) {
       expect(st.preconditionEvidence).toMatchObject({ sql: [], sqlWithheld: true })
       if (st.rollback) expect(st.rollback).toMatchObject({ sql: [] })
     }
-    expect(await drainInRegion()).toBeGreaterThan(0)
     expect((await advance({ projectId: p.projectId, decisionId })).state).toBe('observing')
     const [{ n }] = await inRegion<{ n: string }>(`SELECT count(*)::text AS n FROM "${p.schema}"."order_refunds"`)
     expect(n).toBe('60')

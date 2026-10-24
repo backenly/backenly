@@ -99,6 +99,10 @@ import {
 import type { ArchitectureChangeView, ArchitectureSummary, Continuation, NoChangeView, RecommendationView } from './views'
 import { prisma } from '@/lib/db'
 import { quotedError, quotesKeptHere } from '@/lib/data-plane/residency'
+import { projectRegion } from '@/lib/data-plane/regional'
+import { servedHere } from '@/lib/data-plane/serving'
+import { enqueueRegionalJob, REGIONAL_STATUS } from '@/lib/queue'
+import { regionLabel } from '@/lib/regions'
 import { EVOLUTION_FINDING_TYPE } from '@/lib/core/types'
 import './installed'
 
@@ -757,7 +761,7 @@ export async function approveRequest(input: {
   // Consent is recorded whatever happens next; a failure to start is the
   // change's state to report, not the approval's.
   try {
-    const advanced = await advance({ projectId, decisionId: ev.decisionId, actor: userId })
+    const advanced = await startWhereTheTablesAre({ projectId, decisionId: ev.decisionId, actor: userId })
     const byHand = runs.unattended ? '' : ` ${runs.why} Resume carries it on.`
     return { ok: true, message: `Approved. ${advanced.message}${byHand}`, state: advanced.state }
   } catch (err) {
@@ -972,6 +976,40 @@ export async function advance(input: {
 }
 
 /**
+ * Run what was approved where the project's tables are: what a person's
+ * approve, resume or advance calls, rather than `advance` itself.
+ *
+ * A project of the region this process serves runs now, in this call. One kept
+ * in another region is started by that region's own worker, as an
+ * `evolution_advance` job it claims within a minute (lib/queue,
+ * processRegionalJobs). Its rungs read and write the region's database one
+ * statement at a time, and across regions each statement is a round trip: on
+ * staging the rehearsal took 1.3 s in its own region and over a minute from the
+ * home one, past the load balancer's 60 s, so the person approving saw a
+ * timeout and the change stopped at its first step. Should the job not run, the
+ * region's scheduler resumes the change on its next pass (sweepArchitecture).
+ *
+ * One start is queued per change at a time; a second press finds it queued.
+ */
+export async function startWhereTheTablesAre(input: { projectId: string; decisionId: string; actor?: string | null }): Promise<AdvanceResult> {
+  const { projectId, decisionId } = input
+  if (await servedHere(projectId)) return advance(input)
+  const region = await projectRegion(projectId)
+  const queued = await prisma.backgroundJob.findFirst({
+    where: {
+      type: 'evolution_advance',
+      projectId,
+      status: { in: [REGIONAL_STATUS.pending, REGIONAL_STATUS.running] },
+      payload: { path: ['decisionId'], equals: decisionId },
+    },
+    select: { id: true },
+  })
+  if (!queued) await enqueueRegionalJob('evolution_advance', projectId, region, { decisionId, actor: input.actor ?? null })
+  const state = (await decision(projectId, decisionId)).summary?.state ?? null
+  return { state, message: `It runs in ${regionLabel(region)}, where this project's tables are, starting within a minute.` }
+}
+
+/**
  * Why a run stopped, as a clause a person reads. A failed step is told by what
  * its stage was doing, in the primitive's words (`stages`), never by its
  * internal name, a job id or the database's message: those stay in the
@@ -1101,7 +1139,7 @@ export async function resume(input: { projectId: string; decisionId: string; use
     await enter(projectId, d, back, { sentence: `You resumed the change to ${summary.subject}.`, milestone: true, userId })
   }
   await clearQueue(projectId, decisionId)
-  const r = await advance({ projectId, decisionId, actor: userId })
+  const r = await startWhereTheTablesAre({ projectId, decisionId, actor: userId })
   return { ok: true, message: r.message, state: r.state }
 }
 

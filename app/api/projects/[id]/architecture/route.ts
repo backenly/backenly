@@ -36,7 +36,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { withProjectValidation } from '@/lib/middleware/projectValidation'
 import {
-  advance,
   approveRequest,
   architectureSummary,
   decisionDetail,
@@ -47,6 +46,7 @@ import {
   pause,
   proposeChanges,
   resume,
+  startWhereTheTablesAre,
   undo,
 } from '@/lib/evolution-engine/engine'
 import { allPrimitives } from '@/lib/evolution-engine/primitive'
@@ -114,7 +114,9 @@ export async function POST(request: NextRequest, _props: { params: Promise<{ id:
       const decisionId = str(body.decisionId)
       if (!decisionId) return NextResponse.json({ error: `${action} needs decisionId` }, { status: 400 })
       if (action === 'advance') {
-        const r = await advance({ projectId, decisionId, actor: userId })
+        // Where the project's tables are: a project of another region is
+        // started by that region's worker, not run from this request.
+        const r = await startWhereTheTablesAre({ projectId, decisionId, actor: userId })
         return NextResponse.json({ ok: true, message: r.message, state: r.state })
       }
       const r =

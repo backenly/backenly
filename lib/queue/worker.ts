@@ -304,6 +304,7 @@ class RegionalJobRefusal extends Error {}
 function failureSentence(type: string, region: CloudRegionId): string {
   if (type === 'maintenance_backfill') return `The backfill batch did not complete in ${region}. The reason is in that region's logs.`
   if (type === 'evolution_backfill') return `The architecture change's copy batch did not complete in ${region}. The reason is in that region's logs.`
+  if (type === 'evolution_advance') return `The architecture change did not start in ${region}. The reason is in that region's logs.`
   return type === 'workspace_restore'
     ? `The restore did not complete in ${region}. The reason is in that region's logs.`
     : `The snapshot was not taken in ${region}. The reason is in that region's logs.`
@@ -324,6 +325,17 @@ async function runRegionalJob(type: string, payload: unknown): Promise<Record<st
     // The same for an architecture change's copy (lib/structural-evolution/backfill-job.ts).
     const { handleEvolutionBackfillJob } = await import('@/lib/structural-evolution/backfill-job')
     return (await handleEvolutionBackfillJob(payload as any)) as unknown as Record<string, any>
+  }
+
+  if (type === 'evolution_advance') {
+    // An approved architecture change, run here where its tables are
+    // (lib/evolution-engine/engine.ts, startWhereTheTablesAre). Where it got is
+    // its decision's to record; the result is the engine's own sentence.
+    const { decisionId, actor } = (payload ?? {}) as { decisionId?: unknown; actor?: unknown }
+    if (typeof decisionId !== 'string' || decisionId.length === 0) throw new RegionalJobRefusal('The job names no architecture change.')
+    const { advance } = await import('@/lib/evolution-engine/engine')
+    const r = await advance({ projectId, decisionId, actor: typeof actor === 'string' ? actor : null })
+    return { state: r.state, message: r.message }
   }
 
   const backups = await import('@/lib/services/workspace-backup')

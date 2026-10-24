@@ -56,6 +56,12 @@ export type JobType =
    * as `maintenance_backfill`: one retry lifecycle, not two.
    */
   | 'evolution_backfill'
+  /**
+   * An approved architecture change started where its project's tables are
+   * (lib/evolution-engine/engine.ts, startWhereTheTablesAre). Only ever a
+   * regional job: a project of the region a request reaches runs in it.
+   */
+  | 'evolution_advance'
 
 export const PURGE_JOB_TYPE = 'purge_project' as const
 
@@ -471,17 +477,20 @@ export async function failPurgeJob(id: string, error: string) {
 // batches it dispatches belong there too, not to the home queue, where a
 // failed batch's database error, which can quote a row, would be recorded. So
 // is the copy an architecture change makes into its new table
-// (lib/structural-evolution/backfill-job.ts).
+// (lib/structural-evolution/backfill-job.ts), and so is the start of an
+// approved architecture change: its rungs read and write the region's database
+// statement by statement, which across regions outlasts the request that
+// approved it (lib/evolution-engine/engine.ts, startWhereTheTablesAre).
 
 /** Snapshots taken and restored for another region: what the console's snapshot panel lists. */
 export const SNAPSHOT_JOB_TYPES = ['workspace_backup', 'workspace_restore'] as const
 
 /** The work one region may ask another to do. */
-export const REGIONAL_JOB_TYPES = [...SNAPSHOT_JOB_TYPES, 'maintenance_backfill', 'evolution_backfill'] as const
+export const REGIONAL_JOB_TYPES = [...SNAPSHOT_JOB_TYPES, 'maintenance_backfill', 'evolution_backfill', 'evolution_advance'] as const
 export type RegionalJobType = (typeof REGIONAL_JOB_TYPES)[number]
 
 /** Work that writes the project's data, and so waits while the project is paused. */
-const REGIONAL_WRITES_HELD_WHILE_PAUSED: readonly RegionalJobType[] = ['maintenance_backfill', 'evolution_backfill']
+const REGIONAL_WRITES_HELD_WHILE_PAUSED: readonly RegionalJobType[] = ['maintenance_backfill', 'evolution_backfill', 'evolution_advance']
 
 export const REGIONAL_STATUS = {
   /** Waiting for its region's scheduler. Invisible to every generic query. */
