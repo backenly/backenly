@@ -708,6 +708,8 @@ export async function approveRequest(input: {
   if (remembered?.state !== 'awaiting_approval' || remembered.declined) {
     return { ok: false, status: 409, error: 'This request is out of date. Refresh to see the current state of this change.' }
   }
+  const [busy] = await decisionsInFlight(projectId, ev.decisionId)
+  if (busy) return { ok: false, status: 409, error: busy.words }
 
   if (!(await claimRequest(projectId, findingId))) {
     return { ok: false, status: 409, error: 'This request is already being approved.' }
@@ -721,12 +723,37 @@ export async function approveRequest(input: {
     primitive: ev.primitive,
     subject: ev.subject,
   }
-  let granted
-  try {
-    granted = await primitive.grant({ projectId, spec, planVersion, approvedBy: userId, decisionId: ev.decisionId })
-  } catch (err) {
+  // Consent and its record, under the build lock Backenly's own repairs take
+  // (lib/ai/build-runtime/build-lock.ts): a repair of this table either ended
+  // before consent read it, or finds the change approved and waits for it
+  // (lib/evolution-engine/holds.ts). The lock is only tried, so a repair
+  // running now is said, and the person approves again in a moment.
+  const { withBuildLock } = await import('@/lib/ai/build-runtime/build-lock')
+  const locked = await withBuildLock(
+    projectId,
+    'modify',
+    async () => {
+      const g = await primitive.grant({ projectId, spec, planVersion, approvedBy: userId, decisionId: ev.decisionId })
+      if (!isConsentRefusal(g)) {
+        await setRequestStatus(projectId, findingId, 'approved')
+        await enter(projectId, d, 'approved', {
+          sentence: `You approved: ${ev.summary.headline}.`,
+          milestone: true,
+          userId,
+          payload: { findingId, spec: ev.spec, summary: ev.summary, approvalId: g.approvalId },
+        })
+      }
+      return g
+    },
+    { skipCooldown: true },
+  ).catch(async err => {
     await setRequestStatus(projectId, findingId, 'pending_approval')
     throw err
+  })
+  const granted = locked.result
+  if (!granted) {
+    await setRequestStatus(projectId, findingId, 'pending_approval')
+    return { ok: false, status: 409, error: 'Backenly is repairing this project right now. Approve again in a few seconds.' }
   }
   if (isConsentRefusal(granted)) {
     await setRequestStatus(projectId, findingId, 'pending_approval')
@@ -734,7 +761,11 @@ export async function approveRequest(input: {
       // The table moved since this was rehearsed: rehearse the current version
       // and put that in front of the person instead, where the tables are.
       if (!(await servedHere(projectId))) {
-        const region = await queueInItsRegion('evolution_rerequest', projectId, { decisionId: ev.decisionId })
+        const region = await queueInItsRegion('evolution_rerequest', projectId, {
+          decisionId: ev.decisionId,
+          from: 'awaiting_approval',
+          planVersion: ev.planVersion,
+        })
         return {
           ok: false,
           status: 409,
@@ -752,14 +783,6 @@ export async function approveRequest(input: {
     }
     return { ok: false, status: 409, error: `Not approved: ${granted.refusal}` }
   }
-
-  await setRequestStatus(projectId, findingId, 'approved')
-  await enter(projectId, d, 'approved', {
-    sentence: `You approved: ${ev.summary.headline}.`,
-    milestone: true,
-    userId,
-    payload: { findingId, spec: ev.spec, summary: ev.summary, approvalId: granted.approvalId },
-  })
 
   const exec = executionEnabled(projectId)
   const runs = await continuation(projectId)
@@ -842,6 +865,9 @@ export async function dismissRequest(input: { projectId: string; findingId: stri
   const moved: ActionResult = { ok: false, status: 409, error: 'This change was already decided. Refresh to see where it is now.' }
   if (req.status !== 'pending_approval') return moved
   const ev = req.evolution
+  // A request being checked again is decided on once its updated version is in front of the person.
+  const checking = (await decisionsInFlight(projectId, ev.decisionId)).find(j => j.type === 'evolution_rerequest')
+  if (checking) return { ok: false, status: 409, error: checking.words }
   const { summary } = await decision(projectId, ev.decisionId)
   if (ev.ask === 'approve') {
     // Only a change still waiting for its approval can be declined: a stale
@@ -1013,6 +1039,10 @@ export async function startWhereTheTablesAre(input: { projectId: string; decisio
   if (!executionEnabled(projectId).enabled) {
     return { state: summary.state, message: "Backenly isn't running architecture changes in this deployment right now; nothing ran." }
   }
+  // A start still waiting carries whatever the change is when it runs, and is
+  // found by the queue below; anything else in flight is finished first.
+  const busy = (await decisionsInFlight(projectId, decisionId)).find(j => !(j.type === 'evolution_advance' && j.waiting))
+  if (busy) return { state: summary.state, message: busy.words }
   const region = await queueInItsRegion('evolution_advance', projectId, { decisionId, actor: input.actor ?? null }, { maxAttempts: 5 })
   return { state: summary.state, message: `It runs in ${regionLabel(region)}, where this project's tables are, starting within a minute.` }
 }
@@ -1026,13 +1056,27 @@ export async function startWhereTheTablesAre(input: { projectId: string; decisio
  * change that no longer fits its table is said where the person reads it, as
  * `resume` says it when it runs here.
  */
-export async function reRequestDecision(projectId: string, decisionId: string): Promise<{ state: LifecycleState | null; outcome: RequestOutcome }> {
+export async function reRequestDecision(
+  projectId: string,
+  decisionId: string,
+  queuedAgainst: { from?: string; planVersion?: string } = {},
+): Promise<{ state: LifecycleState | null; outcome: RequestOutcome }> {
   const { summary } = await decision(projectId, decisionId)
   const primitive = summary ? primitiveById(summary.primitive) : null
   if (!summary || !primitive) return { state: summary?.state ?? null, outcome: 'no such change' }
+  // Only the change as it was when the person was told it is checked again;
+  // one that moved on since (declined, approved, undone) is left as it is.
+  const moved =
+    summary.declined ||
+    (queuedAgainst.from !== undefined && summary.state !== queuedAgainst.from) ||
+    (queuedAgainst.planVersion !== undefined && summary.planVersion !== queuedAgainst.planVersion)
+  if (moved) return { state: summary.state, outcome: 'moved on' }
   const d = refOf(summary)
   const outcome = await reRequest(projectId, primitive, d, summary, new Date())
-  if (outcome !== 'requested' && (summary.state === 'blocked' || summary.state === 'failed')) {
+  if (outcome === 'no longer proposed' && summary.state === 'awaiting_approval') {
+    // Left waiting, its version could never be approved again.
+    await withdrawRequest(projectId, d, 'it is no longer proposed: the latest analysis of this table no longer supports it')
+  } else if (outcome !== 'requested' && (summary.state === 'blocked' || summary.state === 'failed')) {
     await remember({ projectId, record: { ...base(d), event: 'noted', payload: { note: NO_LONGER_FITS } }, milestone: true, sentence: NO_LONGER_FITS })
   }
   return { state: (await decision(projectId, decisionId)).summary?.state ?? null, outcome }
@@ -1079,8 +1123,43 @@ export async function undoWhereTheTablesAre(input: { projectId: string; decision
   const { summary } = await decision(projectId, decisionId)
   if (!summary?.state) return { ok: false, status: 404, error: 'No such change.' }
   if (!canUndoFrom(summary.state)) return { ok: false, status: 409, error: 'There is nothing to undo for this change.' }
+  // A start in flight runs first and the undo after it; a check again, or an
+  // undo already asked for, is finished first.
+  const busy = (await decisionsInFlight(projectId, decisionId)).find(j => j.type !== 'evolution_advance')
+  if (busy) return { ok: false, status: 409, error: busy.words }
   const region = await queueInItsRegion('evolution_undo', projectId, { decisionId, userId }, { maxAttempts: 5 })
   return { ok: true, state: summary.state, message: `Undo runs in ${regionLabel(region)}, where this project's tables are, starting within a minute.` }
+}
+
+/**
+ * A person's decisions about this change still waiting for, or running in, the
+ * region its project is kept in (queueInItsRegion), newest first, each with
+ * the words that refuse the next decision while it is in flight: one is
+ * carried out before another is taken, as when they run here, so a later
+ * choice is never overtaken by an earlier one still queued. Pause, a stop, is
+ * never refused; a queued start or undo finds the change paused.
+ */
+async function decisionsInFlight(projectId: string, decisionId: string): Promise<Array<{ type: string; waiting: boolean; words: string }>> {
+  const jobs = await prisma.backgroundJob.findMany({
+    where: {
+      projectId,
+      type: { in: ['evolution_advance', 'evolution_undo', 'evolution_rerequest'] },
+      status: { in: [REGIONAL_STATUS.pending, REGIONAL_STATUS.running] },
+      payload: { path: ['decisionId'], equals: decisionId },
+    },
+    orderBy: { createdAt: 'desc' },
+    select: { type: true, status: true, payload: true },
+  })
+  return jobs.map(j => {
+    const where = `${regionLabel((j.payload as { region: CloudRegionId }).region)}, where this project's tables are`
+    const words =
+      j.type === 'evolution_rerequest'
+        ? `Backenly is checking this change again in ${where}; the updated version will be in your queue within a minute or two.`
+        : j.type === 'evolution_undo'
+          ? `Backenly is undoing this change in ${where}. Decide again once it is done, within a minute or two.`
+          : `Backenly is starting this change in ${where}. Decide again once it has started, within a minute or two.`
+    return { type: j.type, waiting: j.status === REGIONAL_STATUS.pending, words }
+  })
 }
 
 /**
@@ -1188,6 +1267,9 @@ export async function resume(input: { projectId: string; decisionId: string; use
   if (summary.undoIncomplete) {
     return { ok: false, status: 409, error: 'Part of this change was already undone, so it cannot carry on as approved. Undo it to finish.' }
   }
+  // A start still waiting carries the resumed change; anything else in flight is finished first.
+  const busy = (await decisionsInFlight(projectId, decisionId)).find(j => !(j.type === 'evolution_advance' && j.waiting))
+  if (busy) return { ok: false, status: 409, error: busy.words }
   const d = refOf(summary)
 
   // A change regressed in observation, kept on purpose: watching resumes.
@@ -1227,7 +1309,7 @@ export async function resume(input: { projectId: string; decisionId: string; use
       // exists. Rehearse the change for the table as it is now and ask again,
       // on the same decision; the approval queue shows the new version.
       if (!(await servedHere(projectId))) {
-        const region = await queueInItsRegion('evolution_rerequest', projectId, { decisionId })
+        const region = await queueInItsRegion('evolution_rerequest', projectId, { decisionId, from: summary.state, planVersion: summary.planVersion })
         return {
           ok: true,
           message:

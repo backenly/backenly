@@ -54,16 +54,19 @@ import { ladderNames, type ExtractionSpec } from '@/lib/structural-evolution/sql
 import {
   advance,
   approveRequest,
+  dismissRequest,
   isActionRefusal,
   isApprovalRefusal,
   liveStatements,
   observe,
   pause,
   proposeWhereTheTablesAre,
+  reRequestDecision,
   resume,
   startWhereTheTablesAre,
   undoWhereTheTablesAre,
 } from '@/lib/evolution-engine/engine'
+import { withBuildLock } from '@/lib/ai/build-runtime/build-lock'
 import { ordersSql, proposeWhereItRuns, recordHistory, requestsOf, stateOf } from '../helpers/evolution-engine-fixture'
 
 jest.setTimeout(300_000)
@@ -385,11 +388,14 @@ describe('the engine, for a project kept in us-east-1', () => {
     const r = await press()
     expect(isApprovalRefusal(r) && r.status).toBe(409)
     expect(isApprovalRefusal(r) && r.error).toMatch(/^The table changed since this was prepared\. Backenly is checking it again in .*us-east-1.*, where this project's tables are/)
-    // A second press finds it queued.
-    await press()
+    // While it is checked again, a second press and a decline are answered, and nothing more is queued.
+    const checking = /^Backenly is checking this change again in .*us-east-1.*, where this project's tables are; the updated version will be in your queue/
+    const again = await press()
+    expect(isApprovalRefusal(again) && again.error).toMatch(checking)
+    expect(await dismissRequest({ projectId: p.projectId, findingId, userId: p.ownerId })).toMatchObject({ ok: false, status: 409, error: expect.stringMatching(checking) })
     const queued = await prisma.backgroundJob.findMany({ where: { projectId: p.projectId, type: 'evolution_rerequest' } })
     expect(queued).toHaveLength(1)
-    expect(queued[0].payload).toMatchObject({ region: 'us-east-1', projectId: p.projectId, decisionId })
+    expect(queued[0].payload).toMatchObject({ region: 'us-east-1', projectId: p.projectId, decisionId, from: 'awaiting_approval', planVersion })
 
     expect(await drainInRegion()).toBe(1)
     const [done] = await prisma.backgroundJob.findMany({ where: { projectId: p.projectId, type: 'evolution_rerequest' } })
@@ -399,7 +405,25 @@ describe('the engine, for a project kept in us-east-1', () => {
     expect(req.id).toBe(findingId)
     expect(req.ev.planVersion).not.toBe(planVersion)
     expect(req.ev.rehearsal).toMatchObject({ passed: true, planVersion: req.ev.planVersion })
+    // A check queued against the version the person was shown leaves a change that moved on since as it is.
+    expect(await reRequestDecision(p.projectId, decisionId, { from: 'awaiting_approval', planVersion })).toEqual({ state: 'awaiting_approval', outcome: 'moved on' })
+    expect((await requestsOf(p.projectId))[0].ev.planVersion).toBe(req.ev.planVersion)
     planVersion = req.ev.planVersion
+  })
+
+  it('is not approved while a repair holds the build lock, and approves once it is done', async () => {
+    const gate: { release?: () => void } = {}
+    const repair = withBuildLock(p.projectId, 'modify', () => new Promise<void>(resolve => { gate.release = resolve }), { skipCooldown: true })
+    for (let i = 0; i < 100 && !gate.release; i++) await new Promise(resolve => setTimeout(resolve, 20))
+    try {
+      const r = await approveRequest({ projectId: p.projectId, findingId, planVersion, userId: p.ownerId })
+      expect(isApprovalRefusal(r) && r.error).toBe('Backenly is repairing this project right now. Approve again in a few seconds.')
+    } finally {
+      gate.release!()
+      await repair
+    }
+    expect((await requestsOf(p.projectId))[0].status).toBe('pending_approval')
+    expect((await stateOf(p.projectId, decisionId)).state).toBe('awaiting_approval')
   })
 
   it('is approved at home and started by the region, never from the request that approved it', async () => {
@@ -486,9 +510,11 @@ describe('the engine, for a project kept in us-east-1', () => {
     expect(queued).toHaveLength(1)
     expect(queued[0].status).toBe('regional_pending')
     expect(queued[0].payload).toMatchObject({ region: 'us-east-1', projectId: p.projectId, decisionId, userId: p.ownerId })
-    // A second press finds it queued.
-    expect((await undoWhereTheTablesAre({ projectId: p.projectId, decisionId, userId: p.ownerId })).ok).toBe(true)
-    expect(await prisma.backgroundJob.count({ where: { projectId: p.projectId, type: 'evolution_undo' } })).toBe(1)
+    // While it is undone, a second press and a resume are answered, and nothing more is queued.
+    const undoing = /^Backenly is undoing this change in .*us-east-1.*, where this project's tables are\./
+    expect(await undoWhereTheTablesAre({ projectId: p.projectId, decisionId, userId: p.ownerId })).toMatchObject({ ok: false, status: 409, error: expect.stringMatching(undoing) })
+    expect(await resume({ projectId: p.projectId, decisionId, userId: p.ownerId })).toMatchObject({ ok: false, status: 409, error: expect.stringMatching(undoing) })
+    expect(await prisma.backgroundJob.count({ where: { projectId: p.projectId, type: { startsWith: 'evolution_' }, status: 'regional_pending' } })).toBe(1)
 
     expect(await drainInRegion()).toBeGreaterThan(0)
     const [done] = await prisma.backgroundJob.findMany({ where: { projectId: p.projectId, type: 'evolution_undo' } })

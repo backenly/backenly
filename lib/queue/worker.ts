@@ -347,10 +347,14 @@ async function runRegionalJob(type: string, payload: unknown): Promise<Record<st
   if (type === 'evolution_rerequest') {
     // The table moved since the person was asked: rehearsed again here
     // (reRequestDecision), and the queue shows the version for it as it is now.
-    const { decisionId } = (payload ?? {}) as { decisionId?: unknown }
+    // Only the change as it was when the person was told: one that moved on since is left as it is.
+    const { decisionId, from, planVersion } = (payload ?? {}) as { decisionId?: unknown; from?: unknown; planVersion?: unknown }
     if (typeof decisionId !== 'string' || decisionId.length === 0) throw new RegionalJobRefusal('The job names no architecture change.')
     const { reRequestDecision } = await import('@/lib/evolution-engine/engine')
-    return await reRequestDecision(projectId, decisionId)
+    return await reRequestDecision(projectId, decisionId, {
+      from: typeof from === 'string' ? from : undefined,
+      planVersion: typeof planVersion === 'string' ? planVersion : undefined,
+    })
   }
 
   if (type === 'evolution_assess') {
