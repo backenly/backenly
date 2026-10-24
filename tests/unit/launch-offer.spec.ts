@@ -5,7 +5,8 @@
  *     day, with the offer, ends at midnight Pacific. The labels the page prints
  *     are those same moments, so a typo in a UTC constant cannot pass.
  *   - The countdown rounds up, so it reads 00m only once the moment has come.
- *   - The prices the page shows are the offer's: half of $25, of $20, of $240.
+ *   - The offer is half of monthly Pro, $12.50 for three months. Yearly billing
+ *     has no offer.
  *   - The code is one Stripe accepts as a promotion code.
  */
 import {
@@ -37,7 +38,11 @@ describe('the launch runs on Product Hunt time', () => {
   it('goes live at 12:01 AM Pacific on October 31', () => {
     expect(new Date(PRODUCT_HUNT_LAUNCH.startsAt).toISOString()).toBe('2026-10-31T07:01:00.000Z')
     expect(pacific(PRODUCT_HUNT_LAUNCH.startsAt)).toBe('Oct 31, 12:01 AM')
-    expect(pacific(PRODUCT_HUNT_LAUNCH.startsAt)).toContain(PRODUCT_HUNT_LAUNCH.dateLabel)
+    expect(
+      new Intl.DateTimeFormat('en-US', { timeZone: 'America/Los_Angeles', month: 'long', day: 'numeric' }).format(
+        PRODUCT_HUNT_LAUNCH.startsAt,
+      ),
+    ).toBe(PRODUCT_HUNT_LAUNCH.dateLabel)
   })
 
   it('ends with launch day, at midnight Pacific, and the offer with it', () => {
@@ -94,11 +99,9 @@ describe('the countdown', () => {
 })
 
 describe('the offer', () => {
-  it('halves each Pro price the page shows', () => {
+  it('halves monthly Pro, $25 to $12.50', () => {
     expect(LAUNCH_OFFER.percentOff).toBe(50)
     expect(usd(launchPrice(2500))).toBe('$12.50')
-    expect(usd(launchPrice(2000))).toBe('$10')
-    expect(usd(launchPrice(24000))).toBe('$120')
   })
 
   it('prints whole dollars bare and anything else to the cent', () => {

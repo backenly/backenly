@@ -389,7 +389,7 @@ export default function PricingPage() {
               <div className="grid lg:grid-cols-3">
                 {plans.map((plan, index) => (
                   <Fragment key={plan.name}>
-                    {offer && plan.name === 'Pro' && <LaunchOfferPanel now={now} />}
+                    {offer && plan.name === 'Pro' && <LaunchOfferPanel now={now} yearly={cadence === 'yearly'} />}
                     <PlanColumn
                       plan={plan}
                       cadence={cadence}
@@ -524,14 +524,15 @@ function PlanColumn({
   launchOffer: boolean
 }) {
   const yearly = cadence === 'yearly'
-  // Under the offer panel, Pro shows what the code makes it, with the price it
-  // replaces struck through, and says how long that lasts. The amounts are
-  // Stripe's: 50% off the first three monthly invoices, or off the first
-  // yearly one (lib/pricing/launch-offer.ts).
-  const offered = launchOffer && plan.name === 'Pro'
-  const listMonthly = yearly ? PRO_YEARLY_CENTS / 12 : PRO_MONTHLY_CENTS
+  // The offer panel heads Pro on both billing periods, so switching them never
+  // moves the plans. Only monthly Pro is offered: it shows what the code makes
+  // it, the price it replaces struck through, and how long that lasts, which
+  // is Stripe's 50% off the first three monthly invoices
+  // (lib/pricing/launch-offer.ts). Yearly keeps its own price.
+  const joined = launchOffer && plan.name === 'Pro'
+  const offered = joined && !yearly
   const price = offered
-    ? usd(launchPrice(listMonthly))
+    ? usd(launchPrice(PRO_MONTHLY_CENTS))
     : plan.name === 'Free'
       ? '$0'
       : plan.name === 'Pro'
@@ -539,12 +540,10 @@ function PlanColumn({
           ? PRO_YEARLY_MONTHLY
           : PRO_MONTHLY
         : 'Custom'
-  const struck = offered ? usd(listMonthly) : plan.name === 'Pro' && yearly ? PRO_MONTHLY : null
+  const struck = offered ? PRO_MONTHLY : plan.name === 'Pro' && yearly ? PRO_MONTHLY : null
   const unit = plan.name === 'Enterprise' ? null : '/month'
   const priceNote = offered
-    ? yearly
-      ? `${usd(launchPrice(PRO_YEARLY_CENTS))} your first year, then ${PRO_YEARLY_TOTAL} a year`
-      : `Your first ${LAUNCH_OFFER.months} months, then ${PRO_MONTHLY} a month`
+    ? `Your first ${LAUNCH_OFFER.months} months, then ${PRO_MONTHLY} a month`
     : plan.name === 'Free'
       ? 'Free forever. No credit card.'
       : plan.name === 'Pro'
@@ -557,13 +556,13 @@ function PlanColumn({
 
   // With the offer panel above it, Pro continues the panel: no rule and no lit
   // top edge between them, which the panel carries instead.
-  const edge = offered
+  const edge = joined
     ? 'lg:border-l'
     : divided
       ? 'border-t border-white/[0.07] lg:border-l lg:border-t-0'
       : ''
   const ground = plan.highlighted
-    ? offered
+    ? joined
       ? 'bg-white/[0.035]'
       : 'bg-white/[0.035] shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]'
     : ''
@@ -645,34 +644,28 @@ function PlanColumn({
  * Its job is to hand over the code. Stripe Checkout takes it and enforces the
  * deadline, so a page left open past launch day cannot stretch the offer.
  */
-function LaunchOfferPanel({ now }: { now: number | null }) {
+function LaunchOfferPanel({ now, yearly }: { now: number | null; yearly: boolean }) {
   const left = now !== null && launchPhase(now) === 'live' ? timeLeft(LAUNCH_OFFER.endsAt, now) : null
 
   return (
     // From lg up the panel's right edge is drawn one pixel into the next
     // column, onto the line Enterprise's own left border draws below it, so
     // the rule between Pro and Enterprise runs straight through both rows.
+    // It carries the lit top edge the Pro column has without it.
     <section
       id="launch-offer"
       aria-labelledby="launch-offer-title"
-      className="relative isolate scroll-mt-[88px] overflow-hidden border-t border-white/[0.07] bg-white/[0.035] px-[24px] pb-[20px] pt-[20px] sm:px-[28px] md:px-[32px] lg:col-start-2 lg:row-start-1 lg:-mr-px lg:border-x lg:border-t-0"
+      className="scroll-mt-[88px] border-t border-white/[0.07] bg-white/[0.035] px-[24px] pb-[20px] pt-[20px] shadow-[inset_0_1px_0_rgba(255,255,255,0.08)] sm:px-[28px] md:px-[32px] lg:col-start-2 lg:row-start-1 lg:-mr-px lg:border-x lg:border-t-0"
     >
-      {/* The launch bar's lit hairline, and the recommended plan's violet as
-          light falling on the code. */}
-      <div
-        aria-hidden
-        className="pointer-events-none absolute inset-x-0 top-0 h-px bg-[linear-gradient(to_right,transparent,rgba(196,181,253,0.55)_30%,rgba(221,214,254,0.7)_50%,rgba(196,181,253,0.55)_70%,transparent)]"
-      />
-      <div
-        aria-hidden
-        className="pointer-events-none absolute inset-0 -z-10 bg-[radial-gradient(90%_120%_at_50%_0%,rgba(139,92,246,0.16),transparent_70%)]"
-      />
       <div className="flex flex-wrap items-baseline justify-between gap-x-[12px] gap-y-[2px]">
         <h3 id="launch-offer-title" className="text-[13px] font-medium tracking-[-0.004em] text-violet-200">
           Product Hunt launch offer
         </h3>
-        <p className="text-[12px] text-zinc-500 tabular-nums">
-          {left ? (
+        {/* One line on both billing periods, so switching never moves the plans. */}
+        <p className="text-[12px] text-zinc-400 tabular-nums">
+          {yearly ? (
+            'Monthly billing only'
+          ) : left ? (
             <>
               Ends in{' '}
               <span aria-hidden>

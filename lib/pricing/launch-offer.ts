@@ -18,23 +18,20 @@ export const PRODUCT_HUNT_LAUNCH = {
   startsAt: Date.UTC(2026, 9, 31, 7, 1),
   /** Midnight PDT, when launch day is over. */
   endsAt: Date.UTC(2026, 10, 1, 7, 0),
-  /** The date as the bar prints it. */
-  dateLabel: 'Oct 31',
+  /** The date as the bar writes it, in Product Hunt's time. */
+  dateLabel: 'October 31',
 } as const
 
 /**
- * The launch offer: 50% off Pro for the first three months, with a code, until
- * launch day ends.
+ * The launch offer: 50% off monthly Pro for the first three months, with a
+ * code, until launch day ends. $12.50 a month, then $25. Yearly billing gets
+ * no offer (founder, 2026-10-24).
  *
  * The code only works because Stripe knows it. The Cloud overlay's
  * scripts/create-launch-promo-code.ts creates the coupon and the promotion code
  * with this same code, percentage, duration and expiry, and Checkout takes
- * promotion codes. Change one side and you must change the other.
- *
- * Three months on a monthly plan; on a yearly plan Stripe takes 50% off the
- * whole first year, because that year's one invoice falls inside the three
- * months (docs.stripe.com/billing/subscriptions/coupons, "Coupon duration").
- * The page says both, each on its own billing period.
+ * promotion codes on the monthly price only, which is what keeps yearly out.
+ * Change one side and you must change the other.
  */
 export const LAUNCH_OFFER = {
   code: 'PRODUCTHUNT50',
