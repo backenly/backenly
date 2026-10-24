@@ -343,9 +343,9 @@ export async function runAutoFix(
     // them, and again inside the build lock (_executeAutoFix). Unknown is not
     // held: a failed read costs the change a stop, never a repair its delay.
     const holds = await import('@/lib/evolution-engine/holds')
-    const holdTable = holds.repairedTable(finding.type, details)
+    const hold = { table: holds.repairedTable(finding.type, details), action: buildFixAction(finding.type, details)?.action ?? null }
     const held = async (): Promise<AutoFixResult | null> => {
-      const why = await holds.architectureHold(projectId, holdTable).catch(() => null)
+      const why = await holds.repairHold(projectId, hold).catch(() => null)
       return why ? { findingId, outcome: 'held', message: `Held: ${why}.` } : null
     }
 
@@ -379,7 +379,7 @@ export async function runAutoFix(
       }
       const waiting = await held()
       if (waiting) return waiting
-      return _executeAutoFix(finding.id, projectId, type, details, { ...opts, holdTable })
+      return _executeAutoFix(finding.id, projectId, type, details, { ...opts, hold })
     }
 
     const gate = await authorizeAutonomousFix({
@@ -444,7 +444,7 @@ export async function runAutoFix(
       projectId,
       type,
       applyIntentToFixDetails(gate.decision, details),
-      { ...opts, recovery: gate.decision.capability.recovery, holdTable },
+      { ...opts, recovery: gate.decision.capability.recovery, hold },
     )
   }
 
@@ -1551,11 +1551,11 @@ async function _executeAutoFix(
    * `recovery` is the declared recovery of the action class that authorized
    * this repair. Set only on the authority path; the legacy path has none.
    *
-   * `holdTable` is set only for an autonomous repair: the table whose
+   * `hold` is set only for an autonomous repair: the table and action whose
    * architecture hold (lib/evolution-engine/holds.ts) is asked again inside
    * the build lock, so an approval that landed since the first ask holds it.
    */
-  opts: { skipCooldown?: boolean; recovery?: string; holdTable?: string | null } = {},
+  opts: { skipCooldown?: boolean; recovery?: string; hold?: { table: string | null; action: string | null } } = {},
 ): Promise<AutoFixResult> {
   const baseType = (normalizeFindingType(type, details)?.base ?? type) as FindingType
   const fixAction = buildFixAction(type, details)
@@ -1624,9 +1624,9 @@ async function _executeAutoFix(
       projectId,
       'modify',
       async () => {
-        if (opts.holdTable !== undefined) {
-          const { architectureHold } = await import('@/lib/evolution-engine/holds')
-          const why = await architectureHold(projectId, opts.holdTable).catch(() => null)
+        if (opts.hold) {
+          const { repairHold } = await import('@/lib/evolution-engine/holds')
+          const why = await repairHold(projectId, opts.hold).catch(() => null)
           if (why) throw new ArchitectureHold(why)
         }
         const r = await executeAction(

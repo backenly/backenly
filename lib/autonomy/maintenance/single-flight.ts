@@ -198,3 +198,26 @@ export async function withMaintenanceSingleFlight<T>(
     await unlock(key)
   }
 }
+
+/**
+ * Whether a ladder holds this project's lock right now, in this process or
+ * any other (`pg_locks`). The lock ends with the session that took it, so a
+ * crashed ladder reads as not held. Unknown reads as not held.
+ */
+export async function maintenanceLockHeld(projectId: string): Promise<boolean> {
+  const key = projectToLockKey(projectId)
+  if (held.has(key)) return true
+  try {
+    const res = await lockPool.query<{ held: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1 FROM pg_locks
+          WHERE locktype = 'advisory' AND granted AND objsubid = 2
+            AND classid::int8 = ($1::int4::int8 & 4294967295) AND objid::int8 = ($2::int4::int8 & 4294967295)
+       ) AS held`,
+      [MAINTENANCE_LOCK_NAMESPACE, key],
+    )
+    return res.rows[0]?.held === true
+  } catch {
+    return false
+  }
+}

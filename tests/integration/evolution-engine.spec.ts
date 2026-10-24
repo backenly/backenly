@@ -36,7 +36,7 @@
  */
 
 import { prisma } from '@/lib/db'
-import { closeMaintenanceLockPool } from '@/lib/autonomy/maintenance/single-flight'
+import { closeMaintenanceLockPool, projectToLockKey, withMaintenanceSingleFlight } from '@/lib/autonomy/maintenance/single-flight'
 import { applyApproval } from '@/lib/ai/approval-manager'
 import { buildTrustReport } from '@/lib/autonomy/trust-report'
 import { REPAIR_HELD } from '@/lib/autonomy/change-freeze'
@@ -63,7 +63,8 @@ import { basisFingerprint, readTableFacts } from '@/lib/structural-evolution/fac
 import { structuralExtraction } from '@/lib/structural-evolution/primitive'
 import type { Measurement } from '@/lib/evolution-engine/primitive'
 import { workspaceOn } from '@/lib/structural-evolution/workspace'
-import { architectureHold, HOLD_LAPSES_AFTER_MS, repairedTable } from '@/lib/evolution-engine/holds'
+import { architectureHold, HOLD_LAPSES_AFTER_MS, repairedTable, repairHold } from '@/lib/evolution-engine/holds'
+import { Client } from 'pg'
 import { runAutoFix } from '@/lib/core/auto-fix-engine'
 import { runReconcilerLive } from '@/lib/autonomy/reconciler'
 import { asService, buildProject, drain, dropProject, proposeWhereItRuns, q, requestsOf, stateOf, type Fixture } from '../helpers/evolution-engine-fixture'
@@ -792,13 +793,51 @@ describe("Backenly's own repairs wait while an architecture change carries itsel
     expect((await prisma.table.findMany({ where: { projectId: f.projectId, name: 'order_refunds' } })).length).toBe(0)
   })
 
-  it('finds the table the way the repair does', () => {
+  it('finds the table the way the repair does, and holds a repair naming none that may act on every table', async () => {
     expect(repairedTable('unprotected_user_data', { tableName: 'orders' })).toBe('orders')
     expect(repairedTable('unprotected_user_data', { location: 'orders' })).toBe('orders')
     expect(repairedTable('missing_fk_index', { table: 'orders', column: 'user_id' })).toBe('orders')
     expect(repairedTable('missing_rls_orders', {})).toBe('orders')
     expect(repairedTable('infra_hot_table_order_refunds', {})).toBe('order_refunds')
     expect(repairedTable('unprotected_user_data', {})).toBeNull()
+    // FIX_REALTIME with no table installs its trigger on every table, orders included.
+    expect(await repairHold(f.projectId, { table: null, action: 'FIX_REALTIME' })).toMatch(/working on this project's tables, and this repair names none/)
+    expect(await repairHold(f.projectId, { table: null, action: 'CREATE_INDEX' })).toBeNull()
+    expect(await repairHold(f.projectId, { table: null, action: null, tablelessWaits: true })).toMatch(/names none/)
+    expect(await repairHold(f.projectId, { table: 'customers', action: 'FIX_REALTIME' })).toBeNull()
+  })
+
+  it("keeps holding while the project's changes move: a ladder holding its lock, here or elsewhere, or another of their jobs", async () => {
+    const later = new Date(Date.now() + HOLD_LAPSES_AFTER_MS + 60_000)
+    expect(await architectureHold(f.projectId, 'orders', later)).toBeNull()
+    // A ladder running in this process...
+    const gate: { release?: () => void } = {}
+    const ladder = withMaintenanceSingleFlight(f.projectId, () => new Promise<void>(resolve => { gate.release = resolve }))
+    for (let i = 0; i < 100 && !gate.release; i++) await new Promise(resolve => setTimeout(resolve, 20))
+    try {
+      expect(await architectureHold(f.projectId, 'orders', later)).toMatch(/working on orders/)
+    } finally {
+      gate.release!()
+      await ladder
+    }
+    // ...or in another, seen in pg_locks: the lock is its session's ('main', lib/autonomy/maintenance/single-flight.ts).
+    const elsewhere = new Client({ connectionString: process.env.DATABASE_URL })
+    await elsewhere.connect()
+    try {
+      await elsewhere.query('SELECT pg_advisory_lock($1::int4, $2::int4)', [0x6d61696e, projectToLockKey(f.projectId)])
+      expect(await architectureHold(f.projectId, 'orders', later)).toMatch(/working on orders/)
+    } finally {
+      await elsewhere.end()
+    }
+    expect(await architectureHold(f.projectId, 'orders', later)).toBeNull()
+    // Another of the project's jobs moved since.
+    const job = await prisma.backgroundJob.create({ data: { projectId: f.projectId, type: 'evolution_backfill', status: 'completed', payload: {} } })
+    try {
+      await prisma.$executeRawUnsafe(`UPDATE background_jobs SET "updatedAt" = $1 WHERE id = $2`, new Date(later.getTime() - 60_000), job.id)
+      expect(await architectureHold(f.projectId, 'orders', later)).toMatch(/working on orders/)
+    } finally {
+      await prisma.backgroundJob.delete({ where: { id: job.id } })
+    }
   })
 
   it('holds nothing for a change that waits on a person or stopped moving, and nothing else', async () => {
