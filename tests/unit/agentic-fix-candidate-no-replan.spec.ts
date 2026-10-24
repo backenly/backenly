@@ -21,6 +21,8 @@ jest.mock('@/lib/core/auto-fix-engine', () => ({ processOpenFindings: jest.fn() 
 jest.mock('@/lib/ai/behavioral-verifier', () => ({ runBehavioralVerification: jest.fn() }))
 jest.mock('@/lib/ai/agentic-fix-author', () => ({ authorFixForCheck: jest.fn(), MAX_AUTHORED_FIXES_PER_BUILD: 0 }))
 jest.mock('@/lib/ai/scan/scan-to-fixes', () => ({ harvestScanFixes: jest.fn() }))
+const mockHold = jest.fn(async (_projectId: string, _table: string | null): Promise<string | null> => null)
+jest.mock('@/lib/evolution-engine/holds', () => ({ architectureHold: (projectId: string, table: string | null) => mockHold(projectId, table) }))
 
 import { applyCandidate } from '@/lib/ai/agentic-fix-loop'
 
@@ -35,4 +37,13 @@ it('asks the executor for the planned action only, with replanning off', async (
   expect(projectId).toBe(PROJECT)
   expect(retryCount).toBe(0)
   expect(allowReplan).toBe(false)
+})
+
+it('leaves a table alone while an architecture change works on it, asking about the table the action changes', async () => {
+  mockCalls.length = 0
+  mockHold.mockResolvedValueOnce('an architecture change to orders is working on orders; Backenly repairs it once the change is in place')
+  const out = await applyCandidate({ action: 'SET_PERMISSION', params: { table: 'orders', policy: 'own_rows' } } as any, PROJECT)
+  expect(out).toEqual({ success: false, message: expect.stringMatching(/^Held: an architecture change to orders is working on orders/) })
+  expect(mockHold).toHaveBeenLastCalledWith(PROJECT, 'orders')
+  expect(mockCalls).toHaveLength(0)
 })

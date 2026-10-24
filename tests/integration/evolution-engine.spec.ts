@@ -63,8 +63,9 @@ import { basisFingerprint, readTableFacts } from '@/lib/structural-evolution/fac
 import { structuralExtraction } from '@/lib/structural-evolution/primitive'
 import type { Measurement } from '@/lib/evolution-engine/primitive'
 import { workspaceOn } from '@/lib/structural-evolution/workspace'
-import { architectureHold } from '@/lib/evolution-engine/holds'
+import { architectureHold, HOLD_LAPSES_AFTER_MS, repairedTable } from '@/lib/evolution-engine/holds'
 import { runAutoFix } from '@/lib/core/auto-fix-engine'
+import { runReconcilerLive } from '@/lib/autonomy/reconciler'
 import { asService, buildProject, drain, dropProject, proposeWhereItRuns, q, requestsOf, stateOf, type Fixture } from '../helpers/evolution-engine-fixture'
 
 jest.setTimeout(300_000)
@@ -739,19 +740,23 @@ describe('a step that does not finish', () => {
 
 // ── Self-healing while a change works on its table ───────────────────────────
 
-describe("Backenly's own repairs wait while an architecture change works on its tables", () => {
+describe("Backenly's own repairs wait while an architecture change carries itself out", () => {
   let f: Fixture
   let decisionId = ''
-  /** A finding the self-healing loop would repair on its own (lib/core/fix-classifier.ts AUTO_SAFE). */
-  const planted = (type: string, table: string) =>
-    prisma.healthFinding.create({
-      data: { projectId: f.projectId, type, severity: 'warning', category: 'performance', source: 'test', details: { table, column: 'user_id' } },
-    })
+  let approved = ''
+  const saved = { reconciler: process.env.ENABLE_AUTONOMY_RECONCILER, live: process.env.ENABLE_AUTONOMY_LIVE_EXECUTION }
+  const restore = (name: string, value: string | undefined) => (value === undefined ? delete process.env[name] : (process.env[name] = value))
+  /** A finding as its detector raises it. */
+  const planted = (type: string, details: Record<string, unknown>) =>
+    prisma.healthFinding.create({ data: { projectId: f.projectId, type, severity: 'critical', category: 'security', source: 'test', details: details as object } })
   const autonomously = (findingId: string) => runAutoFix(findingId, f.projectId, { actor: { kind: 'autonomous', loop: 'reconciler' } })
   const fingerprint = async () => basisFingerprint((await readTableFacts(workspaceOn(prisma, f.schema), 'orders'))!)
 
   beforeAll(async () => {
     process.env.ENABLE_EVOLUTION_MUTATIONS = 'true'
+    // Repairs applied on their own, as on staging.
+    process.env.ENABLE_AUTONOMY_RECONCILER = 'true'
+    process.env.ENABLE_AUTONOMY_LIVE_EXECUTION = 'true'
     f = await buildProject('holds')
     await proposeWhereItRuns(f.projectId)
     const [req] = await requestsOf(f.projectId)
@@ -759,44 +764,74 @@ describe("Backenly's own repairs wait while an architecture change works on its 
     const a = await approveRequest({ projectId: f.projectId, findingId: req.id, planVersion: req.ev.planVersion, userId: f.ownerId })
     if (isApprovalRefusal(a)) throw new Error(a.error)
     expect(a.state).toBe('backfilling')
+    approved = await fingerprint()
   }, 180_000)
-  afterAll(async () => dropProject(f), 60_000)
+  afterAll(async () => {
+    restore('ENABLE_AUTONOMY_RECONCILER', saved.reconciler)
+    restore('ENABLE_AUTONOMY_LIVE_EXECUTION', saved.live)
+    await dropProject(f)
+  }, 60_000)
 
-  it('holds a repair of the table being changed, leaving the finding open and the table as approved', async () => {
-    const before = await fingerprint()
-    const host = await planted('missing_fk_index', 'orders')
+  it('holds the repair that stopped the change on staging, leaving the finding open and the table as approved', async () => {
+    // unprotected_user_data on orders: Backenly's own-rows policies, added twenty seconds after the approval.
+    const host = await planted('unprotected_user_data', { tableName: 'orders' })
     const r = await autonomously(host.id)
     expect(r.outcome).toBe('held')
     expect(r.message).toMatch(/architecture change to orders is working on orders/)
     expect((await prisma.healthFinding.findUniqueOrThrow({ where: { id: host.id } })).status).toBe('open')
-    expect(await fingerprint()).toBe(before)
-    // Nothing of Backenly's own ran on the project while it was held.
-    expect(await prisma.backendChange.count({ where: { projectId: f.projectId, source: 'autonomy' } })).toBe(0)
+    expect(await fingerprint()).toBe(approved)
   })
 
-  it('holds a repair of the new table too, schema-qualified or not', async () => {
-    const satellite = await planted('orphan_table', 'order_refunds')
+  it('holds the repair of the new table too, and a whole self-healing pass leaves both tables as approved', async () => {
+    // orphan_table on order_refunds: the half-built table, registered before the ladder's own step.
+    const satellite = await planted('orphan_table', { tableName: 'order_refunds' })
     expect((await autonomously(satellite.id)).outcome).toBe('held')
     expect(await architectureHold(f.projectId, `"${f.schema}"."order_refunds"`)).toMatch(/working on order_refunds/)
+    await runReconcilerLive(f.projectId)
+    expect(await fingerprint()).toBe(approved)
+    expect((await prisma.table.findMany({ where: { projectId: f.projectId, name: 'order_refunds' } })).length).toBe(0)
   })
 
-  it('holds nothing else, and nothing in a deployment that runs no architecture change', async () => {
-    expect(await architectureHold(f.projectId, 'customers')).toBeNull()
-    expect(await architectureHold(f.projectId, null)).toBeNull()
+  it('finds the table the way the repair does', () => {
+    expect(repairedTable('unprotected_user_data', { tableName: 'orders' })).toBe('orders')
+    expect(repairedTable('unprotected_user_data', { location: 'orders' })).toBe('orders')
+    expect(repairedTable('missing_fk_index', { table: 'orders', column: 'user_id' })).toBe('orders')
+    expect(repairedTable('missing_rls_orders', {})).toBe('orders')
+    expect(repairedTable('infra_hot_table_order_refunds', {})).toBe('order_refunds')
+    expect(repairedTable('unprotected_user_data', {})).toBeNull()
+  })
+
+  it('holds nothing for a change that waits on a person or stopped moving, and nothing else', async () => {
+    expect(await architectureHold(f.projectId, 'orders')).toMatch(/working on orders/)
+    // A deployment that does not carry changes on by itself: the change waits for a person to resume it.
+    process.env.ENABLE_EVOLUTION_SCHEDULER = 'false'
+    try {
+      expect(await architectureHold(f.projectId, 'orders')).toBeNull()
+    } finally {
+      process.env.ENABLE_EVOLUTION_SCHEDULER = 'true'
+    }
     process.env.ENABLE_EVOLUTION_MUTATIONS = 'false'
     try {
       expect(await architectureHold(f.projectId, 'orders')).toBeNull()
     } finally {
       process.env.ENABLE_EVOLUTION_MUTATIONS = 'true'
     }
+    // An hour with no transition and no backfill batch.
+    expect(await architectureHold(f.projectId, 'orders', new Date(Date.now() + HOLD_LAPSES_AFTER_MS + 60_000))).toBeNull()
+    expect(await architectureHold(f.projectId, 'customers')).toBeNull()
+    expect(await architectureHold(f.projectId, null)).toBeNull()
   })
 
-  it('lets the backfill finish on the table exactly as approved, then lets repairs through', async () => {
+  it('lets the backfill finish on the table exactly as approved; then the held repair runs and does change it', async () => {
     // The copy ran against the same table the owner approved: no "changed shape".
     expect((await drain(f.projectId)).every(x => !x.refusal)).toBe(true)
     expect((await advance({ projectId: f.projectId, decisionId })).state).toBe('observing')
-    // In place: Backenly's repairs of either table go ahead again.
     expect(await architectureHold(f.projectId, 'orders')).toBeNull()
     expect(await architectureHold(f.projectId, 'order_refunds')).toBeNull()
+    // What the hold kept off the table was real: let through, the same repair changes it.
+    const before = await fingerprint()
+    const r = await autonomously((await planted('unprotected_user_data', { tableName: 'orders' })).id)
+    expect(['auto_fixed', 'applied_unverified']).toContain(r.outcome)
+    expect(await fingerprint()).not.toBe(before)
   })
 })

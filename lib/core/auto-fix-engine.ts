@@ -335,14 +335,19 @@ export async function runAutoFix(
           ? (details.table as string)
           : null
 
-    // An architecture change working on this table holds Backenly's own repairs
-    // of it until the change is in place (lib/evolution-engine/holds.ts): the
-    // change stops if its table moves under it, and a repair of ours must not
-    // be what moved it. Unknown is not held: a failed read costs the change a
-    // stop, never a repair its delay.
-    const { architectureHold } = await import('@/lib/evolution-engine/holds')
-    const held = await architectureHold(projectId, tableName).catch(() => null)
-    if (held) return { findingId, outcome: 'held', message: `Held: ${held}.` }
+    // An architecture change carrying itself out on the table this repair
+    // changes holds Backenly's own repairs of it until the change is in place
+    // (lib/evolution-engine/holds.ts): the change stops if its table moves under
+    // it, and a repair of ours must not be what moved it. Asked once the repair
+    // is cleared to run, so one that needs a person is still put in front of
+    // them, and again inside the build lock (_executeAutoFix). Unknown is not
+    // held: a failed read costs the change a stop, never a repair its delay.
+    const holds = await import('@/lib/evolution-engine/holds')
+    const holdTable = holds.repairedTable(finding.type, details)
+    const held = async (): Promise<AutoFixResult | null> => {
+      const why = await holds.architectureHold(projectId, holdTable).catch(() => null)
+      return why ? { findingId, outcome: 'held', message: `Held: ${why}.` } : null
+    }
 
     const path = authorityPathFor(finding.type)
 
@@ -372,7 +377,9 @@ export async function runAutoFix(
       if (!compat.allowed) {
         return { findingId, outcome: 'deferred', message: compat.reason ?? 'not permitted' }
       }
-      return _executeAutoFix(finding.id, projectId, type, details, opts)
+      const waiting = await held()
+      if (waiting) return waiting
+      return _executeAutoFix(finding.id, projectId, type, details, { ...opts, holdTable })
     }
 
     const gate = await authorizeAutonomousFix({
@@ -423,6 +430,8 @@ export async function runAutoFix(
         message: `Authority lapsed before execution: ${still.reason}`,
       }
     }
+    const waiting = await held()
+    if (waiting) return waiting
 
     // The repair applies what the declared intent says, not what the executor
     // would infer. See applyIntentToFixDetails.
@@ -435,7 +444,7 @@ export async function runAutoFix(
       projectId,
       type,
       applyIntentToFixDetails(gate.decision, details),
-      { ...opts, recovery: gate.decision.capability.recovery },
+      { ...opts, recovery: gate.decision.capability.recovery, holdTable },
     )
   }
 
@@ -1530,6 +1539,9 @@ export async function processOpenFindings(
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
+/** An architecture change holds this repair (lib/evolution-engine/holds.ts); its message says why. */
+class ArchitectureHold extends Error {}
+
 async function _executeAutoFix(
   findingId: string,
   projectId: string,
@@ -1538,8 +1550,12 @@ async function _executeAutoFix(
   /**
    * `recovery` is the declared recovery of the action class that authorized
    * this repair. Set only on the authority path; the legacy path has none.
+   *
+   * `holdTable` is set only for an autonomous repair: the table whose
+   * architecture hold (lib/evolution-engine/holds.ts) is asked again inside
+   * the build lock, so an approval that landed since the first ask holds it.
    */
-  opts: { skipCooldown?: boolean; recovery?: string } = {},
+  opts: { skipCooldown?: boolean; recovery?: string; holdTable?: string | null } = {},
 ): Promise<AutoFixResult> {
   const baseType = (normalizeFindingType(type, details)?.base ?? type) as FindingType
   const fixAction = buildFixAction(type, details)
@@ -1608,6 +1624,11 @@ async function _executeAutoFix(
       projectId,
       'modify',
       async () => {
+        if (opts.holdTable !== undefined) {
+          const { architectureHold } = await import('@/lib/evolution-engine/holds')
+          const why = await architectureHold(projectId, opts.holdTable).catch(() => null)
+          if (why) throw new ArchitectureHold(why)
+        }
         const r = await executeAction(
           { action: fixAction.action as AIAction['action'], params: fixAction.params },
           projectId,
@@ -1634,6 +1655,8 @@ async function _executeAutoFix(
     }
     result = governed.result
   } catch (err: any) {
+    // Held inside the lock: nothing ran, and the finding stays open.
+    if (err instanceof ArchitectureHold) return { findingId, outcome: 'held', message: `Held: ${err.message}.` }
     const msg = `Execution threw: ${err.message}`
     return _isTransientGovernanceError(err?.message)
       ? _deferred(findingId, projectId, type, details, msg)
