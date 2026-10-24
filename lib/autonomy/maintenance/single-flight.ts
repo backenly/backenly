@@ -201,22 +201,28 @@ export async function withMaintenanceSingleFlight<T>(
 
 /**
  * Whether a ladder holds this project's lock right now, in this process or
- * any other (`pg_locks`). The lock ends with the session that took it, so a
- * crashed ladder reads as not held. Unknown reads as not held.
+ * any other (`pg_locks`, this database only). The lock ends with the session
+ * that took it, so a crashed ladder reads as not held. Unknown reads as not
+ * held. Asked through the platform client, not this pool, so that ladders
+ * holding every connection of it never hold up the caller.
  */
 export async function maintenanceLockHeld(projectId: string): Promise<boolean> {
   const key = projectToLockKey(projectId)
   if (held.has(key)) return true
   try {
-    const res = await lockPool.query<{ held: boolean }>(
+    const { prisma } = await import('@/lib/db/prisma')
+    // pg_locks shows a two-key advisory lock's keys as oids: classid the first, objid the second, objsubid 2.
+    const rows = await prisma.$queryRawUnsafe<Array<{ held: boolean }>>(
       `SELECT EXISTS (
          SELECT 1 FROM pg_locks
           WHERE locktype = 'advisory' AND granted AND objsubid = 2
-            AND classid::int8 = ($1::int4::int8 & 4294967295) AND objid::int8 = ($2::int4::int8 & 4294967295)
+            AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+            AND classid = $1::oid AND objid = $2::oid
        ) AS held`,
-      [MAINTENANCE_LOCK_NAMESPACE, key],
+      String(MAINTENANCE_LOCK_NAMESPACE >>> 0),
+      String(key >>> 0),
     )
-    return res.rows[0]?.held === true
+    return rows[0]?.held === true
   } catch {
     return false
   }

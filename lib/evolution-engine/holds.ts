@@ -21,12 +21,14 @@
  *     schedules changes, and the project's autonomy is not OFF). One that waits
  *     for a person to resume it holds nothing: a repair never waits on a
  *     decision nobody may make, and a security repair least of all;
- *   - the project's changes moved in the last three hours: a transition of any
- *     change at work, any of their jobs, or a ladder holding the project's lock
- *     now. A project's changes run one at a time, so one waiting its turn
- *     behind another is not stuck; three hours outlasts a scheduler pass and
- *     most incidents (every change waits one out). Changes that stopped moving,
- *     an undo that crashed included, hold nothing;
+ *   - the change moved in the last three hours: a transition, or one of its
+ *     own jobs (its start, its undo, its backfill's batches). Changes still
+ *     being applied run one at a time, so one of them moving, or a ladder
+ *     holding the project's lock, is all of them moving: one waiting its turn
+ *     is not stuck. A change being undone moves only by itself. Three hours
+ *     outlasts a scheduler pass and most incidents (every change waits one
+ *     out). A change that stopped moving, an undo that crashed included,
+ *     holds nothing, whatever else the project does;
  *   - the repair is Backenly's own: the auto-fix kernel's for an autonomous
  *     actor (lib/core/auto-fix-engine.ts), asked once the repair is cleared to
  *     run (one that needs a person is still put in front of them) and again
@@ -72,15 +74,39 @@ export function repairedTable(findingType: string, details: Record<string, unkno
   return typeof named === 'string' && named.length > 0 ? named : null
 }
 
-/** When the project's changes at work last moved; `now` while a ladder holds the project's lock. */
-async function lastMoved(projectId: string, working: DecisionSummary[], now: Date): Promise<Date> {
-  if (await maintenanceLockHeld(projectId)) return now
-  let latest = working.reduce((t, d) => (d.updatedAt > t ? d.updatedAt : t), new Date(0))
-  const job = await prisma.backgroundJob
-    .findFirst({ where: { projectId, type: { startsWith: 'evolution_' } }, orderBy: { updatedAt: 'desc' }, select: { updatedAt: true } })
-    .catch(() => null)
-  if (job && job.updatedAt > latest) latest = job.updatedAt
-  return latest
+/** The jobs a change's own movement is read from: its start, its undo and its backfill's batches. */
+const OWN_JOB_TYPES = ['evolution_backfill', 'evolution_advance', 'evolution_undo']
+
+/**
+ * When each change at work last moved. A change's own movement is its latest
+ * transition and the newest of its own jobs (by its decision, or its plan
+ * version for the backfill's batches). Changes still being applied run one at
+ * a time, so while any of them moves, or a ladder holds the project's lock,
+ * all of them do: one waiting its turn is not stuck. A change being undone
+ * moves only by itself: nothing but its own undo carries it on.
+ */
+async function lastMoved(projectId: string, working: DecisionSummary[], now: Date): Promise<Map<string, Date>> {
+  const jobs = await prisma.backgroundJob
+    .findMany({
+      where: { projectId, type: { in: OWN_JOB_TYPES } },
+      orderBy: { updatedAt: 'desc' },
+      take: 200,
+      select: { payload: true, updatedAt: true },
+    })
+    .catch(() => [])
+  const own = (d: DecisionSummary): Date => {
+    let latest = d.updatedAt
+    for (const j of jobs) {
+      const p = (j.payload ?? {}) as { decisionId?: unknown; planVersion?: unknown }
+      const mine = p.decisionId === d.decisionId || (d.planVersion !== undefined && p.planVersion === d.planVersion)
+      if (mine && j.updatedAt > latest) latest = j.updatedAt
+    }
+    return latest
+  }
+  const applying = working.filter(d => d.state !== 'rolling_back')
+  const ladder = applying.length > 0 && (await maintenanceLockHeld(projectId))
+  const applyingMoved = ladder ? now : applying.reduce((t, d) => (own(d) > t ? own(d) : t), new Date(0))
+  return new Map(working.map(d => [d.decisionId, d.state === 'rolling_back' ? own(d) : applyingMoved]))
 }
 
 /** Each table an architecture change is working on now, with the table the change is about. */
@@ -90,8 +116,9 @@ export async function tablesHeldByArchitecture(projectId: string, now: Date = ne
   if (working.length === 0) return held
   const { continuation } = await import('./engine')
   if (!(await continuation(projectId)).unattended) return held
-  if (now.getTime() - (await lastMoved(projectId, working, now)).getTime() > HOLD_LAPSES_AFTER_MS) return held
+  const moved = await lastMoved(projectId, working, now)
   for (const d of working) {
+    if (now.getTime() - (moved.get(d.decisionId) ?? d.updatedAt).getTime() > HOLD_LAPSES_AFTER_MS) continue
     const spec = primitiveById(d.primitive)?.normaliseSpec(d.spec) ?? null
     for (const table of tablesOf(spec)) held.set(table, d.subject)
   }

@@ -57,7 +57,7 @@ import {
   sweepArchitecture,
   undo,
 } from '@/lib/evolution-engine/engine'
-import { decisionTrail, readMemory, summarizeDecisions, priorsFor } from '@/lib/evolution-engine/memory'
+import { decisionTrail, readMemory, remember, summarizeDecisions, priorsFor } from '@/lib/evolution-engine/memory'
 import { DEFAULT_POLICY } from '@/lib/evolution-engine/policy'
 import { basisFingerprint, readTableFacts } from '@/lib/structural-evolution/facts'
 import { structuralExtraction } from '@/lib/structural-evolution/primitive'
@@ -744,8 +744,15 @@ describe('a step that does not finish', () => {
 describe("Backenly's own repairs wait while an architecture change carries itself out", () => {
   let f: Fixture
   let decisionId = ''
+  let version = ''
   let approved = ''
   const saved = { reconciler: process.env.ENABLE_AUTONOMY_RECONCILER, live: process.env.ENABLE_AUTONOMY_LIVE_EXECUTION }
+  /** A background job of the project, last updated at `at`. */
+  const jobAt = async (type: string, payload: Record<string, unknown>, at: Date) => {
+    const job = await prisma.backgroundJob.create({ data: { projectId: f.projectId, type, status: 'completed', payload: payload as object } })
+    await prisma.$executeRawUnsafe(`UPDATE background_jobs SET "updatedAt" = $1 WHERE id = $2`, at, job.id)
+    return job
+  }
   const restore = (name: string, value: string | undefined) => (value === undefined ? delete process.env[name] : (process.env[name] = value))
   /** A finding as its detector raises it. */
   const planted = (type: string, details: Record<string, unknown>) =>
@@ -762,6 +769,7 @@ describe("Backenly's own repairs wait while an architecture change carries itsel
     await proposeWhereItRuns(f.projectId)
     const [req] = await requestsOf(f.projectId)
     decisionId = req.ev.decisionId
+    version = req.ev.planVersion
     const a = await approveRequest({ projectId: f.projectId, findingId: req.id, planVersion: req.ev.planVersion, userId: f.ownerId })
     if (isApprovalRefusal(a)) throw new Error(a.error)
     expect(a.state).toBe('backfilling')
@@ -830,13 +838,20 @@ describe("Backenly's own repairs wait while an architecture change carries itsel
       await elsewhere.end()
     }
     expect(await architectureHold(f.projectId, 'orders', later)).toBeNull()
-    // Another of the project's jobs moved since.
-    const job = await prisma.backgroundJob.create({ data: { projectId: f.projectId, type: 'evolution_backfill', status: 'completed', payload: {} } })
+    // A batch of its backfill moved since.
+    const batch = await jobAt('evolution_backfill', { planVersion: version }, new Date(later.getTime() - 60_000))
     try {
-      await prisma.$executeRawUnsafe(`UPDATE background_jobs SET "updatedAt" = $1 WHERE id = $2`, new Date(later.getTime() - 60_000), job.id)
       expect(await architectureHold(f.projectId, 'orders', later)).toMatch(/working on orders/)
     } finally {
-      await prisma.backgroundJob.delete({ where: { id: job.id } })
+      await prisma.backgroundJob.delete({ where: { id: batch.id } })
+    }
+    // A person's look for changes, or a job of no change at work, moves nothing.
+    const look = await jobAt('evolution_assess', {}, new Date(later.getTime() - 60_000))
+    const stranger = await jobAt('evolution_backfill', { planVersion: 'not-a-change-at-work' }, new Date(later.getTime() - 60_000))
+    try {
+      expect(await architectureHold(f.projectId, 'orders', later)).toBeNull()
+    } finally {
+      await prisma.backgroundJob.deleteMany({ where: { id: { in: [look.id, stranger.id] } } })
     }
   })
 
@@ -855,7 +870,7 @@ describe("Backenly's own repairs wait while an architecture change carries itsel
     } finally {
       process.env.ENABLE_EVOLUTION_MUTATIONS = 'true'
     }
-    // An hour with no transition and no backfill batch.
+    // Three hours with no transition, no job of its own and no ladder running.
     expect(await architectureHold(f.projectId, 'orders', new Date(Date.now() + HOLD_LAPSES_AFTER_MS + 60_000))).toBeNull()
     expect(await architectureHold(f.projectId, 'customers')).toBeNull()
     expect(await architectureHold(f.projectId, null)).toBeNull()
@@ -872,5 +887,41 @@ describe("Backenly's own repairs wait while an architecture change carries itsel
     const r = await autonomously((await planted('unprotected_user_data', { tableName: 'orders' })).id)
     expect(['auto_fixed', 'applied_unverified']).toContain(r.outcome)
     expect(await fingerprint()).not.toBe(before)
+  })
+
+  it('lets go of an undo that stopped, whatever else the project does', async () => {
+    // An undo that crashed after claiming the change: nothing but its own undo carries it on.
+    const d = summarizeDecisions(await readMemory(f.projectId)).find(x => x.decisionId === decisionId)!
+    await remember({
+      projectId: f.projectId,
+      record: {
+        v: 1, decisionId, concernKey: d.concernKey, proposalKey: d.proposalKey, planId: d.planId, planVersion: d.planVersion,
+        primitive: d.primitive, subject: d.subject, event: 'transition', state: 'rolling_back', from: 'observing',
+      },
+      milestone: false,
+      sentence: 'Undoing the change (a crash, in this test).',
+    })
+    expect(await architectureHold(f.projectId, 'orders')).toMatch(/working on orders/)
+    const later = new Date(Date.now() + HOLD_LAPSES_AFTER_MS + 60_000)
+    expect(await architectureHold(f.projectId, 'orders', later)).toBeNull()
+    // Another change's backfill moving, or a ladder holding the project's lock, does not carry it.
+    const other = await jobAt('evolution_backfill', { planVersion: 'another-change' }, new Date(later.getTime() - 60_000))
+    const gate: { release?: () => void } = {}
+    const ladder = withMaintenanceSingleFlight(f.projectId, () => new Promise<void>(resolve => { gate.release = resolve }))
+    for (let i = 0; i < 100 && !gate.release; i++) await new Promise(resolve => setTimeout(resolve, 20))
+    try {
+      expect(await architectureHold(f.projectId, 'orders', later)).toBeNull()
+    } finally {
+      gate.release!()
+      await ladder
+      await prisma.backgroundJob.delete({ where: { id: other.id } })
+    }
+    // Its own undo moving does.
+    const undoing = await jobAt('evolution_undo', { decisionId }, new Date(later.getTime() - 60_000))
+    try {
+      expect(await architectureHold(f.projectId, 'orders', later)).toMatch(/working on orders/)
+    } finally {
+      await prisma.backgroundJob.delete({ where: { id: undoing.id } })
+    }
   })
 })
