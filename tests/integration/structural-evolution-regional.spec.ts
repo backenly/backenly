@@ -12,8 +12,9 @@
  *   and undo                 read and write the regional database; the home
  *                            database never holds the project's schema
  *   the start of a change    a regional job the region's own worker runs once a
- *   a person approved        person approves it at home: the approving request
- *                            runs nothing (across regions its rungs outlast it)
+ *   a person approved, and   person approves or undoes it at home: the request
+ *   a person's undo          runs nothing there (across regions its statements
+ *                            outlast it)
  *   the backfill             regional jobs, run by the region's own worker
  *                            (processRegionalJobs), never by the home queue;
  *                            each batch's starting key is kept in the region,
@@ -50,7 +51,16 @@ import { rollbackExtraction } from '@/lib/structural-evolution/rollback'
 import { readTableFacts } from '@/lib/structural-evolution/facts'
 import { workspaceAt } from '@/lib/structural-evolution/workspace'
 import { ladderNames, type ExtractionSpec } from '@/lib/structural-evolution/sql'
-import { advance, approveRequest, isApprovalRefusal, liveStatements, observe, startWhereTheTablesAre, undo } from '@/lib/evolution-engine/engine'
+import {
+  advance,
+  approveRequest,
+  isActionRefusal,
+  isApprovalRefusal,
+  liveStatements,
+  observe,
+  startWhereTheTablesAre,
+  undoWhereTheTablesAre,
+} from '@/lib/evolution-engine/engine'
 import { ordersSql, proposeWhereItRuns, recordHistory, requestsOf, stateOf } from '../helpers/evolution-engine-fixture'
 
 jest.setTimeout(300_000)
@@ -401,11 +411,32 @@ describe('the engine, for a project kept in us-east-1', () => {
     expect((await observe({ projectId: p.projectId, decisionId, now: at(25) })).verdict).toBe('stable')
   })
 
-  it('is undone in the region', async () => {
-    const r = await undo({ projectId: p.projectId, decisionId, userId: p.ownerId })
-    expect(r.ok).toBe(true)
+  it('is undone by the region, never from the request that asked for it', async () => {
+    // An undo is some 160 statements to the region's database: from home, half a
+    // minute to over a minute, at or past the load balancer's 60 s.
+    const satellite = () => inRegion<{ r: string | null }>(`SELECT to_regclass($1)::text AS r`, [`"${p.schema}"."order_refunds"`])
+    const r = await undoWhereTheTablesAre({ projectId: p.projectId, decisionId, userId: p.ownerId })
+    if (isActionRefusal(r)) throw new Error(r.error)
+    expect(r.state).toBe('stable')
+    expect(r.message).toMatch(/^Undo runs in .*us-east-1.*, where this project's tables are, starting within a minute\./)
+    expect((await satellite())[0].r).not.toBeNull()
+    const queued = await prisma.backgroundJob.findMany({ where: { projectId: p.projectId, type: 'evolution_undo' } })
+    expect(queued).toHaveLength(1)
+    expect(queued[0].status).toBe('regional_pending')
+    expect(queued[0].payload).toMatchObject({ region: 'us-east-1', projectId: p.projectId, decisionId, userId: p.ownerId })
+    // A second press finds it queued.
+    expect((await undoWhereTheTablesAre({ projectId: p.projectId, decisionId, userId: p.ownerId })).ok).toBe(true)
+    expect(await prisma.backgroundJob.count({ where: { projectId: p.projectId, type: 'evolution_undo' } })).toBe(1)
+
+    expect(await drainInRegion()).toBeGreaterThan(0)
+    const [done] = await prisma.backgroundJob.findMany({ where: { projectId: p.projectId, type: 'evolution_undo' } })
+    expect(done.status).toBe('completed')
+    expect(done.result).toMatchObject({ state: 'rolled_back' })
     expect((await stateOf(p.projectId, decisionId)).state).toBe('rolled_back')
-    expect(await inRegion(`SELECT to_regclass($1) AS r`, [`"${p.schema}"."order_refunds"`])).toEqual([{ r: null }])
+    expect(await satellite()).toEqual([{ r: null }])
+    // Nothing left to undo is said at once, and queues nothing.
+    expect(await undoWhereTheTablesAre({ projectId: p.projectId, decisionId, userId: p.ownerId })).toMatchObject({ ok: false, status: 409 })
+    expect(await prisma.backgroundJob.count({ where: { projectId: p.projectId, type: 'evolution_undo' } })).toBe(1)
   })
 
   it('left nothing at home that quotes a statement, a definition, or a row', async () => {

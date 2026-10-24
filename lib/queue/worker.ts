@@ -305,6 +305,7 @@ function failureSentence(type: string, region: CloudRegionId): string {
   if (type === 'maintenance_backfill') return `The backfill batch did not complete in ${region}. The reason is in that region's logs.`
   if (type === 'evolution_backfill') return `The architecture change's copy batch did not complete in ${region}. The reason is in that region's logs.`
   if (type === 'evolution_advance') return `The architecture change did not start in ${region}. The reason is in that region's logs.`
+  if (type === 'evolution_undo') return `The undo of the architecture change did not run in ${region}. The reason is in that region's logs.`
   return type === 'workspace_restore'
     ? `The restore did not complete in ${region}. The reason is in that region's logs.`
     : `The snapshot was not taken in ${region}. The reason is in that region's logs.`
@@ -336,6 +337,21 @@ async function runRegionalJob(type: string, payload: unknown): Promise<Record<st
     const { advance } = await import('@/lib/evolution-engine/engine')
     const r = await advance({ projectId, decisionId, actor: typeof actor === 'string' ? actor : null })
     return { state: r.state, message: r.message }
+  }
+
+  if (type === 'evolution_undo') {
+    // A person's undo, run here for the same reason (undoWhereTheTablesAre).
+    // Undo records how it went on the decision; a refusal is that outcome, and
+    // only "another change is running" is tried again, after the backoff.
+    const { decisionId, userId } = (payload ?? {}) as { decisionId?: unknown; userId?: unknown }
+    if (typeof decisionId !== 'string' || decisionId.length === 0 || typeof userId !== 'string' || userId.length === 0) {
+      throw new RegionalJobRefusal('The job names no architecture change or no person.')
+    }
+    const { undo, isActionRefusal } = await import('@/lib/evolution-engine/engine')
+    const r = await undo({ projectId, decisionId, userId })
+    if (!isActionRefusal(r)) return { state: r.state, message: r.message }
+    if (r.busy) throw new RegionalJobRefusal('Another change was running on this project, so the undo waited.')
+    return { refusal: r.error }
   }
 
   const backups = await import('@/lib/services/workspace-backup')

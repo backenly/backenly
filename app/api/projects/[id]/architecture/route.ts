@@ -19,7 +19,9 @@
  *                                               change's queue row aside
  *        pause    { decisionId }               stop before the next step
  *        resume   { decisionId }
- *        undo     { decisionId }               lossless, or refused
+ *        undo     { decisionId }               lossless, or refused; for a
+ *                                               project kept in another region,
+ *                                               queued for that region's worker
  *        assess   {}                            look for changes now (reads
  *                                               and rehearses only)
  *
@@ -47,7 +49,7 @@ import {
   proposeChanges,
   resume,
   startWhereTheTablesAre,
-  undo,
+  undoWhereTheTablesAre,
 } from '@/lib/evolution-engine/engine'
 import { allPrimitives } from '@/lib/evolution-engine/primitive'
 import { readMemory, priorsFor, summarizeDecisions } from '@/lib/evolution-engine/memory'
@@ -124,7 +126,7 @@ export async function POST(request: NextRequest, _props: { params: Promise<{ id:
           ? await pause({ projectId, decisionId, userId })
           : action === 'resume'
             ? await resume({ projectId, decisionId, userId })
-            : await undo({ projectId, decisionId, userId })
+            : await undoWhereTheTablesAre({ projectId, decisionId, userId })
       return isActionRefusal(r)
         ? NextResponse.json({ error: r.error }, { status: r.status })
         : NextResponse.json({ ok: true, message: r.message, state: r.state })

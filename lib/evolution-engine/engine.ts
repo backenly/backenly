@@ -102,7 +102,7 @@ import { quotedError, quotesKeptHere } from '@/lib/data-plane/residency'
 import { projectRegion } from '@/lib/data-plane/regional'
 import { servedHere } from '@/lib/data-plane/serving'
 import { enqueueRegionalJob, REGIONAL_STATUS } from '@/lib/queue'
-import { regionLabel } from '@/lib/regions'
+import { regionLabel, type CloudRegionId } from '@/lib/regions'
 import { EVOLUTION_FINDING_TYPE } from '@/lib/core/types'
 import './installed'
 
@@ -994,19 +994,56 @@ export async function advance(input: {
 export async function startWhereTheTablesAre(input: { projectId: string; decisionId: string; actor?: string | null }): Promise<AdvanceResult> {
   const { projectId, decisionId } = input
   if (await servedHere(projectId)) return advance(input)
+  const region = await queueInItsRegion('evolution_advance', projectId, { decisionId, actor: input.actor ?? null })
+  const state = (await decision(projectId, decisionId)).summary?.state ?? null
+  return { state, message: `It runs in ${regionLabel(region)}, where this project's tables are, starting within a minute.` }
+}
+
+/**
+ * Undo where the project's tables are: what a person's undo calls, rather than
+ * `undo` itself, for the reason `startWhereTheTablesAre` gives. An undo sends
+ * some 160 statements to the region's database (counted on the regional spec's
+ * project), which from the home region is half a minute to over a minute, at
+ * or past the load balancer's 60 s.
+ *
+ * What home can tell at once is refused here, as `undo` would refuse it. The
+ * rest, and the record of how it went, is `undo`'s own, run by the region's
+ * worker as an `evolution_undo` job; one that finds another change running on
+ * the project is tried again rather than handed back to the person.
+ */
+export async function undoWhereTheTablesAre(input: { projectId: string; decisionId: string; userId: string }): Promise<ActionResult> {
+  const { projectId, decisionId, userId } = input
+  if (await servedHere(projectId)) return undo(input)
+  const { summary } = await decision(projectId, decisionId)
+  if (!summary?.state) return { ok: false, status: 404, error: 'No such change.' }
+  if (!canUndoFrom(summary.state)) return { ok: false, status: 409, error: 'There is nothing to undo for this change.' }
+  const region = await queueInItsRegion('evolution_undo', projectId, { decisionId, userId }, { maxAttempts: 5 })
+  return { ok: true, state: summary.state, message: `Undo runs in ${regionLabel(region)}, where this project's tables are, starting within a minute.` }
+}
+
+/**
+ * Queue a person's decision about a change for the region its project is kept
+ * in, once: while one is waiting or running for the same change, another press
+ * finds it and adds none. Returns the region.
+ */
+async function queueInItsRegion(
+  type: 'evolution_advance' | 'evolution_undo',
+  projectId: string,
+  payload: { decisionId: string } & Record<string, unknown>,
+  options: { maxAttempts?: number } = {},
+): Promise<CloudRegionId> {
   const region = await projectRegion(projectId)
   const queued = await prisma.backgroundJob.findFirst({
     where: {
-      type: 'evolution_advance',
+      type,
       projectId,
       status: { in: [REGIONAL_STATUS.pending, REGIONAL_STATUS.running] },
-      payload: { path: ['decisionId'], equals: decisionId },
+      payload: { path: ['decisionId'], equals: payload.decisionId },
     },
     select: { id: true },
   })
-  if (!queued) await enqueueRegionalJob('evolution_advance', projectId, region, { decisionId, actor: input.actor ?? null })
-  const state = (await decision(projectId, decisionId)).summary?.state ?? null
-  return { state, message: `It runs in ${regionLabel(region)}, where this project's tables are, starting within a minute.` }
+  if (!queued) await enqueueRegionalJob(type, projectId, region, payload, options)
+  return region
 }
 
 /**
@@ -1043,7 +1080,10 @@ async function askToResumeOrUndo(projectId: string, d: DecisionRef, reason: stri
 
 // ── Pause, resume, undo ──────────────────────────────────────────────────────
 
-export type ActionResult = { ok: true; message: string; state: LifecycleState | null } | { ok: false; status: 404 | 409; error: string }
+export type ActionResult =
+  | { ok: true; message: string; state: LifecycleState | null }
+  // `busy`: refused only because another change was running on the project; nothing was touched.
+  | { ok: false; status: 404 | 409; error: string; busy?: true }
 
 export const isActionRefusal = (r: ActionResult): r is Extract<ActionResult, { ok: false }> => !r.ok
 
@@ -1207,11 +1247,9 @@ export async function undo(input: { projectId: string; decisionId: string; userI
       userId,
       payload: { reason: summary.stoppedBecause, undoRefused: reason },
     })
-    return {
-      ok: false,
-      status: 409,
-      error: busy ? 'Another change is running on this project. Try again in a minute.' : `Not undone, and nothing was removed: ${reason}.`,
-    }
+    return busy
+      ? { ok: false, status: 409, error: 'Another change is running on this project. Try again in a minute.', busy: true }
+      : { ok: false, status: 409, error: `Not undone, and nothing was removed: ${reason}.` }
   }
 
   // Part of it was removed before a step failed. Saying "nothing was removed"

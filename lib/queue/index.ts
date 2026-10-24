@@ -62,6 +62,8 @@ export type JobType =
    * regional job: a project of the region a request reaches runs in it.
    */
   | 'evolution_advance'
+  /** A person's undo of an architecture change, run in the same way (undoWhereTheTablesAre). */
+  | 'evolution_undo'
 
 export const PURGE_JOB_TYPE = 'purge_project' as const
 
@@ -477,20 +479,27 @@ export async function failPurgeJob(id: string, error: string) {
 // batches it dispatches belong there too, not to the home queue, where a
 // failed batch's database error, which can quote a row, would be recorded. So
 // is the copy an architecture change makes into its new table
-// (lib/structural-evolution/backfill-job.ts), and so is the start of an
-// approved architecture change: its rungs read and write the region's database
-// statement by statement, which across regions outlasts the request that
-// approved it (lib/evolution-engine/engine.ts, startWhereTheTablesAre).
+// (lib/structural-evolution/backfill-job.ts), and so are the start and the undo
+// of an architecture change a person decided on: they read and write the
+// region's database statement by statement, which across regions outlasts the
+// request that asked for them (lib/evolution-engine/engine.ts,
+// startWhereTheTablesAre and undoWhereTheTablesAre).
 
 /** Snapshots taken and restored for another region: what the console's snapshot panel lists. */
 export const SNAPSHOT_JOB_TYPES = ['workspace_backup', 'workspace_restore'] as const
 
 /** The work one region may ask another to do. */
-export const REGIONAL_JOB_TYPES = [...SNAPSHOT_JOB_TYPES, 'maintenance_backfill', 'evolution_backfill', 'evolution_advance'] as const
+export const REGIONAL_JOB_TYPES = [
+  ...SNAPSHOT_JOB_TYPES,
+  'maintenance_backfill',
+  'evolution_backfill',
+  'evolution_advance',
+  'evolution_undo',
+] as const
 export type RegionalJobType = (typeof REGIONAL_JOB_TYPES)[number]
 
 /** Work that writes the project's data, and so waits while the project is paused. */
-const REGIONAL_WRITES_HELD_WHILE_PAUSED: readonly RegionalJobType[] = ['maintenance_backfill', 'evolution_backfill', 'evolution_advance']
+const REGIONAL_WRITES_HELD_WHILE_PAUSED: readonly RegionalJobType[] = ['maintenance_backfill', 'evolution_backfill', 'evolution_advance', 'evolution_undo']
 
 export const REGIONAL_STATUS = {
   /** Waiting for its region's scheduler. Invisible to every generic query. */
