@@ -394,16 +394,27 @@ export async function applyCandidate(
   projectId: string,
 ): Promise<{ success: boolean; message: string }> {
   try {
-    const governed = await withBuildLock(projectId, 'modify', async () =>
-      executeAction(
+    // Backenly's own repair, as the reconciler's are: held while an architecture
+    // change carries itself out on the table it would change, or on any table
+    // when it names none (lib/evolution-engine/holds.ts), asked inside the
+    // lock, right before it runs.
+    const { repairHold } = await import('@/lib/evolution-engine/holds')
+    const p = fix.params ?? {}
+    const table = [p.tableName, p.table, p.entity].find((t): t is string => typeof t === 'string' && t.length > 0) ?? null
+    const hold = { why: null as string | null }
+    const governed = await withBuildLock(projectId, 'modify', async () => {
+      hold.why = await repairHold(projectId, { table, action: fix.action, tablelessWaits: true }).catch(() => null)
+      if (hold.why) return null
+      return executeAction(
         { action: fix.action as AIAction['action'], params: fix.params } as AIAction,
         projectId,
         undefined,
         0,
         undefined,
         false,
-      ),
-    )
+      )
+    })
+    if (hold.why) return { success: false, message: `Held: ${hold.why}.` }
     if (governed.error) {
       return { success: false, message: governed.error }
     }

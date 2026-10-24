@@ -36,7 +36,7 @@
  */
 
 import { prisma } from '@/lib/db'
-import { closeMaintenanceLockPool } from '@/lib/autonomy/maintenance/single-flight'
+import { closeMaintenanceLockPool, projectToLockKey, withMaintenanceSingleFlight } from '@/lib/autonomy/maintenance/single-flight'
 import { applyApproval } from '@/lib/ai/approval-manager'
 import { buildTrustReport } from '@/lib/autonomy/trust-report'
 import { REPAIR_HELD } from '@/lib/autonomy/change-freeze'
@@ -57,12 +57,16 @@ import {
   sweepArchitecture,
   undo,
 } from '@/lib/evolution-engine/engine'
-import { decisionTrail, readMemory, summarizeDecisions, priorsFor } from '@/lib/evolution-engine/memory'
+import { decisionTrail, readMemory, remember, summarizeDecisions, priorsFor } from '@/lib/evolution-engine/memory'
 import { DEFAULT_POLICY } from '@/lib/evolution-engine/policy'
-import { readTableFacts } from '@/lib/structural-evolution/facts'
+import { basisFingerprint, readTableFacts } from '@/lib/structural-evolution/facts'
 import { structuralExtraction } from '@/lib/structural-evolution/primitive'
 import type { Measurement } from '@/lib/evolution-engine/primitive'
 import { workspaceOn } from '@/lib/structural-evolution/workspace'
+import { architectureHold, HOLD_LAPSES_AFTER_MS, repairedTable, repairHold } from '@/lib/evolution-engine/holds'
+import { Client } from 'pg'
+import { runAutoFix } from '@/lib/core/auto-fix-engine'
+import { runReconcilerLive } from '@/lib/autonomy/reconciler'
 import { asService, buildProject, drain, dropProject, proposeWhereItRuns, q, requestsOf, stateOf, type Fixture } from '../helpers/evolution-engine-fixture'
 
 jest.setTimeout(300_000)
@@ -732,5 +736,192 @@ describe('a step that does not finish', () => {
     expect(c.actions).toMatchObject({ resume: true, undo: true, pause: false })
     expect(c.headline).toBe('The change to your Orders architecture stopped.')
     expect(c.detail).toBe('It stopped because copying the existing refund data into order_refunds did not finish. Your app works as before.')
+  })
+})
+
+// ── Self-healing while a change works on its table ───────────────────────────
+
+describe("Backenly's own repairs wait while an architecture change carries itself out", () => {
+  let f: Fixture
+  let decisionId = ''
+  let version = ''
+  let approved = ''
+  const saved = { reconciler: process.env.ENABLE_AUTONOMY_RECONCILER, live: process.env.ENABLE_AUTONOMY_LIVE_EXECUTION }
+  /** A background job of the project, last updated at `at`. */
+  const jobAt = async (type: string, payload: Record<string, unknown>, at: Date) => {
+    const job = await prisma.backgroundJob.create({ data: { projectId: f.projectId, type, status: 'completed', payload: payload as object } })
+    await prisma.$executeRawUnsafe(`UPDATE background_jobs SET "updatedAt" = $1 WHERE id = $2`, at, job.id)
+    return job
+  }
+  const restore = (name: string, value: string | undefined) => (value === undefined ? delete process.env[name] : (process.env[name] = value))
+  /** A finding as its detector raises it. */
+  const planted = (type: string, details: Record<string, unknown>) =>
+    prisma.healthFinding.create({ data: { projectId: f.projectId, type, severity: 'critical', category: 'security', source: 'test', details: details as object } })
+  const autonomously = (findingId: string) => runAutoFix(findingId, f.projectId, { actor: { kind: 'autonomous', loop: 'reconciler' } })
+  const fingerprint = async () => basisFingerprint((await readTableFacts(workspaceOn(prisma, f.schema), 'orders'))!)
+
+  beforeAll(async () => {
+    process.env.ENABLE_EVOLUTION_MUTATIONS = 'true'
+    // Repairs applied on their own, as on staging.
+    process.env.ENABLE_AUTONOMY_RECONCILER = 'true'
+    process.env.ENABLE_AUTONOMY_LIVE_EXECUTION = 'true'
+    f = await buildProject('holds')
+    await proposeWhereItRuns(f.projectId)
+    const [req] = await requestsOf(f.projectId)
+    decisionId = req.ev.decisionId
+    version = req.ev.planVersion
+    const a = await approveRequest({ projectId: f.projectId, findingId: req.id, planVersion: req.ev.planVersion, userId: f.ownerId })
+    if (isApprovalRefusal(a)) throw new Error(a.error)
+    expect(a.state).toBe('backfilling')
+    approved = await fingerprint()
+  }, 180_000)
+  afterAll(async () => {
+    restore('ENABLE_AUTONOMY_RECONCILER', saved.reconciler)
+    restore('ENABLE_AUTONOMY_LIVE_EXECUTION', saved.live)
+    await dropProject(f)
+  }, 60_000)
+
+  it('holds the repair that stopped the change on staging, leaving the finding open and the table as approved', async () => {
+    // unprotected_user_data on orders: Backenly's own-rows policies, added twenty seconds after the approval.
+    const host = await planted('unprotected_user_data', { tableName: 'orders' })
+    const r = await autonomously(host.id)
+    expect(r.outcome).toBe('held')
+    expect(r.message).toMatch(/architecture change to orders is working on orders/)
+    expect((await prisma.healthFinding.findUniqueOrThrow({ where: { id: host.id } })).status).toBe('open')
+    expect(await fingerprint()).toBe(approved)
+  })
+
+  it('holds the repair of the new table too, and a whole self-healing pass leaves both tables as approved', async () => {
+    // orphan_table on order_refunds: the half-built table, registered before the ladder's own step.
+    const satellite = await planted('orphan_table', { tableName: 'order_refunds' })
+    expect((await autonomously(satellite.id)).outcome).toBe('held')
+    expect(await architectureHold(f.projectId, `"${f.schema}"."order_refunds"`)).toMatch(/working on order_refunds/)
+    await runReconcilerLive(f.projectId)
+    expect(await fingerprint()).toBe(approved)
+    expect((await prisma.table.findMany({ where: { projectId: f.projectId, name: 'order_refunds' } })).length).toBe(0)
+  })
+
+  it('finds the table the way the repair does, and holds a repair naming none that may act on every table', async () => {
+    expect(repairedTable('unprotected_user_data', { tableName: 'orders' })).toBe('orders')
+    expect(repairedTable('unprotected_user_data', { location: 'orders' })).toBe('orders')
+    expect(repairedTable('missing_fk_index', { table: 'orders', column: 'user_id' })).toBe('orders')
+    expect(repairedTable('missing_rls_orders', {})).toBe('orders')
+    expect(repairedTable('infra_hot_table_order_refunds', {})).toBe('order_refunds')
+    expect(repairedTable('unprotected_user_data', {})).toBeNull()
+    // FIX_REALTIME with no table installs its trigger on every table, orders included.
+    expect(await repairHold(f.projectId, { table: null, action: 'FIX_REALTIME' })).toMatch(/working on this project's tables, and this repair names none/)
+    expect(await repairHold(f.projectId, { table: null, action: 'CREATE_INDEX' })).toBeNull()
+    expect(await repairHold(f.projectId, { table: null, action: null, tablelessWaits: true })).toMatch(/names none/)
+    expect(await repairHold(f.projectId, { table: 'customers', action: 'FIX_REALTIME' })).toBeNull()
+  })
+
+  it("keeps holding while the project's changes move: a ladder holding its lock, here or elsewhere, or another of their jobs", async () => {
+    const later = new Date(Date.now() + HOLD_LAPSES_AFTER_MS + 60_000)
+    expect(await architectureHold(f.projectId, 'orders', later)).toBeNull()
+    // A ladder running in this process...
+    const gate: { release?: () => void } = {}
+    const ladder = withMaintenanceSingleFlight(f.projectId, () => new Promise<void>(resolve => { gate.release = resolve }))
+    for (let i = 0; i < 100 && !gate.release; i++) await new Promise(resolve => setTimeout(resolve, 20))
+    try {
+      expect(await architectureHold(f.projectId, 'orders', later)).toMatch(/working on orders/)
+    } finally {
+      gate.release!()
+      await ladder
+    }
+    // ...or in another, seen in pg_locks: the lock is its session's ('main', lib/autonomy/maintenance/single-flight.ts).
+    const elsewhere = new Client({ connectionString: process.env.DATABASE_URL })
+    await elsewhere.connect()
+    try {
+      await elsewhere.query('SELECT pg_advisory_lock($1::int4, $2::int4)', [0x6d61696e, projectToLockKey(f.projectId)])
+      expect(await architectureHold(f.projectId, 'orders', later)).toMatch(/working on orders/)
+    } finally {
+      await elsewhere.end()
+    }
+    expect(await architectureHold(f.projectId, 'orders', later)).toBeNull()
+    // A batch of its backfill moved since.
+    const batch = await jobAt('evolution_backfill', { planVersion: version }, new Date(later.getTime() - 60_000))
+    try {
+      expect(await architectureHold(f.projectId, 'orders', later)).toMatch(/working on orders/)
+    } finally {
+      await prisma.backgroundJob.delete({ where: { id: batch.id } })
+    }
+    // A person's look for changes, or a job of no change at work, moves nothing.
+    const look = await jobAt('evolution_assess', {}, new Date(later.getTime() - 60_000))
+    const stranger = await jobAt('evolution_backfill', { planVersion: 'not-a-change-at-work' }, new Date(later.getTime() - 60_000))
+    try {
+      expect(await architectureHold(f.projectId, 'orders', later)).toBeNull()
+    } finally {
+      await prisma.backgroundJob.deleteMany({ where: { id: { in: [look.id, stranger.id] } } })
+    }
+  })
+
+  it('holds nothing for a change that waits on a person or stopped moving, and nothing else', async () => {
+    expect(await architectureHold(f.projectId, 'orders')).toMatch(/working on orders/)
+    // A deployment that does not carry changes on by itself: the change waits for a person to resume it.
+    process.env.ENABLE_EVOLUTION_SCHEDULER = 'false'
+    try {
+      expect(await architectureHold(f.projectId, 'orders')).toBeNull()
+    } finally {
+      process.env.ENABLE_EVOLUTION_SCHEDULER = 'true'
+    }
+    process.env.ENABLE_EVOLUTION_MUTATIONS = 'false'
+    try {
+      expect(await architectureHold(f.projectId, 'orders')).toBeNull()
+    } finally {
+      process.env.ENABLE_EVOLUTION_MUTATIONS = 'true'
+    }
+    // Three hours with no transition, no job of its own and no ladder running.
+    expect(await architectureHold(f.projectId, 'orders', new Date(Date.now() + HOLD_LAPSES_AFTER_MS + 60_000))).toBeNull()
+    expect(await architectureHold(f.projectId, 'customers')).toBeNull()
+    expect(await architectureHold(f.projectId, null)).toBeNull()
+  })
+
+  it('lets the backfill finish on the table exactly as approved; then the held repair runs and does change it', async () => {
+    // The copy ran against the same table the owner approved: no "changed shape".
+    expect((await drain(f.projectId)).every(x => !x.refusal)).toBe(true)
+    expect((await advance({ projectId: f.projectId, decisionId })).state).toBe('observing')
+    expect(await architectureHold(f.projectId, 'orders')).toBeNull()
+    expect(await architectureHold(f.projectId, 'order_refunds')).toBeNull()
+    // What the hold kept off the table was real: let through, the same repair changes it.
+    const before = await fingerprint()
+    const r = await autonomously((await planted('unprotected_user_data', { tableName: 'orders' })).id)
+    expect(['auto_fixed', 'applied_unverified']).toContain(r.outcome)
+    expect(await fingerprint()).not.toBe(before)
+  })
+
+  it('lets go of an undo that stopped, whatever else the project does', async () => {
+    // An undo that crashed after claiming the change: nothing but its own undo carries it on.
+    const d = summarizeDecisions(await readMemory(f.projectId)).find(x => x.decisionId === decisionId)!
+    await remember({
+      projectId: f.projectId,
+      record: {
+        v: 1, decisionId, concernKey: d.concernKey, proposalKey: d.proposalKey, planId: d.planId, planVersion: d.planVersion,
+        primitive: d.primitive, subject: d.subject, event: 'transition', state: 'rolling_back', from: 'observing',
+      },
+      milestone: false,
+      sentence: 'Undoing the change (a crash, in this test).',
+    })
+    expect(await architectureHold(f.projectId, 'orders')).toMatch(/working on orders/)
+    const later = new Date(Date.now() + HOLD_LAPSES_AFTER_MS + 60_000)
+    expect(await architectureHold(f.projectId, 'orders', later)).toBeNull()
+    // Another change's backfill moving, or a ladder holding the project's lock, does not carry it.
+    const other = await jobAt('evolution_backfill', { planVersion: 'another-change' }, new Date(later.getTime() - 60_000))
+    const gate: { release?: () => void } = {}
+    const ladder = withMaintenanceSingleFlight(f.projectId, () => new Promise<void>(resolve => { gate.release = resolve }))
+    for (let i = 0; i < 100 && !gate.release; i++) await new Promise(resolve => setTimeout(resolve, 20))
+    try {
+      expect(await architectureHold(f.projectId, 'orders', later)).toBeNull()
+    } finally {
+      gate.release!()
+      await ladder
+      await prisma.backgroundJob.delete({ where: { id: other.id } })
+    }
+    // Its own undo moving does.
+    const undoing = await jobAt('evolution_undo', { decisionId }, new Date(later.getTime() - 60_000))
+    try {
+      expect(await architectureHold(f.projectId, 'orders', later)).toMatch(/working on orders/)
+    } finally {
+      await prisma.backgroundJob.delete({ where: { id: undoing.id } })
+    }
   })
 })
