@@ -48,6 +48,7 @@ import { keepChange, previewRecovery, recoverChange, reconcileChange } from '@/l
 import { claimRecovery } from '@/lib/changes/lifecycle'
 import { listChanges } from '@/lib/changes/history'
 import { closeChangeLockPool, readCatalogOn, withChangeLock } from '@/lib/changes/lock'
+import { openChangeContext } from '@/lib/changes/context'
 import { decideApproval } from '@/lib/mcp/approvals'
 import { installChangeLedgerGuard } from '../helpers/change-ledger-guard'
 
@@ -157,6 +158,22 @@ describe('a change that breaks production, recovered automatically', () => {
     expect(entry.outcome.state).toBe('recovered')
     expect(entry.outcome.note).toBe('Row-level security turned off on secrets')
   })
+
+  it('a change made by work a finished change left running is recovered on the lock it took', async () => {
+    await protectedTable('late_secrets')
+    // Work a finished change left running still carries that change's context
+    // (lib/changes/context.ts). The change it makes is its own, and so is the
+    // lock: its recovery re-enters it instead of waiting 30 s for itself.
+    const leftOver = { projectId, finished: true }
+    const startedAt = Date.now()
+    const { change } = await openChangeContext.run(leftOver, () => asAgent('late: turn row-level security off', async () => {
+      await ddl(`ALTER TABLE ${T('late_secrets')} DISABLE ROW LEVEL SECURITY`)
+    }))
+    expect(change!.status).toBe('recovered')
+    expect(change!.recovery).toMatchObject({ status: 'recovered', verified: true })
+    expect(await rlsOn('late_secrets')).toBe(true)
+    expect(Date.now() - startedAt).toBeLessThan(30_000)
+  }, 90_000)
 
   it('the same thing from a person in the dashboard is their decision, and stays', async () => {
     await protectedTable('open_on_purpose')
@@ -306,7 +323,7 @@ describe('declining a recovery', () => {
     expect(out.ok).toBe(true)
     const a = await prisma.agentApprovalRequest.findUniqueOrThrow({ where: { id: c.recovery!.approvalId! } })
     expect(a.status).toBe('executed')
-    expect(a.resultSummary).toMatch(/Already done from Database → Changes/)
+    expect(a.resultSummary).toMatch(/Already done from History/)
   })
 })
 

@@ -398,7 +398,7 @@ export async function applyMigrationToMain(
         recovered: false,
         hint:
           'The statements in `applied` DID take effect, and restoring the checkpoint automatically was not possible ' +
-          `(${change.recovery.explanation}) — do not replay them. A person decides from Database → Changes.`,
+          `(${change.recovery.explanation}) — do not replay them. A person decides from History.`,
       }
     }
     return { ...failure, change: recorded }

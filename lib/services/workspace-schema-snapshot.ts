@@ -313,86 +313,73 @@ async function readLiveSchema(
   const { workspaceRawClient } = await import('@/lib/data-plane/regional')
   const db = await workspaceRawClient(projectId)
 
-  // ── Get all tables in the schema ──────────────────────────────────────────
-  const tableRows = await db.$queryRawUnsafe<Array<{ table_name: string }>>(
-    `SELECT table_name FROM information_schema.tables
-     WHERE table_schema = $1 AND table_type = 'BASE TABLE'
-     ORDER BY table_name`,
-    postgresSchema,
-  )
+  // One query for each kind of object, over the whole schema, sent together.
+  // The database can be in another region than the process reading it, where
+  // each query costs round trips (two, with the statement cache off:
+  // lib/data-plane/statement-cache.ts). Read table by table, it was nine
+  // queries per table: most of a change's time on a project in another
+  // region, paid twice by a change recovered automatically, and more with
+  // every table the project had.
+  const [tableRows, colRows, primaryKeyRows, idxRows, conIdxRows, fkRows, classRows, polRows, trgRows] = await Promise.all([
+    // ── Tables ──────────────────────────────────────────────────────────────
+    db.$queryRawUnsafe<Array<{ table_name: string }>>(
+      `SELECT table_name FROM information_schema.tables
+       WHERE table_schema = $1 AND table_type = 'BASE TABLE'
+       ORDER BY table_name`,
+      postgresSchema,
+    ),
 
-  const tables: TableSnapshot[] = []
-
-  for (const { table_name } of tableRows) {
-    // ── Columns ───────────────────────────────────────────────────────────
-    const colRows = await db.$queryRawUnsafe<Array<{
+    // ── Columns ─────────────────────────────────────────────────────────────
+    db.$queryRawUnsafe<Array<{
+      table_name: string
       column_name: string
       data_type: string
       is_nullable: string
       column_default: string | null
     }>>(
-      `SELECT column_name, data_type, is_nullable, column_default
+      `SELECT table_name, column_name, data_type, is_nullable, column_default
        FROM information_schema.columns
-       WHERE table_schema = $1 AND table_name = $2
-       ORDER BY ordinal_position`,
+       WHERE table_schema = $1
+       ORDER BY table_name, ordinal_position`,
       postgresSchema,
-      table_name,
-    )
+    ),
 
-    const primaryKeyRows = await db.$queryRawUnsafe<Array<{ column_name: string }>>(
-      `SELECT kcu.column_name
+    db.$queryRawUnsafe<Array<{ table_name: string; column_name: string }>>(
+      `SELECT tc.table_name, kcu.column_name
        FROM information_schema.table_constraints tc
        JOIN information_schema.key_column_usage kcu
          ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
        WHERE tc.constraint_type = 'PRIMARY KEY'
-         AND tc.table_schema = $1 AND tc.table_name = $2`,
+         AND tc.table_schema = $1`,
       postgresSchema,
-      table_name,
-    )
-    const primaryKeys = new Set(primaryKeyRows.map(r => r.column_name))
+    ),
 
-    const columns: ColumnSnapshot[] = colRows.map(c => ({
-      name: c.column_name,
-      type: c.data_type,
-      nullable: c.is_nullable === 'YES',
-      default: c.column_default,
-      isPrimary: primaryKeys.has(c.column_name),
-    }))
-
-    // ── Indexes ───────────────────────────────────────────────────────────
-    const idxRows = await db.$queryRawUnsafe<Array<{
+    // ── Indexes ─────────────────────────────────────────────────────────────
+    db.$queryRawUnsafe<Array<{
+      tablename: string
       indexname: string
       indexdef: string
     }>>(
-      `SELECT indexname, indexdef FROM pg_indexes
-       WHERE schemaname = $1 AND tablename = $2`,
+      `SELECT tablename, indexname, indexdef FROM pg_indexes
+       WHERE schemaname = $1
+       ORDER BY tablename, indexname`,
       postgresSchema,
-      table_name,
-    )
+    ),
 
     // Indexes owned by a constraint (PK/UNIQUE) — DROP INDEX cannot touch
     // these, so a consumer of the snapshot needs to know which they are.
-    const conIdxRows = await db.$queryRawUnsafe<Array<{ relname: string }>>(
-      `SELECT ci.relname FROM pg_constraint con
+    db.$queryRawUnsafe<Array<{ table_name: string; relname: string }>>(
+      `SELECT c.relname AS table_name, ci.relname FROM pg_constraint con
        JOIN pg_class ci ON ci.oid = con.conindid
        JOIN pg_class c  ON c.oid  = con.conrelid
        JOIN pg_namespace n ON n.oid = c.relnamespace
-       WHERE n.nspname = $1 AND c.relname = $2`,
+       WHERE n.nspname = $1`,
       postgresSchema,
-      table_name,
-    )
-    const constraintBackedIdx = new Set(conIdxRows.map(r => r.relname))
+    ),
 
-    const indexes: IndexSnapshot[] = idxRows.map(r => ({
-      name: r.indexname,
-      columns: extractIndexColumns(r.indexdef),
-      unique: r.indexdef.includes('UNIQUE'),
-      definition: r.indexdef,
-      constraintBacked: constraintBackedIdx.has(r.indexname),
-    }))
-
-    // ── Foreign keys ──────────────────────────────────────────────────────
-    const fkRows = await db.$queryRawUnsafe<Array<{
+    // ── Foreign keys ────────────────────────────────────────────────────────
+    db.$queryRawUnsafe<Array<{
+      table_name: string
       constraint_name: string
       column_name: string
       foreign_table_name: string
@@ -400,6 +387,7 @@ async function readLiveSchema(
       delete_rule: string
     }>>(
       `SELECT
+         tc.table_name,
          tc.constraint_name,
          kcu.column_name,
          ccu.table_name AS foreign_table_name,
@@ -413,45 +401,26 @@ async function readLiveSchema(
        LEFT JOIN information_schema.referential_constraints rc
          ON rc.constraint_name = tc.constraint_name AND rc.constraint_schema = tc.table_schema
        WHERE tc.constraint_type = 'FOREIGN KEY'
-         AND tc.table_schema = $1 AND tc.table_name = $2`,
+         AND tc.table_schema = $1
+       ORDER BY tc.table_name, tc.constraint_name, kcu.ordinal_position, ccu.column_name`,
       postgresSchema,
-      table_name,
-    )
+    ),
 
-    const foreignKeys: ForeignKeySnapshot[] = fkRows.map(r => ({
-      constraintName: r.constraint_name,
-      column: r.column_name,
-      referencedTable: r.foreign_table_name,
-      referencedColumn: r.foreign_column_name,
-      onDelete: r.delete_rule ?? 'NO ACTION',
-    }))
-
-    // ── Row estimate ──────────────────────────────────────────────────────
-    const countRows = await db.$queryRawUnsafe<Array<{ reltuples: bigint | number }>>(
-      `SELECT reltuples::bigint AS reltuples FROM pg_class c
+    // ── Row estimate and RLS state ──────────────────────────────────────────
+    // relkind r and p are what information_schema.tables calls BASE TABLE.
+    db.$queryRawUnsafe<Array<{ table_name: string; reltuples: bigint | number; relrowsecurity: boolean }>>(
+      `SELECT c.relname AS table_name, c.reltuples::bigint AS reltuples, c.relrowsecurity
+       FROM pg_class c
        JOIN pg_namespace n ON n.oid = c.relnamespace
-       WHERE n.nspname = $1 AND c.relname = $2`,
+       WHERE n.nspname = $1 AND c.relkind IN ('r', 'p')`,
       postgresSchema,
-      table_name,
-    )
-    // reltuples::bigint comes back as a JS BigInt — Math.max(0, bigint) throws
-    // "Cannot convert a BigInt value to a number", which failed the whole
-    // pre-fix snapshot. Coerce to Number first.
-    const rowEstimate = Math.max(0, Number(countRows[0]?.reltuples ?? 0))
+    ),
 
-    // ── RLS state + policies ──────────────────────────────────────────────
+    // ── Policies ────────────────────────────────────────────────────────────
     // These are the objects SET_PERMISSION creates. Without capturing them,
     // one-click undo of an RLS fix is structurally impossible.
-    const rlsRows = await db.$queryRawUnsafe<Array<{ relrowsecurity: boolean }>>(
-      `SELECT c.relrowsecurity FROM pg_class c
-       JOIN pg_namespace n ON n.oid = c.relnamespace
-       WHERE n.nspname = $1 AND c.relname = $2`,
-      postgresSchema,
-      table_name,
-    )
-    const rlsEnabled = rlsRows[0]?.relrowsecurity === true
-
-    const polRows = await db.$queryRawUnsafe<Array<{
+    db.$queryRawUnsafe<Array<{
+      tablename: string
       policyname: string
       permissive: string
       roles: string[] | string
@@ -459,12 +428,71 @@ async function readLiveSchema(
       qual: string | null
       with_check: string | null
     }>>(
-      `SELECT policyname, permissive, roles, cmd, qual, with_check
-       FROM pg_policies WHERE schemaname = $1 AND tablename = $2`,
+      `SELECT tablename, policyname, permissive, roles, cmd, qual, with_check
+       FROM pg_policies WHERE schemaname = $1
+       ORDER BY tablename, policyname`,
       postgresSchema,
-      table_name,
-    )
-    const policies: PolicySnapshot[] = polRows.map(p => ({
+    ),
+
+    // ── User triggers (NOT tgisinternal — excludes FK/PK machinery) ─────────
+    // These are the objects FIX_REALTIME creates (NOTIFY triggers).
+    db.$queryRawUnsafe<Array<{ table_name: string; tgname: string; def: string }>>(
+      `SELECT c.relname AS table_name, t.tgname, pg_get_triggerdef(t.oid) AS def
+       FROM pg_trigger t
+       JOIN pg_class c ON c.oid = t.tgrelid
+       JOIN pg_namespace n ON n.oid = c.relnamespace
+       WHERE n.nspname = $1 AND NOT t.tgisinternal
+       ORDER BY c.relname, t.tgname`,
+      postgresSchema,
+    ),
+  ])
+
+  const columnsOf = groupByTable(colRows, (r) => r.table_name)
+  const primaryKeysOf = groupByTable(primaryKeyRows, (r) => r.table_name)
+  const indexesOf = groupByTable(idxRows, (r) => r.tablename)
+  const constraintIndexesOf = groupByTable(conIdxRows, (r) => r.table_name)
+  const foreignKeysOf = groupByTable(fkRows, (r) => r.table_name)
+  const classOf = new Map(classRows.map((r) => [r.table_name, r]))
+  const policiesOf = groupByTable(polRows, (r) => r.tablename)
+  const triggersOf = groupByTable(trgRows, (r) => r.table_name)
+
+  return tableRows.map(({ table_name }): TableSnapshot => {
+    const primaryKeys = new Set((primaryKeysOf.get(table_name) ?? []).map(r => r.column_name))
+
+    const columns: ColumnSnapshot[] = (columnsOf.get(table_name) ?? []).map(c => ({
+      name: c.column_name,
+      type: c.data_type,
+      nullable: c.is_nullable === 'YES',
+      default: c.column_default,
+      isPrimary: primaryKeys.has(c.column_name),
+    }))
+
+    const constraintBackedIdx = new Set((constraintIndexesOf.get(table_name) ?? []).map(r => r.relname))
+
+    const indexes: IndexSnapshot[] = (indexesOf.get(table_name) ?? []).map(r => ({
+      name: r.indexname,
+      columns: extractIndexColumns(r.indexdef),
+      unique: r.indexdef.includes('UNIQUE'),
+      definition: r.indexdef,
+      constraintBacked: constraintBackedIdx.has(r.indexname),
+    }))
+
+    const foreignKeys: ForeignKeySnapshot[] = (foreignKeysOf.get(table_name) ?? []).map(r => ({
+      constraintName: r.constraint_name,
+      column: r.column_name,
+      referencedTable: r.foreign_table_name,
+      referencedColumn: r.foreign_column_name,
+      onDelete: r.delete_rule ?? 'NO ACTION',
+    }))
+
+    const cls = classOf.get(table_name)
+    // reltuples::bigint comes back as a JS BigInt — Math.max(0, bigint) throws
+    // "Cannot convert a BigInt value to a number", which failed the whole
+    // pre-fix snapshot. Coerce to Number first.
+    const rowEstimate = Math.max(0, Number(cls?.reltuples ?? 0))
+    const rlsEnabled = cls?.relrowsecurity === true
+
+    const policies: PolicySnapshot[] = (policiesOf.get(table_name) ?? []).map(p => ({
       name: p.policyname,
       cmd: p.cmd ?? 'ALL',
       permissive: String(p.permissive).toUpperCase() !== 'RESTRICTIVE',
@@ -477,23 +505,22 @@ async function readLiveSchema(
       withCheck: p.with_check,
     }))
 
-    // ── User triggers (NOT tgisinternal — excludes FK/PK machinery) ───────
-    // These are the objects FIX_REALTIME creates (NOTIFY triggers).
-    const trgRows = await db.$queryRawUnsafe<Array<{ tgname: string; def: string }>>(
-      `SELECT t.tgname, pg_get_triggerdef(t.oid) AS def
-       FROM pg_trigger t
-       JOIN pg_class c ON c.oid = t.tgrelid
-       JOIN pg_namespace n ON n.oid = c.relnamespace
-       WHERE n.nspname = $1 AND c.relname = $2 AND NOT t.tgisinternal`,
-      postgresSchema,
-      table_name,
-    )
-    const triggers: TriggerSnapshot[] = trgRows.map(t => ({ name: t.tgname, definition: t.def }))
+    const triggers: TriggerSnapshot[] = (triggersOf.get(table_name) ?? []).map(t => ({ name: t.tgname, definition: t.def }))
 
-    tables.push({ name: table_name, columns, indexes, foreignKeys, rowEstimate, rlsEnabled, policies, triggers })
+    return { name: table_name, columns, indexes, foreignKeys, rowEstimate, rlsEnabled, policies, triggers }
+  })
+}
+
+/** Rows grouped by the table they belong to, in the order they were read. */
+function groupByTable<R>(rows: R[], tableOf: (row: R) => string): Map<string, R[]> {
+  const grouped = new Map<string, R[]>()
+  for (const row of rows) {
+    const table = tableOf(row)
+    const list = grouped.get(table)
+    if (list) list.push(row)
+    else grouped.set(table, [row])
   }
-
-  return tables
+  return grouped
 }
 
 // ── DDL generator ─────────────────────────────────────────────────────────────

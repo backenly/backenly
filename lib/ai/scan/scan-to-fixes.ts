@@ -194,6 +194,8 @@ export async function harvestScanFixes(projectId: string): Promise<ScanFixHarves
           params: { tableName: name },
           reason: `API build step "${name}" failed — re-generating the endpoint.`,
           sourceCheckId: `scan:ledger_failed:${name}`,
+          // FIX_API runs outside the change ledger (lib/core/fix-actions.ts).
+          requiresApproval: true,
         })
       } else if (type.includes('storage')) {
         candidates.push({

@@ -38,6 +38,7 @@ import { prisma } from '@/lib/db/prisma'
 import { createProvisionedProject } from '@/lib/projects/provision'
 import { withChangeAttribution, withGovernedChange } from '@/lib/changes/ledger'
 import { archiveTable } from '@/lib/changes/preserve'
+import { reloadServedSchema } from '@/lib/changes/freshness'
 import { recoverChange, reconcileChange } from '@/lib/changes/recovery'
 import { claimRecovery } from '@/lib/changes/lifecycle'
 import { closeChangeLockPool } from '@/lib/changes/lock'
@@ -133,6 +134,18 @@ describe('the REST API', () => {
     expect(back.ok).toBe(true)
     expect(await reloadsAsked(beforeRestore)).toBeGreaterThan(0)
   }, 120_000)
+
+  it('is asked by the refresh itself, with no DDL for the database to notice', async () => {
+    // pg_notify returns void, which reading it back as a query cannot decode:
+    // the request failed on every change, and only the region's DDL trigger,
+    // which does not fire for a table moved into a vault, was ever heard.
+    const failures = jest.spyOn(console, 'error')
+    const before = notices.length
+    await reloadServedSchema(projectId)
+    expect(await reloadsAsked(before)).toBe(1)
+    expect(failures.mock.calls.filter((c) => String(c[0]).includes('[ChangeFreshness]'))).toEqual([])
+    failures.mockRestore()
+  })
 })
 
 describe('the reconciler\'s baseline', () => {

@@ -568,8 +568,10 @@ export async function executeGenerateFunction(
     const existing = existingFn
     const functionId = existing ? existing.id : crypto.randomUUID()
     const rowError = await rowLastError(projectId, functionId, storedError, 'SMOKE_TEST_FAILED: ')
-    const fn = existing
-      ? await prisma.aiFunction.update({
+    // Only the save is a governed change: the model and the smoke test ran before it.
+    const { governedChange } = await import('@/lib/changes/ledger')
+    const fn = await governedChange(projectId, `${existing ? 'Regenerate' : 'Create'} function ${existing?.name ?? functionName}`, () => existing
+      ? prisma.aiFunction.update({
           where: { id: existing.id },
           data: {
             description,
@@ -580,7 +582,7 @@ export async function executeGenerateFunction(
             lastError: rowError,
           },
         })
-      : await prisma.aiFunction.create({
+      : prisma.aiFunction.create({
           data: {
             id: functionId,
             projectId,
@@ -592,7 +594,7 @@ export async function executeGenerateFunction(
             status: storedStatus,
             lastError: rowError,
           },
-        })
+        }))
 
     // The creation checks are runs of this function: record them where its
     // other runs are, so nothing it did at creation is invisible.

@@ -36,3 +36,8 @@ export function withChangeAttribution<T>(attr: ChangeAttribution, fn: () => T): 
 export function currentAttribution(): ChangeAttribution | undefined {
   return store.getStore()
 }
+
+/** Run `fn` with no one attributed (./context.ts, outsideAnyChange). */
+export function outsideAttribution<T>(fn: () => T): T {
+  return store.exit(fn)
+}

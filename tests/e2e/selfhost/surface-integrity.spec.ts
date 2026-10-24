@@ -53,6 +53,7 @@ const NAV = [
   { id: 'integrations', path: '/integrations' },
   { id: 'autonomy', path: '/autonomy' },
   { id: 'monitoring', path: '/monitoring' },
+  { id: 'history', path: '/changes' },
   { id: 'deploy', path: '/deploy' },
   { id: 'connect', path: '/connect' },
   { id: 'webhooks', path: '/webhooks' },
@@ -159,8 +160,8 @@ test.describe('empty states are honest, not fabricated', () => {
   })
 
   test('the change history shows real changes or states that there are none', async ({ page }) => {
-    await page.goto(`/app/projects/${projectId()}/database`)
-    await page.getByRole('tab', { name: 'Changes', exact: true }).click()
+    // One history for the whole backend, in its own section (no longer a Database tab).
+    await page.goto(`/app/projects/${projectId()}/changes`)
 
     // A row per recorded change, or the empty state: never sample rows.
     const changes = page.getByRole('button', { name: /^Change #\d+:/ })

@@ -21,6 +21,7 @@ import { AlertTriangle, ArrowRight, Check, GitBranch, Plus, RefreshCw, Trash2, X
 import { BranchPreviewCard, type BranchPreview } from './BranchPreviewCard'
 import {
   EmptyState,
+  GhostPreview,
   IconButton,
   KitButton,
   KitCard,
@@ -29,13 +30,18 @@ import {
   KitConfirmDialog,
   KitField,
   KitInput,
+  KitModal,
   KitNote,
+  KitSwitch,
   OverflowMenu,
+  PageHeader,
   SectionLabel,
-  SettingsCard,
   Skeleton,
   Tag,
 } from '@/components/inspector/kit'
+
+/** Active preview branches a project may hold at once (lib/branches). */
+const BRANCH_LIMIT = 5
 
 interface Branch {
   id: string
@@ -80,6 +86,7 @@ export function BranchesPanel({ projectId }: { projectId: string }) {
   const [branches, setBranches] = useState<Branch[]>([])
   const [loading, setLoading] = useState(true)
   const [creating, setCreating] = useState(false)
+  const [showNew, setShowNew] = useState(false)
   const [newName, setNewName] = useState('')
   const [includeData, setIncludeData] = useState(false)
   const [busy, setBusy] = useState<string | null>(null)
@@ -149,6 +156,7 @@ export function BranchesPanel({ projectId }: { projectId: string }) {
       if (!res.ok || !j.success) { setError(j.error || 'Could not create branch.'); return }
       setNewName('')
       setIncludeData(false)
+      setShowNew(false)
       await load()
     } catch {
       setError('Network error creating branch.')
@@ -214,73 +222,70 @@ export function BranchesPanel({ projectId }: { projectId: string }) {
 
   const active = branches.filter((b) => b.status === 'active')
   const merged = branches.filter((b) => b.status === 'merged')
-  const atLimit = active.length >= 5
+  const atLimit = active.length >= BRANCH_LIMIT
   const previewing = active.find((b) => b.id === openPreview && b.preview)
 
-  return (
-    <div className="space-y-4">
-      {protectedProduction !== null && (
-        <label className="flex cursor-pointer items-start gap-3 rounded-[10px] border border-white/[0.07] bg-white/[0.02] px-4 py-3.5">
-          <input
-            type="checkbox"
-            checked={protectedProduction}
-            onChange={(e) => saveProtection(e.target.checked)}
-            disabled={savingProtection}
-            className="mt-[3px] h-4 w-4 flex-shrink-0 accent-violet-400"
-          />
-          <span className="min-w-0">
-            <span className="block text-[13px] font-medium text-zinc-100">Protected production</span>
-            <span className="mt-0.5 block text-[12.5px] leading-[18px] text-zinc-500">
-              {protectedProduction
-                ? 'Coding agents change the schema on a preview branch, and production gets it only through a merge you approve. Your own changes in the dashboard are not affected.'
-                : 'Off: coding agents can change production\'s schema directly. Turn on to require a branch and your approval for every agent schema change.'}
-            </span>
-          </span>
-        </label>
-      )}
+  const openNew = () => {
+    setError(null)
+    setShowNew(true)
+  }
 
-      <SettingsCard
-        title="New preview branch"
-        description="A copy of this project's schema in its own isolated space, with the same row security and its own id sequences. It starts empty. Your agent changes its schema with apply_migration and its branchId, and tests against its preview endpoint while production keeps serving. Merging replays those changes onto production."
-        onSubmit={create}
-        footer={<span className="tabular-nums">{active.length} of 5 branches active</span>}
+  // The page header lives here, not in the route file, because its action
+  // opens this panel's dialog. Creating a branch used to be a form that sat
+  // open above the list on every visit, a paragraph of mechanics and all.
+  return (
+    <div>
+      <PageHeader
+        className="!px-0"
+        title="Branches"
+        meta={
+          <>
+            <Tag tone="violet">Beta</Tag>
+            {!loading && (
+              <span className="text-[13px] tabular-nums text-faint">
+                {active.length} of {BRANCH_LIMIT} active
+              </span>
+            )}
+          </>
+        }
+        description="An isolated copy of your schema for your agent to build against. Merging replays the branch’s changes onto production after you approve them."
         actions={
-          <KitButton type="submit" variant="primary" icon={Plus} loading={creating} disabled={!newName.trim() || atLimit}>
-            {creating ? 'Cloning…' : 'Create branch'}
+          <KitButton
+            variant="primary"
+            icon={Plus}
+            onClick={openNew}
+            disabled={atLimit}
+            title={atLimit ? `${BRANCH_LIMIT} branches are active. Merge or discard one first.` : undefined}
+          >
+            New branch
           </KitButton>
         }
-      >
-        <div className="max-w-[360px]">
-          <KitField label="Branch name" hint="Lowercase letters, numbers and dashes.">
-            <KitInput
-              placeholder="add-payments"
-              value={newName}
-              onChange={(e) => setNewName(e.target.value)}
-              disabled={creating}
-              className="font-mono"
-              aria-label="Branch name"
-            />
-          </KitField>
-        </div>
-        <label className="mt-4 flex max-w-[560px] cursor-pointer items-start gap-3 rounded-[8px] border border-white/[0.07] bg-white/[0.02] px-3.5 py-3">
-          <input
-            type="checkbox"
-            checked={includeData}
-            onChange={(e) => setIncludeData(e.target.checked)}
-            disabled={creating}
-            className="mt-[3px] h-4 w-4 flex-shrink-0 accent-violet-400"
-          />
-          <span className="min-w-0">
-            <span className="block text-[13px] font-medium text-zinc-100">Copy production rows</span>
-            <span className="mt-0.5 block text-[12.5px] leading-[18px] text-zinc-500">
-              Off by default. Turn on only to reproduce a problem that depends on real data: the copy includes your
-              end users&apos; records, and anyone holding a key for this branch can read them.
-            </span>
-          </span>
-        </label>
-      </SettingsCard>
+      />
 
-      {error && (
+      <div className="space-y-4">
+      {protectedProduction !== null && (
+        <KitCard className="flex items-start justify-between gap-6 px-4 py-3.5 sm:px-5">
+          <div className="min-w-0">
+            <p id="protected-production" className="text-[13px] font-medium leading-[20px] text-zinc-100">
+              Protected production
+            </p>
+            <p className="mt-0.5 max-w-[72ch] text-[12.5px] leading-[18px] text-faint [text-wrap:pretty]">
+              {protectedProduction
+                ? 'Agents change the schema on a preview branch, and production gets it only through a merge you approve. Your own changes in the dashboard are not affected.'
+                : 'Agents can change production\'s schema directly. Turn on to require a branch and your approval for every agent schema change.'}
+            </p>
+          </div>
+          <KitSwitch
+            checked={protectedProduction}
+            onChange={saveProtection}
+            disabled={savingProtection}
+            label="Protected production"
+            className="mt-0.5"
+          />
+        </KitCard>
+      )}
+
+      {error && !showNew && (
         <KitNote tone="danger" icon={AlertTriangle}>
           {error}
         </KitNote>
@@ -337,7 +342,7 @@ export function BranchesPanel({ projectId }: { projectId: string }) {
           />
           <KitCardBody>
             {openDiff.diff.identical ? (
-              <p className="text-[13px] text-zinc-500">No schema changes on this branch.</p>
+              <p className="text-[13px] text-faint">No schema changes on this branch.</p>
             ) : (
               <div className="space-y-4">
                 {openDiff.diff.addedTables.length > 0 && (
@@ -412,13 +417,14 @@ export function BranchesPanel({ projectId }: { projectId: string }) {
         </KitCard>
       )}
 
-      {/* List */}
-      <KitCard className="overflow-hidden">
+      {/* List. Not overflow-hidden: a row's "…" menu opens below it and was
+          cut off by the card's edge on the last row. */}
+      <KitCard>
         <KitCardHeader
           title={
             <span className="flex items-baseline gap-2">
               Active branches
-              {!loading && <span className="text-[12px] font-normal tabular-nums text-zinc-500">{active.length}</span>}
+              {!loading && <span className="text-[12px] font-normal tabular-nums text-faint">{active.length}</span>}
             </span>
           }
           actions={<IconButton icon={RefreshCw} label="Refresh branches" onClick={load} />}
@@ -431,8 +437,14 @@ export function BranchesPanel({ projectId }: { projectId: string }) {
         ) : active.length === 0 ? (
           <EmptyState
             icon={GitBranch}
+            preview={<GhostPreview kind="list" />}
             title="No preview branches"
-            description="Create one to test against an isolated copy of your schema, then merge to replay its schema changes onto production."
+            description="Create one to test a schema change on an isolated copy, then merge it into production when it works."
+            action={
+              <KitButton icon={Plus} onClick={openNew}>
+                New branch
+              </KitButton>
+            }
           />
         ) : (
           <ul className="divide-y divide-white/[0.06]">
@@ -441,7 +453,7 @@ export function BranchesPanel({ projectId }: { projectId: string }) {
                 <GitBranch className="h-4 w-4 flex-shrink-0 text-zinc-500" strokeWidth={1.75} />
                 <div className="min-w-0 flex-1">
                   <p className="truncate font-mono text-[13px] text-zinc-100">{b.name}</p>
-                  <p className="text-[12px] text-zinc-500">Created {timeAgo(b.createdAt)}</p>
+                  <p className="text-[12px] text-faint">Created {timeAgo(b.createdAt)}</p>
                 </div>
                 <div className="flex flex-shrink-0 items-center gap-1.5">
                   {b.preview && (
@@ -477,7 +489,7 @@ export function BranchesPanel({ projectId }: { projectId: string }) {
             title={
               <span className="flex items-baseline gap-2">
                 Merged
-                <span className="text-[12px] font-normal tabular-nums text-zinc-500">{merged.length}</span>
+                <span className="text-[12px] font-normal tabular-nums text-faint">{merged.length}</span>
               </span>
             }
           />
@@ -486,7 +498,7 @@ export function BranchesPanel({ projectId }: { projectId: string }) {
               <li key={b.id} className="flex items-center gap-3 px-4 py-2.5">
                 <GitBranch className="h-4 w-4 flex-shrink-0 text-zinc-600" strokeWidth={1.75} />
                 <p className="min-w-0 flex-1 truncate font-mono text-[13px] text-zinc-400">{b.name}</p>
-                <span className="text-[12px] text-zinc-500">
+                <span className="text-[12px] text-faint">
                   Merged {b.mergedAt ? timeAgo(b.mergedAt) : ''}
                 </span>
               </li>
@@ -494,6 +506,76 @@ export function BranchesPanel({ projectId }: { projectId: string }) {
           </ul>
         </KitCard>
       )}
+
+      </div>
+
+      <KitModal
+        open={showNew}
+        onClose={() => {
+          if (!creating) setShowNew(false)
+        }}
+        title="New preview branch"
+        description="A copy of this project's schema with the same row security and its own id sequences. Production keeps serving while your agent builds against it."
+        footer={
+          <>
+            <KitButton variant="ghost" onClick={() => setShowNew(false)} disabled={creating}>
+              Cancel
+            </KitButton>
+            <KitButton
+              variant="primary"
+              icon={Plus}
+              loading={creating}
+              disabled={!newName.trim() || atLimit}
+              onClick={create}
+            >
+              {creating ? 'Cloning…' : 'Create branch'}
+            </KitButton>
+          </>
+        }
+      >
+        <form
+          onSubmit={(e) => {
+            e.preventDefault()
+            create()
+          }}
+          className="space-y-4"
+        >
+          <KitField label="Branch name" hint="Lowercase letters, numbers and dashes.">
+            <KitInput
+              placeholder="add-payments"
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              disabled={creating}
+              className="font-mono"
+              aria-label="Branch name"
+              name="branch-name"
+              autoComplete="off"
+              spellCheck={false}
+            />
+          </KitField>
+          <label className="flex cursor-pointer items-start gap-3 rounded-[8px] border border-white/[0.07] bg-white/[0.02] px-3.5 py-3">
+            <input
+              type="checkbox"
+              checked={includeData}
+              onChange={(e) => setIncludeData(e.target.checked)}
+              disabled={creating}
+              className="mt-[3px] h-4 w-4 flex-shrink-0 accent-violet-400"
+            />
+            <span className="min-w-0">
+              <span className="block text-[13px] font-medium text-zinc-100">Copy production rows</span>
+              <span className="mt-0.5 block text-[12.5px] leading-[18px] text-faint">
+                Only to reproduce a problem that depends on real data: the copy includes your end users&apos; records,
+                and anyone holding a key for this branch can read them.
+              </span>
+            </span>
+          </label>
+          {error && (
+            <KitNote tone="danger" icon={AlertTriangle}>
+              {error}
+            </KitNote>
+          )}
+        </form>
+      </KitModal>
 
       <KitConfirmDialog
         open={!!confirmDiscard}

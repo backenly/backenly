@@ -629,7 +629,9 @@ export async function createTrigger(
     assertAllowedUrl(params.webhookUrl, 'webhook')
   }
 
-  const trigger = await prisma.appTrigger.create({
+  // One governed change, in the project's history (lib/changes/resources/webhooks.ts).
+  const { governedChange } = await import('@/lib/changes/ledger')
+  const trigger = await governedChange(projectId, `Create trigger ${params.name}`, () => prisma.appTrigger.create({
     data: {
       projectId,
       name: params.name,
@@ -643,7 +645,7 @@ export async function createTrigger(
       staticFields: params.staticFields || undefined,
       webhookUrl: params.webhookUrl,
     },
-  })
+  }))
 
   console.log(`[Triggers] Created trigger "${trigger.name}" (${trigger.id})`)
 
@@ -683,9 +685,10 @@ export async function deleteTrigger(projectId: string, triggerId: string): Promi
   if (typeof triggerId !== 'string' || !triggerId) {
     throw new Error('deleteTrigger needs the id of the trigger to delete')
   }
-  const { count } = await prisma.appTrigger.deleteMany({
+  const { governedChange } = await import('@/lib/changes/ledger')
+  const { count } = await governedChange(projectId, 'Delete a trigger', () => prisma.appTrigger.deleteMany({
     where: { id: triggerId, projectId },
-  })
+  }))
   return count > 0
 }
 

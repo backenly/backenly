@@ -19,7 +19,7 @@ export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
 import { withProjectAccess } from '@/lib/auth/route-protection'
-import { canWriteProject } from '@/lib/edition/guard'
+import { canAdministerProject, canWriteProject } from '@/lib/edition/guard'
 import { prisma } from '@/lib/db/prisma'
 import { executeApprovedFix, revertAutoFix } from '@/lib/core/auto-fix-engine'
 import { quotedError, quotesKeptHere, recordedResultMessage, recordedStatements } from '@/lib/data-plane/residency'
@@ -280,6 +280,16 @@ export const DELETE = withProjectAccess(async (req: NextRequest, { user, project
     return NextResponse.json(
       { success: false, error: 'Finding not found or not in auto_fixed state' },
       { status: 404 },
+    )
+  }
+
+  // Undoing a fix that changed the schema restores the state before its
+  // governed changes, which takes admin rights, as Restore previous state does.
+  const schemaTouching = ((finding.details ?? {}) as { rollbackData?: { schemaTouching?: boolean } }).rollbackData?.schemaTouching === true
+  if (schemaTouching && !(await canAdministerProject(user.userId, projectId))) {
+    return NextResponse.json(
+      { success: false, error: 'Only a project admin can undo a fix that changed the schema: it restores the state before that change.', code: 'PROJECT_ROLE_INSUFFICIENT' },
+      { status: 403 },
     )
   }
 

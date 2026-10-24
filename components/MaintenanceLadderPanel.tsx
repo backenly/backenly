@@ -184,15 +184,15 @@ export function MaintenanceLadderPanel({ projectId }: { projectId: string }) {
           <h3 className="text-[13px] font-semibold tracking-tight text-zinc-100">
             Structural maintenance
           </h3>
-          <span className="text-[12px] tabular-nums text-zinc-600">{ladder.table}</span>
+          <span className="text-[12px] tabular-nums text-faint">{ladder.table}</span>
         </div>
-        <span className="text-[12px] tabular-nums text-zinc-600">
+        <span className="text-[12px] tabular-nums text-faint">
           {ladder.planId}@{ladder.planVersion}
         </span>
       </div>
 
       <div className="border-b border-white/[0.06] px-5 py-2.5">
-        <p className="text-[12.5px] leading-relaxed text-zinc-500">
+        <p className="text-[12.5px] leading-relaxed text-faint">
           Backenly found a repeating structural problem in <span className="text-zinc-300">{ladder.table}</span>{' '}
           ({hypothesisLabel(ladder.diagnosis)}) and prepared a migration for it. It will not run
           until you approve it, and your approval covers this exact version only.
@@ -212,15 +212,15 @@ export function MaintenanceLadderPanel({ projectId }: { projectId: string }) {
         {ladder.needsBinding.map(r => (
           <li key={r.ordinal} className="flex items-center justify-between px-5 py-2">
             <div className="flex items-center gap-2.5">
-              <span className="text-[12px] tabular-nums text-zinc-600">{r.ordinal}</span>
+              <span className="text-[12px] tabular-nums text-faint">{r.ordinal}</span>
               <span className="text-[12px] text-zinc-200">{r.kind.replace(/_/g, ' ')}</span>
             </div>
             <div className="flex items-center gap-3">
-              <span className="text-[12px] text-zinc-500">
+              <span className="text-[12px] text-faint">
                 tier {r.tier} · {TIER_COPY[r.tier] ?? ''}
               </span>
               <span
-                className={`font-mono text-[12px] ${r.rollback && r.rollback !== 'none_required' ? 'text-emerald-400/70' : 'text-zinc-600'}`}
+                className={`font-mono text-[12px] ${r.rollback && r.rollback !== 'none_required' ? 'text-emerald-400/70' : 'text-faint'}`}
               >
                 {r.rollback === 'none_required'
                   ? 'read-only'
@@ -236,7 +236,7 @@ export function MaintenanceLadderPanel({ projectId }: { projectId: string }) {
       {ladder.humanOnly.length > 0 && (
         <div className="flex items-start gap-2 border-t border-white/[0.06] px-5 py-2.5">
           <ShieldAlert className="mt-0.5 size-3.5 shrink-0 text-zinc-500" />
-          <p className="text-[12.5px] leading-relaxed text-zinc-500">
+          <p className="text-[12.5px] leading-relaxed text-faint">
             {ladder.humanOnly.map(h => h.kind.replace(/_/g, ' ')).join(', ')} is irreversible and is
             never run automatically, at any autonomy mode. The ladder stops before it and waits for
             you to do it yourself.
@@ -264,7 +264,7 @@ export function MaintenanceLadderPanel({ projectId }: { projectId: string }) {
               approval does not carry over.
             </p>
           )}
-          <p className="mb-3 text-[12.5px] leading-relaxed text-zinc-500">
+          <p className="mb-3 text-[12.5px] leading-relaxed text-faint">
             Name the columns. Backenly deliberately does not guess these: approving
             &ldquo;consolidate the lifecycle column&rdquo; without saying which column is not an
             approval anybody could give.
@@ -288,7 +288,7 @@ export function MaintenanceLadderPanel({ projectId }: { projectId: string }) {
               {busy && <Loader2 className="size-3.5 animate-spin" />}
               Approve this migration
             </KitButton>
-            <span className="text-[12px] text-zinc-600">
+            <span className="text-[12px] text-faint">
               Covers tier 2 and below, on version {ladder.planVersion} only.
             </span>
           </div>
@@ -311,12 +311,12 @@ function Field({
 }) {
   return (
     <label className="block">
-      <span className="mb-1 block text-[12px] text-zinc-600">{label}</span>
+      <span className="mb-1 block text-[12px] text-faint">{label}</span>
       <input
         value={value}
         onChange={e => onChange(e.target.value)}
         placeholder={placeholder}
-        className={`w-full rounded-md border border-white/[0.08] ${KIT.well} px-2.5 py-1.5 font-mono text-[12px] text-zinc-200 placeholder:text-zinc-600 focus:border-violet-400/40 focus:outline-none`}
+        className={`w-full rounded-md border border-white/[0.08] ${KIT.well} px-2.5 py-1.5 font-mono text-[12px] text-zinc-200 placeholder:text-zinc-500 focus:border-violet-400/40 focus:outline-none`}
       />
     </label>
   )

@@ -470,7 +470,7 @@ describe('schema history and governed changes are recorded and restored in the p
     process.env[REGION_VARIABLE] = regionalUrl
     const result = await rollbackToVersion(regionalProject, versionId)
     expect(result).toMatchObject({ success: false, statementsExecuted: [] })
-    expect(result.message).toMatch(/Database → Changes/)
+    expect(result.message).toMatch(/goes back from History/)
   })
 })
 

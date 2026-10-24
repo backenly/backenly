@@ -2,7 +2,7 @@
  * THE UNDO ROUTES THAT WORKED OUTSIDE THE CHANGE LEDGER ARE RETIRED
  * ================================================================
  * Restoring is one thing now: the state before a governed change, from
- * Database → Changes (lib/changes/recovery.ts). Each route that undid changes
+ * History (lib/changes/recovery.ts). Each route that undid changes
  * some other way answers 410 with where restoring lives, changes nothing, and
  * still answers only someone who administers the project:
  *
@@ -123,7 +123,7 @@ describe('each retired undo route', () => {
     expect(res.status).toBe(410)
     const body = await res.json()
     expect(body).toMatchObject({ success: false, code: 'MOVED' })
-    expect(body.error).toMatch(/Database → Changes/)
+    expect(body.error).toMatch(/Open History/)
     expect(body.error).toMatch(/Nothing was changed\./)
     expect(await projectState()).toEqual(before)
   })

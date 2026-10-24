@@ -111,7 +111,7 @@ READ-BEFORE-WRITE (mandatory for destructive + identity-resolution tools):
 - Before delete_trigger / delete_ai_function / delete_cron_job / revoke_api_key, call the matching list tool first to confirm the id and what you'd be deleting.
 - Before block_end_user / reset_end_user_password, call list_end_users to resolve the right user.
 - Before set_autonomy_level, call get_autonomy_status so you know what's changing.
-- Before rollback_deploy, call get_deploy_status so you know what version you'd be reverting to.
+- Before rollback_deploy, call list_deploy_versions so you name the version to restore the backend to; approving it undoes every change made since that version was published.
 - Before trigger_deploy (chat path), call get_readiness so you can tell the user the score and any blockers in the same turn.
 - A queued trigger_deploy has not deployed anything. Say "your backend is live" only after it was approved and ran, and get_deploy_status shows status='live'.
 - Before delete_env_var, call list_env_vars to confirm the key exists.

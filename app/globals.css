@@ -49,6 +49,66 @@
   animation: heroFrameEnter 1450ms cubic-bezier(0.16, 1, 0.3, 1) 720ms forwards;
 }
 
+/* The landing hero's entrance (components/landing-v7/HeroV7.tsx): the
+   headline, subline and buttons rise out of a blur, then the showcase rises
+   without one, since a filter left on an ancestor costs every frame of the
+   console inside it. These are the curves and distances the hero's framer
+   variants used. As variants the hero was rendered at opacity 0 until React
+   hydrated; as CSS it starts with the first paint. Each element sets
+   --enter-delay for the stagger (a variable, because the shorthand here
+   would reset a separate animation-delay class), and `both` holds the start
+   state through it. */
+@keyframes landingRise {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+    filter: blur(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+    filter: none;
+  }
+}
+
+@keyframes landingFilmRise {
+  from {
+    opacity: 0;
+    transform: translateY(28px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.landing-rise {
+  animation: landingRise 950ms cubic-bezier(0.16, 1, 0.3, 1) var(--enter-delay, 0ms) both;
+}
+
+.landing-film-rise {
+  animation: landingFilmRise 1200ms cubic-bezier(0.16, 1, 0.3, 1) var(--enter-delay, 0ms) both;
+}
+
+/* The marketing navbar's entrance (components/site/SiteShell.tsx), in CSS for
+   the same reason: as framer props the bar stayed at opacity 0 until
+   hydration on every marketing page. The bar drops 18px; its link group and
+   buttons set --nav-drop to -8px and their own --enter-delay. */
+@keyframes navDrop {
+  from {
+    opacity: 0;
+    transform: translateY(var(--nav-drop, -18px));
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.nav-drop {
+  animation: navDrop 700ms cubic-bezier(0.16, 1, 0.3, 1) var(--enter-delay, 0ms) both;
+}
+
 /* Launch bar: the violet hairline sweeps, so the edge reads imminent
    rather than static. TEMPORARY, paired with components/site/LaunchBar.tsx;
    delete both together after the Product Hunt launch.
@@ -71,7 +131,10 @@
 
 @media (prefers-reduced-motion: reduce) {
   .hero-enter,
-  .hero-frame-enter {
+  .hero-frame-enter,
+  .landing-rise,
+  .landing-film-rise,
+  .nav-drop {
     opacity: 1;
     animation: none;
     transform: none;
@@ -961,6 +1024,14 @@ html {
        the canvas's inner radius. Instruments already clip their panes. */
     border-radius: 13px;
   }
+}
+
+/* The top bar is fixed, so anything scrolled into view (a field focused by
+   Tab or by a form pointing at its first error, an anchor) stops below it
+   instead of under it (WCAG 2.4.11). Only on console pages: the marketing
+   site has its own header. */
+html:has(#console-main) {
+  scroll-padding-top: calc(var(--console-bar) + 16px);
 }
 
 /* The canvas's minimum height, so short pages still read as one sheet. */

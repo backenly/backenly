@@ -325,17 +325,29 @@ export async function notifyDeployComplete(
  * `target` is null for a project kept in another region: its notice names the
  * action only (lib/data-plane/residency.ts).
  */
+/** What a restore request asks, when its target cannot be quoted. */
+const RESTORE_ASKS: Record<string, string> = {
+  rollback_deploy: 'restore the backend to a published version',
+  revert_schema_change: 'restore the state before a change',
+}
+
 export async function notifyApprovalRequested(
   userId: string,
   request: { projectId: string; projectName: string; approvalId: string; tool: string; target: string | null; expiresAt: Date },
 ): Promise<void> {
   const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'https://backenly.com'
+  // A restore says what it restores; its target is already a sentence
+  // ("Restore the backend to v3, …"), not a thing a tool runs on.
+  const restore = RESTORE_ASKS[request.tool]
+  const asked = restore
+    ? request.target ? request.target.charAt(0).toLowerCase() + request.target.slice(1) : restore
+    : `run ${request.tool}${request.target ? ` on ${request.target}` : ''}`
   await createPlatformNotification({
     userId,
     type: 'approval_requested',
     title: `Your agent is waiting for your approval in "${request.projectName}"`,
     body:
-      `It asked to run ${request.tool}${request.target ? ` on ${request.target}` : ''}. Approve or reject it in the ` +
+      `It asked to ${asked}. Approve or reject it in the ` +
       `Review Queue on the Autonomy page. Nothing runs until you do, and the request expires ${request.expiresAt.toUTCString()}.`,
     metadata: {
       projectId: request.projectId,

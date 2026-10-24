@@ -200,9 +200,21 @@ RUN mkdir -p /app/workspace /app/backups && chown -R node:node /app/workspace /a
 COPY docker/certs/rds-ca-ap-south-1.pem docker/certs/rds-ca-us-east-1.pem docker/certs/rds-ca-us-west-2.pem docker/certs/rds-ca-eu-central-1.pem docker/certs/rds-ca-ap-southeast-1.pem /app/certs/
 RUN cat /app/certs/rds-ca-ap-south-1.pem /app/certs/rds-ca-us-east-1.pem /app/certs/rds-ca-us-west-2.pem /app/certs/rds-ca-eu-central-1.pem /app/certs/rds-ca-ap-southeast-1.pem > /app/certs/rds-ca-cloud-regions.pem
 
+# KEEP_ALIVE_TIMEOUT must stay ABOVE the load balancer's idle timeout. Next's
+# standalone server applies it to its HTTP server's keepAliveTimeout; unset,
+# Node 20 keeps 5000 ms and closes an idle keep-alive connection about one
+# second later. A load balancer keeps its idle connections to the target open
+# far longer (an AWS ALB: 60 s by default) and ignores the "Keep-Alive:
+# timeout=5" the server advertises, so it reuses a connection at the moment
+# Node closes it, and that request fails as a 502 with no response from the
+# target. It looks like a rare, random gateway error on any route, mostly on
+# the health check because that is the steadiest traffic. 65 s clears the
+# ALB's 60 s default (tests/unit/web-image-keep-alive.spec.ts); behind a proxy
+# whose idle timeout is longer, set the variable above that one.
 ENV NODE_ENV=production \
     PORT=3000 \
     HOSTNAME=0.0.0.0 \
+    KEEP_ALIVE_TIMEOUT=65000 \
     WORKSPACE_DIR=/app/workspace \
     BACKUP_DIR=/app/backups \
     NODE_EXTRA_CA_CERTS=/app/certs/rds-ca-cloud-regions.pem

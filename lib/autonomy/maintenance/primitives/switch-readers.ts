@@ -137,6 +137,7 @@ export async function switchReaders(spec: SwitchReadersSpec): Promise<SwitchRead
   }
 
   for (const p of planned) {
+    // history: inside the rung's change (../execute.ts inHistory)
     await prisma.aiFunction.update({ where: { id: p.id }, data: { generatedCode: p.nextCode } })
   }
 
@@ -162,6 +163,7 @@ export async function revertReaders(
   let reverted = 0
   for (const r of switched) {
     try {
+      // history: inside the undo's change (../rollback.ts)
       await prisma.aiFunction.update({ where: { id: r.id }, data: { generatedCode: r.previousCode } })
       reverted++
     } catch (err) {

@@ -61,6 +61,8 @@ export interface RecordedStatement {
 
 interface Scope {
   statements: RecordedStatement[]
+  /** Set when the capture that opened it returns: nothing joins or writes to it after that. */
+  closed: boolean
 }
 
 const storage = new AsyncLocalStorage<Scope>()
@@ -101,7 +103,7 @@ export async function withSqlCapture<T>(
   fn: () => Promise<T>,
 ): Promise<{ result: T; statements: RecordedStatement[] }> {
   const existing = storage.getStore()
-  if (existing) {
+  if (existing && !existing.closed) {
     // Already inside a capture: run in place and report what the whole scope has
     // accumulated so far. Opening a nested scope would hide the inner statements
     // from the outer audit row, which is the opposite of the point.
@@ -109,15 +111,30 @@ export async function withSqlCapture<T>(
     return { result, statements: existing.statements }
   }
 
-  const scope: Scope = { statements: [] }
-  const result = await storage.run(scope, fn)
-  return { result, statements: scope.statements }
+  const scope: Scope = { statements: [], closed: false }
+  try {
+    const result = await storage.run(scope, fn)
+    return { result, statements: scope.statements }
+  } finally {
+    // Work it started that is still running (a timer, an unawaited promise)
+    // still carries this scope, and must not add to a list already reported.
+    scope.closed = true
+  }
+}
+
+/**
+ * Run `fn` outside any capture: for work that is its own actor, whatever
+ * scheduled it (lib/changes/context.ts outsideAnyChange). Its statements are
+ * captured by its own change.
+ */
+export function outsideSqlCapture<T>(fn: () => T): T {
+  return storage.exit(fn)
 }
 
 /** Record one statement against the active scope. No-op outside a capture. */
 export function noteStatement(sql: string, params?: unknown[]): void {
   const scope = storage.getStore()
-  if (!scope) return
+  if (!scope || scope.closed) return
   if (scope.statements.length >= MAX_STATEMENTS) return
   if (typeof sql !== 'string' || !sql.trim()) return
   if (!isMutatingStatement(sql)) return
@@ -132,9 +149,10 @@ export function noteStatement(sql: string, params?: unknown[]): void {
   scope.statements.push(entry)
 }
 
-/** True when a capture scope is active. Exported for tests. */
+/** True when a capture scope is active and still open. Exported for tests. */
 export function isCapturing(): boolean {
-  return storage.getStore() !== undefined
+  const scope = storage.getStore()
+  return scope !== undefined && !scope.closed
 }
 
 // ── Installation ─────────────────────────────────────────────────────────────

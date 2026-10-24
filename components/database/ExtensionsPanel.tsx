@@ -109,7 +109,7 @@ export function ExtensionsPanel({ projectId }: { projectId: string }) {
       <div className={`flex h-[44px] flex-shrink-0 items-center gap-2.5 border-b ${RULE} px-4 sm:px-5`}>
         <h2 className="text-[13px] font-medium text-zinc-100">Extensions</h2>
         {!loading && rows.length > 0 && (
-          <span className="text-[12px] tabular-nums text-zinc-500">
+          <span className="text-[12px] tabular-nums text-faint">
             {installedCount} of {rows.length} installed
           </span>
         )}
@@ -154,7 +154,7 @@ export function ExtensionsPanel({ projectId }: { projectId: string }) {
                     <p className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
                       <span className="font-mono text-[12.5px] font-medium text-zinc-100">{ext.name}</span>
                       {ext.installed && (
-                        <span className="text-[12px] tabular-nums text-zinc-500">
+                        <span className="text-[12px] tabular-nums text-faint">
                           {ext.installedVersion}
                           {ext.schema ? ` · ${ext.schema}` : ''}
                         </span>
@@ -194,7 +194,7 @@ export function ExtensionsPanel({ projectId }: { projectId: string }) {
             </ul>
           )}
 
-          <p className="max-w-[72ch] text-[12.5px] leading-[19px] text-zinc-500">
+          <p className="max-w-[72ch] text-[12.5px] leading-[19px] text-faint">
             There is no uninstall here. <span className="font-mono text-zinc-400">DROP EXTENSION</span> cascades into the
             columns and indexes that depend on it, and this page cannot show what that would take with it. Removing one
             is a deliberate act at a psql prompt.

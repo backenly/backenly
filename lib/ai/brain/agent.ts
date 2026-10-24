@@ -1216,8 +1216,17 @@ async function describeDanger(
     }
     case 'trigger_deploy':
       return { tool, target: 'a production deploy', rowCount: null, reversible: true, confirmPhrase: 'Confirm — deploy to production' }
-    case 'rollback_deploy':
-      return { tool, target: 'a production rollback', rowCount: null, reversible: true, confirmPhrase: 'Confirm — roll back the deploy' }
+    case 'rollback_deploy': {
+      const version = Number.isInteger(args.version) ? String(args.version) : str('version')
+      return {
+        tool,
+        target: version ? `the backend as it was when v${version} was published (every change since undone)` : 'the backend as it was at an earlier published version',
+        rowCount: null,
+        // Each step is a restore, which keeps what it removes and can be reapplied.
+        reversible: true,
+        confirmPhrase: `Confirm — restore the backend to ${version ? `v${version}` : 'that version'}`,
+      }
+    }
     case 'revoke_api_key':
       return { tool, target: 'an API key (every client using it stops working immediately)', rowCount: null, reversible: false, confirmPhrase: 'Confirm — revoke the API key' }
     case 'rotate_api_key':

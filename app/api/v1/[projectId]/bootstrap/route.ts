@@ -137,6 +137,7 @@ async function handleGET(request: NextRequest, props: { params: Promise<{ projec
 
     try {
       await prisma.$transaction([
+        // history: the anon key is one with Project.anonKey and provisioned with the project (lib/changes/resources/keys.ts)
         prisma.apiKey.create({
           data: {
             name: 'Public Anon Key',

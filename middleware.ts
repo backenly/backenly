@@ -86,6 +86,8 @@ const publicPathPrefixes = [
   '/.well-known/',  // security.txt etc.
   '/startups',      // Backenly for Startups application (Cloud overlay). Anyone
                     // can apply; signing in is a step inside the page
+  '/guides',        // technical guides (app/guides)
+  '/agents',        // per-agent setup pages (app/agents)
 ]
 
 // ✅ MARKETING SURFACES — the hosted service's shop window.
@@ -118,6 +120,8 @@ const marketingPrefixes = [
   '/mcp',
   '/quickstart',
   '/startups',
+  '/guides',
+  '/agents',
 ]
 
 // Served under a marketing prefix but not marketing. The published CLI and
@@ -137,6 +141,45 @@ function isMarketingPath(pathname: string): boolean {
   if (marketingExemptions.includes(pathname)) return false
   if (marketingRoutes.includes(pathname)) return true
   return marketingPrefixes.some(prefix => pathname === prefix || pathname.startsWith(prefix + '/'))
+}
+
+// 🔑 SIGNED-IN SURFACES — where an anonymous visitor is sent to sign in.
+//
+// Every other path that is neither public nor one of these is answered with the
+// 404 page. It used to redirect to /auth/login as well, so a mistyped or retired
+// URL answered "sign in" instead of "not found": crawlers count that as a soft
+// 404, and a dead link from another site landed its visitors on a login form.
+// The page behind such a path is still never rendered for an anonymous visitor.
+const signInPrefixes = ['/app', '/admin']
+
+function requiresSignIn(pathname: string): boolean {
+  return signInPrefixes.some(prefix => pathname === prefix || pathname.startsWith(prefix + '/'))
+}
+
+/**
+ * www → the canonical host.
+ *
+ * www.backenly.com served every page as a second copy of the site. The page
+ * canonicals point at backenly.com, but a permanent redirect is what makes
+ * search engines merge the two and send every link to one URL. The canonical
+ * host is NEXT_PUBLIC_APP_URL's, so a self-hosted install redirects its own www
+ * host and nothing else. Only page reads move: API calls keep their method and
+ * body where they were sent.
+ */
+function wwwRedirect(request: NextRequest): NextResponse | null {
+  const appUrl = process.env.NEXT_PUBLIC_APP_URL
+  if (!appUrl) return null
+  let canonical: URL
+  try {
+    canonical = new URL(appUrl)
+  } catch {
+    return null
+  }
+  if (request.headers.get('host')?.toLowerCase() !== `www.${canonical.host}`) return null
+  if (request.method !== 'GET' && request.method !== 'HEAD') return null
+  const { pathname, search } = request.nextUrl
+  if (pathname === '/api' || pathname.startsWith('/api/')) return null
+  return NextResponse.redirect(new URL(`${pathname}${search}`, canonical.origin), 301)
 }
 
 // ✅ PUBLIC API ROUTES (Auth endpoints + webhook receivers)
@@ -312,6 +355,9 @@ async function handleCORS(request: NextRequest): Promise<NextResponse | null> {
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl
 
+  const toCanonicalHost = wwwRedirect(request)
+  if (toCanonicalHost) return toCanonicalHost
+
   // STEP 0: CORS
   const corsResponse = await handleCORS(request)
   if (corsResponse) {
@@ -413,6 +459,11 @@ export async function middleware(request: NextRequest) {
         { status: 401 }
       )
       return applyCorsHeaders(response)
+    }
+    if (!requiresSignIn(pathname)) {
+      // Rewritten to a path no route serves, so Next answers with the 404
+      // page and a 404 status, whatever page (if any) lives at `pathname`.
+      return NextResponse.rewrite(new URL('/_not-a-page', request.url))
     }
     const loginUrl = new URL('/auth/login', request.url)
     loginUrl.searchParams.set('redirect', pathname)

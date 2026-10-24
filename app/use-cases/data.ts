@@ -1,4 +1,10 @@
 /**
+ * KEPT WITHOUT ITS PAGES (2026-10-22). The /use-cases pages were removed and
+ * redirect (next.config.js), but the Backenly Cloud overlay's Startups page
+ * still imports USE_CASES from this module for its "From Supabase" card.
+ * Deleting it here would break the composed Cloud build. Remove it only after
+ * the overlay stops importing it.
+ *
  * Use cases — workflows, not audience segments.
  *
  * A page here has to survive one test: does it describe a real problem and a

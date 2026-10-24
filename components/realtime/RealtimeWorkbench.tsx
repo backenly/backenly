@@ -19,9 +19,10 @@ import { Radio, WifiOff, Circle, RefreshCw, AlertTriangle, Trash2, ChevronLeft }
 import { getAuthToken } from '@/lib/api/auth'
 import { getProject } from '@/lib/api/projects'
 import {
-  AgentPrompt, CommandBar, CopyField, EmptyState, IconButton, KIT, KitButton, NoticeStrip, StatusDot,
+  CommandBar, CopyField, EmptyState, IconButton, KIT, KitButton, NoticeStrip, StatusDot,
   type StatusTone,
 } from '@/components/inspector/kit'
+import { AgentEmptyState } from '@/components/inspector/AgentEmptyState'
 import { FOCUS_INSET } from '@/components/console/tokens'
 
 interface RealtimeStatusData {
@@ -84,13 +85,13 @@ const EVENT_BAR: Record<string, string> = {
 /** Event kinds are SQL verbs and channel names: machine text, set as such. */
 function EventType({ type }: { type: string }) {
   return (
-    <span className={`flex-shrink-0 font-mono text-[11.5px] font-medium tracking-[0.02em] ${EVENT_STYLES[type] ?? 'text-zinc-500'}`}>
+    <span className={`flex-shrink-0 font-mono text-[11.5px] font-medium tracking-[0.02em] ${EVENT_STYLES[type] ?? 'text-faint'}`}>
       {type.toUpperCase()}
     </span>
   )
 }
 
-const TH = 'h-[36px] whitespace-nowrap border-b border-white/[0.06] px-3 text-left text-[12px] font-medium text-zinc-500'
+const TH = 'h-[36px] whitespace-nowrap border-b border-white/[0.06] px-3 text-left text-[12px] font-medium text-faint'
 const TD = 'h-[36px] whitespace-nowrap border-b border-white/[0.04] px-3'
 
 export function RealtimeWorkbench({ projectId }: { projectId: string }) {
@@ -354,12 +355,12 @@ export function RealtimeWorkbench({ projectId }: { projectId: string }) {
         return triggeredCount === 0
           ? {
               icon: Radio,
-              title: 'Connected, nothing streaming',
-              description: 'Realtime is opt-in per table. Once a table streams, every insert, update and delete on it appears here as it happens.',
+              title: 'Nothing is streaming yet',
+              description: 'Realtime is opt-in per table. Once a table streams, its inserts, updates and deletes appear here as they happen.',
             }
           : {
               icon: Radio,
-              title: 'Listening',
+              title: 'Listening for changes',
               description: 'The stream is open. Inserts, updates, deletes and broadcasts appear here as they happen.',
             }
       case 'reconnecting':
@@ -385,6 +386,9 @@ export function RealtimeWorkbench({ projectId }: { projectId: string }) {
   // Payload size only matters when the server had to cut one short.
   const anyTruncated = visibleEvents.some((e) => e.truncated)
   const breakdownMax = Math.max(1, ...breakdown.map((b) => b.count))
+
+  /** Loaded, connected or not, and no table streams and nothing has arrived. */
+  const nothingStreams = !loadingStatus && activeTables.length === 0 && events.length === 0
 
   const selectTable = (t: string | null) => {
     setTableFilter(t)
@@ -451,8 +455,16 @@ export function RealtimeWorkbench({ projectId }: { projectId: string }) {
       <div className="relative min-h-0 flex-1">
         <div className="absolute inset-0 flex">
 
-          {/* ── Streaming rail ─────────────────────────── */}
-          <div className={`w-full flex-shrink-0 flex-col border-r border-white/[0.06] md:w-[256px] ${KIT.rail} ${mobilePane === 'tables' ? 'flex' : 'hidden md:flex'}`}>
+          {/* ── Streaming rail ───────────────────────────
+              No rail at any width until a table streams: the stream pane
+              carries the empty state with its request and Connect, and the bar
+              and the session panel already count the tables, so the rail said
+              it a third time (on a phone, instead of the request). */}
+          <div
+            className={`w-full flex-shrink-0 flex-col border-r border-white/[0.06] md:w-[256px] ${KIT.rail} ${
+              nothingStreams ? 'hidden' : mobilePane !== 'tables' ? 'hidden md:flex' : 'flex'
+            }`}
+          >
             <div className="flex h-[44px] flex-shrink-0 items-center justify-between gap-2 border-b border-white/[0.06] pl-4 pr-2">
               <span className="text-[13px] font-medium text-zinc-200">Tables</span>
               <IconButton
@@ -465,9 +477,11 @@ export function RealtimeWorkbench({ projectId }: { projectId: string }) {
 
             <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden py-1.5">
               {activeTables.length === 0 ? (
+                // Events arrived (broadcasts, presence) with no table
+                // streaming: the rail is up and says so.
                 <div className="px-4 py-4">
-                  <p className="text-[13px] font-medium text-zinc-200">No tables streaming</p>
-                  <p className="mt-1 text-[12.5px] leading-[19px] text-zinc-500">
+                  <p className="text-[13px] font-medium text-zinc-200 md:text-[12.5px] md:font-normal md:text-faint">No tables streaming</p>
+                  <p className="mt-1 text-[12.5px] leading-[19px] text-faint md:hidden">
                     Realtime is opt-in. Ask your agent to turn it on for the tables your app listens to.
                   </p>
                 </div>
@@ -486,7 +500,7 @@ export function RealtimeWorkbench({ projectId }: { projectId: string }) {
                     >
                       <Radio className="h-3.5 w-3.5 flex-shrink-0 text-zinc-500" strokeWidth={1.75} />
                       <span className="flex-1 truncate text-[13px] font-medium">All events</span>
-                      <span className="flex-shrink-0 text-[12px] tabular-nums text-zinc-500">{events.length}</span>
+                      <span className="flex-shrink-0 text-[12px] tabular-nums text-faint">{events.length}</span>
                     </button>
                   </li>
 
@@ -510,7 +524,7 @@ export function RealtimeWorkbench({ projectId }: { projectId: string }) {
                           </span>
                           <span className="flex-1 truncate font-mono text-[12.5px]">{t}</span>
                           {count > 0 && (
-                            <span className="flex-shrink-0 text-[12px] tabular-nums text-zinc-500">{count}</span>
+                            <span className="flex-shrink-0 text-[12px] tabular-nums text-faint">{count}</span>
                           )}
                         </button>
                       </li>
@@ -520,13 +534,14 @@ export function RealtimeWorkbench({ projectId }: { projectId: string }) {
               )}
             </div>
 
-            <div className="flex h-[36px] flex-shrink-0 items-center border-t border-white/[0.06] px-4 text-[12px] tabular-nums text-zinc-500">
+            <div className="flex h-[36px] flex-shrink-0 items-center border-t border-white/[0.06] px-4 text-[12px] tabular-nums text-faint">
               {triggeredCount} {triggeredCount === 1 ? 'table' : 'tables'} streaming
             </div>
           </div>
 
           {/* ── Event stream ───────────────────────────── */}
-          <div className={`min-w-0 flex-1 flex-col ${mobilePane === 'feed' ? 'flex' : 'hidden md:flex'}`}>
+          <div className={`min-w-0 flex-1 flex-col ${nothingStreams || mobilePane === 'feed' ? 'flex' : 'hidden md:flex'}`}>
+            {!nothingStreams && (
             <div className="flex h-[44px] flex-shrink-0 items-center justify-between gap-3 border-b border-white/[0.06] px-3 sm:px-4">
               <div className="flex min-w-0 items-center gap-3">
                 <button
@@ -540,26 +555,30 @@ export function RealtimeWorkbench({ projectId }: { projectId: string }) {
                 <h2 className={`truncate text-[13px] font-medium text-zinc-100 ${tableFilter ? 'font-mono' : ''}`}>
                   {tableFilter ?? 'All events'}
                 </h2>
-                <span className="whitespace-nowrap text-[12px] tabular-nums text-zinc-500">
+                <span className="whitespace-nowrap text-[12px] tabular-nums text-faint">
                   {visibleEvents.length} {visibleEvents.length === 1 ? 'event' : 'events'}
                 </span>
               </div>
-              <span className="flex-shrink-0 text-[12px] text-zinc-600">Newest first · last 100 kept</span>
+              <span className="flex-shrink-0 text-[12px] text-faint">Newest first, last 100 kept</span>
             </div>
+            )}
 
             <div className="min-h-0 flex-1 overflow-y-auto" aria-live="polite" aria-relevant="additions">
               {visibleEvents.length === 0 ? (
                 <div className="flex min-h-full flex-col items-center justify-center px-6">
-                  <EmptyState
-                    icon={emptyState.icon}
-                    title={emptyState.title}
-                    description={emptyState.description}
-                    action={
-                      connState === 'connected' && triggeredCount === 0 && !tableFilter ? (
-                        <AgentPrompt prompt="Enable realtime on the orders table so the app gets live updates." />
-                      ) : undefined
-                    }
-                  />
+                  {connState === 'connected' && triggeredCount === 0 && !tableFilter ? (
+                    <AgentEmptyState
+                      projectId={projectId}
+                      icon={emptyState.icon}
+                      title={emptyState.title}
+                      description={emptyState.description}
+                      prompt="Turn on realtime for the orders table so the app gets live updates."
+                      docs="realtime"
+                      preview="events"
+                    />
+                  ) : (
+                    <EmptyState icon={emptyState.icon} title={emptyState.title} description={emptyState.description} />
+                  )}
                 </div>
               ) : (
                 <div className="min-w-full overflow-x-auto">
@@ -575,7 +594,7 @@ export function RealtimeWorkbench({ projectId }: { projectId: string }) {
                     <tbody>
                       {visibleEvents.map((ev) => (
                         <tr key={ev.id} className={`transition-colors ${KIT.rowHoverOn}`}>
-                          <td className={`${TD} text-[12.5px] tabular-nums text-zinc-500`}>
+                          <td className={`${TD} text-[12.5px] tabular-nums text-faint`}>
                             {new Date(ev.timestamp * 1000).toLocaleTimeString([], {
                               hour12: false,
                               hour: '2-digit',
@@ -592,7 +611,7 @@ export function RealtimeWorkbench({ projectId }: { projectId: string }) {
                             ) : ev.channel ? (
                               <span className="text-sky-300/90">#{ev.channel}</span>
                             ) : (
-                              <span className="text-zinc-600">none</span>
+                              <span className="text-faint">none</span>
                             )}
                           </td>
                           {anyTruncated && (
@@ -624,7 +643,7 @@ export function RealtimeWorkbench({ projectId }: { projectId: string }) {
                   ['Events received', eventCount.toLocaleString()],
                 ] as Array<[string, React.ReactNode]>).map(([label, value]) => (
                   <div key={label} className="flex items-center justify-between gap-3 px-4 py-2.5">
-                    <dt className="flex-shrink-0 text-[13px] text-zinc-500">{label}</dt>
+                    <dt className="flex-shrink-0 text-[13px] text-faint">{label}</dt>
                     <dd className="min-w-0 truncate text-right text-[13px] tabular-nums text-zinc-200">{value}</dd>
                   </div>
                 ))}
@@ -655,7 +674,7 @@ export function RealtimeWorkbench({ projectId }: { projectId: string }) {
               {status?.channel && (
                 <section className="border-t border-white/[0.06] px-4 py-4">
                   <h3 className="text-[13px] font-medium text-zinc-200">Postgres channel</h3>
-                  <p className="mb-2 mt-0.5 text-[12.5px] leading-[19px] text-zinc-500">
+                  <p className="mb-2 mt-0.5 text-[12.5px] leading-[19px] text-faint">
                     Changes are published with NOTIFY on this channel.
                   </p>
                   <CopyField value={status.channel} />

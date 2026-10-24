@@ -20,6 +20,7 @@
  */
 
 import type { ReconciliationReport } from '@/lib/ai/schema-reconciler'
+import { outsideAnyChange } from '@/lib/changes/context'
 import type { BuildResponse } from './types'
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -35,8 +36,9 @@ export function triggerPostBuildOrchestration(
   userId: string,
   buildResponse: BuildResponse,
 ): void {
-  // Intentionally NOT awaited — fire-and-forget
-  _runOrchestration(projectId, userId, buildResponse).catch((err) => {
+  // Intentionally NOT awaited — fire-and-forget. Backenly's own passes, not the
+  // build's: run outside the request that built it (lib/changes/context.ts).
+  outsideAnyChange(() => _runOrchestration(projectId, userId, buildResponse)).catch((err) => {
     console.error(`[PostBuildOrchestrator] Unhandled error for project ${projectId}:`, err?.message)
   })
 }

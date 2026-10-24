@@ -137,6 +137,7 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
     if (!bucketRecord) {
       if (bucketName === 'default') {
         // Auto-create a 'default' bucket so SDK users never hit a 404
+        // history: provisioned by the first upload, on the data plane, which never waits for the change lock
         bucketRecord = await prisma.storageBucket.create({
           data: { name: 'default', projectId: context.projectId, isPublic: false },
         })

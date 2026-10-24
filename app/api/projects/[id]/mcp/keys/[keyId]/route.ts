@@ -10,6 +10,7 @@ export const dynamic = 'force-dynamic'
 import { NextRequest, NextResponse } from 'next/server'
 import { withProjectValidation } from '@/lib/middleware/projectValidation'
 import { prisma } from '@/lib/db/prisma'
+import { governedChange } from '@/lib/changes/ledger'
 
 export async function DELETE(
   req: NextRequest,
@@ -34,7 +35,7 @@ export async function DELETE(
       return NextResponse.json({ error: 'MCP key not found' }, { status: 404 })
     }
 
-    await prisma.apiKey.delete({ where: { id: keyId } })
+    await governedChange(projectId, `Revoke agent key ${key.name}`, () => prisma.apiKey.delete({ where: { id: keyId } }))
 
     await prisma.auditLog.create({
       data: {

@@ -309,7 +309,7 @@ function failureSentence(type: string, region: CloudRegionId): string {
 }
 
 async function runRegionalJob(type: string, payload: unknown): Promise<Record<string, any>> {
-  const { projectId, backupId } = (payload ?? {}) as { projectId?: unknown; backupId?: unknown }
+  const { projectId, backupId, requestedBy: asker } = (payload ?? {}) as { projectId?: unknown; backupId?: unknown; requestedBy?: unknown }
   if (typeof projectId !== 'string' || projectId.length === 0) throw new RegionalJobRefusal('The job names no project.')
 
   if (type === 'maintenance_backfill') {
@@ -334,7 +334,8 @@ async function runRegionalJob(type: string, payload: unknown): Promise<Record<st
     if ((await getProjectServingState(projectId)).kind === 'paused') {
       throw new RegionalJobRefusal('This project is paused. Resume it before restoring a snapshot.')
     }
-    const result = await backups.restoreWorkspace(projectId, typeof backupId === 'string' ? backupId : undefined)
+    // By the person who asked, in the project's history (requestRestore carries them).
+    const result = await backups.restoreWorkspace(projectId, typeof backupId === 'string' ? backupId : undefined, typeof asker === 'string' ? asker : null)
     if (!result.success) throw new Error(result.error ?? 'restore failed')
     return { restoredFrom: result.restoredFrom }
   }

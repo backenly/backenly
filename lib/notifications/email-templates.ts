@@ -93,7 +93,7 @@ function buildPaymentSuccessEmail(
     <p style="color:#9ca3af;margin:0 0 20px;font-size:15px;line-height:1.6;">${body}</p>
     ${metadata.planName ? `<p style="color:#6b7280;font-size:13px;margin:0 0 4px;">Plan: <strong style="color:#e5e7eb;">${metadata.planName}</strong></p>` : ''}
     ${metadata.periodEnd ? `<p style="color:#6b7280;font-size:13px;margin:0 0 4px;">Active until: <strong style="color:#e5e7eb;">${new Date(metadata.periodEnd).toLocaleDateString()}</strong></p>` : ''}
-    ${button('Manage subscription', `${APP_URL}/settings/billing`)}
+    ${button('Manage subscription', `${APP_URL}/app/billing`)}
   `)
   return { subject: `✅ ${title} — Backenly`, html }
 }
@@ -107,7 +107,7 @@ function buildPaymentFailedEmail(
     <h1 style="font-size:22px;font-weight:800;margin:0 0 8px;color:#f87171;">⚠️ ${title}</h1>
     <p style="color:#9ca3af;margin:0 0 20px;font-size:15px;line-height:1.6;">${body}</p>
     ${metadata.graceUntil ? `<p style="color:#6b7280;font-size:13px;margin:0 0 16px;">Grace period ends: <strong style="color:#fbbf24;">${new Date(metadata.graceUntil).toLocaleDateString()}</strong></p>` : ''}
-    ${button('Update billing details', `${APP_URL}/settings/billing`)}
+    ${button('Update billing details', `${APP_URL}/app/billing`)}
   `)
   return { subject: `⚠️ ${title} — action required`, html }
 }

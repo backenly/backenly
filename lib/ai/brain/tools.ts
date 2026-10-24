@@ -942,7 +942,7 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
     []),
   // ── Deploy: version history ───────────────────────────────────────────────
   fn('list_deploy_versions',
-    'Every published version, newest first: id, version number, change summary, when it was published, which one is serving, and which can be rolled back to (rollback_deploy takes the version or its id).',
+    'Every published version, newest first: id, version number, change summary, when it was published, and which one is serving. rollback_deploy asks to restore the backend to one of them (by version or id).',
     {},
     []),
   fn('list_schema_changes',
@@ -1299,7 +1299,7 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
     'DESTRUCTIVE-grade. Publish the current backend (tables, APIs, auth, storage, triggers, RLS become publicly callable) as the next production version. There is one production deployment per project; deploy has no staging target. It waits for a person: the call is queued for the project owner to approve in the dashboard, and the approved call runs the readiness gate and publishes. Nothing typed in chat approves it. Use when the user says "ship it" / "publish" / "go live".',
     {}),
   fn('rollback_deploy',
-    'DESTRUCTIVE. Mark a previous published version as current in the version history. This is bookkeeping: it does NOT change the live schema, data, RLS or functions, and the API keeps serving exactly what is deployed now. To restore structure, roll back a schema version from the Database page or restore a Snapshot. It waits for a person: the call is queued for the project owner to approve in the dashboard, and the approved call runs exactly as made. Always call get_deploy_status first.',
+    'DESTRUCTIVE: waits for a person to approve. Ask for the backend to be restored to a published version: every change made since that version was published is undone, newest first, each checked before it runs, and the version is then recorded as current. Backenly measures it first and queues the list of changes it would undo for a project admin to approve in the dashboard; a version that does not exist, or that nothing has changed since, is answered at once. Approving runs exactly that list, or nothing if the history changed since. A step that would set aside data written since stops it there, for the person to review. Data your users wrote is never rewound, and keys or secrets never come back. You cannot run or approve it yourself. Call list_deploy_versions first.',
     {
       version: { type: 'integer', description: 'Target published version number (e.g. 2). Either version OR deploymentId is required.' },
       deploymentId: { type: 'string', description: 'Specific deployment id to roll back to.' },
@@ -3284,7 +3284,7 @@ export async function dispatchTool(
         lines.push('', `${driftPending} schema change(s) arrived over a direct DB connection — call adopt_external_schema to fold them into the contract, or review under Autonomy.`)
       }
       if (snapshot) {
-        lines.push('', `Latest restore point: v${snapshot.versionNum} (${snapshot.tableCount} tables, ${snapshot.createdAt.toISOString()}). To restore the state before a change: Database → Changes, or ask with deploy { action: "revert_change", changeId } (a person approves it).`)
+        lines.push('', `Latest restore point: v${snapshot.versionNum} (${snapshot.tableCount} tables, ${snapshot.createdAt.toISOString()}). To restore the state before a change: History, or ask with deploy { action: "revert_change", changeId } (a person approves it).`)
       }
       if (openRows.length === 0 && approvals.length === 0 && driftPending === 0) {
         // An empty queue is evidence only for the checks that ran. Say which
@@ -3489,6 +3489,46 @@ export async function dispatchTool(
           `Restored the state before this change, and verified it (recorded as #${done.recoverySeq}).` +
           (kept.length ? ` Kept in a recovery snapshot, as approved: ${kept.map((i) => i.detail).join(' ')}` : ''),
         data: done,
+      })
+    }
+
+    if (name === 'rollback_deploy') {
+      // Reached only once a person has approved it: over MCP and in a brain run
+      // the call is parked first, with Backenly's list of the changes it would
+      // undo (lib/mcp/approvals.ts). `steps` is that list; if the history moved
+      // since, nothing runs. The person who approved is the one who restores.
+      if (!ctx.destructiveConfirmed) {
+        return finalize({ ok: false, summary: 'Restoring the backend to a published version runs only once a person approves it.', code: 'DESTRUCTIVE_NEEDS_APPROVAL' })
+      }
+      if (!ctx.userId) return finalize({ ok: false, summary: 'A restore needs the person who approved it.', code: 'NO_APPROVER' })
+      const { restoreToVersion } = await import('@/lib/changes/range')
+      const out = await restoreToVersion(
+        ctx.projectId,
+        { version: args.version, deploymentId: args.deploymentId },
+        { actorUserId: ctx.userId, approvedSteps: args.steps, via: 'APPROVAL' },
+      )
+      if (!out.ok) {
+        const fail = out as Extract<typeof out, { ok: false }>
+        return finalize({ ok: false, summary: fail.error, code: fail.code })
+      }
+      const { version, outcome, versionCurrent } = out as Extract<typeof out, { ok: true }>
+      const restored = outcome.restored.map((r) => `#${r.seq}`).join(', ')
+      const kept = outcome.kept.length ? ` Left as they are: ${outcome.kept.map((k) => `#${k.seq} (${k.reason})`).join(' ')}` : ''
+      if (outcome.stoppedAt) {
+        return finalize({
+          ok: true,
+          summary:
+            `Partly restored toward v${version}: ${restored ? `undid ${restored}, then ` : ''}stopped at #${outcome.stoppedAt.seq}. ` +
+            `${outcome.stoppedAt.reason} A person reviews that change in History; asking again finishes restoring to v${version}.${kept}`,
+          data: out,
+        })
+      }
+      return finalize({
+        ok: true,
+        summary: outcome.restored.length
+          ? `Restored the backend to v${version}: undid ${outcome.restored.length} change${outcome.restored.length === 1 ? '' : 's'} newest first (${restored}), each verified.${kept}${versionCurrent ? ` v${version} is the current version.` : ''}`
+          : `Nothing to restore: the backend is already as it was when v${version} was published.${kept}`,
+        data: out,
       })
     }
 
@@ -3767,7 +3807,7 @@ export function humanTitle(name: string, args: Record<string, unknown>): string 
     case 'connect_frontend': return `Connecting frontend ${args.url ?? ''}`.trim()
     case 'disconnect_frontend': return `Disconnecting frontend ${args.url ?? ''}`.trim()
     case 'trigger_deploy': return args.force ? 'Publishing backend' : 'Previewing deploy'
-    case 'rollback_deploy': return args.version ? `Rolling back to v${args.version}` : 'Rolling back deployment'
+    case 'rollback_deploy': return args.version ? `Restoring the backend to v${args.version}` : 'Restoring the backend to a published version'
     case 'list_schema_changes': return 'Reading the change history'
     case 'revert_schema_change': return 'Restoring the state before a change'
     case 'get_readiness': return isReadOnlyCall(name, args) ? 'Reading deploy readiness' : 'Applying the safe readiness fixes'

@@ -30,6 +30,7 @@
 
 import { prisma } from '@/lib/db/prisma'
 import { createPlatformNotification, notifyDeployComplete } from '@/lib/notifications/platform'
+import { outsideAnyChange } from '@/lib/changes/context'
 
 export type EventType =
   | 'execution.complete'
@@ -261,15 +262,19 @@ on('deploy.complete', async (e) => {
 // Fire an immediate targeted health scan whenever key events happen instead of
 // waiting for the 6-hour cron tick.  All handlers are fire-and-forget.
 
-async function triggerObserverForProject(projectId: string, reason: string): Promise<void> {
-  try {
-    const { runObserverForProject } = await import('@/lib/services/workspace-observer')
-    // A project another region serves is left to that region's worker.
-    const result = await runObserverForProject(projectId)
-    if (!result.skipped) console.log(`[EventBus] WorkspaceObserver triggered by ${reason} for project=${projectId}`)
-  } catch (err: any) {
-    console.error(`[EventBus] Observer trigger failed (${reason}):`, err?.message)
-  }
+function triggerObserverForProject(projectId: string, reason: string): Promise<void> {
+  // The observer's own pass, never part of the change or request that emitted
+  // the event (lib/changes/context.ts).
+  return outsideAnyChange(async () => {
+    try {
+      const { runObserverForProject } = await import('@/lib/services/workspace-observer')
+      // A project another region serves is left to that region's worker.
+      const result = await runObserverForProject(projectId)
+      if (!result.skipped) console.log(`[EventBus] WorkspaceObserver triggered by ${reason} for project=${projectId}`)
+    } catch (err: any) {
+      console.error(`[EventBus] Observer trigger failed (${reason}):`, err?.message)
+    }
+  })
 }
 
 // schema.changed → verify the change landed cleanly and check for RLS gaps

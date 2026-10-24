@@ -191,6 +191,7 @@ async function checkRateLimit(keyId: string): Promise<RateCheckResult> {
     const expired = !key.resetAt || key.resetAt < now
     if (expired) {
       const nextReset = new Date(now.getTime() + windowSec * 1000)
+      // history: usage bookkeeping (last used, rate-limit window), not configuration
       await prisma.apiKey.update({
         where: { id: keyId },
         data: { requestCount: 1, resetAt: nextReset },
@@ -202,6 +203,7 @@ async function checkRateLimit(keyId: string): Promise<RateCheckResult> {
       return { allowed: false, used: key.requestCount, limit, resetAt: key.resetAt! }
     }
 
+    // history: usage bookkeeping (last used, rate-limit window), not configuration
     await prisma.apiKey.update({
       where: { id: keyId },
       data: { requestCount: { increment: 1 } },

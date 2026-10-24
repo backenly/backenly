@@ -41,8 +41,10 @@ const ROUTES: Record<AiPurpose, Omit<PurposeRoute, 'model'>> = {
   'insight.explain':      { thinking: false, effort: 'medium', maxTokens: 4096,  timeoutMs: 90_000 },
   'autonomy.investigate': { thinking: true,  effort: 'max',    maxTokens: 32000, timeoutMs: 300_000 },
   // The support case first responder: one grounded answer a person reads while
-  // the ticket is already filed. Platform-paid (lib/ai/llm/spend.ts).
-  'support.answer':       { thinking: false, effort: 'medium', maxTokens: 2048,  timeoutMs: 60_000 },
+  // the ticket is already filed. Platform-paid (lib/ai/llm/spend.ts). It reads
+  // the agent docs for the case and answers with commands, so it gets the
+  // explanation purposes' 90s rather than a classifier's minute.
+  'support.answer':       { thinking: false, effort: 'medium', maxTokens: 2048,  timeoutMs: 90_000 },
   // The public /v1/{projectId}/ai/generate endpoint: `default` and `fast`.
   'runtime.generate':     { thinking: false, effort: 'medium', maxTokens: 4096,  timeoutMs: 60_000 },
   'runtime.fast':         { thinking: false, effort: 'low',    maxTokens: 4096,  timeoutMs: 30_000 },

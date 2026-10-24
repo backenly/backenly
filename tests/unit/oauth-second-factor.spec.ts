@@ -68,6 +68,14 @@ jest.mock('@/lib/db', () => ({ get prisma() { return mockPrisma } }))
 
 // The platform callbacks issue their session here. Recorded as the row it
 // writes, the same way the project callbacks' own session.create is.
+// The platform Google callback records the account's photo here.
+jest.mock('@/lib/auth/avatar', () => ({
+  recordAvatar: jest.fn(async (userId: string, url: string | null) => {
+    mockWrites.push({ op: 'avatar.record', data: { userId, url } })
+    return true
+  }),
+}))
+
 jest.mock('@/lib/auth/session', () => ({
   createSession: jest.fn(async (userId: string, email: string) => {
     mockWrites.push({ op: 'session.create', data: { userId, email } })
@@ -110,6 +118,7 @@ import { SECOND_FACTOR_REQUIRED, providerSignInRefusal } from '@/lib/auth/oauth/
 const EMAIL = 'ada@example.com'
 const ACCOUNT_ID = '11111111-1111-4111-8111-111111111111'
 const TARGET = '/app/projects'
+const PHOTO = 'https://lh3.googleusercontent.com/a/ACg8ocNotARealPhoto=s100'
 
 /** What each provider endpoint answers. Anything else is a test failure. */
 const PROVIDER_ANSWERS: Record<string, unknown> = {
@@ -119,6 +128,9 @@ const PROVIDER_ANSWERS: Record<string, unknown> = {
     email: EMAIL,
     verified_email: true,
     name: 'Ada',
+  },
+  'https://people.googleapis.com/v1/people/me?personFields=photos': {
+    photos: [{ metadata: { primary: true }, url: PHOTO }],
   },
   'https://github.com/login/oauth/access_token': { access_token: 'not-a-real-github-token' },
   'https://api.github.com/user': { id: 4242, login: 'ada', name: 'Ada' },
@@ -254,9 +266,11 @@ describe.each(CALLBACKS)('the $name callback', ({ run, provider }) => {
     expect(location.searchParams.get('error')).toBe('second_factor_required')
     expect(res.cookies.get('auth-token')).toBeUndefined()
     expect(writes('session.create')).toHaveLength(0)
-    // Nothing is written to the account: no provider link, no last-login stamp.
+    // Nothing is written to the account: no provider link, no last-login
+    // stamp, no photo.
     expect(writes('user.update')).toHaveLength(0)
     expect(writes('user.create')).toHaveLength(0)
+    expect(writes('avatar.record')).toHaveLength(0)
     // It did reach the provider and find the account, so the refusal is the
     // second factor and not an earlier failure.
     expect(mockFetch).toHaveBeenCalled()
@@ -298,6 +312,26 @@ describe('a provider sign-in that creates a new account', () => {
   })
 })
 
+describe('a platform Google sign-in records the account’s own photo', () => {
+  it('for an account it signs in', async () => {
+    seedAccount(false)
+    await platformGoogleCallback(callbackRequest('/api/auth/platform-google/callback', platformState('platform-google')))
+
+    expect(writes('avatar.record').map((w) => w.data)).toEqual([{ userId: ACCOUNT_ID, url: PHOTO }])
+    // With the token Google issued for this sign-in.
+    expect(mockFetch).toHaveBeenCalledWith(
+      'https://people.googleapis.com/v1/people/me?personFields=photos',
+      expect.objectContaining({ headers: { Authorization: 'Bearer not-a-real-google-token' } }),
+    )
+  })
+
+  it('for an account it creates', async () => {
+    await platformGoogleCallback(callbackRequest('/api/auth/platform-google/callback', platformState('platform-google')))
+
+    expect(writes('avatar.record').map((w) => w.data)).toEqual([{ userId: 'created-account', url: PHOTO }])
+  })
+})
+
 describe('every provider callback that issues a platform session asks first', () => {
   // A source sweep, so a callback added later is held to the same rule without
   // anyone having to remember to list it here.
@@ -333,7 +367,7 @@ describe('every provider callback that issues a platform session asks first', ()
     const src = fs.readFileSync(path.join(ROOT, file), 'utf8')
     const asks = src.indexOf('providerSignInRefusal(')
     expect(asks).toBeGreaterThan(-1)
-    for (const write of ['prisma.user.update(', 'createSession(', 'prisma.session.create(']) {
+    for (const write of ['prisma.user.update(', 'createSession(', 'prisma.session.create(', 'recordAvatar(']) {
       const at = src.indexOf(write)
       if (at > -1) expect(asks).toBeLessThan(at)
     }

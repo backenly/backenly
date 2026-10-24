@@ -206,6 +206,7 @@ export async function buildConnectManifest(
     const keyPrefix = anonKey.substring(0, 16)
 
     await prisma.$transaction([
+      // history: the anon key is one with Project.anonKey and provisioned with the project (lib/changes/resources/keys.ts)
       prisma.apiKey.create({
         data: {
           name: 'Public Anon Key',

@@ -1523,7 +1523,7 @@ CONNECT FRONTEND:
 
 DEPLOY:
 - TRIGGER_DEPLOY - Deploy backend to cloud
-- ROLLBACK_DEPLOY - Rollback to previous deployment
+- ROLLBACK_DEPLOY - Ask a person to restore the backend to a published version (never runs here)
 - GET_DEPLOY_STATUS - Get deployment status
 - SET_ENV_VAR - Set environment variable
 
@@ -3134,13 +3134,25 @@ async function _writeDecisionMemory(action: AIAction, projectId: string): Promis
  * verification after. One that turns out to change nothing leaves no record,
  * so an action that only sometimes alters the schema belongs here.
  */
-const SCHEMA_CHANGE_ACTIONS = new Set<AIAction['action']>([
+const GOVERNED_ACTIONS = new Set<AIAction['action']>([
   'CREATE_TABLE', 'CREATE_JUNCTION_TABLE', 'ADD_COLUMN', 'DROP_COLUMN', 'DROP_TABLE',
   'RENAME_COLUMN', 'ADD_CONSTRAINT', 'VALIDATE_CONSTRAINT', 'CREATE_INDEX', 'DROP_INDEX',
   'ALTER_COLUMN_TYPE', 'ENABLE_AUTH', 'ENABLE_TEAMS', 'ENABLE_VECTOR_SEARCH', 'ADD_FULLTEXT_SEARCH',
   'SET_PERMISSION', 'REMOVE_PERMISSION', 'ENABLE_REALTIME', 'DISABLE_REALTIME',
   'CREATE_TRIGGER', 'DELETE_TRIGGER', 'SYNC_COLUMN', 'REMOVE_SYNC_COLUMN',
   'FIX_TABLE', 'FIX_AUTH', 'FIX_REALTIME', 'REGISTER_TABLE', 'RUN_DATA_MIGRATION',
+  // Creates the table first when it is missing.
+  'GENERATE_API',
+  // The rest of the backend is one history with the schema (lib/changes/resources).
+  // Actions that ask a model for code first are governed around their write
+  // only, so the change lock is never held while a model is answering:
+  // CREATE_AI_FUNCTION, FIX_AI_FUNCTION, CREATE_CRON_JOB, GENERATE_FUNCTION,
+  // GENERATE_DOMAIN_LOGIC.
+  'CREATE_BUCKET', 'SET_BUCKET_PUBLIC', 'SET_BUCKET_POLICY', 'DELETE_BUCKET', 'FIX_STORAGE',
+  'DELETE_AI_FUNCTION', 'TOGGLE_AI_FUNCTION', 'DELETE_CRON_JOB',
+  'ROTATE_WEBHOOK_SECRET', 'SET_ENV_VAR', 'DELETE_ENV_VAR',
+  'CREATE_KEY', 'REVOKE_KEY', 'ROTATE_KEY', 'SET_KEY_PERMISSIONS', 'SET_RATE_LIMIT', 'REMOVE_RATE_LIMIT',
+  'ADD_PROVIDER', 'DISABLE_PROVIDER', 'STORE_INTEGRATION_KEY', 'REMOVE_INTEGRATION_KEY',
 ])
 
 export async function executeAction(
@@ -3155,7 +3167,7 @@ export async function executeAction(
   allowReplan: boolean = true,
 ): Promise<ExecutionResult> {
   const run = () => executeActionUnrecorded(action, projectId, apiKey, retryCount, executionId, allowReplan)
-  if (!SCHEMA_CHANGE_ACTIONS.has(action.action)) return run()
+  if (!GOVERNED_ACTIONS.has(action.action)) return run()
 
   // A governed change: checkpoint first, protected verification after, and a
   // recovery if it fails (lib/changes/ledger.ts). Inside an apply_migration or
@@ -3236,7 +3248,9 @@ function describeActionForLedger(action: AIAction): string {
   const p = action.params ?? {}
   const table = p.tableName ?? p.table ?? p.entity
   const column = p.columnName ?? p.column?.name
-  const target = [table, column].filter(Boolean).join('.')
+  // The rest of the backend's actions name their item instead of a table.
+  const item = table ? null : p.bucketName ?? p.name ?? p.key ?? p.provider ?? p.integrationId ?? p.keyId ?? p.functionId
+  const target = [table, column, typeof item === 'string' ? item : null].filter(Boolean).join('.')
   return `${action.action}${target ? ` ${target}` : ''}`
 }
 
@@ -3509,7 +3523,7 @@ async function executeSingleAction(
   }
 
   // Schema-changing actions get their restore point from the change ledger,
-  // which wraps executeAction (SCHEMA_CHANGE_ACTIONS above). The per-action
+  // which wraps executeAction (GOVERNED_ACTIONS above). The per-action
   // SchemaVersion snapshot that used to be taken here held the catalog only:
   // rolling back to it dropped the tables and columns added since, with their
   // data, and could not bring back anything dropped.
@@ -3893,25 +3907,22 @@ async function executeSingleAction(
         return { success: true, message: `**Backups** (${backups.length}):\n${list}`, data: backups.map(snapshotForJson) }
       }
 
-      case 'RESTORE_DATABASE': {
-        // Restored where the project's data is kept, as a queued job when that
-        // is another region (lib/services/workspace-backup.ts).
-        const { requestRestore } = await import('@/lib/services/workspace-backup')
-        const outcome = await requestRestore(projectId, action.params.backupId)
-        if (outcome.kind === 'queued') {
-          return {
-            success: true,
-            message: `Restore queued in ${outcome.region}, where this project's data is kept. It has not run yet: it runs once, within a few minutes. Read the project's state after it has, before changing anything.`,
-            data: { queued: true, jobId: outcome.jobId, region: outcome.region },
-          }
-        }
-        const result = outcome.result
-        if (!result.success) return { success: false, message: `Restore failed: ${result.error}` }
+      case 'RESTORE_DATABASE':
+        // A snapshot restore replaces the whole workspace: every row written
+        // since the snapshot is gone, outside the change ledger. It is a
+        // person's step, an admin's, from Database → Snapshots
+        // (app/api/projects/[id]/backup). Here it was reachable from a model's
+        // output with no approval at all: it is in no risk tier, and the
+        // failure replanner offers it for "undo my changes", so a failed
+        // action could be retried as a restore of the latest snapshot.
         return {
-          success: true,
-          message: `✅ Database restored from **${result.restoredFrom}**. Your workspace is back to that point in time.`,
+          success: false,
+          message:
+            'Restoring a snapshot replaces the whole database, so it is not run from here. ' +
+            'A project admin restores one from Database → Snapshots. To undo one change, ' +
+            'restore the state before it from History.',
+          error: 'RESTORE_FROM_SNAPSHOTS',
         }
-      }
 
       // ========== DESTRUCTIVE TABLE ACTIONS ==========
       case 'DROP_TABLE':
@@ -4579,6 +4590,7 @@ async function executeCreateTable(
         try {
           const existing = await prisma.storageBucket.findFirst({ where: { projectId, name: bkt.name } })
           if (!existing) {
+            // history: GOVERNED_ACTIONS (CREATE_TABLE)
             await prisma.storageBucket.create({
               data: { name: bkt.name, projectId, isPublic: bkt.isPublic },
             })
@@ -6720,6 +6732,7 @@ async function executeSetBucketPublic(params: any, projectId: string): Promise<E
     // "now public" (or worse, "now private" after a leak) while every object
     // kept serving exactly as before. Both are written, then READ BACK, and
     // the answer reports the enforced state.
+    // history: GOVERNED_ACTIONS (SET_BUCKET_PUBLIC)
     const updated = await prisma.storageBucket.update({
       where: { id: bucket.id },
       data: { isPublic, accessPolicy: isPublic ? 'public_read' : 'private' },
@@ -6762,6 +6775,7 @@ async function executeSetBucketPolicy(params: any, projectId: string): Promise<E
 
     // isPublic stays a derived label, exactly as executeSetBucketPublic
     // writes it, so the two doors can never leave the pair disagreeing.
+    // history: GOVERNED_ACTIONS (SET_BUCKET_POLICY)
     const updated = await prisma.storageBucket.update({
       where: { id: bucket.id },
       data: { accessPolicy: policy, isPublic: policyAllowsPublic(policy) },
@@ -7179,6 +7193,7 @@ async function executeCreateKey(params: any, projectId: string): Promise<Executi
     const keyPrefix = keyValue.substring(0, 12)
     const keyHash = crypto.createHash('sha256').update(keyValue).digest('hex')
         
+    // history: GOVERNED_ACTIONS (CREATE_KEY)
     const apiKey = await prisma.apiKey.create({
       data: {
         projectId,
@@ -7810,6 +7825,7 @@ async function executeAddProvider(params: any, projectId: string): Promise<Execu
     })
     const active = (existingProject?.activeIntegrations as Record<string, any>) ?? {}
     if (!active[providerName]?.enabled) {
+      // history: GOVERNED_ACTIONS (ADD_PROVIDER)
       await prisma.project.update({
         where: { id: projectId },
         data: {
@@ -8204,6 +8220,7 @@ async function executeDisableProvider(params: any, projectId: string): Promise<E
         data: { provider, enabled: false },
       }
     }
+    // history: GOVERNED_ACTIONS (DISABLE_PROVIDER)
     await prisma.workspaceOAuthConfig.update({
       where: { projectId_provider: { projectId, provider } },
       data: { enabled: false },
@@ -8217,6 +8234,7 @@ async function executeDisableProvider(params: any, projectId: string): Promise<E
       })
       const active = (proj?.activeIntegrations as Record<string, any>) ?? {}
       if (active[provider]?.enabled) {
+        // history: GOVERNED_ACTIONS (DISABLE_PROVIDER)
         await prisma.project.update({
           where: { id: projectId },
           data: {
@@ -8233,6 +8251,7 @@ async function executeDisableProvider(params: any, projectId: string): Promise<E
     // integrationKeyStore has no delete helper — go direct via Prisma; deleteMany
     // so a missing row is a no-op instead of throwing P2025.
     try {
+      // history: GOVERNED_ACTIONS (DISABLE_PROVIDER)
       await prisma.projectIntegrationKey.deleteMany({
         where: { projectId, integrationId: `${provider}_auth` },
       })
@@ -9832,48 +9851,22 @@ export function normalizeConstraintDef(def: string): string {
 // ============================================================================
 
 /**
- * DEPLOY: Rollback Deploy — not yet supported, returns honest error
+ * ROLLBACK_DEPLOY: never runs here. Restoring the backend to a published
+ * version undoes every change made since, so it is a person's decision: an
+ * agent's deploy { action: "rollback" } is parked with Backenly's list of what
+ * it would undo (lib/mcp/approvals.ts), and approving it runs the brain tool,
+ * not this action (lib/ai/brain/tools.ts). A person can also run it from
+ * History or Deploy. This used to move the version label alone, which looked
+ * like a rollback and undid nothing.
  */
-async function executeRollbackDeploy(params: any, projectId: string): Promise<ExecutionResult> {
-  try {
-    const { prisma } = await import('@/lib/db')
-    const project = await prisma.project.findUnique({
-      where: { id: projectId },
-      select: { userId: true },
-    })
-    if (!project?.userId) return { success: false, message: 'Project not found', error: 'Project not found' }
-
-    const { rollbackDeploy } = await import('@/lib/deployment/rollback')
-    const force = !!(params?.force || params?.confirmed)
-    const { actorUserId, actorVia } = deployActor(params, project.userId)
-    const result = await rollbackDeploy({
-      projectId,
-      userId: actorUserId,
-      deploymentId: params?.deploymentId,
-      version: typeof params?.version === 'number' ? params.version : undefined,
-      confirmedBy: actorVia,
-      force,
-    })
-
-    if (result.kind === 'error') {
-      return { success: false, message: result.error, error: result.error, data: { code: result.code } }
-    }
-
-    if (result.kind === 'confirmation') {
-      return {
-        success: true,
-        message: result.message,
-        data: { requiresConfirmation: true, fromVersion: result.fromVersion, toVersion: result.toVersion },
-      }
-    }
-
-    return {
-      success: true,
-      message: result.message,
-      data: { fromVersion: result.fromVersion, toVersion: result.toVersion },
-    }
-  } catch (error: any) {
-    return { success: false, message: `Rollback failed: ${error.message}`, error: error.message }
+async function executeRollbackDeploy(_params: any, _projectId: string): Promise<ExecutionResult> {
+  return {
+    success: false,
+    error: 'RESTORE_NEEDS_A_PERSON',
+    message:
+      'Not run: restoring the backend to a published version shows the changes it would undo before anyone ' +
+      'approves it. Use Restore on the version in History or Deploy, or ask for it with ' +
+      'deploy { action: "rollback", version }, which waits for approval with that list. Nothing was changed.',
   }
 }
 
@@ -10525,6 +10518,7 @@ async function executeRevokeKey(params: any, projectId: string): Promise<Executi
     const key = await prisma.apiKey.findFirst({ where: { id: keyId, projectId } })
     if (!key) return { success: false, message: `API key "${keyId}" not found` }
 
+    // history: GOVERNED_ACTIONS (REVOKE_KEY)
     await prisma.apiKey.delete({ where: { id: keyId } })
     const { confirmPropagation, propagationSentence } = await import('@/lib/auth-projection/confirm')
     const propagation = await confirmPropagation({ entity: 'api_key', entityId: keyId })
@@ -10564,6 +10558,7 @@ async function executeRotateKey(params: any, projectId: string): Promise<Executi
     const newPrefix = newKeyValue.substring(0, 12)
     const newHash = crypto.createHash('sha256').update(newKeyValue).digest('hex')
 
+    // history: GOVERNED_ACTIONS (ROTATE_KEY)
     await prisma.apiKey.update({
       where: { id: keyId },
       // The rotated secret goes back to the caller below and is never stored.
@@ -10650,6 +10645,7 @@ async function executeSetKeyPermissions(params: any, projectId: string): Promise
     }
 
     const before = key.permissions
+    // history: GOVERNED_ACTIONS (SET_KEY_PERMISSIONS)
     await prisma.apiKey.update({ where: { id: keyId }, data: { permissions } })
     // A narrowed key keeps its old reach in its project's region until the
     // region has the change (lib/auth-projection/confirm.ts).
@@ -11091,7 +11087,9 @@ async function executeCreateAiFunction(params: any, projectId: string): Promise<
       } catch { /* keep original code + honest error status */ }
     }
 
-    const fn = await prisma.aiFunction.create({
+    // Only the save is a governed change: the model answered before the lock (GOVERNED_ACTIONS).
+    const { governedChange, withChangeAttribution } = await import('@/lib/changes/ledger')
+    const fn = await governedChange(projectId, `Create ${triggerType === 'cron' ? 'schedule' : 'function'} ${name}`, () => prisma.aiFunction.create({
       data: {
         projectId,
         name,
@@ -11103,7 +11101,7 @@ async function executeCreateAiFunction(params: any, projectId: string): Promise<
         // Store syntax error so the Functions tab can show an actionable message
         lastError: syntaxCheck.valid ? null : `Syntax error: ${syntaxCheck.error}`,
       },
-    })
+    }))
 
     const triggerLabel: Record<string, string> = {
       on_signup: 'every time a user signs up',
@@ -11141,14 +11139,15 @@ async function executeCreateAiFunction(params: any, projectId: string): Promise<
         .then(async (fixedCode) => {
           if (!fixedCode || fixedCode === code) return
           const recheckSyntax = validateFunctionSyntax(fixedCode)
-          await prisma.aiFunction.update({
+          // Backenly rewrote the code, so the history says Backenly did.
+          await withChangeAttribution({ source: 'autonomy' }, () => governedChange(projectId, `Fix the syntax of function ${fn.name}`, () => prisma.aiFunction.update({
             where: { id: fn.id },
             data: {
               generatedCode: fixedCode,
               status: recheckSyntax.valid ? 'active' : 'error',
               lastError: recheckSyntax.valid ? null : `Syntax error: ${recheckSyntax.error}`,
             },
-          })
+          })))
         })
         .catch(() => {/* non-fatal */ })
     }
@@ -11269,14 +11268,15 @@ async function executeFixAiFunction(params: any, projectId: string): Promise<Exe
 
     const syntaxCheck = validateFunctionSyntax(fixedCode)
 
-    await prisma.aiFunction.update({
+    const { governedChange } = await import('@/lib/changes/ledger')
+    await governedChange(projectId, `Rewrite function ${fn.name} to fix an error`, () => prisma.aiFunction.update({
       where: { id: fn.id },
       data: {
         generatedCode: fixedCode,
         status: syntaxCheck.valid ? 'active' : 'error',
         lastError: syntaxCheck.valid ? null : `Syntax error: ${syntaxCheck.error}`,
       },
-    })
+    }))
     // The runtime error the fix answered is no longer the last one, in the
     // project's region either (a syntax error names the code, not the data).
     if (fn.lastError !== null) {
@@ -11482,6 +11482,7 @@ async function executeDeleteAiFunction(params: any, projectId: string): Promise<
     if ('result' in found) return found.result
     const fn = found
 
+    // history: GOVERNED_ACTIONS (DELETE_AI_FUNCTION)
     await prisma.aiFunction.delete({ where: { id: fn.id } })
 
     // Deleting the last row-event subscriber takes the capture trigger off the
@@ -11556,6 +11557,7 @@ async function executeToggleAiFunction(params: any, projectId: string): Promise<
 
     const { prisma } = await import('@/lib/db')
     const newStatus = active ? 'active' : 'inactive'
+    // history: GOVERNED_ACTIONS (TOGGLE_AI_FUNCTION)
     await prisma.aiFunction.update({ where: { id: fn.id }, data: { status: newStatus } })
 
     // A row-event function going on or off changes what the database-level
@@ -11595,7 +11597,7 @@ async function executeListSchemaVersions(projectId: string): Promise<ExecutionRe
       success: true,
       message:
         `Change history (newest first):\n${lines.join('\n')}\n\n` +
-        'A person restores the state before a change from Database → Changes, or a coding agent asks for it with ' +
+        'A person restores the state before a change from History, or a coding agent asks for it with ' +
         'deploy { action: "revert_change", changeId } for a person to approve.',
       data: { changes, windowDays },
     }
@@ -11613,9 +11615,9 @@ async function executeRollbackToVersion(_params: any, _projectId: string): Promi
     success: false,
     error: 'ROLLBACK_NEEDS_A_PERSON',
     message:
-      'The state before a change is restored one change at a time, by a person: open Database → Changes and use ' +
-      '"Restore previous state" on the change, or request it with deploy { action: "revert_change", changeId } and it ' +
-      'waits for approval. Nothing was changed.',
+      'A person restores from History: "Restore previous state" on one change, or "Restore to this point" to undo ' +
+      'everything after one, newest first. A coding agent requests one change\'s restore with deploy { action: ' +
+      '"revert_change", changeId }, and it waits for approval. Nothing was changed.',
   }
 }
 
@@ -11927,6 +11929,7 @@ async function executeStoreIntegrationKey(params: any, projectId: string): Promi
       // "unreachable" to "confirmed", and the dashboard must never render
       // `enabled: true` as "connected" without saying whether the provider
       // actually confirmed the credential.
+      // history: GOVERNED_ACTIONS (STORE_INTEGRATION_KEY)
       await _syncPrisma.project.update({
         where: { id: projectId },
         data: {
@@ -12092,6 +12095,7 @@ async function executeRemoveIntegrationKey(params: any, projectId: string): Prom
     const { resolveProviderId } = await import('@/lib/services/ai-functions/integration-registry')
     const integrationId = resolveProviderId(String(rawId).trim()) ?? String(rawId).trim().toLowerCase()
 
+    // history: GOVERNED_ACTIONS (REMOVE_INTEGRATION_KEY)
     await db.projectIntegrationKey.deleteMany({
       where: { projectId, integrationId: { startsWith: integrationId } },
     })
@@ -12106,6 +12110,7 @@ async function executeRemoveIntegrationKey(params: any, projectId: string): Prom
       })
       const active = (proj?.activeIntegrations as Record<string, any>) ?? {}
       if (active[integrationId]) {
+        // history: GOVERNED_ACTIONS (REMOVE_INTEGRATION_KEY)
         await db.project.update({
           where: { id: projectId },
           data: {
@@ -12183,8 +12188,9 @@ async function executeCreateCronJob(params: any, projectId: string): Promise<Exe
       return { success: false, message: `Could not create scheduled job — the generated name was invalid. Please describe what the job should do more clearly.` }
     }
 
-    // Store as AI function with triggerType='cron'
-    const fn = await db.aiFunction.create({
+    // Store as AI function with triggerType='cron'; only the save is a governed change.
+    const { governedChange } = await import('@/lib/changes/ledger')
+    const fn = await governedChange(projectId, `Create schedule ${validation.name}`, () => db.aiFunction.create({
       data: {
         projectId,
         name: validation.name,
@@ -12194,7 +12200,7 @@ async function executeCreateCronJob(params: any, projectId: string): Promise<Exe
         triggerTable: cronExpr, // reuse triggerTable field to store cron expression
         status: 'active',
       },
-    })
+    }))
 
     return {
       success: true,
@@ -12260,6 +12266,7 @@ async function executeDeleteCronJob(params: any, projectId: string): Promise<Exe
     }
     const job = found
 
+    // history: GOVERNED_ACTIONS (DELETE_CRON_JOB)
     await db.aiFunction.delete({ where: { id: job.id } })
     return { success: true, message: `Scheduled job "${job.name}" deleted.` }
   } catch (error: any) {
@@ -14019,6 +14026,7 @@ async function executeRotateWebhookSecret(params: any, projectId: string): Promi
     }
     const crypto = await import('crypto')
     const newSecret = `whsec_${crypto.randomBytes(24).toString('hex')}`
+    // history: GOVERNED_ACTIONS (ROTATE_WEBHOOK_SECRET)
     await prisma.appTrigger.update({
       where: { id: trigger.id },
       data: { webhookSecret: newSecret },

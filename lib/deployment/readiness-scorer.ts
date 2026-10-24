@@ -1024,10 +1024,11 @@ async function checkFunctionTriggers(projectId: string, autoFix: boolean): Promi
     }
     if (toDeactivate.length > 0 && autoFix) {
       try {
-        await prisma.aiFunction.updateMany({
-          where: { id: { in: toDeactivate } },
+        const { governedChange } = await import('@/lib/changes/ledger')
+        await governedChange(projectId, `Switch off ${toDeactivate.length === 1 ? 'a placeholder function' : `${toDeactivate.length} placeholder functions`} with live triggers`, () => prisma.aiFunction.updateMany({
+          where: { id: { in: toDeactivate }, projectId },
           data: { status: 'inactive' },
-        })
+        }))
         fixApplied = true
         issues.push(`✓ Auto-deactivated ${toDeactivate.length} placeholder function${toDeactivate.length !== 1 ? 's' : ''} that had live triggers`)
       } catch { /* non-fatal */ }

@@ -81,9 +81,24 @@ describe('revertEligibility — pure verdicts', () => {
   test('metadata-only fixes need no snapshot to be revertible', () => {
     const e = revertEligibility('missing_api_definition', {
       tableName: 'orders',
-      rollbackData: { rollbackFormat: 2, schemaTouching: false, snapshotId: null },
+      rollbackData: {
+        rollbackFormat: 2,
+        schemaTouching: false,
+        snapshotId: null,
+        preMetadata: { kind: 'api', tableName: 'orders', preExistingApiDefinitionIds: [] },
+      },
     })
     expect(e.revertible).toBe(true)
+  })
+
+  // An approved held action (a secret, a key's permissions) changed no schema
+  // and kept no earlier value. Its undo reported "Fix reverted." and changed nothing.
+  test('a fix with nothing recorded to put back is not revertible', () => {
+    const e = revertEligibility('ai_action_pending', {
+      rollbackData: { rollbackFormat: 3, schemaTouching: false, preMetadata: null, statements: [] },
+    })
+    expect(e.revertible).toBe(false)
+    expect(e.reason).toMatch(/kept no earlier state/i)
   })
 
   // Undoing RLS re-exposes every user's rows to every other user. That is a

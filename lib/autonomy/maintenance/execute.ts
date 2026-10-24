@@ -519,7 +519,7 @@ async function runLadder(
 
     let outcome: StepOutcome
     try {
-      outcome = await runStep(projectId, step, binding, plan.planVersion)
+      outcome = await inHistory(projectId, binding, () => runStep(projectId, step, binding, plan.planVersion))
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       await prisma.maintenanceStepExecution.update({
@@ -600,6 +600,41 @@ async function runLadder(
     data: { status: 'completed', completedAt: new Date() },
   })
   return { status: 'completed', executionId, haltReason: null, steps }
+}
+
+/**
+ * What a rung changes, as the project's history names it. A backfill writes
+ * rows, which the history never rewinds, and a verify only reads.
+ */
+function historyTitle(binding: StepBinding): string | null {
+  switch (binding.kind) {
+    case 'add_structure':
+      return `Add column ${binding.table}.${binding.column}`
+    case 'carry_constraints':
+      return `Limit ${binding.table}.${binding.targetColumn} to the values ${binding.sourceColumn} allows`
+    case 'dual_write':
+      return `Write ${binding.table}.${binding.targetColumn} whenever ${binding.sourceColumn} is written`
+    case 'switch_readers':
+      return `Point the functions that read ${binding.table}.${binding.sourceColumn} at ${binding.targetColumn}`
+    default:
+      return null
+  }
+}
+
+/**
+ * A rung that changes the backend is one entry in the project's history, by
+ * Backenly, like every other change (lib/changes/ledger.ts). Never recovered
+ * automatically: undoing a rung is this subsystem's decision, made by
+ * performRollback against what the rung left (see "What this does NOT own").
+ */
+async function inHistory(projectId: string, binding: StepBinding, run: () => Promise<StepOutcome>): Promise<StepOutcome> {
+  const title = historyTitle(binding)
+  if (!title) return run()
+  const { withGovernedChange, withChangeAttribution } = await import('@/lib/changes/ledger')
+  const { result } = await withChangeAttribution({ source: 'autonomy' }, () =>
+    withGovernedChange({ projectId, title, autoRecover: false }, run, (o) => ({ ok: o.status !== 'failed', ...(o.status === 'failed' ? { error: o.detail } : {}) })),
+  )
+  return result
 }
 
 /** One rung. Every branch is a named primitive; there is no default case. */

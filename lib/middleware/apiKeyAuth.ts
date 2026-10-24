@@ -150,6 +150,7 @@ export async function authenticateApiKey(request: NextRequest): Promise<ApiKeyAu
 
   // Reset counter if window expired
   if (resetAt < now) {
+    // history: usage bookkeeping (last used, rate-limit window), not configuration
     await prisma.apiKey.update({
       where: { id: apiKey.id },
       data: {
@@ -162,6 +163,7 @@ export async function authenticateApiKey(request: NextRequest): Promise<ApiKeyAu
 
   // Atomic increment: only increments if requestCount is still below the limit.
   // If another concurrent request already pushed it over the limit, updated.count === 0.
+  // history: usage bookkeeping (last used, rate-limit window), not configuration
   const updated = await prisma.apiKey.updateMany({
     where: { id: apiKey.id, requestCount: { lt: apiKey.rateLimit } },
     data: { requestCount: { increment: 1 }, lastUsed: now },

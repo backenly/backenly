@@ -6,7 +6,7 @@
  * APIs" and that the agent "can roll back this turn". Its dispatch refused
  * every call, so the model could promise an undo, spend a step on it and get
  * nothing back. A change is restored on its own, by a person
- * (revert_schema_change, Database → Changes); nothing may say otherwise.
+ * (revert_schema_change, History); nothing may say otherwise.
  */
 
 import { BRAIN_MODEL_TOOLS, BRAIN_TOOLS, dispatchTool } from '@/lib/ai/brain/tools'

@@ -7,6 +7,7 @@ import { requireAuth } from '@/lib/auth/middleware'
 import crypto from 'crypto'
 import { plaintextForStorage } from '@/lib/auth/api-key-plaintext'
 import { mintKey } from '@/lib/auth/key-prefix'
+import { governedChange } from '@/lib/changes/ledger'
 
 /**
  * Rotate an API key - generates a new key while keeping the same settings
@@ -91,7 +92,7 @@ export async function POST(request: NextRequest, props: { params: Promise<{ id: 
     const keyHash = crypto.createHash('sha256').update(fullKey).digest('hex')
 
     // Update the key (keep all other settings)
-    await prisma.apiKey.update({
+    await governedChange(apiKey.projectId, `Rotate API key ${apiKey.name}`, () => prisma.apiKey.update({
       where: { id: apiKey.id },
       data: {
         // Replacing keyHash is what actually revokes the old credential.
@@ -102,7 +103,7 @@ export async function POST(request: NextRequest, props: { params: Promise<{ id: 
         requestCount: 0, // Reset usage counter
         resetAt: new Date(Date.now() + apiKey.rateLimitWindow * 1000),
       },
-    })
+    }), { actorUserId: auth.userId })
 
     // The old secret stops working in the project's region once the region has
     // the rotation (lib/auth-projection/confirm.ts); `pending` says it is in flight.

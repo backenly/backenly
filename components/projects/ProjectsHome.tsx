@@ -267,7 +267,7 @@ export function ProjectsHome({ org = null }: { org?: ProjectsHomeOrg | null }) {
           title="Projects"
           meta={
             !loading && projects.length > 0 ? (
-              <span className="text-[13px] tabular-nums text-zinc-500">{projects.length}</span>
+              <span className="text-[13px] tabular-nums text-faint">{projects.length}</span>
             ) : undefined
           }
           description={
@@ -674,7 +674,7 @@ function FormRow({
             {label}
           </p>
         )}
-        {hint && <p className="mt-0.5 text-[12px] leading-[17px] text-zinc-500 [text-wrap:pretty]">{hint}</p>}
+        {hint && <p className="mt-0.5 text-[12px] leading-[17px] text-faint [text-wrap:pretty]">{hint}</p>}
       </div>
       <div className="min-w-0">{children}</div>
     </div>
@@ -760,7 +760,7 @@ function RegionPicker({
               <span className={`block truncate text-[13px] font-medium leading-[18px] ${r.open ? 'text-zinc-100' : 'text-zinc-500'}`}>
                 {r.city}
               </span>
-              <span className={`block truncate font-mono text-[11.5px] leading-[16px] ${r.open ? 'text-zinc-500' : 'text-zinc-600'}`}>
+              <span className={`block truncate font-mono text-[11.5px] leading-[16px] ${r.open ? 'text-faint' : 'text-zinc-600'}`}>
                 {r.area} · {r.id}
               </span>
             </span>
@@ -774,7 +774,7 @@ function RegionPicker({
                 {selected && <span className="h-[6px] w-[6px] rounded-full bg-violet-200" />}
               </span>
             ) : (
-              <span className="shrink-0 text-[11.5px] text-zinc-600">Not open yet</span>
+              <span className="shrink-0 text-[11.5px] text-faint">Not open yet</span>
             )}
           </label>
         )
@@ -785,12 +785,32 @@ function RegionPicker({
 
 // ─── Project card ─────────────────────────────────────────────────────────────
 
-function Monogram({ name }: { name: string }) {
+/**
+ * A project's mark: its initial on one of a few muted tints, chosen from the
+ * id so a project keeps its colour wherever it appears and a grid of them can
+ * be told apart at a glance. Identity only; status stays with the dot.
+ */
+const MONOGRAM_TINTS = [
+  'border-violet-300/20 bg-violet-400/[0.09] text-violet-200',
+  'border-sky-300/20 bg-sky-400/[0.08] text-sky-200',
+  'border-emerald-300/20 bg-emerald-400/[0.08] text-emerald-200',
+  'border-amber-300/20 bg-amber-400/[0.08] text-amber-200',
+  'border-rose-300/20 bg-rose-400/[0.08] text-rose-200',
+  'border-teal-300/20 bg-teal-400/[0.08] text-teal-200',
+] as const
+
+function tintOf(id: string): string {
+  let h = 0
+  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0
+  return MONOGRAM_TINTS[h % MONOGRAM_TINTS.length]
+}
+
+function Monogram({ id, name }: { id: string; name: string }) {
   const letter = name.trim().charAt(0).toUpperCase() || '·'
   return (
     <span
       aria-hidden
-      className="flex h-[32px] w-[32px] flex-shrink-0 items-center justify-center rounded-[8px] border border-white/[0.09] bg-[linear-gradient(160deg,rgba(255,255,255,0.07),rgba(255,255,255,0.015))] text-[13px] font-semibold text-zinc-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]"
+      className={`flex h-[32px] w-[32px] flex-shrink-0 items-center justify-center rounded-[8px] border text-[13px] font-semibold shadow-[inset_0_1px_0_rgba(255,255,255,0.06)] ${tintOf(id)}`}
     >
       {letter}
     </span>
@@ -835,7 +855,7 @@ function ProjectCard({
       />
 
       <div className="flex items-start gap-3">
-        <Monogram name={project.name} />
+        <Monogram id={project.id} name={project.name} />
         <div className="min-w-0 flex-1 pt-[1px]">
           {renaming ? (
             <input
@@ -857,7 +877,7 @@ function ProjectCard({
               {project.name}
             </h3>
           )}
-          <p className="truncate text-[12px] leading-[16px] text-zinc-500">
+          <p className="truncate text-[12px] leading-[16px] text-faint">
             {/* The region holding the project's data; null reads as the home region (lib/regions.ts). */}
             {CLOUD_CONTROL_PLANE ? regionLabel(project.region) : 'Self-hosted'}
           </p>
@@ -878,21 +898,18 @@ function ProjectCard({
 
       <p
         className={`mt-3 line-clamp-2 min-h-[40px] text-[13px] leading-[20px] [text-wrap:pretty] ${
-          description ? 'text-zinc-400' : 'text-zinc-600'
+          description ? 'text-zinc-400' : 'text-faint'
         }`}
       >
         {description || 'No description yet.'}
       </p>
 
-      <div className={`mt-auto flex items-center gap-2 border-t ${RULE} pt-3 text-[12px] leading-[16px] text-zinc-500`}>
+      <div className={`mt-auto flex items-center gap-3 border-t ${RULE} pt-3 text-[12px] leading-[16px] text-faint`}>
         <StatusDot tone={status.tone} label={status.label} pulse={status.pulse} />
         {typeof tables === 'number' && (
-          <>
-            <span aria-hidden className="text-zinc-700">·</span>
-            <span className="tabular-nums">
-              {tables} {tables === 1 ? 'table' : 'tables'}
-            </span>
-          </>
+          <span className="tabular-nums">
+            {tables} {tables === 1 ? 'table' : 'tables'}
+          </span>
         )}
         {project.updatedAt && (
           <span className="ml-auto tabular-nums" title={new Date(project.updatedAt).toLocaleString()}>

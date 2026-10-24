@@ -2,8 +2,7 @@
  * PRIVACY POLICY CONTENT
  * ======================
  *
- * Separated from page.tsx for the same reason app/comparisons/data.ts and
- * app/use-cases/data.ts are: the integrity gate imports this, and a Next.js
+ * Separated from page.tsx for the same reason app/comparisons/data.ts is: the integrity gate imports this, and a Next.js
  * page module may only export a default component plus route segment config.
  *
  * WHAT THIS REWRITE FIXED

@@ -39,6 +39,9 @@ import { projectRestriction } from '@/lib/usage/restrictions'
 import { signCdnUrl, signedCdnConfig } from '@/lib/storage/cdn'
 import { fileIdsNamed, forgetFileNames, keepFileNames, storedFileName, withFileName, withFileNames } from '@/lib/storage/file-names'
 
+/** Bucket writes are governed changes (lib/changes/ledger.ts); one made inside another change joins it. */
+const governed = async <T>(projectId: string, title: string, fn: () => Promise<T>) => (await import('@/lib/changes/ledger')).governedChange(projectId, title, fn)
+
 export class S3StorageService implements StorageService {
   private s3Client: S3Client
   private bucket: string
@@ -143,7 +146,12 @@ export class S3StorageService implements StorageService {
     return `${projectId}/${bucketId}/${fileId}-${hash}${ext}`
   }
 
+  /** One change in the project's history, whoever asks (lib/changes/resources/storage.ts). */
   async createBucket(name: string, projectId: string, isPublic: boolean = false) {
+    return governed(projectId, `Create bucket ${name}`, () => this.createBucketNow(name, projectId, isPublic))
+  }
+
+  private async createBucketNow(name: string, projectId: string, isPublic: boolean) {
     if (!projectId) {
       throw new Error('Project ID is required for tenant isolation')
     }
@@ -207,7 +215,13 @@ export class S3StorageService implements StorageService {
     }))
   }
 
+  /** One change, files and all, so the history knows what the bucket held when it went. */
   async deleteBucket(bucketId: string, projectId: string) {
+    const row = await prisma.storageBucket.findUnique({ where: { id: bucketId }, select: { name: true } })
+    return governed(projectId, `Delete bucket ${row?.name ?? bucketId}`, () => this.deleteBucketNow(bucketId, projectId))
+  }
+
+  private async deleteBucketNow(bucketId: string, projectId: string) {
     if (!projectId) {
       throw new Error('Project ID is required for tenant isolation')
     }
@@ -235,6 +249,7 @@ export class S3StorageService implements StorageService {
     const rows = await prisma.storageFile.findMany({ where: { bucketId }, select: { id: true } })
 
     // Delete bucket from database
+    // history: governed by deleteBucket
     await prisma.storageBucket.delete({
       where: { id: bucketId },
     })

@@ -213,6 +213,16 @@ function labelForAudit(
     }
   }
 
+  // The repair loop putting a table's access rules back after its own verifier
+  // rejected a policy repair (lib/core/auto-fix-engine.ts _recoverPolicies). It
+  // read as "Ran a health check", whatever happened to the rules.
+  if (a === 'authority_recovery') {
+    const table = typeof d.tableName === 'string' ? ` on ${d.tableName}` : ''
+    if (d.status === 'verified') return { kind: 'auto_fix', label: `Put the access rules${table} back after a repair failed its check` }
+    if (d.status === 'not_needed') return { kind: 'auto_fix', label: `A repair failed its check and had changed no access rules${table}` }
+    return { kind: 'auto_fix', label: `A repair failed its check, and the access rules${table} could not be put back: needs a look` }
+  }
+
   // Self-healing engine — health-check rows that aren't direct fix events.
   if (t.includes('health') || a.includes('health_fix')) {
     if (a.includes('rolled_back')) return { kind: 'auto_fix', label: 'Undid a previous fix' }
@@ -227,9 +237,14 @@ function labelForAudit(
   if (t.includes('file') || t.includes('upload'))     return { kind: 'file',    label: meta?.bucket ? `File uploaded to ${meta.bucket} bucket` : 'File uploaded' }
   if (t.includes('table') || a.includes('create_table')) return { kind: 'table', label: meta?.tableName ? `Table "${meta.tableName}" created` : 'Table created' }
   if (t.includes('auth'))                              return { kind: 'auth',    label: 'Auth setting updated' }
+  // The backend restored to a published version, every change since undone
+  // (lib/deployment/rollback.ts markVersionCurrent).
+  if (a === 'version_restored') {
+    return { kind: 'deploy', label: d.version ? `Backend restored to v${d.version}` : 'Backend restored to an earlier version' }
+  }
   if (t.includes('deploy')) {
     if (a.includes('fail'))                                          return { kind: 'deploy', label: 'Deployment failed' }
-    if (a.includes('rollback') || a.includes('rolled_back'))         return { kind: 'deploy', label: 'Deployment rolled back' }
+    if (a.includes('rollback') || a.includes('rolled_back'))         return { kind: 'deploy', label: 'Older version recorded as current' }
     if (a.includes('succe') || a.includes('complete') || a.includes('live')) return { kind: 'deploy', label: 'Deployed successfully' }
     if (a.includes('start'))                                         return { kind: 'deploy', label: 'Deployment started' }
     return { kind: 'deploy', label: 'Deployment update' }

@@ -67,7 +67,7 @@ Project level (/app/projects/<id>), one sidebar:
 - Preview endpoint — a branch is served at the project's usual base URL to a key bound to it; there is no separate preview host. create_branch returns that endpoint with a client key (shown once), the X-Backenly-Environment value to assert, an OpenAPI URL and test instructions; connect_branch issues more keys (serviceRole for server-side). Branch keys start proj_preview_ / svc_preview_. A branch's traffic is kept out of production monitoring and autonomy; read it with list_request_logs and its branchId. There is no in-dashboard API tester: the coding agent, curl or the SDK test the endpoint.
 - Environments — an API key can be bound to a branch (create_api_key with branchId), and every request that key makes then reads and writes that branch instead of main. This is the ONLY way to select an environment: the schema is derived from the credential, never from a request header, because a client-settable schema selector would be a cross-tenant bypass. A key whose branch is merged or discarded is REFUSED, never silently pointed back at production. Scope note: branch routing covers the REST data plane (/api/v1/{id}/db and /api/v2) and end-user sign-up, sign-in, refresh and logout, which then use the branch's own users table and issue tokens only that branch accepts (a branch sign-up skips on_signup functions, webhooks, the active-user count and email verification, and lists them in skippedOnBranch). Every other endpoint (functions, storage, realtime, the emailed auth flows) REFUSES a branch-bound key with BRANCH_SURFACE_UNAVAILABLE rather than serving production. Data-plane and auth responses carry X-Backenly-Environment (main or branch:<name>), so a test can confirm which environment answered. Say "branch-scoped data and auth environment", not "fully isolated environment".
 - Autonomy — Activity (the loop timeline with receipts), Guardrails (the autonomy dial + category gates + the repairs Backenly made, each with its undo).
-- Monitoring — metrics + request logs. Deploy — publish, readiness, rollback. Database → Changes — every schema change with its checks, and Restore previous state per change.
+- Monitoring — metrics + request logs. Deploy — publish, readiness, restore to a published version (approved by a person). History — every change to the backend (schema, storage, functions, webhooks, keys, auth, integrations) with its checks: Restore previous state per change, Restore to this point for everything after one.
 - Connect — wire a coding agent over MCP (per-agent setup cards, scoped keys), frontend SDK snippet, direct API access. Also reachable from the top bar: the "Connect agent" button, which reads "Agent connected" once the user's agent is.
 - Project Settings — name, client keys, access, danger zone.
 The Review Queue is the inbox icon in the top bar (lit only when something waits on the user). The Assistant (top-bar button, ⌘J) is a Q&A panel available on every project page — it answers questions and points to sections, never builds. Building happens through Connect (the user's coding agent over MCP) or the Database section UI.
@@ -111,7 +111,7 @@ export const TOOL_CAPABILITIES: Capability[] = [
   {
     id: 'drop_column',
     name: 'Drop a column (destructive)',
-    what: 'Drop a column from a table. Reserved columns (id, createdAt, updatedAt) cannot be dropped. The table\'s REST API is regenerated so the column disappears from CRUD payloads. Its values are kept: restoring the state before the change (Database → Changes) brings the column back with them. Requires explicit user confirmation.',
+    what: 'Drop a column from a table. Reserved columns (id, createdAt, updatedAt) cannot be dropped. The table\'s REST API is regenerated so the column disappears from CRUD payloads. Its values are kept: restoring the state before the change (History) brings the column back with them. Requires explicit user confirmation.',
     tool: 'drop_column',
   },
   {
@@ -487,13 +487,13 @@ export const TOOL_CAPABILITIES: Capability[] = [
   {
     id: 'list_deploy_versions',
     name: 'Published versions (read)',
-    what: 'Every published version, newest first, with its change summary, which one is serving and which can be rolled back to.',
+    what: 'Every published version, newest first, with its change summary and which one is serving.',
     tool: 'list_deploy_versions',
   },
   {
     id: 'rollback_deploy',
-    name: 'Roll back the deploy (destructive)',
-    what: 'Mark a previous published version as current in the version history. Bookkeeping only: the live schema, data, RLS and functions do not change. It waits for a person: the call is queued for the project owner to approve, and the approved call runs exactly as made.',
+    name: 'Restore the backend to a published version (destructive)',
+    what: 'Ask for the backend to be restored to a published version: every change made since it was published is undone, newest first, each checked before it runs, and the version is recorded as current. Backenly queues its own list of those changes for a project admin to approve; approving runs exactly that list, or nothing if the history changed since. A change that would set aside data written since stops it there, for the person to review in History. Data users wrote is never rewound, and keys or secrets never come back.',
     tool: 'rollback_deploy',
   },
   {
@@ -890,7 +890,7 @@ export const MANUAL_CAPABILITIES: Capability[] = [
   {
     id: 'history',
     name: 'Change history',
-    what: 'Every mutation is journaled. Database → Changes lists every schema change with its checks and offers Restore previous state for each, which a person runs; there is no undo of a whole turn. The chat agent can ask for a restore with revert_schema_change, which waits for a person\'s approval, but does not manage the history view itself.',
+    what: 'Every mutation is journaled. History lists every change to the backend with its checks and offers Restore previous state for each, and Restore to this point for everything after one, which a person runs; there is no undo of a whole turn. The chat agent can ask for a restore with revert_schema_change, which waits for a person\'s approval, but does not manage the history view itself.',
     manualOnly: true,
   },
   {

@@ -192,7 +192,7 @@ function classify(file: string): RouteRecord {
     // staff-side functions are deliberately NOT listed: no public route may
     // call them. createTicket authorizes its optional projectId input by
     // calling canAccessProject before the row is written.
-    'createTicket', 'getTicket', 'addCustomerReply', 'resolveTicket', 'reopenTicket',
+    'createTicket', 'getTicket', 'addCustomerReply', 'resolveTicket', 'reopenTicket', 'retryAiAnswer',
   ].filter(h => new RegExp(`\\b${h}\\s*\\(`).test(src))
 
   const pathParams = Array.from(route.matchAll(/\[([^\]]+)\]/g)).map(m => m[1])

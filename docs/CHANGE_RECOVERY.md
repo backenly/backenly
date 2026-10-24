@@ -24,6 +24,56 @@ Three authorities, never mixed:
 | Backenly control plane | checkpoint, verify, recover when recovery is proven lossless, escalate | recover when it cannot prove safety, report success it has not verified |
 | A person (admin on the project) | approve a risky restore, restore manually, approve an agent's request | — |
 
+## One history
+
+A project has one history, for the whole backend, at **History** in the
+console (`/app/projects/:id/changes`; `/history` is a permanent redirect left
+from an older page). A change that adds a table, a bucket and an environment
+variable is one entry, restored as one. The schema is one part of it; the rest
+is recorded by `lib/changes/resources`, one adapter each:
+
+| Part | Items | Comes back exactly | Never comes back |
+|------|-------|--------------------|------------------|
+| database | tables, columns, constraints, indexes, policies, triggers, grants to the API roles, views, functions, enums, domains | everything the catalog holds | data written since (see Recovery plans) |
+| auth | sign-in settings, OAuth providers, the SMTP sender, email templates | settings and templates; a provider's client id, scopes, switch | a client secret, the SMTP password |
+| storage | buckets and their settings | settings; an empty bucket the change created goes again | a bucket holding files written since stays; a bucket removed with its files |
+| functions | functions and schedules: code, trigger, Power switch | all of it, under the same id | — |
+| webhooks | webhooks and table triggers | targets, events, conditions, switches | a signing secret |
+| env | environment variables | descriptions; a variable the change added goes again | a value |
+| keys | API and agent keys | permissions, limits, expiry; a key the change created is revoked | a revoked or rotated key |
+| integrations | stored keys, which integrations are switched on | switches; a key the change stored is removed | a stored key; a switch turned off with its key stays off with it |
+
+A credential never comes back, whoever asks (Cloudflare's rule for its own
+tokens): what is kept of one is a digest of its hash or ciphertext, or the IV
+that identifies its encryption, so a restore can tell that it changed and
+cannot put it back. A restore that would leave one as the change
+made it says so and needs a person who approves exactly that; a change that only
+did what cannot be undone (revoking a key) offers no restore at all.
+
+Not in the history, on purpose:
+
+- **Data.** Rows the application wrote are never rewound by a restore; only
+  data a change itself removed or rewrote is kept and put back. Snapshots are
+  the disaster-recovery copy of the data.
+- **Runtime state.** A key's last-used stamp and rate-limit window, how a
+  function's last run went (`status: 'error'`), integration key verification.
+  None is a decision anyone made, and comparing them would make every restore
+  look blocked.
+- **Backenly's derived plumbing.** The row-event capture trigger and its
+  outbox, presence (`PLATFORM_OBJECTS`, `lib/changes/catalog.ts`). Each is
+  derived from other rows by its own sync, which a restore asks to run again.
+  Realtime's trigger is a person's choice and is in the history.
+- **What belongs to something else.** The project's public anon key (one with
+  `Project.anonKey`), a preview branch's keys (they end with the branch), a
+  table's generated endpoints (they follow the table: `generatedEndpointsFollow`).
+
+Every write to a recorded row goes through a governed change
+(`governedChange`, `withGovernedChange`, or an action in `GOVERNED_ACTIONS`).
+`scripts/assert-history-writes.ts` fails CI on one that does not, reading the
+recorded models from the adapters themselves; a write that is not a change says
+why in a `// history:` comment, and a comment that names `GOVERNED_ACTIONS (X)`
+or `governed by fn` is checked against the code.
+
 ## Lifecycle
 
 `BackendChange.status`, moved only by `lib/changes/lifecycle.ts`:
@@ -61,17 +111,25 @@ Taken under the project's change lock before the first statement
 |------------|---------|------------|
 | additive | create table/column/index/constraint | catalog restore point |
 | transforming | rename, retype, nullability, default | restore point; a retype also keeps the original values and the values it produced |
-| destructive | drop table/column | restore point; the data moves into the change's vault (`lib/changes/preserve.ts`) in the same transaction as the drop |
+| destructive | drop table/column | restore point; the data moves into the change's vault (`lib/changes/preserve.ts`) in the same transaction as the drop; a table that a view, a function or another table's default still reads is not dropped, and the refusal names them |
 | data rewrite | backfill, normalise, split, cast with data | restore point; the pre-image (`_dm_backup_*`) and the post-image of the rewritten columns, captured inside the migration's own transaction |
 
-The checkpoint is resource-typed (`checkpoint.resources.database`) so a change
-spanning database, functions and auth policies can be represented; today only
-the database resource is captured and recovered, and nothing claims otherwise.
+The checkpoint is resource-typed: `checkpoint.database` holds the catalog,
+`checkpoint.resources` every item of the rest of the backend the change touched,
+as it was (`resultState.resources`, as the change left it). A secret is kept as a
+digest of its hash or ciphertext, or as the IV of its encryption, never its
+value. The record's `resources`
+column says which parts it touched, for History's filters.
 
 Integrity: the restore point, result state and footprint are hashed when the
 change closes, and every vault table records its row count and checksum when it
 is filled. A restore re-checks both before it plans anything; a mismatch makes
 the restore point unusable, and it is shown as unavailable, never as available.
+
+Retention: a vault is kept for the plan's restore window plus a grace week, then
+dropped (`lib/changes/retention.ts`). A vault that anything outside it still
+reads is kept past that and named in the log instead: dropping it with
+`CASCADE` would take the reader from the live schema without a word.
 
 ## Protected verification
 
@@ -119,7 +177,21 @@ recovery; an inconclusive check leaves the change `unverified` and says so.
    restore's own vault. But "kept in a vault" is not "available", so any impact
    makes the plan **needs approval**, and the dialog says exactly what and how
    many.
-4. **Proof.** The statements run in a transaction that is rolled back.
+4. **Proof.** The statements run in a transaction that is rolled back. Inside
+   it, nothing outside the restore's vault may read what the restore moved in:
+   a view over a table the change created, a policy on another table that
+   reads it, a default drawing from its sequence. PostgreSQL tracks those by
+   oid, so they would follow the table and keep working against the vault
+   (`lib/changes/dependents.ts`). Each one is a conflict like a later change
+   to the same table: the plan is `blocked`, names it, and names the later
+   change that made it, when one did.
+
+The rest of the backend is planned beside the schema (`assessResources`): an
+item that changed since the change is a conflict that names it and the later
+change, like a table; an item a credential rule keeps is listed for approval.
+Its part is applied in one platform transaction that commits only once the
+schema's restore has, and is compensated if the schema's COMMIT fails, so the
+two never land apart. It is verified afterwards by reading every item back.
 
 | Plan safety | Meaning | Who may run it |
 |-------------|---------|----------------|
@@ -131,8 +203,11 @@ recovery; an inconclusive check leaves the change `unverified` and says so.
 Execution re-proves the plan: tables are locked `ACCESS EXCLUSIVE` first, the
 impact is computed again under the lock, and if it is worse than what the
 person approved (or non-empty for a lossless restore) nothing runs. Then the
-statements, the independent check against the restore point, and protected
-verification of the result.
+statements, the value checks and the check that nothing outside the vault
+reads it, all before COMMIT, and after it the independent check of the result
+against the restore point. A restore is not put through the change checks of
+`verify.ts`: what it must produce is known exactly (the restore point), and it
+is held to that.
 
 A plan's strategy is `reverse_migration` (the plan above, with vault restores
 and value restores) or `manual` (no plan can be built, and a person decides). A
@@ -166,10 +241,18 @@ change (`kept`). A restore or keep from the console answers the request.
 
 ## Manual restore
 
-From the change's ⋯ menu, **Restore previous state**. The restore is itself a
+From the change's ⋯ menu in History, **Restore previous state**. The restore is itself a
 recorded change with its own checkpoint, so the state it replaces is protected
 first; **Reapply this change** restores that checkpoint. Internally that is a
 recovery of a recovery; the console never presents it as one.
+
+Reapply is offered only for the latest restore of a change, from the change
+itself, and only for a change protected verification confirmed when it was
+made. Reapplying marks the change healthy again on the strength of that
+verification, so a change that failed its checks, could not be checked or
+failed part-way is asked for again instead, and checked again. A restore of a
+reapply is not offered either: it would undo the change while the change stayed
+reported in effect.
 
 A restore keeps what a reapply needs the way a change does. Every column it
 converts back or puts original values on gets a keyed image in the restore's
@@ -179,6 +262,32 @@ there. Reapplying then puts the change's values back only on rows nobody has
 touched since the restore, and sets aside, for a person to approve, only what
 was written after it, never the values the restore itself put back.
 
+**Restore to this point** (`lib/changes/range.ts`) returns the backend to how
+it was right after one change: everything made since is undone, newest first,
+each step an ordinary restore with its own proof, record and reapply. A restore
+made after the point, of a change made before it, is undone too (the change is
+reapplied), since it was in effect at the point; a change and its own restore
+after the point are left alone; a change only a credential rule keeps is named
+and left. It runs a step only when its restore is lossless and stops at the
+first that needs a person or cannot run, saying which; what it restored before
+that stays restored, and running it again continues. The dialog lists the
+steps before anything runs, and the server refuses (`STALE_PAGE`) if the list
+changed since.
+
+A published version marks History at the time it was published, and **Restore**
+on a version (History or Deploy) is restore to that point: the last change
+before it was published. Reached in full, the version is also recorded as the
+current one. Deploy's old rollback moved that record and nothing else.
+
+An agent asks for the same thing with `deploy { action: "rollback", version }`.
+Backenly measures it as the console would (`describeVersionRestore`): a version
+that does not exist, or that nothing has changed since, is answered at once;
+otherwise the request is parked with Backenly's list of the changes it would
+undo, never the agent's own words. A project admin approves it in the Review
+Queue, and approving runs exactly that list (`restoreToVersion`), by the
+approver, or nothing if the history changed since. The executor's own
+`ROLLBACK_DEPLOY` runs nothing and says how to ask.
+
 ## Concurrency and idempotency
 
 - One change at a time per project: a PostgreSQL advisory lock held from the
@@ -187,6 +296,9 @@ was written after it, never the values the restore itself put back.
 - Every change records its parent (the change before it). A restore checks the
   live state against the change's result state, so it never acts on a state it
   did not produce.
+- An agent's restore request (`deploy { action: "revert_change" }`) proves the
+  restore before it is queued, and proving locks the tables it touches, so a
+  project takes six such requests a minute from its agents.
 - Recovery is claimed by compare-and-set with a lease. A duplicate request
   finds it claimed and returns the outcome. A process that dies mid-recovery
   leaves the lease to expire; the reconciler then reads the catalog and records
@@ -201,10 +313,10 @@ their identity, attribution or evidence once written, and status can only move
 along the lifecycle above. Each event carries the principals
 (`lib/principal`): who requested, who authorised, who executed. Recoveries and
 restores are also written to the audit log as `ROLLBACK_CHANGE_*` rows, so the
-Autonomy page's activity feed and its "Rolled back" count include them; a
-reapply (`CHANGE_REAPPLIED`), a change kept as it is (`CHANGE_KEPT`) and a
-recovery waiting for a person (`CHANGE_RECOVERY_*`) appear in the feed without
-counting as rollbacks.
+Autonomy page's activity feed shows them; its "Rolled back" count counts undone
+fixes (`HEALTH_FIX_ROLLED_BACK`) only. A reapply (`CHANGE_REAPPLIED`), a change
+kept as it is (`CHANGE_KEPT`) and a recovery waiting for a person
+(`CHANGE_RECOVERY_*`) appear in the feed as well.
 
 ## Regions and residency
 
@@ -231,8 +343,8 @@ from the console and requires the restore to come back verified.
 
 ## What is not automated
 
-- Changes outside the database (functions, auth providers, storage) are not in
-  the checkpoint yet.
+- Credentials are never brought back, and data written since is never
+  rewound (One history, above).
 - Row data written by the application is not versioned; only data a change
   itself removed or rewrote is kept.
 - A restore crossing a later change to the same table is refused, not merged.
@@ -245,19 +357,22 @@ from the console and requires the restore to come back verified.
 
 ## The other ways back, and why they stay
 
-Restoring the state before a change is the only schema undo. The routes that
+Restoring the state before a change, one at a time or to a point, is the only undo. The routes that
 undid changes another way (moving the active-graph pointer, re-creating what a
 saved version named, replaying a snapshot's DDL, the archive restores) answer
-410 and point here (`lib/changes/retired.ts`). Two ways back remain, on
-purpose, outside the ledger:
+410 and point here (`lib/changes/retired.ts`). One way back stays a separate
+restore, on purpose, though it is recorded in the history:
 
 - **Project snapshots** (Database → Snapshots) restore the whole database from a
-  backup, a person's disaster-recovery step. A table it reshaped no longer
-  matches what a change left, so restoring that change is refused as a conflict,
-  as for any change made outside Backenly, rather than run over it.
-- **The repair loop's policy recovery** (`restore_policies`, declared in
-  `lib/authority/action-classes.ts`) puts a table's row-level-security policies
-  back when the repair's own verifier rejects its change, guarded against
-  overwriting a later change and written to the audit log. Moving it onto the
-  ledger needs a recovery mode for a change the ledger verified but a repair
-  rejected; until then it is the one recovery that runs beside it.
+  backup, a person's disaster-recovery step. The restore is an entry in History
+  (`kind: 'snapshot_restore'`, by the person who asked) that History does not
+  undo: restoring an earlier snapshot does. A table it reshaped no longer
+  matches what a change left, so restoring that change is refused as a conflict
+  rather than run over it, and Restore to this point stops at it.
+
+The repair loop's policy recovery is on the ledger now (`recoverRejectedRepair`,
+mode `repair`): a change the ledger verified but the repair's own verifier
+rejected is restored like any other, by Backenly, and recorded. Autonomous
+maintenance (`lib/autonomy/maintenance`) records each rung that changes the
+backend, and its undo, as a change by Backenly, without automatic recovery:
+undoing a rung is that subsystem's decision, against what the rung left.

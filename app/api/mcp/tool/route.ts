@@ -40,6 +40,7 @@ import { createTokenScope, runInTokenScope } from '@/lib/ai/token-meter'
 import { createHash } from 'crypto'
 import { DOCS_MAX_CHARS } from '@/lib/mcp/docs-limit'
 import { AGENT_DOCS_URL, AGENT_DOC_TOPICS, agentDocPublicPath, resolveDocTopic } from '@/lib/mcp/agent-docs'
+import { readPublicDoc as readPublicFile } from '@/lib/mcp/public-docs'
 import { readOnlyView, resolveDomainAction, type DomainResolution } from '@/lib/mcp/domains'
 import { withChangeAttribution } from '@/lib/changes/ledger'
 
@@ -890,45 +891,13 @@ async function loadDocs(
 }
 
 /**
- * Load a file under public/ reliably. The previous implementation self-fetched
- * `request.nextUrl.origin/llms.txt`, which in the Next standalone server behind
- * nginx resolves to an internal origin that does NOT serve the static file — so
- * fetch_docs always returned the tiny fallback pointer instead of the real docs.
- * Try, in order: the file on disk (works in standalone + dev), the absolute app
- * URL, then the request origin. First hit wins. `publicPath` is only ever one of
- * the registry's own paths, never the caller's text.
+ * Load a file under public/ the one reliable way (lib/mcp/public-docs.ts: disk,
+ * then the absolute app URL), with this request's origin as the last resort.
+ * `publicPath` is only ever one of the registry's own paths, never the caller's
+ * text.
  */
-async function readPublicDoc(request: NextRequest, publicPath: string): Promise<string> {
-  // 1. Filesystem — public/ is copied next to the standalone server at build.
-  try {
-    const fs = await import('fs/promises')
-    const path = await import('path')
-    for (const p of [
-      path.join(process.cwd(), 'public', publicPath),
-      path.join(process.cwd(), '.next', 'standalone', 'public', publicPath),
-    ]) {
-      try {
-        const txt = await fs.readFile(/*turbopackIgnore: true*/ p, 'utf8')
-        if (txt && txt.trim()) return txt
-      } catch { /* try next path */ }
-    }
-  } catch { /* fs unavailable — fall through to HTTP */ }
-
-  // 2. Absolute app URL (nginx serves the static file here), then 3. origin.
-  const origins = [
-    process.env.NEXT_PUBLIC_APP_URL?.replace(/\/$/, ''),
-    request.nextUrl.origin,
-  ].filter(Boolean) as string[]
-  for (const origin of origins) {
-    try {
-      const res = await fetch(`${origin}/${publicPath}`, { cache: 'no-store' })
-      if (res.ok) {
-        const txt = await res.text()
-        if (txt && txt.trim()) return txt
-      }
-    } catch { /* try next origin */ }
-  }
-  return ''
+function readPublicDoc(request: NextRequest, publicPath: string): Promise<string> {
+  return readPublicFile(publicPath, [request.nextUrl.origin])
 }
 
 function clamp(s: string, url: string): string {
@@ -981,6 +950,7 @@ async function parkForApproval(
   let rowCount: number | null = null
   let toolArgs: Record<string, unknown> = args
   let restore: import('@/lib/changes/recovery').RestoreRequest | undefined
+  let versionRestore: import('@/lib/changes/range').VersionRestoreRequest | undefined
   // A restore request names the change and exactly what restoring it would do,
   // measured by Backenly now; one that cannot happen (unknown id, already
   // restored, a later change in the way, expired) is answered now rather than
@@ -1005,16 +975,40 @@ async function parkForApproval(
     // A restore keeps what it removes and is itself recorded: it can be reapplied.
     reversible = true
   }
+  // A rollback is a restore to a published version: parked with Backenly's list
+  // of the changes it would undo, measured now. A version that does not exist,
+  // or that nothing has changed since, is answered now and nothing is queued.
+  if (resolution.target === 'rollback_deploy') {
+    const { describeVersionRestore } = await import('@/lib/changes/range')
+    const d = await describeVersionRestore(auth.projectId, { version: args.version, deploymentId: args.deploymentId })
+    if (!d.ok) {
+      const refused = d as Extract<typeof d, { ok: false }>
+      recordMcpCall({ ...auth, endpoint: ENDPOINT, startedAt }, { statusCode: refused.status, tool: callLabel, error: refused.code })
+      return NextResponse.json(
+        { ok: false, error: refused.error, code: refused.code, hint: 'deploy { action: "history" } lists the published versions; deploy { action: "changes" } lists what changed since.' },
+        { status: refused.status },
+      )
+    }
+    const ok = d as Extract<typeof d, { ok: true }>
+    versionRestore = { target: ok.target, detail: ok.detail, toolArgs: ok.toolArgs }
+    described = ok.target
+    toolArgs = { ...ok.toolArgs }
+    reversible = true
+  }
   try {
     const { createApprovalRequest } = await import('@/lib/mcp/approvals')
     const row = await createApprovalRequest({
       projectId: auth.projectId,
       userId: auth.userId,
       apiKeyId: auth.keyId,
-      message: `Requested by an agent over MCP: ${described}`,
+      // A rollback card's title is Backenly's sentence; its text is the list.
+      message: versionRestore
+        ? `Requested by an agent over MCP.\n${versionRestore.detail}`
+        : `Requested by an agent over MCP: ${described}`,
       danger: { tool: resolution.target, target: described, rowCount, reversible },
       toolArgs,
       restore,
+      versionRestore,
     })
     recordMcpCall(
       { ...auth, endpoint: ENDPOINT, startedAt },
@@ -1034,7 +1028,10 @@ async function parkForApproval(
           (resolution.target === 'revert_schema_change'
             ? 'Backenly recorded the restore with what it measured it would do; a person approves exactly that, ' +
               'and it runs only if the data still matches. Tell your human it is waiting, '
-            : 'The exact call you sent runs verbatim once a human approves it. Tell your human it is waiting, ') +
+            : resolution.target === 'rollback_deploy'
+              ? 'Backenly recorded the changes restoring to that version would undo; a person approves exactly that ' +
+                'list, and it runs only if the history has not changed since. Tell your human it is waiting, '
+              : 'The exact call you sent runs verbatim once a human approves it. Tell your human it is waiting, ') +
           'then poll check_approval every 15-30s until it is executed, rejected, failed or expired (24h).',
       },
       needsUser: true,

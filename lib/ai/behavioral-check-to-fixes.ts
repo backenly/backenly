@@ -190,6 +190,8 @@ export function mapCheckToFixes(check: BehavioralCheck): FixCandidate[] {
         params: { issue: 'live_endpoint_broken', detail: err.slice(0, 200) },
         reason: 'A live HTTP endpoint failed the round-trip test.',
         sourceCheckId: check.id,
+        // FIX_API runs outside the change ledger (lib/core/fix-actions.ts).
+        requiresApproval: true,
       })
       break
     }
@@ -202,6 +204,8 @@ export function mapCheckToFixes(check: BehavioralCheck): FixCandidate[] {
         params: { issue: 'crud_lifecycle_broken', detail: err.slice(0, 200) },
         reason: 'CRUD lifecycle failed — regenerating REST endpoints for the affected table.',
         sourceCheckId: check.id,
+        // FIX_API runs outside the change ledger (lib/core/fix-actions.ts).
+        requiresApproval: true,
       })
       break
     }

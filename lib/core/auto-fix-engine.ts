@@ -1121,6 +1121,18 @@ export function revertEligibility(
     }
   }
 
+  // Nothing recorded to put back: a fix that changed no schema and kept no
+  // earlier platform value (an approved held action setting a secret or a key's
+  // permissions) has no undo. Offered anyway, it reported "Fix reverted." and
+  // reopened the finding with the change still in place.
+  if (rollbackData.schemaTouching !== true && !rollbackData.preMetadata) {
+    return {
+      revertible: false,
+      requiresConfirmation: false,
+      reason: 'Backenly kept no earlier state for what this fix changed, so it cannot be undone automatically.',
+    }
+  }
+
   const baseType = (normalizeFindingType(findingType, det)?.base ?? findingType) as string
   return { revertible: true, requiresConfirmation: RLS_PROTECTION_TYPES.has(baseType) }
 }
@@ -1162,7 +1174,7 @@ export async function revertAutoFix(
     return {
       success: false,
       message:
-        `${eligibility.reason} Undo it manually from the Database section, or ask your coding agent.`,
+        `${eligibility.reason} Undo it by hand, or ask your coding agent.`,
     }
   }
   if (!rollbackData) {
@@ -1188,7 +1200,7 @@ export async function revertAutoFix(
   // with the same checks as Restore previous state: refused if a later change
   // touched the same tables, and never silently setting aside data written
   // since. A restore that would affect such data is not done from here: it
-  // belongs in Database → Changes, where the person sees exactly what is kept.
+  // belongs in History, where the person sees exactly what is kept.
   let appliedSteps = 0
   let schemaMessage = ''
   if (rollbackData.schemaTouching === true) {
@@ -1196,20 +1208,38 @@ export async function revertAutoFix(
     const { currentAttribution } = await import('@/lib/changes/attribution')
     const ids = Array.isArray(rollbackData.changeIds) ? (rollbackData.changeIds as string[]) : []
     let restored = 0
+    // Said first when a refusal comes after an earlier change was restored, so
+    // the result never reads as "nothing happened" when part of it did.
+    const lead = (seqs: number[]) =>
+      seqs.length === 0 ? 'Not undone: ' : `Partly undone: the state before ${seqs.map((s) => `#${s}`).join(', ')} is back, verified, but `
+    const restoredSeqs: number[] = []
     for (const id of ids) {
       const preview = await previewRecovery(projectId, id)
-      if (!preview || preview.safety === 'unavailable') continue // already restored, or never in effect
+      if (!preview) continue
+      if (preview.safety === 'unavailable') {
+        // Restored or recovered already, or it never took effect: nothing left
+        // of it to undo. Any other reason (its restore point expired or failed
+        // its integrity check, Backenly is still working on it) leaves the fix
+        // in place, and the undo says so rather than reporting it reverted.
+        const now = await prisma.backendChange.findUnique({ where: { id }, select: { status: true } })
+        if (now && ['restored', 'recovered', 'failed'].includes(now.status)) continue
+        return {
+          success: false,
+          message: `${lead(restoredSeqs)}${preview.reason ?? 'its restore point is not available'} Undo it manually from the Database section, or ask your coding agent.`,
+        }
+      }
       if (preview.safety !== 'lossless') {
         return {
           success: false,
           message:
-            `Not undone: ${preview.reason ?? 'it cannot be restored automatically'}. ` +
-            'Open Database → Changes to restore it there, where you can see exactly what would be kept.',
+            `${lead(restoredSeqs)}${preview.reason ?? 'it cannot be restored automatically'}. ` +
+            'Open History to restore it there, where you can see exactly what would be kept.',
         }
       }
       const out = await recoverChange(projectId, id, { mode: 'manual', actorUserId: currentAttribution()?.actorUserId ?? null })
-      if (!out.ok) return { success: false, message: `Not undone: ${(out as { error: string }).error}` }
+      if (!out.ok) return { success: false, message: `${lead(restoredSeqs)}${(out as { error: string }).error}` }
       restored++
+      restoredSeqs.push(preview.seq)
     }
     appliedSteps = restored
     schemaMessage = restored > 0
@@ -1598,7 +1628,7 @@ async function _executeAutoFix(
   if (!result!.success) {
     const reason = result!.error ?? result!.message
     const recovered = policyPre
-      ? await _recoverPolicies(findingId, projectId, type, policyPre, policyPost, reason)
+      ? await _recoverPolicies(findingId, projectId, type, policyPre, policyPost, reason, changeIds)
       : null
     const full = recovered ? `${reason} ${recovered}` : reason
     return _isTransientGovernanceError(reason)
@@ -1706,7 +1736,7 @@ async function _executeAutoFix(
       (outcome && outcome.regressions.length > 0)
     if (rejected) {
       const recovered = policyPre
-        ? await _recoverPolicies(findingId, projectId, type, policyPre, policyPost, outcome.reason)
+        ? await _recoverPolicies(findingId, projectId, type, policyPre, policyPost, outcome.reason, changeIds)
         : null
       return _escalate(findingId, projectId, type, details,
         recovered ? `${outcome.reason} ${recovered}` : outcome.reason)
@@ -1892,10 +1922,20 @@ async function _recoverPolicies(
   pre: PolicyCapture,
   post: PolicyCapture | null,
   rejectedBecause: string,
+  changeIds: string[] = [],
 ): Promise<string> {
   let status: string
   let message: string
-  if (!post) {
+  if (changeIds.length > 0) {
+    // The repair's governed changes are restored through the ledger, so the
+    // history shows the repair undone (lib/changes/recovery.ts). The direct
+    // policy restore below is for a repair that recorded no change.
+    const { recoverRejectedRepair } = await import('@/lib/changes/recovery')
+    ;({ status, message } = await recoverRejectedRepair(projectId, changeIds).catch((err: any) => ({
+      status: 'failed' as const,
+      message: `Restore threw: ${err?.message ?? err}`,
+    })))
+  } else if (!post) {
     // Without the state this execution left, the stale guard has nothing to
     // compare against, and restoring anyway could overwrite a later change.
     status = 'blocked_stale'

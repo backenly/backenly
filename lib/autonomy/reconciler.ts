@@ -35,6 +35,7 @@ import {
 } from './autonomy-level'
 import { checkBreaker } from './circuit-breaker'
 import { classifyFix } from '@/lib/core/fix-classifier'
+import { buildFixAction, runsOutsideChangeLedger } from '@/lib/core/fix-actions'
 import { heldForIncident } from './change-freeze'
 import { LOOP_TICK_ACTIONS } from './loop-tick'
 import { recordSensorState } from './sensor-state'
@@ -43,6 +44,8 @@ import { FLAGS } from '@/lib/config/flags'
 import { loopPrincipals, principalsToMetadata } from '@/lib/principal'
 import { canReach } from './region-skip'
 import { quotedError, quotesKeptHere } from '@/lib/data-plane/residency'
+import { outsideAnyChange } from '@/lib/changes/context'
+import { changeLockHeld } from '@/lib/changes/lock'
 
 export type ReconcileAction =
   | 'WOULD_AUTO_APPLY'     // tier within dial + breaker budget available
@@ -248,6 +251,11 @@ export interface LiveReconcileResult {
   escalated: number
   /** Blocked by a transient timing condition; left open, retried next tick. */
   deferred: number
+  /**
+   * Gaps whose repair runs outside the change ledger, parked in the Review
+   * Queue this tick for a person to approve. Nothing ran for them.
+   */
+  parked: number
   plan: ReconciliationPlan
 }
 
@@ -729,6 +737,46 @@ export async function ensureFinding(
 }
 
 /**
+ * Park in the Review Queue every gap whose repair runs outside the change
+ * ledger (REPAIRS_OUTSIDE_THE_CHANGE_LEDGER in lib/core/fix-actions.ts).
+ *
+ * The classifier rates those `approval`, so they are Tier 2 and never reach the
+ * apply branch. That alone would leave them nowhere: this loop mints a finding
+ * only for a gap it acts on, and two of their types have no other writer
+ * (`schema_not_registered` and `external_schema_change` are found only by this
+ * loop's probes), so a dead data plane or unadopted DDL would have reached no
+ * one. Each is handed to the kernel like any gap, and the kernel's approval
+ * branch parks it: pending_approval and a HEALTH_FIX_AWAITING_APPROVAL row,
+ * with nothing run. Approving it runs the repair once (executeApprovedFix).
+ *
+ * Safe on every tick: a gap already waiting for a person is matched by
+ * ensureFinding and left alone (`awaiting_human`), so it is parked once. It
+ * writes findings and changes nothing in the backend, so a change freeze does
+ * not hold it back.
+ */
+async function parkRepairsOutsideTheLedger(
+  projectId: string,
+  decisions: ReconcileDecision[],
+): Promise<number> {
+  let parked = 0
+  for (const d of decisions) {
+    if (d.action !== 'NEEDS_APPROVAL') continue
+    const repair = buildFixAction(d.gap.type, d.gap.details as Record<string, unknown>)
+    if (!repair || !runsOutsideChangeLedger(repair.action)) continue
+    const { findingId } = await ensureFinding(projectId, d.gap)
+    if (!findingId) continue
+    const res = await runAutoFix(findingId, projectId, {
+      actor: { kind: 'autonomous', loop: 'reconciler' },
+    }).catch((err: any) => {
+      console.warn(`[Reconciler:live] could not park ${d.gap.type} for ${projectId}:`, err?.message)
+      return null
+    })
+    if (res?.outcome === 'pending_approval') parked++
+  }
+  return parked
+}
+
+/**
  * Close the loop for real. Reuses the deterministic kernel for every mutation.
  *
  * Safety properties (in addition to the kernel's own snapshot/rollback/audit):
@@ -756,6 +804,9 @@ export async function runReconcilerLive(projectId: string): Promise<LiveReconcil
       .then(m => m.reapInvariantFindings(projectId, plan.report))
       .catch(() => 0)
 
+    // Repairs that nothing could restore wait for a person, in the queue.
+    const parked = await parkRepairsOutsideTheLedger(projectId, plan.decisions)
+
     const toApply = plan.decisions.filter(d => d.action === 'WOULD_AUTO_APPLY')
     if (toApply.length === 0) {
       // Why nothing will happen this tick.
@@ -776,18 +827,18 @@ export async function runReconcilerLive(projectId: string): Promise<LiveReconcil
       }
       console.log(
         `[Reconciler:live] project=${projectId} nothing to apply — ` +
-          `counts=${JSON.stringify(plan.counts)} ` +
+          `counts=${JSON.stringify(plan.counts)} parked=${parked} ` +
           `violations=${JSON.stringify((report.violations ?? []).map(v => `${v.type}:t${v.tier}`))} ` +
           `errors=${JSON.stringify(report.errors ?? [])} ` +
           `disabled=${JSON.stringify((report.disabled ?? []).map(d => d.invariantId ?? d.id ?? 'unknown'))}`,
       )
-      return { ...base, frozen: false, attempted: 0, applied: 0, escalated: 0, deferred: 0 }
+      return { ...base, frozen: false, attempted: 0, applied: 0, escalated: 0, deferred: 0, parked }
     }
 
     // ── Change freeze during an active incident ──────────────────────────────
     // The same check every autonomous repair path asks (lib/autonomy/change-freeze.ts).
     if (await heldForIncident(projectId, { loop: 'reconciler', wouldHaveApplied: toApply.length })) {
-      return { ...base, frozen: true, attempted: 0, applied: 0, escalated: 0, deferred: 0 }
+      return { ...base, frozen: true, attempted: 0, applied: 0, escalated: 0, deferred: 0, parked }
     }
 
     let applied = 0
@@ -904,6 +955,7 @@ export async function runReconcilerLive(projectId: string): Promise<LiveReconcil
           escalated,
           deferred,
           unverified,
+          parked,
           autoBudget: plan.autoBudget,
           // The gaps this tick declined to act on, by reason. Persisted (not
           // just logged) because diagnosing the thirteen-day stall required
@@ -921,7 +973,7 @@ export async function runReconcilerLive(projectId: string): Promise<LiveReconcil
 
     console.log(
       `[Reconciler:live] project=${projectId} level=${plan.level} ` +
-      `applied=${applied} escalated=${escalated} deferred=${deferred} attempted=${attempted}` +
+      `applied=${applied} escalated=${escalated} deferred=${deferred} attempted=${attempted} parked=${parked}` +
       (skipSummary ? ` skipped(${skipSummary})` : ''),
     )
 
@@ -961,7 +1013,7 @@ export async function runReconcilerLive(projectId: string): Promise<LiveReconcil
       }
     }
 
-    return { ...base, frozen: false, attempted, applied, escalated, deferred }
+    return { ...base, frozen: false, attempted, applied, escalated, deferred, parked }
   } catch (err: any) {
     console.warn(`[Reconciler:live] failed for ${projectId}:`, err?.message)
     return null
@@ -999,6 +1051,14 @@ export async function runReconcilerLive(projectId: string): Promise<LiveReconcil
 export async function runReconciler(
   projectId: string,
 ): Promise<ReconciliationPlan | LiveReconcileResult | null> {
+  // The loop is its own actor, whatever started it. The post-mutation kick and
+  // a post-build pass start it from inside an agent's request, even from inside
+  // its governed change: run there, its repairs joined that change after it had
+  // closed, were recorded nowhere, and carried the agent's key.
+  return outsideAnyChange(() => reconcile(projectId))
+}
+
+async function reconcile(projectId: string): Promise<ReconciliationPlan | LiveReconcileResult | null> {
   if (!FLAGS.ENABLE_AUTONOMY_RECONCILER) return null
 
   // Every way in — the fleet schedulers, the post-mutation kick, the HTTP cron
@@ -1011,6 +1071,15 @@ export async function runReconciler(
   // recorded (lib/autonomy/region-skip.ts). Reconciling it here would read its
   // failures as an empty or healthy backend.
   if (!(await canReach(projectId, 'reconciler'))) return null
+
+  // A governed change holds the project's change lock from its checkpoint until
+  // it has settled, its automatic recovery included. Read in between, the
+  // project shows that change's half-done state as drift: a table a failing
+  // migration created looked like a shadow mutation, and the repair wrote
+  // generated endpoints for it while the recovery was removing it. Wait for the
+  // change to settle (the kick re-arms itself; the schedulers come back). If the
+  // lock cannot be read, nothing says the project has settled either.
+  if (await changeLockHeld(projectId).catch(() => true)) return null
 
   // Plan-driven cadence gate. The "tick" is any prior reconciler audit row
   // — live, shadow, change-freeze, or the dispatcher-written TICK marker. The

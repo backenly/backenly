@@ -33,6 +33,10 @@ const config: Config = {
           secondary: '#a1a1aa',
           muted: '#52525b',
         },
+        // The console's faint text: meta, captions, timestamps, helper text.
+        // The darkest grey that still reads at 4.5:1 on every console surface
+        // (5.8:1 on the canvas). See components/console/tokens.ts, rule 5.
+        faint: '#8b8b94',
       },
       spacing: {
         '1': '4px',

@@ -17,6 +17,12 @@
  *
  * This suite pins every one of those surfaces to the true model, and pins the
  * lie's exact phrases to never return.
+ *
+ * Since then a rollback became what people took it for: an agent asks for the
+ * backend to be restored to a published version, a person approves
+ * Backenly's list of the changes it would undo, and approving undoes them
+ * (lib/changes/range.ts). Moving the version label alone is left only to
+ * lib/deployment/rollback.ts, which still says it is bookkeeping.
  */
 
 import { readFileSync } from 'fs'
@@ -62,25 +68,37 @@ describe('every surface states the true model', () => {
     const src = read('lib/deployment/rollback.ts')
     expect(src).toContain('does NOT change the live schema')
     expect(src).toContain('version bookkeeping, not a restore')
-    expect(src).toContain("Database → Changes")
+    expect(src).toContain('a person uses Restore on that version (History or Deploy)')
   })
 
+  // An agent's rollback is a request to restore the backend to a published
+  // version, approved by a person, and approving restores it (lib/changes/range.ts).
   it('the brain tool description tells the agent what rollback really does', () => {
     const tool = BRAIN_TOOLS.find((t) => t.function.name === 'rollback_deploy')!
-    expect(tool.function.description).toContain('does NOT change the live schema')
-    expect(tool.function.description).toContain('bookkeeping')
+    expect(tool.function.description).toContain('Ask for the backend to be restored to a published version')
+    expect(tool.function.description).toContain('waits for a person to approve')
+    expect(tool.function.description).toContain('You cannot run or approve it yourself')
+    expect(tool.function.description).not.toContain('bookkeeping')
   })
 
   it('the domain gloss matches', () => {
     const deploy = (DOMAIN_TOOLS as any[]).find((d) => d.name === 'deploy')
     const gloss: string = deploy.actions.rollback.gloss
-    expect(gloss).toContain('bookkeeping')
-    expect(gloss).toContain('unchanged')
+    expect(gloss).toContain('ask to restore the backend to a published version')
+    expect(gloss).toContain('a person approves')
+    expect(gloss).not.toContain('bookkeeping')
   })
 
   it('the generated agent doc carries the regenerated gloss', () => {
     const md = read('public/docs/agents/deploy.md')
-    expect(md).toContain('version bookkeeping; the live backend is unchanged')
+    expect(md).toContain("ask to restore the backend to a published version (version or deploymentId); a person approves Backenly's list")
+    expect(md).not.toContain('which can be rolled back to')
+  })
+
+  it('the executor\'s own rollback runs nothing and says how to ask', () => {
+    const src = read('lib/ai/minimal-executor.ts')
+    expect(src).toContain("error: 'RESTORE_NEEDS_A_PERSON'")
+    expect(src).toContain('ask for it with')
   })
 
   it('the Deploy page describes publishing as recording a version', () => {

@@ -118,6 +118,7 @@ export async function executeAuthIntegration(
   })
   const existing = (project?.activeIntegrations as Record<string, any>) ?? {}
 
+  // history: inside dispatchIntegration's change (./index.ts)
   await prisma.project.update({
     where: { id: projectId },
     data: {

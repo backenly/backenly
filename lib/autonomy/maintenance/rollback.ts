@@ -200,6 +200,20 @@ const INVERSES: Partial<Record<RollbackStrategy, Inverse>> = {
   },
 }
 
+/** The undo, as the project's history names it. */
+function undoTitle(identity: ResourceIdentity): string {
+  switch (identity.kind) {
+    case 'column':
+      return `Remove column ${identity.table}.${identity.column}, which maintenance added`
+    case 'trigger':
+      return `Stop writing ${identity.table}.${identity.targetColumn} alongside its source column`
+    case 'readers':
+      return 'Point functions back at the column they read before maintenance'
+    default:
+      return 'Undo a maintenance step'
+  }
+}
+
 /**
  * Undo one step execution, or say precisely why not.
  *
@@ -318,7 +332,11 @@ export async function performRollback(input: {
     }
 
     try {
-      await inverse({ projectId, identity, preState, result: row.result })
+      // In the project's history like the rung it undoes, by Backenly.
+      const { governedChange, withChangeAttribution } = await import('@/lib/changes/ledger')
+      await withChangeAttribution({ source: 'autonomy' }, () =>
+        governedChange(projectId, undoTitle(identity), () => inverse({ projectId, identity, preState, result: row.result })),
+      )
     } catch (err: unknown) {
       return settle(
         projectId,

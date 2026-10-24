@@ -23,6 +23,8 @@ import { useCallback, useEffect, useState } from 'react'
 import { AlertCircle, RefreshCw, Search, X } from 'lucide-react'
 import { EmptyState, IconButton, INPUT_BASE, KitButton, StatusDot } from '@/components/inspector/kit'
 import { FileText } from 'lucide-react'
+import { when } from '@/components/changes/present'
+import { FOCUS_INSET } from '@/components/console/tokens'
 
 type Severity = 'error' | 'warning' | 'info' | 'debug'
 
@@ -52,7 +54,7 @@ const SEVERITY_TONE: Record<string, string> = {
   error: 'text-rose-300',
   warning: 'text-amber-200',
   info: 'text-zinc-300',
-  debug: 'text-zinc-500',
+  debug: 'text-faint',
 }
 
 const SEVERITY_DOT: Record<string, 'failed' | 'attention' | 'neutral'> = {
@@ -177,7 +179,7 @@ export function LogsExplorer({ projectId }: { projectId: string }) {
 
         <div className="ml-auto flex items-center gap-3">
           {stats && (
-            <div className="hidden items-center gap-3 text-[12px] tabular-nums text-zinc-500 md:flex">
+            <div className="hidden items-center gap-3 text-[12px] tabular-nums text-faint md:flex">
               {/* Tinted only when there is something to look at. */}
               {(['error', 'warning'] as const).map((sev) => (
                 <StatusDot
@@ -200,7 +202,7 @@ export function LogsExplorer({ projectId }: { projectId: string }) {
       </div>
 
       {/* ── Body ───────────────────────────────────────────── */}
-      <div className="min-h-0 flex-1 overflow-auto">
+      <div tabIndex={0} role="region" aria-label="Logs" className={`min-h-0 flex-1 overflow-auto ${FOCUS_INSET}`}>
         {error ? (
           <div className="flex h-full items-center justify-center px-8">
             <div className="max-w-md rounded-[10px] border border-rose-400/20 bg-rose-500/[0.05] px-4 py-3.5">
@@ -222,7 +224,7 @@ export function LogsExplorer({ projectId }: { projectId: string }) {
           </div>
         ) : loading && rows.length === 0 ? (
           <div className="flex h-full items-center justify-center">
-            <div className="flex items-center gap-2 text-[12px] text-zinc-500">
+            <div className="flex items-center gap-2 text-[12px] text-faint">
               <RefreshCw className="h-3.5 w-3.5 animate-spin" />
               Loading logs
             </div>
@@ -254,7 +256,7 @@ export function LogsExplorer({ projectId }: { projectId: string }) {
                 {['Time', 'Severity', 'Type', 'Message', 'Endpoint', 'Status', 'Duration'].map((h, i) => (
                   <th
                     key={h}
-                    className={`h-[36px] whitespace-nowrap border-b border-white/[0.06] px-3 text-[12px] font-medium text-zinc-500 ${i >= 5 ? 'text-right' : 'text-left'}`}
+                    className={`h-[36px] whitespace-nowrap border-b border-white/[0.06] px-3 text-[12px] font-medium text-faint ${i >= 5 ? 'text-right' : 'text-left'}`}
                   >
                     {h}
                   </th>
@@ -264,21 +266,21 @@ export function LogsExplorer({ projectId }: { projectId: string }) {
             <tbody>
               {rows.map((r) => (
                 <tr key={r.id} className="transition-colors hover:bg-[#121316]">
-                  <td className="whitespace-nowrap border-b border-white/[0.04] px-3 py-[9px] text-[12px] tabular-nums text-zinc-500">
-                    {new Date(r.timestamp).toLocaleString()}
+                  <td className="whitespace-nowrap border-b border-white/[0.04] px-3 py-[9px] text-[12px] tabular-nums text-faint">
+                    {when(r.timestamp)}
                   </td>
                   <td className="whitespace-nowrap border-b border-white/[0.04] px-3 py-[9px]">
                     <StatusDot tone={SEVERITY_DOT[r.severity] ?? 'neutral'} label={<span className={SEVERITY_TONE[r.severity] ?? 'text-zinc-400'}>{r.severity}</span>} />
                   </td>
-                  <td className="border-b border-white/[0.04] px-3 py-[9px] font-mono text-[12px] text-zinc-500">{r.type}</td>
+                  <td className="border-b border-white/[0.04] px-3 py-[9px] font-mono text-[12px] text-faint">{r.type}</td>
                   <td className="border-b border-white/[0.04] px-3 py-[9px] text-[12.5px] text-zinc-200">{r.message}</td>
-                  <td className="border-b border-white/[0.04] px-3 py-[9px] font-mono text-[12px] text-zinc-500">
+                  <td className="border-b border-white/[0.04] px-3 py-[9px] font-mono text-[12px] text-faint">
                     {r.method ? `${r.method} ` : ''}{r.endpoint ?? ''}
                   </td>
-                  <td className="border-b border-white/[0.04] px-3 py-[9px] text-right text-[12px] tabular-nums text-zinc-500">
+                  <td className="border-b border-white/[0.04] px-3 py-[9px] text-right text-[12px] tabular-nums text-faint">
                     {r.statusCode ?? ''}
                   </td>
-                  <td className="border-b border-white/[0.04] px-3 py-[9px] text-right text-[12px] tabular-nums text-zinc-500">
+                  <td className="border-b border-white/[0.04] px-3 py-[9px] text-right text-[12px] tabular-nums text-faint">
                     {r.duration != null ? `${r.duration} ms` : ''}
                   </td>
                 </tr>
@@ -291,7 +293,7 @@ export function LogsExplorer({ projectId }: { projectId: string }) {
       {/* ── Paging ─────────────────────────────────────────── */}
       {pagination && pagination.totalPages > 1 && (
         <div className="flex h-[40px] flex-shrink-0 items-center justify-between border-t border-white/[0.06] px-4">
-          <span className="text-[12px] tabular-nums text-zinc-500">
+          <span className="text-[12px] tabular-nums text-faint">
             {pagination.total} entries · page {pagination.page} of {pagination.totalPages}
           </span>
           <div className="flex items-center gap-1">

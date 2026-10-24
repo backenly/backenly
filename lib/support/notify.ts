@@ -69,6 +69,24 @@ export async function notifyOperatorsOfCustomerMessage(
   ], ticket)
 }
 
+/**
+ * The AI first responder gave up on a case. The filing email went out before
+ * it ran, so without this the team cannot tell a case that got an instant
+ * answer from one that is waiting on a person alone, which is the one to pick
+ * up first. `reason` is the recorded failure kind (spend_limit, timeout, …):
+ * for the team, never shown to the customer.
+ */
+export async function notifyOperatorsOfMissedAnswer(ticket: TicketRef, reason: string): Promise<void> {
+  await emailOperators(
+    'support_ai_missed',
+    `[Support #${ticket.caseNumber}] No instant answer (${reason}): ${ticket.subject}`,
+    [
+      `Backenly AI did not answer this case (${reason}). The customer was told the team will reply in the thread.`,
+    ],
+    ticket,
+  )
+}
+
 /** The team answered or changed the case: tell the customer, their way. */
 export async function notifyCustomerOfCaseUpdate(
   userId: string,

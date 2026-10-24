@@ -8,6 +8,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db/prisma'
 import { withProjectValidation } from '@/lib/middleware/projectValidation'
+import { governedChange } from '@/lib/changes/ledger'
 import { listKeyVaultStatuses } from '@/lib/services/integrationKeyStore'
 
 export async function GET(
@@ -86,10 +87,10 @@ export async function POST(
       },
     }
 
-    await prisma.project.update({
+    await governedChange(validated.projectId, `Turn on the ${name ?? integrationId} integration`, () => prisma.project.update({
       where: { id: validated.projectId },
       data: { activeIntegrations: updated },
-    })
+    }))
 
     return NextResponse.json({ integrations: updated, activated: integrationId })
   })

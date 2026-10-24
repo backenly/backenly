@@ -76,7 +76,7 @@ export const POST = withAuth(async (_request: NextRequest, { user, params }) => 
       code: 'MOVED',
       error:
         'Rolling back to a schema version has been replaced by restoring the state before a change. Open ' +
-        'Database → Changes in the project, or POST /api/projects/{id}/changes/{changeId}/preview and then ' +
+        'History in the project, or POST /api/projects/{id}/changes/{changeId}/preview and then ' +
         'POST …/restore. Nothing was changed.',
     },
     { status: 410 },

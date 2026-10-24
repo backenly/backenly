@@ -1,6 +1,13 @@
 import { SiteShell } from '@/components/site/SiteShell'
-import { Page, PageHero } from '@/components/site/kit'
-import { LEGAL_TEXT, LegalBody, LegalFooter, LegalList, LegalSection as Clause } from '@/components/site/legal'
+import { Page } from '@/components/site/kit'
+import {
+  LEGAL_TEXT,
+  LegalContact,
+  LegalDocument,
+  LegalList,
+  LegalSection as Clause,
+  MetaDivider,
+} from '@/components/site/legal'
 
 type LegalSection = {
   id: string
@@ -136,18 +143,23 @@ export default function TermsPage() {
   return (
     <SiteShell>
       <Page>
-        <PageHero
-          size="compact"
-          trail={[{ label: 'Home', href: '/' }, { label: 'Terms of Service' }]}
-          title="Terms of Service"
-          lede="Please read these terms carefully before using Backenly. By using the service, you agree to be bound by them."
+        <LegalDocument
+          current="terms"
+          summary="Please read these terms carefully before using Backenly. By using the service, you agree to be bound by them."
+          meta={
+            <>
+              <span>
+                Last updated <span className="text-zinc-200">October 3, 2026</span>
+              </span>
+              <MetaDivider />
+              <span>
+                Contact <span className="text-zinc-200">support@backenly.com</span>
+              </span>
+            </>
+          }
+          numbered
+          toc={sections.map((section) => ({ id: `section-${section.id}`, label: section.title }))}
         >
-          <p className="mt-7 text-[14px] text-zinc-500">
-            Last updated <span className="text-zinc-300">October 3, 2026</span>
-          </p>
-        </PageHero>
-
-        <LegalBody numbered toc={sections.map((section) => ({ id: `section-${section.id}`, label: section.title }))}>
           {sections.map((section) => (
             <Clause key={section.id} id={`section-${section.id}`} number={Number(section.id)} title={section.title}>
               <p className={LEGAL_TEXT}>{section.content}</p>
@@ -156,13 +168,12 @@ export default function TermsPage() {
             </Clause>
           ))}
 
-          <LegalFooter
-            current="terms"
+          <LegalContact
             title="Questions about these terms?"
             body="We reply to legal and account questions at support@backenly.com."
             email="support@backenly.com"
           />
-        </LegalBody>
+        </LegalDocument>
       </Page>
     </SiteShell>
   )

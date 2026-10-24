@@ -159,6 +159,7 @@ jest.mock('@/lib/ai/build-runtime/build-lock', () => ({
 jest.mock('@/lib/execution/sql-recorder', () => ({
   installSqlRecorder: jest.fn(),
   withSqlCapture: jest.fn(async (fn: () => Promise<unknown>) => ({ result: await fn(), statements: [] })),
+  outsideSqlCapture: jest.fn((fn: () => unknown) => fn()),
 }))
 jest.mock('@/lib/services/workspace-schema-snapshot', () => ({
   captureSchemaSnapshot: jest.fn(async () => null),

@@ -194,6 +194,7 @@ export async function getProjectIdFromAuth(req: Request): Promise<AuthResolution
     // Counted in the region, the key's last use goes home with its count
     // (lib/auth-projection/rate.ts), rather than as a write per request.
     if (!regionalRateCounting()) {
+      // history: usage bookkeeping (last used, rate-limit window), not configuration
       prisma.apiKey.update({ where: { id: key.id }, data: { lastUsed: new Date() } }).catch(console.error)
     }
 

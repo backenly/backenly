@@ -142,7 +142,7 @@ export function TopBar() {
           onClick={() => setProjectMenu((o) => !o)}
           aria-haspopup="menu"
           aria-expanded={projectMenu}
-          className={`flex h-[32px] min-w-0 max-w-[160px] items-center gap-2 ${R_CONTROL} px-2 transition-colors hover:bg-white/[0.05] sm:max-w-[240px] ${FOCUS}`}
+          className={`flex h-[32px] min-w-0 max-w-[132px] items-center gap-2 ${R_CONTROL} px-2 transition-colors hover:bg-white/[0.05] sm:max-w-[240px] ${FOCUS}`}
         >
           <span className={`h-[7px] w-[7px] flex-shrink-0 rounded-full ${STATUS_DOT[status]}`} aria-hidden />
           <span className="truncate text-[13px] font-medium text-zinc-100">{currentProject?.name ?? 'Project'}</span>
@@ -152,7 +152,7 @@ export function TopBar() {
         <AnimatePresence>
           {projectMenu && (
             <MenuPanel width="w-[300px]">
-              <p className="px-2.5 pb-1 pt-1.5 text-[12px] font-medium text-zinc-500">Projects</p>
+              <p className="px-2.5 pb-1 pt-1.5 text-[12px] font-medium text-faint">Projects</p>
               <div className="max-h-[320px] overflow-y-auto">
                 {projects.map((p) => {
                   const active = p.id === projectId
@@ -168,7 +168,7 @@ export function TopBar() {
                         active ? (
                           <Check className="h-4 w-4 flex-shrink-0 text-zinc-200" strokeWidth={2} />
                         ) : (
-                          <span className="text-[12px] text-zinc-600">{STATUS_LABEL[s]}</span>
+                          <span className="text-[12px] text-faint">{STATUS_LABEL[s]}</span>
                         )
                       }
                     >
