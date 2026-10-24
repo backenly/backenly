@@ -1091,6 +1091,29 @@ const PART_BUILT =
   'The table changed since you approved this, and part of the change is already in place for the table as it was. Undo removes it; your app works as before.'
 
 /**
+ * Whether any run of this change started a step that changes the schema or the
+ * data, read from the ladder's own record (maintenance_step_executions, kept
+ * at home) for every plan the decision had. Not the lifecycle trail: a run
+ * paused or killed mid-rung records the states it reached only after the rung
+ * returns. A step that started and failed counts too; undo finds out what is
+ * there.
+ */
+async function builtAnything(projectId: string, trail: MemoryEntry[]): Promise<boolean> {
+  const planIds = [...new Set(trail.map(e => e.record.planId).filter((p): p is string => typeof p === 'string' && p.length > 0 && p !== '*'))]
+  if (planIds.length === 0) return false
+  const step = await prisma.maintenanceStepExecution.findFirst({
+    where: {
+      execution: { projectId, planId: { in: planIds } },
+      stepKind: { notIn: ['rehearse', 'verify'] },
+      // Started, however it went on (running, completed, dispatched, failed).
+      status: { notIn: ['pending', 'skipped'] },
+    },
+    select: { id: true },
+  })
+  return step !== null
+}
+
+/**
  * Look for changes now, where the project's tables are: what the route's
  * `assess` calls. A proposal's rehearsal sends some 700 statements to the
  * region's database; a project kept in another region is assessed by that
@@ -1324,7 +1347,7 @@ export async function resume(input: { projectId: string; decisionId: string; use
       // them. One that built nothing is rehearsed for the table as it is now
       // and asked about again, on the same decision; the queue shows the new
       // version.
-      if (stoppedIn && stoppedIn !== 'approved') return { ok: false, status: 409, error: PART_BUILT }
+      if ((stoppedIn && stoppedIn !== 'approved') || (await builtAnything(projectId, trail))) return { ok: false, status: 409, error: PART_BUILT }
       if (!(await servedHere(projectId))) {
         if (await pausedNow(projectId)) return { ok: false, status: 409, error: PAUSED }
         const region = await queueInItsRegion('evolution_rerequest', projectId, { decisionId, from: summary.state, planVersion: summary.planVersion })
