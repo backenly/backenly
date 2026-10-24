@@ -417,7 +417,7 @@ describe('the engine, for a project kept in us-east-1', () => {
     for (let i = 0; i < 100 && !gate.release; i++) await new Promise(resolve => setTimeout(resolve, 20))
     try {
       const r = await approveRequest({ projectId: p.projectId, findingId, planVersion, userId: p.ownerId })
-      expect(isApprovalRefusal(r) && r.error).toBe('Backenly is repairing this project right now. Approve again in a few seconds.')
+      expect(isApprovalRefusal(r) && r.error).toBe('Backenly is changing this project right now (a repair or a build). Approve again in a few seconds.')
     } finally {
       gate.release!()
       await repair
@@ -538,6 +538,16 @@ describe('the engine, for a project kept in us-east-1', () => {
     expect(done.status).toBe('completed')
     // The owner undid it, so nothing is asked again; what home keeps is counts.
     expect(done.result).toMatchObject({ requested: 0, skipped: expect.any(Number) })
+  })
+
+  it('runs nothing against the tables of a paused project, and says so', async () => {
+    await prisma.project.update({ where: { id: p.projectId }, data: { pausedAt: new Date() } })
+    try {
+      expect((await proposeWhereTheTablesAre(p.projectId)).message).toMatch(/^This project is paused, so nothing runs against its tables until it is resumed\./)
+      expect(await prisma.backgroundJob.count({ where: { projectId: p.projectId, type: { startsWith: 'evolution_' }, status: 'regional_pending' } })).toBe(0)
+    } finally {
+      await prisma.project.update({ where: { id: p.projectId }, data: { pausedAt: null } })
+    }
   })
 
   it('left nothing at home that quotes a statement, a definition, or a row', async () => {
