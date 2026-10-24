@@ -1100,10 +1100,13 @@ const PART_BUILT =
  */
 async function builtAnything(projectId: string, trail: MemoryEntry[]): Promise<boolean> {
   const planIds = [...new Set(trail.map(e => e.record.planId).filter((p): p is string => typeof p === 'string' && p.length > 0 && p !== '*'))]
-  if (planIds.length === 0) return false
+  // Only this decision's own runs: an extraction's plan id is shared by every
+  // decision about it, and an earlier one, already undone, left its steps behind.
+  const approvedAt = trail.find(e => e.record.event === 'transition' && e.record.state === 'approved')?.at
+  if (planIds.length === 0 || !approvedAt) return false
   const step = await prisma.maintenanceStepExecution.findFirst({
     where: {
-      execution: { projectId, planId: { in: planIds } },
+      execution: { projectId, planId: { in: planIds }, createdAt: { gte: approvedAt } },
       stepKind: { notIn: ['rehearse', 'verify'] },
       // Started, however it went on (running, completed, dispatched, failed).
       status: { notIn: ['pending', 'skipped'] },
