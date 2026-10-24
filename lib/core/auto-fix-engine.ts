@@ -83,6 +83,11 @@ export interface AutoFixResult {
   // throws proves nothing about the repair. It is its own outcome so callers
   // cannot count it as a fix, and so the reconciler can stop making dependent
   // repairs on state it has not confirmed.
+  // 'held' = an architecture change is working on the finding's table
+  // (lib/evolution-engine/holds.ts). Nothing ran and the finding stays OPEN; it
+  // is repaired on the first pass after the change is in place. Unlike
+  // 'deferred' it says nothing about the rest of the pass: other tables'
+  // repairs go on.
   outcome:
     | 'auto_fixed'
     | 'applied_unverified'
@@ -90,6 +95,7 @@ export interface AutoFixResult {
     | 'notify_only'
     | 'escalated'
     | 'deferred'
+    | 'held'
   findingId: string
   message: string
   rollbackData?: Record<string, unknown>
@@ -322,6 +328,22 @@ export async function runAutoFix(
       await import('@/lib/authority/gate')
     const { authorityPathFor } = await import('@/lib/authority/action-classes')
 
+    const tableName =
+      typeof details.tableName === 'string'
+        ? details.tableName
+        : typeof details.table === 'string'
+          ? (details.table as string)
+          : null
+
+    // An architecture change working on this table holds Backenly's own repairs
+    // of it until the change is in place (lib/evolution-engine/holds.ts): the
+    // change stops if its table moves under it, and a repair of ours must not
+    // be what moved it. Unknown is not held: a failed read costs the change a
+    // stop, never a repair its delay.
+    const { architectureHold } = await import('@/lib/evolution-engine/holds')
+    const held = await architectureHold(projectId, tableName).catch(() => null)
+    if (held) return { findingId, outcome: 'held', message: `Held: ${held}.` }
+
     const path = authorityPathFor(finding.type)
 
     // ── Neither declared nor enumerated ──────────────────────────────────
@@ -352,13 +374,6 @@ export async function runAutoFix(
       }
       return _executeAutoFix(finding.id, projectId, type, details, opts)
     }
-
-    const tableName =
-      typeof details.tableName === 'string'
-        ? details.tableName
-        : typeof details.table === 'string'
-          ? (details.table as string)
-          : null
 
     const gate = await authorizeAutonomousFix({
       projectId,

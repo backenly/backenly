@@ -59,10 +59,12 @@ import {
 } from '@/lib/evolution-engine/engine'
 import { decisionTrail, readMemory, summarizeDecisions, priorsFor } from '@/lib/evolution-engine/memory'
 import { DEFAULT_POLICY } from '@/lib/evolution-engine/policy'
-import { readTableFacts } from '@/lib/structural-evolution/facts'
+import { basisFingerprint, readTableFacts } from '@/lib/structural-evolution/facts'
 import { structuralExtraction } from '@/lib/structural-evolution/primitive'
 import type { Measurement } from '@/lib/evolution-engine/primitive'
 import { workspaceOn } from '@/lib/structural-evolution/workspace'
+import { architectureHold } from '@/lib/evolution-engine/holds'
+import { runAutoFix } from '@/lib/core/auto-fix-engine'
 import { asService, buildProject, drain, dropProject, proposeWhereItRuns, q, requestsOf, stateOf, type Fixture } from '../helpers/evolution-engine-fixture'
 
 jest.setTimeout(300_000)
@@ -732,5 +734,69 @@ describe('a step that does not finish', () => {
     expect(c.actions).toMatchObject({ resume: true, undo: true, pause: false })
     expect(c.headline).toBe('The change to your Orders architecture stopped.')
     expect(c.detail).toBe('It stopped because copying the existing refund data into order_refunds did not finish. Your app works as before.')
+  })
+})
+
+// ── Self-healing while a change works on its table ───────────────────────────
+
+describe("Backenly's own repairs wait while an architecture change works on its tables", () => {
+  let f: Fixture
+  let decisionId = ''
+  /** A finding the self-healing loop would repair on its own (lib/core/fix-classifier.ts AUTO_SAFE). */
+  const planted = (type: string, table: string) =>
+    prisma.healthFinding.create({
+      data: { projectId: f.projectId, type, severity: 'warning', category: 'performance', source: 'test', details: { table, column: 'user_id' } },
+    })
+  const autonomously = (findingId: string) => runAutoFix(findingId, f.projectId, { actor: { kind: 'autonomous', loop: 'reconciler' } })
+  const fingerprint = async () => basisFingerprint((await readTableFacts(workspaceOn(prisma, f.schema), 'orders'))!)
+
+  beforeAll(async () => {
+    process.env.ENABLE_EVOLUTION_MUTATIONS = 'true'
+    f = await buildProject('holds')
+    await proposeWhereItRuns(f.projectId)
+    const [req] = await requestsOf(f.projectId)
+    decisionId = req.ev.decisionId
+    const a = await approveRequest({ projectId: f.projectId, findingId: req.id, planVersion: req.ev.planVersion, userId: f.ownerId })
+    if (isApprovalRefusal(a)) throw new Error(a.error)
+    expect(a.state).toBe('backfilling')
+  }, 180_000)
+  afterAll(async () => dropProject(f), 60_000)
+
+  it('holds a repair of the table being changed, leaving the finding open and the table as approved', async () => {
+    const before = await fingerprint()
+    const host = await planted('missing_fk_index', 'orders')
+    const r = await autonomously(host.id)
+    expect(r.outcome).toBe('held')
+    expect(r.message).toMatch(/architecture change to orders is working on orders/)
+    expect((await prisma.healthFinding.findUniqueOrThrow({ where: { id: host.id } })).status).toBe('open')
+    expect(await fingerprint()).toBe(before)
+    // Nothing of Backenly's own ran on the project while it was held.
+    expect(await prisma.backendChange.count({ where: { projectId: f.projectId, source: 'autonomy' } })).toBe(0)
+  })
+
+  it('holds a repair of the new table too, schema-qualified or not', async () => {
+    const satellite = await planted('orphan_table', 'order_refunds')
+    expect((await autonomously(satellite.id)).outcome).toBe('held')
+    expect(await architectureHold(f.projectId, `"${f.schema}"."order_refunds"`)).toMatch(/working on order_refunds/)
+  })
+
+  it('holds nothing else, and nothing in a deployment that runs no architecture change', async () => {
+    expect(await architectureHold(f.projectId, 'customers')).toBeNull()
+    expect(await architectureHold(f.projectId, null)).toBeNull()
+    process.env.ENABLE_EVOLUTION_MUTATIONS = 'false'
+    try {
+      expect(await architectureHold(f.projectId, 'orders')).toBeNull()
+    } finally {
+      process.env.ENABLE_EVOLUTION_MUTATIONS = 'true'
+    }
+  })
+
+  it('lets the backfill finish on the table exactly as approved, then lets repairs through', async () => {
+    // The copy ran against the same table the owner approved: no "changed shape".
+    expect((await drain(f.projectId)).every(x => !x.refusal)).toBe(true)
+    expect((await advance({ projectId: f.projectId, decisionId })).state).toBe('observing')
+    // In place: Backenly's repairs of either table go ahead again.
+    expect(await architectureHold(f.projectId, 'orders')).toBeNull()
+    expect(await architectureHold(f.projectId, 'order_refunds')).toBeNull()
   })
 })
