@@ -732,7 +732,15 @@ export async function approveRequest(input: {
     await setRequestStatus(projectId, findingId, 'pending_approval')
     if (granted.currentPlanVersion && granted.currentPlanVersion !== planVersion) {
       // The table moved since this was rehearsed: rehearse the current version
-      // and put that in front of the person instead.
+      // and put that in front of the person instead, where the tables are.
+      if (!(await servedHere(projectId))) {
+        const region = await queueInItsRegion('evolution_rerequest', projectId, { decisionId: ev.decisionId })
+        return {
+          ok: false,
+          status: 409,
+          error: `The table changed since this was prepared. Backenly is checking it again in ${regionLabel(region)}, where this project's tables are; the updated change will be in your queue within a minute or two.`,
+        }
+      }
       await reRequest(projectId, primitive, d, ev, new Date()).catch(() => {})
       const fresh = await requestById(projectId, findingId)
       return {
@@ -986,17 +994,71 @@ export async function advance(input: {
  * statement at a time, and across regions each statement is a round trip: on
  * staging the rehearsal took 1.3 s in its own region and over a minute from the
  * home one, past the load balancer's 60 s, so the person approving saw a
- * timeout and the change stopped at its first step. Should the job not run, the
- * region's scheduler resumes the change on its next pass (sweepArchitecture).
+ * timeout and the change stopped at its first step. A start that finds another
+ * change running on the project is tried again (lib/queue/worker.ts); should
+ * it still not run, the region's scheduler resumes the change on its next pass
+ * (sweepArchitecture).
  *
- * One start is queued per change at a time; a second press finds it queued.
+ * What `advance` would answer at once (no such change, nothing to run, nothing
+ * runs in this deployment) is answered here, and queues nothing.
  */
 export async function startWhereTheTablesAre(input: { projectId: string; decisionId: string; actor?: string | null }): Promise<AdvanceResult> {
   const { projectId, decisionId } = input
   if (await servedHere(projectId)) return advance(input)
-  const region = await queueInItsRegion('evolution_advance', projectId, { decisionId, actor: input.actor ?? null })
-  const state = (await decision(projectId, decisionId)).summary?.state ?? null
-  return { state, message: `It runs in ${regionLabel(region)}, where this project's tables are, starting within a minute.` }
+  const { summary } = await decision(projectId, decisionId)
+  if (!summary?.state) return { state: null, message: 'No such change.' }
+  if (!ADVANCEABLE.includes(summary.state)) {
+    return { state: summary.state, message: `Nothing to run: the change is ${userFacingStatus(summary.state).label.toLowerCase()}.` }
+  }
+  if (!executionEnabled(projectId).enabled) {
+    return { state: summary.state, message: "Backenly isn't running architecture changes in this deployment right now; nothing ran." }
+  }
+  const region = await queueInItsRegion('evolution_advance', projectId, { decisionId, actor: input.actor ?? null }, { maxAttempts: 5 })
+  return { state: summary.state, message: `It runs in ${regionLabel(region)}, where this project's tables are, starting within a minute.` }
+}
+
+/**
+ * The table changed since the person was asked: rehearse the change for the
+ * table as it is now and put that version in front of them (`reRequest`), run
+ * by the worker of the region a project is kept in, as an
+ * `evolution_rerequest` job, for the reason `startWhereTheTablesAre` gives: a
+ * rehearsal sends some 700 statements to the region's database. A stopped
+ * change that no longer fits its table is said where the person reads it, as
+ * `resume` says it when it runs here.
+ */
+export async function reRequestDecision(projectId: string, decisionId: string): Promise<{ state: LifecycleState | null; outcome: RequestOutcome }> {
+  const { summary } = await decision(projectId, decisionId)
+  const primitive = summary ? primitiveById(summary.primitive) : null
+  if (!summary || !primitive) return { state: summary?.state ?? null, outcome: 'no such change' }
+  const d = refOf(summary)
+  const outcome = await reRequest(projectId, primitive, d, summary, new Date())
+  if (outcome !== 'requested' && (summary.state === 'blocked' || summary.state === 'failed')) {
+    await remember({ projectId, record: { ...base(d), event: 'noted', payload: { note: NO_LONGER_FITS } }, milestone: true, sentence: NO_LONGER_FITS })
+  }
+  return { state: (await decision(projectId, decisionId)).summary?.state ?? null, outcome }
+}
+
+const NO_LONGER_FITS =
+  'The table changed since you approved this, and the change no longer fits it as it is now. Undo removes what was done so far; nothing else runs.'
+
+/**
+ * Look for changes now, where the project's tables are: what the route's
+ * `assess` calls. A proposal's rehearsal sends some 700 statements to the
+ * region's database; a project kept in another region is assessed by that
+ * region's worker, as an `evolution_assess` job (its scheduler also looks
+ * every day).
+ */
+export async function proposeWhereTheTablesAre(projectId: string): Promise<ProposalPassResult & { message?: string }> {
+  if (await servedHere(projectId)) return proposeChanges(projectId)
+  const region = await queueInItsRegion('evolution_assess', projectId, {})
+  return {
+    assessed: 0,
+    requested: 0,
+    refreshed: 0,
+    rehearsalFailed: 0,
+    skipped: [],
+    message: `It runs in ${regionLabel(region)}, where this project's tables are, starting within a minute.`,
+  }
 }
 
 /**
@@ -1022,14 +1084,17 @@ export async function undoWhereTheTablesAre(input: { projectId: string; decision
 }
 
 /**
- * Queue a person's decision about a change for the region its project is kept
- * in, once: while one is waiting or running for the same change, another press
- * finds it and adds none. Returns the region.
+ * Queue a person's decision for the region its project is kept in, once: while
+ * one for the same change (or, with no change named, the same project) waits
+ * to be claimed, another press finds it and adds none. One already running
+ * does not count: it read the change before this press, which may have moved
+ * it since (a resume after a pause), so the press gets a run of its own.
+ * Returns the region.
  */
 async function queueInItsRegion(
-  type: 'evolution_advance' | 'evolution_undo',
+  type: 'evolution_advance' | 'evolution_undo' | 'evolution_rerequest' | 'evolution_assess',
   projectId: string,
-  payload: { decisionId: string } & Record<string, unknown>,
+  payload: { decisionId?: string } & Record<string, unknown>,
   options: { maxAttempts?: number } = {},
 ): Promise<CloudRegionId> {
   const region = await projectRegion(projectId)
@@ -1037,8 +1102,8 @@ async function queueInItsRegion(
     where: {
       type,
       projectId,
-      status: { in: [REGIONAL_STATUS.pending, REGIONAL_STATUS.running] },
-      payload: { path: ['decisionId'], equals: payload.decisionId },
+      status: REGIONAL_STATUS.pending,
+      ...(payload.decisionId ? { payload: { path: ['decisionId'], equals: payload.decisionId } } : {}),
     },
     select: { id: true },
   })
@@ -1161,6 +1226,16 @@ export async function resume(input: { projectId: string; decisionId: string; use
       // The table changed since the approval: what was approved no longer
       // exists. Rehearse the change for the table as it is now and ask again,
       // on the same decision; the approval queue shows the new version.
+      if (!(await servedHere(projectId))) {
+        const region = await queueInItsRegion('evolution_rerequest', projectId, { decisionId })
+        return {
+          ok: true,
+          message:
+            `The table changed since you approved this, so Backenly is checking the change again in ${regionLabel(region)}, ` +
+            "where this project's tables are. The updated version will be in your queue to review within a minute or two.",
+          state: summary.state,
+        }
+      }
       const again = await reRequest(projectId, primitive, d, summary, new Date())
       if (again === 'requested') {
         return {
@@ -1169,11 +1244,7 @@ export async function resume(input: { projectId: string; decisionId: string; use
           state: 'awaiting_approval',
         }
       }
-      return {
-        ok: false,
-        status: 409,
-        error: 'The table changed since you approved this, and the change no longer fits it as it is now. Undo removes what was done so far; nothing else runs.',
-      }
+      return { ok: false, status: 409, error: NO_LONGER_FITS }
     }
     const back = stoppedIn && ADVANCEABLE.includes(stoppedIn) ? stoppedIn : 'approved'
     await enter(projectId, d, back, { sentence: `You resumed the change to ${summary.subject}.`, milestone: true, userId })

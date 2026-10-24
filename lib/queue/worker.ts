@@ -306,6 +306,8 @@ function failureSentence(type: string, region: CloudRegionId): string {
   if (type === 'evolution_backfill') return `The architecture change's copy batch did not complete in ${region}. The reason is in that region's logs.`
   if (type === 'evolution_advance') return `The architecture change did not start in ${region}. The reason is in that region's logs.`
   if (type === 'evolution_undo') return `The undo of the architecture change did not run in ${region}. The reason is in that region's logs.`
+  if (type === 'evolution_rerequest') return `The architecture change was not checked again in ${region}. The reason is in that region's logs.`
+  if (type === 'evolution_assess') return `The look for architecture changes did not run in ${region}. The reason is in that region's logs.`
   return type === 'workspace_restore'
     ? `The restore did not complete in ${region}. The reason is in that region's logs.`
     : `The snapshot was not taken in ${region}. The reason is in that region's logs.`
@@ -336,7 +338,27 @@ async function runRegionalJob(type: string, payload: unknown): Promise<Record<st
     if (typeof decisionId !== 'string' || decisionId.length === 0) throw new RegionalJobRefusal('The job names no architecture change.')
     const { advance } = await import('@/lib/evolution-engine/engine')
     const r = await advance({ projectId, decisionId, actor: typeof actor === 'string' ? actor : null })
+    // Another change was running on the project and nothing of this one ran:
+    // tried again after the backoff, so the start the person asked for is not lost.
+    if (r.outcome?.status === 'in_flight_elsewhere') throw new RegionalJobRefusal('Another change was running on this project, so the change waited.')
     return { state: r.state, message: r.message }
+  }
+
+  if (type === 'evolution_rerequest') {
+    // The table moved since the person was asked: rehearsed again here
+    // (reRequestDecision), and the queue shows the version for it as it is now.
+    const { decisionId } = (payload ?? {}) as { decisionId?: unknown }
+    if (typeof decisionId !== 'string' || decisionId.length === 0) throw new RegionalJobRefusal('The job names no architecture change.')
+    const { reRequestDecision } = await import('@/lib/evolution-engine/engine')
+    return await reRequestDecision(projectId, decisionId)
+  }
+
+  if (type === 'evolution_assess') {
+    // A look a person asked for now. Kept at home as counts only, as every
+    // record of a project kept here is.
+    const { proposeChanges } = await import('@/lib/evolution-engine/engine')
+    const r = await proposeChanges(projectId)
+    return { assessed: r.assessed, requested: r.requested, refreshed: r.refreshed, rehearsalFailed: r.rehearsalFailed, skipped: r.skipped.length }
   }
 
   if (type === 'evolution_undo') {

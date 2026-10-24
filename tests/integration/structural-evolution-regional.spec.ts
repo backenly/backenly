@@ -36,7 +36,7 @@ import { Client } from 'pg'
 import { prisma } from '@/lib/db'
 import { jwtClaimFunctionSql } from '@/lib/postgrest/rls-translation'
 import { disconnectRegionalClients } from '@/lib/data-plane/regional'
-import { closeMaintenanceLockPool } from '@/lib/autonomy/maintenance/single-flight'
+import { closeMaintenanceLockPool, withMaintenanceSingleFlight } from '@/lib/autonomy/maintenance/single-flight'
 import { closeChangeLockPool } from '@/lib/changes/lock'
 import { closeAllWorkspacePools } from '@/lib/services/workspace-pool'
 import { getWorkspaceDatabaseNames } from '@/lib/services/databaseProvisioning'
@@ -58,6 +58,9 @@ import {
   isApprovalRefusal,
   liveStatements,
   observe,
+  pause,
+  proposeWhereTheTablesAre,
+  resume,
   startWhereTheTablesAre,
   undoWhereTheTablesAre,
 } from '@/lib/evolution-engine/engine'
@@ -368,6 +371,37 @@ describe('the engine, for a project kept in us-east-1', () => {
     expect(sql).toContain(`"${p.schema}"`)
   })
 
+  it('answers at once what home can tell, and queues nothing for it', async () => {
+    expect(await startWhereTheTablesAre({ projectId: p.projectId, decisionId: 'no-such-change' })).toEqual({ state: null, message: 'No such change.' })
+    const waiting = await startWhereTheTablesAre({ projectId: p.projectId, decisionId })
+    expect(waiting.state).toBe('awaiting_approval')
+    expect(waiting.message).toMatch(/^Nothing to run: the change is /)
+    expect(await prisma.backgroundJob.count({ where: { projectId: p.projectId, type: { startsWith: 'evolution_' } } })).toBe(0)
+  })
+
+  it('is rehearsed again in the region when its table moved before the approval', async () => {
+    await inRegion(`ALTER TABLE "${p.schema}"."orders" ADD COLUMN note text`)
+    const press = () => approveRequest({ projectId: p.projectId, findingId, planVersion, userId: p.ownerId })
+    const r = await press()
+    expect(isApprovalRefusal(r) && r.status).toBe(409)
+    expect(isApprovalRefusal(r) && r.error).toMatch(/^The table changed since this was prepared\. Backenly is checking it again in .*us-east-1.*, where this project's tables are/)
+    // A second press finds it queued.
+    await press()
+    const queued = await prisma.backgroundJob.findMany({ where: { projectId: p.projectId, type: 'evolution_rerequest' } })
+    expect(queued).toHaveLength(1)
+    expect(queued[0].payload).toMatchObject({ region: 'us-east-1', projectId: p.projectId, decisionId })
+
+    expect(await drainInRegion()).toBe(1)
+    const [done] = await prisma.backgroundJob.findMany({ where: { projectId: p.projectId, type: 'evolution_rerequest' } })
+    expect(done.status).toBe('completed')
+    expect(done.result).toMatchObject({ outcome: 'requested', state: 'awaiting_approval' })
+    const [req] = await requestsOf(p.projectId)
+    expect(req.id).toBe(findingId)
+    expect(req.ev.planVersion).not.toBe(planVersion)
+    expect(req.ev.rehearsal).toMatchObject({ passed: true, planVersion: req.ev.planVersion })
+    planVersion = req.ev.planVersion
+  })
+
   it('is approved at home and started by the region, never from the request that approved it', async () => {
     // Across regions every statement of a rung is a round trip, and the rungs
     // outlast the request (on staging the person saw a timeout and the change
@@ -384,6 +418,34 @@ describe('the engine, for a project kept in us-east-1', () => {
     // A second press finds it queued.
     expect((await startWhereTheTablesAre({ projectId: p.projectId, decisionId, actor: p.ownerId })).state).toBe('approved')
     expect(await prisma.backgroundJob.count({ where: { projectId: p.projectId, type: 'evolution_advance' } })).toBe(1)
+  })
+
+  it('is paused and resumed at home, and the start still waiting carries the resumed change', async () => {
+    expect(await pause({ projectId: p.projectId, decisionId, userId: p.ownerId })).toMatchObject({ ok: true, state: 'blocked' })
+    const r = await resume({ projectId: p.projectId, decisionId, userId: p.ownerId })
+    if (isActionRefusal(r)) throw new Error(r.error)
+    expect(r.state).toBe('approved')
+    expect(r.message).toMatch(/^It runs in .*us-east-1.*, where this project's tables are, starting within a minute\./)
+    expect(await prisma.backgroundJob.count({ where: { projectId: p.projectId, type: 'evolution_advance' } })).toBe(1)
+  })
+
+  it('waits out another change running on the project, then starts', async () => {
+    // The project's single-flight lock, held as another change would hold it.
+    const gate: { release?: () => void } = {}
+    const other = withMaintenanceSingleFlight(p.projectId, () => new Promise<void>(resolve => { gate.release = resolve }))
+    for (let i = 0; i < 100 && !gate.release; i++) await new Promise(resolve => setTimeout(resolve, 20))
+    expect(gate.release).toBeDefined()
+    try {
+      expect(await drainInRegion()).toBe(1)
+    } finally {
+      gate.release!()
+      await other
+    }
+    const [waited] = await prisma.backgroundJob.findMany({ where: { projectId: p.projectId, type: 'evolution_advance' } })
+    expect(waited).toMatchObject({ status: 'regional_pending', attempts: 1, error: 'Another change was running on this project, so the change waited.' })
+    expect((await stateOf(p.projectId, decisionId)).state).toBe('approved')
+    // The backoff, passed.
+    await prisma.backgroundJob.update({ where: { id: waited.id }, data: { runAt: new Date() } })
   })
 
   it('is expanded and backfilled in the region, and its step ledger at home keeps no statement', async () => {
@@ -437,6 +499,19 @@ describe('the engine, for a project kept in us-east-1', () => {
     // Nothing left to undo is said at once, and queues nothing.
     expect(await undoWhereTheTablesAre({ projectId: p.projectId, decisionId, userId: p.ownerId })).toMatchObject({ ok: false, status: 409 })
     expect(await prisma.backgroundJob.count({ where: { projectId: p.projectId, type: 'evolution_undo' } })).toBe(1)
+  })
+
+  it('looks for changes in the region when a person asks now', async () => {
+    const r = await proposeWhereTheTablesAre(p.projectId)
+    expect(r).toMatchObject({ requested: 0, assessed: 0 })
+    expect(r.message).toMatch(/^It runs in .*us-east-1.*, where this project's tables are, starting within a minute\./)
+    await proposeWhereTheTablesAre(p.projectId)
+    expect(await prisma.backgroundJob.count({ where: { projectId: p.projectId, type: 'evolution_assess' } })).toBe(1)
+    expect(await drainInRegion()).toBe(1)
+    const [done] = await prisma.backgroundJob.findMany({ where: { projectId: p.projectId, type: 'evolution_assess' } })
+    expect(done.status).toBe('completed')
+    // The owner undid it, so nothing is asked again; what home keeps is counts.
+    expect(done.result).toMatchObject({ requested: 0, skipped: expect.any(Number) })
   })
 
   it('left nothing at home that quotes a statement, a definition, or a row', async () => {

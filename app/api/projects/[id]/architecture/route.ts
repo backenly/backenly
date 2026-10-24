@@ -19,11 +19,14 @@
  *                                               change's queue row aside
  *        pause    { decisionId }               stop before the next step
  *        resume   { decisionId }
- *        undo     { decisionId }               lossless, or refused; for a
- *                                               project kept in another region,
- *                                               queued for that region's worker
+ *        undo     { decisionId }               lossless, or refused
  *        assess   {}                            look for changes now (reads
  *                                               and rehearses only)
+ *
+ * For a project kept in another region, what runs against its tables (the
+ * start of an approved change, a rehearsal again after its table moved, an
+ * undo, a look for changes) is queued for that region's worker, and the answer
+ * says so: from here, those statements outlast the request.
  *
  * Every decision is the engine's (lib/evolution-engine/engine.ts); this route
  * authenticates, parses and answers. Auth is `withProjectValidation`, which
@@ -46,7 +49,7 @@ import {
   isApprovalRefusal,
   liveStatements,
   pause,
-  proposeChanges,
+  proposeWhereTheTablesAre,
   resume,
   startWhereTheTablesAre,
   undoWhereTheTablesAre,
@@ -133,7 +136,7 @@ export async function POST(request: NextRequest, _props: { params: Promise<{ id:
     }
 
     if (action === 'assess') {
-      const r = await proposeChanges(projectId)
+      const r = await proposeWhereTheTablesAre(projectId)
       return NextResponse.json({ ok: true, ...r })
     }
 
