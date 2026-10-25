@@ -25,6 +25,12 @@
  *   a snapshot restore                         stops: History does not undo one
  *   a change still running, or waiting for a
  *   person                                     stops
+ *   a step of an architecture change, or its
+ *   undo, when the whole change and its undo
+ *   are after the point and the undo finished  nothing to undo: nothing of it is
+ *                                              left
+ *   any other step of an architecture change   stops, before anything runs: one
+ *                                              is undone whole, by the engine
  *
  * Who may run it is who may restore: a person, from History or from Deploy
  * (a published version's point is the last change before it was published),
@@ -34,7 +40,14 @@
 
 import { prisma } from '@/lib/db/prisma'
 import { IN_EFFECT } from './types'
-import { previewRecovery, recoverChange, type RecoveryOutcome, type RecoveryPreview } from './recovery'
+import {
+  ARCHITECTURE_CHANGE_GROUP,
+  ARCHITECTURE_UNDO_SUFFIX,
+  previewRecovery,
+  recoverChange,
+  type RecoveryOutcome,
+  type RecoveryPreview,
+} from './recovery'
 
 export interface RangeEntry {
   id: string
@@ -73,10 +86,47 @@ export interface RangeOutcome {
   stoppedAt: RangeStop | null
 }
 
-type Row = { id: string; seq: number; kind: string; status: string; summary: string | null; title: string; recoversId: string | null }
+type Row = { id: string; seq: number; kind: string; status: string; summary: string | null; title: string; recoversId: string | null; groupId: string | null }
 
 const label = (r: Row) => r.summary ?? r.title
 const STILL_RUNNING = new Set(['applying', 'verifying', 'recovering', 'restoring'])
+const ROW = { id: true, seq: true, kind: true, status: true, summary: true, title: true, recoversId: true, groupId: true } as const
+
+/**
+ * The architecture change an entry belongs to, by its plan's group, and
+ * whether the entry is that change's undo. An architecture change
+ * (lib/structural-evolution) is put back whole, by the engine's own undo, never
+ * one step at a time (ARCHITECTURE_CHANGE_GROUP).
+ */
+function architectureOf(groupId: string | null): { group: string; undo: boolean } | null {
+  if (!groupId?.startsWith(ARCHITECTURE_CHANGE_GROUP)) return null
+  const undo = groupId.endsWith(ARCHITECTURE_UNDO_SUFFIX)
+  return { group: undo ? groupId.slice(0, -ARCHITECTURE_UNDO_SUFFIX.length) : groupId, undo }
+}
+
+/**
+ * The architecture changes with an entry after the point, and whether each is
+ * gone: every entry of it after the point, and the newest one that did
+ * anything a finished undo. Such a change leaves nothing to undo. One that
+ * started at or before the point cannot be passed over, since the point holds
+ * part of it, and History cannot put back part of one.
+ */
+async function architectureAfter(projectId: string, afterSeq: number, rows: Row[]) {
+  const changes = new Map<string, { gone: boolean; startedBefore: boolean }>()
+  for (const r of rows) {
+    const a = architectureOf(r.groupId)
+    // Newest first, so the first entry that did anything decides; a failed one altered nothing.
+    if (!a || changes.has(a.group) || r.status === 'failed') continue
+    changes.set(a.group, { gone: a.undo && IN_EFFECT.has(r.status), startedBefore: false })
+  }
+  if (changes.size === 0) return changes
+  const earlier = await prisma.backendChange.findMany({
+    where: { projectId, seq: { lte: afterSeq }, groupId: { in: [...changes.keys()].flatMap((g) => [g, g + ARCHITECTURE_UNDO_SUFFIX]) } },
+    select: { groupId: true },
+  })
+  for (const e of earlier) changes.get(architectureOf(e.groupId)!.group)!.startedBefore = true
+  return changes
+}
 
 /**
  * The entries after the point, read as steps, without proving any of them: a
@@ -86,17 +136,18 @@ export async function planRestoreTo(projectId: string, afterSeq: number): Promis
   const rows: Row[] = await prisma.backendChange.findMany({
     where: { projectId, seq: { gt: afterSeq } },
     orderBy: { seq: 'desc' },
-    select: { id: true, seq: true, kind: true, status: true, summary: true, title: true, recoversId: true },
+    select: ROW,
   })
   const targets = new Map<string, Row>()
   const missing = rows.filter((r) => r.recoversId && !rows.some((x) => x.id === r.recoversId)).map((r) => r.recoversId!)
   if (missing.length > 0) {
     for (const t of await prisma.backendChange.findMany({
       where: { id: { in: missing } },
-      select: { id: true, seq: true, kind: true, status: true, summary: true, title: true, recoversId: true },
+      select: ROW,
     })) targets.set(t.id, t)
   }
   for (const r of rows) targets.set(r.id, r)
+  const architecture = await architectureAfter(projectId, afterSeq, rows)
 
   const plan: RangePlan = { afterSeq, steps: [], kept: [], stop: null }
   for (const r of rows) {
@@ -105,10 +156,30 @@ export async function planRestoreTo(projectId: string, afterSeq: number): Promis
       plan.stop = { ...entry, recordId: r.id, code: 'SNAPSHOT', reason: `#${r.seq} restored a snapshot, which History cannot undo. Restore an earlier snapshot from Database → Snapshots instead.` }
       break
     }
+    const a = architectureOf(r.groupId)
+    if (a) {
+      const change = architecture.get(a.group)
+      if (r.status === 'failed' || (change?.gone && !change.startedBefore)) continue
+      plan.stop = {
+        ...entry,
+        recordId: r.id,
+        code: 'UNAVAILABLE',
+        reason: change?.startedBefore
+          ? `#${r.seq} is one step of an architecture change that started before this point, and an architecture change is only undone whole. Pick a point before it started or after its last step.`
+          : `#${r.seq} is one step of an architecture change. Undo the whole change from the Autonomy page first, then restore again.`,
+      }
+      break
+    }
     if (r.kind === 'recovery') {
       const target = r.recoversId ? targets.get(r.recoversId) : undefined
       // Undone already, or what it restored was made after the point too.
       if (!target || target.seq > afterSeq || !IN_EFFECT.has(r.status)) continue
+      // Never one step of an architecture change put back on its own (none is
+      // restored on its own to begin with, ARCHITECTURE_CHANGE_GROUP).
+      if (architectureOf(target.groupId)) {
+        plan.stop = { ...entry, recordId: r.id, code: 'UNAVAILABLE', reason: `#${r.seq} restored one step of an architecture change, which is only undone whole. Pick a point after #${r.seq}.` }
+        break
+      }
       plan.steps.push({ ...entry, summary: label(target), id: target.id, seq: target.seq, action: 'reapply', recordId: r.id })
       continue
     }

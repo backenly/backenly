@@ -278,7 +278,7 @@ export const ACCEPTANCE_CASES: AcceptanceCase[] = [
       'npx -y @backenly/cli@0.2.0 call deploy action=deploy ; npx -y @backenly/cli@0.2.0 call check_approval id=<approval id> ; ' +
       'npx -y @backenly/cli@0.2.0 call deploy action=rollback version=<earlier version> ; npx -y @backenly/cli@0.2.0 call deploy action=history',
     env: ['BACKENLY_API_URL', 'BACKENLY_PROJECT_ID', 'BACKENLY_MCP_KEY'],
-    preconditions: `${THROWAWAY} ${CLI_READY} A dedicated qualification account on the Pro plan (BUILDER) for rollback. A human who can approve on the project's Autonomy page. Every table in the project must have RLS: readiness blocks a deploy otherwise (correctly), and the harness's hx_ tables have none, so run this on a project the harness has not touched.`,
+    preconditions: `${THROWAWAY} ${CLI_READY} A dedicated qualification account (rollback is on every plan). A human who can approve on the project's Autonomy page. Every table in the project must have RLS: readiness blocks a deploy otherwise (correctly), and the harness's hx_ tables have none, so run this on a project the harness has not touched.`,
     expected: 'each deploy parks with an approval id and check_approval reports executed; a rollback approval returns to the earlier version and deploy action=history lists it.',
     cleanup: 'None beyond the throwaway project.',
     why: 'Publishing runs the real deployment pipeline, which exists only on the deployed stack.',

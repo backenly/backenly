@@ -100,6 +100,8 @@ interface LoadedChange {
   source: string
   apiKeyId: string | null
   actorUserId: string | null
+  /** Several changes made for one request (ledger attribution). */
+  groupId: string | null
   createdAt: Date
   recoversId: string | null
   recoveredById: string | null
@@ -149,6 +151,7 @@ async function load(projectId: string, changeId: string): Promise<LoadedChange |
     source: row.source,
     apiKeyId: row.apiKeyId,
     actorUserId: row.actorUserId,
+    groupId: row.groupId,
     createdAt: row.createdAt,
     recoversId: row.recoversId,
     recoveredById: row.recoveredById,
@@ -254,9 +257,35 @@ export interface Availability {
   available: boolean
   /** Plain sentence, when it is not. */
   reason?: string
-  code?: 'NOT_RESTORABLE' | 'IN_PROGRESS' | 'EXPIRED' | 'CHECKPOINT_INVALID' | 'NOTHING_TO_RESTORE' | 'FAILED_CHANGE_REAPPLY' | 'NOT_REVERSIBLE'
+  code?:
+    | 'NOT_RESTORABLE'
+    | 'IN_PROGRESS'
+    | 'EXPIRED'
+    | 'CHECKPOINT_INVALID'
+    | 'NOTHING_TO_RESTORE'
+    | 'FAILED_CHANGE_REAPPLY'
+    | 'NOT_REVERSIBLE'
+    | 'PART_OF_ARCHITECTURE_CHANGE'
   expiresAt?: string
 }
+
+/**
+ * The group of every change an architecture change makes, its undo included
+ * (lib/structural-evolution: execute.ts, rollback.ts). Such a change is one
+ * step of a whole: its new table and the syncs that keep it equal to its parent
+ * are added, and removed, together, and the engine's own undo first proves that
+ * removing them loses nothing. Restoring one step alone would leave the two
+ * tables apart — the parent's writes no longer mirrored, or a mirror with no
+ * table — so a person is pointed to that undo instead.
+ */
+export const ARCHITECTURE_CHANGE_GROUP = 'evolution:'
+
+/**
+ * Marks the engine's own undo within that group (`evolution:<plan>:undo`), so
+ * History can tell a change that is still in place from one undone in full,
+ * which leaves nothing of it behind (lib/changes/range.ts).
+ */
+export const ARCHITECTURE_UNDO_SUFFIX = ':undo'
 
 /** The statuses a restore may start from, by mode. */
 function restorableFrom(mode: RecoveryMode): ChangeStatus[] {
@@ -274,7 +303,16 @@ function restorableFrom(mode: RecoveryMode): ChangeStatus[] {
  * again, it is checked again.
  */
 export function availabilityOf(
-  change: { kind: string; status: string; footprint: TableChange[]; createdAt: Date; intact: boolean; sealed?: boolean; resourceOps?: ResourceOp[] },
+  change: {
+    kind: string
+    status: string
+    footprint: TableChange[]
+    createdAt: Date
+    intact: boolean
+    sealed?: boolean
+    resourceOps?: ResourceOp[]
+    groupId?: string | null
+  },
   windowDays: number,
   opts: { now?: Date; mode?: RecoveryMode; targetStatus?: string | null; targetVerified?: boolean } = {},
 ): Availability {
@@ -285,6 +323,13 @@ export function availabilityOf(
   }
   if (change.status === 'recovering' || change.status === 'applying' || change.status === 'verifying') {
     return { available: false, code: 'IN_PROGRESS', reason: 'Backenly is still working on this change.' }
+  }
+  if (mode !== 'automatic' && change.groupId?.startsWith(ARCHITECTURE_CHANGE_GROUP)) {
+    return {
+      available: false,
+      code: 'PART_OF_ARCHITECTURE_CHANGE',
+      reason: 'This is one step of an architecture change. Undo the whole change from the Autonomy page instead.',
+    }
   }
   if (!restorableFrom(mode).includes(change.status as ChangeStatus)) {
     return { available: false, code: 'NOT_RESTORABLE', reason: change.status === 'failed' ? 'This change did not alter anything.' : 'This change is no longer in effect.' }

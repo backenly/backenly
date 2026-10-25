@@ -158,6 +158,20 @@ export type FindingType =
    * human makes. Classified `notify_only`.
    */
   | 'subsystem_repeat_failure'
+  /**
+   * An architecture change Backenly prepared, rehearsed and is asking a person
+   * to approve (lib/evolution-engine, first primitive lib/structural-evolution).
+   *
+   * An APPROVAL REQUEST, not a health problem: nothing is broken. It is raised
+   * as `pending_approval` only, never `open` (the Detected panel offers "Fix
+   * now" on every open row), carries no `fix` (the approvals API would run
+   * `fix.sql` verbatim), and names its subject under `details.evolution`
+   * rather than `tableName`/`location`, so no harm or repair counter reads it
+   * as evidence about the table. Consent is given through the evolution route,
+   * which binds it to one exact plan version; every generic approve path
+   * refuses this type (see `isEvolutionApprovalFinding`).
+   */
+  | 'architecture_evolution'
   // ── The spend guard (lib/usage/anomaly.ts) ────────────────────────────────
   // A project's daily usage (egress, function runs, new MAU) far past its own
   // fourteen-day median and past an absolute floor. Emitted per axis as
@@ -341,7 +355,24 @@ export const ALL_FINDING_TYPES = [
   'subsystem_repeat_failure',
   // Added 2026-09-28 in the same commit that introduced it.
   'usage_anomaly',
+  // Added 2026-10-05 in the same commit that introduced it.
+  'architecture_evolution',
 ] as const satisfies ReadonlyArray<FindingType>
+
+/** The finding type that carries an architecture-change approval request. */
+export const EVOLUTION_FINDING_TYPE = 'architecture_evolution' as const
+
+/**
+ * True for a finding whose approval must go through the evolution route.
+ *
+ * Every generic approve path — `/health` approve, `/health/approve`,
+ * `/approvals/[findingId]`, `applyApproval` — calls this and refuses, because
+ * none of them can bind consent to an exact plan version, and one of them runs
+ * `details.fix.sql` as written.
+ */
+export function isEvolutionApprovalFinding(type: string | null | undefined): boolean {
+  return type === EVOLUTION_FINDING_TYPE
+}
 
 // Canonical types — exact matches pass through untouched.
 const CANONICAL: ReadonlySet<string> = new Set<string>(ALL_FINDING_TYPES)

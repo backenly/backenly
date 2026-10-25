@@ -799,6 +799,19 @@ export async function inspectBackgroundJob(
   const job = await newestJobOfChain(chain)
     .then((newest) => newest ?? prisma.backgroundJob.findUnique({ where: { id: jobId }, select: JOB_FIELDS }))
     .catch(() => null)
+  return backgroundJobState(job, jobId)
+}
+
+/**
+ * What one job row of a batch chain says about the chain, by the rules above.
+ * Exported for structural evolution (lib/structural-evolution/backfill-job.ts),
+ * whose chain is found by its plan version but must be read by exactly these
+ * rules: a second reader would be a second definition of "the backfill finished".
+ */
+export function backgroundJobState(
+  job: { id: string; status: string; result: unknown; error: string | null; attempts: number } | null,
+  jobId: string,
+): { state: 'pending' | 'done' | 'failed'; detail: string } {
   if (!job) return { state: 'failed', detail: `background job ${jobId} no longer exists` }
 
   // A regional project's batches end as `regional_failed` (lib/queue REGIONAL_STATUS),

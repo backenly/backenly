@@ -313,7 +313,7 @@ const FEATURE_LIST: FeatureData[] = [
       },
       {
         title: 'History and rollback',
-        body: 'Every change creates a record, and a rollback snapshot is saved before every deploy. On Pro and above, roll back to an earlier version from the dashboard.',
+        body: 'Every change creates a record, and a rollback snapshot is saved before every deploy. On every plan, roll back to an earlier version from the dashboard, as far back as your plan keeps restore points.',
       },
       {
         title: 'Watched every minute',

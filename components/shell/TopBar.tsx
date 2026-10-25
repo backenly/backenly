@@ -101,14 +101,16 @@ export function TopBar() {
         const res = await fetch(`/api/projects/${projectId}/health`, { credentials: 'include' })
         if (!res.ok) return
         const j = await res.json()
-        // Both queues that wait on the user: findings the loop is holding, and
-        // calls their coding agent parked for approval. This counted only the
-        // held findings, and from the 50-row preview, so a parked deploy or
-        // drop left the inbox dark until it expired (AUT-08).
+        // Everything that waits on the user: findings the loop is holding,
+        // calls their coding agent parked for approval, and architecture
+        // changes Backenly prepared. This counted only the held findings, and
+        // from the 50-row preview, so a parked deploy or drop left the inbox
+        // dark until it expired (AUT-08).
         const held = typeof j.data?.needsAttention === 'number'
           ? j.data.needsAttention
           : (j.data?.findings ?? []).filter((f: any) => f.status === 'pending_approval').length
-        const pending = held + (typeof j.data?.agentApprovalsPending === 'number' ? j.data.agentApprovalsPending : 0)
+        const count = (n: unknown) => (typeof n === 'number' ? n : 0)
+        const pending = held + count(j.data?.agentApprovalsPending) + count(j.data?.architectureRequestsPending)
         if (!cancelled) setPendingReview(pending)
       } catch {
         /* silent */

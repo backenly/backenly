@@ -160,6 +160,7 @@ export const DOMAIN_TOOLS: DomainTool[] = [
       status: { tool: 'get_autonomy_status', gloss: 'mode, recent repairs and what is waiting' },
       findings: { tool: 'list_findings', gloss: 'open health findings with evidence' },
       maintenance: { tool: 'get_maintenance_ladder', gloss: 'the schema-maintenance ladder and its consent state' },
+      evolution: { tool: 'get_evolution_proposals', gloss: 'architecture changes, what waits for approval, recommendations; detail: true for evidence and exact plans' },
       set_level: { tool: 'set_autonomy_level', gloss: 'OFF, CONSERVATIVE, BALANCED or AGGRESSIVE' },
     },
   },

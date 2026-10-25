@@ -274,6 +274,13 @@ that stays restored, and running it again continues. The dialog lists the
 steps before anything runs, and the server refuses (`STALE_PAGE`) if the list
 changed since.
 
+An architecture change (`lib/structural-evolution`) is undone whole, by the
+engine's own undo, never one step at a time, so restore to a point never runs
+one of its steps. When the change and its finished undo are both after the
+point, nothing of it is left and they are passed over together. Otherwise the
+list stops at it before anything runs: one still in place is undone from the
+Autonomy page first, and a point that holds part of one is refused.
+
 A published version marks History at the time it was published, and **Restore**
 on a version (History or Deploy) is restore to that point: the last change
 before it was published. Reached in full, the version is also recorded as the

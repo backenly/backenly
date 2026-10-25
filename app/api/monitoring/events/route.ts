@@ -5,6 +5,7 @@ import { withAuth } from '@/lib/auth/route-protection'
 import { prisma } from '@/lib/db'
 import { z } from 'zod'
 import { canAccessProject } from '@/lib/edition/guard'
+import { TRACE_ACTION } from '@/lib/evolution-engine/memory'
 
 const querySchema = z.object({
   projectId: z.string().uuid(),
@@ -31,6 +32,7 @@ function eventMessage(action: string, details?: string | null): string {
   try {
     const parsed = JSON.parse(details)
     if (typeof parsed?.message === 'string') return parsed.message
+    if (typeof parsed?.sentence === 'string') return parsed.sentence
     if (typeof parsed?.summary === 'string') return parsed.summary
     if (typeof parsed?.description === 'string') return parsed.description
   } catch {
@@ -56,7 +58,8 @@ export const GET = withAuth(async (request: NextRequest, { user }) => {
     }
 
     const logs = await prisma.auditLog.findMany({
-      where: { projectId: parsed.projectId },
+      // Architecture-memory traces are the engine's notebook, not events.
+      where: { projectId: parsed.projectId, action: { not: TRACE_ACTION } },
       orderBy: { timestamp: 'desc' },
       take: parsed.limit,
       select: {

@@ -14,6 +14,9 @@
  *   a revoked key is named and left revoked, and the rest still restores
  *   a step that needs a person stops the sequence there, with everything newer
  *   already restored; once that step is decided, running it again finishes
+ *   an architecture change is undone whole or not at all: one still in place
+ *   stops the sequence before anything runs, one undone in full is passed over,
+ *   and a point that holds part of one is refused
  *
  * And an agent asking for restores cannot keep the project's tables locked:
  * proving a restore locks what it touches, so a project takes only so many
@@ -38,7 +41,7 @@ jest.mock('@/lib/postgrest/registration', () => {
 import crypto from 'crypto'
 import { prisma } from '@/lib/db/prisma'
 import { createProvisionedProject } from '@/lib/projects/provision'
-import { withGovernedChange, withChangeAttribution } from '@/lib/changes/ledger'
+import { expectEffect, withGovernedChange, withChangeAttribution } from '@/lib/changes/ledger'
 import { AGENT_PROOFS_PER_MINUTE, describeRestoreRequest, previewRecovery, recoverChange } from '@/lib/changes/recovery'
 import { planRestoreTo, restoreTo } from '@/lib/changes/range'
 import { closeChangeLockPool } from '@/lib/changes/lock'
@@ -62,6 +65,17 @@ async function change(title: string, fn: () => Promise<unknown>) {
     withGovernedChange({ projectId, title }, async () => { await fn() }))
   if (!closed) throw new Error(`"${title}" recorded nothing`)
   return closed
+}
+/** One step of an architecture change, as the engine records one (lib/structural-evolution). */
+async function architectureStep(group: string, title: string, fn: () => Promise<unknown>) {
+  const { change: closed } = await withChangeAttribution({ source: 'approval', actorUserId: ownerId, groupId: group }, () =>
+    withGovernedChange({ projectId, title, autoRecover: false }, async () => { await fn() }))
+  if (!closed) throw new Error(`"${title}" recorded nothing`)
+  return closed
+}
+const dropDeclared = async (table: string) => {
+  expectEffect(projectId, { action: 'DROP_TABLE', table })
+  await ddl(`DROP TABLE ${T(table)}`)
 }
 const restore = (id: string, acknowledged?: Record<string, number> | null) =>
   recoverChange(projectId, id, { mode: 'manual', actorUserId: ownerId, acknowledged: acknowledged ?? null })
@@ -163,6 +177,60 @@ describe('restore to a point', () => {
     expect(await restore(rotated.id, p.acknowledgement)).toMatchObject({ ok: true })
     expect(await to(point.seq)).toMatchObject({ restored: [], stoppedAt: null })
     expect((await prisma.webhook.findUnique({ where: { id: hook.id } }))!.targetUrl).toBe('https://hooks.example.test/a')
+  })
+})
+
+describe('restore to a point across an architecture change', () => {
+  it('stops before a change still in place, before running anything older, and says to undo it whole first', async () => {
+    const point = await change('create carts', () => ddl(`CREATE TABLE ${T('carts')} (id serial PRIMARY KEY)`))
+    const group = `evolution:${hex()}`
+    await architectureStep(group, 'create cart_refunds', () => ddl(`CREATE TABLE ${T('cart_refunds')} (id int PRIMARY KEY)`))
+    const last = await architectureStep(group, 'add cart_refunds.note', () => ddl(`ALTER TABLE ${T('cart_refunds')} ADD COLUMN note text`))
+    const later = await change('create wishlists', () => ddl(`CREATE TABLE ${T('wishlists')} (id serial PRIMARY KEY)`))
+
+    const plan = await planRestoreTo(projectId, point.seq)
+    expect(plan.steps.map((s) => s.seq)).toEqual([later.seq])
+    expect(plan.stop).toMatchObject({ seq: last.seq, code: 'UNAVAILABLE' })
+    expect(plan.stop!.reason).toBe(`#${last.seq} is one step of an architecture change. Undo the whole change from the Autonomy page first, then restore again.`)
+
+    const out = await to(point.seq)
+    expect(out.restored.map((r) => r.seq)).toEqual([later.seq])
+    expect(out.stoppedAt).toMatchObject({ seq: last.seq })
+    expect(await exists('wishlists')).toBe(false)
+    expect(await exists('cart_refunds')).toBe(true)
+  })
+
+  it('passes over a change undone in full, whose undo is still one step it will not restore alone', async () => {
+    const point = await change('create coupons', () => ddl(`CREATE TABLE ${T('coupons')} (id serial PRIMARY KEY)`))
+    const group = `evolution:${hex()}`
+    await architectureStep(group, 'create coupon_refunds', () => ddl(`CREATE TABLE ${T('coupon_refunds')} (id int PRIMARY KEY)`))
+    // A change to the host made while the architecture change was in place.
+    const between = await change('add coupons.code', () => ddl(`ALTER TABLE ${T('coupons')} ADD COLUMN code text`))
+    const undo = await architectureStep(`${group}:undo`, 'undo: remove coupon_refunds', () => dropDeclared('coupon_refunds'))
+    expect(undo.status).toBe('healthy')
+    expect(await previewRecovery(projectId, undo.id)).toMatchObject({ safety: 'unavailable', unavailableCode: 'PART_OF_ARCHITECTURE_CHANGE' })
+
+    const plan = await planRestoreTo(projectId, point.seq)
+    expect(plan.steps.map((s) => s.seq)).toEqual([between.seq])
+    expect(plan.stop).toBeNull()
+    const out = await to(point.seq)
+    expect(out).toMatchObject({ stoppedAt: null })
+    expect(out.restored.map((r) => r.seq)).toEqual([between.seq])
+    expect(await exists('coupon_refunds')).toBe(false)
+    expect((await rows(`SELECT column_name FROM information_schema.columns WHERE table_schema = '${schema}' AND table_name = 'coupons'`)).map((r: any) => r.column_name)).toEqual(['id'])
+  })
+
+  it('refuses a point that holds part of a change, even one undone since: only the whole is undone', async () => {
+    const group = `evolution:${hex()}`
+    const first = await architectureStep(group, 'create tag_refunds', () => ddl(`CREATE TABLE ${T('tag_refunds')} (id int PRIMARY KEY)`))
+    await architectureStep(group, 'add tag_refunds.note', () => ddl(`ALTER TABLE ${T('tag_refunds')} ADD COLUMN note text`))
+    const undo = await architectureStep(`${group}:undo`, 'undo: remove tag_refunds', () => dropDeclared('tag_refunds'))
+
+    const plan = await planRestoreTo(projectId, first.seq)
+    expect(plan.steps).toEqual([])
+    expect(plan.stop).toMatchObject({ seq: undo.seq, code: 'UNAVAILABLE' })
+    expect(plan.stop!.reason).toMatch(/^#\d+ is one step of an architecture change that started before this point/)
+    expect(await to(first.seq)).toMatchObject({ restored: [], stoppedAt: { seq: undo.seq } })
   })
 })
 

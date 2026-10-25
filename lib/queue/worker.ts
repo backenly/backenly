@@ -303,6 +303,11 @@ class RegionalJobRefusal extends Error {}
 
 function failureSentence(type: string, region: CloudRegionId): string {
   if (type === 'maintenance_backfill') return `The backfill batch did not complete in ${region}. The reason is in that region's logs.`
+  if (type === 'evolution_backfill') return `The architecture change's copy batch did not complete in ${region}. The reason is in that region's logs.`
+  if (type === 'evolution_advance') return `The architecture change did not start in ${region}. The reason is in that region's logs.`
+  if (type === 'evolution_undo') return `The undo of the architecture change did not run in ${region}. The reason is in that region's logs.`
+  if (type === 'evolution_rerequest') return `The architecture change was not checked again in ${region}. The reason is in that region's logs.`
+  if (type === 'evolution_assess') return `The look for architecture changes did not run in ${region}. The reason is in that region's logs.`
   return type === 'workspace_restore'
     ? `The restore did not complete in ${region}. The reason is in that region's logs.`
     : `The snapshot was not taken in ${region}. The reason is in that region's logs.`
@@ -317,6 +322,62 @@ async function runRegionalJob(type: string, payload: unknown): Promise<Record<st
     // A refusal is a result, read by the ladder; a batch that raised is retried.
     const { handleBackfillJob } = await import('@/lib/autonomy/maintenance/primitives/backfill-job')
     return (await handleBackfillJob(payload as any)) as unknown as Record<string, any>
+  }
+
+  if (type === 'evolution_backfill') {
+    // The same for an architecture change's copy (lib/structural-evolution/backfill-job.ts).
+    const { handleEvolutionBackfillJob } = await import('@/lib/structural-evolution/backfill-job')
+    return (await handleEvolutionBackfillJob(payload as any)) as unknown as Record<string, any>
+  }
+
+  if (type === 'evolution_advance') {
+    // An approved architecture change, run here where its tables are
+    // (lib/evolution-engine/engine.ts, startWhereTheTablesAre). Where it got is
+    // its decision's to record; the result is the engine's own sentence.
+    const { decisionId, actor } = (payload ?? {}) as { decisionId?: unknown; actor?: unknown }
+    if (typeof decisionId !== 'string' || decisionId.length === 0) throw new RegionalJobRefusal('The job names no architecture change.')
+    const { advance } = await import('@/lib/evolution-engine/engine')
+    const r = await advance({ projectId, decisionId, actor: typeof actor === 'string' ? actor : null })
+    // Another change was running on the project and nothing of this one ran:
+    // tried again after the backoff, so the start the person asked for is not lost.
+    if (r.outcome?.status === 'in_flight_elsewhere') throw new RegionalJobRefusal('Another change was running on this project, so the change waited.')
+    return { state: r.state, message: r.message }
+  }
+
+  if (type === 'evolution_rerequest') {
+    // The table moved since the person was asked: rehearsed again here
+    // (reRequestDecision), and the queue shows the version for it as it is now.
+    // Only the change as it was when the person was told: one that moved on since is left as it is.
+    const { decisionId, from, planVersion } = (payload ?? {}) as { decisionId?: unknown; from?: unknown; planVersion?: unknown }
+    if (typeof decisionId !== 'string' || decisionId.length === 0) throw new RegionalJobRefusal('The job names no architecture change.')
+    const { reRequestDecision } = await import('@/lib/evolution-engine/engine')
+    return await reRequestDecision(projectId, decisionId, {
+      from: typeof from === 'string' ? from : undefined,
+      planVersion: typeof planVersion === 'string' ? planVersion : undefined,
+    })
+  }
+
+  if (type === 'evolution_assess') {
+    // A look a person asked for now. Kept at home as counts only, as every
+    // record of a project kept here is.
+    const { proposeChanges } = await import('@/lib/evolution-engine/engine')
+    const r = await proposeChanges(projectId)
+    return { assessed: r.assessed, requested: r.requested, refreshed: r.refreshed, rehearsalFailed: r.rehearsalFailed, skipped: r.skipped.length }
+  }
+
+  if (type === 'evolution_undo') {
+    // A person's undo, run here for the same reason (undoWhereTheTablesAre).
+    // Undo records how it went on the decision; a refusal is that outcome, and
+    // only "another change is running" is tried again, after the backoff.
+    const { decisionId, userId } = (payload ?? {}) as { decisionId?: unknown; userId?: unknown }
+    if (typeof decisionId !== 'string' || decisionId.length === 0 || typeof userId !== 'string' || userId.length === 0) {
+      throw new RegionalJobRefusal('The job names no architecture change or no person.')
+    }
+    const { undo, isActionRefusal } = await import('@/lib/evolution-engine/engine')
+    const r = await undo({ projectId, decisionId, userId })
+    if (!isActionRefusal(r)) return { state: r.state, message: r.message }
+    if (r.busy) throw new RegionalJobRefusal('Another change was running on this project, so the undo waited.')
+    return { refusal: r.error }
   }
 
   const backups = await import('@/lib/services/workspace-backup')
@@ -380,6 +441,11 @@ export async function processBackgroundJobs(): Promise<{
               '@/lib/autonomy/maintenance/primitives/backfill-job'
             )
             result = await handleBackfillJob(job.payload as any)
+            break
+          }
+          case 'evolution_backfill': {
+            const { handleEvolutionBackfillJob } = await import('@/lib/structural-evolution/backfill-job')
+            result = await handleEvolutionBackfillJob(job.payload as any)
             break
           }
           case 'purge_project':

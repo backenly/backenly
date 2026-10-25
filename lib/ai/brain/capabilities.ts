@@ -856,6 +856,12 @@ export const TOOL_CAPABILITIES: Capability[] = [
     what: 'The structural maintenance plan waiting for a decision: the diagnosis behind it, each step with its tier and whether it can be undone, and whether anyone has consented. A person approves it on the Autonomy page.',
     tool: 'get_maintenance_ladder',
   },
+  {
+    id: 'get_evolution_proposals',
+    name: 'Architecture changes (read)',
+    what: 'What Backenly concluded about the shape of the backend: architecture changes it made (whether they worked and helped, and whether they can be undone), changes waiting for the owner\'s approval, changes it recommends but does not propose to run, and tables it deliberately leaves alone with the reason. Read-only: approving, declining, pausing, resuming or undoing one is a person\'s decision on the Autonomy page.',
+    tool: 'get_evolution_proposals',
+  },
 ]
 
 /** ──────────────────────────────────────────────────────────────────────────

@@ -57,7 +57,7 @@ const sections: LegalSection[] = [
     content: 'Backenly offers Free, Pro, and Enterprise plans. Payments for paid plans, and for usage beyond a plan, are processed by Stripe.',
     list: [
       'Free: one permanent live project with limited monthly capacity',
-      'Pro: additional capacity, custom domain, triggers, webhooks, rollback, team seats, and email support',
+      'Pro: additional capacity, custom domain, triggers, webhooks, longer restore point retention, team seats, and email support',
       'Enterprise: custom limits, SSO, priority support with an SLA, under an individual agreement',
       'Usage beyond a plan: on Pro, usage past the included quotas is paid for in advance, and only after you set a monthly spend limit above zero. Setting or raising the limit requires confirmation from your account email and a payment of whatever your prepaid usage balance does not already cover. Usage past the quotas is charged at the rates published on the pricing page and drawn from that balance when each month closes; a month’s draw will not exceed the spending limit in effect when that month closes, or the balance. Unused balance carries over to later months. You can lower or remove the limit at any time.',
     ],
@@ -149,7 +149,7 @@ export default function TermsPage() {
           meta={
             <>
               <span>
-                Last updated <span className="text-zinc-200">October 3, 2026</span>
+                Last updated <span className="text-zinc-200">October 24, 2026</span>
               </span>
               <MetaDivider />
               <span>

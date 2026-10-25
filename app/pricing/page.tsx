@@ -1,12 +1,13 @@
 'use client'
 
-import { useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
+import { Fragment, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
 import { useRouter } from 'next/navigation'
 import {
   ArrowDown,
   ArrowRight,
   Bot,
   Check,
+  Copy,
   Database,
   KeyRound,
   Layers,
@@ -23,6 +24,7 @@ import { HorizonClose, Page, Section, SectionHead } from '@/components/site/kit'
 import { Faq } from '@/components/site/Faq'
 import { StartButton } from '@/components/site/StartButton'
 import { CONTAINER, DISPLAY, HEADING, LEDE, PRIMARY_CTA, SECONDARY_CTA, TEXT_LINK } from '@/components/site/tokens'
+import { useMinuteClock } from '@/lib/hooks/useMinuteClock'
 import { useUserSession } from '@/lib/hooks/useUserSession'
 import {
   PRO_INCLUDED,
@@ -30,6 +32,15 @@ import {
   usagePricingPublished,
   type OverageAxis,
 } from '@/lib/pricing/catalog'
+import {
+  LAUNCH_OFFER,
+  launchOfferActive,
+  launchPhase,
+  launchPrice,
+  spokenTimeLeft,
+  timeLeft,
+  usd,
+} from '@/lib/pricing/launch-offer'
 
 /* ─────────────────────────────────────────────────────────────
    /pricing (2026-10-15, founders: "make pricing better, check supabase.com,
@@ -74,9 +85,11 @@ type Plan = {
 const ENTERPRISE_MAIL = `mailto:${ROUTES.supportEmail}?subject=Backenly%20Enterprise`
 
 /** Pro billed yearly: $240 a year, which is $20 a month. */
-const PRO_MONTHLY = '$25'
-const PRO_YEARLY_TOTAL = '$240'
-const PRO_YEARLY_MONTHLY = '$20'
+const PRO_MONTHLY_CENTS = 2500
+const PRO_YEARLY_CENTS = 24000
+const PRO_MONTHLY = usd(PRO_MONTHLY_CENTS)
+const PRO_YEARLY_TOTAL = usd(PRO_YEARLY_CENTS)
+const PRO_YEARLY_MONTHLY = usd(PRO_YEARLY_CENTS / 12)
 
 /**
  * The three plans. Pro's metered amounts come from lib/pricing/catalog.ts, and
@@ -122,7 +135,7 @@ function plansFor(published: boolean): Plan[] {
         { text: `${PRO_INCLUDED.fnRuns / 1_000_000}M function runs a month`, note: then('fn_runs') },
         { text: 'Event triggers, outbound webhooks and custom domains' },
         { text: '5 team seats with project-level access' },
-        { text: 'Full deployment history and rollback' },
+        { text: 'Restore points kept for 30 days' },
         { text: '30 days of logs and email support' },
       ],
     },
@@ -189,7 +202,10 @@ function comparisonGroups(published: boolean): MatrixGroup[] {
         // (lib/changes/policy.ts). Whether a given change can still be restored
         // is decided per change, so this is retention, not a promise.
         { label: 'Schema change restore points kept', hint: 'Each change shows whether the state before it can still be restored', cells: ['7 days', '30 days', '90 days'] },
-        { label: 'Deployment history and rollback', cells: [false, 'Full history', 'Full history'] },
+        // Every plan lists every published version and restores from History; how
+        // far back a restore reaches is the row above. The Plan rows' rollback and
+        // history fields gate only APIs the console no longer calls.
+        { label: 'Deployment history and rollback', cells: ['Full history', 'Full history', 'Full history'] },
       ],
     },
     {
@@ -292,7 +308,7 @@ const faqs = [
   },
   {
     q: 'Are database, auth, storage and realtime paid add-ons?',
-    a: 'No. They are included on every plan. Paid plans raise capacity and add support, rollback history and advanced controls.',
+    a: 'No. They are included on every plan. Paid plans raise capacity, keep restore points longer, and add support and advanced controls.',
   },
   {
     q: 'Am I locked in? Can I get my data out?',
@@ -316,6 +332,11 @@ export default function PricingPage() {
   const published = usagePricingPublished()
   const [cadence, setCadence] = useState<Cadence>('monthly')
   const plans = plansFor(published)
+  // The launch offer shows until launch day ends. Before hydration there is no
+  // visitor clock (see useMinuteClock), and the page is built before the
+  // launch, so it renders with the offer and only drops it on a later visit.
+  const now = useMinuteClock()
+  const offer = now === null || launchOfferActive(now)
 
   function handleCta() {
     if (!isLoggedIn) {
@@ -362,9 +383,21 @@ export default function PricingPage() {
               </header>
 
               <h2 className="sr-only">Plans</h2>
+              {/* While the launch offer runs it heads the Pro column in a row of
+                  its own, so the three plans stay aligned with one another
+                  below it. On a phone it sits directly above the Pro card. */}
               <div className="grid lg:grid-cols-3">
                 {plans.map((plan, index) => (
-                  <PlanColumn key={plan.name} plan={plan} cadence={cadence} onCta={handleCta} divided={index > 0} />
+                  <Fragment key={plan.name}>
+                    {offer && plan.name === 'Pro' && <LaunchOfferPanel now={now} yearly={cadence === 'yearly'} />}
+                    <PlanColumn
+                      plan={plan}
+                      cadence={cadence}
+                      onCta={handleCta}
+                      divided={index > 0}
+                      launchOffer={offer}
+                    />
+                  </Fragment>
                 ))}
               </div>
             </div>
@@ -481,17 +514,37 @@ function PlanColumn({
   cadence,
   onCta,
   divided,
+  launchOffer,
 }: {
   plan: Plan
   cadence: Cadence
   onCta: () => void
   divided: boolean
+  /** The launch offer is running: its panel takes the first row, and Pro is priced with it. */
+  launchOffer: boolean
 }) {
   const yearly = cadence === 'yearly'
-  const price = plan.name === 'Free' ? '$0' : plan.name === 'Pro' ? (yearly ? PRO_YEARLY_MONTHLY : PRO_MONTHLY) : 'Custom'
+  // The offer panel heads Pro on both billing periods, so switching them never
+  // moves the plans. Only monthly Pro is offered: it shows what the code makes
+  // it, the price it replaces struck through, and how long that lasts, which
+  // is Stripe's 50% off the first three monthly invoices
+  // (lib/pricing/launch-offer.ts). Yearly keeps its own price.
+  const joined = launchOffer && plan.name === 'Pro'
+  const offered = joined && !yearly
+  const price = offered
+    ? usd(launchPrice(PRO_MONTHLY_CENTS))
+    : plan.name === 'Free'
+      ? '$0'
+      : plan.name === 'Pro'
+        ? yearly
+          ? PRO_YEARLY_MONTHLY
+          : PRO_MONTHLY
+        : 'Custom'
+  const struck = offered ? PRO_MONTHLY : plan.name === 'Pro' && yearly ? PRO_MONTHLY : null
   const unit = plan.name === 'Enterprise' ? null : '/month'
-  const priceNote =
-    plan.name === 'Free'
+  const priceNote = offered
+    ? `Your first ${LAUNCH_OFFER.months} months, then ${PRO_MONTHLY} a month`
+    : plan.name === 'Free'
       ? 'Free forever. No credit card.'
       : plan.name === 'Pro'
         ? yearly
@@ -501,12 +554,25 @@ function PlanColumn({
 
   const ctaClass = `${plan.highlighted ? PRIMARY_CTA : SECONDARY_CTA} w-full`
 
+  // With the offer panel above it, Pro continues the panel: no rule and no lit
+  // top edge between them, which the panel carries instead.
+  const edge = joined
+    ? 'lg:border-l'
+    : divided
+      ? 'border-t border-white/[0.07] lg:border-l lg:border-t-0'
+      : ''
+  const ground = plan.highlighted
+    ? joined
+      ? 'bg-white/[0.035]'
+      : 'bg-white/[0.035] shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]'
+    : ''
+
   return (
     <article
       aria-labelledby={`plan-${plan.name}`}
-      className={`flex min-w-0 flex-col p-[24px] sm:p-[28px] md:p-[32px] ${
-        divided ? 'border-t border-white/[0.07] lg:border-l lg:border-t-0' : ''
-      } ${plan.highlighted ? 'bg-white/[0.035] shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]' : ''}`}
+      className={`flex min-w-0 flex-col border-white/[0.07] p-[24px] sm:p-[28px] md:p-[32px] ${edge} ${ground} ${
+        launchOffer ? 'lg:row-start-2' : ''
+      }`}
     >
       <div className="flex min-h-[26px] items-center justify-between gap-[12px]">
         <h3 id={`plan-${plan.name}`} className={`text-[17px] text-white ${HEADING}`}>
@@ -521,10 +587,10 @@ function PlanColumn({
 
       <p className="mt-[20px] flex flex-wrap items-baseline gap-x-[8px] gap-y-[4px]">
         <span className="text-[44px] font-semibold leading-none tracking-[-0.04em] text-white tabular-nums">{price}</span>
-        {plan.name === 'Pro' && yearly && (
+        {struck && (
           <s className="text-[20px] font-medium tracking-[-0.02em] text-zinc-500 tabular-nums">
-            <span className="sr-only">Month to month: </span>
-            {PRO_MONTHLY}
+            <span className="sr-only">{offered ? 'Without the code: ' : 'Month to month: '}</span>
+            {struck}
           </s>
         )}
         {unit && <span className="text-[15px] text-zinc-500">{unit}</span>}
@@ -565,6 +631,110 @@ function PlanColumn({
         </ul>
       </div>
     </article>
+  )
+}
+
+/* ── Launch offer ────────────────────────────────────────────────────────── */
+
+/**
+ * The Product Hunt launch offer, at the head of the Pro column (founders,
+ * 2026-10-24: a promo code "in the 25usd plan area" until the launch).
+ * TEMPORARY, with the launch bar; the facts are lib/pricing/launch-offer.ts.
+ *
+ * Its job is to hand over the code. Stripe Checkout takes it and enforces the
+ * deadline, so a page left open past launch day cannot stretch the offer.
+ */
+function LaunchOfferPanel({ now, yearly }: { now: number | null; yearly: boolean }) {
+  const left = now !== null && launchPhase(now) === 'live' ? timeLeft(LAUNCH_OFFER.endsAt, now) : null
+
+  return (
+    // From lg up the panel's right edge is drawn one pixel into the next
+    // column, onto the line Enterprise's own left border draws below it, so
+    // the rule between Pro and Enterprise runs straight through both rows.
+    // It carries the lit top edge the Pro column has without it.
+    <section
+      id="launch-offer"
+      aria-labelledby="launch-offer-title"
+      className="scroll-mt-[88px] border-t border-white/[0.07] bg-white/[0.035] px-[24px] pb-[20px] pt-[20px] shadow-[inset_0_1px_0_rgba(255,255,255,0.08)] sm:px-[28px] md:px-[32px] lg:col-start-2 lg:row-start-1 lg:-mr-px lg:border-x lg:border-t-0"
+    >
+      <div className="flex flex-wrap items-baseline justify-between gap-x-[12px] gap-y-[2px]">
+        <h3 id="launch-offer-title" className="text-[13px] font-medium tracking-[-0.004em] text-violet-200">
+          Product Hunt launch offer
+        </h3>
+        {/* One line on both billing periods, so switching never moves the plans. */}
+        <p className="text-[12px] text-zinc-400 tabular-nums">
+          {yearly ? (
+            'Monthly billing only'
+          ) : left ? (
+            <>
+              Ends in{' '}
+              <span aria-hidden>
+                {left.hours}h {String(left.minutes).padStart(2, '0')}m
+              </span>
+              <span className="sr-only">{spokenTimeLeft(left)}</span>
+            </>
+          ) : (
+            `Ends ${LAUNCH_OFFER.endsLabel}`
+          )}
+        </p>
+      </div>
+      <PromoCode code={LAUNCH_OFFER.code} />
+    </section>
+  )
+}
+
+/**
+ * The code, as one field with its copy button, the way a coupon reads. The text
+ * stays selectable, so a browser that blocks the clipboard still lets it be
+ * copied by hand.
+ */
+function PromoCode({ code }: { code: string }) {
+  const [copied, setCopied] = useState(false)
+  const field = useRef<HTMLSpanElement>(null)
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(code)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1600)
+    } catch {
+      // Clipboard blocked: select the code instead, ready for Cmd/Ctrl+C.
+      const range = document.createRange()
+      if (!field.current) return
+      range.selectNodeContents(field.current)
+      window.getSelection()?.removeAllRanges()
+      window.getSelection()?.addRange(range)
+    }
+  }
+
+  return (
+    <div className="mt-[14px] flex h-[44px] items-center justify-between gap-[12px] rounded-[10px] border border-dashed border-violet-300/35 bg-black/20 pl-[16px] pr-[5px]">
+      <span
+        ref={field}
+        className="min-w-0 truncate font-mono text-[15px] font-medium tracking-[0.08em] text-white [font-variant-ligatures:none]"
+      >
+        {code}
+      </span>
+      {/* The label swap is the only confirmation a copy gets, so it is
+          announced (the docs' CodeBlock does the same). */}
+      <button
+        type="button"
+        onClick={copy}
+        aria-label={copied ? 'Code copied' : `Copy code ${code}`}
+        aria-live="polite"
+        className="inline-flex h-[34px] shrink-0 cursor-pointer items-center gap-[6px] rounded-[7px] border border-white/[0.10] bg-white/[0.06] px-[12px] text-[13px] font-medium text-zinc-200 transition-colors duration-200 hover:border-white/20 hover:bg-white/[0.10] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300"
+      >
+        {copied ? (
+          <>
+            <Check aria-hidden className="h-[14px] w-[14px] text-violet-300" strokeWidth={2.25} /> Copied
+          </>
+        ) : (
+          <>
+            <Copy aria-hidden className="h-[14px] w-[14px]" /> Copy
+          </>
+        )}
+      </button>
+    </div>
   )
 }
 

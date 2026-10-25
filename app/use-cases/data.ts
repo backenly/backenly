@@ -224,7 +224,7 @@ Agent: Not available over MCP. Sent to the Review Queue as
       'Adoption is reconciliation, not a migration tool. Moving the data is your job; Backenly makes the resulting schema governed.',
       'adopt_external_schema is not on the advertised 20-tool surface. Reach it through backend_chat by name.',
       'Structure mutates only through governed actions afterwards. If your workflow depends on arbitrary DDL from application code, that path is closed by design.',
-      'Deployment rollback and full deployment history are plan-gated and not available on Free. Check the pricing page before relying on them.',
+      'Rollback reaches back only as far as your plan keeps restore points: 7 days on Free, 30 on Pro and 90 on Enterprise. Check the pricing page before relying on it.',
       'The autonomy loop sweeps a project that shows a sign of life within 30 days: traffic, a governed change, or a conversation. A completely dormant project is not being checked.',
     ],
     faq: [

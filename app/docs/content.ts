@@ -595,7 +595,7 @@ await backend.auth.signIn({ email, password })
     group: 'operate',
     purpose: 'Publish numbered versions of your backend, and roll back to an earlier one.',
     summary:
-      'Deploy is where you publish your backend. Publishing runs readiness checks first, then records the backend as a numbered version and marks the project live. On Pro and higher you can roll back to an earlier published version.',
+      'Deploy is where you publish your backend. Publishing runs readiness checks first, then records the backend as a numbered version and marks the project live. On every plan you can roll back to an earlier published version.',
     metaTitle: 'Deploy: versions, readiness and rollback',
     metaDescription:
       'What Deploy does: readiness checks before you publish, numbered versions of your backend, the history of what went live, and rollback to an earlier version.',
@@ -630,7 +630,7 @@ await backend.auth.signIn({ email, password })
       'Your API answers before you publish, so you can build and test against it straight away. Publishing records a version; it does not switch the API on.',
       'Deploy publishes your backend. Your frontend is hosted wherever you choose and calls the API.',
       'When your agent asks to publish or roll back, the request waits for your approval in the console and then runs exactly as asked.',
-      'Rollback is included in Pro and higher. See [Pricing](/pricing).',
+      'Rollback is on every plan. How far back it reaches depends on how long your plan keeps restore points: 7 days on Free, 30 on Pro and 90 on Enterprise. See [Pricing](/pricing).',
     ],
   },
 

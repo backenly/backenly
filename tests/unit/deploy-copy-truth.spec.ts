@@ -23,6 +23,10 @@
  * Backenly's list of the changes it would undo, and approving undoes them
  * (lib/changes/range.ts). Moving the version label alone is left only to
  * lib/deployment/rollback.ts, which still says it is bookkeeping.
+ *
+ * The pages that describe plans follow: no restore asks for the plan, so
+ * every plan has rollback, and what a plan sets is how long restore points
+ * are kept (lib/changes/policy.ts).
  */
 
 import { readFileSync } from 'fs'
@@ -105,5 +109,26 @@ describe('every surface states the true model', () => {
     const src = read('app/app/projects/[id]/deploy/page.tsx')
     expect(src).toContain('Publishing records a version')
     expect(src).toContain('serves changes as they are made')
+  })
+
+  it('the pricing page sells rollback on every plan, since no restore asks for the plan', () => {
+    const pricing = read('app/pricing/page.tsx')
+    expect(pricing).toContain("label: 'Deployment history and rollback', cells: ['Full history', 'Full history', 'Full history']")
+    // Pro's list is "Everything in Free, plus": rollback there says Free has none.
+    expect(pricing).not.toContain('Full deployment history and rollback')
+    expect(pricing).not.toContain('rollback history')
+    expect(pricing).toContain("{ text: 'Restore points kept for 30 days' }")
+    // The plan's rollback flag is read only by the label-only rollback, which no console flow calls.
+    for (const f of ['app/api/projects/[id]/changes/restore-to/route.ts', 'lib/changes/range.ts', 'lib/changes/recovery.ts', 'lib/mcp/approvals.ts', 'lib/ai/brain/tools.ts']) {
+      expect([f, read(f).includes('allowDeploymentRollback')]).toEqual([f, false])
+    }
+  })
+
+  it('no page says rollback is limited to paid plans', () => {
+    const gated = /Pro and (higher|above)|plan-gated|not available on Free|Pro:[^'"\n]*roll ?back/i
+    for (const f of ['app/docs/content.ts', 'app/features/data.ts', 'app/use-cases/data.ts', 'app/comparisons/data.ts', 'app/pricing/page.tsx', 'app/terms/page.tsx']) {
+      const claims = read(f).split(/(?<=[.!?])\s+|\n/).filter((s) => /roll ?back/i.test(s) && gated.test(s))
+      expect([f, claims]).toEqual([f, []])
+    }
   })
 })

@@ -33,7 +33,8 @@
  * when an entry gets stale rather than failing the build.
  *
  * Backenly claims here stay inside the audited boundary. In particular: the
- * automatic repairs are a short, fixed list, and rollback is plan-gated.
+ * automatic repairs are a short, fixed list, and a restore reaches back only as
+ * far as the plan keeps restore points (7 days on Free).
  * Since #545 every change is one entry in History and can be restored, alone
  * or back to a point, but data the app wrote is never rewound and a credential
  * never comes back (docs/CHANGE_RECOVERY.md). None of those may be widened in

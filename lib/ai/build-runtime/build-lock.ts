@@ -473,3 +473,20 @@ export async function withBuildLock<T>(
     await releaseBuildLock(handle)
   }
 }
+
+/**
+ * Run `fn` holding the project's build lock if it is free, and record nothing:
+ * no job row, so no budget or cooldown is spent, and no stale-job reaping, so
+ * a long repair is never taken over. For a short section that must not land
+ * in the middle of a mutation (consent to an architecture change,
+ * lib/evolution-engine/engine.ts approveRequest), never for a mutation itself.
+ */
+export async function whileBuildLockFree<T>(projectId: string, fn: () => Promise<T>): Promise<{ ran: true; value: T } | { ran: false }> {
+  const key = projectToLockKey(projectId)
+  if (!(await pgTryAdvisoryLock(key))) return { ran: false }
+  try {
+    return { ran: true, value: await fn() }
+  } finally {
+    await pgAdvisoryUnlock(key)
+  }
+}

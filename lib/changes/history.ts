@@ -194,7 +194,16 @@ function outcomeOf(r: Row, recovery: Row | null, recoveryActor: ChangeActor | nu
 /** For a recovery record, `target` is the change it restored. */
 function availabilityFor(r: Row, windowDays: number, target: Row | null): Availability {
   return availabilityOf(
-    { kind: r.kind, status: r.status, footprint: footprintOf(r), createdAt: r.createdAt, intact: checkpointIntact(r), sealed: !!r.checkpointHash, resourceOps: resourceOpsOf(r) },
+    {
+      kind: r.kind,
+      status: r.status,
+      footprint: footprintOf(r),
+      createdAt: r.createdAt,
+      intact: checkpointIntact(r),
+      sealed: !!r.checkpointHash,
+      resourceOps: resourceOpsOf(r),
+      groupId: r.groupId,
+    },
     windowDays,
     {
       targetStatus: target?.status ?? null,

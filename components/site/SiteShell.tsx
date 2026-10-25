@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useLayoutEffect, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { useSettledReducedMotion } from '@/lib/hooks/useSettledReducedMotion'
@@ -190,6 +190,29 @@ export function SiteShell({ children }: { children: React.ReactNode }) {
 ───────────────────────────────────────────────────────────── */
 export function NavBar() {
   const [mobileOpen, setMobileOpen] = useState(false)
+  // The link group and the buttons drop their entrance once it has played. A
+  // finished `nav-drop` holds its end state, and Chrome's full-page capture
+  // (DevTools' "Capture full size screenshot", Playwright's fullPage) re-runs
+  // these nested, delayed animations from their first frame, so the links came
+  // out blank in those captures while the live page was fine. The entrance
+  // often ends before React hydrates, so this waits on the animations' own
+  // `finished` (already resolved by then) rather than on animationend.
+  const [navEntered, setNavEntered] = useState(false)
+  const navGroupRef = useRef<HTMLElement>(null)
+  const authGroupRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    let live = true
+    const animations = [navGroupRef.current, authGroupRef.current].flatMap((el) => el?.getAnimations?.() ?? [])
+    Promise.all(animations.map((a) => a.finished))
+      .then(() => {
+        if (live) setNavEntered(true)
+      })
+      .catch(() => {})
+    return () => {
+      live = false
+    }
+  }, [])
+  const navDrop = navEntered ? '' : 'nav-drop '
   const pathname = usePathname()
   const reduceMotion = useSettledReducedMotion()
   const { isLoggedIn } = useUserSession()
@@ -232,7 +255,8 @@ export function NavBar() {
             // Linear, Stripe, Supabase and Neon all set their marketing nav at
             // 16px. At 15px, next to an 18px wordmark, these read as secondary
             // captions rather than as the site's primary navigation.
-            className="nav-drop flex items-center gap-0.5 text-[15px] font-medium tracking-[-0.006em] text-zinc-400 [--enter-delay:80ms] [--nav-drop:-8px]"
+            ref={navGroupRef}
+            className={`${navDrop}flex items-center gap-0.5 text-[15px] font-medium tracking-[-0.006em] text-zinc-400 [--enter-delay:80ms] [--nav-drop:-8px]`}
           >
             {NAV_LINKS.map((link) => (
               <DesktopNavLink key={link.label} link={link} pathname={pathname} />
@@ -240,7 +264,7 @@ export function NavBar() {
           </nav>
 
           {/* Desktop auth buttons */}
-          <div className="nav-drop flex items-center gap-4 [--enter-delay:140ms] [--nav-drop:-8px]">
+          <div ref={authGroupRef} className={`${navDrop}flex items-center gap-4 [--enter-delay:140ms] [--nav-drop:-8px]`}>
           <a
             href={ROUTES.github}
             target="_blank"

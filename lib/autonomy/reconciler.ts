@@ -522,6 +522,11 @@ export type GapSkipReason =
   | 'recurrence_escalated'
   /** This tick hit its per-project fix ceiling. The next tick continues. */
   | 'tick_batch_full'
+  /**
+   * An architecture change is working on the gap's table (lib/evolution-engine/holds.ts).
+   * Self-clears when the change is in place: the next tick repairs it.
+   */
+  | 'architecture_change'
   /** The bookkeeping itself failed. Always worth shouting about. */
   | 'error'
 
@@ -533,6 +538,8 @@ const SELF_CLEARING_SKIPS: ReadonlySet<GapSkipReason> = new Set<GapSkipReason>([
   // the next minute. Excluded from the stall alarm for the same reason the other
   // two are: nobody needs to do anything for it to clear.
   'tick_batch_full',
+  // An architecture change working on the table finishes, and the hold with it.
+  'architecture_change',
 ])
 
 /**
@@ -937,6 +944,11 @@ export async function runReconcilerLive(projectId: string): Promise<LiveReconcil
         break
       } else if (res.outcome === 'escalated' || res.outcome === 'pending_approval') {
         escalated++
+      } else if (res.outcome === 'held') {
+        // An architecture change is working on this table (lib/evolution-engine/holds.ts):
+        // nothing ran, and other tables' repairs go on. Not an attempt.
+        attempted--
+        skips['architecture_change'] = (skips['architecture_change'] ?? 0) + 1
       }
     }
 

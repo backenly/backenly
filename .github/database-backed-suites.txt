@@ -1172,6 +1172,74 @@ tests/integration/branch-auth.spec.ts
 # the id as the column's type, so it works on the canonical uuid users table.
 # Real provisioned projects (encrypted secrets) and real users are the property.
 
+# The SQL form of the request-path classifier gives the function's answers, in
+# PostgreSQL itself, for v1 /db/<table>, v2 /<table> and v1's own routes.
+tests/integration/table-path-sql.spec.ts
+
+# A maintenance backfill longer than one batch resumes from where it stopped and
+# orders its cursor by key, not by the key's text, on a real table.
+tests/integration/maintenance-backfill-chain.spec.ts
+
+# Structural evolution, end to end on a real schema: detection on measured
+# evidence, rehearsal on a rolled-back copy, consent bound to the shown version,
+# the governed ladder, behaviour under row-level security as a real role, and a
+# lossless undo. A policy nobody rendered stops the access rungs before a grant.
+tests/integration/structural-evolution.spec.ts
+
+# The dual representation is fail-closed under concurrency: each interleaving of
+# writers, the backfill and parent deletes and re-keys is forced with real
+# sessions and locks.
+tests/integration/structural-evolution-concurrency.spec.ts
+
+# Who may read and write the new table is rehearsed identity by identity
+# against its parent on a copy, and planted flaws (wider, narrower, unsynced, a
+# write policy wider only on hidden rows) are caught. Real roles and RLS.
+tests/integration/structural-evolution-authorization.spec.ts
+
+# The Architecture Evolution Engine's lifecycle over a real extraction: asked in
+# the queue, approved only for the rehearsed version, observed before it is
+# called stable, judged only on measurements, undone, and remembered.
+tests/integration/evolution-engine.spec.ts
+
+# The engine never strands a decision: a change kept after a stop, a table that
+# changed after approval, a pause mid-run, a decline under a thousand newer rows,
+# a dropped table, a pass cut off part-way, a refused or part-way undo, a stale
+# "not now", an abandoned approval claim. Real extractions on a real schema.
+tests/integration/evolution-engine-recovery.spec.ts
+
+# The new table as the runtime reaches it: the workspace owned by a NOSUPERUSER
+# NOBYPASSRLS platform role, as in production. Closed until opened, then exactly
+# the host's visibility claim by claim; a hand-set echo guard bypasses nothing.
+tests/integration/structural-evolution-runtime-role.spec.ts
+
+# What the dual representation must preserve, with the workspace owned by a
+# NOSUPERUSER platform role: the host's own triggers decide the value, its
+# constraints keep their exact meaning, rows hidden from Backenly are never
+# reconciled from a partial view, TRUNCATE, forged settings, and the one
+# function that runs as the owner cannot be fired on another table.
+tests/integration/structural-evolution-semantics.spec.ts
+
+# An extraction of a project kept in another region happens in that region: a
+# second database stands in for us-east-1, holds the project's tables alone, and
+# analysis, rehearsal, every rung, the backfill, reconciliation and undo run
+# there; each schema change's record at home keeps structure and digests only.
+tests/integration/structural-evolution-regional.spec.ts
+
+# Who runs each statement of an extraction, and what every other identity can
+# do with it: the ladder over a login as a NOSUPERUSER application role, and
+# PostgREST's roles, MCP / direct read-only, direct read-write (main's own
+# direct-access SQL, which hands the new table to the project's owner role
+# mid-ladder) and backup, each reading and writing exactly what the parent
+# allows; ladder functions resolve names in pg_catalog only, cannot be called,
+# moved or replaced; a write reaches the host exactly once.
+tests/integration/structural-evolution-identities.spec.ts
+
+# An architecture change Backenly prepared is an approval request, not a broken
+# guarantee: the health summary counts it for the inbox on its own and in
+# neither loop reading, and its generic dismiss refuses the type, which is
+# declined where it is approved. Real finding rows.
+tests/integration/architecture-requests-not-broken-guarantees.spec.ts
+
 # Whether a user's coding agent is connected: an MCP key or OAuth connection
 # their agent authenticated with (authenticateMcp's stamp), unexpired, for this
 # user and this project only, and the console status route built on it: owner

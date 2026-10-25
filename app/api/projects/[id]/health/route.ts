@@ -7,6 +7,7 @@
 
 export const dynamic = 'force-dynamic'
 
+import { EVOLUTION_FINDING_TYPE, isEvolutionApprovalFinding } from '@/lib/core/types'
 import { NextRequest, NextResponse } from 'next/server'
 import { withProjectValidation } from '@/lib/middleware/projectValidation'
 import { redactSecretParams } from '@/lib/mcp/withhold-secrets'
@@ -19,6 +20,7 @@ import { getLastLoopTickAt } from '@/lib/autonomy/loop-tick'
 import { countRepairs, recentlyResolved } from '@/lib/autonomy/resolution'
 import { loadSensorState } from '@/lib/autonomy/sensor-state'
 import { countPendingAgentApprovals } from '@/lib/mcp/pending-approvals'
+import { countWaitingRequests } from '@/lib/evolution-engine/request'
 
 /**
  * How many findings the summary payload carries. A preview, not the truth —
@@ -39,6 +41,13 @@ const FINDINGS_PREVIEW_LIMIT = 50
 const RESOLVED_WINDOW_MS = 10 * 60 * 1000
 
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000
+
+/**
+ * The findings the self-healing loop's readings count. An architecture change
+ * Backenly prepared is an approval request, not a broken guarantee: it waits in
+ * the Review Queue and is counted on its own (`architectureRequestsPending`).
+ */
+const LOOP_FINDING = { status: { in: ['open', 'pending_approval'] }, type: { not: EVOLUTION_FINDING_TYPE } }
 
 // ─── GET ──────────────────────────────────────────────────────────────────────
 
@@ -145,9 +154,9 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
     }
 
     // Default: health summary for the dashboard widget
-    const [findings, repairs, resolved, sensors, lastScan, project, lastLoopTick, agentApprovals] = await Promise.all([
+    const [findings, repairs, resolved, sensors, lastScan, project, lastLoopTick, agentApprovals, architectureRequests] = await Promise.all([
       prisma.healthFinding.findMany({
-        where: { projectId, status: { in: ['open', 'pending_approval'] } },
+        where: { projectId, ...LOOP_FINDING },
         orderBy: [{ severity: 'asc' }, { detectedAt: 'desc' }],
         select: {
           id: true,
@@ -184,6 +193,8 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
       // parked for approval. Not findings, so not in `findings` or
       // `needsAttention`, and counted where every surface can read it.
       countPendingAgentApprovals(projectId).catch(() => 0),
+      // Architecture changes Backenly prepared, waiting in the same queue.
+      countWaitingRequests(projectId).catch(() => 0),
     ])
 
     const critical = findings.filter(f => f.severity === 'critical')
@@ -223,6 +234,9 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
         // The Overview and the top bar read both; they read only the findings
         // before, so a parked deploy or drop was invisible there (OV-1, AUT-08).
         agentApprovalsPending: agentApprovals,
+        // Architecture changes Backenly prepared, waiting for approval in the
+        // same queue. Not broken guarantees, so in neither count above.
+        architectureRequestsPending: architectureRequests,
         criticalCount: critical.length,
         warningCount: warnings.length,
         // Uncapped count of everything still needing attention. `findings` below
@@ -276,7 +290,7 @@ export async function PATCH(request: NextRequest, props: { params: Promise<{ id:
     // Return a fresh health summary after the scan
     const [findings, repairs, resolved, sensors, project, lastLoopTick] = await Promise.all([
       prisma.healthFinding.findMany({
-        where: { projectId, status: { in: ['open', 'pending_approval'] } },
+        where: { projectId, ...LOOP_FINDING },
         orderBy: [{ severity: 'asc' }, { detectedAt: 'desc' }],
         select: { id: true, type: true, severity: true, details: true, status: true, detectedAt: true },
       }).then(rows => servable(projectId, rows)),
@@ -356,13 +370,21 @@ export async function POST(request: NextRequest, props: { params: Promise<{ id: 
       return NextResponse.json({ error: 'Finding not found' }, { status: 404 })
     }
 
+    // Declining an architecture change is a decision Backenly remembers, and
+    // it is made where approving it is: POST /architecture { action: 'dismiss' },
+    // at the same role floor. This route's floor is lower.
+    if (isEvolutionApprovalFinding(finding.type)) {
+      return NextResponse.json(
+        { error: 'Architecture changes are decided on the Autonomy page, by an organization admin.' },
+        { status: 409 },
+      )
+    }
+
     const details = (finding.details ?? {}) as Record<string, unknown>
-    await prisma.healthFinding.update({
-      where: { id: findingId },
-      // The time is recorded so the closure can be told apart from a repair
-      // (lib/autonomy/resolution.ts) and placed on a timeline.
-      data: { status: 'dismissed', details: { ...details, dismissedAt: new Date().toISOString() } as any },
-    })
+    // The time is recorded so the closure can be told apart from a repair
+    // (lib/autonomy/resolution.ts) and placed on a timeline.
+    const dismissed = { status: 'dismissed', details: { ...details, dismissedAt: new Date().toISOString() } as any }
+    await prisma.healthFinding.update({ where: { id: findingId }, data: dismissed })
 
     // Keep the Memory timeline in step with the Review-Queue decision so a
     // change the user acted on never lingers as "proposed" in the ledger.
