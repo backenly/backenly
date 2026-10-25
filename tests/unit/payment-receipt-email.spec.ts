@@ -72,10 +72,13 @@ const PAID: PaymentReceipt = {
   billingUrl: 'https://backenly.com/app/org/org-1/billing',
 }
 
-/** The text a reader sees: tags dropped, entities a reader would see decoded. */
+/**
+ * The text a reader sees, near enough for these assertions: every tag (Outlook's
+ * conditional comments included) becomes a space, and the entities a reader
+ * would see are decoded, `&amp;` last so nothing is decoded twice.
+ */
 function visible(html: string): string {
   return html
-    .replace(/<!--[\s\S]*?-->/g, '')
     .replace(/<[^>]+>/g, ' ')
     .replace(/&nbsp;/g, ' ')
     .replace(/&middot;/g, '·')
