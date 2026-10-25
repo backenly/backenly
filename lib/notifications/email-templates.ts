@@ -2,10 +2,15 @@
  * Notification Email Templates
  * =============================
  * One HTML template per PlatformNotificationType.
- * All templates share the same dark-branded shell used in lib/auth/email.ts.
+ * They share the dark-branded shell used in lib/auth/email.ts, except the
+ * payment receipt, which is built as mail clients need it
+ * (./payment-receipt-email).
  */
 
 import { PlatformNotificationType } from './platform'
+import { backenlyMarkAttachment } from '@/lib/email/backenly-mark'
+import { planDisplayName } from '@/lib/entitlements/plan-names'
+import { RECEIPT_REPLY_TO, renderPaymentReceiptEmail } from './payment-receipt-email'
 
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL || 'https://backenly.com'
 
@@ -45,6 +50,12 @@ function button(text: string, url: string): string {
 export interface NotificationEmailContent {
   subject: string
   html: string
+  /** A plain-text part saying what the HTML does. */
+  text?: string
+  /** Where a reply lands, when it should reach a person. */
+  replyTo?: string
+  /** Images the HTML names by Content-ID. */
+  attachments?: Array<ReturnType<typeof backenlyMarkAttachment>>
 }
 
 export function buildNotificationEmail(
@@ -55,7 +66,7 @@ export function buildNotificationEmail(
 ): NotificationEmailContent {
   switch (type) {
     case 'payment_success':
-      return buildPaymentSuccessEmail(title, body, metadata)
+      return buildPaymentSuccessEmail(metadata)
     case 'payment_failed':
       return buildPaymentFailedEmail(title, body, metadata)
     case 'credits_low':
@@ -83,19 +94,33 @@ export function buildNotificationEmail(
 
 // ─── Individual templates ─────────────────────────────────────────────────────
 
-function buildPaymentSuccessEmail(
-  title: string,
-  body: string,
-  metadata: Record<string, any>
-): NotificationEmailContent {
-  const html = shell(`
-    <h1 style="font-size:22px;font-weight:800;margin:0 0 8px;color:#ffffff;">🎉 ${title}</h1>
-    <p style="color:#9ca3af;margin:0 0 20px;font-size:15px;line-height:1.6;">${body}</p>
-    ${metadata.planName ? `<p style="color:#6b7280;font-size:13px;margin:0 0 4px;">Plan: <strong style="color:#e5e7eb;">${metadata.planName}</strong></p>` : ''}
-    ${metadata.periodEnd ? `<p style="color:#6b7280;font-size:13px;margin:0 0 4px;">Active until: <strong style="color:#e5e7eb;">${new Date(metadata.periodEnd).toLocaleDateString()}</strong></p>` : ''}
-    ${button('Manage subscription', `${APP_URL}/app/billing`)}
-  `)
-  return { subject: `✅ ${title} — Backenly`, html }
+/**
+ * The receipt (./payment-receipt-email), from what notifyPaymentSuccess
+ * stored: the plan by its code, dates as ISO strings, and whatever the paid
+ * invoice stated. Replies reach support, and the mark travels with the message.
+ */
+function buildPaymentSuccessEmail(metadata: Record<string, any>): NotificationEmailContent {
+  const date = (v: unknown) => (typeof v === 'string' && v ? new Date(v) : null)
+  const str = (v: unknown) => (typeof v === 'string' && v ? v : null)
+  const receipt = renderPaymentReceiptEmail({
+    plan: planDisplayName(str(metadata.planName) ?? 'BUILDER'),
+    periodEnd: date(metadata.periodEnd),
+    periodStart: date(metadata.periodStart),
+    paidAt: date(metadata.paidAt),
+    renewal: metadata.renewal === true,
+    renews: metadata.renews !== false,
+    interval: metadata.interval === 'monthly' || metadata.interval === 'annual' ? metadata.interval : null,
+    amountPaid: typeof metadata.amountPaid === 'number' ? metadata.amountPaid : null,
+    currency: str(metadata.currency),
+    paymentMethod: str(metadata.paymentMethod),
+    invoiceNumber: str(metadata.invoiceNumber),
+    invoiceUrl: str(metadata.invoiceUrl),
+    invoicePdfUrl: str(metadata.invoicePdfUrl),
+    organization: str(metadata.organization),
+    billingUrl: str(metadata.billingUrl),
+    appUrl: APP_URL,
+  })
+  return { ...receipt, replyTo: RECEIPT_REPLY_TO, attachments: [backenlyMarkAttachment()] }
 }
 
 function buildPaymentFailedEmail(

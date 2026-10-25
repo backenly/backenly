@@ -24,7 +24,9 @@
 import nodemailer from 'nodemailer'
 import { prisma } from '@/lib/db/prisma'
 import { buildNotificationEmail } from './email-templates'
+import { formatAmount, formatLongDate, type PaymentReceipt } from './payment-receipt-email'
 import { buildEnvSmtpTransport } from '@/lib/email/smtp-transport'
+import { planDisplayName } from '@/lib/entitlements/plan-names'
 
 export type PlatformNotificationType =
   | 'payment_success'
@@ -116,12 +118,12 @@ async function sendNotificationEmail(
   metadata: Record<string, any>
 ): Promise<void> {
   try {
-    const { subject, html } = buildNotificationEmail(type, title, body, metadata)
+    const { subject, html, text, replyTo, attachments } = buildNotificationEmail(type, title, body, metadata)
     const from = process.env.SMTP_FROM || 'Backenly <noreply@backenly.com>'
     const transporter = getMailTransporter()
 
     if (transporter) {
-      await transporter.sendMail({ from, to: userEmail, subject, html })
+      await transporter.sendMail({ from, to: userEmail, subject, html, text, replyTo, attachments })
     } else {
       // Dev fallback: log instead of dropping
       console.log(`\n========== NOTIFICATION EMAIL ==========`)
@@ -180,18 +182,45 @@ export async function createPlatformNotification(input: CreateNotificationInput)
 // ─── Convenience helpers ──────────────────────────────────────────────────────
 
 /**
- * Notify developer that their payment succeeded.
+ * Tell the payer their plan payment went through, with a receipt.
+ *
+ * `receipt` is what the payment provider's paid invoice states; Backenly Cloud
+ * passes it from its billing webhook, and the email names only what it is
+ * given (./payment-receipt-email). The plan is named as customers know it
+ * (Pro, not BUILDER), and dates are written out in UTC rather than in the
+ * server's locale, where November 25 came out as "11/25/2026".
  */
-export async function notifyPaymentSuccess(userId: string, planName: string, periodEnd?: Date): Promise<void> {
+export async function notifyPaymentSuccess(
+  userId: string,
+  planName: string,
+  periodEnd?: Date,
+  receipt: PaymentReceipt = {},
+): Promise<void> {
+  const plan = planDisplayName(planName)
+  const amount =
+    typeof receipt.amountPaid === 'number' && receipt.currency ? formatAmount(receipt.amountPaid, receipt.currency) : null
+  const next = periodEnd
+    ? receipt.renews === false
+      ? ` It stays active until ${formatLongDate(periodEnd)}.`
+      : ` It renews on ${formatLongDate(periodEnd)}.`
+    : ''
   await createPlatformNotification({
     userId,
     type: 'payment_success',
-    title: 'Payment successful',
-    body: periodEnd
-      ? `Your ${planName} subscription is active until ${periodEnd.toLocaleDateString()}.`
-      : `Your ${planName} subscription is now active.`,
-    metadata: { planName, periodEnd: periodEnd?.toISOString() },
+    title: 'Payment received',
+    body: (amount ? `We received ${amount} for your ${plan} plan.` : `We received your payment for the ${plan} plan.`) + next,
+    metadata: { ...receiptMetadata(receipt), planName, periodEnd: periodEnd?.toISOString() },
   })
+}
+
+/** A receipt as notification metadata: JSON, so dates as ISO strings, and only what is known. */
+function receiptMetadata(receipt: PaymentReceipt): Record<string, unknown> {
+  const out: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(receipt)) {
+    if (value === null || value === undefined) continue
+    out[key] = value instanceof Date ? value.toISOString() : value
+  }
+  return out
 }
 
 /**
