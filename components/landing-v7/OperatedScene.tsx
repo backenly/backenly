@@ -1,62 +1,35 @@
 'use client'
 
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Database } from 'lucide-react'
 import { AGENT_MARKS, AgentGlyph } from '@/components/landing/AgentMarks'
 import { useSettledReducedMotion } from '@/lib/hooks/useSettledReducedMotion'
-import { BentoCell, CellBody, CellTitle, FIG, frameGate, whenIdle } from './shared'
+import { BentoCell, CellBody, CellTitle, frameGate, whenIdle } from './shared'
+import { Callout, ChipNote, ChipValue, EASE, IllustrativeNote, PlayPause } from './scene-ui'
 import { BEATS, CYCLE, HOLD, beatAt, type Engine, type Mode } from './operated-engine'
 
 /* ─────────────────────────────────────────────────────────────
    The card around the three.js scene in ./operated-engine, in the bento's
    system: a BentoCell whose CellTitle names the scene and whose CellBody is
-   the narration, fact chips for the toggle, bento diagram chips pinned into
-   the canvas, and a mono caption under it. three.js loads only when the card
-   nears the viewport, renders only while it is on screen, and rests on a
-   still frame when motion is reduced.
+   the narration, a segmented control for the comparison, chips pinned into
+   the canvas (./scene-ui, shared with the restructuring and regions cards),
+   and a caption under it. three.js loads only when the card nears the
+   viewport, renders only while it is on screen, and rests on a still frame
+   when motion is reduced.
+
+   2026-10-26 polish, against the installed design skills: the two icon-only
+   buttons became a segmented control that says what each side is, with a
+   thumb that slides to the choice; autoplay can be paused (WCAG 2.2.2); the
+   story starts from its first beat the first time the card is seen; the
+   narration settles in and is announced only after a control is used; chip
+   notes and the caption are words in the text face, not tracked uppercase
+   tags or mono labels.
 ───────────────────────────────────────────────────────────── */
 
 /** No favourite: the agent is any MCP host, shown as three of them in one tone. */
 const AGENTS = ['claude', 'cursor', 'codex']
   .map((id) => AGENT_MARKS.find((m) => m.id === id))
   .filter((m): m is (typeof AGENT_MARKS)[number] => m !== undefined)
-
-/** Which way a chip runs from its leader: centred over it, or as a flag running right or left. */
-const ALIGN = {
-  center: { box: 'items-center -translate-x-1/2', stem: '', dot: '' },
-  start: { box: 'items-start -translate-x-[15px]', stem: 'ml-[14.5px]', dot: 'ml-[12px]' },
-  end: { box: 'items-end translate-x-[calc(-100%+15px)]', stem: 'mr-[14.5px]', dot: 'mr-[12px]' },
-} as const
-
-/**
- * A label pinned to a point in the scene, drawn as a bento diagram chip on a
- * leader with an anchor dot (the dot's centre on the point). `accent` marks
- * what Backenly itself does, in the brand violet; everything else is grey.
- * `align` picks the side a chip runs to, so none covers a table's printed
- * name. The engine finds it by `data-chip`.
- */
-function Callout({
-  name,
-  accent = false,
-  align = 'center',
-  children,
-}: {
-  name: string
-  accent?: boolean
-  align?: keyof typeof ALIGN
-  children: ReactNode
-}) {
-  const a = ALIGN[align]
-  return (
-    <div data-chip={name} aria-hidden className="pointer-events-none absolute left-0 top-0 opacity-0 will-change-transform">
-      <div className={`flex -translate-y-[calc(100%-3px)] flex-col ${a.box}`}>
-        <span className={accent ? FIG.CHIP_BRIGHT : FIG.CHIP}>{children}</span>
-        <span className={`h-[20px] w-px bg-white/[0.24] ${a.stem}`} />
-        <span className={`h-[6px] w-[6px] rounded-full ring-2 ring-[#0b0b0e] ${accent ? 'bg-violet-300' : 'bg-zinc-400'} ${a.dot}`} />
-      </div>
-    </div>
-  )
-}
 
 /**
  * The Backenly mark from /backenly-icon-hd.svg without its app-icon tile, so
@@ -78,6 +51,9 @@ export function OperatedScene() {
   const quiet = useSettledReducedMotion()
   const [mode, setMode] = useState<Mode>('backenly')
   const [beat, setBeat] = useState(0)
+  const [paused, setPaused] = useState(false)
+  /** Narration is announced only once the visitor has used a control, so the loop never talks over the page. */
+  const [announce, setAnnounce] = useState(false)
   const [ready, setReady] = useState(false)
   const [failed, setFailed] = useState(false)
 
@@ -86,13 +62,20 @@ export function OperatedScene() {
   const progressRef = useRef<HTMLSpanElement | null>(null)
   const pointer = useRef({ x: 0, y: 0 })
   const quietRef = useRef(false)
-  /** Set by the effect below; the toggle and the motion preference talk to the scene through it. */
-  const actions = useRef<{ choose: (m: Mode) => void; setQuiet: (q: boolean) => void } | null>(null)
+  const lineRef = useRef<HTMLSpanElement | null>(null)
+  /** Set by the effect below; the toggle, the pause control and the motion preference talk to the scene through it. */
+  const actions = useRef<{ choose: (m: Mode) => void; setPaused: (p: boolean) => void; setQuiet: (q: boolean) => void } | null>(null)
 
   useEffect(() => {
     quietRef.current = quiet
     actions.current?.setQuiet(quiet)
   }, [quiet])
+
+  // The narration settles in rather than snapping, unless motion is reduced.
+  useEffect(() => {
+    if (quietRef.current) return
+    lineRef.current?.animate?.([{ opacity: 0.2 }, { opacity: 1 }], { duration: 320, easing: EASE.out })
+  }, [beat, mode])
 
   useEffect(() => {
     const wrap = wrapRef.current
@@ -107,8 +90,11 @@ export function OperatedScene() {
     const autoRef = { current: true }
     const startRef = { current: 0 }
     const beatRef = { current: 0 }
+    const pausedRef = { current: false }
 
     let disposed = false
+    /** The story starts from its first beat the first time the card is on screen, not wherever the clock got to. */
+    let shown = false
     let booting = false
     let visible = false
     let raf = 0
@@ -120,7 +106,7 @@ export function OperatedScene() {
     const loop = (now: number) => {
       raf = 0
       const engine = engineRef.current
-      if (!engine || !visible || quietRef.current || disposed) return
+      if (!engine || !visible || quietRef.current || pausedRef.current || disposed) return
       if (!gate(now)) {
         raf = requestAnimationFrame(loop)
         return
@@ -143,7 +129,12 @@ export function OperatedScene() {
     }
 
     const start = () => {
-      if (raf || !engineRef.current || !visible || quietRef.current || document.hidden) return
+      if (raf || !engineRef.current || !visible || quietRef.current || pausedRef.current || document.hidden) return
+      if (!shown) {
+        shown = true
+        startRef.current = performance.now()
+        pausedAt = 0
+      }
       if (pausedAt) {
         startRef.current += performance.now() - pausedAt
         pausedAt = 0
@@ -166,6 +157,12 @@ export function OperatedScene() {
         setBeat(beatRef.current)
         setMode(m)
         if (quietRef.current) still(m)
+        else if (pausedRef.current) engineRef.current?.render(m, 0, performance.now())
+      },
+      setPaused(p) {
+        pausedRef.current = p
+        if (p) stop()
+        else start()
       },
       setQuiet(q) {
         if (!engineRef.current) return
@@ -270,37 +267,63 @@ export function OperatedScene() {
         <div className="min-w-0">
           <CellTitle>Same problems, two backends</CellTitle>
           <CellBody className="min-h-[51px]">
-            <span aria-live="polite">{line}</span>
+            <span ref={lineRef} aria-live={announce ? 'polite' : 'off'} className="inline-block">
+              {line}
+            </span>
           </CellBody>
         </div>
-        <div role="group" aria-label="Play the same problems on" className="flex shrink-0 gap-2">
-          {(
-            [
-              ['typical', 'Typical backend'],
-              ['backenly', 'Backenly'],
-            ] as const
-          ).map(([m, label]) => {
-            const on = mode === m
-            return (
-              <button
-                key={m}
-                type="button"
-                aria-pressed={on}
-                aria-label={label}
-                title={label}
-                onClick={() => actions.current?.choose(m)}
-                className={`${FIG.FACT} ${on ? FIG.FACT_ON : FIG.FACT_OFF} group inline-flex h-[34px] w-[42px] items-center justify-center !p-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300`}
-              >
-                {m === 'backenly' ? (
-                  <BackenlyGlyph
-                    className={`h-[17px] w-[17px] transition-[filter,opacity] duration-200 ${on ? '' : 'opacity-60 grayscale group-hover:opacity-90'}`}
-                  />
-                ) : (
-                  <Database aria-hidden className="h-[17px] w-[17px]" strokeWidth={1.75} />
-                )}
-              </button>
-            )
-          })}
+        <div className="flex shrink-0 items-center gap-2">
+          {/* A segmented control with words, not two unlabelled icons: the comparison is the card's point. */}
+          <div
+            role="group"
+            aria-label="Play the same problems on"
+            className="relative grid h-[34px] grid-cols-2 rounded-[9px] border border-white/[0.08] bg-white/[0.03] p-[3px]"
+          >
+            <span
+              aria-hidden
+              className="absolute inset-y-[3px] left-[3px] w-[calc(50%-3px)] rounded-[6px] border border-transparent bg-white/[0.09] shadow-[0_0_0_1px_rgba(255,255,255,0.10),0_1px_2px_rgba(0,0,0,0.45)] transition-transform duration-300 motion-reduce:transition-none"
+              style={{ transform: mode === 'backenly' ? 'translateX(100%)' : 'translateX(0)', transitionTimingFunction: EASE.out }}
+            />
+            {(
+              [
+                ['typical', 'Typical backend'],
+                ['backenly', 'Backenly'],
+              ] as const
+            ).map(([m, label]) => {
+              const on = mode === m
+              return (
+                <button
+                  key={m}
+                  type="button"
+                  aria-pressed={on}
+                  onClick={() => {
+                    setAnnounce(true)
+                    actions.current?.choose(m)
+                  }}
+                  className={`relative z-10 inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-[6px] px-3 text-[13px] font-medium tracking-[-0.01em] transition-colors duration-150 [-webkit-tap-highlight-color:transparent] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300 ${
+                    on ? 'text-zinc-50' : 'text-zinc-400 [@media(hover:hover)_and_(pointer:fine)]:hover:text-zinc-200'
+                  }`}
+                >
+                  {m === 'backenly' ? (
+                    <BackenlyGlyph className={`h-[15px] w-[15px] transition-[filter,opacity] duration-150 ${on ? '' : 'opacity-60 grayscale'}`} />
+                  ) : (
+                    <Database aria-hidden className="h-[14px] w-[14px]" strokeWidth={2} />
+                  )}
+                  {label}
+                </button>
+              )
+            })}
+          </div>
+          {!quiet && (
+            <PlayPause
+              paused={paused}
+              onToggle={() => {
+                setAnnounce(true)
+                setPaused(!paused)
+                actions.current?.setPaused(!paused)
+              }}
+            />
+          )}
         </div>
       </div>
 
@@ -323,29 +346,29 @@ export function OperatedScene() {
 
         <div className="pointer-events-none absolute inset-0 overflow-hidden">
           <Callout name="scan" accent>
-            <span className={`${FIG.MONO} ${FIG.TEXT}`}>check</span>
-            <span className={FIG.TAG}>every minute</span>
+            <ChipValue>check</ChipValue>
+            <ChipNote>every minute</ChipNote>
           </Callout>
           <Callout name="latency" align="start">
-            <span className={`${FIG.MONO} ${FIG.TEXT}`}>orders</span>
-            <span className={`${FIG.MONO} ${FIG.BRIGHT}`}>1,840 ms</span>
-            <span className={FIG.TAG}>avg</span>
+            <ChipValue>orders</ChipValue>
+            <ChipValue bright>1,840 ms</ChipValue>
+            <ChipNote>average</ChipNote>
           </Callout>
           <Callout name="detected" align="end" accent>
-            <span className={`${FIG.MONO} ${FIG.TEXT}`}>slow_query_missing_index</span>
-            <span className={FIG.TAG}>detected</span>
+            <ChipValue>slow_query_missing_index</ChipValue>
+            <ChipNote>found</ChipNote>
           </Callout>
           <Callout name="flagged" align="end">
-            <span className={`${FIG.MONO} ${FIG.TEXT}`}>slow query</span>
-            <span className={FIG.TAG}>flagged · waits</span>
+            <ChipValue>slow query</ChipValue>
+            <ChipNote>flagged, waiting</ChipNote>
           </Callout>
           <Callout name="fix" align="start" accent>
-            <span className={`${FIG.MONO} ${FIG.BRIGHT}`}>idx_orders_customer_id</span>
-            <span className={FIG.TAG}>on its own</span>
+            <ChipValue bright>idx_orders_customer_id</ChipValue>
+            <ChipNote>added on its own</ChipNote>
           </Callout>
           <Callout name="verified" align="start" accent>
-            <span className={`${FIG.MONO} ${FIG.TEXT}`}>re-checked</span>
-            <span className={FIG.TAG}>confirmed</span>
+            <ChipValue>re-checked</ChipValue>
+            <ChipNote>confirmed</ChipNote>
           </Callout>
           <Callout name="agent" align="end">
             <span className="flex -space-x-[4px]">
@@ -355,19 +378,19 @@ export function OperatedScene() {
                 </span>
               ))}
             </span>
-            <span className={`${FIG.MONO} ${FIG.TEXT}`}>your agent</span>
-            <span className={`${FIG.TAG} hidden sm:inline`}>any mcp host</span>
+            <ChipValue>your agent</ChipValue>
+            <ChipNote className="hidden sm:inline">any MCP host</ChipNote>
           </Callout>
           <Callout name="packet" align="start">
-            <span className={`${FIG.MONO} ${FIG.BRIGHT}`}>DROP TABLE carts;</span>
+            <ChipValue bright>DROP TABLE carts;</ChipValue>
           </Callout>
           <Callout name="waits" align="start" accent>
-            <span className={`${FIG.MONO} ${FIG.BRIGHT}`}>waits for you</span>
-            <span className={`${FIG.TAG} hidden sm:inline`}>1,284 rows kept</span>
+            <ChipValue bright>waits for you</ChipValue>
+            <ChipNote className="hidden sm:inline">1,284 rows kept</ChipNote>
           </Callout>
           <Callout name="dropped">
-            <span className={`${FIG.MONO} ${FIG.TEXT}`}>carts dropped</span>
-            <span className={`${FIG.TAG} hidden sm:inline`}>1,284 rows gone</span>
+            <ChipValue>carts dropped</ChipValue>
+            <ChipNote className="hidden sm:inline">1,284 rows gone</ChipNote>
           </Callout>
         </div>
         {failed && (
@@ -378,11 +401,10 @@ export function OperatedScene() {
       </div>
 
       <div className="relative flex items-center justify-between gap-4 border-t border-white/[0.06] px-6 py-3.5 md:px-8">
-        {/* zinc-400, not the figures' muted grey: "illustrative" is the honesty note and must read at 4.5:1. */}
-        <span className={`${FIG.MONO} text-zinc-400`}>
-          {mode === 'backenly' ? 'backenly · checks every minute' : 'typical backend · flagged, not fixed'}
-        </span>
-        <span className={`${FIG.MONO} hidden text-zinc-400 sm:inline`}>example store · 5 tables · illustrative</span>
+        <IllustrativeNote>
+          {mode === 'backenly' ? 'Backenly checks every minute' : 'A typical backend flags it, then waits'}
+        </IllustrativeNote>
+        <IllustrativeNote className="hidden sm:inline">Illustrative example, 5 tables</IllustrativeNote>
         <span aria-hidden className="absolute inset-x-0 bottom-0 h-px bg-white/[0.05]">
           <span ref={progressRef} className="block h-full origin-left scale-x-0 bg-white/30" />
         </span>

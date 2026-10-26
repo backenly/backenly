@@ -41,7 +41,8 @@ export const REGIONS: Region[] = [
 /** The tour runs west, the way the planet turns under a fixed view. */
 const DWELL = 2.8
 const TILT = (-9 * Math.PI) / 180
-const STEP = (1.2 * Math.PI) / 180
+/** The dot lattice's pitch: finer than cobe's default, so the coastlines read at Retina sizes. */
+const STEP = (0.95 * Math.PI) / 180
 
 const VS = /* glsl */ `
   varying vec3 vObj;
@@ -82,7 +83,7 @@ const FS = /* glsl */ `
 
     vec2 uv = vec2(fract((lonC + PI) / (2.0 * PI)), (latC + 0.5 * PI) / PI);
     float land = step(0.5, texture2D(uMask, uv).r);
-    float r = uStep * 0.31;
+    float r = uStep * 0.33;
     float aa = max(fwidth(d), 1e-5) * 1.1;
     float dotMask = (1.0 - smoothstep(r - aa, r + aa, d)) * land;
 
@@ -156,7 +157,7 @@ export async function createGlobe(canvas: HTMLCanvasElement, wrap: HTMLElement, 
         uBase: { value: new THREE.Color('#15161b') },
         uDot: { value: new THREE.Color('#a1a1aa') },
         uDotDim: { value: new THREE.Color('#34353c') },
-        uRim: { value: new THREE.Color('#ffffff').multiplyScalar(0.025) },
+        uRim: { value: new THREE.Color('#ffffff').multiplyScalar(0.045) },
         uLight: { value: new THREE.Vector3(-0.55, 0.75, 0.6) },
         uStep: { value: STEP },
         uFade: { value: 0 },
@@ -182,7 +183,11 @@ export async function createGlobe(canvas: HTMLCanvasElement, wrap: HTMLElement, 
   outline.renderOrder = 2
   scene.add(outline)
 
-  /* Markers: a disc for the live region, a ring for the rest, both lying on the surface. */
+  /* Markers: a pin for each region, standing on the surface along its normal, with a disc at its
+     foot. The focused region's pin stands taller, and focus arriving sends one ripple out from its
+     foot. Nothing pulses forever: a ring that breathes on every region reads as a live feed, and
+     these are places, not a feed (no-ai-design-slop: static status dressed up as live data). A
+     region added before it opens draws a hollow ring and no pin. */
   const toVec = (lat: number, lon: number, r = 1) => {
     const la = rad(lat)
     const lo = rad(lon)
@@ -192,35 +197,41 @@ export async function createGlobe(canvas: HTMLCanvasElement, wrap: HTMLElement, 
   // The page's one accent (violet-300) marks live regions; one not yet open is neutral.
   const liveColor = new THREE.Color('#c4b5fd')
   const soonColor = new THREE.Color('#d4d4d8')
-  const discGeo = keep(new THREE.CircleGeometry(0.016, 40))
+  const discGeo = keep(new THREE.CircleGeometry(0.011, 40))
   const ringGeo = keep(new THREE.RingGeometry(0.0105, 0.0165, 40))
-  const pulseGeo = keep(new THREE.RingGeometry(0.94, 1.0, 64))
-  const focusGeo = keep(new THREE.RingGeometry(0.026, 0.029, 48))
+  const rippleGeo = keep(new THREE.RingGeometry(0.94, 1.0, 64))
+  // A unit-tall stem along +Z from the surface; its height is a scale, so it can grow without new geometry.
+  const stemGeo = keep(new THREE.CylinderGeometry(0.0021, 0.0021, 1, 10, 1, true))
+  stemGeo.rotateX(Math.PI / 2)
+  stemGeo.translate(0, 0, 0.5)
+  const headGeo = keep(new THREE.SphereGeometry(0.0075, 20, 14))
+  const PIN = { rest: 0.045, focus: 0.085 }
 
-  const markers = REGIONS.map((region, i) => {
+  const markers = REGIONS.map((region) => {
     const normal = toVec(region.lat, region.lon).normalize()
     const q = new THREE.Quaternion().setFromUnitVectors(Z, normal)
     const holder = new THREE.Group()
-    holder.position.copy(normal.clone().multiplyScalar(1.003))
+    holder.position.copy(normal.clone().multiplyScalar(1.002))
     holder.quaternion.copy(q)
     spin.add(holder)
 
-    const mat = keep(new THREE.MeshBasicMaterial({ color: region.live ? liveColor : soonColor, transparent: true, depthWrite: false }))
-    holder.add(new THREE.Mesh(region.live ? discGeo : ringGeo, mat))
+    const color = region.live ? liveColor : soonColor
+    const footMat = keep(new THREE.MeshBasicMaterial({ color, transparent: true, depthWrite: false }))
+    holder.add(new THREE.Mesh(region.live ? discGeo : ringGeo, footMat))
 
-    const focusMat = keep(new THREE.MeshBasicMaterial({ color: region.live ? liveColor : soonColor, transparent: true, opacity: 0, depthWrite: false }))
-    const focusRing = new THREE.Mesh(focusGeo, focusMat)
-    holder.add(focusRing)
-
-    let pulse: { mesh: T.Mesh; mat: T.MeshBasicMaterial } | null = null
+    let pin: { stem: T.Mesh; head: T.Mesh; mat: T.MeshBasicMaterial; h: number } | null = null
     if (region.live) {
-      const pm = keep(new THREE.MeshBasicMaterial({ color: liveColor, transparent: true, opacity: 0, depthWrite: false }))
-      const mesh = new THREE.Mesh(pulseGeo, pm)
-      holder.add(mesh)
-      pulse = { mesh, mat: pm }
+      const mat = keep(new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.9, depthWrite: false }))
+      const stem = new THREE.Mesh(stemGeo, mat)
+      const head = new THREE.Mesh(headGeo, mat)
+      holder.add(stem, head)
+      pin = { stem, head, mat, h: PIN.rest }
     }
-    // Offset each pulse so the live regions never blink in unison.
-    return { region, normal, holder, focusMat, pulse, phase: (i * 0.37) % 1 }
+    const rippleMat = keep(new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0, depthWrite: false }))
+    const ripple = new THREE.Mesh(rippleGeo, rippleMat)
+    ripple.visible = false
+    holder.add(ripple)
+    return { region, normal, holder, pin, ripple, rippleMat, rippleAt: -99 }
   })
 
   /* Framing: the globe's centre sits on the canvas's bottom edge, so it rises
@@ -231,11 +242,14 @@ export async function createGlobe(canvas: HTMLCanvasElement, wrap: HTMLElement, 
   function resize() {
     W = Math.max(1, wrap.clientWidth)
     H = Math.max(1, wrap.clientHeight)
-    const pr = Math.min(window.devicePixelRatio || 1, 1.5)
+    // Up to 2x: at 1.5x the dots of a Retina screen's globe soften into a grey haze.
+    const pr = Math.min(window.devicePixelRatio || 1, 2)
     renderer.setPixelRatio(pr)
     renderer.setSize(W, H, false)
     const narrow = W < 640
     R = Math.min(H - (narrow ? 16 : 28), W * (narrow ? 0.6 : 0.42))
+    // The lattice follows the globe's drawn size: fine on a large one, a little coarser on a phone's, so the dots never go to haze.
+    globeMat.uniforms.uStep.value = R < 260 ? rad(1.25) : STEP
     camera.left = -W / 2 / R
     camera.right = W / 2 / R
     camera.top = H / 2 / R
@@ -274,7 +288,14 @@ export async function createGlobe(canvas: HTMLCanvasElement, wrap: HTMLElement, 
     travelDur = 1.3 + (Math.abs(toLon - fromLon) / 90) * 1.25
     phase = 'travel'
     phaseStart = now
+    setFocus(id, now)
+  }
+
+  /** Focus moves to a region: its pin stands up and one ripple leaves its foot when the globe arrives. */
+  function setFocus(id: string, now: number) {
     focused = id
+    const m = markers.find((x) => x.region.id === id)
+    if (m) m.rippleAt = now + travelDur * 0.8
     hooks.onFocus(id)
   }
 
@@ -293,8 +314,7 @@ export async function createGlobe(canvas: HTMLCanvasElement, wrap: HTMLElement, 
     travelDur = 0.9 + (Math.abs(toLon - fromLon) / 90) * 0.8
     phase = 'travel'
     phaseStart = now
-    focused = id
-    hooks.onFocus(id)
+    setFocus(id, now)
   }
 
   const world = new THREE.Vector3()
@@ -329,16 +349,28 @@ export async function createGlobe(canvas: HTMLCanvasElement, wrap: HTMLElement, 
     const roll = still ? 0 : Math.sin(now * 0.35) * 0.6
     spin.rotation.y = -Math.PI / 2 - rad(centerLon + roll)
 
-    /* Markers: the live pulse, the focus ring. */
+    /* Markers: the focused pin stands taller; a ripple runs once when focus arrives. A pin fades as
+       its region turns away, as the labels do, so none pokes out past the horizon as a stray line. */
+    scene.updateMatrixWorld()
+    spin.getWorldQuaternion(spinQ)
     for (const m of markers) {
-      const isFocus = m.region.id === focused
-      m.focusMat.opacity += ((isFocus ? 0.9 : 0) - m.focusMat.opacity) * 0.12
-      if (still) m.focusMat.opacity = 0
-      if (m.pulse) {
-        const a = still ? 0.4 : ((now * 0.55 + m.phase) % 1)
-        const s = 0.012 + a * 0.05
-        m.pulse.mesh.scale.setScalar(s)
-        m.pulse.mat.opacity = (1 - a) * 0.7 * fade
+      const isFocus = m.region.id === focused && !still
+      if (m.pin) {
+        const facing = nWorld.copy(m.normal).applyQuaternion(spinQ).z
+        const target = isFocus ? PIN.focus : PIN.rest
+        m.pin.h = still ? PIN.rest : m.pin.h + (target - m.pin.h) * 0.1
+        m.pin.stem.scale.set(1, 1, m.pin.h)
+        m.pin.head.position.set(0, 0, m.pin.h)
+        m.pin.mat.opacity = (isFocus ? 1 : 0.75) * fade * clamp((facing - 0.18) / 0.22)
+        m.pin.stem.visible = m.pin.mat.opacity > 0.003
+        m.pin.head.visible = m.pin.stem.visible
+      }
+      const a = (now - m.rippleAt) / 1.3
+      m.ripple.visible = !still && a > 0 && a < 1
+      if (m.ripple.visible) {
+        const e = 1 - Math.pow(1 - a, 3)
+        m.ripple.scale.setScalar(0.012 + e * 0.06)
+        m.rippleMat.opacity = (1 - a) * 0.75 * fade
       }
     }
 
@@ -352,6 +384,8 @@ export async function createGlobe(canvas: HTMLCanvasElement, wrap: HTMLElement, 
       if (!el) continue
       m.holder.getWorldPosition(world)
       nWorld.copy(m.normal).applyQuaternion(spinQ)
+      // The label sits on its pin's head, not on the surface under it.
+      if (m.pin) world.addScaledVector(nWorld, m.pin.h + 0.008)
       const facing = nWorld.z
       ndc.copy(world).project(camera)
       const x = (ndc.x * 0.5 + 0.5) * W

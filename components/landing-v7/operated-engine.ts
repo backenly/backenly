@@ -252,7 +252,7 @@ export async function createEngine(canvas: HTMLCanvasElement, wrap: HTMLElement,
 
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true, powerPreference: 'default' })
   renderer.setClearColor(0x000000, 0)
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5))
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2))
 
   const scene = new THREE.Scene()
   const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 80)
@@ -575,7 +575,7 @@ export async function createEngine(canvas: HTMLCanvasElement, wrap: HTMLElement,
     W = Math.max(1, wrap.clientWidth)
     H = Math.max(1, wrap.clientHeight)
     narrow = W / H < 1.45
-    const pr = Math.min(window.devicePixelRatio || 1, 1.5)
+    const pr = Math.min(window.devicePixelRatio || 1, 2)
     renderer.setPixelRatio(pr)
     renderer.setSize(W, H, false)
     aim(AZ, EL)

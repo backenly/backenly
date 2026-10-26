@@ -3,7 +3,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { useSettledReducedMotion } from '@/lib/hooks/useSettledReducedMotion'
 import { REGIONS, type Globe } from './globe-engine'
-import { BentoCell, CellBody, CellTitle, CONTAINER, FIG, frameGate, SECTION, SECTION_BODY_GAP, SECTION_TITLE, whenIdle } from './shared'
+import { BentoCell, CellBody, CellTitle, CONTAINER, frameGate, SECTION, SECTION_BODY_GAP, SECTION_TITLE, whenIdle } from './shared'
+import { CONTROL, PlayPause } from './scene-ui'
 
 /* ─────────────────────────────────────────────────────────────
    Regions, in the bento's system (./shared): the same two-tone title, no
@@ -17,18 +18,28 @@ import { BentoCell, CellBody, CellTitle, CONTAINER, FIG, frameGate, SECTION, SEC
    Backenly's own places, never by the cloud vendor's codes. Nothing from
    Appwrite's feature line (global CDN, DDoS protection, sub-50ms latency) is
    claimed: Backenly Cloud has no CDN or edge network to back it.
+
+   2026-10-26 polish, against the installed design skills: the region buttons
+   and the pause control are the scenes' shared controls (./scene-ui), with a
+   press and a hover only a mouse sees; the globe's labels are the scene chip,
+   the place name in the text face rather than mono; the globe renders at up
+   to 2x, with a finer dot lattice, and stands a pin on each region instead of
+   a ring that pulses forever (./globe-engine). The tour can be paused (WCAG
+   2.2.2); a pick while paused still turns the globe there.
 ───────────────────────────────────────────────────────────── */
 
 export function RegionsV7() {
   const quiet = useSettledReducedMotion()
   const [focus, setFocus] = useState(REGIONS[0].id)
+  const [paused, setPaused] = useState(false)
   const [ready, setReady] = useState(false)
   const [failed, setFailed] = useState(false)
 
   const wrapRef = useRef<HTMLDivElement | null>(null)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const quietRef = useRef(false)
-  const actions = useRef<{ focus: (id: string) => void; setQuiet: (q: boolean) => void } | null>(null)
+  const pausedRef = useRef(false)
+  const actions = useRef<{ focus: (id: string) => void; setPaused: (p: boolean) => void; setQuiet: (q: boolean) => void } | null>(null)
 
   useEffect(() => {
     quietRef.current = quiet
@@ -45,6 +56,7 @@ export function RegionsV7() {
 
     let globe: Globe | null = null
     let disposed = false
+    let held = false
     let booting = false
     let visible = false
     let raf = 0
@@ -52,12 +64,12 @@ export function RegionsV7() {
     const gate = frameGate()
     const loop = (now: number) => {
       raf = 0
-      if (!globe || !visible || quietRef.current || disposed) return
+      if (!globe || !visible || quietRef.current || held || disposed) return
       if (gate(now)) globe.render(now)
       raf = requestAnimationFrame(loop)
     }
     const start = () => {
-      if (raf || !globe || !visible || quietRef.current || document.hidden) return
+      if (raf || !globe || !visible || quietRef.current || held || document.hidden) return
       raf = requestAnimationFrame(loop)
     }
     const stop = () => {
@@ -71,6 +83,23 @@ export function RegionsV7() {
       focus(id) {
         globe?.focus(id)
         if (quietRef.current) globe?.render(performance.now(), true)
+        // Paused, a pick still turns the globe there: it plays until the turn ends, then holds again.
+        else if (held && globe) {
+          held = false
+          start()
+          window.setTimeout(() => {
+            if (!disposed && pausedRef.current) {
+              held = true
+              stop()
+            }
+          }, 2200)
+        }
+      },
+      setPaused(p) {
+        pausedRef.current = p
+        held = p
+        if (p) stop()
+        else start()
       },
       setQuiet(q) {
         if (!globe) return
@@ -171,27 +200,40 @@ export function RegionsV7() {
                   runs wherever your servers do.
                 </CellBody>
               </div>
-              <ul aria-label="Regions" className="flex max-w-[460px] flex-wrap gap-2 md:justify-end lg:max-w-none lg:flex-nowrap">
-                {REGIONS.map((r) => {
-                  const on = focus === r.id
-                  return (
-                    <li key={r.id}>
-                      <button
-                        type="button"
-                        aria-pressed={on}
-                        onClick={() => actions.current?.focus(r.id)}
-                        className={`${FIG.FACT} ${on ? FIG.FACT_ON : FIG.FACT_OFF} inline-flex items-center gap-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300`}
-                      >
-                        <span
-                          aria-hidden
-                          className={r.live ? 'h-[6px] w-[6px] rounded-full bg-violet-300' : 'h-[6px] w-[6px] rounded-full border border-zinc-400'}
-                        />
-                        {r.name}
-                      </button>
-                    </li>
-                  )
-                })}
-              </ul>
+              <div className="flex flex-wrap items-center gap-2 md:justify-end">
+                <ul aria-label="Regions" className="flex max-w-[460px] flex-wrap gap-2 md:justify-end lg:max-w-none lg:flex-nowrap">
+                  {REGIONS.map((r) => {
+                    const on = focus === r.id
+                    return (
+                      <li key={r.id}>
+                        <button
+                          type="button"
+                          aria-pressed={on}
+                          onClick={() => actions.current?.focus(r.id)}
+                          className={`${CONTROL} inline-flex h-[30px] items-center gap-2 px-2.5 text-[12.5px] ${
+                            on ? '!border-white/[0.18] !bg-white/[0.08] !text-white' : ''
+                          }`}
+                        >
+                          <span
+                            aria-hidden
+                            className={r.live ? 'h-[6px] w-[6px] rounded-full bg-violet-300' : 'h-[6px] w-[6px] rounded-full border border-zinc-400'}
+                          />
+                          {r.name}
+                        </button>
+                      </li>
+                    )
+                  })}
+                </ul>
+                {!quiet && (
+                  <PlayPause
+                    paused={paused}
+                    onToggle={() => {
+                      setPaused(!paused)
+                      actions.current?.setPaused(!paused)
+                    }}
+                  />
+                )}
+              </div>
             </div>
 
             <div ref={wrapRef} className="relative h-[250px] w-full select-none sm:h-[360px] md:h-[440px] lg:h-[500px]">
@@ -204,14 +246,17 @@ export function RegionsV7() {
                 {REGIONS.map((r) => (
                   <div key={r.id} data-region={r.id} className="group absolute left-0 top-0 opacity-0 will-change-transform">
                     <div className="flex -translate-x-1/2 -translate-y-[calc(100%+2px)] flex-col items-center">
-                      <span className={`${FIG.CHIP} transition-colors duration-300 group-data-[focus=true]:border-white/[0.18]`}>
+                      {/* The scene chip (./scene-ui): elevation from layered shadow, a hairline ring that brightens on focus. */}
+                      <span className="inline-flex h-[28px] items-center gap-2 whitespace-nowrap rounded-[6px] border border-transparent bg-[#0e0f12] px-2.5 shadow-[0_0_0_1px_rgba(255,255,255,0.10),0_1px_2px_rgba(0,0,0,0.5),0_10px_24px_-8px_rgba(0,0,0,0.75)] transition-shadow duration-300 group-data-[focus=true]:shadow-[0_0_0_1px_rgba(196,181,253,0.38),0_1px_2px_rgba(0,0,0,0.5),0_10px_24px_-8px_rgba(0,0,0,0.75)]">
                         <span
                           aria-hidden
                           className={r.live ? 'h-[6px] w-[6px] rounded-full bg-violet-300' : 'h-[6px] w-[6px] rounded-full border border-zinc-400'}
                         />
-                        <span className={`${FIG.MONO} ${FIG.TEXT} transition-colors duration-300 group-data-[focus=true]:text-zinc-100`}>{r.name}</span>
+                        <span className="text-[12px] font-medium leading-none tracking-[-0.005em] text-zinc-300 transition-colors duration-300 group-data-[focus=true]:text-zinc-50">
+                          {r.name}
+                        </span>
                       </span>
-                      <span className="h-[14px] w-px bg-white/[0.24]" />
+                      <span className="h-[12px] w-px bg-white/[0.22]" />
                     </div>
                   </div>
                 ))}
