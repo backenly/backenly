@@ -58,7 +58,6 @@ import {
 } from './tools'
 import { getBlueprintForPrompt, getCuratedBlueprintForPrompt, isExplicitSpec, shouldUseCuratedBlueprint } from '../blueprints'
 import { looksLikeBuildDescription } from './build-signals'
-import { findOriginalBuildPrompt } from './resume-routing'
 import { saveLoopResume, loadLoopResume, clearLoopResume, resumePrompt, type LoopResume, type LoopStop } from './loop-resume'
 import {
   savePendingPlan, loadPendingPlan, clearPendingPlan,
@@ -696,6 +695,7 @@ async function runTurn(
   //
   // Either way "go ahead" runs every step deterministically — no LLM
   // re-derivation, no partial coverage, no run_test → fix_backend loop.
+  let architectFailedThisTurn = false
   if (classification.intent === 'BUILD' || classification.intent === 'APPLY_PROPOSAL') {
     if (isFreshProject) {
       if (schemaOnBranch) {
@@ -705,6 +705,9 @@ async function runTurn(
       // A design already running for this project answers this build too.
       if (designing) return stillDesigningTurn(classification, emit)
       const resolved = await resolveBlueprintWithHeartbeat(input.message, input.projectId, emit)
+      if (!resolved) {
+        architectFailedThisTurn = true
+      }
       if (resolved && 'vague' in resolved && resolved.vague) {
         console.log(`[Brain] route=ARCHITECT_VAGUE — surfacing clarifying question`)
         return await singleToolTurn('ask_user', { question: resolved.askUser, options: [] }, dispatchCtx, classification, emit, input)
@@ -751,10 +754,57 @@ async function runTurn(
     // A loop turn that stopped unfinished saved where it was. Resume the agent
     // loop on that request with what already landed, rather than searching the
     // history for a prompt that looks like one.
-    if (loopResume) {
-      console.log(`[Brain] route=LOOP_RESUME applied=${loopResume.applied.length} reason="${loopResume.reason}"`)
-      return await runAgentLoop(input, classification, memory.summary, understandingBlock, recent, dispatchCtx, emit, toolsRun, clock, loopResume)
+
+
+    
+if (loopResume) {
+  if (loopResume.architectFailed && loopResume.request) {
+    const resolved = await resolveBlueprintWithHeartbeat(
+      loopResume.request,
+      input.projectId,
+      emit,
+    )
+
+    if (resolved && 'blueprint' in resolved) {
+      console.log('[Brain] route=LOOP_RESUME_REARCHITECT')
+
+      return await blueprintExecuteTurn(
+        resolved.blueprint.steps,
+        resolved.architectTokens,
+        dispatchCtx,
+        classification,
+        emit,
+        input,
+        clock,
+        resolved.blueprint.domain,
+        extractRequirements(loopResume.request),
+      )
     }
+
+    console.log('[Brain] Architect retry failed; falling back to loop resume')
+  }
+
+  console.log(
+    `[Brain] route=LOOP_RESUME applied=${loopResume.applied.length} reason="${loopResume.reason}"`,
+  )
+
+  return await runAgentLoop(
+    input,
+    classification,
+    memory.summary,
+    understandingBlock,
+    recent,
+    dispatchCtx,
+    emit,
+    toolsRun,
+    clock,
+    loopResume,
+    architectFailedThisTurn,
+  )
+}
+
+    
+
 
     // No stored plan at all — but the user is confirming/continuing a build.
     // This is the state that produced the endless "continue" loop: the
@@ -808,7 +858,19 @@ async function runTurn(
   console.log(`[Brain] route=AGENT_LOOP intent=${classification.intent}`)
 
   // BUILD / MODIFY / FIX / QUESTION / DESTRUCTIVE / CONFIRM / APPLY_PROPOSAL → agent loop
-  return await runAgentLoop(input, classification, memory.summary, understandingBlock, recent, dispatchCtx, emit, toolsRun, clock)
+
+  return await runAgentLoop(
+    input,
+    classification,
+    memory.summary,
+    understandingBlock,
+    recent,
+    dispatchCtx,
+    emit,
+    toolsRun,
+    null,
+    architectFailedThisTurn,
+  )
 }
 
 /**
@@ -1546,6 +1608,7 @@ async function runAgentLoop(
   toolsRun: string[],
   clock: TurnClock,
   resume: LoopResume | null = null,
+  architectFailedThisTurn = false,
 ): Promise<BrainResult> {
   const turnTools = toolsForIntent(classification.intent)
 
@@ -2230,6 +2293,7 @@ async function runAgentLoop(
   } else if (resume || mutated) {
     await clearLoopResume(input.projectId)
   }
+  
 
   emit({ type: 'final', summary: finalSummary, needsUser, data: terminalData })
   await saveTurn(input.projectId, input.message, finalSummary, input.requestId ?? null)
