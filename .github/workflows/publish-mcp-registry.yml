@@ -28,10 +28,15 @@ concurrency:
   group: publish-mcp-registry
   cancel-in-progress: false
 
+# Runners are pinned to ubuntu-24.04, not ubuntu-latest: in October 2026 GitHub
+# moved ubuntu-latest to 26.04, where postgresql-16-pgvector is not packaged
+# (apt exits 100) and Playwright 1.57 has no Chromium build, so every PR failed
+# the integration and self-host jobs before running a test. Move to a newer
+# image deliberately, together with those two dependencies.
 jobs:
   publish:
     if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment: mcp-registry
     env:
       # A release more than two weeks old, verified against the release's own
