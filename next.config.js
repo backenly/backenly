@@ -196,16 +196,28 @@ const nextConfig = {
         destination: '/api/mcp/oauth/authorization-server',
       },
     ]
-    // Only when RUNTIME_API_URL is set. This rarely fires: a rewrite in this
-    // position runs only when no route matches, and under /api/v1/{projectId}/
-    // the [...unmatched] catch-all matches everything, so that route is what
-    // forwards the runtime's paths (lib/runtime/forward-to-runtime.ts). This
-    // still covers /api/v1/* paths outside a project.
+    // Only when RUNTIME_API_URL is set, and only as a FALLBACK rewrite, which
+    // runs when no route matches. Under /api/v1/{projectId}/ the [...unmatched]
+    // catch-all matches everything, so that route is what forwards the
+    // runtime's paths (lib/runtime/forward-to-runtime.ts); this covers
+    // /api/v1/* paths outside a project.
+    //
+    // It was a plain array entry, which Next runs as an afterFiles rewrite:
+    // BEFORE dynamic routes. Every route under [projectId] is dynamic, so with
+    // RUNTIME_API_URL set when the config was read (`next dev`, or a build that
+    // had it) the rewrite took healthz, storage, functions, stats and the rest
+    // away from Next and sent them to the runtime, whose proxy back to Next
+    // (server/routes/next-proxy.ts) found nothing: 502 on every one, which the
+    // contract sweep then filed against every project as a broken surface.
     if (process.env.RUNTIME_API_URL) {
-      rules.push({
-        source: '/api/v1/:path*',
-        destination: `${process.env.RUNTIME_API_URL}/api/v1/:path*`,
-      })
+      return {
+        beforeFiles: [],
+        afterFiles: rules,
+        fallback: [{
+          source: '/api/v1/:path*',
+          destination: `${process.env.RUNTIME_API_URL}/api/v1/:path*`,
+        }],
+      }
     }
     return rules
   },

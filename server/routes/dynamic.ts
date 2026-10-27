@@ -657,17 +657,17 @@ async function handleDynamicRequest(req: Request, res: Response) {
   // who followed this one got another 404 with no way to tell which document
   // was wrong. One source now, so there is nothing to keep in sync.
   const notFound = v1NotFoundBody(projectId!, path)
+  // Same field names and shape the Next catch-all returns, and every other v1
+  // error: `error` is the sentence, `code` beside it. This one nested both
+  // inside `error`, so a client reading `error` as text got an object
+  // (found by fuzzing the data API against its OpenAPI document).
   res.status(404).json({
-    error: {
-      code: 'ROUTE_NOT_SUPPORTED',
-      message:
-        `No data-plane route for ${req.method} /${path.join('/')}. ` +
-        (notFound.hint ? `${notFound.hint} ` : '') +
-        `For richer queries — joins, aggregates, embedded resources — use ` +
-        `/api/v2/{projectId}/{table}, which speaks PostgREST grammar directly.`,
-    },
-    // Same field name and shape the Next catch-all returns, so a client that
-    // learned the vocabulary from one 404 can read the other.
+    error:
+      `No data-plane route for ${req.method} /${path.join('/')}. ` +
+      (notFound.hint ? `${notFound.hint} ` : '') +
+      `For richer queries — joins, aggregates, embedded resources — use ` +
+      `/api/v2/{projectId}/{table}, which speaks PostgREST grammar directly.`,
+    code: 'ROUTE_NOT_SUPPORTED',
     availableRoutes: notFound.availableRoutes,
     docs: notFound.docs,
   })

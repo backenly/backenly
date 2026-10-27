@@ -92,11 +92,24 @@ async function syncRole(projectId: string, schema: string, password: string): Pr
   // Outside the try: a region this process cannot reach is its own error, not
   // a missing helper.
   const db = await workspaceRawClient(projectId)
+  const sync = () => db.$queryRaw<Array<{ role: string }>>`
+    SELECT public.backenly_fn_role_sync(${schema}, ${password}) AS role
+  `
   let role: string | undefined
   try {
-    const rows = await db.$queryRaw<Array<{ role: string }>>`
-      SELECT public.backenly_fn_role_sync(${schema}, ${password}) AS role
-    `
+    let rows: Array<{ role: string }>
+    try {
+      rows = await sync()
+    } catch (err: any) {
+      // Two processes' first calls of a project's functions at once both find
+      // no role and both create it, or both alter it: the second loses on the
+      // catalog's unique index (23505, or 42710 once the first has committed)
+      // or on the row ("tuple concurrently updated"), and its call answered
+      // 500. Found by fuzzing the data API. Once more, the role exists and the
+      // sync only re-asserts it.
+      if (!/23505|42710|already exists|tuple concurrently updated/.test(String(err?.message ?? err))) throw err
+      rows = await sync()
+    }
     role = rows[0]?.role
   } catch (err: any) {
     const message = String(err?.message ?? err)
@@ -152,6 +165,8 @@ const IDLE_MS = 10 * 60 * 1000
 
 interface Entry { handle: FunctionDbHandle; syncedAt: number; usedAt: number }
 const clients = new Map<string, Entry>()
+/** A sync under way for a schema, which a call arriving meanwhile waits on. */
+const syncing = new Map<string, Promise<FunctionDbHandle>>()
 
 function evict(schema: string): void {
   const entry = clients.get(schema)
@@ -185,21 +200,35 @@ export async function functionDbClient(projectId: string): Promise<FunctionDbHan
     return cached.handle
   }
 
-  const password = functionRolePassword(schema)
-  const role = await syncRole(projectId, schema, password)
-  if (cached) {
-    cached.syncedAt = now
-    cached.usedAt = now
-    return cached.handle
-  }
+  // Calls that arrive together share one sync and one client. Each used to run
+  // its own: the syncs raced on the same role (one answered 500, found by
+  // fuzzing the data API), and each built a client, the last one replacing the
+  // others without closing them.
+  const inFlight = syncing.get(schema)
+  if (inFlight) return inFlight
+  const run = (async () => {
+    const password = functionRolePassword(schema)
+    const role = await syncRole(projectId, schema, password)
+    if (cached) {
+      cached.syncedAt = now
+      cached.usedAt = now
+      return cached.handle
+    }
 
-  evictIdleAndOverflow()
-  const client = new PrismaClient({
-    datasourceUrl: functionDatabaseUrl(role, password, await projectDatabaseUrl(projectId)),
-  })
-  const handle = { client, schema, role }
-  clients.set(schema, { handle, syncedAt: now, usedAt: now })
-  return handle
+    evictIdleAndOverflow()
+    const client = new PrismaClient({
+      datasourceUrl: functionDatabaseUrl(role, password, await projectDatabaseUrl(projectId)),
+    })
+    const handle = { client, schema, role }
+    clients.set(schema, { handle, syncedAt: now, usedAt: now })
+    return handle
+  })()
+  syncing.set(schema, run)
+  try {
+    return await run
+  } finally {
+    syncing.delete(schema)
+  }
 }
 
 /**
