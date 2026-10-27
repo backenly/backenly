@@ -618,16 +618,21 @@ export async function settleTenantContract(
   /** From the same pass's attribution: projects each surface answered on. */
   answeredBySurface: ReadonlyMap<ContractSurface, number> = new Map(),
 ): Promise<RawFinding[]> {
+  // Withdrawn, not marked fixed: the surface answering again is not Backenly
+  // repairing it (lib/autonomy/resolution.ts). The data-plane heal, which is a
+  // repair, records its own outcome where it runs.
+  const { withdrawFindings } = await import('@/lib/core/finding-reaper')
   for (const r of results.filter(r => r.ok)) {
-    await prisma.healthFinding.updateMany({
+    const answered = await prisma.healthFinding.findMany({
       where: {
         projectId,
         type: 'contract_surface_broken',
         status: { in: ['open', 'pending_approval'] },
         details: { path: ['surface'], equals: r.surface },
       },
-      data: { status: 'auto_fixed', autoFixed: true, fixAppliedAt: new Date() },
-    }).catch(() => {})
+      select: { id: true, details: true },
+    }).catch(() => [])
+    await withdrawFindings(answered, 'contract_reaper')
   }
 
   // A project kept in another region: the finding keeps what failed and how
