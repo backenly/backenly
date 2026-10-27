@@ -21,8 +21,8 @@ import {
 
 /**
  * Presentation only. Every claim lives in ./data.ts, which documents what the
- * policy rewrite corrected and why session replay is disclosed in the present
- * tense.
+ * policy rewrite corrected, when session replay ended in production, and what
+ * Amplitude receives today.
  *
  * Deliberately restrained: no proof cards asserting product claims in a legal
  * document and no coloured trust badge on the summary. Set as a docs page
