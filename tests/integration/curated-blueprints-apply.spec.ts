@@ -22,6 +22,7 @@ import type { BlueprintDomain } from '@/lib/ai/blueprints/types'
 import { runAgenticFixLoop, type FixLoopResult } from '@/lib/ai/agentic-fix-loop'
 import { createEmptyGraph } from '@/lib/orchestration/backend-state-graph'
 import { dispatchTool } from '@/lib/ai/brain/tools'
+import { isAuthManagedTable } from '@/lib/mcp/schema-introspection'
 import { classified, setUpBrainProject, type BrainProject } from '../helpers/brain-harness'
 
 const fixLoop = runAgenticFixLoop as jest.MockedFunction<typeof runAgenticFixLoop>
@@ -58,13 +59,18 @@ beforeEach(() => {
   } as unknown as FixLoopResult)
 })
 
+/**
+ * Tables a client can reach that have no row-level security. The end-user auth
+ * table is left out: it is served through /auth/* only, never over the data
+ * API, and enabling auth creates it before the first sign-up.
+ */
 async function withoutRls(schema: string): Promise<string[]> {
   const rows = await prisma.$queryRawUnsafe<Array<{ relname: string }>>(
     `SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
       WHERE n.nspname = $1 AND c.relkind = 'r' AND NOT c.relrowsecurity AND c.relname NOT LIKE '\\_%' ORDER BY 1`,
     schema,
   )
-  return rows.map((r) => r.relname)
+  return rows.map((r) => r.relname).filter((name) => !isAuthManagedTable(name))
 }
 
 async function build(domain: BlueprintDomain) {
