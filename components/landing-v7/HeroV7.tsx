@@ -259,15 +259,18 @@ function Showcase() {
       </div>
 
       {/* The story's four chapters under the stage, on the page's left axis:
-          each names itself and says what happens, and the lit one's hairline
-          fills while it plays. */}
+          each names itself and says what happens. The four hairlines read as
+          one timeline (chapters already played stay filled, the lit one fills
+          while it plays), and only the lit chapter is at full contrast, so the
+          eye goes to the words that match the console. */}
       <div
         role="tablist"
         aria-label="Backenly, chapter by chapter"
-        className="relative z-10 mt-[28px] grid grid-cols-4 gap-x-[14px] md:mt-[20px] md:gap-x-[32px]"
+        className="relative z-10 mt-[28px] grid grid-cols-4 gap-x-[14px] md:mt-[24px] md:gap-x-[32px]"
       >
         {CHAPTERS.map((c, i) => {
           const on = i === chapter
+          const played = i < chapter
           return (
             <button
               key={c.id}
@@ -282,18 +285,17 @@ function Showcase() {
               tabIndex={on ? 0 : -1}
               onClick={() => choose(i)}
               onKeyDown={onKey}
-              className="group relative flex min-w-0 flex-col justify-start rounded-[4px] pt-[16px] text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300 focus-visible:ring-offset-[6px] focus-visible:ring-offset-[#08090a]"
+              className="group relative flex min-w-0 flex-col justify-start rounded-[4px] pt-[18px] text-left [-webkit-tap-highlight-color:transparent] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300 focus-visible:ring-offset-[6px] focus-visible:ring-offset-[#08090a]"
             >
               <span
                 aria-hidden
-                className={`absolute inset-x-0 top-0 h-px overflow-hidden transition-colors duration-200 ${
-                  on ? 'bg-white/[0.16]' : 'bg-white/[0.08] group-hover:bg-white/[0.16]'
-                }`}
+                className="absolute inset-x-0 top-0 h-px overflow-hidden bg-white/[0.1] transition-colors duration-200 [@media(hover:hover)_and_(pointer:fine)]:group-hover:bg-white/[0.2]"
               >
+                {played && <span className="block h-full bg-white/[0.32]" />}
                 {on && (
                   <span
                     key={`${chapter}-${nonce}`}
-                    className="block h-full origin-left bg-white/80"
+                    className="block h-full origin-left bg-white"
                     style={
                       quiet
                         ? { transform: 'scaleX(1)' }
@@ -302,16 +304,18 @@ function Showcase() {
                   />
                 )}
               </span>
+              {/* Unlit chapters sit at zinc-400 at 80%, about 5:1 on the hero's
+                  violet-lit black: dim enough to recede, still AA. */}
               <span
-                className={`block truncate text-[14px] font-medium tracking-[-0.01em] transition-colors duration-200 md:text-[15px] ${
-                  on ? 'text-zinc-50' : 'text-zinc-400 group-hover:text-zinc-200'
+                className={`block truncate text-[14px] font-medium tracking-[-0.011em] transition-colors duration-200 md:text-[15px] ${
+                  on ? 'text-white' : 'text-zinc-400/80 [@media(hover:hover)_and_(pointer:fine)]:group-hover:text-zinc-200'
                 }`}
               >
                 {c.label}
               </span>
               <span
-                className={`mt-[6px] hidden text-[13.5px] leading-[1.55] tracking-[-0.004em] transition-colors duration-200 [text-wrap:pretty] lg:block ${
-                  on ? 'text-zinc-300' : 'text-zinc-400 group-hover:text-zinc-300'
+                className={`mt-[8px] hidden max-w-[34ch] text-[14px] leading-[1.5] tracking-[-0.006em] transition-colors duration-200 [text-wrap:pretty] lg:block ${
+                  on ? 'text-zinc-300' : 'text-zinc-400/80 [@media(hover:hover)_and_(pointer:fine)]:group-hover:text-zinc-300'
                 }`}
               >
                 {c.caption}
@@ -322,7 +326,7 @@ function Showcase() {
       </div>
 
       {/* Below lg the four names fit but four paragraphs do not: the lit chapter's sentence sits under them. */}
-      <p aria-live={manual ? 'polite' : 'off'} className="mt-[14px] min-h-[44px] text-[14px] leading-[1.55] tracking-[-0.006em] text-zinc-400 lg:hidden">
+      <p aria-live={manual ? 'polite' : 'off'} className="mt-[14px] min-h-[44px] text-[14px] leading-[1.55] tracking-[-0.006em] text-zinc-300 lg:hidden">
         {CHAPTERS[chapter].caption}
       </p>
     </div>
@@ -330,23 +334,38 @@ function Showcase() {
 }
 
 /**
- * The hosts the MCP server runs in, as a quiet logo strip: one line of label,
- * the marks spread across the same width as the step rail above so the edges
- * line up, one muted tone that lights on hover. One row at every width: below
- * md the marks stand alone (names stay for screen readers), because seven
- * wrapping items always strand one. (Founders, 2026-10-14: the boxed band
- * with a two-line label and a divider read as unfinished.)
+ * Each mark's size on the strip, as a share of its 18px box, set by eye from
+ * its measured ink: Cline's solid head and Zed's full square read larger than
+ * Codex's open knot in the same box.
+ */
+const MARK_SCALE: Record<string, number> = { cursor: 0.95, codex: 1.12, cline: 0.88, copilot: 1.06, zed: 0.92 }
+
+/**
+ * The hosts the MCP server runs in, as the band that closes the hero: a small
+ * caption over one centred row of marks, each glyph and name in one tone so it
+ * reads as a lockup, not a link. Nothing lights on hover, because nothing here
+ * is clickable. One row at every width: below lg the row spans the column, as
+ * it must to fit seven names; below md the marks stand alone (names stay for
+ * screen readers), because seven wrapping items always strand one.
+ * (Founders, 2026-10-14: the boxed band with a two-line label and a divider
+ * read as unfinished. 2026-10-28: the label inline with the names, at their
+ * size and tone, read as one more item in a nav bar.)
  */
 function AgentBand() {
   return (
-    <div className={`${CONTAINER} mt-[48px] md:mt-[72px]`}>
-      <div className="flex flex-col items-center gap-[20px] border-t border-white/[0.07] pt-[28px] lg:flex-row lg:gap-[56px] lg:pt-[32px]">
-        <p className="shrink-0 whitespace-nowrap text-[14px] tracking-[-0.006em] text-zinc-400">Works with any MCP host</p>
-        <ul aria-label="MCP hosts" className="flex w-full flex-1 items-center justify-between gap-x-[14px] md:gap-x-[18px] lg:w-auto">
+    <div className={`${CONTAINER} mt-[44px] md:mt-[56px] lg:mt-[72px]`}>
+      <div className="border-t border-white/[0.07] pt-[28px] md:pt-[36px]">
+        <p className="text-center text-[13px] tracking-[-0.003em] text-zinc-400">Works with any MCP host</p>
+        <ul
+          aria-label="MCP hosts"
+          className="mt-[18px] flex items-center justify-between text-zinc-400 lg:justify-center lg:gap-x-[44px] xl:gap-x-[52px]"
+        >
           {AGENT_MARKS.map((mark) => (
-            <li key={mark.id} className="group flex items-center gap-[8px] text-zinc-400 transition-colors duration-200 hover:text-zinc-100">
-              <AgentGlyph mark={mark} className="h-[18px] w-[18px] shrink-0 text-zinc-500 transition-colors duration-200 group-hover:text-zinc-100" />
-              <span className="sr-only whitespace-nowrap text-[15px] font-medium tracking-[-0.015em] md:not-sr-only">{mark.name}</span>
+            <li key={mark.id} className="flex items-center gap-[9px]">
+              <span aria-hidden className="block h-[18px] w-[18px] shrink-0" style={{ transform: `scale(${MARK_SCALE[mark.id] ?? 1})` }}>
+                <AgentGlyph mark={mark} className="h-full w-full" />
+              </span>
+              <span className="sr-only whitespace-nowrap text-[14px] font-semibold tracking-[-0.02em] md:not-sr-only lg:text-[15px]">{mark.name}</span>
             </li>
           ))}
         </ul>

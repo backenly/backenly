@@ -166,9 +166,9 @@ export const FRAMES: Frame[] = BEATS.reduce<Frame[]>((out, beat) => {
 
 export const CHAPTERS = [
   { id: 'build', label: 'Build', caption: 'Your agent builds tables, auth, policies and realtime over MCP.' },
-  { id: 'heal', label: 'Self-heal', caption: 'Backenly finds a slow query and adds the index on its own, then re-checks it.' },
-  { id: 'approve', label: 'Approve', caption: 'A change that alters what the database accepts waits for you.' },
-  { id: 'watch', label: 'Watch', caption: 'Then it keeps checking, every minute. Each fix keeps its Undo.' },
+  { id: 'heal', label: 'Self-heal', caption: 'Backenly fixes a slow query on its own, then re-checks it.' },
+  { id: 'approve', label: 'Approve', caption: 'A fix that could reject writes waits for your approval.' },
+  { id: 'watch', label: 'Watch', caption: 'Checks run every minute, and each fix keeps its Undo.' },
 ] as const
 
 /**
