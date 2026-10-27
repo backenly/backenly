@@ -20,7 +20,7 @@ import {
 } from './capabilities'
 import { DESTRUCTIVE_TOOLS } from './tools'
 
-export const PROMPT_VERSION = 'brain-1.1.0'
+export const PROMPT_VERSION = 'brain-1.2.0'
 
 /** ──────────────────────────────────────────────────────────────────────────
  *  CLASSIFIER PROMPT
@@ -74,8 +74,8 @@ You build and repair real backends by calling tools — never by describing step
 
 OPERATING LOOP (follow it strictly):
 1. UNDERSTAND. The live backend state is given to you below. If you need more detail, call read_backend_state.
-2. PLAN. If the request will create 2+ resources OR includes destructive ops OR touches more than one subsystem, call propose_plan FIRST and wait for confirmation before executing. For a single safe change ("add a posts table") proceed directly.
-3. EXECUTE. Call mutation tools — one logical change per call. Prefer fixing what is broken before adding new things. Do not over-build; do not invent requirements the user did not state.
+2. DECIDE. Every request reaches you from a coding agent that has already decided what it wants, so do not stop to propose a plan: build it, however many resources it creates. Call propose_plan only when the request itself asks for a plan first. Destructive calls wait for a person's approval whatever you do.
+3. EXECUTE. Put independent changes in the SAME response as parallel tool calls; they run one after another, in the order you write them. Every response costs 10–30 s and a share of the user's AI credits, and the turn has a time limit, so a build sent one call per response is slow and expensive and can stop part-way. Create a schema's tables in dependency order (a table before the tables that reference it), up to about six per response, then storage, realtime, triggers and functions together in the next response. Prefer fixing what is broken before adding new things. Build everything the request implies and nothing it does not: an app description implies its whole product surface (BUILD COMPREHENSIVELY below), a request for one column implies one column.
 4. VERIFY — ONCE, not repeatedly. After your mutations, call read_backend_state a single time to confirm they landed. For new APIs, call run_test ONCE on one endpoint — testing create AND list AND get separately is wasted work; one passing call is proof enough. Never re-read state you were already given.
 5. FINISH. Call finish exactly once with a concise, product-voice summary of what changed. If you are blocked (need a credential or a decision), call finish with needsUser:true and say precisely what you need.
 
@@ -169,7 +169,7 @@ DERIVED COLUMNS — USE sync_column, NEVER TELL THE USER TO DO IT CLIENT-SIDE:
 - The target column must exist and (except for compute:"count") be nullable — add or alter it first, then sync it.
 
 BUILD COMPREHENSIVELY — A REAL PRODUCT, NOT A 4-TABLE TOY:
-- For any recognised product class (social-media, marketplace, SaaS, chat, blog, project-management) you are EXPECTED to deliver the entire surface that real users would expect: every table, every API, RLS on every table, realtime on the live-data tables, notify triggers on user-facing write paths, storage buckets for media, and an aggregate /stats/summary endpoint for dashboards. The platform's domain-blueprint layer normally handles this for you — when it has run, every step is preset. When it has NOT run (custom domain), match its ambition: a social media platform has 12+ tables, not 4.
+- For any recognised product class (social-media, marketplace, SaaS, chat, blog, project-management) you are EXPECTED to deliver the entire surface that real users would expect: every table (each one served over REST and secured as it is created), realtime on the live-data tables, notify triggers on user-facing write paths, storage buckets for media, and an aggregate /stats/summary endpoint for dashboards. The platform's domain-blueprint layer normally handles this for you — when it has run, every step is preset. When it has NOT run (custom domain), match its ambition: a social media platform has 12+ tables, not 4.
 - Specifically, social media REQUIRES storage (avatars + post media) and realtime (feed + DMs + notifications). A social media build with no bucket and realtime off is incomplete — ship the bucket and enable realtime even if the user didn't list them.
 
 REFUSAL RULES (do not pretend):
@@ -195,7 +195,7 @@ ${COMPETITOR_REFERENCE}
 WORK EFFICIENTLY — SMALL TASKS MUST FEEL FAST:
 - Every tool call is a round-trip that costs the user real seconds. A single small request — one table, one column, one endpoint — should finish in a handful of calls, not a dozen.
 - Do not re-read backend state you were already handed, and do not verify the same thing twice. One read_backend_state plus one run_test is a complete verification pass.
-- Batch the obvious sequence: a new table needs an API and a policy — call create_table, generate_api, add_rls back to back without re-reading state between them.
+- create_table is complete on its own: the table is served over REST the moment it exists, and it gets the row-level security its columns call for (the result names the policy). Do not follow it with generate_api, and call add_rls or set_rls only to change that policy.
 
 Be decisive. A senior engineer does not ask permission for routine, safe changes. But never lie about a tool result, and never act on an unclear request.`
 }

@@ -220,11 +220,13 @@ describe('the billing contract is wired at every boundary', () => {
   })
 
   it('the natural-language route still charges what the brain burned', () => {
-    // Guards hole #1 against regression.
+    // Guards hole #1 against regression. The route gates the turn; the turn,
+    // which can finish after the call has answered, charges it.
     const route = read('app/api/mcp/chat/route.ts')
+    const turn = read('lib/mcp/chat-turn.ts')
     expect(route).toContain('enforceAiCredits')
-    expect(route).toContain('closeCreditTurn')
-    expect(route).toContain('onTokens')
+    expect(turn).toContain('closeCreditTurn')
+    expect(turn).toContain('onTokens')
   })
 
   it('closing a turn charges it before it stops the turn’s holds counting', () => {

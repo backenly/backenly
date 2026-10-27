@@ -175,3 +175,52 @@ export async function clearResumeQueue(projectId: string): Promise<void> {
     where: { projectId, type: PREF_TYPE, key: PREF_KEY_RESUME },
   }).catch(() => {})
 }
+
+/**
+ * Design in progress — the architect is designing a plan for this project.
+ *
+ * One design is a single model call of up to three minutes, tried twice, and
+ * backend_chat answers within 90 s, so a design regularly finishes after the
+ * call that asked for it has returned. Its plan is then saved like any other,
+ * but the agent was told "nothing was applied" and asked again, and every ask
+ * started another design of the same backend.
+ *
+ * This marks that a design is running, so the next call answers that it is
+ * still designing instead of starting a second one, and a "go ahead" waits for
+ * this design rather than re-architecting. It holds no words, only when the
+ * design started, so it can stay in the home database for every project.
+ *
+ * The TTL covers both architect attempts with room to spare; a design that died
+ * with its process stops counting once it passes.
+ */
+const PREF_KEY_DESIGNING = 'designing'
+const DESIGN_TTL_MS = 7 * 60 * 1000
+
+export async function markDesigning(projectId: string): Promise<void> {
+  const value = JSON.stringify({ startedAt: new Date().toISOString() })
+  await prisma.projectPreference.upsert({
+    where: { projectId_type_key: { projectId, type: PREF_TYPE, key: PREF_KEY_DESIGNING } },
+    create: { projectId, type: PREF_TYPE, key: PREF_KEY_DESIGNING, value, confidence: 1 },
+    update: { value, confidence: 1, lastSeen: new Date() },
+  })
+}
+
+/** Whether a design started for this project in the last seven minutes is still running. */
+export async function designInProgress(projectId: string): Promise<boolean> {
+  const pref = await prisma.projectPreference.findUnique({
+    where: { projectId_type_key: { projectId, type: PREF_TYPE, key: PREF_KEY_DESIGNING } },
+  }).catch(() => null)
+  if (!pref) return false
+  try {
+    const { startedAt } = JSON.parse(pref.value) as { startedAt?: string }
+    return typeof startedAt === 'string' && Date.now() - Date.parse(startedAt) < DESIGN_TTL_MS
+  } catch {
+    return false
+  }
+}
+
+export async function clearDesigning(projectId: string): Promise<void> {
+  await prisma.projectPreference.deleteMany({
+    where: { projectId, type: PREF_TYPE, key: PREF_KEY_DESIGNING },
+  }).catch(() => {})
+}

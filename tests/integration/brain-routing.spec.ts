@@ -346,7 +346,7 @@ describe('CONFIRM when the plan was lost', () => {
 
     const { result, provider } = await fresh.turn([classified('CONFIRM')], 'go ahead')
 
-    expect(architect).toHaveBeenCalledWith(ORIGINAL_REQUEST, fresh.projectId)
+    expect(architect).toHaveBeenCalledWith(ORIGINAL_REQUEST, fresh.projectId, expect.any(Function))
     expect(provider.calls).toHaveLength(1)
     expect(await fresh.tableExists('rearchitected_notes')).toBe(true)
     expect(result).toMatchObject({ success: true, toolsRun: ['create_table'] })

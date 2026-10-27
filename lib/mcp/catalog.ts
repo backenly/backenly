@@ -447,11 +447,15 @@ export function buildDispatchable(): McpToolDescriptor[] {
     name: 'backend_chat',
     tier: 'chat',
     description:
-      'Run a natural-language request through the Backenly brain — the same agent that powers backenly.com. ' +
-      'Use this whenever the user describes WHAT they want without naming specific tools ("create a blog backend", ' +
-      '"add likes and comments to my posts table", "make the orders API faster"). The brain decides the steps, ' +
-      'executes them, and returns a human summary. Prefer this over chaining individual tools unless you have a ' +
-      'specific reason. Long-running multi-step plans take 5-30s. If the request involves a destructive operation ' +
+      'Run a natural-language request through the Backenly brain, Backenly\'s own model, which decides the steps, ' +
+      'applies them through the same governed tools and returns a summary. Use it for what you would rather describe ' +
+      'than specify ("add likes and comments to my posts table", "make the orders API faster"). A call answers within ' +
+      'about 45 s. A request that takes longer keeps running on its own: the answer has `status: "running"`, a run ' +
+      'id and what has landed so far, and backend_chat with "status" waits for it again and returns its result. ' +
+      'While one request runs, a message sent here joins it instead of starting another. Whenever an answer ' +
+      'carries `next`, the request is not finished: make that call. To lay down a whole app\'s schema, ' +
+      'apply_migration with the complete DDL is faster and exact. Where production is protected the brain cannot ' +
+      'change the schema: build it on a branch with apply_migration. If the request involves a destructive operation ' +
       '(dropping tables/columns, deleting buckets), it is NOT executed — the response includes an `approval` object ' +
       'with a pending request id: the human approves it in the Backenly Review Queue, and you poll `check_approval` ' +
       'until it is executed or rejected.',
@@ -571,6 +575,7 @@ export function buildDispatchable(): McpToolDescriptor[] {
     tier: 'read',
     description:
       'Check the status of an approval request: a call that was parked for a human instead of running. ' +
+      'It also takes the run id of a backend_chat request still running, and returns where it has got to or its result. ' +
       'Returns pending | approved | executed | failed | rejected | expired (older requests may also read partial) ' +
       'plus a result summary once decided. ' +
       'Poll every 15-30s while pending; stop on any terminal status. Only the human can approve — ' +
