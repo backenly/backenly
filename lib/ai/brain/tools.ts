@@ -1941,13 +1941,26 @@ const FIX_TARGET_TO_ACTION: Record<string, AIAction['action']> = {
  * iterate against the validator in private; users only see real work.
  */
 /**
- * Refuse a create_table of a table that exists, or an add_column on one that
- * does not, with the wording apply_migration uses. Reads the catalog through
- * the same helper apply_migration does, on the database in the project's
- * region, so the doors cannot disagree.
+ * Calls that act on a table that must already exist. Given a missing one, the
+ * executor's dependency resolver creates it first (resolveDependencies in
+ * minimal-executor.ts), with columns it guesses from the name. So a typo made a
+ * stray table, and generate_api, which the protected-production gate does not
+ * stop because it changes no schema of its own, created tables on a protected
+ * production: a blueprint's create_table steps were refused there and its
+ * generate_api steps built each table anyway, on main, unapproved.
+ */
+const NEEDS_EXISTING_TABLE: ReadonlySet<string> = new Set([
+  'add_column', 'generate_api', 'create_index', 'rename_column', 'add_constraint',
+])
+
+/**
+ * Refuse a create_table of a table that exists, or a NEEDS_EXISTING_TABLE call
+ * on one that does not, with the wording apply_migration uses. Reads the
+ * catalog through the same helper apply_migration does, on the database in the
+ * project's region, so the doors cannot disagree.
  */
 async function tableExistencePreflight(
-  name: 'create_table' | 'add_column',
+  name: string,
   args: Record<string, unknown>,
   projectId: string,
 ): Promise<ToolResult | null> {
@@ -1970,13 +1983,13 @@ async function tableExistencePreflight(
         `To add columns use add_column; get_table_schema shows what ${table} has now.`,
     }
   }
-  if (name === 'add_column' && !exists) {
+  if (NEEDS_EXISTING_TABLE.has(name) && !exists) {
     const suggestion = await closestTableName(projectId, schema, table)
     return {
       ok: false,
       code: 'TABLE_NOT_FOUND',
       summary:
-        `There is no table ${table} in this project, so add_column cannot run. Nothing was changed.` +
+        `There is no table ${table} in this project, so ${name} cannot run. Nothing was changed.` +
         (suggestion ? ` Did you mean ${suggestion}?` : '') +
         ' If it is a new table, create it first with create_table.',
     }
@@ -2149,9 +2162,12 @@ export async function dispatchTool(
   // apply_migration's rule (checkPlan), on the typed doors too: create_table of
   // an existing table changed nothing and answered "Created", and add_column on
   // a missing table CREATED it, so a typo made a stray one-column table while
-  // the agent believed it had changed the real one (DB-06). Internal callers of
-  // the executor (blueprints, auto-wiring) keep their idempotent create.
-  if (name === 'create_table' || name === 'add_column') {
+  // the agent believed it had changed the real one (DB-06). generate_api,
+  // create_index, rename_column and add_constraint made the same stray table,
+  // and generate_api made it past the protected-production gate
+  // (NEEDS_EXISTING_TABLE). Internal callers of the executor (auto-wiring)
+  // keep their idempotent create.
+  if (name === 'create_table' || NEEDS_EXISTING_TABLE.has(name)) {
     const refusal = await tableExistencePreflight(name, args, ctx.projectId)
     if (refusal) return refusal
   }
