@@ -35,6 +35,7 @@ import { z } from 'zod'
 import { mcpGuard, recordMcpCall, refuseIfReadOnly } from '@/lib/mcp/guard'
 import { corsHeaders, optionsResponse } from '@/lib/mcp/cors'
 import { runBrain, type BrainEvent } from '@/lib/ai/brain/agent'
+import { GO_AHEAD_LATER } from '@/lib/ai/brain/next-call'
 import { assertAiAllowed } from '@/lib/platform-controls'
 import { createApprovalRequest, RestoreRequestRefusedError } from '@/lib/mcp/approvals'
 import { enforceAiCredits } from '@/lib/entitlements/policy'
@@ -314,8 +315,8 @@ export async function POST(request: NextRequest) {
 
     const body = {
       ok: onlyNotQueued ? false : escalated || budgetPartial ? true : result.success,
-      /** Set only on escalation, so an agent can branch without parsing prose. */
-      ...(escalated ? { status: 'awaiting_approval' as const } : {}),
+      /** Set only on escalation or a design still running, so an agent can branch without parsing prose. */
+      ...(escalated ? { status: 'awaiting_approval' as const } : result.inProgress ? { status: result.inProgress } : {}),
       ...(budgetPartial
         ? {
             partial: true as const,
@@ -363,6 +364,13 @@ export async function POST(request: NextRequest) {
       // reported alongside `applied` on every path rather than folded into an
       // error the success branch never reaches.
       ...(result.refused?.length ? { refused: result.refused } : {}),
+      // ── What carries the request on, when this call did not finish it ───────
+      //
+      // A build stopped by the wall clock said "say continue" in its summary and
+      // came back `ok: true, partial: true`, and agents took the two tables they
+      // had as the build. `next` is the exact call that picks up the rest; it is
+      // set only when that call will find something (lib/ai/brain/next-call.ts).
+      ...(result.next ? { next: result.next } : {}),
       classification: {
         intent: result.classification.intent,
         confidence: result.classification.confidence,
@@ -421,6 +429,33 @@ export async function POST(request: NextRequest) {
     // is emitted once per dispatch, so a lower bound of "at least as many
     // iterations as distinct tool batches" is the honest number available here.
     const iterations = events.filter((e) => e.type === 'phase').length || (toolsRun.length ? 1 : 0)
+
+    // ── A design still running is not a failure ───────────────────────────────
+    //
+    // The architect is one model call of up to three minutes, and this call
+    // answers within 90 s. Reported as BRAIN_TIMEOUT, "Nothing was applied" and
+    // retryable, it sent the agent back with the same request, and each one
+    // started another design of the same backend while the first finished
+    // unseen. The design carries on and saves its plan when it is done: "go
+    // ahead" then builds it, and until then says it is still designing.
+    if (timedOut && toolsRun.length === 0 && events.some((e) => e.type === 'phase' && e.phase === 'design')) {
+      const summary =
+        'Backenly is still designing this backend: one design takes one to three minutes, longer than one call. ' +
+        'Nothing has been built yet. In about a minute, send backend_chat { "message": "go ahead" }: it builds the ' +
+        'design once it is ready, and says so if it is still designing. Sending the build request again would only ' +
+        'start a second design.'
+      recordMcpCall({ ...auth, endpoint: ENDPOINT, startedAt }, { statusCode: 200, tool: 'backend_chat', summary })
+      return withCors(NextResponse.json({
+        ok: true,
+        status: 'designing',
+        summary,
+        next: GO_AHEAD_LATER,
+        toolsRun,
+        iterations,
+        timing: { ms: Date.now() - startedAt },
+        events: events.map(condense),
+      }))
+    }
 
     if (timedOut && applied.length > 0 && !anyFail) {
       const summary =

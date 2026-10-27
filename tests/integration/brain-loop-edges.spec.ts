@@ -429,6 +429,8 @@ describe('a failure to write down what a turn did', () => {
 
     expect(result).toMatchObject({ success: false, failureCode: 'STEP_BUDGET_EXHAUSTED' })
     expect(await loadLoopResume(built.projectId)).toBeNull()
+    // Nothing was saved, so there is nothing for "continue" to find.
+    expect(result.next).toBeUndefined()
   }, 60_000)
 
   it('does not fail the turn when its operational-memory receipt cannot be written', async () => {

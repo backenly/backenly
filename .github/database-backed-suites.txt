@@ -852,6 +852,17 @@ tests/integration/runtime-generate.spec.ts
 # workspace schema and its conversation, so it needs a real Postgres.
 tests/integration/brain-iterations.spec.ts
 
+# A build asked of backend_chat runs to the end or names the call that carries
+# it on: the loop is told to build several tables per response without a plan
+# first, and one response creates them all; a stop at the wall clock or the step
+# budget returns next: continue only when its resume point was saved; a resumed
+# plan counts tables its first run made as done; on a protected production a
+# build designs and runs nothing and says how the schema reaches it on a branch;
+# and a design still running answers a second build or a "go ahead" instead of
+# starting another. It builds real workspace tables and reads the saved plans,
+# queues and resume points, so it needs a real Postgres.
+tests/integration/brain-builds-finish.spec.ts
+
 # Escalated findings: the deterministic investigation first, then the model
 # investigator with real read-only probes, a checked hypothesis stored as one,
 # once per evidence, with backoff after failures. The probes read the

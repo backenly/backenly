@@ -73,7 +73,14 @@ export function failureGuidance(lean: Record<string, unknown>): string | null {
     parts.push('Steps ran before it stopped, so some of this may already be applied: check with read_backend_state before retrying.')
   }
 
-  if (lean.retryable === true) {
+  // A request that stopped with work left names the call that carries it on.
+  // That call, not a retry or a different request, is the next step.
+  const next = lean.next && typeof lean.next === 'object' ? (lean.next as Record<string, unknown>) : null
+  if (next && typeof next.tool === 'string') {
+    const wait = typeof next.afterMs === 'number' ? ` in about ${Math.round(next.afterMs / 1000)}s` : ''
+    const why = typeof next.why === 'string' ? ` ${next.why}` : ''
+    parts.push(`Next: call ${next.tool} with ${JSON.stringify(next.arguments ?? {})}${wait}.${why}`)
+  } else if (lean.retryable === true) {
     const ms = typeof lean.retryAfterMs === 'number' ? lean.retryAfterMs : null
     parts.push(`This is transient: the same request is worth retrying after ${ms ? `${Math.round(ms / 1000)}s` : 'a moment'}.`)
   } else if (lean.retryable === false) {

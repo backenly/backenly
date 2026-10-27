@@ -32,7 +32,7 @@ Every tool and route answers failures as JSON: `{ ok: false, error, code }`, oft
 | `API_KEY_PROJECT_MISMATCH` | A preview key of one project was sent to another project's auth endpoint | Use a key of the project in the URL |
 | `MCP_KEY_IN_APP` | An app sent an MCP key to the runtime API, which serves only project keys | Give the app a project key from `connect` `create_api_key`; if the MCP key was committed or shipped, ask your human to revoke it in Connect → Agents |
 | `SERVICE_ROLE_IN_BROWSER` | A service-role key was sent from a browser, where it would expose every row | Use a publishable key in browser code and keep the service-role key on a server |
-| `BRANCH_REQUIRED` | Production is protected, so a schema change was refused on main | `branch` `create`, then `apply_migration { sql, branchId }`, then `branch` `merge` |
+| `BRANCH_REQUIRED` | Production is protected, so a schema change was refused on main, whether sent as `apply_migration` or asked of `backend_chat` | `branch` `create`, then `apply_migration { sql, branchId }`, then `branch` `merge` |
 | `MERGE_CONFLICT` | Production changed a table the branch's migrations touch since the branch was cut | Create a fresh branch and apply the change there |
 
-Database errors name the column, the expected type and the value received. A result with `partial` means some changes landed before the run stopped: read state before replaying anything.
+Database errors name the column, the expected type and the value received. A result with `partial` means some changes landed before the run stopped: read state before replaying anything. A result with `next` did not finish the request and names the call that carries it on, usually `backend_chat { "message": "continue" }`: make that call rather than replaying or rephrasing the request.
