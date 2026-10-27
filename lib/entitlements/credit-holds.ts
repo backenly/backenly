@@ -8,9 +8,12 @@
  *
  * The life of a hold:
  *
- *   reserved  taken before the call, under a per-account lock, only when the
- *             credits already charged plus every live hold plus this call's
- *             worst case fit the cap. Otherwise the call is refused unsent.
+ *   reserved  taken before the call, under a per-account lock, while any
+ *             credit is left once the credits already charged and every live
+ *             hold are counted. Otherwise the call is refused unsent. The hold
+ *             counts this call's worst case, so the call after it waits for it
+ *             to settle: an account goes over its credits by at most one call,
+ *             the last, and only by what that call actually used.
  *   used      the call ran: the hold shrinks to the tokens it actually used and
  *             KEEPS COUNTING until its turn is charged. This is what closes the
  *             gap where a finished call was neither held nor charged.
@@ -24,7 +27,7 @@
  * marks the turn's holds charged. In between, usage is counted twice, which is
  * the safe direction; it is never counted zero times. If the charge fails, the
  * holds stay counted until they expire, so a billing fault can cost revenue but
- * never let an account overspend. The charge itself is Cloud's commercial
+ * never frees credits a call used. The charge itself is Cloud's commercial
  * write (recordAiConsumption), which is why the two are ordered rather than
  * one transaction.
  *
@@ -66,6 +69,7 @@ export const creditHoldHook: CustomerSpendHook = {
     const tokens = Math.max(0, Math.ceil(maxTokens))
     const scope = activeTokenScope()
     let id: string | null
+    let spent = false
     try {
       id = await prisma.$transaction(async (tx) => {
         // Serialises holds for one account and month, so two calls racing for
@@ -82,7 +86,15 @@ export const creditHoldHook: CustomerSpendHook = {
                         FROM "ai_credit_holds"
                        WHERE "billingAccountId" = ${account} AND "month" = ${month}
                          AND "status" IN ('reserved', 'used') AND "expiresAt" > (now() AT TIME ZONE 'UTC')), 0)::bigint AS held`
-        if (creditsFromTokens(Number(row.charged) + Number(row.held) + tokens) > cap) return null
+        // A call starts while any credit is left, rather than only when its
+        // worst case fits: a whole call's worst case is far more than a call
+        // uses, so requiring it stranded the last part of every allowance. The
+        // hold below still counts that worst case, so the next call waits for
+        // this one to settle.
+        if (creditsFromTokens(Number(row.charged) + Number(row.held)) >= cap) {
+          spent = creditsFromTokens(Number(row.charged)) >= cap
+          return null
+        }
         const hold = await tx.aiCreditHold.create({
           data: {
             billingAccountId: account,
@@ -105,8 +117,11 @@ export const creditHoldHook: CustomerSpendHook = {
     if (id === null) {
       throw new AiError(
         'credits_exhausted',
-        `This call could use up to ${creditsFromTokens(tokens).toLocaleString()} AI credits, more than this account has ` +
-          'left this month, so it was not sent. Credits reset on the 1st, or upgrade for more.',
+        spent
+          ? 'This account has used all its AI credits this month, so this call was not sent. ' +
+              'Credits reset on the 1st, or upgrade for more.'
+          : "The rest of this account's AI credits this month are held by work still in progress, so this call was not " +
+              'sent. Try again when it finishes. Credits reset on the 1st, or upgrade for more.',
         { consumption: 'none' },
       )
     }
