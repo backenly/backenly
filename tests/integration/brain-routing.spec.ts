@@ -339,30 +339,42 @@ describe('CONFIRM with only a resume queue', () => {
   }, 60_000)
 })
 
+
+
 describe('CONFIRM when the plan was lost', () => {
-  it('designs the original request again, on a project still empty, and runs it', async () => {
-    await saveTurn(fresh.projectId, ORIGINAL_REQUEST, 'Here is the plan.\n\nReply "go ahead" to run this, or tell me what to add or remove.')
-    architect.mockResolvedValueOnce({ blueprint: planOf('rearchitected_notes'), match: matchOf, architectTokens: 500 })
+  it('does not call the architect on confirmation without a saved resume marker', async () => {
+    await saveTurn(
+      fresh.projectId,
+      ORIGINAL_REQUEST,
+      'Here is the plan.\n\nReply "go ahead" to run this, or tell me what to add or remove.',
+    )
 
-    const { result, provider } = await fresh.turn([classified('CONFIRM')], 'go ahead')
+    await fresh.turn([classified('CONFIRM')], 'go ahead')
 
-    expect(architect).toHaveBeenCalledWith(ORIGINAL_REQUEST, fresh.projectId)
-    expect(provider.calls).toHaveLength(1)
-    expect(await fresh.tableExists('rearchitected_notes')).toBe(true)
-    expect(result).toMatchObject({ success: true, toolsRun: ['create_table'] })
-  }, 60_000)
+    expect(architect).not.toHaveBeenCalled()
+  })
+})
 
+describe('CONFIRM on a built project', () => {
   it('does not offer propose_plan to the agent loop a CONFIRM falls into', async () => {
     // A built project is never re-architected, so a lost plan reaches the loop.
-    await saveTurn(built.projectId, 'add a comments table', 'Here is the plan.\n\nReply "go ahead" to run this, or tell me what to add or remove.')
+    await saveTurn(
+      built.projectId,
+      'add a comments table',
+      'Here is the plan.\n\nReply "go ahead" to run this, or tell me what to add or remove.',
+    )
 
-    const { provider } = await built.turn([classified('CONFIRM'), finished('No plan is stored.')], 'go ahead')
+    const { provider } = await built.turn(
+      [classified('CONFIRM'), finished('No plan is stored.')],
+      'go ahead',
+    )
 
     expect(toolNamesOf(provider, 1)).not.toContain('propose_plan')
     expect(toolNamesOf(provider, 1)).toContain('create_table')
     expect(systemOf(provider, 1)).toContain('CONFIRMED the plan')
   }, 60_000)
 })
+
 
 describe('APPLY_PROPOSAL on a built project', () => {
   it('enters the agent loop with the whole catalog and a hint to build what the conversation listed', async () => {

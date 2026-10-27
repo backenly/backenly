@@ -23,6 +23,8 @@
 
 import { prisma } from '@/lib/db/prisma'
 import { quotesKeptHere } from '@/lib/data-plane/residency'
+import { regionalBodiesFor } from '@/lib/data-plane/regional-bodies'
+import { randomUUID } from 'crypto'
 
 const PREF_TYPE = 'pending_plan'
 const PREF_KEY = 'loop_resume'
@@ -39,6 +41,8 @@ export interface LoopResume {
   /** Set for a project kept in another region: the request and titles stayed out of this row. */
   keptInRegion?: true
   /** Why the turn stopped, for the model's context. */
+  architectFailed?: true
+  resumeId?: string
   reason: string
   createdAt: string
   expiresAt: string
@@ -57,17 +61,34 @@ export async function saveLoopResume(
   request: string,
   applied: string[],
   stop: LoopStop,
+  architectFailed = false,
 ): Promise<void> {
   const now = Date.now()
+  const resumeId = randomUUID()
   const quote = await quotesKeptHere(projectId)
   const marker: LoopResume = {
     request: quote ? request.slice(0, MAX_REQUEST_CHARS) : '',
     applied: quote ? applied.slice(-MAX_APPLIED) : [],
     ...(quote ? {} : { keptInRegion: true as const }),
+    ...(architectFailed ? { architectFailed: true as const } : {}),
+    resumeId,
     reason: STOP_REASON[stop],
     createdAt: new Date(now).toISOString(),
     expiresAt: new Date(now + TTL_MS).toISOString(),
   }
+
+  if (!quote) {
+    const bodies = await regionalBodiesFor(projectId)
+
+    await bodies.set('conversation_message', `brain-loop-resume:${resumeId}`, {
+      payload: {
+        request: request.slice(0, MAX_REQUEST_CHARS),
+        resumeId,
+      },
+    })
+  }
+
+
   await prisma.projectPreference.upsert({
     where: { projectId_type_key: { projectId, type: PREF_TYPE, key: PREF_KEY } },
     create: { projectId, type: PREF_TYPE, key: PREF_KEY, value: JSON.stringify(marker), confidence: 1 },
@@ -85,18 +106,70 @@ export async function loadLoopResume(projectId: string): Promise<LoopResume | nu
     if (typeof m.request !== 'string') return null
     if (!m.request.trim() && m.keptInRegion !== true) return null
     if (!Array.isArray(m.applied)) m.applied = []
+
     if (Date.parse(m.expiresAt) < Date.now()) return null
+
+    if (m.keptInRegion) {
+      if (!m.resumeId) return null
+
+      const bodies = await regionalBodiesFor(projectId)
+      const body = await bodies.get(
+        'conversation_message',
+        `brain-loop-resume:${m.resumeId}`,
+      )
+
+      const payload = body?.payload as
+        | { request?: unknown; resumeId?: unknown }
+        | undefined
+
+      if (
+        !payload ||
+        typeof payload.request !== 'string' ||
+        payload.resumeId !== m.resumeId
+      ) {
+        return null
+      }
+
+      m.request = payload.request
+    }
+
     return m
+
   } catch {
     return null
   }
 }
 
+
 export async function clearLoopResume(projectId: string): Promise<void> {
+  const marker = await prisma.projectPreference.findFirst({
+    where: { projectId, type: PREF_TYPE, key: PREF_KEY },
+  }).catch(() => null)
+
+  let data: LoopResume | null = null
+  try {
+    if (marker) data = JSON.parse(marker.value) as LoopResume
+  } catch {
+    // The marker is invalid; still delete the project preference below.
+  }
+
+  if (data?.keptInRegion && data.resumeId) {
+    const bodies = await regionalBodiesFor(projectId)
+
+    await bodies.remove(
+      'conversation_message',
+      [`brain-loop-resume:${data.resumeId}`],
+    ).catch((err) => {
+      console.error('[Brain] could not clean up regional resume body:', err)
+    })
+  }
+
   await prisma.projectPreference
     .deleteMany({ where: { projectId, type: PREF_TYPE, key: PREF_KEY } })
     .catch(() => {})
 }
+
+
 
 /**
  * The message the model is sent in place of a bare "continue". It carries the

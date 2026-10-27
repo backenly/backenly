@@ -22,7 +22,6 @@ import { getBlueprintForPrompt } from '@/lib/ai/blueprints'
 import { loadPendingPlan, loadResumeQueue, savePendingPlan } from '@/lib/ai/blueprints/store'
 import { runAgenticFixLoop, type FixLoopEvent, type FixLoopResult } from '@/lib/ai/agentic-fix-loop'
 import { parseVerificationFence } from '@/lib/ai/verification-evidence'
-import { saveTurn } from '@/lib/ai/brain/memory'
 import { classified, setUpBrainProject } from '../helpers/brain-harness'
 
 jest.mock('@/lib/ai/blueprints', () => {
@@ -305,24 +304,6 @@ describe('stored plans that cannot be used', () => {
     expect(await brain.tableExists('legacy_plan')).toBe(true)
     expect(result.success).toBe(true)
     expect(Number.isFinite(result.tokensUsed)).toBe(true)
-  }, 60_000)
-
-  it('a lost plan is found again past short confirmations in between', async () => {
-    const original =
-      'A recipe sharing app where home cooks post recipes with photos, ingredients and steps, follow each ' +
-      'other, save favourites into collections, and leave ratings and comments on what they cooked, with a ' +
-      'feed of new recipes from the people they follow.'
-    await saveTurn(brain.projectId, original, 'Here is the plan.\n\nReply "go ahead" to run this, or tell me what to add or remove.')
-    // Short replies in between do not hide it: the request is the last long, non-confirming message.
-    await saveTurn(brain.projectId, 'ok', 'Still waiting.\n\nReply "go ahead" to run this, or tell me what to add or remove.')
-    await saveTurn(brain.projectId, 'yes', 'Still waiting.\n\nReply "go ahead" to run this, or tell me what to add or remove.')
-    architect.mockResolvedValueOnce({ blueprint: planWith([createNotes('found_again')]), match, architectTokens: 0 })
-    fixLoopReturns(fixResult([check('Auth flow')]))
-
-    await brain.turn([classified('CONFIRM')], 'go ahead')
-
-    expect(architect).toHaveBeenCalledWith(original, brain.projectId)
-    expect(await brain.tableExists('found_again')).toBe(true)
   }, 60_000)
 })
 

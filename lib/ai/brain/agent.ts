@@ -58,7 +58,6 @@ import {
 } from './tools'
 import { getBlueprintForPrompt, isExplicitSpec } from '../blueprints'
 import { looksLikeBuildDescription } from './build-signals'
-import { findOriginalBuildPrompt } from './resume-routing'
 import { saveLoopResume, loadLoopResume, clearLoopResume, resumePrompt, type LoopResume, type LoopStop } from './loop-resume'
 import {
   savePendingPlan, loadPendingPlan, clearPendingPlan,
@@ -643,9 +642,13 @@ export async function runBrain(
   //
   // Either way "go ahead" runs every step deterministically — no LLM
   // re-derivation, no partial coverage, no run_test → fix_backend loop.
+  let architectFailedThisTurn = false
   if (classification.intent === 'BUILD' || classification.intent === 'APPLY_PROPOSAL') {
     if (isFreshProject) {
       const resolved = await resolveBlueprintWithHeartbeat(input.message, input.projectId, emit)
+      if (!resolved) {
+        architectFailedThisTurn = true
+      }
       if (resolved && 'vague' in resolved && resolved.vague) {
         console.log(`[Brain] route=ARCHITECT_VAGUE — surfacing clarifying question`)
         return await singleToolTurn('ask_user', { question: resolved.askUser, options: [] }, dispatchCtx, classification, emit, input)
@@ -686,10 +689,51 @@ export async function runBrain(
     // A loop turn that stopped unfinished saved where it was. Resume the agent
     // loop on that request with what already landed, rather than searching the
     // history for a prompt that looks like one.
+
+
     if (loopResume) {
-      console.log(`[Brain] route=LOOP_RESUME applied=${loopResume.applied.length} reason="${loopResume.reason}"`)
-      return await runAgentLoop(input, classification, memory.summary, understandingBlock, recent, dispatchCtx, emit, toolsRun, loopResume)
+      if (loopResume.architectFailed && loopResume.request) {
+        const resolved = await resolveBlueprintWithHeartbeat(
+          loopResume.request,
+          input.projectId,
+          emit,
+        )
+
+        if (resolved && 'blueprint' in resolved) {
+          console.log('[Brain] route=LOOP_RESUME_REARCHITECT')
+
+          return await blueprintExecuteTurn(
+            resolved.blueprint.steps,
+            resolved.architectTokens,
+            dispatchCtx,
+            classification,
+            emit,
+            input,
+            resolved.blueprint.domain,
+            extractRequirements(loopResume.request),
+          )
+        }
+
+        console.log('[Brain] Architect retry failed; falling back to loop resume')
+      }
+
+      console.log(
+        `[Brain] route=LOOP_RESUME applied=${loopResume.applied.length} reason="${loopResume.reason}"`,
+      )
+
+      return await runAgentLoop(
+        input,
+        classification,
+        memory.summary,
+        understandingBlock,
+        recent,
+        dispatchCtx,
+        emit,
+        toolsRun,
+        loopResume,
+      )
     }
+
 
     // No stored plan at all — but the user is confirming/continuing a build.
     // This is the state that produced the endless "continue" loop: the
@@ -710,26 +754,8 @@ export async function runBrain(
     // full-schema specs. We only re-architect when the user gave their own
     // table spec (isExplicitSpec — unambiguously a from-scratch build) or when
     // the project is still empty and the original ask was a substantial build.
-    const originalBuild = findOriginalBuildPrompt(memory.history)
-    if (originalBuild && (isExplicitSpec(originalBuild) || (isFreshProject && originalBuild.length > 200))) {
-      const resolved = await resolveBlueprintWithHeartbeat(originalBuild, input.projectId, emit)
-      if (resolved && 'blueprint' in resolved) {
-        console.log(
-          `[Brain] route=CONFIRM_REARCHITECT domain=${resolved.blueprint.domain} ` +
-          `steps=${resolved.blueprint.steps.length} architectTokens=${resolved.architectTokens}`,
-        )
-        return await blueprintExecuteTurn(
-          resolved.blueprint.steps,
-          resolved.architectTokens,
-          dispatchCtx,
-          classification,
-          emit,
-          input,
-          resolved.blueprint.domain,
-          extractRequirements(originalBuild),
-        )
-      }
-    }
+
+
   }
 
   // APPLY_PROPOSAL (with no blueprint match) is NOT a dead-end. It enters the
@@ -741,7 +767,19 @@ export async function runBrain(
   console.log(`[Brain] route=AGENT_LOOP intent=${classification.intent}`)
 
   // BUILD / MODIFY / FIX / QUESTION / DESTRUCTIVE / CONFIRM / APPLY_PROPOSAL → agent loop
-  return await runAgentLoop(input, classification, memory.summary, understandingBlock, recent, dispatchCtx, emit, toolsRun)
+
+  return await runAgentLoop(
+    input,
+    classification,
+    memory.summary,
+    understandingBlock,
+    recent,
+    dispatchCtx,
+    emit,
+    toolsRun,
+    null,
+    architectFailedThisTurn,
+  )
 }
 
 /**
@@ -1418,6 +1456,7 @@ async function runAgentLoop(
   emit: (e: BrainEvent) => void,
   toolsRun: string[],
   resume: LoopResume | null = null,
+  architectFailedThisTurn = false,
 ): Promise<BrainResult> {
   const turnTools = toolsForIntent(classification.intent)
 
@@ -1967,6 +2006,7 @@ async function runAgentLoop(
       resumeRequest,
       [...(resume?.applied ?? []), ...appliedMutationTitles],
       stoppedUnfinished,
+      architectFailedThisTurn,
     ).catch((err) => console.error('[Brain] could not save the resume point:', err))
   } else if (resume || mutated) {
     await clearLoopResume(input.projectId)
