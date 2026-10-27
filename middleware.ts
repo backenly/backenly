@@ -4,6 +4,7 @@ import { jwtVerify } from 'jose'
 import { domainRoutingMiddleware, shouldUseDomainRouting } from '@/lib/middleware/domainRouting'
 import { exceededBodyLimit, isUploadRoute, MAX_BUFFERED_UPLOAD_FILE_BYTES } from '@/lib/storage/body-limits'
 import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
+import { allowsAnyOrigin } from '@/lib/security/development-origin'
 
 // Inlined rather than imported from lib/auth/jwt, which pulls jsonwebtoken and
 // node:crypto into the Edge middleware bundle.
@@ -286,7 +287,10 @@ async function handleCORS(request: NextRequest): Promise<NextResponse | null> {
 
     if (projectId) {
       const projectOrigins = await getProjectAllowedOrigins(projectId)
-      if (projectOrigins.length === 0) {
+      // Connected development origins (localhost, a LAN address) never make
+      // the list exclusive: connecting the dev server used to lock out the
+      // app's deployed origin (lib/security/development-origin.ts).
+      if (allowsAnyOrigin(projectOrigins)) {
         allowedOrigin = origin
       } else {
         allowedOrigin = projectOrigins.includes(origin) ? origin : null

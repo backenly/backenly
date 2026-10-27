@@ -330,6 +330,8 @@ export default function PublishPage() {
     if (status === 'LIVE' && hasRealBackend) return { label: 'Live', tone: 'operational' }
     if (status === 'DEPLOYING') return { label: 'Publishing', tone: 'attention', pulse: true }
     if (status === 'FAILED') return { label: 'Publish failed', tone: 'failed' }
+    // Not "ready" while a check the publish stops on is failing below.
+    if (hasRealBackend && blockingChecks.length > 0) return { label: `${blockingChecks.length} to clear before publishing`, tone: 'attention' }
     if (hasRealBackend) return { label: 'Ready to publish', tone: 'managed' }
     return { label: 'Nothing to publish', tone: 'paused' }
   })()
@@ -399,8 +401,11 @@ export default function PublishPage() {
             <p className="min-w-0 flex-1 text-[12.5px] leading-[18px] text-faint">
               {fixNote ??
                 `${fixableChecks.length} ${fixableChecks.length === 1 ? 'item' : 'items'} Backenly can fix: ` +
-                  `${fixableChecks.map(c => c.name).join(', ')}. This can turn on row-level security for tables ` +
-                  'it can find an owner for, so check what each table should show before applying.'}
+                  `${fixableChecks.map(c => c.name).join(', ')}.` +
+                  // Said only when it is one of the fixes: it changes what each table shows.
+                  (fixableChecks.some(c => c.id === 'rls_applied')
+                    ? ' This turns on row-level security for tables it can find an owner for, so check what each table should show before applying.'
+                    : '')}
             </p>
             {fixableChecks.length > 0 && (
               <KitButton onClick={applySafeFixes} loading={applyingFixes}>
@@ -650,9 +655,11 @@ export default function PublishPage() {
           <KitColumns
             main={
               <SettingsCard
-                title={publishable ? 'Ready to go live' : 'Serving, not yet publishable'}
+                title={!publishable ? 'Serving, not yet publishable' : blockingChecks.length > 0 ? 'Almost ready to go live' : 'Ready to go live'}
                 description={
-                  publishable
+                  publishable && blockingChecks.length > 0
+                    ? `Publishing runs the readiness checks first and stops on ${blockingChecks.length === 1 ? 'the one' : `the ${blockingChecks.length}`} failing under Before you publish. Clear ${blockingChecks.length === 1 ? 'it' : 'them'}, then publish to record version one.`
+                    : publishable
                     ? 'Publishing snapshots the backend as version one and marks the project live. The API is already answering, and keeps serving later changes as they are made; publish again to record the next version.'
                     : 'Functions, storage and realtime are already serving. Publishing records a schema snapshot, so it needs at least one table, a generated API or enabled auth first.'
                 }

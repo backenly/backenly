@@ -253,21 +253,16 @@ export function formatProjectSnapshot(snapshot: ProjectSnapshot): string {
 }
 
 export async function checkAuthStatus(projectId: string): Promise<{ enabled: boolean; providers: string[] }> {
-  const { prisma } = await import('@/lib/db/prisma')
   try {
-    const project = await prisma.project.findUnique({
-      where: { id: projectId },
-      select: { authManifest: true },
-    })
-    const manifest = project?.authManifest as any
-    if (!manifest?.enabled) return { enabled: false, providers: [] }
-
-    const providers: string[] = []
-    if (manifest.providers?.emailPassword?.enabled) providers.push('email')
-    if (manifest.providers?.google?.enabled) providers.push('google')
-    if (manifest.providers?.github?.enabled) providers.push('github')
-
-    return { enabled: true, providers }
+    // The same answer every other surface gives (lib/services/auth-status.ts).
+    // This read `authManifest`, which nothing that enables auth writes, so the
+    // snapshot said auth was off on every project.
+    const { getProjectAuthStatus } = await import('@/lib/services/auth-status')
+    const status = await getProjectAuthStatus(projectId)
+    return {
+      enabled: status.status !== 'none',
+      providers: status.providers.filter(p => p.enabled).map(p => p.id),
+    }
   } catch {
     return { enabled: false, providers: [] }
   }

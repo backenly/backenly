@@ -465,7 +465,14 @@ function buildHealthSummary(findings: FindingRow[]) {
   ]
 
   return categories.map(cat => {
-    const catFindings = cat.types.flatMap(t => byType.get(t) ?? [])
+    // A failed verification scenario belongs to the category it checks
+    // (details.category: auth, rls, ...). Left out, the summary said "Auth
+    // integrity: No issues detected" beside an open critical saying auth could
+    // not function.
+    const catFindings = [
+      ...cat.types.flatMap(t => byType.get(t) ?? []),
+      ...(byType.get('verification_failed') ?? []).filter(f => f.details?.category === cat.key),
+    ]
     const critical = catFindings.some(f => f.severity === 'critical')
     const warning = catFindings.length > 0
 

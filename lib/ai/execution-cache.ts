@@ -124,9 +124,10 @@ export async function getCachedProjectSettings(projectId: string): Promise<{
     },
   })
 
+  const { isEndUserAuthEnabled } = await import('@/lib/services/auth-status')
   const result = {
     activeIntegrations: (project?.activeIntegrations as Record<string, any>) ?? {},
-    hasAuth: !!(project?.authManifest as any)?.enabled,
+    hasAuth: project ? await isEndUserAuthEnabled(projectId, project.authManifest) : false,
     isFrontendConnected: project?.isFrontendConnected ?? false,
     isDeployed: project?.isDeployed ?? false,
   }

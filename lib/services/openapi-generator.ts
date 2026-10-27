@@ -66,9 +66,12 @@ export async function generateOpenApiSpec(
     // information_schema via getTableSchema, which is also what the runtime
     // resolves against, so the spec cannot drift from what is actually served.
     (async () => {
-      const { listExposedTables, getTableSchema } = await import('@/lib/mcp/schema-introspection')
+      const { listExposedTables, getTableSchema, isCrudExposable } = await import('@/lib/mcp/schema-introspection')
       // A region this server cannot reach is an error, not a project with no tables.
-      const exposed = await listExposedTables(projectId, scope).catch(unlessRegionError([] as Array<{ name: string }>))
+      // `users` is served by /auth/*, documented below, and /db/users answers 404:
+      // listed here, it was a path this document promised and the API refused.
+      const exposed = (await listExposedTables(projectId, scope).catch(unlessRegionError([] as Array<{ name: string }>)))
+        .filter(t => isCrudExposable(t.name))
       return Promise.all(
         exposed.map(async t => ({
           table: {
@@ -235,7 +238,10 @@ export async function generateOpenApiSpec(
         parameters: [
           { name: 'limit', in: 'query', schema: { type: 'integer', default: 50, maximum: 1000 } },
           { name: 'offset', in: 'query', schema: { type: 'integer', default: 0 } },
-          { name: 'orderBy', in: 'query', schema: { type: 'string' }, description: 'Column name to sort by' },
+          // `sort`, the name the data plane reads (lib/postgrest/translate.ts). This
+          // said `orderBy`, which the runtime reads as a filter on a column of that
+          // name, so a client built from this document got a 400 on every sorted list.
+          { name: 'sort', in: 'query', schema: { type: 'string' }, description: 'Column name to sort by' },
           { name: 'order', in: 'query', schema: { type: 'string', enum: ['asc', 'desc'], default: 'asc' } },
         ],
         responses: {
