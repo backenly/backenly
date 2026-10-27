@@ -28,6 +28,16 @@ export const CONTINUE: NextCall = {
   why: 'This request is not finished. What already landed stays in place; this carries on with the rest.',
 }
 
+/**
+ * Waits for a request that is still running (lib/ai/brain/runs.ts). Any message
+ * sent while one runs joins it; "status" is the one that says so.
+ */
+export const STATUS_NEXT: NextCall = {
+  tool: 'backend_chat',
+  arguments: { message: 'status' },
+  why: 'Backenly is still working on this request; this waits for it and returns its result.',
+}
+
 /** Collects a design that is still running: "go ahead" builds it once it is ready. */
 export const GO_AHEAD_LATER: NextCall = {
   tool: 'backend_chat',

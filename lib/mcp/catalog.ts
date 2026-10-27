@@ -449,9 +449,11 @@ export function buildDispatchable(): McpToolDescriptor[] {
     description:
       'Run a natural-language request through the Backenly brain, Backenly\'s own model, which decides the steps, ' +
       'applies them through the same governed tools and returns a summary. Use it for what you would rather describe ' +
-      'than specify ("add likes and comments to my posts table", "make the orders API faster"). One call has about ' +
-      '90 s, so a large build can take several: when the response carries `next`, the request is not finished, and ' +
-      'that call (usually backend_chat with "continue") carries it on. To lay down a whole app\'s schema, ' +
+      'than specify ("add likes and comments to my posts table", "make the orders API faster"). A call answers within ' +
+      'about 45 s. A request that takes longer keeps running on its own: the answer has `status: "running"`, a run ' +
+      'id and what has landed so far, and backend_chat with "status" waits for it again and returns its result. ' +
+      'While one request runs, a message sent here joins it instead of starting another. Whenever an answer ' +
+      'carries `next`, the request is not finished: make that call. To lay down a whole app\'s schema, ' +
       'apply_migration with the complete DDL is faster and exact. Where production is protected the brain cannot ' +
       'change the schema: build it on a branch with apply_migration. If the request involves a destructive operation ' +
       '(dropping tables/columns, deleting buckets), it is NOT executed — the response includes an `approval` object ' +
@@ -573,6 +575,7 @@ export function buildDispatchable(): McpToolDescriptor[] {
     tier: 'read',
     description:
       'Check the status of an approval request: a call that was parked for a human instead of running. ' +
+      'It also takes the run id of a backend_chat request still running, and returns where it has got to or its result. ' +
       'Returns pending | approved | executed | failed | rejected | expired (older requests may also read partial) ' +
       'plus a result summary once decided. ' +
       'Poll every 15-30s while pending; stop on any terminal status. Only the human can approve — ' +

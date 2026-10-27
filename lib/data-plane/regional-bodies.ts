@@ -24,6 +24,8 @@
  *                       function bodies, view queries, CHECK, policy and default
  *                       expressions, comments and enum labels, which its
  *                       record keeps only as digests (lib/changes/residency.ts)
+ *   brain_run           a backend_chat run: the request, the changes that
+ *                       landed and the answer (lib/ai/brain/runs.ts)
  *
  * For a project in the home region all of it stays on the platform rows, as
  * it always has. For a project in another region it never leaves that region
@@ -59,6 +61,7 @@ export type BodyKind =
   | 'held_action'
   | 'approval_request'
   | 'change_catalog'
+  | 'brain_run'
 
 /** How long a region keeps a log body (PRUNED_KINDS) after its last change. */
 export const REGIONAL_BODY_RETENTION_DAYS = 30
@@ -74,7 +77,7 @@ export const REGIONAL_BODY_RETENTION_DAYS = 30
  * with the request (lib/queue/worker.ts). A change's catalogs last as long as
  * its record, which is how long it can be restored and audited.
  */
-const PRUNED_KINDS: BodyKind[] = ['webhook', 'trigger', 'function_run', 'function_error', 'backfill_cursor']
+const PRUNED_KINDS: BodyKind[] = ['webhook', 'trigger', 'function_run', 'function_error', 'backfill_cursor', 'brain_run']
 
 export interface Body {
   payload: unknown

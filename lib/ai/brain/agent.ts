@@ -173,17 +173,17 @@ export interface BrainInput {
    * may not reach; it is a budget line item that is spent first from the end.
    *
    * Omit it and the loop has no wall clock of its own. backend_chat always
-   * passes one, from its 90s cap.
+   * passes one: its run's own limit (lib/ai/brain/runs.ts, RUN_LIMITS.maxMs),
+   * not the call's, since a run keeps going after the call has answered.
    */
   deadlineAt?: number
   /**
    * ── Token reporting that survives an abort ─────────────────────────────────
    *
-   * `BrainResult.tokensUsed` is only readable when the turn RETURNS. Callers
-   * that race this function against a wall clock (the MCP transport caps at
-   * 90s) never see it on the timeout path, because the race rejects and the
-   * result is discarded — so a run that spent 80s of model time was billed
-   * nothing at all. That is the most expensive kind of turn to lose.
+   * `BrainResult.tokensUsed` is only readable when the turn RETURNS. A turn
+   * that throws, and one a caller races against a wall clock, never return it,
+   * so a run that spent 80s of model time was billed nothing at all. That is
+   * the most expensive kind of turn to lose.
    *
    * This fires after every completion, as the tokens are actually consumed, so
    * a caller can accumulate them itself and charge what was spent even when the
@@ -425,7 +425,8 @@ const ARCHITECT_HEARTBEAT_MESSAGES = [
  * The LLM architect is a SINGLE 30–180s design call that emits nothing on its
  * own (`architectBackend` budgets up to 180s per attempt), so these lines are
  * all the turn's events show meanwhile; backend_chat returns them in `events`.
- * They extend nothing: backend_chat's 90s cap is a hard wall clock.
+ * A call not done waiting by then answers that the request is still running
+ * (lib/ai/brain/runs.ts), and these lines are its progress.
  */
 async function withHeartbeat<T>(
   emit: (e: BrainEvent) => void,

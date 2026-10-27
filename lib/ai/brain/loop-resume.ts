@@ -44,12 +44,14 @@ export interface LoopResume {
   expiresAt: string
 }
 
-export type LoopStop = 'step_budget' | 'time_budget' | 'model_failure'
+export type LoopStop = 'step_budget' | 'time_budget' | 'model_failure' | 'interrupted'
 
 const STOP_REASON: Record<LoopStop, string> = {
   step_budget: 'it ran out of steps',
   time_budget: 'it stopped to keep time for verification',
   model_failure: 'the AI model failed partway',
+  // The process running it stopped (a deploy, a crash): lib/ai/brain/runs.ts.
+  interrupted: 'Backenly restarted while it was running',
 }
 
 export async function saveLoopResume(

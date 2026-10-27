@@ -863,6 +863,16 @@ tests/integration/brain-iterations.spec.ts
 # queues and resume points, so it needs a real Postgres.
 tests/integration/brain-builds-finish.spec.ts
 
+# A backend_chat request is a run that outlives its call: one done inside the
+# window answers at once; one that is not answers status "running" and keeps
+# going, and "status", check_approval with its run id, or any message sent
+# meanwhile collects its result; a run nobody collected is charged when it ends
+# and reported to the next request; a run whose process stopped is closed as
+# interrupted with a resume point; and a project kept in another region keeps
+# the run's words there. It writes the run rows, resume points and conversation,
+# so it needs a real Postgres.
+tests/integration/brain-runs.spec.ts
+
 # Escalated findings: the deterministic investigation first, then the model
 # investigator with real read-only probes, a checked hypothesis stored as one,
 # once per evidence, with backoff after failures. The probes read the

@@ -3,12 +3,14 @@
  *
  * A build the wall clock stopped came back `ok: true, partial: true` with "say
  * continue" in its prose, and agents took the two tables they had as the
- * build. A design that outlasted the call came back BRAIN_TIMEOUT, "Nothing was
- * applied", retryable, so every retry started another design of the same
- * backend. The body now names the call that carries the request on (`next`),
- * and a design still running answers `status: "designing"`.
+ * build. The body now names the call that carries the request on (`next`), a
+ * design still running answers `status: "designing"`, and a request that is
+ * still going when the call answers says so with the call that collects it.
  *
- * The brain, the key, the gates and the credits are stubbed; the route is real.
+ * The brain, the key, the gates and the credits are stubbed, and there is no
+ * database here, so the run cannot be recorded: these are the answers a run
+ * gives on that path too. tests/integration/brain-runs.spec.ts holds runs to a
+ * real database.
  */
 import '../helpers/next-request-polyfill'
 
@@ -24,6 +26,16 @@ jest.mock('@/lib/mcp/guard', () => ({
 jest.mock('@/lib/ai/brain/agent', () => ({
   runBrain: jest.fn((_input: unknown, emit: (e: unknown) => void) => mockTurn(emit)),
 }))
+jest.mock('@/lib/ai/brain/runs', () => {
+  const actual = jest.requireActual('@/lib/ai/brain/runs')
+  const refuse = async () => { throw new Error('no database in this suite') }
+  return {
+    ...actual,
+    startRun: jest.fn(refuse),
+    activeRun: jest.fn(async () => null),
+    latestRun: jest.fn(async () => null),
+  }
+})
 jest.mock('@/lib/mcp/approvals', () => ({
   createApprovalRequest: jest.fn(),
   RestoreRequestRefusedError: class RestoreRequestRefusedError extends Error {},
@@ -36,6 +48,7 @@ jest.mock('@/lib/usage/account', () => ({ creditAccountOf: jest.fn(async () => '
 import { NextRequest } from 'next/server'
 import { POST as chat } from '@/app/api/mcp/chat/route'
 import { CONTINUE, GO_AHEAD_LATER } from '@/lib/ai/brain/next-call'
+import { isStatusCheck, setRunLimitsForTests } from '@/lib/ai/brain/runs'
 
 const ask = (message: string) =>
   chat(new NextRequest('https://backenly.test/api/mcp/chat', {
@@ -55,10 +68,10 @@ const turn = (o: Record<string, unknown>) => ({
   ...o,
 })
 
-afterEach(() => jest.useRealTimers())
+afterEach(() => setRunLimitsForTests(null))
 
-describe('a build that did not finish in one call', () => {
-  it('a wall-clock stop that verified what landed carries next: continue', async () => {
+describe('a build that did not finish in one turn', () => {
+  it('a stop that verified what landed carries next: continue', async () => {
     mockTurn = async () => turn({
       success: false,
       budgetStopped: true,
@@ -111,42 +124,34 @@ describe('a build that did not finish in one call', () => {
   })
 })
 
-describe('the wall clock', () => {
-  it('cutting a design answers that it is still designing, not that nothing was applied', async () => {
-    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] })
-    mockTurn = (emit) => {
-      emit({ type: 'phase', phase: 'route' })
-      emit({ type: 'phase', phase: 'design' })
-      emit({ type: 'thinking', text: 'Designing your database schema and table relationships…' })
-      return new Promise(() => {})
-    }
+describe('a request still going when the call answers', () => {
+  it('is not cut off: the answer says it is running, and it finishes after the call', async () => {
+    setRunLimitsForTests({ syncWaitMs: 50 })
+    let finished = false
+    mockTurn = () => new Promise((resolve) => setTimeout(() => {
+      finished = true
+      resolve(turn({ applied: ['Creating table products'] }))
+    }, 300))
 
-    const pending = ask('build a recipe app')
-    await jest.advanceTimersByTimeAsync(90_000)
-    const res = await pending
+    const res = await ask('build my store')
     const body = await res.json()
 
     expect(res.status).toBe(200)
-    expect(body).toMatchObject({ ok: true, status: 'designing', next: GO_AHEAD_LATER })
-    expect(body.summary).toContain('"go ahead"')
-    expect(body.summary).toContain('would only start a second design')
+    expect(body).toMatchObject({ ok: true, status: 'running' })
     expect(body).not.toHaveProperty('code')
+    // Unrecorded here, so the answer points at the live state rather than a run to poll.
+    expect(body.next).toMatchObject({ tool: 'read_backend_state' })
+    expect(finished).toBe(false)
+    await new Promise((r) => setTimeout(r, 400))
+    expect(finished).toBe(true)
   })
+})
 
-  it('cutting a turn with nothing designed or applied is still a timeout', async () => {
-    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] })
-    mockTurn = (emit) => {
-      emit({ type: 'phase', phase: 'route' })
-      return new Promise(() => {})
-    }
-
-    const pending = ask('build a recipe app')
-    await jest.advanceTimersByTimeAsync(90_000)
-    const res = await pending
-    const body = await res.json()
-
-    expect(res.status).toBe(504)
-    expect(body).toMatchObject({ ok: false, code: 'BRAIN_TIMEOUT', retryable: true })
-    expect(body).not.toHaveProperty('status')
+describe('which messages only ask after a running request', () => {
+  it.each(['status', 'Status', 'check status', 'is it done?', 'progress.', 'wait'])('%s does', (m) => {
+    expect(isStatusCheck(m)).toBe(true)
+  })
+  it.each(['continue', 'go ahead', 'build my store', 'what is the status of my orders table?'])('%s does not', (m) => {
+    expect(isStatusCheck(m)).toBe(false)
   })
 })
