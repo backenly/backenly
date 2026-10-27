@@ -117,8 +117,10 @@ describe('enabling auth', () => {
 })
 
 describe('a key into users on a project nobody has signed up to', () => {
+  // Auth on as a project that enabled it before enabling created the table.
   it('is created, with the users table it needs', async () => {
     const p = await project('users-reference')
+    await authOnWithoutUsersTable(p.id)
     const result = await applyMigrationToMain(
       p.id,
       ownerId,
@@ -135,6 +137,19 @@ describe('a key into users on a project nobody has signed up to', () => {
           ON ccu.constraint_name = tc.constraint_name AND ccu.constraint_schema = tc.constraint_schema
        WHERE tc.table_schema = ${p.schema} AND tc.table_name = 'profiles' AND tc.constraint_type = 'FOREIGN KEY'`
     expect(fk.map((r) => r.ref)).toEqual(['users'])
+  }, 120_000)
+
+  // With auth off, `users` may be a table of the project's own that a later
+  // statement creates. The auth table is not made for it; the key is refused,
+  // naming what is missing, as it always was.
+  it('creates no auth table while auth is off', async () => {
+    const p = await project('users-reference-no-auth')
+    const result = await applyMigrationToMain(p.id, ownerId, 'CREATE TABLE profiles (user_id uuid REFERENCES users(id))', {
+      workspaceSchema: p.schema, agentSurface: true,
+    })
+    expect(result.ok).toBe(false)
+    expect(JSON.stringify(result)).not.toContain('prisma')
+    expect(await tables(p.schema)).not.toContain('users')
   }, 120_000)
 
   it('never creates anything for a key into another table', async () => {
