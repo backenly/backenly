@@ -63,8 +63,8 @@ export async function runBackgroundAgent(projectId: string): Promise<BackgroundC
     })
 
     const integrations = (project?.activeIntegrations as Record<string, any>) ?? {}
-    const authManifest = (project?.authManifest as any) ?? {}
-    const hasAuth = !!authManifest?.enabled
+    const { isEndUserAuthEnabled } = await import('@/lib/services/auth-status')
+    const hasAuth = project ? await isEndUserAuthEnabled(projectId, project.authManifest) : false
     const hasTables = (project?.tables?.length ?? 0) > 0
     const tableNames = (project?.tables ?? []).map(t => t.name)
 

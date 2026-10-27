@@ -4372,6 +4372,16 @@ async function executeCreateTable(
     // create or re-adoption of a physically-present table.
     const createTableSQL = `CREATE TABLE IF NOT EXISTS "${postgresSchema}"."${tableName}" (\n  ${columnDefs.join(',\n  ')}\n);`
 
+    // A key into `users` needs the end-user auth table, which otherwise only
+    // the first sign-up creates (lib/services/auth-users-reference.ts).
+    if (!branchMode && tableName !== 'users') {
+      const { ensureReferencedAuthUsersTable } = await import('@/lib/services/auth-users-reference')
+      for (const { col } of columnPlans) {
+        const declared = (col as { references?: { table?: unknown } }).references
+        if (await ensureReferencedAuthUsersTable(projectId, declared?.table ?? col?.fkTo, postgresSchema)) break
+      }
+    }
+
     console.log(`📝 [AI Executor] Executing SQL:`, createTableSQL)
     await db.$executeRawUnsafe(createTableSQL)
 
@@ -4941,10 +4951,16 @@ async function executeCreateTable(
       }
     }
     
+    // The driver's own words ("Invalid `prisma.$executeRawUnsafe()` invocation:
+    // … Code: `42P01`") reached the person approving a merge verbatim. Said in
+    // a sentence instead; the raw text stays in the server log.
+    console.error(`[AI Executor] Creating "${tableName}" failed:`, error?.message ?? error)
+    const { sanitizeDiagnostic } = await import('@/lib/errors/diagnostic-sanitize')
+    const reason = sanitizeDiagnostic(error)
     return {
       success: false,
-      message: `Failed to create table: ${error.message}`,
-      error: error.message,
+      message: `Failed to create table "${tableName}": ${reason}`,
+      error: reason,
     }
   }
 }
@@ -5862,6 +5878,12 @@ async function executeAddColumn(
       }
       const type = normalizeColumnType(String(spec!.type ?? colsToAdd[0].type), name)
       const definition = `${type}${defaultSql}${spec!.nullable === false ? ' NOT NULL' : ''}${spec!.unique === true ? ' UNIQUE' : ''}${referencesSql}`
+      if (referencesSql) {
+        // A key into `users` needs the end-user auth table (lib/services/auth-users-reference.ts),
+        // in the branch's own schema on a branch.
+        const { ensureReferencedAuthUsersTable } = await import('@/lib/services/auth-users-reference')
+        await ensureReferencedAuthUsersTable(projectId, isDeclaredForeignKey(declaredFk) ? declaredFk.table : spec!.fkTo, postgresSchema)
+      }
       try {
         await db.$executeRawUnsafe(`ALTER TABLE "${postgresSchema}"."${tableName}" ADD COLUMN "${name}" ${definition}`)
       } catch (err: any) {
@@ -7313,28 +7335,18 @@ async function executeListKeys(projectId: string): Promise<ExecutionResult> {
 
 /**
  * AUTH: Enable Authentication
- * Updates the BackendGraph so the UI reflects auth as configured.
+ * Marks email/password auth enabled in the BackendGraph, which every surface
+ * reads as "auth is on" (getProjectAuthStatus), and creates the end-user
+ * `users` table the way a sign-up would.
  */
 async function executeEnableAuth(projectId: string): Promise<ExecutionResult> {
   try {
-    const { prisma: authPrisma } = await import('@/lib/db')
-
     // Step 1: Ensure project has a jwtSecret — this is what makes auth actually functional.
     // readAuth() in proof-system checks project.jwtSecret, so without this auth will never
-    // appear as enabled in any proof query.
-    const project = await authPrisma.project.findUnique({
-      where: { id: projectId },
-      select: { jwtSecret: true },
-    })
-    if (!project?.jwtSecret) {
-      const { randomBytes } = await import('crypto')
-      const secret = randomBytes(32).toString('hex')
-      await authPrisma.project.update({
-        where: { id: projectId },
-        data: { jwtSecret: secret },
-      })
-      console.log(`[executeEnableAuth] Generated jwtSecret for project ${projectId}`)
-    }
+    // appear as enabled in any proof query. The canonical path, so the secret is
+    // stored in its encrypted-at-rest form like every other project's.
+    const { JWTSecretManager } = await import('@/lib/services/jwtSecretManager')
+    await JWTSecretManager.getOrCreateSecret(projectId)
 
     // Step 2: Mark email/password auth as enabled in the BackendGraph (drives UI state)
     const graph = await getActiveGraph(projectId)
@@ -7354,6 +7366,15 @@ async function executeEnableAuth(projectId: string): Promise<ExecutionResult> {
     }
 
     await saveNewGraph(projectId, updatedGraph as any, undefined, { skipBillingCheck: true })
+
+    // Step 3: The end-user `users` table, with its own-rows policy. The first
+    // sign-up used to be the only thing that created it, so until someone signed
+    // up, a table referencing users(id) could not be created or merged, autonomy
+    // reported "users table missing" as critical, and the auth workflow check
+    // asked for RLS on a table that did not exist. Idempotent, and inside this
+    // governed change, so enabling auth is on the history and can be restored.
+    const { ensureAuthUsersTable } = await import('@/lib/services/end-user-auth-table')
+    await ensureAuthUsersTable(projectId, { email: null })
 
     return {
       success: true,
@@ -9379,6 +9400,9 @@ async function executeAddConstraint(params: any, projectId: string, schemaTarget
       const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
       const sql = addForeignKeySql(getWorkspaceDatabaseNames(projectId).postgresSchema, tableName, columnName, fk)
       try {
+        // A key into `users` needs the end-user auth table (lib/services/auth-users-reference.ts).
+        const { ensureReferencedAuthUsersTable } = await import('@/lib/services/auth-users-reference')
+        await ensureReferencedAuthUsersTable(projectId, fk.table)
         await db.$executeRawUnsafe(sql)
       } catch (err: any) {
         const reason = err?.meta?.message ?? err?.message ?? String(err)
