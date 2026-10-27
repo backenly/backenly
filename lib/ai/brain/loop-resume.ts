@@ -142,12 +142,18 @@ export async function loadLoopResume(projectId: string): Promise<LoopResume | nu
   }
 }
 
+
 export async function clearLoopResume(projectId: string): Promise<void> {
   const marker = await prisma.projectPreference.findFirst({
     where: { projectId, type: PREF_TYPE, key: PREF_KEY },
   }).catch(() => null)
 
-  const data = marker?.value as LoopResume | null
+  let data: LoopResume | null = null
+  try {
+    if (marker) data = JSON.parse(marker.value) as LoopResume
+  } catch {
+    // The marker is invalid; still delete the project preference below.
+  }
 
   if (data?.keptInRegion && data.resumeId) {
     const bodies = await regionalBodiesFor(projectId)
@@ -164,6 +170,7 @@ export async function clearLoopResume(projectId: string): Promise<void> {
     .deleteMany({ where: { projectId, type: PREF_TYPE, key: PREF_KEY } })
     .catch(() => {})
 }
+
 
 
 /**
