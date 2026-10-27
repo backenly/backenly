@@ -19,6 +19,8 @@ const col = (n: string, t: BlueprintColumn['type'], o: Partial<BlueprintColumn> 
 const createTable = (label: string, tableName: string, columns: BlueprintColumn[]) => ({ label, tool: 'create_table', args: { tableName, columns } })
 const generateApi = (tableName: string) => ({ label: `Generate REST API for ${tableName}`, tool: 'generate_api', args: { tableName } })
 const addRls = (tableName: string, policy: string, label?: string) => ({ label: label ?? `Lock down ${tableName} with ${policy} RLS`, tool: 'add_rls', args: { tableName, policy } })
+/** A row owned through its parent: `via` names the foreign key, because inference refuses a table with two owned parents. */
+const addRlsVia = (tableName: string, via: string, label: string) => ({ label, tool: 'add_rls', args: { tableName, policy: 'owned_via_parent', via } })
 const enableRealtime = (tableName: string) => ({ label: `Stream realtime changes on ${tableName}`, tool: 'enable_realtime', args: { tableName } })
 const createTrigger = (tableName: string, on: 'insert' | 'update' | 'delete') => ({ label: `Add ${on} trigger on ${tableName}`, tool: 'create_trigger', args: { tableName, on, kind: 'notify' } })
 
@@ -121,7 +123,7 @@ export const CHAT_APP_BLUEPRINT: Blueprint = {
     addRls('conversation_participants', 'owner_read_write'),
     addRls('messages', 'owner_read_write'),
     addRls('reactions', 'owner_read_write'),
-    addRls('attachments', 'owner_read_write'),
+    addRlsVia('attachments', 'message_id', 'Attachments follow their message'),
     addRls('presence', 'public_read', 'Presence is public-read (so contacts can see status)'),
     addRls('typing_indicators', 'owner_read_write'),
     addRls('contacts', 'owner_read_write'),

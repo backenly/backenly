@@ -873,6 +873,14 @@ tests/integration/brain-builds-finish.spec.ts
 # so it needs a real Postgres.
 tests/integration/brain-runs.spec.ts
 
+# Every curated blueprint runs to the end with no follow-ups, and the
+# row-level security it asks for applies: a child table names the parent that
+# owns it (add_rls via), every org-scoped table carries organization_id, and a
+# `via` that is not a foreign key is refused with the reason. It builds each
+# plan's tables and policies in a real workspace schema, so it needs a real
+# Postgres.
+tests/integration/curated-blueprints-apply.spec.ts
+
 # Escalated findings: the deterministic investigation first, then the model
 # investigator with real read-only probes, a checked hypothesis stored as one,
 # once per evidence, with backoff after failures. The probes read the
