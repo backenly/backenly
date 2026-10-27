@@ -42,7 +42,6 @@ tests/auth/email-eligibility.test.ts
 
 tests/blueprints/blueprint-routing.test.ts
 tests/blueprints/plan-coverage.test.ts
-tests/blueprints/resume-routing.test.ts
 tests/build-runs/flag.test.ts
 tests/build-runtime/build-runtime.test.ts
 tests/build-runtime/marketplace-regression.test.ts
