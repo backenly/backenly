@@ -98,6 +98,22 @@ describe('enabling auth', () => {
       SELECT count(*)::bigint AS n FROM backend_changes WHERE "projectId" = ${p.id}`
     expect(Number(change[0].n)).toBeGreaterThan(0)
   }, 120_000)
+
+  // Older projects still hold a plaintext signing secret, which sign-in accepts.
+  // Enabling auth must leave it alone: decrypting it as the canonical format
+  // fails, and that failure used to be one refactor away from failing auth itself.
+  it('keeps a legacy plaintext secret as it is', async () => {
+    const p = await project('auth-enable-legacy-secret')
+    const legacy = crypto.randomBytes(32).toString('hex')
+    await prisma.project.update({ where: { id: p.id }, data: { jwtSecret: legacy } })
+
+    const result = await executeAction({ action: 'ENABLE_AUTH', params: {} } as any, p.id)
+    expect(result.success).toBe(true)
+
+    const row = await prisma.project.findUnique({ where: { id: p.id }, select: { jwtSecret: true } })
+    expect(row?.jwtSecret).toBe(legacy)
+    expect(await tables(p.schema)).toContain('users')
+  }, 120_000)
 })
 
 describe('a key into users on a project nobody has signed up to', () => {

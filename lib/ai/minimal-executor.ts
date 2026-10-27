@@ -7343,10 +7343,19 @@ async function executeEnableAuth(projectId: string): Promise<ExecutionResult> {
   try {
     // Step 1: Ensure project has a jwtSecret — this is what makes auth actually functional.
     // readAuth() in proof-system checks project.jwtSecret, so without this auth will never
-    // appear as enabled in any proof query. The canonical path, so the secret is
-    // stored in its encrypted-at-rest form like every other project's.
-    const { JWTSecretManager } = await import('@/lib/services/jwtSecretManager')
-    await JWTSecretManager.getOrCreateSecret(projectId)
+    // appear as enabled in any proof query. Created through the canonical path, so it is
+    // stored in its encrypted-at-rest form, and only when missing: getOrCreateSecret
+    // decrypts a secret that exists and refuses a legacy plaintext one, which older
+    // projects still hold and sign-in still accepts.
+    const { prisma: authPrisma } = await import('@/lib/db')
+    const project = await authPrisma.project.findUnique({
+      where: { id: projectId },
+      select: { jwtSecret: true },
+    })
+    if (!project?.jwtSecret) {
+      const { JWTSecretManager } = await import('@/lib/services/jwtSecretManager')
+      await JWTSecretManager.getOrCreateSecret(projectId)
+    }
 
     // Step 2: Mark email/password auth as enabled in the BackendGraph (drives UI state)
     const graph = await getActiveGraph(projectId)
