@@ -565,6 +565,7 @@ export function WorkspaceHome({
           loopPhase={loopPhase}
           healSignal={healSignal}
           lastReconciledIso={lastReconciledIso}
+          sensors={health?.sensors ?? null}
           onReview={() => router.push(`/app/projects/${projectId}/autonomy`)}
         />
       </div>
@@ -649,7 +650,7 @@ const LOOP_STAGES: Array<{ key: LoopPhase; label: string }> = [
  */
 const LOOP_EXPLAIN: Record<LoopPhase, string> = {
   observe:
-    'The rules your backend must always hold to. Backenly re-checks every one of them, every minute, on every plan.',
+    'The rules your backend must always hold to that it could check on its last pass. Backenly re-checks them against the live database every minute, on every plan.',
   detect:
     'How many of those rules it is failing right now. Backenly probes the live database instead of waiting for a bug report.',
   propose:
@@ -662,7 +663,10 @@ const LOOP_EXPLAIN: Record<LoopPhase, string> = {
 
 /** Live per-phase readings for the loop instrument. null → render '—'. */
 interface LoopStats {
-  invariants: number | null
+  /** Checks that ran on this project's last pass (sensor-state.ts); null before its first. */
+  checksRan: number | null
+  /** Of those, the ones that errored and so could not report a problem. */
+  checksErrored: number
   openFindings: number | null
   actionableFindings: number | null
   pending: number | null
@@ -790,7 +794,7 @@ function AgentPanel({
 
 function LoopPanel({
   autonomy, autonomyOff, pending, openFindings, actionableFindings,
-  loopPhase, healSignal, lastReconciledIso, onReview,
+  loopPhase, healSignal, lastReconciledIso, sensors, onReview,
 }: {
   autonomy: ReturnType<typeof useAutonomyStatus>['status']
   autonomyOff: boolean
@@ -801,10 +805,16 @@ function LoopPanel({
   healSignal: number
   /** Last reconciler pass — the loop's cadence, not the daily observer's. */
   lastReconciledIso: string | null
+  /** What this project's last pass could check (from the same /health read). */
+  sensors: SensorSummary | null
   onReview: () => void
 }) {
   const loopStats: LoopStats = {
-    invariants: autonomy?.invariantCount ?? null,
+    // This project's last pass, not the size of the rulebook. That was
+    // `invariantCount`, the same 26 on every project, built or empty, checked
+    // or not, so the reading never moved and meant nothing about this backend.
+    checksRan: sensors ? sensors.ran : null,
+    checksErrored: sensors ? sensors.errored.length : 0,
     openFindings,
     actionableFindings,
     // Gated on the SAME payload as `actionableFindings` (the caller derives
@@ -960,11 +970,14 @@ function SelfHealingLoop({
   // Per-node reading: value + unit. '—' while the trust report is loading.
   const readings: Record<LoopPhase, { value: string; unit: string; accent?: boolean }> = {
     observe: {
-      value: stats.invariants == null ? '—' : String(stats.invariants),
-      // The cadence belongs ON the reading. It is the whole claim — a linter
-      // runs when you invoke it, this runs whether or not anyone is looking —
-      // and it holds for every plan including Free.
-      unit: 'guarantees, every minute',
+      value: stats.checksRan == null ? '—' : String(stats.checksRan),
+      // What ran on this project's last pass. A check that errored could not
+      // have reported a problem, so it is said rather than counted as clean.
+      unit: stats.checksRan == null
+        ? 'first check pending'
+        : stats.checksErrored > 0
+          ? `guarantees checked, ${stats.checksErrored} could not run`
+          : 'guarantees checked',
     },
     detect: {
       // open + pending_approval: the sum of what the Autonomy page shows

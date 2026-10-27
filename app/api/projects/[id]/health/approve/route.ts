@@ -158,9 +158,13 @@ export const POST = withProjectAccess(async (req: NextRequest, { user, project, 
       lower.includes('in progress') ||
       lower.includes('another auto-fix') ||
       lower.includes('try again')
+    // A repair that ran and said why it could not apply is an answer, not a
+    // server fault. The workflow repair's report ("Needs your action: …") was
+    // missing here, so an approval it could not complete was counted as a 500.
     const needsUserAction =
       lower.includes('needs your manual review') ||
-      lower.includes('needs your api key')
+      lower.includes('needs your api key') ||
+      lower.includes('needs your action')
 
     // 503: the project's region, which keeps what a held action replays, could
     // not be reached, so nothing ran.

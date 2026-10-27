@@ -104,3 +104,34 @@ describe('never falling back to the app connection', () => {
     await expect(functionDbClient(PID)).rejects.toThrow(/unexpected role/)
   })
 })
+
+// Found by fuzzing the data API: two first calls of a project's functions at
+// once each synced the role, the syncs raced on it, and one call answered 500.
+describe('first calls that arrive together', () => {
+  const PID2 = '22222222-3333-4444-8555-666666666666'
+  const PID3 = '33333333-4444-4555-8666-777777777777'
+
+  it('share one sync and one client', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((r) => { release = r })
+    mockQueryRaw.mockImplementation(async () => {
+      await gate
+      return [{ role: functionRoleName(`workspace_${PID2}`) }]
+    })
+    const first = functionDbClient(PID2)
+    const second = functionDbClient(PID2)
+    release()
+    const [a, b] = await Promise.all([first, second])
+    expect(mockQueryRaw).toHaveBeenCalledTimes(1)
+    expect(a).toBe(b)
+  })
+
+  it('retry once when another process held the role at the same moment', async () => {
+    mockQueryRaw
+      .mockRejectedValueOnce(new Error('Raw query failed. Code: `XX000`. Message: `ERROR: tuple concurrently updated`'))
+      .mockResolvedValueOnce([{ role: functionRoleName(`workspace_${PID3}`) }])
+    const handle = await functionDbClient(PID3)
+    expect(handle.role).toBe(functionRoleName(`workspace_${PID3}`))
+    expect(mockQueryRaw).toHaveBeenCalledTimes(2)
+  })
+})

@@ -1614,3 +1614,18 @@ tests/integration/brain-loop-edges.spec.ts
 # the table-by-table reader read. What PostgreSQL's catalog returns is the
 # property, so it needs a real Postgres.
 tests/integration/workspace-schema-snapshot-reader.spec.ts
+
+# A project whose agent turned auth on before anyone signed up: enabling auth
+# creates the users table, a key into users works on a fresh project (directly
+# and as a merge replays it), the loop files no false auth alarms, findings
+# that clear are withdrawn by the check of their own claim and never credited as
+# fixes, and the deploy gate reads auth as every other surface does. The
+# executor, migration dispatch, observer and gate run their real DDL and catalog
+# reads, so it needs a real Postgres.
+tests/integration/auth-before-first-signup.spec.ts
+
+# A request body the runtime cannot parse is answered 400 with the v1 error
+# shape, never 500, and a valid body still reaches the route. Boots the real
+# Express app (server/app.ts), whose modules open the platform database, so it
+# runs with one.
+tests/integration/runtime-rejects-bad-bodies.spec.ts

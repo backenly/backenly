@@ -25,6 +25,7 @@
  */
 
 import { prisma } from '@/lib/db/prisma'
+import { allowsAnyOrigin, isDevelopmentOrigin } from '@/lib/security/development-origin'
 
 export interface ConnectFrontendOptions {
   projectId: string
@@ -43,7 +44,8 @@ export interface ConnectFrontendResult {
   backendVersion?: number
   /**
    * True when this connect made the CORS allowlist exclusive: it is the
-   * project's only active origin, and an empty allowlist admits every origin.
+   * project's first active deployed origin, and an allowlist of development
+   * origins only admits every origin.
    */
   firstConnectedOrigin?: boolean
   errors?: string[]
@@ -183,12 +185,14 @@ export async function connectFrontend(options: ConnectFrontendOptions): Promise<
   }
 
   // Active origins are the CORS allowlist the web app's middleware enforces on
-  // the SDK routes it answers, and an EMPTY list admits every origin. So the
-  // first bind quietly turns every other frontend away; say so instead.
-  const otherActiveOrigins = await prisma.connectedApp.count({
+  // the SDK routes it answers, and a list of only development origins admits
+  // every origin (lib/security/development-origin.ts). So the first deployed
+  // origin bound quietly turns every other frontend away; say so instead.
+  const otherActive = await prisma.connectedApp.findMany({
     where: { projectId, isActive: true, origin: { not: origin } },
+    select: { origin: true },
   })
-  const firstConnectedOrigin = otherActiveOrigins === 0
+  const firstConnectedOrigin = !isDevelopmentOrigin(origin) && allowsAnyOrigin(otherActive.map(o => o.origin))
 
   const row = await prisma.connectedApp.upsert({
     where: { projectId_origin: { projectId, origin } },
@@ -237,10 +241,10 @@ export async function connectFrontend(options: ConnectFrontendOptions): Promise<
     message:
       `Connected: ${origin}\n\nYour frontend can now call your backend APIs.` +
       (firstConnectedOrigin
-        ? '\n\nThis is the first connected origin, and connected origins are the CORS allowlist on the SDK ' +
-          'routes the web app answers: outside local development, browser calls from any other origin are ' +
-          'now refused there until that origin is connected too. Connect every frontend that calls this ' +
-          'backend (production, preview, local).'
+        ? '\n\nThis is the first deployed origin connected, and connected origins are the CORS allowlist on ' +
+          'the SDK routes the web app answers: browser calls from any other deployed origin are now refused ' +
+          'there until that origin is connected too. Connect every deployed frontend that calls this backend ' +
+          '(production and preview). Development origins such as localhost never close the list.'
         : ''),
     connected: true,
     origin,
