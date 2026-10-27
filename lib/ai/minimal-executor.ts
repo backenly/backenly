@@ -8,6 +8,7 @@
  */
 
 import { isReservedWorkspaceTable } from '@/lib/security/workspace-schema'
+import type { RelatedRowsVia } from '@/lib/services/rls-ownership'
 import { addForeignKeySql, columnForeignKeySql, describeTarget, isDeclaredForeignKey } from '@/lib/db/declared-foreign-key'
 import { getActiveGraph, saveNewGraph } from '@/lib/orchestration/graph-pointer'
 import { withTimeout } from './with-timeout'
@@ -10394,11 +10395,25 @@ async function executeSetPermission(params: any, projectId: string): Promise<Exe
   try {
     const { applyPermissionPolicy } = await import('@/lib/services/workspace-rls')
 
+    // An ownership path named by its foreign-key column, checked against the
+    // live catalog. Without one, related_rows infers it, and refuses when two
+    // parents could own the row.
+    let via: RelatedRowsVia | undefined
+    if (template === 'related_rows' && typeof params.via === 'string' && params.via) {
+      const { resolveOwnershipPath } = await import('@/lib/services/rls-ownership')
+      const path = await resolveOwnershipPath(projectId, tableName, params.via)
+      if ('error' in path) {
+        return { success: false, message: `No policy was applied to "${tableName}". ${path.error}`, code: 'RLS_NOT_APPLIED' }
+      }
+      via = path.via
+    }
+
     const result = await applyPermissionPolicy(projectId, {
       tableName,
       template,
       userIdColumn,
       roleColumn: params.roleColumn,
+      ...(via ? { via } : {}),
       ...(Array.isArray(params.partyColumns) ? { partyColumns: params.partyColumns } : {}),
       ...(params.using ? { using: params.using } : {}),
       ...(params.withCheck ? { withCheck: params.withCheck } : {}),

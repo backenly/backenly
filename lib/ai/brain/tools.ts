@@ -595,6 +595,13 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
         items: { type: 'string' },
         description: 'For `participants`: the columns naming each user party to a row, e.g. ["requester_id","addressee_id"].',
       },
+      via: {
+        type: 'string',
+        description:
+          'For `owned_via_parent`: the foreign-key column whose parent row decides access, e.g. "order_id". ' +
+          'Omit and it is inferred, which is refused when the row could belong to more than one parent ' +
+          '(order_items points at both orders and sellers).',
+      },
       using: {
         type: 'string',
         description:
@@ -1683,6 +1690,7 @@ export const TOOL_TO_ACTION: Record<string, (args: any) => AIAction> = {
             custom: 'custom',
           } as Record<string, string>)[String(a.policy)] ?? String(a.policy),
       ...(Array.isArray(a.partyColumns) ? { partyColumns: a.partyColumns } : {}),
+      ...(typeof a.via === 'string' && a.via ? { via: a.via } : {}),
       ...(a.using ? { using: a.using } : {}),
       ...(a.withCheck ? { withCheck: a.withCheck } : {}),
       // Per-command rules. Forwarded as-is: the executor validates every
