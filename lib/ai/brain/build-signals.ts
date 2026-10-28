@@ -3,7 +3,7 @@
  * =============
  * Pure, dependency-free heuristics for recognising build intent from raw text.
  * Kept in a leaf module (no prisma / no openai) so it can be unit-tested in
- * isolation, exactly like blueprints/resume-routing.
+ * isolation.
  */
 
 /** Question-opener words — a short message starting with one of these is a

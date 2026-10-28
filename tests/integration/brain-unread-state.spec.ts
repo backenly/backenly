@@ -45,7 +45,7 @@ let builtProjectId: string
 /** Has nothing built. */
 let freshProjectId: string
 
-/** Long enough, and not a table spec, for the lost-plan fallback to re-architect it on a fresh project. */
+/** Long, and not a table spec: a whole app the architect would design from scratch. */
 const ORIGINAL_REQUEST =
   'A recipe sharing app where home cooks post recipes with photos, ingredients and steps, follow each ' +
   'other, save favourites into collections, and leave ratings and comments on what they cooked, with a ' +
@@ -132,8 +132,9 @@ describe('a project whose state could not be read', () => {
   }, 60_000)
 
   it('does not re-architect and run the original request when "go ahead" finds no stored plan', async () => {
-    // A plan was shown, but nothing executable was kept, so the CONFIRM path
-    // falls back to designing the original request again and running it.
+    // A plan was shown, but nothing executable was kept. The CONFIRM path once
+    // designed the request it found in the history again and ran it; now the
+    // loop takes the confirmation.
     await saveTurn(builtProjectId, ORIGINAL_REQUEST, 'Here is the plan.\n\nReply "go ahead" to run this, or tell me what to add or remove.')
     failTheStateRead()
     const provider = scriptedProvider([classified('CONFIRM'), finished('There is no stored plan to run.')])
