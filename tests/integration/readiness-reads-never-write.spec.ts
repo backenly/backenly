@@ -12,6 +12,10 @@
  * Now a read changes nothing on every path, the would-be fixes are reported
  * as auto-fixable items, and fixing is an explicit act: the Deploy page's
  * "Apply safe fixes", POST /readiness, autoFix: true, or the deploy itself.
+ *
+ * The auth flag is not written at all any more, fixing or not: the auth check
+ * reads whether auth is on the way every other surface does
+ * (isEndUserAuthEnabled), so there is no flag left for it to set.
  */
 import fs from 'fs'
 import path from 'path'
@@ -80,12 +84,13 @@ afterAll(async () => {
 }, 60_000)
 
 describe('DEP-06: a readiness read changes nothing', () => {
-  it('scoreReadiness without autoFix leaves the auth flag and the function alone, and reports both fixes', async () => {
+  it('scoreReadiness without autoFix leaves the function alone, and reports its fix', async () => {
     const report = await scoreReadiness(projectId)
     expect(await state()).toEqual({ authEnabled: false, fnStatus: 'active' })
     expect(report.autoFixed).toEqual([])
+    // No provider is on, so auth is off as every surface reads it: nothing to fix.
     const auth = report.checks.find((c) => c.id === 'end_user_auth_table')!
-    expect(auth).toMatchObject({ status: 'fail', severity: 'auto-fixable', fixApplied: false })
+    expect(auth).toMatchObject({ status: 'skip', fixApplied: false })
     const fns = report.checks.find((c) => c.id === 'function_triggers')!
     expect(fns.fixApplied).toBe(false)
     expect(fns.details.join('\n')).toContain('Applying safe fixes deactivates 1 placeholder function')
@@ -98,10 +103,11 @@ describe('DEP-06: a readiness read changes nothing', () => {
     expect(await state()).toEqual({ authEnabled: false, fnStatus: 'active' })
   }, 120_000)
 
-  it('fixing, asked for explicitly, still applies both (control)', async () => {
+  it('fixing, asked for explicitly, still applies the function fix and writes no auth flag (control)', async () => {
     const report = await scoreReadiness(projectId, { autoFix: true })
-    expect(await state()).toEqual({ authEnabled: true, fnStatus: 'inactive' })
-    expect(report.autoFixed.map((c) => c.id)).toEqual(expect.arrayContaining(['end_user_auth_table', 'function_triggers']))
+    expect(await state()).toEqual({ authEnabled: false, fnStatus: 'inactive' })
+    expect(report.autoFixed.map((c) => c.id)).toEqual(expect.arrayContaining(['function_triggers']))
+    expect(report.autoFixed.map((c) => c.id)).not.toContain('end_user_auth_table')
   }, 120_000)
 
   it('the Deploy page reads on load and fixes only on an explicit action', () => {

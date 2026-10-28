@@ -2,9 +2,9 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.backenly/backenly",
   "title": "Backenly",
-  "description": "Autonomous backend platform. Built by your coding agent over MCP, every change reversible.",
+  "description": "Postgres backend your coding agent builds over MCP; destructive actions wait for a person.",
   "version": "0.4.0",
-  "websiteUrl": "https://backenly.com",
+  "websiteUrl": "https://backenly.com/mcp",
   "repository": {
     "url": "https://github.com/backenly/backenly",
     "source": "github",

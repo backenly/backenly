@@ -140,13 +140,14 @@ describe('no finding type is classified auto without an executable repair', () =
     // it is produced by EXECUTING verification scenarios, so re-running it after
     // every fix would make the recheck path side-effecting and expensive. It is
     // covered by the acceptance gate's regression half instead.
+    //
+    // api_drift, missing_api_crud, missing_api_definition and verification_failed
+    // left this list when their repairs (FIX_API, FIX_WORKFLOW), which run
+    // outside the change ledger, moved to approval. They are no longer applied
+    // without asking, which is what this list counts; nothing new was probed.
     expect(unverifiable.sort()).toEqual([
-      'api_drift',
-      'missing_api_crud',
-      'missing_api_definition',
       'missing_rate_limit',
       'realtime_gap',
-      'verification_failed',
     ])
   })
 

@@ -55,6 +55,7 @@ export async function executeFrontendIntegration(
     select: { activeIntegrations: true },
   })
   const integrations = (existing?.activeIntegrations as Record<string, any>) ?? {}
+  // history: inside dispatchIntegration's change (./index.ts)
   await prisma.project.update({
     where: { id: projectId },
     data: {

@@ -150,7 +150,7 @@ export async function getSchemaVersion(
  * proven first, in one transaction, keeping what it removes in a vault, and
  * verified against the restore point afterwards. It runs automatically only
  * when that is lossless and the change failed its checks; otherwise a person
- * decides, from Database → Changes or by approving a request. This function
+ * decides, from History or by approving a request. This function
  * stays exported so nothing that still imports it can reach the old behaviour;
  * it changes nothing and says where restoring lives.
  */
@@ -167,9 +167,9 @@ export async function rollbackToVersion(
     success: false,
     statementsExecuted: [],
     message:
-      `Schema v${target.versionNum} cannot be restored wholesale. Each schema change since then is recorded with a ` +
-      'restore point, and the state before any one of them can be restored from Database → Changes, checked ' +
-      'first and verified afterwards. Nothing was changed.',
+      `Schema v${target.versionNum} cannot be restored wholesale. Each change since then is recorded with a ` +
+      'restore point: a person goes back from History, one change at a time or with Restore to this point, ' +
+      'each checked first and verified afterwards. Nothing was changed.',
   }
 }
 

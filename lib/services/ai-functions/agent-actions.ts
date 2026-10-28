@@ -457,9 +457,10 @@ export async function deployFunctionCode(
   // A function someone switched off stays off: deploying new code is not a
   // decision to start running it.
   const keptOff = existing?.status === 'inactive' || existing?.status === 'disabled'
-  const fn = existing
-    ? await prisma.aiFunction.update({ where: { id: existing.id }, data: { ...fields, ...(keptOff ? {} : { status: 'active' }) } })
-    : await prisma.aiFunction.create({ data: { projectId: actor.projectId, name, status: 'active', ...fields } })
+  const { governedChange } = await import('@/lib/changes/ledger')
+  const fn = await governedChange(actor.projectId, `${existing ? 'Deploy new code to' : 'Deploy'} function ${deployedName}`, () => existing
+    ? prisma.aiFunction.update({ where: { id: existing.id }, data: { ...fields, ...(keptOff ? {} : { status: 'active' }) } })
+    : prisma.aiFunction.create({ data: { projectId: actor.projectId, name, status: 'active', ...fields } }))
   // New code clears the last error, in the project's region too.
   if (existing?.lastError) await rowLastError(actor.projectId, existing.id, null)
 

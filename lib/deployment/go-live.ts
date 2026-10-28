@@ -97,7 +97,9 @@ export async function goLive(
   // accidentally triggers deploy (e.g. a build prompt containing "deploy-ready").
   const tableCount = await prisma.table.count({ where: { projectId } })
   const apiCount = (await listExposedTables(projectId)).filter((table) => isCrudExposable(table.name)).length
-  const hasAuth = (project.authManifest as any)?.enabled === true
+  // As every other surface reads it (lib/services/auth-status.ts).
+  const { isEndUserAuthEnabled } = await import('@/lib/services/auth-status')
+  const hasAuth = await isEndUserAuthEnabled(projectId, project.authManifest)
 
   if (tableCount === 0 && apiCount === 0 && !hasAuth) {
     return {

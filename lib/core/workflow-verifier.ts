@@ -225,17 +225,39 @@ async function verifyUserAuthFlow(projectId: string): Promise<WorkflowVerifyResu
     // Workflow not in use — healthy with empty components so observer skips it
     return { healthy: true, missingComponents: [], presentComponents: [] }
   }
-  present.push('users_table')
 
   const schema = `workspace_${projectId}`
 
-  // At least one PermissionPolicy on the users table (RLS enabled)
+  // The table itself, read from the catalog. This used to be pushed as present
+  // whenever auth was in use, so a project that had only enabled auth was told
+  // its User Auth Flow was missing RLS on a users table that did not exist, and
+  // approving that fix failed. Before first use there is nothing to protect yet
+  // (the table is created with its policy); missing after it existed is a gap.
+  if (!usage.usersTableExists) {
+    if (!usage.usersTableExpected) return { healthy: true, missingComponents: [], presentComponents: [] }
+    return { healthy: false, missingComponents: ['users_table'], presentComponents: [] }
+  }
+  present.push('users_table')
+
+  // RLS on the users table, as the database enforces it: enabled, with a
+  // policy. A PermissionPolicy row is Backenly's record of one it installed;
+  // the catalog is what protects the rows, and either one reads as present.
   await check('rls_on_users', async () => {
     const policy = await prisma.permissionPolicy.findFirst({
       where: { projectId, tableName: 'users', enabled: true },
       select: { id: true },
     })
-    return !!policy
+    if (policy) return true
+    const live = await queryWorkspaceSchema(
+      projectId,
+      `SELECT 1 FROM pg_class c
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = $1 AND c.relname = 'users' AND c.relrowsecurity
+          AND EXISTS (SELECT 1 FROM pg_policy p WHERE p.polrelid = c.oid AND p.polpermissive)
+        LIMIT 1`,
+      schema,
+    )
+    return (((live as any)?.rows ?? live ?? []) as unknown[]).length > 0
   })
 
   // At least one other table has a user_id column with RLS (end-user data is
@@ -262,7 +284,19 @@ async function verifyUserAuthFlow(projectId: string): Promise<WorkflowVerifyResu
         where: { projectId, tableName: { in: userDataTables }, enabled: true },
         select: { id: true },
       })
-      return !!policy
+      if (policy) return true
+      // As for rls_on_users: the catalog's policies count as well as Backenly's record of them.
+      const live = await queryWorkspaceSchema(
+        projectId,
+        `SELECT 1 FROM pg_class c
+           JOIN pg_namespace n ON n.oid = c.relnamespace
+          WHERE n.nspname = $1 AND c.relname = ANY($2::text[]) AND c.relrowsecurity
+            AND EXISTS (SELECT 1 FROM pg_policy p WHERE p.polrelid = c.oid AND p.polpermissive)
+          LIMIT 1`,
+        schema,
+        userDataTables,
+      )
+      return (((live as any)?.rows ?? live ?? []) as unknown[]).length > 0
     })
   }
 

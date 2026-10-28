@@ -127,7 +127,7 @@ describe('rollbackToVersion', () => {
 
     expect(result).toMatchObject({ success: false, statementsExecuted: [] })
     expect(result.message).toMatch(/cannot be restored wholesale/)
-    expect(result.message).toMatch(/Database → Changes/)
+    expect(result.message).toMatch(/goes back from History/)
     // Nothing newer than the version was dropped, and its data is intact.
     expect(await tableNames()).toEqual(['authors', 'drafts', 'posts', 'users'])
     expect(await columnsOf('posts')).toContain('subtitle')

@@ -26,6 +26,7 @@
 import { runReconciler } from './reconciler'
 import { FLAGS } from '@/lib/config/flags'
 import { outsideAnyChange } from '@/lib/changes/context'
+import { changeLockHeld } from '@/lib/changes/lock'
 
 /**
  * A timer whose work is its own actor (lib/changes/context.ts). The kick comes
@@ -75,6 +76,8 @@ interface Pending {
   timer: ReturnType<typeof setTimeout>
   /** All reasons coalesced into this pending kick (audit-friendly). */
   reasons: string[]
+  /** How many times this kick has waited for a change on the project to settle. */
+  waits?: number
 }
 
 const pending = new Map<string, Pending>()
@@ -82,6 +85,14 @@ const pending = new Map<string, Pending>()
 // 1.5s — long enough to coalesce a typical brain turn's chain of mutations,
 // short enough that the user still sees autonomy act within the same session.
 const DEBOUNCE_MS = 1500
+
+// The mutation that kicked the loop is often one step of a governed change
+// still under way: an agent's migration with more statements to run, its
+// verification, its automatic recovery. The reconciler waits for the project's
+// change lock to be free (lib/autonomy/reconciler.ts), so the kick looks again
+// every 2 s, for up to two minutes; past that the schedulers pick it up.
+export const SETTLE_POLL_MS = 2_000
+export const MAX_SETTLE_WAITS = 60
 
 // Defensive ceiling. If pending ever drifts above this, something is wrong —
 // timers should always clear themselves. Cap protects against a runaway leak
@@ -163,8 +174,27 @@ function scheduleSettledObserverPass(projectId: string): void {
 
 async function runKick(projectId: string): Promise<void> {
   const entry = pending.get(projectId)
-  pending.delete(projectId)
   if (!entry) return
+  const armed = entry.timer
+
+  // A change on the project still holds its lock, and the reconciler would only
+  // skip the pass: look again shortly, as the same kick, until it has settled.
+  // A newer kick for the project re-arms this entry's timer itself.
+  const busy = await changeLockHeld(projectId).catch(() => false)
+  if (pending.get(projectId) !== entry || entry.timer !== armed) return
+  if (busy) {
+    entry.waits = (entry.waits ?? 0) + 1
+    if (entry.waits <= MAX_SETTLE_WAITS) {
+      entry.timer = later(() => runKick(projectId), SETTLE_POLL_MS)
+      return
+    }
+    console.warn(
+      `[autonomy:event-trigger] project=${projectId} still changing after ${MAX_SETTLE_WAITS} looks; ` +
+      `the schedulers will pick it up.`,
+    )
+  }
+  pending.delete(projectId)
+  if (busy) return
 
   try {
     // runReconciler honors the master flag + per-project dial + breaker + the

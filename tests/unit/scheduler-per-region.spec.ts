@@ -84,6 +84,7 @@ describe('instrumentation.ts', () => {
     'runAndStoreFrontendCoevolution',
     'runReconciler',
     'sweepProjectMaintenance',
+    'sweepArchitecture',
     'collectBaseline',
     'runDriftEventUpkeep',
     'snapshotScheduledDbStorage',

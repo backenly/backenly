@@ -117,7 +117,7 @@ export function EnumsPanel({ projectId }: { projectId: string }) {
         <div className="flex min-w-0 items-baseline gap-2.5">
           <h2 className="text-[13px] font-medium text-zinc-100">Types</h2>
           {!loading && (
-            <span className="text-[12px] tabular-nums text-zinc-500">
+            <span className="text-[12px] tabular-nums text-faint">
               {enums.length} {enums.length === 1 ? 'enum' : 'enums'} · {domains.length}{' '}
               {domains.length === 1 ? 'domain' : 'domains'}
             </span>
@@ -168,7 +168,7 @@ export function EnumsPanel({ projectId }: { projectId: string }) {
                   Enums
                 </h3>
                 {enums.length === 0 ? (
-                  <p className={`border border-dashed ${EDGE} ${R_PANEL} px-4 py-4 text-[13px] text-zinc-500`}>
+                  <p className={`border border-dashed ${EDGE} ${R_PANEL} px-4 py-4 text-[13px] text-faint`}>
                     No enum types in this project yet. An enum fixes a column to a set of values, like an order
                     status.
                   </p>
@@ -214,7 +214,7 @@ export function EnumsPanel({ projectId }: { projectId: string }) {
                   Domains
                 </h3>
                 {domains.length === 0 ? (
-                  <p className={`border border-dashed ${EDGE} ${R_PANEL} px-4 py-4 text-[13px] text-zinc-500`}>
+                  <p className={`border border-dashed ${EDGE} ${R_PANEL} px-4 py-4 text-[13px] text-faint`}>
                     No domains in this project yet. A domain is a base type with rules attached, like an email
                     address that must contain an @.
                   </p>
@@ -225,7 +225,7 @@ export function EnumsPanel({ projectId }: { projectId: string }) {
                         <div className="min-w-0 flex-1">
                           <p className="flex flex-wrap items-center gap-2">
                             <span className="font-mono text-[12.5px] font-medium text-zinc-100">{d.name}</span>
-                            <span className="font-mono text-[12px] text-zinc-500">{d.baseType}</span>
+                            <span className="font-mono text-[12px] text-faint">{d.baseType}</span>
                             {d.notNull && <Tag mono>not null</Tag>}
                           </p>
                           {d.constraints.length > 0 && (
@@ -249,7 +249,7 @@ export function EnumsPanel({ projectId }: { projectId: string }) {
                 )}
               </section>
 
-              <p className="max-w-[72ch] text-[12.5px] leading-[19px] text-zinc-500">
+              <p className="max-w-[72ch] text-[12.5px] leading-[19px] text-faint">
                 There is no &ldquo;remove value&rdquo; for an enum. PostgreSQL has no{' '}
                 <span className="font-mono text-zinc-400">ALTER TYPE &hellip; DROP VALUE</span> at any version. Removing
                 one means creating a replacement type, converting every column that uses it and dropping the old one:
@@ -323,10 +323,10 @@ export function EnumsPanel({ projectId }: { projectId: string }) {
 /** The dependents of a type, which is what makes a change safe or not. */
 function UsedBy({ usedBy }: { usedBy: string[] }) {
   if (usedBy.length === 0) {
-    return <p className="mt-1.5 text-[12px] text-zinc-600">Not used by any column.</p>
+    return <p className="mt-1.5 text-[12px] text-faint">Not used by any column.</p>
   }
   return (
-    <p className="mt-1.5 text-[12px] text-zinc-500">
+    <p className="mt-1.5 text-[12px] text-faint">
       Used by <span className="font-mono text-zinc-400">{usedBy.join(', ')}</span>
     </p>
   )
@@ -372,7 +372,7 @@ function EnumForm({
             onChange={e => setRaw(e.target.value)}
             rows={6}
             placeholder={'draft\npublished\narchived'}
-            className="w-full rounded-md border border-white/10 bg-[#08090a] px-3 py-2 font-mono text-[12px] text-zinc-50 placeholder:text-zinc-600 focus:border-violet-400/40 focus:outline-none focus:ring-2 focus:ring-violet-400/15"
+            className="w-full rounded-md border border-white/10 bg-[#08090a] px-3 py-2 font-mono text-[12px] text-zinc-50 placeholder:text-zinc-500 focus:border-violet-400/40 focus:outline-none focus:ring-2 focus:ring-violet-400/15"
           />
         </KitField>
       </div>

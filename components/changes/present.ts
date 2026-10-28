@@ -31,6 +31,26 @@ export function awaitsDecision(c: Pick<ChangeSummary, 'outcome'>): boolean {
   return c.outcome.state === 'awaiting_approval' || c.outcome.state === 'needs_attention'
 }
 
+/**
+ * The parts of the backend a change can touch, in the sidebar's order: the
+ * History page's filters and each row's label (ChangeSummary.resources).
+ */
+export const RESOURCES: ReadonlyArray<{ id: string; label: string }> = [
+  { id: 'database', label: 'Database' },
+  { id: 'auth', label: 'Auth' },
+  { id: 'storage', label: 'Storage' },
+  { id: 'functions', label: 'Functions' },
+  { id: 'integrations', label: 'Integrations' },
+  { id: 'webhooks', label: 'Webhooks' },
+  { id: 'env', label: 'Environment' },
+  { id: 'keys', label: 'API keys' },
+]
+const RESOURCE_LABEL = new Map(RESOURCES.map((r) => [r.id, r.label]))
+
+export function resourceLabels(ids: readonly string[]): string {
+  return RESOURCES.filter((r) => ids.includes(r.id)).map((r) => r.label).join(', ') || RESOURCE_LABEL.get('database')!
+}
+
 export const EVENT: Record<string, string> = {
   checkpointed: 'Checkpoint taken',
   applied: 'Applied',

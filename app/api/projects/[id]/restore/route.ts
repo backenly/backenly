@@ -5,7 +5,7 @@
  * pointer to an earlier version, then re-created whatever that version named
  * and the workspace lacked, as new forward changes recorded to nobody in
  * particular. It removed nothing added since, so the backend was not put back
- * to that version. Restoring is per governed change now: Database → Changes,
+ * to that version. Restoring is per governed change now: History,
  * the change's ⋯ menu, Restore previous state (lib/changes/recovery.ts).
  *
  * Still answers only someone who administers the project, and 404 to anyone

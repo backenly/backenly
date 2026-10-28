@@ -18,7 +18,7 @@ export function movedToChanges(what: string): NextResponse {
       success: false,
       code: 'MOVED',
       error:
-        `${what} has been replaced by restoring the state before a change. Open Database → Changes in the ` +
+        `${what} has been replaced by restoring the state before a change. Open History in the ` +
         'project, or POST /api/projects/{id}/changes/{changeId}/preview and then POST …/restore. Nothing was changed.',
     },
     { status: 410 },

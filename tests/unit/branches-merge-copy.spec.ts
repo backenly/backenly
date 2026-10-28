@@ -30,8 +30,9 @@ describe('BR-08: the retired additive-merge story is gone', () => {
   })
 
   it('all three surfaces describe the replay the engine performs', () => {
-    expect(page).toContain('replays the branch')
-    expect(panel).toContain('replay')
+    // The page header, and with it this sentence, moved into the panel so its
+    // New branch action can open the panel's dialog.
+    expect(panel).toContain('replays the branch')
     expect(docs).toContain('replays the branch')
   })
 })

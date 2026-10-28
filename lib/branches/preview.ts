@@ -175,6 +175,7 @@ export async function mintPreviewKey(
   const serviceRole = opts.serviceRole === true
   const { key } = mintKey({ serviceRole, branchId: branch.id })
   const keyPrefix = key.substring(0, 16)
+  // history: a preview branch's key ends with its branch (lib/changes/resources/keys.ts)
   const row = await prisma.apiKey.create({
     data: {
       projectId,

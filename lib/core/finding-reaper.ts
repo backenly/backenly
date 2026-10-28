@@ -22,17 +22,33 @@
 import { prisma } from '@/lib/db/prisma'
 import { builtEvidenceWhere } from '@/lib/projects/backend-presence'
 
+export type WithdrawnBy =
+  | 'evolution_reaper'
+  | 'agent_reaper'
+  | 'invariant_reaper'
+  | 'detector_retired'
+  | 'not_built'
+  | 'platform_fault'
+  | 'locked_down'
+  | 'paused'
+  // The workspace observer's own checks no longer see the problem: a workflow
+  // that is whole again, a foreign key that now exists (or a column that is
+  // gone or was never a key), a verification scenario that passes. Backenly did
+  // not repair these, so they are withdrawn, never recorded as its fixes.
+  | 'workflow_reaper'
+  | 'fk_reaper'
+  | 'verification_reaper'
+  // A live probe of the surface answers correctly again (contract-verifier.ts).
+  | 'contract_reaper'
+
+/**
+ * Close findings whose condition is gone without Backenly repairing it:
+ * `condition_cleared` in lib/autonomy/resolution.ts, never a fix. Exported as
+ * `withdrawFindings` for the writers that reap inline.
+ */
 async function withdraw(
   rows: Array<{ id: string; details: unknown }>,
-  marker:
-    | 'evolution_reaper'
-    | 'agent_reaper'
-    | 'invariant_reaper'
-    | 'detector_retired'
-    | 'not_built'
-    | 'platform_fault'
-    | 'locked_down'
-    | 'paused',
+  marker: WithdrawnBy,
 ): Promise<number> {
   let withdrawn = 0
   for (const row of rows) {
@@ -50,6 +66,8 @@ async function withdraw(
   }
   return withdrawn
 }
+
+export { withdraw as withdrawFindings }
 
 /**
  * Withdraw what the agent orchestrator filed (rows carrying `details.agentType`),

@@ -15,6 +15,9 @@ jest.mock('@/lib/services/workspace-observer', () => ({
 jest.mock('@/lib/autonomy/reconciler', () => ({
   runReconciler: jest.fn().mockResolvedValue(null),
 }))
+jest.mock('@/lib/changes/lock', () => ({
+  changeLockHeld: jest.fn().mockResolvedValue(false),
+}))
 
 import { kickReconciler, OBSERVER_SETTLE_MS } from '@/lib/autonomy/event-trigger'
 import { runObserverForProject } from '@/lib/services/workspace-observer'

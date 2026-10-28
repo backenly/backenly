@@ -1,12 +1,15 @@
 import type { Metadata } from 'next'
+import Link from 'next/link'
 import { notFound } from 'next/navigation'
+import { ArrowRight, ChevronRight } from 'lucide-react'
 import { safeJsonLd } from '@/lib/security/safe-jsonld'
+import { pageMetadata } from '@/lib/seo/metadata'
 import { SiteShell } from '@/components/site/SiteShell'
+import { BentoCell, CellBody, CellTitle } from '@/components/landing-v7/shared'
 import {
   ArrowLink,
   ButtonLink,
   ComparisonTable,
-  Facts,
   GlyphList,
   HorizonClose,
   JsonLd,
@@ -15,16 +18,52 @@ import {
   PageHero,
   Section,
   SectionHead,
-  SplitDecision,
-  withCode,
 } from '@/components/site/kit'
 import { Faq } from '@/components/site/Faq'
-import { Reveal } from '@/components/site/Reveal'
 import { StartButton } from '@/components/site/StartButton'
-import { HEADING, TITLE } from '@/components/site/tokens'
-import { COMPARISONS, COMPARISON_LIST, type ComparisonData } from '../data'
+import { TEXT_LINK, TITLE } from '@/components/site/tokens'
+import { COMPARISONS, COMPARISON_LIST, type ComparisonData, type ExternalFact } from '../data'
 
 const APP_URL = 'https://backenly.com'
+
+/* ─────────────────────────────────────────────────────────────
+   /comparisons/<slug> (2026-10-15, founders: "no jargon, no lots of text, no
+   big banners, clean and professional").
+
+   One job: an honest side by side. The page reads top to bottom as three
+   short points, the table, which one to pick, what moving costs, and a short
+   FAQ. The essays that sat between those blocks are gone; the table carries
+   the detail, and every cell is one plain line.
+
+   The competitor comes first wherever the two sit side by side, on the page
+   as in the DOM. Violet marks only Backenly's own column and cell.
+
+   2026-10-23 (founders: match the landing and the rest of the site): the
+   header takes the feature pages' two actions, the questions take the
+   landing FAQ's own header (a line and two links under the title), and every
+   card under "More comparisons" says what is on the other side of it.
+
+   The bento cells and fact chips are the landing's (components/landing-v7).
+   Plain class strings are restated here rather than imported, because a
+   string exported from that client module would arrive in this server page
+   as a client reference.
+───────────────────────────────────────────────────────────── */
+
+/** The landing bento's fact chip. */
+const CHIP =
+  'inline-flex items-center rounded-[6px] border border-white/[0.08] bg-white/[0.03] px-[10px] py-[5px] text-[13px] text-zinc-300'
+
+/**
+ * The landing FAQ's two links. Literal here: SiteShell's ROUTES is a client
+ * module's export, and a server page that imports it receives a client
+ * reference rather than the string. Keep them equal to ROUTES.docs and
+ * ROUTES.founder.
+ */
+const DOCS_HREF = '/docs/database'
+const FOUNDERS_HREF = 'https://calendly.com/adarsh-c-jose/30min'
+
+/** The gap between a section title and its first cell. */
+const BODY_GAP = 'mt-[40px] md:mt-[56px]'
 
 export function generateStaticParams() {
   return COMPARISON_LIST.map((c) => ({ slug: c.slug }))
@@ -35,61 +74,24 @@ export async function generateMetadata(props: { params: Promise<{ slug: string }
   const c = COMPARISONS[params.slug]
   if (!c) return { title: 'Not Found' }
 
-  return {
+  // Every comparison title leads with "Backenly vs", so the template's suffix
+  // would only repeat the brand.
+  return pageMetadata({
     title: c.metaTitle,
+    brandInTitle: true,
     description: c.metaDescription,
-    openGraph: {
-      title: c.metaTitle,
-      description: c.metaDescription,
-      url: `${APP_URL}/comparisons/${c.slug}`,
-      type: 'article',
-    },
-    twitter: { card: 'summary_large_image', title: c.metaTitle, description: c.metaDescription },
-    alternates: { canonical: `${APP_URL}/comparisons/${c.slug}` },
-  }
-}
-
-/**
- * A strength, on either side. Rendered identically for the competitor and for
- * Backenly so the page cannot visually weight one over the other. The
- * competitor's column comes first, on the page as in the DOM.
- */
-function StrengthColumn({ id, title, items }: { id: string; title: string; items: { title: string; body: string }[] }) {
-  return (
-    <div className="min-w-0">
-      <h2 id={id} className={`text-[24px] text-white md:text-[30px] ${TITLE}`}>
-        {title}
-      </h2>
-      <ul className="mt-8 flex flex-col">
-        {items.map((item) => (
-          <li key={item.title} className="border-t border-white/[0.08] py-6">
-            <h3 className={`text-[17px] text-white ${HEADING}`}>{item.title}</h3>
-            <p className="mt-2 max-w-[58ch] text-[15px] leading-[1.7] text-zinc-400 [text-wrap:pretty]">{withCode(item.body)}</p>
-          </li>
-        ))}
-      </ul>
-    </div>
-  )
-}
-
-/** A heading on the left, prose on the right: for the per-page narrative blocks. */
-function Editorial({ id, heading, children }: { id: string; heading: string; children: React.ReactNode }) {
-  return (
-    <div className="grid gap-8 lg:grid-cols-[minmax(0,4fr)_minmax(0,8fr)] lg:gap-16">
-      <Reveal>
-        <h2 id={id} className={`max-w-[20ch] text-[24px] text-white [text-wrap:balance] md:text-[30px] ${TITLE}`}>
-          {heading}
-        </h2>
-      </Reveal>
-      <Reveal delay={0.06}>{children}</Reveal>
-    </div>
-  )
+    path: `/comparisons/${c.slug}`,
+    type: 'article',
+  })
 }
 
 export default async function ComparisonSlugPage(props: { params: Promise<{ slug: string }> }) {
   const params = await props.params
   const c: ComparisonData | undefined = COMPARISONS[params.slug]
   if (!c) notFound()
+
+  /** The competitor mid-sentence: "Choose no-code app builders when". */
+  const name = c.nameInSentence ?? c.competitor
 
   /**
    * Structured data mirrors what is on the page and nothing else. The FAQ
@@ -118,7 +120,6 @@ export default async function ComparisonSlugPage(props: { params: Promise<{ slug
   }
 
   const others = COMPARISON_LIST.filter((x) => x.slug !== c.slug)
-  const PROSE = 'max-w-[66ch] text-[17px] leading-[1.75] tracking-[-0.008em] text-zinc-400 [text-wrap:pretty]'
 
   return (
     <SiteShell>
@@ -126,6 +127,7 @@ export default async function ComparisonSlugPage(props: { params: Promise<{ slug
       <JsonLd json={safeJsonLd(breadcrumbSchema)} />
       <Page>
         <PageHero
+          readableTrail
           trail={[
             { label: 'Home', href: '/' },
             { label: 'Comparisons', href: '/comparisons' },
@@ -136,173 +138,143 @@ export default async function ComparisonSlugPage(props: { params: Promise<{ slug
           actions={
             <>
               <StartButton />
-              <ButtonLink href="/pricing" variant="secondary">
-                See pricing
+              <ButtonLink href="/comparisons" variant="secondary">
+                All comparisons
               </ButtonLink>
             </>
           }
         />
 
-        {/* The difference in one paragraph, set as the page's statement. */}
-        <Section flush aria-labelledby="difference">
-          <Reveal className="grid gap-6 lg:grid-cols-[minmax(0,4fr)_minmax(0,8fr)] lg:gap-16">
-            <h2 id="difference" className={`text-[22px] text-white md:text-[26px] ${TITLE}`}>
-              The difference in one paragraph
-            </h2>
-            <p className="max-w-[60ch] text-[19px] leading-[1.65] tracking-[-0.016em] text-zinc-200 [text-wrap:pretty] md:text-[22px] md:leading-[1.55]">
-              {withCode(c.summary)}
-            </p>
-          </Reveal>
+        {/* The difference in three short points, before any detail. */}
+        <Section flush aria-labelledby="at-a-glance">
+          <h2 id="at-a-glance" className="sr-only">
+            At a glance
+          </h2>
+          <div className="grid gap-[12px] lg:grid-cols-3">
+            {c.architecture.map((point) => (
+              <BentoCell key={point.heading}>
+                <CellTitle>{point.heading}</CellTitle>
+                <CellBody>{point.body}</CellBody>
+              </BentoCell>
+            ))}
+          </div>
         </Section>
 
-        <Section aria-labelledby="shaped">
-          <Reveal>
-            <SectionHead id="shaped" title="How they are shaped" />
-          </Reveal>
-          <Reveal delay={0.06}>
-            <Facts
-              className="mt-12"
-              items={c.architecture.map((section) => ({ title: section.heading, body: withCode(section.body) }))}
-            />
-          </Reveal>
-        </Section>
-
-        <Section aria-labelledby="capabilities">
-          <Reveal>
-            <SectionHead
-              id="capabilities"
-              title="Capability by capability"
-              lede="The fourth column says what each difference costs or buys in practice, including when the honest answer is nothing."
-            />
-          </Reveal>
-          <Reveal delay={0.06} className="mt-12">
+        <Section aria-labelledby="side-by-side">
+          <SectionHead
+            id="side-by-side"
+            title={
+              <>
+                Side by side. <span className="text-zinc-500">What changes in practice.</span>
+              </>
+            }
+          />
+          <div className={BODY_GAP}>
             <ComparisonTable
-              caption={`Backenly compared with ${c.competitor}, by capability`}
+              caption={`Backenly compared with ${name}, by capability`}
               competitor={c.competitor}
               rows={c.table}
             />
-          </Reveal>
+          </div>
+          {c.facts.length > 0 && <Sources competitor={c.competitor} facts={c.facts} />}
         </Section>
 
-        {/* Competitor strengths first. Deliberately. */}
-        <Section aria-label="Strengths on each side">
-          <Reveal>
-            <p className="max-w-[62ch] text-[17px] leading-[1.7] text-zinc-400">
-              These are real advantages, not concessions written to look balanced. If one of them is
-              decisive for you, it should decide it.
-            </p>
-          </Reveal>
-          <div className="mt-12 grid gap-12 lg:grid-cols-2 lg:gap-16">
-            <Reveal>
-              <StrengthColumn id="competitor-stronger" title={`Where ${c.competitor} is stronger`} items={c.competitorStrengths} />
-            </Reveal>
-            <Reveal delay={0.06}>
-              <StrengthColumn id="backenly-stronger" title="Where Backenly is stronger" items={c.backenlyStrengths} />
-            </Reveal>
+        <Section aria-labelledby="which-to-pick">
+          <SectionHead id="which-to-pick" title="Which one to pick" lede={c.summary} />
+          <div className={`${BODY_GAP} grid gap-[12px] md:grid-cols-2`}>
+            <BentoCell>
+              <CellTitle>Choose {name} when</CellTitle>
+              <GlyphList glyph="dash" items={c.chooseCompetitorWhen} className="mt-[20px]" />
+            </BentoCell>
+            <BentoCell bare>
+              <span
+                aria-hidden
+                className="pointer-events-none absolute inset-x-0 top-0 h-px bg-[linear-gradient(to_right,transparent,rgba(196,181,253,0.7),transparent)]"
+              />
+              <div className="p-[20px] md:p-[26px]">
+                <CellTitle>Choose Backenly when</CellTitle>
+                <GlyphList glyph="check" items={c.chooseBackenlyWhen} className="mt-[20px]" />
+              </div>
+            </BentoCell>
           </div>
         </Section>
 
-        {/* Operating model, only where it is the actual difference. */}
-        {c.operating && (
-          <Section aria-labelledby="operating">
-            <Editorial id="operating" heading={c.operating.heading}>
-              <p className={PROSE}>{withCode(c.operating.body)}</p>
-            </Editorial>
-          </Section>
-        )}
-
-        {/* Agent workflow, only where the two genuinely diverge. */}
-        {c.agents && (
-          <Section aria-labelledby="agents">
-            <Editorial id="agents" heading={c.agents.heading}>
-              <p className={PROSE}>{withCode(c.agents.body)}</p>
-            </Editorial>
-          </Section>
-        )}
-
-        {/* Migration and adoption. The limits are not optional. */}
+        {/* Moving across. What stays the reader's work is never softened. */}
         {c.migration && (
-          <Section aria-labelledby="migration">
-            <Editorial id="migration" heading={c.migration.heading}>
-              <p className={PROSE}>{withCode(c.migration.body)}</p>
-              <h3 className={`mt-10 text-[17px] text-white ${HEADING}`}>What stays your work</h3>
-              <GlyphList className="mt-5 max-w-[66ch]" glyph="dash" items={c.migration.limits.map(withCode)} />
-              {c.migration.link && (
-                <ArrowLink href={c.migration.link.href} className="mt-9">
-                  {c.migration.link.label}
-                </ArrowLink>
-              )}
-            </Editorial>
+          <Section aria-labelledby="moving">
+            <div className="grid gap-[40px] lg:grid-cols-[minmax(0,4fr)_minmax(0,7fr)] lg:gap-[64px]">
+              <div>
+                <SectionHead id="moving" title={c.migration.heading} lede={c.migration.body} />
+                {c.migration.link && (
+                  <ArrowLink href={c.migration.link.href} className="mt-[24px]">
+                    {c.migration.link.label}
+                  </ArrowLink>
+                )}
+              </div>
+              <BentoCell>
+                {c.migration.carries && (
+                  <div className="mb-[28px] border-b border-white/[0.07] pb-[28px]">
+                    <CellTitle>What carries over</CellTitle>
+                    <ul className="mt-[16px] flex flex-wrap gap-[6px]">
+                      {c.migration.carries.map((item) => (
+                        <li key={item} className={CHIP}>
+                          {item}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                <CellTitle>What stays your work</CellTitle>
+                <GlyphList glyph="dash" items={c.migration.limits} className="mt-[16px]" />
+              </BentoCell>
+            </div>
           </Section>
         )}
-
-        <Section aria-label="Which one to pick">
-          <Reveal>
-            <SplitDecision
-              heading="Which one to pick"
-              competitor={c.competitor}
-              chooseCompetitor={c.chooseCompetitorWhen}
-              chooseBackenly={c.chooseBackenlyWhen}
-            />
-          </Reveal>
-        </Section>
 
         <Section aria-labelledby="comparison-faq">
-          <div className="grid gap-10 lg:grid-cols-[minmax(0,4fr)_minmax(0,7fr)] lg:gap-16">
-            <Reveal className="lg:sticky lg:top-28 lg:self-start">
+          <div className="grid gap-[40px] lg:grid-cols-[minmax(0,4fr)_minmax(0,7fr)] lg:gap-[64px]">
+            <div className="lg:sticky lg:top-[112px] lg:self-start">
               <SectionHead id="comparison-faq" title="Common questions" />
-            </Reveal>
-            <Reveal delay={0.06}>
-              <Faq items={c.faq} />
-            </Reveal>
+              {/* The landing FAQ's own close to the header. */}
+              <p className="mt-5 max-w-[36ch] text-[15px] leading-[1.7] text-zinc-400">
+                Anything else, ask the people who built it.
+              </p>
+              <div className="mt-7 flex flex-wrap gap-x-6 gap-y-3">
+                <Link href={DOCS_HREF} className={TEXT_LINK}>
+                  Read the docs
+                  <ArrowRight aria-hidden className="h-4 w-4 transition-transform duration-200 group-hover:translate-x-0.5" />
+                </Link>
+                <a href={FOUNDERS_HREF} target="_blank" rel="noopener noreferrer" className={TEXT_LINK}>
+                  Book 30 minutes
+                  <ArrowRight aria-hidden className="h-4 w-4 transition-transform duration-200 group-hover:translate-x-0.5" />
+                </a>
+              </div>
+            </div>
+            <Faq items={c.faq} />
           </div>
         </Section>
 
-        {/*
-         * Sourcing. Every checkable statement about the competitor on this page
-         * carries the URL it came from and the date it was read, because
-         * competitor pricing and capabilities move and an undated claim is one
-         * nobody can audit later.
-         */}
-        {c.facts.length > 0 && (
-          <Section aria-labelledby="sources">
-            <Reveal className="grid gap-8 border-t border-white/[0.08] pt-12 lg:grid-cols-[minmax(0,4fr)_minmax(0,8fr)] lg:gap-16">
-              <h2 id="sources" className={`max-w-[24ch] text-[18px] text-white ${HEADING}`}>
-                Where the {c.competitor} facts on this page came from
-              </h2>
-              <ul className="flex flex-col gap-4">
-                {c.facts.map((fact) => (
-                  <li key={fact.source} className="max-w-[80ch] text-[14px] leading-[1.65] text-zinc-500">
-                    {fact.claim}{' '}
-                    <a
-                      href={fact.source}
-                      rel="noopener noreferrer nofollow"
-                      target="_blank"
-                      className="break-words text-zinc-400 underline decoration-white/20 underline-offset-4 transition-colors duration-200 hover:text-white"
-                    >
-                      {fact.source}
-                    </a>{' '}
-                    <span className="whitespace-nowrap">(read {fact.verifiedOn})</span>
-                  </li>
-                ))}
-              </ul>
-            </Reveal>
-          </Section>
-        )}
-
-        <Section aria-labelledby="other-comparisons">
-          <Reveal>
-            <h2 id="other-comparisons" className={`text-[22px] text-white md:text-[26px] ${TITLE}`}>
-              Other comparisons
-            </h2>
-            <NextLinks
-              className="mt-8"
-              items={[
-                ...others.map((x) => ({ href: `/comparisons/${x.slug}`, meta: x.category, title: x.headline })),
-                { href: '/alternatives', meta: 'Before a shortlist', title: 'How to evaluate an alternative' },
-              ]}
-            />
-          </Reveal>
+        <Section aria-labelledby="more-comparisons">
+          <h2 id="more-comparisons" className={`text-[22px] text-white md:text-[26px] ${TITLE}`}>
+            More comparisons
+          </h2>
+          <NextLinks
+            className="mt-[28px]"
+            items={[
+              ...others.map((x) => ({
+                href: `/comparisons/${x.slug}`,
+                meta: x.category,
+                title: x.headline,
+                body: x.positioning,
+              })),
+              {
+                href: '/alternatives',
+                meta: 'Before a shortlist',
+                title: 'How to evaluate an alternative',
+                body: 'Six questions to ask any platform, and when to stay where you are.',
+              },
+            ]}
+          />
         </Section>
 
         <HorizonClose title="Try Backenly free" lede="One free project, kept permanently. No credit card.">
@@ -313,5 +285,40 @@ export default async function ComparisonSlugPage(props: { params: Promise<{ slug
         </HorizonClose>
       </Page>
     </SiteShell>
+  )
+}
+
+/**
+ * Where the competitor facts came from: each claim, its official URL and the
+ * date it was read, under the table they support. Closed by default so the
+ * page stays short; native <details>, so it needs no client code.
+ */
+function Sources({ competitor, facts }: { competitor: string; facts: ExternalFact[] }) {
+  return (
+    <details className="group/sources mt-[20px]">
+      <summary className="inline-flex cursor-pointer list-none items-center gap-[6px] rounded-sm text-[14px] text-zinc-400 transition-colors duration-200 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300 [&::-webkit-details-marker]:hidden">
+        <ChevronRight
+          aria-hidden
+          className="h-[14px] w-[14px] transition-transform duration-200 group-open/sources:rotate-90"
+        />
+        Where the {competitor} facts on this page come from
+      </summary>
+      <ul className="mt-[14px] flex max-w-[84ch] flex-col gap-[10px] pl-[20px]">
+        {facts.map((fact) => (
+          <li key={fact.source} className="text-[13px] leading-[1.65] text-zinc-400 [text-wrap:pretty]">
+            {fact.claim}{' '}
+            <a
+              href={fact.source}
+              rel="noopener noreferrer nofollow"
+              target="_blank"
+              className="break-words text-zinc-300 underline decoration-white/20 underline-offset-4 transition-colors duration-200 hover:text-white"
+            >
+              {fact.source.replace(/^https:\/\//, '')}
+            </a>{' '}
+            <span className="whitespace-nowrap">(read {fact.verifiedOn})</span>
+          </li>
+        ))}
+      </ul>
+    </details>
   )
 }

@@ -71,6 +71,56 @@ export const TICKET_BODY_MAX = 10_000
 /** Creation and reply ceilings per user per hour (lib/middleware/rateLimiter.ts keys). */
 export const TICKET_CREATE_LIMIT = { limit: 10, windowMs: 60 * 60 * 1000 }
 export const TICKET_REPLY_LIMIT = { limit: 60, windowMs: 60 * 60 * 1000 }
+/** Asking the AI first responder to try again, per user per hour. Each case has its own attempt cap too. */
+export const TICKET_AI_RETRY_LIMIT = { limit: 10, windowMs: 60 * 60 * 1000 }
+
+/**
+ * The AI first responder's attempts (lib/support/ai.ts). It makes up to
+ * SUPPORT_AI_AUTO_ATTEMPTS on its own; once those fail the customer may ask
+ * again, up to SUPPORT_AI_MAX_ATTEMPTS in all. Here rather than in ai.ts so the
+ * case page can offer "try again" by the same rule the API enforces.
+ */
+export const SUPPORT_AI_AUTO_ATTEMPTS = 3
+export const SUPPORT_AI_MAX_ATTEMPTS = 5
+
+/**
+ * Failure kinds (AiError kinds, plus "internal") that a later attempt can get
+ * past: the provider throttled or blinked, the answer came back empty, the
+ * spend ledger could not be written. Every other kind (no provider, the monthly
+ * AI budget used up, access refused, the request rejected) fails the same way
+ * again, so it is never retried. A null kind is a case that failed before
+ * reasons were recorded: unknown, so it gets the benefit of the doubt.
+ */
+export const SUPPORT_AI_TRANSIENT_ERRORS: readonly string[] = [
+  'rate_limited',
+  'unavailable',
+  'timeout',
+  'aborted',
+  'output_invalid',
+  'spend_unavailable',
+  'internal',
+]
+
+export function isTransientSupportAiError(kind: string | null): boolean {
+  return kind === null || SUPPORT_AI_TRANSIENT_ERRORS.includes(kind)
+}
+
+/** Whether the customer may ask the AI first responder to try again on this case. */
+export function supportAiRetryAllowed(t: {
+  aiState: string
+  aiError: string | null
+  aiAttempts: number
+  status: string
+  firstStaffReplyAt: Date | string | null
+}): boolean {
+  return (
+    t.aiState === 'failed' &&
+    isTransientSupportAiError(t.aiError) &&
+    t.aiAttempts < SUPPORT_AI_MAX_ATTEMPTS &&
+    t.status !== 'closed' &&
+    !t.firstStaffReplyAt
+  )
+}
 
 export function isSupportCategory(v: unknown): v is SupportCategory {
   return typeof v === 'string' && SUPPORT_CATEGORIES.some((c) => c.id === v)

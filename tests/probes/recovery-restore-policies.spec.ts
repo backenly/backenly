@@ -162,6 +162,28 @@ describe('restoring brings back the exact protection', () => {
     // policy set and not the protection, since the owner would bypass it.
     expect(after.rlsForced).toBe(true)
   })
+
+  it('a restore that fails part-way leaves the policies exactly as they were', async () => {
+    const { projectId, schema } = await project()
+    await seedPolicies(schema)
+    const pre = await capturePolicies(projectId, 'posts')
+    await prisma.$executeRawUnsafe(`DROP POLICY "own_rows_select" ON "${schema}"."posts"`)
+    await prisma.$executeRawUnsafe(`DROP POLICY "own_rows_insert" ON "${schema}"."posts"`)
+    await prisma.$executeRawUnsafe(`CREATE POLICY "consolidated" ON "${schema}"."posts" AS RESTRICTIVE USING (user_id IS NOT NULL)`)
+    const post = await capturePolicies(projectId, 'posts')
+
+    // The last policy to come back cannot be created: its expression names a
+    // column that is not there. Everything before it already ran.
+    const last = pre.policies.length - 1
+    const unrestorable = { ...pre, policies: pre.policies.map((p, i) => (i === last ? { ...p, qual: 'no_such_column = 1', withCheck: null } : p)) }
+    const out = await recoveryRestorePolicies(projectId, unrestorable, post)
+    expect(out.status).toBe('failed')
+    expect(out.message).toMatch(/rolled back, so they are as they were/)
+
+    // The restrictive policy was not dropped and left missing.
+    const after = await capturePolicies(projectId, 'posts')
+    expect(samePolicies(after, post)).toBe(true)
+  })
 })
 
 describe('it refuses rather than overwriting somebody else', () => {

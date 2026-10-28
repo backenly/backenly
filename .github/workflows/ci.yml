@@ -14,6 +14,11 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# Runners are pinned to ubuntu-24.04, not ubuntu-latest: in October 2026 GitHub
+# moved ubuntu-latest to 26.04, where postgresql-16-pgvector is not packaged
+# (apt exits 100) and Playwright 1.57 has no Chromium build, so every PR failed
+# the integration and self-host jobs before running a test. Move to a newer
+# image deliberately, together with those two dependencies.
 jobs:
   # ── No database CONNECTION required ─────────────────────────────────────────
   # These guard the contracts that broke in the 2026-07-19 post-mortem: the
@@ -29,7 +34,7 @@ jobs:
   # a hidden database dependency.
   static:
     name: typecheck + unit tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
       DATABASE_URL: postgresql://ci:ci@127.0.0.1:1/unused
@@ -277,7 +282,7 @@ jobs:
   # ── MCP server package ──────────────────────────────────────────────────────
   secrets:
     name: no credentials in committed content
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -297,7 +302,7 @@ jobs:
 
   mcp-server:
     name: mcp-server build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -366,7 +371,7 @@ jobs:
   # This one exists only to test the DEFAULT.
   default-oss-build:
     name: default OSS build (edition unset)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     # JWT_SECRET only, and deliberately nothing else.
     #
@@ -430,7 +435,7 @@ jobs:
   # dead database. They now use TEST_DATABASE_URL like everything else.
   integration:
     name: integration suites
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     services:
       postgres:
@@ -563,7 +568,7 @@ jobs:
     name: MCP acceptance matrix
     needs: [static, integration, mcp-server]
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -609,7 +614,7 @@ jobs:
   # dashboard rendered green.
   probes:
     name: probe fixtures
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     services:
       postgres:
@@ -686,7 +691,7 @@ jobs:
   # coverage the baseline exists to protect.
   baseline:
     name: known-failure baseline
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     services:
       postgres:
@@ -760,7 +765,7 @@ jobs:
   # worse than no test, because the suite spends its credibility vouching for it.
   autonomy:
     name: autonomy guards
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     services:
       postgres:
@@ -848,7 +853,7 @@ jobs:
   # autonomy still need a real machine; everything before them no longer does.
   self-host:
     name: self-host quickstart
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
@@ -1057,7 +1062,7 @@ jobs:
   # on the installer's behalf: a clean clone, `npm ci`, then the command.
   self-host-one-command:
     name: self-host one command
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Installs a deployment, reruns the installer, then builds the app and runs
     # the browser suite against it. The Next build is the long pole.
     timeout-minutes: 45

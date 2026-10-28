@@ -15,7 +15,7 @@
  */
 
 import type { CatalogSnapshot, ColumnState, ObjectState, TableState } from './catalog'
-import { sameObject, sameTable } from './catalog'
+import { apiGrantsRemoved, sameObject, sameTable } from './catalog'
 import { isKeptInRegion } from './digest'
 import type { TableChange } from './types'
 
@@ -32,7 +32,9 @@ export function diffCatalogs(before: CatalogSnapshot, after: CatalogSnapshot): T
     const b = beforeByOid.get(a.oid)
     if (b) {
       matchedBefore.add(b.name)
-      if (b.name !== a.name || !sameTable(a, b)) {
+      // Privileges the API lost count too: a change that only revoked them
+      // left no record, so nothing could verify or restore it.
+      if (b.name !== a.name || !sameTable(a, b) || apiGrantsRemoved(b, a).length > 0) {
         out.push({ kind: 'modified', before: b.name, after: a.name, details: describeTableChange(b, a) })
       }
     } else {
@@ -184,6 +186,8 @@ export function describeTableChange(b: TableState, a: TableState): string[] {
   diffNamed(b.indexes, a.indexes, (i) => i.definition, lines, (i) => `index ${i.name}`)
   diffNamed(b.policies, a.policies, (p) => JSON.stringify([p.cmd, p.permissive, [...p.roles].sort(), p.using, p.check]), lines, (p) => `policy ${p.name} (${CMD[p.cmd] ?? p.cmd})`)
   diffNamed(b.triggers, a.triggers, (g) => `${g.definition}|${g.enabled}`, lines, (g) => `trigger ${g.name}`)
+
+  for (const g of apiGrantsRemoved(b, a)) lines.push(`− privilege ${g.privilege} for ${g.grantee}`)
 
   if (b.rls.enabled !== a.rls.enabled) lines.push(`row-level security ${a.rls.enabled ? 'enabled' : 'disabled'}`)
   if (b.rls.forced !== a.rls.forced) lines.push(`row-level security ${a.rls.forced ? 'forced' : 'no longer forced'} for the owner`)

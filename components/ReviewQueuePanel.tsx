@@ -32,17 +32,29 @@
  * needing nine identical approvals. A group is one row, one decision, and one
  * "Approve & fix all" that walks every member — the storage unit stays per
  * table, the decision unit becomes per cause.
+ *
+ * ARCHITECTURE CHANGES are the one exception to grouping. A prepared change
+ * (type `architecture_evolution`, lib/evolution-engine/request.ts) arrives in
+ * the same pendingApprovals, but each one is its own decision bound to its own
+ * plan version, so they are taken out BEFORE grouping: folded together they
+ * would share one title and one dismiss, and an approval could not say which
+ * version it consents to. Each renders as an EvolutionRequestRow, which
+ * approves through POST /api/projects/[id]/architecture only. They still count
+ * in the header, because they are still waiting on you.
  */
 
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import { useRouter } from 'next/navigation'
-import { KIT, KitButton } from '@/components/inspector/kit'
+import { IconButton, KIT, KitButton, MetaCode, MetaRow, TextWithCode } from '@/components/inspector/kit'
 import {
-  AlertTriangle, RefreshCw, CheckCircle2, Loader2, XCircle, ArrowRight,
+  AlertTriangle, RefreshCw, CheckCircle2, Loader2, XCircle, ArrowRight, Inbox,
   ChevronDown, ClipboardCopy, Check,
 } from 'lucide-react'
-import { groupFindings, CATEGORY_LABEL, type FindingGroup } from '@/lib/core/finding-groups'
+import { groupFindings, CATEGORY_LABEL, severityWord, type FindingGroup } from '@/lib/core/finding-groups'
 import { hasExecutableFix } from '@/lib/core/fix-actions'
+import { isEvolutionApprovalFinding } from '@/lib/core/types'
+import { EvolutionRequestRow } from '@/components/autonomy/EvolutionRequestRow'
+import { onArchitectureChange } from '@/components/autonomy/architecture-decisions'
 
 interface PendingApproval {
   id: string
@@ -91,6 +103,8 @@ interface AgentApproval {
   /** Absent on responses that predate it: those were all agent requests. */
   requestedBy?: 'agent' | 'backenly'
   changeId?: string | null
+  /** The published version a rollback request restores the backend to. */
+  version?: number | null
   rowCount: number | null
   reversible: boolean
   message: string
@@ -164,7 +178,7 @@ function reasonForApproval(p: PendingApproval): string {
 function heldKindLabel(p: PendingApproval): string | null {
   switch (p.heldBecause?.kind) {
     case 'escalated':  return 'Escalated by Autopilot after a verified fix attempt'
-    case 'recurrence': return 'Fix applied but kept recurring — stopped retrying'
+    case 'recurrence': return 'Fix applied but kept recurring, so retries stopped'
     case 'guardrail':  return null // the text itself already says "requires approval"
     default:           return null
   }
@@ -234,13 +248,18 @@ export function ReviewQueuePanel({ projectId }: { projectId: string }) {
   }, [projectId])
 
   useEffect(() => { fetchReport() }, [fetchReport])
+  // A change decided on the Architecture changes card leaves or joins this queue.
+  useEffect(() => onArchitectureChange('queue', () => { void fetchReport(true) }), [fetchReport])
 
-  const groups = useMemo(
-    () => groupFindings(
-      (data?.pendingApprovals ?? []).map(p => ({ ...p, details: p.details ?? null })),
-    ),
-    [data],
-  )
+  // Architecture changes leave before grouping: each is its own decision on its
+  // own plan version, and the grouper would fold several into one row.
+  const { groups, evolutionRequests } = useMemo(() => {
+    const all = (data?.pendingApprovals ?? []).map(p => ({ ...p, details: p.details ?? null }))
+    return {
+      groups: groupFindings(all.filter(p => !isEvolutionApprovalFinding(p.type))),
+      evolutionRequests: all.filter(p => isEvolutionApprovalFinding(p.type)),
+    }
+  }, [data])
 
   const flashBanner = (title: string, detail?: string) => {
     setBanner({ title, detail })
@@ -255,7 +274,7 @@ export function ReviewQueuePanel({ projectId }: { projectId: string }) {
   const approveOne = async (
     findingId: string,
     retriesLeft = 3,
-  ): Promise<{ ok: boolean; alreadyApplied?: boolean; error?: string }> => {
+  ): Promise<{ ok: boolean; alreadyApplied?: boolean; error?: string; message?: string }> => {
     try {
       const res = await fetch(`/api/projects/${projectId}/health/approve`, {
         method: 'POST',
@@ -265,7 +284,7 @@ export function ReviewQueuePanel({ projectId }: { projectId: string }) {
       })
       const j = await res.json().catch(() => ({} as any))
 
-      if (res.ok && j?.success) return { ok: true, alreadyApplied: !!j?.alreadyApplied }
+      if (res.ok && j?.success) return { ok: true, alreadyApplied: !!j?.alreadyApplied, message: typeof j?.message === 'string' ? j.message : undefined }
 
       // 409 = lock contention (a scan/auto-fix holds the project lock). The
       // server already waits ~30s per attempt, so each retry here rides a
@@ -301,9 +320,10 @@ export function ReviewQueuePanel({ projectId }: { projectId: string }) {
     setRow(g.key, { phase: 'applying' })
     let applied = 0
     let firstError: string | undefined
+    let lastMessage: string | undefined
     for (const m of targets) {
       const r = await approveOne(m.id)
-      if (r.ok) applied += 1
+      if (r.ok) { applied += 1; lastMessage = r.message }
       else if (!firstError) firstError = r.error
     }
 
@@ -320,9 +340,11 @@ export function ReviewQueuePanel({ projectId }: { projectId: string }) {
       applied === targets.length
         ? `Fix applied${targets.length > 1 ? ` to ${applied} tables` : ''}`
         : `Applied to ${applied} of ${targets.length}`,
+      // What the server said the fix did, when there is one fix to speak for:
+      // not every fix is verified, and not every fix keeps a restore point.
       applied === targets.length
-        ? 'schema verified · rollback snapshot captured'
-        : `${targets.length - applied} left in the queue — ${firstError ?? 'see details'}`,
+        ? (targets.length === 1 && lastMessage ? lastMessage.slice(0, 160) : undefined)
+        : `${targets.length - applied} left in the queue: ${firstError ?? 'see details'}`,
     )
     const t = setTimeout(async () => {
       await fetchReport(true)
@@ -390,13 +412,14 @@ export function ReviewQueuePanel({ projectId }: { projectId: string }) {
         setRow(approvalId, { phase: 'verified' })
         const request = agentApprovals.find(a => a.id === approvalId)
         const restore = request?.tool === 'revert_schema_change'
+        const versionRestore = request?.tool === 'rollback_deploy'
         const fromBackenly = request?.requestedBy === 'backenly'
         flashBanner(
           decision === 'approve'
-            ? (restore ? 'Previous state restored' : 'Agent request executed')
-            : (restore ? 'Restore declined' : 'Agent request rejected'),
+            ? (restore ? 'Previous state restored' : versionRestore ? 'Restore ran' : 'Agent request executed')
+            : (restore || versionRestore ? 'Restore declined' : 'Agent request rejected'),
           decision === 'approve'
-            ? (j?.resultSummary ? String(j.resultSummary).slice(0, 120) : 'the agent sees the result on its next poll')
+            ? (j?.resultSummary ? clip(String(j.resultSummary), 120) : 'the agent sees the result on its next poll')
             : fromBackenly ? 'the change stays as it is' : 'the agent is told not to retry',
         )
         const t = setTimeout(async () => {
@@ -410,9 +433,12 @@ export function ReviewQueuePanel({ projectId }: { projectId: string }) {
         return
       }
 
+      // A call that ran and failed answers with what happened (resultSummary):
+      // a restore refused because the data moved since, or one applied and not
+      // yet confirmed. Shown as it is; "try again" is not true of either.
       setRow(approvalId, {
         phase: 'error',
-        message: j?.error || (decision === 'approve'
+        message: j?.error || j?.resultSummary || (decision === 'approve'
           ? 'The operation could not be executed. Try again in a moment.'
           : 'Could not reject. Try again.'),
       })
@@ -489,19 +515,21 @@ export function ReviewQueuePanel({ projectId }: { projectId: string }) {
   // The header counts FINDINGS (what the user must clear), the list renders
   // GROUPS (what they must decide). Both numbers are shown, so folding nine
   // rows into one never looks like eight findings quietly disappearing.
+  // Architecture changes are in pendingApprovals, so they are in `total`; each
+  // is one row of its own.
   const total = data.pendingApprovals.length + pendingAgents.length + stuckAgents.length
 
   return (
     <section className={CARD}>
       <PanelHeader
         count={total}
-        groupCount={groups.length + pendingAgents.length + stuckAgents.length}
+        groupCount={groups.length + evolutionRequests.length + pendingAgents.length + stuckAgents.length}
         refreshing={refreshing}
         onRefresh={() => fetchReport(true)}
       />
 
       <div className="border-b border-white/[0.06] px-5 py-2.5">
-        <p className="text-[12.5px] leading-relaxed text-zinc-500">
+        <p className="text-[12.5px] leading-relaxed text-faint">
           Backenly deliberately did not act on these. They need your call; everything else it handles itself.
           {' '}Once you decide, each change settles into the agent journal on{' '}
           <button
@@ -519,7 +547,7 @@ export function ReviewQueuePanel({ projectId }: { projectId: string }) {
           <p className="min-w-0 text-[12px] font-medium text-zinc-200">
             {banner.title}
             {banner.detail && (
-              <span className="ml-2 font-mono text-[12px] font-normal text-zinc-500">{banner.detail}</span>
+              <span className="ml-2 text-[12px] font-normal text-faint">{banner.detail}</span>
             )}
           </p>
         </div>
@@ -529,7 +557,7 @@ export function ReviewQueuePanel({ projectId }: { projectId: string }) {
         <div className="px-5 py-12 text-center">
           <CheckCircle2 className="mx-auto mb-3 size-5 text-emerald-400/70" />
           <p className="text-[13px] font-medium text-zinc-300">Nothing waiting on you</p>
-          <p className="mt-1 text-[12px] text-zinc-500">Risk-flagged changes show up here before they apply.</p>
+          <p className="mt-1 text-[12px] text-faint">Risk-flagged changes show up here before they apply.</p>
         </div>
       ) : (
         <ul className="divide-y divide-white/[0.04]">
@@ -553,6 +581,15 @@ export function ReviewQueuePanel({ projectId }: { projectId: string }) {
               onApprove={() => decideAgentRequest(a.id, 'approve', a.shownDigest)}
               onReject={() => decideAgentRequest(a.id, 'reject')}
               onResetError={() => setRow(a.id, { phase: 'idle' })}
+            />
+          ))}
+          {evolutionRequests.map(r => (
+            <EvolutionRequestRow
+              key={r.id}
+              projectId={projectId}
+              request={r}
+              onRefresh={() => fetchReport(true)}
+              onDecided={message => flashBanner(message)}
             />
           ))}
           {runningAgents.map(a => (
@@ -588,26 +625,31 @@ function PanelHeader({
 }) {
   return (
     <div className="flex items-center gap-2.5 border-b border-white/[0.06] px-5 py-3.5">
-      <AlertTriangle className="size-3.5 text-amber-400" />
+      {/* The warning mark only while something waits: an empty queue under an
+          amber triangle read as a problem that was not there. */}
+      {typeof count === 'number' && count > 0 ? (
+        <AlertTriangle className="size-3.5 text-amber-400" />
+      ) : (
+        <Inbox className="size-3.5 text-zinc-500" strokeWidth={1.75} />
+      )}
       <h3 className="text-[13px] font-semibold tracking-tight text-zinc-100">Waiting on you</h3>
       {typeof count === 'number' && count > 0 && (
         <span className="text-[12px] font-medium tabular-nums text-amber-300">
           {count}
           {typeof groupCount === 'number' && groupCount < count && (
-            <span className="ml-1.5 font-normal text-zinc-500">
+            <span className="ml-1.5 font-normal text-faint">
               in {groupCount} {groupCount === 1 ? 'issue' : 'issues'}
             </span>
           )}
         </span>
       )}
-      <button
+      <IconButton
+        icon={RefreshCw}
+        label="Refresh the queue"
         onClick={onRefresh}
         disabled={disabled || refreshing}
-        className="ml-auto text-zinc-600 transition-colors hover:text-zinc-300 disabled:opacity-40"
-        aria-label="Refresh"
-      >
-        <RefreshCw className={`size-3.5 ${refreshing ? 'animate-spin' : ''}`} />
-      </button>
+        className={`ml-auto ${refreshing ? '[&_svg]:animate-spin' : ''}`}
+      />
     </div>
   )
 }
@@ -674,14 +716,16 @@ function AgentRequestRow({
   // Restoring a change reads as what it does, whoever asked for it: Backenly
   // raises one when a change fails its checks and recovering it would affect
   // data written since. The details are on the change itself.
-  const restore = a.tool === 'revert_schema_change'
+  // A rollback is a restore too: of the backend to a published version, with
+  // Backenly's list of the changes it would undo as the card's text.
+  const restore = a.tool === 'revert_schema_change' || a.tool === 'rollback_deploy'
   const fromBackenly = a.requestedBy === 'backenly'
   // The card is the ONLY thing the human reads before approving — a merge
   // message carries the exact statements that reach production, and cutting
   // it at 180 characters asked them to approve what they could not see.
   const [showFull, setShowFull] = useState(false)
   const long = a.message.length > 180
-  const shown = long && !showFull ? a.message.slice(0, 180) + '…' : a.message
+  const shown = long && !showFull ? clip(a.message, 180) : a.message
   // A card that could only show stand-ins is not something a human read, so it
   // cannot be approved. Rejecting it needs nothing from the region.
   const unreadable = a.readable === false
@@ -694,10 +738,10 @@ function AgentRequestRow({
             {restore ? (
               a.target
             ) : (
-              <>Your coding agent wants to run <span className="font-mono text-[12px] text-violet-200">{a.tool}</span> on {a.target}</>
+              <>Your coding agent wants to run <span className="font-mono text-[12px] text-violet-200">{a.tool}</span> on <TextWithCode text={a.target} /></>
             )}
           </p>
-          <p className="mt-1 whitespace-pre-wrap break-words text-[12px] leading-relaxed text-zinc-500">
+          <p className="mt-1 whitespace-pre-wrap break-words text-[12px] leading-relaxed text-faint">
             {restore || fromBackenly ? shown : `“${shown}”`}
           </p>
           {long && (
@@ -708,24 +752,32 @@ function AgentRequestRow({
               {showFull ? 'Show less' : 'Show the full request'}
             </button>
           )}
-          <p className="mt-1.5 font-mono text-[12px] text-zinc-600">
+          <MetaRow>
             {a.rowCount !== null && a.rowCount > 0 && (
-              <span className="text-amber-400/90">{a.rowCount} row{a.rowCount === 1 ? '' : 's'} affected · </span>
+              <span className="tabular-nums text-amber-200/90">
+                {a.rowCount.toLocaleString()} row{a.rowCount === 1 ? '' : 's'} affected
+              </span>
             )}
-            {restore ? 'current state protected first' : a.reversible ? 'restore point available' : 'not auto-reversible'}
-            {' · '}{fromBackenly ? 'Backenly' : 'MCP'} · {timeAgo(a.createdAt)}
+            <span>{restore ? 'Current state protected first' : a.reversible ? 'Restore point available' : 'Not auto-reversible'}</span>
+            <span>{fromBackenly ? 'From Backenly' : 'From your agent'}</span>
+            <span className="tabular-nums">{timeAgo(a.createdAt)}</span>
             {restore && a.changeId && (
-              <>
-                {' · '}
-                <a
-                  href={`/app/projects/${projectId}/database?view=changes&change=${encodeURIComponent(a.changeId)}`}
-                  className="text-zinc-400 underline underline-offset-2 hover:text-zinc-200"
-                >
-                  View details
-                </a>
-              </>
+              <a
+                href={`/app/projects/${projectId}/changes?change=${encodeURIComponent(a.changeId)}`}
+                className="text-zinc-400 underline underline-offset-2 hover:text-zinc-200"
+              >
+                View details
+              </a>
             )}
-          </p>
+            {a.tool === 'rollback_deploy' && (
+              <a
+                href={`/app/projects/${projectId}/changes`}
+                className="text-zinc-400 underline underline-offset-2 hover:text-zinc-200"
+              >
+                Open History
+              </a>
+            )}
+          </MetaRow>
           {unreadable && (
             <p className="mt-2 text-[12px] text-amber-200/80">
               The exact call is kept in the project’s region and could not be read just now. Refresh to try again.
@@ -734,13 +786,13 @@ function AgentRequestRow({
           {state.phase === 'error' && (
             <p className="mt-2 text-[12px] text-rose-300/90">
               {state.message}{' '}
-              <button onClick={onResetError} className="text-zinc-500 underline underline-offset-2 hover:text-zinc-300">retry</button>
+              <button onClick={onResetError} className="text-faint underline underline-offset-2 hover:text-zinc-300">retry</button>
             </p>
           )}
         </div>
         <div className="flex shrink-0 items-center gap-2">
           {state.phase === 'verified' ? (
-            <span className="inline-flex items-center gap-1.5 font-mono text-[12.5px] text-emerald-300">
+            <span className="inline-flex items-center gap-1.5 text-[12.5px] font-medium text-emerald-300">
               <CheckCircle2 className="size-3.5" /> Done
             </span>
           ) : (
@@ -774,13 +826,16 @@ function AgentOutcomeRow({ request: a, running }: { request: AgentApproval; runn
         <span className={`mt-1.5 size-1.5 shrink-0 rounded-full ${running ? 'bg-sky-400' : 'bg-amber-400'}`} />
         <div className="min-w-0 flex-1">
           <p className="text-[13px] font-medium text-zinc-100">
-            {running ? 'Approved — running now: ' : 'Approved, but the outcome is unknown: '}
-            <span className="font-mono text-[12px] text-violet-200">{a.tool}</span> on {a.target}
+            {running ? 'Approved, running now: ' : 'Approved, but the outcome is unknown: '}
+            <span className="font-mono text-[12px] text-violet-200">{a.tool}</span> on <TextWithCode text={a.target} />
           </p>
           {!running && a.resultSummary && (
             <p className="mt-1 break-words text-[12px] leading-relaxed text-amber-200/80">{a.resultSummary}</p>
           )}
-          <p className="mt-1.5 font-mono text-[12px] text-zinc-600">MCP · {timeAgo(a.createdAt)}</p>
+          <MetaRow>
+            <span>From your agent</span>
+            <span className="tabular-nums">{timeAgo(a.createdAt)}</span>
+          </MetaRow>
         </div>
         {running && <Loader2 className="size-3.5 shrink-0 animate-spin text-zinc-500" />}
       </div>
@@ -837,9 +892,10 @@ function ApprovalRow({
         <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-emerald-400" />
         <div className="min-w-0 flex-1">
           <p className="text-[12.5px] font-medium text-zinc-200">{g.title}</p>
-          <p className="mt-1 font-mono text-[12px] text-zinc-500">
-            fixed{many ? ` · ${g.members.length} tables` : ''} · schema verified · rollback snapshot captured
-          </p>
+          {/* Only what is true of every fix: not every fix is verified, nor keeps a restore point. */}
+          <MetaRow className="!mt-1">
+            <span>Fixed{many ? ` on ${g.members.length} tables` : ''}</span>
+          </MetaRow>
         </div>
       </li>
     )
@@ -870,13 +926,13 @@ function ApprovalRow({
               {heldKindLabel(head)}
             </p>
           )}
-          <p className="mt-1 text-[12.5px] leading-snug text-zinc-500">{reasonForApproval(head)}</p>
+          <p className="mt-1 text-[12.5px] leading-snug text-faint">{reasonForApproval(head)}</p>
           {(() => {
             const diag = diagnosisOf(head)
             if (!diag) return null
             return (
               <div className="mt-1.5 border-l border-white/[0.08] pl-3">
-                <p className="mb-0.5 text-[11.5px] font-medium uppercase tracking-wide text-zinc-500">
+                <p className="mb-0.5 text-[12px] font-medium text-faint">
                   {diag.provenance === 'investigation'
                     ? `Confirmed by investigation${diag.observations ? ` · ${diag.observations} observation${diag.observations === 1 ? '' : 's'}` : ''}`
                     : 'AI hypothesis · not verified'}
@@ -885,21 +941,22 @@ function ApprovalRow({
                   <p className="text-[12.5px] leading-snug text-zinc-400">{diag.rootCause}</p>
                 )}
                 {diag.recommendation && (
-                  <p className="mt-0.5 text-[12.5px] leading-snug text-zinc-500">
+                  <p className="mt-0.5 text-[12.5px] leading-snug text-faint">
                     <span className="text-zinc-400">Recommended:</span> {diag.recommendation}
                   </p>
                 )}
               </div>
             )
           })()}
-          <p className="mt-1.5 font-mono text-[12px] text-zinc-600">
-            {head.type} · {g.severity}
-            {!many && head.resource && <> · <span className="text-zinc-500">{head.resource}</span></>}
+          <MetaRow>
+            <MetaCode>{head.type}</MetaCode>
+            <span>{severityWord(g.severity)}</span>
+            {!many && head.resource && <MetaCode>{head.resource}</MetaCode>}
             {head.source && head.source !== 'autonomy' && (
-              <> · <span className="text-violet-300/80">{head.source === 'brain-risk' ? 'AI agent' : 'backend build'}</span></>
+              <span>{head.source === 'brain-risk' ? 'Raised by an AI agent' : 'From the backend build'}</span>
             )}
-            {' · '}{timeAgo(head.detectedAt)}
-          </p>
+            <span className="tabular-nums">{timeAgo(head.detectedAt)}</span>
+          </MetaRow>
 
           {/* The fold is never a hiding place: every member is one click away,
               and the count is stated before you click. */}
@@ -908,7 +965,7 @@ function ApprovalRow({
               <button
                 onClick={() => setExpanded(v => !v)}
                 aria-expanded={expanded}
-                className="inline-flex items-center gap-1 text-[12.5px] font-medium text-zinc-500 transition-colors hover:text-zinc-300"
+                className="inline-flex items-center gap-1 text-[12.5px] font-medium text-faint transition-colors hover:text-zinc-300"
               >
                 {g.members.length} findings, one cause
                 <ChevronDown className={`size-3 transition-transform ${expanded ? 'rotate-180' : ''}`} />
@@ -916,7 +973,7 @@ function ApprovalRow({
               {expanded && (
                 <ul className="mt-2 space-y-1 border-l border-white/[0.08] pl-3">
                   {g.members.map((m, i) => (
-                    <li key={m.id} className="font-mono text-[12px] leading-relaxed text-zinc-500">
+                    <li key={m.id} className="font-mono text-[12px] leading-relaxed text-faint">
                       {g.subjects[i] ?? m.resource ?? m.reason}
                     </li>
                   ))}
@@ -935,7 +992,7 @@ function ApprovalRow({
                 AI-proposed repair · needs your approval
               </p>
               <p className="text-[12.5px] leading-snug text-zinc-300">{proposal.summary}</p>
-              <p className="mt-0.5 text-[12px] leading-snug text-zinc-500">
+              <p className="mt-0.5 text-[12px] leading-snug text-faint">
                 Recorded as fixed only if it is in the catalog, the issue is gone on re-check and nothing else broke. Undo restores the state before it.
               </p>
             </div>
@@ -991,4 +1048,12 @@ function ApprovalRow({
       </div>
     </li>
   )
+}
+
+/** Cut at the last word boundary within `max` characters and mark the cut. */
+function clip(text: string, max: number): string {
+  if (text.length <= max) return text
+  const cut = text.slice(0, max)
+  const space = cut.lastIndexOf(' ')
+  return `${(space > max * 0.6 ? cut.slice(0, space) : cut).replace(/[\s,.;:]+$/, '')}…`
 }

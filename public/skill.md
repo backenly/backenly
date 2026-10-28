@@ -72,7 +72,7 @@ SDK: `npm install @backenly/sdk`, then `createClient({ projectId, apiKey })` wit
 ## The workflow that works
 
 1. `read_backend_state`, then `get_table_schema` on anything you will touch. Never guess names.
-2. Change structure with `apply_migration` / `set_rls`, or `backend_chat` for the outcome.
+2. Change structure with `apply_migration` / `set_rls`, or `backend_chat` for the outcome. **Building an app:** design its whole data model first (every table its features need, with foreign keys) and send it as one `apply_migration`, parents first; then a storage bucket for each kind of upload, `auth`, and realtime where features need it. On a protected production, apply it with a `branchId` and merge. `backend_chat` answers within about 45 s; a longer request keeps running and answers `status: "running"`, and `backend_chat { "message": "status" }` collects its result. A response carrying `next` is not finished: make that call.
 3. Read the schema back after every migration. **Every new table gets four columns you did not ask for:** `id` (uuid), `"createdAt"` and `"updatedAt"` (camelCase), `"deleted_at"` (snake_case). Order by `createdAt`, filter soft deletes on `deleted_at`, and quote camelCase names in SQL. A `created_at` or `updated_at` you declare in `CREATE TABLE` is skipped in favour of these.
 4. `generate_types` (or `backenly types --client`), commit the output, regenerate after every schema change. `backenly diff` in CI fails when they drift.
 5. Build the app against the REST API or SDK.
@@ -85,4 +85,5 @@ Structured JSON: `{ ok: false, error, code }`. `RATE_LIMITED`: respect `retry-af
 
 - Every change is verified, snapshotted and reversible; the History page is the audit trail and the Autonomy page is the approvals inbox.
 - The backend is not static between sessions: the autonomy loop repairs what it safely can on every plan, so a gap you leave may already be closed next time.
+- When a table starts doing two jobs, Backenly may propose moving the second into a table of its own, with apps kept working throughout. `autonomy { action: "evolution" }` says what is proposed and why; only a person approves it, on the Autonomy page.
 - Docs index: https://backenly.com/llms.txt; each topic is https://backenly.com/docs/agents/<topic>.md, or `fetch_docs { topic }` · this file: https://backenly.com/skill.md

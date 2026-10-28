@@ -78,6 +78,8 @@ export interface RecordRollbackMemoryInput {
   beforeState?: unknown
   afterState?: unknown
   rollbackId?: string | null
+  /** The receipt's title. A deploy rollback moves a version pointer and restores nothing, so it says so. */
+  title?: string
 }
 
 export interface RecordToolExecutionMemoryInput {
@@ -796,7 +798,7 @@ export async function recordRollbackMemory(input: RecordRollbackMemoryInput) {
   const receipt = await createChangeReceipt({
     projectId: input.projectId,
     eventIds: [event.id],
-    title: 'Rolled back backend state',
+    title: input.title ?? 'Rolled back backend state',
     summary: input.summary,
     resourcesChanged: {
       rollbackId: input.rollbackId,

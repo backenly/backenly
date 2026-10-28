@@ -14,6 +14,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 jest.mock('@/lib/autonomy/reconciler', () => ({ runReconciler: jest.fn() }))
+jest.mock('@/lib/changes/lock', () => ({ ...jest.requireActual('@/lib/changes/lock'), changeLockHeld: jest.fn(async () => false) }))
 jest.mock('@/lib/services/workspace-observer', () => ({ runObserverForProject: jest.fn() }))
 jest.mock('@/lib/ai/background-monitor', () => ({ runMonitoredHealthScan: jest.fn() }))
 jest.mock('@/lib/ai/schema-reconciler', () => ({

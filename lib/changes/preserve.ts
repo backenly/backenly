@@ -32,9 +32,13 @@
 
 import type { PoolClient } from 'pg'
 import { currentChange, ensureVault, recordStatement, type OpenChange } from './ledger'
+import { describeReaders, vaultReaders } from './dependents'
 import { tableChecksum } from './integrity'
 import { AFTER_COLUMN, qualified, quoteIdent as q, vaultTableName } from './names'
-import type { PreservedEntry } from './types'
+import type { CatalogSnapshot } from './catalog'
+import { columnKey } from './diff'
+import { isConstantDefault } from './impact'
+import type { PreservedEntry, TableChange } from './types'
 
 export { AFTER_COLUMN }
 
@@ -82,6 +86,12 @@ async function primaryKey(client: Pick<PoolClient, 'query'>, target: string): Pr
  * between the vault and production, cascading deletes into archived rows or
  * refusing live ones), and policies on other tables whose expressions name it.
  * Every one of those is in the change's checkpoint, and comes back with it.
+ *
+ * Anything else that reads it (a view, a default drawing from its sequence, a
+ * function whose body names it) refuses the drop, and nothing changes. Moved
+ * with the table, each would keep reading the vault, and the vault's purge
+ * would later drop it from the live schema (lib/changes/dependents.ts); a
+ * CASCADE would have removed it unasked, which verification treats as damage.
  */
 export async function archiveTable(
   projectId: string,
@@ -127,6 +137,10 @@ export async function archiveTable(
     }
 
     await run(change, `ALTER TABLE ${target} SET SCHEMA ${q(vault)}`)
+    const readers = await vaultReaders(async <R>(sql: string, params: unknown[]) => (await client.query(sql, params)).rows as R[], vault)
+    if (readers.length > 0) {
+      throw new Error(`${table} was not dropped, because other objects read it: ${describeReaders(readers)}. Remove or change them first, then drop ${table}.`)
+    }
     return tableChecksum(client, vault, table)
   })
 
@@ -282,6 +296,63 @@ export async function captureRewrite(
     }
   }
   return { commit: () => change.preserved.push(...entries) }
+}
+
+/**
+ * The values a change filled into the columns it added, when their default is
+ * not a constant (now(), gen_random_uuid(), an identity), keyed by primary key.
+ *
+ * A restore removes such a column, and has to say whether that sets aside data
+ * written since the change. For a constant default it compares each value with
+ * the default; for these there is nothing to compare with, so every value read
+ * as possibly written since: the restore always needed a person, and an
+ * automatic recovery of a change that added `seen_at timestamptz DEFAULT now()`
+ * to a table with rows was never possible. With what the change filled in kept,
+ * only the values that differ from it are writes since (lib/changes/impact.ts).
+ *
+ * Taken when the change closes, inside its lock, as the contents of the tables
+ * a change creates are (resultDataFor). Bounded: a table estimated above
+ * `maxRows` keeps nothing, and its restore asks a person as before.
+ */
+export async function keepFilledValues(
+  change: OpenChange,
+  before: CatalogSnapshot,
+  after: CatalogSnapshot,
+  footprint: TableChange[],
+  maxRows = 100_000,
+): Promise<void> {
+  for (const c of footprint) {
+    if (c.object || c.kind !== 'modified' || !c.before || !c.after) continue
+    const B = before.tables[c.before]
+    const A = after.tables[c.after]
+    if (!A || !B) continue
+    const key = columnKey(A.oid === B.oid)
+    const had = new Set(B.columns.map(key))
+    const pk = A.constraints.find((con) => con.type === 'p')?.columns ?? []
+    if (pk.length === 0) continue
+    const filled = A.columns.filter(
+      (col) => !had.has(key(col)) && !col.generated && !pk.includes(col.name) && (!!col.identity || !isConstantDefault(col.default)),
+    )
+    if (filled.length === 0) continue
+    const est = await change.client.query<{ n: string }>(
+      `SELECT greatest(c.reltuples, 0)::bigint AS n FROM pg_class c JOIN pg_namespace s ON s.oid = c.relnamespace WHERE s.nspname = $1 AND c.relname = $2`,
+      [change.schema, A.name],
+    )
+    if (Number(est.rows[0]?.n ?? 0) > maxRows) continue
+    const vault = await ensureVault(change)
+    for (const col of filled) {
+      const vaultTable = uniqueVaultTable(change, [A.name, col.name, 'filled'])
+      await run(
+        change,
+        `CREATE TABLE ${qualified(vault, vaultTable)} AS SELECT ${pk.map(q).join(', ')}, ${q(col.name)} AS ${q(AFTER_COLUMN)} FROM ${qualified(change.schema, A.name)}`,
+      )
+      const sum = await tableChecksum(change.client, vault, vaultTable)
+      change.preserved.push({
+        kind: 'column', table: A.name, column: col.name, reason: 'filled', keyColumns: pk,
+        vault, vaultTable, rows: sum.rows, checksum: sum.checksum, afterColumn: AFTER_COLUMN,
+      })
+    }
+  }
 }
 
 function uniqueVaultTable(change: OpenChange, parts: string[], pending: PreservedEntry[] = []): string {

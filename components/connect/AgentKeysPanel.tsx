@@ -21,16 +21,21 @@ import { refreshAgentConnection } from '@/lib/hooks/useAgentConnection'
 import {
   CopyField,
   EmptyState,
+  GhostPreview,
   KitButton,
   KitConfirmDialog,
+  KitField,
   KitInput,
+  KitModal,
   KitNote,
+  KitSwitch,
   SectionTitle,
   Skeleton,
   Stat,
   StatStrip,
   Tag,
 } from '@/components/inspector/kit'
+import { formatDay, plainText } from '@/components/console/format'
 
 interface McpKey {
   id: string
@@ -94,6 +99,7 @@ export function AgentKeysPanel({
   const [loading, setLoading] = useState(true)
   const [creating, setCreating] = useState(false)
   const [newKey, setNewKey] = useState<{ rawKey: string; label: string | null } | null>(null)
+  const [showNew, setShowNew] = useState(false)
   const [newLabel, setNewLabel] = useState('')
   const [newReadOnly, setNewReadOnly] = useState(false)
   const [revoking, setRevoking] = useState<string | null>(null)
@@ -146,6 +152,7 @@ export function AgentKeysPanel({
       setNewLabel('')
       setNewReadOnly(false)
       setTestResult(null)
+      setShowNew(false)
       fetchAll()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create key')
@@ -203,7 +210,7 @@ export function AgentKeysPanel({
 
   return (
     <div className="min-w-0 space-y-10">
-      {error && <KitNote tone="danger" icon={AlertTriangle}>{error}</KitNote>}
+      {error && !showNew && <KitNote tone="danger" icon={AlertTriangle}>{error}</KitNote>}
 
       {/* ── Live activity ─────────────────────────────────────────────── */}
       {hasLiveActivity && (
@@ -223,14 +230,19 @@ export function AgentKeysPanel({
             <div className="overflow-hidden rounded-[10px] border border-white/[0.08] bg-[#0f1012]">
               <div className="flex items-center justify-between border-b border-white/[0.06] px-4 py-2.5">
                 <h3 className="text-[13px] font-medium text-zinc-100">Recent tool calls</h3>
-                <span className="text-[12px] tabular-nums text-zinc-500">{usage!.recent.length} events</span>
+                <span className="text-[12px] tabular-nums text-faint">{usage!.recent.length} events</span>
               </div>
-              <ul className="max-h-[380px] divide-y divide-white/[0.05] overflow-y-auto overscroll-contain">
+              <ul
+                tabIndex={0}
+                aria-label="Recent tool calls"
+                className="max-h-[380px] divide-y divide-white/[0.05] overflow-y-auto overscroll-contain focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-violet-300/60"
+              >
                 {usage!.recent.map((r) => {
                   const ok = r.statusCode >= 200 && r.statusCode < 300
                   return (
                     <li key={r.id} className="flex items-center gap-3 px-4 py-2.5">
                       <span
+                        role="img"
                         className={`h-[7px] w-[7px] flex-shrink-0 rounded-full ${ok ? 'bg-emerald-400' : 'bg-rose-400'}`}
                         aria-label={ok ? `Succeeded (${r.statusCode})` : `Failed (${r.statusCode})`}
                       />
@@ -241,11 +253,11 @@ export function AgentKeysPanel({
                           {!ok && <span className="text-[12px] tabular-nums text-rose-300">{r.statusCode}</span>}
                         </div>
                         {(r.summary || r.error) && (
-                          <div className="mt-0.5 truncate text-[12px] text-zinc-500">{plainText(r.error ?? r.summary ?? '')}</div>
+                          <div className="mt-0.5 truncate text-[12px] text-faint">{plainText(r.error ?? r.summary ?? '')}</div>
                         )}
                       </div>
-                      <div className="w-16 flex-shrink-0 text-right text-[12px] tabular-nums text-zinc-500">{r.ms ?? 0} ms</div>
-                      <div className="w-10 flex-shrink-0 text-right text-[12px] tabular-nums text-zinc-600">{timeAgo(r.timestamp)}</div>
+                      <div className="w-16 flex-shrink-0 text-right text-[12px] tabular-nums text-faint">{r.ms ?? 0} ms</div>
+                      <div className="w-10 flex-shrink-0 text-right text-[12px] tabular-nums text-faint">{timeAgo(r.timestamp)}</div>
                     </li>
                   )
                 })}
@@ -262,10 +274,10 @@ export function AgentKeysPanel({
             <h2 id="agent-connections-heading" className="text-[15px] font-semibold leading-[22px] tracking-[-0.012em] text-zinc-100">Connected agents</h2>
             <p className="mt-1 text-[13px] text-zinc-400">Agents you authorised by signing in from the browser. There is no key to copy; disconnect one and it stops working at once.</p>
           </div>
-          <div className="overflow-x-auto rounded-[10px] border border-white/[0.08] bg-[#0f1012]">
+          <div className="relative overflow-x-auto rounded-[10px] border border-white/[0.08] bg-[#0f1012]">
             <table className="w-full min-w-[520px] text-left">
               <thead>
-                <tr className="border-b border-white/[0.06] text-[12px] text-zinc-500">
+                <tr className="border-b border-white/[0.06] text-[12px] text-faint">
                   <th scope="col" className="h-[36px] whitespace-nowrap px-4 font-medium">Agent</th>
                   <th scope="col" className="h-[36px] whitespace-nowrap px-4 font-medium">Connected</th>
                   <th scope="col" className="h-[36px] whitespace-nowrap px-4 font-medium">Last used</th>
@@ -282,15 +294,15 @@ export function AgentKeysPanel({
                         <div className="mt-0.5 flex flex-wrap items-center gap-2">
                           {c.readOnly && <Tag tone="neutral">Read-only</Tag>}
                           {stat && stat.calls7d > 0 && (
-                            <span className="text-[12px] tabular-nums text-zinc-500">{stat.calls7d.toLocaleString()} calls this week</span>
+                            <span className="text-[12px] tabular-nums text-faint">{stat.calls7d.toLocaleString()} calls this week</span>
                           )}
                         </div>
                       </td>
                       <td className="whitespace-nowrap px-4 py-3 text-[13px] tabular-nums text-zinc-400">
-                        {new Date(c.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}
+                        {formatDay(c.createdAt)}
                       </td>
                       <td className="whitespace-nowrap px-4 py-3 text-[13px] tabular-nums text-zinc-400">
-                        {c.lastUsed ? `${timeAgo(c.lastUsed)} ago` : <span className="text-zinc-600">Never</span>}
+                        {c.lastUsed ? `${timeAgo(c.lastUsed)} ago` : <span className="text-faint">Never</span>}
                       </td>
                       <td className="px-4 py-3 text-right">
                         <KitButton
@@ -313,47 +325,29 @@ export function AgentKeysPanel({
         </section>
       )}
 
-      {/* ── Keys ──────────────────────────────────────────────────────── */}
+      {/* ── Keys ────────────────────────────────────────────────────────
+          The label and read-only choice open in a dialog behind New key. They
+          sat inline in this header, which in the narrow right column pushed
+          the button past the column's edge. */}
       <section aria-labelledby="agent-keys-heading">
-        <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-          <div>
-            <h2 id="agent-keys-heading" className="text-[15px] font-semibold leading-[22px] tracking-[-0.012em] text-zinc-100">Agent keys</h2>
-            <p className="mt-1 text-[13px] text-zinc-400">Server-side only, rate limited per key, and every mutation is audited.</p>
-          </div>
-          <form
-            className="flex items-center gap-2"
-            onSubmit={(e) => { e.preventDefault(); createKey() }}
-          >
-            <label className="sr-only" htmlFor="agent-key-label">Label for a new key</label>
-            <KitInput
-              id="agent-key-label"
-              name="agent-key-label"
-              autoComplete="off"
-              type="text"
-              placeholder="Label, e.g. CI server…"
-              value={newLabel}
-              onChange={(e) => setNewLabel(e.target.value)}
-              disabled={creating}
-              className="w-full sm:w-48"
-            />
-            <label className="flex shrink-0 cursor-pointer items-center gap-1.5 text-[12.5px] text-zinc-400">
-              <input
-                type="checkbox"
-                checked={newReadOnly}
-                onChange={(e) => setNewReadOnly(e.target.checked)}
-                disabled={creating}
-                className="h-3.5 w-3.5 accent-violet-400"
-              />
-              Read-only
-            </label>
-            <KitButton type="submit" icon={Plug2} loading={creating}>
+        <SectionTitle
+          title={<span id="agent-keys-heading">Agent keys</span>}
+          description="Server-side only, rate limited per key, and every change is audited."
+          actions={
+            <KitButton
+              icon={Plug2}
+              onClick={() => {
+                setError(null)
+                setShowNew(true)
+              }}
+            >
               New key
             </KitButton>
-          </form>
-        </div>
+          }
+        />
 
         {newKey && (
-          <div className="mb-4 rounded-[10px] border border-violet-300/25 bg-violet-400/[0.04] p-4">
+          <div className="mb-4 rounded-[10px] border border-emerald-400/20 bg-emerald-400/[0.04] p-4">
             <p className="flex items-center gap-2 text-[13px] font-medium text-zinc-100">
               <Check className="h-4 w-4 text-emerald-300" />
               Key created{newKey.label ? `: ${newKey.label}` : ''}
@@ -385,19 +379,20 @@ export function AgentKeysPanel({
             <Skeleton className="h-[56px] w-full rounded-[10px]" />
           </div>
         ) : keys.length === 0 ? (
-          <div className="rounded-[10px] border border-dashed border-white/[0.10]">
+          <div className="rounded-[10px] border border-white/[0.08] bg-[#0f1012]">
             <EmptyState
               icon={KeyRound}
+              preview={<GhostPreview kind="list" />}
               title="No agent keys yet"
-              description="Generate one in step 1, or add a labelled key here, to wire your first agent."
+              description="Generate one in step 1, or create a labelled key here, to wire your first agent."
               className="py-10"
             />
           </div>
         ) : (
-          <div className="overflow-x-auto rounded-[10px] border border-white/[0.08] bg-[#0f1012]">
+          <div className="relative overflow-x-auto rounded-[10px] border border-white/[0.08] bg-[#0f1012]">
             <table className="w-full min-w-[520px] text-left">
               <thead>
-                <tr className="border-b border-white/[0.06] text-[12px] text-zinc-500">
+                <tr className="border-b border-white/[0.06] text-[12px] text-faint">
                   <th scope="col" className="h-[36px] whitespace-nowrap px-4 font-medium">Key</th>
                   <th scope="col" className="h-[36px] whitespace-nowrap px-4 font-medium">Created</th>
                   <th scope="col" className="h-[36px] whitespace-nowrap px-4 font-medium">Last used</th>
@@ -412,18 +407,18 @@ export function AgentKeysPanel({
                       <td className="px-4 py-3">
                         <div className="truncate text-[13px] font-medium text-zinc-100">{k.label || k.name}</div>
                         <div className="mt-0.5 flex flex-wrap items-center gap-2">
-                          <code className="font-mono text-[12px] text-zinc-500">{k.masked}</code>
+                          <code className="font-mono text-[12px] text-faint">{k.masked}</code>
                           {k.readOnly && <Tag tone="neutral">Read-only</Tag>}
                           {stat && stat.calls7d > 0 && (
-                            <span className="text-[12px] tabular-nums text-zinc-500">{stat.calls7d.toLocaleString()} calls this week</span>
+                            <span className="text-[12px] tabular-nums text-faint">{stat.calls7d.toLocaleString()} calls this week</span>
                           )}
                         </div>
                       </td>
                       <td className="whitespace-nowrap px-4 py-3 text-[13px] tabular-nums text-zinc-400">
-                        {new Date(k.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}
+                        {formatDay(k.createdAt)}
                       </td>
                       <td className="whitespace-nowrap px-4 py-3 text-[13px] tabular-nums text-zinc-400">
-                        {k.lastUsed ? `${timeAgo(k.lastUsed)} ago` : <span className="text-zinc-600">Never</span>}
+                        {k.lastUsed ? `${timeAgo(k.lastUsed)} ago` : <span className="text-faint">Never</span>}
                       </td>
                       <td className="px-4 py-3 text-right">
                         <KitButton
@@ -445,6 +440,60 @@ export function AgentKeysPanel({
           </div>
         )}
       </section>
+
+      <KitModal
+        open={showNew}
+        onClose={() => {
+          if (!creating) setShowNew(false)
+        }}
+        title="New agent key"
+        description="Scoped to this project and revocable. The key is shown once, after you create it."
+        footer={
+          <>
+            <KitButton variant="ghost" onClick={() => setShowNew(false)} disabled={creating}>
+              Cancel
+            </KitButton>
+            <KitButton variant="primary" icon={Plug2} loading={creating} onClick={createKey}>
+              {creating ? 'Creating…' : 'Create key'}
+            </KitButton>
+          </>
+        }
+      >
+        <form
+          onSubmit={(e) => {
+            e.preventDefault()
+            createKey()
+          }}
+          className="space-y-4"
+        >
+          <KitField label="Label" hint="Optional. Name the machine or agent that will use it.">
+            <KitInput
+              name="agent-key-label"
+              autoComplete="off"
+              spellCheck={false}
+              placeholder="CI server…"
+              value={newLabel}
+              onChange={(e) => setNewLabel(e.target.value)}
+              disabled={creating}
+              aria-label="Label"
+            />
+          </KitField>
+          <div className="flex items-start justify-between gap-4 rounded-[8px] border border-white/[0.07] bg-white/[0.02] px-3.5 py-3">
+            <span className="min-w-0">
+              <span className="block text-[13px] font-medium text-zinc-100">Read-only</span>
+              <span className="mt-0.5 block text-[12.5px] leading-[18px] text-faint">
+                The agent can read the schema and data but cannot change anything.
+              </span>
+            </span>
+            <KitSwitch checked={newReadOnly} onChange={setNewReadOnly} disabled={creating} label="Read-only" className="mt-0.5" />
+          </div>
+          {error && (
+            <KitNote tone="danger" icon={AlertTriangle}>
+              {error}
+            </KitNote>
+          )}
+        </form>
+      </KitModal>
 
       <KitConfirmDialog
         open={!!revokeTarget}
@@ -471,19 +520,6 @@ export function AgentKeysPanel({
 }
 
 // ── Sub-components ───────────────────────────────────────────────────────────
-
-// MCP result summaries are stored as agent-facing markdown (bold, backticks,
-// emoji bullets); this feed renders plain text, so strip the formatting.
-function plainText(s: string): string {
-  return s
-    .replace(/\*\*([^*]+)\*\*/g, '$1')
-    .replace(/__([^_]+)__/g, '$1')
-    .replace(/`([^`]+)`/g, '$1')
-    .replace(/[\u2600-\u27BF\u2B00-\u2BFF\uFE0F]|\uD83C[\uDC00-\uDFFF]|\uD83D[\uDC00-\uDFFF]|\uD83E[\uDC00-\uDEFF]/g, '')
-    .replace(/\s*[•·]\s*/g, ' · ')
-    .replace(/\s+/g, ' ')
-    .trim()
-}
 
 function timeAgo(iso: string): string {
   const diff = Date.now() - new Date(iso).getTime()

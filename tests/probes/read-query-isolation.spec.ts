@@ -24,7 +24,7 @@
  * only exists in a real server.
  */
 
-import { PrismaClient } from '@prisma/client'
+import { PrismaClient, type Prisma } from '@prisma/client'
 import { randomUUID } from 'crypto'
 
 const prisma = new PrismaClient()
@@ -34,24 +34,33 @@ const MINE = `workspace_rq_mine_${suffix}`
 const THEIRS = `workspace_rq_theirs_${suffix}`
 const RO_ROLE = `bkn_ro_test_${suffix}`
 
-/** Run a statement with the session switched to the read-only role. */
-async function asReadOnlyRole<T>(fn: () => Promise<T>): Promise<T> {
-  await prisma.$executeRawUnsafe(`SET ROLE "${RO_ROLE}"`)
-  try {
-    return await fn()
-  } finally {
-    await prisma.$executeRawUnsafe(`RESET ROLE`)
-  }
+type Db = Prisma.TransactionClient
+
+/**
+ * Run as the read-only role on ONE connection: the role and the case's own
+ * queries share an interactive transaction. Separate `prisma` calls are served
+ * by any pooled connection, so a role set by one call did not reach the next: a
+ * refusal case could fail at random, and a positive case could pass as the
+ * suite's superuser. SET LOCAL ends with the transaction.
+ */
+async function asReadOnlyRole<T>(fn: (db: Db) => Promise<T>): Promise<T> {
+  return prisma.$transaction(async (tx) => {
+    await tx.$executeRawUnsafe(`SET LOCAL ROLE "${RO_ROLE}"`)
+    const [ctx] = await tx.$queryRawUnsafe<Array<{ who: string }>>(`SELECT current_user::text AS who`)
+    if (ctx?.who !== RO_ROLE) throw new Error(`not impersonating: running as ${ctx?.who}`)
+    return fn(tx)
+  }, { timeout: 30_000, maxWait: 30_000 })
 }
 
+/** The statement is refused with a permission error (any other failure, the guard's included, is not a refusal). */
 async function expectDenied(sql: string): Promise<string> {
   let message = ''
   try {
-    await asReadOnlyRole(() => prisma.$executeRawUnsafe(sql))
+    await asReadOnlyRole((db) => db.$executeRawUnsafe(sql))
   } catch (err) {
     message = err instanceof Error ? err.message : String(err)
   }
-  expect(message).not.toBe('')
+  expect(message).toMatch(/permission denied/i)
   return message
 }
 
@@ -98,16 +107,16 @@ afterAll(async () => {
 
 describe('read-only role — can do its job', () => {
   it('reads its own schema', async () => {
-    const rows = await asReadOnlyRole(() =>
-      prisma.$queryRawUnsafe<Array<{ body: string }>>(`SELECT body FROM "${MINE}".notes`),
+    const rows = await asReadOnlyRole((db) =>
+      db.$queryRawUnsafe<Array<{ body: string }>>(`SELECT body FROM "${MINE}".notes`),
     )
     expect(rows).toHaveLength(1)
     expect(rows[0].body).toContain('mine')
   })
 
   it('runs the set-based SQL that db_query could not express', async () => {
-    const rows = await asReadOnlyRole(() =>
-      prisma.$queryRawUnsafe<Array<{ n: bigint }>>(
+    const rows = await asReadOnlyRole((db) =>
+      db.$queryRawUnsafe<Array<{ n: bigint }>>(
         `SELECT count(*)::bigint AS n FROM "${MINE}".notes GROUP BY body`,
       ),
     )

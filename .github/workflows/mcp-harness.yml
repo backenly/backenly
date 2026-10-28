@@ -52,6 +52,11 @@ on:
         type: boolean
         default: true
 
+# Runners are pinned to ubuntu-24.04, not ubuntu-latest: in October 2026 GitHub
+# moved ubuntu-latest to 26.04, where postgresql-16-pgvector is not packaged
+# (apt exits 100) and Playwright 1.57 has no Chromium build, so every PR failed
+# the integration and self-host jobs before running a test. Move to a newer
+# image deliberately, together with those two dependencies.
 jobs:
   harness:
     name: golden workflows vs production
@@ -59,7 +64,7 @@ jobs:
     # contributor pressing "Run workflow" would get a red X on a run that could
     # never have worked — noise that reads like their change broke something.
     if: github.repository == 'backenly/backenly'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4

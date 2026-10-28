@@ -9,21 +9,40 @@
  * called by each region's scheduler for its own projects (lib/changes/upkeep.ts)
  * and by the archive-cleanup cron, and only a schema that is provably one of
  * this project's vaults, by name, is ever dropped.
+ *
+ * A vault that anything outside it still reads (a view, a policy on a live
+ * table, a default drawing from a sequence kept there) is kept and named
+ * instead: `DROP SCHEMA … CASCADE` would drop that reader from the live schema,
+ * silently (lib/changes/dependents.ts). Nothing moves a table into a vault
+ * while something reads it any more, but vaults made before that was enforced
+ * can still have readers, and a person has to decide what happens to them.
  */
 
 import { Prisma } from '@prisma/client'
 import { prisma } from '@/lib/db/prisma'
 import { workspaceRawClient } from '@/lib/data-plane/regional'
+import { describeReaders, vaultReaders, type VaultReader } from './dependents'
 import { isVaultSchema, quoteIdent } from './names'
 import { rollbackWindowDays, VAULT_GRACE_DAYS } from './policy'
 import type { ChangePreservation } from './types'
 
-export async function purgeExpiredVaults(projectId: string, now = new Date()): Promise<{ purged: string[] }> {
+export async function purgeExpiredVaults(
+  projectId: string,
+  now = new Date(),
+): Promise<{ purged: string[]; kept: Array<{ vault: string; readers: VaultReader[] }> }> {
   const windowDays = await rollbackWindowDays(projectId)
   const cutoff = new Date(now.getTime() - (windowDays + VAULT_GRACE_DAYS) * 24 * 60 * 60 * 1000)
   const purged: string[] = []
+  const kept: Array<{ vault: string; readers: VaultReader[] }> = []
   // Vaults are schemas in the project's own database, in its region.
   const db = await workspaceRawClient(projectId)
+  const readOutside = async (vault: string): Promise<boolean> => {
+    const readers = await vaultReaders(<R>(sql: string, params: unknown[]) => db.$queryRawUnsafe<R[]>(sql, ...params), vault)
+    if (readers.length === 0) return false
+    kept.push({ vault, readers })
+    console.warn(`[ChangeRetention] project=${projectId}: kept vault ${vault} past its window, because live objects read it: ${describeReaders(readers)}`)
+    return true
+  }
 
   const rows = await prisma.backendChange.findMany({
     where: { projectId, createdAt: { lt: cutoff }, NOT: { preserved: { equals: Prisma.DbNull } } },
@@ -32,6 +51,7 @@ export async function purgeExpiredVaults(projectId: string, now = new Date()): P
   for (const row of rows) {
     const preserved = row.preserved as unknown as ChangePreservation | null
     if (!preserved || preserved.purgedAt || !isVaultSchema(projectId, preserved.vault)) continue
+    if (await readOutside(preserved.vault)) continue
     await db.$executeRawUnsafe(`DROP SCHEMA IF EXISTS ${quoteIdent(preserved.vault)} CASCADE`)
     await prisma.backendChange.update({
       where: { id: row.id },
@@ -54,9 +74,10 @@ export async function purgeExpiredVaults(projectId: string, now = new Date()): P
     const recorded = change?.preserved && (change.preserved as unknown as ChangePreservation).vault === nspname
     if (recorded) continue
     if (change && change.createdAt >= cutoff) continue
+    if (await readOutside(nspname)) continue
     await db.$executeRawUnsafe(`DROP SCHEMA IF EXISTS ${quoteIdent(nspname)} CASCADE`)
     purged.push(nspname)
   }
 
-  return { purged }
+  return { purged, kept }
 }

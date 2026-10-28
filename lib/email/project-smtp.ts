@@ -260,7 +260,14 @@ export function validateSmtpConfig(
  * not been proven, and leaving a stale green tick beside new credentials is
  * exactly the false claim this row exists to avoid.
  */
+/** One governed change each (lib/changes/resources/auth.ts). */
+const governed = async <T>(projectId: string, title: string, fn: () => Promise<T>) => (await import('@/lib/changes/ledger')).governedChange(projectId, title, fn)
+
 export async function saveSmtpConfig(projectId: string, input: SmtpConfigInput) {
+  return governed(projectId, 'Set the email sender (SMTP)', () => writeSmtpConfig(projectId, input))
+}
+
+async function writeSmtpConfig(projectId: string, input: SmtpConfigInput) {
   const existing = await prisma.projectEmailConfig.findUnique({ where: { projectId } })
 
   const secret = input.password ? encryptValue(input.password) : null
@@ -289,6 +296,7 @@ export async function saveSmtpConfig(projectId: string, input: SmtpConfigInput) 
     })
   }
 
+  // history: governed by saveSmtpConfig
   return prisma.projectEmailConfig.update({
     where: { projectId },
     data: {
@@ -369,6 +377,8 @@ export function isTestRecipient(to: unknown): to is string {
 }
 
 export async function deleteSmtpConfig(projectId: string): Promise<boolean> {
-  const { count } = await prisma.projectEmailConfig.deleteMany({ where: { projectId } })
-  return count > 0
+  return governed(projectId, 'Remove the email sender (SMTP)', async () => {
+    const { count } = await prisma.projectEmailConfig.deleteMany({ where: { projectId } })
+    return count > 0
+  })
 }

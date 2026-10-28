@@ -19,6 +19,7 @@
  *   health dismiss                DEVELOPER
  *   autonomy dial                 DEVELOPER
  *   maintenance consent/revoke    ADMIN
+ *   architecture change decisions ADMIN   (approve, pause, resume, undo)
  *   finding approve / dismiss     DEVELOPER
  *   finding rollback              ADMIN
  *   branch create / discard       DEVELOPER
@@ -225,6 +226,16 @@ const calls: Record<string, Call> = {
       params({ id: projectId }),
     )
   },
+  // Approving, pausing, resuming or undoing an architecture change decides
+  // what happens to a production table. Past the floor, an unknown decision is
+  // refused by the engine (404), never by the floor.
+  decideArchitecture: async (token, projectId) => {
+    const { POST } = await import('@/app/api/projects/[id]/architecture/route')
+    return POST(
+      req({ method: 'POST', token, path: `/api/projects/${projectId}/architecture`, body: { action: 'undo', decisionId: randomUUID() } }) as any,
+      params({ id: projectId }),
+    )
+  },
   approveFindingFix: async (token, projectId) => {
     const { POST } = await import('@/app/api/projects/[id]/approvals/[findingId]/route')
     return POST(
@@ -317,7 +328,7 @@ const developerFloor: Array<keyof typeof calls> = [
 
 /** The ADMIN-floor surfaces: DEVELOPER refused, ADMIN past the floor. */
 const adminFloor: Array<keyof typeof calls> = [
-  'decideApproval', 'grantMaintenance', 'rollbackFinding', 'mergeBranch', 'restoreSnapshot',
+  'decideApproval', 'grantMaintenance', 'decideArchitecture', 'rollbackFinding', 'mergeBranch', 'restoreSnapshot',
 ]
 
 describe('DEVELOPER-floor surfaces', () => {

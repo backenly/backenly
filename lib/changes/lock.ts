@@ -144,6 +144,26 @@ export async function withChangeLock<T>(
   }
 }
 
+/**
+ * Whether a governed change holds this project's change lock right now: an
+ * agent's migration, a restore, or the automatic recovery of either, from its
+ * checkpoint until it has settled. Read from pg_locks on the database holding
+ * the lock, so asking takes no lock and never holds a change up.
+ */
+export async function changeLockHeld(projectId: string): Promise<boolean> {
+  // pg_locks shows a two-key advisory lock's keys as oids: classid the first,
+  // objid the second, objsubid 2.
+  const res = await (await lockPool(projectId)).query(
+    `SELECT 1 FROM pg_locks
+      WHERE locktype = 'advisory' AND granted AND objsubid = 2
+        AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+        AND classid = $1::oid AND objid = $2::oid
+      LIMIT 1`,
+    [String(CHANGE_LOCK_NAMESPACE >>> 0), String(projectToLockKey(projectId) >>> 0)],
+  )
+  return (res.rowCount ?? 0) > 0
+}
+
 /** Close every region's pool. Tests only. */
 export async function closeChangeLockPool(): Promise<void> {
   const all = [...pools.values()]

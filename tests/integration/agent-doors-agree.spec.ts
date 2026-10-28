@@ -15,7 +15,8 @@
  * CON-07: connect_frontend's schema promised a "type CONNECT" prompt that the
  * typed door never shows, and binding the first origin silently made the
  * CORS allowlist exclusive. The descriptions now say which door prompts, and
- * the first bind says that other origins are now refused.
+ * the first deployed bind says that other origins are now refused; a
+ * development origin such as localhost never closes the list.
  */
 import fs from 'fs'
 import path from 'path'
@@ -134,19 +135,32 @@ describe('AUTH-F5: a password reset is not parked on one door and run on the oth
 })
 
 describe('CON-07: connect_frontend says what each door does', () => {
-  it('the first bind says the allowlist is now exclusive; a later bind does not', async () => {
+  it('the first deployed bind says the allowlist is now exclusive; a later bind does not', async () => {
     const projectId = await freshProject('doors-connect')
     // confirmed: what the typed MCP door sets for an owner-held key.
     const first = await act(projectId, 'CONNECT_FRONTEND', { url: 'https://app.example.test', confirmed: true })
     expect(first.success).toBe(true)
     expect((first.data as any).firstConnectedOrigin).toBe(true)
-    expect(first.message).toContain('first connected origin')
+    expect(first.message).toContain('first deployed origin connected')
     expect(first.message).toContain('refused')
 
     const second = await act(projectId, 'CONNECT_FRONTEND', { url: 'https://staging.example.test', confirmed: true })
     expect(second.success).toBe(true)
     expect((second.data as any).firstConnectedOrigin).toBe(false)
-    expect(second.message).not.toContain('first connected origin')
+    expect(second.message).not.toContain('first deployed origin connected')
+  }, 60_000)
+
+  // The dev server an agent connects while it builds never closes the list:
+  // that bind is how a deployed app came to work only on localhost.
+  it('a development origin does not close the allowlist, and the deployed one after it does', async () => {
+    const projectId = await freshProject('doors-connect-local')
+    const local = await act(projectId, 'CONNECT_FRONTEND', { url: 'http://localhost:5173', confirmed: true })
+    expect(local.success).toBe(true)
+    expect((local.data as any).firstConnectedOrigin).toBe(false)
+    expect(local.message).not.toContain('refused')
+
+    const deployed = await act(projectId, 'CONNECT_FRONTEND', { url: 'https://app.example.test', confirmed: true })
+    expect((deployed.data as any).firstConnectedOrigin).toBe(true)
   }, 60_000)
 
   it('the schema no longer promises a prompt the typed door never shows', () => {

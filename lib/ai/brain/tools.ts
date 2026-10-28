@@ -73,6 +73,7 @@ export type ToolName =
   | 'get_usage'
   | 'get_autonomy_status'
   | 'get_maintenance_ladder'
+  | 'get_evolution_proposals'
   | 'get_realtime_status'
   // Build
   | 'create_table'
@@ -283,6 +284,7 @@ export const READ_ONLY_TOOLS = new Set<ToolName>([
   'get_usage',
   'get_autonomy_status',
   'get_maintenance_ladder',
+  'get_evolution_proposals',
   'get_realtime_status',
   'list_findings',
   'get_pending_incidents',
@@ -592,6 +594,13 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
         type: 'array',
         items: { type: 'string' },
         description: 'For `participants`: the columns naming each user party to a row, e.g. ["requester_id","addressee_id"].',
+      },
+      via: {
+        type: 'string',
+        description:
+          'For `owned_via_parent`: the foreign-key column whose parent row decides access, e.g. "order_id". ' +
+          'Omit and it is inferred, which is refused when the row could belong to more than one parent ' +
+          '(order_items points at both orders and sellers).',
       },
       using: {
         type: 'string',
@@ -942,7 +951,7 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
     []),
   // ── Deploy: version history ───────────────────────────────────────────────
   fn('list_deploy_versions',
-    'Every published version, newest first: id, version number, change summary, when it was published, which one is serving, and which can be rolled back to (rollback_deploy takes the version or its id).',
+    'Every published version, newest first: id, version number, change summary, when it was published, and which one is serving. rollback_deploy asks to restore the backend to one of them (by version or id).',
     {},
     []),
   fn('list_schema_changes',
@@ -1181,6 +1190,9 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
   fn('get_maintenance_ladder',
     'Read the structural maintenance ladder awaiting a decision on this project: the diagnosis that produced it, every rung with its tier and whether it can be undone, and whether anybody has consented yet. A ladder rewrites schema, so consent belongs to a person and this tool is READ-ONLY: report what is waiting and why, then point the user at the Autonomy page to approve it. Consent binds to one exact planVersion, so a version read earlier may already be stale.',
     {}),
+  fn('get_evolution_proposals',
+    'Read Backenly\'s architecture evolution for this project, concisely: recent architecture changes in plain sentences (what changed, whether it worked and helped, whether it can be undone), how many changes wait for the owner\'s approval, recommendations not proposed to run, and tables deliberately left alone with the reason. Pass detail: true for a fresh analysis with every concern\'s evidence and the exact plans (optionally narrowed by `table`), or `decision` for one change\'s full history. READ-ONLY: approving, pausing, resuming or undoing a change belongs to a person on the Autonomy page; report what is waiting and why, and point the user there.',
+    { detail: { type: 'boolean' }, table: { type: 'string' }, decision: { type: 'string' } }),
   fn('get_realtime_status',
     'Read realtime streaming state from the live database: which tables push live INSERT/UPDATE/DELETE events to subscribed clients over SSE, which tables are idle (realtime not enabled), how many end-users are online right now, and the Postgres NOTIFY channel. Side-effect free. Call this to answer "is realtime working?" / "what is streaming?" / "how many users are online?", and ALWAYS before enable_realtime / disable_realtime / fix_backend(target="realtime") so you act on real state instead of guessing.',
     {}),
@@ -1299,7 +1311,7 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
     'DESTRUCTIVE-grade. Publish the current backend (tables, APIs, auth, storage, triggers, RLS become publicly callable) as the next production version. There is one production deployment per project; deploy has no staging target. It waits for a person: the call is queued for the project owner to approve in the dashboard, and the approved call runs the readiness gate and publishes. Nothing typed in chat approves it. Use when the user says "ship it" / "publish" / "go live".',
     {}),
   fn('rollback_deploy',
-    'DESTRUCTIVE. Mark a previous published version as current in the version history. This is bookkeeping: it does NOT change the live schema, data, RLS or functions, and the API keeps serving exactly what is deployed now. To restore structure, roll back a schema version from the Database page or restore a Snapshot. It waits for a person: the call is queued for the project owner to approve in the dashboard, and the approved call runs exactly as made. Always call get_deploy_status first.',
+    'DESTRUCTIVE: waits for a person to approve. Ask for the backend to be restored to a published version: every change made since that version was published is undone, newest first, each checked before it runs, and the version is then recorded as current. Backenly measures it first and queues the list of changes it would undo for a project admin to approve in the dashboard; a version that does not exist, or that nothing has changed since, is answered at once. Approving runs exactly that list, or nothing if the history changed since. A step that would set aside data written since stops it there, for the person to review. Data your users wrote is never rewound, and keys or secrets never come back. You cannot run or approve it yourself. Call list_deploy_versions first.',
     {
       version: { type: 'integer', description: 'Target published version number (e.g. 2). Either version OR deploymentId is required.' },
       deploymentId: { type: 'string', description: 'Specific deployment id to roll back to.' },
@@ -1678,6 +1690,7 @@ export const TOOL_TO_ACTION: Record<string, (args: any) => AIAction> = {
             custom: 'custom',
           } as Record<string, string>)[String(a.policy)] ?? String(a.policy),
       ...(Array.isArray(a.partyColumns) ? { partyColumns: a.partyColumns } : {}),
+      ...(typeof a.via === 'string' && a.via ? { via: a.via } : {}),
       ...(a.using ? { using: a.using } : {}),
       ...(a.withCheck ? { withCheck: a.withCheck } : {}),
       // Per-command rules. Forwarded as-is: the executor validates every
@@ -1928,13 +1941,26 @@ const FIX_TARGET_TO_ACTION: Record<string, AIAction['action']> = {
  * iterate against the validator in private; users only see real work.
  */
 /**
- * Refuse a create_table of a table that exists, or an add_column on one that
- * does not, with the wording apply_migration uses. Reads the catalog through
- * the same helper apply_migration does, on the database in the project's
- * region, so the doors cannot disagree.
+ * Calls that act on a table that must already exist. Given a missing one, the
+ * executor's dependency resolver creates it first (resolveDependencies in
+ * minimal-executor.ts), with columns it guesses from the name. So a typo made a
+ * stray table, and generate_api, which the protected-production gate does not
+ * stop because it changes no schema of its own, created tables on a protected
+ * production: a blueprint's create_table steps were refused there and its
+ * generate_api steps built each table anyway, on main, unapproved.
+ */
+const NEEDS_EXISTING_TABLE: ReadonlySet<string> = new Set([
+  'add_column', 'generate_api', 'create_index', 'rename_column', 'add_constraint',
+])
+
+/**
+ * Refuse a create_table of a table that exists, or a NEEDS_EXISTING_TABLE call
+ * on one that does not, with the wording apply_migration uses. Reads the
+ * catalog through the same helper apply_migration does, on the database in the
+ * project's region, so the doors cannot disagree.
  */
 async function tableExistencePreflight(
-  name: 'create_table' | 'add_column',
+  name: string,
   args: Record<string, unknown>,
   projectId: string,
 ): Promise<ToolResult | null> {
@@ -1957,13 +1983,13 @@ async function tableExistencePreflight(
         `To add columns use add_column; get_table_schema shows what ${table} has now.`,
     }
   }
-  if (name === 'add_column' && !exists) {
+  if (NEEDS_EXISTING_TABLE.has(name) && !exists) {
     const suggestion = await closestTableName(projectId, schema, table)
     return {
       ok: false,
       code: 'TABLE_NOT_FOUND',
       summary:
-        `There is no table ${table} in this project, so add_column cannot run. Nothing was changed.` +
+        `There is no table ${table} in this project, so ${name} cannot run. Nothing was changed.` +
         (suggestion ? ` Did you mean ${suggestion}?` : '') +
         ' If it is a new table, create it first with create_table.',
     }
@@ -2136,9 +2162,12 @@ export async function dispatchTool(
   // apply_migration's rule (checkPlan), on the typed doors too: create_table of
   // an existing table changed nothing and answered "Created", and add_column on
   // a missing table CREATED it, so a typo made a stray one-column table while
-  // the agent believed it had changed the real one (DB-06). Internal callers of
-  // the executor (blueprints, auto-wiring) keep their idempotent create.
-  if (name === 'create_table' || name === 'add_column') {
+  // the agent believed it had changed the real one (DB-06). generate_api,
+  // create_index, rename_column and add_constraint made the same stray table,
+  // and generate_api made it past the protected-production gate
+  // (NEEDS_EXISTING_TABLE). Internal callers of the executor (auto-wiring)
+  // keep their idempotent create.
+  if (name === 'create_table' || NEEDS_EXISTING_TABLE.has(name)) {
     const refusal = await tableExistencePreflight(name, args, ctx.projectId)
     if (refusal) return refusal
   }
@@ -2213,10 +2242,12 @@ export async function dispatchTool(
         '- Other sections: `tables`, `apis`, `functions`, `rls`, `triggers`, `keys`, `users`, `buckets`, `files`, `cron`, `env`, `integrations`, `apps`, `webhooks`, `deliveries`, `metrics`, `errors`, `usage`, `deploy`, `readiness`, `findings`, `incidents`, `autonomy`, `maintenance`, `realtime`.',
         '',
         '## 2. Build',
+        '- **Building an app?** Design its whole data model before writing any of it: every table its features need, with foreign keys, CHECKs and indexes. Send it as ONE `apply_migration`, parents first; it lands as one governed, verified, reversible change, with REST and row-level security on every table. Then `storage { action: "create_bucket" }` for each kind of upload, `auth { action: "enable" }`, and realtime on the tables that update live. A table at a time, or the app described to `backend_chat`, takes many more calls to reach the same backend.',
+        '- On a project whose production is protected, `apply_migration` without a `branchId` is refused with BRANCH_REQUIRED, and so is a schema change asked of `backend_chat`: build the schema on a branch (below) and merge it.',
         '- `apply_migration { sql }` for schema. Ordinary PostgreSQL DDL: CREATE TABLE, ALTER TABLE ADD COLUMN / RENAME COLUMN / ADD CONSTRAINT, CREATE INDEX. Multiple statements, semicolon-separated. Your DDL is applied AS WRITTEN — declared NOT NULL, DEFAULT and nullability are honoured exactly. Every table also gets `id`, `"createdAt"`, `"updatedAt"` (camelCase) and `"deleted_at"`; a declared `id`, `created_at` or `updated_at` is skipped in their favour and reported, so order by `"createdAt"`.',
         '- One tool per dashboard section, each with an `action`: `auth`, `storage`, `functions`, `realtime`, `integrations`, `monitoring`, `autonomy`, `webhooks`, `deploy`, `connect`. Each tool\'s description lists its actions and the arguments they need, e.g. `auth { action: "enable" }`, `storage { action: "create_bucket", bucketName }`, `integrations { action: "connect", integrationId, apiKey }`.',
         '- `set_rls` for row-level security as exact SQL; `generate_types` for TypeScript types after a schema change.',
-        '- `backend_chat { message }` for anything you would rather describe than specify ("add likes and comments to posts"), or that no tool above covers. The brain plans, executes and verifies, and draws AI credits.',
+        '- `backend_chat { message }` for anything you would rather describe than specify ("add likes and comments to posts"), or that no tool above covers. The brain plans, executes and verifies, and draws AI credits. A call answers within about 45 s; a request that takes longer keeps running and answers `status: "running"` with a run id, and `backend_chat { message: "status" }` waits for it and returns its result. Whenever an answer carries `next`, the request is not finished: make that call.',
         '- **Unsure about a migration? Stage it.** `branch { action: "create", name: "add-payments" }` clones this project\'s schema into an isolated PostgreSQL schema; it starts EMPTY unless you pass `includeData: true`. Build against it, `branch { action: "diff", branchId }` to see exactly what would land, then `branch { action: "merge", branchId }`. `branch { action: "list" }` for ids. Up to 5 active. A merge applies new tables through the governed kernel and returns added columns / type changes / drops as review items rather than reshaping a live column silently. Discarding a branch is destructive — ask via `backend_chat`.',
         '- A table is served over REST as soon as it exists — exposure is derived from the live catalog, so there is no separate "generate the API" step, and no tool for one. If you are looking for something to call after creating a table: there is nothing to call.',
         '',
@@ -2796,6 +2827,55 @@ export async function dispatchTool(
       return finalize({ ok: true, summary, data: { pending: true, ladder } })
     }
 
+    // ── Architecture evolution: what changed, what waits, what was left ────
+    //
+    // READ-ONLY for the same reason as the maintenance ladder: a change of
+    // architecture restructures production tables, and the property that makes
+    // running it safe is a person's consent to one exact plan version. An agent
+    // that could grant it would be approving its own proposal; the decision
+    // routes need a platform session, which an MCP key is not.
+    if (name === 'get_evolution_proposals') {
+      const engine = await import('@/lib/evolution-engine/engine')
+      const decisionId = typeof args.decision === 'string' && args.decision.trim() ? args.decision.trim() : null
+      if (decisionId) {
+        const detail = await engine.decisionDetail(ctx.projectId, decisionId).catch(() => null)
+        return detail
+          ? finalize({ ok: true, summary: `History of one architecture change (${detail.status?.label ?? 'unknown'}): ${detail.trail.filter(t => t.milestone).map(t => t.sentence).join(' ')}`, data: detail })
+          : finalize({ ok: false, summary: 'No architecture change with that id in this project.' })
+      }
+      const summary = await engine.architectureSummary(ctx.projectId, { detail: args.detail === true }).catch(() => null)
+      if (!summary) return finalize({ ok: false, summary: 'Could not read architecture evolution right now. Try again in a moment.' })
+      const lines: string[] = []
+      for (const c of summary.changes) lines.push(`- ${c.headline} ${c.detail} (${c.status.label}${c.outcome ? `; ${c.outcome.plain}` : ''})`)
+      if (summary.waitingOnYou > 0) {
+        lines.push(`${summary.waitingOnYou} architecture change(s) wait for the owner's approval on the Autonomy page. Approval is theirs to give; an agent cannot give it.`)
+      }
+      // Each sentence already says what it is ("Recommended for orders, not proposed to run: …").
+      for (const r of summary.recommendations.slice(0, 3)) lines.push(`- ${r.sentence}`)
+      for (const n of summary.noChange.slice(0, 3)) lines.push(`- ${n.subject}: ${n.reason}`)
+      if (!summary.execution.enabled) lines.push(summary.execution.reason ?? '')
+      let data: Record<string, unknown> = { ...summary }
+      if (args.detail === true) {
+        const { allPrimitives } = await import('@/lib/evolution-engine/primitive')
+        const { readMemory, priorsFor, summarizeDecisions } = await import('@/lib/evolution-engine/memory')
+        const table = typeof args.table === 'string' && args.table.trim() ? args.table.trim() : null
+        const priors = priorsFor(summarizeDecisions(await readMemory(ctx.projectId)))
+        const analyses = []
+        for (const p of allPrimitives()) {
+          const assessment = await p.assess(ctx.projectId, { priors, ...(table ? { subjects: [table] } : {}) }).catch(() => null)
+          if (assessment) analyses.push({ primitive: p.id, title: p.title, assessment })
+        }
+        data = { ...data, analyses }
+      }
+      return finalize({
+        ok: true,
+        summary: lines.length
+          ? ['Architecture evolution:', ...lines.filter(Boolean)].join('\n')
+          : 'No architecture changes, requests or recommendations: the shape of this backend is right as it stands.',
+        data,
+      })
+    }
+
     // ── Autonomy: set dial ────────────────────────────────────────────────
     if (name === 'set_autonomy_level') {
       const {
@@ -3284,7 +3364,7 @@ export async function dispatchTool(
         lines.push('', `${driftPending} schema change(s) arrived over a direct DB connection — call adopt_external_schema to fold them into the contract, or review under Autonomy.`)
       }
       if (snapshot) {
-        lines.push('', `Latest restore point: v${snapshot.versionNum} (${snapshot.tableCount} tables, ${snapshot.createdAt.toISOString()}). To restore the state before a change: Database → Changes, or ask with deploy { action: "revert_change", changeId } (a person approves it).`)
+        lines.push('', `Latest restore point: v${snapshot.versionNum} (${snapshot.tableCount} tables, ${snapshot.createdAt.toISOString()}). To restore the state before a change: History, or ask with deploy { action: "revert_change", changeId } (a person approves it).`)
       }
       if (openRows.length === 0 && approvals.length === 0 && driftPending === 0) {
         // An empty queue is evidence only for the checks that ran. Say which
@@ -3489,6 +3569,46 @@ export async function dispatchTool(
           `Restored the state before this change, and verified it (recorded as #${done.recoverySeq}).` +
           (kept.length ? ` Kept in a recovery snapshot, as approved: ${kept.map((i) => i.detail).join(' ')}` : ''),
         data: done,
+      })
+    }
+
+    if (name === 'rollback_deploy') {
+      // Reached only once a person has approved it: over MCP and in a brain run
+      // the call is parked first, with Backenly's list of the changes it would
+      // undo (lib/mcp/approvals.ts). `steps` is that list; if the history moved
+      // since, nothing runs. The person who approved is the one who restores.
+      if (!ctx.destructiveConfirmed) {
+        return finalize({ ok: false, summary: 'Restoring the backend to a published version runs only once a person approves it.', code: 'DESTRUCTIVE_NEEDS_APPROVAL' })
+      }
+      if (!ctx.userId) return finalize({ ok: false, summary: 'A restore needs the person who approved it.', code: 'NO_APPROVER' })
+      const { restoreToVersion } = await import('@/lib/changes/range')
+      const out = await restoreToVersion(
+        ctx.projectId,
+        { version: args.version, deploymentId: args.deploymentId },
+        { actorUserId: ctx.userId, approvedSteps: args.steps, via: 'APPROVAL' },
+      )
+      if (!out.ok) {
+        const fail = out as Extract<typeof out, { ok: false }>
+        return finalize({ ok: false, summary: fail.error, code: fail.code })
+      }
+      const { version, outcome, versionCurrent } = out as Extract<typeof out, { ok: true }>
+      const restored = outcome.restored.map((r) => `#${r.seq}`).join(', ')
+      const kept = outcome.kept.length ? ` Left as they are: ${outcome.kept.map((k) => `#${k.seq} (${k.reason})`).join(' ')}` : ''
+      if (outcome.stoppedAt) {
+        return finalize({
+          ok: true,
+          summary:
+            `Partly restored toward v${version}: ${restored ? `undid ${restored}, then ` : ''}stopped at #${outcome.stoppedAt.seq}. ` +
+            `${outcome.stoppedAt.reason} A person reviews that change in History; asking again finishes restoring to v${version}.${kept}`,
+          data: out,
+        })
+      }
+      return finalize({
+        ok: true,
+        summary: outcome.restored.length
+          ? `Restored the backend to v${version}: undid ${outcome.restored.length} change${outcome.restored.length === 1 ? '' : 's'} newest first (${restored}), each verified.${kept}${versionCurrent ? ` v${version} is the current version.` : ''}`
+          : `Nothing to restore: the backend is already as it was when v${version} was published.${kept}`,
+        data: out,
       })
     }
 
@@ -3760,6 +3880,7 @@ export function humanTitle(name: string, args: Record<string, unknown>): string 
     case 'get_usage': return 'Reading usage + quota'
     case 'get_autonomy_status': return 'Reading autonomy + trust report'
     case 'get_maintenance_ladder': return 'Reading the maintenance ladder'
+    case 'get_evolution_proposals': return 'Reading architecture evolution'
     case 'set_bucket_public': return `Making ${args.bucketName ?? 'bucket'} ${args.isPublic ? 'public' : 'private'}`
     case 'set_bucket_policy': return `Setting ${args.bucketName ?? 'bucket'} access policy to ${args.policy ?? '…'}`
     case 'delete_bucket': return `Deleting bucket ${args.bucketName ?? ''}`.trim()
@@ -3767,7 +3888,7 @@ export function humanTitle(name: string, args: Record<string, unknown>): string 
     case 'connect_frontend': return `Connecting frontend ${args.url ?? ''}`.trim()
     case 'disconnect_frontend': return `Disconnecting frontend ${args.url ?? ''}`.trim()
     case 'trigger_deploy': return args.force ? 'Publishing backend' : 'Previewing deploy'
-    case 'rollback_deploy': return args.version ? `Rolling back to v${args.version}` : 'Rolling back deployment'
+    case 'rollback_deploy': return args.version ? `Restoring the backend to v${args.version}` : 'Restoring the backend to a published version'
     case 'list_schema_changes': return 'Reading the change history'
     case 'revert_schema_change': return 'Restoring the state before a change'
     case 'get_readiness': return isReadOnlyCall(name, args) ? 'Reading deploy readiness' : 'Applying the safe readiness fixes'

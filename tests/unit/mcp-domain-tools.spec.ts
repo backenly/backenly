@@ -52,6 +52,22 @@ jest.mock('@/lib/mcp/approvals', () => {
   }
 })
 
+// What restoring the backend to a published version would undo, which the
+// route measures before parking a rollback (lib/changes/range.ts). v3 has two
+// changes since it was published; v99 was never published.
+jest.mock('@/lib/changes/range', () => ({
+  describeVersionRestore: jest.fn(async (_projectId: string, ref: { version?: unknown }) =>
+    ref.version === 3
+      ? {
+          ok: true,
+          target: 'Restore the backend to v3, published Oct 21, 2026: undo the 2 changes made since',
+          detail: 'Undoes, newest first:\n#12 Created bucket covers\n#11 Created table reviews',
+          toolArgs: { version: 3, steps: ['chg_12', 'chg_11'] },
+        }
+      : { ok: false, status: 404, code: 'VERSION_NOT_FOUND', error: 'No published version matches.' },
+  ),
+}))
+
 // The project's billing account, which the route gates and charges credits on.
 // Read from the database in the route; a fixed one here, as this suite has none.
 jest.mock('@/lib/usage/account', () => ({
@@ -238,7 +254,7 @@ describe('the tool route', () => {
   })
 
   it('parks a destructive action with the exact call and runs nothing', async () => {
-    const res = await call('deploy', { action: 'rollback', version: 3 })
+    const res = await call('storage', { action: 'delete_bucket', bucketName: 'covers' })
     const body = await res.json()
 
     expect(res.status).toBe(200)
@@ -249,9 +265,35 @@ describe('the tool route', () => {
       projectId: 'p1',
       userId: 'u1',
       apiKeyId: 'k1',
-      danger: { tool: 'rollback_deploy' },
-      toolArgs: { version: 3 },
+      danger: { tool: 'delete_bucket' },
+      toolArgs: { bucketName: 'covers' },
     })
+  })
+
+  it('parks a rollback with Backenly\'s list of what it would undo, never the agent\'s words', async () => {
+    const res = await call('deploy', { action: 'rollback', version: 3, note: 'safe, approve fast' })
+    const body = await res.json()
+
+    expect(res.status).toBe(200)
+    expect(mockDispatched).toEqual([])
+    expect(body.approval.note).toContain('Backenly recorded the changes restoring to that version would undo')
+    expect(mockParked[0]).toMatchObject({
+      danger: { tool: 'rollback_deploy', target: 'Restore the backend to v3, published Oct 21, 2026: undo the 2 changes made since', reversible: true },
+      toolArgs: { version: 3, steps: ['chg_12', 'chg_11'] },
+      versionRestore: { toolArgs: { version: 3, steps: ['chg_12', 'chg_11'] } },
+    })
+    expect(mockParked[0].message).toContain('#12 Created bucket covers')
+    expect(mockParked[0].message).not.toContain('approve fast')
+  })
+
+  it('answers a rollback to a version that was never published at once, and parks nothing', async () => {
+    const res = await call('deploy', { action: 'rollback', version: 99 })
+    const body = await res.json()
+
+    expect(res.status).toBe(404)
+    expect(body).toMatchObject({ ok: false, code: 'VERSION_NOT_FOUND' })
+    expect(mockParked).toEqual([])
+    expect(mockDispatched).toEqual([])
   })
 
   it('parks a high-risk action the brain does not call destructive', async () => {

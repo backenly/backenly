@@ -15,6 +15,9 @@ export interface TicketSummary {
   severity: string
   status: string
   aiState: string
+  /** Why the AI first responder did not answer (an AiError kind), when it did not. */
+  aiError: string | null
+  aiAttempts: number
   projectId: string | null
   lastMessageAt: string
   lastMessageBy: string
@@ -32,6 +35,9 @@ export interface TicketDetail extends TicketSummary {
   message: string
   resolvedAt: string | null
   resolvedBy: string | null
+  firstStaffReplyAt: string | null
+  /** When the next AI attempt is due, or the running one's lease. */
+  aiNextAttemptAt: string | null
   project: { id: string; name: string } | null
   messages: TicketMessage[]
 }
@@ -78,7 +84,7 @@ export function createSupportTicket(input: {
 }
 
 export function getSupportTicket(id: string) {
-  return call<{ ticket: TicketDetail }>(`/api/support/tickets/${encodeURIComponent(id)}`)
+  return call<{ ticket: TicketDetail; level?: SupportLevel | null }>(`/api/support/tickets/${encodeURIComponent(id)}`)
 }
 
 export function replyToSupportTicket(id: string, body: string) {
@@ -88,7 +94,7 @@ export function replyToSupportTicket(id: string, body: string) {
   })
 }
 
-export function patchSupportTicket(id: string, action: 'resolve' | 'reopen') {
+export function patchSupportTicket(id: string, action: 'resolve' | 'reopen' | 'retry_ai') {
   return call<{ ticket: TicketSummary }>(`/api/support/tickets/${encodeURIComponent(id)}`, {
     method: 'PATCH',
     body: JSON.stringify({ action }),

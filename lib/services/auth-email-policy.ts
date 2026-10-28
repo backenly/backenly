@@ -65,7 +65,14 @@ export async function getAuthEmailPolicy(projectId: string): Promise<AuthEmailPo
   }
 }
 
+/** One governed change: the settings, and the column turning verification on adds (lib/changes/resources/auth.ts). */
+const governed = async <T>(projectId: string, title: string, fn: () => Promise<T>) => (await import('@/lib/changes/ledger')).governedChange(projectId, title, fn)
+
 export async function saveAuthEmailPolicy(projectId: string, raw: unknown): Promise<SaveAuthEmailPolicyResult> {
+  return governed(projectId, 'Change sign-in settings', () => writeAuthEmailPolicy(projectId, raw))
+}
+
+async function writeAuthEmailPolicy(projectId: string, raw: unknown): Promise<SaveAuthEmailPolicyResult> {
   const parsed = AUTH_EMAIL_POLICY_INPUT.safeParse(raw ?? {})
   if (!parsed.success) {
     const problems = parsed.error.flatten().fieldErrors
@@ -96,6 +103,7 @@ export async function saveAuthEmailPolicy(projectId: string, raw: unknown): Prom
     ...(requireEmailVerification !== undefined && { requireEmailVerification }),
     ...(magicLinksEnabled !== undefined && { magicLinksEnabled }),
   }
+  // history: governed by saveAuthEmailPolicy
   await prisma.projectAuthConfig.upsert({
     where: { projectId },
     create: { projectId, ...data },

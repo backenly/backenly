@@ -44,7 +44,7 @@ import {
   History, Undo2, Loader2, XCircle, ShieldAlert, Lock, ChevronDown,
   ClipboardCopy, Check,
 } from 'lucide-react'
-import { KIT, KitButton } from '@/components/inspector/kit'
+import { KIT, KitButton, MetaCode, MetaRow, StatusDot } from '@/components/inspector/kit'
 
 export interface AppliedChange {
   findingId: string
@@ -157,17 +157,17 @@ export function AppliedChangesPanel({
           <h3 className="text-[13px] font-semibold tracking-tight text-zinc-100">
             Changes Backenly made
           </h3>
-          <span className="text-[12px] tabular-nums text-zinc-600">
+          <span className="text-[12px] tabular-nums text-faint">
             {changes.length}
           </span>
         </div>
-        <span className="text-[12px] tabular-nums text-zinc-600">
+        <span className="text-[12px] tabular-nums text-faint">
           {revertibleCount} undoable
         </span>
       </div>
 
       <div className="border-b border-white/[0.06] px-5 py-2.5">
-        <p className="text-[12.5px] leading-relaxed text-zinc-500">
+        <p className="text-[12.5px] leading-relaxed text-faint">
           Applied without waiting for you, because each one was additive and snapshotted first.
           Undo restores the exact state captured before the fix ran.
         </p>
@@ -223,7 +223,7 @@ function ChangeRow({
         <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-emerald-400" />
         <div className="min-w-0 flex-1">
           <p className="text-[12.5px] font-medium text-zinc-200">{c.summary}</p>
-          <p className="mt-1 font-mono text-[12px] text-zinc-500">{state.message}</p>
+          <p className="mt-1 text-[12px] leading-[18px] text-faint">{state.message}</p>
         </div>
       </li>
     )
@@ -237,17 +237,17 @@ function ChangeRow({
         <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-zinc-600" />
         <div className="min-w-0 flex-1">
           <p className="text-[12.5px] leading-snug text-zinc-100">{c.summary}</p>
-          <p className="mt-1.5 font-mono text-[12px] text-zinc-600">
-            {c.type}
-            {c.resource && <> · <span className="text-zinc-500">{c.resource}</span></>}
-            {' · '}{timeAgo(c.at)}
-            {' · '}
+          <MetaRow>
+            <MetaCode>{c.type}</MetaCode>
+            {c.resource && <MetaCode>{c.resource}</MetaCode>}
+            <span className="tabular-nums">{timeAgo(c.at)}</span>
             {/* Never claim verification the kernel did not perform. Types no
                 probe can re-detect are recorded honestly as unchecked. */}
-            <span className={c.verified ? 'text-emerald-400/80' : 'text-zinc-600'}>
-              {c.verified ? 're-checked and confirmed' : 'not independently re-checked'}
-            </span>
-          </p>
+            <StatusDot
+              tone={c.verified ? 'operational' : 'neutral'}
+              label={c.verified ? 'Re-checked and confirmed' : 'Not independently re-checked'}
+            />
+          </MetaRow>
 
           {/* The exact statements, on demand. Collapsed by default because the
               summary above is what most people want; expanded it is the answer
@@ -260,7 +260,7 @@ function ChangeRow({
               <button
                 onClick={() => setShowSql(v => !v)}
                 aria-expanded={showSql}
-                className="inline-flex items-center gap-1 text-[12.5px] font-medium text-zinc-500 transition-colors hover:text-zinc-300"
+                className="inline-flex items-center gap-1 text-[12.5px] font-medium text-faint transition-colors hover:text-zinc-300"
               >
                 {statements.length === 1 ? '1 statement' : `${statements.length} statements`}
                 <ChevronDown className={`size-3 transition-transform ${showSql ? 'rotate-180' : ''}`} />
@@ -275,7 +275,7 @@ function ChangeRow({
                         </pre>
                         <button
                           onClick={() => copySql(st.sql)}
-                          className="shrink-0 text-zinc-600 transition-colors hover:text-zinc-300"
+                          className="shrink-0 text-zinc-500 transition-colors hover:text-zinc-300"
                           aria-label="Copy statement"
                         >
                           {copied === i
@@ -284,7 +284,7 @@ function ChangeRow({
                         </button>
                       </div>
                       {st.params && st.params.length > 0 && (
-                        <p className="border-t border-white/[0.05] px-3 py-1.5 font-mono text-[12px] text-zinc-600">
+                        <p className="border-t border-white/[0.05] px-3 py-1.5 font-mono text-[12px] text-faint">
                           {st.params.map((p, j) => `$${j + 1} = ${p}`).join('  ·  ')}
                         </p>
                       )}
@@ -312,7 +312,7 @@ function ChangeRow({
           {!c.revertible && c.revertBlockedReason && (
             <div className="mt-2 flex items-start gap-2">
               <Lock className="mt-px size-3 shrink-0 text-zinc-600" />
-              <p className="text-[12.5px] leading-snug text-zinc-500">{c.revertBlockedReason}</p>
+              <p className="text-[12.5px] leading-snug text-faint">{c.revertBlockedReason}</p>
             </div>
           )}
         </div>

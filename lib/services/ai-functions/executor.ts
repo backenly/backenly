@@ -560,6 +560,22 @@ async function rewritableFunction(functionId: string): Promise<{ codeOrigin: str
   return row
 }
 
+/**
+ * A self-heal rewrite is Backenly changing the code, so it is an entry in the
+ * project's history like any other change (lib/changes/ledger.ts): the code
+ * before it is a restore away. The model answered before this; only the save
+ * holds the change lock.
+ */
+async function selfHealSave(projectId: string, functionId: string, name: string, fixedCode: string): Promise<void> {
+  const lastError = await rowLastError(projectId, functionId, null)
+  const { governedChange, withChangeAttribution } = await import('@/lib/changes/ledger')
+  await withChangeAttribution({ source: 'autonomy' }, () =>
+    governedChange(projectId, `Rewrite function ${name} after a runtime error`, () =>
+      prisma.aiFunction.update({ where: { id: functionId }, data: { generatedCode: fixedCode, status: 'active', lastError } }),
+    ),
+  )
+}
+
 /** Every self-heal rewrite leaves an audit row; a silent one is a lie about who wrote the code. */
 async function recordSelfHealRewrite(
   projectId: string,
@@ -615,6 +631,7 @@ async function autoFixAiFunction(
     )
 
     if (!fixedCode || fixedCode === originalCode) {
+      // history: how the last run went, not configuration (lib/changes/resources/functions.ts)
       await prisma.aiFunction.update({
         where: { id: functionId },
         data: {
@@ -625,16 +642,14 @@ async function autoFixAiFunction(
       return
     }
 
-    await prisma.aiFunction.update({
-      where: { id: functionId },
-      data: { generatedCode: fixedCode, status: 'active', lastError: await rowLastError(projectId, functionId, null) },
-    })
+    await selfHealSave(projectId, functionId, row.name, fixedCode)
     await recordSelfHealRewrite(projectId, functionId, row.name, errorMessage, originalCode, fixedCode)
 
     console.log(`[AutoFix] Successfully fixed function ${functionId}`)
   } catch (err: any) {
     console.warn(`[AutoFix] Fix failed for function ${functionId}:`, err?.message)
     await rowLastError(projectId, functionId, `AUTO-FIX-FAILED: ${err?.message || 'unknown error'}`, 'AUTO-FIX-FAILED: ')
+      // history: how the last run went, not configuration (lib/changes/resources/functions.ts)
       .then((lastError) => prisma.aiFunction.update({ where: { id: functionId }, data: { lastError, status: 'error' } }))
       .catch(() => {})
   }
@@ -664,6 +679,7 @@ export async function autoFixRouteModuleFunction(
     const fixedCode = await generateFixedRouteModule(originalCode, errorMessage, description, method, projectId)
 
     if (!fixedCode) {
+      // history: how the last run went, not configuration (lib/changes/resources/functions.ts)
       await prisma.aiFunction.update({
         where: { id: functionId },
         data: {
@@ -674,16 +690,14 @@ export async function autoFixRouteModuleFunction(
       return false
     }
 
-    await prisma.aiFunction.update({
-      where: { id: functionId },
-      data: { generatedCode: fixedCode, status: 'active', lastError: await rowLastError(projectId, functionId, null) },
-    })
+    await selfHealSave(projectId, functionId, row.name, fixedCode)
     await recordSelfHealRewrite(projectId, functionId, row.name, errorMessage, originalCode, fixedCode)
     console.log(`[AutoFix:RouteModule] Successfully fixed function ${functionId}`)
     return true
   } catch (err: any) {
     console.warn(`[AutoFix:RouteModule] Fix failed for function ${functionId}:`, err?.message)
     await rowLastError(projectId, functionId, `AUTO-FIX-FAILED: ${err?.message || 'unknown error'}`, 'AUTO-FIX-FAILED: ')
+      // history: how the last run went, not configuration (lib/changes/resources/functions.ts)
       .then((lastError) => prisma.aiFunction.update({ where: { id: functionId }, data: { lastError, status: 'error' } }))
       .catch(() => {})
     return false
@@ -745,6 +759,7 @@ export async function healErroredAiFunctions(
       if (isRouteModuleFunction(fn.generatedCode)) {
         const check = validateRouteModule(fn.generatedCode)
         if (check.valid && RUNNER_CONTRACT_BUG_RE.test(lastError)) {
+          // history: how the last run went, not configuration (lib/changes/resources/functions.ts)
           await prisma.aiFunction.update({
             where: { id: fn.id },
             data: { status: 'active', lastError: await rowLastError(projectId, fn.id, null) },
@@ -869,6 +884,7 @@ export async function executeAiFunction(
       )
       const durationMs = Date.now() - startMs
       await persistExecutionLog(functionId, projectId, true, logs, undefined, durationMs, event.type)
+      // history: how the last run went, not configuration (lib/changes/resources/functions.ts)
       prisma.aiFunction.update({
         where: { id: functionId },
         data: { runCount: { increment: 1 }, lastRun: new Date(), lastError: null, status: 'active' },
@@ -885,6 +901,7 @@ export async function executeAiFunction(
       const errorMsg = err?.message || 'Route function error'
       await persistExecutionLog(functionId, projectId, false, [], errorMsg, durationMs, event.type)
       rowLastError(projectId, functionId, errorMsg)
+        // history: how the last run went, not configuration (lib/changes/resources/functions.ts)
         .then((lastError) => prisma.aiFunction.update({
           where: { id: functionId },
           data: { runCount: { increment: 1 }, lastRun: new Date(), lastError, status: 'error' },
@@ -940,6 +957,7 @@ export async function executeAiFunction(
       // Persist execution log
       await persistExecutionLog(functionId, projectId, true, logs, undefined, durationMs, event.type)
 
+      // history: how the last run went, not configuration (lib/changes/resources/functions.ts)
       prisma.aiFunction.update({
         where: { id: functionId },
         data: { runCount: { increment: 1 }, lastRun: new Date(), lastError: null, status: 'active' },
@@ -964,6 +982,7 @@ export async function executeAiFunction(
   await persistExecutionLog(functionId, projectId, false, logs, errorMsg, durationMs, event.type)
 
   rowLastError(projectId, functionId, errorMsg)
+    // history: how the last run went, not configuration (lib/changes/resources/functions.ts)
     .then((lastError) => prisma.aiFunction.update({
       where: { id: functionId },
       data: { runCount: { increment: 1 }, lastRun: new Date(), lastError, status: 'error' },

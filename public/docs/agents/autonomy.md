@@ -4,7 +4,7 @@ Index: https://backenly.com/llms.txt
 
 ## The loop
 
-A Monitor → Analyze → Plan → Execute loop watches every project. It applies on its own only additive, snapshotted changes in the reversible safe band (missing indexes, drift it can reconcile, broken triggers). Anything it will not apply lands on the project's **Autonomy** page as a finding with a receipt, for a human to approve or reject. Auth, external credentials, destructive and irreversible changes always wait for a human. The loop runs no model, so it never draws AI credits.
+A Monitor → Analyze → Plan → Execute loop watches every project. It applies on its own only additive, snapshotted changes in the reversible safe band (missing indexes, broken triggers). Anything it will not apply lands on the project's **Autonomy** page as a finding with a receipt, for a human to approve or reject. Auth, external credentials, destructive and irreversible changes always wait for a human. Its fixes are rule-based, and it never draws AI credits.
 
 ## Actions
 
@@ -16,10 +16,17 @@ Call as `autonomy { action: "<action>", … }`.
 | `status` | mode, recent repairs and what is waiting | nothing | yes | no |
 | `findings` | open health findings with evidence | nothing | yes | no |
 | `maintenance` | the schema-maintenance ladder and its consent state | nothing | yes | no |
+| `evolution` | architecture changes, what waits for approval, recommendations; detail: true for evidence and exact plans | nothing | yes | no |
 | `set_level` | OFF, CONSERVATIVE, BALANCED or AGGRESSIVE | `level` | no | no |
 <!-- end generated -->
 
 `set_level { level }` takes `OFF`, `CONSERVATIVE`, `BALANCED` or `AGGRESSIVE`. Approving what the loop queued is for a human only; there is no agent action for it.
+
+## Architecture changes
+
+Self-healing keeps a backend working; architecture changes keep it well shaped. When a group of columns in a table behaves as a job of its own (the refund columns on `orders`) and keeping it there has a measured cost, Backenly proposes moving it into a table of its own, rehearsed on a copy first. An organization admin approves the exact plan on the **Autonomy** page; there is no agent action for it. The new table is kept in step with the old one in both directions while the data is copied, so code that uses the old table keeps working, and who can read or change the data stays the same. Undo leaves the original table exactly as it was, and dropping the old columns is shown in the plan but never run by Backenly. Most of the time the answer is that no change is recommended.
+
+`autonomy { action: "evolution" }` reads what is proposed, waiting or done; `autonomy { action: "evolution", detail: true }` adds the evidence and the exact plans. When your human asks why a table changed shape, or whether a change helped, read it there.
 
 ## Approvals
 
