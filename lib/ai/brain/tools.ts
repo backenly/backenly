@@ -2089,7 +2089,20 @@ function preflightValidate(
       return null
     }
     case 'generate_function': {
-      const trigger = String(args.trigger || 'http').toLowerCase()
+      const validTriggers = ['on_signup', 'on_insert', 'on_update', 'on_delete', 'http', 'manual'] as const
+      const rawTrigger = args.trigger === undefined || args.trigger === null ? '' : String(args.trigger).trim()
+      const trigger = (rawTrigger || 'http').toLowerCase()
+      if (!validTriggers.includes(trigger as (typeof validTriggers)[number])) {
+        const soundsTimeBased = /cron|schedul|timer|interval|periodic|hourly|daily|weekly|monthly|every|time/i.test(rawTrigger)
+        return {
+          ok: false,
+          code: 'INVALID_ARGUMENT',
+          summary:
+            `generate_function rejected: unknown \`trigger\` "${rawTrigger}". ` +
+            `Valid triggers are: ${validTriggers.join(' | ')}.` +
+            (soundsTimeBased ? ' For recurring or time-based work, use `create_cron_job` instead.' : ''),
+        }
+      }
       const dbEvents = new Set(['on_insert', 'on_update', 'on_delete'])
       if (dbEvents.has(trigger) && !(typeof args.table === 'string' && args.table.trim())) {
         return {
