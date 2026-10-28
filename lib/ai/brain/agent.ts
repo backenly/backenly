@@ -1528,11 +1528,13 @@ async function runAgentLoop(
 
   let mutated = false
   let verifiedAfterMutation = false
-  // The latest run_test after the last mutation failed. The model has seen a
-  // check fail, so it may finish and say so, but the turn is not a success. A
-  // failed catalog read is different: it says nothing about the mutation, so
-  // it only leaves the mutation unverified (below).
-  let verificationFailed = false
+  // run_test checks that failed after the last mutation, by table and
+  // operation. The model has seen a check fail, so it may finish and say so,
+  // but the turn is not a success. Only that same check passing clears one: a
+  // pass on another endpoint, or a catalog read, says nothing about the one
+  // that failed. A failed catalog read is different again: it says nothing
+  // about the mutation, so it only leaves the mutation unverified (below).
+  const failedChecks = new Set<string>()
   // The model gets one chance to verify a mutation before the loop returns an
   // applied-but-unverified outcome. This is a phase, not a prompt alone: while
   // it is pending, another mutation must not be dispatched accidentally.
@@ -1765,7 +1767,7 @@ async function runAgentLoop(
       // Preserve a no-tool reply too. When it follows a mutation, the next
       // model call must see the answer it is being asked to substantiate.
       messages.push({ role: 'assistant', content: reply.message.content })
-      if (mutated && !verifiedAfterMutation && !verificationFailed) {
+      if (mutated && !verifiedAfterMutation && failedChecks.size === 0) {
         if (verificationSteered) {
           finalSummary = await unverifiedMutationSummary()
           success = false
@@ -1785,7 +1787,7 @@ async function runAgentLoop(
       // Model answered without tools and there is no outstanding mutation to
       // verify — accept its text as the final summary.
       finalSummary = text || 'Done.'
-      success = !verificationFailed
+      success = failedChecks.size === 0
       break
     }
 
@@ -1902,8 +1904,13 @@ async function runAgentLoop(
       // a run_test that failed is a failed check, including a handled exception.
       if (toolName === 'read_backend_state' && mutated) verifiedAfterMutation = result.ok
       if (toolName === 'run_test' && mutated) {
-        if (result.ok) verifiedAfterMutation = true
-        verificationFailed = !result.ok
+        const check = `${String(args.tableName ?? '')}:${String(args.operation ?? 'list')}`
+        if (result.ok) {
+          verifiedAfterMutation = true
+          failedChecks.delete(check)
+        } else {
+          failedChecks.add(check)
+        }
       }
       // Allowlist-driven: a mutation is anything that is NOT a control tool and
       // NOT a read. Adding a new read tool to tools.READ_ONLY_TOOLS (or a
@@ -1931,7 +1938,7 @@ async function runAgentLoop(
         // first place.
         verifiedAfterMutation = result.ok && SELF_VERIFYING_TOOLS.has(toolName)
         // A check run before this mutation says nothing about the state after it.
-        verificationFailed = false
+        failedChecks.clear()
         // Recorded even when the turn later fails, so the caller can tell "the
         // run stopped" from "nothing changed" — the distinction that decides
         // whether retrying is safe or duplicates work.
@@ -1955,7 +1962,7 @@ async function runAgentLoop(
         finalSummary = result.summary || 'Done.'
         needsUser = !!result.needsUser
         terminalData = result.data ?? null
-        success = !needsUser && result.ok && !verificationFailed
+        success = !needsUser && result.ok && failedChecks.size === 0
         finished = true
       }
     }
@@ -1964,7 +1971,7 @@ async function runAgentLoop(
       // Steer the model to verify if it tried to finish after mutating. The
       // steer rides in the same user turn as the results: the routed models
       // take no system message mid-conversation.
-      if (mutated && !verifiedAfterMutation && !verificationFailed && !needsUser) {
+      if (mutated && !verifiedAfterMutation && failedChecks.size === 0 && !needsUser) {
         if (verificationSteered) {
           finalSummary = await unverifiedMutationSummary()
           success = false

@@ -208,6 +208,37 @@ describe('a turn on the gateway', () => {
     expect(answers.find((a) => a.tool_use_id === 'check')).toMatchObject({ is_error: true })
   }, 60_000)
 
+  it('does not let a passing check or a catalog read hide a check that failed', async () => {
+    mockRunEndpointTest
+      .mockResolvedValueOnce({ ok: false, summary: 'POST returned 400.', endpoint: '/keep_me', method: 'POST', statusCode: 400, bodyExcerpt: '' })
+      .mockResolvedValueOnce({ ok: true, summary: 'GET returned 200.', endpoint: '/keep_me', method: 'GET', statusCode: 200, bodyExcerpt: '[]' })
+    const provider = scriptedProvider([
+      classified('MODIFY'), mutate(),
+      scriptedMessage({ toolUse: [
+        { id: 'create', name: 'run_test', input: { tableName: 'keep_me', operation: 'create' } },
+        { id: 'list', name: 'run_test', input: { tableName: 'keep_me', operation: 'list' } },
+      ] }),
+      read(),
+      finish('Listing works; creating a row returned 400.'),
+    ])
+    const { result } = await turn(provider, 'make a small table')
+    expect(result).toMatchObject({ success: false, summary: 'Listing works; creating a row returned 400.' })
+    expect(provider.calls).toHaveLength(5)
+    expect(mockRunEndpointTest).toHaveBeenCalledTimes(2)
+  }, 60_000)
+
+  it('clears a failed check when the same check passes again', async () => {
+    mockRunEndpointTest
+      .mockResolvedValueOnce({ ok: false, summary: 'The request timed out.', endpoint: '/keep_me', method: 'GET', statusCode: null, bodyExcerpt: '' })
+      .mockResolvedValueOnce({ ok: true, summary: 'GET returned 200.', endpoint: '/keep_me', method: 'GET', statusCode: 200, bodyExcerpt: '[]' })
+    const check = (id: string) =>
+      scriptedMessage({ toolUse: [{ id, name: 'run_test', input: { tableName: 'keep_me', operation: 'list' } }] })
+    const provider = scriptedProvider([classified('MODIFY'), mutate(), check('first'), check('again'), finish()])
+    const { result } = await turn(provider, 'make a small table')
+    expect(result).toMatchObject({ success: true, summary: 'Observed verification.' })
+    expect(mockRunEndpointTest).toHaveBeenCalledTimes(2)
+  }, 60_000)
+
   it('invalidates verification after a later ordinary mutation', async () => {
     const provider = scriptedProvider([
       classified('MODIFY'), mutate(), read(), mutate(), finish('Too early.'), read(), finish(),
