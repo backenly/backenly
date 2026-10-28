@@ -32,6 +32,7 @@ import { isDataPlaneOutage } from '@/lib/core/fix-actions'
 import type { RawFinding } from '@/lib/core/types'
 import { internalTrafficHeaders } from '@/lib/traffic/request-recorder'
 import { PLATFORM_FAULT_HEADER } from '@/lib/runtime/forward-to-runtime'
+import { quotesKeptHere } from '@/lib/data-plane/residency'
 
 const PROBE_TIMEOUT_MS = 8_000
 
@@ -168,7 +169,16 @@ function describeBody(res: { body: any; raw: string }): string {
 /** `returned 404 — No API definition for "posts"` (or just `returned 502`). */
 function statusLine(res: { status: number; body: any; raw: string }): string {
   const why = describeBody(res)
-  return `returned ${res.status}${why ? ` — ${why}` : ''}`
+  return `returned ${res.status}${why ? `${HANDLER_MESSAGE}${why}` : ''}`
+}
+
+/** What separates a status line from the handler's own message in a probe's detail. */
+const HANDLER_MESSAGE = ' — '
+
+/** A probe's detail without the handler's message: `GET /db/posts returned 500`. */
+export function withoutHandlerMessage(detail: string): string {
+  const at = detail.indexOf(HANDLER_MESSAGE)
+  return at === -1 ? detail : detail.slice(0, at)
 }
 
 // ── Individual probes ──────────────────────────────────────────────────────────
@@ -388,6 +398,11 @@ export interface PlatformFault {
   /** How many projects this surface was probed on this pass. */
   probed: number
   detail: string
+  /**
+   * Set when the fault only showed among one region's projects (see
+   * attributeAcrossRegions). Absent when it showed across the fleet.
+   */
+  region?: string
 }
 
 export interface ContractAttribution {
@@ -513,6 +528,59 @@ export function attributeContractFailures(outcomes: ProjectProbeOutcome[]): Cont
 }
 
 /**
+ * attributeContractFailures for a fleet whose projects live in several regions.
+ *
+ * A failure is the platform's when it crosses the fleet threshold across every
+ * project, as before: a route, the ingress or the runtime breaks everyone's at
+ * once. It is ALSO the platform's when it crosses the threshold among the
+ * projects of its own region. Each region has its own data plane, and an outage
+ * in a region holding a few of the fleet's projects never reaches the fleet
+ * share, so on fleet numbers alone it would be filed against each of its
+ * tenants. A fault found only within a region carries that region.
+ *
+ * A failure stays the tenant's only when neither level calls it the
+ * platform's. With one region this is attributeContractFailures exactly.
+ * Pure, so the rule is provable without a network.
+ */
+export function attributeAcrossRegions(
+  outcomes: ProjectProbeOutcome[],
+  regionOf: (projectId: string) => string,
+): ContractAttribution {
+  const fleet = attributeContractFailures(outcomes)
+  const groups = new Map<string, ProjectProbeOutcome[]>()
+  for (const outcome of outcomes) {
+    const region = regionOf(outcome.projectId)
+    groups.set(region, [...(groups.get(region) ?? []), outcome])
+  }
+
+  const faultKey = (f: PlatformFault) => `${f.kind}|${f.surface}|${f.status ?? ''}`
+  const fleetKeys = new Set(fleet.platformFaults.map(faultKey))
+  const platformFaults = [...fleet.platformFaults]
+  const tenantBroken = new Map<string, ProbeResult[]>()
+  const unknown = new Map<string, Set<ContractSurface>>()
+  for (const [projectId, surfaces] of fleet.unknown) unknown.set(projectId, new Set(surfaces))
+
+  for (const [region, group] of groups) {
+    const local = attributeContractFailures(group)
+    for (const f of local.platformFaults) {
+      if (!fleetKeys.has(faultKey(f))) platformFaults.push({ ...f, region, detail: `${f.detail} in ${region}` })
+    }
+    for (const [projectId, surfaces] of local.unknown) {
+      const set = unknown.get(projectId) ?? new Set<ContractSurface>()
+      for (const surface of surfaces) set.add(surface)
+      unknown.set(projectId, set)
+    }
+    for (const { projectId } of group) {
+      const localBroken = local.tenantBroken.get(projectId) ?? []
+      const mine = (fleet.tenantBroken.get(projectId) ?? []).filter((r) => localBroken.includes(r))
+      if (mine.length > 0) tenantBroken.set(projectId, mine)
+    }
+  }
+
+  return { platformFaults, tenantBroken, unknown, answeredBySurface: fleet.answeredBySurface }
+}
+
+/**
  * The finding's hint, saying only what this pass actually showed.
  *
  * It used to say "Other projects answered on this surface in the same pass"
@@ -550,23 +618,36 @@ export async function settleTenantContract(
   /** From the same pass's attribution: projects each surface answered on. */
   answeredBySurface: ReadonlyMap<ContractSurface, number> = new Map(),
 ): Promise<RawFinding[]> {
+  // Withdrawn, not marked fixed: the surface answering again is not Backenly
+  // repairing it (lib/autonomy/resolution.ts). The data-plane heal, which is a
+  // repair, records its own outcome where it runs.
+  const { withdrawFindings } = await import('@/lib/core/finding-reaper')
   for (const r of results.filter(r => r.ok)) {
-    await prisma.healthFinding.updateMany({
+    const answered = await prisma.healthFinding.findMany({
       where: {
         projectId,
         type: 'contract_surface_broken',
         status: { in: ['open', 'pending_approval'] },
         details: { path: ['surface'], equals: r.surface },
       },
-      data: { status: 'auto_fixed', autoFixed: true, fixAppliedAt: new Date() },
-    }).catch(() => {})
+      select: { id: true, details: true },
+    }).catch(() => [])
+    await withdrawFindings(answered, 'contract_reaper')
   }
+
+  // A project kept in another region: the finding keeps what failed and how
+  // (the surface, the request, the status, the size of the answer), not what
+  // the answer said. A probe's body, or the handler's message in the status
+  // line, can echo a row or an end user's value, and this row is in the home
+  // region (lib/data-plane/residency.ts).
+  const quote = await quotesKeptHere(projectId)
 
   return broken.map((r): RawFinding => {
     const details = {
       surface: r.surface,
-      detail: r.detail,
-      response: r.response?.slice(0, 300) ?? null,
+      detail: quote ? r.detail : withoutHandlerMessage(r.detail),
+      response: quote ? (r.response?.slice(0, 300) ?? null) : null,
+      ...(quote ? {} : { responseBytes: r.response?.length ?? null }),
       httpStatus: r.status ?? null,
       durationMs: r.durationMs,
       probedAt: new Date().toISOString(),

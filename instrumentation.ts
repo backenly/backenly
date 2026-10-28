@@ -66,36 +66,84 @@ export async function register() {
     // is the only scheduler, so it must run here.
     if (!process.env.VERCEL) {
       const { default: nodeCron } = await import('node-cron')
-      const { runDueCronJobs, runSystemTasks } = await import('./lib/services/cron-runner')
+      const { runDueCronJobs, runRegionalSystemTasks, runPlatformSystemTasks } = await import('./lib/services/cron-runner')
 
-      // Every process schedules; only the one holding the scheduler lock runs
-      // the jobs, so two instances (or an overlapping deploy) never run a job
-      // twice. Every `cron.schedule` below goes through this gate.
+      // Every process schedules; only the one holding its region's scheduler
+      // lock runs the jobs, so two instances (or an overlapping deploy) never
+      // run a job twice. Every job below goes through this gate.
       // lib/scheduler/leader.ts.
       const { startSchedulerLeadership, leaderOnly } = await import('./lib/scheduler/leader')
-      startSchedulerLeadership()
+      const { serviceRegion } = await import('./lib/data-plane/serving')
+      const { HOME_REGION } = await import('./lib/regions')
+
+      // One scheduler per region. A region's jobs see only that region's
+      // projects (lib/data-plane/serving.ts); the platform's own work is
+      // scheduled in the home region alone. A service region this build does
+      // not know starts no leadership at all, so nothing here ever runs: a typo
+      // must not make a Virginia worker run Mumbai's billing.
+      let region: ReturnType<typeof serviceRegion> | null = null
+      try {
+        region = serviceRegion()
+        startSchedulerLeadership({ region })
+      } catch (err) {
+        console.error(`[CronScheduler] NOT scheduling: ${err instanceof Error ? err.message : String(err)}`)
+      }
+      const home = region === HOME_REGION
       const cron = {
+        // This region's projects: every region's scheduler runs these.
         schedule: (
           expression: string,
           task: () => unknown,
           options?: Parameters<typeof nodeCron.schedule>[2],
         ) => nodeCron.schedule(expression, leaderOnly(task), options),
+        // The platform's own work (billing, usage, back office): scheduled in
+        // the home region only, so it happens once however many regions run.
+        platform: (
+          expression: string,
+          task: () => unknown,
+          options?: Parameters<typeof nodeCron.schedule>[2],
+        ) => (home ? nodeCron.schedule(expression, leaderOnly(task), options) : undefined),
       }
 
       // Mark cron scheduler as alive in process memory (for health checks)
       ;(globalThis as any).__cronSchedulerStartedAt = new Date().toISOString()
 
       cron.schedule('* * * * *', async () => {
-        // Run user jobs and system tasks in parallel — independent failure domains
+        // Run user jobs and this region's system tasks in parallel —
+        // independent failure domains
         await Promise.allSettled([
           runDueCronJobs().catch((err: any) =>
             console.error('[CronScheduler] User cron error:', err?.message)
           ),
-          runSystemTasks().catch((err: any) =>
+          runRegionalSystemTasks().catch((err: any) =>
             console.error('[CronScheduler] System tasks error:', err?.message)
           ),
         ])
       })
+
+      // The platform's share at half past each minute: after the outbox drain
+      // above has made each delivery's first attempt, so the retry pass sees
+      // this minute's failures this minute (lib/services/cron-runner.ts).
+      cron.platform('30 * * * * *', async () => {
+        await runPlatformSystemTasks().catch((err: any) =>
+          console.error('[CronScheduler] Platform system tasks error:', err?.message)
+        )
+      })
+
+      // Each region's copy of what authorizes its projects' requests: the
+      // changes since the last delivery and a new watermark, every few seconds,
+      // from home (lib/auth-projection/deliver.ts). Off until
+      // BACKENLY_AUTH_PROJECTION is set, which waits for every region's database
+      // procedure to have run its auth-projection step.
+      const { authProjectionMode, AUTH_PROJECTION_DELIVERY_SECONDS } = await import('./lib/auth-projection/mode')
+      if (authProjectionMode() !== 'off') {
+        const { deliverAuthProjection } = await import('./lib/auth-projection/deliver')
+        cron.platform(`*/${AUTH_PROJECTION_DELIVERY_SECONDS} * * * * *`, async () => {
+          await deliverAuthProjection().catch((err: any) =>
+            console.error('[CronScheduler] Authorization projection error:', err?.message)
+          )
+        })
+      }
 
       // ── Tier B: diagnose what Tier A escalated ─────────────────────────────
       //
@@ -189,7 +237,7 @@ export async function register() {
       // Safe by construction: per-project transaction, never deletes the active
       // graph or sequence 1, and both FKs onto backend_graphs are
       // ON DELETE SET NULL so a severed lineage cannot fail the delete.
-      cron.schedule('20 5 * * *', async () => {
+      cron.platform('20 5 * * *', async () => {
         const { cleanupAllProjectGraphs } = await import('./lib/orchestration/graph-cleanup')
         const res = await cleanupAllProjectGraphs().catch((err: any) => {
           console.error('[GraphCleanup] Cron error:', err?.message)
@@ -220,7 +268,7 @@ export async function register() {
       // business, and in single-tenant it is nothing at all. Going through the
       // platform seam is what lets the billing implementation move to the
       // private overlay without this file ever importing it.
-      cron.schedule('10 3 * * *', async () => {
+      cron.platform('10 3 * * *', async () => {
         const { runScheduledBackOfficeMaintenance } = await import('./lib/platform-signals')
         await runScheduledBackOfficeMaintenance()
       })
@@ -548,6 +596,47 @@ export async function register() {
         }
       })
 
+      // ── Tier D: the Architecture Evolution Engine ──────────────────────────
+      //
+      // `sweepArchitecture` was reached only through GET /api/cron/autonomy,
+      // which nothing calls on AWS or a self-hosted box (see Tier C above): the
+      // observation passes that decide whether a change counts as done, the
+      // resumption of what a person approved, and the daily look for changes
+      // worth asking about would simply never have run. Every region schedules
+      // it for the projects it serves, as the fleet scheduler hands them out, so
+      // a regional project's change is watched and resumed where its tables are.
+      //
+      // Nothing is relaxed by being reached from here: the scheduler flag is read
+      // inside the sweep too, a project with autonomy OFF is skipped, resuming
+      // also needs the mutation flag, and the sweep never approves anything or
+      // starts what a person did not approve. Every 10 minutes, like Tier C.
+      cron.schedule('*/10 * * * *', async () => {
+        const { FLAGS } = await import('./lib/config/flags')
+        if (!FLAGS.ENABLE_EVOLUTION_SCHEDULER) return
+
+        const { sweepArchitecture } = await import('./lib/evolution-engine/engine')
+        const { getFleetScheduler } = await import('./lib/edition')
+
+        const activeProjects = await getFleetScheduler().activeTargets()
+        if (activeProjects.length === 0) return
+
+        const CONCURRENCY = 5
+        const tally: Record<string, number> = {}
+        for (let i = 0; i < activeProjects.length; i += CONCURRENCY) {
+          const batch = activeProjects.slice(i, i + CONCURRENCY)
+          const results = await Promise.allSettled(batch.map(p => sweepArchitecture({ projectId: p.id })))
+          for (const r of results) {
+            const key = r.status === 'fulfilled' ? r.value.disposition : 'errored'
+            tally[key] = (tally[key] ?? 0) + 1
+          }
+        }
+        // `disabled` (autonomy OFF) is a condition, not news; anything else is logged.
+        const events = Object.entries(tally).filter(([k]) => k !== 'disabled')
+        if (events.length > 0) {
+          console.log(`[ArchitectureSweep] ${activeProjects.length} projects — ${events.map(([k, n]) => `${k}: ${n}`).join(', ')}`)
+        }
+      })
+
       // ── Database behaviour baseline — hourly, on the hour ───────────────────
       //
       // Records query latency, sequential scans, table size and connection
@@ -564,7 +653,7 @@ export async function register() {
         if (g.__baselineCollectorRunning) return
         g.__baselineCollectorRunning = true
         try {
-          const { collectBaseline, pruneBaseline } = await import('./lib/autonomy/baseline/collector')
+          const { collectBaseline } = await import('./lib/autonomy/baseline/collector')
           const { getFleetScheduler } = await import('./lib/edition')
 
           const projects = await getFleetScheduler().activeTargets()
@@ -574,14 +663,45 @@ export async function register() {
             const batch = projects.slice(i, i + CONCURRENCY)
             await Promise.allSettled(batch.map(p => collectBaseline(p.id)))
           }
-
-          // One indexed delete for the whole platform, not one per project.
-          const pruned = await pruneBaseline()
-          console.log(`[Baseline] sampled ${projects.length} project(s), pruned ${pruned} old sample(s)`)
+          console.log(`[Baseline] sampled ${projects.length} project(s)`)
         } catch (err: any) {
           console.error('[Baseline] Cron error:', err?.message)
         } finally {
           g.__baselineCollectorRunning = false
+        }
+      })
+
+      // One indexed delete over every project's samples, so the platform's
+      // scheduler runs it, once, rather than every region's.
+      cron.platform('45 * * * *', async () => {
+        const { pruneBaseline } = await import('./lib/autonomy/baseline/collector')
+        try {
+          const pruned = await pruneBaseline()
+          if (pruned > 0) console.log(`[Baseline] pruned ${pruned} old sample(s)`)
+        } catch (err: any) {
+          console.error('[Baseline] Prune error:', err?.message)
+        }
+      })
+
+      // ── Drift event upkeep — hourly, per region ─────────────────────────────
+      //
+      // Schema drift events live in each region's database. Hourly, for the
+      // region this process serves: is the capture apparatus able to write
+      // (it never breaks a developer's DDL, so a broken one would drop events
+      // silently), how old is the oldest pending event, and resolved events past
+      // the retention window are pruned. One JSON line per region for the
+      // CloudWatch metric filters (lib/autonomy/drift-event-upkeep.ts).
+      cron.schedule('17 * * * *', async () => {
+        const g = globalThis as any
+        if (g.__driftUpkeepRunning) return
+        g.__driftUpkeepRunning = true
+        try {
+          const { runDriftEventUpkeep } = await import('./lib/autonomy/drift-event-upkeep')
+          await runDriftEventUpkeep()
+        } catch (err: any) {
+          console.error('[DriftUpkeep] Cron error:', err?.message)
+        } finally {
+          g.__driftUpkeepRunning = false
         }
       })
 
@@ -625,7 +745,7 @@ export async function register() {
       // own fourteen-day median becomes a finding in the Autonomy queue, with
       // the evidence, and resolves itself once the day is back near normal.
       // lib/usage/anomaly.ts.
-      cron.schedule('40 0 * * *', async () => {
+      cron.platform('40 0 * * *', async () => {
         const { evaluateUsageAnomalies } = await import('./lib/usage/anomaly')
         try {
           const r = await evaluateUsageAnomalies()
@@ -639,7 +759,7 @@ export async function register() {
       // 50/80/100% of each pooled quota and of the spend limit, each sent once
       // per account and month, plus the grace-period state the limit
       // behaviours read. lib/usage/alerts.ts.
-      cron.schedule('*/5 * * * *', async () => {
+      cron.platform('*/5 * * * *', async () => {
         const { evaluateUsageAlerts } = await import('./lib/usage/alerts')
         try {
           const r = await evaluateUsageAlerts()
@@ -655,7 +775,7 @@ export async function register() {
       // Closes the previous UTC month. The first run of a month does the work;
       // every later run is a no-op (insert-only close), which also covers a day
       // the scheduler was down. lib/usage/close.ts.
-      cron.schedule('5 0 * * *', async () => {
+      cron.platform('5 0 * * *', async () => {
         const { closePreviousPeriod } = await import('./lib/usage/close')
         const { pruneAppliedBatches } = await import('./lib/usage/ledger')
         try {
@@ -670,7 +790,8 @@ export async function register() {
       }, { timezone: 'UTC' })
 
       console.log(
-        '[CronScheduler] Started (jobs run only on the instance holding the scheduler lock) — ' +
+        `[CronScheduler] Started for ${region ?? 'no region'}${home ? ' (home: platform jobs too)' : ''} ` +
+        '(jobs run only on the instance holding the region\'s scheduler lock) — ' +
         'user cron jobs + system tasks every minute, ' +
         'autonomy reconciler tick every minute (1-min cadence on every plan), ' +
         'DB storage snapshot hourly, ' +

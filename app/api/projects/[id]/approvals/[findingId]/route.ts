@@ -58,7 +58,7 @@ export async function POST(
 
     const applyResult = result.data!
     return NextResponse.json(applyResult, { status: applyResult.success ? 200 : 422 })
-  })
+  }, { floor: 'write' })
 }
 
 export async function DELETE(
@@ -69,5 +69,5 @@ export async function DELETE(
   return withProjectValidation<any>(request, async (validated) => {
     await dismissFinding(validated.projectId, params.findingId)
     return NextResponse.json({ ok: true, findingId: params.findingId, status: 'dismissed' })
-  })
+  }, { floor: 'write' })
 }

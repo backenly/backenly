@@ -59,7 +59,9 @@ const mockUpdateExecution = jest.fn(async ({ where, data }: any) => {
   return row
 })
 const mockFindFirstExecution = jest.fn(async () => null)
-const mockJobFindUnique = jest.fn(async () => null as any)
+const mockJobFindUnique = jest.fn(async (_args?: any) => null as any)
+/** The step's batch chain, newest first. Empty means only the dispatched job is known. */
+const mockJobFindMany = jest.fn(async (_args?: any) => [] as any[])
 const mockFindUniqueStep = jest.fn(async ({ where }: any) => stepRows.get(where.idempotencyKey) ?? null)
 const mockUpsertStep = jest.fn(async ({ where, create, update }: any) => {
   const existing = stepRows.get(where.idempotencyKey)
@@ -86,7 +88,10 @@ jest.mock('@/lib/db', () => ({
       update: (...a: any[]) => mockUpdateExecution(...(a as [any])),
       findFirst: (...a: any[]) => mockFindFirstExecution(...(a as [])),
     },
-    backgroundJob: { findUnique: (...a: any[]) => mockJobFindUnique(...(a as [any])) },
+    backgroundJob: {
+      findUnique: (...a: any[]) => mockJobFindUnique(...(a as [any])),
+      findMany: (...a: any[]) => mockJobFindMany(...(a as [any])),
+    },
     maintenanceStepExecution: {
       findUnique: (...a: any[]) => mockFindUniqueStep(...(a as [any])),
       upsert: (...a: any[]) => mockUpsertStep(...(a as [any])),
@@ -154,8 +159,26 @@ jest.mock('@/lib/autonomy/maintenance/single-flight', () => ({
   closeMaintenanceLockPool: async () => {},
 }))
 
-const mockEnqueue = jest.fn(async () => ({ id: 'job-1' }))
-jest.mock('@/lib/queue', () => ({ enqueue: (...a: any[]) => mockEnqueue(...(a as [])) }))
+// The workspace pool asks which region holds a project's data before it
+// connects (lib/data-plane/regional.ts), and that lookup is a platform-database
+// read. There is no database here and a failed read takes about two seconds,
+// so it is answered as the home region: the pool then reaches exactly the
+// connection it always did, in the time it always did.
+// A backfill is queued where the project is (primitives/backfill-job.ts), so
+// the same lookup decides between the home queue and a regional job.
+const mockProjectRegion = jest.fn(async (_projectId?: string) => 'ap-south-1')
+jest.mock('@/lib/data-plane/regional', () => ({
+  projectDatabaseUrl: async () => process.env.DATABASE_URL,
+  projectRegion: (...a: any[]) => mockProjectRegion(...(a as [string])),
+}))
+
+const mockEnqueue = jest.fn(async (..._args: any[]) => ({ id: 'job-1' }))
+const mockEnqueueRegionalJob = jest.fn(async (..._args: any[]) => ({ id: 'regional-job-1' }))
+jest.mock('@/lib/queue', () => ({
+  enqueue: (...a: any[]) => mockEnqueue(...a),
+  enqueueRegionalJob: (...a: any[]) => mockEnqueueRegionalJob(...a),
+  REGIONAL_STATUS: { pending: 'regional_pending', running: 'regional_running', failed: 'regional_failed' },
+}))
 
 const mockAddStructure = jest.fn()
 jest.mock('@/lib/autonomy/maintenance/primitives/add-structure', () => ({
@@ -369,6 +392,8 @@ beforeEach(() => {
     identity: { oidBefore: '1', oidAfter: '1', rowsBefore: 80, rowsAfter: 80 },
   })
   mockJobFindUnique.mockResolvedValue(null)
+  mockJobFindMany.mockResolvedValue([])
+  mockProjectRegion.mockResolvedValue('ap-south-1')
 })
 
 // ── The ladder is all-or-nothing ─────────────────────────────────────────────
@@ -655,6 +680,22 @@ describe('a backfill is dispatched, not looped', () => {
     expect(mockEnqueue).toHaveBeenCalledTimes(1)
     expect(mockEnqueue.mock.calls[0][0]).toBe('maintenance_backfill')
   })
+
+  it('queues a regional project’s backfill in its region, never on the home queue', async () => {
+    // The ladder runs in the project's region; its batches belong there too,
+    // where a failed batch's database error, which can quote a row, is logged.
+    mockProjectRegion.mockResolvedValue('us-east-1')
+    const plan = fullLadder()
+    const r = await run({ plan, approvedPlanVersion: plan.planVersion, approvalId: 'a1' })
+    expect(r.steps.find(s => s.kind === 'backfill')).toMatchObject({ status: 'dispatched', backgroundJobId: 'regional-job-1' })
+    expect(mockEnqueue).not.toHaveBeenCalled()
+    expect(mockEnqueueRegionalJob).toHaveBeenCalledWith(
+      'maintenance_backfill',
+      'p1',
+      'us-east-1',
+      expect.objectContaining({ cursor: null, cursorKey: null }),
+    )
+  })
 })
 
 
@@ -712,7 +753,7 @@ describe('a dispatched backfill stops the ladder', () => {
     const { plan, over } = withBackfill()
     completed(plan, ...plan.steps.slice(0, at(plan, 'backfill')).map(x => x.ordinal))
     dispatched(plan, at(plan, 'backfill'))
-    mockJobFindUnique.mockResolvedValue({ status: 'queued', result: null, error: null, attempts: 0 })
+    mockJobFindUnique.mockResolvedValue({ id: 'job-1', status: 'queued', result: null, error: null, attempts: 0 })
 
     const r = await run(over)
     expect(r.status).toBe('awaiting_background_work')
@@ -728,6 +769,7 @@ describe('a dispatched backfill stops the ladder', () => {
     completed(plan, ...plan.steps.slice(0, at(plan, 'backfill')).map(x => x.ordinal))
     dispatched(plan, at(plan, 'backfill'))
     mockJobFindUnique.mockResolvedValue({
+      id: 'job-1',
       status: 'completed',
       result: { skipped: true, reason: 'No handler for job type maintenance_backfill' },
       error: null,
@@ -740,15 +782,114 @@ describe('a dispatched backfill stops the ladder', () => {
     expect(mockRunVerify).not.toHaveBeenCalled()
   })
 
+  /**
+   * A job of the step's batch chain, queued after `batchesBefore` batches. Each
+   * batch queues the next as a new job, so the dispatched job is only the first.
+   */
+  const chainJob = (
+    id: string,
+    fields: Record<string, unknown>,
+    batchesBefore: number,
+    createdAt = new Date(Date.UTC(2026, 9, 17, 0, batchesBefore)),
+  ) => ({ id, result: null, error: null, attempts: 0, createdAt, payload: { batches: batchesBefore }, ...fields })
+
+  /** The dispatched job after its one batch: whatever the chain has done since, it says more remain. */
+  const firstBatchRan = () =>
+    mockJobFindUnique.mockResolvedValue({ id: 'job-1', status: 'completed', result: { done: false, batches: 1 }, error: null, attempts: 0 })
+
   it('waits while a batch chain is still re-queueing itself', async () => {
     const { plan, over } = withBackfill()
     completed(plan, ...plan.steps.slice(0, at(plan, 'backfill')).map(x => x.ordinal))
     dispatched(plan, at(plan, 'backfill'))
-    // done:false means another batch is queued behind this one.
-    mockJobFindUnique.mockResolvedValue({ status: 'completed', result: { done: false, batches: 3 }, error: null, attempts: 0 })
+    firstBatchRan()
+    mockJobFindMany.mockResolvedValue([
+      chainJob('job-2', { status: 'queued' }, 1),
+      chainJob('job-1', { status: 'completed', result: { done: false, batches: 1 } }, 0),
+    ])
 
-    expect((await run(over)).status).toBe('awaiting_background_work')
+    const r = await run(over)
+    expect(r.status).toBe('awaiting_background_work')
+    expect(r.steps.find(s => s.kind === 'backfill')?.detail).toMatch(/queued \(attempt 0\), at job job-2 of its batch chain/)
+    expect(mockEnqueue).not.toHaveBeenCalled()
     expect(mockRunVerify).not.toHaveBeenCalled()
+  })
+
+  it('follows the batch chain past the dispatched job, and resumes into verify once its last batch is done', async () => {
+    // Read alone, the dispatched job said "more remain" for ever, and a ladder
+    // whose backfill took more than one batch never reached verify.
+    const { plan, over } = withBackfill()
+    const step = plan.steps[at(plan, 'backfill')]
+    completed(plan, ...plan.steps.slice(0, at(plan, 'backfill')).map(x => x.ordinal))
+    dispatched(plan, at(plan, 'backfill'))
+    firstBatchRan()
+    mockJobFindMany.mockResolvedValue([
+      chainJob('job-3', { status: 'completed', result: { done: true, updated: 250, batches: 3 } }, 2),
+      chainJob('job-2', { status: 'completed', result: { done: false, batches: 2 } }, 1),
+    ])
+
+    const r = await run(over)
+    expect(mockJobFindMany.mock.calls[0][0]).toMatchObject({
+      where: { projectId: 'p1', type: 'maintenance_backfill', payload: { path: ['idempotencyKey'], equals: step.idempotencyKey } },
+      orderBy: { createdAt: 'desc' },
+    })
+    expect(mockRunVerify).toHaveBeenCalledTimes(1)
+    expect(r.steps.find(s => s.kind === 'backfill')).toMatchObject({
+      status: 'completed',
+      detail: 'backfill complete: 250 row(s) updated over 3 batch(es)',
+    })
+    expect(r.status).toBe('completed')
+  })
+
+  it('halts when a later batch of the chain dead-lettered', async () => {
+    const { plan, over } = withBackfill()
+    completed(plan, ...plan.steps.slice(0, at(plan, 'backfill')).map(x => x.ordinal))
+    dispatched(plan, at(plan, 'backfill'))
+    firstBatchRan()
+    mockJobFindMany.mockResolvedValue([
+      chainJob('job-2', { status: 'dead_letter', error: 'lock timeout', attempts: 5 }, 1),
+      chainJob('job-1', { status: 'completed', result: { done: false, batches: 1 } }, 0),
+    ])
+
+    const r = await run(over)
+    expect(r.status).toBe('halted')
+    expect(r.haltReason).toMatch(/job job-2 is dead_letter: lock timeout/)
+    expect(mockRunVerify).not.toHaveBeenCalled()
+  })
+
+  it('halts when a regional batch failed in its region, with the platform’s own reason', async () => {
+    const { plan, over } = withBackfill()
+    completed(plan, ...plan.steps.slice(0, at(plan, 'backfill')).map(x => x.ordinal))
+    dispatched(plan, at(plan, 'backfill'))
+    firstBatchRan()
+    mockJobFindMany.mockResolvedValue([
+      chainJob('job-2', {
+        status: 'regional_failed',
+        error: 'The backfill batch did not complete in us-east-1. The reason is in that region’s logs.',
+        attempts: 3,
+      }, 1),
+    ])
+
+    const r = await run(over)
+    expect(r.status).toBe('halted')
+    expect(r.haltReason).toMatch(/job job-2 is regional_failed: The backfill batch did not complete in us-east-1/)
+    expect(mockRunVerify).not.toHaveBeenCalled()
+  })
+
+  it('tells apart two jobs of the chain queued in the same millisecond by the batches before each', async () => {
+    const { plan, over } = withBackfill()
+    completed(plan, ...plan.steps.slice(0, at(plan, 'backfill')).map(x => x.ordinal))
+    dispatched(plan, at(plan, 'backfill'))
+    firstBatchRan()
+    const sameMillisecond = new Date(Date.UTC(2026, 9, 17))
+    // Equal timestamps come back from the database in either order.
+    mockJobFindMany.mockResolvedValue([
+      chainJob('job-2', { status: 'completed', result: { done: false, batches: 2 } }, 1, sameMillisecond),
+      chainJob('job-3', { status: 'completed', result: { done: true, updated: 9, batches: 3 } }, 2, sameMillisecond),
+    ])
+
+    const r = await run(over)
+    expect(mockRunVerify).toHaveBeenCalledTimes(1)
+    expect(r.status).toBe('completed')
   })
 
   it('resumes into verify once the job really finished', async () => {
@@ -756,6 +897,7 @@ describe('a dispatched backfill stops the ladder', () => {
     completed(plan, ...plan.steps.slice(0, at(plan, 'backfill')).map(x => x.ordinal))
     dispatched(plan, at(plan, 'backfill'))
     mockJobFindUnique.mockResolvedValue({
+      id: 'job-1',
       status: 'completed',
       result: { done: true, updated: 80, batches: 1 },
       error: null,
@@ -772,7 +914,7 @@ describe('a dispatched backfill stops the ladder', () => {
     const { plan, over } = withBackfill()
     completed(plan, ...plan.steps.slice(0, at(plan, 'backfill')).map(x => x.ordinal))
     dispatched(plan, at(plan, 'backfill'))
-    mockJobFindUnique.mockResolvedValue({ status: 'dead_letter', result: null, error: 'lock timeout', attempts: 5 })
+    mockJobFindUnique.mockResolvedValue({ id: 'job-1', status: 'dead_letter', result: null, error: 'lock timeout', attempts: 5 })
 
     const r = await run(over)
     expect(r.status).toBe('halted')

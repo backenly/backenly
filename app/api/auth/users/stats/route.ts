@@ -74,7 +74,7 @@ export async function GET(request: NextRequest) {
       const whereClause = `WHERE ${whereParts.join(' AND ')}`
       const sql = `SELECT ${select.join(', ')} FROM "${schemaName}"."users" ${whereClause}`
 
-      const rows = await executeWithUserContext<any>('', true, sql, [])
+      const rows = await executeWithUserContext<any>(projectId, '', true, sql, [])
       const r = rows[0] ?? {}
 
       const activeUsers = Number(r.activeUsers ?? 0)

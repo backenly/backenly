@@ -20,17 +20,26 @@
 --                                     (hardened: connection limit, timeouts,
 --                                     search_path pinned to the one schema).
 --   3. backenly_direct_set_password — rotate.
---   4. backenly_direct_drop_role    — terminate sessions, strip policies,
---                                     reassign owned objects, drop.
+--   4. backenly_direct_drop_role    — take the role's privileges, terminate
+--                                     sessions, strip policies, reassign owned
+--                                     objects, drop; or, when another database
+--                                     on the cluster still names the role,
+--                                     retire it (NOLOGIN, no password).
 --   5. backenly_direct_sync_schema  — idempotent grants/ownership/RLS-policy
 --                                     sync for a workspace schema, including the
---                                     backup role's read. Called after every
---                                     governed DDL mutation and on adopt.
+--                                     backup role's read, which every workspace
+--                                     gets whether or not it has direct access.
+--                                     Called when a workspace is created, after
+--                                     governed DDL, after a restore and on adopt.
 --   6. backenly_capture_ddl/_drop   — event triggers that record every DDL
 --                                     statement executed BY a bkn_% role into
 --                                     public.schema_drift_events (the evidence
 --                                     the autonomy loop adopts or flags).
 --                                     Platform DDL (backenly_user) is ignored.
+--
+-- Last, every workspace schema that already exists is brought to what the
+-- sync declares for the backup role, so re-running this file is also how an
+-- existing database is converged (section 7).
 --
 -- Network exposure (listen_addresses / pg_hba / firewall) is applied by
 -- scripts/setup-direct-access.sh — not here — because pg_hba syntax errors can
@@ -167,19 +176,61 @@ $fn$;
 
 REVOKE ALL ON FUNCTION public.backenly_direct_set_password(text, text) FROM PUBLIC;
 -- ── 4. Drop a role cleanly ────────────────────────────────────────────────────
+--
+-- The definer needs the PRIVILEGES of the role it drops, not only ADMIN over
+-- it: REASSIGN OWNED and DROP OWNED require them, and so does terminating the
+-- role's sessions without pg_signal_backend. PostgreSQL 16 gives a CREATEROLE
+-- role that is not a superuser ADMIN on a role it creates and nothing more. On
+-- Amazon RDS the master is not made a member at all (pg_has_role still reports
+-- its ADMIN), and createrole_self_grant has no effect; both measured on
+-- staging. So on a managed database, where this definer is the master, every
+-- login it created failed here with "permission denied to reassign objects",
+-- and so did deleting any project that had one. ADMIN is what lets the definer
+-- grant the role to itself first. That is done only when the privileges are
+-- missing (a superuser has them all), and the grant goes with the role in the
+-- DROP ROLE below.
+--
+-- A role is cluster-wide, but REASSIGN OWNED and DROP OWNED reach only the
+-- current database, and a definer that is not a superuser cannot revoke a
+-- database-level privilege another role granted. When anything outside this
+-- database still names the role (a grant, a default privilege or an object in
+-- another database, or such a database-level privilege), DROP ROLE fails with
+-- 2BP01, and so did every deletion of a project whose login it was. A database
+-- restored beside this one from a dump that carried the grants is enough. This
+-- function touches nothing outside this database, which may hold anyone's
+-- data. It retires the login instead: NOLOGIN with no password, so it cannot
+-- authenticate by any means, and it returns false. A session that logged in
+-- after the termination above outlives it until this transaction commits, so
+-- the caller calls again after its commit to end it. The privileges taken
+-- above are given back, because the grant no longer goes with the role. The
+-- login stays retired, since nothing calls this again on its own: an operator
+-- removes what names it elsewhere, then calls this function to drop it.
+--
+-- Returns true when the role is gone (dropped now, or never existed), false
+-- when it was retired.
 CREATE OR REPLACE FUNCTION public.backenly_direct_drop_role(
   p_role text
 ) RETURNS boolean
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public
 AS $fn$
 DECLARE
-  pol record;
+  pol     record;
+  granted boolean := false;
 BEGIN
   IF p_role !~ '^bkn_(ro|rw)_[0-9a-f]{12}$' THEN
     RAISE EXCEPTION 'backenly_direct_drop_role: invalid role name %', p_role;
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = p_role) THEN
     RETURN true; -- already gone — idempotent
+  END IF;
+
+  -- Before anything that needs them (see above). WITH INHERIT exists from
+  -- PostgreSQL 16; before it a membership is inherited by an INHERIT member.
+  IF NOT pg_has_role(current_user, p_role, 'USAGE') THEN
+    EXECUTE format(CASE WHEN current_setting('server_version_num')::int >= 160000
+                        THEN 'GRANT %I TO %I WITH INHERIT TRUE, SET FALSE'
+                        ELSE 'GRANT %I TO %I' END, p_role, current_user);
+    granted := true;
   END IF;
 
   PERFORM pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = p_role;
@@ -197,6 +248,21 @@ BEGIN
   -- role so the backend they describe keeps working after revocation.
   EXECUTE format('REASSIGN OWNED BY %I TO %I', p_role, public.backenly_app_role());
   EXECUTE format('DROP OWNED BY %I', p_role); -- strips remaining grants
+
+  -- Whatever still names the role is outside this database (see above): retire it.
+  IF EXISTS (
+    SELECT 1 FROM pg_shdepend s
+     WHERE s.refclassid = 'pg_authid'::regclass
+       AND s.refobjid = (SELECT oid FROM pg_roles WHERE rolname = p_role)
+       AND s.dbid <> (SELECT oid FROM pg_database WHERE datname = current_database())
+  ) THEN
+    EXECUTE format('ALTER ROLE %I NOLOGIN PASSWORD NULL', p_role);
+    IF granted THEN
+      EXECUTE format('REVOKE %I FROM %I', p_role, current_user);
+    END IF;
+    RETURN false;
+  END IF;
+
   EXECUTE format('DROP ROLE %I', p_role);
   RETURN true;
 END
@@ -205,7 +271,10 @@ $fn$;
 REVOKE ALL ON FUNCTION public.backenly_direct_drop_role(text) FROM PUBLIC;
 -- ── 5. Idempotent grants / ownership / RLS-policy sync for one schema ────────
 --
--- Called: at provision, after every governed DDL mutation, and on drift adopt.
+-- Called for EVERY workspace, with or without direct access: when the schema is
+-- created (lib/projects/provision.ts), after governed DDL, after a restore, on
+-- drift adopt, and for each existing workspace when this file is installed
+-- (section 7). With no ro/rw role it grants the backup role and stops.
 -- Owner-role model (READ_WRITE only): a NOLOGIN role bkn_own_<hex> owns the
 -- schema and every table in it; backenly_user AND the rw login role are members,
 -- so BOTH the platform and the external developer can ALTER/DROP any table —
@@ -222,6 +291,7 @@ AS $fn$
 DECLARE
   t record;
   v_backup text;
+  v_creator text;
 BEGIN
   IF p_schema !~ '^workspace_[0-9a-fA-F][0-9a-fA-F-]{10,60}$' THEN
     RAISE EXCEPTION 'backenly_direct_sync_schema: invalid schema %', p_schema;
@@ -237,9 +307,6 @@ BEGIN
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = p_schema) THEN
     RETURN true; -- workspace not provisioned yet — nothing to sync
-  END IF;
-  IF p_ro IS NULL AND p_rw IS NULL THEN
-    RETURN true;
   END IF;
 
   -- Skip roles that disappeared (revoked between the app's read and this call).
@@ -287,14 +354,29 @@ BEGIN
     EXECUTE format('GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA %I TO %I', p_schema, p_rw);
   END IF;
 
-  -- ── The backup role ────────────────────────────────────────────────────────
-  -- Backups dump each workspace as the read-only backup role
-  -- (scripts/setup-backup-role.ts). Its default privileges name the roles that
-  -- created tables when it last converged, and a table created over a
-  -- READ_WRITE connection belongs to bkn_rw_* (then bkn_own_*), which did not
-  -- exist then. Without this grant pg_dump fails "permission denied" for that
-  -- project on every run until someone reruns the converge. Every external
-  -- table passes through here on adoption, so this is where it is closed.
+  -- ── The backup role: every workspace, with or without direct access ───────
+  -- Snapshots dump each workspace as the read-only backup role: pg_dump
+  -- --schema workspace_<id> locks every table, which needs USAGE on the schema
+  -- and SELECT on the table, and reads every sequence. One object it cannot
+  -- read fails every snapshot of that project, with "permission denied".
+  --
+  -- Nothing else grants it on a workspace made later: the regional procedure
+  -- (tools/managed-db/regional/sql/roles.sql) creates the role with CONNECT
+  -- only, and scripts/setup-backup-role.ts, which a self-hosted install runs,
+  -- converges the schemas that exist when it runs. So this runs for every
+  -- workspace. It used to come after an early return for a call with no ro/rw
+  -- role, which left every project without direct access unreadable.
+  --
+  -- Explicit grants cover what exists now. Default privileges cover a table
+  -- created before the next sync, by the roles that create them: the
+  -- application (every platform path: typed actions, migrations, imports,
+  -- branch merges) and, with READ_WRITE access, the developer's own role, whose
+  -- tables are otherwise unreadable until adoption, which may wait for the
+  -- owner's approval. PostgreSQL lets a role set defaults only for a role whose
+  -- privileges it holds, so a creator this definer cannot act for is left to
+  -- the explicit grants of the next sync. The bkn_own_* role creates nothing
+  -- unless a developer becomes it, and the adoption sync covers that.
+  --
   -- The role is BYPASSRLS, so it needs no policy. Name it with
   --   ALTER DATABASE <db> SET backenly.backup_role = '<role>';
   -- when BACKENLY_BACKUP_ROLE is not the default. No role, no grant.
@@ -303,6 +385,20 @@ BEGIN
     EXECUTE format('GRANT USAGE ON SCHEMA %I TO %I', p_schema, v_backup);
     EXECUTE format('GRANT SELECT ON ALL TABLES IN SCHEMA %I TO %I', p_schema, v_backup);
     EXECUTE format('GRANT SELECT ON ALL SEQUENCES IN SCHEMA %I TO %I', p_schema, v_backup);
+    -- One check per statement: a privilege check on a missing role raises.
+    FOREACH v_creator IN ARRAY ARRAY[public.backenly_app_role(), p_rw] LOOP
+      CONTINUE WHEN v_creator IS NULL;
+      CONTINUE WHEN NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = v_creator);
+      CONTINUE WHEN NOT pg_has_role(current_user, v_creator, 'USAGE');
+      EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I GRANT SELECT ON TABLES TO %I',
+                     v_creator, p_schema, v_backup);
+      EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I GRANT SELECT ON SEQUENCES TO %I',
+                     v_creator, p_schema, v_backup);
+    END LOOP;
+  END IF;
+
+  IF p_ro IS NULL AND p_rw IS NULL THEN
+    RETURN true; -- no direct-access role, so nothing below applies
   END IF;
 
   -- ── RLS pass-through policies ───────────────────────────────────────────────
@@ -348,18 +444,66 @@ REVOKE ALL ON FUNCTION public.backenly_direct_sync_schema(text, text, text, text
 -- psql-as-postgres are never recorded. The insert is wrapped so a capture
 -- failure can NEVER break the developer's DDL statement. No recursion risk:
 -- the function only INSERTs (never DDL), and INSERT does not fire event triggers.
+--
+-- A failed capture is not silent, though: it raises a WARNING tagged
+-- BACKENLY_DRIFT_CAPTURE_FAILED with the SQLSTATE only (the developer's client
+-- sees the tag, not platform internals). The database log carries it; on RDS
+-- that log is exported to CloudWatch, where a metric filter alarms on the tag,
+-- and lib/autonomy/drift-event-upkeep.ts checks the apparatus hourly.
+--
+-- capturedAt is written in UTC. The column has no time zone, the application
+-- reads it as UTC (Prisma), and now() alone would store the session's local time.
+--
+-- Every event names its project. A GRANT or REVOKE names no single object, so
+-- pg_event_trigger_ddl_commands() reports it with no schema, and a dropped
+-- schema has none either; those events used to be stored with no project, so no
+-- adoption could ever clear them and they aged the region's drift backlog
+-- forever. They are attributed to the project the session's login belongs to.
+-- A direct-access login does DDL in its own project's schema only, and a GRANT
+-- inside it includes the PostgREST sync granting the API roles on a table the
+-- developer just created.
+
+-- The workspace schema a capturing login belongs to, read from its NAME:
+-- bkn_ro_/bkn_rw_ + sha256(projectId) (lib/services/direct-access.ts) and
+-- bkn_fn_ + sha256(schema) (scripts/sql/function-roles.sql), 12 hex each. The
+-- name, not a setting such as its search_path, because a login may change its
+-- own settings and could then point its events at another project. NULL when
+-- no workspace matches, or more than one does.
+CREATE OR REPLACE FUNCTION public.backenly_capture_home_schema(p_role text) RETURNS text
+LANGUAGE plpgsql STABLE SET search_path = pg_catalog
+AS $fn$
+DECLARE
+  v_kind    text := substring(p_role FROM '^bkn_(ro|rw|fn)_[0-9a-f]{12}$');
+  v_schema  text;
+  v_matches int;
+BEGIN
+  IF v_kind IS NULL THEN RETURN NULL; END IF;
+  SELECT min(n.nspname), count(*) INTO v_schema, v_matches
+    FROM pg_namespace n
+   WHERE n.nspname ~ '^workspace_[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+     AND left(encode(sha256(convert_to(
+           CASE WHEN v_kind = 'fn' THEN n.nspname ELSE substring(n.nspname FROM 11) END, 'UTF8')), 'hex'), 12)
+         = right(p_role, 12);
+  RETURN CASE WHEN v_matches = 1 THEN v_schema END;
+END
+$fn$;
+
+REVOKE ALL ON FUNCTION public.backenly_capture_home_schema(text) FROM PUBLIC;
+
 CREATE OR REPLACE FUNCTION public.backenly_capture_ddl() RETURNS event_trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public
 AS $fn$
 DECLARE
   r        record;
   v_schema text;
+  v_home   text;
 BEGIN
   IF session_user NOT LIKE 'bkn\_%' THEN RETURN; END IF;
+  v_home := public.backenly_capture_home_schema(session_user);
   FOR r IN SELECT command_tag, object_type, object_identity, schema_name
            FROM pg_event_trigger_ddl_commands()
   LOOP
-    v_schema := COALESCE(r.schema_name, split_part(r.object_identity, '.', 1));
+    v_schema := COALESCE(r.schema_name, split_part(r.object_identity, '.', 1), v_home);
     INSERT INTO public.schema_drift_events
       ("id", "projectId", "roleName", "commandTag", "objectType", "objectIdentity", "schemaName", "capturedAt", "status")
     VALUES (
@@ -370,12 +514,14 @@ BEGIN
       r.object_type,
       r.object_identity,
       v_schema,
-      now(),
+      now() AT TIME ZONE 'UTC',
       'pending'
     );
   END LOOP;
 EXCEPTION WHEN OTHERS THEN
-  NULL; -- never break user DDL because bookkeeping failed
+  -- Never break the developer's DDL because bookkeeping failed, and never
+  -- lose the event without a trace either (see the note above).
+  RAISE WARNING 'BACKENLY_DRIFT_CAPTURE_FAILED (SQLSTATE %)', SQLSTATE;
 END
 $fn$;
 
@@ -383,29 +529,37 @@ CREATE OR REPLACE FUNCTION public.backenly_capture_drop() RETURNS event_trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public
 AS $fn$
 DECLARE
-  r record;
+  r        record;
+  v_schema text;
+  v_home   text;
 BEGIN
   IF session_user NOT LIKE 'bkn\_%' THEN RETURN; END IF;
+  v_home := public.backenly_capture_home_schema(session_user);
   FOR r IN SELECT object_type, object_identity, schema_name
            FROM pg_event_trigger_dropped_objects()
            WHERE original AND NOT is_temporary
   LOOP
+    -- sql_drop runs after the catalog rows are gone, so a dropped schema is
+    -- named by its identity rather than looked up.
+    v_schema := COALESCE(r.schema_name,
+                         CASE WHEN r.object_type = 'schema' THEN trim(both '"' FROM r.object_identity) END,
+                         v_home);
     INSERT INTO public.schema_drift_events
       ("id", "projectId", "roleName", "commandTag", "objectType", "objectIdentity", "schemaName", "capturedAt", "status")
     VALUES (
       gen_random_uuid()::text,
-      CASE WHEN r.schema_name LIKE 'workspace\_%' THEN substring(r.schema_name FROM 11) ELSE NULL END,
+      CASE WHEN v_schema LIKE 'workspace\_%' THEN substring(v_schema FROM 11) ELSE NULL END,
       session_user::text,
       'DROP ' || upper(COALESCE(r.object_type, 'OBJECT')),
       r.object_type,
       r.object_identity,
-      r.schema_name,
-      now(),
+      v_schema,
+      now() AT TIME ZONE 'UTC',
       'pending'
     );
   END LOOP;
 EXCEPTION WHEN OTHERS THEN
-  NULL;
+  RAISE WARNING 'BACKENLY_DRIFT_CAPTURE_FAILED (SQLSTATE %)', SQLSTATE;
 END
 $fn$;
 
@@ -436,3 +590,42 @@ BEGIN
     EXECUTE format('GRANT EXECUTE ON FUNCTION public.backenly_direct_sync_schema(text, text, text, text) TO %I', r);
   END IF;
 END $grant$;
+
+-- ── 7. Converge every existing workspace ─────────────────────────────────────
+--
+-- The application calls the sync for each workspace it creates, changes or
+-- restores. A workspace made before the sync covered every one (it granted the
+-- backup role only where direct access existed) is still unreadable, and so is
+-- every snapshot of it. Re-running this file is how an existing database is
+-- brought to what the sync declares: the regional procedure re-applies it
+-- (tools/managed-db/regional/bootstrap.sh, step direct-access), and its
+-- verify.sql then fails the run for any workspace the backup role still cannot
+-- read. Anywhere else it is re-run with scripts/install-sql.sh.
+--
+-- Backup grants only: no ro/rw role is named, so ownership, direct-access
+-- grants and policies are left as they are. The schemas are the ones the sync
+-- accepts, so a preview branch (workspace_<id>_br_<name>) is not one of them.
+-- Last in the file, so a failure here leaves every function installed and
+-- granted. One transaction: every failure is collected and reported together,
+-- and any failure leaves the grants exactly as they were.
+DO $converge$
+DECLARE
+  s text;
+  failed text[] := '{}';
+BEGIN
+  FOR s IN
+    SELECT nspname FROM pg_namespace
+     WHERE nspname ~ '^workspace_[0-9a-fA-F][0-9a-fA-F-]{10,60}$'
+     ORDER BY nspname
+  LOOP
+    BEGIN
+      PERFORM public.backenly_direct_sync_schema(s);
+    EXCEPTION WHEN OTHERS THEN
+      failed := failed || format('%s: %s', s, SQLERRM);
+    END;
+  END LOOP;
+  IF array_length(failed, 1) > 0 THEN
+    RAISE EXCEPTION 'the backup role could not be given read access to % workspace schema(s): %',
+      array_length(failed, 1), array_to_string(failed, '; ');
+  END IF;
+END $converge$;

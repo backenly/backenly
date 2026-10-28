@@ -24,6 +24,7 @@ import { Router, Request, Response, NextFunction } from 'express'
 import { v1AuthMiddleware } from '../lib/auth'
 import { listenerHub } from '@/lib/realtime/listener-hub'
 import { redeemRealtimeTicketParam } from '@/lib/realtime/ticket-auth'
+import { createVisibleEventQueue, type RealtimeChange, type RealtimeSubscriber } from '@/lib/realtime/visibility'
 import { mintSseTicket, SSE_TICKET_TTL_SECONDS } from '@/lib/realtime/sse-ticket'
 import { resolveJwtSecret } from '@/lib/services/jwtSecretManager'
 import { prisma } from '@/lib/db/prisma'
@@ -53,7 +54,25 @@ async function realtimeAuth(req: Request, res: Response, next: NextFunction) {
     res.status(401).json({ error: redeemed.message, code: redeemed.code })
     return
   }
+  res.locals.realtimeSubscriber = {
+    projectId: req.params.projectId,
+    endUserId: redeemed.claims?.endUserId ?? null,
+    endUserRole: redeemed.claims?.endUserRole ?? null,
+    serviceRole: !!redeemed.claims?.serviceRole,
+  } satisfies RealtimeSubscriber
   next()
+}
+
+/** Who the stream is opened as: the ticket's identity, or the key's and its end user's. */
+function subscriberFor(req: Request, res: Response): RealtimeSubscriber {
+  if (res.locals.realtimeSubscriber) return res.locals.realtimeSubscriber as RealtimeSubscriber
+  const ctx = (req as any).v1Context ?? {}
+  return {
+    projectId: req.params.projectId,
+    endUserId: ctx.endUserId ?? null,
+    endUserRole: ctx.endUserRole ?? null,
+    serviceRole: !!ctx.apiKey?.serviceRole,
+  }
 }
 
 router.get('/:projectId/realtime', asyncRoute(realtimeAuth), asyncRoute(async (req: Request, res: Response) => {
@@ -89,15 +108,27 @@ router.get('/:projectId/realtime', asyncRoute(realtimeAuth), asyncRoute(async (r
   req.on('close', cleanup)
 
   try {
+    // Each change only if this stream's identity could read the row, in order
+    // (lib/realtime/visibility.ts).
+    const deliver = createVisibleEventQueue(subscriberFor(req, res), (change) => send(change))
     const result = await listenerHub.subscribe(projectId, (payload) => {
       if (!tableFilter || payload.table === tableFilter) {
-        send(payload)
+        deliver(payload as RealtimeChange)
       }
     })
 
     if (result.ok === false) {
       send({ type: 'error', code: result.code, message: result.message })
       cleanup()
+      return
+    }
+    // The client can disconnect DURING the subscribe await (React StrictMode
+    // remounts, the SDK recycling a connection when its filter changes). The
+    // close handler has already run with `subscription` still null, so this
+    // slot would never be released — it counted against the plan's concurrent
+    // cap until the process restarted.
+    if (closed) {
+      result.unsubscribe()
       return
     }
     subscription = result

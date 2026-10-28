@@ -8,11 +8,12 @@ Every tool and route answers failures as JSON: `{ ok: false, error, code }`, oft
 | --- | --- | --- |
 | `RATE_LIMITED` | Too many calls | Wait for `retry-after`, then retry |
 | `PLAN_LIMIT_EXCEEDED` | The plan's limit is reached | Tell your human; do not retry in a loop |
-| `AI_CREDITS_EXHAUSTED` | No AI credits left | Only `backend_chat` and `functions` `create` spend credits; every other tool still works |
+| `AI_CREDITS_EXHAUSTED` | No AI credits left | Only Backenly's own model spends credits: `backend_chat`, `functions` `create` and `schedule`, and the functions `integrations` `connect` wires (the key is still stored). Every other tool still works |
 | `AI_UNAVAILABLE` | `backend_chat` could not reach an AI model: none is configured, the provider is out of quota, or a monthly AI spending limit is reached | Do not retry. Anything listed in `applied` landed before it stopped; do the rest with the typed tools, which need no AI, and tell your human |
 | `EMBEDDINGS_UNAVAILABLE` | Vector search was asked for on a deployment with no embedding model configured | Tell your human; nothing was searched or enabled |
 | `EMBEDDING_MODEL_MISMATCH` | A table's stored vectors were made with a different model or size than the deployment embeds with now | Do not retry; the vectors need to be made again with the current model |
 | `READ_ONLY_KEY` | This key may only read | Ask your human for a read-write key |
+| `SERVICE_KEY_REQUIRES_HUMAN` | `create_api_key` was asked for a service-role key, which bypasses row-level security | Ask your human to create an Admin key in Settings → API keys and put it in the server's environment, not this conversation |
 | `DESTRUCTIVE_NEEDS_APPROVAL` | A destructive tool was called directly | Use the section tool's action, which parks it for approval (`autonomy`) |
 | `INVALID_KEY` / `NO_AUTH` | The key is missing, wrong or revoked | Ask your human for a new key from Connect → Agents |
 | `PROJECT_PAUSED` | The project is paused | Your human resumes it in the dashboard |
@@ -31,7 +32,8 @@ Every tool and route answers failures as JSON: `{ ok: false, error, code }`, oft
 | `API_KEY_PROJECT_MISMATCH` | A preview key of one project was sent to another project's auth endpoint | Use a key of the project in the URL |
 | `MCP_KEY_IN_APP` | An app sent an MCP key to the runtime API, which serves only project keys | Give the app a project key from `connect` `create_api_key`; if the MCP key was committed or shipped, ask your human to revoke it in Connect → Agents |
 | `SERVICE_ROLE_IN_BROWSER` | A service-role key was sent from a browser, where it would expose every row | Use a publishable key in browser code and keep the service-role key on a server |
-| `BRANCH_REQUIRED` | Production is protected, so a schema change was refused on main | `branch` `create`, then `apply_migration { sql, branchId }`, then `branch` `merge` |
+| `BRANCH_REQUIRED` | Production is protected, so a schema change was refused on main, whether sent as `apply_migration` or asked of `backend_chat` | `branch` `create`, then `apply_migration { sql, branchId }`, then `branch` `merge` |
+| `RUN_INTERRUPTED` | A `backend_chat` request stopped because Backenly restarted while it ran | What is in `applied` landed. Send `backend_chat { "message": "continue" }` to finish it |
 | `MERGE_CONFLICT` | Production changed a table the branch's migrations touch since the branch was cut | Create a fresh branch and apply the change there |
 
-Database errors name the column, the expected type and the value received. A result with `partial` means some changes landed before the run stopped: read state before replaying anything.
+Database errors name the column, the expected type and the value received. A result with `partial` means some changes landed before the run stopped: read state before replaying anything. A result with `next` did not finish the request and names the call that carries it on, usually `backend_chat { "message": "continue" }`: make that call rather than replaying or rephrasing the request. A `backend_chat` answer with `status: "running"` is not an error: the request keeps running, and `backend_chat { "message": "status" }` (or `check_approval` with its `run.id`) returns its result.

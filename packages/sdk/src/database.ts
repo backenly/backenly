@@ -1,6 +1,6 @@
 import type { BackenlyClient } from './client.js'
 import type { QueryResponse, InsertResponse, UpdateResponse, DeleteResponse, OrderByOptions, QueryFilter, CountResponse } from './types.js'
-import { normalizeError } from './errors.js'
+import { BackenlyError, normalizeError } from './errors.js'
 import type { RealtimeCallback, Unsubscribe } from './realtime.js'
 
 /**
@@ -71,7 +71,7 @@ export class TableClient<T = any> {
         method: 'POST',
         body: JSON.stringify({ table: this.tableName, data }),
       })
-      return response.data ?? response
+      return rowsIn(resultOf(response))
     } catch (error) {
       throw normalizeError(error)
     }
@@ -105,13 +105,13 @@ export class TableClient<T = any> {
         method: 'POST',
         body: JSON.stringify({ table: this.tableName, data, where: { id } }),
       })
-      return response.data ?? response
+      return rowsIn(resultOf(response))
     } catch (error) {
       throw normalizeError(error)
     }
   }
 
-  /** Deletes a record by id */
+  /** Deletes a record by id. Resolves `{ success: true, deleted }`, the number of rows deleted. */
   async delete(id: string): Promise<{ success: boolean }> {
     try {
       const projectId = this.client.getProjectId()
@@ -119,7 +119,7 @@ export class TableClient<T = any> {
         method: 'POST',
         body: JSON.stringify({ table: this.tableName, where: { id } }),
       })
-      return response
+      return resultOf(response)
     } catch (error) {
       throw normalizeError(error)
     }
@@ -170,11 +170,41 @@ export class TableClient<T = any> {
   }
 }
 
+// ── Reading a data route's answer ────────────────────────────────────────────
+//
+// Each data route answers `{ data: <result> }`, and each result is an object
+// that carries its rows under a `data` of its own:
+//
+//   POST /database/query   { data: { data: rows, count }, meta }
+//   POST /database/insert  { data: { data: row | rows } }
+//   POST /database/update  { data: { data: row | rows, updated } }
+//   POST /database/delete  { data: { success, deleted } }
+//
+// The Next routes (app/api/v1/[projectId]/database/*) and the runtime's twin
+// (server/routes/database.ts) answer alike, and
+// tests/integration/sdk-data-routes.spec.ts pins it. list() and get() always
+// read the rows from inside the result, and count() its count. create() and
+// update() returned the result itself, so `(await create(...)).id` was
+// undefined, and delete() and the query builder returned the whole answer.
+// They read through these two now.
+
+/** The result inside a route's `{ data: <result> }` answer. */
+function resultOf(response: any): any {
+  return isRecord(response) && 'data' in response ? response.data : response
+}
+
+/** The row, or rows, a result carries under its own `data`. */
+function rowsIn(result: any): any {
+  return isRecord(result) && 'data' in result ? result.data : result
+}
+
+function isRecord(value: unknown): value is Record<string, any> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
 function unwrapRows<T>(response: any): T[] {
-  if (Array.isArray(response)) return response
-  if (Array.isArray(response?.data)) return response.data
-  if (Array.isArray(response?.data?.data)) return response.data.data
-  return []
+  const rows = rowsIn(resultOf(response))
+  return Array.isArray(rows) ? rows : []
 }
 
 export class QueryBuilder<T = any> {
@@ -317,36 +347,83 @@ export class QueryBuilder<T = any> {
   }
 
   // EXECUTION
+  /**
+   * The `where` the servers read: one entry per column, holding every filter
+   * on it. `.gte('age', 18).lt('age', 65)` sends `{ age: { gte: 18, lt: 65 } }`.
+   * Each filter used to replace the one before it on the same column, so that
+   * range sent only `{ lt: 65 }`, and a ranged update() or delete() reached
+   * every row below 65. Two filters that cannot be sent together on one
+   * column (eq() or isNull() with any other, or one operator twice) throw
+   * before anything is sent, and so does a value JSON cannot carry: an
+   * undefined value left its filter out of the request altogether, and NaN
+   * or Infinity arrived as null.
+   */
   private buildWhereClause(): any {
     if (this.filters.length === 0) return undefined
 
-    const where: any = {}
-    for (const filter of this.filters) {
-      if (filter.operator === 'eq') {
-        where[filter.column] = filter.value
-      } else if (filter.operator === 'in') {
-        where[filter.column] = { in: filter.value }
-      } else if (filter.operator === 'gt') {
-        where[filter.column] = { gt: filter.value }
-      } else if (filter.operator === 'gte') {
-        where[filter.column] = { gte: filter.value }
-      } else if (filter.operator === 'lt') {
-        where[filter.column] = { lt: filter.value }
-      } else if (filter.operator === 'lte') {
-        where[filter.column] = { lte: filter.value }
-      } else if (filter.operator === 'neq') {
-        where[filter.column] = { not: filter.value }
-      } else if (filter.operator === 'like') {
-        where[filter.column] = { contains: filter.value }
-      } else if (filter.operator === 'ilike') {
-        where[filter.column] = { contains: filter.value, mode: 'insensitive' }
-      } else if (filter.operator === 'isNull') {
-        where[filter.column] = null
-      } else if (filter.operator === 'isNotNull') {
-        where[filter.column] = { not: null }
+    const where = new Map<string, unknown>()
+    const comparedWhole = new Set<string>()
+    const refuse = (message: string) => new BackenlyError(message, 'VALIDATION_ERROR')
+    /** The methods that write each operator, as the caller wrote them. */
+    const METHODS: Record<string, string> = {
+      in: 'in()', gt: 'gt()', gte: 'gte()', lt: 'lt()', lte: 'lte()', not: 'neq() or isNotNull()', contains: 'like() or ilike()',
+    }
+    const conflict = (column: string, what: string, hint: string) =>
+      refuse(`Two filters on "${column}" cannot be sent together: ${what}. ${hint}`)
+    // A value JSON sends as it is. JSON leaves out undefined, a function or a
+    // symbol, and turns NaN, Infinity and an invalid Date into null; inside an
+    // array each of those becomes null. A bigint cannot be sent at all.
+    const carried = (v: unknown): boolean => {
+      let json: string | undefined
+      try {
+        json = JSON.stringify(v)
+      } catch {
+        return false
+      }
+      if (json === undefined || (json === 'null' && v !== null)) return false
+      return !Array.isArray(v) || v.every(carried)
+    }
+    const describe = (v: unknown): string => {
+      try {
+        return typeof v === 'object' && v !== null && !Array.isArray(v) ? Object.prototype.toString.call(v) : String(v)
+      } catch {
+        return typeof v
       }
     }
-    return where
+    const sendable = (column: string, value: unknown): void => {
+      if (!carried(value)) throw refuse(`The filter on "${column}" has a value JSON cannot send as it is (${describe(value)}).`)
+    }
+    // A value compared whole: eq(), isNull().
+    const compare = (column: string, value: unknown) => {
+      sendable(column, value)
+      if (where.has(column)) throw conflict(column, 'eq() or isNull() with another filter', 'For several values, use in().')
+      comparedWhole.add(column)
+      where.set(column, value)
+    }
+    // One operator among the column's others.
+    const operator = (column: string, key: string, operand: unknown, extra: Record<string, unknown> = {}) => {
+      sendable(column, operand)
+      if (comparedWhole.has(column)) throw conflict(column, 'eq() or isNull() with another filter', 'For several values, use in().')
+      const operators = (where.get(column) as Record<string, unknown> | undefined) ?? {}
+      if (Object.prototype.hasOwnProperty.call(operators, key)) throw conflict(column, `${METHODS[key] ?? key} twice`, 'Keep one of them.')
+      where.set(column, { ...operators, [key]: operand, ...extra })
+    }
+
+    for (const filter of this.filters) {
+      const { column, value } = filter
+      if (filter.operator === 'eq') compare(column, value)
+      else if (filter.operator === 'isNull') compare(column, null)
+      else if (filter.operator === 'in') operator(column, 'in', value)
+      else if (filter.operator === 'gt') operator(column, 'gt', value)
+      else if (filter.operator === 'gte') operator(column, 'gte', value)
+      else if (filter.operator === 'lt') operator(column, 'lt', value)
+      else if (filter.operator === 'lte') operator(column, 'lte', value)
+      else if (filter.operator === 'neq') operator(column, 'not', value)
+      else if (filter.operator === 'isNotNull') operator(column, 'not', null)
+      else if (filter.operator === 'like') operator(column, 'contains', value)
+      else if (filter.operator === 'ilike') operator(column, 'contains', value, { mode: 'insensitive' })
+    }
+    return Object.fromEntries(where)
   }
 
   private buildOrderByClause(): any {
@@ -354,6 +431,11 @@ export class QueryBuilder<T = any> {
     return { [this.orderByColumn]: this.orderDirection }
   }
 
+  /**
+   * Resolves the route's result, not its whole answer: `{ data: rows, count }`
+   * for a select, `{ data: row | rows }` for an insert, `{ data, updated }` for
+   * an update and `{ success, deleted }` for a delete.
+   */
   async execute(): Promise<QueryResponse<T> | InsertResponse<T> | UpdateResponse<T> | DeleteResponse> {
     try {
       const projectId = this.client.getProjectId()
@@ -371,7 +453,7 @@ export class QueryBuilder<T = any> {
             include: this.includeSpec,
           }),
         })
-        return response
+        return resultOf(response)
       }
 
       if (this.operation === 'insert') {
@@ -382,7 +464,7 @@ export class QueryBuilder<T = any> {
             data: this.insertData,
           }),
         })
-        return response
+        return resultOf(response)
       }
 
       if (this.operation === 'update') {
@@ -394,7 +476,7 @@ export class QueryBuilder<T = any> {
             where: this.buildWhereClause(),
           }),
         })
-        return response
+        return resultOf(response)
       }
 
       if (this.operation === 'delete') {
@@ -405,7 +487,7 @@ export class QueryBuilder<T = any> {
             where: this.buildWhereClause(),
           }),
         })
-        return response
+        return resultOf(response)
       }
 
       throw new Error('Invalid operation')

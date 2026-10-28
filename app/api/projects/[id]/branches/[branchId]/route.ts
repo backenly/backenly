@@ -16,6 +16,7 @@ export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
 import { withProjectAccess } from '@/lib/auth/route-protection'
+import { canAdministerProject, canWriteProject } from '@/lib/edition/guard'
 import { isCloudEdition } from '@/lib/edition/cloud-only'
 import { diffBranch, mergeBranch, discardBranch } from '@/lib/branches/engine'
 
@@ -54,6 +55,16 @@ export const GET = withProjectAccess(async (req: NextRequest, { projectId }) => 
 // agent's merge request over MCP waits in the Review Queue instead.
 export const POST = withProjectAccess(async (req: NextRequest, { user, projectId }) => {
   if (!isCloudEdition()) return cloudOnly404()
+  // ADMIN: merging replays the branch's schema changes onto production — the
+  // same rank the protection and branch-key routes already demand, and the
+  // same human authority an agent's parked merge waits for.
+  if (!(await canAdministerProject(user.userId, projectId))) {
+    return NextResponse.json(
+      { success: false, error: 'Project not found or access denied', code: 'PROJECT_ROLE_INSUFFICIENT' },
+      { status: 403 },
+    )
+  }
+
   const result = await mergeBranch(projectId, user.userId, branchIdFrom(req))
   if (!result.ok) {
     const fail = result as { ok: false; error: string; code?: string; applied?: string[]; remaining?: string[] }
@@ -75,6 +86,14 @@ export const POST = withProjectAccess(async (req: NextRequest, { user, projectId
 
 export const DELETE = withProjectAccess(async (req: NextRequest, { user, projectId }) => {
   if (!isCloudEdition()) return cloudOnly404()
+  // DEVELOPER: discarding throws away a scratch schema, not production.
+  if (!(await canWriteProject(user.userId, projectId))) {
+    return NextResponse.json(
+      { success: false, error: 'Project not found or access denied', code: 'PROJECT_ROLE_INSUFFICIENT' },
+      { status: 403 },
+    )
+  }
+
   const result = await discardBranch(projectId, user.userId, branchIdFrom(req))
   if (!result.ok) {
     const fail = result as Extract<typeof result, { ok: false }>

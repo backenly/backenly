@@ -97,7 +97,9 @@ async function handleDELETE(req: NextRequest, props: { params: Promise<{ project
   const triggerId = req.nextUrl.searchParams.get('id')
   if (!triggerId) return NextResponse.json({ error: 'id query parameter is required' }, { status: 400 })
 
-  await deleteTrigger(params.projectId, triggerId)
+  if (!(await deleteTrigger(params.projectId, triggerId))) {
+    return NextResponse.json({ error: 'Trigger not found in this project' }, { status: 404 })
+  }
   return NextResponse.json({ success: true })
 }
 

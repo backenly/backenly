@@ -98,8 +98,10 @@ describe('the topics and their files', () => {
 
   it('keeps the index an index: well under one response', () => {
     // The index opens with a short account of what Backenly is, because
-    // assistants read llms.txt as the product's own description.
-    expect(INDEX.length).toBeLessThanOrEqual(14_000)
+    // assistants read llms.txt as the product's own description. Since
+    // 2026-10-28 it says what self-healing, self-restructuring and History do,
+    // which left the generated tables too little room under 14,000.
+    expect(INDEX.length).toBeLessThanOrEqual(15_000)
     for (const [file, text] of DOCS) expect([file, text.length <= DOCS_MAX_CHARS]).toEqual([file, true])
   })
 })
@@ -339,6 +341,47 @@ describe('fetch_docs serves the topic asked for', () => {
   })
 })
 
+describe('the auth doc describes the API the runtime serves', () => {
+  // The authorities: server/routes/auth.ts (the production Express door) and
+  // lib/api/v1/route-not-found.ts (the runtime's own 404 hint). The doc once
+  // promised accessToken/refreshToken fields nothing returns, an X-User-Token
+  // logout nothing reads, and a GET /auth/me nothing serves — and the 404's
+  // hint itself advertised /auth/me, so an agent trusting its own error
+  // retried the same shape forever.
+  const authDoc = fs.readFileSync(path.join(ROOT, 'public', 'docs', 'agents', 'auth.md'), 'utf8')
+  const skillMd = fs.readFileSync(path.join(ROOT, 'public', 'skill.md'), 'utf8')
+  const notFound = fs.readFileSync(path.join(ROOT, 'lib', 'api', 'v1', 'route-not-found.ts'), 'utf8')
+  const authRouter = fs.readFileSync(path.join(ROOT, 'server', 'routes', 'auth.ts'), 'utf8')
+
+  it('the runtime serves no /auth/me, and nothing LISTS it as served', () => {
+    expect(authRouter).not.toContain('auth/me')
+    // Saying "there is no /auth/me" is fine; OFFERING it as an endpoint is not.
+    expect(authDoc).not.toMatch(/\|\s*GET\s*\|\s*`\/auth\/me`/)
+    expect(skillMd).not.toMatch(/`\/auth\/me`,/)
+    expect(notFound).not.toMatch(/'[A-Z]+ +\/auth\/me/)
+  })
+
+  it('responses are { data: { user, token } } — no accessToken/refreshToken pair', () => {
+    expect(authDoc).not.toContain('accessToken')
+    expect(authDoc).not.toContain('refreshToken }')
+    expect(authDoc).toContain('{ data: { user, token } }')
+  })
+
+  it('logout reads the current token, not X-User-Token', () => {
+    const logoutRow = authDoc.split('\n').find((l) => l.includes('`/auth/logout`')) ?? ''
+    expect(logoutRow).toContain('Authorization: Bearer')
+    expect(logoutRow).not.toContain('X-User-Token')
+  })
+
+  it('the 404 hint lists only routes the router registers', () => {
+    const hinted = [...notFound.matchAll(/\/auth\/([a-z-]+)/g)].map((m) => m[1])
+    expect(hinted.length).toBeGreaterThan(0)
+    for (const route of hinted) {
+      expect(authRouter).toContain(`auth/${route}`)
+    }
+  })
+})
+
 describe('what the docs no longer carry', () => {
   it.each(DOCS.map(([file, text]) => [file, text] as const))('%s: no pricing or positioning', (_file, text) => {
     expect(text).not.toMatch(/\$\d+\s*\/\s*month|\bper month\b|^#+\s*Pricing/im)
@@ -365,5 +408,37 @@ describe('what the docs no longer carry', () => {
     const core = fs.readFileSync(path.join(ROOT, 'lib', 'mcp', 'apply-migration.ts'), 'utf8')
     expect(core).toMatch(/remaining: planned\.slice\(i \+ 1\)/)
     for (const [, text] of DOCS) expect(text).not.toMatch(/all[ -]or[ -]nothing/i)
+  })
+})
+
+describe('the realtime doc describes the stream the runtime sends', () => {
+  // The trigger emits json_build_object('type', ..., 'table', ..., 'data',
+  // row_data, 'old', old_data, 'timestamp', ...) (lib/services/
+  // realtimeTriggers.ts) and the SSE routes forward the payload unchanged; the
+  // SDK types it as DBChangeEvent { type, table, data?, old?, truncated?,
+  // timestamp? } and hands the EVENT OBJECT to the callback (packages/sdk/src/
+  // database.ts). The doc once said { record, old, at } and
+  // subscribe(({ event, row })), and an agent-written client reading e.record
+  // got undefined for every frame.
+  const realtime = fs.readFileSync(path.join(ROOT, 'public', 'docs', 'agents', 'realtime.md'), 'utf8')
+  const clientSetup = fs.readFileSync(path.join(ROOT, 'public', 'docs', 'agents', 'client-setup.md'), 'utf8')
+
+  it('names the emitted fields, not the invented ones', () => {
+    for (const key of ['"data"', '"old"', '"timestamp"']) expect(realtime).toContain(key)
+    expect(realtime).not.toMatch(/"record"/)
+    expect(realtime).not.toMatch(/"at"\s*\}/)
+  })
+
+  it('shows the real SDK callback: the event object, not ({ event, row })', () => {
+    expect(realtime).not.toContain('({ event, row })')
+    expect(clientSetup).not.toContain('({ event, row })')
+    expect(realtime).toContain('event.type')
+  })
+
+  it('points at the endpoint the server actually mounts', () => {
+    // server/routes/realtime.ts mounts GET /:projectId/realtime; there is no
+    // /realtime/subscribe route anywhere.
+    expect(realtime).not.toContain('/realtime/subscribe')
+    expect(realtime).toMatch(/\/realtime\?table=/)
   })
 })

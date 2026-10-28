@@ -7,6 +7,8 @@ import { withAuth } from '@/lib/auth/route-protection'
 import { deleteProjectCompletely } from '@/lib/projects/delete'
 import { canAccessProject, canAdministerProject, canWriteProject } from '@/lib/edition/guard'
 import { getProjectQuota } from '@/lib/services/storageQuota'
+import { resolvePublicBaseUrl } from '@/lib/services/public-url'
+import { isRegionError, regionApiOrigin, regionOfRecord } from '@/lib/data-plane/regional'
 
 // Usage figures (storageUsed, apiRequests, activeUsers, ...) are measured by the
 // server and are deliberately NOT accepted here. They used to be, which let any
@@ -20,6 +22,89 @@ const updateProjectSchema = z.object({
   apiUrlStaging: z.string().url().optional().nullable(),
   apiUrlProd: z.string().url().optional().nullable(),
 })
+
+// The response is the client's Project type (lib/api/projects.ts), BUILT FROM
+// AN EXPLICIT SELECT — never a spread of the raw row. The raw row carries the
+// project's end-user JWT signing secret (jwtSecret, frequently plaintext),
+// the domain verification token and other internals, and this route answers
+// to every VIEWER: spreading the row handed each of them the key that signs
+// any end user's identity. The secret must not even leave the database layer.
+const PROJECT_RESPONSE_SELECT = {
+  id: true,
+  name: true,
+  description: true,
+  userId: true,
+  projectStatus: true,
+  deployedAt: true,
+  environment: true,
+  apiUrlDev: true,
+  apiUrlStaging: true,
+  apiUrlProd: true,
+  apiRequests: true,
+  avgLatency: true,
+  errorCount: true,
+  storageUsed: true,
+  maxFileSize: true,
+  maxFilesPerBucket: true,
+  activeUsers: true,
+  lastMetricsUpdate: true,
+  createdAt: true,
+  updatedAt: true,
+  pausedAt: true,
+  // Where the project's data lives (lib/regions.ts); null is the home region.
+  region: true,
+  _count: { select: { tables: true, workspaces: true } },
+} as const
+
+type ProjectResponseRow = {
+  storageUsed: bigint
+  maxFileSize: bigint
+  apiRequests: number
+  avgLatency: number
+  errorCount: number
+  activeUsers: number
+  lastMetricsUpdate: Date | null
+  region: string | null
+  _count: { tables: number; workspaces: number }
+} & Record<string, unknown>
+
+/**
+ * Where to call this project's API, in the region its data is in. Null when
+ * this server has no API address for that region: the console then shows none,
+ * rather than the home address, which customers would copy and keep.
+ */
+function apiBaseUrl(projectId: string, recordedRegion: string | null, homeOrigin: string): string | null {
+  try {
+    const origin = regionApiOrigin(regionOfRecord(projectId, recordedRegion), homeOrigin, { projectId })
+    return `${origin}/api/v1/${projectId}`
+  } catch (err) {
+    if (isRegionError(err)) return null
+    throw err
+  }
+}
+
+async function serializeProject(project: ProjectResponseRow, projectId: string, homeOrigin: string) {
+  const { _count, ...fields } = project
+  return {
+    ...fields,
+    apiBaseUrl: apiBaseUrl(projectId, project.region, homeOrigin),
+    storageUsed: Number(project.storageUsed),
+    // The plan's effective cap, not the unused Project.storageLimit column.
+    storageLimit: Number((await getProjectQuota(projectId)).limit),
+    maxFileSize: Number(project.maxFileSize),
+    metrics: {
+      totalFunctions: 0, // Functions feature removed
+      totalTables: _count.tables,
+      totalWorkspaces: _count.workspaces,
+      apiRequests: project.apiRequests,
+      avgLatency: project.avgLatency,
+      errorCount: project.errorCount,
+      storageUsed: Number(project.storageUsed),
+      activeUsers: project.activeUsers,
+      lastMetricsUpdate: project.lastMetricsUpdate,
+    },
+  }
+}
 
 // GET /api/projects/[id] - Get a single project
 export const GET = withAuth(async (
@@ -47,18 +132,7 @@ export const GET = withAuth(async (
 
     const project = await prisma.project.findUnique({
       where: { id: projectId },
-      include: {
-        // functions: true, // Commented out - functions feature removed
-        tables: true,
-        workspaces: true,
-        user: {
-          select: {
-            id: true,
-            email: true,
-            name: true,
-          },
-        },
-      },
+      select: PROJECT_RESPONSE_SELECT,
     })
 
     if (!project) {
@@ -71,30 +145,9 @@ export const GET = withAuth(async (
       )
     }
 
-    // Serialize BigInt to number for JSON response
-    const serializedProject = {
-      ...project,
-      storageUsed: Number(project.storageUsed),
-      // The plan's effective cap, not the unused Project.storageLimit column.
-      storageLimit: Number((await getProjectQuota(project.id)).limit),
-      maxFileSize: Number(project.maxFileSize),
-      maxFilesPerBucket: project.maxFilesPerBucket, // Already Int, not BigInt
-      metrics: {
-        totalFunctions: 0, // Functions feature removed
-        totalTables: project.tables.length,
-        totalWorkspaces: project.workspaces.length,
-        apiRequests: project.apiRequests,
-        avgLatency: project.avgLatency,
-        errorCount: project.errorCount,
-        storageUsed: Number(project.storageUsed),
-        activeUsers: project.activeUsers,
-        lastMetricsUpdate: project.lastMetricsUpdate,
-      },
-    }
-
     return NextResponse.json({
       success: true,
-      data: serializedProject,
+      data: await serializeProject(project, projectId, resolvePublicBaseUrl(request)),
     })
   } catch (error: any) {
     console.error('Error fetching project:', error)
@@ -145,43 +198,12 @@ export const PUT = withAuth(async (
     const project = await prisma.project.update({
       where: { id: projectId },
       data: updateData,
-      include: {
-        // functions: true, // Commented out - functions feature removed
-        tables: true,
-        workspaces: true,
-        user: {
-          select: {
-            id: true,
-            email: true,
-            name: true,
-          },
-        },
-      },
+      select: PROJECT_RESPONSE_SELECT,
     })
-
-    // Serialize BigInt to number for JSON response
-    const serializedProject = {
-      ...project,
-      storageUsed: Number(project.storageUsed),
-      storageLimit: Number((await getProjectQuota(project.id)).limit),
-      maxFileSize: Number(project.maxFileSize),
-      maxFilesPerBucket: project.maxFilesPerBucket, // Already Int, not BigInt
-      metrics: {
-        totalFunctions: 0, // Functions feature removed
-        totalTables: project.tables.length,
-        totalWorkspaces: project.workspaces.length,
-        apiRequests: project.apiRequests,
-        avgLatency: project.avgLatency,
-        errorCount: project.errorCount,
-        storageUsed: Number(project.storageUsed),
-        activeUsers: project.activeUsers,
-        lastMetricsUpdate: project.lastMetricsUpdate,
-      },
-    }
 
     return NextResponse.json({
       success: true,
-      data: serializedProject,
+      data: await serializeProject(project, projectId, resolvePublicBaseUrl(request)),
     })
   } catch (error: any) {
     if (error instanceof z.ZodError) {

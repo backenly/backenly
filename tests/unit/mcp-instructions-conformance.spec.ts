@@ -24,6 +24,15 @@
  * the check that keeps it fixed.
  */
 
+// The guide names the project's API address, which reads the project's region
+// from the platform database. This suite has none; a home-region project's
+// address is the deployment's origin (tests/integration/project-region.spec.ts
+// covers another region's).
+jest.mock('@/lib/data-plane/regional', () => ({
+  ...jest.requireActual('@/lib/data-plane/regional'),
+  projectApiOrigin: async (_projectId: string, homeOrigin: string) => homeOrigin,
+}))
+
 import { buildCatalog, STATE_SECTIONS } from '@/lib/mcp/catalog'
 import { dispatchTool } from '@/lib/ai/brain/tools'
 
@@ -128,21 +137,57 @@ describe('get_instructions names only advertised tools', () => {
   })
 })
 
+describe('get_instructions deployment URLs', () => {
+  afterEach(() => jest.restoreAllMocks())
+
+  it.each([
+    ['local self-host', 'http://localhost:3100/', '', 'test', 'http://localhost:3100'],
+    ['public self-host', 'https://backend.example.test:8443/', '', 'production', 'https://backend.example.test:8443'],
+    ['alternate URL', '', 'https://alternate.example.test/', 'test', 'https://alternate.example.test'],
+    ['bind-all address', 'http://0.0.0.0:3100', 'https://alternate.example.test/', 'test', 'https://alternate.example.test'],
+    ['development fallback', '', '', 'test', 'http://localhost:3000'],
+    ['production fallback', '', '', 'production', 'https://backenly.com'],
+  ])('uses the deployment origin for %s', async (_label, appUrl, alternateUrl, mode, origin) => {
+    jest.replaceProperty(process, 'env', {
+      ...process.env,
+      NODE_ENV: mode,
+      NEXT_PUBLIC_APP_URL: appUrl,
+      NEXT_PUBLIC_URL: alternateUrl,
+    })
+    const projectId = '00000000-0000-4000-8000-000000000000'
+    const res = await dispatchTool('get_instructions', {}, { projectId })
+
+    expect(res.ok).toBe(true)
+    expect(res.data).toEqual({ projectId, apiBase: `${origin}/api/v1/${projectId}` })
+    expect(res.summary).toContain(`Base URL: \`${origin}/api/v1/${projectId}\``)
+    const urls = [...res.summary.matchAll(/https?:\/\/[^\s`]+/g)]
+    expect(urls.length).toBeGreaterThan(0)
+    for (const [url] of urls) expect(new URL(url).origin).toBe(origin)
+  })
+})
+
 /**
- * The unregistered-schema fault must be auto-repaired, not merely noticed.
+ * The unregistered-schema fault must come with a repair, not merely be noticed.
  *
  * The registration itself is now enforced in three places, but the reason this
  * shipped was not that a mechanism failed — it was that nothing was asking the
  * question. A probe classified `notify_only` would restore only half of that:
- * the platform would know a customer's data plane was dead and wait for a human
- * to read a dashboard.
+ * the platform would know a customer's data plane was dead and have nothing to
+ * offer.
+ *
+ * This asserted that the loop repairs it without a human. REGISTER_SCHEMA runs
+ * outside the change ledger, so History cannot undo it, and the loop now parks
+ * the finding for a person instead: rated `approval`, with the real repair
+ * behind the approve button. The request path still re-registers a schema the
+ * first time PostgREST answers PGRST106 (server/routes/postgrest-handler.ts).
  */
-describe('schema_not_registered is a first-class, auto-healed finding', () => {
-  it('is classified auto, so the loop repairs it without a human', async () => {
+describe('schema_not_registered is a first-class finding with a repair behind approval', () => {
+  it('is classified approval, with REGISTER_SCHEMA behind the button', async () => {
     const { classifyFix } = await import('@/lib/core/fix-classifier')
+    const { buildFixAction } = await import('@/lib/core/fix-actions')
     const c = classifyFix('schema_not_registered', { reason: 'x' } as any)
-    expect(c.decision).toBe('auto')
-    expect(c.suggestedAction).toBeTruthy()
+    expect(c.decision).toBe('approval')
+    expect(buildFixAction('schema_not_registered', { reason: 'x' })).toMatchObject({ action: 'REGISTER_SCHEMA' })
   })
 
   it('survives finding-type normalization as itself', async () => {

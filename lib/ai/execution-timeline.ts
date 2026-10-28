@@ -14,10 +14,17 @@
  *
  * The service is intentionally fire-and-tolerant: a DB failure here never
  * breaks the execution pipeline. All methods are safe to call without awaiting.
+ *
+ * An entry records how an action went, not what it handed back: a successful
+ * action keeps no message, and a failed one keeps its error with credentials
+ * withheld (lib/mcp/withhold-secrets.ts), as do its retries and its stored
+ * arguments. What the caller is shown is untouched.
  */
 
 import { prisma } from '@/lib/db/prisma'
 import type { ErrorTaxonomyCode } from '@/lib/errors/taxonomy'
+import { NOT_QUOTED, argumentShape, quotesKeptHere } from '@/lib/data-plane/residency'
+import { redactSecretParams, withholdSecrets } from '@/lib/mcp/withhold-secrets'
 import type { RetryAttemptRecord } from './retry-wrapper'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -56,6 +63,10 @@ function isLocalId(id: string) {
  * Open a pending timeline entry at the start of an action.
  * Returns an opaque entry ID used to close the entry later.
  *
+ * A project kept in another region gets its arguments' shape only: names,
+ * structure, ids and counts, never the values, which can be its rows
+ * (lib/data-plane/residency.ts).
+ *
  * Never throws — returns a local fallback ID on DB failure.
  */
 export async function openTimelineEntry(
@@ -66,13 +77,14 @@ export async function openTimelineEntry(
   userId?: string,
 ): Promise<string> {
   try {
+    const quote = await quotesKeptHere(projectId)
     const entry = await (prisma as any).executionTimelineEntry.create({
       data: {
         projectId,
         userId:      userId ?? null,
         executionId,
         actionType,
-        actionParams,
+        actionParams: quote ? redactSecretParams(actionParams) : argumentShape(actionParams),
         startedAt:    new Date(),
         status:       'pending',
         retryCount:   0,
@@ -102,9 +114,15 @@ export async function closeTimelineEntry(
     errorMessage?: string
     retryHistory?: RetryAttemptRecord[]
     metadata?: Record<string, any>
+    /** The action's structured result: credentials it names are withheld from the error too. */
+    resultData?: unknown
   },
 ): Promise<void> {
   if (isLocalId(entryId)) return
+
+  // Withheld before the length cap, so a cut never leaves part of a credential
+  // that no longer matches its shape.
+  const kept = (text: string | null | undefined) => (text ? withholdSecrets(text, params.resultData) : text)
 
   try {
     await (prisma as any).executionTimelineEntry.update({
@@ -117,10 +135,12 @@ export async function closeTimelineEntry(
         selfCorrected:       params.selfCorrected,
         errorClassification: params.errorClassification ?? null,
         errorMessage:        params.errorMessage
-          ? params.errorMessage.slice(0, 2000)
+          ? kept(params.errorMessage)!.slice(0, 2000)
           : null,
-        healingApplied:      params.retryHistory ?? null,
-        metadata:            params.metadata ?? null,
+        healingApplied:      params.retryHistory
+          ? params.retryHistory.map((attempt) => ({ ...attempt, errorMessage: kept(attempt.errorMessage) ?? '' }))
+          : null,
+        metadata:            params.metadata ? redactSecretParams(params.metadata) : null,
       },
     })
   } catch (err) {
@@ -224,7 +244,7 @@ export async function getExecutionSummary(
  *     executeSingleAction(action, projectId, apiKey)
  *   )
  */
-export async function trackAction<T extends { success: boolean; message?: string; error?: string }>(
+export async function trackAction<T extends { success: boolean; message?: string; error?: string; data?: unknown }>(
   projectId: string,
   executionId: string,
   action: { action: string; params: Record<string, any> },
@@ -245,6 +265,14 @@ export async function trackAction<T extends { success: boolean; message?: string
     opts?.userId,
   )
 
+  // A project kept in another region: no message text, whose values can be
+  // its rows, here or in the retry history (lib/data-plane/residency.ts).
+  const quote = await quotesKeptHere(projectId)
+  const message = (text: string | undefined) => (quote || !text ? text : NOT_QUOTED)
+  const retryHistory = quote
+    ? opts?.retryHistory
+    : opts?.retryHistory?.map(attempt => ({ ...attempt, errorMessage: message(attempt.errorMessage) ?? '' }))
+
   const startMs = Date.now()
   let result: T
 
@@ -259,8 +287,8 @@ export async function trackAction<T extends { success: boolean; message?: string
       retryCount:          opts?.retryCount ?? 0,
       selfCorrected:       opts?.selfCorrected ?? false,
       errorClassification: opts?.errorClassification,
-      errorMessage:        err?.message,
-      retryHistory:        opts?.retryHistory,
+      errorMessage:        message(err?.message),
+      retryHistory,
     }).catch(() => {})
     throw err
   }
@@ -274,14 +302,18 @@ export async function trackAction<T extends { success: boolean; message?: string
     status = 'failed'
   }
 
+  // A success keeps no message: what an action hands back is for its caller,
+  // not for the record. A failure keeps its error, with anything the result
+  // names as a credential withheld (closeTimelineEntry).
   closeTimelineEntry(entryId, {
     status,
     durationMs,
     retryCount:          opts?.retryCount ?? 0,
     selfCorrected:       opts?.selfCorrected ?? false,
     errorClassification: opts?.errorClassification,
-    errorMessage:        result.error ?? result.message,
-    retryHistory:        opts?.retryHistory,
+    errorMessage:        result.success ? undefined : message(result.error ?? result.message),
+    retryHistory,
+    resultData:          result.data,
   }).catch(() => {})
 
   return result

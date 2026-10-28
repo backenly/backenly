@@ -2,7 +2,7 @@
 
 Index: https://backenly.com/llms.txt
 
-Server-side code, fired by an end-user signing up (`on_signup`), a row event (`on_insert`, `on_update`, `on_delete` on a table), an HTTP request (`http`), a schedule, or by hand (`manual`). There are two ways to make one:
+Server-side code, fired by an end-user signing up (`on_signup`), a row event (`on_insert`, `on_update`, `on_delete` on a table), an HTTP request (`http`), a schedule, or by hand (`manual`). Row events are captured inside PostgreSQL, so every writer fires them — REST, SDK, MCP, SQL in another function — within about a minute of the write; auth-managed tables (`users`) are not captured, so use `on_signup` for sign-ups. There are two ways to make one:
 
 - `functions { action: "create" }`: Backenly writes the code from your plain-English spec with its own model, which draws AI credits. Name the tables it touches and the integrations it calls.
 - `functions { action: "deploy_code" }`: you write the code; it is stored exactly as written, with no model reading or rewriting it, after the runtime that will run it checks that it can.
@@ -22,7 +22,7 @@ Call as `functions { action: "<action>", … }`.
 | `logs` | recent runs from every trigger, with errors and ctx.log lines | nothing | yes | no |
 | `set_active` | turn a function on or off | `active` | no | no |
 | `delete` | remove a function | nothing | no | waits for a human |
-| `schedule` | a job on a schedule ("every 15 minutes" or 5-field cron) | `description`, `schedule` | no | no |
+| `schedule` | a job on a schedule ("every 15 minutes" or 5-field cron), its code written from your description by Backenly's model | `description`, `schedule` | no | no |
 | `list_schedules` | every scheduled job | nothing | yes | no |
 | `delete_schedule` | remove a scheduled job | nothing | no | waits for a human |
 <!-- end generated -->
@@ -55,7 +55,7 @@ await ctx.integrations.email.send({ to: event.data.email, subject: 'Thanks', htm
 return { count: rows.length }
 ```
 
-- `ctx.db.query(table, where?)`, `ctx.db.insert(table, row)`, `ctx.db.update(table, where, patch)`, `ctx.db.delete(table, where)`: this project's tables only; update and delete need a non-empty `where`.
+- `ctx.db.query(table, where?, { limit, offset, orderBy }?)`, `ctx.db.insert(table, row)`, `ctx.db.update(table, where, patch)`, `ctx.db.delete(table, where)`: this project's tables only; update and delete need a non-empty `where`. `where` matches by equality: every key equals its value, ANDed, with no ranges or patterns. `query` returns at most `limit` rows (default 100, at most 1000), in no particular order unless you pass `orderBy`, such as `{ id: 'asc' }`. To act on every matching row, page with `offset` under one fixed `orderBy` and collect the ids first.
 - `ctx.http.get(url, headers?)`, `ctx.http.post(url, body, headers?)`: outbound requests through the egress guard, which refuses private and metadata addresses.
 - `ctx.log(...)`: lines recorded with the run.
 - `ctx.integrations.<provider>`: connected providers, with their keys kept server side (`integrations`, and each provider's topic).
@@ -81,4 +81,4 @@ The name is lowercased to kebab-case, because it is a URL path segment, and the 
 
 ## Schedules
 
-`schedule { description, schedule }` takes "every 15 minutes" or a five-field cron expression.
+`schedule { description, schedule }` takes "every 15 minutes" or a five-field cron expression. Backenly's model writes the job's code from `description`, which draws AI credits; with none left the call is refused with `AI_CREDITS_EXHAUSTED` and nothing is created.

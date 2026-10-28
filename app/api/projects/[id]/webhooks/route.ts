@@ -117,7 +117,16 @@ export const POST = withAuth(async (request: NextRequest, { user, params }) => {
   // this route exists to stop shipping.
   let captureError: string | null = null
   try {
-    await syncWebhookCapture(projectId)
+    const sync = await syncWebhookCapture(projectId)
+    // A sync that RETURNS can still have failed per table — those tables'
+    // row events silently never fire, which is exactly what captureError
+    // exists to stop shipping as a success.
+    if (sync.uncaptured.length > 0) {
+      captureError = `Row events are not captured on: ${sync.uncaptured
+        .map((u) => `${u.table} (${u.reason})`)
+        .join('; ')}`
+      console.warn('[webhooks] capture incomplete after create:', captureError)
+    }
   } catch (err: any) {
     captureError = err?.message ?? String(err)
     console.warn('[webhooks] capture sync failed after create:', captureError)

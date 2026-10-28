@@ -2,10 +2,11 @@
  * THE COMPATIBILITY BRIDGE MUST NOT WIDEN SILENTLY
  * ================================================
  *
- * 16 finding types execute autonomously without a declared action class, because
- * freezing them would have regressed a working product and declaring 16
+ * 8 finding types execute autonomously without a declared action class, because
+ * freezing them would have regressed a working product and declaring their
  * unverified safety contracts would have been worse. That is a deliberate,
- * bounded exception with a sunset.
+ * bounded exception with a sunset. It started at 16; the other 8 left when
+ * their repairs, which run outside the change ledger, moved to approval.
  *
  * The way a bounded exception stops being bounded is that somebody adds a
  * finding type to `AUTO_SAFE`, it falls through to compatibility, and nobody
@@ -114,9 +115,16 @@ describe('anything else freezes', () => {
   it('the bridge is a fixed list, not a wildcard', () => {
     // A wildcard would mean the exception covers whatever arrives next, which
     // is how a temporary bridge becomes the architecture.
-    expect(LEGACY_AUTONOMY_COMPAT_TYPES.size).toBe(16)
-    expect(authorityPathFor('api_drift')).toBe('legacy_compatibility')
-    expect(authorityPathFor('api_drift_v2')).toBe('freeze')
+    //
+    // 8, down from 16, and deliberately. The 8 that left are repaired by
+    // FIX_API, FIX_WORKFLOW, ADOPT_EXTERNAL_SCHEMA and REGISTER_SCHEMA, which
+    // run outside the change ledger, so no loop applies them without a person.
+    // This used to pin api_drift as the bridged example; it is now one of the
+    // types with no autonomous path at all, and freezes if one ever asks.
+    expect(LEGACY_AUTONOMY_COMPAT_TYPES.size).toBe(8)
+    expect(authorityPathFor('infra_table_bloat')).toBe('legacy_compatibility')
+    expect(authorityPathFor('infra_table_bloat_v2')).toBe('freeze')
+    expect(authorityPathFor('api_drift')).toBe('freeze')
   })
 })
 
@@ -127,9 +135,10 @@ describe('the debt is measurable', () => {
     const remaining = autoSafe.filter(t => LEGACY_AUTONOMY_COMPAT_TYPES.has(t))
 
     // Not a threshold, a statement of record: this is what the sunset has left
-    // to do, and it should only ever go down.
+    // to do, and it should only ever go down. It went from 16 to 8 when the
+    // repairs outside the change ledger moved to approval.
     expect(migrated.length + remaining.length).toBe(autoSafe.length)
-    expect(remaining.length).toBeLessThanOrEqual(16)
+    expect(remaining.length).toBeLessThanOrEqual(8)
   })
 })
 

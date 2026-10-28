@@ -8,9 +8,16 @@
  *                 cannot race past the limit.
  *   Soft signal — adds X-RateLimit-* headers on every successful response so
  *                 clients can back off gracefully before hitting the hard wall.
+ *   In a region  — where the authorization copy is enforced, the key and its
+ *                 project come from the region's copy and the request is
+ *                 counted in the region's window (lib/auth-projection/rate.ts),
+ *                 the one counter the key has there.
  */
 
 import { Request, Response, NextFunction } from 'express'
+import { countInRegion, regionalRateCounting, type RateKey } from '@/lib/auth-projection/rate'
+import { authorizingKeyByHash, authorizingProject } from '@/lib/auth-projection/read'
+import type { CloudRegionId } from '@/lib/regions'
 import { clientIpFromNodeRequest } from '@/lib/security/client-ip'
 import crypto from 'crypto'
 import { prisma } from '@/lib/db'
@@ -86,7 +93,29 @@ async function resolveApiKey(req: Request) {
 
   // Strategy 1: SHA-256 hash lookup (newer keys — lib/auth/apiKeyAuth.ts)
   const keyHash = crypto.createHash('sha256').update(providedKey).digest('hex')
-  let apiKeyRecord = await prisma.apiKey.findFirst({ where: { keyHash } })
+
+  // In a region whose copy is enforced, a hashed key comes from the copy while it
+  // is fresh, from home otherwise (lib/auth-projection/read.ts), and is counted in
+  // the region (rate.ts): what the Next-owned routes and dynamic.ts already do, so
+  // a key has one counter whichever route it calls, and a copied key's request
+  // reads nothing in Mumbai before its response (the gates before this one read
+  // the copy too). A key neither has goes on to the legacy lookup below.
+  const region = regionalRateCounting()
+  if (region) {
+    const key = await authorizingKeyByHash(keyHash)
+    if (key) {
+      if (key.expiresAt && key.expiresAt < new Date()) {
+        return {
+          error: 'API key has expired',
+          diagnostic: classifyKeyFailure(providedKey, 'expired'),
+        }
+      }
+      return { apiKeyRecord: key, regional: { region, keyHash } }
+    }
+  }
+
+  // The region's lookup above already asked home for this hash.
+  let apiKeyRecord = region ? null : await prisma.apiKey.findFirst({ where: { keyHash } })
 
   // Strategy 2: prefix + bcrypt lookup (older keys — lib/middleware/apiKeyAuth.ts)
   if (!apiKeyRecord) {
@@ -157,6 +186,7 @@ async function enforceHardRateLimit(apiKeyRecord: any): Promise<RateLimitDecisio
 
   // Window expired → reset and allow
   if (!apiKeyRecord.resetAt || apiKeyRecord.resetAt <= now) {
+    // history: usage bookkeeping (last used, rate-limit window), not configuration
     await prisma.apiKey.update({
       where: { id: apiKeyRecord.id },
       data: { requestCount: 1, resetAt: windowEnd, lastUsed: now },
@@ -165,6 +195,7 @@ async function enforceHardRateLimit(apiKeyRecord: any): Promise<RateLimitDecisio
   }
 
   // Within window: atomic increment (only succeeds if count is still under limit)
+  // history: usage bookkeeping (last used, rate-limit window), not configuration
   const updated = await prisma.apiKey.updateMany({
     where: { id: apiKeyRecord.id, requestCount: { lt: limit } },
     data: { requestCount: { increment: 1 }, lastUsed: now },
@@ -188,6 +219,16 @@ async function enforceHardRateLimit(apiKeyRecord: any): Promise<RateLimitDecisio
     remaining: Math.max(0, limit - apiKeyRecord.requestCount - 1),
     resetAt: apiKeyRecord.resetAt,
   }
+}
+
+/**
+ * Count a request against a key's window: in the region when it counts there
+ * (lib/auth-projection/rate.ts), at home otherwise.
+ */
+export async function enforceKeyRateLimit(key: RateKey): Promise<RateLimitDecision> {
+  const region = regionalRateCounting()
+  if (region) return countInRegion(region, key)
+  return enforceRateLimitByKeyId(key.id)
 }
 
 /**
@@ -280,6 +321,8 @@ export async function v1AuthMiddleware(req: Request, res: Response, next: NextFu
   }
 
   const { apiKeyRecord } = resolved
+  /** Set when the key was authorized from the region's copy: the project and the count stay in the region too. */
+  const regional: { region: CloudRegionId; keyHash: string } | null = 'regional' in resolved ? resolved.regional : null
 
   // An MCP key is refused by the key-type check below as well, but its wording
   // ("Dashboard keys") names a different credential and sent agents looking for
@@ -351,7 +394,9 @@ export async function v1AuthMiddleware(req: Request, res: Response, next: NextFu
     }
   }
 
-  const project = await prisma.project.findUnique({ where: { id: projectId } })
+  const project = regional
+    ? await authorizingProject(projectId)
+    : await prisma.project.findUnique({ where: { id: projectId }, select: { id: true } })
   if (!project) {
     sendError(res, ErrorCodes.NOT_FOUND, 'Project not found', 404)
     return
@@ -359,7 +404,14 @@ export async function v1AuthMiddleware(req: Request, res: Response, next: NextFu
 
   // ── Hard rate limiting ──────────────────────────────────────────────────────
   const limit: number = apiKeyRecord.rateLimit ?? 1000
-  const rl = await enforceHardRateLimit(apiKeyRecord)
+  const rl = regional
+    ? await countInRegion(regional.region, {
+        id: apiKeyRecord.id,
+        keyHash: regional.keyHash,
+        rateLimit: limit,
+        rateLimitWindow: apiKeyRecord.rateLimitWindow ?? 3600,
+      })
+    : await enforceHardRateLimit(apiKeyRecord)
 
   // Always send rate limit headers so clients can self-throttle
   res.setHeader('X-RateLimit-Limit', String(limit))

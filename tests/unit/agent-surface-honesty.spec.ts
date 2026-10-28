@@ -235,6 +235,36 @@ describe('preview branches are reachable from an agent (#30)', () => {
   })
 })
 
+// ── #242 — every tool the brain is offered is in the manifest ────────────────
+
+describe('the capability manifest lists every tool the brain is offered (#242)', () => {
+  // The answerer is told that what the manifest does not list, Backenly does
+  // not do. sync_column was offered to the model and missing from the
+  // manifest, so by that rule the answer to "can Backenly keep a counter column
+  // in sync?" was no. A tool that needs no entry is named here with the reason.
+  const NO_ENTRY = new Map([
+    ['finish', 'ends the turn; it does nothing to the backend'],
+    ['get_instructions', 'the workflow guide an MCP agent reads first, not something a user asks for'],
+    ['get_project_overview', 'an alias of get_backend_metadata, which has its own entry'],
+  ])
+
+  it('has an entry for each, or says why it needs none', async () => {
+    const { BRAIN_MODEL_TOOLS } = await import('@/lib/ai/brain/tools')
+    const { TOOL_CAPABILITIES } = await import('@/lib/ai/brain/capabilities')
+    const listed = new Set(TOOL_CAPABILITIES.map((c) => c.tool))
+    const missing = BRAIN_MODEL_TOOLS.map((t) => t.function.name).filter((name) => !listed.has(name) && !NO_ENTRY.has(name))
+    expect(missing).toEqual([])
+  })
+
+  it('excuses only tools the brain is offered that have no entry', async () => {
+    const { BRAIN_MODEL_TOOLS } = await import('@/lib/ai/brain/tools')
+    const { TOOL_CAPABILITIES } = await import('@/lib/ai/brain/capabilities')
+    const offered = new Set(BRAIN_MODEL_TOOLS.map((t) => t.function.name))
+    const listed = new Set(TOOL_CAPABILITIES.map((c) => c.tool))
+    expect([...NO_ENTRY.keys()].filter((name) => !offered.has(name) || listed.has(name))).toEqual([])
+  })
+})
+
 // ── #36 — readiness must not demand an architecture ──────────────────────────
 
 describe('integration readiness does not require tables a product may not need (#36)', () => {
@@ -259,6 +289,16 @@ describe('integration readiness does not require tables a product may not need (
     // invent one.
     const mod: any = await import('@/lib/integrations/readiness')
     expect(mod.__DEPENDENCY_SPECS.stripe.requiredKeys).toContain('stripe_webhook_secret')
+  })
+
+  it('does not block Resend or PostHog on functions only the retired executors created (INT-07)', async () => {
+    // 'send-transactional-email' and 'posthog-capture'/'posthog-identify' are
+    // written only by the dead dispatchIntegration executors; the live MCP
+    // connect path never creates them. Requiring them left readiness
+    // permanently blocked with a next step that no call could satisfy.
+    const mod: any = await import('@/lib/integrations/readiness')
+    expect(mod.__DEPENDENCY_SPECS.resend.requiredFunctionPatterns).toEqual([])
+    expect(mod.__DEPENDENCY_SPECS.posthog.requiredFunctionPatterns).toEqual([])
   })
 })
 
@@ -318,6 +358,49 @@ describe('agent-facing text never recommends an unadvertised tool (#43)', () => 
     // The guard does recommend tools — if this is empty the test is vacuous.
     expect(named.size).toBeGreaterThan(0)
     expect([...named].filter((t) => !advertised.has(t))).toEqual([])
+  })
+})
+
+// ── #234 — a non-feature is something no tool does ───────────────────────────
+
+describe('NON_FEATURES refuses nothing a brain tool does (#234)', () => {
+  // NON_FEATURES said there was no "create a webhook URL" surface while
+  // create_webhook sat in the same prompt, so the model was told to refuse a
+  // request a tool in front of it could carry out. A tool is named for what it
+  // does, verb then object, so an entry that says that in plain words is
+  // refusing the tool. An entry that points at a tool as the alternative names
+  // it (run_query), which this does not match.
+  //
+  // These only steer the turn, and "ask the user" is ordinary advice.
+  const STEERING = new Set(['finish', 'propose_plan', 'ask_user', 'answer_question'])
+
+  /** The words a tool is named for: create_webhook → "create a webhook", "creating webhooks", … */
+  function operation(tool: string): RegExp | null {
+    const [verb, ...object] = tool.split('_')
+    if (object.length === 0) return null
+    const stem = verb.replace(/e$/, '')
+    const verbs = [verb, `${verb}s`, `${stem}ed`, `${stem}ing`]
+    const one = object.pop()!.replace(/ies$/, 'y').replace(/(ch|sh|x|ss)es$/, '$1').replace(/([^su])s$/, '$1')
+    const many = /[^aeiou]y$/.test(one) ? one.replace(/y$/, 'ies') : /(ch|sh|x|s)$/.test(one) ? `${one}es` : `${one}s`
+    const lead = object.map((w) => `${w}[\\s-]+`).join('')
+    return new RegExp(`\\b(?:${verbs.join('|')})\\s+(?:(?:a|an|the)\\s+)?${lead}(?:${one}|${many})\\b`, 'i')
+  }
+
+  it('recognises the refusal that was there', () => {
+    expect(operation('create_webhook')!.test('There is no separate "create a webhook URL" surface')).toBe(true)
+    expect(operation('run_query')!.test('run_query executes read-only SQL')).toBe(false)
+  })
+
+  it('no entry says in plain words what a tool is named for', async () => {
+    const { NON_FEATURES } = await import('@/lib/ai/brain/capabilities')
+    const { BRAIN_TOOLS } = await import('@/lib/ai/brain/tools')
+    const tools = BRAIN_TOOLS.map((t) => t.function.name).filter((name) => !STEERING.has(name))
+    const refused = NON_FEATURES.flatMap((entry) =>
+      tools
+        .filter((tool) => operation(tool)?.test(`${entry.pattern}. ${entry.why}`))
+        .map((tool) => ({ entry: entry.pattern, tool })),
+    )
+    expect(refused).toEqual([])
   })
 })
 

@@ -20,6 +20,9 @@ import { recordRuntimeRequest, INTERNAL_TRAFFIC_HEADER, isInternalTraffic } from
 import { meterNodeResponse } from '@/lib/usage/egress'
 import { branchIdForRequest, refuseBranchKeyOffDataPlane } from '@/lib/branches/key-scope'
 import { refuseMisplacedKey } from '@/lib/security/key-placement'
+import { isRegionError } from '@/lib/data-plane/regional'
+import { isAuthorizationUnavailable } from '@/lib/auth-projection/read'
+import { misdirection } from '@/lib/data-plane/serving'
 
 const app = express()
 
@@ -140,6 +143,24 @@ app.use(['/api/v1/:projectId', '/api/v2/:projectId'], (req, res, next) => {
   next()
 })
 
+// ── Each region's projects are served only in that region ─────────────────────
+// Before the serving gate, the Next proxy and every router: a project of another
+// region is answered 421 WRONG_REGION with its own address, and nothing about it
+// is looked up or checked here. Behind Next the same check has already run
+// (lib/traffic/recorded-v1.ts); on a single-box layout this is the only one.
+// lib/data-plane/serving.ts.
+app.use(['/api/v1/:projectId', '/api/v2/:projectId'], asyncRoute(async (req, res, next) => {
+  const projectId = /^\/api\/v[12]\/([^/?#]+)/.exec(req.originalUrl)?.[1]
+  if (projectId) {
+    const refusal = await misdirection(projectId, process.env.NEXT_PUBLIC_APP_URL || 'https://backenly.com')
+    if (refusal) {
+      res.status(refusal.status).json(refusal.body)
+      return
+    }
+  }
+  next()
+}))
+
 // ── Project serving gate ───────────────────────────────────────────────────────
 // Before the Next proxy and before every router, because it is the one check
 // they all need and none of them used to make: founder lockdown was enforced by
@@ -256,6 +277,39 @@ app.use((err: any, _req: express.Request, res: express.Response, next: express.N
   // after that point lands here with nothing sendable. Express's default
   // handler destroys the socket, which is the only correct answer.
   if (res.headersSent) return next(err)
+
+  // A body the JSON parser could not read, or one over its limit: the caller's
+  // to fix, and body-parser marks it so (its own 4xx status, `expose`). Answered
+  // as a 500, a client's malformed JSON read as the platform failing, in the
+  // response and in every error count (found by fuzzing the data API).
+  if (err?.expose === true && Number.isInteger(err.status) && err.status >= 400 && err.status < 500) {
+    res.status(err.status).json({
+      error: err.type === 'entity.parse.failed' ? 'The request body is not valid JSON.' : 'The request body could not be read.',
+      code: 'BAD_REQUEST',
+    })
+    return
+  }
+
+  // The project's data is in a region this process has no connection to, or
+  // its row names a region this build does not know. Nothing was read from
+  // another region's database instead (lib/data-plane/regional.ts). Retryable
+  // once the deployment is configured, so 503 rather than 500, with the code
+  // an operator can search for and without the variable names.
+  if (isRegionError(err)) {
+    res.status(503).json({
+      error: "This project's data region is not reachable from this server.",
+      code: err.code,
+    })
+    return
+  }
+
+  // The region's copy of what authorizes the request was past its bound and
+  // home could not be asked (lib/auth-projection/read.ts). Refused, never
+  // served on stale authorization; retryable.
+  if (isAuthorizationUnavailable(err)) {
+    res.status(503).json({ error: 'This request could not be authorized right now. Try again shortly.', code: err.code })
+    return
+  }
 
   res.status(500).json({ error: 'Internal server error', code: 'INTERNAL_ERROR' })
 })

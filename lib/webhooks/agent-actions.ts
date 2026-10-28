@@ -96,7 +96,12 @@ function present(w: {
  */
 async function resyncCapture(projectId: string): Promise<string | null> {
   try {
-    await syncWebhookCapture(projectId)
+    const sync = await syncWebhookCapture(projectId)
+    // A per-table failure is a capture failure: that table's row events
+    // silently never fire, so it must ride the same warning as a thrown sync.
+    if (sync.uncaptured.length > 0) {
+      return `not captured on ${sync.uncaptured.map((u) => `${u.table} (${u.reason})`).join('; ')}`
+    }
     return null
   } catch (err: any) {
     return err?.message ?? String(err)

@@ -88,5 +88,5 @@ export async function PATCH(
     }).catch(() => {})
 
     return NextResponse.json({ ok: true, level, cap, requested, clamped })
-  })
+  }, { floor: 'write' })
 }

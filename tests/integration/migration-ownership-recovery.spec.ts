@@ -216,13 +216,18 @@ beforeAll(async () => {
   )
 
   // Everything up to, and NOT including, the pause migration, applied by the
-  // admin role. That is the state staging was in before v8.
+  // admin role. That is the state staging was in before v8, and the release
+  // under test is v8 itself: the history up to and including the pause
+  // migration. Nothing later, on either side: a later migration may build on
+  // the pause migration's columns, as the authorization projection's triggers
+  // do, and the steps below pin what Prisma says when the pause migration is
+  // the one left to apply.
   const ids = readdirSync(join(ROOT, CANONICAL_DIR), { withFileTypes: true })
     .filter(d => d.isDirectory())
     .map(d => d.name)
   expect(ids).toContain(PAUSE)
-  before = assembleMigrationWorkspace(ROOT, [], { only: ids.filter(id => id !== PAUSE) })
-  full = assembleMigrationWorkspace(ROOT)
+  before = assembleMigrationWorkspace(ROOT, [], { only: ids.filter(id => id < PAUSE) })
+  full = assembleMigrationWorkspace(ROOT, [], { only: ids.filter(id => id <= PAUSE) })
   const built = prismaDirect(['migrate', 'deploy'], before.schemaPath, adminUrl)
   if (built.status !== 0) throw new Error(`building the pre-v8 schema failed:\n${built.output}`)
 

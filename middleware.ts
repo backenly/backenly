@@ -4,6 +4,8 @@ import { jwtVerify } from 'jose'
 import { domainRoutingMiddleware, shouldUseDomainRouting } from '@/lib/middleware/domainRouting'
 import { exceededBodyLimit, isUploadRoute, MAX_BUFFERED_UPLOAD_FILE_BYTES } from '@/lib/storage/body-limits'
 import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
+import { allowsAnyOrigin } from '@/lib/security/development-origin'
+import { isMarketingPath } from '@/lib/marketing-surfaces'
 
 // Inlined rather than imported from lib/auth/jwt, which pulls jsonwebtoken and
 // node:crypto into the Edge middleware bundle.
@@ -86,51 +88,51 @@ const publicPathPrefixes = [
   '/.well-known/',  // security.txt etc.
   '/startups',      // Backenly for Startups application (Cloud overlay). Anyone
                     // can apply; signing in is a step inside the page
+  '/guides',        // technical guides (app/guides)
+  '/agents',        // per-agent setup pages (app/agents)
 ]
 
-// ✅ MARKETING SURFACES — the hosted service's shop window.
+// ✅ MARKETING SURFACES — the hosted service's shop window. The lists, and why a
+// self-hosted install sends them to /app, live in lib/marketing-surfaces.ts,
+// which Backenly Cloud's click analytics reads as well.
+
+// 🔑 SIGNED-IN SURFACES — where an anonymous visitor is sent to sign in.
 //
-// A self-hosted deployment is somebody's own infrastructure. Serving Backenly's
-// landing page, pricing and competitor comparisons there is wrong twice over:
-// the operator has already installed the product so there is nothing to sell
-// them, and their internal host ends up publishing our marketing to whoever can
-// reach it. Supabase self-hosted puts the dashboard at `/` and ships no
-// marketing at all; this matches that.
-//
-// These redirect to /app rather than 404 so that an indexed or bookmarked link
-// lands the operator in the product instead of on an error page. `/login`,
-// `/signup` and `/auth/*` are NOT here — they are how you reach the product.
-const marketingRoutes = [
-  '/',
-  '/pricing',
-  '/contact',
-  '/privacy',
-  '/terms',
-  '/refund-policy',
-]
-const marketingPrefixes = [
-  '/alternatives',
-  '/comparisons',
-  '/features',
-  '/use-cases',
-  '/docs',
-  '/resources',
-  '/mcp',
-  '/quickstart',
-  '/startups',
-]
+// Every other path that is neither public nor one of these is answered with the
+// 404 page. It used to redirect to /auth/login as well, so a mistyped or retired
+// URL answered "sign in" instead of "not found": crawlers count that as a soft
+// 404, and a dead link from another site landed its visitors on a login form.
+// The page behind such a path is still never rendered for an anonymous visitor.
+const signInPrefixes = ['/app', '/admin']
 
-// Served under a marketing prefix but not marketing. The published CLI and
-// older MCP setup prompts fetch /docs/llms.txt (rewritten to /llms.txt in
-// next.config.js), and an agent on a self-hosted install needs that answered
-// rather than bounced to /app. Middleware runs before rewrites, so the
-// exemption has to be by path here.
-const marketingExemptions = ['/docs/llms.txt']
+function requiresSignIn(pathname: string): boolean {
+  return signInPrefixes.some(prefix => pathname === prefix || pathname.startsWith(prefix + '/'))
+}
 
-function isMarketingPath(pathname: string): boolean {
-  if (marketingExemptions.includes(pathname)) return false
-  if (marketingRoutes.includes(pathname)) return true
-  return marketingPrefixes.some(prefix => pathname === prefix || pathname.startsWith(prefix + '/'))
+/**
+ * www → the canonical host.
+ *
+ * www.backenly.com served every page as a second copy of the site. The page
+ * canonicals point at backenly.com, but a permanent redirect is what makes
+ * search engines merge the two and send every link to one URL. The canonical
+ * host is NEXT_PUBLIC_APP_URL's, so a self-hosted install redirects its own www
+ * host and nothing else. Only page reads move: API calls keep their method and
+ * body where they were sent.
+ */
+function wwwRedirect(request: NextRequest): NextResponse | null {
+  const appUrl = process.env.NEXT_PUBLIC_APP_URL
+  if (!appUrl) return null
+  let canonical: URL
+  try {
+    canonical = new URL(appUrl)
+  } catch {
+    return null
+  }
+  if (request.headers.get('host')?.toLowerCase() !== `www.${canonical.host}`) return null
+  if (request.method !== 'GET' && request.method !== 'HEAD') return null
+  const { pathname, search } = request.nextUrl
+  if (pathname === '/api' || pathname.startsWith('/api/')) return null
+  return NextResponse.redirect(new URL(`${pathname}${search}`, canonical.origin), 301)
 }
 
 // ✅ PUBLIC API ROUTES (Auth endpoints + webhook receivers)
@@ -159,12 +161,21 @@ const publicApiRoutes = [
   '/api/cli/',                      // @backenly/cli — same scoped x-api-key auth (mcpGuard) at route level
   '/api/cron/',                     // Cron jobs — CRON_SECRET at route level
   '/api/billing/webhook',           // Paddle webhook — signature-verified
-  '/api/feedback/feature-request',  // Public form (rate limited at route)
-  '/api/feedback/support',          // Public form (rate limited at route)
+  // '/api/feedback/support' and '/api/feedback/feature-request' were allowed
+  // here, but no routes exist at those paths — the real support and
+  // feature-request routes authenticate. With startsWith matching, a future
+  // route under either prefix would have silently skipped auth, so the dead
+  // allowances are removed rather than kept.
   '/api/startups/',                 // Startup program (Cloud overlay): applying is anonymous, gated by
                                     // Turnstile, rate limits and an emailed code; the status and claim
                                     // routes authenticate the session themselves
   '/api/connect/',                  // Legacy provider handshake flow (routes self-authenticate; flagged for removal)
+]
+
+// ✅ PUBLIC API ROUTES matched exactly, not as prefixes, so a route added under
+// one later is not public by accident.
+const publicApiExactRoutes = [
+  '/api/regions',                   // The Cloud regions as served and which are open (app/api/regions); nothing per account
 ]
 
 // Production: strict allowlist. Development: also accept localhost via a
@@ -228,7 +239,10 @@ async function handleCORS(request: NextRequest): Promise<NextResponse | null> {
 
     if (projectId) {
       const projectOrigins = await getProjectAllowedOrigins(projectId)
-      if (projectOrigins.length === 0) {
+      // Connected development origins (localhost, a LAN address) never make
+      // the list exclusive: connecting the dev server used to lock out the
+      // app's deployed origin (lib/security/development-origin.ts).
+      if (allowsAnyOrigin(projectOrigins)) {
         allowedOrigin = origin
       } else {
         allowedOrigin = projectOrigins.includes(origin) ? origin : null
@@ -297,6 +311,9 @@ async function handleCORS(request: NextRequest): Promise<NextResponse | null> {
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl
 
+  const toCanonicalHost = wwwRedirect(request)
+  if (toCanonicalHost) return toCanonicalHost
+
   // STEP 0: CORS
   const corsResponse = await handleCORS(request)
   if (corsResponse) {
@@ -351,7 +368,7 @@ export async function middleware(request: NextRequest) {
   }
 
   // ✅ Public API routes
-  if (publicApiRoutes.some(route => pathname.startsWith(route))) {
+  if (publicApiRoutes.some(route => pathname.startsWith(route)) || publicApiExactRoutes.includes(pathname)) {
     return applyCorsHeaders(NextResponse.next())
   }
 
@@ -398,6 +415,11 @@ export async function middleware(request: NextRequest) {
         { status: 401 }
       )
       return applyCorsHeaders(response)
+    }
+    if (!requiresSignIn(pathname)) {
+      // Rewritten to a path no route serves, so Next answers with the 404
+      // page and a 404 status, whatever page (if any) lives at `pathname`.
+      return NextResponse.rewrite(new URL('/_not-a-page', request.url))
     }
     const loginUrl = new URL('/auth/login', request.url)
     loginUrl.searchParams.set('redirect', pathname)

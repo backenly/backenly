@@ -9,35 +9,44 @@ export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
 import { ProviderCredentialsService } from '@/lib/services/provider-credentials'
-import { withTenantIsolation, TenantIsolationError } from '@/lib/tenant/isolation'
+import { requireProjectCapability, TenantIsolationError } from '@/lib/tenant/isolation'
+import { canAdministerProject } from '@/lib/edition/guard'
 
-// GET /api/provider-credentials/[provider] - Get credentials
+// GET /api/provider-credentials/[provider] — whether credentials are configured.
+//
+// This used to decrypt the stored deploy-provider token and send it to any
+// member who could RESOLVE the project — a VIEWER could read the owner's
+// Vercel token in plaintext. Two fixes at once: the floor is ADMIN, and the
+// decrypted material no longer leaves the server at all — the deploy
+// pipeline reads it through ProviderCredentialsService server-side, and no UI
+// ever consumed the value. A configuration screen needs to know a credential
+// is SET, not what it is.
 export async function GET(request: NextRequest, props: { params: Promise<{ provider: string }> }) {
   const params = await props.params;
   try {
-    return await withTenantIsolation(request, async (projectId) => {
-      const credentials = await ProviderCredentialsService.getCredentials(
-        projectId,
-        params.provider as any
+    const { projectId } = await requireProjectCapability(request, canAdministerProject)
+    const credentials = await ProviderCredentialsService.getCredentials(
+      projectId,
+      params.provider as any
+    )
+
+    if (!credentials) {
+      return NextResponse.json(
+        { error: 'Credentials not found' },
+        { status: 404 }
       )
+    }
 
-      if (!credentials) {
-        return NextResponse.json(
-          { error: 'Credentials not found' },
-          { status: 404 }
-        )
-      }
-
-      return NextResponse.json({
-        success: true,
-        credentials,
-      })
+    return NextResponse.json({
+      success: true,
+      provider: params.provider,
+      configured: true,
     })
   } catch (error: any) {
     if (error instanceof TenantIsolationError) {
       return NextResponse.json(
         { error: error.message },
-        { status: 403 }
+        { status: error.status ?? 403 }
       )
     }
     console.error('Failed to get credentials:', error)
@@ -48,25 +57,26 @@ export async function GET(request: NextRequest, props: { params: Promise<{ provi
   }
 }
 
-// DELETE /api/provider-credentials/[provider] - Delete credentials
+// DELETE /api/provider-credentials/[provider] - Delete credentials (ADMIN —
+// removing a deploy credential is a credential surface, same floor as reading
+// its existence).
 export async function DELETE(request: NextRequest, props: { params: Promise<{ provider: string }> }) {
   const params = await props.params;
   try {
-    return await withTenantIsolation(request, async (projectId) => {
-      await ProviderCredentialsService.deleteCredentials(
-        projectId,
-        params.provider as any
-      )
+    const { projectId } = await requireProjectCapability(request, canAdministerProject)
+    await ProviderCredentialsService.deleteCredentials(
+      projectId,
+      params.provider as any
+    )
 
-      return NextResponse.json({
-        success: true,
-      })
+    return NextResponse.json({
+      success: true,
     })
   } catch (error: any) {
     if (error instanceof TenantIsolationError) {
       return NextResponse.json(
         { error: error.message },
-        { status: 403 }
+        { status: error.status ?? 403 }
       )
     }
     console.error('Failed to delete credentials:', error)

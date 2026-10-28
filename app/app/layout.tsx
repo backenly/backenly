@@ -36,8 +36,12 @@ function AppLayoutContent({ children }: { children: React.ReactNode }) {
       {!bare && <AppHeader />}
       <div className="flex">
         {!bare && <AppSidebar />}
+        {/* min-w-0: a flex item is as wide as its widest descendant by
+            default, so one table with a minimum width (API keys, the loop
+            rail, a tab row) widened every console page past a phone's screen
+            instead of scrolling inside its own container. */}
         <main
-          className="flex-1"
+          className="min-w-0 flex-1"
           style={{ marginLeft: bare ? '0' : '64px' }}
         >
           {children}
@@ -48,7 +52,7 @@ function AppLayoutContent({ children }: { children: React.ReactNode }) {
 }
 
 const ORG_SHELL_PREFIXES = [
-  '/app/usage', '/app/billing', '/app/members', '/app/referral',
+  '/app/usage', '/app/billing', '/app/members', '/app/referral', '/app/support',
   '/app/org/', '/app/organizations', '/app/new-organization',
 ]
 

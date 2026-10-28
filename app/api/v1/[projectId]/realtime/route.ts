@@ -25,7 +25,14 @@ import { NextRequest, NextResponse } from 'next/server'
 import { v1ApiMiddleware } from '@/lib/api/v1/middleware'
 import { listenerHub } from '@/lib/realtime/listener-hub'
 import { redeemRealtimeTicketParam } from '@/lib/realtime/ticket-auth'
+import { createVisibleEventQueue, type RealtimeChange, type RealtimeSubscriber } from '@/lib/realtime/visibility'
+import { getProjectServingState, PAUSED_CODE, PAUSED_MESSAGE } from '@/lib/projects/serving-state'
+import { LOCKED_MESSAGE } from '@/lib/projects/serving-response'
+
 import { recordedV1 } from '@/lib/traffic/recorded-v1'
+
+/** How often an open stream re-checks that its project still serves, as the runtime stream does. */
+const REALTIME_RECHECK_MS = 25_000
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -39,6 +46,9 @@ async function handleGET(request: NextRequest, props: { params: Promise<{ projec
   // signed with the project's own secret. `?apiKey=` still works for existing
   // clients — see the deprecation note below — but it puts a long-lived
   // credential into every access log it passes through.
+  // Who the stream is opened as: each change is delivered only if this
+  // identity could read the row (lib/realtime/visibility.ts).
+  let subscriber: RealtimeSubscriber
   const ticket = request.nextUrl.searchParams.get('ticket')
   if (ticket) {
     const redeemed = await redeemRealtimeTicketParam(params.projectId, ticket)
@@ -48,12 +58,24 @@ async function handleGET(request: NextRequest, props: { params: Promise<{ projec
     if (redeemed.ok === false) {
       return NextResponse.json({ error: redeemed.message, code: redeemed.code }, { status: 401 })
     }
+    subscriber = {
+      projectId: params.projectId,
+      endUserId: redeemed.claims?.endUserId ?? null,
+      endUserRole: redeemed.claims?.endUserRole ?? null,
+      serviceRole: !!redeemed.claims?.serviceRole,
+    }
   } else {
     // Authenticate via API key (supports ?apiKey= query param since EventSource
     // cannot send Authorization headers in the browser). DEPRECATED for browser
     // clients: prefer POST /realtime/ticket.
     const middleware = await v1ApiMiddleware(request, params)
     if (middleware.response) return middleware.response
+    subscriber = {
+      projectId: params.projectId,
+      endUserId: middleware.context.endUserId ?? null,
+      endUserRole: middleware.context.endUserRole ?? null,
+      serviceRole: !!middleware.context.apiKey?.serviceRole,
+    }
   }
 
   const { projectId } = params
@@ -86,10 +108,17 @@ async function handleGET(request: NextRequest, props: { params: Promise<{ projec
         try { controller.close() } catch { /* already closed */ }
       }
 
+      // Registered BEFORE the subscribe await: an abort during that window
+      // used to fire into nothing (the listener was only added afterwards),
+      // and the just-reserved slot then counted against the plan's concurrent
+      // cap until the process restarted.
+      request.signal.addEventListener('abort', cleanup)
+
       try {
+        const deliver = createVisibleEventQueue(subscriber, (change) => send(change))
         const result = await listenerHub.subscribe(projectId, (payload) => {
           if (!tableFilter || payload.table === tableFilter) {
-            send(payload)
+            deliver(payload as RealtimeChange)
           }
         })
 
@@ -98,16 +127,42 @@ async function handleGET(request: NextRequest, props: { params: Promise<{ projec
           cleanup()
           return
         }
+        // The client may have aborted during the await — cleanup already ran
+        // while `subscription` was still null. Release the slot, not leak it.
+        if (closed || request.signal.aborted) {
+          result.unsubscribe()
+          return
+        }
         subscription = result
 
         send({ type: 'connected', projectId, channel: result.channel })
 
-        // Keepalive comment every 25 s to prevent proxy/CDN idle timeouts.
+        // Keepalive comment every 25 s to prevent proxy/CDN idle timeouts, and
+        // the moment an open stream re-checks its project, as the runtime's
+        // stream does (server/routes/realtime.ts): the serving gate only runs
+        // when a stream connects, so without this a stream opened before a
+        // pause or a lockdown would keep delivering changes. An `unavailable`
+        // answer keeps the stream: a lookup blip is not a pause.
         keepaliveTimer = setInterval(() => {
-          if (!closed) sendComment('keepalive')
-        }, 25_000)
-
-        request.signal.addEventListener('abort', cleanup)
+          if (closed) return
+          void getProjectServingState(projectId)
+            .then((state) => {
+              if (closed) return
+              if (state.kind === 'paused' || state.kind === 'locked') {
+                send({
+                  type: 'error',
+                  code: state.kind === 'paused' ? PAUSED_CODE : 'PROJECT_LOCKED',
+                  message: state.kind === 'paused' ? PAUSED_MESSAGE : LOCKED_MESSAGE,
+                })
+                cleanup()
+                return
+              }
+              sendComment('keepalive')
+            })
+            .catch(() => {
+              if (!closed) sendComment('keepalive')
+            })
+        }, REALTIME_RECHECK_MS)
       } catch (err: any) {
         console.warn('[Realtime SSE] subscribe failed:', err?.message)
         send({ type: 'error', message: 'Failed to connect to realtime stream' })

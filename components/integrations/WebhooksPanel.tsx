@@ -35,10 +35,11 @@ import {
   CheckCircle2, AlertTriangle, ChevronRight, Pencil,
 } from 'lucide-react'
 import {
-  CopyButton, EmptyState, KitBadge, KitButton, KitConfirmDialog, KitField, KitInput, KitModal, KitNote,
+  CopyButton, EmptyState, GhostPreview, KitBadge, KitButton, KitConfirmDialog, KitField, KitInput, KitModal, KitNote,
   OverflowMenu, PageHeader, Skeleton, Tag,
 } from '@/components/inspector/kit'
 import { FOCUS, PAGE_GUTTER, PAGE_WIDTH } from '@/components/console/tokens'
+import { when } from '@/components/changes/present'
 import { WEBHOOK_EVENT_TYPES, EVENT_DESCRIPTIONS, type WebhookEventType } from '@/lib/webhooks/events'
 
 interface WebhookRow {
@@ -56,6 +57,43 @@ interface CaptureState {
   required: boolean
   healthy: boolean
   readable: boolean
+}
+
+/** A webhook wired by the agent over MCP (`webhooks { action: "create_trigger" }`). */
+interface TriggerWebhookRow {
+  id: string
+  name: string
+  sourceTable: string
+  event: string
+  webhookUrl: string | null
+  enabled: boolean
+  createdAt: string
+}
+
+interface TriggerDeliveryRow {
+  id: string
+  triggerId: string
+  eventType: string
+  table: string | null
+  status: string
+  attemptCount: number
+  statusCode: number | null
+  error: string | null
+  deliveredAt: string | null
+  createdAt: string
+  trigger: { name: string; webhookUrl: string | null }
+}
+
+const TRIGGER_STATUS_TONE: Record<string, 'operational' | 'failed' | 'attention' | 'neutral'> = {
+  SUCCESS: 'operational',
+  FAILED: 'attention',
+  DEAD: 'failed',
+}
+
+const TRIGGER_STATUS_LABEL: Record<string, string> = {
+  SUCCESS: 'Delivered',
+  FAILED: 'Failed',
+  DEAD: 'Gave up',
 }
 
 interface DeliveryLog {
@@ -109,14 +147,29 @@ export function WebhooksPanel({ projectId }: { projectId: string }) {
   const [logs, setLogs] = useState<Record<string, DeliveryLog[]>>({})
   const [logsLoading, setLogsLoading] = useState<string | null>(null)
 
+  // Agent-wired trigger webhooks. The MCP tool creates, replays and rotates
+  // these rows; a page titled "Webhooks" that rendered none of them left the
+  // owner blind to deliveries the agent set up.
+  const [triggerWebhooks, setTriggerWebhooks] = useState<TriggerWebhookRow[]>([])
+  const [triggerDeliveries, setTriggerDeliveries] = useState<TriggerDeliveryRow[]>([])
+  const [replayingId, setReplayingId] = useState<string | null>(null)
+
   const load = useCallback(async () => {
     setLoadError(null)
     try {
-      const res = await fetch(`/api/projects/${projectId}/webhooks`)
+      const [res, trigRes] = await Promise.all([
+        fetch(`/api/projects/${projectId}/webhooks`),
+        fetch(`/api/projects/${projectId}/trigger-webhooks`),
+      ])
       const data = await res.json()
       if (!res.ok) throw new Error(data.error ?? 'Webhooks could not be loaded.')
       setWebhooks(data.webhooks ?? [])
       setCapture(data.capture ?? null)
+      if (trigRes.ok) {
+        const trig = await trigRes.json()
+        setTriggerWebhooks(trig.triggers ?? [])
+        setTriggerDeliveries(trig.deliveries ?? [])
+      }
     } catch (err) {
       // Reported, not swallowed. An empty list rendered over a failed request
       // reads as "you have no webhooks", which is a different and false claim.
@@ -125,6 +178,25 @@ export function WebhooksPanel({ projectId }: { projectId: string }) {
       setLoading(false)
     }
   }, [projectId])
+
+  async function replayTriggerDelivery(log: TriggerDeliveryRow) {
+    setReplayingId(log.id)
+    try {
+      const res = await fetch(`/api/projects/${projectId}/trigger-webhooks/replay`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ deliveryLogId: log.id }),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(data.error ?? 'Replay failed')
+      setMessage({ tone: 'success', text: `Replayed the dead delivery to ${log.trigger.webhookUrl ?? 'its receiver'}, and it answered this time.` })
+      await load()
+    } catch (err) {
+      setMessage({ tone: 'danger', text: err instanceof Error ? err.message : 'Replay failed' })
+    } finally {
+      setReplayingId(null)
+    }
+  }
 
   useEffect(() => { load() }, [load])
 
@@ -264,10 +336,10 @@ export function WebhooksPanel({ projectId }: { projectId: string }) {
       <PageHeader
         className="!px-0"
         title="Webhooks"
-        description="Send signed events to your own services when rows change or an end user signs up. Row events are captured in PostgreSQL, so they fire for every writer: the REST data plane, functions and the table editor alike."
+        description="Signed events to your own services when rows change or an end user signs up. Row events are captured in Postgres, so every writer triggers them: the REST API, functions and the table editor."
         meta={
           !loading && webhooks.length > 0 ? (
-            <span className="text-[13px] tabular-nums text-zinc-500">
+            <span className="text-[13px] tabular-nums text-faint">
               {webhooks.length} {webhooks.length === 1 ? 'endpoint' : 'endpoints'}
             </span>
           ) : undefined
@@ -308,9 +380,10 @@ export function WebhooksPanel({ projectId }: { projectId: string }) {
             <Skeleton className="h-[64px] w-full rounded-[10px]" />
           </div>
         ) : webhooks.length === 0 ? (
-          <div className="rounded-[10px] border border-dashed border-white/[0.10]">
+          <div className="rounded-[10px] border border-white/[0.08] bg-[#0f1012]">
             <EmptyState
               icon={Webhook}
+              preview={<GhostPreview kind="list" />}
               title="No endpoints yet"
               description="Add a URL and Backenly POSTs a signed JSON body to it when the event happens, with retries and a delivery log."
               action={
@@ -342,7 +415,7 @@ export function WebhooksPanel({ projectId }: { projectId: string }) {
                       />
                       <span className="min-w-0 flex-1">
                         <span className="block truncate font-mono text-[12.5px] text-zinc-100">{webhook.targetUrl}</span>
-                        <span className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-zinc-500">
+                        <span className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-faint">
                           <Tag mono>{webhook.eventType}</Tag>
                           <span>{webhook.active ? 'Enabled' : 'Disabled'}</span>
                           <span className="tabular-nums">
@@ -388,14 +461,14 @@ export function WebhooksPanel({ projectId }: { projectId: string }) {
                           <Skeleton className="h-[16px] w-2/3" />
                         </div>
                       ) : (logs[webhook.id] ?? []).length === 0 ? (
-                        <p className="py-1 text-[13px] text-zinc-500">
+                        <p className="py-1 text-[13px] text-faint">
                           No deliveries recorded. This endpoint has not fired yet.
                         </p>
                       ) : (
                         <div className="overflow-x-auto">
                           <table className="w-full min-w-[620px] text-left text-[12.5px]">
                             <thead>
-                              <tr className="text-[12px] text-zinc-500">
+                              <tr className="text-[12px] text-faint">
                                 <th scope="col" className="pb-2 pr-4 font-medium">Status</th>
                                 <th scope="col" className="pb-2 pr-4 font-medium">Time</th>
                                 <th scope="col" className="pb-2 pr-4 font-medium">Response</th>
@@ -410,11 +483,11 @@ export function WebhooksPanel({ projectId }: { projectId: string }) {
                                     <KitBadge tone={STATUS_TONE[log.status] ?? 'neutral'}>{STATUS_LABEL[log.status] ?? log.status}</KitBadge>
                                   </td>
                                   <td className="whitespace-nowrap py-2 pr-4 align-top tabular-nums text-zinc-400">
-                                    {new Date(log.createdAt).toLocaleString()}
+                                    {when(log.createdAt)}
                                   </td>
                                   <td className="py-2 pr-4 align-top font-mono text-[12px] text-zinc-400">{log.statusCode ?? '—'}</td>
-                                  <td className="py-2 pr-4 align-top tabular-nums text-zinc-500">{log.attemptCount}</td>
-                                  <td className={`py-2 align-top ${log.status === 'CANCELLED' ? 'text-zinc-500' : 'text-rose-300/90'}`}>
+                                  <td className="py-2 pr-4 align-top tabular-nums text-faint">{log.attemptCount}</td>
+                                  <td className={`py-2 align-top ${log.status === 'CANCELLED' ? 'text-faint' : 'text-rose-300/90'}`}>
                                     {log.status === 'CANCELLED' && log.error === 'project_paused'
                                       ? 'Not sent: the project was paused'
                                       : log.error ?? ''}
@@ -433,6 +506,94 @@ export function WebhooksPanel({ projectId }: { projectId: string }) {
           </ul>
         )}
       </div>
+
+      {/* Trigger webhooks — rows the agent wires over MCP (`webhooks
+          { action: "create_trigger" }`). Rendered here because this is the
+          page titled Webhooks: before this section, those triggers delivered
+          (and dead-lettered) invisibly to the console. Rotating a trigger's
+          secret stays agent-side: `webhooks { action: "rotate_trigger_secret" }`
+          returns the new secret once and the console never sees it. */}
+      {(triggerWebhooks.length > 0 || triggerDeliveries.length > 0) && (
+        <section aria-labelledby="trigger-webhooks-heading" className="mt-12">
+          <h2 id="trigger-webhooks-heading" className="text-[15px] font-semibold leading-[22px] tracking-[-0.012em] text-zinc-100">
+            Trigger webhooks
+          </h2>
+          <p className="mt-1 text-[13px] leading-[21px] text-zinc-400">
+            Wired by your agent over MCP with <code className="font-mono text-[12px] text-zinc-300">create_trigger</code>.
+            They post a signed body to their URL when the row event fires.
+          </p>
+
+          {triggerWebhooks.length > 0 && (
+            <ul className="mt-4 overflow-hidden rounded-[10px] border border-white/[0.08] bg-[#0f1012] divide-y divide-white/[0.06]">
+              {triggerWebhooks.map((t) => (
+                <li key={t.id} className="flex items-center gap-3 px-4 py-3">
+                  <span className={`h-[7px] w-[7px] flex-shrink-0 rounded-full ${t.enabled ? 'bg-emerald-400' : 'bg-zinc-600'}`} aria-hidden />
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-[13px] font-medium text-zinc-100">{t.name}</span>
+                    <span className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-faint">
+                      <Tag mono>{t.event} → {t.sourceTable}</Tag>
+                      <span className="truncate font-mono text-[12px]">{t.webhookUrl ?? '—'}</span>
+                      <span>{t.enabled ? 'Enabled' : 'Disabled'}</span>
+                    </span>
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          {triggerDeliveries.length > 0 && (
+            <div className="mt-4 overflow-x-auto rounded-[10px] border border-white/[0.08] bg-[#0f1012] px-4 py-3">
+              <table className="w-full min-w-[680px] text-left text-[12.5px]">
+                <thead>
+                  <tr className="text-[12px] text-faint">
+                    <th scope="col" className="pb-2 pr-4 font-medium">Status</th>
+                    <th scope="col" className="pb-2 pr-4 font-medium">Trigger</th>
+                    <th scope="col" className="pb-2 pr-4 font-medium">Event</th>
+                    <th scope="col" className="pb-2 pr-4 font-medium">Time</th>
+                    <th scope="col" className="pb-2 pr-4 font-medium">Response</th>
+                    <th scope="col" className="pb-2 pr-4 font-medium">Attempts</th>
+                    <th scope="col" className="pb-2 font-medium" aria-label="Actions" />
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-white/[0.05]">
+                  {triggerDeliveries.map((log) => (
+                    <tr key={log.id}>
+                      <td className="py-2 pr-4 align-top">
+                        <KitBadge tone={TRIGGER_STATUS_TONE[log.status] ?? 'neutral'}>
+                          {TRIGGER_STATUS_LABEL[log.status] ?? log.status}
+                        </KitBadge>
+                      </td>
+                      <td className="py-2 pr-4 align-top text-zinc-300">{log.trigger.name}</td>
+                      <td className="py-2 pr-4 align-top font-mono text-[12px] text-zinc-400">
+                        {log.eventType}{log.table ? ` → ${log.table}` : ''}
+                      </td>
+                      <td className="whitespace-nowrap py-2 pr-4 align-top tabular-nums text-zinc-400">
+                        {when(log.createdAt)}
+                      </td>
+                      <td className="py-2 pr-4 align-top font-mono text-[12px] text-zinc-400">{log.statusCode ?? '—'}</td>
+                      <td className="py-2 pr-4 align-top tabular-nums text-faint">{log.attemptCount}</td>
+                      <td className="py-2 align-top">
+                        {log.status === 'DEAD' && (
+                          <KitButton
+                            variant="secondary"
+                            size="sm"
+                            icon={Send}
+                            loading={replayingId === log.id}
+                            disabled={replayingId !== null}
+                            onClick={() => replayTriggerDelivery(log)}
+                          >
+                            Replay
+                          </KitButton>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+      )}
 
       {/* How a receiver verifies what it got: the contract, and a snippet
           that implements it exactly (lib/webhooks/index.ts signs
@@ -459,7 +620,7 @@ export function WebhooksPanel({ projectId }: { projectId: string }) {
         </div>
         <div className="overflow-hidden rounded-[10px] border border-white/[0.08] bg-[#08090a]">
           <div className="flex items-center justify-between border-b border-white/[0.06] px-4 py-2">
-            <span className="text-[12px] text-zinc-500">verify.js</span>
+            <span className="text-[12px] text-faint">verify.js</span>
             <CopyButton value={VERIFY_SNIPPET} label="Copy snippet" />
           </div>
           <pre className="overflow-x-auto px-4 py-3.5 font-mono text-[12px] leading-[20px] text-zinc-300">
@@ -500,7 +661,7 @@ export function WebhooksPanel({ projectId }: { projectId: string }) {
             </KitButton>
           }
         >
-          <p className="mb-2 truncate font-mono text-[12px] text-zinc-500">{revealedSecret.url}</p>
+          <p className="mb-2 truncate font-mono text-[12px] text-faint">{revealedSecret.url}</p>
           <div className="flex items-start gap-2 rounded-[8px] border border-white/[0.08] bg-[#08090a] p-3">
             <code className="min-w-0 flex-1 select-all break-all font-mono text-[12.5px] leading-[20px] text-zinc-100">
               {revealedSecret.secret}
@@ -654,7 +815,7 @@ function WebhookForm({
                 />
                 <span className="min-w-0">
                   <span className="block font-mono text-[12px] text-zinc-100">{type}</span>
-                  <span className="mt-0.5 block text-[12px] leading-[17px] text-zinc-500">
+                  <span className="mt-0.5 block text-[12px] leading-[17px] text-faint">
                     {EVENT_DESCRIPTIONS[type]}
                   </span>
                 </span>

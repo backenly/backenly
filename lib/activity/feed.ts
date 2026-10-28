@@ -17,6 +17,7 @@
 
 import { prisma } from '@/lib/db/prisma'
 import { explainAutonomyEvent } from '@/lib/autonomy/because-copy'
+import { ARCHITECTURE_LOG_TYPE, TRACE_ACTION } from '@/lib/evolution-engine/memory'
 
 export type ActivityKind =
   | 'api_key' | 'user' | 'file' | 'table' | 'auth' | 'deploy'
@@ -73,7 +74,8 @@ export async function buildActivityFeed(
   // when one source dominates the other.
   const [audits, fixes] = await Promise.all([
     prisma.auditLog.findMany({
-      where: { projectId, timestamp: timeFilter },
+      // Architecture-memory traces are the engine's notebook, not activity.
+      where: { projectId, timestamp: timeFilter, action: { not: TRACE_ACTION } },
       orderBy: { timestamp: 'desc' },
       take: limit,
       select: { id: true, action: true, type: true, timestamp: true, details: true, metadata: true },
@@ -141,6 +143,11 @@ function labelForAudit(
   const t = type.toLowerCase()
   const d = detail ?? {}
 
+  // An architecture change milestone carries the sentence written for it.
+  if (t === ARCHITECTURE_LOG_TYPE) {
+    return { kind: 'autonomy', label: typeof d.sentence === 'string' && d.sentence ? d.sentence : 'Backenly recorded an architecture change' }
+  }
+
   // ── Autonomous fix events FIRST ──────────────────────────────────────────
   // These rows are written with type='autonomy' AND action='AGENT_AUTO_FIXED'
   // / 'HEALTH_AUTO_FIXED' / 'FIX_PLAN_AUTO_EXECUTED'. The previous order
@@ -194,6 +201,14 @@ function labelForAudit(
     if (a === 'agent_approval_rejected') {
       return { kind: 'general', label: target ? `You rejected the agent's change to ${target}` : "You rejected your coding agent's request" }
     }
+    // Approved, but nothing ran (lib/mcp/approvals.ts): these must never read
+    // as a change the agent made.
+    if (a === 'agent_approval_unreadable_refused') {
+      return { kind: 'general', label: 'An agent request was not run: its exact call could not be read' }
+    }
+    if (a === 'agent_approval_unbound_refused') {
+      return { kind: 'general', label: 'An agent request was not run: it named no exact call' }
+    }
     const summary = typeof d.summary === 'string' && d.summary.trim() ? d.summary.trim() : null
     return {
       kind: 'general',
@@ -203,6 +218,16 @@ function labelForAudit(
           ? `Your coding agent made a change via MCP (${tool.replace(/_/g, ' ')})`
           : 'Your coding agent made a change via MCP',
     }
+  }
+
+  // The repair loop putting a table's access rules back after its own verifier
+  // rejected a policy repair (lib/core/auto-fix-engine.ts _recoverPolicies). It
+  // read as "Ran a health check", whatever happened to the rules.
+  if (a === 'authority_recovery') {
+    const table = typeof d.tableName === 'string' ? ` on ${d.tableName}` : ''
+    if (d.status === 'verified') return { kind: 'auto_fix', label: `Put the access rules${table} back after a repair failed its check` }
+    if (d.status === 'not_needed') return { kind: 'auto_fix', label: `A repair failed its check and had changed no access rules${table}` }
+    return { kind: 'auto_fix', label: `A repair failed its check, and the access rules${table} could not be put back: needs a look` }
   }
 
   // Self-healing engine — health-check rows that aren't direct fix events.
@@ -219,9 +244,14 @@ function labelForAudit(
   if (t.includes('file') || t.includes('upload'))     return { kind: 'file',    label: meta?.bucket ? `File uploaded to ${meta.bucket} bucket` : 'File uploaded' }
   if (t.includes('table') || a.includes('create_table')) return { kind: 'table', label: meta?.tableName ? `Table "${meta.tableName}" created` : 'Table created' }
   if (t.includes('auth'))                              return { kind: 'auth',    label: 'Auth setting updated' }
+  // The backend restored to a published version, every change since undone
+  // (lib/deployment/rollback.ts markVersionCurrent).
+  if (a === 'version_restored') {
+    return { kind: 'deploy', label: d.version ? `Backend restored to v${d.version}` : 'Backend restored to an earlier version' }
+  }
   if (t.includes('deploy')) {
     if (a.includes('fail'))                                          return { kind: 'deploy', label: 'Deployment failed' }
-    if (a.includes('rollback') || a.includes('rolled_back'))         return { kind: 'deploy', label: 'Deployment rolled back' }
+    if (a.includes('rollback') || a.includes('rolled_back'))         return { kind: 'deploy', label: 'Older version recorded as current' }
     if (a.includes('succe') || a.includes('complete') || a.includes('live')) return { kind: 'deploy', label: 'Deployed successfully' }
     if (a.includes('start'))                                         return { kind: 'deploy', label: 'Deployment started' }
     return { kind: 'deploy', label: 'Deployment update' }

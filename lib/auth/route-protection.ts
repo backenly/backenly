@@ -27,6 +27,7 @@ import {
   isDatabaseUnavailable,
   DATABASE_UNAVAILABLE_BODY,
 } from '@/lib/errors/dependency-unavailable'
+import { withChangeAttribution } from '@/lib/changes/attribution'
 
 /**
  * The answer for an error that is NOT an authorization decision.
@@ -75,7 +76,10 @@ export function withAuth(
   return async (request: NextRequest, { params }: { params?: Promise<Record<string, string>> } = {}) => {
     try {
       const user = await requireUser()
-      return await handler(request, { user, params })
+      // A session is a person: any schema change this request makes is theirs,
+      // in the change history they roll back from.
+      return await withChangeAttribution({ source: 'dashboard', actorUserId: user.userId }, () =>
+        handler(request, { user, params }))
     } catch (error: any) {
       if (error instanceof UnauthorizedError) {
         return NextResponse.json(
@@ -108,7 +112,8 @@ export function withProjectAccess(
   return async (request: NextRequest) => {
     try {
       const ctx = await requireProjectAccess(request as any)
-      return await handler(request, ctx)
+      return await withChangeAttribution({ source: 'dashboard', actorUserId: ctx.user.userId }, () =>
+        handler(request, ctx))
     } catch (error: any) {
       if (error instanceof UnauthorizedError) {
         return NextResponse.json(
@@ -155,7 +160,8 @@ export function withRole(
   return async (request: NextRequest) => {
     try {
       const ctx = await requireRole(request as any, allowedRoles)
-      return await handler(request, ctx)
+      return await withChangeAttribution({ source: 'dashboard', actorUserId: ctx.user.userId }, () =>
+        handler(request, ctx))
     } catch (error: any) {
       if (error instanceof UnauthorizedError) {
         return NextResponse.json(

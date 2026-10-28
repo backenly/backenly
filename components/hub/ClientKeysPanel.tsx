@@ -11,12 +11,14 @@
  */
 
 import { useState, useEffect } from 'react'
+import Link from 'next/link'
 import { useParams } from 'next/navigation'
 import { Toast } from '@/components/ui/Toast'
 import { KeyRound, Trash2, Plus, Check, Eye, EyeOff, AlertTriangle, Shield } from 'lucide-react'
 import {
   CopyButton,
   EmptyState,
+  GhostPreview,
   IconButton,
   KitButton,
   KitConfirmDialog,
@@ -27,7 +29,6 @@ import {
   Tag,
 } from '@/components/inspector/kit'
 import { PAGE_GUTTER, PAGE_WIDTH } from '@/components/console/tokens'
-import { refreshAgentConnection } from '@/lib/hooks/useAgentConnection'
 
 interface ApiKey {
   id: string
@@ -69,10 +70,13 @@ const ROLE_LABEL: Record<string, string> = {
   client: 'Client',
   'ai-only': 'AI only',
   service: 'Service',
+  // Agent-created publishable keys carry role 'custom'; rendering the raw
+  // word read as an unknown kind next to a "Full access" subtitle.
+  custom: 'Publishable',
 }
 
 const ROLE_OPTIONS: Array<{ value: NewRole; label: string; body: string }> = [
-  { value: 'admin', label: 'Admin', body: 'Full access. Server-side only, never in a browser.' },
+  { value: 'admin', label: 'Admin', body: 'Full access, bypasses row security (svc_live_). Server-side only: the runtime refuses it from a browser.' },
   { value: 'write', label: 'Write', body: 'Read and write data, no administration.' },
   { value: 'read-only', label: 'Read only', body: 'Reads data, changes nothing.' },
   { value: 'client', label: 'Client', body: 'Safe to embed in a frontend app.' },
@@ -135,7 +139,12 @@ export function ClientKeysPanel() {
           keyType: 'public',
           role: newKeyRole,
           capabilities: ['database', 'auth', 'storage', 'functions', 'ai'],
-          serviceRole: false,
+          // The runtime's elevation switch is serviceRole, not the role string.
+          // The Admin option used to send serviceRole:false, which minted a
+          // publishable proj_live_ key: not full access (RLS still applied, the
+          // data plane demanded an end-user token) and served from browsers —
+          // the exact opposite of this option's copy.
+          serviceRole: newKeyRole === 'admin',
           projectId,
         }),
       })
@@ -169,9 +178,6 @@ export function ClientKeysPanel() {
       setToast({ message: `Deleted “${pendingDelete.name}”`, type: 'success' })
       setPendingDelete(null)
       await loadApiKeys()
-      // This list includes agent keys and OAuth connections; deleting the last
-      // one disconnects the agent, which the top bar should show now.
-      if (projectId) void refreshAgentConnection(projectId)
     } catch (error: any) {
       setToast({ message: error.message || 'Failed to delete API key', type: 'error' })
     } finally {
@@ -199,7 +205,12 @@ export function ClientKeysPanel() {
         <div>
           <h2 className="text-[15px] font-semibold leading-[22px] tracking-[-0.012em] text-zinc-100">API keys</h2>
           <p className="mt-1 max-w-[68ch] text-[13px] leading-[20px] text-zinc-400">
-            Keys for apps, scripts and agents. Client keys are safe to embed; admin keys stay server-side.
+            Keys for apps, scripts and servers. Client keys are safe to embed; admin keys stay server-side.
+            Your coding agent’s keys and connections are on{' '}
+            <Link href={`/app/projects/${projectId}/connect`} className="text-zinc-200 underline decoration-white/20 underline-offset-2 hover:decoration-white/60">
+              Connect, Agents
+            </Link>
+            .
           </p>
         </div>
         <KitButton variant="primary" icon={Plus} onClick={() => setShowCreateModal(true)} disabled={creating}>
@@ -213,9 +224,10 @@ export function ClientKeysPanel() {
           <Skeleton className="h-[52px] w-full rounded-[10px]" />
         </div>
       ) : apiKeys.length === 0 ? (
-        <div className="rounded-[10px] border border-dashed border-white/[0.10]">
+        <div className="rounded-[10px] border border-white/[0.08] bg-[#0f1012]">
           <EmptyState
             icon={KeyRound}
+            preview={<GhostPreview kind="list" />}
             title="No API keys yet"
             description="Create a key to make authenticated requests from your app, a script or a server."
             action={
@@ -226,14 +238,15 @@ export function ClientKeysPanel() {
           />
         </div>
       ) : (
-        <div className="overflow-x-auto rounded-[10px] border border-white/[0.08] bg-[#0f1012]">
-          <table className="w-full min-w-[760px] text-left">
+        <div className="relative overflow-x-auto rounded-[10px] border border-white/[0.08] bg-[#0f1012]">
+          <table className="w-full min-w-[840px] text-left">
             <thead>
-              <tr className="border-b border-white/[0.06] text-[12px] text-zinc-500">
+              <tr className="border-b border-white/[0.06] text-[12px] text-faint">
                 <th scope="col" className="h-[38px] whitespace-nowrap px-4 font-medium">Name</th>
                 <th scope="col" className="h-[38px] whitespace-nowrap px-4 font-medium">Key</th>
                 <th scope="col" className="h-[38px] whitespace-nowrap px-4 font-medium">Rate limit</th>
                 <th scope="col" className="h-[38px] whitespace-nowrap px-4 font-medium">Created</th>
+                <th scope="col" className="h-[38px] whitespace-nowrap px-4 font-medium">Expires</th>
                 <th scope="col" className="h-[38px] whitespace-nowrap px-4 font-medium">Last used</th>
                 <th scope="col" className="h-[38px] w-[56px] px-4 font-medium"><span className="sr-only">Actions</span></th>
               </tr>
@@ -263,8 +276,14 @@ export function ClientKeysPanel() {
                           </Tag>
                         )}
                       </div>
-                      <p className="mt-0.5 max-w-[260px] truncate text-[12px] text-zinc-500">
-                        {key.capabilities && key.capabilities.length > 0 ? key.capabilities.join(', ') : 'Full access'}
+                      <p className="mt-0.5 max-w-[260px] truncate text-[12px] text-faint">
+                        {key.serviceRole
+                          ? 'Service role: bypasses row security, server-side only'
+                          : key.capabilities && key.capabilities.length > 0
+                            ? key.capabilities.join(', ')
+                            : key.permissions && key.permissions.length > 0
+                              ? `Row security applies · ${key.permissions.join(', ')}`
+                              : 'Row security applies'}
                       </p>
                     </td>
                     <td className="px-4 py-3 align-middle">
@@ -280,7 +299,7 @@ export function ClientKeysPanel() {
                             <CopyButton value={realKey} label="Copy key" />
                           </>
                         ) : (
-                          <span className="ml-1 inline-flex items-center gap-1 whitespace-nowrap text-[12px] text-zinc-600">
+                          <span className="ml-1 inline-flex items-center gap-1 whitespace-nowrap text-[12px] text-faint">
                             <Shield className="h-3 w-3" /> Shown once
                           </span>
                         )}
@@ -293,10 +312,28 @@ export function ClientKeysPanel() {
                       {formatDate(key.createdAt)}
                     </td>
                     <td className="whitespace-nowrap px-4 py-3 align-middle text-[13px] tabular-nums">
+                      {key.expiresAt ? (
+                        // The runtime refuses the key past this date; a key
+                        // that will die deserves a visible date, not a silent
+                        // birthday. Amber once it is under 30 days out.
+                        <span
+                          className={
+                            new Date(key.expiresAt).getTime() - Date.now() < 30 * 24 * 60 * 60 * 1000
+                              ? 'text-amber-300'
+                              : 'text-zinc-400'
+                          }
+                        >
+                          {formatDate(key.expiresAt)}
+                        </span>
+                      ) : (
+                        <span className="text-faint">Never</span>
+                      )}
+                    </td>
+                    <td className="whitespace-nowrap px-4 py-3 align-middle text-[13px] tabular-nums">
                       {key.lastUsed ? (
                         <span className="text-zinc-300">{formatDate(key.lastUsed)}</span>
                       ) : (
-                        <span className="text-zinc-600">Never</span>
+                        <span className="text-faint">Never</span>
                       )}
                     </td>
                     <td className="px-4 py-3 text-right align-middle">
@@ -375,7 +412,7 @@ export function ClientKeysPanel() {
                       {opt.label}
                       {on && <Check className="h-3.5 w-3.5 text-violet-200" strokeWidth={2.25} />}
                     </span>
-                    <span className="mt-0.5 text-[12px] leading-[17px] text-zinc-500">{opt.body}</span>
+                    <span className="mt-0.5 text-[12px] leading-[17px] text-faint">{opt.body}</span>
                   </label>
                 )
               })}

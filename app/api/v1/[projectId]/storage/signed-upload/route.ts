@@ -8,6 +8,7 @@ import { assertQuotaAvailable, QuotaExceededError } from '@/lib/services/storage
 import { getS3Client, getS3Config, isS3Configured } from '@/lib/services/s3-config'
 import crypto from 'crypto'
 import { recordedV1 } from '@/lib/traffic/recorded-v1'
+import { keepFileNames, storedFileName } from '@/lib/storage/file-names'
 
 const ALLOWED_VIDEO_TYPES = new Set([
   'video/mp4', 'video/webm', 'video/ogg', 'video/quicktime',
@@ -128,6 +129,7 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
       where: { projectId: context.projectId, name: bucketName },
     })
     if (!bucketRecord) {
+      // history: provisioned by the first upload, on the data plane, which never waits for the change lock
       bucketRecord = await prisma.storageBucket.create({
         data: {
           name: bucketName,
@@ -140,10 +142,13 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
     // ── Build storage path ────────────────────────────────────────────────
     const safeFilename = filename.replace(/[^a-zA-Z0-9._\-]/g, '_')
     const uploadId = crypto.randomUUID()
+    const prefix = pathPrefix.replace(/^\/+|\/+$/g, '')
+    // The path is recorded on the platform row, so a regional project's folder
+    // and file name appear in it only as stand-ins (lib/storage/file-names.ts).
     const storagePath = [
-      pathPrefix.replace(/^\/+|\/+$/g, ''),
+      prefix ? await storedFileName(context.projectId, prefix) : '',
       uploadId,
-      safeFilename,
+      await storedFileName(context.projectId, safeFilename),
     ].filter(Boolean).join('/')
 
     const expiresAt = new Date(Date.now() + SIGNED_URL_TTL_SECONDS * 1000)
@@ -182,11 +187,14 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
         // so every signed upload resolved to a non-existent key → NoSuchKey →
         // undownloadable. The real download URL is minted at confirm-upload
         // time via getFileUrl, so we no longer store a bogus amazonaws.com URL.
+        const fileId = crypto.randomUUID()
+        const stored = await keepFileNames(context.projectId, fileId, { name: safeFilename, originalName: '' })
         const fileRecord = await prisma.storageFile.create({
           data: {
+            id: fileId,
             bucketId: bucketRecord.id,
             projectId: context.projectId,
-            name: safeFilename,
+            name: stored.name,
             path: s3Key,
             size: BigInt(contentLength),
             mimeType: contentType,
@@ -216,19 +224,11 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
     const oneTimeToken = crypto.randomBytes(32).toString('hex')
     const tokenExpiry = expiresAt.toISOString()
 
-    // Store token in DB (or in-memory cache in production you'd use Redis)
-    await prisma.storageFile.create({
-      data: {
-        bucketId: bucketRecord.id,
-        projectId: context.projectId,
-        name: safeFilename,
-        path: storagePath,
-        size: BigInt(contentLength),
-        mimeType: contentType,
-        isPublic: Boolean(isPublic),
-        metadata: { uploadId, status: 'pending', oneTimeToken, tokenExpiry },
-      },
-    }).catch(() => null) // non-fatal if file record already exists
+    // No pending StorageFile row here. Nothing ever consumed one — the
+    // fallback upload goes through POST /storage/upload, which creates the
+    // real row itself — so the row this used to create stayed active
+    // forever: a phantom object in every listing and count, at a path no
+    // reader could serve.
 
     const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'
 

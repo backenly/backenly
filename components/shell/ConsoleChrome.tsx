@@ -27,7 +27,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
 import { AnimatePresence, motion } from 'framer-motion'
-import { LogOut, Menu, Search, Settings, X, type LucideIcon } from 'lucide-react'
+import { ArrowUpRight, LogOut, Menu, Search, Settings, X, type LucideIcon } from 'lucide-react'
 import { Logo } from '@/components/Logo'
 import { signOut } from '@/lib/api/auth'
 import { useMobileNavStore } from '@/lib/stores/use-mobile-nav-store'
@@ -223,7 +223,7 @@ export function SearchTrigger() {
       type="button"
       onClick={openCommandPalette}
       aria-label="Search and jump to"
-      className={`group hidden h-[30px] items-center gap-2 ${R_CONTROL} border border-white/[0.08] bg-white/[0.03] pl-2.5 pr-1.5 text-[12.5px] text-zinc-500 transition-colors hover:border-white/[0.13] hover:text-zinc-300 lg:inline-flex ${FOCUS}`}
+      className={`group hidden h-[30px] items-center gap-2 ${R_CONTROL} border border-white/[0.08] bg-white/[0.03] pl-2.5 pr-1.5 text-[12.5px] text-faint transition-colors hover:border-white/[0.13] hover:text-zinc-300 lg:inline-flex ${FOCUS}`}
     >
       <Search className="h-3.5 w-3.5" strokeWidth={2} />
       <span className="pr-6">Search</span>
@@ -241,8 +241,10 @@ export { useDismiss, MenuPanel, MenuItem, MenuSeparator } from '@/components/ins
 /* ── Account menu ──────────────────────────────────────────────────────── */
 
 export interface MeUser {
-  name?: string
+  name?: string | null
   email?: string
+  /** The Google account's own photo; null for every other account. */
+  avatarUrl?: string | null
 }
 
 let cachedUser: MeUser | null = null
@@ -269,18 +271,27 @@ export function useMe(): MeUser | null {
   return user
 }
 
+// Built at run time: the type-check target (ES5) refuses `u`-flag literals.
+const LETTER = new RegExp('\\p{L}', 'u')
+const ONE_CHARACTER_SCRIPTS = new RegExp('[\\p{Script=Han}\\p{Script=Hangul}\\p{Script=Hiragana}\\p{Script=Katakana}]', 'u')
+
+/**
+ * The avatar's letters: the first letter of the name's first two words, or one
+ * character for a Chinese, Japanese or Korean name, as Google draws it. Only
+ * the name itself counts: a Google Workspace name often carries a department
+ * after a bar ("Name | Department | School"), and the bar used to be drawn as
+ * an initial.
+ */
 export function initialsOf(user: MeUser | null): string {
   if (!user) return ''
-  if (user.name) {
-    return user.name
-      .split(' ')
-      .filter(Boolean)
-      .map((n) => n[0])
-      .join('')
-      .toUpperCase()
-      .slice(0, 2)
-  }
-  return user.email?.[0]?.toUpperCase() ?? ''
+  const name = (user.name ?? '').normalize('NFC').split(/[|(]/)[0]
+  const firsts = name
+    .split(/\s+/)
+    .map((word) => word.match(LETTER)?.[0])
+    .filter((letter): letter is string => !!letter)
+  if (firsts.length === 0) return user.email?.match(LETTER)?.[0].toUpperCase() ?? ''
+  if (ONE_CHARACTER_SCRIPTS.test(firsts[0])) return firsts[0]
+  return firsts.slice(0, 2).join('').toUpperCase()
 }
 
 export function displayNameOf(user: MeUser | null, fallback = 'Account'): string {
@@ -334,14 +345,43 @@ export function AccountScope({ className = '' }: { className?: string }) {
   )
 }
 
-export function Avatar({ user, size = 28 }: { user: MeUser | null; size?: number }) {
+/**
+ * The account's avatar: its Google photo when it has one of its own, otherwise
+ * its initials. A photo that fails to load (Google has since replaced it)
+ * falls back to the initials too.
+ */
+export function Avatar({
+  user,
+  size = 28,
+  className = 'text-[11px]',
+}: {
+  user: MeUser | null
+  size?: number
+  /** The initials' type size. */
+  className?: string
+}) {
+  const photo = user?.avatarUrl || null
+  const [failed, setFailed] = useState<string | null>(null)
   return (
     <span
       aria-hidden
       style={{ width: size, height: size }}
-      className="flex flex-shrink-0 items-center justify-center rounded-full bg-[linear-gradient(135deg,#27272a,#18181b)] text-[11px] font-semibold text-zinc-200 ring-1 ring-inset ring-white/[0.12]"
+      className={`relative flex flex-shrink-0 items-center justify-center overflow-hidden rounded-full bg-[linear-gradient(135deg,#27272a,#18181b)] font-semibold text-zinc-200 ${className}`}
     >
-      {initialsOf(user)}
+      {photo && failed !== photo ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src={photo}
+          alt=""
+          referrerPolicy="no-referrer"
+          onError={() => setFailed(photo)}
+          className="h-full w-full object-cover"
+        />
+      ) : (
+        initialsOf(user)
+      )}
+      {/* The hairline sits over the photo as well as the initials. */}
+      <span className="pointer-events-none absolute inset-0 rounded-full ring-1 ring-inset ring-white/[0.12]" />
     </span>
   )
 }
@@ -371,7 +411,7 @@ export function AccountMenu() {
             {user && (
               <div className="px-2.5 pb-2 pt-1.5">
                 <p className="truncate text-[13px] font-medium text-zinc-100">{user.name ?? displayNameOf(user)}</p>
-                <p className="truncate text-[12px] text-zinc-500">{user.email}</p>
+                <p className="truncate text-[12px] text-faint">{user.email}</p>
               </div>
             )}
             {user && <MenuSeparator />}
@@ -403,21 +443,31 @@ export function AccountMenu() {
 
 /* ── Sidebar navigation ────────────────────────────────────────────────── */
 
+/**
+ * The rail: the navigation list, then a footer pinned under it. The list is
+ * the part that scrolls. Sixteen project items fit a 13-inch laptop's browser
+ * (about 600px under the bar), with Branches and History; below that the list scrolls, and its last
+ * 20px fade out so an item cut by the footer reads as "more below" rather than
+ * as the footer drawn over it, which is what a hard edge looked like.
+ */
 export function SidebarNav({ children, footer }: { children: ReactNode; footer?: ReactNode }) {
   return (
     <>
-      <nav aria-label="Primary" className="flex-1 overflow-y-auto overscroll-contain px-3 pb-3 pt-2">
+      <nav
+        aria-label="Primary"
+        className="flex-1 overflow-y-auto overscroll-contain px-3 pb-4 pt-1.5 [mask-image:linear-gradient(to_bottom,black_calc(100%-20px),transparent)]"
+      >
         {children}
       </nav>
-      {footer && <div className="flex-shrink-0 px-3 pb-3 pt-1">{footer}</div>}
+      {footer && <div className="flex-shrink-0 border-t border-white/[0.06] px-3 pb-2.5 pt-2">{footer}</div>}
     </>
   )
 }
 
 export function NavGroup({ label, children, first = false }: { label?: string; children: ReactNode; first?: boolean }) {
   return (
-    <div className={first ? '' : label ? 'mt-5' : 'mt-3'}>
-      {label && <p className="mb-1 px-2.5 text-[12px] font-medium leading-[20px] text-zinc-600">{label}</p>}
+    <div className={first ? '' : 'mt-3'}>
+      {label && <p className="px-2.5 text-[12px] font-medium leading-[18px] text-faint">{label}</p>}
       <ul className="space-y-px">{children}</ul>
     </div>
   )
@@ -430,6 +480,7 @@ export function NavItem({
   active,
   trailing,
   tourTarget,
+  external = false,
 }: {
   href: string
   icon: LucideIcon
@@ -437,6 +488,8 @@ export function NavItem({
   active: boolean
   trailing?: ReactNode
   tourTarget?: string
+  /** Opens in a new tab (the docs), and says so to sighted and screen-reader users alike. */
+  external?: boolean
 }) {
   return (
     <li>
@@ -444,9 +497,10 @@ export function NavItem({
         href={href}
         data-tour={tourTarget}
         aria-current={active ? 'page' : undefined}
-        className={`group flex h-[36px] items-center gap-2.5 rounded-[7px] px-2.5 text-[13px] font-medium transition-[background-color,color] duration-150 md:h-[30px] ${FOCUS} ${
+        {...(external ? { target: '_blank', rel: 'noopener noreferrer' } : {})}
+        className={`group flex h-[36px] items-center gap-2.5 rounded-[7px] px-2.5 text-[13px] font-medium transition-[background-color,color] duration-150 md:h-[28px] ${FOCUS} ${
           active
-            ? 'bg-white/[0.07] text-zinc-50 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]'
+            ? 'bg-white/[0.07] text-zinc-50 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.045),inset_0_1px_0_rgba(255,255,255,0.05)]'
             : 'text-zinc-400 hover:bg-white/[0.04] hover:text-zinc-100'
         }`}
       >
@@ -457,15 +511,50 @@ export function NavItem({
           strokeWidth={1.75}
         />
         <span className="min-w-0 flex-1 truncate">{label}</span>
+        {external && (
+          <>
+            <ArrowUpRight
+              aria-hidden
+              className="h-3.5 w-3.5 flex-shrink-0 text-zinc-600 transition-colors duration-150 group-hover:text-zinc-400"
+              strokeWidth={1.75}
+            />
+            <span className="sr-only">(opens in a new tab)</span>
+          </>
+        )}
         {trailing}
       </Link>
     </li>
   )
 }
 
+/**
+ * The plan at the foot of the account sidebar. On Free it says what upgrading
+ * buys and links to Billing; on a paid plan it is absent, because the bar's
+ * scope chip already names the plan. Cloud only (a self-hosted build has no
+ * plans), and silent until the plan is known, so it never flashes a guess.
+ */
+export function SidebarPlan({ billingHref }: { billingHref: string }) {
+  const plan = usePlanName()
+  if (!CLOUD_CONTROL_PLANE || plan !== 'Free') return null
+  return (
+    <div className="mb-2 rounded-[10px] border border-white/[0.07] bg-white/[0.025] p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]">
+      <p className="text-[12.5px] font-medium leading-[18px] text-zinc-100">Free plan</p>
+      <p className="mt-0.5 text-[12px] leading-[17px] text-faint [text-wrap:pretty]">
+        Upgrade for production-severity support and higher limits.
+      </p>
+      <Link
+        href={billingHref}
+        className={`mt-2.5 inline-flex h-[26px] items-center ${R_CONTROL} border border-white/[0.10] bg-white/[0.05] px-2.5 text-[12px] font-medium text-zinc-100 transition-[background-color,border-color] duration-150 hover:border-white/[0.16] hover:bg-white/[0.08] ${FOCUS}`}
+      >
+        Upgrade
+      </Link>
+    </div>
+  )
+}
+
 /** Trailing count on a nav item: plain tabular text, not a pill. */
 export function NavCount({ value }: { value: number }) {
-  return <span className="text-[12px] font-normal tabular-nums text-zinc-600">{value}</span>
+  return <span className="text-[12px] font-normal tabular-nums text-faint">{value}</span>
 }
 
 /** Trailing tag on a nav item (e.g. MCP). */
@@ -473,7 +562,7 @@ export function NavTag({ children, active }: { children: ReactNode; active?: boo
   return (
     <span
       className={`rounded-[4px] border px-1 text-[10.5px] font-medium leading-[16px] ${
-        active ? 'border-violet-300/25 text-violet-200' : 'border-white/[0.08] text-zinc-500'
+        active ? 'border-violet-300/25 text-violet-200' : 'border-white/[0.08] text-faint'
       }`}
     >
       {children}

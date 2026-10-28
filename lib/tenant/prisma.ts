@@ -10,6 +10,9 @@ import { prisma } from '@/lib/db'
 import { Prisma } from '@prisma/client'
 import { TenantIsolationError } from './isolation'
 
+/** Bucket and key writes are governed changes (lib/changes/ledger.ts); one made inside another change joins it. */
+const governed = async <T>(projectId: string, title: string, fn: () => Promise<T>) => (await import('@/lib/changes/ledger')).governedChange(projectId, title, fn)
+
 /**
  * Tenant-scoped Prisma client
  * All queries are automatically filtered by projectId
@@ -448,13 +451,13 @@ export class TenantPrisma {
       return result
     },
     create: async (args: Prisma.StorageBucketCreateArgs) => {
-      return prisma.storageBucket.create({
+      return governed(this.projectId, `Create bucket ${args.data.name}`, () => prisma.storageBucket.create({
         ...args,
         data: {
           ...args.data,
           projectId: this.projectId,
         },
-      })
+      }))
     },
     delete: async (args: Prisma.StorageBucketDeleteArgs) => {
       const existing = await prisma.storageBucket.findUnique({
@@ -463,13 +466,13 @@ export class TenantPrisma {
       })
       await this.validateOwnership(existing, 'StorageBucket')
 
-      return prisma.storageBucket.delete({
+      return governed(this.projectId, 'Delete a bucket', () => prisma.storageBucket.delete({
         ...args,
         where: {
           ...args.where,
           projectId: this.projectId,
         },
-      })
+      }))
     },
   }
 
@@ -724,13 +727,13 @@ export class TenantPrisma {
       return result
     },
     create: async (args: Prisma.ApiKeyCreateArgs) => {
-      return prisma.apiKey.create({
+      return governed(this.projectId, `Create API key ${args.data.name}`, () => prisma.apiKey.create({
         ...args,
         data: {
           ...args.data,
           projectId: this.projectId,
         },
-      })
+      }))
     },
     update: async (args: Prisma.ApiKeyUpdateArgs) => {
       const existing = await prisma.apiKey.findUnique({
@@ -739,13 +742,13 @@ export class TenantPrisma {
       })
       await this.validateOwnership(existing, 'ApiKey')
 
-      return prisma.apiKey.update({
+      return governed(this.projectId, 'Change an API key', () => prisma.apiKey.update({
         ...args,
         where: {
           ...args.where,
           projectId: this.projectId,
         },
-      })
+      }))
     },
     delete: async (args: Prisma.ApiKeyDeleteArgs) => {
       const existing = await prisma.apiKey.findUnique({
@@ -754,13 +757,13 @@ export class TenantPrisma {
       })
       await this.validateOwnership(existing, 'ApiKey')
 
-      return prisma.apiKey.delete({
+      return governed(this.projectId, 'Revoke an API key', () => prisma.apiKey.delete({
         ...args,
         where: {
           ...args.where,
           projectId: this.projectId,
         },
-      })
+      }))
     },
   }
 

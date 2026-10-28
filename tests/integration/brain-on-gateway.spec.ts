@@ -19,19 +19,18 @@ import { AiError, setProviderForTests } from '@/lib/ai/llm'
 import { scriptedMessage, scriptedProvider, type ScriptedProvider } from '@/lib/ai/llm/providers/scripted'
 import { memorySpendLedger, setSpendLedgerForTests, type MemorySpendLedger } from '@/lib/ai/llm/spend'
 import { classifierPrompt } from '@/lib/ai/brain/prompts'
-import { BRAIN_MODEL_TOOLS } from '@/lib/ai/brain/tools'
+import { BRAIN_MODEL_TOOLS, isReadOnlyTool } from '@/lib/ai/brain/tools'
 import { runBrain, type BrainEvent, type BrainInput } from '@/lib/ai/brain/agent'
+import { collectProof } from '@/lib/ai/proof-system'
 import { runEndpointTest } from '@/lib/ai/brain/verifier'
+
+jest.mock('@/lib/ai/proof-system', () => {
+  const actual = jest.requireActual<typeof import('@/lib/ai/proof-system')>('@/lib/ai/proof-system')
+  return { ...actual, collectProof: jest.fn(actual.collectProof) }
+})
 
 jest.mock('@/lib/ai/brain/verifier', () => ({
   runEndpointTest: jest.fn(),
-}))
-
-// Preserve real history reads while preventing unawaited summary generation
-// from consuming responses queued for the scripted agent provider.
-jest.mock('@/lib/ai/conversation-summarizer', () => ({
-  ...jest.requireActual('@/lib/ai/conversation-summarizer'),
-  maybeSummarizeConversation: jest.fn(async () => {}),
 }))
 
 const mockRunEndpointTest = jest.mocked(runEndpointTest)
@@ -96,6 +95,10 @@ beforeEach(async () => {
   ledger = memorySpendLedger()
   setSpendLedgerForTests(ledger)
   await prisma.aiUsage.deleteMany({ where: { projectId } })
+  // Every turn saves its messages to this one project. Past 20, saveMessages
+  // starts a summary without waiting, and that model call takes the next test's
+  // scripted reply. Each test starts with no history.
+  await prisma.conversationMessage.deleteMany({ where: { projectId } })
 })
 
 afterEach(() => {
@@ -293,11 +296,15 @@ describe('a turn on the gateway', () => {
     expect(classify.output_config?.format).toMatchObject({ type: 'json_schema' })
     expect(classify.thinking).toBeUndefined()
 
-    // The loop: the catalog translated once with its last tool cached, the
-    // stable prompt cached ahead of the turn's own context, thinking on, and
-    // the conversation cached at its last block.
+    // The loop: a question's share of the catalog (the reads and the tools that
+    // end a turn) translated once with its last tool cached, the stable prompt
+    // cached ahead of the turn's own context, thinking on, and the conversation
+    // cached at its last block.
     const first = provider.calls[1].params
-    expect(first.tools!.map((t) => (t as Anthropic.Tool).name)).toEqual(BRAIN_MODEL_TOOLS.map((t) => t.function.name))
+    expect(first.tools!.map((t) => (t as Anthropic.Tool).name)).toEqual(
+      BRAIN_MODEL_TOOLS.map((t) => t.function.name)
+        .filter((name) => isReadOnlyTool(name) || ['finish', 'ask_user', 'answer_question'].includes(name)),
+    )
     expect((first.tools!.at(-1) as Anthropic.Tool).cache_control).toEqual({ type: 'ephemeral' })
     const system = first.system as Anthropic.TextBlockParam[]
     expect(system[0].cache_control).toEqual({ type: 'ephemeral' })
@@ -344,6 +351,20 @@ describe('a turn on the gateway', () => {
     )
   }, 60_000)
 
+  it('does not present an MCP caller as dashboard page context', async () => {
+    const provider = scriptedProvider([
+      classified('QUESTION'),
+      scriptedMessage({
+        toolUse: [{ id: 'toolu_finish', name: 'finish', input: { summary: 'No page context.' } }],
+      }),
+    ])
+
+    await turn(provider, 'what can I do here?', { door: 'mcp' })
+
+    const system = provider.calls[1].params.system as Anthropic.TextBlockParam[]
+    expect(system.map((block) => block.text).join('\n')).not.toContain("USER'S CURRENT PAGE")
+  }, 60_000)
+
   it('stops a destructive call at the approval gate, answers it as an error, and returns it to queue', async () => {
     const provider = scriptedProvider([
       classified('DESTRUCTIVE'),
@@ -363,13 +384,13 @@ describe('a turn on the gateway', () => {
     expect(JSON.parse(answered[0].content as string)).toMatchObject({ ok: false, blocked: 'needs_human_approval' })
   }, 60_000)
 
-  it('runs none of the calls in an answer cut off at its output limit', async () => {
+  // A cut-off answer with calls in it goes back to the model, each call
+  // answered as not run (brain-cut-off-tool-calls.spec.ts). One with no call
+  // has nothing to answer, so the turn stops.
+  it('stops on an answer cut off at its output limit before it called anything', async () => {
     const provider = scriptedProvider([
       classified('MODIFY'),
-      scriptedMessage({
-        toolUse: [{ id: 'toolu_create', name: 'create_table', input: { tableName: 'half_written', columns: [] } }],
-        stopReason: 'max_tokens',
-      }),
+      scriptedMessage({ text: 'I will add a half_written table with', stopReason: 'max_tokens' }),
     ])
 
     const { result } = await turn(provider, 'add a half_written table')
@@ -379,6 +400,152 @@ describe('a turn on the gateway', () => {
     expect(result.summary).toMatch(/cut off at its output limit\. Nothing was modified\./)
     // It ran, so it is billed: 10 in + 5 out by the scripted default.
     expect(result.tokensUsed).toBe(15)
+  }, 60_000)
+
+  it('requires one catalog read after a mutation followed by a plain-text answer (#237)', async () => {
+    const provider = scriptedProvider([
+      classified('MODIFY'),
+      scriptedMessage({
+        toolUse: [{ id: 'toolu_create', name: 'create_table', input: { tableName: 'plain_text_verified', columns: [] } }],
+      }),
+      scriptedMessage({ text: 'The table has been created.' }),
+      scriptedMessage({
+        toolUse: [{ id: 'toolu_verify', name: 'read_backend_state', input: {} }],
+      }),
+      scriptedMessage({ text: 'The table is present in the backend state.' }),
+    ])
+
+    const { result } = await turn(provider, 'create a plain_text_verified table')
+
+    expect(await tableExists('plain_text_verified')).toBe(true)
+    expect(result).toMatchObject({ success: true, toolsRun: ['create_table', 'read_backend_state'] })
+
+    // The original plain-text reply is retained before the verification steer,
+    // so the model sees exactly the claim it must substantiate.
+    const verificationMessages = provider.calls[3].params.messages
+    expect(verificationMessages.at(-2)).toMatchObject({
+      role: 'assistant',
+      content: [{ type: 'text', text: 'The table has been created.' }],
+    })
+    expect(verificationMessages.at(-1)).toMatchObject({
+      role: 'user',
+      content: [{ type: 'text', text: expect.stringContaining('read_backend_state') }],
+    })
+  }, 60_000)
+
+  it('does not replay a mutation while plain-text completion is awaiting verification (#237)', async () => {
+    const provider = scriptedProvider([
+      classified('MODIFY'),
+      scriptedMessage({
+        toolUse: [{ id: 'toolu_create', name: 'create_table', input: { tableName: 'first_mutation', columns: [] } }],
+      }),
+      scriptedMessage({ text: 'The first table has been created.' }),
+      scriptedMessage({
+        toolUse: [{ id: 'toolu_replay', name: 'create_table', input: { tableName: 'must_not_replay', columns: [] } }],
+      }),
+    ])
+
+    const { result } = await turn(provider, 'create a first_mutation table')
+
+    expect(await tableExists('first_mutation')).toBe(true)
+    expect(await tableExists('must_not_replay')).toBe(false)
+    expect(result).toMatchObject({
+      success: false,
+      failureCode: 'UNVERIFIED',
+      retryable: false,
+      toolsRun: ['create_table'],
+      applied: ['Creating table first_mutation'],
+    })
+    expect(result.summary).toMatch(/could not verify/i)
+  }, 60_000)
+
+  it('reports an applied-but-unverified outcome after one ignored verification steer (#237)', async () => {
+    const provider = scriptedProvider([
+      classified('MODIFY'),
+      scriptedMessage({
+        toolUse: [{ id: 'toolu_create', name: 'create_table', input: { tableName: 'unverified_once', columns: [] } }],
+      }),
+      scriptedMessage({ text: 'The table has been created.' }),
+      scriptedMessage({ text: 'Everything is complete.' }),
+    ])
+
+    const { result } = await turn(provider, 'create an unverified_once table')
+
+    expect(await tableExists('unverified_once')).toBe(true)
+    expect(provider.calls).toHaveLength(4)
+    expect(result).toMatchObject({
+      success: false,
+      failureCode: 'UNVERIFIED',
+      retryable: false,
+      toolsRun: ['create_table'],
+    })
+    expect(result.summary).toMatch(/could not verify/i)
+  }, 60_000)
+
+  it('does not retry a failed verification read after a plain-text mutation exit (#237)', async () => {
+    const proofMock = collectProof as jest.MockedFunction<typeof collectProof>
+    const provider = scriptedProvider([
+      classified('MODIFY'),
+      scriptedMessage({
+        toolUse: [{ id: 'toolu_create', name: 'create_table', input: { tableName: 'failed_read_once', columns: [] } }],
+      }),
+      scriptedMessage({ text: 'The table has been created.' }),
+      () => {
+        // The mutation has run and the plain-text exit has steered the model.
+        // Fail the catalog read that the next tool call dispatches, not the
+        // proof lookup used while initializing the turn.
+        proofMock.mockRejectedValueOnce(new Error('catalog unavailable'))
+        return scriptedMessage({
+          toolUse: [{ id: 'toolu_verify_first', name: 'read_backend_state', input: {} }],
+        })
+      },
+      scriptedMessage({
+        toolUse: [{ id: 'toolu_verify_again', name: 'read_backend_state', input: {} }],
+      }),
+    ])
+
+    try {
+      const { result } = await turn(provider, 'create a failed_read_once table')
+
+      expect(await tableExists('failed_read_once')).toBe(true)
+      expect(result).toMatchObject({
+        success: false,
+        failureCode: 'UNVERIFIED',
+        retryable: false,
+        toolsRun: ['create_table', 'read_backend_state'],
+        applied: ['Creating table failed_read_once'],
+      })
+      expect(provider.calls).toHaveLength(5)
+    } finally {
+      proofMock.mockClear()
+    }
+  }, 60_000)
+
+  it('does not dispatch a batched mutation after the requested verification read (#237)', async () => {
+    const provider = scriptedProvider([
+      classified('MODIFY'),
+      scriptedMessage({
+        toolUse: [{ id: 'toolu_create', name: 'create_table', input: { tableName: 'verified_before_replay', columns: [] } }],
+      }),
+      scriptedMessage({ text: 'The table has been created.' }),
+      scriptedMessage({
+        toolUse: [
+          { id: 'toolu_verify', name: 'read_backend_state', input: {} },
+          { id: 'toolu_replay', name: 'create_table', input: { tableName: 'batched_replay', columns: [] } },
+        ],
+      }),
+    ])
+
+    const { result } = await turn(provider, 'create a verified_before_replay table')
+
+    expect(await tableExists('verified_before_replay')).toBe(true)
+    expect(await tableExists('batched_replay')).toBe(false)
+    expect(result).toMatchObject({
+      success: false,
+      failureCode: 'TOOL_REFUSED',
+      retryable: false,
+      toolsRun: ['create_table', 'read_backend_state'],
+    })
   }, 60_000)
 
   it('cancels a model call that reaches the verification reserve and still verifies', async () => {

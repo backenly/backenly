@@ -1,17 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { prisma } from '@/lib/db'
 import { verifySession } from '@/lib/auth/session'
-import { z } from 'zod'
 import { canAccessProject, canWriteProject } from '@/lib/edition/guard'
-import { workspaceSchemaName } from '@/lib/security/workspace-schema'
-import { ensureEmailVerifiedColumn } from '@/lib/services/end-user-auth-flows'
+import { getAuthEmailPolicy, saveAuthEmailPolicy } from '@/lib/services/auth-email-policy'
 
 /**
  * GET/PUT /api/projects/[id]/auth-email-settings
  *
  * Per-project end-user auth email settings (ProjectAuthConfig): the app name
  * and URL used in verification / magic-link / password-reset emails, plus the
- * requireEmailVerification and magicLinksEnabled policy toggles.
+ * requireEmailVerification and magicLinksEnabled policy toggles. The agent's
+ * auth tool writes the same settings through lib/services/auth-email-policy.
  */
 
 /**
@@ -46,44 +44,17 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
       return NextResponse.json({ error: 'Project not found' }, { status: 404 })
     }
 
-    // Fetched for the effective-value fallbacks below, and deliberately by id
-    // alone: the authorization question was already answered above.
-    const project = await prisma.project.findUnique({
-      where: { id: params.id },
-      select: { id: true, name: true, publicUrl: true },
-    })
-    if (!project) {
+    // By id alone: the authorization question was already answered above.
+    const settings = await getAuthEmailPolicy(params.id)
+    if (!settings) {
       return NextResponse.json({ error: 'Project not found' }, { status: 404 })
     }
-
-    const config = await prisma.projectAuthConfig.findUnique({
-      where: { projectId: params.id },
-    })
-
-    return NextResponse.json({
-      success: true,
-      settings: {
-        appName: config?.appName ?? null,
-        appUrl: config?.appUrl ?? null,
-        requireEmailVerification: config?.requireEmailVerification ?? false,
-        magicLinksEnabled: config?.magicLinksEnabled ?? true,
-        // Effective values after fallbacks — what emails will actually show.
-        effectiveAppName: config?.appName || project.name,
-        effectiveAppUrl: config?.appUrl || project.publicUrl || null,
-      },
-    })
+    return NextResponse.json({ success: true, settings })
   } catch (error: any) {
     console.error('[Auth Email Settings] GET failed:', error)
     return NextResponse.json({ error: 'Failed to load auth email settings' }, { status: 500 })
   }
 }
-
-const putSchema = z.object({
-  appName: z.string().trim().max(80).nullable().optional(),
-  appUrl: z.string().trim().url().max(500).nullable().optional().or(z.literal('').transform(() => null)),
-  requireEmailVerification: z.boolean().optional(),
-  magicLinksEnabled: z.boolean().optional(),
-})
 
 export async function PUT(request: NextRequest, props: { params: Promise<{ id: string }> }) {
   const params = await props.params;
@@ -98,37 +69,17 @@ export async function PUT(request: NextRequest, props: { params: Promise<{ id: s
       return NextResponse.json({ error: 'Project not found' }, { status: 404 })
     }
 
-    const parsed = putSchema.safeParse(await request.json())
-    if (!parsed.success) {
-      return NextResponse.json(
-        { error: 'Validation failed', details: parsed.error.flatten().fieldErrors },
-        { status: 400 },
-      )
+    const result = await saveAuthEmailPolicy(params.id, await request.json())
+    if ('code' in result) {
+      if ('problems' in result) {
+        return NextResponse.json({ error: 'Validation failed', details: result.problems }, { status: 400 })
+      }
+      if (result.code === 'NO_EMAIL_SENDER') {
+        return NextResponse.json({ error: result.message, code: result.code }, { status: 409 })
+      }
+      return NextResponse.json({ error: 'Project not found' }, { status: 404 })
     }
-    const { appName, appUrl, requireEmailVerification, magicLinksEnabled } = parsed.data
-
-    const data = {
-      ...(appName !== undefined && { appName: appName || null }),
-      ...(appUrl !== undefined && { appUrl: appUrl || null }),
-      ...(requireEmailVerification !== undefined && { requireEmailVerification }),
-      ...(magicLinksEnabled !== undefined && { magicLinksEnabled }),
-    }
-
-    // Turning verification on records every EXISTING end user as verified now
-    // (ensureEmailVerifiedColumn grandfathers the rows present when it adds the
-    // column), so the switch itself can never lock an app's users out. A
-    // project with no users table yet has nothing to record; that is ignored.
-    if (requireEmailVerification === true) {
-      await ensureEmailVerifiedColumn(workspaceSchemaName(params.id))
-    }
-
-    const config = await prisma.projectAuthConfig.upsert({
-      where: { projectId: params.id },
-      create: { projectId: params.id, ...data },
-      update: data,
-    })
-
-    return NextResponse.json({ success: true, settings: config })
+    return NextResponse.json({ success: true, settings: result.policy })
   } catch (error: any) {
     console.error('[Auth Email Settings] PUT failed:', error)
     return NextResponse.json({ error: 'Failed to save auth email settings' }, { status: 500 })

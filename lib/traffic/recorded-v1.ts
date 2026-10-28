@@ -22,6 +22,10 @@
  * It is also where a key used in the wrong place is refused, before the route
  * authenticates and spends the key's rate limit: an MCP key on the runtime API
  * at all, or a service-role key from a browser. lib/security/key-placement.ts.
+ *
+ * And, before either, where a request for another region's project is refused:
+ * each region's projects are served only by that region's service
+ * (lib/data-plane/serving.ts, 421 WRONG_REGION with the project's address).
  */
 
 import { NextResponse } from 'next/server'
@@ -29,6 +33,12 @@ import { recordRuntimeRequest, INTERNAL_TRAFFIC_HEADER, isInternalTraffic } from
 import { meterResponseBody } from '@/lib/usage/egress'
 import { branchIdForRequest, refuseBranchKeyOffDataPlane } from '@/lib/branches/key-scope'
 import { refuseMisplacedKey } from '@/lib/security/key-placement'
+import { misdirectedResponse } from '@/lib/data-plane/serving'
+import { resolvePublicBaseUrl } from '@/lib/services/public-url'
+import { servingRefusal } from '@/lib/projects/serving-response'
+
+/** A project id, as the runtime gate requires before it looks one up. */
+const PROJECT_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 export function recordedV1<R extends Request, C, T extends Response>(
   handler: (request: R, context: C) => T | Promise<T>,
@@ -42,6 +52,28 @@ export function recordedV1<R extends Request, C, T extends Response>(
     // some callers construct) from throwing before the route runs.
     const url = new URL(request.url, 'http://localhost')
     try {
+      // First: a project of another region is not served here at all, so no
+      // key of it is looked up, checked or rate-limited in the wrong region.
+      const requestedProject = ((await paramsPromise.catch(() => undefined)) as { projectId?: unknown } | undefined)?.projectId
+      if (typeof requestedProject === 'string') {
+        const misdirected = await misdirectedResponse(requestedProject, resolvePublicBaseUrl(request))
+        if (misdirected) {
+          statusCode = misdirected.status
+          return misdirected as unknown as T
+        }
+        // Then a project that is locked, paused or unreadable is not served
+        // either, by any route here: the same gate, codes and words as the
+        // runtime's (server/lib/serving-gate.ts), so no route Next owns
+        // outright (end-user auth, realtime, storage, functions, healthz) can
+        // serve a project the runtime would refuse.
+        if (PROJECT_ID_RE.test(requestedProject)) {
+          const refused = await servingRefusal(requestedProject)
+          if (refused) {
+            statusCode = refused.status
+            return refused as unknown as T
+          }
+        }
+      }
       const refusal =
         (await refuseMisplacedKey(url.pathname, request.headers, url, request.method)) ??
         (await refuseBranchKeyOffDataPlane(url.pathname, request.headers, url))

@@ -15,7 +15,7 @@
  * and how it gets built, instead of an empty dashed box.
  */
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { AlertTriangle, Cable, Database, MessageSquare, Pencil, Plus, Search, Trash2, X } from 'lucide-react'
@@ -25,7 +25,6 @@ import {
   EmptyState,
   KitButton,
   KitConfirmDialog,
-  KitField,
   KitInput,
   KitModal,
   KitNote,
@@ -35,8 +34,9 @@ import {
   StatusDot,
   type StatusTone,
 } from '@/components/inspector/kit'
-import { EDGE, FOCUS, PAGE_GUTTER, PAGE_WIDTH, PLATE, RULE, R_PANEL, WELL } from '@/components/console/tokens'
+import { EDGE, FOCUS, PAGE_GUTTER, PAGE_WIDTH, PLATE, RULE, R_CONTROL, R_PANEL, WELL } from '@/components/console/tokens'
 import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
+import { CLOUD_REGIONS, HOME_REGION, regionLabel, type CloudRegion, type CloudRegionId } from '@/lib/regions'
 
 type UserProfile = { id: string; name?: string; email?: string }
 
@@ -151,14 +151,20 @@ export function ProjectsHome({ org = null }: { org?: ProjectsHomeOrg | null }) {
 
   // Creates the project, then opens its workspace. Building happens through
   // the user's coding agent over MCP (Connect) once the workspace is open.
-  const createProject = async (name: string): Promise<string | null> => {
+  const createProject = async (name: string, region: CloudRegionId | null): Promise<string | null> => {
     if (!user) return null
     const response = await fetch('/api/projects', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
       // Inside an organization the project is created there, for that team.
-      body: JSON.stringify({ name, userId: user.id, ...(org ? { organizationId: org.id } : {}) }),
+      // The region is sent only on Cloud, where the picker exists.
+      body: JSON.stringify({
+        name,
+        userId: user.id,
+        ...(org ? { organizationId: org.id } : {}),
+        ...(region ? { region } : {}),
+      }),
     })
     if (response.status === 401) {
       router.push(loginRedirect)
@@ -261,7 +267,7 @@ export function ProjectsHome({ org = null }: { org?: ProjectsHomeOrg | null }) {
           title="Projects"
           meta={
             !loading && projects.length > 0 ? (
-              <span className="text-[13px] tabular-nums text-zinc-500">{projects.length}</span>
+              <span className="text-[13px] tabular-nums text-faint">{projects.length}</span>
             ) : undefined
           }
           description={
@@ -391,11 +397,11 @@ export function ProjectsHome({ org = null }: { org?: ProjectsHomeOrg | null }) {
             setShowNewModal(false)
             setCreateError(null)
           }}
-          onCreate={async (name) => {
+          onCreate={async ({ name, region }) => {
             setCreating(true)
             setCreateError(null)
             try {
-              const id = await createProject(name)
+              const id = await createProject(name, region)
               if (id) {
                 cachedProjects.delete(cacheKey)
                 router.push(`/app/projects/${id}`)
@@ -527,6 +533,17 @@ function FirstProject({ onCreate }: { onCreate: () => void }) {
 
 // ─── New project ──────────────────────────────────────────────────────────────
 
+/**
+ * Create a project: one form, set out the way Supabase and Vercel set theirs.
+ * Label and hint on the left, the control on the right, rows on hairlines, so
+ * the decisions read in order: where it belongs, what it is called, where it
+ * runs. On a phone the rows stack.
+ *
+ * Region (Cloud only) lists the five Backenly Cloud regions from
+ * lib/regions.ts. An open region can be chosen; the others are listed, greyed,
+ * as "Not open yet", so nobody picks a place their project would not actually
+ * run. The server refuses a region that is not open as well.
+ */
 function NewProjectModal({
   open,
   creating,
@@ -541,23 +558,30 @@ function NewProjectModal({
   /** The organization it will be created in, when there is one. */
   orgName?: string | null
   onClose: () => void
-  onCreate: (name: string) => void
+  onCreate: (input: { name: string; region: CloudRegionId | null }) => void
 }) {
   const [name, setName] = useState('')
+  const [region, setRegion] = useState<CloudRegionId>(HOME_REGION)
+  const nameId = useId()
+  const regionLabelId = useId()
   useEffect(() => {
-    if (open) setName('')
+    if (open) {
+      setName('')
+      setRegion(HOME_REGION)
+    }
   }, [open])
   const submit = () => {
     const trimmed = name.trim()
-    if (trimmed && !creating) onCreate(trimmed)
+    if (trimmed && !creating) onCreate({ name: trimmed, region: CLOUD_CONTROL_PLANE ? region : null })
   }
 
   return (
     <KitModal
       open={open}
       onClose={onClose}
-      title="New project"
-      description="Then connect your coding agent from the project's Connect page and describe the backend you want."
+      width="max-w-[640px]"
+      title="Create a new project"
+      description="A project is one backend: a Postgres database with auth, storage, functions and an API. Your coding agent builds it once you connect it."
       footer={
         <>
           <KitButton variant="ghost" onClick={onClose} disabled={creating}>
@@ -569,56 +593,224 @@ function NewProjectModal({
         </>
       }
     >
-      <div className="space-y-4">
-        <KitField label="Project name" hint="Shown in the project list and on every change receipt. You can rename it later.">
-          <KitInput
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') submit()
-            }}
-            placeholder="e.g. movie-reviews"
-            maxLength={100}
-            disabled={creating}
-            aria-label="Project name"
-          />
-        </KitField>
+      <form
+        onSubmit={(e) => {
+          e.preventDefault()
+          submit()
+        }}
+      >
+        <div className={`divide-y divide-white/[0.06] overflow-hidden ${R_PANEL} border ${EDGE}`}>
+          {orgName && (
+            <FormRow label="Organization" hint="Its members can open the project with their roles.">
+              <p
+                className={`flex h-[36px] items-center ${R_CONTROL} border ${EDGE} ${WELL} px-3 text-[13px] font-medium text-zinc-100 sm:h-[32px]`}
+              >
+                <span className="truncate">{orgName}</span>
+              </p>
+            </FormRow>
+          )}
 
-        {orgName && (
-          <div className={`${R_PANEL} border ${EDGE} ${WELL} px-3 py-2.5`}>
-            <p className="text-[12.5px] font-medium text-zinc-300">Organization</p>
-            <p className="mt-0.5 break-words text-[13px] font-medium text-zinc-100">{orgName}</p>
-            <p className="mt-0.5 text-[12px] text-zinc-500">Its members can reach the project with their roles.</p>
-          </div>
-        )}
+          <FormRow label="Project name" hint="You can rename it later." htmlFor={nameId}>
+            <KitInput
+              id={nameId}
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="e.g. movie-reviews"
+              maxLength={100}
+              disabled={creating}
+              autoComplete="off"
+            />
+          </FormRow>
 
-        {/* Honest region: one AWS region, no fake globe or selector. */}
-        <div className={`flex items-center justify-between gap-3 ${R_PANEL} border ${EDGE} ${WELL} px-3 py-2.5`}>
-          <div className="min-w-0">
-            <p className="text-[12.5px] font-medium text-zinc-300">Region</p>
-            <p className="text-[12px] text-zinc-500">Backenly Cloud runs in one region today.</p>
-          </div>
-          <StatusDot tone="operational" label="AWS ap-south-1" />
+          {CLOUD_CONTROL_PLANE && (
+            <FormRow
+              label="Region"
+              labelId={regionLabelId}
+              hint="Where the database and API run. Pick the one closest to your users."
+            >
+              <RegionPicker value={region} onChange={setRegion} disabled={creating} labelledBy={regionLabelId} />
+            </FormRow>
+          )}
         </div>
 
+        {/* A hidden submit keeps Enter in the name field submitting the form. */}
+        <button type="submit" hidden aria-hidden tabIndex={-1} />
+
         {error && (
-          <KitNote icon={AlertTriangle} tone="danger">
-            {error}
-          </KitNote>
+          <div className="mt-4">
+            <KitNote icon={AlertTriangle} tone="danger">
+              {error}
+            </KitNote>
+          </div>
         )}
-      </div>
+      </form>
     </KitModal>
+  )
+}
+
+/** One row of the create form: what it is on the left, the control on the right. */
+function FormRow({
+  label,
+  hint,
+  htmlFor,
+  labelId,
+  children,
+}: {
+  label: string
+  hint?: string
+  htmlFor?: string
+  labelId?: string
+  children: React.ReactNode
+}) {
+  return (
+    <div className="grid gap-2.5 px-4 py-4 sm:grid-cols-[168px_minmax(0,1fr)] sm:gap-6">
+      <div className="min-w-0 sm:pt-[6px]">
+        {htmlFor ? (
+          <label htmlFor={htmlFor} className="block text-[13px] font-medium leading-[20px] text-zinc-100">
+            {label}
+          </label>
+        ) : (
+          <p id={labelId} className="text-[13px] font-medium leading-[20px] text-zinc-100">
+            {label}
+          </p>
+        )}
+        {hint && <p className="mt-0.5 text-[12px] leading-[17px] text-faint [text-wrap:pretty]">{hint}</p>}
+      </div>
+      <div className="min-w-0">{children}</div>
+    </div>
+  )
+}
+
+/**
+ * The regions with what this deployment serves as open (GET /api/regions), so
+ * a region opened on the running deployment can be chosen without a new build.
+ * Until the answer arrives, or if it never does, the build's own list stands.
+ * The answer can only open a region this build lists; creating the project is
+ * checked again on the server either way.
+ */
+function useRegionsAsServed(): readonly CloudRegion[] {
+  const [regions, setRegions] = useState<readonly CloudRegion[]>(CLOUD_REGIONS)
+  useEffect(() => {
+    let cancelled = false
+    fetch('/api/regions')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((body: { regions?: { id?: unknown; open?: unknown }[] } | null) => {
+        if (cancelled || !Array.isArray(body?.regions)) return
+        const open = new Set(body.regions.filter((r) => r?.open === true).map((r) => r.id))
+        setRegions(CLOUD_REGIONS.map((r) => ({ ...r, open: r.open || open.has(r.id) })))
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [])
+  return regions
+}
+
+/**
+ * The five regions as one list. Native radio inputs underneath: Tab reaches
+ * the group, the arrow keys move between the open regions, and the regions
+ * that are not open are disabled, so they are skipped and announced as such.
+ */
+function RegionPicker({
+  value,
+  onChange,
+  disabled,
+  labelledBy,
+}: {
+  value: CloudRegionId
+  onChange: (region: CloudRegionId) => void
+  disabled?: boolean
+  labelledBy: string
+}) {
+  const regions = useRegionsAsServed()
+  return (
+    <div
+      role="radiogroup"
+      aria-labelledby={labelledBy}
+      className={`divide-y divide-white/[0.06] overflow-hidden ${R_CONTROL} border ${EDGE} ${WELL}`}
+    >
+      {regions.map((r) => {
+        const selected = r.id === value
+        return (
+          <label
+            key={r.id}
+            className={`flex items-center gap-3 px-3 py-2.5 transition-colors duration-150 has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-inset has-[:focus-visible]:ring-violet-300/60 ${
+              r.open ? 'cursor-pointer hover:bg-white/[0.025]' : 'cursor-not-allowed'
+            } ${selected ? 'bg-white/[0.035]' : ''}`}
+          >
+            <input
+              type="radio"
+              name="project-region"
+              value={r.id}
+              checked={selected}
+              disabled={!r.open || disabled}
+              onChange={() => onChange(r.id)}
+              className="sr-only"
+            />
+            <span
+              aria-hidden
+              className={`flex h-[22px] w-[32px] shrink-0 items-center justify-center rounded-[5px] border ${EDGE} font-mono text-[10.5px] font-medium tracking-[0.04em] ${
+                r.open ? 'text-zinc-300' : 'text-zinc-600'
+              }`}
+            >
+              {r.countryCode}
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className={`block truncate text-[13px] font-medium leading-[18px] ${r.open ? 'text-zinc-100' : 'text-zinc-500'}`}>
+                {r.city}
+              </span>
+              <span className={`block truncate font-mono text-[11.5px] leading-[16px] ${r.open ? 'text-faint' : 'text-zinc-600'}`}>
+                {r.area} · {r.id}
+              </span>
+            </span>
+            {r.open ? (
+              <span
+                aria-hidden
+                className={`flex h-[16px] w-[16px] shrink-0 items-center justify-center rounded-full border transition-colors duration-150 ${
+                  selected ? 'border-violet-300 bg-violet-400/20' : 'border-white/20'
+                }`}
+              >
+                {selected && <span className="h-[6px] w-[6px] rounded-full bg-violet-200" />}
+              </span>
+            ) : (
+              <span className="shrink-0 text-[11.5px] text-faint">Not open yet</span>
+            )}
+          </label>
+        )
+      })}
+    </div>
   )
 }
 
 // ─── Project card ─────────────────────────────────────────────────────────────
 
-function Monogram({ name }: { name: string }) {
+/**
+ * A project's mark: its initial on one of a few muted tints, chosen from the
+ * id so a project keeps its colour wherever it appears and a grid of them can
+ * be told apart at a glance. Identity only; status stays with the dot.
+ */
+const MONOGRAM_TINTS = [
+  'border-violet-300/20 bg-violet-400/[0.09] text-violet-200',
+  'border-sky-300/20 bg-sky-400/[0.08] text-sky-200',
+  'border-emerald-300/20 bg-emerald-400/[0.08] text-emerald-200',
+  'border-amber-300/20 bg-amber-400/[0.08] text-amber-200',
+  'border-rose-300/20 bg-rose-400/[0.08] text-rose-200',
+  'border-teal-300/20 bg-teal-400/[0.08] text-teal-200',
+] as const
+
+function tintOf(id: string): string {
+  let h = 0
+  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0
+  return MONOGRAM_TINTS[h % MONOGRAM_TINTS.length]
+}
+
+function Monogram({ id, name }: { id: string; name: string }) {
   const letter = name.trim().charAt(0).toUpperCase() || '·'
   return (
     <span
       aria-hidden
-      className="flex h-[32px] w-[32px] flex-shrink-0 items-center justify-center rounded-[8px] border border-white/[0.09] bg-[linear-gradient(160deg,rgba(255,255,255,0.07),rgba(255,255,255,0.015))] text-[13px] font-semibold text-zinc-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]"
+      className={`flex h-[32px] w-[32px] flex-shrink-0 items-center justify-center rounded-[8px] border text-[13px] font-semibold shadow-[inset_0_1px_0_rgba(255,255,255,0.06)] ${tintOf(id)}`}
     >
       {letter}
     </span>
@@ -663,7 +855,7 @@ function ProjectCard({
       />
 
       <div className="flex items-start gap-3">
-        <Monogram name={project.name} />
+        <Monogram id={project.id} name={project.name} />
         <div className="min-w-0 flex-1 pt-[1px]">
           {renaming ? (
             <input
@@ -685,8 +877,9 @@ function ProjectCard({
               {project.name}
             </h3>
           )}
-          <p className="truncate text-[12px] leading-[16px] text-zinc-500">
-            {CLOUD_CONTROL_PLANE ? 'AWS ap-south-1' : 'Self-hosted'}
+          <p className="truncate text-[12px] leading-[16px] text-faint">
+            {/* The region holding the project's data; null reads as the home region (lib/regions.ts). */}
+            {CLOUD_CONTROL_PLANE ? regionLabel(project.region) : 'Self-hosted'}
           </p>
         </div>
         {/* Always visible: a hover-only trigger would also hide its own open
@@ -705,21 +898,18 @@ function ProjectCard({
 
       <p
         className={`mt-3 line-clamp-2 min-h-[40px] text-[13px] leading-[20px] [text-wrap:pretty] ${
-          description ? 'text-zinc-400' : 'text-zinc-600'
+          description ? 'text-zinc-400' : 'text-faint'
         }`}
       >
         {description || 'No description yet.'}
       </p>
 
-      <div className={`mt-auto flex items-center gap-2 border-t ${RULE} pt-3 text-[12px] leading-[16px] text-zinc-500`}>
+      <div className={`mt-auto flex items-center gap-3 border-t ${RULE} pt-3 text-[12px] leading-[16px] text-faint`}>
         <StatusDot tone={status.tone} label={status.label} pulse={status.pulse} />
         {typeof tables === 'number' && (
-          <>
-            <span aria-hidden className="text-zinc-700">·</span>
-            <span className="tabular-nums">
-              {tables} {tables === 1 ? 'table' : 'tables'}
-            </span>
-          </>
+          <span className="tabular-nums">
+            {tables} {tables === 1 ? 'table' : 'tables'}
+          </span>
         )}
         {project.updatedAt && (
           <span className="ml-auto tabular-nums" title={new Date(project.updatedAt).toLocaleString()}>

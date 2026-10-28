@@ -18,12 +18,19 @@ export const dynamic = 'force-dynamic'
  * clicking through without reading ends up with.
  */
 
+import type { Metadata } from 'next'
 import { cookies } from 'next/headers'
 import { redirect } from 'next/navigation'
 import { prisma } from '@/lib/db/prisma'
 import { verifyToken } from '@/lib/auth/jwt'
+import { getProjectResolver } from '@/lib/edition'
 import { CONFIRM_TYP, REQ_TYP, signAuthzToken, verifyAuthzToken } from '@/lib/mcp/oauth-authz'
 import { SCOPE_WRITE } from '@/lib/mcp/oauth'
+
+export const metadata: Metadata = {
+  title: 'Authorize an agent',
+  robots: { index: false, follow: false },
+}
 
 function Shell({ title, children }: { title: string; children: React.ReactNode }) {
   return (
@@ -70,13 +77,20 @@ export default async function McpAuthorizePage(
     redirect(`/auth/login?redirect=${encodeURIComponent(`/mcp/authorize?req=${reqToken}`)}`)
   }
 
+  // The edition resolver, not a raw userId filter: a self-host bootstrap
+  // project has Project.userId = NULL, so the owner filter showed the operator
+  // "No projects yet" on the one page that mints the authorization code.
   const [client, projects] = await Promise.all([
     prisma.mcpOAuthClient.findUnique({ where: { clientId: req.client_id } }),
-    prisma.project.findMany({
-      where: { userId: uid! },
-      select: { id: true, name: true },
-      orderBy: { createdAt: 'desc' },
-    }),
+    getProjectResolver()
+      .accessibleProjectsWhere(uid!)
+      .then(where =>
+        prisma.project.findMany({
+          where,
+          select: { id: true, name: true },
+          orderBy: { createdAt: 'desc' },
+        }),
+      ),
   ])
 
   if (!client) {

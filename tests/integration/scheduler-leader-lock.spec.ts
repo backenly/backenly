@@ -10,7 +10,7 @@
  * its connection, and dies with it), so mocking would prove nothing.
  */
 import { Client } from 'pg'
-import { SchedulerLeadership, SCHEDULER_LOCK_KEY, leaderOnly } from '@/lib/scheduler/leader'
+import { SchedulerLeadership, SCHEDULER_LOCK_KEY, leaderOnly, schedulerLockKey } from '@/lib/scheduler/leader'
 
 const CONN = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL || ''
 const FAST = { connectionString: CONN, retryMs: 50, heartbeatMs: 50, queryTimeoutMs: 5_000, log: () => {} }
@@ -23,21 +23,24 @@ async function until(cond: () => boolean, ms = 5_000): Promise<void> {
   }
 }
 
-/** Sessions that hold the scheduler lock right now, as the database sees it. */
-async function holders(): Promise<number> {
+/** Sessions that hold a scheduler lock right now, as the database sees it. */
+async function holdersOf(key: readonly [number, number]): Promise<number> {
   const c = new Client({ connectionString: CONN })
   await c.connect()
   try {
     const r = await c.query<{ n: number }>(
       `SELECT count(*)::int AS n FROM pg_locks
         WHERE locktype = 'advisory' AND granted AND classid = $1::int::oid AND objid = $2::int::oid AND objsubid = 2`,
-      [SCHEDULER_LOCK_KEY[0], SCHEDULER_LOCK_KEY[1]],
+      [key[0], key[1]],
     )
     return r.rows[0].n
   } finally {
     await c.end()
   }
 }
+
+/** The home region's scheduler lock. */
+const holders = () => holdersOf(SCHEDULER_LOCK_KEY)
 
 describe('scheduler leader lock', () => {
   const started: SchedulerLeadership[] = []
@@ -117,6 +120,33 @@ describe('scheduler leader lock', () => {
     await a.stop()
     await new Promise((r) => setTimeout(r, 200))
     expect(a.isLeader()).toBe(false)
+    expect(await holders()).toBe(0)
+  })
+
+  // Every region's processes take the lock on the same platform database. With
+  // one key for all of them, a Virginia worker that won it stopped Mumbai's
+  // jobs, and Mumbai holding it left Virginia's projects unscheduled.
+  it('gives every region a leader of its own, so one region never stops another', async () => {
+    const mumbai = make()
+    const virginia = new SchedulerLeadership({ ...FAST, region: 'us-east-1' })
+    started.push(virginia)
+    mumbai.start()
+    virginia.start()
+    await until(() => mumbai.isLeader() && virginia.isLeader())
+    expect(await holdersOf(schedulerLockKey('ap-south-1'))).toBe(1)
+    expect(await holdersOf(schedulerLockKey('us-east-1'))).toBe(1)
+  })
+
+  it('still makes exactly one leader within a region', async () => {
+    const a = new SchedulerLeadership({ ...FAST, region: 'us-east-1' })
+    const b = new SchedulerLeadership({ ...FAST, region: 'us-east-1' })
+    started.push(a, b)
+    a.start()
+    b.start()
+    await until(() => a.isLeader() || b.isLeader())
+    await new Promise((r) => setTimeout(r, 300))
+    expect([a.isLeader(), b.isLeader()].filter(Boolean)).toHaveLength(1)
+    expect(await holdersOf(schedulerLockKey('us-east-1'))).toBe(1)
     expect(await holders()).toBe(0)
   })
 })

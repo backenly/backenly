@@ -31,6 +31,13 @@
  * 4. VIOLET IS AN ACCENT, NOT A FILL. Focus rings, links in prose, the lit
  *    canvas edge. Status is emerald / amber / rose, as a dot beside neutral
  *    text, never color alone.
+ *
+ * 5. TEXT READS AT 4.5:1 OR BETTER. Three steps: zinc-50…200 for what the
+ *    page is about, zinc-300/400 for supporting copy, and `text-faint`
+ *    (#8b8b94, 5.8:1 on the canvas) for meta, timestamps and helper text.
+ *    zinc-500 (4.0:1) and zinc-600 (2.5:1) fail WCAG AA at console sizes, and
+ *    that grey-on-grey is what made the console read as washed out. They stay
+ *    fine for icons beside a label and for hairlines, never for words.
  */
 
 /* ── Surface ladder, dark → light ────────────────────────────────────────── */
@@ -94,7 +101,9 @@ export const T_BODY = 'text-[13px] leading-[20px] text-zinc-300'
 /** Secondary copy under a heading. */
 export const T_MUTED = 'text-[13px] leading-[20px] text-zinc-400'
 /** Meta, captions, table column names, helper text. */
-export const T_META = 'text-[12px] leading-[16px] text-zinc-500'
+export const T_META = 'text-[12px] leading-[16px] text-faint'
+/** The faint text colour alone (rule 5), for meta set at another size. */
+export const TEXT_FAINT = 'text-faint'
 /** Machine text: code, ids, keys, endpoints. */
 export const T_CODE = 'font-mono text-[12px] leading-[18px]'
 /** A number that sits in a column or updates in place. */

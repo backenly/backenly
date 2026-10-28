@@ -57,9 +57,16 @@ function validateValue(value: string): void {
 
 // ─── Writes ────────────────────────────────────────────────────────────────
 
+/** One governed change each, so a variable set or removed is in the project's history (lib/changes/resources/env.ts). */
+const governed = async <T>(projectId: string, title: string, fn: () => Promise<T>) => (await import('@/lib/changes/ledger')).governedChange(projectId, title, fn)
+
 export async function setEnvVar(opts: SetEnvVarOptions): Promise<EnvVarSummary> {
   validateKey(opts.key)
   validateValue(opts.value)
+  return governed(opts.projectId, `Set environment variable ${opts.key}`, () => writeEnvVar(opts))
+}
+
+async function writeEnvVar(opts: SetEnvVarOptions): Promise<EnvVarSummary> {
 
   const enc = encryptValue(opts.value)
 
@@ -100,6 +107,10 @@ export async function setEnvVar(opts: SetEnvVarOptions): Promise<EnvVarSummary> 
 
 export async function deleteEnvVar(projectId: string, key: string, userId: string): Promise<boolean> {
   validateKey(key)
+  return governed(projectId, `Delete environment variable ${key}`, () => removeEnvVar(projectId, key, userId))
+}
+
+async function removeEnvVar(projectId: string, key: string, userId: string): Promise<boolean> {
   const existing = await prisma.projectEnvVar.findUnique({
     where: { projectId_key: { projectId, key } },
   })

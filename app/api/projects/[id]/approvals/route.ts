@@ -14,7 +14,7 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { withProjectValidation } from '@/lib/middleware/projectValidation'
-import { getPendingApprovals, applyApproval, dismissFinding, rollbackFix } from '@/lib/ai/approval-manager'
+import { getPendingApprovals, applyApproval, dismissFinding } from '@/lib/ai/approval-manager'
 
 export async function GET(
   request: NextRequest,

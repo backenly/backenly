@@ -36,10 +36,18 @@
  * `SELECT ... FROM information_schema.columns`. Only statements that can change
  * something are kept.
  *
- * Bound parameters are recorded alongside the statement text because a
- * parameterised DDL is unreadable without them, and every governed fix action
- * binds identifiers and thresholds rather than user data. Both are bounded in
- * size — an audit row is a record, not a log sink.
+ * Bound parameters are captured alongside the statement text because a
+ * parameterised DDL is unreadable without them. They are not only identifiers
+ * and thresholds: an approved held action binds its caller's own values
+ * (BLOCK_USER binds the end user's email). So each record decides what it keeps
+ * of them (recordedStatements in lib/data-plane/residency.ts): the bound values
+ * are kept for a home project's repairs, and dropped for a project kept in
+ * another region and for a held action, whose records keep the statement text
+ * only. The recorder goes on each client a governed action's statements are
+ * sent from: the platform client, and the workspace client of the project's
+ * region (lib/data-plane/regional.ts), which for a home project is the home
+ * workspace client rather than the platform one. Text and values are both
+ * bounded in size: an audit row is a record, not a log sink.
  */
 
 import { AsyncLocalStorage } from 'async_hooks'
@@ -53,6 +61,8 @@ export interface RecordedStatement {
 
 interface Scope {
   statements: RecordedStatement[]
+  /** Set when the capture that opened it returns: nothing joins or writes to it after that. */
+  closed: boolean
 }
 
 const storage = new AsyncLocalStorage<Scope>()
@@ -93,7 +103,7 @@ export async function withSqlCapture<T>(
   fn: () => Promise<T>,
 ): Promise<{ result: T; statements: RecordedStatement[] }> {
   const existing = storage.getStore()
-  if (existing) {
+  if (existing && !existing.closed) {
     // Already inside a capture: run in place and report what the whole scope has
     // accumulated so far. Opening a nested scope would hide the inner statements
     // from the outer audit row, which is the opposite of the point.
@@ -101,15 +111,30 @@ export async function withSqlCapture<T>(
     return { result, statements: existing.statements }
   }
 
-  const scope: Scope = { statements: [] }
-  const result = await storage.run(scope, fn)
-  return { result, statements: scope.statements }
+  const scope: Scope = { statements: [], closed: false }
+  try {
+    const result = await storage.run(scope, fn)
+    return { result, statements: scope.statements }
+  } finally {
+    // Work it started that is still running (a timer, an unawaited promise)
+    // still carries this scope, and must not add to a list already reported.
+    scope.closed = true
+  }
+}
+
+/**
+ * Run `fn` outside any capture: for work that is its own actor, whatever
+ * scheduled it (lib/changes/context.ts outsideAnyChange). Its statements are
+ * captured by its own change.
+ */
+export function outsideSqlCapture<T>(fn: () => T): T {
+  return storage.exit(fn)
 }
 
 /** Record one statement against the active scope. No-op outside a capture. */
 export function noteStatement(sql: string, params?: unknown[]): void {
   const scope = storage.getStore()
-  if (!scope) return
+  if (!scope || scope.closed) return
   if (scope.statements.length >= MAX_STATEMENTS) return
   if (typeof sql !== 'string' || !sql.trim()) return
   if (!isMutatingStatement(sql)) return
@@ -124,22 +149,32 @@ export function noteStatement(sql: string, params?: unknown[]): void {
   scope.statements.push(entry)
 }
 
-/** True when a capture scope is active. Exported for tests. */
+/** True when a capture scope is active and still open. Exported for tests. */
 export function isCapturing(): boolean {
-  return storage.getStore() !== undefined
+  const scope = storage.getStore()
+  return scope !== undefined && !scope.closed
 }
 
 // ── Installation ─────────────────────────────────────────────────────────────
 
-let installed = false
+/**
+ * Every client the middleware is on. Per client, not once per process: a
+ * project's workspace SQL runs on its region's workspace client, which is not
+ * the platform client even in the home region (lib/data-plane/regional.ts), and
+ * a recorder on the platform client alone would capture nothing of its changes.
+ */
+let installedOn = new WeakSet<object>()
 
 /**
- * Attach the recorder to the Prisma singleton.
+ * Attach the recorder to a Prisma client: the platform client, or the workspace
+ * client of a project's region (lib/data-plane/regional.ts).
  *
- * Idempotent, and installed lazily by the auto-fix engine rather than at module
- * load: a middleware on the shared client is a global side effect, and it should
- * exist because something is about to capture, not because a module was
- * imported.
+ * Idempotent per client, and installed lazily, by the auto-fix engine and by a
+ * governed change (lib/changes/ledger.ts), rather than at module load: a
+ * middleware on a shared client is a global side effect, and it should exist
+ * because something is about to capture, not because a module was imported. A
+ * client created later, as a workspace client is after disconnectRegionalClients,
+ * gets it at the next install.
  *
  * `$use` mutates the existing client in place. `$extends` would return a new one
  * and every `import { prisma }` in the codebase would keep the un-extended
@@ -148,8 +183,8 @@ let installed = false
 export function installSqlRecorder(client: {
   $use?: (mw: (params: any, next: (p: any) => Promise<any>) => Promise<any>) => void
 }): void {
-  if (installed || typeof client.$use !== 'function') return
-  installed = true
+  if (typeof client.$use !== 'function' || installedOn.has(client)) return
+  installedOn.add(client)
 
   client.$use(async (params: any, next: (p: any) => Promise<any>) => {
     // Raw operations arrive as action 'executeRaw' / 'queryRaw' with no model,
@@ -173,5 +208,5 @@ export function installSqlRecorder(client: {
 
 /** Reset for tests. Never call in production — the middleware cannot be removed. */
 export function __resetInstalledForTests(): void {
-  installed = false
+  installedOn = new WeakSet<object>()
 }

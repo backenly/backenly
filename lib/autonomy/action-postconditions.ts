@@ -21,7 +21,7 @@
  * go stale instead of running under the new one.
  */
 
-import { prisma } from '@/lib/db/prisma'
+import { workspaceRawClient, type WorkspaceRawClient } from '@/lib/data-plane/regional'
 import { resolveWorkspaceSchema } from '@/lib/services/workspace-pool'
 import { typeFamily } from './intent-conformance'
 
@@ -29,13 +29,17 @@ export const POSTCONDITION_REGISTRY_VERSION = 'v1'
 
 export type Postcondition = 'confirmed' | 'refuted' | 'error'
 
-type Verifier = (projectId: string, params: Record<string, unknown>) => Promise<'confirmed' | 'refuted'>
+type Verifier = (
+  db: WorkspaceRawClient,
+  projectId: string,
+  params: Record<string, unknown>,
+) => Promise<'confirmed' | 'refuted'>
 
 const VERIFIERS: Record<string, Verifier> = {
   /** The column exists on the table, in the requested type family. */
-  ADD_COLUMN: async (projectId, params) => {
+  ADD_COLUMN: async (db, projectId, params) => {
     const schema = await resolveWorkspaceSchema(projectId)
-    const rows = await prisma.$queryRawUnsafe<Array<{ data_type: string }>>(
+    const rows = await db.$queryRawUnsafe<Array<{ data_type: string }>>(
       `SELECT data_type FROM information_schema.columns
         WHERE table_schema = $1 AND table_name = $2 AND column_name = $3`,
       schema,
@@ -58,8 +62,11 @@ export async function verifyPostcondition(
 ): Promise<Postcondition> {
   const verify = VERIFIERS[action]
   if (!verify) return 'error'
+  // The database in the project's region, resolved outside the catch below: a
+  // region this process cannot reach is not a verdict on the action.
+  const db = await workspaceRawClient(projectId)
   try {
-    return await verify(projectId, params)
+    return await verify(db, projectId, params)
   } catch {
     return 'error'
   }

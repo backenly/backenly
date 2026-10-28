@@ -43,7 +43,10 @@ coding agent you already use (Claude Code, Cursor, Codex) over an MCP server.
 Backenly derives the data model, generates the endpoints, writes the policies,
 applies the change, and then **verifies it against the live runtime**. A
 continuous autonomy loop keeps watching after that, repairing drift, missing
-indexes, broken triggers, and RLS gaps on its own.
+indexes, broken triggers, and RLS gaps on its own. When a table starts doing
+two jobs, Backenly moves the second into a table of its own once you approve,
+while your apps keep working, and every change can be undone from one History
+without rewinding your data.
 
 The distinction that matters: Backenly does not just *generate* backend
 resources, it *manages backend change safely*. Every mutation, whether it comes
@@ -83,6 +86,8 @@ are one command away.
 | **Functions** | Serverless route modules, validated before they ship and self-healed if they break |
 | **Integrations** | One `ctx.integrations.<id>.request()` surface for third-party APIs |
 | **Autonomy** | MAPE-K loop that observes, detects, proposes, applies, and verifies repairs |
+| **Restructuring** | A table doing two jobs is split in two after you approve: rehearsed on a copy, kept in step while apps keep working, undoable |
+| **History** | One entry per change to schema, auth, storage, functions, webhooks, env, keys, and integrations; undo one or roll back to a point, app data never rewound |
 | **Monitoring** | Request logs with stability and reliability scoring |
 | **Branches** | Preview branches with their own sequences, plus diff and merge |
 | **Deploy** | Governed rollout with restore points and an audit ledger |
@@ -366,7 +371,7 @@ Those scripts talk to PostgreSQL through one explicit mechanism, chosen by
 | `BACKENLY_DB_ADMIN` | how it connects |
 | --- | --- |
 | `docker` (default) | `psql` inside the Compose `postgres` service |
-| `url` | `psql "$BACKENLY_ADMIN_DATABASE_URL"` — any reachable database |
+| `url` | `psql -d "$BACKENLY_ADMIN_DATABASE_URL"` — any reachable database |
 | `local` | `sudo -u postgres psql` — a cluster installed on this host |
 
 That order is not arbitrary and cannot be collapsed into one command. The first

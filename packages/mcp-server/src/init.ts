@@ -2,12 +2,14 @@
  * `npx @backenly/mcp-server init`
  *
  * Interactive one-time setup. Walks the user through:
- *   1. Pasting their MCP API key (from backenly.com/app/projects/<id>/mcp).
+ *   1. Pasting their MCP API key (from backenly.com/app/projects/<id>/connect).
  *   2. (Optional) Pinning an endpoint other than https://backenly.com.
  *   3. Writing ~/.backenly/mcp.json so the server runs without env vars.
  *   4. Verifying the key works by fetching the manifest.
- *   5. Printing copy-paste config snippets for Claude Code, Cursor, Cline,
- *      and Claude Desktop.
+ *   5. Printing the real wiring step per host: the `claude mcp add` /
+ *      `codex mcp add` commands for Claude Code and Codex (neither reads a
+ *      hand-written mcp.json), and copy-paste JSON for Cursor, Cline and
+ *      Claude Desktop.
  *
  * The user can also pass --api-key flag to skip the prompt, useful in CI /
  * provisioning scripts.
@@ -99,16 +101,27 @@ export async function runInit(flags: InitFlags) {
 function write(s: string) { stdout.write(s) }
 
 function printHostSnippets() {
-  const claudeCode = join(homedir(), '.claude', 'mcp.json')
   const cursor = join(homedir(), '.cursor', 'mcp.json')
 
   write('\n  Add Backenly to your MCP host:\n')
   write('  ──────────────────────────────\n')
 
-  write(`\n  ▸ Claude Code  (${claudeCode}):\n\n`)
-  write(snippetMcpJson())
+  // Claude Code and Codex do NOT read a hand-written mcp.json — their CLIs
+  // register servers (Claude Code: ~/.claude.json via `claude mcp add`;
+  // Codex: ~/.codex/config.toml via `codex mcp add`). This used to print a
+  // ~/.claude/mcp.json path Claude Code never reads, and no Codex step at
+  // all — both users ended at an empty /mcp list.
+  write('\n  ▸ Claude Code — run this in a terminal, then start a new session:\n\n')
+  write('    claude mcp add backenly -- npx -y @backenly/mcp-server\n')
 
-  write(`\n\n  ▸ Cursor  (${cursor}):\n\n`)
+  write('\n  ▸ Codex — run this in a terminal, then relaunch Codex:\n\n')
+  write('    codex mcp add backenly -- npx -y @backenly/mcp-server\n')
+  write('\n    (older Codex builds: add this to ~/.codex/config.toml)\n\n')
+  write('    [mcp_servers.backenly]\n')
+  write('    command = "npx"\n')
+  write('    args = ["-y", "@backenly/mcp-server"]\n')
+
+  write(`\n  ▸ Cursor  (${cursor}):\n\n`)
   write(snippetMcpJson())
 
   write(`\n\n  ▸ Cline  (mcp_settings.json):\n\n`)

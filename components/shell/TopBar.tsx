@@ -26,6 +26,7 @@ import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
 import { getProjects, type Project } from '@/lib/api/projects'
 import { BUTTON_BASE, BUTTON_VARIANTS, Kbd, StatusDot } from '@/components/inspector/kit'
 import { FOCUS, R_CONTROL } from '@/components/console/tokens'
+import { HOME_REGION, regionLabel } from '@/lib/regions'
 import { useAgentConnection } from '@/lib/hooks/useAgentConnection'
 import {
   AccountMenu,
@@ -100,8 +101,16 @@ export function TopBar() {
         const res = await fetch(`/api/projects/${projectId}/health`, { credentials: 'include' })
         if (!res.ok) return
         const j = await res.json()
-        const findings = j.data?.findings ?? []
-        const pending = findings.filter((f: any) => f.status === 'pending_approval').length
+        // Everything that waits on the user: findings the loop is holding,
+        // calls their coding agent parked for approval, and architecture
+        // changes Backenly prepared. This counted only the held findings, and
+        // from the 50-row preview, so a parked deploy or drop left the inbox
+        // dark until it expired (AUT-08).
+        const held = typeof j.data?.needsAttention === 'number'
+          ? j.data.needsAttention
+          : (j.data?.findings ?? []).filter((f: any) => f.status === 'pending_approval').length
+        const count = (n: unknown) => (typeof n === 'number' ? n : 0)
+        const pending = held + count(j.data?.agentApprovalsPending) + count(j.data?.architectureRequestsPending)
         if (!cancelled) setPendingReview(pending)
       } catch {
         /* silent */
@@ -135,7 +144,7 @@ export function TopBar() {
           onClick={() => setProjectMenu((o) => !o)}
           aria-haspopup="menu"
           aria-expanded={projectMenu}
-          className={`flex h-[32px] min-w-0 max-w-[160px] items-center gap-2 ${R_CONTROL} px-2 transition-colors hover:bg-white/[0.05] sm:max-w-[240px] ${FOCUS}`}
+          className={`flex h-[32px] min-w-0 max-w-[132px] items-center gap-2 ${R_CONTROL} px-2 transition-colors hover:bg-white/[0.05] sm:max-w-[240px] ${FOCUS}`}
         >
           <span className={`h-[7px] w-[7px] flex-shrink-0 rounded-full ${STATUS_DOT[status]}`} aria-hidden />
           <span className="truncate text-[13px] font-medium text-zinc-100">{currentProject?.name ?? 'Project'}</span>
@@ -145,7 +154,7 @@ export function TopBar() {
         <AnimatePresence>
           {projectMenu && (
             <MenuPanel width="w-[300px]">
-              <p className="px-2.5 pb-1 pt-1.5 text-[12px] font-medium text-zinc-500">Projects</p>
+              <p className="px-2.5 pb-1 pt-1.5 text-[12px] font-medium text-faint">Projects</p>
               <div className="max-h-[320px] overflow-y-auto">
                 {projects.map((p) => {
                   const active = p.id === projectId
@@ -161,7 +170,7 @@ export function TopBar() {
                         active ? (
                           <Check className="h-4 w-4 flex-shrink-0 text-zinc-200" strokeWidth={2} />
                         ) : (
-                          <span className="text-[12px] text-zinc-600">{STATUS_LABEL[s]}</span>
+                          <span className="text-[12px] text-faint">{STATUS_LABEL[s]}</span>
                         )
                       }
                     >
@@ -191,7 +200,7 @@ export function TopBar() {
       <span
         title={
           CLOUD_CONTROL_PLANE
-            ? 'Backenly Cloud runs one environment, in AWS ap-south-1, today'
+            ? `Backenly Cloud runs one environment, in ${regionLabel(HOME_REGION)}, today`
             : 'This deployment runs one environment'
         }
         className="ml-1 hidden h-[22px] items-center gap-1.5 rounded-[5px] border border-white/[0.07] px-1.5 text-[12px] text-zinc-400 lg:inline-flex"

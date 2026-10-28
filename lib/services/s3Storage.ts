@@ -25,16 +25,22 @@
 
 import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand, HeadObjectCommand } from '@aws-sdk/client-s3'
 import { UploadRejectedError, assertFileAllowed, assertFileSize, uploadExtension } from '@/lib/storage/upload-policy'
+import { clampIsPublic, policyAllowsPublic } from '@/lib/storage/access-policy'
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner'
 import { prisma } from '@/lib/db'
 import crypto from 'crypto'
 import type { StorageService } from './storage'
 import { generateUniqueStoragePath, enforceStorageQuota as enforceStorageLifecycleQuota, generatePresignedUrlExpiry } from '@/lib/storage/storage-lifecycle'
 import { enforceStorageQuota as enforceStorageBillingQuota } from './quota-enforcement'
-import { getS3Client, getS3Config, s3ConfigurationProblem, checkS3Configuration } from './s3-config'
+import { getS3Client, getS3Config, s3ConfigurationProblem, checkS3Configuration, s3LocationFor, type S3Location } from './s3-config'
+import { projectRegion } from '@/lib/data-plane/regional'
 import { StorageUnavailableError } from '@/lib/storage/errors'
 import { projectRestriction } from '@/lib/usage/restrictions'
 import { signCdnUrl, signedCdnConfig } from '@/lib/storage/cdn'
+import { fileIdsNamed, forgetFileNames, keepFileNames, storedFileName, withFileName, withFileNames } from '@/lib/storage/file-names'
+
+/** Bucket writes are governed changes (lib/changes/ledger.ts); one made inside another change joins it. */
+const governed = async <T>(projectId: string, title: string, fn: () => Promise<T>) => (await import('@/lib/changes/ledger')).governedChange(projectId, title, fn)
 
 export class S3StorageService implements StorageService {
   private s3Client: S3Client
@@ -120,6 +126,16 @@ export class S3StorageService implements StorageService {
   }
 
   /**
+   * The bucket holding a project's files, and a client for it: this process's
+   * own for a project it serves, the project's region's otherwise. A project's
+   * files are never read from or written to another region's bucket
+   * (./s3-config.ts s3LocationFor).
+   */
+  private async at(projectId: string): Promise<S3Location> {
+    return s3LocationFor(await projectRegion(projectId))
+  }
+
+  /**
    * Generate S3 object key (path) for a file
    * Format: {projectId}/{bucketId}/{fileId}-{randomHash}.ext
    */
@@ -130,7 +146,12 @@ export class S3StorageService implements StorageService {
     return `${projectId}/${bucketId}/${fileId}-${hash}${ext}`
   }
 
+  /** One change in the project's history, whoever asks (lib/changes/resources/storage.ts). */
   async createBucket(name: string, projectId: string, isPublic: boolean = false) {
+    return governed(projectId, `Create bucket ${name}`, () => this.createBucketNow(name, projectId, isPublic))
+  }
+
+  private async createBucketNow(name: string, projectId: string, isPublic: boolean) {
     if (!projectId) {
       throw new Error('Project ID is required for tenant isolation')
     }
@@ -149,6 +170,10 @@ export class S3StorageService implements StorageService {
         name,
         projectId,
         isPublic,
+        // The enforced field. Serving (mayRead), upload clamping and the
+        // console all read accessPolicy; isPublic alone is a label. Deriving
+        // it here keeps the two in agreement from birth.
+        accessPolicy: isPublic ? 'public_read' : 'private',
       },
     })
 
@@ -182,12 +207,21 @@ export class S3StorageService implements StorageService {
       id: bucket.id,
       name: bucket.name,
       isPublic: bucket.isPublic,
+      // The enforced visibility. isPublic is a label; readers deciding what to
+      // DISPLAY or PROMISE must use this.
+      accessPolicy: bucket.accessPolicy,
       fileCount: bucket.files.length,
       totalSize: bucket.files.reduce((sum, file) => sum + file.size, BigInt(0)), // Keep as BigInt
     }))
   }
 
+  /** One change, files and all, so the history knows what the bucket held when it went. */
   async deleteBucket(bucketId: string, projectId: string) {
+    const row = await prisma.storageBucket.findUnique({ where: { id: bucketId }, select: { name: true } })
+    return governed(projectId, `Delete bucket ${row?.name ?? bucketId}`, () => this.deleteBucketNow(bucketId, projectId))
+  }
+
+  private async deleteBucketNow(bucketId: string, projectId: string) {
     if (!projectId) {
       throw new Error('Project ID is required for tenant isolation')
     }
@@ -210,10 +244,16 @@ export class S3StorageService implements StorageService {
       await this.deleteFile(file.id, projectId)
     }
 
+    // Every row of the bucket goes with it, deleted ones included, and so do
+    // the names the region kept for them.
+    const rows = await prisma.storageFile.findMany({ where: { bucketId }, select: { id: true } })
+
     // Delete bucket from database
+    // history: governed by deleteBucket
     await prisma.storageBucket.delete({
       where: { id: bucketId },
     })
+    await forgetFileNames(projectId, rows.map((r) => r.id))
 
     console.log(`[S3Storage] Deleted bucket: ${bucket.name}`)
   }
@@ -256,6 +296,7 @@ export class S3StorageService implements StorageService {
         name: true,
         projectId: true,
         isPublic: true,
+        accessPolicy: true,
         allowedMimeTypes: true,
         allowedExtensions: true,
         blockExecutables: true,
@@ -314,10 +355,12 @@ export class S3StorageService implements StorageService {
     assertFileSize(fileSize, { bucketMaxBytes: bucket.maxFileSizeBytes })
 
     // ============ OVERWRITE STRATEGY HANDLING ============
+    // A regional project's rows hold a stand-in for each name, so a name is
+    // looked up by its stand-in (lib/storage/file-names.ts).
     const existingFile = await prisma.storageFile.findFirst({
       where: {
         bucketId,
-        name: file.name,
+        name: await storedFileName(options.projectId, file.name),
         deletedAt: null,
       },
     })
@@ -358,7 +401,7 @@ export class S3StorageService implements StorageService {
             const exists = await prisma.storageFile.findFirst({
               where: {
                 bucketId,
-                name: candidateName,
+                name: await storedFileName(options.projectId, candidateName),
                 deletedAt: null,
               },
             })
@@ -381,11 +424,12 @@ export class S3StorageService implements StorageService {
       finalFileName
     )
 
-    // Upload to S3
+    // Upload to S3, in the bucket of the project's own region.
     try {
-      await this.s3Client.send(
+      const at = await this.at(options.projectId)
+      await at.client.send(
         new PutObjectCommand({
-          Bucket: this.bucket,
+          Bucket: at.bucket,
           Key: s3Key,
           Body: file.buffer,
           ContentType: detectedMimeType,
@@ -401,6 +445,11 @@ export class S3StorageService implements StorageService {
       console.error('[S3Storage] Upload failed:', error)
       throw new Error(`Failed to upload file to S3: ${error instanceof Error ? error.message : 'Unknown error'}`)
     }
+
+    // The names, kept in the project's region before its row exists when the
+    // project is kept there; the row then holds their stand-ins.
+    const fileRowId = crypto.randomUUID()
+    const stored = await keepFileNames(options.projectId, fileRowId, { name: finalFileName, originalName })
 
     // Create database record and update project storage usage
     const storageFile = await prisma.$transaction(async (tx) => {
@@ -426,14 +475,23 @@ export class S3StorageService implements StorageService {
 
       const newFile = await tx.storageFile.create({
         data: {
+          id: fileRowId,
           bucketId,
-          name: finalFileName,
-          originalName,
+          name: stored.name,
+          originalName: stored.originalName,
           version,
           path: s3Key, // S3 key is stored as path
           size: BigInt(file.buffer.length),
           mimeType: detectedMimeType || null,
-          isPublic: options?.isPublic ?? bucket.isPublic,
+          // The bucket's policy is the ceiling at WRITE time, exactly as in
+          // the local driver: a caller-supplied `true` must not plant a
+          // world-readable row in a private bucket and leave the serving
+          // path to quietly clean up after it. This driver is the one Cloud
+          // runs, and it was the only writer without the clamp.
+          isPublic: clampIsPublic(
+            options?.isPublic,
+            bucket.accessPolicy ?? (bucket.isPublic ? 'public_read' : 'private'),
+          ),
           projectId: options.projectId,
           uploadedBy: options?.uploadedBy || null,
         },
@@ -454,11 +512,11 @@ export class S3StorageService implements StorageService {
     // Generate URL
     const url = await this.getFileUrl(storageFile.id, options.projectId, 3600)
 
-    console.log(`[S3Storage] Uploaded: ${finalFileName} (${fileSize} bytes) to ${s3Key}`)
+    console.log(`[S3Storage] Uploaded: ${storageFile.name} (${fileSize} bytes) to ${s3Key}`)
 
     return {
       id: storageFile.id,
-      name: storageFile.name,
+      name: finalFileName,
       path: storageFile.path,
       url,
       size: storageFile.size, // Keep as BigInt
@@ -476,10 +534,13 @@ export class S3StorageService implements StorageService {
     }
     if (bucketId) where.bucketId = bucketId
     if (options?.search) {
-      where.name = { contains: options.search, mode: 'insensitive' }
+      // A regional project's names are in its region, so it is searched there.
+      const ids = await fileIdsNamed(projectId, options.search, 'contains')
+      if (ids) where.id = { in: ids }
+      else where.name = { contains: options.search, mode: 'insensitive' }
     }
 
-    const files = await prisma.storageFile.findMany({
+    const rows = await prisma.storageFile.findMany({
       where,
       include: {
         bucket: {
@@ -492,6 +553,7 @@ export class S3StorageService implements StorageService {
       take: options?.limit || 100,
       skip: options?.offset || 0,
     })
+    const files = await withFileNames(projectId, rows)
 
     return Promise.all(
       files.map(async (file) => ({
@@ -500,11 +562,30 @@ export class S3StorageService implements StorageService {
         size: file.size, // Keep as BigInt
         mimeType: file.mimeType,
         isPublic: file.isPublic,
+        uploadedBy: file.uploadedBy ?? null,
         bucket: file.bucket.name,
         createdAt: file.createdAt,
         url: await this.getFileUrl(file.id, projectId, 3600),
       }))
     )
+  }
+
+  /**
+   * How many active files match — the same WHERE as listFiles. Counts the
+   * metadata DB, not S3, so it is cheap and identical across blob drivers.
+   */
+  async countFiles(bucketId: string | undefined, projectId: string, search?: string): Promise<number> {
+    if (!projectId) {
+      throw new Error('Project ID is required for tenant isolation')
+    }
+    const where: any = { projectId, deletedAt: null }
+    if (bucketId) where.bucketId = bucketId
+    if (search) {
+      const ids = await fileIdsNamed(projectId, search, 'contains')
+      if (ids) where.id = { in: ids }
+      else where.name = { contains: search, mode: 'insensitive' }
+    }
+    return prisma.storageFile.count({ where })
   }
 
   async getFile(fileId: string, projectId: string) {
@@ -523,9 +604,10 @@ export class S3StorageService implements StorageService {
     }
 
     try {
-      const response = await this.s3Client.send(
+      const at = await this.at(projectId)
+      const response = await at.client.send(
         new GetObjectCommand({
-          Bucket: this.bucket,
+          Bucket: at.bucket,
           Key: file.path,
         })
       )
@@ -536,7 +618,7 @@ export class S3StorageService implements StorageService {
         path: file.path,
         buffer,
         mimeType: file.mimeType,
-        name: file.name,
+        name: (await withFileName(projectId, file)).name,
       }
     } catch (error) {
       // NOT `return null`. See the local driver and lib/storage/errors.ts: the
@@ -557,6 +639,7 @@ export class S3StorageService implements StorageService {
 
     const file = await prisma.storageFile.findUnique({
       where: { id: fileId },
+      include: { bucket: { select: { accessPolicy: true } } },
     })
 
     if (!file || file.deletedAt) {
@@ -567,16 +650,26 @@ export class S3StorageService implements StorageService {
       throw new Error('File does not belong to this project')
     }
 
+    // The CDN fronts this process's own bucket only. A file kept in another
+    // region's bucket is handed out as a presigned URL from that bucket.
+    const at = await this.at(projectId)
+
     // ── Public files ─────────────────────────────────────────────────────────
     // A public file needs a permanent, auth-free URL. We must NOT hand out a raw
     // S3-endpoint URL: the shared bucket is PRIVATE (per-object presigned
     // access), so a direct `{endpoint}/{bucket}/{key}` URL returns 401. Only a
     // genuine CDN/public host (different from the S3 API endpoint) can serve the
     // object directly.
-    if (file.isPublic) {
+    //
+    // "Public" is the download route's rule (mayRead): the bucket's CURRENT
+    // policy must permit public objects AND the file must be marked public. The
+    // file's flag alone outlives a bucket tightened to private, and a permanent
+    // public URL for such a file is one the route refuses (or, via a public
+    // CDN host, one that serves what the owner made private).
+    if (policyAllowsPublic(file.bucket.accessPolicy) && file.isPublic) {
       // A SIGNED CDN serves nothing unsigned, so a public file's permanent URL
       // is the app route, which mints a fresh signed URL on every request.
-      const cdnBase = signedCdnConfig() ? null : this.publicCdnBase()
+      const cdnBase = !at.local || signedCdnConfig() ? null : this.publicCdnBase()
       if (cdnBase) {
         return `${cdnBase}/${file.path}`
       }
@@ -601,7 +694,7 @@ export class S3StorageService implements StorageService {
 
     // Served from the edge when a signed CDN fronts the bucket (lib/storage/cdn.ts):
     // the same short-lived grant, without the bucket's egress price.
-    const cdn = signedCdnConfig()
+    const cdn = at.local ? signedCdnConfig() : null
     if (cdn) {
       return signCdnUrl(file.path, generatePresignedUrlExpiry(expiresIn), cdn)
     }
@@ -610,13 +703,13 @@ export class S3StorageService implements StorageService {
     // ENFORCED: Time-limited URLs, no direct access
     // Maximum 24-hour expiry enforced
     const safeExpiry = generatePresignedUrlExpiry(expiresIn)
-    
+
     const command = new GetObjectCommand({
-      Bucket: this.bucket,
+      Bucket: at.bucket,
       Key: file.path,
     })
 
-    const url = await getSignedUrl(this.s3Client, command, {
+    const url = await getSignedUrl(at.client, command, {
       expiresIn: safeExpiry,
     })
 
@@ -636,7 +729,8 @@ export class S3StorageService implements StorageService {
     if (!file || file.deletedAt) throw new Error('File not found')
     if (file.projectId !== projectId) throw new Error('File does not belong to this project')
 
-    return getSignedUrl(this.s3Client, new GetObjectCommand({ Bucket: this.bucket, Key: file.path }), {
+    const at = await this.at(projectId)
+    return getSignedUrl(at.client, new GetObjectCommand({ Bucket: at.bucket, Key: file.path }), {
       expiresIn: generatePresignedUrlExpiry(ttlSeconds),
     })
   }
@@ -786,11 +880,13 @@ export class S3StorageService implements StorageService {
       throw new Error('File does not belong to this project')
     }
 
-    // Delete from S3
+    // Delete from S3. Outside the try: a region whose storage this process
+    // cannot reach keeps the row, rather than leaving its object behind.
+    const at = await this.at(projectId)
     try {
-      await this.s3Client.send(
+      await at.client.send(
         new DeleteObjectCommand({
-          Bucket: this.bucket,
+          Bucket: at.bucket,
           Key: file.path,
         })
       )
@@ -799,10 +895,11 @@ export class S3StorageService implements StorageService {
       console.error(`[S3Storage] Failed to delete from S3: ${file.path}`, error)
     }
 
-    // Delete database record
+    // Delete database record, and the names the region kept for it
     await prisma.storageFile.delete({
       where: { id: fileId },
     })
+    await forgetFileNames(projectId, [fileId])
   }
 
   /**
@@ -837,9 +934,11 @@ export class S3StorageService implements StorageService {
 
     for (const file of filesToDelete) {
       try {
-        await this.s3Client.send(
+        // Each file in its own project's region's bucket.
+        const at = await this.at(file.projectId)
+        await at.client.send(
           new DeleteObjectCommand({
-            Bucket: this.bucket,
+            Bucket: at.bucket,
             Key: file.path,
           })
         )
@@ -847,6 +946,7 @@ export class S3StorageService implements StorageService {
         await prisma.storageFile.delete({
           where: { id: file.id },
         })
+        await forgetFileNames(file.projectId, [file.id])
 
         successCount++
         console.log(`[S3Storage Cleanup] Permanently deleted: ${file.name}`)

@@ -14,8 +14,9 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server'
-import { runLifecycleCleanup, getStorageHealth } from '@/lib/storage/storage-lifecycle'
-import { getS3Client, getS3Config } from '@/lib/services/s3-config'
+import { runLifecycleCleanup, getStorageHealth, STORAGE_SOFT_DELETE_RETENTION_DAYS } from '@/lib/storage/storage-lifecycle'
+import { s3LocationFor } from '@/lib/services/s3-config'
+import { serviceRegion } from '@/lib/data-plane/serving'
 import { prisma } from '@/lib/db'
 import { getFleetScheduler } from '@/lib/edition'
 
@@ -62,14 +63,17 @@ export async function POST(request: NextRequest) {
     
     console.log('[Storage Cron] Starting automatic lifecycle cleanup...')
 
-    // Shared S3 client — region derived from endpoint (see s3-config.ts).
-    const s3Client = getS3Client()
-    const bucketName = getS3Config().bucket
-    
+    // This region's bucket, swept for this region's projects only: each region
+    // keeps its projects' files in its own bucket, which its own sweep cleans
+    // (safety rule 3 in lib/storage/storage-lifecycle.ts).
+    const region = serviceRegion()
+    const { client, bucket } = s3LocationFor(region)
+
     // Run cleanup
-    const result = await runLifecycleCleanup(s3Client, bucketName, {
-      softDeleteRetentionDays: 7,
+    const result = await runLifecycleCleanup(client, bucket, {
+      softDeleteRetentionDays: STORAGE_SOFT_DELETE_RETENTION_DAYS,
       dryRun: false,
+      region,
     })
     
     // Health for every project this sweep covers.

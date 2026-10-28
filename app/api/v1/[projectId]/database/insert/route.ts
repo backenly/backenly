@@ -2,10 +2,13 @@ export const dynamic = 'force-dynamic'
 
 import { NextRequest } from 'next/server'
 import { v1ApiMiddleware, requirePermission, requireCapability } from '@/lib/api/v1/middleware'
-import { createErrorResponse, createSuccessResponse, handleValidationError, ErrorCodes } from '@/lib/api/v1/errors'
+import { createErrorResponse, createSuccessResponse, handleValidationError, ErrorCodes, regionErrorResponse, dataRefusalResponse } from '@/lib/api/v1/errors'
 import { insertSchema } from '@/lib/api/v1/schemas'
+import { typedParams } from '@/lib/api/v1/typed-params'
 import { validateRequestBody } from '@/lib/validation/schemas'
 import { prisma } from '@/lib/db'
+import type { QueryContext } from '@/lib/db/query-errors'
+import { columnTypes } from '@/lib/mcp/runtime-db'
 import { executeWithUserContext } from '@/lib/services/workspace-rls'
 import { validateInsertPayload } from '@/lib/services/workspace-validator'
 import { recordedV1 } from '@/lib/traffic/recorded-v1'
@@ -17,6 +20,8 @@ import { projectRestriction, restrictionDetails, restrictionMessage } from '@/li
  */
 async function handlePOST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
   const params = await props.params;
+  // What was bound, so a refusal can name its column (lib/api/v1/data-errors.ts).
+  let refusal: QueryContext | undefined
   try {
     const middleware = await v1ApiMiddleware(request, params)
     if (middleware.response) {
@@ -65,6 +70,8 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
     // Build INSERT from data object
     const rows = Array.isArray(data) ? data : [data]
     const inserted: any[] = []
+    // Each value is cast to its column's type (lib/api/v1/typed-params.ts).
+    const types = await columnTypes(context.projectId, schemaName, tableName)
 
     for (const row of rows) {
       // Validate row fields against live table schema (types, lengths, required columns)
@@ -83,15 +90,17 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
       if (cols.length === 0) continue
 
       const colList = cols.map(c => `"${c}"`).join(', ')
-      const placeholders = cols.map((_, i) => `$${i + 1}`).join(', ')
-      const values = cols.map(c => row[c])
+      const bound = typedParams(types)
+      refusal = bound.context(tableName)
+      const placeholders = cols.map(c => bound.bind(c, row[c])).join(', ')
 
       const sql = `INSERT INTO "${schemaName}"."${tableName}" (${colList}) VALUES (${placeholders}) RETURNING *`
       const result = await executeWithUserContext(
+        context.projectId,
         context.endUserId ?? '',
         context.apiKey.serviceRole,
         sql,
-        values,
+        bound.values,
         context.endUserRole ?? 'user'
       )
       if (result[0]) inserted.push(result[0])
@@ -100,15 +109,11 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
     // Fire event triggers + AI functions + activity log + notifications (non-blocking)
     if (inserted.length > 0) {
       const { fireTriggers } = await import('@/lib/services/trigger-service')
-      const { fireAiFunctions } = await import('@/lib/services/ai-functions/executor')
       const { triggerActivityAndNotification } = await import('@/lib/ai/activity-log-engine')
       const actorId = context.apiKey?.userId
       for (const row of inserted) {
         fireTriggers(context.projectId, { type: 'insert', table: tableName, data: row }).catch(
           (err: any) => console.warn('[Triggers] fire failed (non-fatal):', err?.message)
-        )
-        fireAiFunctions(context.projectId, { type: 'insert', table: tableName, data: row }).catch(
-          (err: any) => console.warn('[AiFunctions] fire failed (non-fatal):', err?.message)
         )
         triggerActivityAndNotification(context.projectId, 'created', tableName, String(row.id || ''), actorId, row).catch(() => {})
 
@@ -127,8 +132,10 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
 
     return createSuccessResponse({ data: inserted.length === 1 ? inserted[0] : inserted })
   } catch (error: any) {
+    const refused = dataRefusalResponse(error, refusal)
+    if (refused) return refused
     console.error('Database insert error:', error)
-    return createErrorResponse(ErrorCodes.INTERNAL_ERROR, 'Failed to insert data', 500)
+    return regionErrorResponse(error) ?? createErrorResponse(ErrorCodes.INTERNAL_ERROR, 'Failed to insert data', 500)
   }
 }
 

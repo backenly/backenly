@@ -6,7 +6,8 @@
  * THE one autonomy surface (2026-07-18): what's waiting on you right now
  * (ReviewQueuePanel, folded in from the deleted /review-queue page), the mode,
  * what is always gated, a trust scoreboard, the changes Backenly made with
- * their way back, the recent-activity feed and restore points.
+ * their way back and the recent-activity feed. Restoring the state before any
+ * change is History.
  *
  * Rebuilt 2026-10-02 on the console kit: a document page with the standard
  * header, the mode as two radio cards, the scoreboard as one stat strip and
@@ -16,7 +17,7 @@
 
 import { useEffect, useState, useCallback } from 'react'
 import Link from 'next/link'
-import { Activity, AlertTriangle, CheckCircle2, Lock, RefreshCw, ShieldCheck, Undo2 } from 'lucide-react'
+import { Activity, AlertTriangle, CheckCircle2, Lock, RefreshCw, ShieldCheck } from 'lucide-react'
 import {
   EmptyState,
   KIT,
@@ -32,13 +33,15 @@ import {
   StatusDot,
   type StatusTone,
 } from '@/components/inspector/kit'
-import { EDGE, FOCUS, PAGE_GUTTER, PAGE_WIDTH, RULE, R_PANEL } from '@/components/console/tokens'
+import { EDGE, FOCUS, FOCUS_INSET, PAGE_GUTTER, PAGE_WIDTH, RULE, R_PANEL } from '@/components/console/tokens'
 import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
-import { VersionHistory } from '@/components/workspace/VersionHistory'
 import { ReviewQueuePanel } from '@/components/ReviewQueuePanel'
 import { DetectedFindingsPanel } from '@/components/DetectedFindingsPanel'
 import { AppliedChangesPanel, type AppliedChange } from '@/components/AppliedChangesPanel'
 import { MaintenanceLadderPanel } from '@/components/MaintenanceLadderPanel'
+import { ArchitectureChangesPanel } from '@/components/autonomy/ArchitectureChangesPanel'
+import { onArchitectureChange } from '@/components/autonomy/architecture-decisions'
+import type { ArchitectureChangeView } from '@/lib/evolution-engine/views'
 
 type Level = 'OFF' | 'CONSERVATIVE' | 'BALANCED' | 'AGGRESSIVE'
 
@@ -58,6 +61,9 @@ interface TrustReport {
   /** Optional on the wire so a response predating the field renders no panel
    *  rather than crashing the page. */
   appliedChanges?: AppliedChange[]
+  /** Approved architecture changes and what became of them. Optional for the
+   *  same reason: an older server sends none and the card does not render. */
+  architectureChanges?: ArchitectureChangeView[]
   /**
    * Whether the loop is really applying repairs.
    *
@@ -81,7 +87,7 @@ interface TrustReport {
 // rows render as Autopilot; a legacy OFF row lights neither card and shows
 // "Off" in the header until the owner picks a mode.
 const LEVELS: { id: Level; label: string; blurb: string }[] = [
-  { id: 'CONSERVATIVE', label: 'Review-only', blurb: 'Every change waits for your one-click approval.' },
+  { id: 'CONSERVATIVE', label: 'Review-only', blurb: 'Visible changes wait for your one-click approval. Silent additive repairs (indexes, API definitions) still apply.' },
   {
     id: 'AGGRESSIVE',
     label: 'Autopilot',
@@ -140,7 +146,7 @@ function Shell({ level, shadow, children }: { level?: Level; shadow?: boolean; c
         className="!px-0"
         title="Autonomy"
         meta={badge ? <StatusDot tone={badge.tone} label={badge.label} /> : undefined}
-        description="Your backend keeps working when nobody is asking. Choose what Backenly may change on its own and what always waits for you. The safety floor never moves, in any mode."
+        description="Choose what Backenly may fix on its own and what waits for your approval. Auth, destructive and irreversible changes always wait, in every mode."
       />
       {children}
     </div>
@@ -170,6 +176,8 @@ export function AutonomyGuardrailsSettings({ projectId }: { projectId: string })
   useEffect(() => {
     fetchReport()
   }, [fetchReport])
+  // An architecture change decided in the queue moves onto the card below.
+  useEffect(() => onArchitectureChange('card', () => { void fetchReport() }), [fetchReport])
 
   const setLevel = async (level: Level) => {
     if (!data || level === data.level || saving) return
@@ -294,7 +302,7 @@ export function AutonomyGuardrailsSettings({ projectId }: { projectId: string })
                 How much Backenly may do between your visits.
               </p>
             </div>
-            <p className="text-[12.5px] text-zinc-500">
+            <p className="text-[12.5px] text-faint">
               {data.plan} plan <span className="text-zinc-700">·</span> up to{' '}
               <span className="text-zinc-300">{capLabel}</span>
             </p>
@@ -333,19 +341,19 @@ export function AutonomyGuardrailsSettings({ projectId }: { projectId: string })
                       >
                         {active && <span className="h-[8px] w-[8px] rounded-full bg-zinc-100" />}
                       </span>
-                      <span className={`text-[14px] font-semibold tracking-[-0.01em] ${locked ? 'text-zinc-500' : 'text-zinc-50'}`}>
+                      <span className={`text-[14px] font-semibold tracking-[-0.01em] ${locked ? 'text-faint' : 'text-zinc-50'}`}>
                         {l.label}
                       </span>
                     </span>
                     {busy ? (
                       <Spinner className="h-3.5 w-3.5 text-zinc-400" />
                     ) : locked ? (
-                      <span className="inline-flex items-center gap-1 text-[12px] text-zinc-500">
+                      <span className="inline-flex items-center gap-1 text-[12px] text-faint">
                         <Lock className="h-3 w-3" /> {next?.name ?? 'Upgrade'}
                       </span>
                     ) : null}
                   </span>
-                  <span className={`mt-2 block pl-[26px] text-[13px] leading-[19px] ${locked ? 'text-zinc-600' : 'text-zinc-400'}`}>
+                  <span className={`mt-2 block pl-[26px] text-[13px] leading-[19px] ${locked ? 'text-faint' : 'text-zinc-400'}`}>
                     {l.blurb}
                   </span>
                 </button>
@@ -355,7 +363,7 @@ export function AutonomyGuardrailsSettings({ projectId }: { projectId: string })
 
           <div className={`flex items-start gap-2.5 border-t ${RULE} bg-white/[0.015] px-5 py-3 sm:px-6`}>
             <ShieldCheck className="mt-[2px] h-4 w-4 flex-shrink-0 text-zinc-500" strokeWidth={1.75} />
-            <p className="text-[12.5px] leading-[18px] text-zinc-500">
+            <p className="text-[12.5px] leading-[18px] text-faint">
               Auth, destructive and irreversible changes always require your approval. No mode can apply them on its
               own.
               {data.cap !== 'AGGRESSIVE' && CLOUD_CONTROL_PLANE && (
@@ -377,7 +385,7 @@ export function AutonomyGuardrailsSettings({ projectId }: { projectId: string })
             <h2 id="autonomy-score" className="text-[15px] font-semibold tracking-[-0.012em] text-zinc-50">
               Track record
             </h2>
-            <span className="text-[12.5px] tabular-nums text-zinc-500">Last {data.scoreboard.windowDays} days</span>
+            <span className="text-[12.5px] tabular-nums text-faint">Last {data.scoreboard.windowDays} days</span>
           </div>
           <StatStrip className="!grid-cols-3 lg:!grid-cols-none">
             <Stat label="Fixed on its own" value={data.scoreboard.autonomousFixes.toLocaleString()} />
@@ -393,6 +401,13 @@ export function AutonomyGuardrailsSettings({ projectId }: { projectId: string })
         {/* ── Changes Backenly made, each with its way back ─────────── */}
         <AppliedChangesPanel projectId={projectId} changes={data.appliedChanges ?? []} onReverted={fetchReport} />
 
+        {/* Renders nothing until a person has approved an architecture change. */}
+        <ArchitectureChangesPanel
+          projectId={projectId}
+          changes={data.architectureChanges ?? []}
+          onChanged={fetchReport}
+        />
+
         {/* ── Recent guardrail actions: an audit log, read as a table ── */}
         <KitCard className="overflow-hidden">
           <KitCardHeader
@@ -401,26 +416,26 @@ export function AutonomyGuardrailsSettings({ projectId }: { projectId: string })
                 <Activity className="h-4 w-4 text-zinc-500" strokeWidth={1.75} />
                 Recent guardrail actions
                 {data.recentActivity.length > 0 && (
-                  <span className="text-[12px] font-normal tabular-nums text-zinc-500">{data.recentActivity.length}</span>
+                  <span className="text-[12px] font-normal tabular-nums text-faint">{data.recentActivity.length}</span>
                 )}
               </span>
             }
-            actions={<span className="text-[12px] tabular-nums text-zinc-500">Last {data.scoreboard.windowDays} days</span>}
+            actions={<span className="text-[12px] tabular-nums text-faint">Last {data.scoreboard.windowDays} days</span>}
           />
           {data.recentActivity.length === 0 ? (
-            <p className="px-4 py-8 text-center text-[13px] text-zinc-500">Nothing yet. Backenly has not needed to act.</p>
+            <p className="px-4 py-8 text-center text-[13px] text-faint">Nothing yet. Backenly has not needed to act.</p>
           ) : (
-            <div className="max-h-[380px] overflow-y-auto">
+            <div tabIndex={0} role="region" aria-label="Recent guardrail actions" className={`max-h-[380px] overflow-y-auto ${FOCUS_INSET}`}>
               <table className="w-full border-separate border-spacing-0">
                 <thead className="sticky top-0 z-10">
                   <tr className={KIT.gridHead}>
-                    <th scope="col" className={`w-24 border-b ${RULE} px-4 py-2 text-left text-[12px] font-normal text-zinc-500`}>
+                    <th scope="col" className={`w-24 border-b ${RULE} px-4 py-2 text-left text-[12px] font-normal text-faint`}>
                       When
                     </th>
-                    <th scope="col" className={`w-36 border-b ${RULE} px-3 py-2 text-left text-[12px] font-normal text-zinc-500`}>
+                    <th scope="col" className={`w-36 border-b ${RULE} px-3 py-2 text-left text-[12px] font-normal text-faint`}>
                       Kind
                     </th>
-                    <th scope="col" className={`border-b ${RULE} px-3 py-2 text-left text-[12px] font-normal text-zinc-500`}>
+                    <th scope="col" className={`border-b ${RULE} px-3 py-2 text-left text-[12px] font-normal text-faint`}>
                       Action
                     </th>
                   </tr>
@@ -428,11 +443,11 @@ export function AutonomyGuardrailsSettings({ projectId }: { projectId: string })
                 <tbody>
                   {data.recentActivity.map((a, i) => (
                     <tr key={i} className={`transition-colors ${KIT.rowHoverOn}`}>
-                      <td className="whitespace-nowrap border-b border-white/[0.04] px-4 py-2.5 align-top text-[12px] tabular-nums text-zinc-500">
+                      <td className="whitespace-nowrap border-b border-white/[0.04] px-4 py-2.5 align-top text-[12px] tabular-nums text-faint">
                         {timeAgo(a.at)}
                       </td>
                       <td className="border-b border-white/[0.04] px-3 py-2.5 align-top">
-                        <span className="font-mono text-[12px] text-zinc-400">{a.kind || a.action || '—'}</span>
+                        <span className="text-[12.5px] text-zinc-400">{kindLabel(a.kind || a.action)}</span>
                       </td>
                       <td className="border-b border-white/[0.04] px-3 py-2.5 text-[13px] leading-[19px] text-zinc-300">
                         {a.summary}
@@ -440,7 +455,7 @@ export function AutonomyGuardrailsSettings({ projectId }: { projectId: string })
                             one decision you haven't made writes one row a
                             minute. Folded server-side; the count keeps the
                             fold honest rather than a truncation. */}
-                        {(a.repeat ?? 1) > 1 && <span className="ml-2 text-[12px] tabular-nums text-zinc-500">×{a.repeat}</span>}
+                        {(a.repeat ?? 1) > 1 && <span className="ml-2 text-[12px] tabular-nums text-faint">×{a.repeat}</span>}
                       </td>
                     </tr>
                   ))}
@@ -450,29 +465,24 @@ export function AutonomyGuardrailsSettings({ projectId }: { projectId: string })
           )}
         </KitCard>
 
-        {/* ── Restore points ──────────────────────────────────────── */}
-        <KitCard className="overflow-hidden">
-          <KitCardHeader
-            title={
-              <span className="flex items-center gap-2">
-                <Undo2 className="h-4 w-4 text-zinc-500" strokeWidth={1.75} />
-                Restore points
-              </span>
-            }
-            description="Roll the backend back to a saved version: tables, columns, APIs, storage buckets and base auth. Resources added since are kept. OAuth providers and functions need to be reconnected by hand."
-          />
-          <VersionHistory projectId={projectId} />
-        </KitCard>
-
-        {/* Says what the engine can actually back up: a fix whose pre-fix
-            snapshot capture failed is not reversible, and the Changes panel
-            names each of those instead of the footer implying they cannot exist. */}
-        <p className="flex items-start gap-2 text-[12.5px] leading-[18px] text-zinc-500">
+        {/* There is no "Restore points" panel here any more: it moved the active
+            version and re-created what that version named, and removed nothing.
+            Restoring is one thing now, the state before a governed change, from
+            History. The footer says what is actually reversible: a
+            repair's own changes, while their restore point is still usable. */}
+        <p className="flex items-start gap-2 text-[12.5px] leading-[18px] text-faint">
           <Lock className="mt-[2px] h-3.5 w-3.5 flex-shrink-0 text-zinc-600" />
-          Every autonomous action is written to the audit log and snapshotted before it runs. Changes that captured a
-          snapshot can be undone above.
+          Every autonomous action is written to the audit log. Its repairs are recorded as changes with a restore point:
+          while one can still be restored, it can be undone above or from History.
         </p>
       </div>
     </Shell>
   )
+}
+
+/** An audit row's kind as words: "auto_fix" reads "Auto fix". */
+function kindLabel(kind: string | null | undefined): string {
+  if (!kind) return '—'
+  const words = kind.replace(/[_-]+/g, ' ').trim().toLowerCase()
+  return words.charAt(0).toUpperCase() + words.slice(1)
 }

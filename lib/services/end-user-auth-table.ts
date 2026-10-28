@@ -36,6 +36,7 @@
  */
 
 import { prisma } from '@/lib/db'
+import { workspaceRawClient, type WorkspaceRawClient } from '@/lib/data-plane/regional'
 
 /** One row of `information_schema.columns` for the users table. */
 export interface AuthUsersColumn {
@@ -47,6 +48,8 @@ export interface AuthUsersColumn {
 
 /** Resolved description of a project's live `users` table. */
 export interface AuthUsersSchema {
+  /** The project whose database, in its region, holds this table. */
+  projectId: string
   /** `workspace_{projectId}` */
   schemaName: string
   /** Every column currently present on the users table. */
@@ -172,6 +175,7 @@ export async function purgeSyntheticAuthArtifacts(
   let introspected = false
   try {
     const present = await executeWithUserContext<{ table_name: string }>(
+      projectId,
       '', true,
       `SELECT table_name FROM information_schema.tables WHERE table_schema = $1`,
       [schemaName],
@@ -190,6 +194,7 @@ export async function purgeSyntheticAuthArtifacts(
     if (introspected && !existing.has(table)) return
     try {
       const rows = await executeWithUserContext<{ x: number }>(
+        projectId,
         '', true,
         `DELETE FROM "${schemaName}"."${table}" WHERE ${where} RETURNING 1 AS x`,
         params,
@@ -215,6 +220,7 @@ export async function purgeSyntheticAuthArtifacts(
     if (!introspected || existing.has('users')) {
       try {
         const remaining = await executeWithUserContext<{ n: bigint }>(
+          projectId,
           '', true, `SELECT count(*)::bigint AS n FROM "${schemaName}"."users"`,
         )
         noUsers = remaining.length > 0 && Number(remaining[0].n) === 0
@@ -229,8 +235,8 @@ export async function purgeSyntheticAuthArtifacts(
 }
 
 /** Read the current column list of `workspace_{projectId}.users`. */
-async function introspectColumns(schemaName: string): Promise<AuthUsersColumn[]> {
-  return prisma.$queryRawUnsafe<AuthUsersColumn[]>(
+async function introspectColumns(db: WorkspaceRawClient, schemaName: string): Promise<AuthUsersColumn[]> {
+  return db.$queryRawUnsafe<AuthUsersColumn[]>(
     `SELECT column_name, data_type, is_nullable, column_default
        FROM information_schema.columns
       WHERE table_schema = $1 AND table_name = 'users'
@@ -240,9 +246,10 @@ async function introspectColumns(schemaName: string): Promise<AuthUsersColumn[]>
 }
 
 /** Turn a raw column list into the resolved `AuthUsersSchema` descriptor. */
-function describe(schemaName: string, cols: AuthUsersColumn[]): AuthUsersSchema {
+function describe(projectId: string, schemaName: string, cols: AuthUsersColumn[]): AuthUsersSchema {
   const columns = new Set(cols.map((c) => c.column_name))
   return {
+    projectId,
     schemaName,
     columns,
     columnMeta: cols,
@@ -287,7 +294,9 @@ export async function introspectAuthUsersTable(
   projectId: string,
   schemaName: string = `workspace_${projectId}`,
 ): Promise<AuthUsersSchema> {
-  return describe(schemaName, await introspectColumns(schemaName))
+  // The project's database, in its region.
+  const db = await workspaceRawClient(projectId)
+  return describe(projectId, schemaName, await introspectColumns(db, schemaName))
 }
 
 /**
@@ -343,15 +352,18 @@ export async function ensureAuthUsersTable(
   schemaName: string = `workspace_${projectId}`,
 ): Promise<AuthUsersSchema> {
   const onBranch = schemaName !== `workspace_${projectId}`
+  // The project's database, in its region. A branch schema lives beside the
+  // project's own, so it is reached the same way.
+  const db = await workspaceRawClient(projectId)
 
   if (isReservedTestEmail(requestedBy.email)) {
-    const existing = await introspectColumns(schemaName)
+    const existing = await introspectColumns(db, schemaName)
     if (existing.length === 0) throw new AuthNotProvisionedError()
   }
 
   // 1. Schema + canonical table. Both IF NOT EXISTS — no-ops when present.
-  if (!onBranch) await prisma.$executeRawUnsafe(`CREATE SCHEMA IF NOT EXISTS "${schemaName}"`)
-  await prisma.$executeRawUnsafe(`
+  if (!onBranch) await db.$executeRawUnsafe(`CREATE SCHEMA IF NOT EXISTS "${schemaName}"`)
+  await db.$executeRawUnsafe(`
     CREATE TABLE IF NOT EXISTS "${schemaName}"."users" (
       "id"           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       "email"        TEXT UNIQUE NOT NULL,
@@ -366,7 +378,7 @@ export async function ensureAuthUsersTable(
   `)
 
   // 2. Introspect the live table.
-  let cols = await introspectColumns(schemaName)
+  let cols = await introspectColumns(db, schemaName)
   const have = new Set(cols.map((c) => c.column_name))
 
   // 3. Self-heal: add any missing canonical auth column. Each ADD is nullable
@@ -391,10 +403,10 @@ export async function ensureAuthUsersTable(
     heal.push(`ADD COLUMN IF NOT EXISTS "updatedAt" TIMESTAMP WITH TIME ZONE DEFAULT NOW()`)
 
   if (heal.length > 0) {
-    await prisma.$executeRawUnsafe(
+    await db.$executeRawUnsafe(
       `ALTER TABLE "${schemaName}"."users" ${heal.join(', ')}`,
     )
-    cols = await introspectColumns(schemaName) // re-read post-heal
+    cols = await introspectColumns(db, schemaName) // re-read post-heal
   }
 
   // 4. Guarantee the users table is protected by RLS. A user must only be able
@@ -404,11 +416,11 @@ export async function ensureAuthUsersTable(
   //    table. Idempotent + guarded (one indexed lookup once a policy exists).
   //    Auth routes (signup/signin/reset) read users under SERVICE-ROLE, which
   //    bypasses this policy, so credential flows are unaffected. Non-fatal.
-  await ensureUsersRlsPolicy(projectId, onBranch ? schemaName : null).catch((e) => {
+  await ensureUsersRlsPolicy(db, projectId, onBranch ? schemaName : null).catch((e) => {
     console.warn(`[AuthUsersTable] users RLS ensure failed (non-fatal): ${e?.message}`)
   })
 
-  return describe(schemaName, cols)
+  return describe(projectId, schemaName, cols)
 }
 
 /**
@@ -421,9 +433,13 @@ export async function ensureAuthUsersTable(
  * branch the catalog is the record: a `users` table cloned with its policies, or
  * given them by an earlier sign-up, is left alone.
  */
-async function ensureUsersRlsPolicy(projectId: string, branchSchema: string | null): Promise<void> {
+async function ensureUsersRlsPolicy(
+  db: WorkspaceRawClient,
+  projectId: string,
+  branchSchema: string | null,
+): Promise<void> {
   if (branchSchema) {
-    const policies = await prisma.$queryRawUnsafe<unknown[]>(
+    const policies = await db.$queryRawUnsafe<unknown[]>(
       `SELECT 1 FROM pg_policies WHERE schemaname = $1 AND tablename = 'users' LIMIT 1`,
       branchSchema,
     )
@@ -458,10 +474,11 @@ async function ensureUsersRlsPolicy(projectId: string, branchSchema: string | nu
  * when our hardcoded default ('user', 'active', …) is not in their list.
  */
 async function loadCheckConstraintValues(
+  db: WorkspaceRawClient,
   schemaName: string,
 ): Promise<Record<string, string>> {
   try {
-    const rows = await prisma.$queryRawUnsafe<
+    const rows = await db.$queryRawUnsafe<
       { attname: string; consrc: string }[]
     >(
       `SELECT a.attname, pg_get_constraintdef(c.oid) AS consrc
@@ -528,7 +545,10 @@ export async function buildUserInsert(
 ): Promise<UserInsertPlan> {
   const { schemaName, columnMeta } = schema
 
-  const checkOverrides = await loadCheckConstraintValues(schemaName)
+  // The catalog of the project's database, in its region. Outside the
+  // lookup's fail-soft catch: an unreachable region is not "no constraints".
+  const db = await workspaceRawClient(schema.projectId)
+  const checkOverrides = await loadCheckConstraintValues(db, schemaName)
 
   // Well-known defaults for standard auth columns. Caller-provided values win.
   const known: Record<string, unknown> = {
@@ -625,6 +645,7 @@ export async function stampLastLogin(
   // Add the column if a legacy table predates the contract. IF NOT EXISTS keeps
   // this idempotent and cheap; it is a no-op once the column is present.
   await executeWithUserContext(
+    projectId,
     '',
     true,
     `ALTER TABLE "${schemaName}"."users" ADD COLUMN IF NOT EXISTS "last_login" TIMESTAMP WITH TIME ZONE`,
@@ -636,6 +657,7 @@ export async function stampLastLogin(
   // for its VALUES, would break a text id that happens to hold a uuid. Matching
   // the column's type also keeps its primary-key index usable.
   const idType = await executeWithUserContext<{ data_type: string }>(
+    projectId,
     '',
     true,
     `SELECT data_type FROM information_schema.columns
@@ -647,6 +669,7 @@ export async function stampLastLogin(
     ? '::uuid'
     : ['smallint', 'integer', 'bigint'].includes(dataType) ? '::bigint' : ''
   await executeWithUserContext(
+    projectId,
     '',
     true,
     `UPDATE "${schemaName}"."users" SET "last_login" = NOW() WHERE id = $1${cast}`,

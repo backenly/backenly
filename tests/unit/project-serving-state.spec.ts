@@ -11,6 +11,7 @@
  */
 import {
   createServingStateReader,
+  withStalenessBound,
   type ServingRow,
 } from '@/lib/projects/serving-state'
 
@@ -72,6 +73,56 @@ describe('what the reader answers when the database answers', () => {
     h.advance(15_001)
     await expect(h.reader.get('p')).resolves.toEqual({ kind: 'locked', reason: 'abuse' })
     expect(h.loads()).toBe(2)
+  })
+
+  it('keeps an answer that was already old when read only for what is left of the bound', async () => {
+    // A region's copy answers with its watermark's age: 11 s of a 15 s bound,
+    // so the answer may be trusted 4 s more, not the cache's full 15.
+    const h = harness()
+    h.set('p', { ...OPEN, freshForMs: 4_000 })
+    await h.reader.get('p')
+    h.advance(3_999)
+    await h.reader.get('p')
+    expect(h.loads()).toBe(1)
+
+    h.set('p', LOCKED)
+    h.advance(2)
+    await expect(h.reader.get('p')).resolves.toEqual({ kind: 'locked', reason: 'abuse' })
+    expect(h.loads()).toBe(2)
+  })
+
+  it("keeps home's answer in a region no longer than the region's bound, so a lock arrives within it", async () => {
+    // Staging regions run a 10 s bound. Home answered (the copy was stale), and
+    // the answer was kept the cache's full 15 s; now it is kept the bound.
+    const h = harness()
+    h.set('p', withStalenessBound({ row: OPEN, ageMs: 0 }, 10_000))
+    await h.reader.get('p')
+    h.set('p', LOCKED)
+    h.advance(10_001)
+    await expect(h.reader.get('p')).resolves.toEqual({ kind: 'locked', reason: 'abuse' })
+    expect(h.loads()).toBe(2)
+  })
+
+  it('bounds every answer by what is left of the staleness bound after its age', () => {
+    expect(withStalenessBound({ row: OPEN, ageMs: 0 }, 10_000)).toEqual({ ...OPEN, freshForMs: 10_000 })
+    expect(withStalenessBound({ row: OPEN, ageMs: 7_000 }, 10_000)).toEqual({ ...OPEN, freshForMs: 3_000 })
+    // At home the bound is the 15 s ceiling: the cache's own 15 s, as before.
+    expect(withStalenessBound({ row: OPEN, ageMs: 0 }, 15_000)).toEqual({ ...OPEN, freshForMs: 15_000 })
+    expect(withStalenessBound({ row: null, ageMs: 0 }, 10_000)).toBeNull()
+  })
+
+  it('never keeps an answer longer than the cache would, nor for a negative time', async () => {
+    const h = harness()
+    h.set('long', { ...OPEN, freshForMs: 60_000 })
+    h.set('spent', { ...OPEN, freshForMs: -5 })
+    await h.reader.get('long')
+    await h.reader.get('spent')
+    h.advance(1)
+    await h.reader.get('spent')
+    expect(h.loads()).toBe(3)
+    h.advance(15_000)
+    await h.reader.get('long')
+    expect(h.loads()).toBe(4)
   })
 
   it('reports a pause with when and why', async () => {

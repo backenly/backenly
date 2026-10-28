@@ -5,8 +5,8 @@
  *
  * One surface: what's waiting on you (the Review Queue, folded in
  * 2026-07-18), the autonomy dial (OFF → detect → propose → auto-apply within
- * bounds), plan cadence, trust scoreboard, the recent MAPE-K activity feed,
- * and restore points (version rollback). AutonomyGuardrailsSettings owns the
+ * bounds), plan cadence, trust scoreboard and the recent MAPE-K activity feed.
+ * Restoring the state before a change is History. AutonomyGuardrailsSettings owns the
  * whole page including its header.
  *
  * The former Memory tab was removed 2026-07-16 (duplicated History), and the

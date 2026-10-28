@@ -25,7 +25,7 @@ jest.mock('@/lib/projects/purge', () => ({
 // Required after the mock so the module under test picks it up.
 const { deleteProjectCompletely, deleteAccountCompletely, PURGE_JOB_TYPE } = require('@/lib/projects/delete')
 const { processBackgroundJobs, processPurgeJobs } = require('@/lib/queue/worker')
-const { PURGE_STATUS, claimNextJobs } = require('@/lib/queue')
+const { PURGE_STATUS, claimNextJobs, claimPurgeJobs } = require('@/lib/queue')
 
 const DB_URL = process.env.TEST_DATABASE_URL ?? ''
 const createdUserIds: string[] = []
@@ -190,10 +190,12 @@ describe('outbox record', () => {
     const payload = job!.payload as any
 
     // The project id names the target; storageDriver names which backend held
-    // the files. Nothing else: no email, no absolute path, no credentials.
-    expect(Object.keys(payload).sort()).toEqual(['projectId', 'storageDriver'])
+    // the files; region names where they live. Nothing else: no email, no
+    // absolute path, no credentials.
+    expect(Object.keys(payload).sort()).toEqual(['projectId', 'region', 'storageDriver'])
     expect(payload.projectId).toBe(projectId)
     expect(['local', 's3']).toContain(payload.storageDriver)
+    expect(payload.region).toBe('ap-south-1')
     const serialized = JSON.stringify(payload).toLowerCase()
     for (const forbidden of ['@', '/', '\\', 'password', 'secret', 'token', 'bucket']) {
       expect(serialized).not.toContain(forbidden)
@@ -403,5 +405,70 @@ describe('purge jobs survive every cascade', () => {
       expect(job).not.toBeNull()
       expect(job!.status).toBe(PURGE_STATUS.pending)
     }
+  })
+})
+
+// ─── Regions ─────────────────────────────────────────────────────────────────
+//
+// A project's files and backups are kept in its region, so its purge runs
+// there, by that region's scheduler. Each job here is the oldest of its region
+// in the queue (runAt in 1970), so a claim of one takes exactly it and never a
+// job another suite is still watching.
+
+describe('each region purges what was kept in it', () => {
+  /** A due purge job, as a deletion records one, for a project already gone. */
+  async function purgeJob(payload: Record<string, unknown>, runAt: Date): Promise<string> {
+    const projectId = randomUUID()
+    createdProjectIds.push(projectId)
+    const job = await prisma.backgroundJob.create({
+      data: { type: PURGE_JOB_TYPE, status: PURGE_STATUS.pending, payload: { projectId, ...payload }, runAt },
+      select: { id: true },
+    })
+    return job.id
+  }
+  const claimed = async (limit: number, region: string): Promise<string[]> =>
+    (await claimPurgeJobs(limit, region)).map((job: { id: string }) => job.id)
+  const statusOf = async (id: string) => (await prisma.backgroundJob.findUnique({ where: { id } }))?.status
+
+  it("is claimed by its own region's scheduler and by no other", async () => {
+    const virginia = await purgeJob({ storageDriver: 's3', region: 'us-east-1' }, new Date(1_000))
+
+    expect(await claimed(1, 'us-west-2')).not.toContain(virginia)
+    expect(await statusOf(virginia)).toBe(PURGE_STATUS.pending)
+    expect(await claimed(1, 'us-east-1')).toEqual([virginia])
+  })
+
+  it("is not hidden by another region's backlog ahead of it in the queue", async () => {
+    for (let i = 0; i < 25; i++) await purgeJob({ region: 'eu-central-1' }, new Date(2_000 + i))
+    const oregon = await purgeJob({ region: 'us-west-2' }, new Date(3_000))
+
+    expect(await claimed(1, 'us-west-2')).toEqual([oregon])
+  })
+
+  it('reads a job from before regions as the home region’s, and one naming an unknown region as nobody’s', async () => {
+    const unknown = await purgeJob({ region: 'xx-nowhere-1' }, new Date(1))
+    const legacy = await purgeJob({ storageDriver: 'local' }, new Date(2))
+
+    // The unknown job is older, so a home claim of one would take it first if
+    // the home region read it as its own.
+    expect(await claimed(1, 'ap-south-1')).toEqual([legacy])
+    for (const region of ['us-west-2', 'eu-central-1', 'ap-southeast-1']) {
+      expect(await claimed(5, region)).not.toContain(unknown)
+    }
+    expect(await statusOf(unknown)).toBe(PURGE_STATUS.pending)
+  })
+
+  it('purges in the region the job records', async () => {
+    const singapore = await purgeJob({ storageDriver: 's3', region: 'ap-southeast-1' }, new Date(4))
+    mockPurge.mockResolvedValue({ projectId: 'x', backups: 'alreadyAbsent', storage: 'purged', workspace: 'alreadyAbsent', objectsDeleted: 1 })
+
+    await processPurgeJobs('ap-southeast-1')
+
+    const job = await prisma.backgroundJob.findUnique({ where: { id: singapore } })
+    expect(job?.status).toBe('completed')
+    expect(mockPurge).toHaveBeenCalledWith((job?.payload as { projectId: string }).projectId, {
+      storageDriver: 's3',
+      region: 'ap-southeast-1',
+    })
   })
 })

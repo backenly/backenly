@@ -1,60 +1,25 @@
 'use client'
 
 import { useState, useEffect, useCallback } from 'react'
-import { useRouter } from 'next/navigation'
-import { AlertCircle, Cable, LayoutGrid, RotateCw } from 'lucide-react'
-import { AgentPrompt, EmptyState as EmptyStateBlock, KitButton, Skeleton } from '@/components/inspector/kit'
-import { useAgentConnection } from '@/lib/hooks/useAgentConnection'
+import { AlertCircle, RotateCw } from 'lucide-react'
+import { EmptyState, KitButton, Skeleton } from '@/components/inspector/kit'
 
 import { WorkspaceHome } from './WorkspaceHome'
+import { WorkspaceSetup } from './WorkspaceSetup'
 
 interface MainWorkspaceProps {
   projectId: string
   projectName?: string | null
 }
 
-// ── Empty state ───────────────────────────────────────────────────────────────
-
-function EmptyState({ projectId, onConnect }: { projectId: string; onConnect: () => void }) {
-  // Honest empty state. Nothing is "built" until the agent genuinely creates
-  // it, so no tables, routes or auth are fabricated here. The one real next
-  // step is connecting an agent, or, once it is connected, asking it for
-  // something; either way the most useful thing to hand over is the first
-  // sentence to send it.
-  const agent = useAgentConnection(projectId)
-  return (
-    <div className="flex min-h-[70vh] flex-col items-center justify-center">
-      <EmptyStateBlock
-        icon={LayoutGrid}
-        title={agent.connected ? 'Your agent is connected' : 'Connect your coding agent'}
-        description={
-          agent.connected
-            ? 'This backend is empty. Ask your agent for what your app needs and Backenly builds the tables, APIs and auth here, then keeps them running.'
-            : 'This backend is empty. Point Claude Code, Codex, Cursor or any MCP client at it and Backenly builds your tables, APIs and auth here, then keeps them running.'
-        }
-        action={
-          <div className="flex w-full flex-col items-center gap-4">
-            {agent.needsConnect && (
-              <KitButton variant="primary" icon={Cable} onClick={onConnect}>
-                Connect your agent
-              </KitButton>
-            )}
-            <AgentPrompt prompt="Build a backend for my app: users, the tables it needs, and the APIs my frontend calls." />
-          </div>
-        }
-      />
-    </div>
-  )
-}
-
 // ── State load failure ────────────────────────────────────────────────────────
-// Rendered when /state can't be fetched. Never show EmptyState on a failed
+// Rendered when /state can't be fetched. Never show WorkspaceSetup on a failed
 // fetch — a 500 would read as "your backend is gone" when the data is intact.
 
 function StateErrorPanel({ onRetry }: { onRetry: () => void }) {
   return (
     <div className="flex min-h-[70vh] flex-col items-center justify-center">
-      <EmptyStateBlock
+      <EmptyState
         icon={AlertCircle}
         title="Couldn’t load your backend"
         description="Your tables and data are safe. The dashboard couldn’t reach them just now, which is usually temporary."
@@ -71,7 +36,6 @@ function StateErrorPanel({ onRetry }: { onRetry: () => void }) {
 // ── Main Component ────────────────────────────────────────────────────────────
 
 export function MainWorkspace({ projectId, projectName }: MainWorkspaceProps) {
-  const router = useRouter()
   const [backendState, setBackendState] = useState<{
     entities: Array<{ name: string; fieldCount: number; fields?: Array<{ name: string; type: string }> }>
     apis: Array<{ method: 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH'; path: string; description?: string }>
@@ -87,9 +51,9 @@ export function MainWorkspace({ projectId, projectName }: MainWorkspaceProps) {
   } | null>(null)
 
   // Tracks the /state fetch itself, separately from its payload. 'error' must
-  // never fall through to EmptyState — that renders a healthy-looking "start
-  // building" canvas over a backend that failed to load (schema-drift incident
-  // 2026-07-06: /state 500s made populated projects look wiped).
+  // never fall through to WorkspaceSetup — that renders a healthy-looking
+  // "start building" page over a backend that failed to load (schema-drift
+  // incident 2026-07-06: /state 500s made populated projects look wiped).
   const [stateStatus, setStateStatus] = useState<'loading' | 'ready' | 'error'>('loading')
   const [blockedCount, setBlockedCount] = useState(0)
 
@@ -141,6 +105,22 @@ export function MainWorkspace({ projectId, projectName }: MainWorkspaceProps) {
     }
   }, [fetchBackendState, fetchBuildStatus])
 
+  // Re-read /state when the user returns to the tab. The agent builds from a
+  // TERMINAL: the user connects Claude Code, asks for a backend, and tabs
+  // back — and this page kept showing the empty state until a hard reload,
+  // because the focus refresh lived only in WorkspaceHome, which is not even
+  // mounted while WorkspaceSetup shows. No polling while hidden.
+  useEffect(() => {
+    const onVisible = () => { if (!document.hidden) { fetchBackendState(); fetchBuildStatus() } }
+    const onFocus = () => { fetchBackendState(); fetchBuildStatus() }
+    document.addEventListener('visibilitychange', onVisible)
+    window.addEventListener('focus', onFocus)
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible)
+      window.removeEventListener('focus', onFocus)
+    }
+  }, [fetchBackendState, fetchBuildStatus])
+
   const retryBackendState = useCallback(() => {
     setStateStatus('loading')
     fetchBackendState()
@@ -153,8 +133,8 @@ export function MainWorkspace({ projectId, projectName }: MainWorkspaceProps) {
     <div className="mx-auto w-full max-w-[1200px] px-4 pb-16 pt-7 sm:px-6 sm:pt-9 lg:px-8">
 
         {/* ── Initial load ────────────────────────────────── */}
-        {/* Don't flash EmptyState while the first /state fetch is in flight —
-            projects with content would briefly render as brand-new. */}
+        {/* Don't flash WorkspaceSetup while the first /state fetch is in
+            flight — projects with content would briefly render as brand-new. */}
         {!hasContent && stateStatus === 'loading' && <OverviewSkeleton />}
 
         {/* ── State load failure ──────────────────────────── */}
@@ -162,16 +142,17 @@ export function MainWorkspace({ projectId, projectName }: MainWorkspaceProps) {
           <StateErrorPanel onRetry={retryBackendState} />
         )}
 
-        {/* ── Empty state (confirmed empty, not failed) ───── */}
+        {/* ── Setup (confirmed empty, not failed) ─────────── */}
         {!hasContent && stateStatus === 'ready' && (
-          <EmptyState projectId={projectId} onConnect={() => router.push(`/app/projects/${projectId}/connect`)} />
+          <WorkspaceSetup projectId={projectId} projectName={projectName ?? null} />
         )}
 
         {/* ── Backend overview ────────────────────────────── */}
         {hasContent && (
           <div>
-            {/* WorkspaceHome — full project home: agent panel + self-healing
-                loop, 24h observability, and the four resource cards. */}
+            {/* WorkspaceHome — full project home: the agent panel while
+                something waits, the self-healing loop, 24h observability,
+                and the four resource cards. */}
             <WorkspaceHome
               projectId={projectId}
               projectName={projectName ?? null}
@@ -190,12 +171,16 @@ export function MainWorkspace({ projectId, projectName }: MainWorkspaceProps) {
   )
 }
 
-/** The Overview's shape while /state loads: name, agent panel, loop, strip. */
+/**
+ * The Overview's shape while /state loads: name, then the loop. No agent-panel
+ * block: the panel renders only while something waits on the user or the page
+ * cannot vouch for the backend, so on a quiet project a placeholder for it
+ * vanished on load and the loop jumped up by its height.
+ */
 function OverviewSkeleton() {
   return (
     <div aria-busy="true" aria-label="Loading overview" className="space-y-3">
       <Skeleton className="mb-6 h-[28px] w-56" />
-      <Skeleton className="h-[168px] w-full rounded-[10px]" />
       <Skeleton className="h-[300px] w-full rounded-[10px]" />
     </div>
   )

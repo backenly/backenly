@@ -16,9 +16,11 @@
  * "You approved it. Here is exactly what changed. One click to undo."
  */
 
+import { isEvolutionApprovalFinding } from '@/lib/core/types'
 import { prisma } from '@/lib/db/prisma'
 import { Pool } from 'pg'
 import { getWorkspaceDatabaseNames } from '@/lib/services/databaseProvisioning'
+import { projectDatabaseUrl } from '@/lib/data-plane/regional'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -42,12 +44,6 @@ export interface ApplyResult {
   snapshotId?: string
   message: string
   sqlExecuted?: string
-}
-
-export interface RollbackResult {
-  success: boolean
-  message: string
-  restoredSnapshot?: string
 }
 
 // ── Preview generation ────────────────────────────────────────────────────────
@@ -134,6 +130,12 @@ export async function applyApproval(
     return { success: false, findingId, message: 'Finding not found or already resolved.' }
   }
 
+  // An architecture-change request is never approved here: this path cannot
+  // bind consent to a plan version, and it runs `details.fix.sql` as written.
+  if (isEvolutionApprovalFinding(finding.type)) {
+    return { success: false, findingId, message: 'This is an architecture change awaiting approval. Approve it from the approval queue on the Autonomy page, which binds your consent to the exact version Backenly rehearsed.' }
+  }
+
   const details = finding.details as any
   const fix = details?.fix as { sql?: string; executorAction?: string; executorParams?: Record<string, unknown> } | null
 
@@ -207,76 +209,9 @@ export async function dismissFinding(projectId: string, findingId: string): Prom
   }).catch(() => {})
 }
 
-// ── Rollback ──────────────────────────────────────────────────────────────────
-
-/**
- * Rollback a previously applied fix by restoring the snapshot taken before it.
- * This re-runs the DDL from the snapshot, overwriting current schema state.
- */
-export async function rollbackFix(
-  projectId: string,
-  findingId: string,
-): Promise<RollbackResult> {
-  // Find the snapshot taken immediately before this fix
-  const snapshot = await prisma.workspaceSchemaSnapshot.findFirst({
-    where: {
-      projectId,
-      trigger: { startsWith: `pre_fix_${findingId.slice(0, 8)}` },
-    },
-    orderBy: { createdAt: 'desc' },
-  })
-
-  if (!snapshot) {
-    return {
-      success: false,
-      message: 'No rollback snapshot found for this fix. The change cannot be automatically reversed.',
-    }
-  }
-
-  try {
-    // Re-execute the raw DDL from the snapshot to restore state
-    const { Pool } = await import('pg')
-    const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
-    const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
-
-    const pool = new Pool({ connectionString: process.env.DATABASE_URL })
-    try {
-      await pool.query(`SET search_path = "${postgresSchema}"`)
-      await pool.query(snapshot.rawDdl)
-    } finally {
-      await pool.end()
-    }
-
-    // Re-open the finding so the user can decide again
-    await prisma.healthFinding.updateMany({
-      where: { id: findingId, projectId },
-      data: { status: 'open', autoFixed: false, fixAppliedAt: null },
-    })
-
-    return {
-      success: true,
-      message: `Rolled back to snapshot v${snapshot.versionNum} (${snapshot.createdAt.toISOString().slice(0, 10)}).`,
-      restoredSnapshot: snapshot.id,
-    }
-  } catch (err: any) {
-    // Emit a visible rollback_failed trace so the timeline shows the failure
-    const { emitTrace } = await import('@/lib/ai/execution-tracer')
-    await emitTrace(projectId, {
-      type:    'rollback_failed',
-      details: {
-        findingId,
-        snapshotId:   snapshot.id,
-        snapshotVersion: snapshot.versionNum,
-        error: err?.message ?? 'Unknown error',
-      },
-    }).catch(() => {})
-
-    return {
-      success: false,
-      message: `Rollback failed: ${err?.message}. The schema may be in an inconsistent state — check the observability timeline.`,
-    }
-  }
-}
+// rollbackFix, which re-ran a pre-fix snapshot's DDL outside the change ledger,
+// is retired: its route answers 410 (app/api/projects/[id]/approvals/[findingId]/
+// rollback). A fix's changes are governed changes, undone by revertAutoFix.
 
 // ── Pending approvals list ────────────────────────────────────────────────────
 
@@ -298,10 +233,13 @@ export async function getPendingApprovals(projectId: string): Promise<ApprovalPr
 
 /** Public — used by mutate.ts for pre-mutation snapshots. */
 export async function takeSnapshot(projectId: string, trigger: string): Promise<string> {
+  // The project's own database, in its region; resolved before any catch, so an
+  // unreachable region fails here instead of reading as an empty catalog.
+  const projectDbUrl = await projectDatabaseUrl(projectId)
   const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
   const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
 
-  const pool = new Pool({ connectionString: process.env.DATABASE_URL })
+  const pool = new Pool({ connectionString: projectDbUrl })
   try {
     // Get current table list + DDL
     const tablesRes = await pool.query<{ table_name: string }>(
@@ -350,10 +288,13 @@ export async function takeSnapshot(projectId: string, trigger: string): Promise<
 }
 
 async function executeSql(projectId: string, sql: string): Promise<string> {
+  // The project's own database, in its region; resolved before any catch, so an
+  // unreachable region fails here instead of reading as an empty catalog.
+  const projectDbUrl = await projectDatabaseUrl(projectId)
   const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
   const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
 
-  const pool = new Pool({ connectionString: process.env.DATABASE_URL })
+  const pool = new Pool({ connectionString: projectDbUrl })
   try {
     const fullSql = `SET search_path = "${postgresSchema}"; ${sql}`
     await pool.query(fullSql)

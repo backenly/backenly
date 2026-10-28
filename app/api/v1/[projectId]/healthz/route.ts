@@ -2,6 +2,7 @@ export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
+import { isRegionError, workspaceRawClient } from '@/lib/data-plane/regional'
 import { recordedV1 } from '@/lib/traffic/recorded-v1'
 
 /**
@@ -52,10 +53,15 @@ async function handleGET(_request: NextRequest, props: { params: Promise<{ proje
   const dbStart = Date.now()
   try {
     const schemaName = `workspace_${params.projectId}`
-    await prisma.$queryRawUnsafe(`SELECT 1 FROM information_schema.schemata WHERE schema_name = $1`, schemaName)
+    // The project's database, in its region. Asked of any other database the
+    // query below succeeds with no rows, so it would report a database it
+    // never reached as healthy.
+    const db = await workspaceRawClient(params.projectId)
+    await db.$queryRawUnsafe(`SELECT 1 FROM information_schema.schemata WHERE schema_name = $1`, schemaName)
     checks.database = { status: 'ok', latencyMs: Date.now() - dbStart }
   } catch (err: any) {
-    checks.database = { status: 'error', latencyMs: Date.now() - dbStart, error: 'Workspace schema unreachable' }
+    const error = isRegionError(err) ? 'Data region not reachable from this server' : 'Workspace schema unreachable'
+    checks.database = { status: 'error', latencyMs: Date.now() - dbStart, error }
     overallStatus = 'degraded'
   }
 

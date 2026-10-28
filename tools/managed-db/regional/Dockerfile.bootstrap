@@ -1,0 +1,56 @@
+# Regional database initialisation (tools/managed-db/regional/bootstrap.sh).
+#
+# psql 16, bash, the region's RDS root certificates and the files listed in
+# image-files.txt, and nothing else: no Node, no Prisma, no application. It runs
+# as a one-off administrative task inside a region's VPC and exits.
+#
+# The build context is assembled by build-and-push.sh: the listed files under
+# tree/, at their repository paths, so bootstrap.sh finds scripts/ exactly where
+# it does in a checkout, and the region's roots as rds-ca.pem.
+
+FROM debian:bookworm-20260918-slim
+
+# psql from the PostgreSQL project's apt repository, as docker/web.Dockerfile
+# installs it: Debian's own client on bookworm is 15, and the procedure is
+# written and rehearsed for 16. The signing key is accepted only if its
+# fingerprint matches, and the installed version is asserted below.
+ARG PG_CLIENT_MAJOR=16
+ARG PGDG_KEY_FINGERPRINT=B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl gnupg \
+ && install -d /usr/share/postgresql-common/pgdg \
+ && curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+ && test "$(gpg --show-keys --with-colons /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc | awk -F: '/^fpr/ {print $10; exit}')" = "$PGDG_KEY_FINGERPRINT" \
+ && . /etc/os-release \
+ && echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" > /etc/apt/sources.list.d/pgdg.list \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends "postgresql-client-${PG_CLIENT_MAJOR}" \
+ && apt-get purge -y curl gnupg \
+ && apt-get autoremove -y \
+ && rm -rf /var/lib/apt/lists/*
+RUN psql --version | grep -E "^psql \(PostgreSQL\) ${PG_CLIENT_MAJOR}\."
+
+# The three RDS roots of the region this image is built for, and no others,
+# from the reviewed copy in docker/certs (the runtime images trust theirs the
+# same way). This connection carries the master credential, so a substituted or
+# wider trust store would let anyone in the path read it. A region whose roots
+# are not in the repository cannot be built for at all (build-and-push.sh).
+COPY rds-ca.pem /etc/ssl/rds/rds-ca.pem
+
+# Verify the server against those roots. verify-full is the default for a URL
+# that names no sslmode, and with a root file present libpq treats an explicit
+# sslmode=require as verify-ca. Only a URL that asks for less than require
+# (disable, allow, prefer) would skip verification, so the secret holding it
+# should say verify-full.
+ENV PGSSLROOTCERT=/etc/ssl/rds/rds-ca.pem \
+    PGSSLMODE=verify-full
+
+COPY tree/ /opt/backenly/
+
+RUN useradd --system --uid 10001 --home-dir /nonexistent --shell /usr/sbin/nologin bootstrap
+USER 10001
+
+# No default mode: BOOTSTRAP_MODE defaults to check, so a task that forgets to
+# say apply reports and writes nothing.
+ENTRYPOINT ["bash", "/opt/backenly/tools/managed-db/regional/bootstrap.sh"]

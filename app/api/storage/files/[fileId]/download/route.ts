@@ -5,9 +5,8 @@ import { storageService } from '@/lib/services/storage'
 import { authenticateRequest } from '@/lib/auth/middleware'
 import { prisma } from '@/lib/db'
 import crypto from 'crypto'
-import jwt from 'jsonwebtoken'
 import { canAccessProject } from '@/lib/edition/guard'
-import { resolveJwtSecret } from '@/lib/services/jwtSecretManager'
+import { resolveEndUserFromToken } from '@/server/lib/end-user-identity'
 import { cacheControlFor, mayRead, type Reader } from '@/lib/storage/access-policy'
 import { isExportToken, verifyExportToken } from '@/lib/storage/export-token'
 import { isStorageUnavailable } from '@/lib/storage/errors'
@@ -21,6 +20,8 @@ import { INTERNAL_TRAFFIC_HEADER, isInternalTraffic } from '@/lib/traffic/reques
 import { recordEgress } from '@/lib/usage/egress'
 import { projectRestriction, restrictionDetails, restrictionMessage, RESTRICTED_CODE } from '@/lib/usage/restrictions'
 import { DOWNLOAD_URL_TTL_SECONDS, signCdnUrl, signedCdnConfig } from '@/lib/storage/cdn'
+import { servedHere } from '@/lib/data-plane/serving'
+import { refusalForState } from '@/lib/projects/serving-response'
 
 /**
  * GET /api/storage/files/{fileId}/download — stream the file bytes.
@@ -85,6 +86,14 @@ export async function GET(request: NextRequest, props: { params: Promise<{ fileI
     if (reader === 'misconfigured') {
       return NextResponse.json({ error: 'Server misconfiguration' }, { status: 500 })
     }
+    if (reader === 'blocked') {
+      // The runtime's answer for a blocked end user (server/routes/dynamic.ts),
+      // whatever the object's policy: refused, not read as anonymous.
+      return NextResponse.json(
+        { error: 'This account has been blocked by the project owner.', code: 'END_USER_BLOCKED' },
+        { status: 403 },
+      )
+    }
 
     // A paused project stops serving its files through this route to everyone
     // except its own members and holders of an EXPORT link, both of whom are
@@ -92,6 +101,18 @@ export async function GET(request: NextRequest, props: { params: Promise<{ fileI
     // never reaches this code, so a pause cannot stop that and nothing claims
     // it does.
     const exporting = reader.kind === 'signed' && reader.purpose === 'export'
+
+    // A locked project is sealed: no file leaves through this route to anyone
+    // but its own members, export links included, with the runtime gate's
+    // answer. A state that cannot be read is not served either (try again),
+    // as the gate does.
+    if (reader.kind !== 'operator') {
+      const state = await getProjectServingState(record.projectId)
+      if (state.kind === 'locked' || state.kind === 'unavailable') {
+        return refusalForState(record.projectId, state)!
+      }
+    }
+
     if (reader.kind !== 'operator' && !exporting) {
       const serving = await getProjectServingState(record.projectId)
       if (serving.kind === 'paused') {
@@ -144,7 +165,14 @@ export async function GET(request: NextRequest, props: { params: Promise<{ fileI
     // Behind a signed CDN (Backenly Cloud's CloudFront) the bytes leave from the
     // edge: every check above has passed, so hand the caller a short-lived
     // signed URL for exactly this object. The CDN's logs meter the bytes.
-    const cdn = (process.env.STORAGE_DRIVER ?? '').toLowerCase() === 's3' ? signedCdnConfig() : null
+    // The CDN fronts this region's bucket only. A project of another region
+    // keeps its files in that region's bucket (lib/services/s3-config.ts
+    // s3LocationFor), where the edge would never find them, so they are read
+    // from there below.
+    const cdn =
+      (process.env.STORAGE_DRIVER ?? '').toLowerCase() === 's3' && (await servedHere(record.projectId))
+        ? signedCdnConfig()
+        : null
     if (cdn) {
       const res = NextResponse.redirect(signCdnUrl(record.path, DOWNLOAD_URL_TTL_SECONDS, cdn), 302)
       res.headers.set('Cache-Control', 'private, no-store')
@@ -213,7 +241,7 @@ async function classifyReader(
   fileId: string,
   token: string | null,
   projectId: string,
-): Promise<Reader | 'invalid-token' | 'misconfigured'> {
+): Promise<Reader | 'invalid-token' | 'misconfigured' | 'blocked'> {
   if (token) {
     const secret = process.env.STORAGE_SECRET
     if (!secret) {
@@ -263,29 +291,18 @@ function verifySignedToken(fileId: string, token: string, secret: string): boole
  * secret.
  *
  * Only consulted for the project that owns the object, so a token minted by one
- * project can never identify a reader of another project's storage.
+ * project can never identify a reader of another project's storage. Resolved by
+ * the check every data door uses (server/lib/end-user-identity.ts): a token
+ * signed for THIS project and not revoked by logout makes a reader, and a
+ * blocked user's token is refused rather than read as anonymous.
  */
-async function classifyEndUser(request: NextRequest, projectId: string): Promise<Reader | null> {
+async function classifyEndUser(request: NextRequest, projectId: string): Promise<Reader | 'blocked' | null> {
   const header = request.headers.get('authorization')
   if (!header?.startsWith('Bearer ')) return null
   const raw = header.slice(7).trim()
   if (!raw) return null
 
-  const project = await prisma.project.findUnique({
-    where: { id: projectId },
-    select: { jwtSecret: true },
-  })
-  if (!project?.jwtSecret || project.jwtSecret.length < 32) return null
-
-  try {
-    const payload = jwt.verify(raw, resolveJwtSecret(project.jwtSecret)) as Record<string, unknown>
-    // The token must name THIS project. A valid token for another project of the
-    // same deployment is not an identity here.
-    if (payload.projectId !== projectId) return null
-    const userId = payload.userId
-    if (typeof userId !== 'string' || !userId) return null
-    return { kind: 'endUser', userId }
-  } catch {
-    return null
-  }
+  const endUser = await resolveEndUserFromToken(projectId, raw)
+  if (endUser === 'blocked') return 'blocked'
+  return endUser ? { kind: 'endUser', userId: endUser.userId } : null
 }

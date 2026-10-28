@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express'
 import crypto from 'crypto'
 import jwt from 'jsonwebtoken'
 import { prisma } from '@/lib/db'
+import { projectApiOrigin, workspaceRawClient } from '@/lib/data-plane/regional'
 import { resolveJwtSecret } from '@/lib/services/jwtSecretManager'
 import { WorkspaceOAuthService } from '@/lib/services/workspaceOAuth'
 import { executeWithUserContext } from '@/lib/services/workspace-rls'
@@ -11,8 +12,10 @@ import {
   buildUserInsert,
   stampLastLogin,
   isReservedTestEmail,
+  userIdCast,
 } from '@/lib/services/end-user-auth-table'
 import { canAcceptNewEndUser, trackEndUserActive } from '@/lib/quota/kernel'
+import { emitEndUserCreated } from '@/lib/services/end-user-auth-events'
 import { sanitizeDiagnostic } from '@/lib/errors/diagnostic-sanitize'
 import { asyncRoute } from '../lib/async-route'
 import { touchProjectActivity } from '@/lib/projects/activity'
@@ -201,7 +204,8 @@ export async function resolveRedirectTarget(
     return {
       rejected:
         `origin ${url.origin} is not a connected frontend for this project. ` +
-        `Connect it first so the platform knows this app is yours.`,
+        `Connect it first so the platform knows this app is yours — over MCP: ` +
+        `connect { "action": "connect_frontend", "url": "${url.origin}" }.`,
     }
   }
 
@@ -216,6 +220,17 @@ function baseUrlFrom(req: Request): string {
   const proto = (req.headers['x-forwarded-proto'] as string | undefined)?.split(',')[0]?.trim()
     || (host.startsWith('localhost') ? 'http' : 'https')
   return process.env.NEXTAUTH_URL || process.env.NEXT_PUBLIC_APP_URL || `${proto}://${host}`
+}
+
+/**
+ * The redirect URI the provider is sent, and the one the console tells the
+ * developer to register: on the project's own API address
+ * (lib/data-plane/regional.ts projectApiOrigin), so a project in another region
+ * is called back where it is served. Initiate and callback both build it here;
+ * the provider refuses a code exchange whose URI differs from the initiate's.
+ */
+async function redirectUriFor(req: Request, projectId: string, provider: string): Promise<string> {
+  return `${await projectApiOrigin(projectId, baseUrlFrom(req))}/api/v1/${projectId}/auth/${provider}/callback`
 }
 
 // ─── Token exchange ───────────────────────────────────────────────────────────
@@ -344,7 +359,7 @@ async function handleOAuthInit(req: Request, res: Response) {
     return jsonError(res, 503, 'Authentication is not configured for this project.', 'INTERNAL_ERROR')
   }
 
-  const redirectUri = `${baseUrlFrom(req)}/api/v1/${projectId}/auth/${provider}/callback`
+  const redirectUri = await redirectUriFor(req, projectId, provider)
   const redirectTo = (req.query.redirect_to as string | undefined) || ''
 
   // Rejected HERE, at initiate time, rather than after the round trip. The
@@ -440,7 +455,7 @@ async function handleOAuthCallback(req: Request, res: Response) {
     return jsonError(res, 404, `${provider} OAuth is not configured for this project`, 'NOT_FOUND')
   }
 
-  const redirectUri = `${baseUrlFrom(req)}/api/v1/${projectId}/auth/${provider}/callback`
+  const redirectUri = await redirectUriFor(req, projectId, provider)
 
   try {
     // 1. Exchange code → access token (uses the DECRYPTED client secret).
@@ -456,14 +471,17 @@ async function handleOAuthCallback(req: Request, res: Response) {
     // 3. Bring the users table to the auth contract, then add OAuth columns.
     const baseSchema = await ensureAuthUsersTable(projectId, { email: providerUser.email })
     const schemaName = baseSchema.schemaName
-    await prisma.$executeRawUnsafe(
+    // The project's database, in its region, where ensureAuthUsersTable just
+    // brought the table to the contract.
+    const db = await workspaceRawClient(projectId)
+    await db.$executeRawUnsafe(
       `ALTER TABLE "${schemaName}"."users"
          ADD COLUMN IF NOT EXISTS oauth_provider TEXT,
          ADD COLUMN IF NOT EXISTS oauth_id TEXT,
          ADD COLUMN IF NOT EXISTS avatar_url TEXT`,
     )
     // OAuth users have no password — the credential column must be nullable.
-    await prisma.$executeRawUnsafe(
+    await db.$executeRawUnsafe(
       `ALTER TABLE "${schemaName}"."users" ALTER COLUMN "${baseSchema.passwordColumn}" DROP NOT NULL`,
     ).catch(() => {})
 
@@ -471,9 +489,10 @@ async function handleOAuthCallback(req: Request, res: Response) {
 
     // 4. Upsert by oauth_id OR email — under service-role (RLS is forced).
     const existing = await executeWithUserContext<any>(
+      projectId,
       '',
       true,
-      `SELECT id, email, name FROM "${schemaName}"."users" WHERE oauth_id = $1 OR email = $2 LIMIT 1`,
+      `SELECT id, email, name${schema.hasIsBlocked ? ', is_blocked' : ''} FROM "${schemaName}"."users" WHERE oauth_id = $1 OR email = $2 LIMIT 1`,
       [providerUser.id, providerUser.email],
     )
 
@@ -483,15 +502,21 @@ async function handleOAuthCallback(req: Request, res: Response) {
 
     if (existing.length > 0) {
       const row = existing[0]
+      // A suspended account is refused before it is linked or signed in, with
+      // the answer sign-in and refresh give it.
+      if (row.is_blocked) return jsonError(res, 403, 'This account has been suspended.', 'FORBIDDEN')
       userId = String(row.id)
       userEmail = row.email
       userName = row.name
       const setParts = ['oauth_provider = $1', 'oauth_id = $2', 'avatar_url = COALESCE(avatar_url, $3)']
       if (schema.updatedAtColumn) setParts.push(`"${schema.updatedAtColumn}" = NOW()`)
+      // The id bound as the column's own type: a bare $4 arrives as text, and
+      // on a uuid `id` (the canonical shape) the link failed with 42883.
       await executeWithUserContext(
+        projectId,
         '',
         true,
-        `UPDATE "${schemaName}"."users" SET ${setParts.join(', ')} WHERE id = $4`,
+        `UPDATE "${schemaName}"."users" SET ${setParts.join(', ')} WHERE id = $4${userIdCast(schema)}`,
         [provider, providerUser.id, providerUser.avatarUrl || null, userId],
       )
     } else {
@@ -512,10 +537,18 @@ async function handleOAuthCallback(req: Request, res: Response) {
         oauth_provider: provider,
         oauth_id: providerUser.id,
       })
-      const createdRows = await executeWithUserContext<any>('', true, plan.sql, plan.values)
+      const createdRows = await executeWithUserContext<any>(projectId, '', true, plan.sql, plan.values)
       userId = String(createdRows[0]?.id)
       userEmail = providerUser.email
       userName = providerUser.name
+      // A first OAuth sign-in IS a sign-up. auth.user.created fired only from
+      // the password routes, so webhook subscribers never heard of OAuth users.
+      void emitEndUserCreated(projectId, {
+        id: userId,
+        email: userEmail,
+        name: userName,
+        created_at: createdRows[0]?.created_at,
+      })
     }
 
     // 5. Mark config used + count activity (never block auth on these).

@@ -2,10 +2,11 @@
  * Autonomy Events Feed
  * ====================
  *
- * GET /api/projects/[id]/autonomy/events?since=ISO
+ * GET /api/projects/[id]/autonomy/events?since=ISO[&include=held]
  *
  * Returns autonomous-fix events for this project since `since` (default: last
- * 60 seconds). Powers two surfaces:
+ * 60 seconds), and with `include=held` the passes the repair loop held back
+ * during an incident. Powers two surfaces:
  *
  *   • In-flow toasts ("Backenly added an index on created_at — your list API
  *     will sort by it") that pop up while a user is actively working in
@@ -22,9 +23,13 @@ import { NextRequest, NextResponse } from 'next/server'
 import { withProjectValidation } from '@/lib/middleware/projectValidation'
 import { prisma } from '@/lib/db/prisma'
 import { AUTONOMOUS_AUDIT_ACTIONS } from '@/lib/autonomy/circuit-breaker'
-import { explainAutonomyEvent } from '@/lib/autonomy/because-copy'
+import { explainAutonomyEvent, explainHeldBack } from '@/lib/autonomy/because-copy'
+import { LOOP_HELD, REPAIR_HELD } from '@/lib/autonomy/change-freeze'
 
 const MAX_LIMIT = 50
+
+/** Repairs held back during an incident: the repair loop's own pass, and any other path's (lib/autonomy/change-freeze.ts). */
+const HELD_BACK: string[] = [LOOP_HELD, REPAIR_HELD]
 
 export async function GET(
   request: NextRequest,
@@ -51,11 +56,19 @@ export async function GET(
       Math.max(1, Number(url.searchParams.get('limit')) || 20),
     )
 
+    // `include=held` adds the passes on which the repair loop held its repairs
+    // back because the project was mid-incident. Off by default: the in-flow
+    // toasts poll this feed every few seconds and a freeze is written every
+    // minute it lasts. Asked for, a repair that waited out an incident is not
+    // read as one that never came.
+    const held = url.searchParams.get('include') === 'held'
+    const actions: string[] = [...AUTONOMOUS_AUDIT_ACTIONS, ...(held ? HELD_BACK : [])]
+
     const rows = await prisma.auditLog.findMany({
       where: {
         projectId: validated.projectId,
         timestamp: { gt: since },
-        action: { in: AUTONOMOUS_AUDIT_ACTIONS as unknown as string[] },
+        action: { in: actions },
       },
       orderBy: { timestamp: 'desc' },
       take: limit,
@@ -67,6 +80,20 @@ export async function GET(
       try {
         d = r.details ? JSON.parse(r.details) : {}
       } catch { /* legacy free-text */ }
+      if (HELD_BACK.includes(r.action)) {
+        const explained = explainHeldBack(d)
+        return {
+          id: r.id,
+          action: r.action,
+          at: r.timestamp.toISOString(),
+          what: explained.what,
+          why: explained.why,
+          full: explained.full,
+          kind: explained.kind,
+          verified: false,
+          tableName: null,
+        }
+      }
       const explained = explainAutonomyEvent(d)
       // Only a recorded 'confirmed' outcome is a verified fix. A change that ran
       // without one is still shown, and says so, so a toast never implies a

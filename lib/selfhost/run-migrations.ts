@@ -113,6 +113,7 @@ export interface MigrationReport {
 export const SUPPORT_OBJECTS = [
   { name: 'backenly_pgrst_schema_registry', kind: 'table' as const },
   { name: 'backenly_pgrst_ddl_sync', kind: 'event_trigger' as const },
+  { name: 'backenly_pgrst_drop_sync', kind: 'event_trigger' as const },
   { name: 'backenly_pgrst_schema_create', kind: 'event_trigger' as const },
   { name: 'backenly_pgrst_schema_drop', kind: 'event_trigger' as const },
 ]

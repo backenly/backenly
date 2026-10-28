@@ -10,6 +10,13 @@ jest.mock('@/lib/db/prisma', () => ({ prisma: { $queryRaw: (...a: unknown[]) => 
 jest.mock('@/lib/services/workspace-pool', () => ({
   resolveWorkspaceSchema: async (id: string) => (id === 'bad' ? 'public' : `workspace_${id}`),
 }))
+// Every project here is in the home region: its raw client is the mocked
+// shared one and its database URL is DATABASE_URL. The regional routing itself
+// is proven against real databases in tests/integration/project-region.spec.ts.
+jest.mock('@/lib/data-plane/regional', () => ({
+  workspaceRawClient: async () => ({ $queryRaw: (...a: unknown[]) => mockQueryRaw(...a) }),
+  projectDatabaseUrl: async () => process.env.DATABASE_URL,
+}))
 
 import {
   functionRoleName,
@@ -59,14 +66,21 @@ describe('the password', () => {
 })
 
 describe('the connection string', () => {
-  it('is the app’s own, with the login swapped in and a small pool', () => {
-    const url = new URL(functionDatabaseUrl('bkn_fn_0123456789ab', 'pw'))
+  it('is the project database’s own, with the login swapped in and a small pool', () => {
+    const url = new URL(functionDatabaseUrl('bkn_fn_0123456789ab', 'pw', process.env.DATABASE_URL as string))
     expect(url.username).toBe('bkn_fn_0123456789ab')
     expect(url.password).toBe('pw')
     expect(url.host).toBe('db.internal:5432')
     expect(url.pathname).toBe('/backenly')
     expect(url.searchParams.get('sslmode')).toBe('require')
     expect(url.searchParams.get('connection_limit')).toBe('2')
+  })
+
+  it("turns Prisma's statement cache off, so a table whose columns changed does not fail a cached statement", () => {
+    // lib/data-plane/statement-cache.ts; the database side is
+    // tests/integration/workspace-sql-cached-plan.spec.ts.
+    const url = new URL(functionDatabaseUrl('bkn_fn_0123456789ab', 'pw', process.env.DATABASE_URL as string))
+    expect(url.searchParams.get('statement_cache_size')).toBe('0')
   })
 })
 
@@ -88,5 +102,36 @@ describe('never falling back to the app connection', () => {
   it('refuses a role name the helper should never have returned', async () => {
     mockQueryRaw.mockResolvedValue([{ role: 'backenly_app' }])
     await expect(functionDbClient(PID)).rejects.toThrow(/unexpected role/)
+  })
+})
+
+// Found by fuzzing the data API: two first calls of a project's functions at
+// once each synced the role, the syncs raced on it, and one call answered 500.
+describe('first calls that arrive together', () => {
+  const PID2 = '22222222-3333-4444-8555-666666666666'
+  const PID3 = '33333333-4444-4555-8666-777777777777'
+
+  it('share one sync and one client', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((r) => { release = r })
+    mockQueryRaw.mockImplementation(async () => {
+      await gate
+      return [{ role: functionRoleName(`workspace_${PID2}`) }]
+    })
+    const first = functionDbClient(PID2)
+    const second = functionDbClient(PID2)
+    release()
+    const [a, b] = await Promise.all([first, second])
+    expect(mockQueryRaw).toHaveBeenCalledTimes(1)
+    expect(a).toBe(b)
+  })
+
+  it('retry once when another process held the role at the same moment', async () => {
+    mockQueryRaw
+      .mockRejectedValueOnce(new Error('Raw query failed. Code: `XX000`. Message: `ERROR: tuple concurrently updated`'))
+      .mockResolvedValueOnce([{ role: functionRoleName(`workspace_${PID3}`) }])
+    const handle = await functionDbClient(PID3)
+    expect(handle.role).toBe(functionRoleName(`workspace_${PID3}`))
+    expect(mockQueryRaw).toHaveBeenCalledTimes(2)
   })
 })

@@ -11,6 +11,9 @@
  *     wired and enforcing security.
  *   - CREATE verification: POST a synthesised sample row, accept 201/401/403,
  *     fail on 400/500. 400 means schema mismatch — flagged for the brain.
+ *   - GET verification: list one row, then GET it by id, accept 200/401/403,
+ *     fail on 404/500. With no row to fetch the route was not exercised,
+ *     which is a fail, never a pass.
  *
  * Auth: the project's ANON key. It is public by design (Project.anonKey), so
  * using it here does not require any secret credential to be recoverable from
@@ -29,12 +32,15 @@
  */
 
 import { prisma } from '@/lib/db/prisma'
+import { workspaceRawClient } from '@/lib/data-plane/regional'
 
 export interface EndpointTestInput {
   projectId: string
   tableName: string
   operation: 'list' | 'create' | 'get'
   sessionToken?: string
+  /** How long the request may take. Defaults to REQUEST_TIMEOUT_MS; tests shorten it. */
+  timeoutMs?: number
 }
 
 export interface EndpointTestResult {
@@ -46,11 +52,20 @@ export interface EndpointTestResult {
   statusCode: number | null
   /** Brief excerpt of the response body for the model to reason over. */
   bodyExcerpt: string
+  /** For a list that answered with a row: that row's id, which get then fetches. */
+  firstRowId?: string
   /** When ok=false, why. */
-  failureKind?: 'not_found' | 'server_error' | 'bad_request' | 'no_endpoint' | 'no_app_url' | 'no_table' | 'fetch_failed' | 'unauthenticated'
+  failureKind?: 'not_found' | 'server_error' | 'bad_request' | 'no_endpoint' | 'no_app_url' | 'no_table' | 'fetch_failed' | 'unauthenticated' | 'no_rows' | 'timeout'
 }
 
 const APP_URL_ENV = ['NEXT_PUBLIC_APP_URL', 'APP_URL'] as const
+
+/**
+ * How long one request to the runtime may take. run_test runs inside the agent
+ * turn, which MCP caps at 90 seconds, so a connection that hangs must not be
+ * able to spend it. Ten seconds is plenty for one CRUD call.
+ */
+const REQUEST_TIMEOUT_MS = 10_000
 
 function resolveAppUrl(): string | null {
   for (const k of APP_URL_ENV) {
@@ -101,9 +116,10 @@ async function loadTableColumns(
   projectId: string,
   tableName: string,
 ): Promise<Array<{ name: string; type: string; nullable: boolean }> | null> {
+  const db = await workspaceRawClient(projectId)
   try {
     const schema = await resolveWorkspaceSchema(projectId)
-    const rows = await prisma.$queryRawUnsafe<
+    const rows = await db.$queryRawUnsafe<
       Array<{ column_name: string; data_type: string; is_nullable: string }>
     >(
       `SELECT column_name, data_type, is_nullable
@@ -155,6 +171,35 @@ function sampleValueFor(type: string, name: string): unknown {
  * and behaving — including auth-required responses, which prove it's wired.
  */
 export async function runEndpointTest(input: EndpointTestInput): Promise<EndpointTestResult> {
+  if (input.operation !== 'get') return requestEndpoint(input)
+
+  // get is the get-by-id route, so it needs the id of a row that exists: list
+  // one row, then fetch that row. A list that fails is reported as that
+  // failure. A list that answers without a row to fetch leaves the route
+  // unexercised, and an unexercised route is not a pass.
+  const listed = await requestEndpoint({ ...input, operation: 'list' })
+  if (!listed.ok) return listed
+  if (listed.firstRowId === undefined) {
+    return {
+      ok: false,
+      summary:
+        `${listed.summary} The list gave no row to fetch by id, so the get route was not exercised ` +
+        'and nothing about it was verified.',
+      endpoint: listed.endpoint,
+      method: listed.method,
+      statusCode: listed.statusCode,
+      bodyExcerpt: listed.bodyExcerpt,
+      failureKind: 'no_rows',
+    }
+  }
+  return requestEndpoint(input, listed.firstRowId)
+}
+
+/**
+ * One request to the table's endpoint, judged by its status. Given a rowId it
+ * fetches that row; any other read lists a single row.
+ */
+async function requestEndpoint(input: EndpointTestInput, rowId?: string): Promise<EndpointTestResult> {
   const { projectId, tableName, operation } = input
 
   const appUrl = resolveAppUrl()
@@ -170,7 +215,9 @@ export async function runEndpointTest(input: EndpointTestInput): Promise<Endpoin
     }
   }
 
-  const path = `/api/v1/${projectId}/db/${encodeURIComponent(tableName)}`
+  const path =
+    `/api/v1/${projectId}/db/${encodeURIComponent(tableName)}` +
+    (rowId === undefined ? '' : `/${encodeURIComponent(rowId)}`)
 
   // Build payload for create. If columns can't be introspected, DON'T report
   // failure — that is a false negative that makes the agent thrash
@@ -189,7 +236,10 @@ export async function runEndpointTest(input: EndpointTestInput): Promise<Endpoin
     }
   }
   const method = effectiveOp === 'create' ? 'POST' : 'GET'
-  const url = `${appUrl}${path}${effectiveOp === 'list' ? '?limit=1' : ''}`
+  // A GET that names no row is a list, and a list asks for one row: that is
+  // all a test needs, and the whole body is read into memory below.
+  const listing = method === 'GET' && rowId === undefined
+  const url = `${appUrl}${path}${listing ? '?limit=1' : ''}`
 
   // Headers
   const headers: Record<string, string> = { 'content-type': 'application/json' }
@@ -200,10 +250,29 @@ export async function runEndpointTest(input: EndpointTestInput): Promise<Endpoin
   // whether a 401 means "the route enforces auth" or "this test never ran".
   const authenticated = Boolean(anonKey) || Boolean(input.sessionToken)
 
+  // The deadline covers the whole exchange, body included, since a response
+  // can stall after its status line. A request it cuts off verified nothing,
+  // and that is a different failure from a connection that could not be made.
+  const timeoutMs = input.timeoutMs ?? REQUEST_TIMEOUT_MS
+  const deadline = AbortSignal.timeout(timeoutMs)
+  const timedOut = (statusCode: number | null): EndpointTestResult => ({
+    ok: false,
+    summary:
+      `${method} ${path} ${statusCode === null ? 'did not answer' : `→ ${statusCode}, but did not finish answering`} ` +
+      `within ${timeoutMs / 1000}s, so nothing was verified. A slow or hung runtime says nothing about whether ` +
+      'the endpoint works.',
+    endpoint: path,
+    method,
+    statusCode,
+    bodyExcerpt: '',
+    failureKind: 'timeout',
+  })
+
   let res: Response
   try {
-    res = await fetch(url, { method, headers, body })
+    res = await fetch(url, { method, headers, body, signal: deadline })
   } catch (err) {
+    if (deadline.aborted) return timedOut(null)
     return {
       ok: false,
       summary: `Fetch to ${path} failed: ${err instanceof Error ? err.message : 'unknown'}`,
@@ -216,7 +285,8 @@ export async function runEndpointTest(input: EndpointTestInput): Promise<Endpoin
   }
 
   const status = res.status
-  const text = await res.text().catch(() => '')
+  const text = await res.text().catch(() => (deadline.aborted ? null : ''))
+  if (text === null) return timedOut(status)
   const excerpt = text.length > 320 ? text.slice(0, 320) + '…' : text
 
   // 200 / 201 → endpoint works
@@ -228,6 +298,7 @@ export async function runEndpointTest(input: EndpointTestInput): Promise<Endpoin
       method,
       statusCode: status,
       bodyExcerpt: excerpt,
+      ...(listing ? { firstRowId: firstRowIdOf(text) } : {}),
     }
   }
   // 401 / 403
@@ -260,11 +331,16 @@ export async function runEndpointTest(input: EndpointTestInput): Promise<Endpoin
       bodyExcerpt: excerpt,
     }
   }
-  // 404 → not routed
+  // 404 → not routed. Not for a row the list just returned, though: the list
+  // answering proves the table is routed, and blaming generate_api would send
+  // the agent to regenerate an API that works.
   if (status === 404) {
     return {
       ok: false,
-      summary: `${method} ${path} → 404. The endpoint is not routed — generate_api may not have run, or the table name is wrong.`,
+      summary:
+        rowId === undefined
+          ? `${method} ${path} → 404. The endpoint is not routed — generate_api may not have run, or the table name is wrong.`
+          : `${method} ${path} → 404 for a row the list had just returned: the table is routed, but fetching a row by its id does not work. Body: ${excerpt.slice(0, 120)}`,
       endpoint: path,
       method,
       statusCode: status,
@@ -284,13 +360,30 @@ export async function runEndpointTest(input: EndpointTestInput): Promise<Endpoin
       failureKind: 'bad_request',
     }
   }
-  // 5xx → broken… UNLESS the body says it's an RLS / permission-denied
-  // failure. Postgres returns code 42501 ("INSUFFICIENT_PRIVILEGE") when an
-  // RLS policy refuses the row; the runtime currently wraps that as a 500.
-  // RLS doing its job is the OPPOSITE of "broken" — it proves the table is
-  // wired AND correctly secured. Treat it as PASS.
+  // 5xx → broken… UNLESS the body says it's an RLS policy denial.
+  // Postgres returns code 42501 ("INSUFFICIENT_PRIVILEGE") for both RLS
+  // denials and missing GRANTs.
+  // - A missing grant (permission denied for table/schema/...) is a broken
+  //   backend and must fail as server_error naming the missing grant.
+  // - A true RLS policy denial proves the table is wired AND secured, so it
+  //   passes.
+  // - A bare 42501 with no RLS wording is treated as a server error.
   if (status >= 500) {
-    const rlsBlocked = looksLikeRlsDenied(excerpt)
+    const bodyToCheck = text || excerpt
+    const missingGrant = extractMissingGrant(bodyToCheck)
+    if (missingGrant) {
+      return {
+        ok: false,
+        summary: `${method} ${path} → ${status}. A database grant is missing (${missingGrant}). The endpoint threw a server error because the database role lacks required permissions.${degradedNote}`,
+        endpoint: path,
+        method,
+        statusCode: status,
+        bodyExcerpt: excerpt,
+        failureKind: 'server_error',
+      }
+    }
+
+    const rlsBlocked = looksLikeRlsDenied(bodyToCheck)
     if (rlsBlocked) {
       return {
         ok: true,
@@ -325,25 +418,63 @@ export async function runEndpointTest(input: EndpointTestInput): Promise<Endpoin
 }
 
 /**
- * Recognise an RLS / permission-denied error inside a 500 body. The runtime
- * sometimes lifts the underlying Postgres error through prisma.$queryRawUnsafe,
- * producing bodies like:
+ * Detect a Postgres missing-grant error inside a 500 body.
+ *
+ * Postgres raises SQLSTATE 42501 (insufficient_privilege) for both RLS denials
+ * AND missing GRANTs. But a missing grant means the runtime role cannot use the
+ * table/schema at all — that is a broken backend, not a secured one.
+ *
+ * Matches errors like:
+ *   permission denied for schema workspace_p1
+ *   permission denied for table posts
+ *   permission denied for sequence posts_id_seq
+ *   permission denied for function my_func
+ */
+export function extractMissingGrant(body: string): string | null {
+  if (!body) return null
+  const match =
+    body.match(/permission denied for (?:table|schema|sequence|function|relation|view|database|foreign table)\s+([^\s"',;\\}]+|"(?:\\.|[^"\\])*"|\\"(?:\\.|[^"\\])*\\")/i) ||
+    body.match(/permission denied for (?:table|schema|sequence|function|relation|view|database|foreign table)/i)
+  if (!match) return null
+  return match[0].replace(/\\"/g, '"').trim()
+}
+
+/**
+ * Recognise an RLS policy denial inside a 500 body. The runtime sometimes
+ * lifts the underlying Postgres error through prisma.$queryRawUnsafe, producing
+ * bodies like:
  *
  *   {"error":"... Raw query failed. Code: `42501`. Message: `ERROR: new row
  *    violates row-level security policy ...`"}
  *
- * We match on both the Postgres SQLSTATE code (42501) and the human message
- * so neither a code-only nor a message-only excerpt slips through. Anything
- * matching is RLS doing its job — not a real server error.
+ * Pass ONLY on RLS-specific phrasing (e.g. `violates row-level security policy`
+ * or `new row violates row-level security policy`).
+ *
+ * Missing grants (e.g. `permission denied for schema/table`) and bare 42501
+ * codes without RLS wording do NOT qualify as an RLS pass.
  */
-function looksLikeRlsDenied(body: string): boolean {
+export function looksLikeRlsDenied(body: string): boolean {
   if (!body) return false
-  const lower = body.toLowerCase()
+  if (extractMissingGrant(body)) return false
+
   return (
-    /\b42501\b/.test(body) ||
     /row[-\s]?level security/i.test(body) ||
-    /violates row[-\s]?level security policy/i.test(body) ||
-    /permission denied/i.test(lower) ||
-    /insufficient[_\s]?privilege/i.test(lower)
+    /violates row[-\s]?level security policy/i.test(body)
   )
+}
+
+/**
+ * The id of the first row in a list body (`{ data: [row, …] }`), as the path
+ * segment the get-by-id route takes, or undefined when there is none to use.
+ * An empty id is none: it would turn the get path back into the bare table
+ * path, which is a list with no limit.
+ */
+function firstRowIdOf(body: string): string | undefined {
+  try {
+    const id = JSON.parse(body)?.data?.[0]?.id
+    if (typeof id === 'number' && Number.isFinite(id)) return String(id)
+    return typeof id === 'string' && id !== '' ? id : undefined
+  } catch {
+    return undefined
+  }
 }

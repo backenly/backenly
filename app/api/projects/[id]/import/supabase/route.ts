@@ -44,6 +44,12 @@ import { runSupabaseImport } from '@/lib/import/supabase-importer'
 const SUPABASE_IMPORT_ENABLED = process.env.SUPABASE_IMPORT_ENABLED === 'true'
 
 const runImport = withProjectAccess(async (req: NextRequest, { user, projectId }) => {
+  // The importer WRITES the workspace (tables, rows, auth users). Writes are
+  // DEVELOPER-floor everywhere else; withProjectAccess alone admitted a VIEWER.
+  const { canWriteProject } = await import('@/lib/edition/guard')
+  if (!(await canWriteProject(user.userId, projectId))) {
+    return NextResponse.json({ success: false, error: 'Your role in this project does not allow imports' }, { status: 403 })
+  }
   let body: { connectionString?: string; options?: { maxRowsPerTable?: number; skipAuth?: boolean } }
   try {
     body = await req.json()

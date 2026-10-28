@@ -136,7 +136,7 @@ export function annotationsFor(name: string): McpToolAnnotations {
  *   - propose_plan / ask_user / answer_question / finish — terminal control,
  *     meaningful only when the LLM is steering the agent loop. From an MCP
  *     host's perspective, the host is doing the steering.
- *   - run_test / rollback — internal verifier hooks. The host LLM can call
+ *   - run_test — an internal verifier hook. The host LLM can call
  *     `get_metrics` or `get_errors` to verify itself.
  *   - fix_backend / apply_proposal — assume a backenly-resident agent context
  *     that doesn't exist on an MCP call.
@@ -150,7 +150,6 @@ const MCP_EXCLUDE = new Set<string>([
   'answer_question',
   'finish',
   'run_test',
-  'rollback',
   'fix_backend',
   'apply_proposal',
   // Credential-gated tools — call backend_chat instead so brain can ask user.
@@ -164,7 +163,7 @@ const BUILD_TOOLS = new Set<string>([
   'create_table', 'add_column', 'create_index', 'rename_column', 'add_constraint',
   // (list_branches / diff_branch are read tools; all four are reachable through
   // the single advertised `branch` tool — see BRANCH_ACTIONS.)
-  'generate_api', 'enable_auth', 'create_bucket', 'set_bucket_public', 'add_rls', 'set_rls',
+  'generate_api', 'enable_auth', 'create_bucket', 'set_bucket_public', 'set_bucket_policy', 'add_rls', 'set_rls',
   'create_trigger', 'enable_realtime', 'generate_function', 'enable_vector_search',
   'create_cron_job', 'set_rate_limit', 'generate_aggregate_api', 'enable_teams',
   'send_push', 'rotate_webhook_secret', 'connect_frontend',
@@ -448,11 +447,15 @@ export function buildDispatchable(): McpToolDescriptor[] {
     name: 'backend_chat',
     tier: 'chat',
     description:
-      'Run a natural-language request through the Backenly brain — the same agent that powers backenly.com. ' +
-      'Use this whenever the user describes WHAT they want without naming specific tools ("create a blog backend", ' +
-      '"add likes and comments to my posts table", "make the orders API faster"). The brain decides the steps, ' +
-      'executes them, and returns a human summary. Prefer this over chaining individual tools unless you have a ' +
-      'specific reason. Long-running multi-step plans take 5-30s. If the request involves a destructive operation ' +
+      'Run a natural-language request through the Backenly brain, Backenly\'s own model, which decides the steps, ' +
+      'applies them through the same governed tools and returns a summary. Use it for what you would rather describe ' +
+      'than specify ("add likes and comments to my posts table", "make the orders API faster"). A call answers within ' +
+      'about 45 s. A request that takes longer keeps running on its own: the answer has `status: "running"`, a run ' +
+      'id and what has landed so far, and backend_chat with "status" waits for it again and returns its result. ' +
+      'While one request runs, a message sent here joins it instead of starting another. Whenever an answer ' +
+      'carries `next`, the request is not finished: make that call. To lay down a whole app\'s schema, ' +
+      'apply_migration with the complete DDL is faster and exact. Where production is protected the brain cannot ' +
+      'change the schema: build it on a branch with apply_migration. If the request involves a destructive operation ' +
       '(dropping tables/columns, deleting buckets), it is NOT executed — the response includes an `approval` object ' +
       'with a pending request id: the human approves it in the Backenly Review Queue, and you poll `check_approval` ' +
       'until it is executed or rejected.',
@@ -572,6 +575,7 @@ export function buildDispatchable(): McpToolDescriptor[] {
     tier: 'read',
     description:
       'Check the status of an approval request: a call that was parked for a human instead of running. ' +
+      'It also takes the run id of a backend_chat request still running, and returns where it has got to or its result. ' +
       'Returns pending | approved | executed | failed | rejected | expired (older requests may also read partial) ' +
       'plus a result summary once decided. ' +
       'Poll every 15-30s while pending; stop on any terminal status. Only the human can approve — ' +
@@ -627,7 +631,7 @@ export function buildDispatchable(): McpToolDescriptor[] {
       description:
         'Read rows from a single workspace table by simple column = value filter. Returns whole rows. ' +
         'For joins, aggregates, GROUP BY, or any multi-table question use `run_query` instead — this tool cannot express them. ' +
-        'Owner/admin maintenance tool: validates table and column shapes, but intentionally bypasses end-user RLS, triggers, and AI function side effects.',
+        'Owner/admin maintenance tool: validates table and column shapes, but intentionally bypasses end-user RLS and app triggers. Row-event AI functions and row webhooks still fire: they are captured inside PostgreSQL, so they see every writer.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -649,7 +653,7 @@ export function buildDispatchable(): McpToolDescriptor[] {
       name: 'db_insert',
       tier: 'data',
       description:
-        'Insert one row into a workspace table. Owner/admin maintenance tool: bypasses end-user RLS, triggers, and AI function side effects. ' +
+        'Insert one row into a workspace table. Owner/admin maintenance tool: bypasses end-user RLS and app triggers; row-event AI functions and row webhooks still fire (captured inside PostgreSQL). ' +
         'Returns the created row including auto-generated id and timestamps.',
       inputSchema: {
         type: 'object',
@@ -667,7 +671,7 @@ export function buildDispatchable(): McpToolDescriptor[] {
       tier: 'data',
       description:
         'Patch one or more rows in a workspace table. `filter` selects which rows to update; `patch` is the column → value diff. ' +
-        'Owner/admin maintenance tool: bypasses end-user RLS, triggers, and AI function side effects. Returns the count of rows updated.',
+        'Owner/admin maintenance tool: bypasses end-user RLS and app triggers; row-event AI functions and row webhooks still fire (captured inside PostgreSQL). Returns the count of rows updated.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -685,7 +689,7 @@ export function buildDispatchable(): McpToolDescriptor[] {
       tier: 'data',
       description:
         'Delete rows from a workspace table matching `filter`. `filter` is REQUIRED and non-empty — there is no "delete all rows" path here. ' +
-        'Owner/admin maintenance tool: bypasses end-user RLS, triggers, and AI function side effects. For destructive table-wide operations use the dashboard.',
+        'Owner/admin maintenance tool: bypasses end-user RLS and app triggers; row-event AI functions and row webhooks still fire (captured inside PostgreSQL). For destructive table-wide operations use the dashboard.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -901,7 +905,12 @@ export const STATE_SECTIONS: Record<string, string> = {
   integrations: 'list_integration_keys',
   apps: 'list_connected_apps',
   env: 'list_env_vars',
-  webhooks: 'list_webhook_deliveries',
+  // The Webhooks PAGE: configured endpoints, their health. This once pointed
+  // at list_webhook_deliveries — the AppTrigger delivery log, which is empty
+  // unless legacy /database/* routes fired — so an agent grounding itself on a
+  // project with three live webhook endpoints was told there were none.
+  webhooks: 'list_webhooks',
+  deliveries: 'list_webhook_deliveries',
   findings: 'list_findings',
   incidents: 'get_pending_incidents',
   metrics: 'get_metrics',
@@ -913,6 +922,9 @@ export const STATE_SECTIONS: Record<string, string> = {
   // Read-only. Granting consent for a schema-rewriting ladder stays with a
   // person: an agent that could approve its own work defeats the tier system.
   maintenance: 'get_maintenance_ladder',
+  // Read-only, for the maintenance ladder's reason: an architecture change
+  // restructures production tables, and its consent belongs to a person.
+  evolution: 'get_evolution_proposals',
   realtime: 'get_realtime_status',
 }
 

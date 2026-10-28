@@ -4,6 +4,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
 import { requireAuth } from '@/lib/auth/middleware'
 import { canAccessProject } from '@/lib/edition/guard'
+import { workspaceRawClient } from '@/lib/data-plane/regional'
 
 /**
  * GET /api/database/tables/[tableId]/columns
@@ -46,8 +47,9 @@ export async function GET(request: NextRequest, props: { params: Promise<{ table
       )
     }
     
-    // Fetch column information from PostgreSQL
-    const columns = await prisma.$queryRawUnsafe<Array<{
+    // Fetch column information from the project's database, in its region
+    const db = await workspaceRawClient(projectId)
+    const columns = await db.$queryRawUnsafe<Array<{
       column_name: string
       data_type: string
       is_nullable: string

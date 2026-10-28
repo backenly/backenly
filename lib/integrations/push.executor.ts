@@ -119,6 +119,7 @@ export async function executePushIntegration(
     select: { activeIntegrations: true },
   })
   const existing = (proj?.activeIntegrations as Record<string, any>) ?? {}
+  // history: inside dispatchIntegration's change (./index.ts)
   await prisma.project.update({
     where: { id: projectId },
     data: {

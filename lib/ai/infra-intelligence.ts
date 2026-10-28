@@ -18,6 +18,7 @@
  */
 
 import { Pool } from 'pg'
+import { projectDatabaseUrl } from '@/lib/data-plane/regional'
 
 // Warn once per server restart if pg_stat_statements is unavailable.
 // Avoids spamming logs on every cron invocation.
@@ -138,7 +139,12 @@ export interface InfraReport {
   websocketPressure: WebSocketFinding | null
   /** Prioritised actionable recommendations, highest severity first */
   topRecommendations: string[]
-  /** SQL fixes safe to auto-apply (no data loss risk) */
+  /**
+   * Index SQL for the hot tables under high or critical pressure: the repairs
+   * their findings carry. Nothing here runs it. A person applies one from its
+   * finding ("Fix now"), through the governed kernel, and the repair loop's
+   * measured invariants index what they detect on their own.
+   */
   autoApplicableFixes: string[]
   /** SQL that needs user approval before running */
   approvalRequired: string[]
@@ -146,8 +152,9 @@ export interface InfraReport {
 
 // ── Connection helper ─────────────────────────────────────────────────────────
 
-function getPool(): Pool {
-  return new Pool({ connectionString: process.env.DATABASE_URL, max: 3 })
+/** A short-lived pool on the project's own database, in its region. */
+async function getPool(projectId: string): Promise<Pool> {
+  return new Pool({ connectionString: await projectDatabaseUrl(projectId), max: 3 })
 }
 
 // ── Detection: Hot tables ─────────────────────────────────────────────────────
@@ -685,7 +692,7 @@ export async function runInfraIntelligence(
   const schema = schemaName ?? `workspace_${projectId}`
   const scannedAt = new Date().toISOString()
 
-  const pool = getPool()
+  const pool = await getPool(projectId)
   try {
     const [hotTables, partitionCandidates, slowQueries, wsPressure] =
       await Promise.allSettled([
@@ -934,35 +941,14 @@ export async function runAndStoreInfraIntelligence(
       await prisma.healthFinding.createMany({ data: toCreate as any, skipDuplicates: true }).catch(() => {})
     }
 
-    // Auto-apply safe index additions — MUST go through the build lock so cron
-    // fixes never race with an active user build on the same project.
-    //
-    // Deliberately OUTSIDE the `toCreate.length > 0` guard it used to sit in.
-    // Nested there, a repair could only ever run on the one scan that first
-    // raised the finding: on every later pass the finding already existed,
-    // toCreate was empty, and the whole block was skipped. So a fix that failed
-    // — or was never attempted because the finding predated the fix being
-    // possible — could never be retried, and the finding sat open forever with
-    // an index that was reported as auto-applicable and never applied.
-    // Detected-but-never-repaired, the same shape as the wide-open RLS bug.
-    // Index creation is tier 0, and still the owner's call: with live
-    // execution off or the dial at Off, the finding stays open and nothing is
-    // created. See permitInlineRepair.
-    const permit = report.autoApplicableFixes.length > 0
-      ? await (await import('@/lib/authority/gate')).permitInlineRepair(projectId, 'infra_hot_table', 0)
-      : null
-    if (permit && !permit.allowed) {
-      console.log(`[InfraIntelligence] Not applying index fixes for ${projectId} — ${permit.reason}`)
-    }
-    if (report.autoApplicableFixes.length > 0 && permit?.allowed) {
-      const { withBuildLock } = await import('@/lib/ai/build-runtime/build-lock')
-      const lockResult = await withBuildLock(projectId, 'modify', async () => {
-        await _applyAutoFixes(projectId, report.autoApplicableFixes)
-      })
-      if (lockResult.error) {
-        console.log(`[InfraIntelligence] Skipping auto-fixes for ${projectId} — ${lockResult.error}`)
-      }
-    }
+    // This pass changes no schema. It used to run each hot table's CREATE INDEX
+    // itself, on its own pool, every minute: outside the change ledger (so a
+    // restore could not see the index and was refused over it), with no
+    // breaker, and through an incident freeze. Every autonomous repair goes
+    // through the governed kernel instead, and the repair loop's measured
+    // invariants (measured_slow_queries_are_indexed, hot_path_columns_are_
+    // indexed) index what they detect there. This pass reports: its findings
+    // carry the column, so "Fix now" applies one through the same kernel.
 
     if (toCreate.length > 0) {
       // Notify
@@ -976,7 +962,8 @@ export async function runAndStoreInfraIntelligence(
           metadata: {
             overallPressure: report.overallPressure,
             findingCount: toCreate.length,
-            autoFixed: report.autoApplicableFixes.length,
+            // Nothing is applied by this pass (see above).
+            autoFixed: 0,
             source: 'infra_intelligence',
           },
           read: false,
@@ -984,27 +971,9 @@ export async function runAndStoreInfraIntelligence(
       }).catch(() => {})
     }
 
-    console.log(`[InfraIntelligence] project=${projectId} pressure=${report.overallPressure} findings=${toCreate.length} autoFixes=${report.autoApplicableFixes.length}`)
+    console.log(`[InfraIntelligence] project=${projectId} pressure=${report.overallPressure} findings=${toCreate.length} applicableIndexes=${report.autoApplicableFixes.length}`)
   } catch (err: any) {
     console.warn(`[InfraIntelligence] Failed for project ${projectId}:`, err?.message)
-  }
-}
-
-// ── Safe auto-fix execution ───────────────────────────────────────────────────
-
-async function _applyAutoFixes(projectId: string, sqls: string[]): Promise<void> {
-  const pool = getPool()
-  try {
-    for (const sql of sqls) {
-      try {
-        await pool.query(sql)
-        console.log(`[InfraIntelligence] Auto-applied: ${sql.slice(0, 80)}`)
-      } catch (e: any) {
-        console.warn(`[InfraIntelligence] Auto-fix failed (non-fatal): ${e?.message}`)
-      }
-    }
-  } finally {
-    await pool.end().catch(() => {})
   }
 }
 

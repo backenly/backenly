@@ -33,6 +33,12 @@ export function generateTypedClient(
   types: GeneratedTypes,
   opts: {
     projectId: string
+    /**
+     * The client's default address: the origin the project's API is served
+     * from (projectApiOrigin in lib/data-plane/regional.ts), default
+     * https://backenly.com. A caller's apiUrl and NEXT_PUBLIC_BACKENLY_URL
+     * still come first.
+     */
     apiUrl?: string
     /** Relative path to the types file from this client file, default './backenly.types' */
     typesImportPath?: string
@@ -81,7 +87,7 @@ ${tableAccessors}
 export function createTypedClient(config?: { apiUrl?: string }): TypedBackenlyClient {
   return new BackenlyClient({
     projectId: '${opts.projectId}',
-    apiUrl: config?.apiUrl ?? (typeof process !== 'undefined' ? process.env.NEXT_PUBLIC_BACKENLY_URL : undefined) ?? 'https://backenly.com',
+    apiUrl: config?.apiUrl ?? (typeof process !== 'undefined' ? process.env.NEXT_PUBLIC_BACKENLY_URL : undefined) ?? '${opts.apiUrl ?? 'https://backenly.com'}',
   }) as TypedBackenlyClient
 }
 

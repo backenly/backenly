@@ -13,6 +13,7 @@ import { assertWritable } from '@/lib/platform-controls'
 import { assertAccountCanConsume } from '@/lib/platform-controls'
 import { getProjectLifecycle } from '@/lib/edition'
 import { ProjectCreationUnsupportedError } from '@/lib/projects/provision'
+import { checkRequestedRegion } from '@/lib/regions'
 import type { ProjectListEntry } from '@/lib/edition/types'
 
 /**
@@ -46,6 +47,9 @@ const createProjectSchema = z.object({
   userId: z.string().uuid(),
   // The organization to create it in (Cloud). Omitted: the creator's own.
   organizationId: z.string().uuid().optional().nullable(),
+  // The Backenly Cloud region it should run in (lib/regions.ts). Omitted: the
+  // home region. Only an open region is accepted.
+  region: z.string().max(32).optional().nullable(),
 })
 
 /** BigInt does not survive JSON.stringify, and every listing carries four. */
@@ -123,6 +127,19 @@ export const POST = withAuth(async (request: NextRequest, { user }) => {
     const body = await request.json()
     const validatedData = createProjectSchema.parse(body)
 
+    // A region that does not exist or is not open yet is refused, never
+    // swapped for another: the caller would get a project somewhere it did not
+    // ask for. The project is then created in the region it asked for (see
+    // lib/regions.ts for what opening a region involves, and for the preview
+    // list that lets named users create in a region being qualified).
+    const regionCheck = checkRequestedRegion(validatedData.region, process.env, user.userId)
+    if (regionCheck.ok === false) {
+      return NextResponse.json(
+        { success: false, error: regionCheck.message, code: regionCheck.code },
+        { status: 400 },
+      )
+    }
+
     // Who the project will belong to, and the billing account whose plan it
     // counts against: inside an organization, the organization; elsewhere, the
     // caller.
@@ -167,6 +184,7 @@ export const POST = withAuth(async (request: NextRequest, { user }) => {
       apiUrlProd: validatedData.apiUrlProd,
       userId: user.userId,
       organizationId: account.organizationId,
+      region: regionCheck.region,
     })
 
     // Track project_created event (non-blocking)

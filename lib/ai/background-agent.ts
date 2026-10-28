@@ -17,6 +17,7 @@
 
 import { prisma } from '@/lib/db/prisma'
 import { listExposedResources } from '@/lib/api/exposed-resources'
+import { workspaceRawClient } from '@/lib/data-plane/regional'
 
 export interface BackgroundFinding {
   severity: 'critical' | 'warning' | 'info'
@@ -41,6 +42,7 @@ export interface BackgroundCheckResult {
  * Auto-fixes low-risk issues silently, surfaces the rest as suggestions.
  */
 export async function runBackgroundAgent(projectId: string): Promise<BackgroundCheckResult> {
+  const db = await workspaceRawClient(projectId)
   const findings: BackgroundFinding[] = []
   const autoFixed: string[] = []
 
@@ -61,8 +63,8 @@ export async function runBackgroundAgent(projectId: string): Promise<BackgroundC
     })
 
     const integrations = (project?.activeIntegrations as Record<string, any>) ?? {}
-    const authManifest = (project?.authManifest as any) ?? {}
-    const hasAuth = !!authManifest?.enabled
+    const { isEndUserAuthEnabled } = await import('@/lib/services/auth-status')
+    const hasAuth = project ? await isEndUserAuthEnabled(projectId, project.authManifest) : false
     const hasTables = (project?.tables?.length ?? 0) > 0
     const tableNames = (project?.tables ?? []).map(t => t.name)
 
@@ -80,7 +82,7 @@ export async function runBackgroundAgent(projectId: string): Promise<BackgroundC
         const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
         const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
 
-        const unindexedFks = await prisma.$queryRawUnsafe<any[]>(`
+        const unindexedFks = await db.$queryRawUnsafe<any[]>(`
           SELECT kcu.table_name, kcu.column_name
           FROM information_schema.key_column_usage kcu
           JOIN information_schema.table_constraints tc

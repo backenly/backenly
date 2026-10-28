@@ -10,6 +10,7 @@ export const dynamic = 'force-dynamic'
 import { NextRequest, NextResponse } from 'next/server'
 import { withProjectValidation } from '@/lib/middleware/projectValidation'
 import { prisma } from '@/lib/db'
+import { deleteFunctionRuns, withRunBodies } from '@/lib/services/ai-functions/run-records'
 
 export async function GET(request: NextRequest, props: { params: Promise<{ id: string }> }) {
   const params = await props.params
@@ -19,7 +20,8 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
     const functionId = searchParams.get('functionId') || undefined
     const limit = Math.min(parseInt(searchParams.get('limit') || '50'), 200)
 
-    const logs = await prisma.aiFunctionLog.findMany({
+    // A regional project's run logs and errors are read from its region.
+    const logs = await withRunBodies(projectId, await prisma.aiFunctionLog.findMany({
       where: {
         projectId,
         ...(functionId ? { functionId } : {}),
@@ -31,7 +33,7 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
           select: { name: true, triggerType: true },
         },
       },
-    })
+    }))
 
     return NextResponse.json({ success: true, data: logs, count: logs.length })
   })
@@ -48,12 +50,8 @@ export async function DELETE(request: NextRequest, props: { params: Promise<{ id
     const { searchParams } = request.nextUrl
     const functionId = searchParams.get('functionId') || undefined
 
-    await prisma.aiFunctionLog.deleteMany({
-      where: {
-        projectId,
-        ...(functionId ? { functionId } : {}),
-      },
-    })
+    // The platform rows and, for a regional project, what its region keeps of them.
+    await deleteFunctionRuns(projectId, functionId)
 
     return NextResponse.json({ success: true, message: 'Logs cleared' })
   })

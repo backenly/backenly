@@ -28,6 +28,9 @@ jest.mock('@prisma/client', () => {
 jest.mock('@/lib/db/hybrid', () => ({
   HybridDatabase: {
     listSchemas: jest.fn().mockResolvedValue(['public']),
+    // The project's schema is asked about directly now; absent, as listSchemas
+    // above (which never held it) used to imply.
+    schemaExists: jest.fn().mockResolvedValue(false),
     listTables: jest.fn().mockResolvedValue([{ name: 'users', rows: 100 }]),
     getStructure: jest.fn().mockResolvedValue([
       { name: 'id', type: 'uuid', primary: true, foreign: false },
@@ -71,7 +74,7 @@ describe('Database Brain Service', () => {
 
     it('should handle errors gracefully', async () => {
       const { HybridDatabase } = require('@/lib/db/hybrid')
-      HybridDatabase.listSchemas.mockRejectedValueOnce(new Error('Database error'))
+      HybridDatabase.schemaExists.mockRejectedValueOnce(new Error('Database error'))
 
       const result = await DatabaseBrain.runAnalysis('project-1')
       // Should return empty array on error, not throw

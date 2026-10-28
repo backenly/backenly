@@ -104,7 +104,16 @@ export class WorkspaceOAuthService {
   /**
    * Create or update workspace OAuth configuration
    */
+  /** One governed change each (lib/changes/resources/auth.ts). */
   static async upsertConfig(
+    projectId: string,
+    data: WorkspaceOAuthConfigData
+  ): Promise<WorkspaceOAuthConfigResponse> {
+    const { governedChange } = await import('@/lib/changes/ledger')
+    return governedChange(projectId, `Configure ${data.provider} sign-in`, () => WorkspaceOAuthService.writeConfig(projectId, data))
+  }
+
+  private static async writeConfig(
     projectId: string,
     data: WorkspaceOAuthConfigData
   ): Promise<WorkspaceOAuthConfigResponse> {
@@ -190,6 +199,11 @@ export class WorkspaceOAuthService {
    * Delete workspace OAuth configuration
    */
   static async deleteConfig(projectId: string, provider: string): Promise<void> {
+    const { governedChange } = await import('@/lib/changes/ledger')
+    return governedChange(projectId, `Remove ${provider} sign-in`, () => WorkspaceOAuthService.removeConfig(projectId, provider))
+  }
+
+  private static async removeConfig(projectId: string, provider: string): Promise<void> {
     await prisma.workspaceOAuthConfig.delete({
       where: {
         projectId_provider: {
@@ -229,7 +243,8 @@ export class WorkspaceOAuthService {
     projectId: string,
     provider: string
   ): Promise<void> {
-    await prisma.workspaceOAuthConfig.upsert({
+    const { governedChange } = await import('@/lib/changes/ledger')
+    await governedChange(projectId, `Prepare ${provider} sign-in`, () => prisma.workspaceOAuthConfig.upsert({
       where: {
         projectId_provider: {
           projectId,
@@ -247,7 +262,7 @@ export class WorkspaceOAuthService {
       update: {
         generatedAt: new Date(),
       },
-    })
+    }))
   }
 
   /**

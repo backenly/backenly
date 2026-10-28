@@ -42,6 +42,7 @@
  */
 
 import { prisma } from '@/lib/db/prisma'
+import { projectDriftEvents } from '@/lib/data-plane/regional'
 import { isVerifiedFix } from '@/lib/core/fix-verification'
 import type { RawFinding, FindingSeverity } from '@/lib/core/types'
 import { FLAGS } from '@/lib/config/flags'
@@ -53,6 +54,7 @@ import {
   type EdgeProvenance,
   type SubsystemMap,
 } from './subsystem'
+import { tableOfRequestPath } from '@/lib/traffic/table-path'
 
 // ── Firing contract ───────────────────────────────────────────────────────────
 
@@ -207,13 +209,14 @@ export function findingTable(details: Record<string, unknown> | null | undefined
 /**
  * The table an API request touched, from its path.
  *
- * Covers the generated data plane (`/api/v1/{projectId}/db/{table}`) only.
- * Function invocations and custom routes are not attributable this way, which
- * is part of why `attributionCoverage` is reported.
+ * Covers the generated data plane in both shapes it is recorded in —
+ * `/db/{table}` (v1) and `/{table}` (v2, PostgREST-native); see
+ * lib/traffic/table-path.ts. Function invocations and custom routes are not
+ * attributable this way, which is part of why `attributionCoverage` is
+ * reported.
  */
 export function requestTable(path: string): string | null {
-  const m = /\/db\/([A-Za-z0-9_]+)/.exec(path)
-  return m ? m[1] : null
+  return tableOfRequestPath(path)
 }
 
 /**
@@ -278,7 +281,11 @@ export async function evaluateSubsystemRecurrence(
       take: 500,
     }),
     prisma.healthFinding.findMany({
-      where: { projectId, status: 'pending_approval', detectedAt: { gte: since } },
+      // An architecture-change approval request waits on a person because
+      // policy says every restructuring does, not because anything escalated.
+      // Counting it would make Backenly's own proposal evidence of harm to the
+      // table it proposes to improve.
+      where: { projectId, status: 'pending_approval', detectedAt: { gte: since }, type: { not: 'architecture_evolution' } },
       select: { id: true, type: true, details: true, detectedAt: true },
       take: 200,
     }),
@@ -298,11 +305,12 @@ export async function evaluateSubsystemRecurrence(
       select: { id: true, title: true, affectedServices: true, startedAt: true },
       take: 200,
     }),
-    prisma.schemaDriftEvent.findMany({
+    // In the project's region, where they are captured.
+    projectDriftEvents(projectId).then((events) => events.findMany({
       where: { projectId, capturedAt: { gte: since } },
       select: { objectIdentity: true },
       take: 500,
-    }),
+    })),
   ])
 
   // ── Attribution coverage, measured on the repairs that matter ──────────────

@@ -1,30 +1,30 @@
 'use client'
 
-import { useState, type ReactNode } from 'react'
+import { Fragment, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
 import { useRouter } from 'next/navigation'
 import {
+  ArrowDown,
   ArrowRight,
   Bot,
   Check,
+  Copy,
   Database,
   KeyRound,
   Layers,
   LifeBuoy,
   Minus,
   Radio,
-  RefreshCcw,
   ShieldCheck,
-  Terminal,
   UploadCloud,
   Zap,
   type LucideIcon,
 } from 'lucide-react'
 import { ROUTES, SiteShell } from '@/components/site/SiteShell'
-import { HorizonClose, Page, PageHero, Section, SectionHead } from '@/components/site/kit'
+import { HorizonClose, Page, Section, SectionHead } from '@/components/site/kit'
 import { Faq } from '@/components/site/Faq'
-import { Reveal } from '@/components/site/Reveal'
 import { StartButton } from '@/components/site/StartButton'
-import { HEADING, PANEL, PRIMARY_CTA, SECONDARY_CTA, TITLE } from '@/components/site/tokens'
+import { CONTAINER, DISPLAY, HEADING, LEDE, PRIMARY_CTA, SECONDARY_CTA, TEXT_LINK } from '@/components/site/tokens'
+import { useMinuteClock } from '@/lib/hooks/useMinuteClock'
 import { useUserSession } from '@/lib/hooks/useUserSession'
 import {
   PRO_INCLUDED,
@@ -32,18 +32,37 @@ import {
   usagePricingPublished,
   type OverageAxis,
 } from '@/lib/pricing/catalog'
+import {
+  LAUNCH_OFFER,
+  launchOfferActive,
+  launchPhase,
+  launchPrice,
+  spokenTimeLeft,
+  timeLeft,
+  usd,
+} from '@/lib/pricing/launch-offer'
 
 /* ─────────────────────────────────────────────────────────────
-   /pricing, rebuilt 2026-09-30 on the landing page's system.
+   /pricing (2026-10-15, founders: "make pricing better, check supabase.com,
+   appwrite.io"). Read against the pricing pages of Supabase, Appwrite and
+   Vercel, which share one shape: the plans side by side in one frame, each
+   led by its price, then who it is for, the button, and "everything in the
+   plan before, plus"; then one long comparison table whose plan header
+   sticks. No feature band between them (founders: "remove all these texts").
 
    Unchanged on purpose: every number, every plan row, the catalog-driven
    rates (a rate only appears once lib/pricing/catalog.ts publishes it), the
-   portability line, and the FAQ text.
+   monthly / yearly switch, the checkout path and the FAQ's facts.
 
-   What moved: the plans stand on the lit stage under the hero; Pro carries the
-   page's one light instead of a "Most popular" badge nobody can verify; a
-   monthly / yearly switch shows the real annual price; the comparison table's
-   plan header sticks under the navbar so a long table never loses its columns.
+   Self-healing is identical on every plan (every minute, no cap, never billed
+   to AI credits). It is listed once, on Free, and reaches the other plans
+   through "Everything in Free, plus", so it can never read as a reason to
+   upgrade. Violet marks one thing: the recommended plan.
+
+   The comparison is one table at every width. From md up the plan header
+   sticks under the navbar (68px), which needs no overflow on its ancestors;
+   below md the table scrolls inside its own focusable region with the row
+   labels pinned, so the page itself never scrolls sideways.
 
    The startup program is not on this page. It has its own page at /startups,
    which Backenly Cloud provides together with the application behind it.
@@ -51,98 +70,93 @@ import {
 
 type Cadence = 'monthly' | 'yearly'
 
+type PlanItem = { text: string; note?: string | null }
+
 type Plan = {
-  name: string
-  price: string
-  cadence: string
+  name: 'Free' | 'Pro' | 'Enterprise'
   summary: string
-  bestFor: string
   cta: string
   ctaHref?: string
   highlighted?: boolean
-  limits: { label: string; value: string }[]
-  features: string[]
+  listTitle: string
+  items: PlanItem[]
 }
 
-const plans: Plan[] = [
-  {
-    name: 'Free',
-    price: '$0',
-    cadence: 'forever',
-    summary: 'Validate one real product backend without a credit card.',
-    bestFor: 'First prototypes and serious experiments',
-    cta: 'Start free',
-    limits: [
-      { label: 'API requests', value: 'Unlimited' },
-      { label: 'Projects', value: '1 live project' },
-      { label: 'Users', value: '50,000 MAU' },
-      { label: 'Autonomy', value: 'Self-healing every minute' },
-      { label: 'AI credits', value: '200 monthly' },
-    ],
-    features: [
-      'Self-healing every minute, repairing everything it safely can, never capped and never metered',
-      'PostgreSQL, auth, storage, realtime and REST APIs: the full runtime, not a trial',
-      'Build over MCP with your own coding agent; the typed tools are never metered as AI',
-    ],
-  },
-  {
-    name: 'Pro',
-    price: '$25',
-    cadence: 'per month',
-    summary: 'Production capacity, plus a backend that heals itself every minute.',
-    bestFor: 'Founders with real users, agencies and small teams',
-    cta: 'Get Pro',
-    highlighted: true,
-    limits: [
-      { label: 'API requests', value: 'Unlimited' },
-      { label: 'Users', value: `${PRO_INCLUDED.mau.toLocaleString('en-US')} MAU` },
-      { label: 'Autonomy', value: 'Every minute, full dial' },
-      { label: 'AI credits', value: '3,000 monthly' },
-      { label: 'Database and files', value: `${PRO_INCLUDED.dbGib}\u00a0GB Postgres, ${PRO_INCLUDED.fileGib}\u00a0GB files` },
-    ],
-    features: [
-      'The same uncapped self-healing loop as Free: you pay for capacity, never for uptime',
-      'Unlimited projects, 2M function runs, triggers, webhooks, custom domains',
-      '5 team seats with project-level access, full deployment history and rollback, 30-day logs',
-    ],
-  },
-  {
-    name: 'Enterprise',
-    price: 'Custom',
-    cadence: 'annual agreement',
-    summary: 'Run your company’s backend with custom limits, isolation and an SLA.',
-    bestFor: 'Companies replacing a backend hire or agency retainer',
-    cta: 'Talk to us',
-    ctaHref: `mailto:support@backenly.com?subject=Backenly%20Enterprise`,
-    limits: [
-      { label: 'API requests', value: 'Unlimited' },
-      { label: 'Users', value: 'Custom MAU' },
-      { label: 'Autonomy', value: 'Every minute, full dial' },
-      { label: 'AI credits', value: 'Custom pool' },
-      { label: 'Database', value: 'Custom capacity' },
-    ],
-    features: [
-      'Custom guardrail policies for your compliance posture',
-      'SSO (OIDC), RBAC, and priority incident response with a 12-hour SLA',
-      'Onboarding and migration help, invoicing, procurement-friendly billing',
-    ],
-  },
-]
+const ENTERPRISE_MAIL = `mailto:${ROUTES.supportEmail}?subject=Backenly%20Enterprise`
 
 /** Pro billed yearly: $240 a year, which is $20 a month. */
-const PRO_YEARLY_TOTAL = '$240'
-const PRO_YEARLY_MONTHLY = '$20'
+const PRO_MONTHLY_CENTS = 2500
+const PRO_YEARLY_CENTS = 24000
+const PRO_MONTHLY = usd(PRO_MONTHLY_CENTS)
+const PRO_YEARLY_TOTAL = usd(PRO_YEARLY_CENTS)
+const PRO_YEARLY_MONTHLY = usd(PRO_YEARLY_CENTS / 12)
 
-const included: { icon: LucideIcon; label: string; body: string }[] = [
-  { icon: Database, label: 'PostgreSQL', body: 'Project-scoped schemas, relations, indexes and real data.' },
-  { icon: KeyRound, label: 'Auth', body: 'JWT sessions and per-project end-user tables.' },
-  { icon: UploadCloud, label: 'Storage', body: 'Buckets, uploads, metadata and signed URLs.' },
-  { icon: Radio, label: 'Realtime', body: 'SSE subscriptions, presence and broadcast channels.' },
-  { icon: Zap, label: 'Triggers', body: 'Event workflows for inserts, updates, schedules and integrations. On Pro and Enterprise.' },
-  { icon: RefreshCcw, label: 'Rollback', body: 'Deployment history and restore paths when changes need reversing.' },
-  { icon: Bot, label: 'Autonomy', body: 'Watches your live backend every minute and repairs what is safe to repair. On every plan.' },
-  { icon: Terminal, label: 'Bring your own agent', body: 'Drive the backend from Claude Code or Cursor over MCP. Typed tools carry no AI charge.' },
-]
+/**
+ * The three plans. Pro's metered amounts come from lib/pricing/catalog.ts, and
+ * the rate past each one is shown only in a build that publishes usage pricing
+ * and only once the catalog publishes that axis's rate.
+ */
+function plansFor(published: boolean): Plan[] {
+  const pro = new Map(proUsagePriceRows().map((r) => [r.axis, r]))
+  const then = (axis: OverageAxis) => {
+    const rate = pro.get(axis)?.rate
+    return published && rate ? `then ${rate}` : null
+  }
+
+  return [
+    {
+      name: 'Free',
+      summary: 'For prototypes and first experiments.',
+      cta: 'Start free',
+      listTitle: 'Includes',
+      items: [
+        { text: '1 live project' },
+        { text: '50,000 monthly active users' },
+        { text: '512 MB Postgres database' },
+        { text: '1 GB file storage' },
+        { text: '200 AI credits a month' },
+        { text: 'Unlimited API requests' },
+        { text: 'Self-healing every minute', note: 'Never capped and never metered' },
+        { text: 'Community support' },
+      ],
+    },
+    {
+      name: 'Pro',
+      summary: 'For products with real users, agencies and small teams.',
+      cta: 'Get Pro',
+      highlighted: true,
+      listTitle: 'Everything in Free, plus',
+      items: [
+        { text: 'Unlimited projects' },
+        { text: `${PRO_INCLUDED.mau.toLocaleString('en-US')} monthly active users`, note: then('mau') },
+        { text: `${PRO_INCLUDED.dbGib} GB Postgres database`, note: then('db_bytes') },
+        { text: `${PRO_INCLUDED.fileGib} GB file storage`, note: then('file_bytes') },
+        { text: '3,000 AI credits a month' },
+        { text: `${PRO_INCLUDED.fnRuns / 1_000_000}M function runs a month`, note: then('fn_runs') },
+        { text: 'Event triggers, outbound webhooks and custom domains' },
+        { text: '5 team seats with project-level access' },
+        { text: 'Restore points kept for 30 days' },
+        { text: '30 days of logs and email support' },
+      ],
+    },
+    {
+      name: 'Enterprise',
+      summary: 'For companies that need custom limits, isolation and an SLA.',
+      cta: 'Talk to us',
+      ctaHref: ENTERPRISE_MAIL,
+      listTitle: 'Everything in Pro, plus',
+      items: [
+        { text: 'Custom limits and a custom AI credit pool' },
+        { text: 'Single sign-on (OIDC)' },
+        { text: 'Custom guardrail policies for your compliance requirements' },
+        { text: '90 days of logs' },
+        { text: 'Dedicated support with a 12-hour SLA' },
+        { text: 'Help with onboarding and migration' },
+        { text: 'Invoiced billing that works with procurement' },
+      ],
+    },
+  ]
+}
 
 /**
  * One cell of the comparison: a value, a yes/no, or an included amount with the
@@ -184,7 +198,14 @@ function comparisonGroups(published: boolean): MatrixGroup[] {
         { label: 'API requests', hint: 'No cap and no per-request fee on any plan', cells: ['Unlimited', 'Unlimited', 'Unlimited'] },
         { label: 'Daily backups', cells: ['7 days kept', '7 days kept', '7 days kept'] },
         { label: 'Direct Postgres access and pg_dump export', cells: [true, true, true] },
-        { label: 'Deployment history and rollback', cells: [false, 'Full history', 'Full history'] },
+        // How long a change's restore point is kept follows log retention
+        // (lib/changes/policy.ts). Whether a given change can still be restored
+        // is decided per change, so this is retention, not a promise.
+        { label: 'Schema change restore points kept', hint: 'Each change shows whether the state before it can still be restored', cells: ['7 days', '30 days', '90 days'] },
+        // Every plan lists every published version and restores from History; how
+        // far back a restore reaches is the row above. The Plan rows' rollback and
+        // history fields gate only APIs the console no longer calls.
+        { label: 'Deployment history and rollback', cells: ['Full history', 'Full history', 'Full history'] },
       ],
     },
     {
@@ -199,8 +220,8 @@ function comparisonGroups(published: boolean): MatrixGroup[] {
       icon: UploadCloud,
       title: 'Storage',
       rows: [
-        { label: 'File storage', cells: ['1\u00a0GB', metered('file_bytes'), 'Custom'] },
-        { label: 'Egress', cells: ['5\u00a0GB', metered('egress_bytes'), 'Custom'] },
+        { label: 'File storage', cells: ['1 GB', metered('file_bytes'), 'Custom'] },
+        { label: 'Egress', cells: ['5 GB', metered('egress_bytes'), 'Custom'] },
       ],
     },
     {
@@ -230,8 +251,8 @@ function comparisonGroups(published: boolean): MatrixGroup[] {
           hint: 'One credit is 1,000 tokens of Backenly’s own model usage',
           cells: ['200 per month', '3,000 per month', 'Custom pool'],
         },
-        { label: 'Build over MCP with your own agent', hint: 'Typed tools never draw credits', cells: ['No charge', 'No charge', 'No charge'] },
-        { label: 'Autonomous healing', hint: 'Checks every minute, repairs what is safe', cells: ['Never metered', 'Never metered', 'Never metered'] },
+        { label: 'Build over MCP with your own agent', hint: 'The typed tools never use credits', cells: ['No charge', 'No charge', 'No charge'] },
+        { label: 'Self-healing', hint: 'Checks every minute and repairs what is safe', cells: ['Never metered', 'Never metered', 'Never metered'] },
       ],
     },
   ]
@@ -271,27 +292,27 @@ const faqs = [
   },
   {
     q: 'Can I self-host Backenly instead of paying?',
-    a: 'Yes. The platform is open source under Apache-2.0 and free to self-host: you bring the servers, the Postgres, and an AI provider key (Claude or OpenAI) if you want the natural-language build tools (the self-healing loop itself needs no model). The plans on this page are Backenly Cloud, where we run the infrastructure and handle backups and upgrades. It is the same codebase either way, and pg_dump moves your data between the two.',
+    a: 'Yes. The platform is open source under Apache-2.0 and free to self-host. You bring the servers, the Postgres, and an AI provider key (Claude or OpenAI) if you want the natural-language build tools. The self-healing loop itself needs no model. The plans on this page are Backenly Cloud, where we run the infrastructure and handle backups and upgrades. It is the same codebase either way, and pg_dump moves your data between the two.',
   },
   {
     q: 'What counts as an AI credit?',
-    a: 'One credit is 1,000 tokens of Backenly’s own model usage. Credits are spent when Backenly runs its own model on your behalf: the natural-language MCP tool (backend_chat), including the LLM-powered steps inside that turn such as the architect and function generation. They are a small included line, not the headline: the dashboard assistant answers questions free, the typed MCP tools cost nothing, and autonomy never draws credits.',
+    a: 'One credit is 1,000 tokens of Backenly’s own model usage. Credits are spent only when Backenly runs its own model for you: the natural-language MCP tool (backend_chat), including the model-driven steps inside that turn, such as the architect and function generation. The dashboard assistant answers questions free, the typed MCP tools cost nothing, and self-healing never uses credits.',
   },
   {
     q: 'Does driving the backend from my coding agent cost credits?',
-    a: 'Almost never; it depends which tool your agent calls. The typed MCP tools (create_table, add_column, set_rls, generate_types, run_query and the rest) compile straight to SQL with no model call, so they are free on every plan: your agent supplies the intelligence and you pay your own provider. The exception is the natural-language tools, backend_chat and generate_function, where Backenly runs its own model on your behalf. Those draw credits, and you are billed the tokens the call actually burned, nothing more. Point your agent at the typed tools and the AI meter stays at zero.',
+    a: 'Almost never. It depends on which tool your agent calls. The typed MCP tools (create_table, add_column, set_rls, generate_types, run_query and the rest) compile straight to SQL with no model call, so they are free on every plan: your agent supplies the reasoning and you pay your own provider. The exception is the natural-language tools, backend_chat and generate_function, where Backenly runs its own model for you. Those use credits, and you are billed only the tokens the call used. An agent that sticks to the typed tools uses no credits.',
   },
   {
-    q: 'Does autonomy spend my credits?',
-    a: 'Never. Detection and repair are deterministic: probes find drift, and each finding maps to a typed repair that compiles to SQL, with no model in the repair path, so there is nothing to bill you for. When the loop cannot fix something and escalates it to you, a model may write up the diagnosis you read; that pass is on us, never your credits. Every plan gets the identical loop: checks every minute, repairs everything it safely can, with no per-window cap and no monthly limit, Free included. We do not meter healing: a backend that stops repairing itself once you hit a quota is the exact failure we built this to remove. Plans differ on capacity (projects, users, storage, AI credits), never on whether your backend is allowed to stay healthy.',
+    q: 'Does self-healing spend my credits?',
+    a: 'No. Detection and repair are deterministic: probes find drift, and each finding maps to a typed repair that compiles to SQL, with no model in the repair path. When the loop cannot fix something and escalates it to you, a model may write the diagnosis you read; we pay for that, not your credits. Every plan, Free included, gets the same loop: a check every minute, repairs for everything it can do safely, no per-window cap and no monthly limit. Healing is never metered, so your backend keeps repairing itself after you reach a quota. Plans differ on capacity (projects, users, storage, AI credits), not on self-healing.',
   },
   {
     q: 'Are database, auth, storage and realtime paid add-ons?',
-    a: 'No. Core backend primitives are included on every plan. Paid tiers increase capacity, support, rollback windows and advanced controls.',
+    a: 'No. They are included on every plan. Paid plans raise capacity, keep restore points longer, and add support and advanced controls.',
   },
   {
     q: 'Am I locked in? Can I get my data out?',
-    a: 'Your backend is standard PostgreSQL, and it stays yours. Every plan, Free included, gets a real read-only connection string (psql, TablePlus, any BI tool), an optional read-write one, and one-click pg_dump exports that restore on any Postgres: RDS, Neon, your own server. The platform is open source too, so a full self-hosted Backenly is always an exit path. Schema, data, constraints, indexes: everything leaves with you, anytime, with no exit fee.',
+    a: 'You are not locked in, and your data can always leave. Your backend is standard PostgreSQL and it stays yours. Every plan, Free included, gets a read-only connection string (psql, TablePlus, any BI tool), an optional read-write one, and one-click pg_dump exports that restore on any Postgres: RDS, Neon, your own server. The platform is open source too, so you can also move to a self-hosted Backenly. Schema, data, constraints and indexes all leave with you, at any time, with no exit fee.',
   },
   {
     q: 'Can I cancel anytime?',
@@ -302,7 +323,7 @@ const faqs = [
 /** Shown only in a build that publishes usage pricing. */
 const usageFaq = {
   q: 'What happens when I go past what Pro includes?',
-  a: 'Nothing is billed unless you choose it. Pro’s quotas are shared by every project on your account, and your spend limit is off by default, so each quota is a hard cap. Set a limit ($50, $100, $250 or your own) and pay it in advance; usage then continues at the rates in the table, never past that limit, with emails at 50%, 80% and 100%. Each month’s usage is drawn from what you paid and the rest carries over, and projects, API requests, autonomy, the typed MCP tools, deploys and rollbacks are never billed at all.',
+  a: 'Nothing is billed unless you choose it. Pro’s quotas are shared by every project on your account, and your spend limit is off by default, so each quota is a hard cap. Set a limit ($50, $100, $250 or your own) and pay it in advance. Usage then continues at the rates in the table, never past that limit, with emails at 50%, 80% and 100%. Each month’s usage is drawn from what you paid and the rest carries over. Projects, API requests, self-healing, the typed MCP tools, deploys and rollbacks are never billed.',
 }
 
 export default function PricingPage() {
@@ -310,6 +331,12 @@ export default function PricingPage() {
   const { isLoggedIn } = useUserSession()
   const published = usagePricingPublished()
   const [cadence, setCadence] = useState<Cadence>('monthly')
+  const plans = plansFor(published)
+  // The launch offer shows until launch day ends. Before hydration there is no
+  // visitor clock (see useMinuteClock), and the page is built before the
+  // launch, so it renders with the offer and only drops it on a later visit.
+  const now = useMinuteClock()
+  const offer = now === null || launchOfferActive(now)
 
   function handleCta() {
     if (!isLoggedIn) {
@@ -319,7 +346,7 @@ export default function PricingPage() {
 
     // Billing was promoted out of settings into its own org page. The legacy
     // `?tab=billing` deep link still works, but only because settings/page.tsx
-    // catches it and redirects — so sending people through it costs a needless
+    // catches it and redirects, so sending people through it costs a needless
     // client-side bounce. Go straight to the real page.
     router.push('/app/billing')
   }
@@ -327,95 +354,87 @@ export default function PricingPage() {
   return (
     <SiteShell>
       <Page>
-        <PageHero
-          trail={[{ label: 'Home', href: '/' }, { label: 'Pricing' }]}
-          title="Start free, scale when usage proves it"
-          lede="Every plan runs the full backend and the same self-healing loop. Paid plans add capacity, never uptime."
-        />
+        {/* A small header in the same frame as the plans (founders, 2026-10-15,
+            pointing at InsForge's pricing page: "no need for this kind of big
+            banner"). One title, one line, the billing switch, then the plans:
+            the plans read as one decision rather than three adverts.
+            Columns go 1 -> 3, never 2 + 1. */}
+        <section aria-labelledby="pricing-title" className="relative isolate pt-[32px] md:pt-[48px]">
+          <div className={CONTAINER}>
+            <div className="overflow-hidden rounded-2xl border border-white/[0.08] bg-white/[0.012]">
+              <header className="relative isolate border-b border-white/[0.07] px-[20px] pb-[40px] pt-[44px] text-center md:pb-[48px] md:pt-[60px]">
+                {/* The site's key light, centred over the title. */}
+                <div
+                  aria-hidden
+                  className="pointer-events-none absolute left-1/2 top-[-200px] -z-10 h-[440px] w-[820px] max-w-none -translate-x-1/2 bg-[radial-gradient(closest-side,rgba(255,255,255,0.07),transparent)]"
+                />
+                <h1
+                  id="pricing-title"
+                  className={`hero-enter bg-gradient-to-b from-white from-40% to-zinc-400 bg-clip-text pb-[4px] text-[40px] text-transparent md:text-[52px] ${DISPLAY}`}
+                >
+                  Pricing
+                </h1>
+                <p className={`hero-enter hero-enter-1 mx-auto mt-[12px] max-w-[52ch] text-[16px] text-zinc-400 [text-wrap:balance] md:text-[18px] ${LEDE}`}>
+                  Start free. Upgrade when you need more capacity.
+                </p>
+                <div className="hero-enter hero-enter-2 mt-[28px] flex justify-center">
+                  <CadenceSwitch value={cadence} onChange={setCadence} />
+                </div>
+              </header>
 
-        <Section flush aria-label="Plans">
-          <div className="flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between">
-            <h2 className={`text-[26px] text-white md:text-[34px] ${TITLE}`}>Plans</h2>
-            <CadenceSwitch value={cadence} onChange={setCadence} />
+              <h2 className="sr-only">Plans</h2>
+              {/* While the launch offer runs it heads the Pro column in a row of
+                  its own, so the three plans stay aligned with one another
+                  below it. On a phone it sits directly above the Pro card. */}
+              <div className="grid lg:grid-cols-3">
+                {plans.map((plan, index) => (
+                  <Fragment key={plan.name}>
+                    {offer && plan.name === 'Pro' && <LaunchOfferPanel now={now} yearly={cadence === 'yearly'} />}
+                    <PlanColumn
+                      plan={plan}
+                      cadence={cadence}
+                      onCta={handleCta}
+                      divided={index > 0}
+                      launchOffer={offer}
+                    />
+                  </Fragment>
+                ))}
+              </div>
+            </div>
+
+            <p className="mt-[20px] text-center">
+              <a href="#compare" className={`${TEXT_LINK} text-[14px]`}>
+                Compare all features
+                <ArrowDown aria-hidden className="h-4 w-4 transition-transform duration-200 group-hover:translate-y-0.5" />
+              </a>
+            </p>
           </div>
+        </section>
 
-          {/* 1 -> 3, never 2 + 1: at two columns Enterprise orphans on a
-              second row at half width across tablet widths. */}
-          <div className="mt-8 grid gap-3 lg:grid-cols-3">
-            {plans.map((plan) => (
-              <PlanCard key={plan.name} plan={plan} cadence={cadence} onCta={handleCta} />
-            ))}
-          </div>
-
-          {/* Portability guarantee: stated where buying decisions happen, not
-              buried in the FAQ. Flat by design (locked pricing-page language). */}
-          <p className="mt-6 max-w-[96ch] text-[14px] leading-[1.7] text-zinc-400">
-            <span className="font-medium text-zinc-200">No lock-in, on every plan:</span>{' '}
-            your backend is standard PostgreSQL with a real connection string, connect psql or any BI
-            tool, and export a full <code className="font-mono text-[13px] text-zinc-300">pg_dump</code>{' '}
-            backup that restores on any Postgres. And the platform itself is open source (Apache-2.0),
-            so the exit path includes running Backenly on your own servers. Your data leaves with you,
-            anytime, free plan included.
-          </p>
-        </Section>
-
-        <Section aria-labelledby="included-title">
-          <div className="grid gap-12 lg:grid-cols-[minmax(0,4fr)_minmax(0,8fr)] lg:gap-16">
-            <Reveal>
-              <SectionHead
-                id="included-title"
-                title="The backend is not split into add-ons"
-                lede="Paid plans increase capacity and support. The primitives you need to build a real backend are there from the first project."
-              />
-            </Reveal>
-            <Reveal delay={0.06}>
-              <ul className="grid gap-x-10 gap-y-8 sm:grid-cols-2">
-                {included.map((item) => {
-                  const ItemIcon = item.icon
-                  return (
-                    <li key={item.label} className="flex min-w-0 gap-4 border-t border-white/[0.08] pt-6">
-                      <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-white/[0.09] bg-white/[0.03]">
-                        <ItemIcon aria-hidden className="h-4 w-4 text-zinc-300" strokeWidth={1.75} />
-                      </span>
-                      <div className="min-w-0">
-                        <h3 className={`text-[15px] text-white ${HEADING}`}>{item.label}</h3>
-                        <p className="mt-1.5 text-[14px] leading-[1.6] text-zinc-400">{item.body}</p>
-                      </div>
-                    </li>
-                  )
-                })}
-              </ul>
-            </Reveal>
-          </div>
-        </Section>
-
-        <ComparisonSection published={published} onCta={handleCta} />
+        <ComparisonSection published={published} cadence={cadence} onCta={handleCta} />
 
         <Section aria-labelledby="pricing-faq">
-          <div className="grid gap-10 lg:grid-cols-[minmax(0,4fr)_minmax(0,7fr)] lg:gap-16">
-            <Reveal className="lg:sticky lg:top-28 lg:self-start">
-              <SectionHead
-                id="pricing-faq"
-                title="Straight answers before you choose"
-                lede="Anything else, ask the people who run it."
-              />
+          <div className="grid gap-[40px] lg:grid-cols-[minmax(0,4fr)_minmax(0,7fr)] lg:gap-[64px]">
+            <div className="lg:sticky lg:top-[112px] lg:self-start">
+              <SectionHead id="pricing-faq" title="Questions about plans and billing" />
+              <p className="mt-[20px] max-w-[36ch] text-[15px] leading-[1.7] text-zinc-400">
+                Anything else, ask the people who run it.
+              </p>
               <a
                 href={`mailto:${ROUTES.supportEmail}?subject=Backenly%20pricing%20question`}
-                className="group mt-7 inline-flex items-center gap-1.5 rounded-sm text-[15px] font-medium text-zinc-300 transition-colors duration-200 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300"
+                className={`mt-[24px] ${TEXT_LINK}`}
               >
                 Email a pricing question
                 <ArrowRight aria-hidden className="h-4 w-4 transition-transform duration-200 group-hover:translate-x-0.5" />
               </a>
-            </Reveal>
-            <Reveal delay={0.06}>
-              <Faq items={[...faqs, ...(published ? [usageFaq] : [])]} />
-            </Reveal>
+            </div>
+            <Faq items={[...faqs, ...(published ? [usageFaq] : [])]} />
           </div>
         </Section>
 
         <HorizonClose
-          title="Build the first backend for free"
-          lede="No credit card. One live project. Upgrade only when your product needs more capacity."
+          title="Start with one free project"
+          lede="No credit card. Move to Pro when your product needs more capacity."
         >
           <StartButton />
         </HorizonClose>
@@ -426,29 +445,60 @@ export default function PricingPage() {
 
 /* ── Plans ───────────────────────────────────────────────────────────────── */
 
+/**
+ * The billing period as a segmented control. A radio group with a roving tab
+ * stop: Tab reaches the selected option, the arrow keys move between them.
+ */
 function CadenceSwitch({ value, onChange }: { value: Cadence; onChange: (next: Cadence) => void }) {
   const options: { id: Cadence; label: string; note?: string }[] = [
     { id: 'monthly', label: 'Monthly' },
     { id: 'yearly', label: 'Yearly', note: 'Save 20%' },
   ]
+  const refs = useRef<(HTMLButtonElement | null)[]>([])
+
+  function onKeyDown(event: KeyboardEvent<HTMLButtonElement>, index: number) {
+    const steps: Record<string, number> = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }
+    const step = steps[event.key]
+    if (!step) return
+    event.preventDefault()
+    const next = (index + step + options.length) % options.length
+    onChange(options[next].id)
+    refs.current[next]?.focus()
+  }
+
   return (
-    <div role="radiogroup" aria-label="Billing period" className="inline-flex self-start rounded-lg border border-white/[0.10] bg-white/[0.03] p-1">
-      {options.map((option) => {
+    <div
+      role="radiogroup"
+      aria-label="Billing period"
+      className="inline-flex shrink-0 rounded-[8px] border border-white/[0.10] bg-white/[0.03] p-[3px]"
+    >
+      {options.map((option, index) => {
         const selected = value === option.id
         return (
           <button
             key={option.id}
+            ref={(el) => {
+              refs.current[index] = el
+            }}
             type="button"
             role="radio"
             aria-checked={selected}
+            tabIndex={selected ? 0 : -1}
             onClick={() => onChange(option.id)}
-            className={`inline-flex h-9 cursor-pointer items-center gap-2 rounded-md px-3.5 text-[14px] font-medium tracking-[-0.006em] transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300 ${
-              selected ? 'bg-white text-black' : 'text-zinc-400 hover:text-white'
+            onKeyDown={(event) => onKeyDown(event, index)}
+            className={`inline-flex h-[34px] cursor-pointer items-center gap-[8px] rounded-[6px] px-[14px] text-[14px] font-medium tracking-[-0.006em] transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300 ${
+              selected
+                ? 'bg-white/[0.10] text-white shadow-[inset_0_0_0_1px_rgba(255,255,255,0.08)]'
+                : 'text-zinc-400 hover:text-zinc-200'
             }`}
           >
             {option.label}
             {option.note && (
-              <span className={`text-[12px] font-medium ${selected ? 'text-violet-700' : 'text-violet-300'}`}>
+              <span
+                className={`rounded-[5px] px-[6px] py-[1px] text-[12px] font-medium ${
+                  selected ? 'bg-white/[0.12] text-zinc-100' : 'bg-white/[0.05] text-zinc-400'
+                }`}
+              >
                 {option.note}
               </span>
             )}
@@ -459,52 +509,101 @@ function CadenceSwitch({ value, onChange }: { value: Cadence; onChange: (next: C
   )
 }
 
-function PlanCard({ plan, cadence, onCta }: { plan: Plan; cadence: Cadence; onCta: () => void }) {
-  const yearlyPro = plan.name === 'Pro' && cadence === 'yearly'
-  const price = yearlyPro ? PRO_YEARLY_MONTHLY : plan.price
-  const cadenceLabel = yearlyPro ? 'per month' : plan.cadence
-  const priceNote =
-    plan.name === 'Pro'
-      ? yearlyPro
-        ? `${PRO_YEARLY_TOTAL} billed yearly`
-        : `or ${PRO_YEARLY_MONTHLY} a month, billed yearly`
-      : plan.name === 'Free'
-        ? 'No credit card'
-        : 'Custom limits, invoiced'
+function PlanColumn({
+  plan,
+  cadence,
+  onCta,
+  divided,
+  launchOffer,
+}: {
+  plan: Plan
+  cadence: Cadence
+  onCta: () => void
+  divided: boolean
+  /** The launch offer is running: its panel takes the first row, and Pro is priced with it. */
+  launchOffer: boolean
+}) {
+  const yearly = cadence === 'yearly'
+  // The offer panel heads Pro on both billing periods, so switching them never
+  // moves the plans. Only monthly Pro is offered: it shows what the code makes
+  // it, the price it replaces struck through, and how long that lasts, which
+  // is Stripe's 50% off the first three monthly invoices
+  // (lib/pricing/launch-offer.ts). Yearly keeps its own price.
+  const joined = launchOffer && plan.name === 'Pro'
+  const offered = joined && !yearly
+  const price = offered
+    ? usd(launchPrice(PRO_MONTHLY_CENTS))
+    : plan.name === 'Free'
+      ? '$0'
+      : plan.name === 'Pro'
+        ? yearly
+          ? PRO_YEARLY_MONTHLY
+          : PRO_MONTHLY
+        : 'Custom'
+  const struck = offered ? PRO_MONTHLY : plan.name === 'Pro' && yearly ? PRO_MONTHLY : null
+  const unit = plan.name === 'Enterprise' ? null : '/month'
+  const priceNote = offered
+    ? `Your first ${LAUNCH_OFFER.months} months, then ${PRO_MONTHLY} a month`
+    : plan.name === 'Free'
+      ? 'Free forever. No credit card.'
+      : plan.name === 'Pro'
+        ? yearly
+          ? `Billed yearly at ${PRO_YEARLY_TOTAL}, or ${PRO_MONTHLY} month to month`
+          : `Or ${PRO_YEARLY_MONTHLY} a month, billed yearly`
+        : 'Annual agreement, invoiced'
 
-  const ctaClass = `${plan.highlighted ? PRIMARY_CTA : SECONDARY_CTA} mt-8 w-full`
+  const ctaClass = `${plan.highlighted ? PRIMARY_CTA : SECONDARY_CTA} w-full`
+
+  // With the offer panel above it, Pro continues the panel: no rule and no lit
+  // top edge between them, which the panel carries instead.
+  const edge = joined
+    ? 'lg:border-l'
+    : divided
+      ? 'border-t border-white/[0.07] lg:border-l lg:border-t-0'
+      : ''
+  const ground = plan.highlighted
+    ? joined
+      ? 'bg-white/[0.035]'
+      : 'bg-white/[0.035] shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]'
+    : ''
 
   return (
     <article
-      className={`relative flex h-full flex-col overflow-hidden p-7 md:p-8 ${PANEL} ${
-        plan.highlighted ? 'border-violet-300/25 shadow-[0_40px_120px_-60px_rgba(139,92,246,0.6)]' : ''
+      aria-labelledby={`plan-${plan.name}`}
+      className={`flex min-w-0 flex-col border-white/[0.07] p-[24px] sm:p-[28px] md:p-[32px] ${edge} ${ground} ${
+        launchOffer ? 'lg:row-start-2' : ''
       }`}
     >
-      {plan.highlighted && (
-        <>
-          <span
-            aria-hidden
-            className="pointer-events-none absolute inset-x-0 top-0 h-px bg-[linear-gradient(to_right,transparent,rgba(196,181,253,0.9),rgba(255,255,255,0.9),rgba(196,181,253,0.9),transparent)]"
-          />
-          <span
-            aria-hidden
-            className="pointer-events-none absolute inset-0 bg-[radial-gradient(80%_45%_at_50%_0%,rgba(139,92,246,0.14),transparent)]"
-          />
-        </>
-      )}
+      <div className="flex min-h-[26px] items-center justify-between gap-[12px]">
+        <h3 id={`plan-${plan.name}`} className={`text-[17px] text-white ${HEADING}`}>
+          {plan.name}
+        </h3>
+        {plan.highlighted && (
+          <span className="rounded-[6px] border border-violet-300/25 bg-violet-400/[0.08] px-[8px] py-[2px] text-[12px] font-medium text-violet-200">
+            Recommended
+          </span>
+        )}
+      </div>
 
-      <div className="relative flex h-full flex-col">
-        <h3 className={`text-[18px] text-white ${HEADING}`}>{plan.name}</h3>
-        <p className="mt-2 min-h-[48px] text-[14px] leading-[1.65] text-zinc-400">{plan.summary}</p>
+      <p className="mt-[20px] flex flex-wrap items-baseline gap-x-[8px] gap-y-[4px]">
+        <span className="text-[44px] font-semibold leading-none tracking-[-0.04em] text-white tabular-nums">{price}</span>
+        {struck && (
+          <s className="text-[20px] font-medium tracking-[-0.02em] text-zinc-500 tabular-nums">
+            <span className="sr-only">{offered ? 'Without the code: ' : 'Month to month: '}</span>
+            {struck}
+          </s>
+        )}
+        {unit && <span className="text-[15px] text-zinc-500">{unit}</span>}
+      </p>
+      <p className="mt-[10px] text-[13px] text-zinc-500" aria-live="polite">
+        {priceNote}
+      </p>
 
-        <p className="mt-7 flex items-baseline gap-2">
-          <span className="text-[48px] font-semibold leading-none tracking-[-0.04em] text-white tabular-nums">{price}</span>
-          <span className="text-[14px] text-zinc-500">{cadenceLabel}</span>
-        </p>
-        <p className="mt-3 text-[13px] text-zinc-500" aria-live="polite">
-          {priceNote}
-        </p>
+      <p className="mt-[16px] text-[15px] leading-[1.6] tracking-[-0.004em] text-zinc-400 [text-wrap:pretty] lg:min-h-[48px]">
+        {plan.summary}
+      </p>
 
+      <div className="mt-[24px]">
         {plan.ctaHref ? (
           <a href={plan.ctaHref} className={ctaClass}>
             {plan.cta}
@@ -515,134 +614,217 @@ function PlanCard({ plan, cadence, onCta }: { plan: Plan; cadence: Cadence; onCt
             <ArrowRight aria-hidden className="h-4 w-4 transition-transform duration-200 group-hover:translate-x-0.5" />
           </button>
         )}
+      </div>
 
-        <dl className="mt-8 border-t border-white/[0.08]">
-          {plan.limits.map((limit) => (
-            <div key={limit.label} className="flex items-baseline justify-between gap-4 border-b border-white/[0.06] py-3">
-              <dt className="text-[14px] text-zinc-500">{limit.label}</dt>
-              <dd className="text-right text-[14px] font-medium text-zinc-200">{limit.value}</dd>
-            </div>
-          ))}
-        </dl>
-
-        <ul className="mt-7 flex flex-col gap-3.5">
-          {plan.features.map((feature) => (
-            <li key={feature} className="flex gap-3 text-[14px] leading-[1.6] text-zinc-300">
-              <Check aria-hidden className={`mt-[3px] h-4 w-4 shrink-0 ${plan.highlighted ? 'text-violet-300' : 'text-zinc-500'}`} strokeWidth={2} />
-              <span>{feature}</span>
+      <div className="mt-[28px] border-t border-white/[0.07] pt-[24px]">
+        <p className="text-[13px] font-medium text-zinc-300">{plan.listTitle}</p>
+        <ul className="mt-[14px] flex flex-col gap-[11px]">
+          {plan.items.map((item) => (
+            <li key={item.text} className="flex gap-[10px] text-[14px] leading-[1.55] text-zinc-300">
+              <Check aria-hidden className="mt-[3px] h-[15px] w-[15px] shrink-0 text-zinc-500" strokeWidth={2} />
+              <span className="min-w-0 [text-wrap:pretty]">
+                {item.text}
+                {item.note && <span className="mt-[2px] block text-[13px] text-zinc-500">{item.note}</span>}
+              </span>
             </li>
           ))}
         </ul>
-
-        <p className="mt-auto pt-8 text-[13px] leading-[1.6] text-zinc-500">
-          Best for <span className="text-zinc-300">{plan.bestFor.charAt(0).toLowerCase() + plan.bestFor.slice(1)}</span>
-        </p>
       </div>
     </article>
   )
 }
 
-/* ── Comparison ──────────────────────────────────────────────────────────── */
+/* ── Launch offer ────────────────────────────────────────────────────────── */
 
 /**
- * The plan comparison, grouped the way people compare backends: each row states
- * what a plan includes and, for Pro's metered quantities, the rate past it.
+ * The Product Hunt launch offer, at the head of the Pro column (founders,
+ * 2026-10-24: a promo code "in the 25usd plan area" until the launch).
+ * TEMPORARY, with the launch bar; the facts are lib/pricing/launch-offer.ts.
  *
- * The plan header sticks under the navbar (68px), so row 30 still says which
- * column is which. That needs the table's ancestors to have no overflow set,
- * which is why the frame is a border and not an overflow-hidden card. On small
- * screens every row becomes a card with the three plans side by side.
+ * Its job is to hand over the code. Stripe Checkout takes it and enforces the
+ * deadline, so a page left open past launch day cannot stretch the offer.
  */
-function ComparisonSection({ published, onCta }: { published: boolean; onCta: () => void }) {
-  const groups = comparisonGroups(published)
-  const heads = [
-    { name: 'Free', price: '$0', cadence: 'forever', cta: 'Start free' },
-    { name: 'Pro', price: '$25', cadence: 'per month', cta: 'Get Pro' },
-    { name: 'Enterprise', price: 'Custom', cadence: 'annual', cta: 'Talk to us' },
-  ]
+function LaunchOfferPanel({ now, yearly }: { now: number | null; yearly: boolean }) {
+  const left = now !== null && launchPhase(now) === 'live' ? timeLeft(LAUNCH_OFFER.endsAt, now) : null
+
   return (
-    <Section aria-labelledby="compare-title">
-      <Reveal>
-        <SectionHead
-          id="compare-title"
-          title="Capacity changes. The core runtime stays."
-          lede={
-            published
-              ? 'Pro’s quotas are shared by every project on your account. Past them, nothing is billed unless you set a spend limit and pay it in advance; with one, usage continues at the rates shown, never past it.'
-              : 'Running at company scale? Enterprise adds custom limits, SSO, onboarding and migration help, and a 12-hour SLA.'
-          }
-        />
-      </Reveal>
-
-      <div className="mt-10 flex flex-col gap-10 md:hidden">
-        {groups.map((group) => (
-          <div key={group.title}>
-            <GroupTitle group={group} />
-            <div className="mt-4 grid gap-3">
-              {group.rows.map((row) => (
-                <div key={row.label} className={`p-5 ${PANEL}`}>
-                  <h3 className="text-[15px] font-medium text-white">{row.label}</h3>
-                  {row.hint && <p className="mt-1 text-[13px] text-zinc-500">{row.hint}</p>}
-                  <div className="mt-4 grid grid-cols-3 gap-3 text-[14px]">
-                    {row.cells.map((cell, i) => (
-                      <div key={heads[i].name} className="min-w-0">
-                        <p className="text-[12px] text-zinc-500">{heads[i].name}</p>
-                        <div className="mt-1">
-                          <CellView cell={cell} />
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        ))}
+    // From lg up the panel's right edge is drawn one pixel into the next
+    // column, onto the line Enterprise's own left border draws below it, so
+    // the rule between Pro and Enterprise runs straight through both rows.
+    // It carries the lit top edge the Pro column has without it.
+    <section
+      id="launch-offer"
+      aria-labelledby="launch-offer-title"
+      className="scroll-mt-[88px] border-t border-white/[0.07] bg-white/[0.035] px-[24px] pb-[20px] pt-[20px] shadow-[inset_0_1px_0_rgba(255,255,255,0.08)] sm:px-[28px] md:px-[32px] lg:col-start-2 lg:row-start-1 lg:-mr-px lg:border-x lg:border-t-0"
+    >
+      <div className="flex flex-wrap items-baseline justify-between gap-x-[12px] gap-y-[2px]">
+        <h3 id="launch-offer-title" className="text-[13px] font-medium tracking-[-0.004em] text-violet-200">
+          Product Hunt launch offer
+        </h3>
+        {/* One line on both billing periods, so switching never moves the plans. */}
+        <p className="text-[12px] text-zinc-400 tabular-nums">
+          {yearly ? (
+            'Monthly billing only'
+          ) : left ? (
+            <>
+              Ends in{' '}
+              <span aria-hidden>
+                {left.hours}h {String(left.minutes).padStart(2, '0')}m
+              </span>
+              <span className="sr-only">{spokenTimeLeft(left)}</span>
+            </>
+          ) : (
+            `Ends ${LAUNCH_OFFER.endsLabel}`
+          )}
+        </p>
       </div>
+      <PromoCode code={LAUNCH_OFFER.code} />
+    </section>
+  )
+}
 
-      <div className="mt-12 hidden rounded-2xl border border-white/[0.08] md:block">
-        <table className="w-full table-fixed border-separate border-spacing-0 text-left">
+/**
+ * The code, as one field with its copy button, the way a coupon reads. The text
+ * stays selectable, so a browser that blocks the clipboard still lets it be
+ * copied by hand.
+ */
+function PromoCode({ code }: { code: string }) {
+  const [copied, setCopied] = useState(false)
+  const field = useRef<HTMLSpanElement>(null)
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(code)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1600)
+    } catch {
+      // Clipboard blocked: select the code instead, ready for Cmd/Ctrl+C.
+      const range = document.createRange()
+      if (!field.current) return
+      range.selectNodeContents(field.current)
+      window.getSelection()?.removeAllRanges()
+      window.getSelection()?.addRange(range)
+    }
+  }
+
+  return (
+    <div className="mt-[14px] flex h-[44px] items-center justify-between gap-[12px] rounded-[10px] border border-dashed border-violet-300/35 bg-black/20 pl-[16px] pr-[5px]">
+      <span
+        ref={field}
+        className="min-w-0 truncate font-mono text-[15px] font-medium tracking-[0.08em] text-white [font-variant-ligatures:none]"
+      >
+        {code}
+      </span>
+      {/* The label swap is the only confirmation a copy gets, so it is
+          announced (the docs' CodeBlock does the same). */}
+      <button
+        type="button"
+        onClick={copy}
+        aria-label={copied ? 'Code copied' : `Copy code ${code}`}
+        aria-live="polite"
+        className="inline-flex h-[34px] shrink-0 cursor-pointer items-center gap-[6px] rounded-[7px] border border-white/[0.10] bg-white/[0.06] px-[12px] text-[13px] font-medium text-zinc-200 transition-colors duration-200 hover:border-white/20 hover:bg-white/[0.10] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300"
+      >
+        {copied ? (
+          <>
+            <Check aria-hidden className="h-[14px] w-[14px] text-violet-300" strokeWidth={2.25} /> Copied
+          </>
+        ) : (
+          <>
+            <Copy aria-hidden className="h-[14px] w-[14px]" /> Copy
+          </>
+        )}
+      </button>
+    </div>
+  )
+}
+
+/* ── Comparison ──────────────────────────────────────────────────────────── */
+
+/** Solid ground for the cells that stick, so rows scrolling under them are hidden. */
+const STUCK = 'bg-[#08090a]'
+
+function ComparisonSection({ published, cadence, onCta }: { published: boolean; cadence: Cadence; onCta: () => void }) {
+  const groups = comparisonGroups(published)
+  const yearly = cadence === 'yearly'
+  const heads = [
+    { name: 'Free', price: '$0', unit: '/month', cta: 'Start free' },
+    {
+      name: 'Pro',
+      price: yearly ? PRO_YEARLY_MONTHLY : PRO_MONTHLY,
+      unit: yearly ? '/month, billed yearly' : '/month',
+      cta: 'Get Pro',
+    },
+    { name: 'Enterprise', price: 'Custom', unit: 'annual', cta: 'Talk to us' },
+  ]
+  // The row label column stays in view while a phone scrolls the plans sideways.
+  // Solid only below md: from md up the frame does not clip, so a solid square
+  // cell in the last row would paint over the frame's rounded corner. Written
+  // out in full because Tailwind only generates classes it finds literally.
+  const pinned = 'max-md:sticky max-md:left-0 max-md:z-[1] max-md:bg-[#08090a]'
+  const button =
+    'mt-[14px] inline-flex h-[36px] w-full cursor-pointer items-center justify-center rounded-[8px] text-[13px] font-semibold transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300'
+  const quietButton = `${button} border border-white/[0.12] bg-white/[0.03] text-zinc-200 hover:border-white/25 hover:bg-white/[0.07] hover:text-white`
+
+  return (
+    <Section id="compare" aria-labelledby="compare-title" className="scroll-mt-[72px]">
+      <SectionHead
+        id="compare-title"
+        title={
+          <>
+            Compare the plans.{' '}
+            <span className="text-zinc-500">Every limit, side by side.</span>
+          </>
+        }
+        lede={
+          published
+            ? 'Pro’s quotas are shared by every project on your account. Past a quota, nothing is billed unless you set a spend limit and pay it in advance. Usage then continues at the rates shown, never past that limit.'
+            : 'Enterprise adds custom limits, single sign-on, onboarding and migration help, and a 12-hour SLA.'
+        }
+      />
+
+      <div
+        role="region"
+        aria-label="Plan comparison table"
+        tabIndex={0}
+        className="mt-[48px] overflow-x-auto rounded-2xl border border-white/[0.07] focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-300 md:mt-[64px] md:overflow-visible"
+      >
+        <table className="w-full min-w-[600px] table-fixed border-separate border-spacing-0 text-left md:min-w-0">
           <caption className="sr-only">Backenly plans compared, feature by feature</caption>
           <colgroup>
-            <col className="w-[31%]" />
+            <col className="w-[28%] md:w-[31%]" />
             <col />
-            <col className="bg-[linear-gradient(180deg,rgba(139,92,246,0.06),rgba(139,92,246,0.015))]" />
+            <col className="bg-white/[0.022]" />
             <col />
           </colgroup>
           <thead>
             <tr>
-              <th className="sticky top-[68px] z-10 rounded-tl-2xl border-b border-white/[0.08] bg-[#0a0b0d] px-6 py-5">
+              <th
+                className={`${STUCK} ${pinned} rounded-tl-2xl border-b border-white/[0.08] px-[20px] py-[20px] align-bottom md:sticky md:top-[68px] md:z-10 md:px-[24px]`}
+              >
                 <span className="sr-only">Feature</span>
               </th>
               {heads.map((head, i) => (
                 <th
                   key={head.name}
                   scope="col"
-                  className={`sticky top-[68px] z-10 border-b border-white/[0.08] bg-[#0a0b0d] px-6 py-5 align-top font-normal ${
-                    i === heads.length - 1 ? 'rounded-tr-2xl' : ''
-                  }`}
+                  className={`border-b border-white/[0.08] px-[16px] py-[20px] align-top font-normal md:sticky md:top-[68px] md:z-10 md:px-[24px] ${
+                    head.name === 'Pro' ? 'bg-[#0d0e0f]' : STUCK
+                  } ${i === heads.length - 1 ? 'rounded-tr-2xl' : ''}`}
                 >
-                  <p className={`text-[15px] font-semibold ${head.name === 'Pro' ? 'text-violet-200' : 'text-white'}`}>{head.name}</p>
-                  <p className="mt-1">
+                  <p className="text-[15px] font-semibold text-white">{head.name}</p>
+                  <p className="mt-[4px] flex flex-wrap items-baseline gap-x-[6px]">
                     <span className="text-[20px] font-semibold tracking-[-0.02em] text-white tabular-nums">{head.price}</span>
-                    <span className="ml-1.5 text-[13px] text-zinc-500">{head.cadence}</span>
+                    <span className="text-[13px] text-zinc-500">{head.unit}</span>
                   </p>
                   {head.name === 'Enterprise' ? (
-                    <a
-                      href="mailto:support@backenly.com?subject=Backenly%20Enterprise"
-                      className="mt-4 inline-flex h-9 w-full items-center justify-center rounded-lg border border-white/[0.12] bg-white/[0.03] text-[13px] font-semibold text-zinc-200 transition-colors duration-200 hover:border-white/25 hover:bg-white/[0.07] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300"
-                    >
+                    <a href={ENTERPRISE_MAIL} className={quietButton}>
                       {head.cta}
                     </a>
                   ) : (
                     <button
                       type="button"
                       onClick={onCta}
-                      className={`mt-4 inline-flex h-9 w-full cursor-pointer items-center justify-center rounded-lg text-[13px] font-semibold transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300 ${
-                        head.name === 'Pro'
-                          ? 'bg-white text-black hover:bg-zinc-200'
-                          : 'border border-white/[0.12] bg-white/[0.03] text-zinc-200 hover:border-white/25 hover:bg-white/[0.07] hover:text-white'
-                      }`}
+                      className={head.name === 'Pro' ? `${button} bg-white text-black hover:bg-zinc-200` : quietButton}
                     >
                       {head.cta}
                     </button>
@@ -654,18 +836,21 @@ function ComparisonSection({ published, onCta }: { published: boolean; onCta: ()
           {groups.map((group) => (
             <tbody key={group.title}>
               <tr>
-                <th colSpan={4} scope="colgroup" className="px-6 pb-3 pt-9 text-left font-normal">
+                <th colSpan={4} scope="colgroup" className="px-[20px] pb-[12px] pt-[36px] text-left font-normal md:px-[24px]">
                   <GroupTitle group={group} />
                 </th>
               </tr>
               {group.rows.map((row) => (
                 <tr key={row.label}>
-                  <th scope="row" className="border-t border-white/[0.06] px-6 py-4 align-top font-normal">
-                    <p className="text-[14px] font-medium text-zinc-200">{row.label}</p>
-                    {row.hint && <p className="mt-1 text-[13px] leading-[1.5] text-zinc-500">{row.hint}</p>}
+                  <th
+                    scope="row"
+                    className={`${pinned} border-t border-white/[0.06] px-[20px] py-[14px] align-top font-normal md:px-[24px]`}
+                  >
+                    <p className="text-[14px] font-medium leading-[1.5] text-zinc-200">{row.label}</p>
+                    {row.hint && <p className="mt-[4px] text-[13px] leading-[1.5] text-zinc-500">{row.hint}</p>}
                   </th>
                   {row.cells.map((cell, i) => (
-                    <td key={heads[i].name} className="border-t border-white/[0.06] px-6 py-4 align-top text-[14px]">
+                    <td key={heads[i].name} className="border-t border-white/[0.06] px-[16px] py-[14px] align-top text-[14px] leading-[1.5] md:px-[24px]">
                       <CellView cell={cell} />
                     </td>
                   ))}
@@ -681,12 +866,11 @@ function ComparisonSection({ published, onCta }: { published: boolean; onCta: ()
 
 function GroupTitle({ group }: { group: MatrixGroup }) {
   const GroupIcon = group.icon
+  // Pinned on a phone, so the group's name stays put while the plans scroll.
   return (
-    <span className="inline-flex items-center gap-3">
-      <span className="flex h-8 w-8 items-center justify-center rounded-lg border border-white/[0.09] bg-white/[0.03]">
-        <GroupIcon aria-hidden className="h-4 w-4 text-zinc-300" strokeWidth={1.75} />
-      </span>
-      <span className={`text-[16px] text-white ${HEADING}`}>{group.title}</span>
+    <span className="flex w-max items-center gap-[10px] max-md:sticky max-md:left-[20px]">
+      <GroupIcon aria-hidden className="h-4 w-4 text-zinc-500" strokeWidth={1.75} />
+      <span className={`text-[15px] text-white ${HEADING}`}>{group.title}</span>
     </span>
   )
 }
@@ -712,7 +896,7 @@ function CellView({ cell }: { cell: Cell }): ReactNode {
   return (
     <div>
       <p className="text-zinc-200">{cell.value}</p>
-      {cell.then && <p className="mt-1 text-[13px] leading-[1.5] text-zinc-500">{cell.then}</p>}
+      {cell.then && <p className="mt-[4px] text-[13px] leading-[1.5] text-zinc-500">{cell.then}</p>}
     </div>
   )
 }

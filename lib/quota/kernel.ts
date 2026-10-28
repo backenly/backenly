@@ -40,6 +40,7 @@
 
 import { randomUUID } from 'crypto'
 import { prisma } from '@/lib/db/prisma'
+import { endUserPseudonym, quotesKeptHere } from '@/lib/data-plane/residency'
 import { accountOfUser, getAccountEntitlements } from '@/lib/entitlements'
 import { isReservedTestEmail } from '@/lib/services/end-user-auth-table'
 import { accountOf, accountProjectsWhere } from '@/lib/usage/account'
@@ -143,13 +144,17 @@ export async function trackEndUserActive(
   if (isReservedTestEmail(email)) return
   const month = thisMonth()
   try {
+    // A project kept in another region is counted under a per-project stand-in
+    // for each end user, not the user's id (lib/data-plane/residency.ts): the
+    // same user gives the same value every time, so the count is unchanged.
+    const counted = (await quotesKeptHere(projectId)) ? endUserId : endUserPseudonym(projectId, endUserId)
     // (xmax = 0) is true only for a row this statement INSERTED, so the usage
     // ledger hears about each (project, end user, month) exactly once, however
     // many requests race to be the first of the month. The ledger's copy is the
     // billing record: it is not deleted with the project, unlike this row.
     const rows = await prisma.$queryRaw<Array<{ inserted: boolean }>>`
       INSERT INTO "project_active_users" ("id", "projectId", "endUserId", "month", "lastSeenAt", "createdAt")
-      VALUES (${randomUUID()}, ${projectId}, ${endUserId}, ${month}, now(), now())
+      VALUES (${randomUUID()}, ${projectId}, ${counted}, ${month}, now(), now())
       ON CONFLICT ("projectId", "endUserId", "month") DO UPDATE SET "lastSeenAt" = now()
       RETURNING (xmax = 0) AS inserted`
     if (rows[0]?.inserted) {

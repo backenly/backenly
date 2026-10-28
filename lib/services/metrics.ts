@@ -108,6 +108,21 @@ export function baselineWindow(timeRange: '1h' | '24h' | '7d' | '30d'): { start:
 
 // ─── Core aggregate (the one true read) ───────────────────────────────────────
 
+
+/**
+ * A window bound as a session-timezone-proof SQL fragment.
+ *
+ * `api_request_logs.timestamp` is a NAIVE timestamp holding UTC (Prisma's
+ * write convention). A tagged `${date}` parameter is bound as timestamptz, so
+ * `"timestamp" >= $1` makes Postgres coerce the naive column using the SESSION
+ * time zone — on any non-UTC session every row shifts by the offset and a
+ * window query silently returns zero. Casting the parameter down to naive UTC
+ * compares like with like on every deployment.
+ */
+function utcBound(d: Date): Prisma.Sql {
+  return Prisma.sql`(${d.toISOString()}::timestamptz AT TIME ZONE 'UTC')`
+}
+
 /**
  * Aggregate a project's runtime traffic between [start, end) in a single
  * indexed query (uses the `@@index([projectId, timestamp])` on ApiRequestLog).
@@ -140,8 +155,8 @@ export async function getRuntimeWindowStats(
       COALESCE(percentile_cont(0.99) WITHIN GROUP (ORDER BY "duration"), 0)::float         AS p99
     FROM "api_request_logs"
     WHERE "projectId" = ${projectId}
-      AND "timestamp" >= ${start}
-      AND "timestamp" <  ${end}
+      AND "timestamp" >= ${utcBound(start)}
+      AND "timestamp" <  ${utcBound(end)}
       ${RUNTIME_PATH_FILTER}
   `)
 
@@ -294,7 +309,7 @@ export async function getMetrics(
       COUNT(*) FILTER (WHERE "statusCode" >= 500)::int                                       AS server_error_count
     FROM "api_request_logs"
     WHERE "projectId" = ${projectId}
-      AND "timestamp" >= ${start}
+      AND "timestamp" >= ${utcBound(start)}
       ${RUNTIME_PATH_FILTER}
     GROUP BY bucket
     ORDER BY bucket ASC
@@ -360,7 +375,7 @@ export async function getPerformanceBreakdown(
       COALESCE(percentile_cont(0.99) WITHIN GROUP (ORDER BY "duration"), 0)::float    AS p99
     FROM "api_request_logs"
     WHERE "projectId" = ${projectId}
-      AND "timestamp" >= ${start}
+      AND "timestamp" >= ${utcBound(start)}
       ${RUNTIME_PATH_FILTER}
     GROUP BY endpoint
     ORDER BY requests DESC

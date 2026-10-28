@@ -10,7 +10,9 @@
  *   - Enum values (from CHECK constraints or known column names like 'status')
  *
  * Schemas are cached per (projectId, tableName) for CACHE_TTL_MS to avoid
- * repeated information_schema queries on every request.
+ * repeated information_schema queries on every request, and used only while
+ * the table's catalog fingerprint is unchanged (tableFingerprint): a column
+ * added or dropped by any process, in any region, is seen on the next request.
  *
  * Usage in route handlers:
  *   import { validateInsertPayload, validateUpdatePayload } from '@/lib/services/workspace-validator'
@@ -23,7 +25,7 @@
  */
 
 import { z, ZodTypeAny } from 'zod'
-import { prisma } from '@/lib/db/prisma'
+import { workspaceRawClient } from '@/lib/data-plane/regional'
 
 const CACHE_TTL_MS = 60_000   // Refresh schema cache every 60s
 
@@ -42,6 +44,8 @@ interface CacheEntry {
   insertSchema: z.ZodObject<Record<string, ZodTypeAny>>
   updateSchema: z.ZodObject<Record<string, ZodTypeAny>>
   expiresAt: number
+  /** The table's catalog fingerprint when the schemas were built. */
+  fingerprint: string
 }
 
 const schemaCache = new Map<string, CacheEntry>()
@@ -127,8 +131,10 @@ function buildZodTypeForColumn(col: ColumnMeta): ZodTypeAny | null {
 
 async function loadColumns(projectId: string, tableName: string): Promise<ColumnMeta[]> {
   const schemaName = `workspace_${projectId}`
+  // The catalog of the database holding the project's data, in its region.
+  const db = await workspaceRawClient(projectId)
 
-  const rows = await prisma.$queryRawUnsafe<{
+  const rows = await db.$queryRawUnsafe<{
     column_name: string
     data_type: string
     udt_name: string
@@ -152,7 +158,7 @@ async function loadColumns(projectId: string, tableName: string): Promise<Column
   )
 
   // Primary keys
-  const pkRows = await prisma.$queryRawUnsafe<{ column_name: string }[]>(
+  const pkRows = await db.$queryRawUnsafe<{ column_name: string }[]>(
     `SELECT kcu.column_name
      FROM information_schema.table_constraints tc
      JOIN information_schema.key_column_usage kcu
@@ -178,7 +184,7 @@ async function loadColumns(projectId: string, tableName: string): Promise<Column
 
 // ── Build Zod schemas ─────────────────────────────────────────────────────────
 
-async function buildSchemas(projectId: string, tableName: string): Promise<CacheEntry> {
+async function buildSchemas(projectId: string, tableName: string): Promise<Omit<CacheEntry, 'fingerprint'>> {
   const columns = await loadColumns(projectId, tableName)
 
   const insertShape: Record<string, ZodTypeAny> = {}
@@ -200,12 +206,35 @@ async function buildSchemas(projectId: string, tableName: string): Promise<Cache
   }
 }
 
+/**
+ * A cheap identity for a table's shape, read from its catalog on every use: its
+ * oid, and the newest row version among its columns and constraints. Adding,
+ * dropping or altering a column, or changing a constraint, writes those rows
+ * again, and a table dropped and created again has a new oid. Invalidation by
+ * call (invalidateSchemaCache) only reaches the process that made the change;
+ * this reaches every process, so a cached schema is used only while the table
+ * is still the one it was built from.
+ */
+async function tableFingerprint(projectId: string, tableName: string): Promise<string> {
+  const db = await workspaceRawClient(projectId)
+  const rows = await db.$queryRawUnsafe<Array<{ fp: string | null }>>(
+    `SELECT r.oid::oid::text || ':' ||
+            coalesce((SELECT max(a.xmin::text::bigint) FROM pg_attribute a WHERE a.attrelid = r.oid AND a.attnum > 0), 0)::text || ':' ||
+            coalesce((SELECT max(k.xmin::text::bigint) FROM pg_constraint k WHERE k.conrelid = r.oid), 0)::text AS fp
+       FROM (SELECT to_regclass(format('%I.%I', $1::text, $2::text)) AS oid) r`,
+    `workspace_${projectId}`,
+    tableName,
+  )
+  return rows[0]?.fp ?? 'absent'
+}
+
 async function getSchemas(projectId: string, tableName: string): Promise<CacheEntry> {
   const key = `${projectId}:${tableName}`
+  const fingerprint = await tableFingerprint(projectId, tableName)
   const cached = schemaCache.get(key)
-  if (cached && cached.expiresAt > Date.now()) return cached
+  if (cached && cached.fingerprint === fingerprint && cached.expiresAt > Date.now()) return cached
 
-  const entry = await buildSchemas(projectId, tableName)
+  const entry: CacheEntry = { ...(await buildSchemas(projectId, tableName)), fingerprint }
   schemaCache.set(key, entry)
   return entry
 }

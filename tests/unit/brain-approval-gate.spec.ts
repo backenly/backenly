@@ -5,8 +5,11 @@
  */
 import fs from 'fs'
 import path from 'path'
-import { needsApproval } from '@/lib/mcp/domains'
+import { needsApproval, resolveDomainAction } from '@/lib/mcp/domains'
+import { buildCatalog } from '@/lib/mcp/catalog'
 import { agentSystemPrompt } from '@/lib/ai/brain/prompts'
+import { TOOL_CAPABILITIES } from '@/lib/ai/brain/capabilities'
+import { BRAIN_MODEL_TOOLS, DESTRUCTIVE_TOOLS } from '@/lib/ai/brain/tools'
 
 describe('the brain approval gate', () => {
   it.each([
@@ -80,10 +83,49 @@ describe('the agent prompt states the rule the gate enforces', () => {
     expect(prompt).toMatch(/Nothing typed in chat approves one/)
   })
 
-  it('gives as examples only tools the gate really stops', () => {
-    const examples = prompt.match(/HUMAN APPROVAL[\s\S]*?For example: ([^.]+)\./)?.[1]
-    const names = (examples ?? '').split(',').map((s) => s.trim()).filter(Boolean)
-    expect(names.length).toBeGreaterThan(5)
-    for (const name of names) expect({ name, gated: needsApproval(name) }).toEqual({ name, gated: true })
+  it('lists every destructive tool, and only tools the gate really stops', () => {
+    const listed = prompt.match(/HUMAN APPROVAL[\s\S]*?These always wait for a person: ([^.]+)\./)?.[1]
+    const names = (listed ?? '').split(',').map((s) => s.trim()).filter(Boolean)
+    // By name, so a tool the prompt leaves out, or lists without the gate
+    // stopping it, is the one reported. The list was typed by hand and had
+    // fallen behind the set (#225).
+    expect([...DESTRUCTIVE_TOOLS].filter((tool) => !names.includes(tool))).toEqual([])
+    expect(names.filter((name) => !needsApproval(name))).toEqual([])
+  })
+})
+
+// A refusal rule that names what a tool in the same prompt does makes the model
+// tell the user Backenly cannot do something it can: push notifications were
+// refused beside enable_push_notifications and send_push (#225).
+describe('the refusal rules', () => {
+  const prompt = agentSystemPrompt()
+  const start = prompt.indexOf('REFUSAL RULES')
+  const end = prompt.indexOf('HUMAN APPROVAL', start)
+  const rules = prompt.slice(start, end)
+  const offered = new Set(BRAIN_MODEL_TOOLS.map((t) => t.function.name))
+
+  it('name no capability of a tool the brain is offered', () => {
+    expect(start).toBeGreaterThan(-1)
+    expect(end).toBeGreaterThan(start)
+    // As the manifest names it: "Push notifications (OneSignal)" is enable_push_notifications.
+    const refused = TOOL_CAPABILITIES.filter(
+      (c) => c.tool && offered.has(c.tool) && rules.toLowerCase().includes(c.name.replace(/\s*\(.*\)$/, '').toLowerCase()),
+    )
+    expect(refused.map((c) => c.tool)).toEqual([])
+  })
+
+  it("send an MCP agent to its own tools for what the brain cannot do, none of them the brain's", () => {
+    const line = rules.split('\n').find((l) => l.includes('over MCP')) ?? ''
+    const advertised = new Set(buildCatalog().map((t) => t.name))
+    // A direct tool by its name, a domain action by the tool it runs.
+    const doors = [
+      ...[...line.matchAll(/\b[a-z]+(?:_[a-z]+)+\b/g)].map((m) => m[0]).filter((name) => advertised.has(name)),
+      ...[...line.matchAll(/(\w+) \{ action: "(\w+)" \}/g)].map(([, domain, action]) => {
+        const resolved = resolveDomainAction(domain, action)
+        return resolved?.kind === 'ok' ? resolved.target : `${domain} { action: "${action}" }, which does not exist`
+      }),
+    ]
+    expect(doors.length).toBeGreaterThan(0)
+    expect(doors.filter((tool) => offered.has(tool) || tool.endsWith('does not exist'))).toEqual([])
   })
 })

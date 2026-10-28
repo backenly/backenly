@@ -10,12 +10,15 @@ export const dynamic = 'force-dynamic'
 import { NextRequest, NextResponse } from 'next/server'
 import { withProjectValidation } from '@/lib/middleware/projectValidation'
 import { prisma } from '@/lib/db/prisma'
+import { governedChange } from '@/lib/changes/ledger'
 
 export async function DELETE(
   req: NextRequest,
   props: { params: Promise<{ id: string; keyId: string }> }
 ) {
   const params = await props.params;
+  // ADMIN: revoking a credential is credential lifecycle, held to the same
+  // rank as issuing one. Every MCP host using the key stops working at once.
   return withProjectValidation<any>(req, async ({ projectId, userId }) => {
     const keyId = params.keyId
     if (!keyId) {
@@ -32,7 +35,7 @@ export async function DELETE(
       return NextResponse.json({ error: 'MCP key not found' }, { status: 404 })
     }
 
-    await prisma.apiKey.delete({ where: { id: keyId } })
+    await governedChange(projectId, `Revoke agent key ${key.name}`, () => prisma.apiKey.delete({ where: { id: keyId } }))
 
     await prisma.auditLog.create({
       data: {
@@ -51,5 +54,5 @@ export async function DELETE(
     }).catch(() => {})
 
     return NextResponse.json({ ok: true, revoked: keyId })
-  })
+  }, { floor: 'administer' })
 }

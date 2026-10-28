@@ -129,12 +129,14 @@ COPY --from=build /src/edition-files/ ./
 # Trust the Amazon RDS root CAs for every Node TLS connection. The runtime's
 # pg connections (realtime LISTEN/NOTIFY among them) hit the same pg 8.13+
 # verify-full behaviour as the web app; see docker/web.Dockerfile for the full
-# account. Additive, verification stays on, inert against non-RDS servers.
-COPY docker/certs/rds-ca-ap-south-1.pem /app/certs/rds-ca-ap-south-1.pem
+# account, and for why every Cloud region's roots are here. Additive,
+# verification stays on, inert against non-RDS servers.
+COPY docker/certs/rds-ca-ap-south-1.pem docker/certs/rds-ca-us-east-1.pem docker/certs/rds-ca-us-west-2.pem docker/certs/rds-ca-eu-central-1.pem docker/certs/rds-ca-ap-southeast-1.pem /app/certs/
+RUN cat /app/certs/rds-ca-ap-south-1.pem /app/certs/rds-ca-us-east-1.pem /app/certs/rds-ca-us-west-2.pem /app/certs/rds-ca-eu-central-1.pem /app/certs/rds-ca-ap-southeast-1.pem > /app/certs/rds-ca-cloud-regions.pem
 
 ENV NODE_ENV=production \
     RUNTIME_PORT=3001 \
-    NODE_EXTRA_CA_CERTS=/app/certs/rds-ca-ap-south-1.pem
+    NODE_EXTRA_CA_CERTS=/app/certs/rds-ca-cloud-regions.pem
 
 EXPOSE 3001
 

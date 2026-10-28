@@ -56,8 +56,21 @@ import { CodeSurface, CliText, JsonText } from './CodeSurface'
  */
 const USER_DOCS = '/docs/connect'
 const KEY_PLACEHOLDER = '<SCOPED_KEY>'
+/**
+ * The dashboard's own origin — which is the backend these commands must point
+ * at. Hardcoding backenly.com here sent every SELF-HOSTED operator's agent to
+ * Backenly Cloud, where their key is unknown and the connection dies with
+ * INVALID_KEY — the one-command install was broken for exactly the audience
+ * that cannot fall back to the hosted product. Client component, so the
+ * browser's origin is the truth; the env fallback only covers prerender.
+ */
+export function dashboardOrigin(): string {
+  if (typeof window !== 'undefined') return window.location.origin
+  return (process.env.NEXT_PUBLIC_APP_URL || 'https://backenly.com').replace(/\/+$/, '')
+}
+
 /** The remote (Streamable-HTTP) MCP endpoint — app/api/mcp/route.ts. No npx. */
-const REMOTE_URL = 'https://backenly.com/api/mcp'
+export const remoteUrl = () => `${dashboardOrigin()}/api/mcp`
 
 type Transport = 'local' | 'remote'
 
@@ -85,7 +98,13 @@ interface Agent {
   remote: Variant
 }
 
-const NPX_ARGS = (p: string, k: string) => ['-y', '@backenly/mcp-server', '--project', p, '--key', k]
+export const NPX_ARGS = (p: string, k: string) => {
+  const args = ['-y', '@backenly/mcp-server', '--project', p, '--key', k]
+  // The stdio package defaults to backenly.com; a self-host must say where it
+  // lives. Cloud commands stay exactly as they were.
+  const origin = dashboardOrigin()
+  return origin === 'https://backenly.com' ? args : [...args, '--endpoint', origin]
+}
 
 /**
  * JSON the way people write mcp.json by hand: two-space indent, with an array
@@ -105,7 +124,7 @@ function stdioJson(projectId: string, key: string): string {
 
 /** Cursor remote: url + headers; Cursor infers the transport from the url. */
 function cursorRemoteJson(_projectId: string, key: string): string {
-  return configJson({ mcpServers: { backenly: { url: REMOTE_URL, headers: { 'x-api-key': key } } } })
+  return configJson({ mcpServers: { backenly: { url: remoteUrl(), headers: { 'x-api-key': key } } } })
 }
 
 /**
@@ -116,7 +135,7 @@ function cursorRemoteJson(_projectId: string, key: string): string {
  * Servers → View raw config; its path on disk has moved between releases.
  */
 function antigravityRemoteJson(_projectId: string, key: string): string {
-  return configJson({ mcpServers: { backenly: { serverUrl: REMOTE_URL, headers: { 'x-api-key': key } } } })
+  return configJson({ mcpServers: { backenly: { serverUrl: remoteUrl(), headers: { 'x-api-key': key } } } })
 }
 
 /**
@@ -125,7 +144,7 @@ function antigravityRemoteJson(_projectId: string, key: string): string {
  * live under `http_headers`. Codex infers http from the `url` key (no `type`).
  */
 function codexRemoteToml(_projectId: string, key: string): string {
-  return `[mcp_servers.backenly]\nurl = "${REMOTE_URL}"\nhttp_headers = { "x-api-key" = "${key}" }`
+  return `[mcp_servers.backenly]\nurl = "${remoteUrl()}"\nhttp_headers = { "x-api-key" = "${key}" }`
 }
 
 const RUN_THEN_NEW_SESSION = 'Run it in a terminal, then start a new Claude Code session.'
@@ -146,7 +165,7 @@ const AGENTS: Agent[] = [
   {
     id: 'claude-code', name: 'Claude Code',
     local: { kind: 'cli', next: RUN_THEN_NEW_SESSION, build: (p, k) => `claude mcp add backenly -- npx -y @backenly/mcp-server --project ${p} --key ${k}` },
-    remote: { kind: 'cli', next: RUN_THEN_NEW_SESSION, build: (_p, k) => `claude mcp add --transport http backenly ${REMOTE_URL} --header "x-api-key: ${k}"` },
+    remote: { kind: 'cli', next: RUN_THEN_NEW_SESSION, build: (_p, k) => `claude mcp add --transport http backenly ${remoteUrl()} --header "x-api-key: ${k}"` },
   },
   {
     id: 'cursor', name: 'Cursor',
@@ -170,7 +189,7 @@ const AGENTS: Agent[] = [
   {
     id: 'other', name: 'Other',
     local: { kind: 'cli', next: 'Use it as the server command in any MCP host, then restart the host.', build: (p, k) => `npx -y @backenly/mcp-server --project ${p} --key ${k}` },
-    remote: { kind: 'cli', next: 'Add it as a Streamable HTTP server in any MCP host, then restart the host.', build: (_p, k) => `URL     ${REMOTE_URL}\nHeader  x-api-key: ${k}` },
+    remote: { kind: 'cli', next: 'Add it as a Streamable HTTP server in any MCP host, then restart the host.', build: (_p, k) => `URL     ${remoteUrl()}\nHeader  x-api-key: ${k}` },
   },
 ]
 
@@ -255,7 +274,7 @@ export function AgentInstallGuide({
             <p className="text-[13px] font-medium text-zinc-100">
               {key ? 'Key ready' : 'One key for this project, scoped and revocable'}
             </p>
-            <p className="mt-0.5 text-[12.5px] text-zinc-500">
+            <p className="mt-0.5 text-[12.5px] text-faint">
               {key ? 'It is in the command below, for your agent only: an app gets its own key. Revoke it any time from the list.' : 'Never a root key. It can request a destructive change, never approve one.'}
             </p>
           </div>
@@ -293,7 +312,7 @@ export function AgentInstallGuide({
           onSelectionCopy={copySelection}
           footer={
             <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
-              <p className="min-w-0 text-[12.5px] leading-[18px] text-zinc-500 [&_code]:font-mono [&_code]:text-[12px] [&_code]:text-zinc-300">
+              <p className="min-w-0 text-[12.5px] leading-[18px] text-faint [&_code]:font-mono [&_code]:text-[12px] [&_code]:text-zinc-300">
                 {variant.next}
               </p>
               <Segmented<Transport>
@@ -341,7 +360,7 @@ function AgentTabs({ value, onChange }: { value: string; onChange: (id: string) 
             aria-checked={active}
             onClick={() => onChange(a.id)}
             className={`group relative flex h-[40px] flex-shrink-0 items-center gap-1 px-[6px] text-[13px] font-medium transition-colors first:pl-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-violet-300/60 ${
-              active ? 'text-zinc-50' : 'text-zinc-500 hover:text-zinc-200'
+              active ? 'text-zinc-50' : 'text-faint hover:text-zinc-200'
             }`}
           >
             <Icon size={14} className={active ? '' : 'opacity-60 transition-opacity group-hover:opacity-100'} />
@@ -438,13 +457,13 @@ export function AgentCapabilitiesCard() {
         {HEADLINE_TOOLS.map((t) => (
           <div key={t.name} className="flex items-baseline justify-between gap-4 px-4 py-2.5">
             <dt><code className="font-mono text-[12px] text-zinc-100">{t.name}</code></dt>
-            <dd className="truncate text-right text-[12.5px] text-zinc-500">{t.gloss}</dd>
+            <dd className="truncate text-right text-[12.5px] text-faint">{t.gloss}</dd>
           </div>
         ))}
       </dl>
       <div className="flex items-center gap-2 border-t border-white/[0.06] px-4 py-2.5">
         <ShieldCheck className="h-3.5 w-3.5 flex-shrink-0 text-zinc-500" />
-        <span className="truncate text-[12.5px] text-zinc-500">Drops and truncates are never exposed over MCP.</span>
+        <span className="truncate text-[12.5px] text-faint">Drops and truncates are never exposed over MCP.</span>
       </div>
     </div>
   )

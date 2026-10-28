@@ -6,6 +6,8 @@
  * Eliminates "tried to create a table that already exists" bugs.
  */
 
+import { workspaceRawClient } from '@/lib/data-plane/regional'
+
 export interface TableInfo {
   name: string
   columns: Array<{ name: string; type: string; nullable: boolean; foreignKey?: string }>
@@ -44,12 +46,13 @@ export async function tableExists(projectId: string, tableName: string): Promise
 }
 
 export async function describeTable(projectId: string, tableName: string): Promise<TableInfo | null> {
+  const db = await workspaceRawClient(projectId)
   const { prisma } = await import('@/lib/db/prisma')
   try {
     const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
     const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
 
-    const columns = await prisma.$queryRawUnsafe<any[]>(
+    const columns = await db.$queryRawUnsafe<any[]>(
       `SELECT column_name, data_type, is_nullable
        FROM information_schema.columns
        WHERE table_schema = $1 AND table_name = $2
@@ -58,7 +61,7 @@ export async function describeTable(projectId: string, tableName: string): Promi
     )
     if (columns.length === 0) return null
 
-    const fkRows = await (prisma.$queryRawUnsafe<any[]>(
+    const fkRows = await (db.$queryRawUnsafe<any[]>(
       `SELECT kcu.column_name, ccu.table_name AS referenced_table
        FROM information_schema.table_constraints tc
        JOIN information_schema.key_column_usage kcu
@@ -250,21 +253,16 @@ export function formatProjectSnapshot(snapshot: ProjectSnapshot): string {
 }
 
 export async function checkAuthStatus(projectId: string): Promise<{ enabled: boolean; providers: string[] }> {
-  const { prisma } = await import('@/lib/db/prisma')
   try {
-    const project = await prisma.project.findUnique({
-      where: { id: projectId },
-      select: { authManifest: true },
-    })
-    const manifest = project?.authManifest as any
-    if (!manifest?.enabled) return { enabled: false, providers: [] }
-
-    const providers: string[] = []
-    if (manifest.providers?.emailPassword?.enabled) providers.push('email')
-    if (manifest.providers?.google?.enabled) providers.push('google')
-    if (manifest.providers?.github?.enabled) providers.push('github')
-
-    return { enabled: true, providers }
+    // The same answer every other surface gives (lib/services/auth-status.ts).
+    // This read `authManifest`, which nothing that enables auth writes, so the
+    // snapshot said auth was off on every project.
+    const { getProjectAuthStatus } = await import('@/lib/services/auth-status')
+    const status = await getProjectAuthStatus(projectId)
+    return {
+      enabled: status.status !== 'none',
+      providers: status.providers.filter(p => p.enabled).map(p => p.id),
+    }
   } catch {
     return { enabled: false, providers: [] }
   }

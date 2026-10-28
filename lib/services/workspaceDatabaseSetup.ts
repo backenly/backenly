@@ -10,6 +10,7 @@
 import { projectWorkspaceDir } from '@/lib/workspace/paths'
 import { provisionWorkspaceDatabase, getWorkspaceDatabaseNames } from './databaseProvisioning'
 import { prisma } from '@/lib/db'
+import { workspaceRawClient, type WorkspaceRawClient } from '@/lib/data-plane/regional'
 import { Prisma } from '@prisma/client'
 import { exec } from 'child_process'
 import { promisify } from 'util'
@@ -47,6 +48,10 @@ export async function setupWorkspaceDatabaseFromSchema(
   try {
     console.log(`🚀 Setting up workspace database for project ${projectId}...`)
 
+    // Every schema, table and row below lives in the database holding the
+    // project's data, in its region (lib/data-plane/regional.ts).
+    const db = await workspaceRawClient(projectId)
+
     // 🔒 SECURITY FIX: Only clean schema if explicitly needed (not for bootstrap-created projects)
     // Check if this is a bootstrap-created project with existing tables
     const checkMetadata = await prisma.projectMetadata.findUnique({
@@ -62,10 +67,10 @@ export async function setupWorkspaceDatabaseFromSchema(
       
       try {
         // Drop and recreate schema for clean slate (multi-tenant isolation)
-        await prisma.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schemaName}" CASCADE`)
+        await db.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schemaName}" CASCADE`)
         console.log(`✅ Dropped existing schema: ${schemaName}`)
         
-        await prisma.$executeRawUnsafe(`CREATE SCHEMA "${schemaName}"`)
+        await db.$executeRawUnsafe(`CREATE SCHEMA "${schemaName}"`)
         console.log(`✅ Created clean schema: ${schemaName}`)
 
         // The DROP above unregistered this schema (the sql_drop event trigger
@@ -150,7 +155,7 @@ export async function setupWorkspaceDatabaseFromSchema(
         
         // Check which tables already exist
         const escapedSchemaForQuery = postgresSchema.replace(/'/g, "''")
-        const existingTables = await prisma.$queryRawUnsafe<Array<{ tablename: string }>>(
+        const existingTables = await db.$queryRawUnsafe<Array<{ tablename: string }>>(
           `SELECT tablename FROM pg_tables WHERE schemaname = '${escapedSchemaForQuery}'`
         )
         const existingTableNames = new Set(existingTables.map(t => t.tablename.toLowerCase()))
@@ -165,7 +170,7 @@ export async function setupWorkspaceDatabaseFromSchema(
           }
           
           try {
-            await createPostgresTableFromModel(postgresSchema, model, false)
+            await createPostgresTableFromModel(db, postgresSchema, model, false)
             tablesCreated.push(model.name)
             console.log(`   ✅ Created table: ${model.name}`)
           } catch (error: any) {
@@ -182,7 +187,7 @@ export async function setupWorkspaceDatabaseFromSchema(
         console.log(`🔗 Step 3b: Adding foreign key constraints...`)
         for (const model of postgresModels) {
           try {
-            await addForeignKeysToTable(postgresSchema, model)
+            await addForeignKeysToTable(db, postgresSchema, model)
           } catch (error: any) {
             console.warn(`   ⚠️  Failed to add foreign keys to ${model.name}:`, error.message)
           }
@@ -226,7 +231,7 @@ export async function setupWorkspaceDatabaseFromSchema(
       console.log(`✅ Tables already created by bootstrap - verifying they exist...`)
       
       const escapedSchemaForQuery = postgresSchema.replace(/'/g, "''")
-      const existingTables = await prisma.$queryRawUnsafe<Array<{ tablename: string }>>(
+      const existingTables = await db.$queryRawUnsafe<Array<{ tablename: string }>>(
         `SELECT tablename FROM pg_tables WHERE schemaname = '${escapedSchemaForQuery}'`
       )
       
@@ -263,7 +268,7 @@ export async function setupWorkspaceDatabaseFromSchema(
       
       // Check which tables already exist
       const escapedSchemaForQuery = postgresSchema.replace(/'/g, "''")
-      const existingTables = await prisma.$queryRawUnsafe<Array<{ tablename: string }>>(
+      const existingTables = await db.$queryRawUnsafe<Array<{ tablename: string }>>(
         `SELECT tablename FROM pg_tables WHERE schemaname = '${escapedSchemaForQuery}'`
       )
       const existingTableNames = new Set(existingTables.map(t => t.tablename.toLowerCase()))
@@ -278,7 +283,7 @@ export async function setupWorkspaceDatabaseFromSchema(
         }
         
         try {
-          await createPostgresTableFromModel(postgresSchema, model, false) // false = don't create FKs yet
+          await createPostgresTableFromModel(db, postgresSchema, model, false) // false = don't create FKs yet
           tablesCreated.push(model.name)
           console.log(`   ✅ Created table: ${model.name}`)
         } catch (error: any) {
@@ -297,7 +302,7 @@ export async function setupWorkspaceDatabaseFromSchema(
       console.log(`🔗 Step 3b: Adding foreign key constraints...`)
       for (const model of postgresModels) {
         try {
-          await addForeignKeysToTable(postgresSchema, model)
+          await addForeignKeysToTable(db, postgresSchema, model)
         } catch (error: any) {
           console.warn(`   ⚠️  Failed to add foreign keys to ${model.name}:`, error.message)
           // Don't fail if FK creation fails - tables are already created
@@ -752,6 +757,7 @@ function parsePrismaModels(schemaContent: string): PrismaModel[] {
  * Create a PostgreSQL table from a Prisma model
  */
 async function createPostgresTableFromModel(
+  db: WorkspaceRawClient,
   schema: string,
   model: PrismaModel,
   includeForeignKeys: boolean = true
@@ -843,11 +849,11 @@ async function createPostgresTableFromModel(
   try {
     console.log(`   🔨 Executing SQL for ${model.name}:`)
     console.log(`   SQL: ${createTableSQL}`)
-    await prisma.$executeRawUnsafe(createTableSQL)
+    await db.$executeRawUnsafe(createTableSQL)
     
     // Verify table was created by querying information_schema
     const verifySQL = `SELECT table_name FROM information_schema.tables WHERE table_schema = '${schema.replace(/'/g, "''")}' AND table_name = '${model.name.replace(/'/g, "''")}'`
-    const verifyResult = await prisma.$queryRawUnsafe<Array<{ table_name: string }>>(verifySQL)
+    const verifyResult = await db.$queryRawUnsafe<Array<{ table_name: string }>>(verifySQL)
     
     if (verifyResult && verifyResult.length > 0) {
       console.log(`   ✅ Successfully created and verified table ${escapedSchema}.${escapedTable}`)
@@ -868,6 +874,7 @@ async function createPostgresTableFromModel(
  * Add foreign key constraints to an existing table
  */
 async function addForeignKeysToTable(
+  db: WorkspaceRawClient,
   schema: string,
   model: PrismaModel
 ): Promise<void> {
@@ -891,7 +898,7 @@ async function addForeignKeysToTable(
           AND constraint_name = '${fkName.replace(/'/g, "''")}'
       `
       
-      const existing = await prisma.$queryRawUnsafe<Array<{ constraint_name: string }>>(checkConstraintSQL)
+      const existing = await db.$queryRawUnsafe<Array<{ constraint_name: string }>>(checkConstraintSQL)
       
       if (existing && existing.length > 0) {
         console.log(`   ℹ️  FK constraint ${fkName} already exists on ${model.name}`)
@@ -907,7 +914,7 @@ async function addForeignKeysToTable(
       `
       
       try {
-        await prisma.$executeRawUnsafe(addFkSQL)
+        await db.$executeRawUnsafe(addFkSQL)
         console.log(`   ✅ Added FK: ${field.name} -> ${field.relation.referencesTable}.${field.relation.references}`)
       } catch (fkError: any) {
         // If FK creation fails (e.g., referenced table doesn't exist), log warning but continue
@@ -922,6 +929,7 @@ async function addForeignKeysToTable(
  * Generate mock data for a table based on its schema
  */
 async function generateMockDataForTable(
+  db: WorkspaceRawClient,
   schema: string,
   model: PrismaModel,
   workspaceSchema: string
@@ -931,7 +939,7 @@ async function generateMockDataForTable(
   
   // Check if table already has data - if so, skip mock data generation
   try {
-    const existingCount = await prisma.$queryRawUnsafe<Array<{ count: bigint }>>(
+    const existingCount = await db.$queryRawUnsafe<Array<{ count: bigint }>>(
       `SELECT COUNT(*) as count FROM ${escapedSchema}.${escapedTable}`
     )
     if (existingCount && existingCount.length > 0 && Number(existingCount[0].count) > 0) {
@@ -975,7 +983,7 @@ async function generateMockDataForTable(
           
           try {
             // Check if parent table exists and has records
-            const parentIds = await prisma.$queryRawUnsafe<Array<{ id: string }>>(
+            const parentIds = await db.$queryRawUnsafe<Array<{ id: string }>>(
               `SELECT id FROM "${workspaceSchema.replace(/"/g, '""')}"."${capitalizedTable.replace(/"/g, '""')}" LIMIT 10`
             )
             if (parentIds && parentIds.length > 0) {
@@ -1017,7 +1025,7 @@ async function generateMockDataForTable(
           
           try {
             // Check if parent table exists and has records
-            const parentIds = await prisma.$queryRawUnsafe<Array<{ id: number }>>(
+            const parentIds = await db.$queryRawUnsafe<Array<{ id: number }>>(
               `SELECT id FROM "${workspaceSchema.replace(/"/g, '""')}"."${capitalizedTable.replace(/"/g, '""')}" LIMIT 10`
             )
             if (parentIds && parentIds.length > 0) {
@@ -1083,7 +1091,7 @@ async function generateMockDataForTable(
     const insertSQL = `INSERT INTO ${escapedSchema}.${escapedTable} (${columns}) VALUES (${values})`
     
     try {
-      await prisma.$executeRawUnsafe(insertSQL)
+      await db.$executeRawUnsafe(insertSQL)
     } catch (insertError: any) {
       // If insert fails (e.g., foreign key constraint), skip this record
       console.warn(`   ⚠️  Failed to insert mock record for ${model.name}:`, insertError.message)

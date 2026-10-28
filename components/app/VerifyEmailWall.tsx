@@ -112,7 +112,7 @@ export function VerifyEmailWall({ email, onLogout }: VerifyEmailWallProps) {
           </p>
         )}
 
-        <p className="mt-5 text-[12.5px] leading-relaxed text-zinc-500 text-center">
+        <p className="mt-5 text-[12.5px] leading-relaxed text-faint text-center">
           Don&apos;t see it? Check your spam folder. Already clicked the link?{' '}
           <button
             type="button"
@@ -128,7 +128,7 @@ export function VerifyEmailWall({ email, onLogout }: VerifyEmailWallProps) {
           <button
             type="button"
             onClick={onLogout}
-            className="text-[12px] text-zinc-500 hover:text-zinc-300 transition-colors"
+            className="text-[12px] text-faint hover:text-zinc-300 transition-colors"
           >
             Sign out
           </button>

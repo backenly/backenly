@@ -30,6 +30,8 @@ import crypto from 'crypto'
 import { z } from 'zod'
 import { prisma } from '@/lib/db/prisma'
 import { resolveWorkspaceSchema } from '@/lib/services/workspace-pool'
+import { workspaceRawClient } from '@/lib/data-plane/regional'
+import { quotedError, quotesKeptHere } from '@/lib/data-plane/residency'
 import { normalizeFindingType } from '@/lib/core/types'
 import { executeApprovedProposal, type ProposalExecution } from '@/lib/core/auto-fix-engine'
 import { canRollback, rollbackContract, type RollbackStrategy } from './maintenance/rollback-capability'
@@ -65,9 +67,11 @@ interface ProposableAction {
   catalogFingerprint(projectId: string, params: Record<string, unknown>): Promise<string>
 }
 
+/** Read in the project's region; a region error propagates to the caller. */
 async function tableColumns(projectId: string, table: string) {
+  const db = await workspaceRawClient(projectId)
   const schema = await resolveWorkspaceSchema(projectId)
-  return prisma.$queryRawUnsafe<Array<{ column_name: string; data_type: string; is_nullable: string }>>(
+  return db.$queryRawUnsafe<Array<{ column_name: string; data_type: string; is_nullable: string }>>(
     `SELECT column_name, data_type, is_nullable FROM information_schema.columns
       WHERE table_schema = $1 AND table_name = $2 ORDER BY column_name`,
     schema,
@@ -397,11 +401,16 @@ export async function approveProposal(input: {
     return { status: 409, body: { ok: false, code: 'RETRY', message: run.message } }
   }
 
+  // The run's message is the executor's or PostgreSQL's own words. The approver
+  // reads it in full in the response; the proposal, the finding and the audit
+  // keep it only as an error code for a project kept in another region
+  // (lib/data-plane/residency.ts).
+  const quote = await quotesKeptHere(input.projectId)
   const outcome = {
     outcome: run.outcome,
     fixed: run.fixed,
     mutated: run.mutated,
-    message: run.message,
+    message: quotedError(run.message, quote),
     postcondition: run.postcondition,
     recheck: run.recheck,
     regressionCheck: run.regressionCheck,
@@ -435,7 +444,7 @@ export async function approveProposal(input: {
                 snapshotId: (run.rollbackData as Record<string, unknown>).snapshotId,
                 at: new Date().toISOString(),
                 source: 'ai_proposal',
-                reason: run.message,
+                reason: quotedError(run.message, quote),
               },
             } as any,
           },

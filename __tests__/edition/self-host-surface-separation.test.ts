@@ -29,6 +29,9 @@ const describeOss = composed ? describe.skip : describe
 
 const read = (rel: string) => fs.readFileSync(path.join(ROOT, rel), 'utf8')
 
+/** Where the marketing lists live; middleware.ts imports isMarketingPath from it. */
+const MARKETING_SURFACES = 'lib/marketing-surfaces.ts'
+
 /** Strip comments so prose explaining a removal is not read as the thing itself. */
 const code = (rel: string) =>
   read(rel)
@@ -60,10 +63,14 @@ describeOss('self-host surface separation', () => {
       expect(mw).toMatch(/isMarketingPath/)
       // The redirect must be conditional on edition, never unconditional.
       expect(mw).toMatch(/!CLOUD_CONTROL_PLANE\s*&&\s*isMarketingPath\(pathname\)/)
+      // One definition, shared with Cloud's click analytics. A copy inlined
+      // here again would let the two disagree about what a marketing page is.
+      expect(mw).toMatch(/import \{ isMarketingPath \} from '@\/lib\/marketing-surfaces'/)
+      expect(mw).not.toMatch(/function isMarketingPath/)
     })
 
     it('covers every marketing route that exists in the tree', () => {
-      const mw = read('middleware.ts')
+      const mw = read(MARKETING_SURFACES)
       const marketingDirs = [
         'pricing',
         'comparisons',
@@ -78,20 +85,22 @@ describeOss('self-host surface separation', () => {
       ].filter((d) => fs.existsSync(path.join(ROOT, 'app', d)))
 
       // Every marketing directory present on disk must be named in the
-      // middleware lists, or a new landing page silently becomes reachable on
+      // marketing lists, or a new landing page silently becomes reachable on
       // somebody's private infrastructure.
       for (const dir of marketingDirs) {
         expect(mw).toContain(`'/${dir}'`)
       }
     })
 
-    it('keeps /docs/llms.txt answering off Cloud, though /docs is marketing', () => {
+    it('keeps /docs/llms.txt and /mcp/authorize answering off Cloud, though their prefixes are marketing', () => {
       // The published CLI and older MCP setup prompts fetch /docs/llms.txt, and
       // middleware runs before the rewrite that serves it, so without the
-      // exemption a self-hosted install would bounce an agent to /app.
+      // exemption a self-hosted install would bounce an agent to /app. The MCP
+      // OAuth consent page at /mcp/authorize is product, not marketing: a
+      // self-hosted operator authorizing their agent must reach it too.
       // Raw source: see the note on the next test about code() and this region.
-      const mw = read('middleware.ts')
-      expect(mw).toMatch(/const marketingExemptions = \['\/docs\/llms\.txt'\]/)
+      const mw = read(MARKETING_SURFACES)
+      expect(mw).toMatch(/const marketingExemptions = \['\/docs\/llms\.txt', '\/mcp\/authorize'\]/)
       const fn = mw.slice(mw.indexOf('function isMarketingPath'))
       expect(fn.indexOf('marketingExemptions')).toBeGreaterThan(-1)
       expect(fn.indexOf('marketingExemptions')).toBeLessThan(fn.indexOf('marketingPrefixes'))
@@ -102,7 +111,7 @@ describeOss('self-host surface separation', () => {
       // and code() reads that `/*` as the start of a block comment, which erased
       // both markers below and left this test asserting against an empty
       // string. The markers are asserted so it cannot go blind that way again.
-      const mw = read('middleware.ts')
+      const mw = read(MARKETING_SURFACES)
       const start = mw.indexOf('const marketingRoutes')
       const end = mw.indexOf('function isMarketingPath')
       expect(start).toBeGreaterThan(-1)

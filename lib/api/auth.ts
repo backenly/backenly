@@ -7,6 +7,16 @@ const API_BASE = '/api'
 export interface LoginRequest {
   email: string
   password: string
+  /** The authenticator app's current code, or a backup code, for an account with two-factor authentication. */
+  totpCode?: string
+}
+
+/** A refused sign-in, with the server's code (`TOTP_REQUIRED`, `TOTP_INVALID`, …) when it gave one. */
+export class LoginError extends Error {
+  constructor(message: string, readonly code: string | null) {
+    super(message)
+    this.name = 'LoginError'
+  }
 }
 
 export interface RegisterRequest {
@@ -59,8 +69,8 @@ export async function login(data: LoginRequest): Promise<AuthResponse> {
   })
   
   if (!response.ok) {
-    const error = await response.json()
-    throw new Error(error.error || 'Login failed')
+    const error = await response.json().catch(() => ({}))
+    throw new LoginError(error.error || 'Login failed', typeof error.code === 'string' ? error.code : null)
   }
   
   const result = await response.json()

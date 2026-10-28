@@ -25,6 +25,7 @@ import { loadProjectMemory, saveProjectMemory } from '@/lib/ai/project-memory'
 import { getWorkspaceDatabaseNames } from '@/lib/services/databaseProvisioning'
 import { prisma } from '@/lib/db/prisma'
 import { Pool } from 'pg'
+import { projectDatabaseUrl } from '@/lib/data-plane/regional'
 
 // ── Public types ─────────────────────────────────────────────────────────────
 
@@ -133,6 +134,9 @@ export async function recordApiUsageEvent(
  * Requires at least 5 events before producing gaps.
  */
 export async function analyzeCoevolutionGaps(projectId: string): Promise<CoevolutionReport> {
+  // The project's own database, in its region; resolved before any catch, so an
+  // unreachable region fails here instead of reading as an empty catalog.
+  const projectDbUrl = await projectDatabaseUrl(projectId)
   const analyzedAt = new Date().toISOString()
   const emptyReport: CoevolutionReport = {
     projectId,
@@ -189,7 +193,7 @@ export async function analyzeCoevolutionGaps(projectId: string): Promise<Coevolu
     let knownColumns: Map<string, Set<string>> = new Map()
     try {
       const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
-      const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 2 })
+      const pool = new Pool({ connectionString: projectDbUrl, max: 2 })
       try {
         const result = await pool.query<{ table_name: string; column_name: string }>(
           `SELECT table_name, column_name
@@ -299,6 +303,9 @@ export async function applyAutoApprovedProposals(
   projectId: string,
   report: CoevolutionReport,
 ): Promise<string[]> {
+  // The project's own database, in its region; resolved before any catch, so an
+  // unreachable region fails here instead of reading as an empty catalog.
+  const projectDbUrl = await projectDatabaseUrl(projectId)
   const applied: string[] = []
 
   const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
@@ -312,7 +319,7 @@ export async function applyAutoApprovedProposals(
     // Extra safety: never auto-apply to protected tables
     if (isProtectedTable(gap.tableName)) continue
 
-    const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 2 })
+    const pool = new Pool({ connectionString: projectDbUrl, max: 2 })
     try {
       // Scope the SQL to the correct schema by setting search_path for this connection
       await pool.query(`SET search_path TO "${postgresSchema}", public`)
@@ -536,6 +543,9 @@ export async function runAndStoreFrontendCoevolution(
   projectId: string,
   userId: string,
 ): Promise<void> {
+  // The project's own database, in its region; resolved before any catch, so an
+  // unreachable region fails here instead of reading as an empty catalog.
+  await projectDatabaseUrl(projectId)
   try {
     // Layer 1: SDK telemetry analysis (field-level gaps)
     const [sdkReport, auditSignals] = await Promise.allSettled([
@@ -578,28 +588,16 @@ export async function runAndStoreFrontendCoevolution(
     // did not know about. Every proposal is persisted below for the owner or
     // their agent; applyAutoApprovedProposals stays for the owner-triggered
     // /coevolution?apply=true route, where a person is the one asking.
-    const appliedDescriptions: string[] = []
 
-    // Layer 3: index additions from AuditLog signals, tier 0, under the same
-    // flag-and-dial check as every other repair. Refused, they are persisted
-    // for the owner like any approval-tier signal.
-    const indexPermit = signals.some(s => !s.requiresApproval && s.sqlFix)
-      ? await (await import('@/lib/authority/gate')).permitInlineRepair(projectId, 'coevo_missing_index', 0)
-      : null
-    const heldSignals = new Set(
-      signals.filter(s => s.requiresApproval || !indexPermit?.allowed),
-    )
-    const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 3 })
-    try {
-      for (const sig of signals.filter(s => !s.requiresApproval && s.sqlFix && indexPermit?.allowed)) {
-        try {
-          await pool.query(sig.sqlFix!)
-          appliedDescriptions.push(`Index added: ${sig.tableName} (${sig.type})`)
-        } catch { /* index may already exist */ }
-      }
-    } finally {
-      await pool.end().catch(() => {})
-    }
+    // Layer 3: index additions from AuditLog signals are NOT applied from here
+    // either. They ran as raw CREATE INDEX on a pool of this pass's own: outside
+    // the change ledger (an index a restore then could not see, and refused
+    // over), with no breaker, and through an incident freeze. The column is a
+    // request parameter's name, never checked against the table. Every signal
+    // is persisted below for the owner; the repair loop's measured invariant
+    // (measured_slow_queries_are_indexed) indexes a genuinely slow filter on
+    // its own, as a governed change.
+    const heldSignals = new Set(signals)
 
     // Store approval-required signals as HealthFindings
     const existing = await prisma.healthFinding.findMany({
@@ -658,19 +656,18 @@ export async function runAndStoreFrontendCoevolution(
       await prisma.healthFinding.createMany({ data: toCreate, skipDuplicates: true }).catch(() => {})
     }
 
-    if (appliedDescriptions.length > 0 || toCreate.length > 0) {
+    if (toCreate.length > 0) {
       await prisma.platformNotification.create({
         data: {
           userId, projectId,
           type: 'frontend_coevolution',
-          title: appliedDescriptions.length > 0
-            ? `Auto-optimised ${appliedDescriptions.length} pattern${appliedDescriptions.length > 1 ? 's' : ''} from frontend usage`
-            : `${toCreate.length} frontend-backend alignment suggestion${toCreate.length > 1 ? 's' : ''} ready`,
+          title: `${toCreate.length} frontend-backend alignment suggestion${toCreate.length > 1 ? 's' : ''} ready`,
           body: sdkGaps?.topMissingFields[0]
             ? `Frontend requests field "${sdkGaps.topMissingFields[0].field}" on "${sdkGaps.topMissingFields[0].table}" ${sdkGaps.topMissingFields[0].occurrences}× but it doesn't exist`
             : signals[0]?.evidence ?? 'Review coevolution hints in your dashboard.',
           metadata: {
-            autoApplied: appliedDescriptions.length,
+            // This pass applies nothing (Layers 2 and 3 above).
+            autoApplied: 0,
             pendingReview: toCreate.length,
             source: 'frontend_coevolution',
           },
@@ -679,7 +676,7 @@ export async function runAndStoreFrontendCoevolution(
       }).catch(() => {})
     }
 
-    console.log(`[Coevolution] project=${projectId} auto=${appliedDescriptions.length} pending=${toCreate.length}`)
+    console.log(`[Coevolution] project=${projectId} pending=${toCreate.length}`)
   } catch (err: any) {
     console.warn(`[Coevolution] runAndStore failed for ${projectId}:`, err?.message)
   }

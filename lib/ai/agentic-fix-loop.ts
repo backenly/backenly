@@ -31,6 +31,7 @@ import { withBuildLock } from '@/lib/ai/build-runtime/build-lock'
 import { FLAGS } from '@/lib/config/flags'
 import { authorFixForCheck, MAX_AUTHORED_FIXES_PER_BUILD } from './agentic-fix-author'
 import { harvestScanFixes } from './scan/scan-to-fixes'
+import { runsOutsideChangeLedger } from '@/lib/core/fix-actions'
 
 // ── Public types ─────────────────────────────────────────────────────────────
 
@@ -68,7 +69,7 @@ export type FixLoopEvent =
       type: 'fix_loop_complete'
       success: boolean
       rounds: number
-      reason: 'passed' | 'no_progress' | 'max_rounds' | 'cancelled' | 'no_initial_failures'
+      reason: FixLoopTerminalReason
       summary: string
     }
 
@@ -87,6 +88,8 @@ export type FixLoopTerminalReason =
   | 'max_rounds'
   | 'cancelled'
   | 'no_initial_failures'
+  /** The project was mid-incident, so no fix was applied (lib/autonomy/change-freeze.ts). */
+  | 'held_for_incident'
 
 export interface FixLoopResult {
   passed: boolean
@@ -162,6 +165,19 @@ export async function runAgenticFixLoop(
       const summary = `Cancelled at round ${round - 1}. Applied ${appliedTotal} fix(es) so far.`
       emit({ type: 'fix_loop_complete', success: false, rounds: round - 1, reason: 'cancelled', summary })
       return { passed: false, rounds: round - 1, reason: 'cancelled' as const, finalCheckSnapshot: snapshot, appliedFixes: appliedTotal, summary }
+    }
+
+    // Nothing is repaired while the project is mid-incident: the freeze every
+    // autonomous repair path honours (lib/autonomy/change-freeze.ts). Its fixes
+    // run as the repair loop's (processOpenFindings), so they are held as its are.
+    // The checks have run, so the snapshot still says what is failing.
+    const { heldForIncident } = await import('@/lib/autonomy/change-freeze')
+    if (await heldForIncident(projectId, { loop: 'reconciler', via: 'agentic_fix_loop', wouldHaveApplied: countFailures(snapshot.checks) })) {
+      const summary =
+        `Held back at round ${round}: the project is mid-incident, so no fix was applied` +
+        `${appliedTotal > 0 ? ` after the ${appliedTotal} already applied` : ''}. Run it again once the incident is over.`
+      emit({ type: 'fix_loop_complete', success: false, rounds: round - 1, reason: 'held_for_incident', summary })
+      return { passed: false, rounds: round - 1, reason: 'held_for_incident' as const, finalCheckSnapshot: snapshot, appliedFixes: appliedTotal, summary }
     }
 
     // ── Phase A: drain HealthFindings queue (existing finding-based fixes) ──
@@ -274,7 +290,10 @@ export async function runAgenticFixLoop(
     for (const fix of dedupedCandidates) {
       if (signal?.aborted) break
 
-      if (fix.requiresApproval) {
+      // A repair that runs outside the change ledger waits for a person even
+      // when whatever proposed it did not say so: three sources propose
+      // candidates, one of them a model, and the rule is the loop's to keep.
+      if (fix.requiresApproval || runsOutsideChangeLedger(fix.action)) {
         emit({
           type: 'fix_loop_fix_needs_approval',
           round,
@@ -364,17 +383,38 @@ function failedKey(checks: BehavioralCheck[]): string {
     .join('|')
 }
 
-async function applyCandidate(
+/**
+ * Apply one fix candidate, as planned. A failed candidate is reported as
+ * failed: the loop's next round decides what to try, so the executor does not
+ * hand the error to a model to pick a different action (no replanning).
+ * Exported for its test.
+ */
+export async function applyCandidate(
   fix: FixCandidate,
   projectId: string,
 ): Promise<{ success: boolean; message: string }> {
   try {
-    const governed = await withBuildLock(projectId, 'modify', async () =>
-      executeAction(
+    // Backenly's own repair, as the reconciler's are: held while an architecture
+    // change carries itself out on the table it would change, or on any table
+    // when it names none (lib/evolution-engine/holds.ts), asked inside the
+    // lock, right before it runs.
+    const { repairHold } = await import('@/lib/evolution-engine/holds')
+    const p = fix.params ?? {}
+    const table = [p.tableName, p.table, p.entity].find((t): t is string => typeof t === 'string' && t.length > 0) ?? null
+    const hold = { why: null as string | null }
+    const governed = await withBuildLock(projectId, 'modify', async () => {
+      hold.why = await repairHold(projectId, { table, action: fix.action, tablelessWaits: true }).catch(() => null)
+      if (hold.why) return null
+      return executeAction(
         { action: fix.action as AIAction['action'], params: fix.params } as AIAction,
         projectId,
-      ),
-    )
+        undefined,
+        0,
+        undefined,
+        false,
+      )
+    })
+    if (hold.why) return { success: false, message: `Held: ${hold.why}.` }
     if (governed.error) {
       return { success: false, message: governed.error }
     }

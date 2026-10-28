@@ -61,6 +61,7 @@ export const PROJECT_MGMT_BLUEPRINT: Blueprint = {
     ]),
 
     createTable('Create subtasks (checklist items)', 'subtasks', [
+      col('organization_id', 'uuid'),
       col('task_id', 'uuid', { fkTo: 'tasks' }),
       col('title', 'text'),
       col('completed', 'boolean'),
@@ -68,6 +69,7 @@ export const PROJECT_MGMT_BLUEPRINT: Blueprint = {
     ]),
 
     createTable('Create assignments (task ↔ users)', 'assignments', [
+      col('organization_id', 'uuid'),
       col('task_id', 'uuid', { fkTo: 'tasks' }),
       col('user_id', 'uuid'),
       col('assigned_at', 'timestamp', { nullable: true }),
@@ -75,6 +77,7 @@ export const PROJECT_MGMT_BLUEPRINT: Blueprint = {
     ]),
 
     createTable('Create comments', 'comments', [
+      col('organization_id', 'uuid'),
       col('task_id', 'uuid', { fkTo: 'tasks' }),
       col('user_id', 'uuid'),
       col('content', 'text'),
@@ -90,11 +93,13 @@ export const PROJECT_MGMT_BLUEPRINT: Blueprint = {
     ]),
 
     createTable('Create task_labels', 'task_labels', [
+      col('organization_id', 'uuid'),
       col('task_id', 'uuid', { fkTo: 'tasks' }),
       col('label_id', 'uuid', { fkTo: 'labels' }),
     ]),
 
     createTable('Create milestones', 'milestones', [
+      col('organization_id', 'uuid'),
       col('project_id', 'uuid', { fkTo: 'projects' }),
       col('name', 'text'),
       col('description', 'text', { nullable: true }),
@@ -103,6 +108,7 @@ export const PROJECT_MGMT_BLUEPRINT: Blueprint = {
     ]),
 
     createTable('Create time_entries (time tracking)', 'time_entries', [
+      col('organization_id', 'uuid'),
       col('task_id', 'uuid', { fkTo: 'tasks' }),
       col('user_id', 'uuid'),
       col('hours', 'numeric'),
@@ -112,6 +118,7 @@ export const PROJECT_MGMT_BLUEPRINT: Blueprint = {
     ]),
 
     createTable('Create attachments (files on tasks/comments)', 'attachments', [
+      col('organization_id', 'uuid'),
       col('task_id', 'uuid', { fkTo: 'tasks', nullable: true }),
       col('comment_id', 'uuid', { fkTo: 'comments', nullable: true }),
       col('uploaded_by_user_id', 'uuid'),

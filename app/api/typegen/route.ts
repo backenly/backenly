@@ -20,6 +20,7 @@ import { generateTypes } from '@/lib/typegen/type-generator'
 import { generateTypedClient } from '@/lib/typegen/client-generator'
 import { generateHandoffAsset, generateHandoffAssets, type HandoffFramework } from '@/lib/typegen/handoff-generator'
 import { generateOpenApiSpec } from '@/lib/typegen/openapi-generator'
+import { projectApiOrigin } from '@/lib/data-plane/regional'
 
 export const GET = withProjectAccess(async (request: NextRequest, { projectId }) => {
   try {
@@ -44,8 +45,12 @@ export const GET = withProjectAccess(async (request: NextRequest, { projectId })
       })
     }
 
+    // Where the generated code calls: the project's own API address, its
+    // region's for a project outside the home region.
+    const apiUrl = await projectApiOrigin(projectId, process.env.NEXT_PUBLIC_APP_URL ?? 'https://backenly.com')
+
     if (format === 'client') {
-      const client = generateTypedClient(schema, types, { projectId })
+      const client = generateTypedClient(schema, types, { projectId, apiUrl })
       return new NextResponse(client.source, {
         status: 200,
         headers: {
@@ -58,9 +63,7 @@ export const GET = withProjectAccess(async (request: NextRequest, { projectId })
 
     // ── format=openapi — OpenAPI 3.0 spec ──────────────────────────────────
     if (format === 'openapi') {
-      const spec = generateOpenApiSpec(schema, {
-        serverUrl: process.env.NEXT_PUBLIC_APP_URL ?? 'https://backenly.com',
-      })
+      const spec = generateOpenApiSpec(schema, { serverUrl: apiUrl })
       const download = searchParams.get('download') === 'true'
       if (download) {
         return new NextResponse(JSON.stringify(spec, null, 2), {
@@ -76,7 +79,7 @@ export const GET = withProjectAccess(async (request: NextRequest, { projectId })
     }
 
     if (format === 'handoff') {
-      const asset = generateHandoffAsset(framework, schema, types, projectId)
+      const asset = generateHandoffAsset(framework, schema, types, projectId, apiUrl)
       return new NextResponse(asset.source, {
         status: 200,
         headers: {
@@ -89,8 +92,8 @@ export const GET = withProjectAccess(async (request: NextRequest, { projectId })
 
     // ── format=all — JSON bundle ────────────────────────────────────────────
 
-    const clientGen = generateTypedClient(schema, types, { projectId })
-    const handoffAssets = generateHandoffAssets(schema, types, projectId)
+    const clientGen = generateTypedClient(schema, types, { projectId, apiUrl })
+    const handoffAssets = generateHandoffAssets(schema, types, projectId, apiUrl)
 
     return NextResponse.json({
       projectId,

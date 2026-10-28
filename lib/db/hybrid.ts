@@ -4,6 +4,7 @@
  */
 
 import { prisma } from './postgres'
+import { workspaceRawClient } from '@/lib/data-plane/regional'
 import { getMongoDB, getCollection } from './mongodb'
 import { Prisma } from '@prisma/client'
 
@@ -102,95 +103,75 @@ export class PostgresService {
   }
 
   /**
-   * List all tables in a schema (or all schemas)
+   * Whether a project's schema exists, asked of the database holding the
+   * project's data (lib/data-plane/regional.ts). listSchemas above lists the
+   * platform's own database and cannot answer this for a project elsewhere.
    */
-  static async listTables(schema?: string): Promise<TableInfo[]> {
-    if (schema) {
-      const result = await prisma.$queryRaw<Array<{
-        table_schema: string
-        table_name: string
-        row_count: bigint
-        table_size: string
-      }>>`
-        SELECT 
-          t.table_schema,
-          t.table_name,
-          COALESCE(c.reltuples::bigint, 0) as row_count,
-          pg_size_pretty(pg_total_relation_size(quote_ident(t.table_schema)||'.'||quote_ident(t.table_name))) as table_size
-        FROM information_schema.tables t
-        LEFT JOIN pg_class c ON c.relname = t.table_name
-          AND c.relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = t.table_schema LIMIT 1)
-        WHERE t.table_schema = ${schema}
-          AND t.table_type = 'BASE TABLE'
-        GROUP BY t.table_schema, t.table_name, c.reltuples
-        ORDER BY t.table_name
-      `
-      // Additional deduplication to ensure no duplicates
-      const seen = new Set<string>()
-      return result
-        .filter((r) => {
-          const key = `${r.table_schema}.${r.table_name}`
-          if (seen.has(key)) {
-            return false
-          }
-          seen.add(key)
-          return true
-        })
-        .map((r) => ({
-          schema: r.table_schema,
-          name: r.table_name,
-          rows: Number(r.row_count),
-          size: r.table_size,
-        }))
-    } else {
-      const result = await prisma.$queryRaw<Array<{
-        table_schema: string
-        table_name: string
-        row_count: bigint
-        table_size: string
-      }>>`
-        SELECT 
-          t.table_schema,
-          t.table_name,
-          COALESCE(c.reltuples::bigint, 0) as row_count,
-          pg_size_pretty(pg_total_relation_size(quote_ident(t.table_schema)||'.'||quote_ident(t.table_name))) as table_size
-        FROM information_schema.tables t
-        LEFT JOIN pg_class c ON c.relname = t.table_name
-          AND c.relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = t.table_schema LIMIT 1)
-        WHERE t.table_schema NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
-          AND t.table_type = 'BASE TABLE'
-        GROUP BY t.table_schema, t.table_name, c.reltuples
-        ORDER BY t.table_schema, t.table_name
-      `
-      // Additional deduplication to ensure no duplicates
-      const seen = new Set<string>()
-      return result
-        .filter((r) => {
-          const key = `${r.table_schema}.${r.table_name}`
-          if (seen.has(key)) {
-            return false
-          }
-          seen.add(key)
-          return true
-        })
-        .map((r) => ({
-          schema: r.table_schema,
-          name: r.table_name,
-          rows: Number(r.row_count),
-          size: r.table_size,
-        }))
-    }
+  static async schemaExists(projectId: string, schema: string): Promise<boolean> {
+    const db = await workspaceRawClient(projectId)
+    const result = await db.$queryRaw<Array<{ exists: boolean }>>`
+      SELECT EXISTS (SELECT 1 FROM information_schema.schemata WHERE schema_name = ${schema}) as exists
+    `
+    return result[0]?.exists === true
   }
 
   /**
-   * Get table columns/structure
+   * List the tables in one of a project's schemas, from the project's own
+   * database. There is no all-schemas form: it had no callers, and a listing
+   * of every schema in a database is not any one project's to read.
    */
-  static async getTableStructure(schema: string, tableName: string): Promise<ColumnInfo[]> {
+  static async listTables(projectId: string, schema: string): Promise<TableInfo[]> {
+    const db = await workspaceRawClient(projectId)
+    const result = await db.$queryRaw<Array<{
+      table_schema: string
+      table_name: string
+      row_count: bigint
+      table_size: string
+    }>>`
+      SELECT
+        t.table_schema,
+        t.table_name,
+        COALESCE(c.reltuples::bigint, 0) as row_count,
+        pg_size_pretty(pg_total_relation_size(quote_ident(t.table_schema)||'.'||quote_ident(t.table_name))) as table_size
+      FROM information_schema.tables t
+      LEFT JOIN pg_class c ON c.relname = t.table_name
+        AND c.relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = t.table_schema LIMIT 1)
+      WHERE t.table_schema = ${schema}
+        AND t.table_type = 'BASE TABLE'
+      GROUP BY t.table_schema, t.table_name, c.reltuples
+      ORDER BY t.table_name
+    `
+    // Additional deduplication to ensure no duplicates
+    const seen = new Set<string>()
+    return result
+      .filter((r) => {
+        const key = `${r.table_schema}.${r.table_name}`
+        if (seen.has(key)) {
+          return false
+        }
+        seen.add(key)
+        return true
+      })
+      .map((r) => ({
+        schema: r.table_schema,
+        name: r.table_name,
+        rows: Number(r.row_count),
+        size: r.table_size,
+      }))
+  }
+
+  /**
+   * Get table columns/structure, from the database holding the project's data
+   */
+  static async getTableStructure(projectId: string, schema: string, tableName: string): Promise<ColumnInfo[]> {
+    // Outside the try below, so a region this process cannot reach is reported
+    // as itself rather than as a missing table.
+    const db = await workspaceRawClient(projectId)
     try {
       // First, check if the table exists in the schema
       // PostgreSQL stores schema names case-sensitively when quoted, but information_schema uses lowercase
       // We need to check both the exact case and lowercase versions
-      const schemaExists = await prisma.$queryRaw<Array<{ exists: boolean }>>`
+      const schemaExists = await db.$queryRaw<Array<{ exists: boolean }>>`
         SELECT EXISTS (
           SELECT 1 
           FROM information_schema.tables 
@@ -208,7 +189,7 @@ export class PostgresService {
         })
         
         // Try to find tables in the schema to help debug
-        const tablesInSchema = await prisma.$queryRaw<Array<{ table_name: string }>>`
+        const tablesInSchema = await db.$queryRaw<Array<{ table_name: string }>>`
           SELECT table_name
           FROM information_schema.tables
           WHERE LOWER(table_schema) = LOWER(${schema})
@@ -226,7 +207,7 @@ export class PostgresService {
       // information_schema stores identifiers in lowercase, but we need to handle
       // case-insensitive matching for user input
       // Use LOWER() in the WHERE clause for case-insensitive comparison
-      const result = await prisma.$queryRaw<Array<{
+      const result = await db.$queryRaw<Array<{
         column_name: string
         data_type: string
         is_nullable: string
@@ -320,7 +301,7 @@ export class PostgresService {
         })
         
         try {
-          const pgResult = await prisma.$queryRaw<Array<{
+          const pgResult = await db.$queryRaw<Array<{
             column_name: string
             data_type: string
             is_nullable: boolean
@@ -392,10 +373,11 @@ export class PostgresService {
   }
 
   /**
-   * Get table indexes
+   * Get table indexes, from the database holding the project's data
    */
-  static async getTableIndexes(schema: string, tableName: string): Promise<IndexInfo[]> {
-    const result = await prisma.$queryRaw<Array<{
+  static async getTableIndexes(projectId: string, schema: string, tableName: string): Promise<IndexInfo[]> {
+    const db = await workspaceRawClient(projectId)
+    const result = await db.$queryRaw<Array<{
       index_name: string
       column_names: string[]
       is_unique: boolean
@@ -426,10 +408,11 @@ export class PostgresService {
   }
 
   /**
-   * Get table relationships (foreign keys)
+   * Get table relationships (foreign keys), from the database holding the project's data
    */
-  static async getTableRelationships(schema: string, tableName: string): Promise<RelationshipInfo[]> {
-    const result = await prisma.$queryRaw<Array<{
+  static async getTableRelationships(projectId: string, schema: string, tableName: string): Promise<RelationshipInfo[]> {
+    const db = await workspaceRawClient(projectId)
+    const result = await db.$queryRaw<Array<{
       constraint_name: string
       from_column: string
       to_schema: string
@@ -463,6 +446,7 @@ export class PostgresService {
    * Get table rows with pagination and filtering
    */
   static async getTableRows(
+    projectId: string,
     schema: string,
     tableName: string,
     pagination: PaginationParams = {},
@@ -496,7 +480,7 @@ export class PostgresService {
     const searchTerm = (pagination.search || '').trim()
     let searchGroup: Prisma.Sql | null = null
     if (searchTerm) {
-      const structure = await this.getTableStructure(schema, tableName)
+      const structure = await this.getTableStructure(projectId, schema, tableName)
       const like = `%${searchTerm}%`
       const perColumn = structure.map((col) => {
         const escapedCol = Prisma.raw(`"${col.name.replace(/"/g, '""')}"`)
@@ -545,13 +529,13 @@ export class PostgresService {
     // asserted the opposite of the truth, which is how a working backend gets
     // mistaken for a broken one.
     //
-    // `executeWithUserContext(_, true, …)` is the same service-role path
+    // `executeWithUserContext(projectId, _, true, …)` is the same service-role path
     // get_table_schema's recordCount already used — which is exactly why
     // run_query reported 1 row while this reported 0 in the same second.
     const { executeWithUserContext } = await import('@/lib/services/workspace-rls')
     const runAsOwner = async <R>(q: Prisma.Sql): Promise<R[]> => {
       const { sql, values } = toRawSql(q)
-      return executeWithUserContext<R>('', true, sql, values)
+      return executeWithUserContext<R>(projectId, '', true, sql, values)
     }
 
     const countResult = await runAsOwner<{ count: bigint }>(countQuery)
@@ -590,11 +574,11 @@ export class PostgresService {
   /**
    * Insert a new row
    */
-  static async insertRow(schema: string, tableName: string, data: Record<string, any>): Promise<any> {
+  static async insertRow(projectId: string, schema: string, tableName: string, data: Record<string, any>): Promise<any> {
     console.log('[PostgresService.insertRow] Input data:', data)
     
     // Get the table structure to know exact column names
-    const columns = await this.getTableStructure(schema, tableName)
+    const columns = await this.getTableStructure(projectId, schema, tableName)
     const columnMap = new Map(columns.map((c: ColumnInfo) => [c.name.toLowerCase(), c.name]))  // Map lowercase to actual names
     
     console.log('[PostgresService.insertRow] Table columns:', columns.map((c: ColumnInfo) => c.name))
@@ -628,9 +612,19 @@ export class PostgresService {
     console.log('[PostgresService.insertRow] SQL:', `INSERT INTO ${escapedSchema}.${escapedTable} (${columnList.join(', ')}) VALUES (${placeholders})`)
     console.log('[PostgresService.insertRow] Values:', values)
 
-    const result = await prisma.$queryRawUnsafe<any[]>(
+    // Service-role context, the same escape getTableRows above was fixed to
+    // use: these tables are FORCE row-level security, so a claimless write
+    // from the NOBYPASSRLS app role matches the owner predicate against a NULL
+    // claim and fails (or touches nothing) on every policied table. The
+    // dashboard's own insert button was broken on exactly the tables the agent
+    // had secured.
+    const { executeWithUserContext } = await import('@/lib/services/workspace-rls')
+    const result = await executeWithUserContext<any>(
+      projectId,
+      '',
+      true,
       `INSERT INTO ${escapedSchema}.${escapedTable} (${columnList.join(', ')}) VALUES (${placeholders}) RETURNING *`,
-      ...values
+      values
     )
 
     return result[0]
@@ -640,6 +634,7 @@ export class PostgresService {
    * Update a row
    */
   static async updateRow(
+    projectId: string,
     schema: string,
     tableName: string,
     id: any,
@@ -652,10 +647,18 @@ export class PostgresService {
     const escapedSchema = `"${schema}"`
     const escapedTable = `"${tableName}"`
 
-    const result = await prisma.$queryRawUnsafe<any[]>(
-      `UPDATE ${escapedSchema}.${escapedTable} SET ${updates} WHERE "id" = $${idValue} RETURNING *`,
-      ...values,
-      id
+    // Service-role context — see insertRow. A claimless UPDATE on a FORCE-RLS
+    // table matches zero rows and the dashboard edit silently did nothing.
+    const { executeWithUserContext } = await import('@/lib/services/workspace-rls')
+    const result = await executeWithUserContext<any>(
+      projectId,
+      '',
+      true,
+      // ::text on the id: the RLS session layer binds parameters as text, and a
+      // bare uuid = text comparison is a 42883. The cast matches uuid, int and
+      // text primary keys alike.
+      `UPDATE ${escapedSchema}.${escapedTable} SET ${updates} WHERE "id"::text = $${idValue} RETURNING *`,
+      [...values, id]
     )
 
     return result[0]
@@ -664,13 +667,18 @@ export class PostgresService {
   /**
    * Delete a row
    */
-  static async deleteRow(schema: string, tableName: string, id: any): Promise<boolean> {
+  static async deleteRow(projectId: string, schema: string, tableName: string, id: any): Promise<boolean> {
     const escapedSchema = `"${schema}"`
     const escapedTable = `"${tableName}"`
 
-    const result = await prisma.$queryRawUnsafe<Array<{ id: any }>>(
-      `DELETE FROM ${escapedSchema}.${escapedTable} WHERE "id" = $1 RETURNING "id"`,
-      id
+    // Service-role context — see insertRow.
+    const { executeWithUserContext } = await import('@/lib/services/workspace-rls')
+    const result = await executeWithUserContext<{ id: any }>(
+      projectId,
+      '',
+      true,
+      `DELETE FROM ${escapedSchema}.${escapedTable} WHERE "id"::text = $1 RETURNING "id"`,
+      [id]
     )
 
     return result.length > 0
@@ -855,11 +863,19 @@ export class HybridDatabase {
   }
 
   /**
+   * Whether a project's schema exists, in the project's own database (PostgreSQL only)
+   */
+  static async schemaExists(projectId: string, schema: string): Promise<boolean> {
+    return await PostgresService.schemaExists(projectId, schema)
+  }
+
+  /**
    * List schemas/tables/collections based on database type
    */
-  static async listTables(dbType: DatabaseType, schema?: string): Promise<TableInfo[]> {
+  static async listTables(projectId: string, dbType: DatabaseType, schema?: string): Promise<TableInfo[]> {
     if (dbType === 'postgresql') {
-      return await PostgresService.listTables(schema)
+      if (!schema) throw new Error('Schema is required for PostgreSQL')
+      return await PostgresService.listTables(projectId, schema)
     } else {
       return await MongoService.listCollections()
     }
@@ -869,13 +885,14 @@ export class HybridDatabase {
    * Get table/collection structure
    */
   static async getStructure(
+    projectId: string,
     dbType: DatabaseType,
     schema: string | undefined,
     tableName: string
   ): Promise<ColumnInfo[]> {
     if (dbType === 'postgresql') {
       if (!schema) throw new Error('Schema is required for PostgreSQL')
-      return await PostgresService.getTableStructure(schema, tableName)
+      return await PostgresService.getTableStructure(projectId, schema, tableName)
     } else {
       return await MongoService.getCollectionStructure(tableName)
     }
@@ -884,21 +901,22 @@ export class HybridDatabase {
   /**
    * Get table indexes (PostgreSQL only)
    */
-  static async getTableIndexes(schema: string, tableName: string): Promise<IndexInfo[]> {
-    return await PostgresService.getTableIndexes(schema, tableName)
+  static async getTableIndexes(projectId: string, schema: string, tableName: string): Promise<IndexInfo[]> {
+    return await PostgresService.getTableIndexes(projectId, schema, tableName)
   }
 
   /**
    * Get table relationships (PostgreSQL only)
    */
-  static async getTableRelationships(schema: string, tableName: string): Promise<RelationshipInfo[]> {
-    return await PostgresService.getTableRelationships(schema, tableName)
+  static async getTableRelationships(projectId: string, schema: string, tableName: string): Promise<RelationshipInfo[]> {
+    return await PostgresService.getTableRelationships(projectId, schema, tableName)
   }
 
   /**
    * Get rows/documents with pagination
    */
   static async getRows(
+    projectId: string,
     dbType: DatabaseType,
     schema: string | undefined,
     tableName: string,
@@ -907,7 +925,7 @@ export class HybridDatabase {
   ): Promise<{ data: any[]; total: number; page: number; limit: number }> {
     if (dbType === 'postgresql') {
       if (!schema) throw new Error('Schema is required for PostgreSQL')
-      return await PostgresService.getTableRows(schema, tableName, pagination, filters)
+      return await PostgresService.getTableRows(projectId, schema, tableName, pagination, filters)
     } else {
       return await MongoService.getCollectionDocuments(tableName, pagination, filters)
     }
@@ -917,6 +935,7 @@ export class HybridDatabase {
    * Insert row/document
    */
   static async insertRow(
+    projectId: string,
     dbType: DatabaseType,
     schema: string | undefined,
     tableName: string,
@@ -924,7 +943,7 @@ export class HybridDatabase {
   ): Promise<any> {
     if (dbType === 'postgresql') {
       if (!schema) throw new Error('Schema is required for PostgreSQL')
-      return await PostgresService.insertRow(schema, tableName, data)
+      return await PostgresService.insertRow(projectId, schema, tableName, data)
     } else {
       return await MongoService.insertDocument(tableName, data)
     }
@@ -934,6 +953,7 @@ export class HybridDatabase {
    * Update row/document
    */
   static async updateRow(
+    projectId: string,
     dbType: DatabaseType,
     schema: string | undefined,
     tableName: string,
@@ -942,7 +962,7 @@ export class HybridDatabase {
   ): Promise<any> {
     if (dbType === 'postgresql') {
       if (!schema) throw new Error('Schema is required for PostgreSQL')
-      return await PostgresService.updateRow(schema, tableName, id, data)
+      return await PostgresService.updateRow(projectId, schema, tableName, id, data)
     } else {
       return await MongoService.updateDocument(tableName, id, data)
     }
@@ -952,6 +972,7 @@ export class HybridDatabase {
    * Delete row/document
    */
   static async deleteRow(
+    projectId: string,
     dbType: DatabaseType,
     schema: string | undefined,
     tableName: string,
@@ -959,7 +980,7 @@ export class HybridDatabase {
   ): Promise<boolean> {
     if (dbType === 'postgresql') {
       if (!schema) throw new Error('Schema is required for PostgreSQL')
-      return await PostgresService.deleteRow(schema, tableName, id)
+      return await PostgresService.deleteRow(projectId, schema, tableName, id)
     } else {
       return await MongoService.deleteDocument(tableName, id)
     }

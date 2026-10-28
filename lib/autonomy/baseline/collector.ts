@@ -33,14 +33,19 @@
  * rows an hour. Only the heaviest MAX_QUERY_SUBJECTS by total time are tracked,
  * which is also the set anyone would look at. Same for tables.
  *
- * Never throws: one project's collection failing must not stop the sweep.
+ * Never throws for a failed collection: one project's failing must not stop the
+ * sweep. The one exception is a project whose region this process cannot reach:
+ * that fails as the region error itself, before anything is collected. The
+ * hourly sweep leaves such projects out first (lib/autonomy/region-skip.ts).
  */
 
-import { Pool } from 'pg'
+import type { Pool } from 'pg'
 import { createHash } from 'crypto'
 import { prisma } from '@/lib/db/prisma'
 import { directAccessRoleNames } from '@/lib/services/direct-access'
 import { hasCapability } from '../platform-capabilities'
+import { projectRegion, regionPool } from '@/lib/data-plane/regional'
+import type { CloudRegionId } from '@/lib/regions'
 
 /** Raw cumulative readings, kept between runs so deltas can be computed. */
 const RAW_LEDGER_TYPE = 'baseline_raw'
@@ -50,12 +55,6 @@ export const MAX_TABLE_SUBJECTS = 30
 
 /** How long samples are kept. Two weeks is plenty of baseline and a bounded table. */
 export const RETENTION_DAYS = 14
-
-let pool: Pool | null = null
-function getPool(): Pool {
-  if (!pool) pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 2 })
-  return pool
-}
 
 /** The hour a timestamp belongs to, in UTC. */
 export function hourBucket(at: Date = new Date()): Date {
@@ -131,14 +130,16 @@ async function writeSample(
  * the number that actually changes when something breaks.
  */
 async function collectQueryLatency(
+  pool: Pool,
+  region: CloudRegionId,
   projectId: string,
   schema: string,
   bucket: Date,
 ): Promise<void> {
-  const cap = await hasCapability('pg_stat_statements')
+  const cap = await hasCapability('pg_stat_statements', region)
   if (!cap.available) return
 
-  const res = await getPool().query<{
+  const res = await pool.query<{
     query: string
     calls: string
     total_ms: string
@@ -190,11 +191,12 @@ async function collectQueryLatency(
 // ── Table scans and size ─────────────────────────────────────────────────────
 
 async function collectTableActivity(
+  pool: Pool,
   projectId: string,
   schema: string,
   bucket: Date,
 ): Promise<void> {
-  const res = await getPool().query<{
+  const res = await pool.query<{
     relname: string
     seq_scan: string
     live_rows: string
@@ -255,9 +257,9 @@ async function collectTableActivity(
  * normally hold three connections or thirty", which is exactly the thing an
  * absolute threshold on a shared cluster could never tell anyone.
  */
-async function collectConnections(projectId: string, bucket: Date): Promise<void> {
+async function collectConnections(pool: Pool, projectId: string, bucket: Date): Promise<void> {
   const roles = directAccessRoleNames(projectId)
-  const res = await getPool().query<{ total: string; idle_in_tx: string }>(
+  const res = await pool.query<{ total: string; idle_in_tx: string }>(
     `SELECT COUNT(*)::text                                                  AS total,
             COUNT(*) FILTER (WHERE state = 'idle in transaction')::text     AS idle_in_tx
        FROM pg_stat_activity
@@ -274,16 +276,24 @@ async function collectConnections(projectId: string, bucket: Date): Promise<void
 
 // ── Entry points ─────────────────────────────────────────────────────────────
 
-/** Collect one project's hourly sample. Never throws. */
+/**
+ * Collect one project's hourly sample. Never throws, except the region error
+ * for a project whose region this process cannot reach (see the module header).
+ */
 export async function collectBaseline(projectId: string, at: Date = new Date()): Promise<void> {
   const schema = `workspace_${projectId}`
   const bucket = hourBucket(at)
+  // Statistics live in the database holding the project's data. Resolved
+  // outside the allSettled below, which would otherwise swallow a region error
+  // and leave the hour looking quiet rather than unmeasured.
+  const region = await projectRegion(projectId)
+  const pool = regionPool(region, 'baseline', { max: 2 }, projectId)
   // allSettled, not sequential awaits: one collector failing (a missing
   // extension, a dropped schema mid-sweep) must not cost the other two.
   await Promise.allSettled([
-    collectQueryLatency(projectId, schema, bucket),
-    collectTableActivity(projectId, schema, bucket),
-    collectConnections(projectId, bucket),
+    collectQueryLatency(pool, region, projectId, schema, bucket),
+    collectTableActivity(pool, projectId, schema, bucket),
+    collectConnections(pool, projectId, bucket),
   ])
 }
 

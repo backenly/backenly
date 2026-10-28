@@ -16,10 +16,10 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { v1ApiMiddleware } from '@/lib/api/v1/middleware'
-import { prisma } from '@/lib/db/prisma'
 import { resolveJwtSecret } from '@/lib/services/jwtSecretManager'
 import { mintSseTicket, SSE_TICKET_TTL_SECONDS } from '@/lib/realtime/sse-ticket'
 import { recordedV1 } from '@/lib/traffic/recorded-v1'
+import { authorizingProject } from '@/lib/auth-projection/read'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -30,10 +30,7 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
   if (middleware.response) return middleware.response
   const { context } = middleware
 
-  const project = await prisma.project.findUnique({
-    where: { id: params.projectId },
-    select: { jwtSecret: true },
-  })
+  const project = await authorizingProject(params.projectId)
 
   // A project with no signing secret has never had auth enabled. Say that
   // instead of minting a ticket signed with a platform-wide key, which would be

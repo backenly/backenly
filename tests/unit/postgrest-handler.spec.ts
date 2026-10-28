@@ -22,6 +22,19 @@ jest.mock('@/lib/db', () => ({
     $queryRawUnsafe: (...a: unknown[]) => queryRawUnsafe(...a),
   },
 }))
+// The project resolves to the home region, as every project does until regions
+// open: its PostgREST is POSTGREST_URL, and its raw client the one above. Which
+// region a project is in, and that nothing crosses regions, is
+// tests/integration/project-region.spec.ts.
+jest.mock('@/lib/data-plane/regional', () => {
+  const actual = jest.requireActual('@/lib/data-plane/regional')
+  const { HOME_REGION } = jest.requireActual('@/lib/regions')
+  return {
+    ...actual,
+    projectPostgrest: async () => actual.regionPostgrest(HOME_REGION),
+    workspaceRawClient: async () => jest.requireMock('@/lib/db').prisma,
+  }
+})
 
 import { handleViaPostgrest } from '@/server/routes/postgrest-handler'
 import { clearSoftDeleteCache } from '@/lib/postgrest/exposure'
@@ -210,6 +223,18 @@ describe('request forwarding', () => {
     )
     expect(captured!.url).toContain('id=eq.7')
     expect(captured!.url).not.toContain('status=eq.anything')
+  })
+
+  // The documented contract is that PUT is the same partial update as PATCH.
+  // Forwarded as PUT, PostgREST read it as its full-row upsert and answered 405
+  // to every one (found by fuzzing the data API against its OpenAPI document).
+  it('sends a PUT upstream as the PATCH it is documented to be', async () => {
+    stubUpstream(200, [{ id: 7, name: 'x' }])
+    const res = mockRes()
+    await handleViaPostgrest(mockReq('PUT', {}, { name: 'x' }), res, ['orders', '7'], { projectId: PROJECT })
+    expect(captured!.init.method).toBe('PATCH')
+    expect(captured!.url).toContain('id=eq.7')
+    expect(res.statusCode).toBe(200)
   })
 
   it('mints service_role only from a server decision', async () => {

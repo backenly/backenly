@@ -2,6 +2,7 @@
 
 import Link from 'next/link'
 import { Globe2 } from 'lucide-react'
+import { FOCUS } from '@/components/console/tokens'
 import { useConnectionHealth, type ConnectionStatus } from '@/lib/hooks/useConnectionHealth'
 
 /**
@@ -19,7 +20,8 @@ import { useConnectionHealth, type ConnectionStatus } from '@/lib/hooks/useConne
  * (connection health + copy-paste fix prompts) and origin allowlist live.
  *
  * Variants:
- *   - 'compact'  : the sidebar footer row, the height of a nav item
+ *   - 'compact'  : the sidebar footer row, drawn as a nav item: "Frontend",
+ *                  then the state ("Not connected", the origin, "Failing")
  *   - 'badge'    : an inline chip with the origin and a count tooltip
  */
 
@@ -36,12 +38,12 @@ const STATUS_STYLES: Record<ConnectionStatus, {
 }> = {
   loading: {
     dotClass: 'bg-zinc-600',
-    labelClass: 'text-zinc-500',
+    labelClass: 'text-faint',
     label: () => 'Checking frontend…',
   },
   idle: {
     dotClass: 'bg-zinc-600',
-    labelClass: 'text-zinc-500',
+    labelClass: 'text-faint',
     label: () => 'No frontend yet',
   },
   connected: {
@@ -104,19 +106,30 @@ export function FrontendConnectionPill({
     )
   }
 
-  // Compact (sidebar footer): one row, the same height as a nav item.
+  // Compact (sidebar footer): one row drawn as a nav item, with the state at
+  // its end. It was a bordered two-line card, which read as a widget parked
+  // over the list and, on a laptop-height window, covered Settings.
   return (
     <Link
       href={href}
       title={tooltip}
-      className={`group flex h-[36px] w-full items-center gap-2.5 rounded-[7px] border border-white/[0.06] px-2.5 transition-colors hover:border-white/[0.12] hover:bg-white/[0.03] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300/60 ${className}`}
+      className={`group flex h-[36px] w-full min-w-0 items-center gap-2.5 rounded-[7px] px-2.5 text-[13px] transition-colors duration-150 hover:bg-white/[0.04] md:h-[30px] ${FOCUS} ${className}`}
     >
-      <Globe2 className="h-4 w-4 flex-shrink-0 text-zinc-500 group-hover:text-zinc-300" strokeWidth={1.75} aria-hidden />
-      <span className="min-w-0 flex-1">
-        <span className="block text-[11px] leading-[13px] text-zinc-600">Frontend</span>
-        <span className={`block truncate text-[12px] leading-[16px] ${style.labelClass}`}>{style.label(displayOrigin)}</span>
+      <Globe2 className="h-4 w-4 flex-shrink-0 text-zinc-500 transition-colors duration-150 group-hover:text-zinc-300" strokeWidth={1.75} aria-hidden />
+      <span className="flex-shrink-0 font-medium text-zinc-400 transition-colors duration-150 group-hover:text-zinc-100">Frontend</span>
+      <span className={`ml-auto flex min-w-0 items-center gap-1.5 text-[12px] ${style.labelClass}`}>
+        <span className="truncate">{COMPACT_LABEL[status](displayOrigin)}</span>
+        <span className={`h-[6px] w-[6px] flex-shrink-0 rounded-full ${style.dotClass}`} aria-hidden />
       </span>
-      <span className={`h-[6px] w-[6px] flex-shrink-0 rounded-full ${style.dotClass}`} aria-hidden />
     </Link>
   )
+}
+
+/** The footer row's state, short enough to sit after the "Frontend" label. */
+const COMPACT_LABEL: Record<ConnectionStatus, (origin: string | null) => string> = {
+  loading: () => 'Checking…',
+  idle: () => 'Not connected',
+  connected: (origin) => origin ?? 'Connected',
+  degraded: () => 'With errors',
+  failing: () => 'Failing',
 }

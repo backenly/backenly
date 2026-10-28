@@ -31,7 +31,7 @@
 
 import { createHash, createHmac } from 'crypto'
 import jwt from 'jsonwebtoken'
-import { prisma } from '@/lib/db/prisma'
+import { authorizingKeyByHash } from '@/lib/auth-projection/read'
 import { profileForBranchSchema, profileForProject } from '@/lib/postgrest/gateway'
 import { presentedApiKey } from './key-scope'
 
@@ -66,7 +66,9 @@ interface HeaderSource {
  *
  * Not cached, unlike the Phase 0 check: a branch merged or discarded a second
  * ago must stop creating users at once, and the lookup is one indexed read on a
- * route that already reads the project.
+ * route that already reads the project. In a region whose copy is enforced the
+ * read is the copy's while it is fresh (lib/auth-projection/read.ts), so "at
+ * once" there is within the copy's bound, as it is for every key.
  *
  * A key bound to a branch that is no longer active, that has expired, or that
  * belongs to another project is refused. Falling back to production for any of
@@ -81,14 +83,7 @@ export async function resolveAuthEnvironment(
   const key = presentedApiKey(headers, url)
   if (!key) return main
 
-  const row = await prisma.apiKey.findFirst({
-    where: { keyHash: createHash('sha256').update(key).digest('hex') },
-    select: {
-      projectId: true,
-      expiresAt: true,
-      branch: { select: { id: true, name: true, status: true, schemaName: true, projectId: true } },
-    },
-  })
+  const row = await authorizingKeyByHash(createHash('sha256').update(key).digest('hex'))
   // A main key, or a value that is not a key at all: auth never required one,
   // and neither changes where the request runs.
   if (!row?.branch) return main

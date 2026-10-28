@@ -13,6 +13,8 @@
  * autonomous history exactly.
  */
 
+import { redactSecretParams } from '@/lib/mcp/withhold-secrets'
+import { withHeldActions } from '@/lib/operational-memory/held-action-targets'
 import { prisma } from '@/lib/db/prisma'
 import { AUTONOMOUS_AUDIT_ACTIONS } from './circuit-breaker'
 import {
@@ -29,6 +31,8 @@ import { classifyFix } from '@/lib/core/fix-classifier'
 import { revertEligibility } from '@/lib/core/auto-fix-engine'
 import { INVARIANTS } from './desired-state'
 import { resolveExecutionMode, type ExecutionModeState } from './execution-mode'
+import { ARCHITECTURE_LOG_TYPE, MILESTONE_ACTION } from '@/lib/evolution-engine/memory'
+import type { ArchitectureChangeView } from '@/lib/evolution-engine/views'
 import { describeProposal } from './ai-proposals'
 
 export interface TrustScoreboard {
@@ -73,6 +77,8 @@ export interface ActivityItem {
     | 'rollback'
     | 'shadow'
     | 'failed'
+    /** A milestone in an architecture change (Architecture Evolution Engine). */
+    | 'architecture'
     | 'other'
   summary: string
   /**
@@ -222,6 +228,12 @@ export interface TrustReport {
   pendingApprovals: PendingApproval[]
   /** Changes the loop applied on its own, newest first, each with its undo state. */
   appliedChanges: AppliedChange[]
+  /**
+   * Architecture changes a person approved (lib/evolution-engine), newest
+   * first: what changed, whether it worked and helped, and what can be done
+   * about it now. Empty unless the project has any.
+   */
+  architectureChanges: ArchitectureChangeView[]
   /** What the closed loop would do right now (present only in shadow mode). */
   shadowPreview: ShadowPreview | null
   /**
@@ -273,7 +285,8 @@ function classify(action: string): ActivityItem['kind'] {
   // as a completed fix.
   if (action === 'HEALTH_FIX_UNVERIFIED') return 'applied_unverified'
   if ((AUTONOMOUS_AUDIT_ACTIONS as readonly string[]).includes(action)) return 'auto_fix'
-  if (action === 'HEALTH_FIX_ESCALATED') return 'escalation'
+  // A governed change whose recovery waits for a person is held back the same way.
+  if (action === 'HEALTH_FIX_ESCALATED' || action.startsWith('CHANGE_RECOVERY_')) return 'escalation'
   if (action === 'AUTONOMY_CIRCUIT_OPEN') return 'breaker'
   if (action.startsWith(ROLLBACK_PREFIX) || action === 'HEALTH_FIX_ROLLED_BACK') return 'rollback'
   if (action === 'AUTONOMY_SHADOW_DECISION') return 'shadow'
@@ -309,6 +322,7 @@ function humanize(action: string, details: string | null): string {
       // none, so they read as what they were.
       return `${explainAutonomyEvent(d).full}${isVerifiedFix(d.verification) ? '' : ' (it ran, but could not be confirmed)'}`
     case 'escalation':
+      if (!d.findingType && typeof d.summary === 'string' && d.summary) return d.summary
       // Never the raw type. `Held back for your approval: rls_expression_invalid`
       // told the user nothing they could act on, and every escalation on a
       // different table produced a byte-identical row — six lines that looked
@@ -341,6 +355,8 @@ function humanize(action: string, details: string | null): string {
       if (action === 'HEALTH_FIX_ROLLED_BACK') {
         return d.findingType ? `You undid a fix: ${summariseFinding(d.findingType, d)}` : 'You undid a fix'
       }
+      // A governed change's recovery writes its own sentence (lib/changes/recovery.ts).
+      if (typeof d.summary === 'string' && d.summary) return d.summary
       return `Rolled back a previous change${d.findingType ? `: ${d.findingType.replace(/_/g, ' ')}` : ''}`
     case 'shadow':
       return d.summary ?? 'Evaluated what it would do (shadow mode)'
@@ -362,6 +378,8 @@ function humanize(action: string, details: string | null): string {
       // beside it. Kept in the feed (it is a real thing a human did, and the
       // audit row exists so History can show who asked) but given the subject
       // that makes it worth a line.
+      // Governed-change rows write their own sentence (lib/changes/recovery.ts).
+      if (action.startsWith('CHANGE_') && typeof d.summary === 'string' && d.summary) return d.summary
       if (action === 'HEALTH_FIX_REQUESTED') {
         return d.findingType
           ? `You asked Backenly to fix: ${summariseFinding(d.findingType, d)}`
@@ -369,6 +387,27 @@ function humanize(action: string, details: string | null): string {
       }
       return prettyAction(action)
   }
+}
+
+/**
+ * An architecture milestone row, rendered from what the engine wrote.
+ *
+ * The sentence is composed when the milestone is recorded (lib/evolution-engine),
+ * so the feed never has to understand the engine's states. Only what the engine
+ * marked a problem (a step that did not finish, a regression, an undo that
+ * stopped part-way) reads as a failure: a request it withdrew, or a pause a
+ * person asked for, is an architecture event like any other.
+ */
+function architectureItem(details: string | null): { kind: ActivityItem['kind']; summary: string } {
+  let d: { sentence?: string; state?: string | null; problem?: boolean } = {}
+  try { d = details ? JSON.parse(details) : {} } catch { /* written by us; tolerate anyway */ }
+  const kind: ActivityItem['kind'] =
+    d.problem === true
+      ? 'failed'
+      : d.state === 'rolled_back' || d.state === 'rolling_back'
+        ? 'rollback'
+        : 'architecture'
+  return { kind, summary: d.sentence || 'Backenly recorded an architecture change' }
 }
 
 /**
@@ -409,6 +448,15 @@ function heldBecauseFor(
     }
   }
 
+  // A prepared architecture change. Held by policy, always: restructuring a
+  // table needs a person's consent to the exact version that was rehearsed.
+  if (type === 'architecture_evolution') {
+    return {
+      kind: 'guardrail',
+      text: 'Restructuring a table always waits for you. Backenly rehearsed it on a copy of your data first.',
+    }
+  }
+
   // Risk-flagged AI actions (approval-system) are genuine guardrail holds.
   if (type === 'ai_action_pending') {
     return {
@@ -444,6 +492,7 @@ export async function buildTrustReport(
     rollbacks,
     confirmedFixes,
     activityRows,
+    architectureRows,
     pending,
     applied,
     lastShadow,
@@ -485,18 +534,33 @@ export async function buildTrustReport(
         OR: [
           { type: { in: ['autonomy', 'health'] } },
           { action: { startsWith: ROLLBACK_PREFIX } },
+          // Governed changes: a recovery waiting for a person, one that needs
+          // attention, one kept as it is, one reapplied (lib/changes/recovery.ts).
+          { action: { startsWith: 'CHANGE_' } },
         ],
       },
       orderBy: { timestamp: 'desc' },
       take: 25,
       select: { action: true, details: true, timestamp: true },
     }),
+    // Architecture milestones, read separately: they are rare and each one
+    // matters, so they must not be pushed out of the feed by a busy loop's
+    // twenty-five routine rows. Traces (ARCHITECTURE_EVOLUTION_TRACE) are memory
+    // for the engine, never news.
+    prisma.auditLog.findMany({
+      where: { projectId, timestamp: { gte: since }, type: ARCHITECTURE_LOG_TYPE, action: MILESTONE_ACTION },
+      orderBy: { timestamp: 'desc' },
+      take: 10,
+      select: { action: true, details: true, timestamp: true, type: true },
+    }),
+    // A regional project's held actions with the target and arguments the
+    // approver reads, from its region (lib/operational-memory/held-action-targets.ts).
     prisma.healthFinding.findMany({
       where: { projectId, status: 'pending_approval' },
       orderBy: [{ severity: 'asc' }, { detectedAt: 'desc' }],
       take: 25,
       select: { id: true, type: true, severity: true, detectedAt: true, details: true },
-    }),
+    }).then(rows => withHeldActions(projectId, rows)),
     // Ordered by fixAppliedAt, not detectedAt: a finding raised last week and
     // healed a minute ago belongs at the top of "what just changed".
     // `nulls: 'last'` keeps legacy rows (fixed before the column was stamped)
@@ -509,7 +573,7 @@ export async function buildTrustReport(
         id: true, type: true, severity: true,
         detectedAt: true, fixAppliedAt: true, details: true,
       },
-    }),
+    }).then(rows => withHeldActions(projectId, rows)),
     prisma.auditLog.findFirst({
       where: { projectId, action: 'AUTONOMY_SHADOW_DECISION' },
       orderBy: { timestamp: 'desc' },
@@ -537,9 +601,15 @@ export async function buildTrustReport(
   // Rows are newest-first, so folding CONSECUTIVE identical summaries keeps
   // `at` on the most recent occurrence and never merges two runs separated by
   // something that actually happened in between.
+  const merged = [
+    ...activityRows.map(r => ({ ...r, architecture: false })),
+    ...architectureRows.map(r => ({ ...r, architecture: true })),
+  ].sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())
   const recentActivity: ActivityItem[] = []
-  for (const r of activityRows) {
-    const summary = humanize(r.action, r.details ?? null)
+  for (const r of merged) {
+    const { kind, summary } = r.architecture
+      ? architectureItem(r.details ?? null)
+      : { kind: classify(r.action), summary: humanize(r.action, r.details ?? null) }
     const prev = recentActivity[recentActivity.length - 1]
     if (prev && prev.action === r.action && prev.summary === summary) {
       prev.repeat += 1
@@ -548,7 +618,7 @@ export async function buildTrustReport(
     recentActivity.push({
       at: r.timestamp.toISOString(),
       action: r.action,
-      kind: classify(r.action),
+      kind,
       summary,
       repeat: 1,
     })
@@ -567,7 +637,11 @@ export async function buildTrustReport(
   for (const pr of proposals) if (!proposalByFinding.has(pr.findingId)) proposalByFinding.set(pr.findingId, pr)
 
   const pendingApprovals: PendingApproval[] = pending.map(p => {
-    const det = (p.details ?? {}) as Record<string, any>
+    const raw = (p.details ?? {}) as Record<string, any>
+    // Legacy pending rows stored executor params unredacted; never serve them.
+    const det = raw.executorParams
+      ? { ...raw, executorParams: redactSecretParams(raw.executorParams), executorParamsSealed: undefined }
+      : raw
     return {
       id: p.id,
       type: p.type,
@@ -599,8 +673,17 @@ export async function buildTrustReport(
     }
   })
 
+  // Read separately and never allowed to fail the report: the trust report is
+  // the Autonomy page's spine, and architecture changes are one card on it.
+  const architectureChanges: ArchitectureChangeView[] = await import('@/lib/evolution-engine/engine')
+    .then(m => m.listChanges(projectId, { limit: 5 }))
+    .catch(() => [])
+
   const appliedChanges: AppliedChange[] = applied.map(f => {
-    const det = (f.details ?? {}) as Record<string, any>
+    const rawDet = (f.details ?? {}) as Record<string, any>
+    const det = rawDet.executorParams
+      ? { ...rawDet, executorParams: redactSecretParams(rawDet.executorParams), executorParamsSealed: undefined }
+      : rawDet
     const eligibility = revertEligibility(f.type, det)
     return {
       findingId: f.id,
@@ -659,6 +742,7 @@ export async function buildTrustReport(
     recentActivity,
     pendingApprovals,
     appliedChanges,
+    architectureChanges,
     shadowPreview,
   }
 }

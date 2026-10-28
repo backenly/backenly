@@ -54,14 +54,15 @@ export const DOMAIN_TOOLS: DomainTool[] = [
       'Read the current user list with action "list_users".',
     actions: {
       enable: { tool: 'enable_auth', gloss: 'turn on email + password sign-up with JWT sessions' },
-      add_oauth_provider: { tool: 'add_oauth_provider', gloss: 'Google, GitHub, Discord, Facebook or Apple sign-in, with the provider\'s clientId and clientSecret' },
+      add_oauth_provider: { tool: 'add_oauth_provider', gloss: 'Google, GitHub, Discord or Facebook sign-in, with the provider\'s clientId and clientSecret' },
       remove_oauth_provider: { tool: 'disable_oauth_provider', gloss: 'turn a sign-in provider off' },
       list_users: { tool: 'list_end_users', gloss: 'the end-users who have signed up' },
       reset_password: { tool: 'reset_end_user_password', gloss: 'send a password reset to one user (userId or email)' },
       block_user: { tool: 'block_end_user', gloss: 'stop one user from signing in' },
       unblock_user: { tool: 'unblock_end_user', gloss: 'let a blocked user sign in again' },
       enable_teams: { tool: 'enable_teams', gloss: 'organizations with members and roles' },
-      email_settings: { tool: 'get_auth_email_settings', gloss: 'how verification and password-reset emails are sent, whether the last test worked, and the templates' },
+      email_settings: { tool: 'get_auth_email_settings', gloss: 'how verification and password-reset emails are sent, whether the last test worked, the templates, and the sign-in email policy' },
+      set_email_policy: { tool: 'set_auth_email_policy', gloss: 'the app name and URL auth emails link to, whether sign-in requires a verified email (needs a working sender first), and whether magic links are on' },
       set_smtp: { tool: 'set_auth_smtp', gloss: 'the SMTP server auth emails are sent through (the password is stored encrypted and never returned)' },
       test_smtp: { tool: 'test_auth_smtp', gloss: 'send one real test email and record whether it arrived at the server' },
       remove_smtp: { tool: 'remove_auth_smtp', gloss: 'remove the SMTP settings' },
@@ -75,7 +76,8 @@ export const DOMAIN_TOOLS: DomainTool[] = [
     summary: 'Buckets and files. Uploads happen from the app through the SDK or REST, not here.',
     actions: {
       create_bucket: { tool: 'create_bucket', gloss: 'a new bucket, private unless isPublic' },
-      set_public: { tool: 'set_bucket_public', gloss: 'make a bucket public or private' },
+      set_public: { tool: 'set_bucket_public', gloss: 'make a bucket public or private (shorthand for the public_read / private policies)' },
+      set_policy: { tool: 'set_bucket_policy', gloss: 'set the enforced access policy: public_read, cdn_cacheable, private or owner_only' },
       list_buckets: { tool: 'list_buckets', gloss: 'every bucket with its visibility' },
       list_files: { tool: 'list_files', gloss: 'the files in one bucket' },
       signed_url: { tool: 'generate_signed_url', gloss: 'a time-limited download link for one file' },
@@ -87,7 +89,7 @@ export const DOMAIN_TOOLS: DomainTool[] = [
     name: 'functions',
     title: 'Functions',
     summary:
-      'Server-side functions and schedules. "create" has Backenly write a function\'s code from your spec with its ' +
+      'Server-side functions and schedules. "create" and "schedule" have Backenly write the code from your spec with its ' +
       'own model, which draws AI credits; name the tables and integrations it uses. "deploy_code" stores code you wrote, ' +
       'exactly as written, after the runtime checks it can run.',
     actions: {
@@ -99,7 +101,7 @@ export const DOMAIN_TOOLS: DomainTool[] = [
       logs: { tool: 'list_ai_function_logs', gloss: 'recent runs from every trigger, with errors and ctx.log lines' },
       set_active: { tool: 'toggle_ai_function', gloss: 'turn a function on or off' },
       delete: { tool: 'delete_ai_function', gloss: 'remove a function' },
-      schedule: { tool: 'create_cron_job', gloss: 'a job on a schedule ("every 15 minutes" or 5-field cron)' },
+      schedule: { tool: 'create_cron_job', gloss: 'a job on a schedule ("every 15 minutes" or 5-field cron), its code written from your description by Backenly\'s model' },
       list_schedules: { tool: 'list_cron_jobs', gloss: 'every scheduled job' },
       delete_schedule: { tool: 'delete_cron_job', gloss: 'remove a scheduled job' },
     },
@@ -127,7 +129,7 @@ export const DOMAIN_TOOLS: DomainTool[] = [
       list: { tool: 'list_integration_keys', gloss: 'connected providers, masked keys and verification state' },
       capabilities: { tool: 'list_integration_capabilities', gloss: 'the exact ctx.integrations methods each provider gives a function, and for Stripe its receiver URL and signing-secret state' },
       verify: { tool: 'verify_integration_key', gloss: 'ask the provider again whether the stored key works' },
-      connect: { tool: 'store_integration_key', gloss: 'store a provider key (Stripe also takes webhookSecret) and wire the first functions' },
+      connect: { tool: 'store_integration_key', gloss: 'store a provider key (Stripe also takes webhookSecret, OneSignal also takes appId) and wire the first functions, which Backenly\'s model writes' },
       disconnect: { tool: 'remove_integration_key', gloss: 'remove a provider key' },
       send_push: { tool: 'send_push', gloss: 'a push notification through the connected OneSignal app' },
     },
@@ -158,6 +160,7 @@ export const DOMAIN_TOOLS: DomainTool[] = [
       status: { tool: 'get_autonomy_status', gloss: 'mode, recent repairs and what is waiting' },
       findings: { tool: 'list_findings', gloss: 'open health findings with evidence' },
       maintenance: { tool: 'get_maintenance_ladder', gloss: 'the schema-maintenance ladder and its consent state' },
+      evolution: { tool: 'get_evolution_proposals', gloss: 'architecture changes, what waits for approval, recommendations; detail: true for evidence and exact plans' },
       set_level: { tool: 'set_autonomy_level', gloss: 'OFF, CONSERVATIVE, BALANCED or AGGRESSIVE' },
     },
   },
@@ -187,13 +190,18 @@ export const DOMAIN_TOOLS: DomainTool[] = [
   {
     name: 'deploy',
     title: 'Deploy',
-    summary: 'Publishing and rolling back. Both change what production serves, so both wait for a human.',
+    summary:
+      'Publishing, the change history, and restoring the state before a change. Every schema change to production ' +
+      'is checkpointed and verified by Backenly, and recovered automatically when that check fails; anything that ' +
+      'changes what production serves waits for a human.',
     actions: {
       status: { tool: 'get_deploy_status', gloss: 'the live version, when it shipped and its state' },
-      history: { tool: 'list_deploy_versions', gloss: 'every published version, which one is serving, and which can be rolled back to' },
+      history: { tool: 'list_deploy_versions', gloss: 'every published version and which one is serving' },
       readiness: { tool: 'get_readiness', gloss: 'the 0-100 readiness score with blockers; fixes nothing unless autoFix is true', readGloss: 'the 0-100 readiness score with its blockers' },
       deploy: { tool: 'trigger_deploy', gloss: 'publish the current backend' },
-      rollback: { tool: 'rollback_deploy', gloss: 'return to an earlier version' },
+      rollback: { tool: 'rollback_deploy', gloss: 'ask to restore the backend to a published version (version or deploymentId); a person approves Backenly\'s list of the changes it would undo, and approving undoes them, newest first' },
+      changes: { tool: 'list_schema_changes', gloss: 'every schema change to production, newest first: its changeId, who made it, what it did, whether it was verified, and whether the state before it can be restored' },
+      revert_change: { tool: 'revert_schema_change', gloss: 'ask to restore the state before one change (changeId); a person approves it, and data written since is never dropped silently' },
     },
   },
   {
@@ -208,7 +216,7 @@ export const DOMAIN_TOOLS: DomainTool[] = [
     // approvals list serve it. Create-then-revoke rotates with nothing stored.
     actions: {
       whoami: { tool: 'get_connection_identity', gloss: 'the project this connection is bound to, and the key or OAuth connection calling' },
-      create_api_key: { tool: 'create_api_key', gloss: 'the key an app uses: publishable by default and safe in a browser, serviceRole for server code; optionally bound to a preview branch' },
+      create_api_key: { tool: 'create_api_key', gloss: 'the key an app uses: publishable and safe in a browser (a person creates a server\'s service-role key in Settings); optionally bound to a preview branch' },
       list_api_keys: { tool: 'list_api_keys', gloss: 'every key with its scope and last use' },
       set_key_permissions: { tool: 'set_key_permissions', gloss: 'change what a key may do' },
       revoke_api_key: { tool: 'revoke_api_key', gloss: 'disable a key (apps using it stop working)' },
@@ -216,7 +224,7 @@ export const DOMAIN_TOOLS: DomainTool[] = [
       list_env: { tool: 'list_env_vars', gloss: 'variable names with 4-character previews' },
       delete_env: { tool: 'delete_env_var', gloss: 'remove a variable' },
       database_credentials: { tool: 'get_database_credentials', gloss: 'a Postgres connection string (read-write only after a human arms it)' },
-      connect_frontend: { tool: 'connect_frontend', gloss: 'allow a frontend origin (CORS)' },
+      connect_frontend: { tool: 'connect_frontend', gloss: 'allow a frontend origin (CORS); binds at once, and once a deployed (non-localhost) origin is connected, connected origins become the project\'s CORS allowlist' },
       disconnect_frontend: { tool: 'disconnect_frontend', gloss: 'remove a frontend origin' },
       list_apps: { tool: 'list_connected_apps', gloss: 'the frontends connected to this backend' },
     },
@@ -297,8 +305,22 @@ function brainParams(tool: string): { properties: Record<string, JsonSchema>; re
   return { properties: def?.parameters?.properties ?? {}, required: def?.parameters?.required ?? [] }
 }
 
+/**
+ * Tools whose executor requires ONE OF several arguments. Their brain schema
+ * declares `required: []` (JSON Schema here cannot express the alternative),
+ * which rendered as "Needs: nothing" — and the executor then refused the
+ * call. The docs and descriptions print this declared alternative instead.
+ */
+const REQUIRED_ALTERNATIVES: Record<string, string> = {
+  rotate_webhook_secret: 'triggerName or triggerId',
+  block_end_user: 'userId or email',
+  unblock_end_user: 'userId or email',
+}
+
 /** The arguments an action's target tool requires, as its description lists them. */
 export function actionRequires(tool: string): string[] {
+  const alternative = REQUIRED_ALTERNATIVES[tool]
+  if (alternative) return [alternative]
   return brainParams(tool).required.filter((p) => p !== 'action')
 }
 
@@ -359,7 +381,7 @@ export function domainInputSchema(domain: DomainTool, opts?: { readOnly?: boolea
 /** The advertised description: the summary, then one line per action. */
 export function domainDescription(domain: DomainTool): string {
   const lines = Object.entries(domain.actions).map(([action, { tool, gloss }]) => {
-    const needs = brainParams(tool).required
+    const needs = actionRequires(tool)
     const args = needs.length ? ` (needs ${needs.join(', ')})` : ''
     const gate = needsApproval(tool) ? ' [waits for human approval; poll check_approval]' : ''
     return `• ${action}: ${gloss}${args}${gate}`

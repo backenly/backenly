@@ -15,6 +15,7 @@ import { prisma } from '@/lib/db/prisma'
 import { getProjectAuthStatus } from '@/lib/services/auth-status'
 import { createHash } from 'crypto'
 import { generateApiKey } from '@/lib/auth/apiKeyAuth'
+import { regionApiOrigin, regionOfRecord, workspaceRawClient } from '@/lib/data-plane/regional'
 
 export interface ManifestColumn {
   name: string
@@ -132,13 +133,14 @@ function buildCreateExample(tableName: string, columns: ManifestColumn[]): strin
 // ─── workspace schema fallback (live reflection if Table.schema is empty) ────
 
 async function reflectLiveColumns(projectId: string, tableName: string): Promise<ManifestColumn[]> {
+  const db = await workspaceRawClient(projectId)
   // Use the canonical schema-name helper. The earlier `replace(/-/g, '_')`
   // produced a name that doesn't match the actual workspace schema (which
   // keeps hyphens), so this fallback returned empty columns silently.
   const { workspaceSchemaName } = await import('@/lib/security/workspace-schema')
   const workspaceSchema = workspaceSchemaName(projectId)
   try {
-    const rows = await prisma.$queryRawUnsafe<Array<{
+    const rows = await db.$queryRawUnsafe<Array<{
       column_name: string
       data_type: string
       is_nullable: string
@@ -175,7 +177,7 @@ export async function buildConnectManifest(
   const [project, tables, authStatus, buckets] = await Promise.all([
     prisma.project.findUnique({
       where: { id: projectId },
-      select: { id: true, name: true, anonKey: true, apiUrlProd: true, userId: true },
+      select: { id: true, name: true, anonKey: true, apiUrlProd: true, userId: true, region: true },
     }),
     prisma.table.findMany({
       where: { projectId },
@@ -190,6 +192,13 @@ export async function buildConnectManifest(
     throw new Error(`Project not found: ${projectId}`)
   }
 
+  // Where the project's API is served: this host for the home region, the
+  // region's own API address elsewhere. Resolved before the anon key below is
+  // minted, so a region with no address configured changes nothing.
+  const apiOrigin = regionApiOrigin(regionOfRecord(project.id, project.region), baseUrl, { projectId: project.id })
+  // The SDK defaults to the home address, so only another region's is spelled out.
+  const apiUrlArg = apiOrigin === baseUrl ? '' : `, apiUrl: "${apiOrigin}"`
+
   let anonKey = project.anonKey
   if (!anonKey) {
     anonKey = generateApiKey('live')
@@ -197,6 +206,7 @@ export async function buildConnectManifest(
     const keyPrefix = anonKey.substring(0, 16)
 
     await prisma.$transaction([
+      // history: the anon key is one with Project.anonKey and provisioned with the project (lib/changes/resources/keys.ts)
       prisma.apiKey.create({
         data: {
           name: 'Public Anon Key',
@@ -320,14 +330,14 @@ export async function buildConnectManifest(
     project: {
       id: project.id,
       name: project.name,
-      apiBaseUrl: `${baseUrl}/api/v1/${project.id}`,
+      apiBaseUrl: `${apiOrigin}/api/v1/${project.id}`,
     },
     apiKey: anonKey,
     sdk: {
       cdnEsm: sdkEsm,
       cdnUmd: sdkUmd,
       importLine: `import { createClient } from "${sdkEsm}"`,
-      initLine: `const backend = createClient({ projectId: "${project.id}", apiKey: "${anonKey}" })`,
+      initLine: `const backend = createClient({ projectId: "${project.id}", apiKey: "${anonKey}"${apiUrlArg} })`,
     },
     tables: manifestTables,
     auth,
@@ -335,7 +345,7 @@ export async function buildConnectManifest(
     storage,
     instructions: [
       `The backend is fully deployed on Backenly. DO NOT scaffold any server code, database, or API routes — they already exist and are live.`,
-      `Import the SDK from "${sdkEsm}" and call createClient({ projectId, apiKey }) with the exact strings above. Do not wrap the key in import.meta.env or process.env — the Backenly anon key is public by design and is safe to embed in your shipped bundle.`,
+      `Import the SDK from "${sdkEsm}" and call createClient({ projectId, apiKey${apiUrlArg ? ', apiUrl' : ''} }) with the exact strings above. Do not wrap the key in import.meta.env or process.env — the Backenly anon key is public by design and is safe to embed in your shipped bundle.`,
       manifestTables.length > 0
         ? `Replace mock data with the SDK calls below. Tables available: ${manifestTables.map(t => t.name).join(', ')}.`
         : `No tables exist yet — create tables from the dashboard or via your MCP-connected agent before wiring the frontend.`,

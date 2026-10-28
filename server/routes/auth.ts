@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express'
 import { clientIpFromNodeRequest } from '@/lib/security/client-ip'
 import { prisma } from '@/lib/db'
+import { workspaceRawClient } from '@/lib/data-plane/regional'
 import { hashPassword, verifyPassword, verifyPasswordAgainstDecoy } from '@/lib/auth/password'
 import { executeWithUserContext } from '@/lib/services/workspace-rls'
 import { ensureAuthUsersTable, buildUserInsert, isReservedTestEmail, AuthNotProvisionedError } from '@/lib/services/end-user-auth-table'
@@ -201,6 +202,7 @@ async function handleSignUp(req: Request, res: Response) {
       return
     }
     const existing = await executeWithUserContext<any>(
+      projectId,
       '',
       true,
       `SELECT id FROM "${schemaName}"."users" WHERE email = $1 LIMIT 1`,
@@ -232,7 +234,7 @@ async function handleSignUp(req: Request, res: Response) {
     // which branch it belongs to (SKIPPED_ON_BRANCH_SIGNUP).
     const requireVerification =
       !isInternalTest && !env.branch && (await getAuthEmailContext(projectId)).requireEmailVerification
-    if (requireVerification) await ensureEmailVerifiedColumn(schemaName)
+    if (requireVerification) await ensureEmailVerifiedColumn(projectId, schemaName)
 
     const hashedPassword = await hashPassword(password)
     const displayName = name || email.split('@')[0]
@@ -249,7 +251,7 @@ async function handleSignUp(req: Request, res: Response) {
     })
 
     // Service-role INSERT — see comment on `existing` SELECT above.
-    const created = await executeWithUserContext<any>('', true, plan.sql, plan.values)
+    const created = await executeWithUserContext<any>(projectId, '', true, plan.sql, plan.values)
     const user = created[0]
 
     // A branch session is signed with the branch's own secret, so it cannot be
@@ -366,7 +368,11 @@ async function handleSignIn(req: Request, res: Response) {
       return
     }
 
-    const tableCheck = await prisma.$queryRawUnsafe<{ exists: boolean }[]>(
+    // The users table is in the project's database, in its region. Asked of
+    // any other database it would not exist, and sign-in would answer that
+    // authentication is not enabled.
+    const db = await workspaceRawClient(projectId)
+    const tableCheck = await db.$queryRawUnsafe<{ exists: boolean }[]>(
       `SELECT EXISTS (
         SELECT 1 FROM information_schema.tables
         WHERE table_schema = $1 AND table_name = 'users'
@@ -391,6 +397,7 @@ async function handleSignIn(req: Request, res: Response) {
     // authenticate user", but the real cause is schema mismatch, not bad
     // credentials).
     const users = await executeWithUserContext<any>(
+      projectId,
       '',
       true,
       `SELECT * FROM "${schemaName}"."users" WHERE email = $1 LIMIT 1`,

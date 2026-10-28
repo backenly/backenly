@@ -12,6 +12,7 @@
  * Phase 5: All deploys now run through the readiness gate first.
  */
 
+import crypto from 'crypto'
 import { prisma } from '@/lib/db/prisma'
 import { scoreReadiness, formatReadinessReport } from '@/lib/deployment/readiness-scorer'
 import type { ReadinessReport } from '@/lib/deployment/readiness-scorer'
@@ -54,7 +55,11 @@ export interface GoLiveOptions {
    * readiness gate. The UI button is the one path that should pass
    * `force:true` on first call (the click itself is the confirmation).
    */
-  confirmedBy?: 'UI' | 'CHAT' | 'API'
+  /**
+   * How the deploy was authorised, recorded on its audit row with `userId`.
+   * APPROVAL: a person approved an agent's exact call; `userId` is that person.
+   */
+  confirmedBy?: 'UI' | 'CHAT' | 'API' | 'APPROVAL'
   /** Skip the second-layer "Type DEPLOY" prompt. */
   force?: boolean
 }
@@ -92,13 +97,17 @@ export async function goLive(
   // accidentally triggers deploy (e.g. a build prompt containing "deploy-ready").
   const tableCount = await prisma.table.count({ where: { projectId } })
   const apiCount = (await listExposedTables(projectId)).filter((table) => isCrudExposable(table.name)).length
-  const hasAuth = (project.authManifest as any)?.enabled === true
+  // As every other surface reads it (lib/services/auth-status.ts).
+  const { isEndUserAuthEnabled } = await import('@/lib/services/auth-status')
+  const hasAuth = await isEndUserAuthEnabled(projectId, project.authManifest)
 
   if (tableCount === 0 && apiCount === 0 && !hasAuth) {
     return {
       kind: 'error',
       success: false,
-      error: 'Cannot deploy: no backend has been built yet. Ask me to create tables, APIs, or auth first, then deploy when your backend is ready.',
+      error:
+        'Nothing to publish yet: this backend has no tables, APIs or auth. ' +
+        'Create them first — from your coding agent over MCP, or in the Database section — then publish.',
     }
   }
 
@@ -169,7 +178,7 @@ export async function goLive(
 
   // If already LIVE, create a new versioned deployment (publish update)
   if (project.projectStatus === 'LIVE') {
-    return await publishUpdate(projectId, userId, publicUrl, project.activeGraphId)
+    return await publishUpdate(projectId, userId, publicUrl, project.activeGraphId, options.confirmedBy)
   }
 
   // First-time publish: PRIVATE → DEPLOYING → LIVE
@@ -179,6 +188,10 @@ export async function goLive(
   })
 
   try {
+    // v1 records the catalog it published, like every later version, so an
+    // identical publish right after going live is a truthful no-op instead of
+    // a second version that changes nothing.
+    const catalogSchemaHash = await liveCatalogHash(projectId)
     const result = await prisma.$transaction(async (tx) => {
       // Validate project has a backend graph
       const projectWithGraph = await tx.project.findUnique({
@@ -228,6 +241,8 @@ export async function goLive(
           version: 1,
           graphSnapshotId: project.activeGraphId,
           changeSummary,
+          // What the next publish compares against to decide "no changes".
+          config: { catalogSchemaHash },
         },
       })
 
@@ -243,6 +258,7 @@ export async function goLive(
             publicUrl,
             projectSlug,
             version: 1,
+            triggerSource: options.confirmedBy ?? null,
             timestamp: new Date().toISOString(),
           }),
           timestamp: new Date(),
@@ -267,16 +283,41 @@ export async function goLive(
 }
 
 /**
+ * Fingerprint of the LIVE catalog, recorded on every published version so the
+ * next publish can tell "nothing changed" from "changed". The MCP schema path
+ * (apply_migration, the typed executors) changes real tables without moving
+ * activeGraphId, so comparing graph pointers answered "Already up to date"
+ * after an agent reshaped the schema. information_schema is ordered
+ * (table_name, ordinal_position), so the hash is stable; generatedAt is
+ * excluded because it changes on every read.
+ */
+async function liveCatalogHash(projectId: string): Promise<string> {
+  const { readWorkspaceSchema } = await import('@/lib/typegen/schema-reader')
+  const liveSchema = await readWorkspaceSchema(projectId)
+  return crypto
+    .createHash('sha256')
+    .update(JSON.stringify(liveSchema.tables))
+    .digest('hex')
+    .slice(0, 16)
+}
+
+/**
  * Publish an update for an already-live project.
  * Creates a new versioned deployment snapshot pointing to the current activeGraphId.
+ *
+ * Exported for tests: the no-op decision below is behavior worth pinning
+ * without driving the whole readiness gate.
  */
-async function publishUpdate(
+export async function publishUpdate(
   projectId: string,
   userId: string,
   publicUrl: string,
   activeGraphId: string,
+  triggerSource?: GoLiveOptions['confirmedBy'],
 ): Promise<GoLiveResult | GoLiveError> {
   try {
+    const catalogSchemaHash = await liveCatalogHash(projectId)
+
     const result = await prisma.$transaction(async (tx) => {
       // Get next version number
       const latestDeployment = await tx.deployment.findFirst({
@@ -287,14 +328,19 @@ async function publishUpdate(
           version: { not: null },
         },
         orderBy: { version: 'desc' },
-        select: { version: true, graphSnapshotId: true },
+        select: { version: true, graphSnapshotId: true, config: true },
       })
 
       const nextVersion = (latestDeployment?.version || 0) + 1
 
-      // Check if the graph has actually changed since last publish
-      if (latestDeployment?.graphSnapshotId === activeGraphId) {
-        // No changes since last publish — still return success but note it
+      // "Already up to date" is claimed ONLY when the previous publish
+      // recorded a catalog hash and the live catalog still matches it. A
+      // deployment from before hashes were recorded cannot prove sameness,
+      // and the honest default there is to record a new version — an extra
+      // snapshot is harmless, while "up to date" over a changed schema is
+      // the lie this replaces.
+      const prevHash = (latestDeployment?.config as any)?.catalogSchemaHash
+      if (prevHash && prevHash === catalogSchemaHash) {
         return { publicUrl, version: latestDeployment?.version || 1, noChanges: true }
       }
 
@@ -342,6 +388,8 @@ async function publishUpdate(
           version: nextVersion,
           graphSnapshotId: activeGraphId,
           changeSummary,
+          // What the next publish compares against to decide "no changes".
+          config: { catalogSchemaHash },
         },
       })
 
@@ -369,6 +417,7 @@ async function publishUpdate(
             version: nextVersion,
             graphSnapshotId: activeGraphId,
             changeSummary,
+            triggerSource: triggerSource ?? null,
             timestamp: new Date().toISOString(),
           }),
           timestamp: new Date(),

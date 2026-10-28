@@ -18,10 +18,16 @@ export const dynamic = 'force-dynamic'
  * Dropping a type is refused while anything uses it, and the dependents are
  * returned. No CASCADE: CASCADE would drop the columns typed by it, which is
  * data the dashboard cannot show the consequences of.
+ *
+ * Each action is one governed change (lib/changes/ledger.ts): checkpointed,
+ * verified, in the project's history and restorable from there, like any other
+ * change to the schema. They ran outside the ledger, so a type created, renamed
+ * or dropped here was in no history and could not be put back.
  */
 
 import { NextRequest, NextResponse } from 'next/server'
 import { withAuth } from '@/lib/auth/route-protection'
+import { withGovernedChange } from '@/lib/changes/ledger'
 import { canAccessProject, canWriteProject, canAdministerProject } from '@/lib/edition/guard'
 import {
   addEnumValue,
@@ -59,32 +65,33 @@ export const POST = withAuth(async (request: NextRequest, { user, params }) => {
   const body = await request.json().catch(() => null)
   const action = body?.action
 
+  // The person is attributed where the session is checked (withAuth).
+  const governed = (title: string, fn: () => Promise<void>) => withGovernedChange({ projectId, title }, fn)
+  const name = String(body?.name ?? '')
+
   try {
     switch (action) {
       case 'create_enum':
-        await createEnum(projectId, String(body?.name ?? ''), body?.values ?? [])
+        await governed(`Create enum type ${name}`, () => createEnum(projectId, name, body?.values ?? []))
         break
 
       case 'add_enum_value':
-        await addEnumValue(projectId, String(body?.name ?? ''), String(body?.value ?? ''))
+        await governed(`Add a value to enum type ${name}`, () => addEnumValue(projectId, name, String(body?.value ?? '')))
         break
 
       case 'rename_enum_value':
-        await renameEnumValue(
-          projectId,
-          String(body?.name ?? ''),
-          String(body?.from ?? ''),
-          String(body?.to ?? ''),
-        )
+        await governed(`Rename a value of enum type ${name}`, () =>
+          renameEnumValue(projectId, name, String(body?.from ?? ''), String(body?.to ?? '')))
         break
 
       case 'create_domain':
-        await createDomain(projectId, {
-          name: String(body?.name ?? ''),
-          baseType: String(body?.baseType ?? ''),
-          notNull: Boolean(body?.notNull),
-          check: typeof body?.check === 'string' ? body.check : null,
-        })
+        await governed(`Create domain ${name}`, () =>
+          createDomain(projectId, {
+            name,
+            baseType: String(body?.baseType ?? ''),
+            notNull: Boolean(body?.notNull),
+            check: typeof body?.check === 'string' ? body.check : null,
+          }))
         break
 
       case 'drop_enum_value':
@@ -127,7 +134,7 @@ export const DELETE = withAuth(async (request: NextRequest, { user, params }) =>
   if (!name) return NextResponse.json({ error: 'name is required' }, { status: 400 })
 
   try {
-    const result = await dropType(projectId, name)
+    const { result } = await withGovernedChange({ projectId, title: `Drop type ${name}` }, () => dropType(projectId, name))
     if (!result.dropped && result.usedBy.length > 0) {
       // The dependents, so an operator can deal with them deliberately rather
       // than reaching for CASCADE.

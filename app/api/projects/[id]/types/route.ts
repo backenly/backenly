@@ -16,7 +16,8 @@ import { withProjectValidation } from '@/lib/middleware/projectValidation'
 import { readWorkspaceSchema } from '@/lib/typegen/schema-reader'
 import { generateTypes } from '@/lib/typegen/type-generator'
 import { generateTypedClient } from '@/lib/typegen/client-generator'
-import { prisma } from '@/lib/db'
+import { resolvePublicBaseUrl } from '@/lib/services/public-url'
+import { projectApiOrigin } from '@/lib/data-plane/regional'
 
 export async function GET(request: NextRequest, props: { params: Promise<{ id: string }> }) {
   const params = await props.params
@@ -35,13 +36,11 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
       }, { status: 404 })
     }
 
-    // Get project API URL for the client file
-    const project = await prisma.project.findFirst({
-      where: { id: projectId },
-      select: { apiUrlProd: true, apiUrlDev: true, name: true },
-    })
-
-    const apiUrl = project?.apiUrlProd || project?.apiUrlDev || 'https://api.backenly.com'
+    // The client's default address: the project's own API origin, its region's
+    // for a project outside the home region. (This used to pass apiUrlProd,
+    // apiUrlDev or https://api.backenly.com, a host that does not exist; the
+    // generator ignored the value until it started baking it in.)
+    const apiUrl = await projectApiOrigin(projectId, resolvePublicBaseUrl(request))
 
     const types = generateTypes(schema)
     const client = generateTypedClient(schema, types, { projectId, apiUrl })

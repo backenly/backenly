@@ -1004,9 +1004,11 @@ async function executePermissionsNode(
     // as failures. Count policies actually present in the workspace schema.
     let actualApplied = successCount
     try {
-      const { prisma: rlsPrisma } = await import('@/lib/db')
+      // The catalog of the project's database, in its region.
+      const { workspaceRawClient } = await import('@/lib/data-plane/regional')
+      const db = await workspaceRawClient(projectId)
       const schemaName = `workspace_${projectId}`
-      const policyRows = await rlsPrisma.$queryRawUnsafe<Array<{ tablename: string }>>(
+      const policyRows = await db.$queryRawUnsafe<Array<{ tablename: string }>>(
         `SELECT DISTINCT tablename FROM pg_policies
          WHERE schemaname = $1 AND policyname LIKE '%own_rows%'`,
         schemaName
@@ -1064,9 +1066,17 @@ async function executeStorageNode(
     return {
       nodeId: node.id,
       status: 'verified',
-      detail: `Created storage bucket \`${bucketName}\``,
+      detail: (result.data as { existed?: boolean } | undefined)?.existed
+        ? `Bucket \`${bucketName}\` already exists`
+        : `Created storage bucket \`${bucketName}\``,
       artifacts: result.artifacts,
     }
+  }
+
+  // An existing bucket with the OTHER visibility is not this node done: the
+  // build asked for public (or private) storage and did not get it.
+  if (result.error === 'BUCKET_VISIBILITY_MISMATCH') {
+    return { nodeId: node.id, status: 'failed', failureReason: result.message }
   }
 
   if (result.message?.toLowerCase().includes('already exists')) {

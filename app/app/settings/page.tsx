@@ -14,10 +14,11 @@
  */
 
 import { useState, useEffect } from 'react'
+import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import {
   LogOut, Mail, Lock, Trash2, HelpCircle, Key, Check, X,
-  User, Shield, AlertTriangle, Sparkles, Smartphone, MessageSquare,
+  User, Shield, AlertTriangle, Sparkles, Smartphone,
   Activity, Calendar, FolderKanban, Loader2, Copy, ShieldCheck, ShieldAlert,
   Send, ArrowUpRight, CheckCircle2, LifeBuoy, Bell,
 } from 'lucide-react'
@@ -28,7 +29,7 @@ import {
   INPUT_BASE, PageHeader, Skeleton, StatusDot, Tag,
 } from '@/components/inspector/kit'
 import { FLOAT, PAGE_GUTTER, PAGE_WIDTH, RAISE } from '@/components/console/tokens'
-import { usePlanName } from '@/components/shell/ConsoleChrome'
+import { Avatar, usePlanName } from '@/components/shell/ConsoleChrome'
 import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
 import { DeploymentRecoverySection } from '@/components/app/DeploymentRecoverySection'
 import { deleteAccount, signOut } from '@/lib/api/auth'
@@ -46,6 +47,7 @@ interface UserProfile {
   lastLogin?: string | null
   tier?: string
   projectsCount?: number
+  avatarUrl?: string | null
 }
 
 function providerLabel(p?: string): string {
@@ -269,10 +271,6 @@ export default function SettingsPage() {
     setTwoFABackupCodes(null)
   }
 
-  const initials = user?.name
-    ? user.name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2)
-    : user?.email?.[0]?.toUpperCase() ?? 'U'
-
   const TABS: { id: Section; label: string; icon: typeof User }[] = [
     { id: 'profile', label: 'Profile', icon: User },
     { id: 'security', label: 'Security', icon: Shield },
@@ -337,7 +335,6 @@ export default function SettingsPage() {
             {activeSection === 'profile' && (
               <ProfileSection
                 user={user}
-                initials={initials}
                 planLabel={CLOUD_CONTROL_PLANE ? planName ?? planLabelFor(user?.tier) : null}
                 editingName={editingName}
                 setEditingName={setEditingName}
@@ -530,10 +527,9 @@ export default function SettingsPage() {
 // ─── Profile ──────────────────────────────────────────────────────────────────
 
 function ProfileSection({
-  user, initials, planLabel, editingName, setEditingName, newName, setNewName, savingName, onSaveName,
+  user, planLabel, editingName, setEditingName, newName, setNewName, savingName, onSaveName,
 }: {
   user: UserProfile | null
-  initials: string
   planLabel: string | null
   editingName: boolean
   setEditingName: (v: boolean) => void
@@ -547,9 +543,7 @@ function ProfileSection({
       {/* Identity */}
       <KitCard>
         <div className="flex flex-wrap items-center gap-4 px-5 py-5">
-          <div className="flex h-[52px] w-[52px] items-center justify-center rounded-full bg-[linear-gradient(135deg,#27272a,#18181b)] text-[16px] font-semibold text-zinc-100 ring-1 ring-inset ring-white/[0.12]">
-            {initials}
-          </div>
+          <Avatar user={user} size={52} className="text-[16px]" />
           <div className="min-w-0 flex-1">
             <h2 className="text-[17px] font-semibold leading-[24px] tracking-[-0.014em] text-zinc-50">{user?.name || 'Unnamed user'}</h2>
             <p className="text-[13px] text-zinc-500">{user?.email}</p>
@@ -733,6 +727,14 @@ const NOTIFICATION_LABELS: Record<string, { label: string; description: string }
     label: 'Backend health alerts',
     description: 'A critical problem in one of your backends that Backenly could not resolve on its own.',
   },
+  approval_requested: {
+    label: 'Agent approval requests',
+    description: 'Your coding agent asked for a change that waits for your approval. Unanswered, it expires after a day.',
+  },
+  support_update: {
+    label: 'Support cases',
+    description: 'The team replied to or resolved one of your support cases.',
+  },
   autonomous_action: {
     label: 'Autonomous changes',
     description: 'What Backenly repaired or changed while you were away.',
@@ -845,101 +847,94 @@ function NotificationsSection({ onToast }: { onToast: (msg: string, kind?: 'succ
 
 // ─── Support ──────────────────────────────────────────────────────────────────
 
-type FormKind = 'support' | 'feature'
 const PRIMARY_MAX = 160
 const SECONDARY_MAX = 5000
 const SECONDARY_MIN = 10
 
-function SupportSection({ userEmail }: { userEmail?: string }) {
-  const [activeForm, setActiveForm] = useState<FormKind | null>(null)
+const FEATURE_FORM = {
+  icon: Sparkles,
+  title: 'Request a feature',
+  cardDesc: 'Tell us what you want to see in Backenly next.',
+  formDesc: 'Help us understand the problem you want to solve, not just the solution.',
+  primaryLabel: 'Feature title',
+  primaryHint: 'One line: what should we build?',
+  primaryPlaceholder: 'e.g. Add MongoDB support',
+  secondaryLabel: 'Why you need it',
+  secondaryHint: 'The use case, your current workaround, and how it would change your workflow',
+  secondaryPlaceholder: 'What problem does this solve? How are you working around it today?',
+  successTitle: 'Request received',
+  successMsg: "This goes straight to the founder's roadmap.",
+  submitLabel: 'Submit request',
+}
 
-  const configs = {
-    support: {
-      kind: 'support' as const,
-      icon: MessageSquare,
-      title: 'Contact support',
-      cardDesc: 'Email our team. Typical reply in under a few hours.',
-      formDesc: 'Describe what went wrong. The more detail, the faster we can help.',
-      primaryLabel: 'Subject',
-      primaryHint: 'A short summary of the issue',
-      primaryPlaceholder: "e.g. Can't deploy my project",
-      secondaryLabel: 'Message',
-      secondaryHint: 'Steps to reproduce, error messages, expected behavior',
-      secondaryPlaceholder: 'What were you trying to do? What happened instead? Include any error messages.',
-      successTitle: 'Message sent',
-      successMsg: "We'll get back to you over email shortly.",
-      submitLabel: 'Send message',
-    },
-    feature: {
-      kind: 'feature' as const,
-      icon: Sparkles,
-      title: 'Request a feature',
-      cardDesc: 'Tell us what you want to see in Backenly next.',
-      formDesc: 'Help us understand the problem you want to solve, not just the solution.',
-      primaryLabel: 'Feature title',
-      primaryHint: 'One line: what should we build?',
-      primaryPlaceholder: 'e.g. Add MongoDB support',
-      secondaryLabel: 'Why you need it',
-      secondaryHint: 'The use case, your current workaround, and how it would change your workflow',
-      secondaryPlaceholder: 'What problem does this solve? How are you working around it today?',
-      successTitle: 'Request received',
-      successMsg: "This goes straight to the founder's roadmap.",
-      submitLabel: 'Submit request',
-    },
-  }
-  const active = activeForm ? configs[activeForm] : null
+function SupportSection({ userEmail }: { userEmail?: string }) {
+  const [featureFormOpen, setFeatureFormOpen] = useState(false)
+
+  const cardClass =
+    'group flex items-start gap-3 rounded-lg border border-white/[0.07] bg-white/[0.02] p-4 text-left transition-colors hover:border-white/[0.14] hover:bg-white/[0.04]'
 
   return (
     <div className="space-y-4">
       <KitCard>
         <KitCardHeader title="Get help" description="Support and feature requests" />
         <KitCardBody>
-          {active ? (
-            <InlineForm {...active} userEmail={userEmail} onBack={() => setActiveForm(null)} />
+          {featureFormOpen ? (
+            <InlineForm {...FEATURE_FORM} userEmail={userEmail} onBack={() => setFeatureFormOpen(false)} />
           ) : (
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              {[configs.support, configs.feature].map((c) => {
-                const Icon = c.icon
-                return (
-                  <button
-                    key={c.kind}
-                    onClick={() => setActiveForm(c.kind)}
-                    className="group flex items-start gap-3 rounded-lg border border-white/[0.07] bg-white/[0.02] p-4 text-left transition-colors hover:border-white/[0.14] hover:bg-white/[0.04]"
-                  >
-                    <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg border border-white/[0.08] bg-white/[0.04]">
-                      <Icon className="h-4 w-4 text-zinc-400 transition-colors group-hover:text-violet-300" />
+              {/* The contact form became the Support Center (Cloud): cases get an
+                  AI first response and a correspondence thread instead of a
+                  one-shot message into a mailbox. */}
+              {CLOUD_CONTROL_PLANE && (
+                <Link href="/app/support" className={cardClass}>
+                  <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg border border-white/[0.08] bg-white/[0.04]">
+                    <LifeBuoy className="h-4 w-4 text-zinc-400 transition-colors group-hover:text-violet-300" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-1">
+                      <p className="text-[13px] font-medium text-zinc-100">Support center</p>
+                      <ArrowUpRight className="h-3.5 w-3.5 text-zinc-600 transition-colors group-hover:text-zinc-300" />
                     </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-1">
-                        <p className="text-[13px] font-medium text-zinc-100">{c.title}</p>
-                        <ArrowUpRight className="h-3.5 w-3.5 text-zinc-600 transition-colors group-hover:text-zinc-300" />
-                      </div>
-                      <p className="mt-0.5 text-[12.5px] leading-snug text-zinc-500">{c.cardDesc}</p>
-                    </div>
-                  </button>
-                )
-              })}
+                    <p className="mt-0.5 text-[12.5px] leading-snug text-zinc-500">
+                      File a case. Backenly AI answers instantly; the team follows up.
+                    </p>
+                  </div>
+                </Link>
+              )}
+              <button onClick={() => setFeatureFormOpen(true)} className={cardClass}>
+                <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg border border-white/[0.08] bg-white/[0.04]">
+                  <Sparkles className="h-4 w-4 text-zinc-400 transition-colors group-hover:text-violet-300" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-1">
+                    <p className="text-[13px] font-medium text-zinc-100">{FEATURE_FORM.title}</p>
+                    <ArrowUpRight className="h-3.5 w-3.5 text-zinc-600 transition-colors group-hover:text-zinc-300" />
+                  </div>
+                  <p className="mt-0.5 text-[12.5px] leading-snug text-zinc-500">{FEATURE_FORM.cardDesc}</p>
+                </div>
+              </button>
             </div>
           )}
         </KitCardBody>
       </KitCard>
 
-      <KitNote icon={Mail} tone="info" title="Prefer email?">
-        Reach our team directly at{' '}
-        <a href="mailto:support@backenly.com" className="text-violet-300 underline underline-offset-2 hover:text-violet-200">support@backenly.com</a>
-. Most replies go out within a few hours.
-      </KitNote>
+      {CLOUD_CONTROL_PLANE && (
+        <KitNote icon={Mail} tone="info" title="Prefer email?">
+          Reach our team directly at{' '}
+          <a href="mailto:support@backenly.com" className="text-violet-300 underline underline-offset-2 hover:text-violet-200">support@backenly.com</a>
+. Cases filed in the Support center get the fastest answer.
+        </KitNote>
+      )}
     </div>
   )
 }
 
 function InlineForm({
-  kind, icon: Icon, title, formDesc,
+  icon: Icon, title, formDesc,
   primaryLabel, primaryHint, primaryPlaceholder,
   secondaryLabel, secondaryHint, secondaryPlaceholder,
   successTitle, successMsg, submitLabel, userEmail, onBack,
 }: {
-  kind: FormKind
   icon: React.ElementType
   title: string
   formDesc: string
@@ -971,11 +966,8 @@ function InlineForm({
     if (!secondaryValid) { setError(`${secondaryLabel} must be at least ${SECONDARY_MIN} characters.`); return }
     setBusy(true)
     try {
-      const url = kind === 'support' ? '/api/support/contact' : '/api/feature-request'
-      const payload = kind === 'support'
-        ? { subject: primary.trim(), message: secondary.trim() }
-        : { title: primary.trim(), body: secondary.trim() }
-      const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
+      const payload = { title: primary.trim(), body: secondary.trim() }
+      const r = await fetch('/api/feature-request', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
       if (!r.ok) {
         const j = await r.json().catch(() => ({}))
         throw new Error(j.error || `Submission failed (${r.status})`)

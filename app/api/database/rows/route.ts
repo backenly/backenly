@@ -96,6 +96,7 @@ export const GET = withProjectAccess(async (request: NextRequest, { user, projec
       const { PostgresService } = await import('@/lib/db/hybrid')
       try {
         result = await PostgresService.getTableRows(
+          projectId,
           expectedSchema,
           validated.table,
           {
@@ -167,6 +168,7 @@ export const GET = withProjectAccess(async (request: NextRequest, { user, projec
     } else {
       // Use standard HybridDatabase for platform database
       result = await HybridDatabase.getRows(
+        projectId,
         validated.type as DatabaseType,
         validated.schema,
         validated.table,
@@ -253,7 +255,7 @@ export const POST = withProjectAccess(async (request: NextRequest, { user, proje
       // Use workspace-specific insert for PostgreSQL - use PostgresService which handles schema properly
       const { PostgresService } = await import('@/lib/db/hybrid')
       try {
-        result = await PostgresService.insertRow(expectedSchema, table, data)
+        result = await PostgresService.insertRow(projectId, expectedSchema, table, data)
       } catch (error: any) {
         console.error('Error inserting row into workspace schema:', error)
         throw error
@@ -271,6 +273,7 @@ export const POST = withProjectAccess(async (request: NextRequest, { user, proje
     } else {
       // Use standard HybridDatabase for platform database
       result = await HybridDatabase.insertRow(
+        projectId,
         type as DatabaseType,
         schema,
         table,

@@ -1,7 +1,7 @@
 import { prisma } from '@/lib/db/prisma'
 import { loadGraph } from '@/lib/orchestration/backend-state-graph'
 
-export type AuthProviderId = 'email' | 'google' | 'github'
+export type AuthProviderId = 'email' | 'google' | 'github' | 'discord' | 'facebook'
 
 export interface AuthProviderStatus {
   id: AuthProviderId
@@ -19,7 +19,9 @@ export interface ProjectAuthStatus {
   status: AuthOverallStatus
 }
 
-const KNOWN_OAUTH_PROVIDERS: AuthProviderId[] = ['google', 'github']
+// Every OAuth provider the runtime serves (server/routes/oauth.ts). Listing a
+// subset here made /auth-state omit providers an agent had already activated.
+const KNOWN_OAUTH_PROVIDERS: AuthProviderId[] = ['google', 'github', 'discord', 'facebook']
 
 /**
  * Single source of truth for a project's auth status.
@@ -102,6 +104,14 @@ export interface EndUserAuthUsage {
   configuredEvidence: boolean
   /** End-user auth is demonstrably in use for this project. */
   inUse: boolean
+  /**
+   * The `users` table should exist: a permission policy was installed on it,
+   * which only happens once it has been created. Every door that needs the
+   * table creates it on first use (sign-up, OAuth, import, enabling auth, a
+   * foreign key into it), so a missing table is a fault only when this is true:
+   * it existed and is gone.
+   */
+  usersTableExpected: boolean
 }
 
 /**
@@ -130,6 +140,22 @@ export interface EndUserAuthUsage {
  * Table existence and the bare jwtSecret are BOTH provisioning state and prove
  * nothing. Detectors call this first and stay silent when auth is not in use.
  */
+/**
+ * Whether end-user auth is on: the one answer every gate reads.
+ *
+ * The deploy gate, publishing and two agent paths read `authManifest.enabled`,
+ * which nothing that turns auth on ever set: enabling auth writes the graph's
+ * email provider (getProjectAuthStatus). So once anyone signed up, the deploy
+ * gate failed every auth project with "Auth is not marked enabled" until a
+ * person pressed Apply safe fixes, while every other surface said auth was on.
+ * A manifest that does say enabled still counts.
+ */
+export async function isEndUserAuthEnabled(projectId: string, authManifest?: unknown): Promise<boolean> {
+  if ((authManifest as { enabled?: unknown } | null | undefined)?.enabled === true) return true
+  const status = await getProjectAuthStatus(projectId).catch(() => null)
+  return (status?.status ?? 'none') !== 'none'
+}
+
 export async function getEndUserAuthUsage(projectId: string): Promise<EndUserAuthUsage> {
   const { queryWorkspaceSchema } = await import('@/lib/services/workspaceDatabase')
   const schema = `workspace_${projectId}`
@@ -187,6 +213,7 @@ export async function getEndUserAuthUsage(projectId: string): Promise<EndUserAut
     hasIdentities,
     configuredEvidence,
     inUse: hasIdentities || configuredEvidence,
+    usersTableExpected: usersPolicyCount > 0,
   }
 }
 
@@ -194,6 +221,8 @@ const PROVIDER_LABEL: Record<AuthProviderId, string> = {
   email: 'Email / Password',
   google: 'Google',
   github: 'GitHub',
+  discord: 'Discord',
+  facebook: 'Facebook',
 }
 
 /** Renders a status into the chip label shown on the dashboard, e.g.

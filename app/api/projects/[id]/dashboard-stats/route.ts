@@ -27,7 +27,7 @@ export const dynamic = 'force-dynamic'
 import { NextRequest, NextResponse } from 'next/server'
 import { withProjectValidation } from '@/lib/middleware/projectValidation'
 import { prisma } from '@/lib/db/prisma'
-import { listTableStats } from '@/lib/services/workspace-table-stats'
+import { listTableStats, type TableStat as KernelTableStat } from '@/lib/services/workspace-table-stats'
 import { introspectAuthUsersTable, SYNTHETIC_USER_SQL } from '@/lib/services/end-user-auth-table'
 import { executeWithUserContext } from '@/lib/services/workspace-rls'
 
@@ -55,10 +55,13 @@ export async function GET(
 
     const [tableStats, buckets, endUsers] = await Promise.all([
       // null (not []) when the kernel throws, so `dbBytes` can stay unknown
-      // instead of collapsing to a confident "0 B".
-      listTableStats(projectId).catch(() => null),
+      // instead of collapsing to a confident "0 B". Each fallback names its
+      // type: with strictNullChecks off, a bare `() => null` widens the result
+      // to `any`, which let `(tableStats ?? []).length.map(...)` typecheck and
+      // throw on every request.
+      listTableStats(projectId).catch((): KernelTableStat[] | null => null),
       collectBucketStats(projectId).catch(() => [] as BucketStat[]),
-      countEndUsers(projectId).catch(() => null),
+      countEndUsers(projectId).catch((): number | null => null),
     ])
 
     // Cap at 12 to keep the dashboard card lean; the kernel already sorts
@@ -69,6 +72,9 @@ export async function GET(
       rowCount: s.rows,
       estimated: s.estimated,
     }))
+    // The slice keeps the card lean; the COUNT must be the real one — the
+    // card once rendered '12 Tables' for a 15-table backend.
+    const tableCount = (tableStats ?? []).length
     const summary: Summary = {
       endUsers,
       dbBytes: tableStats
@@ -78,7 +84,7 @@ export async function GET(
 
     return NextResponse.json({
       success: true,
-      data: { tables, buckets, summary },
+      data: { tables, tableCount, buckets, summary },
     })
   })
 }
@@ -100,6 +106,7 @@ async function countEndUsers(projectId: string): Promise<number | null> {
   // Service-role: the users table is RLS-FORCED with a service-role-only
   // policy. Ownership was already proven by withProjectValidation above.
   const rows = await executeWithUserContext<{ count: number }>(
+    projectId,
     '',
     true,
     `SELECT COUNT(*)::int AS count FROM "${schema.schemaName}"."users" WHERE ${where.join(' AND ')}`,

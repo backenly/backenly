@@ -12,6 +12,7 @@
  */
 
 import { prisma } from '@/lib/db/prisma'
+import { workspaceRawClient } from '@/lib/data-plane/regional'
 
 export interface ColumnSnapshot {
   name: string
@@ -50,13 +51,14 @@ export async function snapshotSchema(
   description: string,
   triggeredBy: string
 ): Promise<string> {
-  // Get current schema via introspection
-  const { introspectSchema } = await import('@/lib/ai/minimal-executor')
-  const schemaText = await introspectSchema(projectId)
-
-  // Parse the schema text into a structured snapshot
+  // Read the structure straight from the catalog. This used to round-trip
+  // through introspectSchema's human-formatted string and a parser expecting
+  // `Table:` / `FK:` lines that format never contained, so every snapshot was
+  // stored with ZERO tables — the History panel always rendered empty, and
+  // rollback diffed two empty sets and reported "Rolled back ... Dropped 0
+  // table(s)" as a success while changing nothing.
   const snapshot: SchemaSnapshot = {
-    tables: parseSchemaText(schemaText),
+    tables: await captureLiveSchema(projectId),
     capturedAt: new Date().toISOString(),
   }
 
@@ -135,103 +137,130 @@ export async function getSchemaVersion(
 }
 
 /**
- * Rollback to a previous schema version.
- * Computes the diff between current schema and target version,
- * then executes the necessary DDL to revert.
+ * Retired: rolling back is per change, through the change ledger.
  *
- * WARNING: Rollback drops columns/tables — data loss possible.
- * Returns list of DDL statements that were executed.
+ * This used to diff the live schema against a SchemaVersion and run
+ * `DROP TABLE … CASCADE` on every table newer than it and `DROP COLUMN` on every
+ * newer column: statement by statement, outside any transaction, destroying
+ * the rows and values written since with nothing kept, and unable to bring
+ * back anything dropped since (it said so, and stopped there). It could only
+ * destroy, under the name "rollback".
+ *
+ * Restoring now goes through lib/changes/recovery.ts: one change at a time,
+ * proven first, in one transaction, keeping what it removes in a vault, and
+ * verified against the restore point afterwards. It runs automatically only
+ * when that is lossless and the change failed its checks; otherwise a person
+ * decides, from History or by approving a request. This function
+ * stays exported so nothing that still imports it can reach the old behaviour;
+ * it changes nothing and says where restoring lives.
  */
 export async function rollbackToVersion(
   projectId: string,
-  targetVersionId: string
+  targetVersionId: string,
 ): Promise<{ success: boolean; statementsExecuted: string[]; message: string }> {
-  // Scoped to this project. Unscoped, a caller could name any version in the
-  // system and roll their own schema into another tenant's shape.
+  // Still scoped: another project's version is not found, never described.
   const target = await getSchemaVersion(targetVersionId, projectId)
   if (!target) {
     return { success: false, statementsExecuted: [], message: 'Version not found.' }
   }
-
-  // Snapshot current state before rollback (for audit)
-  await snapshotSchema(
-    projectId,
-    `Pre-rollback snapshot (reverting to v${target.versionNum})`,
-    'system:rollback'
-  ).catch(() => {})
-
-  const statements: string[] = []
-  const errors: string[] = []
-
-  // Import workspace DB access
-  const { getWorkspacePostgresClient } = await import('@/lib/services/workspaceDatabase')
-  const db = await getWorkspacePostgresClient(projectId)
-
-  if (!db?.executeRaw) {
-    return { success: false, statementsExecuted: [], message: 'Cannot connect to workspace database.' }
-  }
-
-  // Get current live schema
-  const { introspectSchema } = await import('@/lib/ai/minimal-executor')
-  const currentText = await introspectSchema(projectId)
-  const currentTables = parseSchemaText(currentText)
-
-  const targetTables = target.snapshot.tables
-  const targetTableNames = new Set(targetTables.map(t => t.name))
-  const currentTableNames = new Set(currentTables.map(t => t.name))
-
-  // Drop tables that exist now but didn't exist in target version
-  for (const table of currentTables) {
-    if (!targetTableNames.has(table.name)) {
-      const sql = `DROP TABLE IF EXISTS {schema}."${table.name}" CASCADE`
-      try {
-        await db.executeRaw(sql)
-        statements.push(sql)
-      } catch (err: any) {
-        errors.push(`DROP ${table.name}: ${err.message}`)
-      }
-    }
-  }
-
-  if (errors.length > 0) {
-    return {
-      success: false,
-      statementsExecuted: statements,
-      message: `Rollback partially failed: ${errors.join('; ')}`,
-    }
-  }
-
   return {
-    success: true,
-    statementsExecuted: statements,
-    message: `Rolled back to schema v${target.versionNum}. Dropped ${statements.length} table(s).`,
+    success: false,
+    statementsExecuted: [],
+    message:
+      `Schema v${target.versionNum} cannot be restored wholesale. Each change since then is recorded with a ` +
+      'restore point: a person goes back from History, one change at a time or with Restore to this point, ' +
+      'each checked first and verified afterwards. Nothing was changed.',
   }
 }
 
-// ─── Internal: parse schema text into structured snapshot ─────────────────────
+// ─── Internal: capture the live schema from the catalog ───────────────────────
 
-function parseSchemaText(schemaText: string): TableSnapshot[] {
-  const tables: TableSnapshot[] = []
-  if (!schemaText) return tables
+/**
+ * The workspace schema's real structure, read from information_schema.
+ *
+ * This is what gets stored in a snapshot: the shape read from the catalog,
+ * so two snapshots compared are a statement about the database rather than
+ * about a parser.
+ *
+ * Read in the project's own region (lib/data-plane/regional.ts). A regional
+ * project's schema exists only in its region's database: read from the home
+ * one it has no tables, so every snapshot would be empty. A region this
+ * process cannot reach is refused, never read as empty.
+ */
+async function captureLiveSchema(projectId: string): Promise<TableSnapshot[]> {
+  const schemaName = `workspace_${projectId}`
+  const db = await workspaceRawClient(projectId)
 
-  // Basic parser: look for "Table: name\n  column: type" pattern
-  // (introspectSchema returns a formatted string)
-  const tableBlocks = schemaText.split(/\n(?=Table:|table:)/i)
+  const tables = await db.$queryRawUnsafe<Array<{ table_name: string }>>(
+    `SELECT table_name FROM information_schema.tables
+      WHERE table_schema = $1 AND table_type = 'BASE TABLE'
+      ORDER BY table_name`,
+    schemaName
+  )
+  if (tables.length === 0) return []
 
-  for (const block of tableBlocks) {
-    const nameMatch = block.match(/[Tt]able:\s*(\w+)/)
-    if (!nameMatch) continue
+  const columns = await db.$queryRawUnsafe<Array<{
+    table_name: string
+    column_name: string
+    data_type: string
+    is_nullable: string
+    column_default: string | null
+  }>>(
+    `SELECT table_name, column_name, data_type, is_nullable, column_default
+       FROM information_schema.columns
+      WHERE table_schema = $1
+      ORDER BY table_name, ordinal_position`,
+    schemaName
+  )
 
-    const columns: ColumnSnapshot[] = []
-    const fkLines = block.match(/FK:\s*(\w+)\s*→\s*(\w+)\((\w+)\)/g) ?? []
+  // Single-column UNIQUE constraints and unique indexes, for the `unique` flag.
+  const uniques = await db.$queryRawUnsafe<Array<{ table_name: string; column_name: string }>>(
+    `SELECT c.relname AS table_name, a.attname AS column_name
+       FROM pg_index i
+       JOIN pg_class c ON c.oid = i.indrelid
+       JOIN pg_namespace n ON n.oid = c.relnamespace
+       JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = ANY(i.indkey)
+      WHERE n.nspname = $1 AND i.indisunique AND array_length(i.indkey, 1) = 1`,
+    schemaName
+  )
+  const uniqueSet = new Set(uniques.map(u => `${u.table_name}.${u.column_name}`))
 
-    const foreignKeys = fkLines.map(fk => {
-      const m = fk.match(/FK:\s*(\w+)\s*→\s*(\w+)\((\w+)\)/)
-      return m ? { column: m[1], referencesTable: m[2], referencesColumn: m[3] } : null
-    }).filter(Boolean) as TableSnapshot['foreignKeys']
+  const foreignKeys = await db.$queryRawUnsafe<Array<{
+    table_name: string
+    column_name: string
+    foreign_table: string
+    foreign_column: string
+  }>>(
+    `SELECT tc.table_name,
+            kcu.column_name,
+            ccu.table_name  AS foreign_table,
+            ccu.column_name AS foreign_column
+       FROM information_schema.table_constraints tc
+       JOIN information_schema.key_column_usage kcu
+         ON kcu.constraint_name = tc.constraint_name AND kcu.constraint_schema = tc.constraint_schema
+       JOIN information_schema.constraint_column_usage ccu
+         ON ccu.constraint_name = tc.constraint_name AND ccu.constraint_schema = tc.constraint_schema
+      WHERE tc.table_schema = $1 AND tc.constraint_type = 'FOREIGN KEY'`,
+    schemaName
+  )
 
-    tables.push({ name: nameMatch[1], columns, foreignKeys })
-  }
-
-  return tables
+  return tables.map(({ table_name }) => ({
+    name: table_name,
+    columns: columns
+      .filter(c => c.table_name === table_name)
+      .map(c => ({
+        name: c.column_name,
+        type: c.data_type,
+        nullable: c.is_nullable === 'YES',
+        unique: uniqueSet.has(`${table_name}.${c.column_name}`),
+        ...(c.column_default != null ? { default: c.column_default } : {}),
+      })),
+    foreignKeys: foreignKeys
+      .filter(fk => fk.table_name === table_name)
+      .map(fk => ({
+        column: fk.column_name,
+        referencesTable: fk.foreign_table,
+        referencesColumn: fk.foreign_column,
+      })),
+  }))
 }

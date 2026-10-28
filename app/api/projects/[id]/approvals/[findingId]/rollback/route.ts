@@ -1,23 +1,24 @@
 /**
- * POST /api/projects/[id]/approvals/[findingId]/rollback
+ * POST /api/projects/[id]/approvals/[findingId]/rollback: retired.
  *
- * Reverses a previously applied fix by restoring the schema snapshot
- * taken immediately before the fix was applied.
+ * This re-ran the "DDL" stored with the schema snapshot taken before a fix,
+ * against the workspace and outside the change ledger. That text was a comment
+ * header and a list of column names, not SQL, so on a schema with tables it
+ * failed, and on an empty one it reported success having done nothing. A fix's
+ * changes are governed changes now, and its undo restores exactly those
+ * (revertAutoFix, lib/changes/recovery.ts).
  *
- * "You approved it. One click to undo."
+ * The administer floor stays, so the route answers the same callers as before.
  */
 
-import { NextRequest, NextResponse } from 'next/server'
+import { NextRequest } from 'next/server'
 import { withProjectValidation } from '@/lib/middleware/projectValidation'
-import { rollbackFix } from '@/lib/ai/approval-manager'
+import { movedToChanges } from '@/lib/changes/retired'
 
-export async function POST(
-  request: NextRequest,
-  props: { params: Promise<{ id: string; findingId: string }> }
-) {
-  const params = await props.params;
-  return withProjectValidation<any>(request, async (validated) => {
-    const result = await rollbackFix(validated.projectId, params.findingId)
-    return NextResponse.json(result, { status: result.success ? 200 : 422 })
-  })
+export async function POST(request: NextRequest) {
+  return withProjectValidation<any>(
+    request,
+    async () => movedToChanges('Rolling back an approved fix from its snapshot'),
+    { floor: 'administer' },
+  )
 }

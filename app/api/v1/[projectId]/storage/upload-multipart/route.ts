@@ -11,6 +11,7 @@ import path from 'path'
 import fs from 'fs/promises'
 import os from 'os'
 import { recordedV1 } from '@/lib/traffic/recorded-v1'
+import { forgetFileNames, keepFileNames, storedFileName, withFileName } from '@/lib/storage/file-names'
 
 const CHUNK_UPLOAD_DIR = process.env.CHUNK_TEMP_DIR || path.join(os.tmpdir(), 'backenly-chunks')
 // Maximum total assembled file size (2 GB)
@@ -93,6 +94,7 @@ async function handleInitiate(request: NextRequest, context: { projectId: string
     where: { projectId: context.projectId, name: bucketName },
   })
   if (!bucketRecord) {
+    // history: provisioned by the first upload, on the data plane, which never waits for the change lock
     bucketRecord = await prisma.storageBucket.create({
       data: { name: bucketName, projectId: context.projectId, isPublic: Boolean(isPublic), maxFileSizeBytes: BigInt(MAX_ASSEMBLED_BYTES) },
     })
@@ -106,7 +108,9 @@ async function handleInitiate(request: NextRequest, context: { projectId: string
       const { bucket: s3Bucket } = getS3Config()
       const safeFilename = filename.replace(/[^a-zA-Z0-9._\-]/g, '_')
       const uploadId = crypto.randomUUID()
-      const s3Key = `projects/${context.projectId}/buckets/${bucketName}/${uploadId}/${safeFilename}`
+      // The key is recorded on the platform row (its path), so a regional
+      // project's names only by their stand-in (lib/storage/file-names.ts).
+      const s3Key = `projects/${context.projectId}/buckets/${bucketName}/${uploadId}/${await storedFileName(context.projectId, safeFilename)}`
       const cmd = new CreateMultipartUploadCommand({
         Bucket: s3Bucket,
         Key: s3Key,
@@ -119,11 +123,14 @@ async function handleInitiate(request: NextRequest, context: { projectId: string
       // CRITICAL: `path` must equal the S3 object key (the download layer uses
       // it verbatim as the Key). Storing the shorter `{uploadId}/{filename}`
       // made completed multipart uploads undownloadable → NoSuchKey.
+      const fileId = crypto.randomUUID()
+      const stored = await keepFileNames(context.projectId, fileId, { name: safeFilename, originalName: '' })
       const fileRecord = await prisma.storageFile.create({
         data: {
+          id: fileId,
           bucketId: bucketRecord.id,
           projectId: context.projectId,
-          name: safeFilename,
+          name: stored.name,
           path: s3Key,
           size: BigInt(contentLength),
           mimeType: contentType,
@@ -151,12 +158,15 @@ async function handleInitiate(request: NextRequest, context: { projectId: string
   const chunkDir = path.join(CHUNK_UPLOAD_DIR, uploadId)
   await fs.mkdir(chunkDir, { recursive: true })
 
+  const fileId = crypto.randomUUID()
+  const stored = await keepFileNames(context.projectId, fileId, { name: safeFilename, originalName: '' })
   await prisma.storageFile.create({
     data: {
+      id: fileId,
       bucketId: bucketRecord.id,
       projectId: context.projectId,
-      name: safeFilename,
-      path: `${uploadId}/${safeFilename}`,
+      name: stored.name,
+      path: `${uploadId}/${stored.name}`,
       size: BigInt(contentLength),
       mimeType: contentType,
       isPublic: Boolean(isPublic),
@@ -332,23 +342,27 @@ async function handleComplete(request: NextRequest, uploadId: string, totalParts
   }
   const storedFile = await storageService.uploadFile(
     bucket.id,
-    { name: fileRecord.name, buffer: assembled, mimeType: fileRecord.mimeType || 'application/octet-stream' },
-    { isPublic: fileRecord.isPublic, projectId, uploadedBy: '' }
+    // The real name: a regional project's tracking row holds only its stand-in.
+    { name: (await withFileName(projectId, fileRecord)).name, buffer: assembled, mimeType: fileRecord.mimeType || 'application/octet-stream' },
+    // Multipart's initiate step carries no end-user identity yet, so the
+    // uploader is unknown, not ''. Null reads as operator-only under
+    // owner_only — closed rather than broken.
+    { isPublic: fileRecord.isPublic, projectId, uploadedBy: undefined }
   )
   // Clean up temp chunks
   fs.rm(chunkDir, { recursive: true, force: true }).catch(() => null)
 
-  await prisma.storageFile.update({
-    where: { id: fileRecord.id },
-    data: { size: BigInt(assembled.length), metadata: { ...meta, url: storedFile.url, status: 'complete' } },
-  })
-
-  // Track storage usage (non-blocking)
-  incrementStorageUsed(projectId, BigInt(assembled.length)).catch(
-    (err: any) => console.warn('[Storage] Failed to increment storage usage:', err?.message)
+  // uploadFile wrote the REAL row (correct path, quota counted inside it).
+  // The pending tracking row is deleted, not kept: updating it in place left
+  // an active second row whose path `${uploadId}/${filename}` no reader can
+  // serve, and the extra incrementStorageUsed here counted the same bytes a
+  // second time. The id handed back is the row downloads actually resolve.
+  await prisma.storageFile.delete({ where: { id: fileRecord.id } }).catch(
+    (err: any) => console.warn('[Multipart] Could not remove pending record:', err?.message)
   )
+  await forgetFileNames(projectId, [fileRecord.id]).catch(() => {})
 
-  return createSuccessResponse({ id: fileRecord.id, url: storedFile.url, path: fileRecord.path, size: assembled.length })
+  return createSuccessResponse({ id: storedFile.id, url: storedFile.url, path: storedFile.path, size: assembled.length })
 }
 
 // ── Route dispatcher ───────────────────────────────────────────────────────────
@@ -407,6 +421,7 @@ async function handleDELETE(request: NextRequest, props: { params: Promise<{ pro
 
   if (fileRecord) {
     await prisma.storageFile.delete({ where: { id: fileRecord.id } }).catch(() => null)
+    await forgetFileNames(context.projectId, [fileRecord.id]).catch(() => {})
     const meta: any = fileRecord.metadata || {}
     // Abort S3 multipart upload if applicable.
     // Previously this built `new S3Client({ region })` with NO endpoint and NO

@@ -36,6 +36,7 @@
  */
 
 import { validateBooleanExpression } from '@/lib/db/sql-expression'
+import { describeTarget, type DeclaredForeignKey, type ReferentialAction } from '@/lib/db/declared-foreign-key'
 
 /**
  * The typed-action vocabulary the governance kernel accepts.
@@ -311,12 +312,162 @@ interface ParsedColumn {
   type: string
   nullable?: boolean
   unique?: boolean
+  /** The referenced table, as the executor's `fkTo` contract has always named it. */
   fkTo?: string
+  /** The whole REFERENCES clause; with it the executor installs exactly this key. */
+  references?: DeclaredForeignKey
   default?: string
 }
 
 /** Identifiers that begin a table-level constraint rather than a column. */
 const TABLE_CONSTRAINT = /^(primary\s+key|foreign\s+key|unique|check|constraint|exclude)\b/i
+
+// ── Foreign keys: the whole REFERENCES clause ────────────────────────────────
+//
+// This used to read the referenced table and nothing after it, and the executor
+// chose the rest: `REFERENCES guilds(id) ON DELETE SET NULL` was installed as ON
+// DELETE CASCADE, so deleting a guild deleted its members. The clause is now
+// read to its end and carried whole (lib/db/declared-foreign-key.ts), and
+// anything in it that cannot be installed exactly is refused, not dropped. What
+// it does not say takes SQL's meaning: no ON DELETE is NO ACTION.
+
+const REFERENTIAL_ACTION = /^on\s+(delete|update)\s+(no\s+action|restrict|cascade|set\s+null|set\s+default)\b/i
+const PLAIN_NAME = /^[A-Za-z_][A-Za-z0-9_$]{0,62}$/
+
+/**
+ * Read the REFERENCES clause at the start of `text` (literals already masked)
+ * and return the key it declares and how many characters it spans.
+ */
+function readReferences(text: string, stmt: string, name?: string): { fk: DeclaredForeignKey; length: number } {
+  const head = /^references\s+("(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$.]*)\s*/i.exec(text)
+  if (!head) {
+    throw new MigrationParseError(
+      'Malformed REFERENCES clause.',
+      'BAD_STATEMENT',
+      'e.g. `REFERENCES users(id) ON DELETE CASCADE`.',
+      stmt,
+    )
+  }
+  const table = unquoteIdent(head[1])
+  assertUnqualified(table, stmt)
+  let at = head[0].length
+  // No column named: SQL's meaning is the referenced table's primary key, left
+  // to PostgreSQL to resolve, as it is in the statement Backenly sends.
+  let column: string | undefined
+  if (text[at] === '(') {
+    const close = text.indexOf(')', at)
+    const cols = close === -1 ? [] : splitTopLevel(text.slice(at + 1, close)).map((c) => unquoteIdent(c))
+    if (cols.length !== 1 || !cols[0]) {
+      throw new MigrationParseError(
+        `Composite foreign keys are not supported.`,
+        'UNSUPPORTED_CONSTRAINT',
+        `Reference one column, e.g. REFERENCES ${table}(id), or describe the relationship via backend_chat.`,
+        stmt,
+      )
+    }
+    column = cols[0]
+    at = close + 1
+  }
+  for (const [what, value] of [['table', table], ['column', column], ['constraint name', name]] as const) {
+    if (value !== undefined && !PLAIN_NAME.test(value)) {
+      throw new MigrationParseError(
+        `The foreign key's ${what} "${value}" is not a name Backenly can install.`,
+        'UNSUPPORTED_CONSTRAINT',
+        'Use a plain name: letters, digits and underscores, starting with a letter.',
+        stmt,
+      )
+    }
+  }
+
+  const actions: { delete?: ReferentialAction; update?: ReferentialAction } = {}
+  for (;;) {
+    const rest = text.slice(at)
+    const gap = rest.length - rest.trimStart().length
+    const clause = rest.slice(gap)
+    const action = REFERENTIAL_ACTION.exec(clause)
+    if (action) {
+      const event = action[1].toLowerCase() as 'delete' | 'update'
+      const rule = action[2].replace(/\s+/g, ' ').toUpperCase() as ReferentialAction
+      if (actions[event]) {
+        throw new MigrationParseError(`ON ${event.toUpperCase()} is given twice.`, 'BAD_STATEMENT', undefined, stmt)
+      }
+      // PostgreSQL 15's column list (`ON DELETE SET NULL (a)`) is not modelled.
+      if (/^\s*\(/.test(clause.slice(action[0].length))) {
+        throw new MigrationParseError(
+          `ON ${event.toUpperCase()} ${rule} with a column list is not supported.`,
+          'UNSUPPORTED_CONSTRAINT',
+          `Write ON ${event.toUpperCase()} ${rule} without the column list.`,
+          stmt,
+        )
+      }
+      actions[event] = rule
+      at += gap + action[0].length
+      continue
+    }
+    const match = /^match\s+(simple|full|partial)\b/i.exec(clause)
+    if (match) {
+      // On one column MATCH FULL behaves exactly as MATCH SIMPLE, the default.
+      if (match[1].toLowerCase() === 'partial') {
+        throw new MigrationParseError(
+          'MATCH PARTIAL is not supported.',
+          'UNSUPPORTED_CONSTRAINT',
+          'Remove it. On one column MATCH SIMPLE (the default) and MATCH FULL behave the same.',
+          stmt,
+        )
+      }
+      at += gap + match[0].length
+      continue
+    }
+    if (/^(?:not\s+)?deferrable\b|^initially\s+(?:deferred|immediate)\b/i.test(clause)) {
+      throw new MigrationParseError(
+        'Deferrable foreign keys are not supported.',
+        'UNSUPPORTED_CONSTRAINT',
+        'Remove DEFERRABLE and INITIALLY; the key is then checked as each statement runs.',
+        stmt,
+      )
+    }
+    break
+  }
+  return {
+    fk: {
+      table,
+      ...(column ? { column } : {}),
+      onDelete: actions.delete ?? 'NO ACTION',
+      onUpdate: actions.update ?? 'NO ACTION',
+      ...(name ? { name } : {}),
+    },
+    length: at,
+  }
+}
+
+/** `FOREIGN KEY (column) REFERENCES …`, a table constraint, read whole. */
+function readForeignKeyConstraint(
+  spec: string,
+  name: string | undefined,
+  stmt: string,
+): { column: string; fk: DeclaredForeignKey } {
+  const head = /^foreign\s+key\s*\(([^)]*)\)\s*/i.exec(spec)
+  const cols = head ? splitTopLevel(head[1]).map((c) => unquoteIdent(c)) : []
+  if (!head || cols.length !== 1 || !cols[0]) {
+    throw new MigrationParseError(
+      `Composite foreign keys are not supported.`,
+      'UNSUPPORTED_CONSTRAINT',
+      `Describe the relationship via backend_chat and it will be modelled for you.`,
+      stmt,
+    )
+  }
+  const { fk, length } = readReferences(maskLiterals(spec).slice(head[0].length), stmt, name)
+  const trailing = spec.slice(head[0].length + length).trim()
+  if (trailing) {
+    throw new MigrationParseError(
+      `Could not translate "${trailing.slice(0, 40)}" after the foreign key.`,
+      'UNSUPPORTED_CONSTRAINT',
+      'A foreign key is FOREIGN KEY (column) REFERENCES table(column) [ON DELETE …] [ON UPDATE …].',
+      stmt,
+    )
+  }
+  return { column: cols[0], fk }
+}
 
 // ── CHECK constraints ────────────────────────────────────────────────────────
 
@@ -535,22 +686,30 @@ function parseColumnDef(def: string, stmt: string, checksOut?: ParsedCheck[]): P
   // offsets still line up with the original and values are sliced from the
   // original text. Searching the mask and slicing the source is the only version
   // of this that is correct for both.
-  const mask = maskLiterals(modifiers)
+  let mask = maskLiterals(modifiers)
+
+  // ── REFERENCES, read whole and taken out first ──────────────────────────────
+  // Its actions spell NULL and DEFAULT (`ON DELETE SET NULL`, `SET DEFAULT`),
+  // which the scans below would read as the column's own. The mask keeps quoted
+  // identifiers as written, so the clause is read from it directly.
+  // `CONSTRAINT <name> REFERENCES …` names the key.
+  const refAt = /\breferences\b/i.exec(mask)
+  if (refAt) {
+    const namedRef = /\bconstraint\s+("(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$]*)\s+$/i.exec(mask.slice(0, refAt.index))
+    const { fk, length } = readReferences(mask.slice(refAt.index), stmt, namedRef ? unquoteIdent(namedRef[1]) : undefined)
+    col.fkTo = fk.table
+    col.references = fk
+    const from = namedRef ? namedRef.index : refAt.index
+    const to = refAt.index + length
+    mask = mask.slice(0, from) + ' '.repeat(to - from) + mask.slice(to)
+    modifiers = modifiers.slice(0, from) + ' '.repeat(to - from) + modifiers.slice(to)
+  }
 
   if (/\bnot\s+null\b/i.test(mask)) col.nullable = false
   else if (/\bprimary\s+key\b/i.test(mask)) col.nullable = false
   else col.nullable = true
 
   if (/\bunique\b/i.test(mask) || /\bprimary\s+key\b/i.test(mask)) col.unique = true
-
-  const ref = /\breferences\s+("(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$.]*)/i.exec(mask)
-  if (ref) {
-    // Sliced from the ORIGINAL so a quoted identifier survives the mask.
-    const raw = modifiers.slice(ref.index, ref.index + ref[0].length)
-    const target = unquoteIdent(raw.replace(/^\s*references\s+/i, '').replace(/\s*\(.*$/, ''))
-    assertUnqualified(target, stmt)
-    col.fkTo = target
-  }
 
   // Anchored on the keyword alone, never `default\s+`: a masked literal is a run
   // of spaces, and a greedy `\s+` would consume the very value being extracted.
@@ -650,6 +809,8 @@ function translateCreateTable(stmt: string): PlannedAction[] {
   const checks: ParsedCheck[] = []
   /** Multi-column UNIQUE → a unique index, applied after the table exists. */
   const compositeUniques: string[][] = []
+  /** Table-level foreign keys, folded onto their columns once every column is read. */
+  const tableForeignKeys: Array<{ column: string; fk: DeclaredForeignKey }> = []
 
   for (const part of splitTopLevel(paren.body)) {
     const trimmed = part.trim()
@@ -660,14 +821,11 @@ function translateCreateTable(stmt: string): PlannedAction[] {
     const spec = named ? named[2].trim() : trimmed
     const specName = named ? unquoteIdent(named[1]) : undefined
 
-    // Table-level FOREIGN KEY (col) REFERENCES other(id) — fold onto the column.
-    const tableFk = /^foreign\s+key\s*\(\s*("(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$]*)\s*\)\s*references\s+("(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$.]*)/i.exec(spec)
-    if (tableFk) {
-      const colName = unquoteIdent(tableFk[1])
-      const target = unquoteIdent(tableFk[2].replace(/\s*\(.*$/, ''))
-      assertUnqualified(target, stmt)
-      const existing = columns.find((c) => c.name === colName)
-      if (existing) existing.fkTo = target
+    // Table-level FOREIGN KEY (col) REFERENCES … — folded onto the column after
+    // the loop, because SQL lets the constraint come before the column it names.
+    // Matching only columns already read used to drop such a key without a word.
+    if (/^foreign\s+key\b/i.test(spec)) {
+      tableForeignKeys.push(readForeignKeyConstraint(spec, specName, stmt))
       continue
     }
 
@@ -754,6 +912,28 @@ function translateCreateTable(stmt: string): PlannedAction[] {
     }
     if (MANAGED_COLUMNS.has(col.name)) { dropped.push(col.name); continue }
     columns.push(col)
+  }
+
+  for (const { column, fk } of tableForeignKeys) {
+    const target = columns.find((c) => c.name === column)
+    if (!target) {
+      throw new MigrationParseError(
+        `FOREIGN KEY (${column}) names a column CREATE TABLE ${tableName} does not declare.`,
+        'BAD_STATEMENT',
+        `Declare ${column} in the column list.`,
+        stmt,
+      )
+    }
+    if (target.references) {
+      throw new MigrationParseError(
+        `${tableName}.${column} is given two foreign keys.`,
+        'UNSUPPORTED_CONSTRAINT',
+        `Declare one: either REFERENCES on the column or a FOREIGN KEY (${column}) constraint.`,
+        stmt,
+      )
+    }
+    target.fkTo = fk.table
+    target.references = fk
   }
 
   if (columns.length === 0) {
@@ -871,29 +1051,18 @@ function translateAddConstraint(tableName: string, body: string, stmt: string): 
     }]
   }
 
-  const fk = /^foreign\s+key\s*\(([^)]*)\)\s*references\s+("(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$.]*)\s*(\(([^)]*)\))?/i.exec(spec)
-  if (fk) {
-    const cols = splitTopLevel(fk[1]).map((c) => unquoteIdent(c))
-    if (cols.length !== 1) {
-      throw new MigrationParseError(
-        `Composite foreign keys are not supported.`,
-        'UNSUPPORTED_CONSTRAINT',
-        `Describe the relationship via backend_chat and it will be modelled for you.`,
-        stmt,
-      )
-    }
-    const target = unquoteIdent(fk[2])
-    assertUnqualified(target, stmt)
-    const targetCol = fk[4] ? unquoteIdent(fk[4]) : 'id'
+  if (/^foreign\s+key\b/i.test(spec)) {
+    const { column, fk } = readForeignKeyConstraint(spec, constraintName, stmt)
     return [{
       tool: 'add_constraint',
       args: {
         tableName,
-        columnName: cols[0],
+        columnName: column,
         constraintType: 'foreign_key',
-        expression: `${target}(${targetCol})`,
-        referencedTable: target,
+        expression: describeTarget(fk),
+        referencedTable: fk.table,
         ...(constraintName ? { constraintName } : {}),
+        references: fk,
       },
       source: stmt,
     }]
@@ -1026,6 +1195,7 @@ function translateAlterTable(stmt: string): PlannedAction[] {
     if (col.default !== undefined) column.default = col.default
     if (col.unique !== undefined) column.unique = col.unique
     if (col.fkTo !== undefined) column.fkTo = col.fkTo
+    if (col.references !== undefined) column.references = col.references
     const actions: PlannedAction[] = [{ tool: 'add_column', args: { tableName, column }, source: stmt }]
     for (const check of checks) actions.push(checkAction(tableName, check, stmt))
     return actions

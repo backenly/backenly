@@ -13,7 +13,8 @@
  *   2. Captures current live state from PostgreSQL (RLS, FKs, orphan tables,
  *      API drift, webhook health, auth error rate)
  *   3. Classifies each finding as safe-to-auto-fix or risky (needs approval)
- *   4. Executes safe fixes inline
+ *   4. Leaves safe fixes to the repair loop, which applies them as governed
+ *      changes (lib/autonomy/reconciler.ts)
  *   5. Writes HealthFinding records for everything found
  *   6. Sends a PlatformNotification for critical findings
  */
@@ -22,8 +23,7 @@ import { prisma } from '@/lib/db/prisma'
 import { detectSubsystemRecurrence } from '@/lib/autonomy/subsystem-recurrence'
 import { detectIntentDrift } from '@/lib/autonomy/intent-conformance'
 import { probeQueryFailed } from '@/lib/core/drift-detector'
-import { queryWorkspaceSchema, executeInWorkspaceSchema } from './workspaceDatabase'
-import { applyPermissionPolicy } from './workspace-rls'
+import { queryWorkspaceSchema } from './workspaceDatabase'
 import {
   loadOwnershipCatalog,
   inferRlsPlanFromCatalog,
@@ -46,19 +46,24 @@ import { verifyWorkflows } from '@/lib/core/workflow-verifier'
 import {
   runContractVerification,
   probePlatformIngress,
-  attributeContractFailures,
+  attributeAcrossRegions,
   settleTenantContract,
   type ProjectProbeOutcome,
 } from '@/lib/services/contract-verifier'
 import { isDataPlaneOutage } from '@/lib/core/fix-actions'
 import { reportPlatformFault, type PlatformFaultReport } from '@/lib/autonomy/platform-faults'
-import { reapUnattributableFindings } from '@/lib/core/finding-reaper'
+import { reapUnattributableFindings, withdrawFindings } from '@/lib/core/finding-reaper'
 import { recordContractSweepResult } from '@/lib/autonomy/data-plane-liveness'
 import { writeFixHistory, checkEscalation, buildResolutionText } from '@/lib/memory/fix-history'
 import { generateFixPlansFromRawFindings, type FixPlan } from '@/lib/core/fix-plan-generator'
 import { runBuiltInVerification, type VerificationExecutionResult } from '@/lib/verification/verification-executor'
 import { FLAGS } from '@/lib/config/flags'
 import { watchableProjectsWhere, isWatchableProject } from '@/lib/projects/backend-presence'
+import { canReach, skipUnreachable } from '@/lib/autonomy/region-skip'
+import { projectRegion } from '@/lib/data-plane/regional'
+import { partitionServed } from '@/lib/data-plane/serving'
+import { findingDetailsKeptHere } from '@/lib/data-plane/residency'
+import type { CloudRegionId } from '@/lib/regions'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -78,6 +83,15 @@ export interface ObserverResult {
   fixPlans?: FixPlan[]
   /** Phase 13 — populated when ENABLE_VERIFICATION_EXECUTION + ENABLE_SAFE_VERIFICATION_MODE are on */
   verificationResult?: VerificationExecutionResult
+  /**
+   * Set when nothing was checked here. `served-elsewhere`: another region's
+   * worker checks and repairs the project on its own schedule. `unreachable`:
+   * this process cannot reach the project's region, and the skip is recorded
+   * (lib/autonomy/region-skip.ts).
+   */
+  skipped?: 'served-elsewhere' | 'unreachable'
+  /** The region whose worker checks the project, when it is served elsewhere. */
+  region?: CloudRegionId
 }
 
 // ─── Main Entry Point ─────────────────────────────────────────────────────────
@@ -102,10 +116,15 @@ export async function runWorkspaceObserver(): Promise<{
   results: ObserverResult[]
   errors: string[]
 }> {
-  const projects = await prisma.project.findMany({
-    where: watchableProjectsWhere(),
-    select: { id: true, userId: true },
-  })
+  // Only projects this process can reach; the rest are recorded as skipped
+  // (lib/autonomy/region-skip.ts) rather than observed as empty.
+  const projects = await skipUnreachable(
+    await prisma.project.findMany({
+      where: watchableProjectsWhere(),
+      select: { id: true, userId: true },
+    }),
+    'workspace-observer',
+  )
 
   const results: ObserverResult[] = []
   const topLevelErrors: string[] = []
@@ -179,12 +198,17 @@ export async function runContractSweep(options: {
     errors.push(`[reap] ${err?.message ?? String(err)}`)
   })
 
-  const projects = await prisma.project.findMany({
-    where: options.projectIds
-      ? { id: { in: options.projectIds }, ...watchableProjectsWhere() }
-      : watchableProjectsWhere(),
-    select: { id: true },
-  })
+  // Only projects this process can reach; the rest are recorded as skipped
+  // (lib/autonomy/region-skip.ts) rather than probed and filed as broken.
+  const projects = await skipUnreachable(
+    await prisma.project.findMany({
+      where: options.projectIds
+        ? { id: { in: options.projectIds }, ...watchableProjectsWhere() }
+        : watchableProjectsWhere(),
+      select: { id: true },
+    }),
+    'contract-sweep',
+  )
   if (projects.length === 0) return { processed: 0, broken, errors, platformFaults }
 
   const ingress = await probePlatformIngress()
@@ -215,7 +239,20 @@ export async function runContractSweep(options: {
     }
   }
 
-  const attribution = attributeContractFailures(outcomes)
+  // Faults are attributed fleet-wide and within each region, because each
+  // region has its own data plane (attributeAcrossRegions). A project whose
+  // region cannot be looked up is not settled this pass: placing it in the
+  // wrong region would attribute its failures against the wrong plane.
+  const regionOf = new Map<string, CloudRegionId>()
+  for (const { projectId } of outcomes) {
+    try {
+      regionOf.set(projectId, await projectRegion(projectId))
+    } catch (err: any) {
+      errors.push(`[${projectId}] ${err?.message ?? String(err)}`)
+    }
+  }
+  const placed = outcomes.filter(o => regionOf.has(o.projectId))
+  const attribution = attributeAcrossRegions(placed, id => regionOf.get(id) as CloudRegionId)
 
   for (const f of attribution.platformFaults) {
     const fault: PlatformFaultReport = {
@@ -225,32 +262,35 @@ export async function runContractSweep(options: {
       status: f.status,
       projectIds: f.projectIds,
       origin: ingress.origin,
+      ...(f.region ? { region: f.region } : {}),
     }
     reportPlatformFault(fault)
     platformFaults.push(fault)
   }
 
-  // The data plane is shared. When it fails for everyone, the repair is a
-  // platform action taken once, not a finding per tenant. healDataPlane is
-  // single-flighted and re-verifies against its own PostgREST probe before it
-  // restarts anything.
-  const dataPlaneDown = attribution.platformFaults.some(
-    f =>
+  // A data plane serves one region. When it fails for that region's projects,
+  // the repair is a platform action taken once for the region, not a finding
+  // per tenant. healDataPlane is single-flighted per region and re-verifies
+  // against that region's PostgREST probe before it restarts anything.
+  const regionsDown = new Set<CloudRegionId>()
+  for (const f of attribution.platformFaults) {
+    const dataPlane =
       f.kind === 'surface_failing_fleetwide' &&
-      isDataPlaneOutage({ surface: f.surface, httpStatus: f.status === 'timeout' ? null : f.status ?? null }),
-  )
-  if (dataPlaneDown) {
+      isDataPlaneOutage({ surface: f.surface, httpStatus: f.status === 'timeout' ? null : f.status ?? null })
+    if (dataPlane) for (const id of f.projectIds) regionsDown.add(regionOf.get(id) as CloudRegionId)
+  }
+  for (const region of regionsDown) {
     try {
       const { healDataPlane, describeHeal } = await import('@/lib/postgrest/supervisor')
-      const heal = await healDataPlane(null)
-      if (!heal.healthy) errors.push(`[data-plane heal] ${describeHeal(heal)}`)
+      const heal = await healDataPlane(null, region)
+      if (!heal.healthy) errors.push(`[data-plane heal ${region}] ${describeHeal(heal)}`)
     } catch (err: any) {
-      errors.push(`[data-plane heal] ${err?.message ?? String(err)}`)
+      errors.push(`[data-plane heal ${region}] ${err?.message ?? String(err)}`)
     }
   }
 
-  for (let i = 0; i < outcomes.length; i += CONCURRENCY) {
-    const batch = outcomes.slice(i, i + CONCURRENCY)
+  for (let i = 0; i < placed.length; i += CONCURRENCY) {
+    const batch = placed.slice(i, i + CONCURRENCY)
     const settled = await Promise.allSettled(
       batch.map(async ({ projectId, results }) => {
         const findings = await settleTenantContract(
@@ -316,7 +356,7 @@ export async function runContractSweep(options: {
     )
   }
 
-  return { processed: outcomes.length, broken, errors, platformFaults }
+  return { processed: placed.length, broken, errors, platformFaults }
 }
 
 /**
@@ -334,7 +374,22 @@ export async function runObserverForProject(projectId: string): Promise<Observer
     errors: [],
   }
 
-  // Nothing built means nothing can be wrong. This is the only gate, and it is
+  // A project is checked and repaired only by the region that serves it
+  // (lib/autonomy/region-skip.ts). The scheduled passes keep to their own
+  // projects before they get here, but a mutation's event, the event bus and
+  // the console reach this function for any project, so the rule is kept here,
+  // where every caller passes: nothing here detects or repairs a project
+  // another region serves. One this process cannot reach is skipped and
+  // recorded, as the scheduled passes do.
+  const { served } = await partitionServed([{ id: projectId }])
+  if (served.length === 0) {
+    const region = await projectRegion(projectId)
+    console.log(`[WorkspaceObserver] project=${projectId} is checked by its own region's worker (${region}); nothing was scanned here`)
+    return { ...result, skipped: 'served-elsewhere', region }
+  }
+  if (!(await canReach(projectId, 'observer'))) return { ...result, skipped: 'unreachable' }
+
+  // Nothing built means nothing can be wrong. This gate, like the region's, is
   // here rather than at the callers because five of them reach this function
   // (the dashboard's first-load kick, Re-scan, the event bus, the cron route
   // and the daily sweep) and the one that did not check is the one that
@@ -424,7 +479,7 @@ async function observeProject(projectId: string, result: ObserverResult): Promis
   // Only these can reach the owner's inbox (see notifyCritical).
   const outstandingCritical: Array<{ finding: RawFinding; firstDetectedAt: Date }> = []
 
-  // Process each finding: auto-fix safe ones, queue others for approval
+  // Record each finding: the repair loop repairs the safe ones, a person the rest
   for (const finding of allFindings) {
     // Pillar 5.3: If this finding type was previously fixed and has re-appeared,
     // escalate severity rather than repeating the same auto-fix loop.
@@ -442,63 +497,29 @@ async function observeProject(projectId: string, result: ObserverResult): Promis
     if (finding.severity === 'critical') result.critical++
 
     let status: FindingStatus
-    let autoFixed = false
-    let fixAppliedAt: Date | undefined
 
-    // An inline fix is a mutation of the owner's schema, so it answers to the
-    // same flag and dial as every other repair. Refused, the finding is still
-    // recorded as detected, with the reason, and nothing is changed.
-    // Imported lazily: desired-state imports this module.
-    const permit =
-      finding.autoFixable && finding.fix
-        ? await (async () => {
-            const [{ permitInlineRepair }, { deriveTier }] = await Promise.all([
-              import('@/lib/authority/gate'),
-              import('@/lib/autonomy/desired-state'),
-            ])
-            return permitInlineRepair(projectId, finding.type, deriveTier(finding.type, finding.details))
-          })()
-        : null
-
-    if (finding.autoFixable && finding.fix && permit && !permit.allowed) {
+    // The observer repairs nothing. Every repair it could make (RLS on an
+    // exposed table, a policy for a deny-all table, an index on a reference
+    // column) is an invariant the repair loop probes with these same detectors
+    // (lib/autonomy/desired-state.ts), and the loop applies it through
+    // runAutoFix: a governed change in the change ledger, under the master flag,
+    // the dial, the circuit breaker and the change freeze during an incident.
+    // Repairing here as well was a second path with none of those. The settled
+    // pass a minute after a build created an index while the loop was frozen
+    // for an incident, the index was in no change record, and restoring the
+    // build was then refused because its table had changed since.
+    //
+    // So the finding stays open for the loop, and when the flags or the dial
+    // hold the repair back it says why. Imported lazily: desired-state imports
+    // this module.
+    if (finding.autoFixable) {
+      const [{ repairRefusal }, { deriveTier }] = await Promise.all([
+        import('@/lib/authority/gate'),
+        import('@/lib/autonomy/desired-state'),
+      ])
       status = 'open'
-      finding.details = { ...finding.details, notAppliedBecause: permit.reason }
-    } else if (finding.autoFixable && finding.fix) {
-      try {
-        await finding.fix()
-        // The repair returning is not proof it worked. Re-check the specific
-        // gap against the live database, the same rule every other repair path
-        // follows: 'resolved' is a verified fix, 'unresolved' is not a fix at
-        // all, and anything else is a repair that ran without confirmation.
-        const { recheckGap } = await import('@/lib/autonomy/desired-state')
-        const recheck = await recheckGap(
-          projectId,
-          finding.type,
-          finding.details as Record<string, unknown>,
-        ).catch(() => 'unknown' as const)
-        if (recheck === 'unresolved') {
-          status = 'pending_approval'
-          result.pendingApproval++
-          finding.details = {
-            ...finding.details,
-            fixError: 'The repair ran, but the problem is still present on re-check.',
-          }
-        } else {
-          status = 'auto_fixed'
-          autoFixed = true
-          fixAppliedAt = new Date()
-          result.autoFixed++
-          finding.details = {
-            ...finding.details,
-            verification: recheck === 'resolved' ? 'confirmed' : 'unverified',
-          }
-        }
-      } catch (err: any) {
-        // Fix failed — demote to pending_approval so a human can review
-        status = 'pending_approval'
-        result.pendingApproval++
-        finding.details.fixError = err?.message ?? String(err)
-      }
+      const refusal = await repairRefusal(projectId, deriveTier(finding.type, finding.details))
+      if (refusal) finding.details = { ...finding.details, notAppliedBecause: refusal }
     } else if (finding.autoFixable === false) {
       status = 'pending_approval'
       result.pendingApproval++
@@ -506,8 +527,8 @@ async function observeProject(projectId: string, result: ObserverResult): Promis
       status = 'open'
     }
 
-    const written = await writeFinding(projectId, finding, status, autoFixed, fixAppliedAt)
-    if (finding.severity === 'critical' && status !== 'auto_fixed') {
+    const written = await writeFinding(projectId, finding, status, false)
+    if (finding.severity === 'critical') {
       outstandingCritical.push({ finding, firstDetectedAt: written.firstDetectedAt })
     }
   }
@@ -527,26 +548,26 @@ async function observeProject(projectId: string, result: ObserverResult): Promis
       where: { projectId, type: 'workflow_broken', status: { in: ['open', 'pending_approval'] } },
       select: { id: true, details: true },
     })
-    const staleWorkflowIds = workflowRows
-      .filter((f) => !brokenNow.has(String((f.details as { workflow?: unknown } | null)?.workflow ?? '')))
-      .map((f) => f.id)
-    if (staleWorkflowIds.length > 0) {
-      await prisma.healthFinding.updateMany({
-        where: { id: { in: staleWorkflowIds } },
-        data: { status: 'auto_fixed', autoFixed: true, fixAppliedAt: new Date() },
-      })
-    }
+    // Withdrawn, not marked fixed: Backenly did not repair these, so they must
+    // not appear as "Backenly fixed …" (lib/autonomy/resolution.ts).
+    await withdrawFindings(
+      workflowRows.filter((f) => !brokenNow.has(String((f.details as { workflow?: unknown } | null)?.workflow ?? ''))),
+      'workflow_reaper',
+    )
   } catch { /* best-effort — a failed cleanup must never fail the scan */ }
 
   // Reap stale missing_fk findings by POSITIVELY verifying each one against the
   // live schema — never by absence from this scan (the FK probe swallows query
   // errors into an empty result, so "absent" can't be trusted to mean "gone").
   // A queued missing_fk row is closed only when we can prove it no longer holds:
-  //   • the FK constraint now exists          → auto_fixed (the loop/approve added it)
-  //   • the column no longer exists           → auto_fixed (table was reshaped)
-  //   • the column has no resolvable target    → dismissed (external/polymorphic id,
-  //                                               e.g. stripe_session_id — never a FK)
-  // Anything still genuinely missing its FK is left untouched. Best-effort.
+  //   • the FK constraint now exists
+  //   • the column no longer exists (table was reshaped)
+  //   • the column has no resolvable target (external/polymorphic id,
+  //     e.g. stripe_session_id — never a FK)
+  // Each is withdrawn, never marked fixed: a repair the loop or an approval ran
+  // has already closed its finding, so a row still open here was settled by
+  // something else (lib/autonomy/resolution.ts). Anything still genuinely
+  // missing its FK is left untouched. Best-effort.
   try {
     const openFk = await prisma.healthFinding.findMany({
       where: { projectId, type: 'missing_fk', status: { in: ['open', 'pending_approval'] } },
@@ -573,29 +594,16 @@ async function observeProject(projectId: string, result: ObserverResult): Promis
       const { buildWorkspaceTableNameMap, resolveReferencedTable } = await import('@/lib/ai/fk-repair')
       const tableMap = await buildWorkspaceTableNameMap(projectId).catch(() => new Map<string, string>())
 
-      const resolvedIds: string[] = []
-      const dismissedIds: string[] = []
+      const settled: typeof openFk = []
       for (const f of openFk) {
         const d = (f.details ?? {}) as { tableName?: unknown; columnName?: unknown }
         const table = typeof d.tableName === 'string' ? d.tableName : ''
         const column = typeof d.columnName === 'string' ? d.columnName : ''
         if (!table || !column) continue
         const key = `${table}.${column}`
-        if (fkSet.has(key) || !colSet.has(key)) { resolvedIds.push(f.id); continue }
-        if (!resolveReferencedTable(column, tableMap, table)) { dismissedIds.push(f.id) }
+        if (fkSet.has(key) || !colSet.has(key) || !resolveReferencedTable(column, tableMap, table)) settled.push(f)
       }
-      if (resolvedIds.length > 0) {
-        await prisma.healthFinding.updateMany({
-          where: { id: { in: resolvedIds } },
-          data: { status: 'auto_fixed', autoFixed: true, fixAppliedAt: new Date() },
-        })
-      }
-      if (dismissedIds.length > 0) {
-        await prisma.healthFinding.updateMany({
-          where: { id: { in: dismissedIds } },
-          data: { status: 'dismissed' },
-        })
-      }
+      await withdrawFindings(settled, 'fk_reaper')
     }
   } catch { /* best-effort — a failed cleanup must never fail the scan */ }
 
@@ -637,20 +645,40 @@ async function observeProject(projectId: string, result: ObserverResult): Promis
   // whose stored code re-validates clean and whose error matches a known
   // runner-contract bug are restored outright (no LLM); genuinely broken code
   // is regenerated through the validated fixers, LLM-budget-capped per scan.
+  //
+  // Rewriting a project's function is an autonomous repair like any other, so
+  // it asks what every repair asks: the deployment's flags and the owner's
+  // dial (repairRefusal, tier 1: it changes behaviour) and the incident freeze
+  // (lib/autonomy/change-freeze.ts). It used to run whatever the dial said,
+  // even at Off. A function is not schema, so the change ledger has no record
+  // of it; the function keeps its own.
   try {
-    const { healErroredAiFunctions } = await import('@/lib/services/ai-functions/executor')
-    const healed = await healErroredAiFunctions(projectId)
-    if (healed.restored > 0 || healed.regenerated > 0) {
-      result.autoFixed += healed.restored + healed.regenerated
-      console.log(
-        `[WorkspaceObserver] healed AI functions for ${projectId}: ` +
-        `${healed.restored} restored, ${healed.regenerated} regenerated, ${healed.failed} unfixable`
-      )
+    const errored = await prisma.aiFunction.count({ where: { projectId, status: 'error', lastError: { not: null } } })
+    if (errored > 0) {
+      const [{ repairRefusal }, { heldForIncident }] = await Promise.all([
+        import('@/lib/authority/gate'),
+        import('@/lib/autonomy/change-freeze'),
+      ])
+      const refusal = await repairRefusal(projectId, 1)
+      if (refusal) {
+        console.log(`[WorkspaceObserver] not healing ${errored} errored function(s) for ${projectId}: ${refusal}`)
+      } else if (!(await heldForIncident(projectId, { loop: 'maintenance', via: 'function_heal', wouldHaveApplied: errored }))) {
+        const { healErroredAiFunctions } = await import('@/lib/services/ai-functions/executor')
+        const healed = await healErroredAiFunctions(projectId)
+        if (healed.restored > 0 || healed.regenerated > 0) {
+          result.autoFixed += healed.restored + healed.regenerated
+          console.log(
+            `[WorkspaceObserver] healed AI functions for ${projectId}: ` +
+            `${healed.restored} restored, ${healed.regenerated} regenerated, ${healed.failed} unfixable`
+          )
+        }
+      }
     }
   } catch { /* best-effort — a failed heal must never fail the scan */ }
 
-  // Tell the owner about criticals that are still theirs to deal with. Counted
-  // AFTER the fix attempts: a critical this pass repaired is not news.
+  // Tell the owner about criticals that are still theirs to deal with. Only
+  // those first seen CRITICAL_ALERT_CONFIRM_MS ago are sent, and by then the
+  // repair loop, which runs every minute, has repaired any it is allowed to.
   if (outstandingCritical.length > 0) {
     await notifyCritical(projectId, outstandingCritical)
   }
@@ -691,12 +719,14 @@ async function observeProject(projectId: string, result: ObserverResult): Promis
         )
       }
 
-      // Resolve verification_failed findings whose scenario now passes. A
+      // Withdraw verification_failed findings whose scenario now passes. A
       // verification finding is a claim about CURRENT structure — once the
       // check passes (the build fixed it, a detector false-positive was
       // corrected, or the user acted), keeping the row open shows the user a
       // problem that no longer exists. Without this, verification findings
       // were a one-way ratchet: written on failure, never closed on success.
+      // Withdrawn, not marked fixed: a scenario passing is not Backenly
+      // repairing anything (lib/autonomy/resolution.ts).
       if (verificationResult.passed.length > 0) {
         try {
           const passedScenarioIds = new Set(
@@ -710,44 +740,70 @@ async function observeProject(projectId: string, result: ObserverResult): Promis
             },
             select: { id: true, details: true },
           })
-          const clearedIds = openVerifications
-            .filter((f) => {
+          await withdrawFindings(
+            openVerifications.filter((f) => {
               const sid = (f.details as { scenarioId?: unknown } | null)?.scenarioId
               return typeof sid === 'string' && passedScenarioIds.has(sid)
-            })
-            .map((f) => f.id)
-          if (clearedIds.length > 0) {
-            await prisma.healthFinding.updateMany({
-              where: { id: { in: clearedIds } },
-              data: { status: 'auto_fixed', autoFixed: true, fixAppliedAt: new Date() },
-            })
-          }
+            }),
+            'verification_reaper',
+          )
         } catch { /* best-effort — a failed cleanup must never fail the scan */ }
       }
 
-      // Resolve any open missing_verification findings when structural checks
-      // pass. Includes pending_approval rows: a finding whose evidence no
-      // longer exists must leave the approval queue, not wait forever for a
-      // human to approve a fix for a problem that is already gone.
-      if (verificationResult.passed.length > 0) {
-        const passedCategories = new Set(verificationResult.passed.map(s => s.category))
-        if (passedCategories.has('auth')) {
-          await prisma.healthFinding.updateMany({
-            where: {
-              projectId,
-              type: { in: ['auth_jwt_missing', 'auth_users_table_missing'] },
-              status: { in: ['open', 'pending_approval'] },
-            },
-            data: { status: 'auto_fixed', autoFixed: true, fixAppliedAt: new Date() },
-          })
+      // Withdraw the auth and RLS findings a check now disproves. Includes
+      // pending_approval rows: a finding whose evidence no longer exists must
+      // leave the approval queue, not wait forever for a human to approve a fix
+      // for a problem that is already gone.
+      //
+      // Each is closed by the check of exactly its claim. This used to close
+      // them by CATEGORY: any passing auth scenario (the JWT secret was set)
+      // closed "users table missing" in the same pass that found the table
+      // missing, and the one RLS scenario, which only looks at tables with a
+      // user_id column, closed missing_rls on every table, as "Backenly fixed
+      // it". The deploy gate, which looks at every table, still failed, so the
+      // Autonomy page said resolved while Deploy said one check was failing.
+      try {
+        const passedScenarioIds = new Set(verificationResult.passed.map((s) => s.scenarioId))
+        const disproved: string[] = []
+        if (passedScenarioIds.has('builtin_auth_users_table')) disproved.push('auth_users_table_missing')
+        if (passedScenarioIds.has('builtin_auth_jwt_config')) disproved.push('auth_jwt_missing')
+        if (disproved.length > 0) {
+          await withdrawFindings(
+            await prisma.healthFinding.findMany({
+              where: { projectId, type: { in: disproved }, status: { in: ['open', 'pending_approval'] } },
+              select: { id: true, details: true },
+            }),
+            'verification_reaper',
+          )
         }
-        if (passedCategories.has('rls')) {
-          await prisma.healthFinding.updateMany({
-            where: { projectId, type: 'missing_rls', status: { in: ['open', 'pending_approval'] } },
-            data: { status: 'auto_fixed', autoFixed: true, fixAppliedAt: new Date() },
-          })
+        // missing_rls, table by table: protected when the catalog shows RLS on
+        // with at least one permissive policy, which is what the detector and
+        // the deploy gate ask of it.
+        const openRls = await prisma.healthFinding.findMany({
+          where: { projectId, type: 'missing_rls', status: { in: ['open', 'pending_approval'] } },
+          select: { id: true, details: true },
+        })
+        if (openRls.length > 0) {
+          const rows = await queryWorkspaceSchema(
+            projectId,
+            `SELECT c.relname FROM pg_class c
+               JOIN pg_namespace n ON n.oid = c.relnamespace
+              WHERE n.nspname = $1 AND c.relkind IN ('r', 'p') AND c.relrowsecurity
+                AND EXISTS (SELECT 1 FROM pg_policy p WHERE p.polrelid = c.oid AND p.polpermissive)`,
+            `workspace_${projectId}`,
+          )
+          const protectedTables = new Set(
+            (((rows as any)?.rows ?? rows ?? []) as Array<{ relname: string }>).map((r) => r.relname),
+          )
+          await withdrawFindings(
+            openRls.filter((f) => {
+              const table = (f.details as { tableName?: unknown } | null)?.tableName
+              return typeof table === 'string' && protectedTables.has(table)
+            }),
+            'verification_reaper',
+          )
         }
-      }
+      } catch { /* best-effort — a failed cleanup must never fail the scan */ }
     } catch (err: any) {
       result.errors.push(`[verification] ${err?.message ?? String(err)}`)
     }
@@ -822,6 +878,8 @@ async function writeFinding(
   autoFixed: boolean,
   fixAppliedAt?: Date
 ): Promise<{ firstDetectedAt: Date }> {
+  finding.details = await findingDetailsKeptHere(projectId, finding.type, finding.details as Record<string, unknown>)
+
   // Upsert: if an open finding of the same type already exists, update it.
   //
   // Some types carry several INDEPENDENT instances at once, and keying the
@@ -834,7 +892,7 @@ async function writeFinding(
   // failure would fight over a single row and recovery would clear the wrong
   // one. Add a type to this map whenever a detector can emit concurrent,
   // separately-resolvable instances.
-  const DISCRIMINATOR: Record<string, string> = {
+  const DISCRIMINATOR: Record<string, string | string[]> = {
     verification_failed: 'scenarioId',
     contract_surface_broken: 'surface',
     // One row per SUBSYSTEM, keyed on the membership snapshot rather than the
@@ -847,23 +905,28 @@ async function writeFinding(
     // One row per drifted column (`table.column`): two missing columns are two
     // repairs, and each one's proposal is bound to its own finding.
     intent_drift: 'location',
+    // The gaps the repair loop repairs: one row per gap, keyed as the loop keys
+    // its own (gapIdentity, lib/autonomy/desired-state.ts), so the row the
+    // observer records is the one the loop acts on. Keyed by type alone, one
+    // gap's details were written over another gap's row.
+    missing_fk_index: ['tableName', 'columnName'],
+    missing_rls: 'tableName',
+    rls_denies_everything: 'tableName',
   }
 
-  const discriminatorKey = DISCRIMINATOR[finding.type]
-  const discriminatorValue = discriminatorKey
-    ? (finding.details as Record<string, unknown>)[discriminatorKey] as string | undefined
-    : undefined
+  const discriminator = ([] as string[])
+    .concat(DISCRIMINATOR[finding.type] ?? [])
+    .map((key) => ({ key, value: (finding.details as Record<string, unknown>)[key] as string | undefined }))
+  const keyed = discriminator.length > 0 && discriminator.every((d) => d.value !== undefined)
 
   const existing = await prisma.healthFinding.findFirst({
     where: {
       projectId,
       type: finding.type,
       status: { in: ['open', 'pending_approval'] },
-      ...(discriminatorKey !== undefined && discriminatorValue !== undefined
-        ? { details: { path: [discriminatorKey], equals: discriminatorValue } }
-        : {}),
+      ...(keyed ? { AND: discriminator.map((d) => ({ details: { path: [d.key], equals: d.value as string } })) } : {}),
     },
-    select: { id: true, details: true },
+    select: { id: true, status: true, details: true },
   })
 
   // `detectedAt` moves on every write, so it cannot say how long a problem
@@ -877,12 +940,18 @@ async function writeFinding(
   finding.details = { ...finding.details, firstDetectedAt: firstDetectedAt.toISOString() }
 
   if (existing) {
+    // A row waiting for a person stays theirs, with what the repair loop wrote
+    // on it. The loop moved it there (its repair failed, or did not hold), and
+    // the observer seeing the gap again, or escalating it itself, is no reason
+    // to hand it back or wipe that record: reopened, it was retried at once,
+    // and with its details replaced the loop's retry backoff started over.
+    const waiting = existing.status === 'pending_approval'
     await prisma.healthFinding.update({
       where: { id: existing.id },
       data: {
         severity: finding.severity,
-        details: finding.details as any,
-        status,
+        details: (waiting ? { ...((existing.details ?? {}) as Record<string, unknown>), ...finding.details } : finding.details) as any,
+        status: waiting && status === 'open' ? 'pending_approval' : status,
         autoFixed,
         fixAppliedAt: fixAppliedAt ?? null,
         detectedAt: new Date(),
@@ -1044,11 +1113,30 @@ export async function notifyCritical(
 
 /**
  * Detect tables that have a user_id column but no RLS enabled.
- * Auto-fixable: applies the 'own_rows' policy automatically.
+ * Auto-fixable: the repair loop applies the derived policy, governed.
  */
 // Exported so the declarative desired-state spec (lib/autonomy/desired-state.ts)
-// can reuse the canonical RLS probe read-only. Calling this never mutates —
-// the `fix` closure on each finding is lazy and only the observer loop invokes it.
+// can reuse the canonical RLS probe read-only. Calling this never mutates, and
+// its findings carry no fix of their own: the repair loop repairs them.
+/**
+ * The tables whose latest Backenly RLS template is all-access: their owner (or
+ * an agent acting for them) chose to leave every row open. Template rows are
+ * upserted per table and template, so the latest by updatedAt is the choice in
+ * force.
+ */
+export async function tablesOwnerOpened(projectId: string, tables: string[]): Promise<Set<string>> {
+  const rows = await prisma.permissionPolicy.findMany({
+    where: { projectId, tableName: { in: tables }, enabled: true, policyName: { startsWith: 'backenly_' } },
+    select: { tableName: true, policyName: true, updatedAt: true },
+  })
+  const latest = new Map<string, { policyName: string; updatedAt: Date }>()
+  for (const row of rows) {
+    const current = latest.get(row.tableName)
+    if (!current || row.updatedAt > current.updatedAt) latest.set(row.tableName, row)
+  }
+  return new Set([...latest].filter(([, row]) => row.policyName === 'backenly_all_access').map(([table]) => table))
+}
+
 export async function detectMissingRls(projectId: string): Promise<RawFinding[]> {
   const schemaName = `workspace_${projectId}`
 
@@ -1102,8 +1190,16 @@ export async function detectMissingRls(projectId: string): Promise<RawFinding[]>
   // No swallow. "I could not look" must never be reported as "I looked and
   // found nothing" — that is precisely how this probe stayed dead for months.
 
-  const hits: Array<{ tablename: string; has_owner_column: boolean }> =
+  const found: Array<{ tablename: string; has_owner_column: boolean }> =
     (rows?.rows ?? rows ?? []) as any
+
+  // A table its owner opened on purpose is not missing anything. The all-access
+  // template turns RLS off and records the choice (backenly_all_access); while
+  // that is the table's latest Backenly template, the detector leaves the table
+  // alone, as reconcileAutoRls already does, rather than re-locking it on every
+  // pass. A later template (which turns RLS back on) outranks it.
+  const opened = found.length ? await tablesOwnerOpened(projectId, found.map((h) => h.tablename)) : new Set<string>()
+  const hits = found.filter((h) => !opened.has(h.tablename))
 
   if (!hits.length) return []
 
@@ -1132,7 +1228,7 @@ export async function detectMissingRls(projectId: string): Promise<RawFinding[]>
         schemaName,
         reason: exposureReason(tableName, plan),
         // Carried so the approve modal, the agent journal and buildFixAction all
-        // describe the SAME repair the fix closure will actually run.
+        // describe the SAME repair the repair loop will actually run.
         rlsTemplate: plan.template,
         rlsBasis: plan.basis,
         rlsRationale: plan.reason,
@@ -1142,12 +1238,8 @@ export async function detectMissingRls(projectId: string): Promise<RawFinding[]>
       // carrying a literal user_id. Still never true for `undecidable`: enabling
       // RLS with no derivable policy makes the table read EMPTY, replacing a data
       // exposure with an outage. Those go to a human, who decides the rule.
+      // No inline fix: the repair loop applies the policy as a governed change.
       autoFixable: plan.kind !== 'undecidable',
-      fix: plan.kind !== 'undecidable'
-        ? async () => {
-            await applyPermissionPolicy(projectId, { tableName, template: 'auto' })
-          }
-        : undefined,
     }
   })
 }
@@ -1235,18 +1327,8 @@ export async function detectRlsDeniesEverything(projectId: string): Promise<RawF
       // Same rule as missing_rls: repair only when a policy is DERIVABLE.
       // Installing a wrong policy here would replace an outage with a different
       // outage, so undecidable ownership goes to the human who knows the intent.
+      // No inline fix: the repair loop installs the policy as a governed change.
       autoFixable: plan.kind !== 'undecidable',
-      fix: plan.kind !== 'undecidable'
-        ? async () => {
-            const result = await applyPermissionPolicy(projectId, { tableName, template: 'auto' })
-            // Never report a repair that did not land — an unfixed default-deny
-            // table that reads as "auto_fixed" is worse than an open finding,
-            // because the queue stops showing it.
-            if (!result.success) {
-              throw new Error(`Could not install a policy on "${tableName}": ${result.message}`)
-            }
-          }
-        : undefined,
     }
   })
 }

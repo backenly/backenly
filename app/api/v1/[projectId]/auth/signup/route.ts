@@ -28,6 +28,7 @@ import {
   type AuthEnvironment,
 } from '@/lib/branches/auth-environment'
 import { inAuthEnvironment } from '@/lib/branches/next-auth-environment'
+import { authorizingProject } from '@/lib/auth-projection/read'
 
 /**
  * POST /v1/{projectId}/auth/signup
@@ -66,10 +67,9 @@ async function signUp(request: NextRequest, projectId: string, env: AuthEnvironm
       if (!limit.allowed) return throttledV1Response(limit)
     }
 
-    // Validate project exists
-    const project = await prisma.project.findUnique({
-      where: { id: projectId },
-    })
+    // Validate project exists. Existence and the signing secret are all this
+    // route reads of it: the region's copy while it is fresh, home otherwise.
+    const project = await authorizingProject(projectId)
 
     if (!project) {
       return createErrorResponse(ErrorCodes.NOT_FOUND, 'Project not found', 404)
@@ -122,6 +122,7 @@ async function signUp(request: NextRequest, projectId: string, env: AuthEnvironm
     const check = probe ? null : await admitExistenceCheck(projectId, ip)
     if (check?.denied) return throttledV1Response(check.denied)
     const existing = await executeWithUserContext<any>(
+      projectId,
       '',
       true,
       `SELECT id FROM "${schemaName}"."users" WHERE email = $1 LIMIT 1`,
@@ -154,7 +155,7 @@ async function signUp(request: NextRequest, projectId: string, env: AuthEnvironm
     // not say which branch it belongs to (SKIPPED_ON_BRANCH_SIGNUP).
     const requireVerification =
       !isInternalTest && !env.branch && (await getAuthEmailContext(projectId)).requireEmailVerification
-    if (requireVerification) await ensureEmailVerifiedColumn(schemaName)
+    if (requireVerification) await ensureEmailVerifiedColumn(projectId, schemaName)
 
     const hashedPassword = await hashPassword(password)
     const displayName = name || email.split('@')[0]
@@ -176,7 +177,7 @@ async function signUp(request: NextRequest, projectId: string, env: AuthEnvironm
     // on the users table don't block the very first signup — the policies'
     // service-role escape hatch (current_setting('app.is_service_role')) is
     // designed exactly for this internal-platform path.
-    const created = await executeWithUserContext<any>('', true, plan.sql, plan.values)
+    const created = await executeWithUserContext<any>(projectId, '', true, plan.sql, plan.values)
 
     const user = created[0]
 

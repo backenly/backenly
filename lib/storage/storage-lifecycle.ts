@@ -31,6 +31,8 @@ import { S3Client, ListObjectsV2Command, DeleteObjectCommand, HeadObjectCommand 
 import crypto from 'crypto'
 import { getProjectQuota } from '@/lib/services/storageQuota'
 import { MAX_BUFFERED_UPLOAD_BYTES } from '@/lib/storage/upload-policy'
+import { heldInRegionWhere, serviceRegion } from '@/lib/data-plane/serving'
+import type { CloudRegionId } from '@/lib/regions'
 
 const prisma = new PrismaClient()
 
@@ -199,6 +201,12 @@ export async function runLifecycleCleanup(
   options: {
     softDeleteRetentionDays?: number
     dryRun?: boolean
+    /**
+     * The region whose projects keep their files in `bucketName`, this
+     * process's by default. Only those projects' files are cleaned here
+     * (safety rule 3 on detectAndCleanOrphans).
+     */
+    region?: CloudRegionId
   } = {}
 ): Promise<{
   deletedSoftDeletes: number
@@ -209,7 +217,8 @@ export async function runLifecycleCleanup(
 }> {
   const softDeleteRetentionDays = options.softDeleteRetentionDays || 7
   const dryRun = options.dryRun || false
-  
+  const region = options.region ?? serviceRegion()
+
   const result = {
     deletedSoftDeletes: 0,
     deletedOrphans: 0,
@@ -231,6 +240,10 @@ export async function runLifecycleCleanup(
         deletedAt: {
           lt: softDeleteCutoff,
         },
+        // Only the files this bucket holds. Another region's are deleted from
+        // that region's bucket, by that region's sweep: deleting the row here
+        // would leave its object behind with nothing pointing at it.
+        project: heldInRegionWhere(region),
       },
       select: {
         id: true,
@@ -253,10 +266,12 @@ export async function runLifecycleCleanup(
             })
           )
           
-          // Hard delete from database
+          // Hard delete from database, and the names its region kept for it
           await prisma.storageFile.delete({
             where: { id: file.id },
           })
+          const { forgetFileNames } = await import('@/lib/storage/file-names')
+          await forgetFileNames(file.projectId, [file.id])
         }
         
         result.deletedSoftDeletes++
@@ -270,20 +285,24 @@ export async function runLifecycleCleanup(
     const orphanResult = await detectAndCleanOrphans(
       s3Client,
       bucketName,
-      dryRun
+      dryRun,
+      region
     )
-    
+
     result.deletedOrphans = orphanResult.deletedCount
     result.totalBytesFreed += orphanResult.bytesFreed
     result.errors.push(...orphanResult.errors)
-    
-    // 3. Clean up incomplete uploads (>1 hour old with no file record)
-    const incompleteResult = await cleanIncompleteUploads(dryRun)
-    
-    result.deletedIncomplete = incompleteResult.deletedCount
-    result.totalBytesFreed += incompleteResult.bytesFreed
-    result.errors.push(...incompleteResult.errors)
-    
+
+    // There is deliberately no third step. A `cleanIncompleteUploads` pass used
+    // to live here, described as "records >1 hour old without corresponding
+    // storage file" — but it never looked at storage. Its query was every
+    // non-deleted row older than one hour, `take: 100`, soft-deleted
+    // unconditionally: one hundred arbitrary LIVE files per run, fleet-wide,
+    // until nothing was left. The honest version of that job — a row whose
+    // object never arrived — is exactly the phantom branch of the orphan pass
+    // above, which decides from the real bucket listing. `deletedIncomplete`
+    // stays in the result shape for the cron route's report and is always 0.
+
     console.log(`[Lifecycle] Cleanup complete:`, result)
     
     return result
@@ -296,19 +315,48 @@ export async function runLifecycleCleanup(
 
 /**
  * Detect orphaned files (storage ↔ DB reconciliation)
- * 
+ *
  * ORPHAN DETECTION:
  * - Files exist in S3 but not in database
  * - Database records exist but not in S3 (phantom files)
- * 
+ *
  * AUTOMATIC RESOLUTION:
  * - Delete S3 orphans (reclaim storage)
  * - Mark DB phantoms as deleted (fix inconsistency)
+ *
+ * THREE SAFETY RULES, the first two learned from this sweep deleting live data:
+ *
+ * 1. "Known to the database" means EVERY row, soft-deleted included. The
+ *    known-paths set used to be `deletedAt: null` only, so the moment a user
+ *    deleted a file its object stopped being known, and the next nightly run
+ *    physically destroyed it as an "orphan" — six days inside the advertised
+ *    seven-day recovery window. Only step 1 of runLifecycleCleanup, which
+ *    honours the retention clock, may delete a soft-deleted file's object.
+ *
+ * 2. Both directions get a grace window. An upload is not atomic: the row and
+ *    the object land seconds to minutes apart, in either order. An object
+ *    younger than ORPHAN_OBJECT_GRACE_MS is never an orphan (its row may be a
+ *    transaction away), and a row younger than PHANTOM_ROW_GRACE_MS is never a
+ *    phantom (its object may still be uploading). An object with no
+ *    LastModified is left alone: unknown age is not proof of abandonment.
+ *
+ * 3. A bucket answers only for the projects whose files it holds. Each region
+ *    keeps its projects' files in its own bucket (lib/services/s3-config.ts
+ *    s3LocationFor), so a project of another region has none of its objects
+ *    in this listing, and every one of its rows would read as a phantom. Only
+ *    `region`'s projects' rows are judged against the bucket. The known-paths
+ *    set stays every row in every region: a path any row claims is never an
+ *    orphan.
  */
+const ORPHAN_OBJECT_GRACE_MS = 24 * 60 * 60 * 1000
+const PHANTOM_ROW_GRACE_MS = 60 * 60 * 1000
+
 export async function detectAndCleanOrphans(
   s3Client: S3Client,
   bucketName: string,
-  dryRun: boolean = false
+  dryRun: boolean = false,
+  /** The region whose projects keep their files in `bucketName` (safety rule 3). */
+  region: CloudRegionId = serviceRegion()
 ): Promise<{
   deletedCount: number
   bytesFreed: bigint
@@ -323,10 +371,10 @@ export async function detectAndCleanOrphans(
   console.log(`[Orphan Detection] Scanning storage...`)
   
   try {
-    // Get all files from S3
-    const s3Files = new Set<string>()
+    // Get all files from S3, with their age — the age is a safety input.
+    const s3Files = new Map<string, Date | undefined>()
     let continuationToken: string | undefined
-    
+
     do {
       const listResponse = await s3Client.send(
         new ListObjectsV2Command({
@@ -335,33 +383,40 @@ export async function detectAndCleanOrphans(
           MaxKeys: 1000,
         })
       )
-      
+
       if (listResponse.Contents) {
         for (const obj of listResponse.Contents) {
           if (obj.Key) {
-            s3Files.add(obj.Key)
+            s3Files.set(obj.Key, obj.LastModified)
           }
         }
       }
-      
+
       continuationToken = listResponse.NextContinuationToken
     } while (continuationToken)
-    
+
     console.log(`[Orphan Detection] Found ${s3Files.size} files in S3`)
-    
-    // Get all file paths from database
-    const dbFiles = await prisma.storageFile.findMany({
-      where: { deletedAt: null },
-      select: { path: true, size: true },
-    })
-    
-    const dbFilePaths = new Set(dbFiles.map(f => f.path))
-    
-    console.log(`[Orphan Detection] Found ${dbFilePaths.size} active files in database`)
-    
-    // Find orphans (in S3 but not in DB)
-    const orphans = Array.from(s3Files).filter(path => !dbFilePaths.has(path))
-    
+
+    // Every row the database knows, in every region, soft-deleted included: a
+    // file inside its retention window still owns its object (safety rule 1
+    // above), and a path any row claims is never an orphan (rule 3).
+    const dbFilePaths = new Set(
+      (await prisma.storageFile.findMany({ select: { path: true } })).map(f => f.path)
+    )
+
+    console.log(`[Orphan Detection] Found ${dbFilePaths.size} files known to the database`)
+
+    // Find orphans: in S3, unknown to the database, and old enough that no
+    // in-flight upload can still be about to claim them (safety rule 2).
+    const orphanCutoff = Date.now() - ORPHAN_OBJECT_GRACE_MS
+    const orphans = Array.from(s3Files.entries())
+      .filter(([path, lastModified]) =>
+        !dbFilePaths.has(path) &&
+        lastModified !== undefined &&
+        lastModified.getTime() < orphanCutoff
+      )
+      .map(([path]) => path)
+
     console.log(`[Orphan Detection] Found ${orphans.length} orphaned files`)
     
     // Delete orphans
@@ -393,17 +448,30 @@ export async function detectAndCleanOrphans(
       }
     }
     
-    // Find phantoms (in DB but not in S3)
-    const phantoms = dbFiles.filter(f => !s3Files.has(f.path))
-    
+    // Find phantoms: live rows whose object is missing. This is also what
+    // handles an upload that never completed — the row exists, the object
+    // never arrived — which a deleted "incomplete uploads" pass used to guess
+    // at by age alone. Rows younger than the grace window are skipped: their
+    // object may still be on its way (safety rule 2). Soft-deleted rows are
+    // already on the retention clock and need no second verdict. Only the rows
+    // of the projects whose files this bucket holds (safety rule 3).
+    const phantomCutoff = new Date(Date.now() - PHANTOM_ROW_GRACE_MS)
+    const phantoms = (
+      await prisma.storageFile.findMany({
+        where: { deletedAt: null, createdAt: { lt: phantomCutoff }, project: heldInRegionWhere(region) },
+        select: { id: true, path: true },
+      })
+    ).filter(f => !s3Files.has(f.path))
+
     if (phantoms.length > 0) {
       console.log(`[Orphan Detection] Found ${phantoms.length} phantom files (DB records without S3 objects)`)
-      
+
       if (!dryRun) {
         // Soft delete phantom files
         await prisma.storageFile.updateMany({
           where: {
-            path: { in: phantoms.map(p => p.path) },
+            id: { in: phantoms.map(p => p.id) },
+            deletedAt: null,
           },
           data: {
             deletedAt: new Date(),
@@ -416,60 +484,6 @@ export async function detectAndCleanOrphans(
   } catch (error) {
     console.error(`[Orphan Detection] Failed:`, error)
     result.errors.push(`Orphan detection failed: ${error}`)
-    return result
-  }
-}
-
-/**
- * Clean incomplete uploads
- * 
- * Removes database records >1 hour old without corresponding storage file
- */
-async function cleanIncompleteUploads(
-  dryRun: boolean
-): Promise<{
-  deletedCount: number
-  bytesFreed: bigint
-  errors: string[]
-}> {
-  const result = {
-    deletedCount: 0,
-    bytesFreed: BigInt(0),
-    errors: [] as string[],
-  }
-  
-  try {
-    // Find files created >1 hour ago that might be incomplete
-    const cutoff = new Date(Date.now() - 60 * 60 * 1000)
-    
-    const incompleteFiles = await prisma.storageFile.findMany({
-      where: {
-        createdAt: { lt: cutoff },
-        deletedAt: null,
-        // Add additional criteria if needed (e.g., missing metadata)
-      },
-      select: {
-        id: true,
-        size: true,
-      },
-      take: 100, // Limit batch size
-    })
-    
-    if (incompleteFiles.length > 0 && !dryRun) {
-      for (const file of incompleteFiles) {
-        await prisma.storageFile.update({
-          where: { id: file.id },
-          data: { deletedAt: new Date() },
-        })
-        
-        result.deletedCount++
-        result.bytesFreed += file.size
-      }
-    }
-    
-    return result
-  } catch (error) {
-    result.errors.push(`Incomplete upload cleanup failed: ${error}`)
     return result
   }
 }
@@ -583,4 +597,53 @@ export function generatePresignedUrlExpiry(
   
   // Enforce maximum expiry
   return Math.min(customExpiry, maxExpiry)
+}
+
+// ── The daily sweep ───────────────────────────────────────────────────────────
+
+/** How long a deleted file can still be restored before the sweep removes it. */
+export const STORAGE_SOFT_DELETE_RETENTION_DAYS = 7
+
+export type StoragePurgeMode = 'off' | 'dry-run' | 'enforce'
+
+/**
+ * How the scheduled sweep runs, read from BACKENLY_STORAGE_PURGE. The sweep
+ * deletes files for good, so until the founders turn it on (`enforce`) it only
+ * reports what it would delete; `off` stops it. Anything else is dry-run,
+ * never enforce.
+ */
+export function storagePurgeMode(raw: string | undefined = process.env.BACKENLY_STORAGE_PURGE): StoragePurgeMode {
+  const value = (raw ?? '').trim().toLowerCase()
+  return value === 'off' || value === 'enforce' ? value : 'dry-run'
+}
+
+/**
+ * This region's bucket, swept for this region's projects: files deleted more
+ * than STORAGE_SOFT_DELETE_RETENTION_DAYS ago, objects no row names, and
+ * abandoned uploads. Run daily by every region's scheduler
+ * (lib/services/cron-runner.ts runRegionalSystemTasks). Only the S3 driver
+ * keeps a bucket to sweep; `location` is the seam the tests inject through.
+ */
+export async function sweepRegionStorage(
+  region: CloudRegionId,
+  options: { mode?: StoragePurgeMode; location?: { client: S3Client; bucket: string } } = {},
+): Promise<Awaited<ReturnType<typeof runLifecycleCleanup>> | null> {
+  const mode = options.mode ?? storagePurgeMode()
+  if (mode === 'off') return null
+  if (!options.location && (process.env.STORAGE_DRIVER || 'local') !== 's3') return null
+
+  const { s3LocationFor } = await import('@/lib/services/s3-config')
+  const { client, bucket } = options.location ?? s3LocationFor(region)
+  const result = await runLifecycleCleanup(client, bucket, {
+    softDeleteRetentionDays: STORAGE_SOFT_DELETE_RETENTION_DAYS,
+    dryRun: mode !== 'enforce',
+    region,
+  })
+  console.log(
+    `[storage-sweep] ${mode === 'enforce' ? 'deleted' : 'would delete (dry-run)'} in ${region}: ` +
+      `${result.deletedSoftDeletes} deleted file(s), ${result.deletedOrphans} unreferenced object(s), ` +
+      `${result.deletedIncomplete} abandoned upload(s), ${result.totalBytesFreed} bytes` +
+      (result.errors.length ? `; ${result.errors.length} error(s)` : ''),
+  )
+  return result
 }

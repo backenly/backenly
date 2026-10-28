@@ -26,7 +26,8 @@ export interface RollbackOptions {
   /** Either a deployment id OR a version number — caller can pick. */
   deploymentId?: string
   version?: number
-  confirmedBy: 'CHAT' | 'UI' | 'API'
+  /** APPROVAL: a person approved an agent's exact call; `userId` is that person. */
+  confirmedBy: 'CHAT' | 'UI' | 'API' | 'APPROVAL'
   /** Skip the second-layer "Type ROLLBACK to confirm" prompt. */
   force?: boolean
 }
@@ -152,10 +153,12 @@ export async function rollbackDeploy(
       fromVersion,
       toVersion,
       message:
-        `You're about to roll back:\n\n` +
+        `You're about to roll back the RECORDED version:\n\n` +
         `• From: v${fromVersion} (current)\n` +
         `• To:   v${toVersion} — ${target.changeSummary || 'Published'}\n\n` +
-        `Live consumers will start seeing the older schema and API shape immediately.\n\n` +
+        `This moves the version history's pointer. It does NOT change the live schema, ` +
+        `data, RLS or functions — the API keeps serving exactly what is there now. ` +
+        `To restore the backend itself to v${toVersion}, a person uses Restore on that version (History or Deploy).\n\n` +
         `Type ROLLBACK to confirm.`,
     }
   }
@@ -214,7 +217,8 @@ export async function rollbackDeploy(
   await recordRollbackMemory({
     projectId,
     actorId: userId,
-    summary: `Rolled back deployment from v${fromVersion} to v${toVersion}.`,
+    title: 'Recorded an older version as current',
+    summary: `Recorded v${toVersion} as the current version, in place of v${fromVersion}. The live schema and data are unchanged.`,
     reason: `Rollback requested from ${confirmedBy}.`,
     beforeState: {
       version: fromVersion,
@@ -233,8 +237,52 @@ export async function rollbackDeploy(
   return {
     kind: 'rolled_back',
     success: true,
-    message: `Rolled back to v${toVersion}.`,
+    message:
+      `Recorded v${toVersion} as the current version. The live schema, data, RLS ` +
+      `and functions are unchanged — this is version bookkeeping, not a restore. ` +
+      `To restore the backend itself to v${toVersion}, a person uses Restore on that version (History or Deploy).`,
     fromVersion,
     toVersion,
   }
+}
+
+/**
+ * Record a published version as current once the backend has been restored to
+ * it (lib/changes/range.ts restoreToVersion). The restore already happened and
+ * was authorized, by the person who ran it or approved it, so this has no plan
+ * gate and no confirmation: it only says what is now true. A version already
+ * current is reported as current.
+ */
+export async function markVersionCurrent(
+  projectId: string,
+  version: number,
+  userId: string,
+  via: 'UI' | 'APPROVAL',
+): Promise<boolean> {
+  const target = await prisma.deployment.findFirst({
+    where: { projectId, environment: 'live', status: 'live', version },
+    select: { id: true, graphSnapshotId: true },
+  })
+  if (!target?.graphSnapshotId) return false
+  const graph = await prisma.backendGraph.findFirst({ where: { id: target.graphSnapshotId, projectId }, select: { id: true } })
+  if (!graph) return false
+  const project = await prisma.project.findUnique({ where: { id: projectId }, select: { activeGraphId: true } })
+  if (!project) return false
+  if (project.activeGraphId === target.graphSnapshotId) return true
+  await prisma.$transaction([
+    prisma.project.update({ where: { id: projectId }, data: { activeGraphId: target.graphSnapshotId } }),
+    prisma.deployment.update({ where: { id: target.id }, data: { rolledBackTo: project.activeGraphId } }),
+    prisma.auditLog.create({
+      data: {
+        projectId,
+        userId,
+        action: 'VERSION_RESTORED',
+        type: 'deployment',
+        details: JSON.stringify({ version, deploymentId: target.id, previousGraphId: project.activeGraphId, newGraphId: target.graphSnapshotId, triggerSource: via }),
+        timestamp: new Date(),
+      },
+    }),
+  ])
+  emit('deploy.complete', projectId, { type: 'restore', version, deploymentId: target.id })
+  return true
 }

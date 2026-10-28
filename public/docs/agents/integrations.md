@@ -14,7 +14,7 @@ Call as `integrations { action: "<action>", … }`.
 | `list` | connected providers, masked keys and verification state | nothing | yes | no |
 | `capabilities` | the exact ctx.integrations methods each provider gives a function, and for Stripe its receiver URL and signing-secret state | nothing | yes | no |
 | `verify` | ask the provider again whether the stored key works | `integrationId` | no | no |
-| `connect` | store a provider key (Stripe also takes webhookSecret) and wire the first functions | `integrationId` | no | no |
+| `connect` | store a provider key (Stripe also takes webhookSecret, OneSignal also takes appId) and wire the first functions, which Backenly's model writes | `integrationId` | no | no |
 | `disconnect` | remove a provider key | `integrationId` | no | waits for a human |
 | `send_push` | a push notification through the connected OneSignal app | `message` | no | no |
 <!-- end generated -->
@@ -27,13 +27,16 @@ Either the human pastes it on the Integrations page, which keeps it out of the c
 
 ```
 integrations { action: "connect", integrationId: "stripe", apiKey: "sk_test_…", webhookSecret: "whsec_…" }
+integrations { action: "connect", integrationId: "onesignal", apiKey: "<REST API Key>", appId: "<App ID>" }
 ```
+
+OneSignal needs both values (Settings → Keys & IDs on onesignal.com); `send_push` refuses until both are stored and names what is missing. Unknown integration ids are refused with the list of providers the runtime serves — a stored key under an id nothing looks up is a credential that exists and does nothing.
 
 From the shell: `npx -y @backenly/cli@latest call integrations action=connect integrationId=stripe apiKey=sk_test_…`.
 
 The key is checked with the provider before it is stored: Stripe, Resend, OpenAI and Anthropic are asked directly, and a key the provider rejects is refused rather than filed. PostHog project keys and webhook signing secrets cannot be checked by an API call and are stored as unverifiable, never reported as verified. `verify` asks the provider again about a stored key and records the answer. Backenly never invents a credential.
 
-Storing a key from an agent also builds the first functions for that provider (each provider's topic says which). Connecting from the dashboard stores the key only. Anything beyond that is built by asking for it, with `functions` `deploy_code` for code you write or `backend_chat` for an outcome you describe.
+Storing a key from an agent also builds the first functions for that provider (each provider's topic says which). Backenly's model writes them, which draws AI credits. With none left the key is still stored, and the receipt lists each function under "Not wired" with the reason (`data.notWired`); connect again later to wire them. Connecting from the dashboard stores the key only. Anything beyond that is built by asking for it, with `functions` `deploy_code` for code you write or `backend_chat` for an outcome you describe.
 
 ## Using a provider in a function
 

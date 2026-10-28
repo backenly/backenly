@@ -11,12 +11,14 @@
  *  - Snapshots the real PostgreSQL DDL (not the AI graph representation) after every change
  *  - Stores column types, constraints, indexes, foreign keys — the full live schema
  *  - Provides diff between any two snapshots (shows exactly what changed)
- *  - Provides one-click rollback to any previous snapshot (runs the actual DDL delta)
+ *
+ * It is a record, not a way back. Snapshot-to-snapshot rollback (which replayed
+ * a DDL delta and dropped whatever was newer) is retired: a change is undone by
+ * restoring its own checkpoint, through lib/changes/recovery.ts.
  *
  * Rules:
  *  - captureSchemaSnapshot() is called by schema-migration-engine before and after every migration
  *  - Snapshots are read-only records — never mutated after creation
- *  - Rollback uses add-new/rename-old strategy — never DROP without archiving
  *  - Diffs are structural (column-level), not just raw DDL string diffs
  */
 
@@ -39,8 +41,8 @@ export interface IndexSnapshot {
   definition: string
   /**
    * True when the index is owned by a constraint (PRIMARY KEY / UNIQUE). Such
-   * indexes can never be dropped via DROP INDEX — the rollback DDL engine must
-   * skip them (their lifecycle belongs to the constraint diff). Optional:
+   * indexes can never be dropped via DROP INDEX — anything diffing snapshots
+   * must skip them (their lifecycle belongs to the constraint diff). Optional:
    * snapshots captured before this field existed lack it.
    */
   constraintBacked?: boolean
@@ -80,7 +82,7 @@ export interface TableSnapshot {
    * RLS / policy / trigger state — the exact objects the autonomy loop's
    * Tier 0/1 fixes create (SET_PERMISSION, FIX_REALTIME). Optional: snapshots
    * captured before these fields existed lack them, and every consumer must
-   * treat `undefined` as "state unknown" and emit NO rollback DDL for that
+   * treat `undefined` as "state unknown" and draw no conclusion for that
    * dimension — never as "RLS off" / "no triggers".
    */
   rlsEnabled?: boolean
@@ -119,14 +121,6 @@ export interface SchemaDiff {
   }>
   isEmpty: boolean
   summary: string
-}
-
-export interface SchemaRollbackResult {
-  success: boolean
-  appliedSteps: number
-  error?: string
-  durationMs: number
-  rollbackDdl: string
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -309,158 +303,83 @@ export async function diffCurrentVsVersion(
   return computeDiff(historicSnapshot.tables, currentTables, compareToVersion, -1)
 }
 
-/**
- * Roll back the workspace schema to a previous snapshot.
- *
- * Strategy:
- *  - Added tables (tables that exist now but not in target) → RENAME to _archived_{name}_{ts}
- *  - Dropped tables (tables that existed in target but not now) → RECREATE from snapshot DDL
- *  - Modified columns → ALTER TABLE to restore previous types, defaults, constraints
- *  - Indexes → DROP new / RECREATE old
- *
- * Non-destructive: tables are never DROPped — only renamed (preserving data for manual recovery).
- */
-export async function rollbackToSchemaVersion(
-  projectId: string,
-  targetVersionNum: number,
-): Promise<SchemaRollbackResult> {
-  const start = Date.now()
-
-  try {
-    const { prisma } = await import('@/lib/db/prisma')
-    const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
-
-    const targetSnapshot = await getSchemaSnapshot(projectId, targetVersionNum)
-    if (!targetSnapshot) {
-      return {
-        success: false,
-        appliedSteps: 0,
-        error: `Version ${targetVersionNum} not found`,
-        durationMs: Date.now() - start,
-        rollbackDdl: '',
-      }
-    }
-
-    // Snapshot current state before rollback (for safety)
-    await captureSchemaSnapshot(projectId, 'pre_migration')
-
-    const currentTables = await readLiveSchema(projectId, postgresSchema)
-    const rollbackSteps = computeRollbackDdl(currentTables, targetSnapshot.tables, postgresSchema)
-
-    let appliedSteps = 0
-    for (const sql of rollbackSteps) {
-      await prisma.$executeRawUnsafe(sql)
-      appliedSteps++
-    }
-
-    // Snapshot after rollback
-    await captureSchemaSnapshot(projectId, 'post_migration')
-
-    return {
-      success: true,
-      appliedSteps,
-      durationMs: Date.now() - start,
-      rollbackDdl: rollbackSteps.join('\n'),
-    }
-  } catch (err) {
-    return {
-      success: false,
-      appliedSteps: 0,
-      error: String(err),
-      durationMs: Date.now() - start,
-      rollbackDdl: '',
-    }
-  }
-}
-
 // ── Live schema reader ────────────────────────────────────────────────────────
 
 async function readLiveSchema(
   projectId: string,
   postgresSchema: string,
 ): Promise<TableSnapshot[]> {
-  const { prisma } = await import('@/lib/db/prisma')
+  // The catalog of the database holding the project's data, in its region.
+  const { workspaceRawClient } = await import('@/lib/data-plane/regional')
+  const db = await workspaceRawClient(projectId)
 
-  // ── Get all tables in the schema ──────────────────────────────────────────
-  const tableRows = await prisma.$queryRawUnsafe<Array<{ table_name: string }>>(
-    `SELECT table_name FROM information_schema.tables
-     WHERE table_schema = $1 AND table_type = 'BASE TABLE'
-     ORDER BY table_name`,
-    postgresSchema,
-  )
+  // One query for each kind of object, over the whole schema, sent together.
+  // The database can be in another region than the process reading it, where
+  // each query costs round trips (two, with the statement cache off:
+  // lib/data-plane/statement-cache.ts). Read table by table, it was nine
+  // queries per table: most of a change's time on a project in another
+  // region, paid twice by a change recovered automatically, and more with
+  // every table the project had.
+  const [tableRows, colRows, primaryKeyRows, idxRows, conIdxRows, fkRows, classRows, polRows, trgRows] = await Promise.all([
+    // ── Tables ──────────────────────────────────────────────────────────────
+    db.$queryRawUnsafe<Array<{ table_name: string }>>(
+      `SELECT table_name FROM information_schema.tables
+       WHERE table_schema = $1 AND table_type = 'BASE TABLE'
+       ORDER BY table_name`,
+      postgresSchema,
+    ),
 
-  const tables: TableSnapshot[] = []
-
-  for (const { table_name } of tableRows) {
-    // ── Columns ───────────────────────────────────────────────────────────
-    const colRows = await prisma.$queryRawUnsafe<Array<{
+    // ── Columns ─────────────────────────────────────────────────────────────
+    db.$queryRawUnsafe<Array<{
+      table_name: string
       column_name: string
       data_type: string
       is_nullable: string
       column_default: string | null
     }>>(
-      `SELECT column_name, data_type, is_nullable, column_default
+      `SELECT table_name, column_name, data_type, is_nullable, column_default
        FROM information_schema.columns
-       WHERE table_schema = $1 AND table_name = $2
-       ORDER BY ordinal_position`,
+       WHERE table_schema = $1
+       ORDER BY table_name, ordinal_position`,
       postgresSchema,
-      table_name,
-    )
+    ),
 
-    const primaryKeyRows = await prisma.$queryRawUnsafe<Array<{ column_name: string }>>(
-      `SELECT kcu.column_name
+    db.$queryRawUnsafe<Array<{ table_name: string; column_name: string }>>(
+      `SELECT tc.table_name, kcu.column_name
        FROM information_schema.table_constraints tc
        JOIN information_schema.key_column_usage kcu
          ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
        WHERE tc.constraint_type = 'PRIMARY KEY'
-         AND tc.table_schema = $1 AND tc.table_name = $2`,
+         AND tc.table_schema = $1`,
       postgresSchema,
-      table_name,
-    )
-    const primaryKeys = new Set(primaryKeyRows.map(r => r.column_name))
+    ),
 
-    const columns: ColumnSnapshot[] = colRows.map(c => ({
-      name: c.column_name,
-      type: c.data_type,
-      nullable: c.is_nullable === 'YES',
-      default: c.column_default,
-      isPrimary: primaryKeys.has(c.column_name),
-    }))
-
-    // ── Indexes ───────────────────────────────────────────────────────────
-    const idxRows = await prisma.$queryRawUnsafe<Array<{
+    // ── Indexes ─────────────────────────────────────────────────────────────
+    db.$queryRawUnsafe<Array<{
+      tablename: string
       indexname: string
       indexdef: string
     }>>(
-      `SELECT indexname, indexdef FROM pg_indexes
-       WHERE schemaname = $1 AND tablename = $2`,
+      `SELECT tablename, indexname, indexdef FROM pg_indexes
+       WHERE schemaname = $1
+       ORDER BY tablename, indexname`,
       postgresSchema,
-      table_name,
-    )
+    ),
 
     // Indexes owned by a constraint (PK/UNIQUE) — DROP INDEX cannot touch
-    // these, so the rollback DDL engine needs to know which they are.
-    const conIdxRows = await prisma.$queryRawUnsafe<Array<{ relname: string }>>(
-      `SELECT ci.relname FROM pg_constraint con
+    // these, so a consumer of the snapshot needs to know which they are.
+    db.$queryRawUnsafe<Array<{ table_name: string; relname: string }>>(
+      `SELECT c.relname AS table_name, ci.relname FROM pg_constraint con
        JOIN pg_class ci ON ci.oid = con.conindid
        JOIN pg_class c  ON c.oid  = con.conrelid
        JOIN pg_namespace n ON n.oid = c.relnamespace
-       WHERE n.nspname = $1 AND c.relname = $2`,
+       WHERE n.nspname = $1`,
       postgresSchema,
-      table_name,
-    )
-    const constraintBackedIdx = new Set(conIdxRows.map(r => r.relname))
+    ),
 
-    const indexes: IndexSnapshot[] = idxRows.map(r => ({
-      name: r.indexname,
-      columns: extractIndexColumns(r.indexdef),
-      unique: r.indexdef.includes('UNIQUE'),
-      definition: r.indexdef,
-      constraintBacked: constraintBackedIdx.has(r.indexname),
-    }))
-
-    // ── Foreign keys ──────────────────────────────────────────────────────
-    const fkRows = await prisma.$queryRawUnsafe<Array<{
+    // ── Foreign keys ────────────────────────────────────────────────────────
+    db.$queryRawUnsafe<Array<{
+      table_name: string
       constraint_name: string
       column_name: string
       foreign_table_name: string
@@ -468,6 +387,7 @@ async function readLiveSchema(
       delete_rule: string
     }>>(
       `SELECT
+         tc.table_name,
          tc.constraint_name,
          kcu.column_name,
          ccu.table_name AS foreign_table_name,
@@ -481,45 +401,26 @@ async function readLiveSchema(
        LEFT JOIN information_schema.referential_constraints rc
          ON rc.constraint_name = tc.constraint_name AND rc.constraint_schema = tc.table_schema
        WHERE tc.constraint_type = 'FOREIGN KEY'
-         AND tc.table_schema = $1 AND tc.table_name = $2`,
+         AND tc.table_schema = $1
+       ORDER BY tc.table_name, tc.constraint_name, kcu.ordinal_position, ccu.column_name`,
       postgresSchema,
-      table_name,
-    )
+    ),
 
-    const foreignKeys: ForeignKeySnapshot[] = fkRows.map(r => ({
-      constraintName: r.constraint_name,
-      column: r.column_name,
-      referencedTable: r.foreign_table_name,
-      referencedColumn: r.foreign_column_name,
-      onDelete: r.delete_rule ?? 'NO ACTION',
-    }))
-
-    // ── Row estimate ──────────────────────────────────────────────────────
-    const countRows = await prisma.$queryRawUnsafe<Array<{ reltuples: bigint | number }>>(
-      `SELECT reltuples::bigint AS reltuples FROM pg_class c
+    // ── Row estimate and RLS state ──────────────────────────────────────────
+    // relkind r and p are what information_schema.tables calls BASE TABLE.
+    db.$queryRawUnsafe<Array<{ table_name: string; reltuples: bigint | number; relrowsecurity: boolean }>>(
+      `SELECT c.relname AS table_name, c.reltuples::bigint AS reltuples, c.relrowsecurity
+       FROM pg_class c
        JOIN pg_namespace n ON n.oid = c.relnamespace
-       WHERE n.nspname = $1 AND c.relname = $2`,
+       WHERE n.nspname = $1 AND c.relkind IN ('r', 'p')`,
       postgresSchema,
-      table_name,
-    )
-    // reltuples::bigint comes back as a JS BigInt — Math.max(0, bigint) throws
-    // "Cannot convert a BigInt value to a number", which failed the whole
-    // pre-fix rollback snapshot. Coerce to Number first.
-    const rowEstimate = Math.max(0, Number(countRows[0]?.reltuples ?? 0))
+    ),
 
-    // ── RLS state + policies ──────────────────────────────────────────────
+    // ── Policies ────────────────────────────────────────────────────────────
     // These are the objects SET_PERMISSION creates. Without capturing them,
     // one-click undo of an RLS fix is structurally impossible.
-    const rlsRows = await prisma.$queryRawUnsafe<Array<{ relrowsecurity: boolean }>>(
-      `SELECT c.relrowsecurity FROM pg_class c
-       JOIN pg_namespace n ON n.oid = c.relnamespace
-       WHERE n.nspname = $1 AND c.relname = $2`,
-      postgresSchema,
-      table_name,
-    )
-    const rlsEnabled = rlsRows[0]?.relrowsecurity === true
-
-    const polRows = await prisma.$queryRawUnsafe<Array<{
+    db.$queryRawUnsafe<Array<{
+      tablename: string
       policyname: string
       permissive: string
       roles: string[] | string
@@ -527,12 +428,71 @@ async function readLiveSchema(
       qual: string | null
       with_check: string | null
     }>>(
-      `SELECT policyname, permissive, roles, cmd, qual, with_check
-       FROM pg_policies WHERE schemaname = $1 AND tablename = $2`,
+      `SELECT tablename, policyname, permissive, roles, cmd, qual, with_check
+       FROM pg_policies WHERE schemaname = $1
+       ORDER BY tablename, policyname`,
       postgresSchema,
-      table_name,
-    )
-    const policies: PolicySnapshot[] = polRows.map(p => ({
+    ),
+
+    // ── User triggers (NOT tgisinternal — excludes FK/PK machinery) ─────────
+    // These are the objects FIX_REALTIME creates (NOTIFY triggers).
+    db.$queryRawUnsafe<Array<{ table_name: string; tgname: string; def: string }>>(
+      `SELECT c.relname AS table_name, t.tgname, pg_get_triggerdef(t.oid) AS def
+       FROM pg_trigger t
+       JOIN pg_class c ON c.oid = t.tgrelid
+       JOIN pg_namespace n ON n.oid = c.relnamespace
+       WHERE n.nspname = $1 AND NOT t.tgisinternal
+       ORDER BY c.relname, t.tgname`,
+      postgresSchema,
+    ),
+  ])
+
+  const columnsOf = groupByTable(colRows, (r) => r.table_name)
+  const primaryKeysOf = groupByTable(primaryKeyRows, (r) => r.table_name)
+  const indexesOf = groupByTable(idxRows, (r) => r.tablename)
+  const constraintIndexesOf = groupByTable(conIdxRows, (r) => r.table_name)
+  const foreignKeysOf = groupByTable(fkRows, (r) => r.table_name)
+  const classOf = new Map(classRows.map((r) => [r.table_name, r]))
+  const policiesOf = groupByTable(polRows, (r) => r.tablename)
+  const triggersOf = groupByTable(trgRows, (r) => r.table_name)
+
+  return tableRows.map(({ table_name }): TableSnapshot => {
+    const primaryKeys = new Set((primaryKeysOf.get(table_name) ?? []).map(r => r.column_name))
+
+    const columns: ColumnSnapshot[] = (columnsOf.get(table_name) ?? []).map(c => ({
+      name: c.column_name,
+      type: c.data_type,
+      nullable: c.is_nullable === 'YES',
+      default: c.column_default,
+      isPrimary: primaryKeys.has(c.column_name),
+    }))
+
+    const constraintBackedIdx = new Set((constraintIndexesOf.get(table_name) ?? []).map(r => r.relname))
+
+    const indexes: IndexSnapshot[] = (indexesOf.get(table_name) ?? []).map(r => ({
+      name: r.indexname,
+      columns: extractIndexColumns(r.indexdef),
+      unique: r.indexdef.includes('UNIQUE'),
+      definition: r.indexdef,
+      constraintBacked: constraintBackedIdx.has(r.indexname),
+    }))
+
+    const foreignKeys: ForeignKeySnapshot[] = (foreignKeysOf.get(table_name) ?? []).map(r => ({
+      constraintName: r.constraint_name,
+      column: r.column_name,
+      referencedTable: r.foreign_table_name,
+      referencedColumn: r.foreign_column_name,
+      onDelete: r.delete_rule ?? 'NO ACTION',
+    }))
+
+    const cls = classOf.get(table_name)
+    // reltuples::bigint comes back as a JS BigInt — Math.max(0, bigint) throws
+    // "Cannot convert a BigInt value to a number", which failed the whole
+    // pre-fix snapshot. Coerce to Number first.
+    const rowEstimate = Math.max(0, Number(cls?.reltuples ?? 0))
+    const rlsEnabled = cls?.relrowsecurity === true
+
+    const policies: PolicySnapshot[] = (policiesOf.get(table_name) ?? []).map(p => ({
       name: p.policyname,
       cmd: p.cmd ?? 'ALL',
       permissive: String(p.permissive).toUpperCase() !== 'RESTRICTIVE',
@@ -545,23 +505,22 @@ async function readLiveSchema(
       withCheck: p.with_check,
     }))
 
-    // ── User triggers (NOT tgisinternal — excludes FK/PK machinery) ───────
-    // These are the objects FIX_REALTIME creates (NOTIFY triggers).
-    const trgRows = await prisma.$queryRawUnsafe<Array<{ tgname: string; def: string }>>(
-      `SELECT t.tgname, pg_get_triggerdef(t.oid) AS def
-       FROM pg_trigger t
-       JOIN pg_class c ON c.oid = t.tgrelid
-       JOIN pg_namespace n ON n.oid = c.relnamespace
-       WHERE n.nspname = $1 AND c.relname = $2 AND NOT t.tgisinternal`,
-      postgresSchema,
-      table_name,
-    )
-    const triggers: TriggerSnapshot[] = trgRows.map(t => ({ name: t.tgname, definition: t.def }))
+    const triggers: TriggerSnapshot[] = (triggersOf.get(table_name) ?? []).map(t => ({ name: t.tgname, definition: t.def }))
 
-    tables.push({ name: table_name, columns, indexes, foreignKeys, rowEstimate, rlsEnabled, policies, triggers })
+    return { name: table_name, columns, indexes, foreignKeys, rowEstimate, rlsEnabled, policies, triggers }
+  })
+}
+
+/** Rows grouped by the table they belong to, in the order they were read. */
+function groupByTable<R>(rows: R[], tableOf: (row: R) => string): Map<string, R[]> {
+  const grouped = new Map<string, R[]>()
+  for (const row of rows) {
+    const table = tableOf(row)
+    const list = grouped.get(table)
+    if (list) list.push(row)
+    else grouped.set(table, [row])
   }
-
-  return tables
+  return grouped
 }
 
 // ── DDL generator ─────────────────────────────────────────────────────────────
@@ -682,197 +641,6 @@ function buildDiffSummary(
     parts.push(`${t.tableName}: ${changes.join(', ')}`)
   }
   return parts.join(' | ')
-}
-
-// ── Rollback DDL generator ────────────────────────────────────────────────────
-
-function computeRollbackDdl(
-  currentTables: TableSnapshot[],
-  targetTables: TableSnapshot[],
-  schema: string,
-): string[] {
-  const steps: string[] = [`SET search_path TO "${schema}", public;`]
-  const ts = Date.now()
-
-  const currentMap = new Map(currentTables.map(t => [t.name, t]))
-  const targetMap = new Map(targetTables.map(t => [t.name, t]))
-
-  // Tables that exist now but not in target → RENAME (non-destructive)
-  for (const [name] of currentMap) {
-    if (!targetMap.has(name)) {
-      steps.push(`ALTER TABLE "${schema}"."${name}" RENAME TO "_archived_${name}_${ts}";`)
-    }
-  }
-
-  // Tables that existed in target but not now → RECREATE from target DDL
-  for (const [name, table] of targetMap) {
-    if (!currentMap.has(name)) {
-      const colDefs = table.columns.map(c => {
-        const nullable = c.nullable ? '' : ' NOT NULL'
-        const def = c.default ? ` DEFAULT ${c.default}` : ''
-        const pk = c.isPrimary ? ' PRIMARY KEY' : ''
-        return `  "${c.name}" ${c.type}${pk}${nullable}${def}`
-      }).join(',\n')
-      steps.push(`CREATE TABLE IF NOT EXISTS "${schema}"."${name}" (\n${colDefs}\n);`)
-    }
-  }
-
-  // Modified tables → restore columns
-  for (const [name, currentTable] of currentMap) {
-    const target = targetMap.get(name)
-    if (!target) continue
-
-    const currentColMap = new Map(currentTable.columns.map(c => [c.name, c]))
-    const targetColMap = new Map(target.columns.map(c => [c.name, c]))
-
-    // Columns in target but not in current → ADD
-    for (const [colName, col] of targetColMap) {
-      if (!currentColMap.has(colName)) {
-        const nullable = col.nullable ? '' : ' NOT NULL'
-        const def = col.default ? ` DEFAULT ${col.default}` : ''
-        steps.push(`ALTER TABLE "${schema}"."${name}" ADD COLUMN IF NOT EXISTS "${colName}" ${col.type}${nullable}${def};`)
-      }
-    }
-
-    // Columns in current but not in target → RENAME to archived (non-destructive)
-    for (const [colName] of currentColMap) {
-      if (!targetColMap.has(colName)) {
-        steps.push(`ALTER TABLE "${schema}"."${name}" RENAME COLUMN "${colName}" TO "_archived_${colName}_${ts}";`)
-      }
-    }
-
-    // Modified columns → ALTER to restore
-    for (const [colName, currentCol] of currentColMap) {
-      const targetCol = targetColMap.get(colName)
-      if (!targetCol) continue
-
-      if (currentCol.type !== targetCol.type) {
-        steps.push(`ALTER TABLE "${schema}"."${name}" ALTER COLUMN "${colName}" TYPE ${targetCol.type};`)
-      }
-      if (currentCol.nullable !== targetCol.nullable) {
-        if (targetCol.nullable) {
-          steps.push(`ALTER TABLE "${schema}"."${name}" ALTER COLUMN "${colName}" DROP NOT NULL;`)
-        } else {
-          steps.push(`ALTER TABLE "${schema}"."${name}" ALTER COLUMN "${colName}" SET NOT NULL;`)
-        }
-      }
-      if (currentCol.default !== targetCol.default) {
-        if (targetCol.default) {
-          steps.push(`ALTER TABLE "${schema}"."${name}" ALTER COLUMN "${colName}" SET DEFAULT ${targetCol.default};`)
-        } else {
-          steps.push(`ALTER TABLE "${schema}"."${name}" ALTER COLUMN "${colName}" DROP DEFAULT;`)
-        }
-      }
-    }
-
-    // Restore dropped indexes
-    const currentIdxNames = new Set(currentTable.indexes.map(i => i.name))
-    for (const idx of target.indexes) {
-      if (!currentIdxNames.has(idx.name) && !idx.definition.includes('PRIMARY KEY')) {
-        steps.push(`${idx.definition};`)
-      }
-    }
-
-    // Drop indexes ADDED since the target — the missing branch that made a
-    // reverted CREATE_INDEX fix survive its own undo. Constraint-backed
-    // indexes are skipped: DROP INDEX cannot touch them, and their lifecycle
-    // belongs to the constraint diff below.
-    const targetIdxNames = new Set(target.indexes.map(i => i.name))
-    for (const idx of currentTable.indexes) {
-      if (
-        !targetIdxNames.has(idx.name) &&
-        !idx.constraintBacked &&
-        !idx.definition.includes('PRIMARY KEY')
-      ) {
-        steps.push(`DROP INDEX IF EXISTS "${schema}"."${idx.name}";`)
-      }
-    }
-
-    // Foreign-key constraints — both directions. FKs were captured in every
-    // snapshot since v1 but never diffed, so ADD_CONSTRAINT fixes were
-    // irreversible via snapshots.
-    const currentFks = new Map(currentTable.foreignKeys.map(f => [f.constraintName, f]))
-    const targetFks = new Map((target.foreignKeys ?? []).map(f => [f.constraintName, f]))
-    for (const [fkName] of currentFks) {
-      if (!targetFks.has(fkName)) {
-        steps.push(`ALTER TABLE "${schema}"."${name}" DROP CONSTRAINT IF EXISTS "${fkName}";`)
-      }
-    }
-    for (const [fkName, fk] of targetFks) {
-      if (!currentFks.has(fkName)) {
-        steps.push(
-          `ALTER TABLE "${schema}"."${name}" ADD CONSTRAINT "${fkName}" ` +
-          `FOREIGN KEY ("${fk.column}") REFERENCES "${schema}"."${fk.referencedTable}"("${fk.referencedColumn}") ` +
-          `ON DELETE ${fk.onDelete};`,
-        )
-      }
-    }
-
-    // RLS + policies — ONLY when the target snapshot RECORDED this state.
-    // Snapshots captured before policies existed leave RLS untouched: "state
-    // unknown" must never be treated as "RLS off" (that would strip protection
-    // as a side effect of an unrelated rollback).
-    if (target.rlsEnabled !== undefined && target.policies !== undefined) {
-      const currentPolicies = new Map((currentTable.policies ?? []).map(p => [p.name, p]))
-      const targetPolicies = new Map(target.policies.map(p => [p.name, p]))
-
-      // Enable first so recreated policies land on an RLS-enabled table.
-      if (target.rlsEnabled && currentTable.rlsEnabled === false) {
-        steps.push(`ALTER TABLE "${schema}"."${name}" ENABLE ROW LEVEL SECURITY;`)
-      }
-
-      for (const [polName, cur] of currentPolicies) {
-        const tgt = targetPolicies.get(polName)
-        if (!tgt) {
-          steps.push(`DROP POLICY IF EXISTS "${polName}" ON "${schema}"."${name}";`)
-        } else if (cur.using !== tgt.using || cur.withCheck !== tgt.withCheck || cur.cmd !== tgt.cmd) {
-          // Policy body changed — recreate from the target definition.
-          steps.push(`DROP POLICY IF EXISTS "${polName}" ON "${schema}"."${name}";`)
-          steps.push(buildCreatePolicyDdl(schema, name, tgt))
-        }
-      }
-      for (const [polName, tgt] of targetPolicies) {
-        if (!currentPolicies.has(polName)) {
-          steps.push(buildCreatePolicyDdl(schema, name, tgt))
-        }
-      }
-
-      // Disable last, after added policies have been dropped.
-      if (!target.rlsEnabled && currentTable.rlsEnabled === true) {
-        steps.push(`ALTER TABLE "${schema}"."${name}" DISABLE ROW LEVEL SECURITY;`)
-      }
-    }
-
-    // Triggers — same "recorded state only" rule as RLS. This is what makes a
-    // FIX_REALTIME (NOTIFY trigger) fix reversible.
-    if (target.triggers !== undefined) {
-      const currentTrgs = new Map((currentTable.triggers ?? []).map(t => [t.name, t]))
-      const targetTrgs = new Map(target.triggers.map(t => [t.name, t]))
-      for (const [trgName] of currentTrgs) {
-        if (!targetTrgs.has(trgName)) {
-          steps.push(`DROP TRIGGER IF EXISTS "${trgName}" ON "${schema}"."${name}";`)
-        }
-      }
-      for (const [trgName, trg] of targetTrgs) {
-        if (!currentTrgs.has(trgName)) {
-          steps.push(`${trg.definition};`)
-        }
-      }
-    }
-  }
-
-  return steps
-}
-
-/** Reconstruct a CREATE POLICY statement from a captured PolicySnapshot. */
-function buildCreatePolicyDdl(schema: string, table: string, p: PolicySnapshot): string {
-  const roles = p.roles.length > 0
-    ? p.roles.map(r => (r === 'public' ? 'public' : `"${r}"`)).join(', ')
-    : 'public'
-  const asClause = p.permissive ? 'PERMISSIVE' : 'RESTRICTIVE'
-  const usingClause = p.using ? ` USING (${p.using})` : ''
-  const checkClause = p.withCheck ? ` WITH CHECK (${p.withCheck})` : ''
-  return `CREATE POLICY "${p.name}" ON "${schema}"."${table}" AS ${asClause} FOR ${p.cmd} TO ${roles}${usingClause}${checkClause};`
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

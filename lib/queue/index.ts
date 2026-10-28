@@ -21,6 +21,8 @@
 
 import { prisma } from '@/lib/db/prisma'
 import { emit } from '@/lib/events/bus'
+import { serviceRegion } from '@/lib/data-plane/serving'
+import { HOME_REGION, type CloudRegionId } from '@/lib/regions'
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -48,6 +50,24 @@ export type JobType =
    * attempts, backoff and dead-lettering have exactly one implementation.
    */
   | 'maintenance_backfill'
+  /**
+   * One batch of a structural-evolution backfill (lib/structural-evolution/backfill-job.ts),
+   * re-queued with a cursor until the host table ends. Here for the same reason
+   * as `maintenance_backfill`: one retry lifecycle, not two.
+   */
+  | 'evolution_backfill'
+  /**
+   * An approved architecture change started where its project's tables are
+   * (lib/evolution-engine/engine.ts, startWhereTheTablesAre). Only ever a
+   * regional job: a project of the region a request reaches runs in it.
+   */
+  | 'evolution_advance'
+  /** A person's undo of an architecture change, run in the same way (undoWhereTheTablesAre). */
+  | 'evolution_undo'
+  /** A change whose table moved since the person was asked, rehearsed again there (reRequestDecision). */
+  | 'evolution_rerequest'
+  /** A look for architecture changes a person asked for now (proposeWhereTheTablesAre). */
+  | 'evolution_assess'
 
 export const PURGE_JOB_TYPE = 'purge_project' as const
 
@@ -343,7 +363,7 @@ export async function detectAndTimeoutStuckJobs(): Promise<number> {
  * without this they would sit there forever, which is the same lost-instruction
  * failure in a different costume.
  */
-export async function claimPurgeJobs(limit = 5) {
+export async function claimPurgeJobs(limit = 5, region: CloudRegionId = serviceRegion()) {
   const now = new Date()
 
   await prisma.backgroundJob.updateMany({
@@ -355,12 +375,19 @@ export async function claimPurgeJobs(limit = 5) {
     data: { status: PURGE_STATUS.pending, startedAt: null, timeoutAt: null },
   })
 
-  const candidates = await prisma.backgroundJob.findMany({
-    where: { type: PURGE_JOB_TYPE, status: PURGE_STATUS.pending, runAt: { lte: now } },
-    orderBy: { runAt: 'asc' },
-    take: limit,
-    select: { id: true },
-  })
+  // Only this region's jobs: each region's scheduler purges what was kept in
+  // it, whose bucket and disks are its own. Chosen in the query, so another
+  // region's backlog ahead in the queue can never hide them. A job written
+  // before the region was recorded is the home region's; one naming a region
+  // this build does not know matches none, so no region purges the wrong place.
+  const candidates = await prisma.$queryRaw<{ id: string }[]>`
+    SELECT "id" FROM "background_jobs"
+    WHERE "type" = ${PURGE_JOB_TYPE}
+      AND "status" = ${PURGE_STATUS.pending}
+      AND "runAt" <= (${now}::timestamptz AT TIME ZONE 'UTC')
+      AND COALESCE("payload"->>'region', ${HOME_REGION}) = ${region}
+    ORDER BY "runAt" ASC
+    LIMIT ${limit}`
 
   if (candidates.length === 0) return []
 
@@ -434,4 +461,220 @@ export async function failPurgeJob(id: string, error: string) {
       timeoutAt: null,
     },
   })
+}
+
+// ─── Regional jobs ────────────────────────────────────────────────────────────
+//
+// Work requested in one region that has to be done in another. The console,
+// MCP and the agent run in the home region, but a project kept elsewhere has
+// its database and its snapshots there: a pg_dump of it taken here would put
+// a full copy of its data in the home region, and a restore from here could
+// not even read its snapshot, which is in that region's bucket. So the request
+// is recorded here and carried out there, by that region's own scheduler
+// (lib/queue/worker.ts processRegionalJobs).
+//
+// Purges' rule, for the same reason (PURGE_STATUS above): these rows never
+// enter 'queued', so no generic worker, this build's or one already released,
+// can claim one and complete it without a handler, or run it in the wrong
+// region.
+//
+// A maintenance backfill of a regional project is the same kind of work: its
+// ladder runs in the project's region (lib/autonomy/region-skip.ts), and the
+// batches it dispatches belong there too, not to the home queue, where a
+// failed batch's database error, which can quote a row, would be recorded. So
+// is the copy an architecture change makes into its new table
+// (lib/structural-evolution/backfill-job.ts), and so is what a person asks of
+// an architecture change, its start, its undo, a rehearsal again and a look
+// for changes: each reads and writes the region's database statement by
+// statement, which across regions outlasts the request that asked for it
+// (lib/evolution-engine/engine.ts, startWhereTheTablesAre and the rest).
+
+/** Snapshots taken and restored for another region: what the console's snapshot panel lists. */
+export const SNAPSHOT_JOB_TYPES = ['workspace_backup', 'workspace_restore'] as const
+
+/** The work one region may ask another to do. */
+export const REGIONAL_JOB_TYPES = [
+  ...SNAPSHOT_JOB_TYPES,
+  'maintenance_backfill',
+  'evolution_backfill',
+  'evolution_advance',
+  'evolution_undo',
+  'evolution_rerequest',
+  'evolution_assess',
+] as const
+export type RegionalJobType = (typeof REGIONAL_JOB_TYPES)[number]
+
+/**
+ * Work that writes the project's data, and so waits while the project is
+ * paused; with it, the rehearsals and looks an architecture change asks for,
+ * which would wake a paused database.
+ */
+const REGIONAL_WRITES_HELD_WHILE_PAUSED: readonly RegionalJobType[] = [
+  'maintenance_backfill',
+  'evolution_backfill',
+  'evolution_advance',
+  'evolution_undo',
+  'evolution_rerequest',
+  'evolution_assess',
+]
+
+export const REGIONAL_STATUS = {
+  /** Waiting for its region's scheduler. Invisible to every generic query. */
+  pending: 'regional_pending',
+  /** Claimed by its region's scheduler. */
+  running: 'regional_running',
+  /** Attempts exhausted. Terminal and never auto-pruned: the project is shown it. */
+  failed: 'regional_failed',
+} as const
+
+/**
+ * Long enough for any snapshot or restore (pg_dump itself stops at two minutes,
+ * lib/services/workspace-backup.ts), short enough that a worker that died is
+ * noticed within the hour. A run still going past it counts as an attempt.
+ */
+const REGIONAL_JOB_TIMEOUT_MS = 30 * 60 * 1000
+
+/**
+ * Ask `region` to do `type` for `projectId`. The region is recorded in the
+ * payload, which is where a region's claim looks for its own work.
+ */
+export async function enqueueRegionalJob(
+  type: RegionalJobType,
+  projectId: string,
+  region: CloudRegionId,
+  payload: Record<string, unknown> = {},
+  options: { maxAttempts?: number } = {},
+): Promise<{ id: string }> {
+  return prisma.backgroundJob.create({
+    data: {
+      type,
+      projectId,
+      status: REGIONAL_STATUS.pending,
+      payload: { ...payload, projectId, region } as Record<string, any>,
+      maxAttempts: options.maxAttempts ?? 3,
+      runAt: new Date(),
+    },
+    select: { id: true },
+  })
+}
+
+/**
+ * Claim up to `limit` due jobs of `region`, chosen in the query like purges.
+ *
+ * A job left running past its timeout by a worker that died, or one still
+ * running, counts that attempt: it goes back to pending while attempts remain
+ * and to failed after, so a slow restore is never started a second time
+ * without anyone deciding to.
+ */
+export async function claimRegionalJobs(limit = 2, region: CloudRegionId = serviceRegion()) {
+  const now = new Date()
+
+  // Only this region's: whether another region's run is stale is for that
+  // region to decide, where it may still be running.
+  const stale = (
+    await prisma.backgroundJob.findMany({
+      where: { type: { in: [...REGIONAL_JOB_TYPES] }, status: REGIONAL_STATUS.running, timeoutAt: { lte: now } },
+      select: { id: true, attempts: true, maxAttempts: true, payload: true },
+    })
+  ).filter((job) => ((job.payload ?? {}) as { region?: unknown }).region === region)
+  for (const job of stale) {
+    const attempts = job.attempts + 1
+    await prisma.backgroundJob.updateMany({
+      where: { id: job.id, status: REGIONAL_STATUS.running },
+      data: attempts >= job.maxAttempts
+        ? { status: REGIONAL_STATUS.failed, attempts, error: 'Timed out in its region.', completedAt: now, timeoutAt: null }
+        : { status: REGIONAL_STATUS.pending, attempts, error: 'Timed out in its region; retried.', startedAt: null, timeoutAt: null },
+    })
+  }
+
+  // A paused project takes no writes, so its backfill is left pending, not
+  // claimed: no attempt is spent, and it runs as normal once the project
+  // resumes, as the generic queue does (claimNextJobs). Snapshots are claimed:
+  // taking one is how an owner gets their data out, and a restore checks again
+  // where it runs.
+  const candidates = await prisma.$queryRaw<{ id: string }[]>`
+    SELECT "id" FROM "background_jobs"
+    WHERE "type" = ANY(${[...REGIONAL_JOB_TYPES]}::text[])
+      AND "status" = ${REGIONAL_STATUS.pending}
+      AND "runAt" <= (${now}::timestamptz AT TIME ZONE 'UTC')
+      AND "payload"->>'region' = ${region}
+      AND NOT (
+        "type" = ANY(${[...REGIONAL_WRITES_HELD_WHILE_PAUSED]}::text[])
+        AND "projectId" IN (SELECT "id" FROM "projects" WHERE "pausedAt" IS NOT NULL)
+      )
+    ORDER BY "runAt" ASC
+    LIMIT ${limit}`
+
+  if (candidates.length === 0) return []
+
+  const ids = candidates.map((c) => c.id)
+
+  await prisma.backgroundJob.updateMany({
+    where: { id: { in: ids }, status: REGIONAL_STATUS.pending },
+    data: {
+      status: REGIONAL_STATUS.running,
+      startedAt: now,
+      timeoutAt: new Date(now.getTime() + REGIONAL_JOB_TIMEOUT_MS),
+    },
+  })
+
+  return prisma.backgroundJob.findMany({
+    where: { id: { in: ids }, status: REGIONAL_STATUS.running },
+  })
+}
+
+/** Done. `completed` is shared with the generic vocabulary, as for purges. */
+export async function completeRegionalJob(id: string, result: Record<string, any>) {
+  await prisma.backgroundJob.update({
+    where: { id },
+    data: { status: 'completed', result, completedAt: new Date(), error: null, timeoutAt: null },
+  })
+}
+
+/**
+ * A failed attempt: pending again after the backoff while attempts remain,
+ * failed after. `error` is what the project is shown, so it is the platform's
+ * own sentence, never the database's (which can quote rows).
+ */
+export async function failRegionalJob(id: string, error: string) {
+  const job = await prisma.backgroundJob.findUnique({ where: { id } })
+  if (!job) return
+
+  const attempts = job.attempts + 1
+  if (attempts >= job.maxAttempts) {
+    await prisma.backgroundJob.update({
+      where: { id },
+      data: { status: REGIONAL_STATUS.failed, attempts, error, completedAt: new Date(), timeoutAt: null },
+    })
+    return
+  }
+
+  const delayMs = RETRY_DELAYS_MS[attempts] ?? RETRY_DELAYS_MS[RETRY_DELAYS_MS.length - 1]
+  await prisma.backgroundJob.update({
+    where: { id },
+    data: {
+      status: REGIONAL_STATUS.pending,
+      attempts,
+      error,
+      runAt: new Date(Date.now() + delayMs),
+      startedAt: null,
+      timeoutAt: null,
+    },
+  })
+}
+
+/**
+ * A project's recent regional snapshots and restores, newest first: what its
+ * console's snapshot panel shows as queued, running or failed, and in which
+ * region. The payload stays here. Backfill batches are a maintenance ladder's,
+ * which reads them itself.
+ */
+export async function regionalJobsOf(projectId: string, take = 10) {
+  const jobs = await prisma.backgroundJob.findMany({
+    where: { projectId, type: { in: [...SNAPSHOT_JOB_TYPES] } },
+    orderBy: { createdAt: 'desc' },
+    take,
+    select: { id: true, type: true, status: true, error: true, createdAt: true, completedAt: true, payload: true },
+  })
+  return jobs.map(({ payload, ...job }) => ({ ...job, region: ((payload ?? {}) as { region?: string }).region ?? null }))
 }

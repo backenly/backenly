@@ -10,10 +10,12 @@
 
 import crypto from 'crypto'
 import { verify } from 'jsonwebtoken'
-import { prisma } from '@/lib/db'
+import { workspaceRawClient } from '@/lib/data-plane/regional'
+import { authorizingProject } from '@/lib/auth-projection/read'
 import { resolveJwtSecret } from '@/lib/services/jwtSecretManager'
 import { noteEndUserActivity } from '@/lib/quota/kernel'
 import { crossEnvironmentToken, endUserTokenSecret } from '@/lib/branches/auth-environment'
+import { readEndUserBlocked } from '@/lib/services/end-user-blocked'
 
 export interface EndUserIdentity {
   userId: string
@@ -45,13 +47,11 @@ export async function resolveEndUserFromToken(
   projectId: string,
   rawTokenInput: string | undefined,
   branch: EndUserBranch | null = null,
-): Promise<EndUserIdentity | null> {
+): Promise<EndUserIdentity | 'blocked' | null> {
   if (!rawTokenInput) return null
   const rawToken = bareToken(rawTokenInput)
-  const project = await prisma.project.findUnique({
-    where: { id: projectId },
-    select: { jwtSecret: true },
-  })
+  // The region's copy while it is fresh, home otherwise (lib/auth-projection/read.ts).
+  const project = await authorizingProject(projectId)
   if (!project?.jwtSecret) return null
   let payload: any
   try {
@@ -61,11 +61,17 @@ export async function resolveEndUserFromToken(
   }
   if (payload?.projectId !== projectId || !payload.userId) return null
   if ((payload.br ?? null) !== (branch?.id ?? null)) return null
+  // The blacklist and the users table are in the project's database, in its
+  // region. Resolved before the fail-open checks below: they accept a token
+  // when its status cannot be read, which for a region this process cannot
+  // reach would honour every revoked and blocked token. The error fails the
+  // request instead.
+  const db = await workspaceRawClient(projectId)
   // Honour /auth/logout revocations.
   if (payload.jti) {
     try {
       const schemaName = branch?.schemaName ?? `workspace_${projectId}`
-      const rows = await prisma.$queryRawUnsafe<{ jti: string }[]>(
+      const rows = await db.$queryRawUnsafe<{ jti: string }[]>(
         `SELECT jti FROM "${schemaName}"."_token_blacklist" WHERE jti = $1 LIMIT 1`,
         payload.jti,
       )
@@ -96,6 +102,29 @@ export async function resolveEndUserFromToken(
       }
     }
   }
+  // Blocking promises "existing JWT tokens stop working immediately"
+  // (block_end_user's description and its success message) — which is only
+  // true if request-time resolution checks it. Before this check, is_blocked
+  // was read at sign-in and refresh alone, so a blocked user's live token
+  // kept working for up to seven days. Read as the service role: the users
+  // table is row-level secured against the app role (lib/services/end-user-blocked.ts).
+  // A missing table or column means nobody was ever blocked; any other failure
+  // fails open like the revocation check above, and just as loudly.
+  try {
+    const schemaName = branch?.schemaName ?? `workspace_${projectId}`
+    // 'blocked', not null: the caller answers 403 — the promised behavior —
+    // instead of silently serving the request as an anonymous caller.
+    if (await readEndUserBlocked(db, schemaName, String(payload.userId))) return 'blocked'
+  } catch (err: any) {
+    const text = String(err?.message ?? err)
+    const absent = err?.code === '42P01' || err?.code === '42703' || text.includes('42P01') || text.includes('42703')
+    if (!absent) {
+      console.error(
+        `[EndUserIdentity] is_blocked check FAILED OPEN for project ${projectId}: ${text}. ` +
+        `A blocked user's token would have been accepted.`,
+      )
+    }
+  }
   // An authenticated data request is use: count the end user active this month
   // (throttled to one write a day, never blocks). A preview branch's test users
   // are not the month's active users.
@@ -115,10 +144,7 @@ export async function crossEnvironmentUserToken(
   rawTokenInput: string,
   branch: EndUserBranch | null,
 ): Promise<{ code: string; error: string } | null> {
-  const project = await prisma.project.findUnique({
-    where: { id: projectId },
-    select: { jwtSecret: true },
-  })
+  const project = await authorizingProject(projectId)
   if (!project?.jwtSecret) return null
   return crossEnvironmentToken(bareToken(rawTokenInput), resolveJwtSecret(project.jwtSecret), branch)
 }

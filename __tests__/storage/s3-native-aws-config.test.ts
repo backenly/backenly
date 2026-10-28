@@ -21,6 +21,7 @@ import {
   isS3Configured,
   s3ConfigurationProblem,
   getS3Config,
+  s3LocationFor,
 } from '@/lib/services/s3-config'
 
 const KEYS = [
@@ -187,5 +188,64 @@ describe('every site that was silently disabled on AWS', () => {
     process.env.STORAGE_S3_ACCESS_KEY = 'only-the-key'
     const { S3StorageService } = await import('@/lib/services/s3Storage')
     expect(() => new S3StorageService()).toThrow(/not configured/i)
+  })
+})
+
+describe("each region's project files are in that region's bucket", () => {
+  const REGION_KEYS = ['BACKENLY_SERVICE_REGION', 'STORAGE_S3_BUCKET_US_EAST_1', 'STORAGE_S3_BUCKET_AP_SOUTH_1'] as const
+  const savedRegion: Record<string, string | undefined> = {}
+
+  beforeEach(() => {
+    for (const k of REGION_KEYS) {
+      savedRegion[k] = process.env[k]
+      delete process.env[k]
+    }
+  })
+
+  afterEach(() => {
+    for (const k of REGION_KEYS) {
+      if (savedRegion[k] === undefined) delete process.env[k]
+      else process.env[k] = savedRegion[k]
+    }
+  })
+
+  const refusal = (fn: () => unknown): unknown => {
+    try {
+      fn()
+    } catch (err) {
+      return err
+    }
+    return undefined
+  }
+
+  it("serves this process's own region from its configuration, as before", () => {
+    awsEcsMode()
+    expect(s3LocationFor('ap-south-1')).toMatchObject({ bucket: 'backenly-prod-storage', local: true })
+  })
+
+  it("reaches another region's bucket in that region, never through this one's", async () => {
+    awsEcsMode()
+    process.env.STORAGE_S3_BUCKET_US_EAST_1 = 'example-files-us-east-1'
+    const at = s3LocationFor('us-east-1')
+    expect(at.bucket).toBe('example-files-us-east-1')
+    expect(at.local).toBe(false)
+    expect(await at.client.config.region()).toBe('us-east-1')
+  })
+
+  it("refuses another region whose bucket is not set, rather than using this one's", () => {
+    awsEcsMode()
+    expect(refusal(() => s3LocationFor('us-east-1'))).toMatchObject({
+      code: 'REGION_NOT_CONFIGURED',
+      variable: 'STORAGE_S3_BUCKET_US_EAST_1',
+    })
+  })
+
+  it("makes a regional process's own region the local one, and the home region another", () => {
+    awsEcsMode()
+    process.env.BACKENLY_SERVICE_REGION = 'us-east-1'
+    process.env.STORAGE_S3_REGION = 'us-east-1'
+    process.env.STORAGE_S3_BUCKET = 'example-files-us-east-1'
+    expect(s3LocationFor('us-east-1')).toMatchObject({ bucket: 'example-files-us-east-1', local: true })
+    expect(refusal(() => s3LocationFor('ap-south-1'))).toMatchObject({ variable: 'STORAGE_S3_BUCKET_AP_SOUTH_1' })
   })
 })

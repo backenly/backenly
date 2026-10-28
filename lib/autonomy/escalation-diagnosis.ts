@@ -34,8 +34,11 @@
 import { prisma } from '@/lib/db/prisma'
 import { AiError } from '@/lib/ai/llm'
 import { summariseFinding } from '@/lib/core/finding-summaries'
+import { EVOLUTION_FINDING_TYPE } from '@/lib/core/types'
 import { classifyFix } from '@/lib/core/fix-classifier'
 import { resolveWorkspaceSchema } from '@/lib/services/workspace-pool'
+import { workspaceRawClient, type WorkspaceRawClient } from '@/lib/data-plane/regional'
+import { quotesKeptHere } from '@/lib/data-plane/residency'
 import { investigateFinding, type CatalogTable, type Investigation } from './investigator'
 import { evidenceFingerprint } from './finding-fingerprint'
 import { proposableFor, proposeRepair } from './ai-proposals'
@@ -86,9 +89,9 @@ export function isDue(details: Record<string, unknown>, fingerprint: string, now
 }
 
 /** Table and column names of the project's workspace schema. Names only, never rows. */
-async function loadCatalog(projectId: string): Promise<CatalogTable[]> {
+async function loadCatalog(db: WorkspaceRawClient, projectId: string): Promise<CatalogTable[]> {
   const schema = await resolveWorkspaceSchema(projectId)
-  const rows = await prisma.$queryRawUnsafe<Array<{ table_name: string; column_name: string }>>(
+  const rows = await db.$queryRawUnsafe<Array<{ table_name: string; column_name: string }>>(
     `SELECT table_name, column_name FROM information_schema.columns WHERE table_schema = $1 ORDER BY table_name, ordinal_position`,
     schema,
   )
@@ -147,15 +150,26 @@ export async function diagnoseEscalatedFindings(projectId: string): Promise<numb
           { status: 'pending_approval' },
           { status: 'open', severity: { in: ['critical', 'warning'] } },
         ],
+        // An architecture change awaiting a person is explained by the engine
+        // that prepared it, deterministically; its row is the engine's handle
+        // and is never rewritten, or shown to a model, by generic code.
+        type: { not: EVOLUTION_FINDING_TYPE },
       },
       orderBy: { detectedAt: 'desc' },
       take: 20,
     })
+    // A held action of a project kept in another region keeps its target and
+    // arguments there (lib/operational-memory/held-action-targets.ts). Its
+    // diagnosis would be written here, by a model that may run outside the
+    // region, about an action the owner asked for and only has to decide on,
+    // so it is not investigated (lib/data-plane/residency.ts).
+    const quote = await quotesKeptHere(projectId)
     const candidates = rows.filter(
       (f) =>
-        f.status === 'pending_approval' ||
-        f.severity === 'critical' ||
-        classifyFix(f.type, (f.details ?? {}) as Record<string, unknown>).decision !== 'auto',
+        (quote || f.type !== 'ai_action_pending') &&
+        (f.status === 'pending_approval' ||
+          f.severity === 'critical' ||
+          classifyFix(f.type, (f.details ?? {}) as Record<string, unknown>).decision !== 'auto'),
     )
     const due = candidates
       .map((f) => {
@@ -165,6 +179,12 @@ export async function diagnoseEscalatedFindings(projectId: string): Promise<numb
       .filter((c) => isDue(c.details, c.fingerprint))
       .slice(0, MAX_PER_TICK)
     if (due.length === 0) return 0
+
+    // The catalog is in the project's region. Resolved here rather than in the
+    // fail-soft catalog read below, so a project whose region this process
+    // cannot reach gets no diagnosis at all instead of one reasoned from an
+    // empty catalog.
+    const db = await workspaceRawClient(projectId)
 
     const since = new Date(Date.now() - 24 * 60 * 60 * 1000)
     const [recentAutonomy, investigatedToday] = await Promise.all([
@@ -233,7 +253,7 @@ export async function diagnoseEscalatedFindings(projectId: string): Promise<numb
 
         if (modelUnavailable || modelBudget <= 0) continue
         modelBudget--
-        if (!catalog) catalog = await loadCatalog(projectId).catch(() => [])
+        if (!catalog) catalog = await loadCatalog(db, projectId).catch(() => [])
 
         const state = details.investigation as InvestigationState | undefined
         const prior = state?.fingerprint === fingerprint ? state : undefined

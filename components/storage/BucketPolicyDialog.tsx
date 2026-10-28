@@ -113,9 +113,9 @@ export function BucketPolicyDialog({
             <span className="min-w-0">
               <span className="block text-[12px] text-zinc-200">
                 {POLICY_LABELS[option].title}
-                <span className="ml-1.5 font-mono text-[12px] text-zinc-500">{option}</span>
+                <span className="ml-1.5 font-mono text-[12px] text-faint">{option}</span>
               </span>
-              <span className="mt-0.5 block text-[12.5px] leading-snug text-zinc-500">
+              <span className="mt-0.5 block text-[12.5px] leading-snug text-faint">
                 {POLICY_LABELS[option].means}
               </span>
             </span>

@@ -9,7 +9,8 @@ export const maxDuration = 15
  *   Auth: X-User-Token (project-scoped end-user JWT signed with project.jwtSecret)
  *
  * Flow:
- *   1. Verify the end-user JWT against project.jwtSecret.
+ *   1. Resolve the end-user JWT through the check every data door uses:
+ *      project.jwtSecret, this project, not revoked, user not blocked.
  *   2. Look up `organization_invitations.token` in the workspace schema.
  *   3. Reject expired, already-accepted, or wrong-email invites.
  *   4. Insert into `organization_members` and stamp `accepted_at`.
@@ -21,8 +22,9 @@ export const maxDuration = 15
 
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
-import jwt from 'jsonwebtoken'
-import { resolveJwtSecret } from '@/lib/services/jwtSecretManager'
+import { isRegionError, workspaceRawClient } from '@/lib/data-plane/regional'
+import { executeWithUserContext } from '@/lib/services/workspace-rls'
+import { resolveEndUserFromToken } from '@/server/lib/end-user-identity'
 import { getWorkspaceDatabaseNames } from '@/lib/services/databaseProvisioning'
 import { recordedV1 } from '@/lib/traffic/recorded-v1'
 
@@ -54,19 +56,20 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
       )
     }
     const rawToken = header.replace(/^Bearer\s+/i, '')
-    let payload: { userId?: string; email?: string; projectId?: string } = {}
-    try {
-      payload = jwt.verify(rawToken, resolveJwtSecret(project.jwtSecret), { algorithms: ['HS256'] }) as any
-    } catch {
+    // The check every data door uses (server/lib/end-user-identity.ts): signed
+    // with this project's secret, naming this project, and not revoked by
+    // logout. A blocked user is refused with the runtime's answer.
+    const endUser = await resolveEndUserFromToken(projectId, rawToken)
+    if (endUser === 'blocked') {
+      return NextResponse.json(
+        { error: 'This account has been blocked by the project owner.', code: 'END_USER_BLOCKED' },
+        { status: 403 },
+      )
+    }
+    if (!endUser) {
       return NextResponse.json(
         { error: 'Invalid or expired session', code: 'INVALID_TOKEN' },
         { status: 401 },
-      )
-    }
-    if (!payload.userId || payload.projectId !== projectId) {
-      return NextResponse.json(
-        { error: 'Token does not belong to this project', code: 'WRONG_PROJECT' },
-        { status: 403 },
       )
     }
 
@@ -81,9 +84,13 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
     }
 
     const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
+    // The project's database, in its region. Resolved before the users
+    // lookup's fail-soft catch, which would read an unreachable region as
+    // "no account".
+    const db = await workspaceRawClient(projectId)
 
     // ── Lookup invitation ──────────────────────────────────────────────────
-    const invites = await prisma.$queryRawUnsafe<Array<{
+    const invites = await db.$queryRawUnsafe<Array<{
       id: string
       organization_id: string
       email: string
@@ -119,12 +126,18 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
     // ── Email match (anti-token-theft) ─────────────────────────────────────
     // Look up the end-user's email from the workspace users table — the JWT
     // payload may not include it. The invite is only valid for the user it
-    // was addressed to.
+    // was addressed to. Read as the service role: the users table is row-level
+    // secured against the app role, so a read without session claims matched
+    // no row (lib/services/end-user-blocked.ts). And a bare $1 arrives as text,
+    // which a uuid id refuses (42883), so the id is compared as text.
     let endUserEmail: string | null = null
     try {
-      const rows = await prisma.$queryRawUnsafe<Array<{ email: string }>>(
-        `SELECT email FROM "${postgresSchema}"."users" WHERE id = $1 LIMIT 1`,
-        payload.userId,
+      const rows = await executeWithUserContext<{ email: string }>(
+        projectId,
+        '',
+        true,
+        `SELECT email FROM "${postgresSchema}"."users" WHERE id::text = $1 LIMIT 1`,
+        [endUser.userId],
       )
       endUserEmail = rows[0]?.email ?? null
     } catch {
@@ -147,14 +160,14 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
     }
 
     // ── Already a member? Treat as idempotent success ──────────────────────
-    const existing = await prisma.$queryRawUnsafe<Array<{ id: string }>>(
+    const existing = await db.$queryRawUnsafe<Array<{ id: string }>>(
       `SELECT id FROM "${postgresSchema}"."organization_members"
         WHERE organization_id = $1::uuid AND user_id = $2::uuid LIMIT 1`,
-      invite.organization_id, payload.userId,
+      invite.organization_id, endUser.userId,
     )
     if (existing.length > 0) {
       // Still mark the invite consumed so it can't be reused later.
-      await prisma.$executeRawUnsafe(
+      await db.$executeRawUnsafe(
         `UPDATE "${postgresSchema}"."organization_invitations"
             SET accepted_at = NOW() WHERE id = $1::uuid`,
         invite.id,
@@ -168,14 +181,14 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
     }
 
     // ── Insert member + consume invite atomically ──────────────────────────
-    await prisma.$transaction([
-      prisma.$executeRawUnsafe(
+    await db.$transaction([
+      db.$executeRawUnsafe(
         `INSERT INTO "${postgresSchema}"."organization_members"
            (id, organization_id, user_id, role, joined_at)
          VALUES (gen_random_uuid(), $1::uuid, $2::uuid, $3, NOW())`,
-        invite.organization_id, payload.userId, invite.role || 'member',
+        invite.organization_id, endUser.userId, invite.role || 'member',
       ),
-      prisma.$executeRawUnsafe(
+      db.$executeRawUnsafe(
         `UPDATE "${postgresSchema}"."organization_invitations"
             SET accepted_at = NOW() WHERE id = $1::uuid`,
         invite.id,
@@ -189,6 +202,14 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
       role: invite.role || 'member',
     })
   } catch (err: any) {
+    // A region this process cannot reach: say so, without the message's
+    // variable names.
+    if (isRegionError(err)) {
+      return NextResponse.json(
+        { error: "This project's data region is not reachable from this server.", code: err.code },
+        { status: 503 },
+      )
+    }
     return NextResponse.json(
       { error: err?.message ?? 'Unexpected error', code: 'INTERNAL' },
       { status: 500 },

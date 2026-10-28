@@ -17,19 +17,30 @@
  */
 
 import { sanitizeMessageForStorage } from '@/lib/ai/api-key-detector'
+import { ISSUED_PREFIX, LEGACY_PREFIXES } from '@/lib/auth/key-prefix'
 
 const PLACEHOLDER = '[withheld]'
+
+/** What a withheld value reads as on a stored or served copy. */
+export const WITHHELD = PLACEHOLDER
 
 /** Field names whose string values are credentials. */
 const SECRET_FIELD = /^(apiKey|newKey|secret|webhookSecret|signingSecret|password|connectionString|psqlCommand|pgDumpCommand|token|accessToken|refreshToken|clientSecret)$/i
 
-/** Credential shapes Backenly issues. */
+/**
+ * Credential shapes Backenly issues, found wherever they sit. A word boundary
+ * missed two common places: after an escaped newline in JSON text, where
+ * "\nproj_live_…" has no boundary between the "n" and the key, and before an
+ * underscore or other word character right after a key, where the match
+ * cannot end on a boundary inside the key.
+ */
 const ISSUED_SHAPES: RegExp[] = [
-  /\b(?:proj|svc|mcp|bkn)_(?:live|test)_[A-Za-z0-9]{16,}\b/g,
-  // Rotated API keys, until rotation mints the project prefixes too.
-  /\bsk_(?:live|test)_[0-9a-f]{32,}\b/g,
-  /\bwhsec_[A-Za-z0-9+/=_-]{16,}/g,
-  /\bbk_admin_[A-Za-z0-9_-]{16,}/g,
+  /(?:proj|svc|mcp|bkn)_(?:live|test)_[A-Za-z0-9]{16,}/g,
+  // Every prefix a key is or was minted with, dashboard, preview-branch and
+  // legacy keys among them, followed by the hex it is minted with.
+  new RegExp(`(?:${[...Object.values(ISSUED_PREFIX), ...LEGACY_PREFIXES].join('|')})[0-9a-f]{32,}`, 'gi'),
+  /whsec_[A-Za-z0-9+/=_-]{16,}/g,
+  /bk_admin_[A-Za-z0-9_-]{16,}/g,
 ]
 
 /** A password inside a connection string, keeping the rest readable. */
@@ -58,6 +69,32 @@ export function namedSecrets(data: unknown): string[] {
   collect(data, out, 0, false)
   // Longest first, so a value that contains another is removed whole.
   return [...new Set(out)].sort((a, b) => b.length - a.length)
+}
+
+/**
+ * Field names whose values must never be DISPLAYED from stored executor
+ * params. `value` is here on top of SECRET_FIELD because SET_ENV_VAR carries
+ * its secret under that name, and a display copy never needs it — replay reads
+ * the sealed copy (lib/operational-memory/sealed-params.ts).
+ */
+const PARAM_SECRET_FIELD = new RegExp(SECRET_FIELD.source.replace(')$', '|value|envValue)$'), 'i')
+
+/**
+ * A deep copy of `params` safe to show and to store for showing: every string
+ * under a secret-named key is replaced. Arrays and nesting are preserved so
+ * the Review Queue card still renders the action's shape.
+ */
+export function redactSecretParams<T>(params: T, depth = 0): T {
+  if (depth > 6 || params == null || typeof params !== 'object') return params
+  if (Array.isArray(params)) {
+    return params.map((v) => redactSecretParams(v, depth + 1)) as unknown as T
+  }
+  const out: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(params as Record<string, unknown>)) {
+    if (PARAM_SECRET_FIELD.test(k) && typeof v === 'string' && v.length > 0) out[k] = PLACEHOLDER
+    else out[k] = redactSecretParams(v, depth + 1)
+  }
+  return out as T
 }
 
 /** `text` as it may be stored: named values and issued shapes withheld. */

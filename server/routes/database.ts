@@ -3,6 +3,11 @@ import { prisma } from '@/lib/db'
 import { v1AuthMiddleware, checkPermission, checkCapability } from '../lib/auth'
 import { sendError, sendSuccess, ErrorCodes } from '../lib/response'
 import { z } from 'zod'
+import { refusedDataRequest } from '@/lib/api/v1/data-errors'
+import { typedParams, type TypedParams } from '@/lib/api/v1/typed-params'
+import { whereConditions } from '@/lib/api/v1/where'
+import type { QueryContext } from '@/lib/db/query-errors'
+import { columnTypes } from '@/lib/mcp/runtime-db'
 import { executeWithUserContext } from '@/lib/services/workspace-rls'
 import { resolveEndUserFromToken } from '../lib/end-user-identity'
 import { applyIncludes, UnknownRelationError } from '@/lib/services/relational-include'
@@ -17,6 +22,8 @@ interface RlsIdentity {
   userId: string
   isServiceRole: boolean
   role: string
+  /** The token belonged to a user the owner blocked — the request must 403. */
+  blocked?: boolean
 }
 
 /**
@@ -32,8 +39,18 @@ async function resolveRlsIdentity(req: Request, projectId: string, serviceRole: 
     projectId,
     req.headers['x-user-token'] as string | undefined,
   )
+  // A blocked user gets the promised 403, never a silent downgrade to the
+  // anonymous identity — public-readable tables would still serve them.
+  if (endUser === 'blocked') return { userId: '', isServiceRole: false, role: 'user', blocked: true }
   if (endUser) return { userId: endUser.userId, isServiceRole: false, role: endUser.role }
   return { userId: '', isServiceRole: false, role: 'user' }
+}
+
+/** Answer the promised 403 for a blocked end-user; true when the request is done. */
+function refuseIfBlocked(res: Response, rls: RlsIdentity): boolean {
+  if (!rls.blocked) return false
+  sendError(res, ErrorCodes.FORBIDDEN, 'This account has been blocked by the project owner.', 403)
+  return true
 }
 
 // ── Schemas ────────────────────────────────────────────────────────────────────
@@ -64,44 +81,29 @@ const deleteSchema = z.object({
   where: z.record(z.any()),
 })
 
-// ── WHERE clause builder ───────────────────────────────────────────────────────
+// ── WHERE clause and refusals ──────────────────────────────────────────────────
 
-function buildWhere(where: Record<string, any> | undefined, startIdx = 1) {
-  const parts: string[] = []
-  const values: any[] = []
-  let idx = startIdx
+/**
+ * The WHERE clause for `where`, built as the Next routes build it
+ * (lib/api/v1/where.ts): the same operators, each value cast to its column's
+ * type through `bound`. Bound uncast, a value for a uuid, timestamp, numeric
+ * or boolean column was refused by PostgreSQL, so getting, updating or
+ * deleting a row by its uuid id answered 500.
+ */
+function whereSql(where: Record<string, unknown> | undefined, bound: TypedParams, types: Map<string, string>): string {
+  const conditions = whereConditions(where, bound, types)
+  return conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : ''
+}
 
-  if (where && typeof where === 'object') {
-    for (const [col, val] of Object.entries(where)) {
-      if (!/^[a-z_][a-z0-9_]*$/i.test(col)) continue
-      if (val === null) {
-        // SQL `= NULL` never matches — the SDK's isNull() serializes to null.
-        parts.push(`"${col}" IS NULL`)
-      } else if (typeof val === 'object') {
-        const op = val as any
-        if (op.gt !== undefined)  { parts.push(`"${col}" > $${idx++}`); values.push(op.gt) }
-        if (op.gte !== undefined) { parts.push(`"${col}" >= $${idx++}`); values.push(op.gte) }
-        if (op.lt !== undefined)  { parts.push(`"${col}" < $${idx++}`); values.push(op.lt) }
-        if (op.lte !== undefined) { parts.push(`"${col}" <= $${idx++}`); values.push(op.lte) }
-        if (op.not === null) {
-          // SDK isNotNull() serializes to { not: null }.
-          parts.push(`"${col}" IS NOT NULL`)
-        } else if (op.not !== undefined) {
-          parts.push(`"${col}" != $${idx++}`); values.push(op.not)
-        }
-        if (op.contains !== undefined) { parts.push(`"${col}"::text ILIKE $${idx++}`); values.push(`%${op.contains}%`) }
-        if (op.in !== undefined && Array.isArray(op.in)) {
-          const placeholders = op.in.map(() => `$${idx++}`).join(', ')
-          parts.push(`"${col}" IN (${placeholders})`)
-          values.push(...op.in)
-        }
-      } else {
-        parts.push(`"${col}" = $${idx++}`)
-        values.push(val)
-      }
-    }
-  }
-  return { clause: parts.length > 0 ? `WHERE ${parts.join(' AND ')}` : '', values, nextIdx: idx }
+/**
+ * Answer a request refused for what it asked, 400 or 409 naming the column
+ * (lib/api/v1/data-errors.ts); true when the request is done.
+ */
+function sendRefusal(res: Response, error: unknown, context: QueryContext | undefined): boolean {
+  const refused = refusedDataRequest(error, context)
+  if (!refused) return false
+  sendError(res, refused.code, refused.message, refused.status, refused.details)
+  return true
 }
 
 // ── POST /api/v1/:projectId/database/query ─────────────────────────────────────
@@ -123,6 +125,8 @@ router.post('/:projectId/database/query', asyncRoute(v1AuthMiddleware), asyncRou
   const { table, where, orderBy, limit, offset, include } = parsed.data
   const tableName = table.toLowerCase()
   const schemaName = `workspace_${ctx.projectId}`
+  // What was bound, so a refusal can name its column.
+  let refusal: QueryContext | undefined
 
   try {
     // Catalog-truth existence gate (single source of truth). Servable iff the
@@ -134,7 +138,14 @@ router.post('/:projectId/database/query', asyncRoute(v1AuthMiddleware), asyncRou
       return
     }
 
-    const { clause: whereClause, values: whereValues } = buildWhere(where)
+    // A blocked end-user is answered 403 before anything in the request is read.
+    const rls = await resolveRlsIdentity(req, ctx.projectId, ctx.apiKey.serviceRole)
+    if (refuseIfBlocked(res, rls)) return
+
+    const types = await columnTypes(ctx.projectId, schemaName, tableName)
+    const bound = typedParams(types)
+    refusal = bound.context(tableName)
+    const whereClause = whereSql(where, bound, types)
 
     let orderByClause = ''
     if (orderBy && typeof orderBy === 'object') {
@@ -147,10 +158,9 @@ router.post('/:projectId/database/query', asyncRoute(v1AuthMiddleware), asyncRou
     const countSql = `SELECT COUNT(*)::int AS count FROM "${schemaName}"."${tableName}" ${whereClause}`
     const dataSql  = `SELECT * FROM "${schemaName}"."${tableName}" ${whereClause} ${orderByClause} LIMIT ${Number(limit)} OFFSET ${Number(offset)}`
 
-    const rls = await resolveRlsIdentity(req, ctx.projectId, ctx.apiKey.serviceRole)
     const [countResult, rows] = await Promise.all([
-      executeWithUserContext<{ count: number }>(rls.userId, rls.isServiceRole, countSql, whereValues, rls.role),
-      executeWithUserContext<any>(rls.userId, rls.isServiceRole, dataSql, whereValues, rls.role),
+      executeWithUserContext<{ count: number }>(ctx.projectId, rls.userId, rls.isServiceRole, countSql, bound.values, rls.role),
+      executeWithUserContext<any>(ctx.projectId, rls.userId, rls.isServiceRole, dataSql, bound.values, rls.role),
     ])
 
     if (include) {
@@ -168,6 +178,7 @@ router.post('/:projectId/database/query', asyncRoute(v1AuthMiddleware), asyncRou
       })
       return
     }
+    if (sendRefusal(res, error, refusal)) return
     console.error('Database query error:', error)
     sendError(res, ErrorCodes.INTERNAL_ERROR, 'Failed to execute database query', 500)
   }
@@ -192,6 +203,8 @@ router.post('/:projectId/database/insert', asyncRoute(v1AuthMiddleware), asyncRo
   const { table, data } = parsed.data
   const tableName = table.toLowerCase()
   const schemaName = `workspace_${ctx.projectId}`
+  // What was bound, so a refusal can name its column.
+  let refusal: QueryContext | undefined
 
   try {
     // Catalog-truth existence gate (single source of truth). Servable iff the
@@ -207,33 +220,34 @@ router.post('/:projectId/database/insert', asyncRoute(v1AuthMiddleware), asyncRo
     const inserted: any[] = []
 
     const rls = await resolveRlsIdentity(req, ctx.projectId, ctx.apiKey.serviceRole)
+    if (refuseIfBlocked(res, rls)) return
+    // Each value is cast to its column's type (lib/api/v1/typed-params.ts).
+    const types = await columnTypes(ctx.projectId, schemaName, tableName)
     for (const row of rows) {
       const cols = Object.keys(row).filter(c => /^[a-z_][a-z0-9_]*$/i.test(c))
       if (cols.length === 0) continue
       const colList = cols.map(c => `"${c}"`).join(', ')
-      const placeholders = cols.map((_, i) => `$${i + 1}`).join(', ')
-      const values = cols.map(c => row[c])
+      const bound = typedParams(types)
+      refusal = bound.context(tableName)
+      const placeholders = cols.map(c => bound.bind(c, row[c])).join(', ')
       const sql = `INSERT INTO "${schemaName}"."${tableName}" (${colList}) VALUES (${placeholders}) RETURNING *`
-      const result = await executeWithUserContext<any>(rls.userId, rls.isServiceRole, sql, values, rls.role)
+      const result = await executeWithUserContext<any>(ctx.projectId, rls.userId, rls.isServiceRole, sql, bound.values, rls.role)
       if (result[0]) inserted.push(result[0])
     }
 
     // Non-blocking triggers + AI functions
     if (inserted.length > 0) {
       const { fireTriggers } = await import('@/lib/services/trigger-service')
-      const { fireAiFunctions } = await import('@/lib/services/ai-functions/executor')
       for (const row of inserted) {
         fireTriggers(ctx.projectId, { type: 'insert', table: tableName, data: row }).catch(
           (err: any) => console.warn('[Triggers] fire failed (non-fatal):', err?.message)
-        )
-        fireAiFunctions(ctx.projectId, { type: 'insert', table: tableName, data: row }).catch(
-          (err: any) => console.warn('[AiFunctions] fire failed (non-fatal):', err?.message)
         )
       }
     }
 
     sendSuccess(res, { data: inserted.length === 1 ? inserted[0] : inserted })
   } catch (error: any) {
+    if (sendRefusal(res, error, refusal)) return
     console.error('Database insert error:', error)
     sendError(res, ErrorCodes.INTERNAL_ERROR, 'Failed to insert data', 500)
   }
@@ -258,6 +272,8 @@ router.post('/:projectId/database/update', asyncRoute(v1AuthMiddleware), asyncRo
   const { table, where, data } = parsed.data
   const tableName = table.toLowerCase()
   const schemaName = `workspace_${ctx.projectId}`
+  // What was bound, so a refusal can name its column.
+  let refusal: QueryContext | undefined
 
   try {
     // Catalog-truth existence gate (single source of truth). Servable iff the
@@ -269,40 +285,45 @@ router.post('/:projectId/database/update', asyncRoute(v1AuthMiddleware), asyncRo
       return
     }
 
+    // A blocked end-user is answered 403 before anything in the request is read.
+    const rls = await resolveRlsIdentity(req, ctx.projectId, ctx.apiKey.serviceRole)
+    if (refuseIfBlocked(res, rls)) return
+
     const setCols = Object.keys(data).filter(c => /^[a-z_][a-z0-9_]*$/i.test(c))
     if (setCols.length === 0) {
       sendError(res, ErrorCodes.VALIDATION_ERROR, 'No valid fields to update', 400)
       return
     }
 
-    const values: any[] = []
-    let idx = 1
-    const setParts = setCols.map(c => { values.push(data[c]); return `"${c}" = $${idx++}` })
+    const types = await columnTypes(ctx.projectId, schemaName, tableName)
+    const bound = typedParams(types)
+    refusal = bound.context(tableName)
+    const setParts = setCols.map(c => `"${c}" = ${bound.bind(c, data[c])}`)
 
-    // WHERE params start after the SET params; buildWhere numbers them and
-    // supports the full operator vocabulary (gt/lt/in/contains/null/…).
-    const { clause: whereClause, values: whereValues } = buildWhere(where, idx)
-    values.push(...whereValues)
+    // WHERE params follow the SET params in the same sequence. Required, as for
+    // delete and on the Next route: with none, every row the key can reach was
+    // updated (an SDK update() with no filter sends no `where` at all).
+    const whereClause = whereSql(where, bound, types)
+    if (!whereClause) {
+      sendError(res, ErrorCodes.VALIDATION_ERROR, 'A WHERE condition is required for update', 400)
+      return
+    }
 
     const sql = `UPDATE "${schemaName}"."${tableName}" SET ${setParts.join(', ')} ${whereClause} RETURNING *`
-    const rls = await resolveRlsIdentity(req, ctx.projectId, ctx.apiKey.serviceRole)
-    const result = await executeWithUserContext<any>(rls.userId, rls.isServiceRole, sql, values, rls.role)
+    const result = await executeWithUserContext<any>(ctx.projectId, rls.userId, rls.isServiceRole, sql, bound.values, rls.role)
 
     if (result.length > 0) {
       const { fireTriggers } = await import('@/lib/services/trigger-service')
-      const { fireAiFunctions } = await import('@/lib/services/ai-functions/executor')
       for (const row of result) {
         fireTriggers(ctx.projectId, { type: 'update', table: tableName, data: row }).catch(
           (err: any) => console.warn('[Triggers] fire failed (non-fatal):', err?.message)
-        )
-        fireAiFunctions(ctx.projectId, { type: 'update', table: tableName, data: row }).catch(
-          (err: any) => console.warn('[AiFunctions] fire failed (non-fatal):', err?.message)
         )
       }
     }
 
     sendSuccess(res, { data: result.length === 1 ? result[0] : result, updated: result.length })
   } catch (error: any) {
+    if (sendRefusal(res, error, refusal)) return
     console.error('Database update error:', error)
     sendError(res, ErrorCodes.INTERNAL_ERROR, 'Failed to update data', 500)
   }
@@ -327,6 +348,8 @@ router.post('/:projectId/database/delete', asyncRoute(v1AuthMiddleware), asyncRo
   const { table, where } = parsed.data
   const tableName = table.toLowerCase()
   const schemaName = `workspace_${ctx.projectId}`
+  // What was bound, so a refusal can name its column.
+  let refusal: QueryContext | undefined
 
   try {
     // Catalog-truth existence gate (single source of truth). Servable iff the
@@ -338,32 +361,35 @@ router.post('/:projectId/database/delete', asyncRoute(v1AuthMiddleware), asyncRo
       return
     }
 
-    const { clause: whereClause, values } = buildWhere(where)
+    // A blocked end-user is answered 403 before anything in the request is read.
+    const rls = await resolveRlsIdentity(req, ctx.projectId, ctx.apiKey.serviceRole)
+    if (refuseIfBlocked(res, rls)) return
+
+    const types = await columnTypes(ctx.projectId, schemaName, tableName)
+    const bound = typedParams(types)
+    refusal = bound.context(tableName)
+    const whereClause = whereSql(where, bound, types)
 
     if (!whereClause) {
       sendError(res, ErrorCodes.VALIDATION_ERROR, 'A WHERE condition is required for delete', 400)
       return
     }
 
-    const sql = `DELETE FROM "${schemaName}"."${tableName}" ${whereClause} RETURNING id`
-    const rls = await resolveRlsIdentity(req, ctx.projectId, ctx.apiKey.serviceRole)
-    const result = await executeWithUserContext<any>(rls.userId, rls.isServiceRole, sql, values, rls.role)
+    const sql = `DELETE FROM "${schemaName}"."${tableName}" ${whereClause} RETURNING *`
+    const result = await executeWithUserContext<any>(ctx.projectId, rls.userId, rls.isServiceRole, sql, bound.values, rls.role)
 
     if (result.length > 0) {
       const { fireTriggers } = await import('@/lib/services/trigger-service')
-      const { fireAiFunctions } = await import('@/lib/services/ai-functions/executor')
       for (const row of result) {
         fireTriggers(ctx.projectId, { type: 'delete', table: tableName, data: row }).catch(
           (err: any) => console.warn('[Triggers] fire failed (non-fatal):', err?.message)
-        )
-        fireAiFunctions(ctx.projectId, { type: 'delete', table: tableName, data: row }).catch(
-          (err: any) => console.warn('[AiFunctions] fire failed (non-fatal):', err?.message)
         )
       }
     }
 
     sendSuccess(res, { success: true, deleted: result.length })
   } catch (error: any) {
+    if (sendRefusal(res, error, refusal)) return
     console.error('Database delete error:', error)
     sendError(res, ErrorCodes.INTERNAL_ERROR, 'Failed to delete data', 500)
   }

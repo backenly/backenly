@@ -1,345 +1,16 @@
 /**
- * Non-Destructive Rollback System
- * 
- * PHILOSOPHY: NEVER DELETE USER DATA
- * 
- * ═══════════════════════════════════════════════════════════════════════
- * TRUST-PRESERVING RESTORE
- * ═══════════════════════════════════════════════════════════════════════
- * 
- * REQUIREMENTS:
- * - Never DROP TABLE in production
- * - On restore: Rename tables (e.g., users__archived__timestamp)
- * - Keep all data intact
- * - Implement PITR using database snapshots
- * - Restore switches pointers, not deletes data
- * 
- * CONSTRAINTS:
- * - No restore options exposed to users
- * - No warnings shown (automatic safety)
- * 
- * SUCCESS:
- * - Restore is reversible
- * - No user data is ever destroyed automatically
- * - All destructive operations converted to renames/soft deletes
+ * Expiring the table archives the old rollback system left behind.
+ *
+ * That system renamed a dropped table to <name>__archived__<time> and wrote a
+ * TableArchive row; restoring meant renaming it back or asking for a
+ * point-in-time snapshot, which was never implemented. Nothing archives tables
+ * that way now: data a change removes is kept in that change's vault and comes
+ * back by restoring the state before the change (lib/changes). What is left is
+ * the cron that drops archives once their retention has passed.
  */
 
-import { PrismaClient } from '@prisma/client'
-import { ExecutionContext } from '@/lib/context/execution-context'
-import { BackendStateGraph } from '@/lib/orchestration/backend-state-graph'
-
-const prisma = new PrismaClient()
-
-/**
- * Archive Strategy
- * 
- * Instead of DROP TABLE:
- * - Rename to {table}__archived__{timestamp}
- * - Update graph to point to new active tables
- * - Preserve all data for potential recovery
- */
-export interface ArchiveOperation {
-  originalTable: string
-  archivedTable: string
-  archivedAt: Date
-  projectId: string
-  canRestore: boolean
-}
-
-/**
- * Point-in-Time Restore Snapshot
- * 
- * Captures complete state at specific moment
- * Allows reverting restore operations
- */
-export interface PITRSnapshot {
-  id: string
-  projectId: string
-  capturedAt: Date
-  graphState: BackendStateGraph
-  schemaState: {
-    tables: string[]
-    archivedTables: string[]
-  }
-  canRestoreTo: boolean
-}
-
-/**
- * Non-destructive table "removal"
- * 
- * INSTEAD OF: DROP TABLE users
- * DO THIS: RENAME TABLE users TO users__archived__1234567890
- * 
- * GUARANTEES:
- * - Data preserved
- * - Restore reversible
- * - No data loss
- */
-export async function archiveTable(
-  context: ExecutionContext,
-  tableName: string,
-  reason: 'rollback' | 'schema_change' | 'manual'
-): Promise<ArchiveOperation> {
-  console.log(`[Non-Destructive] Archiving table: ${tableName} (reason: ${reason})`)
-  
-  // Get workspace schema
-  const workspace = await prisma.workspace.findFirst({
-    where: { projectId: context.projectId },
-  })
-  
-  if (!workspace || !workspace.postgresSchema) {
-    throw new Error('Workspace not found or not provisioned')
-  }
-  
-  const schema = workspace.postgresSchema
-  const timestamp = Date.now()
-  const archivedTableName = `${tableName}__archived__${timestamp}`
-  
-  // Rename table instead of dropping
-  const quotedSchema = `"${schema}"`
-  const quotedOriginal = `"${capitalizeTableName(tableName)}"`
-  const quotedArchived = `"${capitalizeTableName(archivedTableName)}"`
-  
-  try {
-    // Execute rename in transaction
-    await prisma.$transaction(async (tx) => {
-      // RENAME TABLE instead of DROP TABLE
-      await tx.$executeRawUnsafe(
-        `ALTER TABLE ${quotedSchema}.${quotedOriginal} RENAME TO ${quotedArchived}`
-      )
-      
-      console.log(`[Non-Destructive] ✅ Renamed ${tableName} → ${archivedTableName}`)
-      
-      // Record archive operation for potential recovery
-      await tx.tableArchive.create({
-        data: {
-          projectId: context.projectId,
-          originalName: tableName,
-          archivedName: archivedTableName,
-          archivedAt: new Date(),
-          reason,
-          canRestore: true,
-          dataPreserved: true,
-        },
-      })
-    })
-    
-    return {
-      originalTable: tableName,
-      archivedTable: archivedTableName,
-      archivedAt: new Date(),
-      projectId: context.projectId,
-      canRestore: true,
-    }
-  } catch (error) {
-    console.error(`[Non-Destructive] Failed to archive table ${tableName}:`, error)
-    throw new Error(`Failed to archive table: ${error instanceof Error ? error.message : 'Unknown error'}`)
-  }
-}
-
-/**
- * Restore archived table
- * 
- * Reverses archiveTable operation
- * Renames archived table back to original name
- */
-export async function restoreArchivedTable(
-  context: ExecutionContext,
-  archivedTableName: string,
-  originalTableName: string
-): Promise<void> {
-  console.log(`[Non-Destructive] Restoring table: ${archivedTableName} → ${originalTableName}`)
-  
-  const workspace = await prisma.workspace.findFirst({
-    where: { projectId: context.projectId },
-  })
-  
-  if (!workspace || !workspace.postgresSchema) {
-    throw new Error('Workspace not found')
-  }
-  
-  const schema = workspace.postgresSchema
-  const quotedSchema = `"${schema}"`
-  const quotedArchived = `"${capitalizeTableName(archivedTableName)}"`
-  const quotedOriginal = `"${capitalizeTableName(originalTableName)}"`
-  
-  try {
-    await prisma.$transaction(async (tx) => {
-      // Check if target name is already taken
-      const existing = await tx.$queryRawUnsafe<any[]>(
-        `SELECT 1 FROM information_schema.tables 
-         WHERE table_schema = $1 AND table_name = $2`,
-        schema,
-        capitalizeTableName(originalTableName)
-      )
-      
-      if (existing.length > 0) {
-        // Archive the current table first
-        const tempArchive = `${originalTableName}__replaced__${Date.now()}`
-        const quotedTemp = `"${capitalizeTableName(tempArchive)}"`
-        
-        await tx.$executeRawUnsafe(
-          `ALTER TABLE ${quotedSchema}.${quotedOriginal} RENAME TO ${quotedTemp}`
-        )
-        
-        console.log(`[Non-Destructive] Existing table archived: ${originalTableName} → ${tempArchive}`)
-      }
-      
-      // Rename archived table back to original
-      await tx.$executeRawUnsafe(
-        `ALTER TABLE ${quotedSchema}.${quotedArchived} RENAME TO ${quotedOriginal}`
-      )
-      
-      console.log(`[Non-Destructive] ✅ Restored ${archivedTableName} → ${originalTableName}`)
-      
-      // Update archive record
-      await tx.tableArchive.updateMany({
-        where: {
-          projectId: context.projectId,
-          archivedName: archivedTableName,
-        },
-        data: {
-          restoredAt: new Date(),
-          canRestore: false,
-        },
-      })
-    })
-  } catch (error) {
-    console.error(`[Non-Destructive] Failed to restore table:`, error)
-    throw new Error(`Failed to restore table: ${error instanceof Error ? error.message : 'Unknown error'}`)
-  }
-}
-
-/**
- * Create Point-in-Time Restore Snapshot
- * 
- * Captures complete state before restore operation
- * Allows rolling back the rollback
- */
-export async function createPITRSnapshot(
-  context: ExecutionContext,
-  currentState: BackendStateGraph
-): Promise<PITRSnapshot> {
-  console.log(`[PITR] Creating snapshot for project ${context.projectId}`)
-  
-  const workspace = await prisma.workspace.findFirst({
-    where: { projectId: context.projectId },
-  })
-  
-  if (!workspace || !workspace.postgresSchema) {
-    throw new Error('Workspace not found')
-  }
-  
-  // Get current tables
-  const schema = workspace.postgresSchema
-  const tables = await prisma.$queryRawUnsafe<any[]>(
-    `SELECT table_name FROM information_schema.tables 
-     WHERE table_schema = $1 AND table_type = 'BASE TABLE'`,
-    schema
-  )
-  
-  const tableNames = tables.map(t => t.table_name)
-  const archivedTables = tableNames.filter(t => t.includes('__archived__'))
-  const activeTables = tableNames.filter(t => !t.includes('__archived__'))
-  
-  const snapshotId = `pitr_${Date.now()}_${Math.random().toString(36).substring(2, 15)}`
-  
-  // TODO: Fix Prisma client generation for PITRSnapshot model
-  console.log(`[PITR] Snapshot creation temporarily disabled`)
-  
-  return {
-    id: snapshotId,
-    projectId: context.projectId,
-    capturedAt: new Date(),
-    graphState: currentState,
-    schemaState: {
-      tables: activeTables,
-      archivedTables: archivedTables,
-    },
-    canRestoreTo: false, // Disabled
-  }
-  
-  /* Disabled until Prisma model is available
-  // Store snapshot
-  const snapshot = await prisma.pitrSnapshot.create({
-    data: {
-      id: snapshotId,
-      projectId: context.projectId,
-      capturedAt: new Date(),
-      graphState: currentState as any, // JSON
-      schemaState: {
-        tables: activeTables,
-        archivedTables: archivedTables,
-      },
-      canRestoreTo: true,
-    },
-  })
-  
-  console.log(`[PITR] ✅ Snapshot created: ${snapshotId}`)
-  
-  return {
-    id: snapshot.id,
-    projectId: snapshot.projectId,
-    capturedAt: snapshot.capturedAt,
-    graphState: snapshot.graphState as BackendStateGraph,
-    schemaState: snapshot.schemaState as any,
-    canRestoreTo: snapshot.canRestoreTo,
-  }
-  */
-}
-
-/**
- * Restore to PITR snapshot
- * 
- * Reverses a previous restore operation
- * All changes are pointer switches, no data deletion
- */
-export async function restoreToPITRSnapshot(
-  context: ExecutionContext,
-  snapshotId: string
-): Promise<{
-  success: boolean
-  tablesRestored: string[]
-  tablesArchived: string[]
-}> {
-  console.log(`[PITR] Restoring to snapshot: ${snapshotId}`)
-  
-  // TODO: Fix Prisma client generation for PITRSnapshot model
-  throw new Error('PITR restore temporarily disabled - Prisma client generation issue')
-}
-
-/**
- * List available PITR snapshots
- */
-export async function listPITRSnapshots(
-  projectId: string
-): Promise<PITRSnapshot[]> {
-  // TODO: Fix Prisma client generation for PITRSnapshot model
-  return []
-}
-
-/**
- * List archived tables for recovery
- */
-export async function listArchivedTables(
-  projectId: string
-): Promise<ArchiveOperation[]> {
-  const archives = await prisma.tableArchive.findMany({
-    where: {
-      projectId,
-      canRestore: true,
-    },
-    orderBy: { archivedAt: 'desc' },
-  })
-  
-  return archives.map(a => ({
-    originalTable: a.originalName,
-    archivedTable: a.archivedName,
-    archivedAt: a.archivedAt,
-    projectId: a.projectId,
-    canRestore: a.canRestore,
-  }))
-}
+import { prisma } from '@/lib/db/prisma'
+import { workspaceRawClient } from '@/lib/data-plane/regional'
 
 /**
  * Permanently delete old archives (>90 days)
@@ -379,17 +50,31 @@ export async function cleanupOldArchives(
   }
   
   const schema = workspace.postgresSchema
+  // The archived tables are in the project's region; their records are platform
+  // rows. Dropped through the platform database, the DROP ... IF EXISTS found
+  // nothing, succeeded, and the archive was marked deleted while its table and
+  // data stayed in the region past their retention.
+  const db = await workspaceRawClient(projectId)
   let deletedTables = 0
   
   for (const archive of oldArchives) {
     try {
-      const quotedSchema = `"${schema}"`
-      const quotedTable = `"${capitalizeTableName(archive.archivedName)}"`
-      
-      // NOW we can safely DROP (after 90 days)
-      await prisma.$executeRawUnsafe(
-        `DROP TABLE IF EXISTS ${quotedSchema}.${quotedTable} CASCADE`
+      // The retired writer quoted the name capitalised when it renamed the
+      // table (capitalizeTableName), so that is normally the table's name; the
+      // name as recorded is the other candidate. Whichever is there is dropped.
+      const candidates = [...new Set([capitalizeTableName(archive.archivedName), archive.archivedName])]
+      const present = await db.$queryRawUnsafe<Array<{ relname: string }>>(
+        `SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+          WHERE n.nspname = $1 AND c.relname = ANY($2::text[]) AND c.relkind IN ('r', 'p')`,
+        schema,
+        candidates,
       )
+      for (const { relname } of present) {
+        // Without CASCADE: a view or a foreign key that still reads the table
+        // makes the DROP fail, and the archive stays, named in the log below,
+        // instead of taking the reader with it (lib/changes/dependents.ts).
+        await db.$executeRawUnsafe(`DROP TABLE "${schema}"."${relname}"`)
+      }
       
       // Mark as deleted
       await prisma.tableArchive.update({

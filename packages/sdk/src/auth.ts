@@ -303,6 +303,13 @@ export class AuthModule {
    * `redirectTo` (default: the current page) with `?token=...&user_id=...`.
    * Call `handleOAuthCallback()` on the destination page to finish sign-in.
    *
+   * The redirect only happens when `redirectTo`'s origin is a CONNECTED
+   * frontend of the project (connect `{ "action": "connect_frontend" }` over
+   * MCP, or the Connect page). An unconnected origin never receives the
+   * token: the start endpoint refuses up front with REDIRECT_NOT_ALLOWED,
+   * because handing a credential to an origin the project never claimed is
+   * how OAuth tokens leak.
+   *
    * @example
    * <button onClick={() => backend.auth.signInWithProvider('github')}>
    *   Sign in with GitHub

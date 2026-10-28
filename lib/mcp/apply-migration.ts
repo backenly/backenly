@@ -14,9 +14,17 @@
  * exactly what applied and what remains, because an agent that knows three of
  * five statements landed can finish the job, and one told only "failed" replays
  * the lot.
+ *
+ * On main, a migration is also one governed change (lib/changes/ledger.ts):
+ * a checkpoint is taken before its first statement, and protected verification
+ * runs after its last. If a statement fails after others ran, or the migration
+ * applies and then fails verification, Backenly restores the checkpoint on the
+ * spot when that is provably lossless, and otherwise leaves it for a person.
+ * The response says which: `applied` is what is in effect now, `rolledBack`
+ * what ran and was undone, and `change` how its lifecycle ended.
  */
 
-import { prisma } from '@/lib/db/prisma'
+import { workspaceRawClient } from '@/lib/data-plane/regional'
 import { MigrationParseError, parseMigration, type PlannedAction } from '@/lib/mcp/migration-parser'
 
 export interface MigrationRefusal {
@@ -28,14 +36,37 @@ export interface MigrationRefusal {
   applied: []
 }
 
+/** The governed change a migration on main became. */
+export interface MigrationChange {
+  id: string
+  /** "change #12" in the console. */
+  seq: number
+  /** lib/changes/types.ts: healthy, unverified, recovered, awaiting_approval, manual_intervention_required, ... */
+  status: string
+  /** Protected verification confirmed the change. */
+  verified: boolean
+  /** When it failed: the check that failed, or why it could not be recovered. */
+  reason?: string
+  /** When Backenly recovered it: the recovery's change number. */
+  recoverySeq?: number | null
+  /** When recovering it waits for a person: the approval to poll. */
+  approvalId?: string | null
+}
+
 export interface MigrationFailure {
   ok: false
-  code: 'MIGRATION_FAILED'
+  code: 'MIGRATION_FAILED' | 'VERIFICATION_FAILED'
   error: string
   detail: string
+  /** What is in effect now. */
   applied: AppliedStep[]
   remaining: string[]
   hint: string
+  change?: MigrationChange
+  /** What ran and was then restored to the checkpoint. */
+  rolledBack?: AppliedStep[]
+  /** True when Backenly restored the previous state and verified it. */
+  recovered?: boolean
 }
 
 export interface MigrationSuccess {
@@ -43,6 +74,7 @@ export interface MigrationSuccess {
   summary: string
   applied: AppliedStep[]
   notes: string[]
+  change?: MigrationChange
 }
 
 export type MigrationOutcome = MigrationRefusal | MigrationFailure | MigrationSuccess
@@ -81,10 +113,15 @@ export function planMigration(sql: string): { ok: true; planned: PlannedAction[]
   }
 }
 
-/** The tables, of those named, that exist in a schema. */
-export async function existingTables(schema: string, names: string[]): Promise<Set<string>> {
+/**
+ * The tables, of those named, that exist in a schema of the project's
+ * database, in its region. Any other database has none of them, which would
+ * refuse every ALTER and wave every CREATE through.
+ */
+export async function existingTables(projectId: string, schema: string, names: string[]): Promise<Set<string>> {
   if (names.length === 0) return new Set()
-  const found = await prisma.$queryRaw<Array<{ table_name: string }>>`
+  const db = await workspaceRawClient(projectId)
+  const found = await db.$queryRaw<Array<{ table_name: string }>>`
     SELECT table_name FROM information_schema.tables
     WHERE table_schema = ${schema} AND table_name = ANY(${names})`
   return new Set(found.map((r) => r.table_name))
@@ -216,6 +253,15 @@ export function fullyAppliedStatements(planned: PlannedAction[], applied: Applie
   return order.filter((s) => complete.get(s))
 }
 
+/** "apply_migration: CREATE TABLE refunds (…) and 2 more statements" */
+export function migrationTitle(planned: PlannedAction[]): string {
+  const statements = [...new Set(planned.map((p) => p.source.split(' → ')[0]))]
+  const first = statements[0]?.replace(/\s+/g, ' ').trim() ?? ''
+  const head = first.length > 90 ? `${first.slice(0, 89)}…` : first
+  const more = statements.length - 1
+  return `apply_migration: ${head}${more > 0 ? ` and ${more} more statement${more === 1 ? '' : 's'}` : ''}`
+}
+
 /**
  * Apply a migration to a project's MAIN schema through the brain's dispatch,
  * so approval gates, the intent ledger and rollback behave exactly as a typed
@@ -232,12 +278,12 @@ export async function applyMigrationToMain(
   const plan = planMigration(sql)
   if (!plan.ok) return plan as MigrationRefusal
   const planned = (plan as { ok: true; planned: PlannedAction[] }).planned
-  const existing = await existingTables(opts.workspaceSchema, tablesNamed(planned))
+  const existing = await existingTables(projectId, opts.workspaceSchema, tablesNamed(planned))
   const checked = checkPlan(planned, existing)
   if (!checked.ok) return checked as MigrationRefusal
   const ok = checked as Extract<typeof checked, { ok: true }>
   const { dispatchTool } = await import('@/lib/ai/brain/tools')
-  return runPlan(ok.planned, ok.notes, (step) =>
+  const run = () => runPlan(ok.planned, ok.notes, (step) =>
     dispatchTool(step.tool, step.args, {
       projectId,
       userId,
@@ -251,4 +297,121 @@ export async function applyMigrationToMain(
       createdThisTurn: new Set<string>(),
     }),
   )
+
+  const { withGovernedChange } = await import('@/lib/changes/ledger')
+  const { ChangeInProgressError } = await import('@/lib/changes/lock')
+  try {
+    const { result, change } = await withGovernedChange(
+      {
+        projectId,
+        title: migrationTitle(ok.planned),
+        // The title quotes the first statement, which can carry values: for a
+        // project kept in another region the record says only how many.
+        regionalTitle: `apply_migration: ${ok.planned.length} statement${ok.planned.length === 1 ? '' : 's'}`,
+      },
+      run,
+      (outcome) => ({
+        ok: outcome.ok,
+        ...(outcome.ok ? {} : { error: `${(outcome as MigrationFailure).error} ${(outcome as MigrationFailure).detail}` }),
+        steps: [
+          ...outcome.applied.map((a) => ({ statement: a.statement, tool: a.tool, summary: a.summary, ok: true })),
+          ...(outcome.ok ? [] : [{ statement: (outcome as MigrationFailure).error.replace(/^Migration stopped at: /, ''), summary: (outcome as MigrationFailure).detail, ok: false }]),
+        ],
+      }),
+    )
+    if (!change) return result
+    const failing = change.verification?.checks.find((c) => c.outcome === 'contradicted')
+    const recorded: MigrationChange = {
+      id: change.id,
+      seq: change.seq,
+      status: change.status,
+      verified: change.status === 'healthy',
+      ...(failing ? { reason: `${failing.label}: ${failing.detail}` } : {}),
+      ...(change.recovery?.recoverySeq ? { recoverySeq: change.recovery.recoverySeq } : {}),
+      ...(change.recovery?.approvalId ? { approvalId: change.recovery.approvalId } : {}),
+      ...(change.recovery && !failing ? { reason: change.recovery.explanation } : {}),
+    }
+    const ranSteps = result.ok ? (result as MigrationSuccess).applied : (result as MigrationFailure).applied
+
+    // Applied, then failed protected verification.
+    if (result.ok && change.recovery) {
+      const base = {
+        ok: false as const,
+        code: 'VERIFICATION_FAILED' as const,
+        error: `The migration applied, then failed production verification: ${recorded.reason ?? 'see the change'}.`,
+        detail: change.recovery.explanation,
+        remaining: [],
+        change: recorded,
+      }
+      if (change.status === 'recovered') {
+        return {
+          ...base,
+          applied: [],
+          rolledBack: ranSteps,
+          recovered: true,
+          hint:
+            `Nothing from this migration is in effect: Backenly restored the state before it and verified it ` +
+            `(change #${change.seq}, recovery #${change.recovery.recoverySeq}). Fix what verification found, then send the migration again.`,
+        }
+      }
+      return {
+        ...base,
+        applied: ranSteps,
+        recovered: false,
+        hint:
+          change.status === 'awaiting_approval'
+            ? `The migration is still in effect. Recovering it would affect data written since it applied, so a person decides` +
+              `${change.recovery.approvalId ? `: poll check_approval { id: "${change.recovery.approvalId}" }` : ''}. Do not replay it.`
+            : 'The migration is still in effect and needs a person to look at it. Do not replay it.',
+      }
+    }
+    if (result.ok) {
+      const success = result as MigrationSuccess
+      return {
+        ...success,
+        change: recorded,
+        ...(change.status === 'unverified'
+          ? { notes: [...success.notes, 'Applied, but protected verification could not run, so it is not verified.'] }
+          : {}),
+      }
+    }
+
+    // Failed part-way.
+    const failure = result as MigrationFailure
+    if (change.status === 'recovered') {
+      return {
+        ...failure,
+        applied: [],
+        rolledBack: failure.applied,
+        recovered: true,
+        change: recorded,
+        hint:
+          `Nothing was applied. The ${failure.applied.length} statement(s) that ran before the failure were restored ` +
+          `to the checkpoint automatically (change #${change.seq}, recovery #${change.recovery?.recoverySeq}). ` +
+          'Fix the failing statement and send the whole migration again.',
+      }
+    }
+    if (change.recovery) {
+      return {
+        ...failure,
+        change: recorded,
+        recovered: false,
+        hint:
+          'The statements in `applied` DID take effect, and restoring the checkpoint automatically was not possible ' +
+          `(${change.recovery.explanation}) — do not replay them. A person decides from History.`,
+      }
+    }
+    return { ...failure, change: recorded }
+  } catch (err) {
+    if (err instanceof ChangeInProgressError) {
+      return {
+        ok: false,
+        code: err.code,
+        error: err.message,
+        hint: 'Another schema change is being applied to this project. Nothing was applied; send the migration again in a moment.',
+        applied: [],
+      }
+    }
+    throw err
+  }
 }

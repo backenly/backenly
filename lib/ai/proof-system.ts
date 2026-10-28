@@ -21,6 +21,8 @@
 
 import { prisma } from '@/lib/db/prisma'
 import { isReservedWorkspaceTable } from '@/lib/security/workspace-schema'
+import { isLegacyAliasVaultId } from '@/lib/services/integrationKeyStore'
+import { workspaceRawClient } from '@/lib/data-plane/regional'
 
 /** The four commands a policy can govern — used to name the ones that are NOT covered. */
 const ALL_COMMANDS = ['SELECT', 'INSERT', 'UPDATE', 'DELETE'] as const
@@ -61,12 +63,13 @@ export interface ProofResponseResult {
 // ── State readers (each queries real DB) ─────────────────────────────────────
 
 async function readTables(projectId: string): Promise<string[]> {
+  const db = await workspaceRawClient(projectId)
   try {
     // Catalog is the single source of truth. Reading prisma.table (a metadata copy
     // written after CREATE_TABLE) could drift from the real schema — an agent would
     // then reason about a table that no longer exists (or miss one adopted via
     // external DDL). information_schema can never drift from the live schema.
-    const rows = await prisma.$queryRawUnsafe<Array<{ table_name: string }>>(
+    const rows = await db.$queryRawUnsafe<Array<{ table_name: string }>>(
       `SELECT table_name FROM information_schema.tables
         WHERE table_schema = $1 AND table_type = 'BASE TABLE'
         ORDER BY table_name`,
@@ -99,23 +102,18 @@ async function readAuth(
   projectId: string,
 ): Promise<{ enabled: boolean; providers: string[] }> {
   try {
-    // Auth is enabled if the project has a jwtSecret set
-    const project = await prisma.project.findUnique({
-      where: { id: projectId },
-      select: { jwtSecret: true },
-    })
-    const jwtEnabled = !!(project?.jwtSecret)
-
-    // Check OAuth providers
-    const oauthConfigs = await prisma.workspaceOAuthConfig.findMany({
-      where: { projectId, enabled: true },
-      select: { provider: true },
-    })
+    // The SAME authority the console uses (lib/services/auth-status.ts). The
+    // old read keyed "enabled" off the seeded jwtSecret — infrastructure every
+    // project gets at creation — so the agent grounded itself on
+    // "Auth: email/password" for backends where nobody had enabled anything,
+    // skipped auth { action: "enable" }, and told the developer sign-up was
+    // configured while the console truthfully said "Not set up".
+    const { getProjectAuthStatus } = await import('@/lib/services/auth-status')
+    const status = await getProjectAuthStatus(projectId)
     const providers: string[] = []
-    if (jwtEnabled) providers.push('email/password')
-    for (const o of oauthConfigs) providers.push(o.provider)
-
-    return { enabled: jwtEnabled || oauthConfigs.length > 0, providers }
+    if (status.emailPasswordEnabled) providers.push('email/password')
+    for (const p of status.oauthProviders) providers.push(p)
+    return { enabled: providers.length > 0, providers }
   } catch {
     return { enabled: false, providers: [] }
   }
@@ -127,6 +125,7 @@ async function readRls(
   policies: Array<{ table: string; operation: string; policyName: string }>
   byTable: ProofBlock['rlsByTable']
 }> {
+  const db = await workspaceRawClient(projectId)
   // ── pg_policies, not PermissionPolicy ──────────────────────────────────────
   //
   // The metadata table records ONE row per applied template while the database
@@ -141,7 +140,7 @@ async function readRls(
   try {
     // One row per (table, policy). Tables with no policy still appear, with
     // NULLs — that LEFT JOIN is what makes a zero-policy table visible.
-    const rows = await prisma.$queryRawUnsafe<Array<{
+    const rows = await db.$queryRawUnsafe<Array<{
       table_name: string
       rls_enabled: boolean
       forced: boolean
@@ -201,7 +200,9 @@ async function readIntegrations(projectId: string): Promise<string[]> {
       select: { integrationId: true },
       orderBy: { connectedAt: 'asc' },
     })
-    return keys.map(k => k.integrationId)
+    // A legacy alias row is the same credential under its env-var name, not
+    // a second integration.
+    return keys.map(k => k.integrationId).filter(id => !isLegacyAliasVaultId(id))
   } catch {
     return []
   }

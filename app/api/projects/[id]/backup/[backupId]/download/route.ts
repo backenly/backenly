@@ -20,7 +20,7 @@ import { Readable } from 'stream'
 import { NextRequest, NextResponse } from 'next/server'
 import { authenticateRequest } from '@/lib/auth/middleware'
 import { canAdministerProject } from '@/lib/edition/guard'
-import { resolveSnapshotFile } from '@/lib/services/workspace-backup'
+import { SnapshotElsewhereError, regionalSnapshotLink, resolveSnapshotFile } from '@/lib/services/workspace-backup'
 
 export async function GET(
   request: NextRequest,
@@ -36,7 +36,28 @@ export async function GET(
     return NextResponse.json({ error: 'Project not found' }, { status: 404 })
   }
 
-  const snapshot = await resolveSnapshotFile(projectId, backupId)
+  // A project kept in another region has its snapshots in that region's
+  // bucket. The download is handed to the region: a short-lived link the
+  // browser follows to the bucket, so the dump never passes through here.
+  let snapshot: Awaited<ReturnType<typeof resolveSnapshotFile>>
+  try {
+    snapshot = await resolveSnapshotFile(projectId, backupId)
+  } catch (err) {
+    if (err instanceof SnapshotElsewhereError) {
+      const link = await regionalSnapshotLink(projectId, backupId)
+      if (link.kind === 'missing') return NextResponse.json({ error: 'Snapshot not found' }, { status: 404 })
+      if (link.kind === 'unavailable') {
+        return NextResponse.json(
+          { error: `${err.message} This snapshot cannot be linked to from here.`, code: err.code, region: err.region },
+          { status: 409 },
+        )
+      }
+      const res = NextResponse.redirect(link.url, 302)
+      res.headers.set('Cache-Control', 'private, no-store')
+      return res
+    }
+    throw err
+  }
   if (!snapshot) {
     return NextResponse.json({ error: 'Snapshot not found' }, { status: 404 })
   }

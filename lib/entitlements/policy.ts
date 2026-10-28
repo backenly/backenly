@@ -32,28 +32,18 @@ import crypto from 'crypto'
 import { bonusCredits, purchasedCredits, recordAiConsumption } from '@cloud/entitlements'
 import { prisma } from '@/lib/db/prisma'
 import { accountOwner, getAccountEntitlements } from './index'
+import { planDisplayName } from './plan-names'
 import type { UserEntitlements } from './types'
 import { invalidateUsageCache } from './usage-cache'
+
+export { planDisplayName }
 
 // ─── Tier naming ─────────────────────────────────────────────────────────────
 // Current tiers (v4): SANDBOX (Free $0) → BUILDER (Pro $25) → SCALE (Enterprise, custom)
 // Legacy tiers (backward compat): FREE → STARTER → GROWTH → PRO
+// What each one is called where a customer reads it: ./plan-names.
 const TIER_ORDER = ['SANDBOX', 'FREE', 'STARTER', 'BUILDER', 'GROWTH', 'PRO', 'SCALE'] as const
 type TierName = typeof TIER_ORDER[number]
-
-const PLAN_DISPLAY: Record<string, string> = {
-  SANDBOX: 'Free',
-  BUILDER: 'Pro',
-  SCALE: 'Enterprise',
-  FREE: 'Free',
-  STARTER: 'Starter',
-  GROWTH: 'Growth',
-  PRO: 'Pro',
-}
-
-export function planDisplayName(name: string): string {
-  return PLAN_DISPLAY[name.toUpperCase()] ?? name
-}
 
 function nextTier(current: string): string {
   const upper = current.toUpperCase()

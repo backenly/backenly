@@ -16,8 +16,12 @@
  */
 
 import { prisma } from '@/lib/db/prisma'
+import { workspaceRawClient } from '@/lib/data-plane/regional'
+import { redactRows } from './read-query'
 import { executeWithUserContext } from '@/lib/services/workspace-rls'
 import { explainDbError, type QueryContext } from '@/lib/db/query-errors'
+import { typedParams, type TypedParams } from '@/lib/api/v1/typed-params'
+import { FilterError, whereConditions } from '@/lib/api/v1/where'
 
 /**
  * Run a fully schema-qualified statement as the project owner with the
@@ -31,12 +35,13 @@ import { explainDbError, type QueryContext } from '@/lib/db/query-errors'
  * ("bypasses end-user RLS").
  */
 async function runAsServiceRole<T = any>(
+  projectId: string,
   sql: string,
   values: unknown[] = [],
   ctx?: QueryContext,
 ): Promise<T[]> {
   try {
-    return await executeWithUserContext<T>('', true, sql, values)
+    return await executeWithUserContext<T>(projectId, '', true, sql, values)
   } catch (err) {
     // Pass the bind context so the error can name the offending column even
     // when PostgreSQL reported only a type and a value (SQLSTATE 22007/22P02).
@@ -51,7 +56,11 @@ async function runAsServiceRole<T = any>(
 // no way to correct itself and fell into blind retry loops.
 
 const IDENT = /^[a-z_][a-z0-9_]{0,62}$/i
-const VALID_OPS = new Set(['$gt', '$gte', '$lt', '$lte', '$ne', '$in', '$contains', '$ilike'])
+
+/** The MCP filter operators, as the operators of the v1 vocabulary whereConditions builds. */
+const V1_OPERATOR: Record<string, string> = {
+  $gt: 'gt', $gte: 'gte', $lt: 'lt', $lte: 'lte', $ne: 'not', $in: 'in', $contains: 'contains',
+}
 
 function schemaFor(projectId: string): string {
   return `workspace_${projectId}`
@@ -89,7 +98,9 @@ async function assertTable(projectId: string, tableName: string, target: Target)
   // A branch's tables are in its catalog only; main's metadata does not list
   // a table created on the branch, and must not.
   if (target.branch) {
-    const found = await prisma.$queryRawUnsafe<Array<{ exists: boolean }>>(
+    // The branch schema lives in the project's database, in its region.
+    const db = await workspaceRawClient(projectId)
+    const found = await db.$queryRawUnsafe<Array<{ exists: boolean }>>(
       `SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = $1 AND table_name = $2) AS exists`,
       target.schema, tableName.toLowerCase(),
     )
@@ -107,10 +118,13 @@ async function assertTable(projectId: string, tableName: string, target: Target)
 
 /**
  * Map of column name → PostgreSQL data_type for a workspace table. Read from the
- * live catalog so casts always match reality.
+ * live catalog so casts always match reality: the catalog of the project's
+ * database, in its region. Any other catalog answers no columns, and every
+ * cast would silently be dropped.
  */
-export async function columnTypes(schema: string, table: string): Promise<Map<string, string>> {
-  const rows = await prisma.$queryRawUnsafe<Array<{ column_name: string; data_type: string }>>(
+export async function columnTypes(projectId: string, schema: string, table: string): Promise<Map<string, string>> {
+  const db = await workspaceRawClient(projectId)
+  const rows = await db.$queryRawUnsafe<Array<{ column_name: string; data_type: string }>>(
     `SELECT column_name, data_type FROM information_schema.columns
       WHERE table_schema = $1 AND table_name = $2`,
     schema, table,
@@ -192,71 +206,64 @@ export function coerceValue(dataType: string | undefined, value: unknown): unkno
 }
 
 /**
- * Translate a filter object into a WHERE clause + values. Supports both
- * shorthand (col: value → "col = ?") and operator-objects (col: { $gt: 5 }).
+ * The conditions of a db_query, db_update or db_delete filter, each value
+ * bound through `bound`, cast to its column's type. Shorthand compares
+ * (col: value → "col" = value, col: null → "col" IS NULL); an operator object
+ * uses the MCP names ($gt, $gte, $lt, $lte, $ne, $in, $contains, $ilike):
  *
  *   { status: "published", views: { $gt: 100 }, id: { $in: [1,2,3] } }
- *     → WHERE "status" = $1 AND "views" > $2 AND "id" IN ($3, $4, $5)
+ *     → "status" = $1 AND "views" > $2::integer AND "id" IN ($3::integer, …)
+ *
+ * Built by whereConditions (lib/api/v1/where.ts), the builder both v1 data
+ * servers use, so a filter that cannot be applied is refused (FilterError,
+ * answered 400) rather than skipped. Skipping an invalid column name, an
+ * unknown operator or an empty $in left the other conditions to choose the
+ * rows, and db_update and db_delete, which run as the service role past every
+ * RLS policy, then changed rows the caller had not named. $ne: null is
+ * IS NOT NULL ("col" != NULL matched no row), and $in: [] matches no row.
  */
-function buildWhere(
-  filter: Record<string, unknown> | undefined,
-  startIdx = 1,
-  types?: Map<string, string>,
-): { sql: string; values: unknown[]; nextIdx: number } {
-  if (!filter || typeof filter !== 'object' || Array.isArray(filter)) {
-    return { sql: '', values: [], nextIdx: startIdx }
+function mcpWhere(filter: unknown, bound: TypedParams, types: Map<string, string>): string[] {
+  if (filter === undefined || filter === null) return []
+  if (typeof filter !== 'object' || Array.isArray(filter)) {
+    throw new FilterError('`filter` must be an object of column names and values.')
   }
-  const parts: string[] = []
-  const values: unknown[] = []
-  let idx = startIdx
-  // Cast text params to strict types so equality/comparison filters on a
-  // uuid/timestamp/numeric column don't fail with "operator does not exist".
-  // `bind` mirrors the cast on the value side — without it, filtering a
-  // timestamp column (`{ occurred_at: { $gt: "2026-01-01" } }`) hit the same
-  // 42804 that made timestamp inserts impossible.
-  const cs = (col: string) => castSuffix(types?.get(col))
-  const bind = (col: string, v: unknown) => coerceValue(types?.get(col), v)
-
-  for (const [col, raw] of Object.entries(filter)) {
-    if (!IDENT.test(col)) continue
-    if (raw === null) {
-      parts.push(`"${col}" IS NULL`)
+  const conditions: string[] = []
+  for (const [column, value] of Object.entries(filter as Record<string, unknown>)) {
+    if (!IDENT.test(column)) throw new FilterError(`"${column}" is not a column name.`, column)
+    const type = types.get(column)
+    const object = typeof value === 'object' && value !== null && !Array.isArray(value) && !(value instanceof Date)
+    // A json or jsonb column compares with a whole object; there only an
+    // object naming a $ operator is one.
+    const operators = object && (type === 'json' || type === 'jsonb'
+      ? Object.keys(value).some((key) => key.startsWith('$'))
+      : true)
+    if (!operators) {
+      conditions.push(value === null ? `"${column}" IS NULL` : `"${column}" = ${bound.bind(column, value)}`)
       continue
     }
-    if (typeof raw === 'object' && !Array.isArray(raw)) {
-      const ops = raw as Record<string, unknown>
-      for (const [op, v] of Object.entries(ops)) {
-        if (!VALID_OPS.has(op)) continue
-        if (op === '$gt')       { parts.push(`"${col}" > $${idx++}${cs(col)}`);  values.push(bind(col, v)) }
-        else if (op === '$gte') { parts.push(`"${col}" >= $${idx++}${cs(col)}`); values.push(bind(col, v)) }
-        else if (op === '$lt')  { parts.push(`"${col}" < $${idx++}${cs(col)}`);  values.push(bind(col, v)) }
-        else if (op === '$lte') { parts.push(`"${col}" <= $${idx++}${cs(col)}`); values.push(bind(col, v)) }
-        else if (op === '$ne')  { parts.push(`"${col}" != $${idx++}${cs(col)}`); values.push(bind(col, v)) }
-        else if (op === '$contains') {
-          parts.push(`"${col}" ILIKE $${idx++}`)
-          values.push(`%${String(v)}%`)
-        }
-        else if (op === '$ilike') {
-          parts.push(`"${col}" ILIKE $${idx++}`)
-          values.push(String(v))
-        }
-        else if (op === '$in' && Array.isArray(v) && v.length > 0) {
-          const ph = v.map(() => `$${idx++}${cs(col)}`).join(', ')
-          parts.push(`"${col}" IN (${ph})`)
-          values.push(...v.map((item) => bind(col, item)))
-        }
+
+    const v1: Record<string, unknown> = {}
+    for (const [key, operand] of Object.entries(value as Record<string, unknown>)) {
+      // A pattern used as written (whereConditions' contains wraps it in %).
+      if (key === '$ilike') {
+        conditions.push(`"${column}"::text ILIKE ${bound.raw(String(operand))}`)
+        continue
       }
-      continue
+      // Own keys only: "constructor" is no operator.
+      if (!Object.prototype.hasOwnProperty.call(V1_OPERATOR, key)) {
+        throw new FilterError(
+          `Unknown filter "${key}" on "${column}". Use $gt, $gte, $lt, $lte, $ne, $in, $contains or $ilike.`,
+          column,
+        )
+      }
+      v1[V1_OPERATOR[key]] = operand
     }
-    parts.push(`"${col}" = $${idx++}${cs(col)}`)
-    values.push(bind(col, raw))
+    if (Object.keys(v1).length > 0) conditions.push(...whereConditions({ [column]: v1 }, bound, types))
+    else if (!('$ilike' in (value as Record<string, unknown>))) {
+      throw new FilterError(`The filter on "${column}" names no condition.`, column)
+    }
   }
-
-  return {
-    sql: parts.length ? ` WHERE ${parts.join(' AND ')}` : '',
-    values,
-    nextIdx: idx,
-  }
+  return conditions
 }
 
 export interface DbQueryInput {
@@ -277,8 +284,9 @@ export async function dbQuery(projectId: string, input: DbQueryInput) {
   const limit = Math.min(Math.max(1, Number(input.limit ?? 50)), 200)
   const offset = Math.max(0, Number(input.offset ?? 0))
 
-  const types = await columnTypes(schema, table)
-  const where = buildWhere(input.filter, 1, types)
+  const types = await columnTypes(projectId, schema, table)
+  const bound = typedParams(types)
+  const conditions = mcpWhere(input.filter, bound, types)
   let orderBy = ''
   if (input.orderBy && typeof input.orderBy === 'object') {
     const parts = Object.entries(input.orderBy)
@@ -287,12 +295,21 @@ export async function dbQuery(projectId: string, input: DbQueryInput) {
     if (parts.length) orderBy = ` ORDER BY ${parts.join(', ')}`
   }
 
+  const where = conditions.length ? ` WHERE ${conditions.join(' AND ')}` : ''
   const sql =
-    `SELECT * FROM "${schema}"."${table}"${where.sql}${orderBy} LIMIT ${limit} OFFSET ${offset}`
-  const rows = await runAsServiceRole(sql, where.values, {
-    table, columns: Object.keys(input.filter ?? {}), values: where.values, types,
-  })
-  return { rows: Array.isArray(rows) ? rows : [], count: Array.isArray(rows) ? rows.length : 0 }
+    `SELECT * FROM "${schema}"."${table}"${where}${orderBy} LIMIT ${limit} OFFSET ${offset}`
+  const rows = await runAsServiceRole(projectId, sql, bound.values, bound.context(table))
+  // Secret columns never land in an agent transcript. run_query redacts for
+  // exactly this reason; db_query returned the end-user `users` table —
+  // bcrypt hashes included — verbatim. Values are replaced, not dropped, so
+  // the shape still says the column exists.
+  const list = Array.isArray(rows) ? rows : []
+  const { rows: safeRows, redactedColumns } = redactRows(list as Record<string, unknown>[])
+  return {
+    rows: safeRows,
+    count: list.length,
+    ...(redactedColumns.length > 0 ? { redactedColumns } : {}),
+  }
 }
 
 export interface DbInsertInput {
@@ -311,13 +328,15 @@ export async function dbInsert(projectId: string, input: DbInsertInput) {
   const cols = Object.keys(row).filter((c) => IDENT.test(c))
   if (cols.length === 0) throw new Error('`row` must include at least one valid column.')
 
-  const types = await columnTypes(schema, table)
+  const types = await columnTypes(projectId, schema, table)
   const colList = cols.map((c) => `"${c}"`).join(', ')
   const placeholders = cols.map((c, i) => `$${i + 1}${castSuffix(types.get(c))}`).join(', ')
   const values = cols.map((c) => coerceValue(types.get(c), (row as any)[c]))
   const sql = `INSERT INTO "${schema}"."${table}" (${colList}) VALUES (${placeholders}) RETURNING *`
-  const result = await runAsServiceRole(sql, values, { table, columns: cols, values, types })
-  return { row: Array.isArray(result) ? result[0] : null }
+  const result = await runAsServiceRole(projectId, sql, values, { table, columns: cols, values, types })
+  const returned = Array.isArray(result) && result[0] ? [result[0] as Record<string, unknown>] : []
+  const { rows: safeRows, redactedColumns } = redactRows(returned)
+  return { row: safeRows[0] ?? null, ...(redactedColumns.length > 0 ? { redactedColumns } : {}) }
 }
 
 export interface DbUpdateInput {
@@ -345,27 +364,19 @@ export async function dbUpdate(projectId: string, input: DbUpdateInput) {
     throw new Error('`filter` is required and must be non-empty (refusing table-wide UPDATE).')
   }
 
-  const types = await columnTypes(schema, table)
-  let idx = 1
-  const setSqlParts: string[] = []
-  const setValues: unknown[] = []
-  for (const c of setCols) {
-    setSqlParts.push(`"${c}" = $${idx++}${castSuffix(types.get(c))}`)
-    setValues.push(coerceValue(types.get(c), (patch as any)[c]))
-  }
+  const types = await columnTypes(projectId, schema, table)
+  // The filter's values follow the patch's in the same sequence.
+  const bound = typedParams(types)
+  const setSqlParts = setCols.map((c) => `"${c}" = ${bound.bind(c, (patch as any)[c])}`)
 
-  const where = buildWhere(input.filter, idx, types)
-  if (!where.sql) throw new Error('`filter` is required (refusing table-wide UPDATE).')
+  const conditions = mcpWhere(input.filter, bound, types)
+  if (conditions.length === 0) throw new Error('`filter` is required (refusing table-wide UPDATE).')
 
-  const sql = `UPDATE "${schema}"."${table}" SET ${setSqlParts.join(', ')}${where.sql} RETURNING *`
-  const result = await runAsServiceRole(sql, [...setValues, ...where.values], {
-    table,
-    columns: [...setCols, ...Object.keys(input.filter ?? {})],
-    values: [...setValues, ...where.values],
-    types,
-  })
+  const sql = `UPDATE "${schema}"."${table}" SET ${setSqlParts.join(', ')} WHERE ${conditions.join(' AND ')} RETURNING *`
+  const result = await runAsServiceRole(projectId, sql, bound.values, bound.context(table))
   const rows = Array.isArray(result) ? result : []
-  return { updated: rows.length, rows }
+  const { rows: safeRows, redactedColumns } = redactRows(rows as Record<string, unknown>[])
+  return { updated: rows.length, rows: safeRows, ...(redactedColumns.length > 0 ? { redactedColumns } : {}) }
 }
 
 export interface DbDeleteInput {
@@ -386,14 +397,13 @@ export async function dbDelete(projectId: string, input: DbDeleteInput) {
     throw new Error('`filter` is required and must be non-empty (refusing table-wide DELETE).')
   }
 
-  const types = await columnTypes(schema, table)
-  const where = buildWhere(input.filter, 1, types)
-  if (!where.sql) throw new Error('`filter` is required (refusing table-wide DELETE).')
+  const types = await columnTypes(projectId, schema, table)
+  const bound = typedParams(types)
+  const conditions = mcpWhere(input.filter, bound, types)
+  if (conditions.length === 0) throw new Error('`filter` is required (refusing table-wide DELETE).')
 
-  const sql = `DELETE FROM "${schema}"."${table}"${where.sql} RETURNING id`
-  const result = await runAsServiceRole(sql, where.values, {
-    table, columns: Object.keys(input.filter ?? {}), values: where.values, types,
-  })
+  const sql = `DELETE FROM "${schema}"."${table}" WHERE ${conditions.join(' AND ')} RETURNING id`
+  const result = await runAsServiceRole(projectId, sql, bound.values, bound.context(table))
   const rows = Array.isArray(result) ? result : []
   return { deleted: rows.length }
 }

@@ -37,6 +37,9 @@ import {
   removeDualWrite,
 } from '@/lib/autonomy/maintenance/primitives/dual-write'
 import { runBackfillBatch } from '@/lib/autonomy/maintenance/primitives/backfill'
+import { handleBackfillJob, type BackfillJobPayload } from '@/lib/autonomy/maintenance/primitives/backfill-job'
+import { inspectBackgroundJob } from '@/lib/autonomy/maintenance/execute'
+import { completeJob, enqueue } from '@/lib/queue'
 import { runVerify } from '@/lib/autonomy/maintenance/primitives/verify'
 import { switchReaders, revertReaders } from '@/lib/autonomy/maintenance/primitives/switch-readers'
 import { inventoryReaders } from '@/lib/autonomy/maintenance/readers'
@@ -251,6 +254,71 @@ describe('the backfill', () => {
     // rather than a guess at which part to page by.
     expect(r.refusal).toMatch(/no single-column primary key/)
     expect(r.updated).toBe(0)
+  })
+})
+
+describe('the backfill as a chain of jobs', () => {
+  const idempotencyKey = `chain-${randomUUID()}`
+
+  beforeAll(async () => {
+    await q(`CREATE TABLE "${SCHEMA}"."chain" (id int PRIMARY KEY, status text, state text)`)
+    await q(`INSERT INTO "${SCHEMA}"."chain" (id, status) VALUES (1, 'a'), (2, 'b'), (3, 'c'), (4, 'd'), (5, 'e')`)
+  })
+
+  afterAll(async () => {
+    await prisma.backgroundJob.deleteMany({ where: { projectId: PROJECT_ID } }).catch(() => {})
+  })
+
+  it('is read from its newest job, so a ladder sees a backfill of several batches finish', async () => {
+    const payload: BackfillJobPayload = {
+      projectId: PROJECT_ID,
+      planVersion: 'v1',
+      idempotencyKey,
+      table: 'chain',
+      sourceColumn: 'status',
+      targetColumn: 'state',
+      transform: UPPER,
+      batchRows: 2,
+      cursor: null,
+    }
+    const first = await enqueue('maintenance_backfill', payload as unknown as Record<string, unknown>, { projectId: PROJECT_ID })
+
+    // The worker's part, for this chain only: other suites' jobs in the shared
+    // database are not this test's to run.
+    for (let runs = 0; runs < 10; runs++) {
+      const job = await prisma.backgroundJob.findFirst({
+        where: { projectId: PROJECT_ID, type: 'maintenance_backfill', status: 'queued' },
+        orderBy: { createdAt: 'asc' },
+      })
+      if (!job) break
+      await completeJob(job.id, (await handleBackfillJob(job.payload as unknown as BackfillJobPayload)) as unknown as Record<string, unknown>)
+    }
+
+    // Five rows, two a batch: three jobs, of which the dispatched one ran only the first.
+    const chain = await prisma.backgroundJob.findMany({ where: { projectId: PROJECT_ID, type: 'maintenance_backfill' } })
+    expect(chain).toHaveLength(3)
+    expect(chain.find((job) => job.id === first.id)?.result).toMatchObject({ done: false, batches: 1 })
+
+    expect(await inspectBackgroundJob(first.id, { projectId: PROJECT_ID, idempotencyKey })).toEqual({
+      state: 'done',
+      detail: 'backfill complete: 5 row(s) updated over 3 batch(es)',
+    })
+    expect(await rows(`SELECT state FROM "${SCHEMA}"."chain" ORDER BY id`)).toEqual(
+      ['A', 'B', 'C', 'D', 'E'].map((state) => ({ state })),
+    )
+  })
+
+  it("is not confused with another step's chain", async () => {
+    const other = await enqueue(
+      'maintenance_backfill',
+      { projectId: PROJECT_ID, idempotencyKey: `other-${randomUUID()}`, cursor: null },
+      { projectId: PROJECT_ID },
+    )
+    expect(await inspectBackgroundJob(other.id, { projectId: PROJECT_ID, idempotencyKey })).toMatchObject({ state: 'done' })
+    expect(await inspectBackgroundJob(other.id, { projectId: PROJECT_ID, idempotencyKey: 'no-such-step' })).toMatchObject({
+      state: 'pending',
+      detail: 'queued (attempt 0)',
+    })
   })
 })
 

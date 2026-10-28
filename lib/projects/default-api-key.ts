@@ -29,6 +29,7 @@ export async function createDefaultApiKey(
     const { key: plaintext, prefix: apiKeyPrefix } = mintKey({ keyType: 'public', serviceRole: false })
     const keyHash = crypto.createHash('sha256').update(plaintext).digest('hex')
 
+    // history: issued with the project, before its history begins
     await prisma.apiKey.create({
       data: {
         name: `${projectName} Default Key`,

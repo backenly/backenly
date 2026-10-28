@@ -89,6 +89,8 @@ model User {
   projectMemberships      ProjectMember[]
   // Product tours this user has finished or skipped (lib/tours).
   toursSeen               UserTourSeen[]
+  // The Google account's own photo, for the console avatar (lib/auth/avatar.ts).
+  avatar                  UserAvatar?
 
   @@index([email])
   @@index([provider, providerId])
@@ -150,6 +152,12 @@ model Project {
   pauseWarnedAt           DateTime? // When the pause warning was DELIVERED. Cleared by real activity. No delivered warning, no pause.
   lastActivityAt          DateTime? // Real use only (runtime traffic, MCP calls, dashboard writes). Never stamped by autonomy, cron or backups.
   pausePolicySince        DateTime? // When the inactivity policy first applied to this project, so a paid-to-Free downgrade gets a full window.
+  // The Backenly Cloud region holding this project's data (lib/regions.ts).
+  // Null is the home region: every project created before a second region
+  // opens, and every self-hosted project. Recorded at creation and never
+  // changed. lib/data-plane/regional.ts opens every connection to the
+  // project's data in this region and never falls back to another.
+  region                  String?
   // Protected production: a coding agent may change this project's schema only
   // on a preview branch, and production only through a branch merge a human
   // approved. Dashboard changes, autonomy fixes and row writes are not gated.
@@ -199,6 +207,7 @@ model Project {
   roles                   Role[]
   securityIssues          SecurityIssue[]
   securityScans           SecurityScan[]
+  supportTickets          SupportTicket[]
   storageBuckets          StorageBucket[]
   storageFiles            StorageFile[]
   multipartUploads        MultipartUpload[]
@@ -242,6 +251,7 @@ model Project {
   maintenanceApprovals   MaintenanceApproval[]
   ownershipIntents       OwnershipIntent[]
   authorityGrants        AuthorityGrant[]
+  backendChanges         BackendChange[]
 
   @@index([userId])
   @@index([updatedAt])
@@ -2066,6 +2076,95 @@ model WorkspaceBranchMigration {
   @@map("workspace_branch_migrations")
 }
 
+// One governed change to a project's production backend: the checkpoint taken
+// before it, the protected verification after it, and its recovery
+// (lib/changes, docs/CHANGE_RECOVERY.md).
+//
+// Every path that changes production schema opens one: an agent's
+// apply_migration, a typed tool from backend_chat, a person in the dashboard,
+// an approved destructive operation, a branch merge, an autonomy repair. A
+// recovery (Backenly restoring the state before a failed change, or a person
+// restoring it later) is a change of its own, kind = recovery, so the state it
+// replaces is protected the same way.
+//
+// `resources` names what the checkpoint covers. Only "database" is captured
+// and recovered today; the shape leaves room for functions and auth policy
+// without claiming to cover them.
+//
+// Rows are permanent and their evidence write-once. A trigger installed by the
+// migration refuses edits to identity, attribution and evidence, and moves
+// status only along the lifecycle in lib/changes/lifecycle.ts.
+model BackendChange {
+  id                 String               @id @default(uuid())
+  projectId          String
+  // Per project, never reused: "change #12".
+  seq                Int
+  // change | recovery
+  kind               String               @default("change")
+  resources          String[]             @default(["database"])
+  // mcp | agent_chat | approval | dashboard | branch_merge | autonomy | system
+  source             String
+  // What was asked for, as the caller put it.
+  title              String
+  // What it did, in one plain sentence, derived from the footprint.
+  summary            String?
+  // additive | transforming | destructive | data_rewrite
+  risk               String?
+  // The person on whose authority it ran; for an agent key, the key's owner.
+  actorUserId        String?
+  // The API key a coding agent used, when an agent made the change.
+  apiKeyId           String?
+  // Several changes made for one request, e.g. an autonomy repair's finding.
+  groupId            String?
+  // The change before this one in the project's order.
+  parentId           String?
+  // lib/changes/lifecycle.ts
+  status             String               @default("applying")
+  error              String?
+  steps              Json? // what was asked for and what took effect, in order
+  statements         Json? // the SQL that actually ran, as captured from the connection
+  checkpoint         Json // { database: catalog snapshot + platform rows }, trimmed to what changed
+  resultState        Json? // what the change touched, as it left it
+  footprint          Json? // per-object summary of what changed
+  preserved          Json? // data moved into this change's vault instead of destroyed
+  checkpointHash     String? // sha256 over checkpoint, resultState and footprint, set at close
+  verification       Json? // protected verification of this change
+  recoversId         String? // kind = recovery: the change whose previous state it restored
+  recoveredById      String? // the recovery that restored this change's previous state
+  recoveredAt        DateTime?
+  recoveryClaim      String? // the recovery that owns this change right now (compare-and-set)
+  recoveryLeaseUntil DateTime?
+  createdAt          DateTime             @default(now())
+  completedAt        DateTime?
+  project            Project              @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  events             BackendChangeEvent[]
+
+  @@unique([projectId, seq])
+  @@index([projectId, createdAt])
+  @@index([projectId, status])
+  @@index([groupId])
+  @@index([recoversId])
+  @@map("backend_changes")
+}
+
+// The lifecycle of a governed change, one row per transition, with the
+// principals involved (lib/principal). Append-only: a trigger refuses UPDATE,
+// and DELETE except together with the change's project.
+model BackendChangeEvent {
+  id        String        @id @default(uuid())
+  changeId  String
+  projectId String
+  // lib/changes/lifecycle.ts: checkpointed, applied, verified, verification_failed, ...
+  type      String
+  data      Json?
+  at        DateTime      @default(now())
+  change    BackendChange @relation(fields: [changeId], references: [id], onDelete: Cascade)
+
+  @@index([changeId, at])
+  @@index([projectId, at])
+  @@map("backend_change_events")
+}
+
 // Revocable public-share token for read-only report pages (/report/[token]).
 // Only the SHA-256 hash is stored; the raw token is shown once at creation.
 // Powers the agency deliverable: "here is proof of what changed and that
@@ -2384,7 +2483,7 @@ model WebhookLog {
   id           String                @id @default(uuid())
   webhookId    String
   eventType    String
-  payload      Json // The event payload sent
+  payload      Json? // The event payload sent. NULL for a project outside the home region: it is kept in that region (lib/data-plane/regional-bodies.ts)
   signature    String // HMAC signature used
   status       WebhookDeliveryStatus @default(PENDING)
   statusCode   Int? // HTTP response status
@@ -2636,6 +2735,7 @@ model AiFunction {
   name          String // Auto-generated short name
   description   String // User's natural language description
   generatedCode String    @db.Text // AI-generated JS function body
+  codeOrigin    String    @default("generated") // generated (Backenly model — self-heal may rewrite) | agent (deploy_code — never model-rewritten)
   triggerType   String // on_signup | on_db_insert | on_db_update | on_db_delete | manual | cron
   triggerTable  String? // Table name for db triggers; for cron jobs stores the cron expression (e.g. "0 9 * * *")
   status        String    @default("active") // active | inactive | error
@@ -2758,6 +2858,24 @@ model UserTourSeen {
 
   @@id([userId, tourId])
   @@map("user_tours_seen")
+}
+
+// ============================================================================
+// PROFILE PHOTOS — the Google account's own photo, shown as the console avatar
+//
+// Written at each Google sign-in, and only when Google says the account has a
+// photo of its own rather than its generated letter (lib/auth/avatar.ts). An
+// account with no row shows its initials. Its own table for the same reason as
+// user_tours_seen: the session lookup loads the whole user row.
+// ============================================================================
+
+model UserAvatar {
+  userId    String   @id
+  url       String
+  updatedAt DateTime @updatedAt
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_avatars")
 }
 
 // ============================================================================
@@ -3072,7 +3190,7 @@ model TriggerDeliveryLog {
   projectId    String
   eventType    String // 'insert' | 'update' | 'delete'
   table        String // Source table that fired the event
-  payload      Json // Full event payload that was sent
+  payload      Json? // Full event payload that was sent. NULL for a project outside the home region: it is kept in that region (lib/data-plane/regional-bodies.ts)
   status       TriggerDeliveryStatus
   attemptCount Int                   @default(1)
   statusCode   Int? // HTTP response status (null if network error)
@@ -3581,20 +3699,76 @@ model UnsupportedRequest {
 
 // In-app support inbox. User submits via Settings → "Contact support" form.
 // Founder reads from admin Feedback tab. No email round-trip required.
+// A support case (Backenly Cloud). `message` is the opening description and
+// renders as the thread's first entry; replies live in SupportMessage. The AI
+// first response is platform-paid (purpose `support.answer`) and never spends
+// the customer's plan credits. Routes refuse off Cloud: on a self-hosted
+// install there is nobody behind the ticket box, so the surface must not exist.
 model SupportTicket {
-  id        String   @id @default(uuid())
-  userId    String
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  subject   String
-  message   String
-  status    String   @default("open") // open | resolved | dismissed
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id         String   @id @default(uuid())
+  // Human reference ("Case #1042"). The only autoincrement in the schema, on
+  // purpose: people quote case numbers in email and chat, and a uuid cannot be
+  // read aloud.
+  caseNumber Int      @unique @default(autoincrement())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // Optional: the project the case is about. SetNull so deleting a project
+  // keeps the correspondence.
+  projectId  String?
+  project    Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  subject    String
+  message    String
+  category   String   @default("other") // database | api | auth | storage | functions | realtime | deploy | agent | billing | account | security | other
+  severity   String   @default("normal") // low | normal | high | urgent — high/urgent need a paid plan (lib/support/constants.ts)
+  status     String   @default("open") // open | waiting_on_customer | resolved | closed (legacy "dismissed" rows were migrated to closed)
+  // What the AI first responder did: none (not answered yet: queued, running,
+  // or waiting to retry) | replied | unavailable (no provider configured) |
+  // failed (gave up). Honesty field — the admin queue must know which tickets
+  // got no instant answer.
+  aiState    String   @default("none")
+  // Why the last attempt did not answer: an AiError kind (spend_limit,
+  // rate_limited, timeout, …) or "internal". Null once it answers. This is what
+  // says whether "the AI could not answer" was a blip or a configuration fault.
+  aiError    String?
+  // Attempts started, automatic and asked-for together (lib/support/ai.ts caps both).
+  aiAttempts Int      @default(0)
+  // The earliest an attempt may start. While one runs it is that attempt's
+  // lease, so two dispatches never both answer; after a transient failure it
+  // is when the retry is due.
+  aiNextAttemptAt DateTime?
+  // Thread ordering and queue triage without joining messages.
+  lastMessageAt     DateTime  @default(now())
+  lastMessageBy     String    @default("user") // user | ai | staff
+  firstStaffReplyAt DateTime?
+  resolvedAt        DateTime?
+  resolvedBy        String? // user | staff
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  messages   SupportMessage[]
 
   @@index([userId])
   @@index([status])
   @@index([createdAt])
+  @@index([lastMessageAt])
+  @@index([projectId])
   @@map("support_tickets")
+}
+
+// One correspondence entry on a support case, in the AWS Support sense: the
+// customer, the AI first responder and the team write into one thread.
+model SupportMessage {
+  id           String        @id @default(uuid())
+  ticketId     String
+  ticket       SupportTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  author       String // user | ai | staff
+  // The platform user who wrote it: the customer for `user`, the responding
+  // founder/operator for `staff`, null for `ai`.
+  authorUserId String?
+  body         String
+  createdAt    DateTime      @default(now())
+
+  @@index([ticketId, createdAt])
+  @@map("support_messages")
 }
 
 // Founder's roadmap, written by users. Submitted via Settings → "Feature requests" form.
@@ -3758,6 +3932,51 @@ model SchemaDriftEvent {
   @@index([projectId, status])
   @@index([capturedAt])
   @@map("schema_drift_events")
+}
+
+// ─── Authorization projection ───────────────────────────────────────────────
+//
+// A request to a project kept outside the home region is authorized from rows
+// here: the project's lock, pause and signing secret, its keys, and the
+// branches they are bound to. Each region keeps a copy of those rows for its
+// own projects (scripts/sql/auth-projection.sql), delivered from here by
+// lib/auth-projection/deliver.ts. The triggers that fill
+// auth_projection_changes are in the migration that created it
+// (20261017120000_auth_projection): Prisma does not model triggers.
+
+// One changed row of a regional project, waiting for its region: which row,
+// never what it holds. The delivery reads the row's state when it delivers.
+model AuthProjectionChange {
+  id          BigInt    @id @default(autoincrement())
+  region      String
+  projectId   String
+  // project | api_key | branch
+  entity      String
+  entityId    String
+  createdAt   DateTime  @default(now())
+  deliveredAt DateTime?
+
+  @@index([region, deliveredAt, id])
+  @@index([deliveredAt])
+  @@map("auth_projection_changes")
+}
+
+// Where delivery to each region stands. The region keeps the same epoch and
+// round beside its copy; when the two differ, one side was restored or a
+// delivery committed in only one of them, and the region's copy is delivered
+// afresh.
+model AuthProjectionRegion {
+  region      String    @id
+  epoch       String
+  round       BigInt    @default(0)
+  // Every change committed here before this time is in the region's copy.
+  watermarkAt DateTime?
+  deliveredAt DateTime?
+  resyncedAt  DateTime  @default(now())
+  lastError   String?
+  lastErrorAt DateTime?
+
+  @@map("auth_projection_regions")
 }
 
 // ─── MCP OAuth ───────────────────────────────────────────────────────────────

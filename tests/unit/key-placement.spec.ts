@@ -18,6 +18,14 @@
  * tests/integration/key-placement-surfaces.spec.ts.
  */
 
+// The workflow guide names the project's API address, which reads the
+// project's region from the platform database. This suite has none; a
+// home-region project's address is the deployment's origin.
+jest.mock('@/lib/data-plane/regional', () => ({
+  ...jest.requireActual('@/lib/data-plane/regional'),
+  projectApiOrigin: async (_projectId: string, homeOrigin: string) => homeOrigin,
+}))
+
 import {
   MCP_KEY_HINT,
   MCP_KEY_IN_APP,
@@ -86,7 +94,10 @@ describe('the MCP refusal', () => {
     expect(MCP_KEY_HINT).toContain('connect { action: "create_api_key", description: "web app" }')
     expect(MCP_KEY_HINT).toContain('Settings → API keys → New key → Client')
     expect(MCP_KEY_HINT).toContain('X-User-Token')
-    expect(MCP_KEY_HINT).toContain('serviceRole: true')
+    // A server's RLS-bypassing key is a person's to create; agents are refused
+    // one (CON-12), so the hint no longer suggests passing serviceRole.
+    expect(MCP_KEY_HINT).toContain('an Admin key a person creates in Settings → API keys')
+    expect(MCP_KEY_HINT).not.toContain('serviceRole: true')
     // And what to do about the key that leaked.
     expect(MCP_KEY_HINT).toMatch(/revoke it in Connect → Agents/)
   })

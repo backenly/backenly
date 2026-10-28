@@ -15,6 +15,7 @@ import * as path from 'path'
 import * as fs from 'fs'
 import { PrismaClient } from '@prisma/client'
 import { isIntegrationMode, shouldExecuteRealMigrations } from '@/lib/config/engine-mode'
+import { projectDatabaseUrl } from '@/lib/data-plane/regional'
 
 const execAsync = promisify(exec)
 
@@ -92,16 +93,19 @@ export async function runMigration(
     console.log(`[Migration Runner] Migration name: ${migrationName}`)
     
     const workspaceSchema = `workspace_${projectId}`
-    
+    // The database of the project's own region. A region with no connection
+    // throws here, rather than the home database being used in its place.
+    const databaseUrl = await projectDatabaseUrl(projectId)
+
     // Use Prisma Client to create schema and execute raw SQL
     // This is the ONLY safe way to handle multi-schema migrations
     console.log(`[Migration Runner] Creating workspace schema: ${workspaceSchema}`)
-    
+
     const { PrismaClient } = await import('@prisma/client')
     const prisma = new PrismaClient({
       datasources: {
         db: {
-          url: process.env[`DATABASE_URL_${projectId}`] || process.env.DATABASE_URL,
+          url: databaseUrl,
         },
       },
     })
@@ -117,7 +121,7 @@ export async function runMigration(
       {
         env: {
           ...process.env,
-          DATABASE_URL: process.env[`DATABASE_URL_${projectId}`] || process.env.DATABASE_URL,
+          DATABASE_URL: databaseUrl,
         },
       }
     )
@@ -223,11 +227,11 @@ export async function verifyTablesExist(
     const workspaceSchema = `workspace_${projectId}`
     console.log(`[Migration Runner] Checking schema: ${workspaceSchema}`)
     
-    // Query database to check if tables exist
+    // Query the project's own region's database to check if tables exist
     const prisma = new PrismaClient({
       datasources: {
         db: {
-          url: process.env[`DATABASE_URL_${projectId}`] || process.env.DATABASE_URL,
+          url: await projectDatabaseUrl(projectId),
         },
       },
     })

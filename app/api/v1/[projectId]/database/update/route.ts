@@ -2,10 +2,14 @@ export const dynamic = 'force-dynamic'
 
 import { NextRequest } from 'next/server'
 import { v1ApiMiddleware, requirePermission, requireCapability } from '@/lib/api/v1/middleware'
-import { createErrorResponse, createSuccessResponse, handleValidationError, ErrorCodes } from '@/lib/api/v1/errors'
+import { createErrorResponse, createSuccessResponse, handleValidationError, ErrorCodes, regionErrorResponse, dataRefusalResponse } from '@/lib/api/v1/errors'
 import { updateSchema } from '@/lib/api/v1/schemas'
+import { typedParams } from '@/lib/api/v1/typed-params'
+import { whereConditions } from '@/lib/api/v1/where'
 import { validateRequestBody } from '@/lib/validation/schemas'
 import { prisma } from '@/lib/db'
+import type { QueryContext } from '@/lib/db/query-errors'
+import { columnTypes } from '@/lib/mcp/runtime-db'
 import { executeWithUserContext } from '@/lib/services/workspace-rls'
 import { validateUpdatePayload } from '@/lib/services/workspace-validator'
 import { recordedV1 } from '@/lib/traffic/recorded-v1'
@@ -17,6 +21,8 @@ import { projectRestriction, restrictionDetails, restrictionMessage } from '@/li
  */
 async function handlePOST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
   const params = await props.params;
+  // What was bound, so a refusal can name its column (lib/api/v1/data-errors.ts).
+  let refusal: QueryContext | undefined
   try {
     const middleware = await v1ApiMiddleware(request, params)
     if (middleware.response) {
@@ -80,46 +86,39 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
       return createErrorResponse(ErrorCodes.VALIDATION_ERROR, 'No valid fields to update', 400)
     }
 
-    const values: any[] = []
-    let paramIdx = 1
+    // Each value is cast to its column's type (lib/api/v1/typed-params.ts).
+    const types = await columnTypes(context.projectId, schemaName, tableName)
+    const bound = typedParams(types)
+    refusal = bound.context(tableName)
 
-    const setParts = setCols.map(c => {
-      values.push(data[c])
-      return `"${c}" = $${paramIdx++}`
-    })
+    const setParts = setCols.map(c => `"${c}" = ${bound.bind(c, data[c])}`)
 
-    // Build WHERE clause
-    const whereParts: string[] = []
-    if (where && typeof where === 'object') {
-      for (const [col, val] of Object.entries(where)) {
-        if (!/^[a-z_][a-z0-9_]*$/i.test(col)) continue
-        whereParts.push(`"${col}" = $${paramIdx++}`)
-        values.push(val)
-      }
+    // The filter's conditions, with the operators the SDK sends (lib/api/v1/where.ts).
+    // Required, as for delete: `where: {}` updated every row the key can reach.
+    const whereParts = whereConditions(where, bound, types)
+    if (whereParts.length === 0) {
+      return createErrorResponse(ErrorCodes.VALIDATION_ERROR, 'A WHERE condition is required for update', 400)
     }
 
-    const whereClause = whereParts.length > 0 ? `WHERE ${whereParts.join(' AND ')}` : ''
+    const whereClause = `WHERE ${whereParts.join(' AND ')}`
     const sql = `UPDATE "${schemaName}"."${tableName}" SET ${setParts.join(', ')} ${whereClause} RETURNING *`
     const result = await executeWithUserContext(
+      context.projectId,
       context.endUserId ?? '',
       context.apiKey.serviceRole,
       sql,
-      values,
+      bound.values,
       context.endUserRole ?? 'user'
     )
 
     // Fire event triggers + AI functions + activity log + notifications (non-blocking)
     if (result.length > 0) {
       const { fireTriggers } = await import('@/lib/services/trigger-service')
-      const { fireAiFunctions } = await import('@/lib/services/ai-functions/executor')
       const { triggerActivityAndNotification } = await import('@/lib/ai/activity-log-engine')
       const actorId = context.apiKey?.userId
       for (const row of result) {
         fireTriggers(context.projectId, { type: 'update', table: tableName, data: row }).catch(
           (err: any) => console.warn('[Triggers] fire failed (non-fatal):', err?.message)
-        )
-        fireAiFunctions(context.projectId, { type: 'update', table: tableName, data: row }).catch(
-          (err: any) => console.warn('[AiFunctions] fire failed (non-fatal):', err?.message)
         )
         triggerActivityAndNotification(context.projectId, 'updated', tableName, String(row.id || ''), actorId, row).catch(() => {})
 
@@ -139,8 +138,10 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
 
     return createSuccessResponse({ data: result.length === 1 ? result[0] : result, updated: result.length })
   } catch (error: any) {
+    const refused = dataRefusalResponse(error, refusal)
+    if (refused) return refused
     console.error('Database update error:', error)
-    return createErrorResponse(ErrorCodes.INTERNAL_ERROR, 'Failed to update data', 500)
+    return regionErrorResponse(error) ?? createErrorResponse(ErrorCodes.INTERNAL_ERROR, 'Failed to update data', 500)
   }
 }
 

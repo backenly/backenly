@@ -21,9 +21,9 @@
  */
 
 import crypto from 'crypto'
-import { prisma } from '@/lib/db/prisma'
 import { workspaceSchemaName } from '@/lib/security/workspace-schema'
 import { queryWorkspaceSchema } from '@/lib/services/workspaceDatabase'
+import { workspaceRawClient } from '@/lib/data-plane/regional'
 
 const IDENT_RE = /^[a-z_][a-z0-9_]*$/
 
@@ -62,8 +62,10 @@ interface FkMapping {
   foreign_column: string
 }
 
-async function loadLiveColumns(schema: string, table: string): Promise<LiveColumn[]> {
-  return prisma.$queryRawUnsafe<LiveColumn[]>(
+/** The catalog of the project's database, in its region. */
+async function loadLiveColumns(projectId: string, schema: string, table: string): Promise<LiveColumn[]> {
+  const db = await workspaceRawClient(projectId)
+  return db.$queryRawUnsafe<LiveColumn[]>(
     `SELECT column_name, data_type, is_nullable, column_default
      FROM information_schema.columns
      WHERE table_schema = $1 AND table_name = $2
@@ -72,9 +74,11 @@ async function loadLiveColumns(schema: string, table: string): Promise<LiveColum
   )
 }
 
-async function loadFkMappings(schema: string, table: string): Promise<FkMapping[]> {
+async function loadFkMappings(projectId: string, schema: string, table: string): Promise<FkMapping[]> {
+  // Outside the catch: an unreachable region is not "no foreign keys".
+  const db = await workspaceRawClient(projectId)
   try {
-    return await prisma.$queryRawUnsafe<FkMapping[]>(
+    return await db.$queryRawUnsafe<FkMapping[]>(
       `SELECT
          att.attname     AS column,
          ref.relname     AS foreign_table,
@@ -145,7 +149,7 @@ async function ensureDemoUser(ctx: SeedRunContext, schema: string): Promise<stri
 
     // Introspect the users table so the insert satisfies every NOT NULL
     // column with no default — auth implementations differ on column names.
-    const cols = await loadLiveColumns(schema, 'users')
+    const cols = await loadLiveColumns(ctx.projectId, schema, 'users')
     if (cols.length === 0) return null
     const names: string[] = []
     const values: unknown[] = []
@@ -206,8 +210,8 @@ export async function runSeedStep(
   let fks: FkMapping[]
   try {
     ;[liveCols, fks] = await Promise.all([
-      loadLiveColumns(schema, tableName),
-      loadFkMappings(schema, tableName),
+      loadLiveColumns(ctx.projectId, schema, tableName),
+      loadFkMappings(ctx.projectId, schema, tableName),
     ])
   } catch (err) {
     result.error = `introspection failed: ${err instanceof Error ? err.message.slice(0, 120) : 'unknown'}`

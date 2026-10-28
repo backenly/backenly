@@ -183,6 +183,7 @@ async function authenticateBearer(token: string): Promise<McpAuthResult> {
     return { success: false, status: 403, code: 'WRONG_SCOPE', error: 'Not an MCP connection.' }
   }
 
+  // history: usage bookkeeping (last used, rate-limit window), not configuration
   prisma.apiKey.update({ where: { id: record.id }, data: { lastUsed: new Date() } }).catch(() => {})
 
   return {

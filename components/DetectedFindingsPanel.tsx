@@ -43,10 +43,11 @@ import {
   Radar, RefreshCw, CheckCircle2, Loader2, XCircle, ChevronDown,
   ClipboardCopy, Check,
 } from 'lucide-react'
-import { KIT, KitButton } from '@/components/inspector/kit'
+import { IconButton, KIT, KitButton, MetaCode, MetaRow } from '@/components/inspector/kit'
 import {
-  groupFindings, CATEGORY_LABEL, severityLabel, type FindingGroup,
+  groupFindings, CATEGORY_LABEL, severityLabel, severityWord, type FindingGroup,
 } from '@/lib/core/finding-groups'
+import { hasExecutableFix } from '@/lib/core/fix-actions'
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -96,15 +97,24 @@ function timeAgo(iso: string | null): string {
  * claiming "Backenly fixes these itself" under Review-only would be a lie —
  * in that mode the next pass raises them for approval instead of applying.
  */
-function dispositionCopy(level: Level | undefined): string {
+function dispositionCopy(level: Level | undefined, allRepairable: boolean): string {
   if (level === 'CONSERVATIVE') {
-    return 'Backenly found these and has not acted. Under Review-only it raises each one for your approval on its next pass — or fix any of them now.'
+    return 'Backenly found these and has not acted yet. On its next pass, Review-only applies the silent additive ones (indexes, API definitions) and raises everything else for your approval. You can also fix any of them now.'
   }
   if (level === 'OFF') {
     return 'Backenly found these while checking the runtime. Autonomy is off, so nothing will be applied until you pick a mode or fix them here.'
   }
-  return 'Backenly found these and can fix them itself — they are queued for its next pass and need no approval from you. Fix now to skip the wait, or hand one to your coding agent.'
+  // Only what Backenly has a repair for is queued. A finding with none (a
+  // failed verification, a probe of the live API) was promised a next pass
+  // that never fixed it.
+  if (!allRepairable) {
+    return 'Backenly found these. The ones with Fix now are queued for its next pass and need no approval from you; the others have no repair Backenly can run, so hand them to your coding agent.'
+  }
+  return 'Backenly found these and can fix them itself. They are queued for its next pass and need no approval from you. Fix now to skip the wait, or hand one to your coding agent.'
 }
+
+/** Whether Backenly can run a repair for any member (the same test the Review Queue uses). */
+const repairable = (g: FindingGroup<HealthFinding>) => g.members.some(m => hasExecutableFix(m.type, m.details))
 
 /** The prompt handed to the user's coding agent — same contract as the approval queue. */
 function agentPrompt(g: FindingGroup<HealthFinding>): string {
@@ -280,23 +290,22 @@ export function DetectedFindingsPanel({
         <span className="text-[12px] font-medium tabular-nums text-violet-300">
           {openTotal}
           {groups.length < openTotal && (
-            <span className="ml-1.5 font-normal text-zinc-500">
+            <span className="ml-1.5 font-normal text-faint">
               in {groups.length} {groups.length === 1 ? 'issue' : 'issues'}
             </span>
           )}
         </span>
-        <button
+        <IconButton
+          icon={RefreshCw}
+          label="Refresh findings"
           onClick={() => fetchHealth(true)}
           disabled={refreshing}
-          className="ml-auto text-zinc-600 transition-colors hover:text-zinc-300 disabled:opacity-40"
-          aria-label="Refresh"
-        >
-          <RefreshCw className={`size-3.5 ${refreshing ? 'animate-spin' : ''}`} />
-        </button>
+          className={`ml-auto ${refreshing ? '[&_svg]:animate-spin' : ''}`}
+        />
       </div>
 
       <div className="border-b border-white/[0.06] px-5 py-2.5">
-        <p className="text-[12.5px] leading-relaxed text-zinc-500">{dispositionCopy(level)}</p>
+        <p className="text-[12.5px] leading-relaxed text-faint">{dispositionCopy(level, groups.every(repairable))}</p>
       </div>
 
       <ul className="divide-y divide-white/[0.04]">
@@ -305,7 +314,7 @@ export function DetectedFindingsPanel({
             key={g.key}
             group={g}
             state={rowState[g.key] ?? { phase: 'idle' }}
-            onFix={() => fixGroup(g)}
+            onFix={repairable(g) ? () => fixGroup(g) : undefined}
             onDismiss={() => dismissGroup(g)}
             onResetError={() => setRow(g.key, { phase: 'idle' })}
           />
@@ -315,8 +324,8 @@ export function DetectedFindingsPanel({
       {/* The preview cap is stated rather than hidden: a project over 50
           actionable rows would otherwise look like it had exactly 50. */}
       {openTotal > openFindings.length && (
-        <p className="border-t border-white/[0.06] px-5 py-2.5 font-mono text-[12px] text-zinc-600">
-          showing {openFindings.length} of {openTotal} — the rest appear as these clear
+        <p className="border-t border-white/[0.06] px-5 py-2.5 text-[12px] tabular-nums text-faint">
+          Showing {openFindings.length} of {openTotal}. The rest appear as these clear.
         </p>
       )}
     </section>
@@ -334,7 +343,8 @@ function DetectedRow({
 }: {
   group: FindingGroup<HealthFinding>
   state: RowState
-  onFix: () => void
+  /** Absent when Backenly has no repair to run: approving would only fail. */
+  onFix?: () => void
   onDismiss: () => void
   onResetError: () => void
 }) {
@@ -350,9 +360,10 @@ function DetectedRow({
         <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-emerald-400" />
         <div className="min-w-0 flex-1">
           <p className="text-[12.5px] font-medium text-zinc-200">{g.title}</p>
-          <p className="mt-1 font-mono text-[12px] text-zinc-500">
-            fixed{many ? ` · ${g.members.length} tables` : ''} · rollback snapshot captured
-          </p>
+          <MetaRow className="!mt-1">
+            <span>Fixed{many ? ` on ${g.members.length} tables` : ''}</span>
+            <span>Rollback snapshot captured</span>
+          </MetaRow>
         </div>
       </li>
     )
@@ -378,18 +389,19 @@ function DetectedRow({
         />
         <div className="min-w-0 flex-1">
           <p className="text-[12.5px] leading-snug text-zinc-100">{g.title}</p>
-          <p className="mt-1.5 font-mono text-[12px] text-zinc-600">
-            {head.type} · {g.severity}
-            {!many && g.subjects[0] && <> · <span className="text-zinc-500">{g.subjects[0]}</span></>}
-            {' · '}{timeAgo(head.detectedAt)}
-          </p>
+          <MetaRow>
+            <MetaCode>{head.type}</MetaCode>
+            <span>{severityWord(g.severity)}</span>
+            {!many && g.subjects[0] && <MetaCode>{g.subjects[0]}</MetaCode>}
+            <span className="tabular-nums">{timeAgo(head.detectedAt)}</span>
+          </MetaRow>
 
           {many && (
             <div className="mt-2">
               <button
                 onClick={() => setExpanded(v => !v)}
                 aria-expanded={expanded}
-                className="inline-flex items-center gap-1 text-[12.5px] font-medium text-zinc-500 transition-colors hover:text-zinc-300"
+                className="inline-flex items-center gap-1 text-[12.5px] font-medium text-faint transition-colors hover:text-zinc-300"
               >
                 {g.members.length} findings, one cause
                 <ChevronDown className={`size-3 transition-transform ${expanded ? 'rotate-180' : ''}`} />
@@ -397,7 +409,7 @@ function DetectedRow({
               {expanded && (
                 <ul className="mt-2 space-y-1 border-l border-white/[0.08] pl-3">
                   {g.members.map((m, i) => (
-                    <li key={m.id} className="font-mono text-[12px] leading-relaxed text-zinc-500">
+                    <li key={m.id} className="font-mono text-[12px] leading-relaxed text-faint">
                       {g.subjects[i] ?? m.type}
                     </li>
                   ))}
@@ -419,11 +431,13 @@ function DetectedRow({
             <KitButton variant="primary" onClick={onResetError}>Try again</KitButton>
           ) : (
             <>
-              <KitButton variant="primary" onClick={onFix} disabled={busy}>
-                {state.phase === 'applying'
-                  ? <><Loader2 className="size-3.5 animate-spin" /> {many ? `Fixing ${g.members.length}…` : 'Fixing…'}</>
-                  : <><CheckCircle2 className="size-3.5" /> {many ? `Fix all ${g.members.length}` : 'Fix now'}</>}
-              </KitButton>
+              {onFix && (
+                <KitButton variant="primary" onClick={onFix} disabled={busy}>
+                  {state.phase === 'applying'
+                    ? <><Loader2 className="size-3.5 animate-spin" /> {many ? `Fixing ${g.members.length}…` : 'Fixing…'}</>
+                    : <><CheckCircle2 className="size-3.5" /> {many ? `Fix all ${g.members.length}` : 'Fix now'}</>}
+                </KitButton>
+              )}
               <KitButton variant="secondary" onClick={handToAgent} disabled={busy}>
                 {copied ? <Check className="size-3.5 text-emerald-400" /> : <ClipboardCopy className="size-3.5" />}
                 {copied ? 'Copied' : 'Hand to my agent'}

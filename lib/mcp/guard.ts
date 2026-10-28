@@ -26,6 +26,7 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db/prisma'
+import { quotesKeptHere } from '@/lib/data-plane/residency'
 import { withholdSecrets } from '@/lib/mcp/withhold-secrets'
 import {
   authenticateMcp,
@@ -190,6 +191,7 @@ async function checkRateLimit(keyId: string): Promise<RateCheckResult> {
     const expired = !key.resetAt || key.resetAt < now
     if (expired) {
       const nextReset = new Date(now.getTime() + windowSec * 1000)
+      // history: usage bookkeeping (last used, rate-limit window), not configuration
       await prisma.apiKey.update({
         where: { id: keyId },
         data: { requestCount: 1, resetAt: nextReset },
@@ -201,6 +203,7 @@ async function checkRateLimit(keyId: string): Promise<RateCheckResult> {
       return { allowed: false, used: key.requestCount, limit, resetAt: key.resetAt! }
     }
 
+    // history: usage bookkeeping (last used, rate-limit window), not configuration
     await prisma.apiKey.update({
       where: { id: keyId },
       data: { requestCount: { increment: 1 } },
@@ -228,6 +231,11 @@ export interface McpCallContext {
  * the tool just handed the agent (a new API key, a rotated signing secret), so
  * it is stored with those withheld. Pass the tool's `data` so values it names
  * are withheld too; it is read here and never stored.
+ *
+ * A project kept in another region gets no summary and no error message: both
+ * can quote its rows (lib/data-plane/residency.ts). The tool, status, timing
+ * and an error that is a code (READ_ONLY_KEY, MIGRATION_FAILED), which quotes
+ * nothing, are still recorded.
  */
 export function recordMcpCall(
   ctx: McpCallContext,
@@ -241,8 +249,25 @@ export function recordMcpCall(
   },
 ): void {
   const responseTime = Date.now() - ctx.startedAt
-  const summary = result.summary === undefined ? undefined : withholdSecrets(result.summary, result.data)
-  const error = result.error === undefined ? undefined : withholdSecrets(result.error, result.data)
+  quotesKeptHere(ctx.projectId)
+    .then((quote) => writeMcpCallRows(ctx, result, responseTime, quote))
+    .catch(() => {})
+}
+
+/** An error code (BAD_BODY, MIGRATION_FAILED): a name the platform chose, never a message about data. */
+const ERROR_CODE = /^[A-Z][A-Z0-9_]{1,63}$/
+
+function writeMcpCallRows(
+  ctx: McpCallContext,
+  result: Parameters<typeof recordMcpCall>[1],
+  responseTime: number,
+  quote: boolean,
+): void {
+  const summary = !quote || result.summary === undefined ? undefined : withholdSecrets(result.summary, result.data)
+  const error =
+    result.error === undefined ? undefined
+      : quote ? withholdSecrets(result.error, result.data)
+        : ERROR_CODE.test(result.error) ? result.error : undefined
 
   prisma.apiKeyUsage
     .create({

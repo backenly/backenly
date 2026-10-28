@@ -26,7 +26,7 @@
  *     so the "source of truth" converges back to honesty instead of rotting.
  */
 
-import { prisma } from '@/lib/db/prisma'
+import { workspaceRawClient } from '@/lib/data-plane/regional'
 import { PostgresService, type ColumnInfo } from '@/lib/db/hybrid'
 import { listTableStats } from '@/lib/services/workspace-table-stats'
 import { isReservedWorkspaceTable } from '@/lib/security/workspace-schema'
@@ -99,13 +99,16 @@ function isSystemTable(name: string): boolean {
  * Returns a map of tableName → columnCount. Never throws.
  */
 async function getColumnCounts(
+  projectId: string,
   workspaceSchema: string,
   tableNames: string[]
 ): Promise<Record<string, number>> {
   if (tableNames.length === 0) return {}
   try {
+    // The catalog of the database holding the project's data, in its region.
+    const db = await workspaceRawClient(projectId)
     const placeholders = tableNames.map((_, i) => `$${i + 2}`).join(', ')
-    const rows = await prisma.$queryRawUnsafe<Array<{ table_name: string; col_count: string }>>(
+    const rows = await db.$queryRawUnsafe<Array<{ table_name: string; col_count: string }>>(
       `SELECT table_name, COUNT(*) AS col_count
        FROM information_schema.columns
        WHERE table_schema = $1 AND table_name IN (${placeholders})
@@ -157,7 +160,7 @@ export async function resolveWorkspaceTables(projectId: string): Promise<Resolve
   // kernel below — same source the dashboard reads from, so the two surfaces
   // can never disagree on "X rows".
   const [dbTablesRaw, graph, liveStats] = await Promise.all([
-    PostgresService.listTables(workspaceSchema).catch((err) => {
+    PostgresService.listTables(projectId, workspaceSchema).catch((err) => {
       console.error('[SchemaResolver] listTables failed:', err?.message)
       return [] as Awaited<ReturnType<typeof PostgresService.listTables>>
     }),
@@ -172,7 +175,7 @@ export async function resolveWorkspaceTables(projectId: string): Promise<Resolve
   ])
 
   const dbTables = dbTablesRaw.filter((t) => !isSystemTable(t.name))
-  const columnCounts = await getColumnCounts(workspaceSchema, dbTables.map((t) => t.name))
+  const columnCounts = await getColumnCounts(projectId, workspaceSchema, dbTables.map((t) => t.name))
   const statByName = new Map(liveStats.map((s) => [s.name, s]))
 
   const graphEntities: Record<string, EntityState> = graph?.entities || {}
@@ -259,7 +262,7 @@ export async function resolveTableStructure(
 
   let dbColumns: ColumnInfo[] = []
   try {
-    dbColumns = await PostgresService.getTableStructure(workspaceSchema, tableName)
+    dbColumns = await PostgresService.getTableStructure(projectId, workspaceSchema, tableName)
   } catch (err: any) {
     console.error(`[SchemaResolver] introspection failed for ${tableName}:`, err?.message)
   }
@@ -334,7 +337,7 @@ export async function reconcileGraphDrift(projectId: string): Promise<void> {
   reconciling.add(projectId)
   try {
     const workspaceSchema = `workspace_${projectId}`
-    const dbTables = (await PostgresService.listTables(workspaceSchema)).filter(
+    const dbTables = (await PostgresService.listTables(projectId, workspaceSchema)).filter(
       (t) => !isSystemTable(t.name)
     )
     if (dbTables.length === 0) return
@@ -342,7 +345,7 @@ export async function reconcileGraphDrift(projectId: string): Promise<void> {
     const existingGraph = await getActiveGraph(projectId)
     const graph: BackendStateGraph = existingGraph || createEmptyGraph(projectId)
 
-    const columnCounts = await getColumnCounts(workspaceSchema, dbTables.map((t) => t.name))
+    const columnCounts = await getColumnCounts(projectId, workspaceSchema, dbTables.map((t) => t.name))
     const entities: Record<string, EntityState> = { ...(graph.entities || {}) }
     const lowerToKey = new Map(Object.keys(entities).map((k) => [k.toLowerCase(), k]))
 
@@ -363,7 +366,7 @@ export async function reconcileGraphDrift(projectId: string): Promise<void> {
 
       let cols: ColumnInfo[] = []
       try {
-        cols = await PostgresService.getTableStructure(workspaceSchema, t.name)
+        cols = await PostgresService.getTableStructure(projectId, workspaceSchema, t.name)
       } catch (err: any) {
         console.error(`[SchemaResolver] reconcile introspection failed for ${t.name}:`, err?.message)
         continue

@@ -18,10 +18,12 @@
  *   - deliverSingleAttempt() → shared single-attempt helper used by both paths
  */
 
+import { Prisma } from '@prisma/client'
 import { prisma } from '@/lib/db/prisma'
 import crypto from 'crypto'
 import { emit } from '@/lib/events/bus'
 import { safeFetch, assertAllowedUrl, BlockedOutboundError } from '@/lib/security/outbound-guard'
+import { BODIES_ON_THE_ROW, REGIONAL_BODY_RETENTION_DAYS, regionalBodiesFor, type RegionalBodies } from '@/lib/data-plane/regional-bodies'
 import { WEBHOOK_EVENT_TYPES, isWebhookEventType, type WebhookEventType } from './events'
 
 // ─── Retry schedule ───────────────────────────────────────────────────────────
@@ -84,10 +86,13 @@ export function verifyWebhookSignature(
 
 /**
  * Perform ONE HTTP delivery attempt.
- * Does not retry, does not sleep, does not update the WebhookLog.
+ * Does not retry, does not sleep, and writes the WebhookLog only on success.
  * Returns the raw result so the caller can decide what to do next.
  *
  * Timeout: 10 s per attempt (enough for a slow endpoint, but won't block long).
+ *
+ * `bodies` says where the receiver's answer is kept: on the row for a home
+ * project, in the project's region otherwise (lib/data-plane/regional-bodies.ts).
  */
 export async function deliverSingleAttempt(
   webhookId: string,
@@ -95,7 +100,8 @@ export async function deliverSingleAttempt(
   secret: string,
   payload: WebhookPayload,
   logId: string,
-  attemptNumber: number = 1
+  attemptNumber: number = 1,
+  bodies: RegionalBodies = BODIES_ON_THE_ROW
 ): Promise<WebhookDeliveryResult> {
   const payloadString = JSON.stringify(payload)
   const signature = generateWebhookSignature(payloadString, secret)
@@ -136,16 +142,18 @@ export async function deliverSingleAttempt(
     const responseBody = await response.text().catch(() => null)
 
     if (response.ok) {
+      const answer = responseBody?.slice(0, 1000) ?? null
       await prisma.webhookLog.update({
         where: { id: logId },
         data: {
           status: 'SUCCESS',
           statusCode: response.status,
-          responseBody: responseBody?.slice(0, 1000) ?? null,
+          responseBody: bodies.region ? null : answer,
           attemptCount: attemptNumber,
           deliveredAt: new Date(),
         },
       })
+      if (bodies.region) await bodies.set('webhook', logId, { responseBody: answer })
       return {
         success: true,
         statusCode: response.status,
@@ -184,14 +192,15 @@ export async function deliverWebhook(
   targetUrl: string,
   secret: string,
   payload: WebhookPayload,
-  logId: string
+  logId: string,
+  bodies: RegionalBodies = BODIES_ON_THE_ROW
 ): Promise<WebhookDeliveryResult> {
-  const result = await deliverSingleAttempt(webhookId, targetUrl, secret, payload, logId, 1)
+  const result = await deliverSingleAttempt(webhookId, targetUrl, secret, payload, logId, 1, bodies)
 
   if (result.success) return result
 
   // Schedule retry #2 (5 s from now) — subsequent retries handled by cron
-  await _scheduleRetry(logId, result, 1)
+  await _scheduleRetry(logId, result, 1, bodies)
 
   return result
 }
@@ -206,9 +215,14 @@ export async function deliverWebhook(
 async function _scheduleRetry(
   logId: string,
   lastResult: WebhookDeliveryResult,
-  attemptNumber: number
+  attemptNumber: number,
+  bodies: RegionalBodies = BODIES_ON_THE_ROW
 ): Promise<void> {
   const nextAttempt = attemptNumber + 1
+  // What the receiver answered stays with the body: on the row at home, in the
+  // project's region otherwise.
+  const answer = lastResult.responseBody?.slice(0, 1000) ?? null
+  const rowAnswer = bodies.region ? null : answer
 
   // A refused destination is terminal on the first attempt. FAILED rather than
   // DEAD_LETTER: dead-letter means "we tried and they never answered", and
@@ -237,10 +251,11 @@ async function _scheduleRetry(
         attemptCount: attemptNumber,
         error: lastResult.error ?? null,
         statusCode: lastResult.statusCode ?? null,
-        responseBody: lastResult.responseBody?.slice(0, 1000) ?? null,
+        responseBody: rowAnswer,
         nextRetryAt: null,
       },
     })
+    if (bodies.region) await bodies.set('webhook', logId, { responseBody: answer })
 
     // Notify via event bus → creates a PlatformNotification for the project owner
     const log = await prisma.webhookLog.findUnique({
@@ -268,10 +283,11 @@ async function _scheduleRetry(
         attemptCount: attemptNumber,
         error: lastResult.error ?? null,
         statusCode: lastResult.statusCode ?? null,
-        responseBody: lastResult.responseBody?.slice(0, 1000) ?? null,
+        responseBody: rowAnswer,
         nextRetryAt,
       },
     })
+    if (bodies.region) await bodies.set('webhook', logId, { responseBody: answer })
   }
 }
 
@@ -286,10 +302,18 @@ async function _scheduleRetry(
 export async function retryFailedWebhooks(): Promise<number> {
   const now = new Date()
 
+  // A PENDING row older than this had its first attempt interrupted (crash
+  // or restart between creating the log and the fetch resolving). Its outbox
+  // row is already gone, so nothing else will ever touch it: without this
+  // sweep it sat PENDING forever — never retried, never dead-lettered.
+  const STUCK_PENDING_MS = 10 * 60 * 1000
+
   const pending = await prisma.webhookLog.findMany({
     where: {
-      status: 'RETRYING',
-      nextRetryAt: { lte: now },
+      OR: [
+        { status: 'RETRYING', nextRetryAt: { lte: now } },
+        { status: 'PENDING', createdAt: { lte: new Date(now.getTime() - STUCK_PENDING_MS) } },
+      ],
       attemptCount: { lt: MAX_ATTEMPTS },
       // Pausing cancels these; this keeps one created by a drain that was
       // already in flight from being delivered before that cancellation lands.
@@ -297,12 +321,23 @@ export async function retryFailedWebhooks(): Promise<number> {
     },
     include: {
       webhook: {
-        select: { id: true, targetUrl: true, secret: true, active: true },
+        select: { id: true, projectId: true, targetUrl: true, secret: true, active: true },
       },
     },
   })
 
   if (pending.length === 0) return 0
+
+  // One lookup of where each project's bodies are kept, for the whole pass.
+  const bodiesByProject = new Map<string, Promise<RegionalBodies>>()
+  const bodiesOf = (projectId: string): Promise<RegionalBodies> => {
+    let bodies = bodiesByProject.get(projectId)
+    if (!bodies) {
+      bodies = regionalBodiesFor(projectId)
+      bodiesByProject.set(projectId, bodies)
+    }
+    return bodies
+  }
 
   await Promise.allSettled(
     pending.map(async (log) => {
@@ -315,8 +350,34 @@ export async function retryFailedWebhooks(): Promise<number> {
         return
       }
 
+      const bodies = await bodiesOf(log.webhook.projectId)
+      let payload = log.payload as unknown as WebhookPayload | null
+      if (payload === null) {
+        // A regional project's event is kept in its region. When the region
+        // cannot be read this tick, the delivery stays due and is tried again
+        // on the next one: there is no other copy to send instead.
+        let held: Awaited<ReturnType<RegionalBodies['get']>>
+        try {
+          held = await bodies.get('webhook', log.id)
+        } catch (err: any) {
+          console.warn(`[Webhooks] retry of ${log.id} waits: its region could not be read (${err?.message})`)
+          return
+        }
+        if (!held) {
+          await prisma.webhookLog.update({
+            where: { id: log.id },
+            data: {
+              status: 'FAILED',
+              error: `The event is no longer kept in the project's region (${REGIONAL_BODY_RETENTION_DAYS} days), so it cannot be retried`,
+              nextRetryAt: null,
+            },
+          })
+          return
+        }
+        payload = held.payload as WebhookPayload
+      }
+
       const nextAttempt = log.attemptCount + 1
-      const payload = log.payload as unknown as WebhookPayload
 
       const result = await deliverSingleAttempt(
         log.webhookId,
@@ -324,11 +385,12 @@ export async function retryFailedWebhooks(): Promise<number> {
         log.webhook.secret,
         payload,
         log.id,
-        nextAttempt
+        nextAttempt,
+        bodies
       )
 
       if (!result.success) {
-        await _scheduleRetry(log.id, result, nextAttempt)
+        await _scheduleRetry(log.id, result, nextAttempt, bodies)
       }
     })
   )
@@ -360,24 +422,42 @@ export async function triggerWebhooks(
     projectId,
     data,
   }
+  const bodies = await regionalBodiesFor(projectId)
 
   await Promise.all(
     webhooks.map(async (webhook) => {
-      const log = await prisma.webhookLog.create({
-        data: {
-          webhookId: webhook.id,
-          eventType,
-          payload: payload as any,
-          signature: generateWebhookSignature(JSON.stringify(payload), webhook.secret),
-        },
-      })
+      const log = await createLog(webhook, eventType, payload, bodies)
 
       // Fire-and-forget: don't await delivery so the HTTP response isn't delayed
-      deliverWebhook(webhook.id, webhook.targetUrl, webhook.secret, payload, log.id).catch(
+      deliverWebhook(webhook.id, webhook.targetUrl, webhook.secret, payload, log.id, bodies).catch(
         err => console.warn('[Webhooks] deliverWebhook error (non-fatal):', err?.message)
       )
     })
   )
+}
+
+/**
+ * A delivery's log row, with its payload where the project's data is kept: on
+ * the row at home; in the project's region otherwise, written first and under
+ * the row's id, so the row never exists without it (lib/data-plane/regional-bodies.ts).
+ */
+async function createLog(
+  webhook: { id: string; secret: string },
+  eventType: string,
+  payload: WebhookPayload,
+  bodies: RegionalBodies,
+) {
+  const id = crypto.randomUUID()
+  await bodies.set('webhook', id, { payload })
+  return prisma.webhookLog.create({
+    data: {
+      id,
+      webhookId: webhook.id,
+      eventType,
+      payload: bodies.region ? Prisma.DbNull : (payload as any),
+      signature: generateWebhookSignature(JSON.stringify(payload), webhook.secret),
+    },
+  })
 }
 
 // ─── Webhook Management ───────────────────────────────────────────────────────
@@ -397,15 +477,19 @@ export function assertDeliverableUrl(targetUrl: string): void {
   assertAllowedUrl(targetUrl, 'webhook')
 }
 
+/** Each write below is one governed change, in the project's history (lib/changes/resources/webhooks.ts). */
+const governed = async <T>(projectId: string, title: string, fn: () => Promise<T>) => (await import('@/lib/changes/ledger')).governedChange(projectId, title, fn)
+
 export async function createWebhook(
   projectId: string,
   eventType: WebhookEventType,
   targetUrl: string
 ) {
   assertDeliverableUrl(targetUrl)
-  return prisma.webhook.create({
-    data: { projectId, eventType, targetUrl, secret: crypto.randomBytes(32).toString('hex') },
-  })
+  return governed(projectId, `Create a webhook for ${eventType}`, () =>
+    prisma.webhook.create({
+      data: { projectId, eventType, targetUrl, secret: crypto.randomBytes(32).toString('hex') },
+    }))
 }
 
 export async function getProjectWebhooks(projectId: string) {
@@ -445,10 +529,20 @@ const MAX_LOG_PAGE = 200
  */
 export async function getWebhookLogs(projectId: string, webhookId: string, limit = 50) {
   const take = Number.isFinite(limit) ? Math.min(Math.max(Math.trunc(limit), 1), MAX_LOG_PAGE) : 50
-  return prisma.webhookLog.findMany({
+  const rows = await prisma.webhookLog.findMany({
     where: { webhookId, webhook: { projectId } },
     orderBy: { createdAt: 'desc' },
     take,
+  })
+
+  // A regional project's payloads and answers are read from its region, for
+  // whoever asked; they are not copied back to the platform row.
+  const bodies = await regionalBodiesFor(projectId)
+  if (!bodies.region) return rows
+  const held = await bodies.getMany('webhook', rows.filter((row) => row.payload === null).map((row) => row.id))
+  return rows.map((row) => {
+    const body = held.get(row.id)
+    return body ? { ...row, payload: body.payload as Prisma.JsonValue, responseBody: body.responseBody } : row
   })
 }
 
@@ -471,7 +565,7 @@ export async function updateWebhook(
   })
   if (!existing) return null
 
-  return prisma.webhook.update({ where: { id: webhookId }, data: changes })
+  return governed(projectId, 'Change a webhook', () => prisma.webhook.update({ where: { id: webhookId }, data: changes }))
 }
 
 /**
@@ -490,7 +584,7 @@ export async function rotateWebhookSecret(projectId: string, webhookId: string) 
   if (!existing) return null
 
   const secret = crypto.randomBytes(32).toString('hex')
-  await prisma.webhook.update({ where: { id: webhookId }, data: { secret } })
+  await governed(projectId, "Rotate a webhook's signing secret", () => prisma.webhook.update({ where: { id: webhookId }, data: { secret } }))
   return { secret }
 }
 
@@ -522,7 +616,7 @@ export async function sendTestDelivery(projectId: string, webhookId: string) {
     },
   }
 
-  return deliverOnceAndRecord(webhook, payload)
+  return deliverOnceAndRecord(webhook, payload, await regionalBodiesFor(projectId))
 }
 
 /** Why a delivery cannot be sent again, or null when it can. */
@@ -554,7 +648,20 @@ export async function redeliverWebhookLog(projectId: string, logId: string) {
   const refusal = replayRefusal(original.status, original.webhook.active)
   if (refusal) return { refused: refusal, status: original.status }
 
-  const result = await deliverOnceAndRecord(original.webhook, original.payload as unknown as WebhookPayload)
+  const bodies = await regionalBodiesFor(projectId)
+  let payload = original.payload as unknown as WebhookPayload | null
+  if (payload === null) {
+    const held = await bodies.get('webhook', original.id)
+    if (!held) {
+      return {
+        refused: `the event is no longer kept in the project's region (${REGIONAL_BODY_RETENTION_DAYS} days)`,
+        status: original.status,
+      }
+    }
+    payload = held.payload as WebhookPayload
+  }
+
+  const result = await deliverOnceAndRecord(original.webhook, payload, bodies)
   return { replayOf: original.id, ...result }
 }
 
@@ -565,15 +672,9 @@ export async function redeliverWebhookLog(projectId: string, logId: string) {
 async function deliverOnceAndRecord(
   webhook: { id: string; eventType: string; targetUrl: string; secret: string },
   payload: WebhookPayload,
+  bodies: RegionalBodies,
 ) {
-  const log = await prisma.webhookLog.create({
-    data: {
-      webhookId: webhook.id,
-      eventType: webhook.eventType,
-      payload: payload as any,
-      signature: generateWebhookSignature(JSON.stringify(payload), webhook.secret),
-    },
-  })
+  const log = await createLog(webhook, webhook.eventType, payload, bodies)
 
   const result = await deliverSingleAttempt(
     webhook.id,
@@ -582,11 +683,13 @@ async function deliverOnceAndRecord(
     payload,
     log.id,
     1,
+    bodies,
   )
 
   // deliverSingleAttempt only writes the log on success, so a failed attempt
   // would otherwise sit at PENDING for ever and read as "still trying".
   if (!result.success) {
+    const answer = result.responseBody?.slice(0, 1000) ?? null
     await prisma.webhookLog.update({
       where: { id: log.id },
       data: {
@@ -594,19 +697,21 @@ async function deliverOnceAndRecord(
         attemptCount: 1,
         error: result.error ?? null,
         statusCode: result.statusCode ?? null,
-        responseBody: result.responseBody?.slice(0, 1000) ?? null,
+        responseBody: bodies.region ? null : answer,
         nextRetryAt: null,
       },
     })
+    if (bodies.region) await bodies.set('webhook', log.id, { responseBody: answer })
   }
 
   return { logId: log.id, ...result }
 }
 
 export async function deleteWebhook(webhookId: string, projectId: string) {
-  return prisma.webhook.deleteMany({ where: { id: webhookId, projectId } })
+  return governed(projectId, 'Delete a webhook', () => prisma.webhook.deleteMany({ where: { id: webhookId, projectId } }))
 }
 
 export async function toggleWebhook(webhookId: string, projectId: string, active: boolean) {
-  return prisma.webhook.updateMany({ where: { id: webhookId, projectId }, data: { active } })
+  return governed(projectId, active ? 'Turn a webhook on' : 'Turn a webhook off', () =>
+    prisma.webhook.updateMany({ where: { id: webhookId, projectId }, data: { active } }))
 }

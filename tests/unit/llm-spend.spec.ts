@@ -54,8 +54,11 @@ const ok = () => scriptedMessage({ text: 'fine', usage: { input_tokens: 1000, ou
 const OK_COST = 0.0075
 
 describe('who pays', () => {
-  it('bills autonomy to the deployment and everything else to a customer', () => {
+  it('bills autonomy and support to the deployment and everything else to a customer', () => {
     expect(defaultPayer('autonomy.investigate')).toBe('platform')
+    // A support answer is the platform helping its customer; it must never
+    // spend the customer's plan credits.
+    expect(defaultPayer('support.answer')).toBe('platform')
     expect(defaultPayer('brain.agent')).toBe('customer')
   })
 

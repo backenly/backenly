@@ -58,7 +58,8 @@
  * serving from a runtime that had just read it, and on how long a resumed one
  * keeps being refused.
  */
-import { prisma } from '@/lib/db/prisma'
+import { authorizingProjectWithAge } from '@/lib/auth-projection/read'
+import { authMaxStalenessMs } from '@/lib/auth-projection/mode'
 
 export type ProjectServingState =
   | { kind: 'serving' }
@@ -80,6 +81,13 @@ export interface ServingRow {
   lockedDownReason: string | null
   pausedAt: Date | null
   pauseReason: string | null
+  /**
+   * How much longer this answer may be trusted, when it was already old as it
+   * was read: one from a region's copy is as old as the copy's watermark. It is
+   * cached no longer than that, so the copy's age and the cache's together
+   * stay within the bound. Unset for an answer read at home, just now.
+   */
+  freshForMs?: number
 }
 
 export interface ServingStateReaderOptions {
@@ -154,10 +162,12 @@ export function createServingStateReader(options: ServingStateReaderOptions): Se
     }
 
     try {
-      const state = toState(await options.load(projectId))
+      const row = await options.load(projectId)
+      const state = toState(row)
+      const fresh = Math.max(0, Math.min(freshMs, row?.freshForMs ?? freshMs))
       remember(projectId, {
         state,
-        freshUntil: at + (state.kind === 'not_found' ? notFoundFreshMs : freshMs),
+        freshUntil: at + (state.kind === 'not_found' ? notFoundFreshMs : fresh),
       })
       return state
     } catch (err: any) {
@@ -182,12 +192,21 @@ export function createServingStateReader(options: ServingStateReaderOptions): Se
   }
 }
 
+// The region's copy while it is fresh, home otherwise (lib/auth-projection/read.ts).
+// Any answer is cached only for what is left of the bound after its own age: the
+// copy's watermark age, or 0 when home answered. So a lock or pause reaches every
+// request within the bound however it was read, in a region running below 15 s
+// (staging, 10) as at home (the 15 s ceiling, which is FRESH_MS). When neither can
+// answer the loader throws, and the reader fails closed as above.
+export function withStalenessBound<T extends object>(
+  answer: { row: T | null; ageMs: number },
+  boundMs: number = authMaxStalenessMs(),
+): (T & { freshForMs: number }) | null {
+  return answer.row ? { ...answer.row, freshForMs: boundMs - answer.ageMs } : null
+}
+
 const reader = createServingStateReader({
-  load: projectId =>
-    prisma.project.findUnique({
-      where: { id: projectId },
-      select: { lockedDownAt: true, lockedDownReason: true, pausedAt: true, pauseReason: true },
-    }),
+  load: async projectId => withStalenessBound(await authorizingProjectWithAge(projectId)),
 })
 
 export function getProjectServingState(projectId: string): Promise<ProjectServingState> {

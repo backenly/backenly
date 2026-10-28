@@ -182,6 +182,16 @@ export class JWTSecretManager {
   }
 
   /**
+   * A stored value in the encrypted format, under the active key, for a copy
+   * kept outside this database: a region's authorization copy
+   * (lib/auth-projection/deliver.ts). A legacy plaintext row, or one under the
+   * legacy zero key, is never written anywhere else as it is.
+   */
+  static atRest(stored: string): string {
+    return this.encrypt(this.resolve(stored))
+  }
+
+  /**
    * Migrate one project's jwtSecret to the encrypted format.
    * Idempotent — encrypted rows get re-encrypted with the active key.
    */

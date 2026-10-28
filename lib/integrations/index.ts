@@ -38,10 +38,24 @@ export interface DispatchResult {
   data?: Record<string, any>
 }
 
+/**
+ * Connecting an integration is one change in the project's history: its keys,
+ * the tables and functions it adds and its switch, together (lib/changes).
+ * A dispatch that asks for credentials first writes nothing and leaves no entry.
+ */
 export async function dispatchIntegration(
   integrationId: IntegrationId,
   projectId: string,
   params: Record<string, any> = {}
+): Promise<DispatchResult> {
+  const { governedChange } = await import('@/lib/changes/ledger')
+  return governedChange(projectId, `Connect ${integrationId.replace(/_/g, ' ')}`, () => dispatchNow(integrationId, projectId, params))
+}
+
+async function dispatchNow(
+  integrationId: IntegrationId,
+  projectId: string,
+  params: Record<string, any>,
 ): Promise<DispatchResult> {
   switch (integrationId) {
     case 'stripe': {

@@ -8,7 +8,7 @@ import { carriesInternalToken, isPlatformProbe } from '@/lib/security/platform-p
 import { createErrorResponse, createSuccessResponse, ErrorCodes } from '@/lib/api/v1/errors'
 import { signInSchema } from '@/lib/api/v1/schemas'
 import { validateRequestBody } from '@/lib/validation/schemas'
-import { prisma } from '@/lib/db'
+import { workspaceRawClient } from '@/lib/data-plane/regional'
 import { verifyPassword, verifyPasswordAgainstDecoy } from '@/lib/auth/password'
 import { executeWithUserContext } from '@/lib/services/workspace-rls'
 import { stampLastLogin } from '@/lib/services/end-user-auth-table'
@@ -19,6 +19,7 @@ import { resolveJwtSecret } from '@/lib/services/jwtSecretManager'
 import { recordedV1 } from '@/lib/traffic/recorded-v1'
 import { endUserTokenSecret, endUserTokenClaims, type AuthEnvironment } from '@/lib/branches/auth-environment'
 import { inAuthEnvironment } from '@/lib/branches/next-auth-environment'
+import { authorizingProject } from '@/lib/auth-projection/read'
 
 /**
  * POST /v1/{projectId}/auth/signin
@@ -51,10 +52,9 @@ async function signIn(request: NextRequest, projectId: string, env: AuthEnvironm
       if (!limit.allowed) return throttledV1Response(limit)
     }
 
-    // Validate project exists
-    const project = await prisma.project.findUnique({
-      where: { id: projectId },
-    })
+    // Validate project exists. Existence and the signing secret are all this
+    // route reads of it: the region's copy while it is fresh, home otherwise.
+    const project = await authorizingProject(projectId)
 
     if (!project) {
       return createErrorResponse(ErrorCodes.NOT_FOUND, 'Project not found', 404)
@@ -93,9 +93,13 @@ async function signIn(request: NextRequest, projectId: string, env: AuthEnvironm
     const attempt = probe ? null : await admitSigninAttempt(projectId, ip, email)
     if (attempt?.denied) return throttledV1Response(attempt.denied)
     const schemaName = env.schemaName
+    // The users table is in the project's database, in its region. Asked of
+    // any other database it would not exist, and sign-in would answer that
+    // authentication is not enabled.
+    const db = await workspaceRawClient(projectId)
 
     // Check if users table exists
-    const tableCheck = await prisma.$queryRawUnsafe<{ exists: boolean }[]>(
+    const tableCheck = await db.$queryRawUnsafe<{ exists: boolean }[]>(
       `SELECT EXISTS (
         SELECT 1 FROM information_schema.tables
         WHERE table_schema = $1 AND table_name = 'users'
@@ -112,7 +116,7 @@ async function signIn(request: NextRequest, projectId: string, env: AuthEnvironm
     }
 
     // Detect which column stores the password hash — some schemas use 'password', others 'password_hash'
-    const pwColRows = await prisma.$queryRawUnsafe<{ column_name: string }[]>(
+    const pwColRows = await db.$queryRawUnsafe<{ column_name: string }[]>(
       `SELECT column_name FROM information_schema.columns
        WHERE table_schema = $1 AND table_name = 'users'
        AND column_name IN ('password', 'password_hash') LIMIT 1`,
@@ -121,7 +125,7 @@ async function signIn(request: NextRequest, projectId: string, env: AuthEnvironm
     const pwCol = pwColRows[0]?.column_name ?? 'password'
 
     // Detect optional columns
-    const optColRows = await prisma.$queryRawUnsafe<{ column_name: string }[]>(
+    const optColRows = await db.$queryRawUnsafe<{ column_name: string }[]>(
       `SELECT column_name FROM information_schema.columns
        WHERE table_schema = $1 AND table_name = 'users'
        AND column_name IN ('role', 'is_blocked', 'email_verified')`,
@@ -135,6 +139,7 @@ async function signIn(request: NextRequest, projectId: string, env: AuthEnvironm
     // hide the row. Run as service-role — sign-in is a platform-internal
     // privileged operation, exactly what the service-role escape hatch is for.
     const users = await executeWithUserContext<any>(
+      projectId,
       '',
       true,
       `SELECT ${selectCols} FROM "${schemaName}"."users" WHERE email = $1 LIMIT 1`,

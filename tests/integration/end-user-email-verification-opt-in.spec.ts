@@ -149,9 +149,9 @@ afterAll(async () => {
 
 describe('adding the column grandfathers the users who already exist', () => {
   it('records existing rows as verified and new rows as unverified', async () => {
-    const { schema } = await legacyProject(null)
+    const { id, schema } = await legacyProject(null)
 
-    await ensureEmailVerifiedColumn(schema)
+    await ensureEmailVerifiedColumn(id, schema)
 
     expect(await verifiedByEmail(schema)).toEqual({
       'existing-a@example.test': true,
@@ -164,13 +164,13 @@ describe('adding the column grandfathers the users who already exist', () => {
   })
 
   it('never touches the rows again once the column exists', async () => {
-    const { schema } = await legacyProject(null)
-    await ensureEmailVerifiedColumn(schema)
+    const { id, schema } = await legacyProject(null)
+    await ensureEmailVerifiedColumn(id, schema)
     await prisma.$executeRawUnsafe(
       `UPDATE "${schema}"."users" SET email_verified = false WHERE email = 'existing-a@example.test'`,
     )
 
-    await ensureEmailVerifiedColumn(schema)
+    await ensureEmailVerifiedColumn(id, schema)
 
     expect(await verifiedByEmail(schema)).toEqual({
       'existing-a@example.test': false,
@@ -197,7 +197,7 @@ describe('a project that never opted in is left exactly as it was', () => {
 
   it('sign-in admits a row recorded as unverified', async () => {
     const { id, schema } = await legacyProject(false)
-    await ensureEmailVerifiedColumn(schema)
+    await ensureEmailVerifiedColumn(id, schema)
     await prisma.$executeRawUnsafe(
       `UPDATE "${schema}"."users" SET email_verified = false WHERE email = 'existing-a@example.test'`,
     )

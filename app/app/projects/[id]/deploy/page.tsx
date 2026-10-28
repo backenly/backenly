@@ -2,16 +2,17 @@
 
 import { useState, useEffect } from 'react'
 import Link from 'next/link'
-import { useParams } from 'next/navigation'
+import { useParams, useRouter } from 'next/navigation'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   AlertCircle, Cable, Check, CheckCircle2, Code2, Database, ExternalLink, Globe, HardDrive, Info, Layers, Loader2,
-  Lock, Rocket, RotateCcw, Shield, ShieldCheck,
+  Lock, Rocket, Shield, ShieldCheck, Undo2, Globe2,
 } from 'lucide-react'
 import { EnvVarsPanel } from '@/components/inspector/EnvVarsPanel'
-import { FrontendConnectionPill } from '@/components/inspector/FrontendConnectionPill'
+import { RestoreToDialog, type RestorePoint } from '@/components/changes/RestoreToDialog'
+import { useConnectionHealth } from '@/lib/hooks/useConnectionHealth'
+import { AgentEmptyState } from '@/components/inspector/AgentEmptyState'
 import {
-  AgentPrompt,
   BUTTON_BASE,
   BUTTON_SIZES,
   BUTTON_VARIANTS,
@@ -42,6 +43,10 @@ interface ProjectData {
   name: string
   projectStatus: ProjectStatus
   publicUrl?: string | null
+  /** Set only by an operator override. */
+  apiUrlProd?: string | null
+  /** The API address the server works out for the project's region. */
+  apiBaseUrl?: string | null
   deployedAt?: string | null
   deploymentError?: string | null
 }
@@ -82,6 +87,7 @@ export default function PublishPage() {
   const projectId = params.id as string
   // Nothing to publish is the agent's next job: offer Connect only until it is connected.
   const agent = useAgentConnection(projectId)
+  const frontend = useConnectionHealth(projectId)
 
   const [project, setProject] = useState<ProjectData | null>(null)
   const [publishedVersions, setPublishedVersions] = useState<PublishedVersion[]>([])
@@ -91,8 +97,40 @@ export default function PublishPage() {
   const [publishing, setPublishing] = useState(false)
   const [copied, setCopied] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // Rollback and loading fail here too; the note named every failure a publish.
+  const [errorTitle, setErrorTitle] = useState('The publish did not complete')
   const [successMsg, setSuccessMsg] = useState<string | null>(null)
-  const [rollingBackId, setRollingBackId] = useState<string | null>(null)
+  // Restoring to a version is History's restore to a point (components/changes/RestoreToDialog.tsx).
+  const [restoreTo, setRestoreTo] = useState<RestorePoint | null>(null)
+  const router = useRouter()
+  const [applyingFixes, setApplyingFixes] = useState(false)
+  const [fixNote, setFixNote] = useState<string | null>(null)
+
+  /**
+   * Applying fixes is a deliberate act, never a side effect of looking: it can
+   * enable row-level security with an owner policy (rows other users could
+   * read stop appearing to them), generate the project JWT secret, set the
+   * auth flag, and switch off placeholder functions that have live triggers.
+   */
+  const applySafeFixes = async () => {
+    setApplyingFixes(true)
+    setFixNote(null)
+    try {
+      const res = await fetch(`/api/projects/${projectId}/readiness`, { method: 'POST', credentials: 'include' })
+      const r = await res.json().catch(() => ({}))
+      if (res.ok) {
+        setReadinessChecks(r.report?.checks ?? [])
+        const applied: ReadinessCheck[] = r.report?.autoFixed ?? []
+        setFixNote(applied.length > 0 ? `Applied: ${applied.map(c => c.name).join(', ')}.` : 'Nothing needed fixing.')
+      } else {
+        setFixNote(r.error || 'The fixes could not be applied.')
+      }
+    } catch {
+      setFixNote('The fixes could not be applied.')
+    } finally {
+      setApplyingFixes(false)
+    }
+  }
 
   const fetchAll = async () => {
     try {
@@ -123,11 +161,12 @@ export default function PublishPage() {
       const hasRealContent = (state?.hasContent ?? false) || hasAuth
       if (hasRealContent) {
         try {
-          // POST → run auto-fixes (RLS, JWT secret, etc.) BEFORE rendering the
-          // score, so the page shows the post-repair state rather than a stale
-          // snapshot. Same logic the autonomy runtime applies in the background.
+          // GET: a read that changes nothing. This used to POST, which ran the
+          // auto-fixes on every page load: enabling RLS with an owner policy on
+          // tables an agent had left open on purpose, generating secrets and
+          // switching functions off, with no click and no record on the page.
+          // Fixes are the explicit "Apply safe fixes" action in the panel.
           const readinessRes = await fetch(`/api/projects/${projectId}/readiness`, {
-            method: 'POST',
             credentials: 'include',
           })
           if (readinessRes.ok) {
@@ -140,6 +179,7 @@ export default function PublishPage() {
       }
     } catch (err) {
       console.error('Failed to fetch project:', err)
+      setErrorTitle('Couldn’t load this project')
       setError('Failed to load project data')
     } finally {
       setLoading(false)
@@ -190,6 +230,7 @@ export default function PublishPage() {
       setTimeout(() => setSuccessMsg(null), 4000)
       await fetchAll()
     } catch (err: any) {
+      setErrorTitle('The publish did not complete')
       setError(err.message || 'Publish failed')
       await fetchAll()
     } finally {
@@ -197,38 +238,15 @@ export default function PublishPage() {
     }
   }
 
-  const handleRollback = async (deploymentId: string, version: number) => {
-    if (rollingBackId) return
-    setRollingBackId(deploymentId)
-    setError(null)
-    setSuccessMsg(null)
-    try {
-      const response = await fetch(`/api/projects/${projectId}/rollback`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({ deploymentId }),
-      })
-      const data = await response.json()
-      if (!response.ok || !data.success) {
-        if (data.code === 'PLAN_LIMIT_EXCEEDED') {
-          throw new Error('Rollback is included in Pro and higher. Compare plans on the Billing page.')
-        }
-        throw new Error(data.error || 'Rollback failed')
-      }
-      setSuccessMsg(`Rolled back to Published v${version}`)
-      setTimeout(() => setSuccessMsg(null), 4000)
-      await fetchAll()
-    } catch (err: any) {
-      setError(err.message || 'Rollback failed')
-    } finally {
-      setRollingBackId(null)
-    }
-  }
+  // The live endpoint. publicUrl comes back only from the publish call itself,
+  // never from GET /api/projects/[id], so a card keyed on it alone never showed
+  // after a reload; apiBaseUrl is the address the server works out for the
+  // project's region, and an operator override still wins.
+  const endpointUrl = project?.publicUrl || project?.apiUrlProd || project?.apiBaseUrl || null
 
   const handleCopyURL = () => {
-    if (project?.publicUrl) {
-      navigator.clipboard.writeText(project.publicUrl)
+    if (endpointUrl) {
+      navigator.clipboard.writeText(endpointUrl)
       setCopied(true)
       setTimeout(() => setCopied(false), 2000)
     }
@@ -250,7 +268,7 @@ export default function PublishPage() {
   if (loading) {
     return (
       <div className={`${PAGE_WIDTH} ${PAGE_GUTTER} pb-16`}>
-        <PageHeader className="!px-0" title="Deploy" description="Production changes only when you publish." />
+        <PageHeader className="!px-0" title="Deploy" description="Publishing records a version of your backend. The API serves changes as they are made." />
         <div className="space-y-4" aria-hidden>
           <Skeleton className="h-[76px] w-full rounded-[10px]" />
           <Skeleton className="h-[200px] w-full rounded-[10px]" />
@@ -279,10 +297,17 @@ export default function PublishPage() {
   const endpointCount = backendState?.endpointCount ?? (backendState?.apis.length ?? 0) * 5
   const tableCount = backendState?.entities.length ?? 0
   const apiResourceCount = backendState?.apis.length ?? 0
+  // What the publish ENGINE will accept (lib/deployment/go-live.ts refuses
+  // when tables, exposed APIs and auth are all absent). hasContent is wider —
+  // functions, buckets or realtime alone flip it — and offering Publish on
+  // that wider set meant the button led straight to a refusal.
+  const publishable = tableCount > 0 || apiResourceCount > 0 || hasAuth
 
   const passingChecks = readinessChecks.filter(c => c.status === 'pass').length
   const blockingChecks = readinessChecks.filter(c => c.status === 'fail' && c.severity === 'blocking')
   const warningChecks = readinessChecks.filter(c => c.status === 'fail' && c.severity !== 'blocking')
+  // What "Apply safe fixes" would change: failing checks the engine can fix.
+  const fixableChecks = readinessChecks.filter(c => c.status === 'fail' && c.severity === 'auto-fixable' && !c.fixApplied)
 
   /**
    * What the readiness card actually draws: anything that FAILED, then the
@@ -305,18 +330,20 @@ export default function PublishPage() {
     if (status === 'LIVE' && hasRealBackend) return { label: 'Live', tone: 'operational' }
     if (status === 'DEPLOYING') return { label: 'Publishing', tone: 'attention', pulse: true }
     if (status === 'FAILED') return { label: 'Publish failed', tone: 'failed' }
+    // Not "ready" while a check the publish stops on is failing below.
+    if (hasRealBackend && blockingChecks.length > 0) return { label: `${blockingChecks.length} to clear before publishing`, tone: 'attention' }
     if (hasRealBackend) return { label: 'Ready to publish', tone: 'managed' }
     return { label: 'Nothing to publish', tone: 'paused' }
   })()
 
   const runtimeTagline = (() => {
-    if (status === 'LIVE' && hasRealBackend) return 'Your production endpoint is serving. Every change is governed, snapshotted and reversible.'
-    if (status === 'DEPLOYING') return 'Creating a stable production snapshot. The runtime stays locked until activation completes.'
-    if (status === 'FAILED') return 'The last publish failed. Production is unchanged, and the previous version is still serving.'
-    if (hasRealBackend) return 'Your backend is built. Publish it to get a stable, versioned endpoint your app can rely on.'
+    if (status === 'LIVE' && hasRealBackend) return 'Your endpoint is serving. Every change is governed and recorded; publishing snapshots a version you can compare and report against.'
+    if (status === 'DEPLOYING') return 'Recording a versioned snapshot of the backend. The API keeps serving while it completes.'
+    if (status === 'FAILED') return 'The last publish failed, so no new version was recorded. The API keeps serving the backend as it is.'
+    if (hasRealBackend) return 'Your backend is built and its API is already answering. Publish to record version one and mark the project live.'
     return agent.connected
-      ? 'Production changes only when you publish. Ask your agent to start building.'
-      : 'Production changes only when you publish. Connect your coding agent to start building.'
+      ? 'The API serves changes as your agent makes them. Ask your agent to start building.'
+      : 'The API serves changes as they are made. Connect your coding agent to start building.'
   })()
 
   const publishButton = (label: string) => (
@@ -358,17 +385,35 @@ export default function PublishPage() {
                 <p className={`text-[13px] leading-[19px] ${check.status === 'pass' ? 'text-zinc-400' : 'text-zinc-100'}`}>{check.name}</p>
                 {/* A failing check states WHY inline, not in a title attribute nobody hovers. */}
                 {check.status !== 'pass' && check.message && (
-                  <p className="mt-0.5 text-[12.5px] leading-[18px] text-zinc-500">{check.message}</p>
+                  <p className="mt-0.5 text-[12.5px] leading-[18px] text-faint">{check.message}</p>
                 )}
               </div>
             </li>
           ))}
           {hiddenCheckCount > 0 && (
-            <li className="pl-6 text-[12.5px] text-zinc-500">
+            <li className="pl-6 text-[12.5px] text-faint">
               +{hiddenCheckCount} more passing {hiddenCheckCount === 1 ? 'check' : 'checks'}
             </li>
           )}
         </ul>
+        {(fixableChecks.length > 0 || fixNote) && (
+          <div className={`flex flex-wrap items-center justify-between gap-3 border-t ${RULE} px-4 py-2.5`}>
+            <p className="min-w-0 flex-1 text-[12.5px] leading-[18px] text-faint">
+              {fixNote ??
+                `${fixableChecks.length} ${fixableChecks.length === 1 ? 'item' : 'items'} Backenly can fix: ` +
+                  `${fixableChecks.map(c => c.name).join(', ')}.` +
+                  // Said only when it is one of the fixes: it changes what each table shows.
+                  (fixableChecks.some(c => c.id === 'rls_applied')
+                    ? ' This turns on row-level security for tables it can find an owner for, so check what each table should show before applying.'
+                    : '')}
+            </p>
+            {fixableChecks.length > 0 && (
+              <KitButton onClick={applySafeFixes} loading={applyingFixes}>
+                {applyingFixes ? 'Applying…' : 'Apply safe fixes'}
+              </KitButton>
+            )}
+          </div>
+        )}
         {blockingChecks.length > 0 && (
           <div className={`border-t ${RULE} px-4 py-2.5`}>
             <Link
@@ -398,7 +443,7 @@ export default function PublishPage() {
         <AnimatePresence>
           {error && (
             <motion.div key="err" initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}>
-              <KitNote tone="warn" icon={AlertCircle} title="The publish did not complete">
+              <KitNote tone="warn" icon={AlertCircle} title={errorTitle}>
                 <span className="whitespace-pre-line">{error}</span>
               </KitNote>
             </motion.div>
@@ -433,7 +478,7 @@ export default function PublishPage() {
             <KitColumns
               main={
                 <>
-                  {project.publicUrl && (
+                  {endpointUrl && (
                     <KitCard className="overflow-hidden">
                       <KitCardHeader
                         title={
@@ -445,9 +490,9 @@ export default function PublishPage() {
                         actions={<StatusDot tone="operational" label="Serving" />}
                       />
                       <div className="flex items-center gap-2 px-4 py-3.5">
-                        <CopyField value={project.publicUrl} className="flex-1" />
+                        <CopyField value={endpointUrl} className="flex-1" />
                         <a
-                          href={project.publicUrl}
+                          href={endpointUrl}
                           target="_blank"
                           rel="noopener noreferrer"
                           aria-label="Open the endpoint in a new tab"
@@ -463,7 +508,7 @@ export default function PublishPage() {
                     <KitCard className="overflow-hidden">
                       <KitCardHeader
                         title="Versions"
-                        actions={<span className="text-[12px] tabular-nums text-zinc-500">{publishedVersions.length}</span>}
+                        actions={<span className="text-[12px] tabular-nums text-faint">{publishedVersions.length}</span>}
                       />
                       {/* A version is "active" only while its snapshot still equals
                           the live graph (see app/api/projects/[id]/rollback). Every
@@ -474,8 +519,8 @@ export default function PublishPage() {
                       {!publishedVersions.some(v => v.isActive) && (
                         <div className="px-4 pt-3">
                           <KitNote tone="info" icon={Info}>
-                            The live backend has changed since v{publishedVersions[0]?.version} was published. Publish an
-                            update to save the current state as a version you can roll back to.
+                            The live backend has changed since v{publishedVersions[0]?.version} was published. Publish to save
+                            the current state as a new version, or restore v{publishedVersions[0]?.version} to undo the changes since.
                           </KitNote>
                         </div>
                       )}
@@ -483,17 +528,16 @@ export default function PublishPage() {
                         <table className="w-full min-w-[560px] border-separate border-spacing-0">
                           <thead>
                             <tr className={KIT.gridHead}>
-                              <th scope="col" className={`w-16 border-b ${RULE} px-4 py-2 text-left text-[12px] font-normal text-zinc-500`}>Version</th>
-                              <th scope="col" className={`border-b ${RULE} px-3 py-2 text-left text-[12px] font-normal text-zinc-500`}>Change</th>
-                              <th scope="col" className={`w-44 whitespace-nowrap border-b ${RULE} px-3 py-2 text-left text-[12px] font-normal text-zinc-500`}>Published</th>
-                              <th scope="col" className={`w-36 whitespace-nowrap border-b ${RULE} px-4 py-2 text-right text-[12px] font-normal text-zinc-500`}>
+                              <th scope="col" className={`w-16 border-b ${RULE} px-4 py-2 text-left text-[12px] font-normal text-faint`}>Version</th>
+                              <th scope="col" className={`border-b ${RULE} px-3 py-2 text-left text-[12px] font-normal text-faint`}>Change</th>
+                              <th scope="col" className={`w-44 whitespace-nowrap border-b ${RULE} px-3 py-2 text-left text-[12px] font-normal text-faint`}>Published</th>
+                              <th scope="col" className={`w-36 whitespace-nowrap border-b ${RULE} px-4 py-2 text-right text-[12px] font-normal text-faint`}>
                                 <span className="sr-only">State</span>
                               </th>
                             </tr>
                           </thead>
                           <tbody>
                             {publishedVersions.map(version => {
-                              const isRollingBack = rollingBackId === version.id
                               return (
                                 <tr key={version.id} className={`transition-colors ${KIT.rowHoverOn}`}>
                                   <td className="border-b border-white/[0.04] px-4 py-2.5">
@@ -502,26 +546,27 @@ export default function PublishPage() {
                                     </span>
                                   </td>
                                   <td className="border-b border-white/[0.04] px-3 py-2.5 text-[13px] text-zinc-300">{version.changeSummary}</td>
-                                  <td className="whitespace-nowrap border-b border-white/[0.04] px-3 py-2.5 text-[12.5px] tabular-nums text-zinc-500">
+                                  <td className="whitespace-nowrap border-b border-white/[0.04] px-3 py-2.5 text-[12.5px] tabular-nums text-faint">
                                     {formatDate(version.publishedAt)}
-                                    <span className="text-zinc-600"> · {formatTimeAgo(version.publishedAt)}</span>
+                                    <span className="text-faint"> · {formatTimeAgo(version.publishedAt)}</span>
                                   </td>
                                   <td className="whitespace-nowrap border-b border-white/[0.04] px-4 py-2 text-right">
                                     {version.isActive ? (
-                                      <StatusDot tone="operational" label="Live" />
-                                    ) : version.canRollback ? (
+                                      <StatusDot tone="operational" label="Current" />
+                                    ) : (
+                                      // The backend as it was when this was published: every change since undone, each checked.
                                       <KitButton
                                         variant="ghost"
                                         size="sm"
-                                        icon={RotateCcw}
-                                        loading={isRollingBack}
-                                        onClick={() => handleRollback(version.id, version.version)}
-                                        disabled={!!rollingBackId && !isRollingBack}
+                                        icon={Undo2}
+                                        onClick={() => setRestoreTo({
+                                          version: version.version,
+                                          label: `v${version.version}`,
+                                          detail: `Published ${formatTimeAgo(version.publishedAt)} · ${version.changeSummary}`,
+                                        })}
                                       >
-                                        {isRollingBack ? 'Rolling back…' : 'Roll back'}
+                                        Restore
                                       </KitButton>
-                                    ) : (
-                                      <span className="text-[12px] text-zinc-600">Archived</span>
                                     )}
                                   </td>
                                 </tr>
@@ -534,6 +579,17 @@ export default function PublishPage() {
                   )}
 
                   <EnvVarsPanel projectId={projectId} />
+
+                  {restoreTo && (
+                    <RestoreToDialog
+                      projectId={projectId}
+                      point={restoreTo}
+                      onClose={() => setRestoreTo(null)}
+                      onDone={() => void fetchAll()}
+                      // The step that stopped it opens where every change is: History.
+                      onOpenChange={(id) => router.push(`/app/projects/${projectId}/changes?change=${encodeURIComponent(id)}`)}
+                    />
+                  )}
                 </>
               }
               side={
@@ -546,22 +602,33 @@ export default function PublishPage() {
                         { icon: Code2, label: 'REST API', active: endpointCount > 0, sub: `${endpointCount} endpoints` },
                         { icon: Shield, label: 'Authentication', active: hasAuth, sub: hasAuth ? 'JWT sessions' : 'Not configured' },
                         { icon: HardDrive, label: 'File storage', active: hasStorage, sub: hasStorage ? 'Buckets provisioned' : 'Not configured' },
+                        // The frontend calling this API, from the same 24-hour
+                        // health the sidebar row reads. It was a badge floating
+                        // under the readiness card.
+                        {
+                          icon: Globe2,
+                          label: 'Frontend',
+                          active: frontend.status === 'connected',
+                          sub:
+                            frontend.status === 'connected' ? frontend.primaryOrigin ?? 'Connected'
+                            : frontend.status === 'degraded' ? `${frontend.primaryOrigin ?? 'Connected'}, with errors`
+                            : frontend.status === 'failing' ? 'Requests failing'
+                            : frontend.status === 'loading' ? 'Checking…'
+                            : 'No requests yet',
+                        },
                       ].map(({ icon: Icon, label, active, sub }) => (
                         <li key={label} className="flex items-center gap-3 px-4 py-2.5">
                           <Icon className={`h-4 w-4 flex-shrink-0 ${active ? 'text-zinc-400' : 'text-zinc-700'}`} strokeWidth={1.75} />
                           <div className="min-w-0 flex-1">
-                            <p className={`text-[13px] ${active ? 'text-zinc-100' : 'text-zinc-500'}`}>{label}</p>
-                            <p className="text-[12px] tabular-nums text-zinc-500">{sub}</p>
+                            <p className={`text-[13px] ${active ? 'text-zinc-100' : 'text-faint'}`}>{label}</p>
+                            <p className="text-[12px] tabular-nums text-faint">{sub}</p>
                           </div>
                           {active && <Check className="h-3.5 w-3.5 flex-shrink-0 text-emerald-400/80" strokeWidth={2} />}
                         </li>
                       ))}
                     </ul>
                   </KitCard>
-                  {readinessPanel('Runtime readiness')}
-                  <div className="hidden md:block">
-                    <FrontendConnectionPill projectId={projectId} variant="badge" />
-                  </div>
+                  {readinessPanel('Readiness')}
                 </>
               }
             />
@@ -571,21 +638,14 @@ export default function PublishPage() {
         {/* ── PRIVATE, nothing built ───────────────────────────── */}
         {status === 'PRIVATE' && !hasRealBackend && (
           <KitCard>
-            <EmptyState
+            <AgentEmptyState
+              projectId={projectId}
               icon={Layers}
               title="Nothing to publish yet"
-              description="Describe your app to your coding agent. Once it has built tables, auth or storage, publishing gives the backend a stable, versioned endpoint."
-              action={
-                <div className="flex w-full flex-col items-center gap-3">
-                  <AgentPrompt prompt="Build the backend for a task tracker: projects, tasks with a status and a due date, and email sign-in. Only a task's owner can edit it." />
-                  {agent.needsConnect && (
-                    <Link href={`/app/projects/${projectId}/connect`} className={`${BUTTON_BASE} ${BUTTON_SIZES.md} ${BUTTON_VARIANTS.primary}`}>
-                      <Cable className="h-[15px] w-[15px]" strokeWidth={2} />
-                      Connect your agent
-                    </Link>
-                  )}
-                </div>
-              }
+              description="Publishing runs readiness checks, then records your backend as a numbered version. Ask your agent to build tables, auth or storage first."
+              prompt="Build the backend for a task tracker: projects, tasks with a status and a due date, and email sign-in. Only a task's owner can edit it."
+              docs="deploy"
+              preview="list"
             />
           </KitCard>
         )}
@@ -595,8 +655,14 @@ export default function PublishPage() {
           <KitColumns
             main={
               <SettingsCard
-                title="Ready to go live"
-                description="Publishing snapshots the backend as version one and gives your app a stable endpoint. Later changes stay in development until you publish again."
+                title={!publishable ? 'Serving, not yet publishable' : blockingChecks.length > 0 ? 'Almost ready to go live' : 'Ready to go live'}
+                description={
+                  publishable && blockingChecks.length > 0
+                    ? `Publishing runs the readiness checks first and stops on ${blockingChecks.length === 1 ? 'the one' : `the ${blockingChecks.length}`} failing under Before you publish. Clear ${blockingChecks.length === 1 ? 'it' : 'them'}, then publish to record version one.`
+                    : publishable
+                    ? 'Publishing snapshots the backend as version one and marks the project live. The API is already answering, and keeps serving later changes as they are made; publish again to record the next version.'
+                    : 'Functions, storage and realtime are already serving. Publishing records a schema snapshot, so it needs at least one table, a generated API or enabled auth first.'
+                }
                 footer={
                   <span className="flex flex-wrap items-center gap-x-4 gap-y-1 tabular-nums">
                     {tableCount > 0 && <span>{tableCount} {tableCount === 1 ? 'table' : 'tables'}</span>}
@@ -605,7 +671,7 @@ export default function PublishPage() {
                     {hasStorage && <span>Storage</span>}
                   </span>
                 }
-                actions={publishButton('Publish backend')}
+                actions={publishable ? publishButton('Publish backend') : undefined}
               />
             }
             side={readinessPanel('Before you publish')}
@@ -643,7 +709,7 @@ export default function PublishPage() {
             <EmptyState
               icon={AlertCircle}
               title="The publish did not complete"
-              description={project.deploymentError || 'Production is unchanged and the previous version is still serving. Try again, or ask your agent to look at the error.'}
+              description={project.deploymentError || 'No new version was recorded; the API keeps serving the backend as it is. Try again, or ask your agent to look at the error.'}
               action={publishButton('Try again')}
             />
           </KitCard>
@@ -657,14 +723,14 @@ export default function PublishPage() {
               title="Live, but empty"
               description={
                 agent.connected
-                  ? 'This project is published, but there is nothing to serve yet. Ask your agent to build the backend first.'
-                  : 'This project is published, but there is nothing to serve yet. Connect your coding agent and build the backend first.'
+                  ? 'This project is marked live, but it has no tables, auth or storage to serve yet. Ask your agent to build the backend.'
+                  : 'This project is marked live, but it has no tables, auth or storage to serve yet. Connect your agent to build the backend.'
               }
               action={
                 agent.needsConnect ? (
                   <Link href={`/app/projects/${projectId}/connect`} className={`${BUTTON_BASE} ${BUTTON_SIZES.md} ${BUTTON_VARIANTS.secondary}`}>
                     <Cable className="h-[15px] w-[15px]" strokeWidth={2} />
-                    Connect your agent
+                    Connect agent
                   </Link>
                 ) : undefined
               }
@@ -672,7 +738,7 @@ export default function PublishPage() {
           </KitCard>
         )}
 
-        <p className="flex items-center gap-2 pt-2 text-[12.5px] text-zinc-500">
+        <p className="flex items-center gap-2 pt-2 text-[12.5px] text-faint">
           <Lock className="h-3.5 w-3.5 text-zinc-600" />
           Every change is planned, snapshotted and written to the audit log before it reaches production.
         </p>

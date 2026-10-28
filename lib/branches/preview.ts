@@ -49,15 +49,27 @@ export function publicOrigin(): string {
   return resolvePublicBaseUrl({ headers: new Headers() })
 }
 
-export function previewEndpoint(projectId: string, branch: PreviewBranchRef, origin = publicOrigin()): PreviewEndpoint {
+/**
+ * `origin` is this deployment's public origin, where the OpenAPI spec is read.
+ * `apiOrigin` is where the project's API is served (projectApiOrigin in
+ * lib/data-plane/regional.ts): the same for the home region, the region's own
+ * API address for a project in another region.
+ */
+export function previewEndpoint(
+  projectId: string,
+  branch: PreviewBranchRef,
+  origin = publicOrigin(),
+  apiOrigin = origin,
+): PreviewEndpoint {
   const root = origin.replace(/\/$/, '')
-  const baseUrl = `${root}/api/v1/${projectId}`
+  const apiRoot = apiOrigin.replace(/\/$/, '')
+  const baseUrl = `${apiRoot}/api/v1/${projectId}`
   return {
     branchId: branch.id,
     branch: branch.name,
     baseUrl,
     dataUrl: `${baseUrl}/db/{table}`,
-    v2Url: `${root}/api/v2/${projectId}/{table}`,
+    v2Url: `${apiRoot}/api/v2/${projectId}/{table}`,
     environmentHeader: { name: ENVIRONMENT_HEADER, value: environmentHeaderValue(branch.name) },
     openapiUrl: `${root}/api/cli/types?format=openapi&branch=${branch.id}`,
     branchScoped: BRANCH_SCOPED_SURFACES,
@@ -76,7 +88,15 @@ export function previewCurl(endpoint: PreviewEndpoint, table = 'your_table', key
  * KEY from /bootstrap, which is a production key. A preview build whose env var
  * is missing would therefore talk to production without a single error.
  */
-export function previewSdkSnippet(projectId: string, key = 'process.env.BACKENLY_PREVIEW_KEY'): string {
+export function previewSdkSnippet(
+  projectId: string,
+  key = 'process.env.BACKENLY_PREVIEW_KEY',
+  /** Another region's API address. The SDK's default is the home one. */
+  apiUrl?: string,
+): string {
+  const client = apiUrl
+    ? `const backend = new BackenlyClient({ projectId: '${projectId}', apiKey, apiUrl: '${apiUrl}' })`
+    : `const backend = new BackenlyClient({ projectId: '${projectId}', apiKey })`
   return [
     `import { BackenlyClient } from '@backenly/sdk'`,
     ``,
@@ -86,7 +106,7 @@ export function previewSdkSnippet(projectId: string, key = 'process.env.BACKENLY
     `// Without an apiKey the SDK falls back to the production anon key, so refuse to start.`,
     `const apiKey = ${key}`,
     `if (!apiKey) throw new Error('BACKENLY_PREVIEW_KEY is not set')`,
-    `const backend = new BackenlyClient({ projectId: '${projectId}', apiKey })`,
+    client,
   ].join('\n')
 }
 
@@ -155,6 +175,7 @@ export async function mintPreviewKey(
   const serviceRole = opts.serviceRole === true
   const { key } = mintKey({ serviceRole, branchId: branch.id })
   const keyPrefix = key.substring(0, 16)
+  // history: a preview branch's key ends with its branch (lib/changes/resources/keys.ts)
   const row = await prisma.apiKey.create({
     data: {
       projectId,

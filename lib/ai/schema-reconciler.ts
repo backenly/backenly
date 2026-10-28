@@ -17,17 +17,22 @@ import { prisma } from '@/lib/db/prisma'
 import { Pool, PoolClient } from 'pg'
 import { isReservedWorkspaceTable } from '@/lib/security/workspace-schema'
 import { jwtClaimFunctionSql, ownRowsPredicate } from '@/lib/postgrest/rls-translation'
+import { projectPool } from '@/lib/data-plane/regional'
 
 // ---------------------------------------------------------------------------
 // Shared pg pool
 // ---------------------------------------------------------------------------
-const pgPool = new Pool({ connectionString: process.env.DATABASE_URL })
+/** This module's pool on the project's own database, in its region. */
+function pgPool(projectId: string): Promise<Pool> {
+  return projectPool(projectId, 'schema-reconciler')
+}
 
 async function pgQuery<T extends Record<string, unknown> = Record<string, unknown>>(
+  projectId: string,
   sql: string,
   params: unknown[] = [],
 ): Promise<T[]> {
-  const client = await pgPool.connect()
+  const client = await (await pgPool(projectId)).connect()
   try {
     const result = await client.query(sql, params)
     return result.rows as T[]
@@ -164,6 +169,10 @@ export async function detectSchemaDrift(projectId: string): Promise<Reconciliati
     summary,
   })
 
+  // The project's own database, in its region. Resolved before the catch below,
+  // which reports a failed scan with no drifts.
+  await pgPool(projectId)
+
   try {
     // 1. Load latest snapshot
     const snapshot = await prisma.workspaceSchemaSnapshot.findFirst({
@@ -193,6 +202,7 @@ export async function detectSchemaDrift(projectId: string): Promise<Reconciliati
       data_type: string
       is_nullable: string
     }>(
+      projectId,
       `SELECT table_name, column_name, data_type, is_nullable
        FROM information_schema.columns
        WHERE table_schema = $1
@@ -333,6 +343,7 @@ export async function detectSchemaDrift(projectId: string): Promise<Reconciliati
 
     if (fkColsInActual.length > 0) {
       const indexedCols = await pgQuery<{ tablename: string; indexdef: string }>(
+        projectId,
         `SELECT tablename, indexdef
          FROM pg_indexes
          WHERE schemaname = $1`,
@@ -375,6 +386,7 @@ export async function detectSchemaDrift(projectId: string): Promise<Reconciliati
 
     if (userIdTables.length > 0) {
       const rlsRows = await pgQuery<{ relname: string; relrowsecurity: boolean }>(
+        projectId,
         `SELECT c.relname, c.relrowsecurity
          FROM pg_class c
          JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -508,7 +520,7 @@ export async function applyReconciliationMigrations(
 
   if (dryRun) {
     // Validate syntax only — wrap each statement in a transaction that is always rolled back
-    const client: PoolClient = await pgPool.connect()
+    const client: PoolClient = await (await pgPool(projectId)).connect()
     try {
       await client.query('BEGIN')
       for (const sql of migrations) {
@@ -531,7 +543,7 @@ export async function applyReconciliationMigrations(
   // Live apply — run each migration in its own transaction so one failure
   // does not prevent subsequent migrations from being attempted.
   for (const sql of migrations) {
-    const client: PoolClient = await pgPool.connect()
+    const client: PoolClient = await (await pgPool(projectId)).connect()
     try {
       await client.query('BEGIN')
       await client.query(sql)

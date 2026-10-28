@@ -15,6 +15,8 @@
  * The point of this interface is that there is exactly ONE authority.
  */
 
+import type { CloudRegionId } from '@/lib/regions'
+
 /** Which edition is running. Resolved once, in lib/edition/index.ts. */
 export type Edition = 'single-tenant' | 'cloud'
 
@@ -213,6 +215,8 @@ export interface ProjectListEntry {
   updatedAt: Date
   /** Set while the project is paused for inactivity (Backenly Cloud only). */
   pausedAt: Date | null
+  /** The Backenly Cloud region holding the project's data. Null is the home region. */
+  region: string | null
   _count: { tables: number; workspaces: number }
 }
 
@@ -230,6 +234,11 @@ export interface ProjectCreateInput {
    * Omitted: the creator's own. Where there are no organizations it is ignored.
    */
   organizationId?: string | null
+  /**
+   * The region its data lives in (lib/regions.ts), already checked by the
+   * caller (checkRequestedRegion). Omitted: the home region.
+   */
+  region?: CloudRegionId | null
 }
 
 export interface ProjectListOptions {

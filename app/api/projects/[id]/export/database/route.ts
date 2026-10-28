@@ -25,10 +25,13 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { spawn } from 'child_process'
-import { Readable, Transform } from 'stream'
+import { Transform } from 'stream'
 import { withProjectValidation } from '@/lib/middleware/projectValidation'
 import { resolveWorkspaceSchema } from '@/lib/services/workspace-pool'
+import { buildConnection, sanitizeError } from '@/lib/services/workspace-backup'
 import { prisma } from '@/lib/db/prisma'
+import { projectRegion } from '@/lib/data-plane/regional'
+import { regionErrorResponse } from '@/lib/api/v1/errors'
 
 export const dynamic = 'force-dynamic'
 export const maxDuration = 300
@@ -56,6 +59,10 @@ function portableFilter(): Transform {
   })
 }
 
+// ADMIN: `mode=full` streams every row of every table in the workspace — the
+// whole tenant, end-user data included. An export is classified by what it
+// hands over, not by its verb; membership alone let an organization VIEWER
+// exfiltrate the project.
 export async function GET(request: NextRequest) {
   return withProjectValidation<any>(request, async (validated) => {
     const url = new URL(request.url)
@@ -70,13 +77,23 @@ export async function GET(request: NextRequest) {
       where: { id: validated.projectId },
       select: { name: true },
     })
-    const dbUrl = process.env.DATABASE_URL
-    if (!dbUrl) {
-      return NextResponse.json({ error: 'Database is not configured.' }, { status: 500 })
+
+    // The SAME credential the nightly backups use (workspace-backup.ts), for
+    // the same reason: workspace tables carry FORCE ROW LEVEL SECURITY, so
+    // pg_dump as the NOBYPASSRLS app role aborts at the first protected table
+    // — the exact failure that once took the nightly backups to zero. On a
+    // production split, BACKUP_DATABASE_URL must exist; the single-role
+    // Compose/self-host stack works on its one superuser connection. Each
+    // region has its own, and the schema is only in the project's region.
+    let conn: { args: string[]; env: NodeJS.ProcessEnv }
+    try {
+      conn = buildConnection('read', await projectRegion(validated.projectId))
+    } catch (err) {
+      return regionErrorResponse(err) ?? NextResponse.json({ error: 'Database is not configured.' }, { status: 500 })
     }
 
     const args = [
-      `--dbname=${dbUrl}`,
+      ...conn.args,
       `--schema=${schema}`,
       '--no-owner',
       '--no-privileges',
@@ -87,41 +104,41 @@ export async function GET(request: NextRequest) {
 
     let child
     try {
-      child = spawn('pg_dump', args, { stdio: ['ignore', 'pipe', 'pipe'] })
+      child = spawn('pg_dump', args, { stdio: ['ignore', 'pipe', 'pipe'], env: conn.env })
     } catch {
       return NextResponse.json({ error: 'pg_dump is not available on this server.' }, { status: 503 })
     }
 
+    // Run to COMPLETION before answering. The old version committed to a 200
+    // stream on the first stdout byte — and pg_dump prints the pre-data DDL
+    // before the COPY that can fail, so an aborted dump downloaded as a
+    // successful-looking .sql that silently ended mid-way with no data.
     let stderr = ''
     child.stderr.on('data', (d) => { stderr += d.toString() })
-
-    // Fail fast (clean 4xx/5xx) if pg_dump dies before producing output —
-    // after the first stdout byte we're committed to the stream.
-    const firstChunk = await new Promise<Buffer | null>((resolve) => {
-      const onData = (d: Buffer) => { cleanup(); resolve(d) }
-      const onClose = () => { cleanup(); resolve(null) }
-      const onError = () => { cleanup(); resolve(null) }
-      const cleanup = () => {
-        child.stdout.off('data', onData)
-        child.off('close', onClose)
-        child.off('error', onError)
-      }
-      child.stdout.once('data', onData)
-      child.once('close', onClose)
-      child.once('error', onError)
+    const chunks: Buffer[] = []
+    child.stdout.on('data', (d: Buffer) => { chunks.push(d) })
+    const exitCode: number | null = await new Promise((resolve) => {
+      child.once('close', (code) => resolve(code))
+      child.once('error', () => resolve(null))
     })
 
-    if (firstChunk === null) {
-      console.error('[export/database] pg_dump failed:', stderr.slice(0, 500))
-      const notFound = /ENOENT|not found/i.test(stderr) || stderr.length === 0
+    if (exitCode !== 0) {
+      console.error('[export/database] pg_dump failed:', sanitizeError(stderr).slice(0, 500))
+      const notFound = exitCode === null || /ENOENT|not found/i.test(stderr)
+      const rls = /row-level security/i.test(stderr)
       return NextResponse.json(
-        { error: notFound ? 'pg_dump is not available on this server.' : 'Export failed — see server logs.' },
+        {
+          error: notFound
+            ? 'pg_dump is not available on this server.'
+            : rls
+              ? 'Export failed: the export credential cannot read RLS-protected tables. Set BACKUP_DATABASE_URL to the backup role (see README, Backups).'
+              : 'Export failed — see server logs.',
+        },
         { status: 503 },
       )
     }
 
-    child.stdout.pause()
-    child.stdout.unshift(firstChunk)
+    const dump = Buffer.concat(chunks)
 
     const header = [
       `-- Backenly database export`,
@@ -141,40 +158,27 @@ export async function GET(request: NextRequest) {
       ``,
     ].join('\n')
 
-    const headerStream = Readable.from([header])
-    const body = raw ? child.stdout : child.stdout.pipe(portableFilter())
+    const filtered = raw
+      ? dump
+      : await new Promise<Buffer>((resolve, reject) => {
+          const out: Buffer[] = []
+          const f = portableFilter()
+          f.on('data', (d: Buffer) => out.push(Buffer.from(d)))
+          f.on('end', () => resolve(Buffer.concat(out)))
+          f.on('error', reject)
+          f.end(dump)
+        })
 
-    const webStream = new ReadableStream<Uint8Array>({
-      async start(controller) {
-        const push = (readable: NodeJS.ReadableStream) =>
-          new Promise<void>((resolve, reject) => {
-            readable.on('data', (d: Buffer) => controller.enqueue(new Uint8Array(d.buffer, d.byteOffset, d.byteLength)))
-            readable.on('end', resolve)
-            readable.on('error', reject)
-          })
-        try {
-          await push(headerStream)
-          child.stdout.resume()
-          await push(body)
-          controller.close()
-        } catch (err) {
-          console.error('[export/database] stream error:', err)
-          controller.error(err)
-        }
-      },
-      cancel() {
-        child.kill('SIGTERM')
-      },
-    })
+    const payload = Buffer.concat([Buffer.from(header, 'utf8'), filtered])
 
     const safeName = (project?.name ?? 'backenly-project').replace(/[^a-z0-9]/gi, '-').toLowerCase()
     const stamp = new Date().toISOString().slice(0, 10)
-    return new NextResponse(webStream, {
+    return new NextResponse(new Uint8Array(payload), {
       headers: {
         'Content-Type': 'application/sql; charset=utf-8',
         'Content-Disposition': `attachment; filename="${safeName}-${mode}-${stamp}.sql"`,
         'Cache-Control': 'no-store',
       },
     })
-  })
+  }, { floor: 'administer' })
 }

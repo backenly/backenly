@@ -8,6 +8,8 @@ import { NextRequest, NextResponse } from 'next/server'
 import { withProjectValidation } from '@/lib/middleware/projectValidation'
 import { rotateDirectAccess, type DirectAccessMode } from '@/lib/services/direct-access'
 
+// ADMIN: rotation mints a new password and returns it, and kills every live
+// session on the old one — credential issuance and revocation in one call.
 export async function POST(request: NextRequest) {
   return withProjectValidation<any>(request, async (validated) => {
     const body = await request.json().catch(() => ({}))
@@ -23,5 +25,5 @@ export async function POST(request: NextRequest) {
       const status = /No .* credential to rotate/.test(err?.message ?? '') ? 404 : 500
       return NextResponse.json({ error: err?.message ?? 'Rotation failed.' }, { status })
     }
-  })
+  }, { floor: 'administer' })
 }

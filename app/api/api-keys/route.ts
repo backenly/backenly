@@ -6,9 +6,10 @@ import { requireAuth } from '@/lib/auth/middleware'
 import { z } from 'zod'
 import crypto from 'crypto'
 import { maskFromPrefix, plaintextForStorage } from '@/lib/auth/api-key-plaintext'
-import { canAdministerProject } from '@/lib/edition/guard'
+import { canAccessProject, canAdministerProject } from '@/lib/edition/guard'
 import { mintKey } from '@/lib/auth/key-prefix'
 import { apiKeyRateCeilingViolation } from '@/lib/quota/kernel'
+import { governedChange } from '@/lib/changes/ledger'
 
 const createApiKeySchema = z.object({
   name: z.string().min(1, 'Name is required'),
@@ -78,10 +79,23 @@ export async function GET(request: NextRequest) {
       )
     }
     
+    // Membership check, then EVERY key for the project — not just the
+    // caller's own rows. Agent-created keys belong to the project owner, so
+    // an org ADMIN opening Settings → API keys saw an empty table and could
+    // not revoke a leaked key from the one place the docs say to do it. The
+    // list is masked metadata (no plaintext exists to leak), so a member read
+    // is the right floor.
+    if (!(await canAccessProject(auth.userId, projectId))) {
+      return NextResponse.json({ error: 'Project not found' }, { status: 404 })
+    }
+    // Client keys only. Agent credentials (MCP keys and browser-authorised
+    // agent connections, scope 'mcp') are listed and revoked on Connect ->
+    // Agents. Listed here they were labelled "Client", and a connection, which
+    // never had a plaintext, showed a masked key tagged "Shown once" (T4, CON-09).
     const apiKeys = await prisma.apiKey.findMany({
       where: {
-        userId: auth.userId,
         projectId, // Tenant isolation
+        scope: { not: 'mcp' },
       },
       orderBy: { createdAt: 'desc' },
       include: { branch: { select: { id: true, name: true, status: true } } },
@@ -201,7 +215,8 @@ export async function POST(request: NextRequest) {
     const now = new Date()
     const resetAt = new Date(now.getTime() + data.rateLimitWindow * 1000)
     
-    const apiKey = await prisma.apiKey.create({
+    // In the project's history, and revoked by restoring it (lib/changes/resources/keys.ts).
+    const apiKey = await governedChange(projectId || null, `Create API key ${data.name}`, () => prisma.apiKey.create({
       data: {
         name: data.name,
         // Plaintext is persisted ONLY for genuinely public keys.
@@ -237,7 +252,7 @@ export async function POST(request: NextRequest) {
         rateLimitWindow: data.rateLimitWindow,
         resetAt,
       },
-    })
+    }), { actorUserId: auth.userId })
     
     // Return the full plaintext key EXACTLY ONCE — immediately after creation.
     // Subsequent reads via GET return only the masked value. The caller must

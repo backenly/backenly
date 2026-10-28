@@ -1,20 +1,22 @@
 /**
  * CONNECT FRONTEND — canonical engine
  *
- * The ONE place that connects/disconnects a frontend to a deployed backend.
+ * The ONE place that connects/disconnects a frontend to a backend.
  * UI, chat, and REST API all funnel through `connectFrontend` /
  * `disconnectFrontend`. Anything that writes a CORS allowance and doesn't
  * call this file is a bug.
  *
  * Guarantees:
- *   1. Backend must be DEPLOYED before any origin can be connected.
+ *   1. No publish is required: the runtime serves an unpublished project on
+ *      every surface, so it connects as version 0.
  *   2. Origin is normalized to exact protocol+host+port — no wildcards,
  *      no trailing slashes, no path component.
  *   3. Confirmation gate on every write unless `force: true` is passed by
  *      the layer that already has user consent (chat replay, REST POST).
  *   4. Every connect/disconnect writes an AuditLog row.
- *   5. Each ConnectedApp row pins the DeploymentAudit graphVersion at
- *      connect time — so we know which version the frontend agreed to.
+ *   5. Each ConnectedApp row records the published Deployment version at
+ *      connect time (0 before a first publish), so we know which version
+ *      the frontend agreed to.
  *
  * State machine per (projectId, origin):
  *   NOT_CONNECTED  →  AWAITING_CONFIRMATION  →  CONNECTED  →  DISCONNECTED
@@ -23,6 +25,7 @@
  */
 
 import { prisma } from '@/lib/db/prisma'
+import { allowsAnyOrigin, isDevelopmentOrigin } from '@/lib/security/development-origin'
 
 export interface ConnectFrontendOptions {
   projectId: string
@@ -39,6 +42,12 @@ export interface ConnectFrontendResult {
   requiresConfirmation?: boolean
   origin?: string
   backendVersion?: number
+  /**
+   * True when this connect made the CORS allowlist exclusive: it is the
+   * project's first active deployed origin, and an allowlist of development
+   * origins only admits every origin.
+   */
+  firstConnectedOrigin?: boolean
   errors?: string[]
 }
 
@@ -111,11 +120,12 @@ async function getDeployedVersion(projectId: string): Promise<{ deployed: boolea
     return { deployed: true, version: 1 }
   }
 
-  return {
-    deployed: false,
-    reason:
-      "I can't connect a frontend yet because your backend hasn't been deployed.\n\nDeploy your backend first, then connect your app.",
-  }
+  // Not published — which is NOT a reason to refuse the connection. The
+  // runtime serves unpublished projects on every surface (/db, /auth, /fn,
+  // realtime), local development runs against them, and the OAuth
+  // redirect_to allowlist reads ConnectedApp — so refusing here locked
+  // developers out of the exact flows that must work before a first publish.
+  return { deployed: false }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -137,10 +147,10 @@ export async function connectFrontend(options: ConnectFrontendOptions): Promise<
     }
   }
 
+  // The deployed version is informational: it labels the confirmation and
+  // the ConnectedApp row, and an unpublished backend connects as version 0.
   const deploy = await getDeployedVersion(projectId)
-  if (!deploy.deployed) {
-    return { success: false, message: deploy.reason!, connected: false, errors: ['backend not deployed'] }
-  }
+  const backendVersion = deploy.deployed ? deploy.version! : 0
 
   const existing = await prisma.connectedApp.findUnique({
     where: { projectId_origin: { projectId, origin } },
@@ -162,22 +172,34 @@ export async function connectFrontend(options: ConnectFrontendOptions): Promise<
       message:
         `You're about to connect this frontend:\n\n` +
         `• URL: ${origin}\n` +
-        `• Backend version: v${deploy.version} (deployed)\n\n` +
+        (deploy.deployed
+          ? `• Backend version: v${deploy.version} (published)\n\n`
+          : `• Backend: not published yet — the API already answers; publishing adds a stable public URL\n\n`) +
         `Once connected, this app can call your backend APIs.\n\n` +
         `Type CONNECT to confirm.`,
       connected: false,
       requiresConfirmation: true,
       origin,
-      backendVersion: deploy.version,
+      backendVersion,
     }
   }
+
+  // Active origins are the CORS allowlist the web app's middleware enforces on
+  // the SDK routes it answers, and a list of only development origins admits
+  // every origin (lib/security/development-origin.ts). So the first deployed
+  // origin bound quietly turns every other frontend away; say so instead.
+  const otherActive = await prisma.connectedApp.findMany({
+    where: { projectId, isActive: true, origin: { not: origin } },
+    select: { origin: true },
+  })
+  const firstConnectedOrigin = !isDevelopmentOrigin(origin) && allowsAnyOrigin(otherActive.map(o => o.origin))
 
   const row = await prisma.connectedApp.upsert({
     where: { projectId_origin: { projectId, origin } },
     update: {
       isActive: true,
       connectedBy: confirmedBy,
-      backendVersion: deploy.version!,
+      backendVersion,
       connectedAt: new Date(),
       disconnectedAt: null,
     },
@@ -186,7 +208,7 @@ export async function connectFrontend(options: ConnectFrontendOptions): Promise<
       origin,
       isActive: true,
       connectedBy: confirmedBy,
-      backendVersion: deploy.version!,
+      backendVersion,
     },
   })
 
@@ -199,7 +221,7 @@ export async function connectFrontend(options: ConnectFrontendOptions): Promise<
       type: 'connected_app',
       details: JSON.stringify({
         origin,
-        backendVersion: deploy.version,
+        backendVersion,
         triggerSource: confirmedBy,
         resourceId: row.id,
         timestamp: new Date().toISOString(),
@@ -216,10 +238,18 @@ export async function connectFrontend(options: ConnectFrontendOptions): Promise<
 
   return {
     success: true,
-    message: `Connected: ${origin}\n\nYour frontend can now call your backend APIs.`,
+    message:
+      `Connected: ${origin}\n\nYour frontend can now call your backend APIs.` +
+      (firstConnectedOrigin
+        ? '\n\nThis is the first deployed origin connected, and connected origins are the CORS allowlist on ' +
+          'the SDK routes the web app answers: browser calls from any other deployed origin are now refused ' +
+          'there until that origin is connected too. Connect every deployed frontend that calls this backend ' +
+          '(production and preview). Development origins such as localhost never close the list.'
+        : ''),
     connected: true,
     origin,
-    backendVersion: deploy.version,
+    backendVersion,
+    firstConnectedOrigin,
   }
 }
 

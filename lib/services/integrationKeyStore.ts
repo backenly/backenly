@@ -31,8 +31,59 @@ export interface KeyVaultStatus {
   verificationDetail?: string
 }
 
-const INTEGRATION_KEY_ALIASES: Record<string, string[]> = {
-  stripe: ['stripe_secret_key'],
+/**
+ * Env-var names a credential is known by (the console's credential fields and
+ * the build runtime's requiredEnvVar), each mapped to the ONE vault id the
+ * credential is stored under.
+ *
+ * The console used to store every key twice: under this id, and again under
+ * the lowercased env-var name. The second row listed as a separate "Key
+ * Stored" integration, and for Stripe a read-side alias kept the runtime
+ * connected after the canonical row was deleted. A credential is one row now,
+ * and a lookup by env-var name resolves here instead of needing its own row.
+ */
+const ENV_VAR_VAULT_IDS: Record<string, string> = {
+  stripe_secret_key: 'stripe',
+  stripe_webhook_secret: 'stripe_webhook_secret',
+  resend_api_key: 'resend',
+  sendgrid_api_key: 'sendgrid',
+  openai_api_key: 'openai',
+  anthropic_api_key: 'anthropic',
+  posthog_api_key: 'posthog',
+  google_client_id: 'google',
+  google_client_secret: 'google',
+  github_client_id: 'github',
+  github_client_secret: 'github',
+  discord_client_id: 'discord',
+  discord_client_secret: 'discord',
+  facebook_client_id: 'facebook',
+  facebook_client_secret: 'facebook',
+}
+
+/** The vault id an env-var name's credential is stored under, if it names one. */
+export function vaultIdForEnvVar(envVar: string): string | undefined {
+  return ENV_VAR_VAULT_IDS[envVar.toLowerCase()]
+}
+
+/** The vault id to read or delete, for a vault id or an env-var name. */
+export function canonicalVaultId(integrationId: string): string {
+  return vaultIdForEnvVar(integrationId) ?? integrationId
+}
+
+/**
+ * A row the old double write left under an env-var name. It is never a
+ * credential: every one was written beside a canonical row holding the same
+ * value, lookups read only that row, listings leave the alias out, and
+ * disconnect deletes it. Reading it was what kept Stripe connected after the
+ * canonical row was gone.
+ */
+export function isLegacyAliasVaultId(integrationId: string): boolean {
+  const canonical = vaultIdForEnvVar(integrationId)
+  return canonical !== undefined && canonical !== integrationId.toLowerCase()
+}
+
+function legacyAliasIds(vaultId: string): string[] {
+  return Object.keys(ENV_VAR_VAULT_IDS).filter((id) => ENV_VAR_VAULT_IDS[id] === vaultId && id !== vaultId)
 }
 
 // ─── Per-integration format validators ────────────────────────────────────────
@@ -145,6 +196,10 @@ export async function storeIntegrationKey(
   rawKey: string,
   options: { skipVerification?: boolean } = {},
 ): Promise<KeyVaultStatus & { formatWarning?: string }> {
+  // One row per credential: a key offered under an env-var name is stored
+  // under the vault id every reader looks up, never beside it.
+  const vaultId = canonicalVaultId(integrationId)
+
   // ── Secret scan: block dangerous values before they touch the DB ──────────
   const scan = scanForDangerousSecret(rawKey)
   if (scan.isDangerous) {
@@ -152,7 +207,7 @@ export async function storeIntegrationKey(
   }
 
   // ── Format validation: reject clearly wrong keys (wrong provider, wrong mode) ──
-  const formatCheck = validateIntegrationKeyFormat(integrationId, rawKey)
+  const formatCheck = validateIntegrationKeyFormat(vaultId, rawKey)
   if ('error' in formatCheck) {
     throw Object.assign(new Error(formatCheck.error), { isFormatError: true })
   }
@@ -162,7 +217,7 @@ export async function storeIntegrationKey(
   // credential already known good. It is NOT a connect-time option.
   const verification = options.skipVerification
     ? { status: 'unchecked' as VerificationStatus, detail: 'Verification skipped (internal re-file).' }
-    : await verifyIntegrationKey(integrationId, rawKey)
+    : await verifyIntegrationKey(vaultId, rawKey)
 
   if (blocksStorage(verification)) {
     throw Object.assign(new Error(verification.detail), { isVerificationError: true })
@@ -172,10 +227,13 @@ export async function storeIntegrationKey(
   const maskedKey = maskApiKey(rawKey)
   const verifiedAt = verification.status === 'verified' ? new Date() : null
 
-  const record = await prisma.projectIntegrationKey.upsert({
-    where: { projectId_integrationId: { projectId, integrationId } },
+  // The write alone is one governed change: the provider's verification above
+  // runs outside the change lock (lib/changes/resources/integrations.ts).
+  const { governedChange } = await import('@/lib/changes/ledger')
+  const record = await governedChange(projectId, `Store the ${vaultId} key`, () => prisma.projectIntegrationKey.upsert({
+    where: { projectId_integrationId: { projectId, integrationId: vaultId } },
     create: {
-      projectId, integrationId, encryptedKey, maskedKey,
+      projectId, integrationId: vaultId, encryptedKey, maskedKey,
       verification: verification.status,
       verificationDetail: verification.detail,
       verifiedAt,
@@ -186,10 +244,10 @@ export async function storeIntegrationKey(
       verificationDetail: verification.detail,
       verifiedAt,
     },
-  })
+  }))
 
   const result: KeyVaultStatus & { formatWarning?: string } = {
-    integrationId,
+    integrationId: vaultId,
     maskedKey: record.maskedKey,
     connectedAt: record.connectedAt.toISOString(),
     verification: verification.status,
@@ -212,13 +270,8 @@ export async function getIntegrationKey(
   projectId: string,
   integrationId: string
 ): Promise<string | null> {
-  const integrationIds = [integrationId, ...(INTEGRATION_KEY_ALIASES[integrationId] ?? [])]
-  const record = await prisma.projectIntegrationKey.findFirst({
-    where: {
-      projectId,
-      integrationId: { in: integrationIds },
-    },
-    orderBy: { updatedAt: 'desc' },
+  const record = await prisma.projectIntegrationKey.findUnique({
+    where: { projectId_integrationId: { projectId, integrationId: canonicalVaultId(integrationId) } },
   })
   if (!record) return null
   return decrypt(record.encryptedKey)
@@ -238,7 +291,7 @@ export async function listKeyVaultStatuses(projectId: string): Promise<KeyVaultS
     orderBy: { connectedAt: 'asc' },
   })
 
-  return records.map((r) => ({
+  return records.filter((r) => !isLegacyAliasVaultId(r.integrationId)).map((r) => ({
     integrationId: r.integrationId,
     maskedKey: r.maskedKey,
     connectedAt: r.connectedAt.toISOString(),
@@ -260,12 +313,14 @@ export async function recheckIntegrationKey(
   projectId: string,
   integrationId: string,
 ): Promise<KeyVaultStatus | null> {
-  const raw = await getIntegrationKey(projectId, integrationId)
+  const vaultId = canonicalVaultId(integrationId)
+  const raw = await getIntegrationKey(projectId, vaultId)
   if (!raw) return null
 
-  const verification = await verifyIntegrationKey(integrationId, raw)
+  const verification = await verifyIntegrationKey(vaultId, raw)
+  // history: a verification result, not configuration
   const record = await prisma.projectIntegrationKey.update({
-    where: { projectId_integrationId: { projectId, integrationId } },
+    where: { projectId_integrationId: { projectId, integrationId: vaultId } },
     data: {
       verification: verification.status,
       verificationDetail: verification.detail,
@@ -290,12 +345,29 @@ export async function hasIntegrationKey(
   projectId: string,
   integrationId: string
 ): Promise<boolean> {
-  const integrationIds = [integrationId, ...(INTEGRATION_KEY_ALIASES[integrationId] ?? [])]
   const count = await prisma.projectIntegrationKey.count({
-    where: {
-      projectId,
-      integrationId: { in: integrationIds },
-    },
+    where: { projectId, integrationId: canonicalVaultId(integrationId) },
   })
   return count > 0
+}
+
+/**
+ * Remove a stored credential: its vault row and any legacy alias rows the old
+ * double write left beside it, so nothing can still read it as connected.
+ * Returns the number of rows deleted.
+ */
+export async function removeIntegrationKey(projectId: string, integrationId: string): Promise<number> {
+  const vaultId = canonicalVaultId(integrationId)
+  const { governedChange } = await import('@/lib/changes/ledger')
+  const { count } = await governedChange(projectId, `Remove the ${vaultId} key`, () => prisma.projectIntegrationKey.deleteMany({
+    where: {
+      projectId,
+      // Case-insensitive: older writers filed ids verbatim ("Stripe",
+      // "STRIPE_SECRET_KEY"), and those rows are this credential too.
+      OR: [vaultId, ...legacyAliasIds(vaultId)].map((id) => ({
+        integrationId: { equals: id, mode: 'insensitive' as const },
+      })),
+    },
+  }))
+  return count
 }

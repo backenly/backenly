@@ -7,6 +7,7 @@
 
 import { prisma } from '@/lib/db'
 import { getWorkspaceDatabaseNames } from '@/lib/services/databaseProvisioning'
+import { workspaceRawClient } from '@/lib/data-plane/regional'
 
 export interface ProjectContext {
   // Database state
@@ -165,12 +166,13 @@ async function getTableColumns(
   nullable: boolean
   isPrimaryKey: boolean
 }>> {
+  const db = await workspaceRawClient(projectId)
   try {
     const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
     const targetSchema = schema || postgresSchema
     
     // Query PostgreSQL information_schema
-    const columns: any[] = await prisma.$queryRawUnsafe(`
+    const columns: any[] = await db.$queryRawUnsafe(`
       SELECT 
         column_name as "name",
         data_type as "type",
@@ -210,12 +212,13 @@ async function getTableRelationships(
   referencesTable: string
   referencesColumn: string
 }>> {
+  const db = await workspaceRawClient(projectId)
   try {
     const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
     const targetSchema = schema || postgresSchema
     
     // Query foreign key constraints
-    const relationships: any[] = await prisma.$queryRawUnsafe(`
+    const relationships: any[] = await db.$queryRawUnsafe(`
       SELECT 
         kcu.column_name as "column",
         ccu.table_name as "referencesTable",

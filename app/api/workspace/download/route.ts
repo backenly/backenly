@@ -2,26 +2,31 @@ export const dynamic = 'force-dynamic'
 
 import { projectWorkspaceDir } from '@/lib/workspace/paths'
 import { NextRequest, NextResponse } from 'next/server'
-import { authenticateRequest } from '@/lib/auth/middleware'
+import { getCurrentProjectId, TenantIsolationError } from '@/lib/tenant/isolation'
 import { promises as fs } from 'fs'
 import path from 'path'
 import archiver from 'archiver'
 import { Readable } from 'stream'
 
 // GET /api/workspace/download - Download entire project workspace as ZIP
+//
+// The ZIP is the project's generated workspace on disk, which can hold its
+// `.env`, so reading it is a tenant boundary. The project id arrives in the
+// `X-Project-Id` header, a request and not a grant: `getCurrentProjectId`
+// resolves it for the caller and refuses a project they may not see, the same
+// guard the sibling workspace/files routes use. Authenticating and then reading
+// the header unchecked let any signed-in account download another project's
+// workspace by naming its id.
 export async function GET(request: NextRequest) {
   try {
-    const auth = await authenticateRequest(request)
-    if (!auth.authenticated || !auth.userId) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-    }
-
-    const projectId = request.headers.get('X-Project-Id')
-    if (!projectId) {
-      return NextResponse.json(
-        { error: 'Project ID is required' },
-        { status: 400 }
-      )
+    let projectId: string
+    try {
+      projectId = await getCurrentProjectId(request)
+    } catch (error) {
+      if (error instanceof TenantIsolationError) {
+        return NextResponse.json({ error: error.message, code: error.code }, { status: error.status })
+      }
+      throw error
     }
 
     const workspacePath = projectWorkspaceDir(projectId)

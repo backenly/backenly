@@ -10,10 +10,14 @@
  *   • Command bar    Name — nothing else. The top bar owns all global actions
  *                    (Assistant, review inbox, Connect agent), so the page
  *                    header carries zero duplicate buttons (§6.2).
- *   • Agent panel    What the agent has to say right now, in its own voice,
- *                    with the single next action. Right: the mode dial, what
- *                    that mode permits in plain English, and the promise no
- *                    mode overrides.
+ *   • Agent panel    Only while something waits on the user, or while the
+ *                    page cannot vouch for the backend: what the agent has to
+ *                    say, in its own voice, with the single next action.
+ *                    Right: the mode dial, what that mode permits in plain
+ *                    English, and the promise no mode overrides. With nothing
+ *                    to say it is not rendered (2026-10-22): "Built and
+ *                    standing by" and "No issues detected" restated what the
+ *                    loop below already shows.
  *   • Loop panel     THE hero surface (promoted out of the agent panel's
  *                    footer, 2026-07-21). The closed circuit — Observe →
  *                    Detect → Propose → Apply → Verify, and a drawn RETURN
@@ -81,7 +85,6 @@ import { FOCUS, FOCUS_INSET } from '@/components/console/tokens'
 import {
   levelLabel, useAutonomyStatus, type AutonomyLastAction,
 } from '@/lib/hooks/useAutonomyStatus'
-import { useAgentConnection } from '@/lib/hooks/useAgentConnection'
 import { type GroupableFinding } from '@/lib/core/finding-groups'
 import { freshlyVerifiedRepairs, quietState as quietStateFor, type SensorSummary } from '@/components/workspace/health-state'
 import { ObservabilityStrip } from '@/components/workspace/ObservabilityStrip'
@@ -124,6 +127,10 @@ interface HealthData {
   unverifiedRepairsThisWeek?: number
   /** Uncapped count of findings held for approval. */
   needsAttention: number
+  /** Calls the user's coding agent parked for approval (not findings). */
+  agentApprovalsPending?: number
+  /** Architecture changes Backenly prepared, waiting for approval (not findings, not broken guarantees). */
+  architectureRequestsPending?: number
   criticalCount?: number
   warningCount?: number
   /** Uncapped count of everything still needing attention (open + held). */
@@ -143,6 +150,8 @@ interface HealthData {
 
 interface DashboardStats {
   tables:  Array<{ name: string; rowCount: number }>
+  /** The REAL table total — `tables` is sliced to 12 for the card. */
+  tableCount?: number
   buckets: Array<{ name: string; totalBytes: number; fileCount: number; isPublic: boolean }>
   /** Headline counters for the resource cards. null members → render '—'. */
   summary?: { endUsers: number | null; dbBytes: number | null }
@@ -209,7 +218,6 @@ export function WorkspaceHome({
   const [health, setHealth]     = useState<HealthData | null>(null)
   const [stats, setStats]       = useState<DashboardStats | null>(null)
   const { status: autonomy, refresh: refreshAutonomy } = useAutonomyStatus(hasBackend ? projectId : null)
-  const agentConnection = useAgentConnection(projectId)
 
   // Whether the last /health read failed. Without it a failed load looked like
   // "nothing is wrong", and the headline below would have said all clear.
@@ -395,39 +403,61 @@ export function WorkspaceHome({
   })
 
   // ── Agent panel state — one headline, one action, in the agent's voice ───
+  //
+  // null renders no panel. A backend with nothing waiting and checks that ran
+  // has nothing to report beyond what the loop already prints, so only a
+  // caveat from the quiet state (a failed load, a stale pass, a blind check)
+  // still earns the panel when nothing waits.
   const autonomyPending = heldFindings ?? autonomy?.pendingCount ?? 0
-  const agent: {
-    headline: string
-    body: string
-    cta?: { label: string; onClick: () => void }
-    quiet?: { label: string; onClick: () => void }
-  } =
-    autonomyPending > 0 ? {
+  // Calls the user's coding agent parked for approval. They come first: they
+  // expire unanswered. They are not the loop's findings, so the loop rail
+  // below does not count them; this panel was the one place left to say so,
+  // and it said "No issues detected" over a parked drop (OV-1).
+  const agentWaiting = health?.agentApprovalsPending ?? 0
+  // Changes Backenly prepared and holds for the owner: its own held repairs,
+  // and architecture changes waiting for approval. The loop rail below counts
+  // only the repairs: an architecture change is not a broken guarantee.
+  const reviewWaiting = autonomyPending + (health?.architectureRequestsPending ?? 0)
+  const agent: AgentReport | null =
+    agentWaiting > 0 ? {
+      headline: 'Your agent is waiting on you',
+      body:
+        `Your coding agent parked ${agentWaiting === 1 ? 'a call' : `${agentWaiting} calls`} for your approval` +
+        (reviewWaiting > 0
+          ? `, and Backenly is holding ${reviewWaiting} change${reviewWaiting === 1 ? '' : 's'} of its own`
+          : '') +
+        `. Nothing runs until you decide, and ${agentWaiting === 1 ? 'the request expires' : 'each request expires'} after a day.`,
+      cta: {
+        label: agentWaiting === 1 ? 'Review the request' : `Review ${agentWaiting} requests`,
+        onClick: () => router.push(`/app/projects/${projectId}/autonomy`),
+      },
+    }
+    : reviewWaiting > 0 ? {
       headline: 'Waiting on your review',
-      body: `Backenly prepared ${autonomyPending} change${autonomyPending === 1 ? '' : 's'} and is holding ${autonomyPending === 1 ? 'it' : 'them'}. Destructive and auth-related changes never ship without your OK.`,
-      cta: { label: `Review ${autonomyPending === 1 ? 'the change' : `${autonomyPending} changes`}`, onClick: () => router.push(`/app/projects/${projectId}/autonomy`) },
+      body: `Backenly prepared ${reviewWaiting} change${reviewWaiting === 1 ? '' : 's'} and is holding ${reviewWaiting === 1 ? 'it' : 'them'}. Destructive and auth-related changes never ship without your OK.`,
+      cta: { label: `Review ${reviewWaiting === 1 ? 'the change' : `${reviewWaiting} changes`}`, onClick: () => router.push(`/app/projects/${projectId}/autonomy`) },
     }
     : (verdict === 'credentials_needed' || liveBlocked > 0) ? {
       headline: 'Paused: a key is missing',
       body: 'Part of the build is waiting on a credential. Add it in Integrations and Backenly picks up exactly where it stopped.',
       cta: { label: "See what's blocked", onClick: () => router.push(`/app/projects/${projectId}/autonomy`) },
     }
+    // Counted, and true for a live backend too: this read "A few things to
+    // clear before launch" on projects that had launched weeks earlier, and
+    // offered to "auto-fix them here" from a panel whose only action leaves.
     : hasOpenWork ? {
-      headline: 'A few things to clear before launch',
-      body: 'Backenly flagged some issues while checking the runtime. Auto-fix them here, or hand them to your coding agent.',
+      headline:
+        actionableFindings != null && actionableFindings > 0
+          ? `${actionableFindings} ${actionableFindings === 1 ? 'issue' : 'issues'} to look at`
+          : 'Something needs a look',
+      body:
+        (actionableFindings ?? 0) > 1
+          ? 'Backenly found these while checking your backend. Fix them from Autonomy, or hand them to your coding agent.'
+          : 'Backenly found this while checking your backend. Fix it from Autonomy, or hand it to your coding agent.',
       cta: { label: 'Review in Autonomy', onClick: () => router.push(`/app/projects/${projectId}/autonomy`) },
     }
-    : verdict === 'structure_ready' ? (agentConnection.connected ? {
-      headline: 'Built and standing by',
-      body: 'Your backend is ready and your agent is connected. Backenly watches every change it makes, live: schema, APIs, auth, storage.',
-    } : {
-      headline: 'Built and standing by',
-      body: 'Your backend is ready. Point your coding agent at it and Backenly starts watching every change live: schema, APIs, auth, storage.',
-      cta: agentConnection.needsConnect
-        ? { label: 'Connect your agent', onClick: () => router.push(`/app/projects/${projectId}/connect`) }
-        : undefined,
-    })
-    : quietState
+    : quietState.caveat ? quietState
+    : null
 
   // ── Loop phase (derived from real state, never animated fiction) ─────────
   const autonomyOff = autonomy?.level === 'OFF'
@@ -453,7 +483,10 @@ export function WorkspaceHome({
   // Table count: the live stats when they've landed, else the server-rendered
   // list, so the card shows a real number on first paint instead of a dash
   // that resolves a second later.
-  const tableCount   = stats?.tables ? stats.tables.length : tables.length
+  // dashboard-stats slices its tables array to 12 for the card; the COUNT is
+  // the real total it sends alongside. Falling back to the slice's length
+  // capped a 15-table backend at '12 Tables'.
+  const tableCount   = stats?.tableCount ?? (stats?.tables ? stats.tables.length : tables.length)
   const bucketCount  = stats?.buckets ? stats.buckets.length : storageBuckets
   const storageBytes = stats?.buckets
     ? stats.buckets.reduce((acc, b) => acc + b.totalBytes, 0)
@@ -511,12 +544,14 @@ export function WorkspaceHome({
           </h1>
         </header>
 
-        <AgentPanel
-          agent={agent}
-          autonomy={autonomy}
-          autonomyOff={!!autonomyOff}
-          onOpenAutonomy={() => router.push(`/app/projects/${projectId}/autonomy`)}
-        />
+        {agent && (
+          <AgentPanel
+            agent={agent}
+            autonomy={autonomy}
+            autonomyOff={!!autonomyOff}
+            onOpenAutonomy={() => router.push(`/app/projects/${projectId}/autonomy`)}
+          />
+        )}
 
         {/* The loop is the page's centrepiece: a closed circuit whose readings
             are the same numbers the Autonomy page computes, and whose return
@@ -530,6 +565,7 @@ export function WorkspaceHome({
           loopPhase={loopPhase}
           healSignal={healSignal}
           lastReconciledIso={lastReconciledIso}
+          sensors={health?.sensors ?? null}
           onReview={() => router.push(`/app/projects/${projectId}/autonomy`)}
         />
       </div>
@@ -580,7 +616,7 @@ function BlockHeading({ children, id, hint }: { children: React.ReactNode; id: s
       <h2 id={id} className="text-[15px] font-semibold leading-[22px] tracking-[-0.012em] text-zinc-100">
         {children}
       </h2>
-      {hint && <p className="text-[13px] leading-[20px] text-zinc-500">{hint}</p>}
+      {hint && <p className="text-[13px] leading-[20px] text-faint">{hint}</p>}
     </div>
   )
 }
@@ -614,7 +650,7 @@ const LOOP_STAGES: Array<{ key: LoopPhase; label: string }> = [
  */
 const LOOP_EXPLAIN: Record<LoopPhase, string> = {
   observe:
-    'The rules your backend must always hold to. Backenly re-checks every one of them, every minute, on every plan.',
+    'The rules your backend must always hold to that it could check on its last pass. Backenly re-checks them against the live database every minute, on every plan.',
   detect:
     'How many of those rules it is failing right now. Backenly probes the live database instead of waiting for a bug report.',
   propose:
@@ -627,7 +663,10 @@ const LOOP_EXPLAIN: Record<LoopPhase, string> = {
 
 /** Live per-phase readings for the loop instrument. null → render '—'. */
 interface LoopStats {
-  invariants: number | null
+  /** Checks that ran on this project's last pass (sensor-state.ts); null before its first. */
+  checksRan: number | null
+  /** Of those, the ones that errored and so could not report a problem. */
+  checksErrored: number
   openFindings: number | null
   actionableFindings: number | null
   pending: number | null
@@ -642,10 +681,18 @@ const MODE_MEANING: Record<string, string> = {
   Off:          'The loop watches and records, but changes nothing.',
 }
 
+/** What the agent panel says: a headline, its body and at most one next step. */
+interface AgentReport {
+  headline: string
+  body: string
+  cta?: { label: string; onClick: () => void }
+  quiet?: { label: string; onClick: () => void }
+}
+
 function AgentPanel({
   agent, autonomy, autonomyOff, onOpenAutonomy,
 }: {
-  agent: { headline: string; body: string; cta?: { label: string; onClick: () => void }; quiet?: { label: string; onClick: () => void } }
+  agent: AgentReport
   autonomy: ReturnType<typeof useAutonomyStatus>['status']
   autonomyOff: boolean
   onOpenAutonomy: () => void
@@ -711,8 +758,8 @@ function AgentPanel({
             className={`group/mode flex-1 px-5 py-5 text-left transition-colors hover:bg-white/[0.02] sm:px-6 ${FOCUS_INSET}`}
           >
             <span className="flex items-center justify-between">
-              <span className="text-[12px] font-medium text-zinc-500">Autonomy mode</span>
-              <ChevronRight className="h-4 w-4 text-zinc-600 transition-all group-hover/mode:translate-x-0.5 group-hover/mode:text-zinc-300" />
+              <span className="text-[12px] font-medium text-faint">Autonomy mode</span>
+              <ChevronRight className="h-4 w-4 text-zinc-600 transition-[color,transform] duration-150 group-hover/mode:translate-x-0.5 group-hover/mode:text-zinc-300" />
             </span>
             <span className="mt-2 flex items-center gap-2.5">
               <span className={`text-[16px] font-semibold tracking-[-0.014em] ${autonomyOff ? 'text-zinc-400' : 'text-zinc-50'}`}>
@@ -726,7 +773,7 @@ function AgentPanel({
           </button>
           <div className={`flex items-start gap-2.5 border-t ${HAIRLINE} px-5 py-3.5 sm:px-6`}>
             <ShieldCheck className="mt-[2px] h-4 w-4 flex-shrink-0 text-zinc-500" strokeWidth={1.75} />
-            <p className="text-[12.5px] leading-[19px] text-zinc-500">
+            <p className="text-[12.5px] leading-[19px] text-faint">
               Auth, destructive and irreversible changes always need your approval, in every mode.
             </p>
           </div>
@@ -747,7 +794,7 @@ function AgentPanel({
 
 function LoopPanel({
   autonomy, autonomyOff, pending, openFindings, actionableFindings,
-  loopPhase, healSignal, lastReconciledIso, onReview,
+  loopPhase, healSignal, lastReconciledIso, sensors, onReview,
 }: {
   autonomy: ReturnType<typeof useAutonomyStatus>['status']
   autonomyOff: boolean
@@ -758,10 +805,16 @@ function LoopPanel({
   healSignal: number
   /** Last reconciler pass — the loop's cadence, not the daily observer's. */
   lastReconciledIso: string | null
+  /** What this project's last pass could check (from the same /health read). */
+  sensors: SensorSummary | null
   onReview: () => void
 }) {
   const loopStats: LoopStats = {
-    invariants: autonomy?.invariantCount ?? null,
+    // This project's last pass, not the size of the rulebook. That was
+    // `invariantCount`, the same 26 on every project, built or empty, checked
+    // or not, so the reading never moved and meant nothing about this backend.
+    checksRan: sensors ? sensors.ran : null,
+    checksErrored: sensors ? sensors.errored.length : 0,
     openFindings,
     actionableFindings,
     // Gated on the SAME payload as `actionableFindings` (the caller derives
@@ -786,7 +839,7 @@ function LoopPanel({
             pulse={!autonomyOff}
           />
         </div>
-        <span className="text-[12px] tabular-nums text-zinc-500">
+        <span className="text-[12px] tabular-nums text-faint">
           {autonomyOff
             ? 'Records and suggests only'
             : lastReconciledIso ? `Checked ${formatRelative(lastReconciledIso)}` : 'First check running…'}
@@ -820,9 +873,9 @@ function LoopPanel({
             className={`group/all flex w-full items-center justify-between border-t ${HAIRLINE} px-5 py-3 text-left transition-colors hover:bg-white/[0.02] sm:px-7 ${FOCUS_INSET}`}
           >
             <span className="text-[12.5px] font-medium text-zinc-400 transition-colors group-hover/all:text-zinc-100">
-              Full guardrail log, restore points and approvals
+              Full guardrail log, repairs and approvals
             </span>
-            <ChevronRight className="h-4 w-4 text-zinc-600 transition-all group-hover/all:translate-x-0.5 group-hover/all:text-zinc-300" />
+            <ChevronRight className="h-4 w-4 text-zinc-600 transition-[color,transform] duration-150 group-hover/all:translate-x-0.5 group-hover/all:text-zinc-300" />
           </button>
         </div>
       )}
@@ -839,6 +892,7 @@ const RECEIPT_TONE: Record<string, string> = {
   rollback:   'bg-amber-400',
   failed:     'bg-rose-400',
   breaker:    'bg-rose-400',
+  architecture: 'bg-sky-400',
   shadow:     'bg-zinc-600',
   other:      'bg-zinc-600',
 }
@@ -850,10 +904,10 @@ function ReceiptRow({ item }: { item: AutonomyLastAction }) {
       <span className="line-clamp-2 min-w-0 flex-1 text-[13px] leading-[20px] text-zinc-300">
         {item.summary}
         {(item.repeat ?? 1) > 1 && (
-          <span className="ml-1.5 text-[12px] tabular-nums text-zinc-500">×{item.repeat}</span>
+          <span className="ml-1.5 text-[12px] tabular-nums text-faint">×{item.repeat}</span>
         )}
       </span>
-      <span className="flex-shrink-0 pt-px text-[12px] tabular-nums text-zinc-500">{formatRelative(item.at)}</span>
+      <span className="flex-shrink-0 pt-px text-[12px] tabular-nums text-faint">{formatRelative(item.at)}</span>
     </li>
   )
 }
@@ -916,11 +970,14 @@ function SelfHealingLoop({
   // Per-node reading: value + unit. '—' while the trust report is loading.
   const readings: Record<LoopPhase, { value: string; unit: string; accent?: boolean }> = {
     observe: {
-      value: stats.invariants == null ? '—' : String(stats.invariants),
-      // The cadence belongs ON the reading. It is the whole claim — a linter
-      // runs when you invoke it, this runs whether or not anyone is looking —
-      // and it holds for every plan including Free.
-      unit: 'guarantees, every minute',
+      value: stats.checksRan == null ? '—' : String(stats.checksRan),
+      // What ran on this project's last pass. A check that errored could not
+      // have reported a problem, so it is said rather than counted as clean.
+      unit: stats.checksRan == null
+        ? 'first check pending'
+        : stats.checksErrored > 0
+          ? `guarantees checked, ${stats.checksErrored} could not run`
+          : 'guarantees checked',
     },
     detect: {
       // open + pending_approval: the sum of what the Autonomy page shows
@@ -999,12 +1056,12 @@ function SelfHealingLoop({
               const clickable = s.key === 'propose' && (stats.pending ?? 0) > 0
               const IconComponent = STAGE_ICONS[s.key]
               const valueClass = `text-[28px] font-semibold leading-none tabular-nums tracking-[-0.03em] ${
-                r.accent ? 'text-violet-200' : off ? 'text-zinc-600' : active ? 'text-zinc-50' : 'text-zinc-300'
+                r.accent ? 'text-violet-200' : off ? 'text-faint' : active ? 'text-zinc-50' : 'text-zinc-300'
               }`
               const node = (
                 <>
                   <span
-                    className={`relative flex h-[46px] w-[46px] items-center justify-center rounded-xl border transition-all duration-300 select-none ${
+                    className={`relative flex h-[46px] w-[46px] items-center justify-center rounded-xl border transition-[border-color,background-color,box-shadow] duration-300 select-none ${
                       active
                         ? 'border-violet-300/70 bg-[#12131a] shadow-[0_0_24px_rgba(167,139,250,0.35)]'
                         : off ? 'border-white/[0.06] bg-[#101014]' : 'border-[#2D2D35] bg-[#101014]'
@@ -1078,7 +1135,7 @@ function SelfHealingLoop({
                     )}
                   </span>
 
-                  <span className="mt-1.5 max-w-[140px] px-1 text-center text-[12px] leading-[16px] text-zinc-500">
+                  <span className="mt-1.5 max-w-[140px] px-1 text-center text-[12px] leading-[16px] text-faint">
                     {r.unit}
                   </span>
 
@@ -1131,7 +1188,7 @@ function SelfHealingLoop({
             ) : (
               <>
                 Verify feeds the next Observe
-                <span className="hidden lg:inline">. No human at the top of the loop</span>
+                <span className="hidden lg:inline">. The loop runs every minute</span>
               </>
             )
           }
@@ -1146,7 +1203,7 @@ function AxisSpan({ label, className = '' }: { label: string; className?: string
   return (
     <div className={`flex items-center gap-2.5 ${className}`}>
       <span className="h-px flex-1 bg-gradient-to-r from-white/[0.02] to-white/[0.09]" />
-      <span className="whitespace-nowrap text-[12px] text-zinc-500">{label}</span>
+      <span className="whitespace-nowrap text-[12px] text-faint">{label}</span>
       <span className="h-px flex-1 bg-gradient-to-l from-white/[0.02] to-white/[0.09]" />
     </div>
   )
@@ -1230,7 +1287,7 @@ function ReturnCircuit({ off, live, label }: { off: boolean; live: boolean; labe
 
       {/* Why the arc exists, said once — set ON the return run like a callout
           on a circuit diagram. */}
-      <span className={`pointer-events-none absolute bottom-0 left-1/2 -translate-x-1/2 translate-y-1/2 whitespace-nowrap ${NODE_GROUND} px-3 text-[12px] leading-[16px] text-zinc-500`}>
+      <span className={`pointer-events-none absolute bottom-0 left-1/2 -translate-x-1/2 translate-y-1/2 whitespace-nowrap ${NODE_GROUND} px-3 text-[12px] leading-[16px] text-faint`}>
         {label}
       </span>
     </div>
@@ -1274,12 +1331,12 @@ function ResourceCards({ items }: { items: ResourceCard[] }) {
           </span>
 
           <span className="flex items-baseline gap-2">
-            <span className={`text-[28px] font-semibold leading-none tracking-[-0.03em] tabular-nums ${m.muted ? 'text-zinc-500' : 'text-zinc-50'}`}>
+            <span className={`text-[28px] font-semibold leading-none tracking-[-0.03em] tabular-nums ${m.muted ? 'text-faint' : 'text-zinc-50'}`}>
               {m.value}
             </span>
-            {m.unit && <span className="text-[13px] leading-none text-zinc-500">{m.unit}</span>}
+            {m.unit && <span className="text-[13px] leading-none text-faint">{m.unit}</span>}
             {m.meta && (
-              <span className="ml-auto whitespace-nowrap text-[12.5px] leading-none text-zinc-500 tabular-nums">{m.meta}</span>
+              <span className="ml-auto whitespace-nowrap text-[12.5px] leading-none text-faint tabular-nums">{m.meta}</span>
             )}
           </span>
         </button>

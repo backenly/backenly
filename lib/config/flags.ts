@@ -143,6 +143,35 @@ export const FLAGS = {
   },
 
   /**
+   * Structural evolution MUTATIONS — extracting a concern into its own table.
+   *
+   * Off by default for the same reason as the maintenance flag: shipping the
+   * engine and letting it restructure a production table are separate
+   * decisions. With it off, an approved extraction still rebuilds its plan,
+   * checks every gate, runs the rehearsal (which commits nothing) and the
+   * read-only verifications, writes the ledger, and refuses at the first rung
+   * that would change the live schema. That makes "would this have run here?"
+   * answerable on production before anything is allowed to.
+   *
+   * With it on, nothing else widens: every rung still needs consent bound to
+   * the exact plan version, and `contract` is still never run.
+   */
+  get ENABLE_EVOLUTION_MUTATIONS(): boolean {
+    return readBool('ENABLE_EVOLUTION_MUTATIONS')
+  },
+
+  /**
+   * Resume approved extractions without anybody pressing the button — chiefly
+   * so a long backfill finishes and the ladder continues on its own. Useless
+   * without ENABLE_EVOLUTION_MUTATIONS, and separate from it for the reason the
+   * maintenance scheduler is: whether a deployment may write, and whether it
+   * may decide when, are different questions.
+   */
+  get ENABLE_EVOLUTION_SCHEDULER(): boolean {
+    return readBool('ENABLE_EVOLUTION_SCHEDULER')
+  },
+
+  /**
    * Phase 12 — Auto-Fix Execution.
    *
    * When on (requires ENABLE_AUTO_FIX_PLANNER also on), safe auto-fixable
@@ -291,6 +320,21 @@ export const FLAGS = {
 
 export function isFlagEnabled(name: keyof typeof FLAGS): boolean {
   return FLAGS[name]
+}
+
+/**
+ * The projects architecture changes may run for while they roll out:
+ * EVOLUTION_PROJECT_ALLOWLIST, project ids separated by commas or whitespace.
+ * Unset or empty, every project.
+ *
+ * It narrows the two evolution flags and never widens them: a listed project
+ * still needs ENABLE_EVOLUTION_MUTATIONS to run a rung, and the scheduler to
+ * carry one on by itself. A project taken off the list keeps what already ran:
+ * its changes are still observed and judged, and undo never checks this list.
+ */
+export function evolutionAllowedFor(projectId: string): boolean {
+  const ids = (process.env.EVOLUTION_PROJECT_ALLOWLIST ?? '').split(/[\s,]+/).filter(Boolean)
+  return ids.length === 0 || ids.includes(projectId)
 }
 
 /**

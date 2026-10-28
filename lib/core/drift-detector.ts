@@ -18,9 +18,10 @@
  */
 
 import { prisma } from '@/lib/db/prisma'
-import { queryWorkspaceSchema, executeInWorkspaceSchema } from '@/lib/services/workspaceDatabase'
+import { queryWorkspaceSchema } from '@/lib/services/workspaceDatabase'
 import { listSchemaSnapshots, getSchemaSnapshot } from '@/lib/services/workspace-schema-snapshot'
 import { isReservedWorkspaceTable, notReservedTableSql } from '@/lib/security/workspace-schema'
+import { isRegionError } from '@/lib/data-plane/regional'
 import type { RawFinding } from './types'
 
 // ─── 3.1 Schema Drift ────────────────────────────────────────────────────────
@@ -51,9 +52,13 @@ import type { RawFinding } from './types'
  * could not look must not report nothing found". Copying it would let the two
  * drift, and the copy that quietly returned [] is exactly the bug this exists
  * to prevent.
+ *
+ * A region error (this process has no connection to the project's region) is
+ * rethrown unchanged, so callers can still tell it apart from a failed query.
  */
 export function probeQueryFailed(probe: string): (err: unknown) => never {
   return (err) => {
+    if (isRegionError(err)) throw err
     throw new Error(
       `[${probe}] catalog query failed: ${err instanceof Error ? err.message : String(err)}`,
     )
@@ -358,16 +363,9 @@ export async function detectMissingFkIndexes(
         ? `Column "${r.column_name}" has a foreign key but no index — joins will scan the full table`
         : `Column "${r.column_name}" is a likely FK column but has no index — joins will scan the full table`,
     },
+    // No inline fix. The repair loop's CREATE_INDEX repair (runAutoFix) is the
+    // only one, so the index is a governed change that a restore can see.
     autoFixable: true,
-    fix: async () => {
-      const idxName = `idx_${r.table_name}_${r.column_name}`
-        .replace(/[^a-z0-9_]/g, '_')
-        .slice(0, 63)
-      await executeInWorkspaceSchema(
-        projectId,
-        `CREATE INDEX IF NOT EXISTS "${idxName}" ON {schema}."${r.table_name}" ("${r.column_name}")`,
-      )
-    },
   }))
 }
 
@@ -520,10 +518,13 @@ export async function checkAuthIntegrity(
     })
   }
 
-  // 2. users table missing while auth is configured beyond the platform
-  //    defaults (enabled OAuth provider or an enabled policy on users). A
-  //    missing table with no such evidence is normal — signup creates it.
-  if (!usage.usersTableExists && usage.configuredEvidence) {
+  // 2. users table missing although it existed: a policy was installed on it.
+  //    Auth being configured is not that evidence. Enabling email auth made
+  //    `configuredEvidence` true at once, while the table is created on first
+  //    use (sign-up, OAuth, enabling auth, a key into it), so every project that
+  //    turned auth on was reported critical, then "fixed", before anyone could
+  //    have signed up.
+  if (!usage.usersTableExists && usage.usersTableExpected) {
     findings.push({
       type: 'auth_users_table_missing',
       severity: 'critical',

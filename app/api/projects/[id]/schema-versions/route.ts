@@ -31,7 +31,7 @@ export const dynamic = 'force-dynamic'
 import { NextRequest, NextResponse } from 'next/server'
 import { withAuth } from '@/lib/auth/route-protection'
 import { canAccessProject, canAdministerProject } from '@/lib/edition/guard'
-import { listSchemaVersions, getSchemaVersion, rollbackToVersion } from '@/lib/versioning/schema-versions'
+import { listSchemaVersions, getSchemaVersion } from '@/lib/versioning/schema-versions'
 
 export const GET = withAuth(async (request: NextRequest, { user, params }) => {
   try {
@@ -60,35 +60,25 @@ export const GET = withAuth(async (request: NextRequest, { user, params }) => {
   }
 })
 
-export const POST = withAuth(async (request: NextRequest, { user, params }) => {
-  try {
-    const { id: projectId } = await params
-
-    // Administer, not merely access. A rollback rewrites the live schema, so it
-    // is not something a read-only collaborator should be able to trigger.
-    if (!(await canAdministerProject(user.userId, projectId))) {
-      return NextResponse.json({ error: 'Project not found' }, { status: 404 })
-    }
-
-    const body = await request.json().catch(() => ({}))
-    const { versionId } = body ?? {}
-    if (!versionId) {
-      return NextResponse.json({ error: 'versionId is required' }, { status: 400 })
-    }
-
-    // Refused early with a clear answer. rollbackToVersion scopes the same
-    // way, so this is a better error rather than the enforcement.
-    if (!(await getSchemaVersion(versionId, projectId))) {
-      return NextResponse.json({ error: 'Version not found' }, { status: 404 })
-    }
-
-    const result = await rollbackToVersion(projectId, versionId)
-    return NextResponse.json({
-      success: result.success,
-      message: result.message,
-      statementsExecuted: result.statementsExecuted,
-    }, { status: result.success ? 200 : 500 })
-  } catch (error: any) {
-    return NextResponse.json({ error: 'Rollback failed', details: error.message }, { status: 500 })
+/**
+ * Retired. This rolled the project back to a SchemaVersion by dropping every
+ * table newer than it (see rollbackToVersion). Restoring is per change now:
+ * POST /api/projects/[id]/changes/[changeId]/preview, then POST …/restore.
+ */
+export const POST = withAuth(async (_request: NextRequest, { user, params }) => {
+  const { id: projectId } = await params
+  if (!(await canAdministerProject(user.userId, projectId))) {
+    return NextResponse.json({ error: 'Project not found' }, { status: 404 })
   }
+  return NextResponse.json(
+    {
+      success: false,
+      code: 'MOVED',
+      error:
+        'Rolling back to a schema version has been replaced by restoring the state before a change. Open ' +
+        'History in the project, or POST /api/projects/{id}/changes/{changeId}/preview and then ' +
+        'POST …/restore. Nothing was changed.',
+    },
+    { status: 410 },
+  )
 })

@@ -62,7 +62,7 @@
  * silently is worse than an honest "I could not tell".
  */
 
-import { prisma } from '@/lib/db'
+import { workspaceRawClient } from '@/lib/data-plane/regional'
 
 /** The end-user identity table in every workspace schema. */
 const END_USER_TABLE = 'users'
@@ -226,8 +226,12 @@ export async function loadOwnershipCatalog(
   // give them. Defaults to the project's main schema.
   schemaName = `workspace_${projectId}`,
 ): Promise<OwnershipCatalog> {
+  // The catalog of the database holding the project's data, in its region.
+  // Resolved outside the fail-soft catches below: a region this process cannot
+  // reach is an error to report, not an empty catalog to infer from.
+  const db = await workspaceRawClient(projectId)
 
-  const columnRows = await prisma.$queryRawUnsafe<Array<{ table_name: string; column_name: string }>>(
+  const columnRows = await db.$queryRawUnsafe<Array<{ table_name: string; column_name: string }>>(
     `SELECT table_name, column_name
        FROM information_schema.columns
       WHERE table_schema = $1
@@ -245,7 +249,7 @@ export async function loadOwnershipCatalog(
   // Single-column foreign keys only. A composite FK cannot be expressed as a
   // one-column ownership hop, and guessing which part carries ownership is the
   // kind of silent inference this module exists to avoid.
-  const fkRows = await prisma.$queryRawUnsafe<Array<{
+  const fkRows = await db.$queryRawUnsafe<Array<{
     child_table: string
     child_column: string
     parent_table: string
@@ -601,6 +605,40 @@ export function inferRlsPlanFromCatalog(
 export async function inferRlsPlan(projectId: string, tableName: string, schemaName?: string): Promise<RlsPlan> {
   const catalog = await loadOwnershipCatalog(projectId, schemaName)
   return inferRlsPlanFromCatalog(catalog, tableName)
+}
+
+/**
+ * The ownership path through one named foreign key: the parent it points at,
+ * and every column of that parent naming an owner.
+ *
+ * Inference takes a parent path only when exactly one owned parent exists,
+ * because choosing between two is a security decision it has no basis for.
+ * `order_items(order_id → orders, seller_id → sellers)` is the common case, and
+ * left to inference it stayed without row-level security. Naming the column
+ * makes that decision explicit, and it is checked against the live catalog:
+ * the column must be a foreign key to a parent that has an owner.
+ */
+export async function resolveOwnershipPath(
+  projectId: string,
+  tableName: string,
+  column: string,
+  schemaName?: string,
+): Promise<{ via: RelatedRowsVia } | { error: string }> {
+  const catalog = await loadOwnershipCatalog(projectId, schemaName)
+  const fk = parentLinksOf(catalog, tableName).find((link) => link.childColumn === column)
+  if (!fk) {
+    return { error: `"${tableName}"."${column}" is not a foreign key, so it cannot name the parent that owns a row.` }
+  }
+  if (fk.parentTable === tableName) {
+    return { error: `"${tableName}"."${column}" points at "${tableName}" itself, which cannot pass ownership down.` }
+  }
+  const parentOwnerColumns = allOwnerColumnsOf(catalog, fk.parentTable)
+  if (parentOwnerColumns.length === 0) {
+    return { error: `"${fk.parentTable}", which "${tableName}"."${column}" points at, has no column naming an owner.` }
+  }
+  return {
+    via: { localColumn: fk.childColumn, parentTable: fk.parentTable, parentColumn: fk.parentColumn, parentOwnerColumns },
+  }
 }
 
 /**

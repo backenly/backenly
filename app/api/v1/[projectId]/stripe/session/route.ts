@@ -22,9 +22,9 @@ export const dynamic = 'force-dynamic'
 
 import { NextRequest } from 'next/server'
 import { v1ApiMiddleware, requirePermission } from '@/lib/api/v1/middleware'
-import { createErrorResponse, createSuccessResponse, ErrorCodes } from '@/lib/api/v1/errors'
+import { createErrorResponse, createSuccessResponse, ErrorCodes, regionErrorResponse } from '@/lib/api/v1/errors'
 import { getIntegrationKey } from '@/lib/services/integrationKeyStore'
-import { prisma } from '@/lib/db/prisma'
+import { workspaceRawClient } from '@/lib/data-plane/regional'
 import { executeInWorkspaceSchema } from '@/lib/services/workspaceDatabase'
 import { recordedV1 } from '@/lib/traffic/recorded-v1'
 
@@ -128,6 +128,10 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
     // ── 3. Build line items ───────────────────────────────────────────────────
     const currency = (body.currency ?? 'usd').toLowerCase()
     const schemaName = `workspace_${context.projectId}`
+    // The project's database, in its region. Resolved before the Stripe
+    // session exists, so an unreachable region refuses the request instead of
+    // leaving a paid session whose order was never stamped.
+    const db = await workspaceRawClient(context.projectId)
     let lineItems: Array<{
       price_data: {
         currency: string
@@ -232,7 +236,7 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
 
     // ── 5. Stamp the order with stripe_session_id (best-effort) ──────────────
     if (body.orderId) {
-      const colCheck = await prisma.$queryRawUnsafe<any[]>(
+      const colCheck = await db.$queryRawUnsafe<any[]>(
         `SELECT column_name FROM information_schema.columns
          WHERE table_schema = $1 AND table_name = 'orders' AND column_name = 'stripe_session_id'`,
         schemaName,
@@ -262,7 +266,7 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
       return createErrorResponse(ErrorCodes.BAD_REQUEST, err.message, 400)
     }
 
-    return createErrorResponse(ErrorCodes.INTERNAL_ERROR, 'Failed to create Stripe session', 500)
+    return regionErrorResponse(err) ?? createErrorResponse(ErrorCodes.INTERNAL_ERROR, 'Failed to create Stripe session', 500)
   }
 }
 

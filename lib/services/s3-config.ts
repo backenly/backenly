@@ -23,6 +23,9 @@
  */
 
 import { S3Client } from '@aws-sdk/client-s3'
+import { RegionNotConfiguredError } from '@/lib/data-plane/regional'
+import { serviceRegion } from '@/lib/data-plane/serving'
+import type { CloudRegionId } from '@/lib/regions'
 
 export interface S3Config {
   endpoint?: string
@@ -208,4 +211,49 @@ export function getS3Client(): S3Client {
   })
   _clientKey = key
   return _client
+}
+
+/** Where a region's project files are, and a client for them. */
+export interface S3Location {
+  client: S3Client
+  bucket: string
+  /** This process's own bucket, the one its configuration (STORAGE_S3_*) and CDN serve. */
+  local: boolean
+}
+
+const regionalClients = new Map<CloudRegionId, S3Client>()
+
+/**
+ * The bucket holding a region's project files.
+ *
+ * A project's files are kept in its own region, like its database. The
+ * region this process serves uses its configuration (STORAGE_S3_*), exactly as
+ * before: every /api/v1 storage call is served in the project's own region.
+ * Another region's bucket, for work done here about a project held elsewhere
+ * (the console, a deletion's purge, the cleanup of deleted files), is named by
+ * STORAGE_S3_BUCKET_<REGION> and reached in that region with the SDK's default
+ * credential chain, the ECS task role on Backenly Cloud. Without that setting
+ * the call is refused: this region's bucket does not hold the project's files,
+ * so nothing is read from or written to it instead.
+ */
+export function s3LocationFor(region: CloudRegionId): S3Location {
+  if (region === serviceRegion()) {
+    return { client: getS3Client(), bucket: getS3Config().bucket, local: true }
+  }
+  const variable = `STORAGE_S3_BUCKET_${region.toUpperCase().replace(/-/g, '_')}`
+  const bucket = (process.env[variable] ?? '').trim()
+  if (!bucket) {
+    throw new RegionNotConfiguredError(
+      region,
+      variable,
+      undefined,
+      `No file storage for ${region}: ${variable} is not set. The files are only in that region's bucket, so nothing was sent to another one.`,
+    )
+  }
+  let client = regionalClients.get(region)
+  if (!client) {
+    client = new S3Client({ region })
+    regionalClients.set(region, client)
+  }
+  return { client, bucket, local: false }
 }

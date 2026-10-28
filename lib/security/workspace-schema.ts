@@ -43,6 +43,19 @@ export function workspaceSchemaName(projectId: unknown): string {
   return `workspace_${projectId}`
 }
 
+const PROJECT_SCHEMA_RE =
+  /^workspace_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:_[a-z0-9_]+)?$/i
+
+/**
+ * The project a workspace schema belongs to: its own `workspace_<id>`, or one
+ * named after it such as a preview branch's `workspace_<id>_br_<name>`. Null
+ * for any other name. Every such schema lives in the project's database, so
+ * this is how code holding only a schema name finds the region to ask.
+ */
+export function projectIdOfWorkspaceSchema(schemaName: string): string | null {
+  return PROJECT_SCHEMA_RE.exec(schemaName)?.[1] ?? null
+}
+
 /**
  * Workspace realtime notification channel name (`workspace_<id>_changes`).
  * Same validation; same rules.
@@ -98,6 +111,21 @@ export function isProjectOwnedSchema(projectId: unknown, schemaName: string): bo
   if (!schemaName.startsWith(`workspace_${projectId}_`)) return false
   const suffix = schemaName.slice(`workspace_${projectId}_`.length)
   return suffix.length > 0 && /^[A-Za-z0-9_]+$/.test(suffix)
+}
+
+/**
+ * True for a change vault: `workspace_<uuid>_r<seq>`, the schema a recorded
+ * schema change moves the data it removed into (lib/changes/preserve.ts), so
+ * rolling the change back can bring it back.
+ *
+ * A vault is tenant data and lives in the project's namespace on purpose:
+ * deleting the project drops it, a backup carries it and a restore brings it
+ * back. It is never served. The data plane registers the canonical schema and
+ * branches only, so anything that walks every `workspace_` schema to register,
+ * repair or report unregistered ones must skip vaults, not "fix" them.
+ */
+export function isChangeVaultSchema(schemaName: string): boolean {
+  return /^workspace_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}_r[0-9]+$/i.test(schemaName)
 }
 
 // ─── Reserved workspace tables — single source of truth ───────────────────────

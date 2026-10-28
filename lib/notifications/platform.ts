@@ -12,6 +12,7 @@
  *   - deploy_complete
  *   - system  (maintenance, feature announcements, etc.)
  *   - health_alert  (a critical problem in one of their backends that needs them)
+ *   - approval_requested  (their coding agent parked a call that waits for their approval)
  *
  * Every `createPlatformNotification` call:
  *   1. Checks NotificationPreference — if inAppEnabled=false, skips DB insert.
@@ -23,7 +24,9 @@
 import nodemailer from 'nodemailer'
 import { prisma } from '@/lib/db/prisma'
 import { buildNotificationEmail } from './email-templates'
+import { formatAmount, formatLongDate, type PaymentReceipt } from './payment-receipt-email'
 import { buildEnvSmtpTransport } from '@/lib/email/smtp-transport'
+import { planDisplayName } from '@/lib/entitlements/plan-names'
 
 export type PlatformNotificationType =
   | 'payment_success'
@@ -36,6 +39,8 @@ export type PlatformNotificationType =
   | 'system'
   | 'autonomous_action'   // "While you were away" — autonomous background fixes and findings
   | 'health_alert'        // A confirmed critical in one of their backends, still unresolved
+  | 'support_update'      // Backenly replied to or resolved one of their support cases
+  | 'approval_requested'  // Their coding agent parked a call for approval; it expires unanswered
 
 // All valid types — used for preference initialization
 export const ALL_NOTIFICATION_TYPES: PlatformNotificationType[] = [
@@ -49,6 +54,8 @@ export const ALL_NOTIFICATION_TYPES: PlatformNotificationType[] = [
   'system',
   'autonomous_action',
   'health_alert',
+  'support_update',
+  'approval_requested',
 ]
 
 export interface CreateNotificationInput {
@@ -111,12 +118,12 @@ async function sendNotificationEmail(
   metadata: Record<string, any>
 ): Promise<void> {
   try {
-    const { subject, html } = buildNotificationEmail(type, title, body, metadata)
+    const { subject, html, text, replyTo, attachments } = buildNotificationEmail(type, title, body, metadata)
     const from = process.env.SMTP_FROM || 'Backenly <noreply@backenly.com>'
     const transporter = getMailTransporter()
 
     if (transporter) {
-      await transporter.sendMail({ from, to: userEmail, subject, html })
+      await transporter.sendMail({ from, to: userEmail, subject, html, text, replyTo, attachments })
     } else {
       // Dev fallback: log instead of dropping
       console.log(`\n========== NOTIFICATION EMAIL ==========`)
@@ -175,18 +182,45 @@ export async function createPlatformNotification(input: CreateNotificationInput)
 // ─── Convenience helpers ──────────────────────────────────────────────────────
 
 /**
- * Notify developer that their payment succeeded.
+ * Tell the payer their plan payment went through, with a receipt.
+ *
+ * `receipt` is what the payment provider's paid invoice states; Backenly Cloud
+ * passes it from its billing webhook, and the email names only what it is
+ * given (./payment-receipt-email). The plan is named as customers know it
+ * (Pro, not BUILDER), and dates are written out in UTC rather than in the
+ * server's locale, where November 25 came out as "11/25/2026".
  */
-export async function notifyPaymentSuccess(userId: string, planName: string, periodEnd?: Date): Promise<void> {
+export async function notifyPaymentSuccess(
+  userId: string,
+  planName: string,
+  periodEnd?: Date,
+  receipt: PaymentReceipt = {},
+): Promise<void> {
+  const plan = planDisplayName(planName)
+  const amount =
+    typeof receipt.amountPaid === 'number' && receipt.currency ? formatAmount(receipt.amountPaid, receipt.currency) : null
+  const next = periodEnd
+    ? receipt.renews === false
+      ? ` It stays active until ${formatLongDate(periodEnd)}.`
+      : ` It renews on ${formatLongDate(periodEnd)}.`
+    : ''
   await createPlatformNotification({
     userId,
     type: 'payment_success',
-    title: 'Payment successful',
-    body: periodEnd
-      ? `Your ${planName} subscription is active until ${periodEnd.toLocaleDateString()}.`
-      : `Your ${planName} subscription is now active.`,
-    metadata: { planName, periodEnd: periodEnd?.toISOString() },
+    title: 'Payment received',
+    body: (amount ? `We received ${amount} for your ${plan} plan.` : `We received your payment for the ${plan} plan.`) + next,
+    metadata: { ...receiptMetadata(receipt), planName, periodEnd: periodEnd?.toISOString() },
   })
+}
+
+/** A receipt as notification metadata: JSON, so dates as ISO strings, and only what is known. */
+function receiptMetadata(receipt: PaymentReceipt): Record<string, unknown> {
+  const out: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(receipt)) {
+    if (value === null || value === undefined) continue
+    out[key] = value instanceof Date ? value.toISOString() : value
+  }
+  return out
 }
 
 /**
@@ -306,6 +340,52 @@ export async function notifyDeployComplete(
       ? `Project "${projectName}" deployed successfully. Your backend is live.`
       : `Project "${projectName}" deployed successfully.`,
     metadata: { projectId, projectName, url },
+  })
+}
+
+/**
+ * Tell a project's owner that their coding agent parked a call for approval.
+ *
+ * The request runs only once a human approves it and expires unanswered after
+ * a day. Nothing else announced it: it appeared only in the Review Queue on the
+ * Autonomy page, so a request nobody happened to look for simply ran out
+ * (AUT-08).
+ *
+ * `target` is null for a project kept in another region: its notice names the
+ * action only (lib/data-plane/residency.ts).
+ */
+/** What a restore request asks, when its target cannot be quoted. */
+const RESTORE_ASKS: Record<string, string> = {
+  rollback_deploy: 'restore the backend to a published version',
+  revert_schema_change: 'restore the state before a change',
+}
+
+export async function notifyApprovalRequested(
+  userId: string,
+  request: { projectId: string; projectName: string; approvalId: string; tool: string; target: string | null; expiresAt: Date },
+): Promise<void> {
+  const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'https://backenly.com'
+  // A restore says what it restores; its target is already a sentence
+  // ("Restore the backend to v3, …"), not a thing a tool runs on.
+  const restore = RESTORE_ASKS[request.tool]
+  const asked = restore
+    ? request.target ? request.target.charAt(0).toLowerCase() + request.target.slice(1) : restore
+    : `run ${request.tool}${request.target ? ` on ${request.target}` : ''}`
+  await createPlatformNotification({
+    userId,
+    type: 'approval_requested',
+    title: `Your agent is waiting for your approval in "${request.projectName}"`,
+    body:
+      `It asked to ${asked}. Approve or reject it in the ` +
+      `Review Queue on the Autonomy page. Nothing runs until you do, and the request expires ${request.expiresAt.toUTCString()}.`,
+    metadata: {
+      projectId: request.projectId,
+      approvalId: request.approvalId,
+      tool: request.tool,
+      ...(request.target ? { target: request.target } : {}),
+      expiresAt: request.expiresAt.toISOString(),
+      actionUrl: `${appUrl}/app/projects/${request.projectId}/autonomy`,
+    },
   })
 }
 

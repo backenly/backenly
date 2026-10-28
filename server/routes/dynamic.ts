@@ -15,11 +15,14 @@
 import { Router } from 'express'
 import type { Request, Response } from 'express'
 import { prisma } from '@/lib/db'
+import { isRegionError } from '@/lib/data-plane/regional'
+import { authorizingKeyByHash, isAuthorizationUnavailable } from '@/lib/auth-projection/read'
 import { verify } from 'jsonwebtoken'
-import { enforceRateLimitByKeyId } from '../lib/auth'
-import { resolveJwtSecret } from '@/lib/services/jwtSecretManager'
+import { enforceKeyRateLimit, enforceRateLimitByKeyId } from '../lib/auth'
+import { regionalRateCounting, type RateKey } from '@/lib/auth-projection/rate'
 import { hashApiKey, resolveEndUserFromToken, crossEnvironmentUserToken } from '../lib/end-user-identity'
 import { handleViaPostgrest } from './postgrest-handler'
+import { isFunctionSwitchedOff } from '@/lib/services/ai-functions/status'
 import { v1NotFoundBody } from '@/lib/api/v1/route-not-found'
 import {
   SERVICE_ROLE_IN_BROWSER,
@@ -34,6 +37,7 @@ import {
   isMcpCredential,
   mcpKeyRefusalMessage,
 } from '@/lib/security/key-placement'
+import { endUserBearerToken } from '@/lib/security/end-user-bearer'
 import { asyncRoute } from '../lib/async-route'
 import { refuseUnlessServing } from '../lib/serving-gate'
 import { touchProjectActivity } from '@/lib/projects/activity'
@@ -67,6 +71,14 @@ interface AuthResolution {
   branchSchema?: string
   /** The bound branch's name, for the X-Backenly-Environment response header. */
   branchName?: string
+  /**
+   * The key's granular permission set, for the method gate both data doors
+   * apply. Only set when a KEY authenticated: Bearer identities carry their
+   * authority in the token (end-user RLS, platform service-role), not here.
+   */
+  permissions?: string[]
+  /** What the key's rate-limit window is counted by, when a key authenticated. */
+  rateKey?: RateKey
   error?: string
   code?: string
   /** Replaces the generic "include a credential" hint when the credential was present but wrong. */
@@ -78,19 +90,64 @@ interface AuthResolution {
  * implementations for two surfaces over one data plane is how a fix lands on
  * one and not the other.
  */
+/**
+ * The method gate for a key's granular permissions, shared by both data doors.
+ *
+ * `set_key_permissions` and the key editor have always written
+ * `ApiKey.permissions`, and the legacy Express routers checked it — but the
+ * data plane (/db here and /api/v2) never did, so a key narrowed to ['read']
+ * kept writing and the tool's "✅ permissions updated" changed nothing that
+ * mattered. Service-role keys bypass by definition, as in checkPermission;
+ * 'admin' grants everything via hasPermission. Returns true when it REFUSED
+ * (response already sent), mirroring refuseUnlessServing's contract.
+ */
+export function refuseIfKeyLacksMethodPermission(
+  req: Request,
+  res: Response,
+  auth: AuthResolution,
+): boolean {
+  if (!auth.keyId || auth.isServiceRole) return false
+  const required = req.method === 'GET' || req.method === 'HEAD' ? 'read' : 'write'
+  const permissions = auth.permissions ?? []
+  const allowed = permissions.includes('admin') || permissions.includes(required)
+  if (allowed) return false
+  res.status(403).json({
+    code: 'INSUFFICIENT_KEY_PERMISSIONS',
+    error: `This API key does not have '${required}' permission.`,
+    required,
+    permissions,
+    hint: `The key's permission set is ${JSON.stringify(permissions)}. Use a key with '${required}' access, or update this key's permissions.`,
+  })
+  return true
+}
+
+/**
+ * The status for a refused authentication on a data door. A refusal of a
+ * valid credential (a key used where it may not be, an end user the project
+ * blocked) is 403: the caller is known and refused, and 401 would send them to
+ * re-issue a credential that is fine. Anything else is 401.
+ */
+export function authRefusalStatus(code: string | undefined): 401 | 403 {
+  return isKeyPlacementRefusal(code) || code === 'END_USER_BLOCKED' ? 403 : 401
+}
+
+/**
+ * The end-user token in `Authorization: Bearer`, for a request that brings the
+ * project's key in x-api-key and no X-User-Token. Only a token that names a
+ * project (an end-user token) is taken; a platform session token is not one,
+ * and the key path never reads it as a user. The rule is shared with the Next
+ * v1 routes (lib/security/end-user-bearer.ts).
+ */
+export function endUserBearer(req: Request): string | undefined {
+  return endUserBearerToken(req.headers['authorization'] as string | undefined)
+}
+
 export async function getProjectIdFromAuth(req: Request): Promise<AuthResolution> {
   const xApiKey = req.headers['x-api-key'] as string | undefined
   if (xApiKey) {
     const keyHash = hashApiKey(xApiKey)
-    const key = await prisma.apiKey.findFirst({
-      where: { keyHash },
-      select: {
-        id: true, name: true, keyPrefix: true, projectId: true, userId: true,
-        permissions: true, rateLimit: true, expiresAt: true, serviceRole: true,
-        scope: true, keyType: true,
-        branch: { select: { id: true, schemaName: true, status: true, name: true } },
-      },
-    })
+    // The region's copy while it is fresh, home otherwise (lib/auth-projection/read.ts).
+    const key = await authorizingKeyByHash(keyHash)
     if (!key) return { success: false, error: 'Invalid API key', code: 'INVALID_API_KEY' }
     if (key.expiresAt && key.expiresAt < new Date()) return { success: false, error: 'API key has expired', code: 'API_KEY_EXPIRED' }
     if (!key.projectId) return { success: false, error: 'API key is not associated with a project', code: 'NO_PROJECT_ID' }
@@ -134,7 +191,12 @@ export async function getProjectIdFromAuth(req: Request): Promise<AuthResolution
         }
       }
     }
-    prisma.apiKey.update({ where: { id: key.id }, data: { lastUsed: new Date() } }).catch(console.error)
+    // Counted in the region, the key's last use goes home with its count
+    // (lib/auth-projection/rate.ts), rather than as a write per request.
+    if (!regionalRateCounting()) {
+      // history: usage bookkeeping (last used, rate-limit window), not configuration
+      prisma.apiKey.update({ where: { id: key.id }, data: { lastUsed: new Date() } }).catch(console.error)
+    }
 
     // A key bound to a branch that was merged or discarded must NOT silently
     // fall back to main. That is the one failure mode branch routing can have
@@ -153,6 +215,8 @@ export async function getProjectIdFromAuth(req: Request): Promise<AuthResolution
     // RLS identity:
     //   - service-role key → bypass RLS (backends, cron, internal tools)
     //   - non-service key + X-User-Token → act as that end-user (own_rows)
+    //   - non-service key + Authorization: Bearer <end-user token>, when no
+    //     X-User-Token is sent → the same, through the same resolver
     //   - non-service key, no user token → no user context (own_rows → empty)
     //
     // On a branch key the user token must have been issued on that branch.
@@ -162,11 +226,20 @@ export async function getProjectIdFromAuth(req: Request): Promise<AuthResolution
     let endUserId: string | undefined
     let userRole: string | undefined
     if (!key.serviceRole) {
-      const userToken = req.headers['x-user-token'] as string | undefined
+      const userToken = (req.headers['x-user-token'] as string | undefined) ?? endUserBearer(req)
       const branch = key.branch
         ? { id: key.branch.id, name: key.branch.name, schemaName: key.branch.schemaName }
         : null
       const endUser = await resolveEndUserFromToken(key.projectId, userToken, branch)
+      if (endUser === 'blocked') {
+        // The promised behavior of block_end_user: a 403 on the next
+        // request, not a silent downgrade to the anonymous identity.
+        return {
+          success: false,
+          error: 'This account has been blocked by the project owner.',
+          code: 'END_USER_BLOCKED',
+        }
+      }
       if (endUser) {
         endUserId = endUser.userId
         userRole = endUser.role
@@ -215,6 +288,8 @@ export async function getProjectIdFromAuth(req: Request): Promise<AuthResolution
       userRole,
       branchSchema: key.branch?.schemaName,
       branchName: key.branch?.name,
+      permissions: key.permissions ?? [],
+      rateKey: { id: key.id, keyHash, rateLimit: key.rateLimit, rateLimitWindow: key.rateLimitWindow },
     }
   }
 
@@ -241,37 +316,18 @@ export async function getProjectIdFromAuth(req: Request): Promise<AuthResolution
             hint: 'Sign the user in with the same key you use for data requests.',
           }
         }
-        // End-user token — verify with project.jwtSecret
-        const project = await prisma.project.findUnique({
-          where: { id: unverified.projectId },
-          select: { id: true, jwtSecret: true },
-        })
-        if (!project?.jwtSecret) return { success: false, error: 'Invalid token', code: 'INVALID_TOKEN' }
-        const decoded: any = verify(token, resolveJwtSecret(project.jwtSecret), { algorithms: ['HS256'] })
-        if (!decoded?.userId) return { success: false, error: 'Invalid token', code: 'INVALID_TOKEN' }
-        // Reject tokens revoked via /auth/logout.
-        if (decoded.jti) {
-          try {
-            const schemaName = `workspace_${decoded.projectId}`
-            const rows = await prisma.$queryRawUnsafe<{ jti: string }[]>(
-              `SELECT jti FROM "${schemaName}"."_token_blacklist" WHERE jti = $1 LIMIT 1`,
-              decoded.jti,
-            )
-            if (rows.length > 0) {
-              return { success: false, error: 'Token has been revoked. Please sign in again.', code: 'TOKEN_REVOKED' }
-            }
-          } catch {
-            // Blacklist table doesn't exist yet — not revoked.
-          }
-        }
-        // End-user JWT → RLS scopes to their own rows.
+        // An end-user token says WHO is asking; the project's key says through
+        // what. The key carries the project's permission set and rate limit,
+        // and with it the token goes through the one end-user resolver (its
+        // revocation, block and branch checks). So the data plane takes an
+        // end-user token only together with a key, as the client docs and the
+        // SDK always send it; Authorization: Bearer is still read as the token
+        // when the key comes in x-api-key.
         return {
-          success: true,
-          projectId: decoded.projectId,
-          userId: decoded.userId,
-          endUserId: String(decoded.userId),
-          isServiceRole: false,
-          userRole: decoded.role ?? 'user',
+          success: false,
+          error: "End-user tokens are accepted with the project's key: send the key as x-api-key and this token as X-User-Token (or keep it in Authorization).",
+          code: 'API_KEY_REQUIRED',
+          hint: "Add the project's publishable key in the x-api-key header.",
         }
       }
 
@@ -288,7 +344,10 @@ export async function getProjectIdFromAuth(req: Request): Promise<AuthResolution
       })
       if (!user || user.projects.length === 0) return { success: false, error: 'No project found for user', code: 'NO_PROJECT' }
       return { success: true, projectId: user.projects[0].id, userId: user.id, isServiceRole: true }
-    } catch {
+    } catch (err) {
+      // An unreachable region, or authorization that could not be checked, is
+      // the server's fault, not the token's.
+      if (isRegionError(err) || isAuthorizationUnavailable(err)) throw err
       return { success: false, error: 'Invalid or expired token', code: 'INVALID_TOKEN' }
     }
   }
@@ -343,10 +402,10 @@ async function handleDynamicRequest(req: Request, res: Response) {
   if (!authResult.success) {
     // A valid key used in the wrong place is refused, not unauthenticated: 401
     // would send the developer to re-issue a key that is fine. Matches /api/v2.
-    res.status(isKeyPlacementRefusal(authResult.code) ? 403 : 401).json({
+    res.status(authRefusalStatus(authResult.code)).json({
       error: authResult.error || 'Authentication required',
       code: authResult.code || 'AUTHENTICATION_REQUIRED',
-      hint: authResult.hint ?? 'Include x-api-key header or Authorization: Bearer token',
+      hint: authResult.hint ?? "Include the project's key in x-api-key, and an end user's token in X-User-Token.",
     })
     return
   }
@@ -357,6 +416,7 @@ async function handleDynamicRequest(req: Request, res: Response) {
   // never saw when the path is the legacy `/api/v1/{table}` form. Judge it now
   // that it is known, or a paused or locked project's key walks straight past.
   if (await refuseUnlessServing(res, projectId)) return
+  if (refuseIfKeyLacksMethodPermission(req, res, authResult)) return
   void touchProjectActivity(projectId)
 
   // Strip the URL prefix that the SDK and verifier always include:
@@ -421,11 +481,14 @@ async function handleDynamicRequest(req: Request, res: Response) {
       // may well be the one that works — which is also the only way it can
       // recover on its own.
       //
-      // 'disabled' remains a real refusal: that one is a deliberate act, not a
-      // side effect of a runtime error.
-      if (fn.status === 'disabled' || fn.status === 'deleted') {
+      // A deliberate OFF remains a real refusal: that one is an owner's act,
+      // not a side effect of a runtime error. The console toggle and MCP
+      // set_active write 'inactive' — this gate once listed only the older
+      // 'disabled'/'deleted' spellings, so a switched-off function stayed live
+      // here while every other surface said it was off.
+      if (isFunctionSwitchedOff(fn.status)) {
         res.status(409).json({
-          error: `Function "${fnName}" is disabled`,
+          error: `Function "${fnName}" is switched off`,
           code: 'FUNCTION_DISABLED',
           hint: 'Re-enable it from the project\'s Functions page, or regenerate it with generate_function.',
         })
@@ -524,7 +587,7 @@ async function handleDynamicRequest(req: Request, res: Response) {
 
   // Enforce hard rate limit on API key routes (JWT-authed dynamic routes skip this)
   if (keyId) {
-    const rl = await enforceRateLimitByKeyId(keyId)
+    const rl = authResult.rateKey ? await enforceKeyRateLimit(authResult.rateKey) : await enforceRateLimitByKeyId(keyId)
     res.setHeader('X-RateLimit-Remaining', String(rl.remaining))
     res.setHeader('X-RateLimit-Reset', String(Math.floor(rl.resetAt.getTime() / 1000)))
 
@@ -594,17 +657,17 @@ async function handleDynamicRequest(req: Request, res: Response) {
   // who followed this one got another 404 with no way to tell which document
   // was wrong. One source now, so there is nothing to keep in sync.
   const notFound = v1NotFoundBody(projectId!, path)
+  // Same field names and shape the Next catch-all returns, and every other v1
+  // error: `error` is the sentence, `code` beside it. This one nested both
+  // inside `error`, so a client reading `error` as text got an object
+  // (found by fuzzing the data API against its OpenAPI document).
   res.status(404).json({
-    error: {
-      code: 'ROUTE_NOT_SUPPORTED',
-      message:
-        `No data-plane route for ${req.method} /${path.join('/')}. ` +
-        (notFound.hint ? `${notFound.hint} ` : '') +
-        `For richer queries — joins, aggregates, embedded resources — use ` +
-        `/api/v2/{projectId}/{table}, which speaks PostgREST grammar directly.`,
-    },
-    // Same field name and shape the Next catch-all returns, so a client that
-    // learned the vocabulary from one 404 can read the other.
+    error:
+      `No data-plane route for ${req.method} /${path.join('/')}. ` +
+      (notFound.hint ? `${notFound.hint} ` : '') +
+      `For richer queries — joins, aggregates, embedded resources — use ` +
+      `/api/v2/{projectId}/{table}, which speaks PostgREST grammar directly.`,
+    code: 'ROUTE_NOT_SUPPORTED',
     availableRoutes: notFound.availableRoutes,
     docs: notFound.docs,
   })

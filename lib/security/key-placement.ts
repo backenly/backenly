@@ -38,6 +38,7 @@
 
 import { createHash } from 'crypto'
 import { prisma } from '@/lib/db/prisma'
+import { answersFromCopy, authorizingKeyByHash } from '@/lib/auth-projection/read'
 import { presentedApiKey } from '@/lib/branches/key-scope'
 import {
   SERVICE_ROLE_IN_BROWSER,
@@ -79,9 +80,9 @@ export const MCP_KEY_HINT =
   'Use a project key in the app. For browser or mobile code, create a client key: ' +
   'connect { action: "create_api_key", description: "web app" } from your agent, or ' +
   'Settings → API keys → New key → Client in the dashboard. It is bound by row-level ' +
-  "security, and writes also need the signed-in user's X-User-Token. Pass serviceRole: true " +
-  'only for a key that stays on a server. If this MCP key was committed or shipped, revoke it ' +
-  'in Connect → Agents and generate a new one.'
+  "security, and writes also need the signed-in user's X-User-Token. A key that stays on a " +
+  'server and bypasses row-level security is an Admin key a person creates in Settings → API keys. ' +
+  'If this MCP key was committed or shipped, revoke it in Connect → Agents and generate a new one.'
 
 export interface KeyPlacementRefusal {
   status: 403
@@ -140,10 +141,15 @@ async function placementFacts(rawKey: string): Promise<PlacementFacts | null> {
   const hit = cache.get(keyHash)
   if (hit && now - hit.at < CACHE_TTL_MS) return hit.facts
 
-  const row = await prisma.apiKey.findFirst({
-    where: { keyHash },
-    select: { id: true, name: true, keyPrefix: true, projectId: true, scope: true, keyType: true, serviceRole: true },
-  })
+  // Where this process answers from its region's copy, so does this gate: the copy while it is fresh, home otherwise
+  // (lib/auth-projection/read.ts). A regional request then reads nothing in Mumbai before its response, and keeps
+  // being served while home cannot answer. An MCP or service-role key is never copied, so home still answers for it.
+  const row = answersFromCopy()
+    ? await authorizingKeyByHash(keyHash)
+    : await prisma.apiKey.findFirst({
+        where: { keyHash },
+        select: { id: true, name: true, keyPrefix: true, projectId: true, scope: true, keyType: true, serviceRole: true },
+      })
   const facts: PlacementFacts | null = row
     ? {
         id: row.id,

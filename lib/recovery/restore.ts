@@ -55,6 +55,7 @@ import {
   sha256,
   unwrapDataKey,
 } from './crypto'
+import { isChangeVaultSchema } from '@/lib/security/workspace-schema'
 import { BUNDLE_FILES, MANIFEST_FILE } from './export'
 import { extractTar } from './tar'
 
@@ -812,11 +813,15 @@ async function reconcileDerivedState(
   // Re-register every workspace the bundle restored, so the data plane serves
   // it again. The function is SECURITY DEFINER and owned by the installer role
   // after the step above, which is why this runs here and not earlier.
+  //
+  // Change vaults came back with the data and stay unserved: they hold what a
+  // schema change removed, kept for rolling that change back, and the registry
+  // refuses them by name.
   const metadata = await readComponent(bundle, 'deployment-metadata')
   const schemas: string[] = metadata
     ? (JSON.parse(metadata.toString('utf8')).schemas ?? [])
     : []
-  const workspaces = schemas.filter(s => s.startsWith('workspace_'))
+  const workspaces = schemas.filter(s => s.startsWith('workspace_') && !isChangeVaultSchema(s))
   for (const schema of workspaces) {
     await psql(admin, `SELECT public.backenly_pgrst_register_schema('${schema.replace(/'/g, "''")}')`)
   }
@@ -991,10 +996,11 @@ async function verifyHealth(bundle: ValidatedBundle, options: RestoreOptions): P
   checks.push(`${triggers} event trigger(s)`)
 
   // 6. The registry identifies the workspace that was actually restored.
+  //    Change vaults are restored but never served, so they are not expected.
   const metadata = await readComponent(bundle, 'deployment-metadata')
   const expectedSchemas: string[] = metadata
     ? (JSON.parse(metadata.toString('utf8')).schemas ?? []).filter((s: string) =>
-        s.startsWith('workspace_'),
+        s.startsWith('workspace_') && !isChangeVaultSchema(s),
       )
     : []
   for (const schema of expectedSchemas) {

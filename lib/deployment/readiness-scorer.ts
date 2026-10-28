@@ -9,11 +9,13 @@
  *   auto-fixable — will be deterministically fixed before re-evaluation
  *
  * Usage:
- *   const report = await scoreReadiness(projectId)
+ *   const report = await scoreReadiness(projectId)                 // a read
+ *   const fixed  = await scoreReadiness(projectId, { autoFix: true }) // applies safe fixes
  *   if (!report.ready) { ... show report.blockers ... }
  */
 
 import { prisma } from '@/lib/db'
+import { workspaceRawClient } from '@/lib/data-plane/regional'
 import { sanitizeDiagnostic } from '@/lib/errors/diagnostic-sanitize'
 import { aiAvailability } from '@/lib/ai/llm'
 
@@ -47,7 +49,11 @@ export interface ReadinessReport {
 }
 
 export interface ReadinessOptions {
-  /** When true, run safe deterministic fixes before evaluating blockers. Default: true */
+  /**
+   * When true, run safe deterministic fixes before evaluating blockers.
+   * Default false: a readiness read changes nothing. Fixing is asked for
+   * explicitly (the deploy itself, POST /readiness, autoFix: true).
+   */
   autoFix?: boolean
 }
 
@@ -65,7 +71,7 @@ export async function scoreReadiness(
   projectId: string,
   options: ReadinessOptions = {},
 ): Promise<ReadinessReport> {
-  const { autoFix = true } = options
+  const { autoFix = false } = options
 
   // Load everything we need in one round-trip
   // `apiDefs` was destructured here and never referenced again in this file —
@@ -113,11 +119,11 @@ export async function scoreReadiness(
     checkRlsApplied(projectId, entities, policies, autoFix),
     checkWebhookSecurity(triggers),
     checkApiExposure(projectId),
-    checkEndUserAuthTable(projectId, project),  // auth enabled → users table must exist
+    checkEndUserAuthTable(projectId, project),           // auth enabled → users table ready (or created on first sign-up)
     checkMonitoringBasics(projectId),
     checkBehavioralVerification(projectId),
     checkSecurityAudit(projectId),          // #31/#7 security — blocks deploy on critical/high findings
-    checkFunctionTriggers(projectId),        // signup functions must have auto-triggers; placeholders must be cleaned up
+    checkFunctionTriggers(projectId, autoFix), // signup functions must have auto-triggers; placeholders must be cleaned up
   ])
 
   return buildReport(projectId, checks)
@@ -250,7 +256,11 @@ async function checkProjectJwt(
  * authentication" because it iterated an empty list.
  *
  * A vacuous pass on a blocking security gate is worse than no gate. This reads
- * what actually decides the answer.
+ * what actually decides the answer, in the database that holds the project's
+ * schema and its roles: its region's (lib/data-plane/regional.ts). Asked of the
+ * home database, a regional project had no tables there, so this passed without
+ * looking at any. A catalog it cannot read is reported as unverified, never as
+ * protected.
  */
 async function checkRouteProtection(projectId: string): Promise<ReadinessCheck> {
   const base: Omit<ReadinessCheck, 'status' | 'message' | 'details' | 'fixApplied'> = {
@@ -262,32 +272,44 @@ async function checkRouteProtection(projectId: string): Promise<ReadinessCheck> 
 
   const schema = `workspace_${projectId}`
 
-  // `anon` is the role an unauthenticated request runs as. If it holds a write
-  // privilege on a table that does not enforce RLS, that table is writable by
-  // anyone holding the public key — no policy stands between them and the row.
-  const rows = await prisma.$queryRawUnsafe<Array<{ table_name: string; privs: string; rls: boolean }>>(
-    `SELECT c.relname AS table_name,
-            string_agg(DISTINCT g.privilege_type, ', ' ORDER BY g.privilege_type) AS privs,
-            c.relrowsecurity AS rls
-       FROM pg_class c
-       JOIN pg_namespace n ON n.oid = c.relnamespace
-       JOIN information_schema.role_table_grants g
-         ON g.table_schema = n.nspname AND g.table_name = c.relname
-      WHERE n.nspname = $1
-        AND c.relkind = 'r'
-        AND g.grantee = 'anon'
-        AND g.privilege_type IN ('INSERT', 'UPDATE', 'DELETE', 'TRUNCATE')
-        AND NOT c.relrowsecurity
-      GROUP BY c.relname, c.relrowsecurity
-      ORDER BY c.relname`,
-    schema,
-  ).catch(() => [] as Array<{ table_name: string; privs: string; rls: boolean }>)
-
-  // A dev/CI database may have no PostgREST roles at all. "The role does not
-  // exist" is not "the check passed" — say which one it is.
-  const rolesExist = await prisma.$queryRawUnsafe<Array<{ ok: boolean }>>(
-    `SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') AS ok`,
-  ).catch(() => [{ ok: false }])
+  let rows: Array<{ table_name: string; privs: string; rls: boolean }>
+  let rolesExist: Array<{ ok: boolean }>
+  try {
+    const db = await workspaceRawClient(projectId)
+    // `anon` is the role an unauthenticated request runs as. If it holds a write
+    // privilege on a table that does not enforce RLS, that table is writable by
+    // anyone holding the public key — no policy stands between them and the row.
+    rows = await db.$queryRawUnsafe<Array<{ table_name: string; privs: string; rls: boolean }>>(
+      `SELECT c.relname AS table_name,
+              string_agg(DISTINCT g.privilege_type, ', ' ORDER BY g.privilege_type) AS privs,
+              c.relrowsecurity AS rls
+         FROM pg_class c
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+         JOIN information_schema.role_table_grants g
+           ON g.table_schema = n.nspname AND g.table_name = c.relname
+        WHERE n.nspname = $1
+          AND c.relkind = 'r'
+          AND g.grantee = 'anon'
+          AND g.privilege_type IN ('INSERT', 'UPDATE', 'DELETE', 'TRUNCATE')
+          AND NOT c.relrowsecurity
+        GROUP BY c.relname, c.relrowsecurity
+        ORDER BY c.relname`,
+      schema,
+    )
+    // A dev/CI database may have no PostgREST roles at all. "The role does not
+    // exist" is not "the check passed" — say which one it is.
+    rolesExist = await db.$queryRawUnsafe<Array<{ ok: boolean }>>(
+      `SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') AS ok`,
+    )
+  } catch (err) {
+    return {
+      ...base,
+      status: 'fail',
+      message: 'Could not read which tables an unauthenticated caller can write, so route protection is unverified',
+      details: [`⚠ ${sanitizeDiagnostic(err) || 'Unknown error'}`],
+      fixApplied: false,
+    }
+  }
 
   if (!rolesExist[0]?.ok) {
     return {
@@ -724,13 +746,12 @@ async function checkBehavioralVerification(projectId: string): Promise<Readiness
 
 /**
  * CHECK 7b — end_user_auth_table (blocking)
- * If the project has auth enabled (jwtSecret set + authManifest.enabled), the
- * workspace must contain a `users` table. Without it, end-user sign-up/sign-in
- * will fail with a SQL error at runtime.
+ * Whether end-user auth is on, and its `users` table ready. A table not created
+ * yet is not a failure: the first sign-up creates it.
  */
 async function checkEndUserAuthTable(
   projectId: string,
-  project: { jwtSecret: string | null; authManifest: any },
+  project: { authManifest: any },
 ): Promise<ReadinessCheck> {
   const base: Omit<ReadinessCheck, 'status' | 'message' | 'details' | 'fixApplied'> = {
     id: 'end_user_auth_table',
@@ -739,14 +760,20 @@ async function checkEndUserAuthTable(
     severity: 'blocking',
   }
 
-  const jwtReady = !!project.jwtSecret && project.jwtSecret.length >= 32
-  const manifestEnabled = (project.authManifest as any)?.enabled === true
-  const authEnabled = jwtReady && manifestEnabled
+  // Whether auth is on, as every other surface says it (isEndUserAuthEnabled).
+  // This read `authManifest.enabled`, which nothing that enables auth sets, so
+  // after the first sign-up every auth project failed here until a person
+  // pressed Apply safe fixes, and before it the check said auth was off.
+  const { isEndUserAuthEnabled } = await import('@/lib/services/auth-status')
+  const authEnabled = await isEndUserAuthEnabled(projectId, project.authManifest)
 
   const schemaName = `workspace_${projectId}`
 
   try {
-    const rows = await prisma.$queryRawUnsafe<{ count: string }[]>(
+    // In the project's region, which holds its schema: asked of the home
+    // database, a regional project's users table was always missing.
+    const db = await workspaceRawClient(projectId)
+    const rows = await db.$queryRawUnsafe<{ count: string }[]>(
       `SELECT COUNT(*)::text AS count
          FROM information_schema.tables
         WHERE table_schema = $1
@@ -755,29 +782,6 @@ async function checkEndUserAuthTable(
     )
     const usersTableExists = parseInt(rows[0]?.count ?? '0', 10) > 0
 
-    // Auth manifest flag not set but users table + jwtSecret already exist → auto-correct the flag.
-    // This happens when Google OAuth is connected but the AI build flow skipped the manifest write.
-    if (!authEnabled && jwtReady && usersTableExists) {
-      try {
-        const existing = (typeof project.authManifest === 'object' && project.authManifest !== null)
-          ? (project.authManifest as Record<string, unknown>)
-          : {}
-        await prisma.project.update({
-          where: { id: projectId },
-          data: { authManifest: { ...existing, enabled: true } },
-        })
-      } catch { /* non-fatal — check still passes below */ }
-
-      return {
-        ...base,
-        status: 'pass',
-        message: `workspace_${projectId}.users table exists — authManifest.enabled auto-corrected`,
-        details: ['✓ Auth manifest was missing enabled:true — auto-set because users table and jwtSecret exist'],
-        fixApplied: true,
-      }
-    }
-
-    // Auth is intentionally not enabled and no users table → skip (not a problem)
     if (!authEnabled) {
       return {
         ...base,
@@ -789,25 +793,24 @@ async function checkEndUserAuthTable(
       }
     }
 
-    // Auth is enabled — users table must exist
     if (usersTableExists) {
       return {
         ...base,
         status: 'pass',
-        message: `workspace_${projectId}.users table exists — end-user auth is ready`,
+        message: 'The users table exists — end-user auth is ready',
         details: [],
         fixApplied: false,
       }
     }
 
+    // Not a defect: sign-up, OAuth sign-in and enabling auth each create the
+    // table, with its policy, on first use (ensureAuthUsersTable). Auth
+    // enabled before that happened has none until someone signs up.
     return {
       ...base,
-      status: 'fail',
-      message: 'Auth is enabled but the workspace `users` table does not exist',
-      details: [
-        '✗ Sign-up and sign-in routes will fail with a table-not-found error',
-        '→ Ask the AI to "set up user authentication" or re-run the build to create the users table',
-      ],
+      status: 'pass',
+      message: 'End-user auth is on — the users table is created on the first sign-up',
+      details: [],
       fixApplied: false,
     }
   } catch (err: any) {
@@ -934,7 +937,7 @@ async function checkSecurityAudit(projectId: string): Promise<ReadinessCheck> {
  *
  * Placeholder functions with active triggers are auto-deactivated.
  */
-async function checkFunctionTriggers(projectId: string): Promise<ReadinessCheck> {
+async function checkFunctionTriggers(projectId: string, autoFix: boolean): Promise<ReadinessCheck> {
   const base: Omit<ReadinessCheck, 'status' | 'message' | 'details' | 'fixApplied'> = {
     id: 'function_triggers',
     name: 'AI function trigger configuration',
@@ -979,14 +982,19 @@ async function checkFunctionTriggers(projectId: string): Promise<ReadinessCheck>
       }
     }
 
-    // Auto-deactivate placeholder functions that have live triggers
+    // Auto-deactivate placeholder functions that have live triggers, only
+    // when fixing was asked for: a read (autoFix false) reports and changes nothing.
     let fixApplied = false
-    if (toDeactivate.length > 0) {
+    if (toDeactivate.length > 0 && !autoFix) {
+      issues.push(`→ Applying safe fixes deactivates ${toDeactivate.length} placeholder function${toDeactivate.length !== 1 ? 's' : ''} with live triggers`)
+    }
+    if (toDeactivate.length > 0 && autoFix) {
       try {
-        await prisma.aiFunction.updateMany({
-          where: { id: { in: toDeactivate } },
+        const { governedChange } = await import('@/lib/changes/ledger')
+        await governedChange(projectId, `Switch off ${toDeactivate.length === 1 ? 'a placeholder function' : `${toDeactivate.length} placeholder functions`} with live triggers`, () => prisma.aiFunction.updateMany({
+          where: { id: { in: toDeactivate }, projectId },
           data: { status: 'inactive' },
-        })
+        }))
         fixApplied = true
         issues.push(`✓ Auto-deactivated ${toDeactivate.length} placeholder function${toDeactivate.length !== 1 ? 's' : ''} that had live triggers`)
       } catch { /* non-fatal */ }

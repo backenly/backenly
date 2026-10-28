@@ -7,8 +7,11 @@
  *   AI_TOTAL_MONTHLY_HARD_LIMIT_USD   every call, whoever pays. On Backenly
  *                                     Cloud this protects the AWS credits.
  *   AI_PLATFORM_MONTHLY_BUDGET_USD    calls the deployment pays for itself
- *                                     (autonomy investigations), as opposed
- *                                     to calls billed to a customer.
+ *                                     (autonomy investigations and support
+ *                                     first responses), as opposed to calls
+ *                                     billed to a customer. Autonomy can use
+ *                                     it all up; support cases then get no
+ *                                     instant answer (aiError spend_limit).
  *
  * Before a call, its worst case (estimated prompt plus the full output
  * ceiling) is reserved against each limit with one conditional update, so
@@ -41,9 +44,13 @@ export type Payer = 'customer' | 'platform'
 export type SpendScope = 'total' | 'platform'
 export type Settlement = 'settled' | 'released' | 'unknown'
 
-/** Who pays for a purpose unless the call says otherwise. */
+/**
+ * Who pays for a purpose unless the call says otherwise. Autonomy and support
+ * are the deployment's own work: healing a backend and answering a support
+ * case must never spend the customer's plan credits.
+ */
 export function defaultPayer(purpose: AiPurpose): Payer {
-  return purpose.startsWith('autonomy.') ? 'platform' : 'customer'
+  return purpose.startsWith('autonomy.') || purpose.startsWith('support.') ? 'platform' : 'customer'
 }
 
 export interface SpendLimits {

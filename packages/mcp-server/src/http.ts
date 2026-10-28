@@ -8,9 +8,14 @@
  *
  * Retry strategy:
  *   - GET requests retry on network errors and any 5xx.
- *   - POST requests retry only on 502 / 503 / 504 (the gateway / overload
- *     responses), NOT on 5xx-with-body — those probably did partial work
- *     and replaying would double-execute.
+ *   - POST requests NEVER auto-retry. A 504 means the gateway stopped
+ *     waiting, not that the server stopped working: backend_chat keeps
+ *     applying changes for up to 90 s, and a resent body launches a second
+ *     run on the same project (duplicate tables, triggers, migrations). A
+ *     network error on a POST is equally ambiguous — the connection can die
+ *     after the request was delivered. The error is surfaced with its status
+ *     and detail so the agent can read state and decide; the remote transport
+ *     and the CLI already behave this way.
  *   - 3 attempts max, 250ms / 1s / 3s delays (with jitter).
  */
 
@@ -19,7 +24,6 @@ import type { Config } from './config.js'
 
 const MAX_ATTEMPTS = 3
 const RETRY_DELAYS_MS = [250, 1_000, 3_000]
-const RETRY_STATUSES_POST = new Set([502, 503, 504])
 
 /**
  * A failed request to backenly.com. Carries the HTTP `status` (undefined for a
@@ -137,7 +141,10 @@ export class BackenlyClient {
           `Could not reach Backenly at ${this.cfg.endpoint}: ${err instanceof Error ? err.message : String(err)}`,
           { code: 'NETWORK' },
         )
-        if (attempt < MAX_ATTEMPTS - 1) {
+        // Only GETs retry here: a POST's connection can die AFTER the request
+        // was delivered, and the mutation may be running to completion
+        // server-side. Resending it is how one long backend_chat became three.
+        if (method === 'GET' && attempt < MAX_ATTEMPTS - 1) {
           await sleep(jitter(RETRY_DELAYS_MS[attempt]))
           continue
         }
@@ -152,17 +159,17 @@ export class BackenlyClient {
         return (parsed ?? {}) as T
       }
 
-      // Decide whether to retry. GET → any 5xx is fair game. POST → only the
-      // gateway-flavor 5xx, never a 500-from-app since the request may have
-      // mutated state already.
+      // Decide whether to retry. GET → any 5xx is fair game. POST → never:
+      // a 502/503/504 is the gateway giving up on a request the server may
+      // still be executing (the brain runs up to 90 s), so a resend
+      // double-executes the mutation.
       // A paused project answers 503 but will keep answering it until a person
       // resumes the project, so retrying only delays telling the agent why.
       const paused = parsed?.code === 'PROJECT_PAUSED'
       const retryable =
         !paused &&
         attempt < MAX_ATTEMPTS - 1 &&
-        ((method === 'GET' && response.status >= 500 && response.status < 600) ||
-          (method === 'POST' && RETRY_STATUSES_POST.has(response.status)))
+        method === 'GET' && response.status >= 500 && response.status < 600
 
       // `summary` is read too. The tool endpoint used to report a failure's
       // reason ONLY in `summary`, so reading just error/message produced

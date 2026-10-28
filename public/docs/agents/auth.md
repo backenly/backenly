@@ -12,14 +12,15 @@ Call as `auth { action: "<action>", … }`.
 | Action | What it does | Needs | Read-only key | Approval |
 | --- | --- | --- | --- | --- |
 | `enable` | turn on email + password sign-up with JWT sessions | nothing | no | no |
-| `add_oauth_provider` | Google, GitHub, Discord, Facebook or Apple sign-in, with the provider's clientId and clientSecret | `provider` | no | no |
+| `add_oauth_provider` | Google, GitHub, Discord or Facebook sign-in, with the provider's clientId and clientSecret | `provider` | no | no |
 | `remove_oauth_provider` | turn a sign-in provider off | `provider` | no | waits for a human |
 | `list_users` | the end-users who have signed up | nothing | yes | no |
 | `reset_password` | send a password reset to one user (userId or email) | nothing | no | no |
-| `block_user` | stop one user from signing in | nothing | no | waits for a human |
-| `unblock_user` | let a blocked user sign in again | nothing | no | no |
+| `block_user` | stop one user from signing in | `userId or email` | no | waits for a human |
+| `unblock_user` | let a blocked user sign in again | `userId or email` | no | no |
 | `enable_teams` | organizations with members and roles | nothing | no | no |
-| `email_settings` | how verification and password-reset emails are sent, whether the last test worked, and the templates | nothing | yes | no |
+| `email_settings` | how verification and password-reset emails are sent, whether the last test worked, the templates, and the sign-in email policy | nothing | yes | no |
+| `set_email_policy` | the app name and URL auth emails link to, whether sign-in requires a verified email (needs a working sender first), and whether magic links are on | nothing | no | no |
 | `set_smtp` | the SMTP server auth emails are sent through (the password is stored encrypted and never returned) | `host`, `port`, `username`, `fromAddress` | no | no |
 | `test_smtp` | send one real test email and record whether it arrived at the server | `to` | no | no |
 | `remove_smtp` | remove the SMTP settings | nothing | no | waits for a human |
@@ -35,15 +36,16 @@ Relative to `https://backenly.com/api/v1/{projectId}`, with `x-api-key: <project
 
 | Method | Path | Body / notes |
 | --- | --- | --- |
-| POST | `/auth/signup` | `{ email, password, name? }` returns `{ user, accessToken, refreshToken }` |
-| POST | `/auth/signin` | `{ email, password }` returns `{ user, accessToken, refreshToken }` |
-| POST | `/auth/refresh-token` | `{ refreshToken }` returns `{ accessToken, refreshToken }` |
-| POST | `/auth/logout` | `X-User-Token` required; revokes the session |
+| POST | `/auth/signup` | `{ email, password, name? }` returns `{ data: { user, token } }` |
+| POST | `/auth/signin` | `{ email, password }` returns `{ data: { user, token } }` |
+| POST | `/auth/refresh-token` | current token as `Authorization: Bearer <token>` (or `{ token }`) returns `{ data: { token, user } }` — there is no separate refresh token |
+| POST | `/auth/logout` | current token as `Authorization: Bearer <token>` (or `{ token }`); revokes it. Always answers 200 |
 | POST | `/auth/forgot-password` | `{ email }`, always 200 (no account enumeration) |
 | POST | `/auth/reset-password` | `{ token, password }` |
-| GET | `/auth/me` | `X-User-Token` required; the current end-user |
-| GET | `/auth/{provider}?redirect_to=…` | OAuth start; redirects back to `redirect_to` with the tokens |
+| GET | `/auth/{provider}?redirect_to=…` | OAuth start; redirects back to `redirect_to` with `?token=…&user_id=…` |
 | POST | `/auth/magic-link` | `{ email, redirectTo? }` emails a one-time sign-in link |
 | POST | `/auth/verify-email` | `{ token }` |
 
-Send the access token as `X-User-Token` on data requests; that is what row-level security reads. `users` is never served through `/db/users`.
+Send the access token as `X-User-Token` on data requests; that is what row-level security reads. There is no `/auth/me`: the signup/signin/refresh responses carry the `user` object, and the token's claims carry `userId`. `users` is never served through `/db/users`.
+
+OAuth `redirect_to` only redirects to a **connected frontend origin** — connect it first with `connect { "action": "connect_frontend", "url": "…" }`. An unconnected origin never receives a token: the OAuth start refuses with `REDIRECT_NOT_ALLOWED` so the failure is visible on your screen, not after the provider round-trip.

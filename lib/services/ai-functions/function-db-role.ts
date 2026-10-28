@@ -16,11 +16,18 @@
  * app's connection: a function whose login cannot be established fails with
  * FUNCTION_DB_ROLE_UNAVAILABLE, because running it anyway is the exposure this
  * exists to close.
+ *
+ * The role, its grants and the login all live in the database holding the
+ * project's schema, in the project's region (lib/data-plane/regional.ts). A
+ * project in a region this process cannot reach fails with
+ * REGION_NOT_CONFIGURED; it is never tried against another region's database.
  */
 
 import { createHash, createHmac } from 'crypto'
 import { PrismaClient } from '@prisma/client'
-import { prisma } from '@/lib/db/prisma'
+import { projectDatabaseUrl, regionRawClient, workspaceRawClient } from '@/lib/data-plane/regional'
+import { withoutStatementCache } from '@/lib/data-plane/statement-cache'
+import { HOME_REGION, type CloudRegionId } from '@/lib/regions'
 import { resolveWorkspaceSchema } from '@/lib/services/workspace-pool'
 
 export interface FunctionDbHandle {
@@ -59,10 +66,17 @@ export function functionRolePassword(schema: string): string {
   return createHmac('sha256', derivationKey()).update(`backenly:function-db-role:v1:${schema}`).digest('base64url')
 }
 
-/** The app's own URL with the function login swapped in and a small pool. */
-export function functionDatabaseUrl(role: string, password: string, base = process.env.DATABASE_URL): string {
-  if (!base) throw new FunctionDbRoleUnavailableError('DATABASE_URL is not set')
-  const url = new URL(base)
+/**
+ * The project's own database URL (lib/data-plane/regional.ts) with the function
+ * login swapped in and a small pool. The base is required: a default would be
+ * the home region's database, which holds no schema for a project elsewhere.
+ *
+ * Prisma's statement cache is off, as on every client that runs workspace SQL:
+ * function code reads whole rows of tables whose columns change
+ * (lib/data-plane/statement-cache.ts).
+ */
+export function functionDatabaseUrl(role: string, password: string, base: string): string {
+  const url = new URL(withoutStatementCache(base))
   url.username = role
   url.password = password
   url.searchParams.set('connection_limit', '2')
@@ -70,13 +84,32 @@ export function functionDatabaseUrl(role: string, password: string, base = proce
   return url.toString()
 }
 
-/** Create or re-assert the role and its grants. Returns the role name. */
-async function syncRole(schema: string, password: string): Promise<string> {
+/**
+ * Create or re-assert the role and its grants, in the database holding the
+ * project's schema: roles and grants live in that cluster. Returns the role name.
+ */
+async function syncRole(projectId: string, schema: string, password: string): Promise<string> {
+  // Outside the try: a region this process cannot reach is its own error, not
+  // a missing helper.
+  const db = await workspaceRawClient(projectId)
+  const sync = () => db.$queryRaw<Array<{ role: string }>>`
+    SELECT public.backenly_fn_role_sync(${schema}, ${password}) AS role
+  `
   let role: string | undefined
   try {
-    const rows = await prisma.$queryRaw<Array<{ role: string }>>`
-      SELECT public.backenly_fn_role_sync(${schema}, ${password}) AS role
-    `
+    let rows: Array<{ role: string }>
+    try {
+      rows = await sync()
+    } catch (err: any) {
+      // Two processes' first calls of a project's functions at once both find
+      // no role and both create it, or both alter it: the second loses on the
+      // catalog's unique index (23505, or 42710 once the first has committed)
+      // or on the row ("tuple concurrently updated"), and its call answered
+      // 500. Found by fuzzing the data API. Once more, the role exists and the
+      // sync only re-asserts it.
+      if (!/23505|42710|already exists|tuple concurrently updated/.test(String(err?.message ?? err))) throw err
+      rows = await sync()
+    }
     role = rows[0]?.role
   } catch (err: any) {
     const message = String(err?.message ?? err)
@@ -94,9 +127,13 @@ async function syncRole(schema: string, password: string): Promise<string> {
   return role
 }
 
-/** Whether scripts/sql/function-roles.sql is installed. A catalog probe, so nothing logs an error. */
-export async function functionRoleHelperInstalled(): Promise<boolean> {
-  const rows = await prisma.$queryRaw<Array<{ ok: boolean }>>`
+/**
+ * Whether scripts/sql/function-roles.sql is installed in a region's database
+ * (home by default; each region needs its own copy). A catalog probe, so
+ * nothing logs an error.
+ */
+export async function functionRoleHelperInstalled(region: CloudRegionId = HOME_REGION): Promise<boolean> {
+  const rows = await regionRawClient(region).$queryRaw<Array<{ ok: boolean }>>`
     SELECT to_regprocedure('public.backenly_fn_role_sync(text, text)') IS NOT NULL AS ok
   `
   return rows[0]?.ok === true
@@ -108,10 +145,11 @@ export async function provisionFunctionRole(projectId: string): Promise<{ role: 
   if (!SCHEMA_RE.test(schema)) {
     throw new FunctionDbRoleUnavailableError(`"${schema}" is not a workspace schema`)
   }
-  const rows = await prisma.$queryRaw<Array<{ n: number }>>`
+  const db = await workspaceRawClient(projectId)
+  const rows = await db.$queryRaw<Array<{ n: number }>>`
     SELECT count(*)::int AS n FROM pg_roles WHERE rolname = ${functionRoleName(schema)}
   `
-  const role = await syncRole(schema, functionRolePassword(schema))
+  const role = await syncRole(projectId, schema, functionRolePassword(schema))
   return { role, existed: (rows[0]?.n ?? 0) > 0 }
 }
 
@@ -127,6 +165,8 @@ const IDLE_MS = 10 * 60 * 1000
 
 interface Entry { handle: FunctionDbHandle; syncedAt: number; usedAt: number }
 const clients = new Map<string, Entry>()
+/** A sync under way for a schema, which a call arriving meanwhile waits on. */
+const syncing = new Map<string, Promise<FunctionDbHandle>>()
 
 function evict(schema: string): void {
   const entry = clients.get(schema)
@@ -160,19 +200,35 @@ export async function functionDbClient(projectId: string): Promise<FunctionDbHan
     return cached.handle
   }
 
-  const password = functionRolePassword(schema)
-  const role = await syncRole(schema, password)
-  if (cached) {
-    cached.syncedAt = now
-    cached.usedAt = now
-    return cached.handle
-  }
+  // Calls that arrive together share one sync and one client. Each used to run
+  // its own: the syncs raced on the same role (one answered 500, found by
+  // fuzzing the data API), and each built a client, the last one replacing the
+  // others without closing them.
+  const inFlight = syncing.get(schema)
+  if (inFlight) return inFlight
+  const run = (async () => {
+    const password = functionRolePassword(schema)
+    const role = await syncRole(projectId, schema, password)
+    if (cached) {
+      cached.syncedAt = now
+      cached.usedAt = now
+      return cached.handle
+    }
 
-  evictIdleAndOverflow()
-  const client = new PrismaClient({ datasourceUrl: functionDatabaseUrl(role, password) })
-  const handle = { client, schema, role }
-  clients.set(schema, { handle, syncedAt: now, usedAt: now })
-  return handle
+    evictIdleAndOverflow()
+    const client = new PrismaClient({
+      datasourceUrl: functionDatabaseUrl(role, password, await projectDatabaseUrl(projectId)),
+    })
+    const handle = { client, schema, role }
+    clients.set(schema, { handle, syncedAt: now, usedAt: now })
+    return handle
+  })()
+  syncing.set(schema, run)
+  try {
+    return await run
+  } finally {
+    syncing.delete(schema)
+  }
 }
 
 /**

@@ -39,6 +39,7 @@ import {
 import { PAGE_GUTTER, PAGE_WIDTH } from '@/components/console/tokens'
 import { ClientKeysPanel } from '@/components/hub/ClientKeysPanel'
 import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
+import { regionLabel } from '@/lib/regions'
 
 type Tab = 'general' | 'keys' | 'access'
 
@@ -105,11 +106,15 @@ export default function ProjectSettingsPage() {
   )
 }
 
-/** The settings column: one readable width, left-aligned under the header. */
+/**
+ * The settings body. Each card is split from lg up: what the setting is on
+ * the left, the control on the right. A single 760px column used to sit under
+ * a 1200px header and leave the right of a wide screen empty.
+ */
 function SettingsColumn({ children }: { children: React.ReactNode }) {
   return (
-    <div className={`${PAGE_WIDTH} ${PAGE_GUTTER} pt-6`}>
-      <div className="max-w-[760px] space-y-5">{children}</div>
+    <div className={`${PAGE_WIDTH} ${PAGE_GUTTER} pt-8`}>
+      <div className="space-y-10">{children}</div>
     </div>
   )
 }
@@ -163,7 +168,17 @@ function GeneralTab({ projectId, onDeleted }: { projectId: string; onDeleted: ()
     }
   }
 
-  const apiBaseUrl = project?.apiUrlProd || project?.apiUrlStaging || project?.apiUrlDev || null
+  // The live base is {origin}/api/v1/{projectId}, where origin is the API
+  // address of the project's region: this console's own origin for the home
+  // region, the region's API service elsewhere. The server works it out
+  // (apiBaseUrl); this page's origin would be wrong for a project in another
+  // region. The old read keyed off apiUrlProd/Staging/Dev, columns nothing in
+  // the product ever writes (the console creates projects with a name only),
+  // so this row promised a value on first publish, forever, and publishing
+  // never set it either. An operator-supplied override still wins when one of
+  // those columns is actually filled.
+  const apiBaseUrl =
+    project?.apiUrlProd || project?.apiUrlStaging || project?.apiUrlDev || project?.apiBaseUrl || null
 
   const confirmDelete = async () => {
     if (deleteText !== (project?.name ?? '')) return
@@ -181,8 +196,15 @@ function GeneralTab({ projectId, onDeleted }: { projectId: string; onDeleted: ()
   if (loading) {
     return (
       <SettingsColumn>
-        <Skeleton className="h-[236px] w-full rounded-[10px]" />
-        <Skeleton className="h-[180px] w-full rounded-[10px]" />
+        {['h-[160px]', 'h-[180px]'].map((h) => (
+          <div key={h} className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,280px)_minmax(0,1fr)] lg:gap-10" aria-hidden>
+            <div className="hidden space-y-2 lg:block lg:pt-1">
+              <Skeleton className="h-[18px] w-28" />
+              <Skeleton className="h-[14px] w-52" />
+            </div>
+            <Skeleton className={`${h} w-full rounded-[10px]`} />
+          </div>
+        ))}
       </SettingsColumn>
     )
   }
@@ -191,6 +213,7 @@ function GeneralTab({ projectId, onDeleted }: { projectId: string; onDeleted: ()
     <SettingsColumn>
       {/* Identity */}
       <SettingsCard
+        layout="split"
         title="Project"
         description="How this project is named across the console, the project list and every receipt."
         onSubmit={save}
@@ -236,7 +259,7 @@ function GeneralTab({ projectId, onDeleted }: { projectId: string; onDeleted: ()
       </SettingsCard>
 
       {/* Connection facts */}
-      <SettingsCard title="Connection" description="The coordinates your agent or app uses to reach this backend.">
+      <SettingsCard layout="split" title="Connection" description="The coordinates your agent or app uses to reach this backend.">
         <DetailList>
           <DetailRow label="Project ID">
             <CopyField value={projectId} />
@@ -245,19 +268,21 @@ function GeneralTab({ projectId, onDeleted }: { projectId: string; onDeleted: ()
             {apiBaseUrl ? (
               <CopyField value={apiBaseUrl} />
             ) : (
-              <span className="text-zinc-500">Set when the project is first published</span>
+              <span className="text-faint">—</span>
             )}
           </DetailRow>
           <DetailRow label="Runs on">
-            {/* Honest per edition: Cloud runs one AWS region today; a
-                self-hosted deployment runs wherever its operator put it. */}
-            {CLOUD_CONTROL_PLANE ? 'Backenly Cloud, AWS ap-south-1' : 'This self-hosted deployment'}
+            {/* Honest per edition: a Cloud project's recorded region, null
+                being the home region (lib/regions.ts); a self-hosted
+                deployment runs wherever its operator put it. */}
+            {CLOUD_CONTROL_PLANE ? `Backenly Cloud, ${regionLabel(project?.region)}` : 'This self-hosted deployment'}
           </DetailRow>
         </DetailList>
       </SettingsCard>
 
       {/* Danger zone */}
       <SettingsCard
+        layout="split"
         danger
         title="Delete project"
         description={
@@ -377,6 +402,7 @@ function AccessTab({ projectId }: { projectId: string }) {
   return (
     <SettingsColumn>
       <SettingsCard
+        layout="split"
         title="Who can open this project"
         description={
           scopedCount > 0
@@ -391,7 +417,7 @@ function AccessTab({ projectId }: { projectId: string }) {
         }
       >
         {!data || data.members.length === 0 ? (
-          <p className="text-[13px] text-zinc-500">
+          <p className="text-[13px] text-faint">
             {data && !data.hasOrg
               ? 'This is a solo project; only you can open it. Invite teammates from the Members page to share access.'
               : "Couldn't load your organization roster. Manage people and roles on the Members page."}
@@ -406,9 +432,9 @@ function AccessTab({ projectId }: { projectId: string }) {
                     <div className="flex items-center gap-1.5">
                       <span className="truncate text-[13px] font-medium text-zinc-100">{m.name || m.email}</span>
                       {m.isOwner && <Crown className="h-3.5 w-3.5 flex-shrink-0 text-amber-300/80" aria-label="Owner" />}
-                      {m.userId === data.me?.userId && <span className="text-[12px] text-zinc-500">(you)</span>}
+                      {m.userId === data.me?.userId && <span className="text-[12px] text-faint">(you)</span>}
                     </div>
-                    {m.name && <p className="truncate text-[12px] text-zinc-500">{m.email}</p>}
+                    {m.name && <p className="truncate text-[12px] text-faint">{m.email}</p>}
                   </div>
                   <div className="flex flex-shrink-0 flex-wrap items-center gap-2.5">
                     {orgWide ? (
@@ -420,7 +446,7 @@ function AccessTab({ projectId }: { projectId: string }) {
                         <FolderLock className="h-3.5 w-3.5" /> This project
                       </span>
                     ) : (
-                      <span className="text-[12px] text-zinc-600">No access</span>
+                      <span className="text-[12px] text-faint">No access</span>
                     )}
 
                     {/* Grant / revoke for scoped members (owners/admins only) */}

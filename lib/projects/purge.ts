@@ -39,6 +39,7 @@ import { promises as fs } from 'fs'
 import * as path from 'path'
 import { workspaceRoot } from '@/lib/workspace/paths'
 import { assertValidProjectId } from '@/lib/security/workspace-schema'
+import { HOME_REGION, type CloudRegionId } from '@/lib/regions'
 
 /** Per-resource outcome. `alreadyAbsent` is a success, not a failure. */
 export type PurgeResourceStatus = 'purged' | 'alreadyAbsent' | 'skipped'
@@ -110,6 +111,13 @@ export interface PurgeOptions {
    * the retry target what the deletion targeted.
    */
   storageDriver?: string
+  /**
+   * The region the project's files and backups were kept in, captured with the
+   * job because no later read can recover it once the project's row is gone.
+   * The purge runs in that region (lib/queue/worker.ts processPurgeJobs), so
+   * its bucket and disks are this process's own. Omitted: the home region.
+   */
+  region?: CloudRegionId
 }
 
 // ─── Safety ──────────────────────────────────────────────────────────────────
@@ -191,18 +199,22 @@ async function removeDirectory(root: string, target: string): Promise<PurgeResou
  * Imported lazily so the local driver never loads the AWS SDK, and so a
  * deployment without S3 configured does not pay for it.
  */
-async function purgeS3Prefix(projectId: string): Promise<{ status: PurgeResourceStatus; deleted: number }> {
+async function purgeS3Prefix(
+  projectId: string,
+  region: CloudRegionId,
+): Promise<{ status: PurgeResourceStatus; deleted: number }> {
   const prefix = projectStoragePrefix(projectId)
   if (!prefix || prefix === '/' || prefix.length < 2) {
     throw new UnsafePurgeTargetError('computed storage prefix is too broad')
   }
 
-  const { isS3Configured, getS3Client, getS3Config } = await import('@/lib/services/s3-config')
+  const { isS3Configured, s3LocationFor } = await import('@/lib/services/s3-config')
   if (!isS3Configured()) return { status: 'skipped', deleted: 0 }
 
   const { ListObjectsV2Command, DeleteObjectsCommand } = await import('@aws-sdk/client-s3')
-  const client = getS3Client()
-  const { bucket } = getS3Config()
+  // The bucket of the region the files were kept in. Never this region's
+  // instead: an empty listing there would report a purge that did not happen.
+  const { client, bucket } = s3LocationFor(region)
 
   let deleted = 0
   let continuationToken: string | undefined
@@ -272,7 +284,7 @@ export async function purgeProjectExternals(
   const driver = options.storageDriver || storageDriver()
 
   if (driver === 's3') {
-    const result = await purgeS3Prefix(projectId)
+    const result = await purgeS3Prefix(projectId, options.region ?? HOME_REGION)
     storage = result.status
     objectsDeleted = result.deleted
   } else {

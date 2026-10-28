@@ -75,10 +75,10 @@ export const POST = withAuth(async (request: NextRequest, { user }) => {
   })
 
   // Distinguish:
-  //   200 → connected
+  //   200 → connected, or already connected
   //   202 → confirmation required (UI shows the prompt + "Type CONNECT")
-  //   400 → invalid URL
-  //   409 → backend not deployed / already connected (success:false from engine)
+  //   400 → malformed request body
+  //   409 → the engine refused (success:false, e.g. a URL it cannot normalize)
   const status = result.connected
     ? 200
     : result.requiresConfirmation

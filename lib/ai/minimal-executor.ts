@@ -8,16 +8,29 @@
  */
 
 import { isReservedWorkspaceTable } from '@/lib/security/workspace-schema'
+import type { RelatedRowsVia } from '@/lib/services/rls-ownership'
+import { addForeignKeySql, columnForeignKeySql, describeTarget, isDeclaredForeignKey } from '@/lib/db/declared-foreign-key'
 import { getActiveGraph, saveNewGraph } from '@/lib/orchestration/graph-pointer'
 import { withTimeout } from './with-timeout'
 import { trackAction } from './execution-timeline'
 import { classifyErrorCode } from '@/lib/errors/taxonomy'
-import { generateDomainEndpoints as _generateDomainEndpoints } from './build-runtime/domain-business-logic'
 import { USER_ROLE_ID_BASES as _SEMANTIC_USER_ROLE_ID_BASES, USER_SEMANTIC_COLS as _SEMANTIC_USER_COLS } from './semantic-relations'
 import { writeDecisionEntry, extractFkInferences } from '@/lib/memory/decision-memory'
 import { riskLevelForExecutorAction, queuePendingActionFinding } from '@/lib/operational-memory/ledger'
 import { plaintextForStorage } from '@/lib/auth/api-key-plaintext'
 import { chat } from '@/lib/ai/llm/chat'
+
+/**
+ * The project's own database, in its region (lib/data-plane/regional.ts), for
+ * the raw SQL on its workspace schema. Every executor below resolves it first,
+ * before any fail-soft catch, so a region this process cannot reach fails the
+ * action instead of reading as "no such table" or "no rows". Platform models
+ * stay on the shared `prisma` client.
+ */
+async function projectDb(projectId: string) {
+  const { workspaceRawClient } = await import('@/lib/data-plane/regional')
+  return workspaceRawClient(projectId)
+}
 
 export interface AIAction {
   /** Optional trace explaining why this action was chosen — aids debugging hallucinations */
@@ -42,7 +55,7 @@ export interface AIAction {
     // API
     | 'GENERATE_API' | 'LIST_APIS'
     // Storage
-    | 'CREATE_BUCKET' | 'DELETE_BUCKET' | 'UPLOAD_FILE' | 'LIST_FILES' | 'LIST_BUCKETS' | 'DELETE_FILE' | 'GENERATE_SIGNED_URL' | 'SET_BUCKET_PUBLIC'
+    | 'CREATE_BUCKET' | 'DELETE_BUCKET' | 'UPLOAD_FILE' | 'LIST_FILES' | 'LIST_BUCKETS' | 'DELETE_FILE' | 'GENERATE_SIGNED_URL' | 'SET_BUCKET_PUBLIC' | 'SET_BUCKET_POLICY'
     // Connect Frontend
     | 'CONNECT_FRONTEND' | 'DISCONNECT_FRONTEND' | 'LIST_CONNECTED_APPS'
     // Deploy
@@ -957,13 +970,13 @@ type RelEntry = {
  *           (fixes partial graphs, not just empty graphs)
  */
 export async function inferAndSaveRelationships(projectId: string): Promise<void> {
+  const db = await projectDb(projectId)
   try {
-    const { prisma } = await import('@/lib/db')
     const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
     const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
 
     // ── 1. Table names ─────────────────────────────────────────────────────────
-    const tableRows = await prisma.$queryRawUnsafe<{ table_name: string }[]>(
+    const tableRows = await db.$queryRawUnsafe<{ table_name: string }[]>(
       `SELECT table_name FROM information_schema.tables
        WHERE table_schema = $1 AND table_type = 'BASE TABLE'`,
       postgresSchema
@@ -972,7 +985,7 @@ export async function inferAndSaveRelationships(projectId: string): Promise<void
     if (tableNames.size === 0) return
 
     // ── Layer 1: Real FK constraints (authoritative) ───────────────────────────
-    const realFKRows = await prisma.$queryRawUnsafe<{
+    const realFKRows = await db.$queryRawUnsafe<{
       child_table: string; child_col: string
       parent_table: string; parent_col: string
     }[]>(
@@ -1005,7 +1018,7 @@ export async function inferAndSaveRelationships(projectId: string): Promise<void
     }))
 
     // ── All columns (needed for layers 2a–2d) ─────────────────────────────────
-    const allCols = await prisma.$queryRawUnsafe<{
+    const allCols = await db.$queryRawUnsafe<{
       table_name: string; column_name: string
     }[]>(
       `SELECT table_name, column_name
@@ -1201,6 +1214,7 @@ export async function inferAndSaveRelationships(projectId: string): Promise<void
  * EXPORTED for use by intent planner
  */
 export async function introspectSchema(projectId: string): Promise<string> {
+  const db = await projectDb(projectId)
   try {
     const { prisma } = await import('@/lib/db')
     const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
@@ -1219,7 +1233,7 @@ export async function introspectSchema(projectId: string): Promise<string> {
     // as product tables in prisma.table (the bug that leaked auth-runtime tables
     // into the dashboard count, gave them generated REST APIs, and exposed them).
     const AI_CONTEXT_SKIP_PREFIXES = ['audit_log', 'email_event', 'sms_event']
-    const liveTables = await prisma.$queryRawUnsafe<{ table_name: string }[]>(
+    const liveTables = await db.$queryRawUnsafe<{ table_name: string }[]>(
       `SELECT table_name FROM information_schema.tables
        WHERE table_schema = $1 AND table_type = 'BASE TABLE'
        ORDER BY table_name`,
@@ -1260,7 +1274,7 @@ export async function introspectSchema(projectId: string): Promise<string> {
     // Pre-fetch all FK relationships for the schema in one query
     let fkMap: Map<string, Map<string, string>> = new Map()
     try {
-      const fkRows = await prisma.$queryRawUnsafe<any[]>(
+      const fkRows = await db.$queryRawUnsafe<any[]>(
         `SELECT
            kcu.table_name,
            kcu.column_name,
@@ -1288,7 +1302,7 @@ export async function introspectSchema(projectId: string): Promise<string> {
       const tableName = table.table_name
       try {
         // Get basic column information
-        const columns = await prisma.$queryRawUnsafe<any[]>(
+        const columns = await db.$queryRawUnsafe<any[]>(
           `SELECT
             column_name,
             data_type,
@@ -1411,6 +1425,7 @@ export async function extractAction(
   conversationHistory?: Array<{ role: 'user' | 'ai'; content: string }>,
   semanticEnrichment?: string,
 ): Promise<AIAction> {
+  const db = await projectDb(projectId)
   // Normalize input before parsing
   const normalizedMessage = normalizeUserInput(userMessage)
   
@@ -1427,7 +1442,6 @@ export async function extractAction(
     if (tableMatch) {
       const tableName = tableMatch[1]
       try {
-        const { prisma } = await import('@/lib/db')
         const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
         const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
         
@@ -1444,7 +1458,7 @@ export async function extractAction(
           ORDER BY ordinal_position
         `
         
-        const columns: any[] = await prisma.$queryRawUnsafe(columnsQuery, postgresSchema, tableName)
+        const columns: any[] = await db.$queryRawUnsafe(columnsQuery, postgresSchema, tableName)
         
         if (columns.length > 0) {
           const requiredFields = columns
@@ -1495,6 +1509,7 @@ API:
 STORAGE:
 - CREATE_BUCKET - Create storage bucket
 - SET_BUCKET_PUBLIC - Make bucket public/private
+- SET_BUCKET_POLICY - Set a bucket's access policy (public_read | cdn_cacheable | private | owner_only)
 - LIST_BUCKETS - List all storage buckets
 - UPLOAD_FILE - Upload file to bucket
 - LIST_FILES - List files in bucket
@@ -1503,19 +1518,19 @@ STORAGE:
 - GENERATE_SIGNED_URL - Generate signed URL for file
 
 CONNECT FRONTEND:
-- CONNECT_FRONTEND - Connect a frontend URL to this deployed backend (deployment-gated, confirmation-gated)
+- CONNECT_FRONTEND - Connect a frontend URL to this backend (confirmation-gated; works before a first publish)
 - DISCONNECT_FRONTEND - Disconnect a previously-connected frontend (confirmation-gated)
 - LIST_CONNECTED_APPS - List frontends connected to this backend
 
 DEPLOY:
 - TRIGGER_DEPLOY - Deploy backend to cloud
-- ROLLBACK_DEPLOY - Rollback to previous deployment
+- ROLLBACK_DEPLOY - Ask a person to restore the backend to a published version (never runs here)
 - GET_DEPLOY_STATUS - Get deployment status
 - SET_ENV_VAR - Set environment variable
 
 AUTH:
 - ENABLE_AUTH - Enable authentication (email/password)
-- ADD_PROVIDER - Add an OAuth sign-in provider (Google, GitHub, Discord, Facebook, Apple)
+- ADD_PROVIDER - Add an OAuth sign-in provider (Google, GitHub, Discord, Facebook)
 - DISABLE_PROVIDER - Disable an OAuth sign-in provider (keeps stored credentials)
 - LIST_USERS - List the project's end-users (people who signed up via the project's auth)
 - BLOCK_USER - Block an end-user from signing in
@@ -1541,7 +1556,6 @@ IAM (API KEYS):
 MONITORING:
 - GET_METRICS - Get API metrics
 - GET_ERRORS - Get error logs
-- SET_ALERT - Set monitoring alert
 - GET_USAGE - Get usage statistics
 
 TRIGGERS (event automation — "when X happens, do Y automatically"):
@@ -1948,6 +1962,7 @@ export async function validateAction(
   action: AIAction,
   projectId: string
 ): Promise<ValidationResult> {
+  const db = await projectDb(projectId)
   const errors: string[] = []
   const warnings: string[] = []
   let preview = ''
@@ -2001,7 +2016,6 @@ export async function validateAction(
       } else {
         // CHECK: Does column already exist?
         try {
-          const { prisma } = await import('@/lib/db')
           const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
           const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
           
@@ -2011,7 +2025,7 @@ export async function validateAction(
             WHERE table_schema = $1 AND table_name = $2 AND column_name = $3
           `
           
-          const existingColumn: any[] = await prisma.$queryRawUnsafe(
+          const existingColumn: any[] = await db.$queryRawUnsafe(
             columnCheckQuery,
             postgresSchema,
             action.params.tableName,
@@ -2119,6 +2133,16 @@ export async function validateAction(
       preview = `Make bucket "${action.params.bucketName}" ${action.params.isPublic ? 'public' : 'private'}`
       break
 
+    case 'SET_BUCKET_POLICY':
+      if (!action.params.bucketName) {
+        errors.push('Bucket name is required')
+      }
+      if (!action.params.policy) {
+        errors.push('policy is required (public_read | cdn_cacheable | private | owner_only)')
+      }
+      preview = `Set bucket "${action.params.bucketName}" access policy to ${action.params.policy}`
+      break
+
     case 'DELETE_BUCKET':
       if (!action.params.bucketName) {
         errors.push('Bucket name is required')
@@ -2159,7 +2183,7 @@ export async function validateAction(
 
     case 'ROLLBACK_DEPLOY':
       preview = action.params.version ? `Rollback to v${action.params.version}` : 'Rollback to previous deployment'
-      warnings.push('Live consumers will see the older schema immediately')
+      warnings.push('Moves the recorded current version only; the live schema, data and functions do not change')
       break
 
     case 'GET_READINESS':
@@ -2919,6 +2943,7 @@ async function verifyExecution(
   result: ExecutionResult,
   projectId: string
 ): Promise<ExecutionResult> {
+  const db = await projectDb(projectId)
   // Only verify if execution succeeded
   if (!result.success) return result
   
@@ -2930,7 +2955,7 @@ async function verifyExecution(
     switch (action.action) {
       case 'CREATE_TABLE': {
         // Verify table exists in DB
-        const tableCheck = await prisma.$queryRawUnsafe<any[]>(
+        const tableCheck = await db.$queryRawUnsafe<any[]>(
           `SELECT table_name FROM information_schema.tables WHERE table_schema = $1 AND table_name = $2`,
           postgresSchema,
           action.params.tableName
@@ -2967,7 +2992,7 @@ async function verifyExecution(
 
       case 'ADD_COLUMN': {
         // Verify column exists
-        const columnCheck = await prisma.$queryRawUnsafe<any[]>(
+        const columnCheck = await db.$queryRawUnsafe<any[]>(
           `SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2 AND column_name = $3`,
           postgresSchema,
           action.params.tableName,
@@ -3104,6 +3129,33 @@ async function _writeDecisionMemory(action: AIAction, projectId: string): Promis
   })
 }
 
+/**
+ * Actions that can change a workspace's schema, and are therefore governed
+ * changes (lib/changes/ledger.ts): a checkpoint before them, protected
+ * verification after. One that turns out to change nothing leaves no record,
+ * so an action that only sometimes alters the schema belongs here.
+ */
+const GOVERNED_ACTIONS = new Set<AIAction['action']>([
+  'CREATE_TABLE', 'CREATE_JUNCTION_TABLE', 'ADD_COLUMN', 'DROP_COLUMN', 'DROP_TABLE',
+  'RENAME_COLUMN', 'ADD_CONSTRAINT', 'VALIDATE_CONSTRAINT', 'CREATE_INDEX', 'DROP_INDEX',
+  'ALTER_COLUMN_TYPE', 'ENABLE_AUTH', 'ENABLE_TEAMS', 'ENABLE_VECTOR_SEARCH', 'ADD_FULLTEXT_SEARCH',
+  'SET_PERMISSION', 'REMOVE_PERMISSION', 'ENABLE_REALTIME', 'DISABLE_REALTIME',
+  'CREATE_TRIGGER', 'DELETE_TRIGGER', 'SYNC_COLUMN', 'REMOVE_SYNC_COLUMN',
+  'FIX_TABLE', 'FIX_AUTH', 'FIX_REALTIME', 'REGISTER_TABLE', 'RUN_DATA_MIGRATION',
+  // Creates the table first when it is missing.
+  'GENERATE_API',
+  // The rest of the backend is one history with the schema (lib/changes/resources).
+  // Actions that ask a model for code first are governed around their write
+  // only, so the change lock is never held while a model is answering:
+  // CREATE_AI_FUNCTION, FIX_AI_FUNCTION, CREATE_CRON_JOB, GENERATE_FUNCTION,
+  // GENERATE_DOMAIN_LOGIC.
+  'CREATE_BUCKET', 'SET_BUCKET_PUBLIC', 'SET_BUCKET_POLICY', 'DELETE_BUCKET', 'FIX_STORAGE',
+  'DELETE_AI_FUNCTION', 'TOGGLE_AI_FUNCTION', 'DELETE_CRON_JOB',
+  'ROTATE_WEBHOOK_SECRET', 'SET_ENV_VAR', 'DELETE_ENV_VAR',
+  'CREATE_KEY', 'REVOKE_KEY', 'ROTATE_KEY', 'SET_KEY_PERMISSIONS', 'SET_RATE_LIMIT', 'REMOVE_RATE_LIMIT',
+  'ADD_PROVIDER', 'DISABLE_PROVIDER', 'STORE_INTEGRATION_KEY', 'REMOVE_INTEGRATION_KEY',
+])
+
 export async function executeAction(
   action: AIAction,
   projectId: string,
@@ -3113,6 +3165,102 @@ export async function executeAction(
   // Autonomy auto-fixes run a single deterministic buildFixAction and must NOT
   // be LLM-replanned into a different action — replanning a failed CREATE_INDEX
   // into a no-op INFO reported a fix that never happened. Chat keeps replanning.
+  allowReplan: boolean = true,
+): Promise<ExecutionResult> {
+  const run = () => executeActionUnrecorded(action, projectId, apiKey, retryCount, executionId, allowReplan)
+  if (!GOVERNED_ACTIONS.has(action.action)) return run()
+
+  // A governed change: checkpoint first, protected verification after, and a
+  // recovery if it fails (lib/changes/ledger.ts). Inside an apply_migration or
+  // a merge this joins that change instead of opening its own (one migration,
+  // one checkpoint), and reports what it did for that change's verification.
+  const { withGovernedChange, expectEffect } = await import('@/lib/changes/ledger')
+  const { ChangeInProgressError } = await import('@/lib/changes/lock')
+  const recorded = async () => {
+    const r = await run()
+    if (r.success) for (const e of expectationsFor(action)) expectEffect(projectId, e)
+    return r
+  }
+  try {
+    const { result, change } = await withGovernedChange(
+      { projectId, title: describeActionForLedger(action) },
+      recorded,
+      (r) => ({
+        ok: r.success,
+        ...(r.success ? {} : { error: r.error ?? r.message }),
+        steps: [{ statement: describeActionForLedger(action), tool: action.action, summary: r.message?.slice(0, 500), ok: r.success }],
+      }),
+    )
+    if (change?.recovery) {
+      // It ran, failed protected verification or failed part-way, and Backenly
+      // acted on that. The caller hears what is true now, not "success".
+      const failing = change.verification?.checks.find((c) => c.outcome === 'contradicted')
+      return {
+        ...result,
+        success: false,
+        message:
+          `${change.summary}: ${failing ? `failed production verification (${failing.label.toLowerCase()}: ${failing.detail}). ` : 'failed part-way. '}` +
+          change.recovery.explanation,
+        error: `CHANGE_${change.status.toUpperCase()}`,
+        code: `CHANGE_${change.status.toUpperCase()}`,
+        change: { id: change.id, seq: change.seq, status: change.status },
+      } as ExecutionResult
+    }
+    return change ? ({ ...result, change: { id: change.id, seq: change.seq, status: change.status } } as ExecutionResult) : result
+  } catch (err) {
+    if (err instanceof ChangeInProgressError) {
+      return { success: false, message: err.message, error: err.code, code: err.code } as ExecutionResult
+    }
+    throw err
+  }
+}
+
+/** What a successful action promised, for protected verification to check against the catalog. */
+function expectationsFor(action: AIAction): Array<{ action: string; table?: string; column?: string; newName?: string }> {
+  const p = (action.params ?? {}) as Record<string, any>
+  const table: string | undefined = p.tableName ?? p.table
+  switch (action.action) {
+    case 'CREATE_TABLE':
+      return table ? [{ action: 'CREATE_TABLE', table }] : []
+    case 'CREATE_JUNCTION_TABLE':
+      return p.junctionName ? [{ action: 'CREATE_TABLE', table: p.junctionName }] : []
+    case 'DROP_TABLE':
+      return table ? [{ action: 'DROP_TABLE', table }] : []
+    case 'ADD_COLUMN': {
+      const column = p.columnName ?? p.column?.name
+      return table && column ? [{ action: 'ADD_COLUMN', table, column }] : []
+    }
+    case 'DROP_COLUMN':
+      return table && p.columnName ? [{ action: 'DROP_COLUMN', table, column: p.columnName }] : []
+    case 'RENAME_COLUMN':
+      return table && p.newName ? [{ action: 'RENAME_COLUMN', table, column: p.oldName, newName: p.newName }] : []
+    // The table whose access rules this step was asked to set (set_rls, add_rls):
+    // what it sets there is the request, not a side effect (lib/changes/verify.ts).
+    case 'SET_PERMISSION':
+    case 'REMOVE_PERMISSION':
+      return table ? [{ action: action.action, table }] : []
+    default:
+      return []
+  }
+}
+
+/** One line for the change history: what was asked for, in the executor's terms. */
+function describeActionForLedger(action: AIAction): string {
+  const p = action.params ?? {}
+  const table = p.tableName ?? p.table ?? p.entity
+  const column = p.columnName ?? p.column?.name
+  // The rest of the backend's actions name their item instead of a table.
+  const item = table ? null : p.bucketName ?? p.name ?? p.key ?? p.provider ?? p.integrationId ?? p.keyId ?? p.functionId
+  const target = [table, column, typeof item === 'string' ? item : null].filter(Boolean).join('.')
+  return `${action.action}${target ? ` ${target}` : ''}`
+}
+
+async function executeActionUnrecorded(
+  action: AIAction,
+  projectId: string,
+  apiKey?: string,
+  retryCount: number = 0,
+  executionId?: string,
   allowReplan: boolean = true,
 ): Promise<ExecutionResult> {
   console.log('[AI Executor] Executing action:', action.action)
@@ -3187,7 +3335,12 @@ export async function executeAction(
           console.log('[Replanning] Generated new action:', newAction.action)
 
           // Retry with the replanned action — pass executionId so all attempts share a run
-          return await executeAction(newAction, projectId, apiKey, retryCount + 1, runId, allowReplan)
+          //
+          // The replacement carries no approval: one given for the failed action
+          // was for that action, and a model's output cannot grant one. So a
+          // medium- or high-risk replacement waits for the owner in the gate
+          // below like any other unconfirmed action.
+          return await executeAction(withoutApprovalParams(newAction), projectId, apiKey, retryCount + 1, runId, allowReplan)
         } catch (replanError: any) {
           console.error('[Replanning] Failed to replan:', replanError.message)
           // Fall through to return original error
@@ -3269,6 +3422,27 @@ export async function executeAction(
 }
 
 /**
+ * The params that carry an approval, or name who gave one. `confirmed` opens
+ * the executor's approval gates, and the deploy, rollback and frontend
+ * connection executors also take `force` as the go-ahead. Deploy and rollback
+ * record `actorVia` and `actorUserId` as who authorised the call. runExecutor
+ * (lib/ai/brain/tools.ts) sets them from how the call was authorised.
+ */
+const APPROVAL_PARAMS = ['confirmed', 'force', 'actorVia', 'actorUserId'] as const
+
+/**
+ * A replanned action as it may run: a model picked it from an error, so it
+ * keeps none of the approval params its output may name.
+ */
+export function withoutApprovalParams(action: AIAction): AIAction {
+  const params = action?.params
+  if (!params || typeof params !== 'object' || Array.isArray(params)) return action
+  const kept: Record<string, any> = { ...params }
+  for (const key of APPROVAL_PARAMS) delete kept[key]
+  return { ...action, params: kept }
+}
+
+/**
  * Generate replanning message from failed action
  */
 function getReplanningMessage(action: AIAction, result: ExecutionResult): string {
@@ -3317,8 +3491,12 @@ async function executeSingleAction(
     || action.params?.userId || action.params?.path || undefined
   const riskLevel = riskLevelForExecutorAction(action.action)
   if (riskLevel !== 'low' && !action.params?.confirmed) {
+    // The parked finding's id travels back to the caller: without it the
+    // agent had NOTHING to poll — check_approval only knew approval rows —
+    // so a parked action simply vanished from the agent's point of view.
+    let findingId: string | null = null
     try {
-      await queuePendingActionFinding({
+      const finding = await queuePendingActionFinding({
         projectId,
         action: action.action,
         params: action.params ?? {},
@@ -3327,6 +3505,7 @@ async function executeSingleAction(
         source: 'brain-risk',
         reason: `Backenly paused this ${riskLevel}-risk action for your review instead of applying it immediately.`,
       })
+      findingId = (finding as { id?: string } | null)?.id ?? null
     } catch (error) {
       console.error('[ApprovalGate] Failed to queue pending action finding:', error)
     }
@@ -3336,27 +3515,19 @@ async function executeSingleAction(
     // would tell an agent, or the person reading it, something untrue.
     return {
       success: false,
-      message: `⛔ \`${action.action}\`${target ? ` on \`${target}\`` : ''} was not run: it is a ${riskLevel}-risk action and is waiting for the project owner's approval in the Review Queue (Autonomy). Approving it there runs exactly this action.`,
+      message:
+        `⛔ \`${action.action}\`${target ? ` on \`${target}\`` : ''} was not run: it is a ${riskLevel}-risk action and is waiting for the project owner's approval in the Review Queue (Autonomy). Approving it there runs exactly this action.` +
+        (findingId ? ` Poll check_approval with { "id": "${findingId}" } to follow it.` : ''),
+      data: findingId ? { findingId, poll: `check_approval with { "id": "${findingId}" }` } : undefined,
       error: 'APPROVAL_REQUIRED',
     }
   }
 
-  // #13 — Schema versioning: snapshot before any schema-mutating action
-  // so every change is reversible with LIST_SCHEMA_VERSIONS / ROLLBACK_TO_VERSION
-  const SCHEMA_MUTATING_ACTIONS = new Set([
-    'CREATE_TABLE', 'CREATE_JUNCTION_TABLE', 'ADD_COLUMN', 'DROP_COLUMN',
-    'RENAME_COLUMN', 'ADD_CONSTRAINT', 'CREATE_INDEX', 'ENABLE_AUTH',
-    'ENABLE_VECTOR_SEARCH', 'ENABLE_TEAMS',
-  ])
-  if (SCHEMA_MUTATING_ACTIONS.has(action.action)) {
-    try {
-      const { snapshotSchema } = await import('@/lib/versioning/schema-versions')
-      const label = action.params?.tableName || action.params?.entity || action.action
-      await snapshotSchema(projectId, `Before ${action.action} on ${label}`, 'ai-executor')
-    } catch {
-      // Non-fatal — snapshot failure must never block execution
-    }
-  }
+  // Schema-changing actions get their restore point from the change ledger,
+  // which wraps executeAction (GOVERNED_ACTIONS above). The per-action
+  // SchemaVersion snapshot that used to be taken here held the catalog only:
+  // rolling back to it dropped the tables and columns added since, with their
+  // data, and could not bring back anything dropped.
 
   try {
     switch (action.action) {
@@ -3415,7 +3586,10 @@ async function executeSingleAction(
 
       case 'SET_BUCKET_PUBLIC':
         return await executeSetBucketPublic(action.params, projectId)
-      
+
+      case 'SET_BUCKET_POLICY':
+        return await executeSetBucketPolicy(action.params, projectId)
+
       case 'LIST_BUCKETS':
         return await executeListBuckets(projectId)
       
@@ -3649,6 +3823,10 @@ async function executeSingleAction(
         }
 
         // Real run: destructive-class operation → approval gate unless confirmed.
+        // The model cannot set `confirmed`: the tool passes only operations and
+        // dryRun, and the only call that reaches here with it is one a person
+        // approved (lib/mcp/approvals.ts). A brain run holds this answer for
+        // that approval, with the counts below (lib/ai/brain/agent.ts).
         if (!action.params.confirmed) {
           try {
             const estimates = await estimateDataMigration(projectId, ops)
@@ -3659,7 +3837,7 @@ async function executeSingleAction(
               message:
                 `⚠️ This data migration will modify existing rows:\n${lines.join('\n')}\n\n` +
                 `A checkpoint copy of each affected table is taken first, so this is reversible. ` +
-                `Reply **confirm** to apply.`,
+                `It runs once a person approves this exact call; nothing typed in chat approves it.`,
               data: { requiresApproval: true, estimates },
             }
           } catch (err: any) {
@@ -3698,8 +3876,18 @@ async function executeSingleAction(
 
       // ========== DATABASE BACKUPS ==========
       case 'BACKUP_DATABASE': {
-        const { backupWorkspace, snapshotForJson } = await import('@/lib/services/workspace-backup')
-        const result = await backupWorkspace(projectId)
+        // A project kept in another region is snapshotted there, as a queued
+        // job: its dump never leaves its region (lib/services/workspace-backup.ts).
+        const { requestBackup, snapshotForJson } = await import('@/lib/services/workspace-backup')
+        const outcome = await requestBackup(projectId)
+        if (outcome.kind === 'queued') {
+          return {
+            success: true,
+            message: `Snapshot queued in ${outcome.region}, where this project's data is kept. It runs within a few minutes; list the backups to see it.`,
+            data: { queued: true, jobId: outcome.jobId, region: outcome.region },
+          }
+        }
+        const result = outcome.result
         if (!result.success) return { success: false, message: `Backup failed: ${result.error}` }
         return {
           success: true,
@@ -3720,15 +3908,22 @@ async function executeSingleAction(
         return { success: true, message: `**Backups** (${backups.length}):\n${list}`, data: backups.map(snapshotForJson) }
       }
 
-      case 'RESTORE_DATABASE': {
-        const { restoreWorkspace } = await import('@/lib/services/workspace-backup')
-        const result = await restoreWorkspace(projectId, action.params.backupId)
-        if (!result.success) return { success: false, message: `Restore failed: ${result.error}` }
+      case 'RESTORE_DATABASE':
+        // A snapshot restore replaces the whole workspace: every row written
+        // since the snapshot is gone, outside the change ledger. It is a
+        // person's step, an admin's, from Database → Snapshots
+        // (app/api/projects/[id]/backup). Here it was reachable from a model's
+        // output with no approval at all: it is in no risk tier, and the
+        // failure replanner offers it for "undo my changes", so a failed
+        // action could be retried as a restore of the latest snapshot.
         return {
-          success: true,
-          message: `✅ Database restored from **${result.restoredFrom}**. Your workspace is back to that point in time.`,
+          success: false,
+          message:
+            'Restoring a snapshot replaces the whole database, so it is not run from here. ' +
+            'A project admin restores one from Database → Snapshots. To undo one change, ' +
+            'restore the state before it from History.',
+          error: 'RESTORE_FROM_SNAPSHOTS',
         }
-      }
 
       // ========== DESTRUCTIVE TABLE ACTIONS ==========
       case 'DROP_TABLE':
@@ -3833,12 +4028,12 @@ async function addColumnWithConstraints(
   projectId: string,
   postgresSchema: string
 ): Promise<void> {
-  const { prisma } = await import('@/lib/db')
+  const db = await projectDb(projectId)
   
   try {
     const alterSQL = `ALTER TABLE "${postgresSchema}"."${tableName}" ADD COLUMN ${columnSQL}`
     console.log(`[Constraints] Executing: ${alterSQL}`)
-    await prisma.$executeRawUnsafe(alterSQL)
+    await db.$executeRawUnsafe(alterSQL)
     console.log(`[Constraints] Column added successfully`)
   } catch (error: any) {
     // If column already exists, that's fine (idempotent)
@@ -3848,7 +4043,7 @@ async function addColumnWithConstraints(
       // Referenced table doesn't exist yet — add column without FK constraint so the table still gets its column
       console.warn(`[Constraints] FK reference failed (${error.code}), retrying without REFERENCES constraint`)
       const plainSQL = columnSQL.replace(/\s+REFERENCES\s+"[^"]*"\."[^"]*"\("[^"]*"\)[^,;]*/gi, '').trim()
-      await prisma.$executeRawUnsafe(`ALTER TABLE "${postgresSchema}"."${tableName}" ADD COLUMN ${plainSQL}`)
+      await db.$executeRawUnsafe(`ALTER TABLE "${postgresSchema}"."${tableName}" ADD COLUMN ${plainSQL}`)
       console.log(`[Constraints] Column added without FK constraint (referenced table missing)`)
     } else {
       throw error
@@ -3883,6 +4078,7 @@ async function executeCreateTable(
   apiKey?: string,
   target: SchemaTarget = {},
 ): Promise<ExecutionResult> {
+  const db = await projectDb(projectId)
   const branchMode = !!target.targetSchema
   console.log('[AI Executor] Creating table:', params.tableName)
   console.log('[AI Executor] Params:', JSON.stringify(params, null, 2))
@@ -4134,6 +4330,21 @@ async function executeCreateTable(
         let colSql = applyConstraintsToColumn(columnDef, constraints, postgresSchema)
         // Strip FK references — we'll add them in the retroactive pass below
         colSql = colSql.replace(/\s+REFERENCES\s+"[^"]*"\."[^"]*"\("[^"]*"\)[^,;]*/gi, '').trim()
+        // A foreign key declared in a migration is installed exactly as written,
+        // in this same statement, so a key that cannot be created leaves no table
+        // behind (lib/db/declared-foreign-key.ts). A branch is built without
+        // foreign keys, and gets this one when its merge replays the statement.
+        const declaredFk = (col as { references?: unknown }).references
+        if (declaredFk !== undefined && !branchMode) {
+          if (!isDeclaredForeignKey(declaredFk)) {
+            return {
+              success: false,
+              message: `The foreign key declared on "${col.name}" cannot be installed as written, so "${tableName}" was not created.`,
+              error: 'Invalid declared foreign key',
+            }
+          }
+          colSql += ` ${columnForeignKeySql(postgresSchema, tableName, col.name, declaredFk)}`
+        }
         columnDefs.push(colSql)
       }
     }
@@ -4162,8 +4373,18 @@ async function executeCreateTable(
     // create or re-adoption of a physically-present table.
     const createTableSQL = `CREATE TABLE IF NOT EXISTS "${postgresSchema}"."${tableName}" (\n  ${columnDefs.join(',\n  ')}\n);`
 
+    // A key into `users` needs the end-user auth table, which otherwise only
+    // the first sign-up creates (lib/services/auth-users-reference.ts).
+    if (!branchMode && tableName !== 'users') {
+      const { ensureReferencedAuthUsersTable } = await import('@/lib/services/auth-users-reference')
+      for (const { col } of columnPlans) {
+        const declared = (col as { references?: { table?: unknown } }).references
+        if (await ensureReferencedAuthUsersTable(projectId, declared?.table ?? col?.fkTo, postgresSchema)) break
+      }
+    }
+
     console.log(`📝 [AI Executor] Executing SQL:`, createTableSQL)
-    await prisma.$executeRawUnsafe(createTableSQL)
+    await db.$executeRawUnsafe(createTableSQL)
 
     console.log(`✅ [AI Executor] Table created with ${columnDefs.length} columns`)
 
@@ -4188,7 +4409,7 @@ async function executeCreateTable(
       // Create the shared trigger function once per schema (idempotent).
       // CREATE OR REPLACE upgrades every existing table's trigger in this
       // schema automatically the next time create_table runs here.
-      await prisma.$executeRawUnsafe(`
+      await db.$executeRawUnsafe(`
         CREATE OR REPLACE FUNCTION "${postgresSchema}".set_updated_at()
         RETURNS TRIGGER AS $$
         BEGIN
@@ -4202,7 +4423,7 @@ async function executeCreateTable(
         $$ LANGUAGE plpgsql;
       `)
       // Attach to the new table
-      await prisma.$executeRawUnsafe(`
+      await db.$executeRawUnsafe(`
         CREATE OR REPLACE TRIGGER trg_set_updated_at_${tableName}
         BEFORE UPDATE ON "${postgresSchema}"."${tableName}"
         FOR EACH ROW EXECUTE FUNCTION "${postgresSchema}".set_updated_at();
@@ -4268,7 +4489,7 @@ async function executeCreateTable(
       seenIndexCols.add(col.toLowerCase())
       const indexName = `idx_${tableName}_${col.toLowerCase().replace(/[^a-z0-9]/g, '_')}`
       try {
-        await prisma.$executeRawUnsafe(
+        await db.$executeRawUnsafe(
           `CREATE INDEX IF NOT EXISTS "${indexName}" ON "${postgresSchema}"."${tableName}" ("${col}")`
         )
         console.log(`📑 [AI Executor] Index created: ${indexName}`)
@@ -4348,6 +4569,19 @@ async function executeCreateTable(
       console.warn(`[AI Executor] Realtime trigger install failed (non-fatal):`, rtErr?.message)
     }
 
+    // ── Webhook row-capture follows the project, like realtime above ─────────
+    // syncWebhookCapture's contract says it runs "after a table is added", but
+    // nothing on the creation path ever called it, so a webhook saved on
+    // Monday never saw rows written to a table created on Tuesday — while the
+    // Webhooks page promised capture "for every writer". Idempotent, and a
+    // no-op when the project has no active row webhooks.
+    try {
+      const { syncWebhookCapture } = await import('@/lib/webhooks/capture')
+      await syncWebhookCapture(projectId)
+    } catch (whErr: any) {
+      console.warn(`[AI Executor] Webhook capture sync failed (non-fatal):`, whErr?.message)
+    }
+
     // ── Auto-create storage buckets for video/asset domain tables ────────────
     // When a generation_jobs, render_jobs, or similar video/asset table is created,
     // automatically provision the "videos", "thumbnails", and "source-assets" buckets
@@ -4367,6 +4601,7 @@ async function executeCreateTable(
         try {
           const existing = await prisma.storageBucket.findFirst({ where: { projectId, name: bkt.name } })
           if (!existing) {
+            // history: GOVERNED_ACTIONS (CREATE_TABLE)
             await prisma.storageBucket.create({
               data: { name: bkt.name, projectId, isPublic: bkt.isPublic },
             })
@@ -4385,9 +4620,8 @@ async function executeCreateTable(
       // Columns whose REFERENCES clause was stripped (referenced table didn't
       // exist yet) get a second chance now that all tables in this batch exist.
       try {
-        const { prisma: _rp } = await import('@/lib/db')
         // Build case-insensitive table map for this workspace
-        const allTablesInWs = await _rp.$queryRawUnsafe<{ table_name: string }[]>(
+        const allTablesInWs = await db.$queryRawUnsafe<{ table_name: string }[]>(
           `SELECT table_name FROM information_schema.tables WHERE table_schema = $1 AND table_type = 'BASE TABLE'`,
           postgresSchema
         )
@@ -4415,7 +4649,7 @@ async function executeCreateTable(
           if (!refTable || refTable.toLowerCase() === tableName.toLowerCase()) continue
 
           try {
-            const fkExists = await _rp.$queryRawUnsafe<{ count: string }[]>(
+            const fkExists = await db.$queryRawUnsafe<{ count: string }[]>(
               `SELECT COUNT(*) AS count FROM information_schema.table_constraints tc
                JOIN information_schema.key_column_usage kcu
                  ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
@@ -4425,7 +4659,7 @@ async function executeCreateTable(
             ).then(r => parseInt(r[0]?.count ?? '0', 10) > 0)
 
             if (!fkExists) {
-              await _rp.$executeRawUnsafe(
+              await db.$executeRawUnsafe(
                 `ALTER TABLE "${postgresSchema}"."${tableName}"
                  ADD CONSTRAINT "${tableName}_${col.name}_fkey"
                  FOREIGN KEY ("${col.name}") REFERENCES "${postgresSchema}"."${refTable}"(id) ON DELETE SET NULL`
@@ -4451,6 +4685,8 @@ async function executeCreateTable(
     // up here, before the convention pass, using the target the caller named.
     try {
       for (const { col, constraints } of columnPlans) {
+        // A declared key was installed with the table, exactly as written.
+        if (col?.references !== undefined) continue
         if (typeof col?.fkTo !== 'string' || !col.fkTo.trim()) continue
 
         const target = String(col.fkTo).trim().toLowerCase().split('.')[0]
@@ -4459,7 +4695,7 @@ async function executeCreateTable(
         if (target === tableName.toLowerCase()) continue // self-ref handled by name rules
 
         // Target must actually exist, otherwise ALTER TABLE aborts the turn.
-        const targetExists = await prisma.$queryRawUnsafe<{ count: string }[]>(
+        const targetExists = await db.$queryRawUnsafe<{ count: string }[]>(
           `SELECT COUNT(*) AS count FROM information_schema.tables
             WHERE table_schema = $1 AND table_name = $2 AND table_type = 'BASE TABLE'`,
           postgresSchema, target,
@@ -4469,7 +4705,7 @@ async function executeCreateTable(
           continue
         }
 
-        const alreadyHasFk = await prisma.$queryRawUnsafe<{ count: string }[]>(
+        const alreadyHasFk = await db.$queryRawUnsafe<{ count: string }[]>(
           `SELECT COUNT(*) AS count FROM information_schema.table_constraints tc
              JOIN information_schema.key_column_usage kcu
                ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
@@ -4484,7 +4720,7 @@ async function executeCreateTable(
         const onDelete = constraints.isRequired ? 'CASCADE' : 'SET NULL'
         const constraintName = `fk_${tableName}_${col.name}`.slice(0, 63)
 
-        await prisma.$executeRawUnsafe(
+        await db.$executeRawUnsafe(
           `ALTER TABLE "${postgresSchema}"."${tableName}"
              ADD CONSTRAINT "${constraintName}"
              FOREIGN KEY ("${col.name}") REFERENCES "${postgresSchema}"."${target}"("id")
@@ -4716,10 +4952,16 @@ async function executeCreateTable(
       }
     }
     
+    // The driver's own words ("Invalid `prisma.$executeRawUnsafe()` invocation:
+    // … Code: `42P01`") reached the person approving a merge verbatim. Said in
+    // a sentence instead; the raw text stays in the server log.
+    console.error(`[AI Executor] Creating "${tableName}" failed:`, error?.message ?? error)
+    const { sanitizeDiagnostic } = await import('@/lib/errors/diagnostic-sanitize')
+    const reason = sanitizeDiagnostic(error)
     return {
       success: false,
-      message: `Failed to create table: ${error.message}`,
-      error: error.message,
+      message: `Failed to create table "${tableName}": ${reason}`,
+      error: reason,
     }
   }
 }
@@ -4732,6 +4974,7 @@ async function executeCreateJunctionTable(
   params: any,
   projectId: string
 ): Promise<ExecutionResult> {
+  const db = await projectDb(projectId)
   const { tableA, tableB, junctionName } = params
 
   if (!tableA || !tableB) {
@@ -4758,13 +5001,13 @@ async function executeCreateJunctionTable(
     // Pre-condition: ensure both referenced tables physically exist in the DB
     // (Prisma metadata can diverge from actual PostgreSQL state)
     for (const tbl of [first, second]) {
-      const check = await prisma.$queryRawUnsafe<{ exists: boolean }[]>(
+      const check = await db.$queryRawUnsafe<{ exists: boolean }[]>(
         `SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = $1 AND table_name = $2) AS exists`,
         postgresSchema,
         tbl,
       )
       if (!check[0]?.exists) {
-        await prisma.$executeRawUnsafe(
+        await db.$executeRawUnsafe(
           `CREATE TABLE IF NOT EXISTS "${postgresSchema}"."${tbl}" (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), "createdAt" TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP, "updatedAt" TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP)`
         )
         // Register in metadata if missing
@@ -4782,7 +5025,7 @@ async function executeCreateJunctionTable(
     // FIX 3: Detect real PK type for each referenced table to avoid int/uuid mismatch (error 42804)
     const getPrimaryKeyType = async (schema: string, tableName: string): Promise<string> => {
       try {
-        const rows = await prisma.$queryRawUnsafe<{ data_type: string }[]>(
+        const rows = await db.$queryRawUnsafe<{ data_type: string }[]>(
           `SELECT c.data_type FROM information_schema.columns c
            JOIN information_schema.table_constraints tc ON tc.table_schema = c.table_schema AND tc.table_name = c.table_name
            JOIN information_schema.key_column_usage kcu ON kcu.constraint_name = tc.constraint_name AND kcu.column_name = c.column_name
@@ -4833,9 +5076,9 @@ async function executeCreateJunctionTable(
     const indexASQL = `CREATE INDEX IF NOT EXISTS "idx_${finalName}_${singularA}Id" ON "${postgresSchema}"."${finalName}"("${singularA}Id")`
     const indexBSQL = `CREATE INDEX IF NOT EXISTS "idx_${finalName}_${singularB}Id" ON "${postgresSchema}"."${finalName}"("${singularB}Id")`
 
-    await prisma.$executeRawUnsafe(createTableSQL)
-    await prisma.$executeRawUnsafe(indexASQL)
-    await prisma.$executeRawUnsafe(indexBSQL)
+    await db.$executeRawUnsafe(createTableSQL)
+    await db.$executeRawUnsafe(indexASQL)
+    await db.$executeRawUnsafe(indexBSQL)
 
     // Save metadata
     const existingMeta = await prisma.table.findFirst({ where: { projectId, name: finalName } })
@@ -4955,46 +5198,14 @@ async function executeGenerateAPI(
     // so the project gets real endpoints like POST /jobs/:id/cancel, not just
     // generic CRUD.  These use pre-written TypeScript templates (no extra
     // OpenAI call) so they are fast and deterministic.
+    // Registered in one place (lib/services/domain-endpoints.ts), because a
+    // restore or reapply registers and removes them as well.
     const _allProjectTables = await prisma.table.findMany({ where: { projectId }, select: { name: true } })
       .then(rows => rows.map(r => r.name)).catch(() => [])
-    const domainEndpoints = _generateDomainEndpoints(tableName, projectId, _allProjectTables)
+    const { registerDomainEndpoints } = await import('@/lib/services/domain-endpoints')
+    const domainEndpoints = await registerDomainEndpoints(projectId, tableName, _allProjectTables)
     if (domainEndpoints.length > 0) {
-      console.log(`[AI Executor] 🎯 Registering ${domainEndpoints.length} domain endpoints for "${tableName}"`)
-      const { prisma: prismaDyn } = await import('@/lib/db')
-      for (const ep of domainEndpoints) {
-        try {
-          const existing = await prismaDyn.aiFunction.findFirst({
-            where: { projectId, name: ep.name },
-            select: { id: true },
-          })
-          if (existing) {
-            await prismaDyn.aiFunction.update({
-              where: { id: existing.id },
-              data: {
-                description: ep.description,
-                generatedCode: ep.code,
-                triggerType: 'manual',
-                triggerTable: `${ep.method} /api/v1/${projectId}/fn/${ep.name}`,
-                status: 'active',
-              },
-            })
-          } else {
-            await prismaDyn.aiFunction.create({
-              data: {
-                projectId,
-                name: ep.name,
-                description: ep.description,
-                generatedCode: ep.code,
-                triggerType: 'manual',
-                triggerTable: `${ep.method} /api/v1/${projectId}/fn/${ep.name}`,
-                status: 'active',
-              },
-            })
-          }
-        } catch (epErr: any) {
-          console.warn(`[AI Executor] Could not register domain endpoint "${ep.name}":`, epErr.message)
-        }
-      }
+      console.log(`[AI Executor] 🎯 Registered ${domainEndpoints.length} domain endpoints for "${tableName}"`)
     }
     // ── END domain endpoints ──────────────────────────────────────────────────
 
@@ -5563,6 +5774,7 @@ async function executeAddColumn(
   apiKey?: string,
   target: SchemaTarget = {},
 ): Promise<ExecutionResult> {
+  const db = await projectDb(projectId)
   const branchMode = !!target.targetSchema
   console.log('[AI Executor] Adding column:', params)
 
@@ -5588,7 +5800,7 @@ async function executeAddColumn(
     const postgresSchema = target.targetSchema ?? getWorkspaceDatabaseNames(projectId).postgresSchema
 
     // ── REAL DB CHECK: does the table actually exist in PostgreSQL? ──────────
-    const tableCheck = await prisma.$queryRawUnsafe<{ exists: boolean }[]>(
+    const tableCheck = await db.$queryRawUnsafe<{ exists: boolean }[]>(
       `SELECT EXISTS (
          SELECT 1 FROM information_schema.tables
          WHERE table_schema = $1 AND table_name = $2
@@ -5607,7 +5819,7 @@ async function executeAddColumn(
     if (!tableExistsInDB) {
       // Auto-create the table with just an id column so we can add columns to it
       console.warn(`[AI Executor] Table "${tableName}" not in DB — auto-creating before adding columns`)
-      await prisma.$executeRawUnsafe(
+      await db.$executeRawUnsafe(
         `CREATE TABLE IF NOT EXISTS "${postgresSchema}"."${tableName}" (
            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
            "createdAt" TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
@@ -5635,7 +5847,8 @@ async function executeAddColumn(
     // NULL it cannot satisfy (23502), and either way the result is the truth.
     const spec = params.column && typeof params.column === 'object' ? params.column as Record<string, unknown> : null
     const declared = !!spec && colsToAdd.length === 1 &&
-      (spec.nullable === false || spec.default !== undefined || spec.unique === true || typeof spec.fkTo === 'string')
+      (spec.nullable === false || spec.default !== undefined || spec.unique === true || typeof spec.fkTo === 'string' ||
+        spec.references !== undefined)
     if (declared) {
       const name = String(spec!.name ?? colsToAdd[0].name)
       const ident = /^[A-Za-z_][A-Za-z0-9_]{0,62}$/
@@ -5653,14 +5866,27 @@ async function executeAddColumn(
         defaultSql = ` DEFAULT ${d}`
       }
       let referencesSql = ''
-      if (typeof spec!.fkTo === 'string') {
+      const declaredFk = spec!.references
+      if (declaredFk !== undefined) {
+        // Declared in a migration: installed exactly as written (lib/db/declared-foreign-key.ts).
+        if (!isDeclaredForeignKey(declaredFk)) {
+          return { success: false, message: `The foreign key declared on "${name}" cannot be installed as written, so nothing was added.` }
+        }
+        referencesSql = ` ${columnForeignKeySql(postgresSchema, tableName, name, declaredFk)}`
+      } else if (typeof spec!.fkTo === 'string') {
         if (!ident.test(spec!.fkTo)) return { success: false, message: `"${spec!.fkTo}" is not a table this path can reference.` }
         referencesSql = ` REFERENCES "${postgresSchema}"."${spec!.fkTo}"("id")`
       }
       const type = normalizeColumnType(String(spec!.type ?? colsToAdd[0].type), name)
       const definition = `${type}${defaultSql}${spec!.nullable === false ? ' NOT NULL' : ''}${spec!.unique === true ? ' UNIQUE' : ''}${referencesSql}`
+      if (referencesSql) {
+        // A key into `users` needs the end-user auth table (lib/services/auth-users-reference.ts),
+        // in the branch's own schema on a branch.
+        const { ensureReferencedAuthUsersTable } = await import('@/lib/services/auth-users-reference')
+        await ensureReferencedAuthUsersTable(projectId, isDeclaredForeignKey(declaredFk) ? declaredFk.table : spec!.fkTo, postgresSchema)
+      }
       try {
-        await prisma.$executeRawUnsafe(`ALTER TABLE "${postgresSchema}"."${tableName}" ADD COLUMN "${name}" ${definition}`)
+        await db.$executeRawUnsafe(`ALTER TABLE "${postgresSchema}"."${tableName}" ADD COLUMN "${name}" ${definition}`)
       } catch (err: any) {
         // Prisma reports this one as "Code: `23502`. Message: `N/A`", which an agent cannot act on.
         if (String(err?.message ?? '').includes('23502')) {
@@ -5676,7 +5902,7 @@ async function executeAddColumn(
       // A foreign key is indexed, as addColumnToTable and create_table do.
       if (referencesSql) {
         const indexName = `idx_${tableName}_${name.toLowerCase()}`.slice(0, 63)
-        await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS "${indexName}" ON "${postgresSchema}"."${tableName}" ("${name}")`)
+        await db.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS "${indexName}" ON "${postgresSchema}"."${tableName}" ("${name}")`)
       }
       import('@/lib/services/workspace-validator').then(({ invalidateSchemaCache }) => invalidateSchemaCache(projectId, tableName)).catch(() => {})
       return { success: true, message: `✅ Added "${name}" ${definition.replace(` REFERENCES "${postgresSchema}".`, ' REFERENCES ')} to table "${tableName}"` }
@@ -5701,6 +5927,7 @@ async function executeAddColumn(
 }
 
 async function executeDropTable(params: any, projectId: string): Promise<ExecutionResult> {
+  const db = await projectDb(projectId)
   const tableName = (params.tableName as string)?.toLowerCase()?.trim()
   if (!tableName) return { success: false, message: 'Table name is required' }
   try {
@@ -5711,7 +5938,14 @@ async function executeDropTable(params: any, projectId: string): Promise<Executi
     // Count APIs before deletion so we can report the number removed
     const removedApiCount = await prisma.apiDefinition.count({ where: { projectId, name: tableName } }).catch(() => 0)
 
-    await prisma.$executeRawUnsafe(`DROP TABLE IF EXISTS "${postgresSchema}"."${tableName}" CASCADE`)
+    // Inside a recorded change (every approved drop is one) the table and its
+    // rows move into the change's vault instead of being destroyed, so rolling
+    // the change back brings them back. lib/changes/preserve.ts.
+    const { archiveTable } = await import('@/lib/changes/preserve')
+    const kept = await archiveTable(projectId, postgresSchema, tableName)
+    if (!kept.handled) {
+      await db.$executeRawUnsafe(`DROP TABLE IF EXISTS "${postgresSchema}"."${tableName}" CASCADE`)
+    }
     await prisma.table.deleteMany({ where: { projectId, name: tableName } })
     await prisma.apiDefinition.deleteMany({ where: { projectId, name: tableName } })
     const { supersedeSchemaIntent } = await import('@/lib/autonomy/intent-conformance')
@@ -5745,9 +5979,12 @@ async function executeDropTable(params: any, projectId: string): Promise<Executi
     const apiMsg = removedApiCount > 0 ? ` and removed ${removedApiCount} API definition${removedApiCount !== 1 ? 's' : ''}` : ''
     return {
       success: true,
-      message: `✅ Table \`${tableName}\` dropped permanently${apiMsg}.`,
+      message: kept.handled
+        ? `✅ Table \`${tableName}\` dropped${apiMsg}. Its ${kept.rows} row${kept.rows === 1 ? ' is' : 's are'} kept: ` +
+          `restoring the state before change #${kept.seq} brings the table back with ${kept.rows === 1 ? 'it' : 'them'}.`
+        : `✅ Table \`${tableName}\` dropped permanently${apiMsg}.`,
       diff: { added: [], modified: [], removed: [tableName] },
-      data: { tableName, removedApiCount },
+      data: { tableName, removedApiCount, ...(kept.handled ? { keptRows: kept.rows, change: kept.seq } : {}) },
     }
   } catch (err: any) {
     return { success: false, message: `Failed to drop table: ${err.message}`, error: err.message }
@@ -5755,13 +5992,13 @@ async function executeDropTable(params: any, projectId: string): Promise<Executi
 }
 
 async function executeTruncateTable(params: any, projectId: string): Promise<ExecutionResult> {
+  const db = await projectDb(projectId)
   const tableName = (params.tableName as string)?.toLowerCase()?.trim()
   if (!tableName) return { success: false, message: 'Table name is required' }
   try {
-    const { prisma } = await import('@/lib/db')
     const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
     const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
-    await prisma.$executeRawUnsafe(`TRUNCATE TABLE "${postgresSchema}"."${tableName}" RESTART IDENTITY CASCADE`)
+    await db.$executeRawUnsafe(`TRUNCATE TABLE "${postgresSchema}"."${tableName}" RESTART IDENTITY CASCADE`)
     import('@/lib/services/workspace-table-stats').then(({ invalidateTableStats }) => invalidateTableStats(projectId, tableName)).catch(() => {})
     return { success: true, message: `Table \`${tableName}\` truncated — all rows deleted.` }
   } catch (err: any) {
@@ -5778,6 +6015,7 @@ async function executeInsertData(
   projectId: string,
   apiKey?: string
 ): Promise<ExecutionResult> {
+  const db = await projectDb(projectId)
   console.log('[AI Executor] Inserting data:', params)
   
   const { tableName, rows = [] } = params
@@ -5790,7 +6028,6 @@ async function executeInsertData(
   }
   
   try {
-    const { prisma } = await import('@/lib/db')
     const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
     
     const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
@@ -5809,7 +6046,7 @@ async function executeInsertData(
       ORDER BY ordinal_position
     `
     
-    const columns: any[] = await prisma.$queryRawUnsafe(columnsQuery, postgresSchema, tableName)
+    const columns: any[] = await db.$queryRawUnsafe(columnsQuery, postgresSchema, tableName)
     
     // Filter out auto-generated columns
     const userColumns = columns.filter(c => !['id', 'createdAt', 'updatedAt'].includes(c.column_name))
@@ -5894,7 +6131,7 @@ async function executeInsertData(
       `
 
       console.log(`📝 [AI Executor] Executing:`, insertSQL, 'with values:', values)
-      await prisma.$executeRawUnsafe(insertSQL, ...values)
+      await db.$executeRawUnsafe(insertSQL, ...values)
       insertedCount++
     }
     
@@ -5931,8 +6168,8 @@ async function addColumnToTable(
   apiKey?: string,
   target: SchemaTarget = {},
 ): Promise<void> {
+  const db = await projectDb(projectId)
   try {
-    const { prisma } = await import('@/lib/db')
     const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
 
     const postgresSchema = target.targetSchema ?? getWorkspaceDatabaseNames(projectId).postgresSchema
@@ -5943,7 +6180,7 @@ async function addColumnToTable(
       FROM information_schema.columns
       WHERE table_schema = $1 AND table_name = $2 AND column_name = $3
     `
-    const existingColumn: any[] = await prisma.$queryRawUnsafe(columnsQuery, postgresSchema, tableName, column.name)
+    const existingColumn: any[] = await db.$queryRawUnsafe(columnsQuery, postgresSchema, tableName, column.name)
     
     if (existingColumn.length > 0) {
       console.log(`⚠️ [AI Executor] Column "${column.name}" already exists in "${tableName}" - skipping (idempotent)`)
@@ -5965,7 +6202,7 @@ async function addColumnToTable(
 
     console.log(`📝 [AI Executor] Adding column SQL:`, alterSQL)
     try {
-      await prisma.$executeRawUnsafe(alterSQL)
+      await db.$executeRawUnsafe(alterSQL)
     } catch (fkError: any) {
       // FK reference failed — retry without REFERENCES so the column is still added
       if (fkError.code === '42P01' || fkError.code === '42830' || (fkError.message && fkError.message.includes('does not exist'))) {
@@ -5974,7 +6211,7 @@ async function addColumnToTable(
           .replace(/\s+REFERENCES\s+"[^"]*"\."[^"]*"\("[^"]*"\)[^,;]*/gi, '')
           .replace(/\s+NOT NULL(?!\s*DEFAULT|\s*GENERATED)/gi, ' DEFAULT NULL')
           .trim()
-        await prisma.$executeRawUnsafe(`ALTER TABLE "${postgresSchema}"."${tableName}" ADD COLUMN IF NOT EXISTS ${plainSQL}`)
+        await db.$executeRawUnsafe(`ALTER TABLE "${postgresSchema}"."${tableName}" ADD COLUMN IF NOT EXISTS ${plainSQL}`)
       } else {
         throw fkError
       }
@@ -5997,7 +6234,7 @@ async function addColumnToTable(
     if (isFkColumn) {
       const indexName = `idx_${tableName}_${lower.replace(/[^a-z0-9]/g, '_')}`.slice(0, 63)
       try {
-        await prisma.$executeRawUnsafe(
+        await db.$executeRawUnsafe(
           `CREATE INDEX IF NOT EXISTS "${indexName}" ON "${postgresSchema}"."${tableName}" ("${column.name}")`,
         )
         console.log(`📑 [AI Executor] Index created for added FK column: ${indexName}`)
@@ -6024,6 +6261,7 @@ async function addColumnToTable(
  *     so the change is reversible via LIST_SCHEMA_VERSIONS / ROLLBACK_TO_VERSION
  */
 async function executeDropColumn(params: any, projectId: string): Promise<ExecutionResult> {
+  const db = await projectDb(projectId)
   const tableName = String(params?.tableName ?? '').trim()
   const columnName = String(params?.columnName ?? '').trim()
 
@@ -6040,13 +6278,12 @@ async function executeDropColumn(params: any, projectId: string): Promise<Execut
   }
 
   try {
-    const { prisma } = await import('@/lib/db')
     const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
     const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
 
     // Verify the column actually exists before issuing the DDL — gives a
     // truthful "no such column" error rather than the cryptic Postgres one.
-    const exists = await prisma.$queryRawUnsafe<Array<{ exists: boolean }>>(
+    const exists = await db.$queryRawUnsafe<Array<{ exists: boolean }>>(
       `SELECT EXISTS (
          SELECT 1 FROM information_schema.columns
          WHERE table_schema = $1 AND table_name = $2 AND column_name = $3
@@ -6063,9 +6300,13 @@ async function executeDropColumn(params: any, projectId: string): Promise<Execut
 
     // CASCADE so any view / trigger / index that references this column is
     // also dropped — without it Postgres refuses on dependent objects.
-    await prisma.$executeRawUnsafe(
-      `ALTER TABLE "${postgresSchema}"."${tableName}" DROP COLUMN IF EXISTS "${columnName}" CASCADE`
-    )
+    //
+    // Inside a recorded change its values are kept first, in the same
+    // transaction, so rolling the change back restores them row by row.
+    const dropSql = `ALTER TABLE "${postgresSchema}"."${tableName}" DROP COLUMN IF EXISTS "${columnName}" CASCADE`
+    const { keepColumnValues } = await import('@/lib/changes/preserve')
+    const kept = await keepColumnValues(projectId, postgresSchema, tableName, columnName, 'dropped', dropSql)
+    if (!kept.handled) await db.$executeRawUnsafe(dropSql)
 
     // The drop was asked for, so the column is no longer requested: without
     // this the intent ledger would report it missing (lib/autonomy/intent-conformance).
@@ -6090,7 +6331,12 @@ async function executeDropColumn(params: any, projectId: string): Promise<Execut
 
     return {
       success: true,
-      message: `✅ Column \`${columnName}\` dropped from \`${tableName}\`. The REST API was regenerated and old values are gone. This change is reversible via the version history.`,
+      // Says what can actually be undone. It used to call every drop "reversible
+      // via the version history", which could re-add an empty column at best.
+      message: kept.handled
+        ? `✅ Column \`${columnName}\` dropped from \`${tableName}\`. The REST API was regenerated. Its ${kept.rows} ` +
+          `value${kept.rows === 1 ? ' is' : 's are'} kept: restoring the state before change #${kept.seq} brings the column back with them.`
+        : `✅ Column \`${columnName}\` dropped from \`${tableName}\`. The REST API was regenerated and old values are gone.`,
       diff: { added: [], modified: [tableName], removed: [`${tableName}.${columnName}`] },
       verifiedAt: new Date().toISOString(),
     }
@@ -6373,7 +6619,7 @@ async function executeCreateBucket(params: any, projectId: string): Promise<Exec
     const { prisma: prismaVerify } = await import('@/lib/db')
     const verified = await prismaVerify.storageBucket.findFirst({
       where: { name: bucketName, projectId },
-      select: { id: true, name: true, isPublic: true },
+      select: { id: true, name: true, isPublic: true, accessPolicy: true },
     })
 
     if (!verified) {
@@ -6405,7 +6651,11 @@ async function executeCreateBucket(params: any, projectId: string): Promise<Exec
       console.warn('[executeCreateBucket] Graph update failed:', graphErr)
     }
 
-    const visibilityLabel = isPublic ? 'public' : 'private'
+    // Reported from the ENFORCED field, read back — not from the request.
+    const visibilityLabel =
+      verified.accessPolicy === 'public_read' || verified.accessPolicy === 'cdn_cacheable'
+        ? 'public'
+        : 'private'
     const bucketList = allBucketNames.map(b => `  • ${b}`).join('\n')
     const message = [
       `Done — created \`${bucketName}\` bucket.`,
@@ -6425,22 +6675,61 @@ async function executeCreateBucket(params: any, projectId: string): Promise<Exec
     return {
       success: true,
       message,
-      data: { bucketId: verified.id, bucketName: verified.name, isPublic: verified.isPublic, verified: true },
+      data: {
+        bucketId: verified.id,
+        bucketName: verified.name,
+        isPublic: verified.isPublic,
+        accessPolicy: verified.accessPolicy,
+        verified: true,
+      },
       artifacts: { buckets: [bucketName] },
       diff: { added: [bucketName], modified: [], removed: [] },
       verifiedAt: new Date().toISOString(),
     }
   } catch (error: any) {
     if (error.message?.includes('already exists')) {
-      // Even on "already exists", verify it's actually there
+      // Even on "already exists", verify it's actually there, and report what
+      // it IS. This used to answer success whatever visibility was asked for,
+      // so an agent that asked for a public bucket told its user the files
+      // were public when the existing bucket was private (or the reverse).
       try {
         const { prisma: prismaCheck } = await import('@/lib/db')
         const existing = await prismaCheck.storageBucket.findFirst({
           where: { name: bucketName, projectId },
-          select: { id: true, name: true, isPublic: true },
+          select: { id: true, name: true, isPublic: true, accessPolicy: true },
         })
         if (existing) {
-          return { success: true, message: `✅ Bucket "${bucketName}" confirmed in DB (already existed)`, data: { bucketName, verified: true } }
+          const { policyAllowsPublic } = await import('@/lib/storage/access-policy')
+          const existingPublic = policyAllowsPublic(existing.accessPolicy)
+          const requestedPublic = !!isPublic
+          const visibility = (pub: boolean) => (pub ? 'public' : 'private')
+          const data = {
+            bucketId: existing.id,
+            bucketName: existing.name,
+            existed: true,
+            isPublic: existingPublic,
+            accessPolicy: existing.accessPolicy,
+            verified: true,
+          }
+          if (requestedPublic !== existingPublic) {
+            return {
+              success: false,
+              message:
+                `Bucket "${bucketName}" already exists and is ${visibility(existingPublic)} ` +
+                `(policy ${existing.accessPolicy}); this call asked for a ${visibility(requestedPublic)} bucket. ` +
+                'Nothing changed. To change its visibility, call storage { "action": "set_public" } or ' +
+                'storage { "action": "set_policy" }.',
+              error: 'BUCKET_VISIBILITY_MISMATCH',
+              data,
+            }
+          }
+          return {
+            success: true,
+            message:
+              `Bucket "${bucketName}" already exists and is ${visibility(existingPublic)} ` +
+              `(policy ${existing.accessPolicy}). Nothing changed.`,
+            data,
+          }
         }
       } catch { /* fall through */ }
       return { success: false, message: `Bucket "${bucketName}" reported as existing but could not be verified in DB`, error: 'verification_failed' }
@@ -6461,14 +6750,70 @@ async function executeSetBucketPublic(params: any, projectId: string): Promise<E
     const bucket = await prisma.storageBucket.findFirst({ where: { name: bucketName, projectId } })
     if (!bucket) return { success: false, message: `Bucket "${bucketName}" not found` }
 
-    await prisma.storageBucket.update({ where: { id: bucket.id }, data: { isPublic } })
+    // accessPolicy is the field serving, upload clamping and the console
+    // enforce; isPublic is a label. Writing only the label told the agent
+    // "now public" (or worse, "now private" after a leak) while every object
+    // kept serving exactly as before. Both are written, then READ BACK, and
+    // the answer reports the enforced state.
+    // history: GOVERNED_ACTIONS (SET_BUCKET_PUBLIC)
+    const updated = await prisma.storageBucket.update({
+      where: { id: bucket.id },
+      data: { isPublic, accessPolicy: isPublic ? 'public_read' : 'private' },
+      select: { isPublic: true, accessPolicy: true },
+    })
+    const enforcedPublic = updated.accessPolicy === 'public_read' || updated.accessPolicy === 'cdn_cacheable'
     return {
       success: true,
-      message: `✅ Bucket **"${bucketName}"** is now **${isPublic ? 'public' : 'private'}**`,
-      data: { bucketName, isPublic },
+      message: `✅ Bucket **"${bucketName}"** is now **${enforcedPublic ? 'public' : 'private'}** (access policy: ${updated.accessPolicy})`,
+      data: { bucketName, isPublic: updated.isPublic, accessPolicy: updated.accessPolicy },
     }
   } catch (error: any) {
     return { success: false, message: `Failed to update bucket: ${error.message}`, error: error.message }
+  }
+}
+
+/**
+ * STORAGE: Set a bucket's access policy — the four-value contract the
+ * serving path, upload clamping and the console enforce. set_bucket_public
+ * covers only public_read ↔ private; without this, owner_only and
+ * cdn_cacheable were unreachable from the agent lane.
+ */
+async function executeSetBucketPolicy(params: any, projectId: string): Promise<ExecutionResult> {
+  const { bucketName, policy } = params
+  if (!bucketName) return { success: false, message: 'Bucket name is required' }
+
+  const { ACCESS_POLICIES, policyAllowsPublic, POLICY_LABELS } = await import('@/lib/storage/access-policy')
+  if (!(ACCESS_POLICIES as readonly string[]).includes(policy)) {
+    return {
+      success: false,
+      message: `Unknown access policy "${policy}". The serving path enforces exactly: ${ACCESS_POLICIES.join(', ')}.`,
+      error: 'UNKNOWN_ACCESS_POLICY',
+    }
+  }
+
+  try {
+    const { prisma } = await import('@/lib/db')
+    const bucket = await prisma.storageBucket.findFirst({ where: { name: bucketName, projectId } })
+    if (!bucket) return { success: false, message: `Bucket "${bucketName}" not found` }
+
+    // isPublic stays a derived label, exactly as executeSetBucketPublic
+    // writes it, so the two doors can never leave the pair disagreeing.
+    // history: GOVERNED_ACTIONS (SET_BUCKET_POLICY)
+    const updated = await prisma.storageBucket.update({
+      where: { id: bucket.id },
+      data: { accessPolicy: policy, isPublic: policyAllowsPublic(policy) },
+      select: { accessPolicy: true, isPublic: true },
+    })
+    const label = POLICY_LABELS[updated.accessPolicy as keyof typeof POLICY_LABELS]
+    return {
+      success: true,
+      message:
+        `✅ Bucket **"${bucketName}"** access policy is now **${updated.accessPolicy}**` +
+        (label ? ` — ${label.means}` : ''),
+      data: { bucketName, accessPolicy: updated.accessPolicy, isPublic: updated.isPublic },
+    }
+  } catch (error: any) {
+    return { success: false, message: `Failed to set bucket policy: ${error.message}`, error: error.message }
   }
 }
 
@@ -6488,9 +6833,13 @@ async function executeListBuckets(projectId: string): Promise<ExecutionResult> {
       }
     }
 
-    const list = buckets.map(b =>
-      `• **${b.name}** — ${b.fileCount} file${b.fileCount !== 1 ? 's' : ''} · ${b.isPublic ? 'public' : 'private'}`
-    ).join('\n')
+    const list = buckets.map(b => {
+      // Report the ENFORCED visibility (accessPolicy), not the isPublic label:
+      // the two disagreed on buckets whose policy was changed elsewhere, and
+      // this read-back is how an agent confirms a set_public took effect.
+      const enforcedPublic = b.accessPolicy === 'public_read' || b.accessPolicy === 'cdn_cacheable'
+      return `• **${b.name}** — ${b.fileCount} file${b.fileCount !== 1 ? 's' : ''} · ${enforcedPublic ? 'public' : 'private'} (${b.accessPolicy})`
+    }).join('\n')
 
     // StorageBucket carries BigInt columns (storageUsed / maxFileSize). Left raw,
     // they crash JSON.stringify at the MCP boundary ("Do not know how to
@@ -6581,6 +6930,7 @@ async function executeConnectFrontend(params: any, projectId: string): Promise<E
       requiresConfirmation: result.requiresConfirmation,
       origin: result.origin,
       backendVersion: result.backendVersion,
+      firstConnectedOrigin: result.firstConnectedOrigin,
     },
   }
 }
@@ -6623,7 +6973,7 @@ async function executeListConnectedApps(projectId: string): Promise<ExecutionRes
       return {
         success: true,
         message:
-          '**Connected Frontends:**\n\nNone yet. Try: _"Connect my Replit app at https://app.replit.com/my-app"_\n\nFor anything to connect, your backend must be deployed first.',
+          '**Connected Frontends:**\n\nNone yet. Try: _"Connect my Replit app at https://app.replit.com/my-app"_\n\nConnecting works before a first publish too — the API already answers.',
         data: { apps: [], active: [] },
       }
     }
@@ -6638,6 +6988,23 @@ async function executeListConnectedApps(projectId: string): Promise<ExecutionRes
     }
   } catch (error: any) {
     return { success: false, message: `Failed to list connected frontends: ${error.message}`, error: error.message }
+  }
+}
+
+/**
+ * Who a deploy or rollback is recorded as acting. runExecutor names the real
+ * actor (the person who approved the call, or the holder of the key on the
+ * MCP door) and how the call was authorised; any other caller falls back to
+ * the project owner acting from chat, as before.
+ */
+function deployActor(
+  params: any,
+  ownerUserId: string,
+): { actorUserId: string; actorVia: 'APPROVAL' | 'API' | 'CHAT' } {
+  const via = params?.actorVia
+  return {
+    actorUserId: typeof params?.actorUserId === 'string' && params.actorUserId ? params.actorUserId : ownerUserId,
+    actorVia: via === 'APPROVAL' || via === 'API' ? via : 'CHAT',
   }
 }
 
@@ -6660,10 +7027,25 @@ async function executeTriggerDeploy(params: any, projectId: string): Promise<Exe
       return { success: false, message: 'Project not found', error: 'Project not found' }
     }
 
-    // Brain flow: `confirmed` is set by runExecutor when the user authorised
-    // this turn (e.g. typed DEPLOY). Without it, engine returns the preview.
+    // There is one production deployment per project. The tool used to offer
+    // environment: 'staging', print it on the approval card, and publish
+    // production anyway; a caller that still sends it is refused.
+    if (params?.environment !== undefined && params.environment !== 'production') {
+      return {
+        success: false,
+        message:
+          `There is no "${params.environment}" environment: every deploy publishes the project's one ` +
+          'production version. Nothing was deployed.',
+        error: 'ENVIRONMENT_NOT_SUPPORTED',
+      }
+    }
+
+    // `confirmed` is set by runExecutor once a person approved this exact call
+    // (or the MCP door applied its own approval rule). Without it, the engine
+    // returns the preview.
     const force = !!(params?.force || params?.confirmed)
-    const result = await goLive(projectId, project.userId, { confirmedBy: 'CHAT', force })
+    const { actorUserId, actorVia } = deployActor(params, project.userId)
+    const result = await goLive(projectId, actorUserId, { confirmedBy: actorVia, force })
 
     if (result.kind === 'error') {
       if (result.readinessReport) {
@@ -6690,18 +7072,36 @@ async function executeTriggerDeploy(params: any, projectId: string): Promise<Exe
       }
     }
 
+    // Three different outcomes, three different answers. A published update
+    // used to read "already live", so an agent reported that nothing was
+    // published; and every answer pointed at a "Publish" section that does not
+    // exist (the console calls it Deploy).
+    if (result.noChanges) {
+      return {
+        success: true,
+        message:
+          `Nothing new to publish: v${result.version} is already the latest version and the live schema has ` +
+          `not changed since it was published. No new version was created.\n\n**Base URL:** \`${result.publicUrl}\``,
+        data: { publicUrl: result.publicUrl, alreadyLive: true, noChanges: true, published: false, version: result.version },
+      }
+    }
+
     if (result.alreadyLive) {
       return {
         success: true,
-        message: `Your backend is already live (v${result.version}).\n\n**Base URL:** \`${result.publicUrl}\`\n\nCheck the **Publish** section for deployment details and SDK snippets.`,
-        data: { publicUrl: result.publicUrl, alreadyLive: true, version: result.version },
+        message:
+          `Published v${result.version}: the live backend now serves this version.\n\n**Base URL:** \`${result.publicUrl}\`\n\n` +
+          'The **Deploy** section lists every version and can mark an earlier one as current.',
+        data: { publicUrl: result.publicUrl, alreadyLive: true, noChanges: false, published: true, version: result.version },
       }
     }
 
     return {
       success: true,
-      message: `Your backend is now live (v${result.version}).\n\n**Base URL:** \`${result.publicUrl}\`\n\nCheck the **Publish** section for deployment details. Your SDK snippet is ready in the **Connect** tab.`,
-      data: { publicUrl: result.publicUrl, alreadyLive: false, version: result.version },
+      message:
+        `Published v${result.version}: your backend is now live.\n\n**Base URL:** \`${result.publicUrl}\`\n\n` +
+        'The **Deploy** section shows its versions, and the **Connect** section has the client setup.',
+      data: { publicUrl: result.publicUrl, alreadyLive: false, noChanges: false, published: true, version: result.version },
     }
   } catch (error: any) {
     return { success: false, message: `Deployment failed: ${error.message}`, error: error.message }
@@ -6717,6 +7117,34 @@ async function executeCreateKey(params: any, projectId: string): Promise<Executi
   // the browser-safe publishable key, which is what a frontend needs and what
   // this tool is asked for most often.
   const serviceRole = params.serviceRole === true
+
+  // A service-role key bypasses row-level security entirely: the same
+  // escalation as granting 'admin', which SET_KEY_PERMISSIONS already leaves to
+  // the owner's click in Settings. Minting one here ran with no human in the
+  // loop on either agent door (CON-12). Parking it for approval would not help:
+  // its plaintext exists once, and an approved call's stored result withholds
+  // it, so the key would be minted and never seen. A person creates it in
+  // Settings, where it is shown to them once to copy.
+  if (serviceRole) {
+    return {
+      success: false,
+      message:
+        'Refused: a service-role key bypasses row-level security entirely, so a person creates it in ' +
+        'Settings → API keys → New key → Admin, where it is shown to them once. It belongs in a server\'s ' +
+        'environment, never in an agent conversation or a browser. To create a publishable key, call ' +
+        'create_api_key without serviceRole.',
+      error: 'SERVICE_KEY_REQUIRES_HUMAN',
+      code: 'SERVICE_KEY_REQUIRES_HUMAN',
+    }
+  }
+
+  // Expiry is opt-in (1–3650 days) and echoed in the result; see the note on
+  // the create below for why there is no silent default.
+  const expiresInDays =
+    Number.isFinite(Number(params.expiresInDays)) && Number(params.expiresInDays) >= 1
+      ? Math.min(Math.floor(Number(params.expiresInDays)), 3650)
+      : null
+  const expiresAt = expiresInDays ? new Date(Date.now() + expiresInDays * 24 * 60 * 60 * 1000) : null
 
   // ── Branch scoping ─────────────────────────────────────────────────────────
   //
@@ -6788,6 +7216,7 @@ async function executeCreateKey(params: any, projectId: string): Promise<Executi
     const keyPrefix = keyValue.substring(0, 12)
     const keyHash = crypto.createHash('sha256').update(keyValue).digest('hex')
         
+    // history: GOVERNED_ACTIONS (CREATE_KEY)
     const apiKey = await prisma.apiKey.create({
       data: {
         projectId,
@@ -6801,7 +7230,12 @@ async function executeCreateKey(params: any, projectId: string): Promise<Executi
         serviceRole,
         branchId,
         role: serviceRole ? 'service' : 'custom',
-        expiresAt: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000), // 1 year
+        // No silent expiry. Dashboard keys default to never expiring; this
+        // tool used to stamp a hidden 365-day expiry that no message, doc or
+        // console column mentioned — the runtime then refused the key a year
+        // later with nothing having warned anyone. Expiry is opt-in and,
+        // when chosen, said out loud below.
+        expiresAt: expiresAt,
       }
     })
     
@@ -6825,6 +7259,8 @@ async function executeCreateKey(params: any, projectId: string): Promise<Executi
 
 ${safety}
 
+${expiresAt ? `⏳ Expires ${expiresAt.toISOString().slice(0, 10)} (${expiresInDays} days) — the runtime refuses it after that.` : 'No expiry: the key works until it is revoked or rotated.'}
+
 **Copy this key (shown once):**
 \`\`\`
 ${keyValue}
@@ -6836,6 +7272,7 @@ ${keyValue}
         publishable: !serviceRole,
         header: 'x-api-key',
         safeInBrowser: !serviceRole,
+        expiresAt: expiresAt ? expiresAt.toISOString() : null,
       }
     }
   } catch (error: any) {
@@ -6899,27 +7336,26 @@ async function executeListKeys(projectId: string): Promise<ExecutionResult> {
 
 /**
  * AUTH: Enable Authentication
- * Updates the BackendGraph so the UI reflects auth as configured.
+ * Marks email/password auth enabled in the BackendGraph, which every surface
+ * reads as "auth is on" (getProjectAuthStatus), and creates the end-user
+ * `users` table the way a sign-up would.
  */
 async function executeEnableAuth(projectId: string): Promise<ExecutionResult> {
   try {
-    const { prisma: authPrisma } = await import('@/lib/db')
-
     // Step 1: Ensure project has a jwtSecret — this is what makes auth actually functional.
     // readAuth() in proof-system checks project.jwtSecret, so without this auth will never
-    // appear as enabled in any proof query.
+    // appear as enabled in any proof query. Created through the canonical path, so it is
+    // stored in its encrypted-at-rest form, and only when missing: getOrCreateSecret
+    // decrypts a secret that exists and refuses a legacy plaintext one, which older
+    // projects still hold and sign-in still accepts.
+    const { prisma: authPrisma } = await import('@/lib/db')
     const project = await authPrisma.project.findUnique({
       where: { id: projectId },
       select: { jwtSecret: true },
     })
     if (!project?.jwtSecret) {
-      const { randomBytes } = await import('crypto')
-      const secret = randomBytes(32).toString('hex')
-      await authPrisma.project.update({
-        where: { id: projectId },
-        data: { jwtSecret: secret },
-      })
-      console.log(`[executeEnableAuth] Generated jwtSecret for project ${projectId}`)
+      const { JWTSecretManager } = await import('@/lib/services/jwtSecretManager')
+      await JWTSecretManager.getOrCreateSecret(projectId)
     }
 
     // Step 2: Mark email/password auth as enabled in the BackendGraph (drives UI state)
@@ -6941,6 +7377,15 @@ async function executeEnableAuth(projectId: string): Promise<ExecutionResult> {
 
     await saveNewGraph(projectId, updatedGraph as any, undefined, { skipBillingCheck: true })
 
+    // Step 3: The end-user `users` table, with its own-rows policy. The first
+    // sign-up used to be the only thing that created it, so until someone signed
+    // up, a table referencing users(id) could not be created or merged, autonomy
+    // reported "users table missing" as critical, and the auth workflow check
+    // asked for RLS on a table that did not exist. Idempotent, and inside this
+    // governed change, so enabling auth is on the history and can be restored.
+    const { ensureAuthUsersTable } = await import('@/lib/services/end-user-auth-table')
+    await ensureAuthUsersTable(projectId, { email: null })
+
     return {
       success: true,
       message: `Authentication enabled — email/password sign-up and sign-in are configured.`,
@@ -6960,8 +7405,25 @@ async function executeEnableAuth(projectId: string): Promise<ExecutionResult> {
  * Does not require an active BackendGraph — works directly on the workspace schema.
  */
 async function executeEnableRealtime(params: Record<string, any>, projectId: string): Promise<ExecutionResult> {
+  const db = await projectDb(projectId)
   try {
     const tableName: string | undefined = params?.table || params?.tableName
+
+    // Enabling is PER TABLE. Without a name this used to fall through to the
+    // install-on-every-table branch, so `realtime { action: "enable" }` from
+    // an agent that forgot the argument silently started streaming the whole
+    // project. The all-tables branch stays reachable for internal callers that
+    // pass allTables: true; the agent's tool forwards only tableName, so the
+    // refusal names only the call an agent can make.
+    if (!tableName && params?.allTables !== true) {
+      return {
+        success: false,
+        message:
+          'Realtime is enabled per table: pass tableName, e.g. realtime { "action": "enable", "tableName": "posts" }, ' +
+          'once for each table that should stream.',
+        error: 'TABLE_NAME_REQUIRED',
+      }
+    }
 
     // ── Install actual PostgreSQL NOTIFY triggers ──────────────────────────
     const { installRealtimeTrigger, installRealtimeTriggersForAllTables, listTablesWithRealtimeTriggers } =
@@ -6969,24 +7431,42 @@ async function executeEnableRealtime(params: Record<string, any>, projectId: str
 
     const installedTables: string[] = []
     const failedTables: string[] = []
+    const skippedTables: Array<{ table: string; reason: string }> = []
 
     if (tableName) {
-      // Install on the specified table only
+      // Install on the specified table only. A refusal (internal or
+      // auth-managed table) and a failure (table missing, wrong case) are
+      // ANSWERS: reporting either under a "Realtime active" banner sent the
+      // agent away believing a stream existed while nothing was installed.
       try {
-        await installRealtimeTrigger(projectId, tableName)
+        const result = await installRealtimeTrigger(projectId, tableName)
+        if (!result.installed) {
+          return {
+            success: false,
+            message: `Realtime was NOT enabled for \`${tableName}\`: ${result.reason}.`,
+            error: 'REALTIME_TABLE_REFUSED',
+            data: { enabled: false, table: tableName, reason: result.reason },
+          }
+        }
         installedTables.push(tableName)
       } catch (err: any) {
         console.warn(`[enableRealtime] Failed to install trigger on ${tableName}:`, err?.message)
-        failedTables.push(tableName)
+        return {
+          success: false,
+          message:
+            `Realtime was NOT enabled for \`${tableName}\` — the trigger could not be installed: ` +
+            `${err?.message ?? err}. Check the table exists (names are case-sensitive as created).`,
+          error: 'REALTIME_TABLE_NOT_FOUND',
+          data: { enabled: false, table: tableName },
+        }
       }
     } else {
       // Install on every existing workspace table — query workspace schema directly
       // (does not depend on graph or Prisma Table model, which may lag behind actual DB state)
-      const { prisma: rtPrisma } = await import('@/lib/db')
       const workspaceSchema = `workspace_${projectId}`
       let tableNames: string[] = []
       try {
-        const rows = await rtPrisma.$queryRawUnsafe<Array<{ table_name: string }>>(
+        const rows = await db.$queryRawUnsafe<Array<{ table_name: string }>>(
           `SELECT table_name FROM information_schema.tables WHERE table_schema = $1 AND table_type = 'BASE TABLE' ORDER BY table_name`,
           workspaceSchema
         )
@@ -6995,12 +7475,15 @@ async function executeEnableRealtime(params: Record<string, any>, projectId: str
           .filter((n: string) => !isReservedWorkspaceTable(n))
       } catch {
         // Fallback: Prisma Table model
+        const { prisma: rtPrisma } = await import('@/lib/db')
         const rows = await rtPrisma.table.findMany({ where: { projectId }, select: { name: true } })
         tableNames = rows.map((t: { name: string }) => t.name)
       }
       if (tableNames.length > 0) {
-        await installRealtimeTriggersForAllTables(projectId, tableNames)
-        installedTables.push(...tableNames)
+        const batch = await installRealtimeTriggersForAllTables(projectId, tableNames)
+        installedTables.push(...batch.installed)
+        skippedTables.push(...batch.skipped)
+        failedTables.push(...batch.failed.map((f) => f.table))
       }
     }
 
@@ -7031,6 +7514,19 @@ async function executeEnableRealtime(params: Record<string, any>, projectId: str
     // the result of a single-table call is what made a scoped `enable_realtime`
     // on `orders` look like it had silently enabled `products` and `order_items`
     // too. Name the delta and the pre-existing set as different things.
+    // Single-table calls are additionally gated on the POST-INSTALL read-back:
+    // success means "the catalog shows the trigger", not "no exception thrown".
+    if (tableName && !verifiedTables.includes(tableName)) {
+      return {
+        success: false,
+        message:
+          `Realtime was NOT enabled for \`${tableName}\`: the install ran but the read-back ` +
+          `does not show a trigger on it. Nothing is streaming for this table.`,
+        error: 'REALTIME_NOT_VERIFIED',
+        data: { enabled: false, table: tableName, watchedTables: verifiedTables },
+      }
+    }
+
     const alreadyOn = verifiedTables.filter((t) => !installedTables.includes(t))
     const scope = tableName ? `\`${tableName}\`` : `${installedTables.length} table(s)`
     const changedList = installedTables.length > 0
@@ -7039,15 +7535,48 @@ async function executeEnableRealtime(params: Record<string, any>, projectId: str
     const alreadyList = alreadyOn.length > 0
       ? `\n\n**Already streaming before this call (unchanged):**\n${alreadyOn.map((t) => `- \`${t}\``).join('\n')}`
       : ''
-    const failNote = failedTables.length > 0
-      ? `\n\n⚠️ Could not install trigger on: ${failedTables.map(t => `\`${t}\``).join(', ')} — table may not exist yet.`
+    const skippedList = skippedTables.length > 0
+      ? `\n\n**Skipped (never streamed):**\n${skippedTables.map((s) => `- \`${s.table}\` — ${s.reason}`).join('\n')}`
       : ''
+
+    // A project-wide call that installed nothing is not "Realtime active".
+    if (!tableName && installedTables.length === 0 && failedTables.length === 0) {
+      return {
+        success: true,
+        message:
+          verifiedTables.length > 0
+            ? `Realtime is already active on ${verifiedTables.length} table(s); this call changed nothing.${skippedList}`
+            : `No realtime triggers were installed: this project has no streamable tables yet. Create a table first, then enable realtime.${skippedList}`,
+        data: { enabled: verifiedTables.length > 0, table: null, enabledNow: [], alreadyEnabled: verifiedTables, watchedTables: verifiedTables },
+      }
+    }
+
+    // Partial failure is FAILURE with a ledger — the apply_migration contract.
+    // "Active, with a footnote" sent agents away from tables that never streamed.
+    if (failedTables.length > 0) {
+      return {
+        success: false,
+        message:
+          `Realtime was only PARTIALLY enabled.\n\n` +
+          `**Installed (streaming now):**\n${installedTables.length ? installedTables.map((t) => `- \`${t}\``).join('\n') : '- (none)'}\n\n` +
+          `**Failed (NOT streaming):**\n${failedTables.map((t) => `- \`${t}\``).join('\n')}` +
+          skippedList,
+        error: 'REALTIME_PARTIAL',
+        data: {
+          enabled: installedTables.length > 0,
+          table: tableName ?? null,
+          enabledNow: installedTables,
+          failed: failedTables,
+          watchedTables: verifiedTables,
+        },
+      }
+    }
 
     const exampleTable = tableName ?? installedTables[0] ?? verifiedTables[0] ?? 'messages'
 
     return {
       success: true,
-      message: `✅ **Realtime active for ${scope}.**\n\nPostgreSQL NOTIFY triggers installed — live INSERT/UPDATE/DELETE events flow to subscribers immediately.\n\nSDK usage:\n\`\`\`js\nbackend.${exampleTable}.subscribe((event) => console.log(event))\n\`\`\`${changedList}${alreadyList}${failNote}`,
+      message: `✅ **Realtime active for ${scope}.**\n\nPostgreSQL NOTIFY triggers installed — live INSERT/UPDATE/DELETE events flow to subscribers immediately.\n\nSDK usage:\n\`\`\`js\nbackend.${exampleTable}.subscribe((event) => console.log(event))\n\`\`\`${changedList}${alreadyList}${skippedList}`,
       data: {
         enabled: true,
         table: tableName ?? null,
@@ -7169,8 +7698,8 @@ async function executeGetRealtimeStatus(projectId: string): Promise<ExecutionRes
       return {
         success: true,
         message:
-          'No workspace tables yet — realtime has nothing to stream. Create a table first; ' +
-          'NOTIFY triggers are installed automatically as tables are built.',
+          'No workspace tables yet — realtime has nothing to stream. Realtime is opt-in per table: ' +
+          'after creating a table, call realtime { "action": "enable", "tableName": "<table>" }.',
         data: { ...status, healthy: true },
       }
     }
@@ -7228,15 +7757,28 @@ async function executeGetRealtimeStatus(projectId: string): Promise<ExecutionRes
  * users table has the required OAuth columns.
  */
 async function executeAddProvider(params: any, projectId: string): Promise<ExecutionResult> {
+  const db = await projectDb(projectId)
+  // The redirect URI the runtime sends the provider (server/routes/oauth.ts) is
+  // on the project's own API address, which for a project in another region is
+  // that region's, not this server's. Resolved before anything is written, so a
+  // region with no address configured fails the call rather than a saved one.
+  const { projectApiOrigin } = await import('@/lib/data-plane/regional')
+  const apiOrigin = await projectApiOrigin(
+    projectId,
+    process.env.NEXTAUTH_URL || process.env.NEXT_PUBLIC_APP_URL || 'https://your-domain.com',
+  )
   const { provider, clientId, clientSecret } = params
 
   const providerName = (provider || '').toLowerCase()
 
-  const SUPPORTED_PROVIDERS = ['google', 'github', 'discord', 'facebook', 'apple']
-  if (!SUPPORTED_PROVIDERS.includes(providerName)) {
+  // Only providers the runtime serves (server/routes/oauth.ts). Apple used to
+  // be accepted here, stored, and reported live while every sign-in 404'd.
+  const { SERVED_OAUTH_PROVIDERS, isServedOAuthProvider } = await import('@/lib/services/oauth-providers')
+  if (!isServedOAuthProvider(providerName)) {
     return {
       success: false,
-      message: `Provider "${provider}" is not supported. Supported providers: ${SUPPORTED_PROVIDERS.join(', ')}`,
+      message: `Provider "${provider}" is not supported. Supported providers: ${SERVED_OAUTH_PROVIDERS.join(', ')}`,
+      error: 'UNSUPPORTED_PROVIDER',
     }
   }
 
@@ -7252,7 +7794,6 @@ async function executeAddProvider(params: any, projectId: string): Promise<Execu
     github:   ['read:user', 'user:email'],
     discord:  ['identify', 'email'],
     facebook: ['email', 'public_profile'],
-    apple:    ['email', 'name'],
   }
 
   const { prisma } = await import('@/lib/db')
@@ -7275,7 +7816,7 @@ async function executeAddProvider(params: any, projectId: string): Promise<Execu
   // Ensure OAuth columns exist in the workspace users table (if it exists)
   const schemaName = `workspace_${projectId}`
   try {
-    const tableCheck = await prisma.$queryRawUnsafe<{ exists: boolean }[]>(
+    const tableCheck = await db.$queryRawUnsafe<{ exists: boolean }[]>(
       `SELECT EXISTS (
         SELECT 1 FROM information_schema.tables
         WHERE table_schema = $1 AND table_name = 'users'
@@ -7283,7 +7824,7 @@ async function executeAddProvider(params: any, projectId: string): Promise<Execu
       schemaName
     )
     if (tableCheck[0]?.exists) {
-      await prisma.$executeRawUnsafe(
+      await db.$executeRawUnsafe(
         `ALTER TABLE "${schemaName}"."users"
            ADD COLUMN IF NOT EXISTS oauth_provider TEXT,
            ADD COLUMN IF NOT EXISTS oauth_id TEXT,
@@ -7315,6 +7856,7 @@ async function executeAddProvider(params: any, projectId: string): Promise<Execu
     })
     const active = (existingProject?.activeIntegrations as Record<string, any>) ?? {}
     if (!active[providerName]?.enabled) {
+      // history: GOVERNED_ACTIONS (ADD_PROVIDER)
       await prisma.project.update({
         where: { id: projectId },
         data: {
@@ -7334,8 +7876,7 @@ async function executeAddProvider(params: any, projectId: string): Promise<Execu
   }
 
   const displayName = providerName.charAt(0).toUpperCase() + providerName.slice(1)
-  const baseUrl = process.env.NEXTAUTH_URL || process.env.NEXT_PUBLIC_APP_URL || 'https://your-domain.com'
-  const redirectUri = `${baseUrl}/api/v1/${projectId}/auth/${providerName}/callback`
+  const redirectUri = `${apiOrigin}/api/v1/${projectId}/auth/${providerName}/callback`
 
   return {
     success: true,
@@ -7376,13 +7917,13 @@ Users of your project can now sign in with ${displayName}.`,
  * surfaced an identity those tools could never act on.
  */
 async function executeListUsers(projectId: string, params?: any): Promise<ExecutionResult> {
+  const db = await projectDb(projectId)
   try {
-    const { prisma } = await import('@/lib/db')
     const schemaName = `workspace_${projectId}`
     const limit = Math.max(1, Math.min(200, Number(params?.limit) || 50))
 
     // The workspace users table is created lazily on first signup.
-    const tableCheck = await prisma.$queryRawUnsafe<{ exists: boolean }[]>(
+    const tableCheck = await db.$queryRawUnsafe<{ exists: boolean }[]>(
       `SELECT EXISTS (
         SELECT 1 FROM information_schema.tables
         WHERE table_schema = $1 AND table_name = 'users'
@@ -7400,7 +7941,7 @@ async function executeListUsers(projectId: string, params?: any): Promise<Execut
     // Introspect columns so the SELECT tolerates whatever auth schema the
     // project generated (snake_case vs camelCase timestamps, optional
     // provider / verified / blocked columns, OAuth columns, etc.).
-    const cols = await prisma.$queryRawUnsafe<{ column_name: string }[]>(
+    const cols = await db.$queryRawUnsafe<{ column_name: string }[]>(
       `SELECT column_name FROM information_schema.columns
        WHERE table_schema = $1 AND table_name = 'users'`,
       schemaName,
@@ -7431,11 +7972,13 @@ async function executeListUsers(projectId: string, params?: any): Promise<Execut
     const { executeWithUserContext } = await import('@/lib/services/workspace-rls')
     const orderBy = createdCol ? `ORDER BY "${createdCol}" DESC` : ''
     const rows = await executeWithUserContext<any>(
+      projectId,
       '', true,
       `SELECT ${select.join(', ')} FROM "${schemaName}"."users" ${orderBy} LIMIT ${limit}`,
     )
 
     const countRows = await executeWithUserContext<{ count: bigint }>(
+      projectId,
       '', true,
       `SELECT COUNT(*)::bigint AS count FROM "${schemaName}"."users"`,
     )
@@ -7490,15 +8033,15 @@ async function executeListUsers(projectId: string, params?: any): Promise<Execut
  * Signin route checks this column and rejects blocked users.
  */
 async function executeBlockUser(params: any, projectId: string): Promise<ExecutionResult> {
+  const db = await projectDb(projectId)
   const { userId, email } = params
   if (!userId && !email) return { success: false, message: 'userId or email is required' }
 
   try {
-    const { prisma } = await import('@/lib/db')
     const schemaName = `workspace_${projectId}`
 
     // Ensure is_blocked column exists (idempotent)
-    await prisma.$executeRawUnsafe(
+    await db.$executeRawUnsafe(
       `ALTER TABLE "${schemaName}"."users" ADD COLUMN IF NOT EXISTS is_blocked BOOLEAN DEFAULT FALSE`
     )
 
@@ -7512,12 +8055,23 @@ async function executeBlockUser(params: any, projectId: string): Promise<Executi
       paramValue = userId
     }
 
-    const result = await prisma.$executeRawUnsafe(
-      `UPDATE "${schemaName}"."users" SET is_blocked = TRUE WHERE "${identifier}" = $1`,
-      paramValue
+    // Service-role UPDATE: the users table is FORCE row-level security with an
+    // own-rows policy, so a claimless query matches ZERO rows — this exact
+    // UPDATE used to report every real account as "not found" while is_blocked
+    // stayed false, including after a human approved the block. Same pattern as
+    // executeResetPassword's read below; `id` is cast because the column may be
+    // uuid. RETURNING is the row count executeWithUserContext can report.
+    const { executeWithUserContext } = await import('@/lib/services/workspace-rls')
+    const where = identifier === 'email' ? `"email" = $1` : `"id"::text = $1`
+    const updated = await executeWithUserContext<{ id: string }>(
+      projectId,
+      '',
+      true,
+      `UPDATE "${schemaName}"."users" SET is_blocked = TRUE WHERE ${where} RETURNING id`,
+      [String(paramValue)]
     )
 
-    if (result === 0) {
+    if (updated.length === 0) {
       return { success: false, message: `User "${email || userId}" not found in this project` }
     }
 
@@ -7555,6 +8109,7 @@ async function executeResetPassword(params: any, projectId: string): Promise<Exe
     const identifier = email ? 'email' : 'id'
     const paramValue = String(email || userId)
     const users = await executeWithUserContext<{ id: string; email: string | null }>(
+      projectId,
       '',
       true,
       `SELECT id, email FROM "${schemaName}"."users" WHERE "${identifier}" = $1 LIMIT 1`,
@@ -7619,29 +8174,37 @@ async function executeResetPassword(params: any, projectId: string): Promise<Exe
  * Flips is_blocked back to false so the user can sign in again.
  */
 async function executeUnblockUser(params: any, projectId: string): Promise<ExecutionResult> {
+  const db = await projectDb(projectId)
   const { userId, email } = params
   if (!userId && !email) return { success: false, message: 'userId or email is required' }
 
   try {
-    const { prisma } = await import('@/lib/db')
     const schemaName = `workspace_${projectId}`
 
     // is_blocked must exist before we can unblock — BLOCK_USER adds it on
     // first block, but a user might be calling unblock on a never-blocked
     // project.
-    await prisma.$executeRawUnsafe(
+    await db.$executeRawUnsafe(
       `ALTER TABLE "${schemaName}"."users" ADD COLUMN IF NOT EXISTS is_blocked BOOLEAN DEFAULT FALSE`
     )
 
     const identifier = email ? 'email' : 'id'
     const paramValue = email || userId
 
-    const result = await prisma.$executeRawUnsafe(
-      `UPDATE "${schemaName}"."users" SET is_blocked = FALSE WHERE "${identifier}" = $1`,
-      paramValue,
+    // Service-role UPDATE, for the same reason as executeBlockUser: FORCE RLS
+    // hides every row from a claimless query, so unblock reported "not found"
+    // and changed nothing.
+    const { executeWithUserContext } = await import('@/lib/services/workspace-rls')
+    const where = identifier === 'email' ? `"email" = $1` : `"id"::text = $1`
+    const updated = await executeWithUserContext<{ id: string }>(
+      projectId,
+      '',
+      true,
+      `UPDATE "${schemaName}"."users" SET is_blocked = FALSE WHERE ${where} RETURNING id`,
+      [String(paramValue)]
     )
 
-    if (result === 0) {
+    if (updated.length === 0) {
       return { success: false, message: `User "${email || userId}" not found in this project` }
     }
 
@@ -7688,6 +8251,7 @@ async function executeDisableProvider(params: any, projectId: string): Promise<E
         data: { provider, enabled: false },
       }
     }
+    // history: GOVERNED_ACTIONS (DISABLE_PROVIDER)
     await prisma.workspaceOAuthConfig.update({
       where: { projectId_provider: { projectId, provider } },
       data: { enabled: false },
@@ -7701,6 +8265,7 @@ async function executeDisableProvider(params: any, projectId: string): Promise<E
       })
       const active = (proj?.activeIntegrations as Record<string, any>) ?? {}
       if (active[provider]?.enabled) {
+        // history: GOVERNED_ACTIONS (DISABLE_PROVIDER)
         await prisma.project.update({
           where: { id: projectId },
           data: {
@@ -7717,6 +8282,7 @@ async function executeDisableProvider(params: any, projectId: string): Promise<E
     // integrationKeyStore has no delete helper — go direct via Prisma; deleteMany
     // so a missing row is a no-op instead of throwing P2025.
     try {
+      // history: GOVERNED_ACTIONS (DISABLE_PROVIDER)
       await prisma.projectIntegrationKey.deleteMany({
         where: { projectId, integrationId: `${provider}_auth` },
       })
@@ -7737,50 +8303,49 @@ async function executeDisableProvider(params: any, projectId: string): Promise<E
 
 /**
  * MONITORING: Get Metrics
+ *
+ * Reads what the runtime actually records: ApiRequestLog, through the same
+ * window-stats service the Monitoring page uses. The old implementation
+ * grouped `Log` rows of type 'api_request' — a type nothing in the codebase
+ * has ever written — so every project, however busy, was told "No API metrics
+ * available yet" while the docs promised latency percentiles and error rate.
  */
 async function executeGetMetrics(params: any, projectId: string): Promise<ExecutionResult> {
   try {
-    const { prisma } = await import('@/lib/db')
-    
-    // Get API metrics from logs
-    const metrics = await prisma.log.groupBy({
-      by: ['endpoint'],
-      where: {
-        projectId,
-        type: 'api_request',
-        timestamp: {
-          gte: new Date(Date.now() - 24 * 60 * 60 * 1000) // Last 24 hours
-        }
-      },
-      _count: true,
-      _avg: {
-        duration: true
-      },
-      orderBy: {
-        _count: {
-          endpoint: 'desc'
-        }
-      },
-      take: 10
-    })
-    
-    if (metrics.length === 0) {
+    const { getRuntimeWindowStats, getPerformanceBreakdown } = await import('@/lib/services/metrics')
+
+    const windowMinutes = Math.min(Math.max(Number(params?.windowMinutes) || 24 * 60, 5), 30 * 24 * 60)
+    const end = new Date()
+    const start = new Date(end.getTime() - windowMinutes * 60 * 1000)
+    const stats = await getRuntimeWindowStats(projectId, start, end)
+
+    if (stats.count === 0) {
       return {
         success: true,
-        message: "📊 No API metrics available yet.\n\nStart making API calls to see performance data.",
-        data: { metrics: [] }
+        message:
+          `📊 No runtime API traffic in the last ${windowMinutes >= 60 ? `${Math.round(windowMinutes / 60)}h` : `${windowMinutes}m`}.` +
+          `\n\nMetrics appear here once your app calls the project's API.`,
+        data: { windowMinutes, stats, endpoints: [] },
       }
     }
-    
-    const metricsList = metrics.map(m => {
-      const avgTime = m._avg.duration ? `${Math.round(m._avg.duration)}ms` : 'N/A'
-      return `📈 **${m.endpoint}** - ${m._count} calls, avg ${avgTime}`
-    }).join('\n')
-    
+
+    // Top endpoints over the service's nearest canonical range.
+    const range = windowMinutes <= 60 ? '1h' : windowMinutes <= 24 * 60 ? '24h' : windowMinutes <= 7 * 24 * 60 ? '7d' : '30d'
+    const endpoints = await getPerformanceBreakdown(range, 'api', projectId).catch(() => [])
+
+    const top = endpoints
+      .slice(0, 10)
+      .map((e) => `📈 **${e.id}** — ${e.requests} req · avg ${Math.round(e.avgResponseTime)}ms · p95 ${Math.round(e.p95)}ms · ${e.errorRate.toFixed(1)}% errors`)
+      .join('\n')
+
     return {
       success: true,
-      message: `📊 **API Metrics (Last 24h):**\n\n${metricsList}`,
-      data: { metrics }
+      message:
+        `📊 **API Metrics (last ${windowMinutes >= 60 ? `${Math.round(windowMinutes / 60)}h` : `${windowMinutes}m`}):**\n\n` +
+        `${stats.count} requests · error rate ${stats.errorRatePct.toFixed(1)}% (${stats.serverErrorCount} × 5xx)\n` +
+        `latency p50 ${Math.round(stats.p50)}ms · p95 ${Math.round(stats.p95)}ms · p99 ${Math.round(stats.p99)}ms` +
+        (top ? `\n\n**Top endpoints (${range}):**\n${top}` : ''),
+      data: { windowMinutes, stats, endpoints },
     }
   } catch (error: any) {
     return {
@@ -7793,47 +8358,65 @@ async function executeGetMetrics(params: any, projectId: string): Promise<Execut
 
 /**
  * MONITORING: Get Errors
+ *
+ * 5xx from the runtime's own record (ApiRequestLog), grouped by method + path
+ * with count and last-seen — what the tool has always promised. The old
+ * implementation read `Log` rows with severity 'error', which no runtime path
+ * writes, so it answered "No errors in the last hour! Your APIs are running
+ * smoothly." while request_logs showed the 500s.
  */
 async function executeGetErrors(params: any, projectId: string): Promise<ExecutionResult> {
   try {
     const { prisma } = await import('@/lib/db')
-    
-    const errors = await prisma.log.findMany({
-      where: {
-        projectId,
-        severity: 'error',
-        timestamp: {
-          gte: new Date(Date.now() - 60 * 60 * 1000) // Last hour
-        }
-      },
-      orderBy: { timestamp: 'desc' },
-      take: 10,
-      select: {
-        id: true,
-        message: true,
-        endpoint: true,
-        statusCode: true,
-        timestamp: true
-      }
-    })
-    
-    if (errors.length === 0) {
+
+    const windowMinutes = Math.min(Math.max(Number(params?.windowMinutes) || 60, 5), 30 * 24 * 60)
+    const limit = Math.min(Math.max(Number(params?.limit) || 10, 1), 50)
+    const since = new Date(Date.now() - windowMinutes * 60 * 1000)
+
+    const groups = await prisma.$queryRawUnsafe<Array<{
+      method: string
+      path: string
+      status_code: number
+      count: number
+      last_seen: Date
+    }>>(
+      `SELECT "method", "path", "statusCode" AS status_code,
+              COUNT(*)::int AS count,
+              MAX("timestamp") AS last_seen
+         FROM "api_request_logs"
+        WHERE "projectId" = $1 AND "statusCode" >= 500
+          AND "timestamp" >= ($2::timestamptz AT TIME ZONE 'UTC')
+          AND "branchId" IS NULL
+        GROUP BY "method", "path", "statusCode"
+        ORDER BY MAX("timestamp") DESC
+        LIMIT $3`,
+      projectId,
+      since.toISOString(),
+      limit
+    )
+
+    const windowLabel = windowMinutes >= 60 ? `${Math.round(windowMinutes / 60)}h` : `${windowMinutes}m`
+
+    if (groups.length === 0) {
       return {
         success: true,
-        message: "✅ No errors in the last hour!\n\nYour APIs are running smoothly.",
-        data: { errors: [], count: 0 }
+        message: `✅ No 5xx responses from the runtime API in the last ${windowLabel}.`,
+        data: { windowMinutes, errors: [], count: 0 },
       }
     }
-    
-    const errorList = errors.map(e => {
-      const time = new Date(e.timestamp).toLocaleTimeString()
-      return `❌ **[${time}]** ${e.endpoint || 'Unknown'} - ${e.statusCode || 500}: ${e.message.substring(0, 80)}`
-    }).join('\n')
-    
+
+    const total = groups.reduce((n, g) => n + g.count, 0)
+    const errorList = groups
+      .map((g) => {
+        const last = new Date(g.last_seen).toISOString()
+        return `❌ **${g.method} ${g.path}** — ${g.status_code} × ${g.count}, last ${last}`
+      })
+      .join('\n')
+
     return {
       success: true,
-      message: `🚨 **Recent Errors (${errors.length}):**\n\n${errorList}`,
-      data: { errors, count: errors.length }
+      message: `🚨 **5xx in the last ${windowLabel} (${total} across ${groups.length} endpoint(s)):**\n\n${errorList}`,
+      data: { windowMinutes, errors: groups, count: total },
     }
   } catch (error: any) {
     return {
@@ -7902,59 +8485,22 @@ async function executeGetUsage(projectId: string): Promise<ExecutionResult> {
  * MONITORING: Set Alert — persists alert config as JSON in project.activeIntegrations
  * Stored under the `_monitoring_alerts` key so no schema migration is needed.
  */
-async function executeSetAlert(params: any, projectId: string): Promise<ExecutionResult> {
-  const { metric, threshold, operator = 'gt', channel = 'in_app', name } = params ?? {}
-
-  if (!metric || threshold === undefined) {
-    return {
-      success: false,
-      message: 'Alert requires metric and threshold. Example: { metric: "error_rate", threshold: 5, operator: "gt" }',
-    }
-  }
-
-  try {
-    const { prisma } = await import('@/lib/db')
-
-    const project = await prisma.project.findUnique({
-      where: { id: projectId },
-      select: { activeIntegrations: true },
-    })
-
-    const existing = (project?.activeIntegrations as Record<string, any>) ?? {}
-    const alerts: any[] = existing._monitoring_alerts ?? []
-
-    const newAlert = {
-      id: `alert_${Date.now()}`,
-      name: name || `${metric} alert`,
-      metric,
-      threshold: Number(threshold),
-      operator,   // 'gt' | 'lt' | 'gte' | 'lte'
-      channel,    // 'in_app' | 'email' | 'webhook'
-      enabled: true,
-      createdAt: new Date().toISOString(),
-    }
-
-    // Replace existing alert for same metric (idempotent)
-    const updated = alerts.filter(a => a.metric !== metric)
-    updated.push(newAlert)
-
-    await prisma.project.update({
-      where: { id: projectId },
-      data: { activeIntegrations: { ...existing, _monitoring_alerts: updated } },
-    })
-
-    const opLabel = operator === 'gt' ? 'exceeds' : operator === 'lt' ? 'drops below' : 'reaches'
-    return {
-      success: true,
-      message: `✅ Alert set: notify when ${metric} ${opLabel} ${threshold}. Active on Monitoring tab.`,
-      data: newAlert,
-    }
-  } catch (error: any) {
-    return {
-      success: false,
-      message: `Failed to save alert: ${error.message}`,
-      error: error.message,
-    }
+async function executeSetAlert(_params: any, _projectId: string): Promise<ExecutionResult> {
+  // This used to store the alert under project.activeIntegrations and answer
+  // with a green set-and-active receipt — but NOTHING evaluates those
+  // rows: no cron, no reconciler pass, no console surface reads them. The
+  // agent was told a watchdog existed that could never bark, which is worse
+  // than having none. The MCP door already removed its set_alert action and
+  // the brain no longer offers the tool; this refusal covers any caller that
+  // still carries the action name. It returns when an evaluator exists.
+  return {
+    success: false,
+    message:
+      'Alerts are not available yet: nothing evaluates stored alert rules, so setting one would ' +
+      'claim a watchdog that can never fire. Watch the backend directly instead — ' +
+      'monitoring { "action": "metrics" } and { "action": "errors" } — or rely on the autonomy ' +
+      'loop, which already surfaces failing endpoints on the Autonomy page.',
+    error: 'ALERTS_NOT_EVALUATED',
   }
 }
 
@@ -8007,6 +8553,7 @@ async function executeSetAlert(params: any, projectId: string): Promise<Executio
 // ============================================================================
 
 async function executeVacuumTable(params: any, projectId: string): Promise<ExecutionResult> {
+  const db = await projectDb(projectId)
   const tableName = params?.tableName ?? params?.table
   if (!tableName) {
     return {
@@ -8018,7 +8565,6 @@ async function executeVacuumTable(params: any, projectId: string): Promise<Execu
   }
 
   try {
-    const { prisma } = await import('@/lib/db')
     const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
     const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
 
@@ -8036,7 +8582,7 @@ async function executeVacuumTable(params: any, projectId: string): Promise<Execu
 
     // Must still exist. A finding can outlive its table, and VACUUM on a missing
     // relation is an error rather than a no-op.
-    const exists = await prisma.$queryRawUnsafe<Array<{ one: number }>>(
+    const exists = await db.$queryRawUnsafe<Array<{ one: number }>>(
       `SELECT 1 AS one FROM information_schema.tables
         WHERE table_schema = $1 AND table_name = $2 LIMIT 1`,
       postgresSchema, tableName,
@@ -8050,7 +8596,7 @@ async function executeVacuumTable(params: any, projectId: string): Promise<Execu
       }
     }
 
-    const before = await prisma.$queryRawUnsafe<Array<{ dead: string; live: string }>>(
+    const before = await db.$queryRawUnsafe<Array<{ dead: string; live: string }>>(
       `SELECT n_dead_tup::text AS dead, n_live_tup::text AS live
          FROM pg_stat_user_tables WHERE schemaname = $1 AND relname = $2`,
       postgresSchema, tableName,
@@ -8059,9 +8605,9 @@ async function executeVacuumTable(params: any, projectId: string): Promise<Execu
 
     // VACUUM cannot run inside a transaction block, so this must go through
     // $executeRawUnsafe (autocommit) and never $transaction.
-    await prisma.$executeRawUnsafe(`VACUUM (ANALYZE) "${postgresSchema}"."${tableName}"`)
+    await db.$executeRawUnsafe(`VACUUM (ANALYZE) "${postgresSchema}"."${tableName}"`)
 
-    const after = await prisma.$queryRawUnsafe<Array<{ dead: string }>>(
+    const after = await db.$queryRawUnsafe<Array<{ dead: string }>>(
       `SELECT n_dead_tup::text AS dead
          FROM pg_stat_user_tables WHERE schemaname = $1 AND relname = $2`,
       postgresSchema, tableName,
@@ -8108,6 +8654,7 @@ async function executeVacuumTable(params: any, projectId: string): Promise<Execu
  * the cost of the approved change and is stated in the result.
  */
 async function executeDropIndex(params: any, projectId: string): Promise<ExecutionResult> {
+  const db = await projectDb(projectId)
   const indexName = params?.indexName ?? params?.index
   const tableName = params?.tableName ?? params?.table
 
@@ -8121,7 +8668,6 @@ async function executeDropIndex(params: any, projectId: string): Promise<Executi
   }
 
   try {
-    const { prisma } = await import('@/lib/db')
     const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
     const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
 
@@ -8137,7 +8683,7 @@ async function executeDropIndex(params: any, projectId: string): Promise<Executi
 
     // One catalog read answers every precondition at once, scoped to this
     // project's schema so the name can only ever resolve inside this tenant.
-    const rows = await prisma.$queryRawUnsafe<Array<{
+    const rows = await db.$queryRawUnsafe<Array<{
       table_name: string
       is_primary: boolean
       is_unique: boolean
@@ -8194,7 +8740,7 @@ async function executeDropIndex(params: any, projectId: string): Promise<Executi
       }
     }
 
-    await prisma.$executeRawUnsafe(`DROP INDEX "${postgresSchema}"."${indexName}"`)
+    await db.$executeRawUnsafe(`DROP INDEX "${postgresSchema}"."${indexName}"`)
 
     return {
       success: true,
@@ -8229,6 +8775,7 @@ async function executeDropIndex(params: any, projectId: string): Promise<Executi
  * reclaimed and "reindexed successfully" is not evidence of that.
  */
 async function executeReindexIndex(params: any, projectId: string): Promise<ExecutionResult> {
+  const db = await projectDb(projectId)
   const indexName = params?.indexName ?? params?.index
 
   if (!indexName) {
@@ -8241,7 +8788,6 @@ async function executeReindexIndex(params: any, projectId: string): Promise<Exec
   }
 
   try {
-    const { prisma } = await import('@/lib/db')
     const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
     const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
 
@@ -8255,7 +8801,7 @@ async function executeReindexIndex(params: any, projectId: string): Promise<Exec
       }
     }
 
-    const before = await prisma.$queryRawUnsafe<Array<{ table_name: string; size_bytes: string }>>(
+    const before = await db.$queryRawUnsafe<Array<{ table_name: string; size_bytes: string }>>(
       `SELECT t.relname AS table_name, pg_relation_size(i.oid)::text AS size_bytes
          FROM pg_index ix
          JOIN pg_class i     ON i.oid = ix.indexrelid
@@ -8276,11 +8822,11 @@ async function executeReindexIndex(params: any, projectId: string): Promise<Exec
     }
 
     const sizeBefore = Number(before[0].size_bytes) || 0
-    await prisma.$executeRawUnsafe(
+    await db.$executeRawUnsafe(
       `REINDEX INDEX CONCURRENTLY "${postgresSchema}"."${indexName}"`,
     )
 
-    const after = await prisma.$queryRawUnsafe<Array<{ size_bytes: string }>>(
+    const after = await db.$queryRawUnsafe<Array<{ size_bytes: string }>>(
       `SELECT pg_relation_size(i.oid)::text AS size_bytes
          FROM pg_class i
          JOIN pg_namespace n ON n.oid = i.relnamespace
@@ -8335,6 +8881,7 @@ async function executeReindexIndex(params: any, projectId: string): Promise<Exec
  * it is still a full scan.
  */
 async function executeValidateConstraint(params: any, projectId: string): Promise<ExecutionResult> {
+  const db = await projectDb(projectId)
   const tableName = params?.tableName ?? params?.table
   const constraintName = params?.constraintName ?? params?.constraint
 
@@ -8348,7 +8895,6 @@ async function executeValidateConstraint(params: any, projectId: string): Promis
   }
 
   try {
-    const { prisma } = await import('@/lib/db')
     const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
     const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
 
@@ -8364,7 +8910,7 @@ async function executeValidateConstraint(params: any, projectId: string): Promis
       }
     }
 
-    const rows = await prisma.$queryRawUnsafe<Array<{ convalidated: boolean; definition: string }>>(
+    const rows = await db.$queryRawUnsafe<Array<{ convalidated: boolean; definition: string }>>(
       `SELECT c.convalidated, pg_get_constraintdef(c.oid) AS definition
          FROM pg_constraint c
          JOIN pg_class rel   ON rel.oid = c.conrelid
@@ -8389,7 +8935,7 @@ async function executeValidateConstraint(params: any, projectId: string): Promis
       }
     }
 
-    await prisma.$executeRawUnsafe(
+    await db.$executeRawUnsafe(
       `ALTER TABLE "${postgresSchema}"."${tableName}" VALIDATE CONSTRAINT "${constraintName}"`,
     )
 
@@ -8416,6 +8962,7 @@ async function executeValidateConstraint(params: any, projectId: string): Promis
 }
 
 async function executeCreateIndex(params: any, projectId: string, target: SchemaTarget = {}): Promise<ExecutionResult> {
+  const db = await projectDb(projectId)
   const { tableName } = params
   // Accept { columnName } (autonomy buildFixAction) or { columns: [...] } (chat,
   // MCP, migration parser). A param-name drift here must never silently no-op.
@@ -8476,7 +9023,6 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
   }
 
   try {
-    const { prisma } = await import('@/lib/db')
     const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
     const postgresSchema = target.targetSchema ?? getWorkspaceDatabaseNames(projectId).postgresSchema
 
@@ -8506,7 +9052,7 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
     // question.
     let softDeleteScoped = false
     let effectiveWhere = wherePredicate
-    if (unique && !wherePredicate && (await hasSoftDeleteColumn(prisma, postgresSchema, tableName))) {
+    if (unique && !wherePredicate && (await hasSoftDeleteColumn(db, postgresSchema, tableName))) {
       effectiveWhere = '"deleted_at" IS NULL'
       softDeleteScoped = true
     }
@@ -8521,7 +9067,7 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
     // exists over different columns — or without UNIQUE — Postgres returns
     // success and leaves the old one in place. That is exactly how a "created"
     // unique index turned out to be a pre-existing non-unique one.
-    const existing = await prisma.$queryRawUnsafe<Array<{ indexdef: string }>>(
+    const existing = await db.$queryRawUnsafe<Array<{ indexdef: string }>>(
       `SELECT indexdef FROM pg_indexes WHERE schemaname = $1 AND tablename = $2 AND indexname = $3`,
       postgresSchema, tableName, idxName,
     )
@@ -8550,10 +9096,10 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
       }
     }
 
-    await prisma.$executeRawUnsafe(ddl)
+    await db.$executeRawUnsafe(ddl)
 
     // ── Verify, do not assume ───────────────────────────────────────────────
-    const after = await prisma.$queryRawUnsafe<Array<{ indexdef: string }>>(
+    const after = await db.$queryRawUnsafe<Array<{ indexdef: string }>>(
       `SELECT indexdef FROM pg_indexes WHERE schemaname = $1 AND tablename = $2 AND indexname = $3`,
       postgresSchema, tableName, idxName,
     )
@@ -8707,16 +9253,16 @@ export function indexDefColumns(indexdef: string): string[] {
  * DATABASE: Rename Column
  */
 async function executeRenameColumn(params: any, projectId: string, target: SchemaTarget = {}): Promise<ExecutionResult> {
+  const db = await projectDb(projectId)
   const { tableName, oldName, newName } = params
   if (!tableName || !oldName || !newName) {
     return { success: false, message: 'tableName, oldName and newName are required', error: 'Missing parameters' }
   }
   try {
-    const { prisma } = await import('@/lib/db')
     const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
     const postgresSchema = target.targetSchema ?? getWorkspaceDatabaseNames(projectId).postgresSchema
     const safe = (s: string) => s.replace(/[^a-z0-9_]/gi, '')
-    await prisma.$executeRawUnsafe(
+    await db.$executeRawUnsafe(
       `ALTER TABLE "${postgresSchema}"."${safe(tableName)}" RENAME COLUMN "${safe(oldName)}" TO "${safe(newName)}"`
     )
     // The ledger describes MAIN; a branch's rename is applied when it is merged.
@@ -8813,6 +9359,7 @@ export async function executeBranchSchemaAction(
 }
 
 async function executeAddConstraint(params: any, projectId: string, schemaTarget: SchemaTarget = {}): Promise<ExecutionResult> {
+  const db = await projectDb(projectId)
   const branchMode = !!schemaTarget.targetSchema
   const { tableName, constraintName, constraintDefinition, referencedTable } = params
   const columnName = params.columnName ? String(params.columnName).trim() : ''
@@ -8845,6 +9392,41 @@ async function executeAddConstraint(params: any, projectId: string, schemaTarget
           `Recorded foreign key ${tableName}.${columnName}${target ? ` → ${target}` : ''}; it is not enforced on a ` +
           `branch and is added to production when the branch is merged.`,
         data: { tableName, columnName, referencedTable: target ?? null, enforcedOnBranch: false },
+      }
+    }
+    // A foreign key declared in a migration is installed exactly as written:
+    // its referenced column, both actions and its name. fk-repair's rules are
+    // for keys Backenly infers, and their default is ON DELETE CASCADE, which is
+    // how a declared ON DELETE SET NULL used to become one.
+    if (params.references !== undefined) {
+      const fk = params.references
+      if (!isDeclaredForeignKey(fk)) {
+        return {
+          success: false,
+          message: `The foreign key declared on "${tableName}.${columnName}" cannot be installed as written, so nothing was added.`,
+          code: 'FK_FAILED',
+        }
+      }
+      const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
+      const sql = addForeignKeySql(getWorkspaceDatabaseNames(projectId).postgresSchema, tableName, columnName, fk)
+      try {
+        // A key into `users` needs the end-user auth table (lib/services/auth-users-reference.ts).
+        const { ensureReferencedAuthUsersTable } = await import('@/lib/services/auth-users-reference')
+        await ensureReferencedAuthUsersTable(projectId, fk.table)
+        await db.$executeRawUnsafe(sql)
+      } catch (err: any) {
+        const reason = err?.meta?.message ?? err?.message ?? String(err)
+        return {
+          success: false,
+          message: `The foreign key ${tableName}.${columnName} → ${describeTarget(fk)} was not added: ${reason}`,
+          error: reason,
+          code: 'FK_FAILED',
+        }
+      }
+      return {
+        success: true,
+        message: `✅ Added foreign key ${tableName}.${columnName} → ${describeTarget(fk)} ON DELETE ${fk.onDelete} ON UPDATE ${fk.onUpdate}`,
+        data: { tableName, columnName, referencedTable: fk.table, referencedColumn: fk.column ?? null, onDelete: fk.onDelete, onUpdate: fk.onUpdate },
       }
     }
     const { repairForeignKeyColumn } = await import('./fk-repair')
@@ -8915,7 +9497,6 @@ async function executeAddConstraint(params: any, projectId: string, schemaTarget
   }
 
   try {
-    const { prisma } = await import('@/lib/db')
     const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
     const postgresSchema = schemaTarget.targetSchema ?? getWorkspaceDatabaseNames(projectId).postgresSchema
     const qualified = `"${postgresSchema}"."${tableName}"`
@@ -8929,7 +9510,7 @@ async function executeAddConstraint(params: any, projectId: string, schemaTarget
     if (ct === 'not_null' || ct === 'drop_not_null') {
       const verb = ct === 'not_null' ? 'SET NOT NULL' : 'DROP NOT NULL'
       try {
-        await prisma.$executeRawUnsafe(`ALTER TABLE ${qualified} ALTER COLUMN "${columnName}" ${verb}`)
+        await db.$executeRawUnsafe(`ALTER TABLE ${qualified} ALTER COLUMN "${columnName}" ${verb}`)
       } catch (err: any) {
         if (err?.code === '23502' || /contains null values/i.test(err?.message ?? '')) {
           return {
@@ -8944,7 +9525,7 @@ async function executeAddConstraint(params: any, projectId: string, schemaTarget
         }
         throw err
       }
-      const nullable = await columnIsNullable(prisma, postgresSchema, tableName, columnName)
+      const nullable = await columnIsNullable(db, postgresSchema, tableName, columnName)
       if (nullable === null) {
         return {
           success: false,
@@ -8973,7 +9554,7 @@ async function executeAddConstraint(params: any, projectId: string, schemaTarget
 
     if (ct === 'set_default' || ct === 'drop_default') {
       if (ct === 'drop_default') {
-        await prisma.$executeRawUnsafe(`ALTER TABLE ${qualified} ALTER COLUMN "${columnName}" DROP DEFAULT`)
+        await db.$executeRawUnsafe(`ALTER TABLE ${qualified} ALTER COLUMN "${columnName}" DROP DEFAULT`)
         return {
           success: true,
           message: `✅ Dropped the default on ${tableName}.${columnName}`,
@@ -8994,7 +9575,7 @@ async function executeAddConstraint(params: any, projectId: string, schemaTarget
           code: 'VALIDATION',
         }
       }
-      await prisma.$executeRawUnsafe(`ALTER TABLE ${qualified} ALTER COLUMN "${columnName}" SET DEFAULT ${expr}`)
+      await db.$executeRawUnsafe(`ALTER TABLE ${qualified} ALTER COLUMN "${columnName}" SET DEFAULT ${expr}`)
       return {
         success: true,
         message: `✅ ${tableName}.${columnName} now defaults to ${expr}`,
@@ -9047,7 +9628,7 @@ async function executeAddConstraint(params: any, projectId: string, schemaTarget
       // is routed to executeCreateIndex, which applies the `deleted_at IS NULL`
       // scoping and reports it. Uniqueness is delivered; only the catalog object
       // differs, and the response says so.
-      if (await hasSoftDeleteColumn(prisma, postgresSchema, tableName)) {
+      if (await hasSoftDeleteColumn(db, postgresSchema, tableName)) {
         const idxResult = await executeCreateIndex(
           { tableName, columns, unique: true, ...(constraintName ? { indexName: constraintName } : {}) },
           projectId,
@@ -9097,7 +9678,7 @@ async function executeAddConstraint(params: any, projectId: string, schemaTarget
 
     // ── Compare before claiming idempotency ─────────────────────────────────
     // "already exists" is only good news if what exists is what was asked for.
-    const existing = await prisma.$queryRawUnsafe<Array<{ conname: string; def: string }>>(
+    const existing = await db.$queryRawUnsafe<Array<{ conname: string; def: string }>>(
       `SELECT con.conname, pg_get_constraintdef(con.oid) AS def
          FROM pg_constraint con
          JOIN pg_class rel ON rel.oid = con.conrelid
@@ -9132,7 +9713,7 @@ async function executeAddConstraint(params: any, projectId: string, schemaTarget
     // An equivalent constraint under a DIFFERENT name is also already-satisfied.
     // Without this, an author who wrote the same CHECK twice under two names got
     // two identical constraints on the table.
-    const equivalent = await prisma.$queryRawUnsafe<Array<{ conname: string; def: string }>>(
+    const equivalent = await db.$queryRawUnsafe<Array<{ conname: string; def: string }>>(
       `SELECT con.conname, pg_get_constraintdef(con.oid) AS def
          FROM pg_constraint con
          JOIN pg_class rel ON rel.oid = con.conrelid
@@ -9151,10 +9732,10 @@ async function executeAddConstraint(params: any, projectId: string, schemaTarget
       }
     }
 
-    await prisma.$executeRawUnsafe(`ALTER TABLE ${qualified} ADD CONSTRAINT "${cName}" ${definition}`)
+    await db.$executeRawUnsafe(`ALTER TABLE ${qualified} ADD CONSTRAINT "${cName}" ${definition}`)
 
     // ── Verify against the catalog ──────────────────────────────────────────
-    const after = await prisma.$queryRawUnsafe<Array<{ def: string }>>(
+    const after = await db.$queryRawUnsafe<Array<{ def: string }>>(
       `SELECT pg_get_constraintdef(con.oid) AS def
          FROM pg_constraint con
          JOIN pg_class rel ON rel.oid = con.conrelid
@@ -9304,73 +9885,77 @@ export function normalizeConstraintDef(def: string): string {
 // ============================================================================
 
 /**
- * DEPLOY: Rollback Deploy — not yet supported, returns honest error
+ * ROLLBACK_DEPLOY: never runs here. Restoring the backend to a published
+ * version undoes every change made since, so it is a person's decision: an
+ * agent's deploy { action: "rollback" } is parked with Backenly's list of what
+ * it would undo (lib/mcp/approvals.ts), and approving it runs the brain tool,
+ * not this action (lib/ai/brain/tools.ts). A person can also run it from
+ * History or Deploy. This used to move the version label alone, which looked
+ * like a rollback and undid nothing.
  */
-async function executeRollbackDeploy(params: any, projectId: string): Promise<ExecutionResult> {
-  try {
-    const { prisma } = await import('@/lib/db')
-    const project = await prisma.project.findUnique({
-      where: { id: projectId },
-      select: { userId: true },
-    })
-    if (!project?.userId) return { success: false, message: 'Project not found', error: 'Project not found' }
-
-    const { rollbackDeploy } = await import('@/lib/deployment/rollback')
-    const force = !!(params?.force || params?.confirmed)
-    const result = await rollbackDeploy({
-      projectId,
-      userId: project.userId,
-      deploymentId: params?.deploymentId,
-      version: typeof params?.version === 'number' ? params.version : undefined,
-      confirmedBy: 'CHAT',
-      force,
-    })
-
-    if (result.kind === 'error') {
-      return { success: false, message: result.error, error: result.error, data: { code: result.code } }
-    }
-
-    if (result.kind === 'confirmation') {
-      return {
-        success: true,
-        message: result.message,
-        data: { requiresConfirmation: true, fromVersion: result.fromVersion, toVersion: result.toVersion },
-      }
-    }
-
-    return {
-      success: true,
-      message: result.message,
-      data: { fromVersion: result.fromVersion, toVersion: result.toVersion },
-    }
-  } catch (error: any) {
-    return { success: false, message: `Rollback failed: ${error.message}`, error: error.message }
+async function executeRollbackDeploy(_params: any, _projectId: string): Promise<ExecutionResult> {
+  return {
+    success: false,
+    error: 'RESTORE_NEEDS_A_PERSON',
+    message:
+      'Not run: restoring the backend to a published version shows the changes it would undo before anyone ' +
+      'approves it. Use Restore on the version in History or Deploy, or ask for it with ' +
+      'deploy { action: "rollback", version }, which waits for approval with that list. Nothing was changed.',
   }
 }
 
 /**
- * DEPLOY: Get Deploy Status — reads real deployment record from DB
+ * DEPLOY: Get Deploy Status — the CURRENT published version, from the same
+ * authority as the Deploy page's history (listPublishedVersions).
+ *
+ * This used to answer with the newest deployment row by createdAt and no
+ * version. A rollback adds no row, so after rolling back to v1 it reported
+ * v2 as live, and an agent that checked status before acting, as the tool
+ * tells it to, was told the wrong version was current (DEP-07).
  */
 async function executeGetDeployStatus(projectId: string): Promise<ExecutionResult> {
   try {
     const { prisma } = await import('@/lib/db')
-    const deployment = await prisma.deployment.findFirst({
-      where: { projectId },
-      orderBy: { createdAt: 'desc' },
+    const { listPublishedVersions } = await import('@/lib/deployment/published-versions')
+    const project = await prisma.project.findUnique({
+      where: { id: projectId },
+      select: { projectStatus: true },
     })
-    if (!deployment) {
+    if (!project) return { success: false, message: 'Project not found', error: 'Project not found' }
+
+    const published = await listPublishedVersions(projectId)
+    const latest = published?.versions[0] ?? null
+    if (!published || !latest) {
       return {
         success: true,
-        message: `ℹ️ No deployments found for this project yet.\n\nUse the **Deploy** tab to publish your backend.`,
-        data: { status: 'not_deployed' }
+        message:
+          `ℹ️ Nothing has been published for this project yet (project status: ${project.projectStatus ?? 'unknown'}).\n\n` +
+          'Publish from the **Deploy** section, or call deploy { "action": "deploy" }, which waits for the owner\'s approval.',
+        data: { status: 'not_deployed', projectStatus: project.projectStatus, version: null, latestVersion: null },
       }
     }
-    const statusEmoji = deployment.status === 'live' ? '✅' : deployment.status === 'building' ? '🔄' : '❌'
-    const lastDeploy = deployment.createdAt ? new Date(deployment.createdAt).toLocaleString() : 'unknown'
+
+    const current = published.versions.find((v) => v.isActive) ?? latest
+    const row = await prisma.deployment.findUnique({ where: { id: current.id }, select: { url: true } })
+    const rolledBack = current.version !== latest.version
+    const publishedAt = new Date(current.publishedAt).toLocaleString()
     return {
       success: true,
-      message: `🚀 **Deployment Status:**\n\n${statusEmoji} **Status:** ${deployment.status}\n🌐 **URL:** ${deployment.url || 'Not available'}\n⏱️ **Last Deploy:** ${lastDeploy}`,
-      data: { status: deployment.status, deploymentId: deployment.id, createdAt: deployment.createdAt }
+      message:
+        `🚀 **Deploy status:** v${current.version} is the current version` +
+        (rolledBack ? ` (marked current by a rollback; the latest published is v${latest.version})` : '') +
+        `, published ${publishedAt}.\n🌐 **URL:** ${row?.url || 'Not recorded'}\n📋 **Project status:** ${project.projectStatus ?? 'unknown'}\n\n` +
+        'Every published version: deploy { "action": "history" }.',
+      data: {
+        status: 'live',
+        projectStatus: project.projectStatus,
+        version: current.version,
+        latestVersion: latest.version,
+        isLatest: !rolledBack,
+        publishedAt: current.publishedAt,
+        publicUrl: row?.url ?? null,
+        deploymentId: current.id,
+      },
     }
   } catch (error: any) {
     return { success: false, message: `Failed to fetch deployment status: ${error.message}`, error: error.message }
@@ -9471,7 +10056,11 @@ async function executeDeleteEnvVar(params: any, projectId: string): Promise<Exec
 async function executeGetReadiness(params: any, projectId: string): Promise<ExecutionResult> {
   try {
     const { scoreReadiness, formatReadinessReport } = await import('@/lib/deployment/readiness-scorer')
-    const autoFix = params?.autoFix !== false // default true
+    // A readiness read changes nothing unless fixing is asked for in so many
+    // words. This defaulted to true, so the brain's get_readiness, described
+    // as reading the scorecard, enabled RLS policies, generated secrets and
+    // switched functions off whenever an agent looked (DEP-06).
+    const autoFix = params?.autoFix === true
     const report = await scoreReadiness(projectId, { autoFix })
     const summary = formatReadinessReport(report)
 
@@ -9500,6 +10089,18 @@ async function executeCreateTrigger(params: any, projectId: string): Promise<Exe
     return { success: false, message: 'name, sourceTable, event, and actionType are required' }
   }
 
+  // A webhook trigger without a destination used to be CREATED and reported as
+  // "calls your webhook at `undefined`"; every later matching write then threw
+  // 'webhook trigger requires webhookUrl' and logged a DEAD delivery. Refuse
+  // at creation, where the caller can still fix it. https only: each delivery
+  // carries the row that fired it.
+  if (actionType === 'webhook' && !(typeof webhookUrl === 'string' && /^https:\/\//i.test(webhookUrl.trim()))) {
+    return {
+      success: false,
+      message: 'A webhook trigger needs webhookUrl — the https:// endpoint it calls. Pass webhookUrl, or use create_webhook for a signed row webhook.',
+    }
+  }
+
   try {
     const { prisma } = await import('@/lib/db')
     const { createTrigger } = await import('@/lib/services/trigger-service')
@@ -9511,8 +10112,23 @@ async function executeCreateTrigger(params: any, projectId: string): Promise<Exe
     // per source table.
     const existing = await prisma.appTrigger.findFirst({
       where: { projectId, name },
-      select: { id: true, name: true, sourceTable: true, event: true },
+      select: { id: true, name: true, sourceTable: true, event: true, webhookUrl: true },
     }).catch(() => null)
+    // The name comes from the table and the event, so asking again with a
+    // different URL lands here too. "Nothing to do" kept the old destination,
+    // or none for a trigger stored before the URL was required, while the
+    // caller believed the new one was set.
+    if (existing && actionType === 'webhook' && (existing.webhookUrl ?? '').trim() !== webhookUrl.trim()) {
+      return {
+        success: false,
+        message:
+          `Trigger "${existing.name}" already exists on \`${existing.sourceTable}.${existing.event}\` and calls ` +
+          `${existing.webhookUrl ? `\`${existing.webhookUrl}\`` : 'no URL'}, not \`${webhookUrl}\`. Nothing was changed. ` +
+          'To send these events to the new URL, delete it with delete_trigger and create it again.',
+        code: 'TRIGGER_CONFLICT',
+        data: { triggerId: existing.id, name: existing.name, existingWebhookUrl: existing.webhookUrl, requestedWebhookUrl: webhookUrl },
+      }
+    }
     if (existing) {
       return {
         success: true,
@@ -9560,7 +10176,12 @@ async function executeListTriggers(projectId: string): Promise<ExecutionResult> 
     }
 
     const lines = triggers.map(t => {
-      const arrow = t.actionType === 'webhook' ? `→ webhook` : `→ ${t.actionType} in ${t.targetTable || '?'}`
+      // Where a webhook trigger posts is what there is to check, and the
+      // brain's model reads this text, not `data`: without the URL, a trigger
+      // calling the wrong address, or none, read the same as a working one.
+      const arrow = t.actionType === 'webhook'
+        ? `→ webhook ${t.webhookUrl ? `\`${t.webhookUrl}\`` : '(no URL, so nothing is delivered)'}`
+        : `→ ${t.actionType} in ${t.targetTable || '?'}`
       const status = t.enabled ? '✅' : '⏸️'
       return `${status} **${t.name}**: \`${t.sourceTable}.${t.event}\` ${arrow}`
     })
@@ -9577,28 +10198,58 @@ async function executeListTriggers(projectId: string): Promise<ExecutionResult> 
 
 /**
  * DELETE_TRIGGER: Remove an event trigger
+ *
+ * The trigger a person approves is the trigger that is deleted, and the answer
+ * says what happened (WH-F15). The id used to go straight to deleteMany and the
+ * result said "removed" whatever it matched: a mistyped id, or one from another
+ * project, deleted nothing and read as success, and a call naming no trigger
+ * deleted every trigger in the project.
  */
 async function executeDeleteTrigger(params: any, projectId: string): Promise<ExecutionResult> {
-  const { triggerId, name } = params
+  const { triggerId, name } = params ?? {}
 
   try {
     const { prisma } = await import('@/lib/db')
     const { deleteTrigger } = await import('@/lib/services/trigger-service')
 
-    // Resolve name → id if needed
-    let resolvedId = triggerId
-    if (!resolvedId && name) {
-      const found = await prisma.appTrigger.findFirst({ where: { projectId, name } })
-      if (!found) return { success: false, message: `Trigger "${name}" not found` }
-      resolvedId = found.id
+    let trigger: { id: string; name: string } | null = null
+    let asked: string
+    if (typeof triggerId === 'string' && triggerId) {
+      asked = `the id "${triggerId}"`
+      trigger = await prisma.appTrigger.findFirst({ where: { id: triggerId, projectId }, select: { id: true, name: true } })
+    } else if (typeof name === 'string' && name.trim()) {
+      asked = `the name "${name}"`
+      // Names are not unique (the REST route creates without checking), so a
+      // name two triggers answer to is a question, not an instruction.
+      const named = await prisma.appTrigger.findMany({ where: { projectId, name }, select: { id: true, name: true } })
+      if (named.length > 1) {
+        return {
+          success: false,
+          message: `More than one trigger is named "${name}" (${named.map((t) => t.id).join(', ')}). Name the one to delete by triggerId.`,
+          code: 'INVALID_ARGUMENT',
+        }
+      }
+      trigger = named[0] ?? null
+    } else {
+      return { success: false, message: 'triggerId or name is required: name the trigger to delete.', code: 'INVALID_ARGUMENT' }
     }
 
-    await deleteTrigger(projectId, resolvedId)
+    // A trigger deleted between the read and the delete is not found either.
+    if (!trigger || !(await deleteTrigger(projectId, trigger.id))) {
+      const triggers = await prisma.appTrigger.findMany({ where: { projectId }, select: { name: true } })
+      return {
+        success: false,
+        message:
+          `No trigger in this project has ${asked}, so nothing was deleted. ` +
+          (triggers.length ? `Its triggers are: ${triggers.map((t) => t.name).join(', ')}.` : 'This project has no triggers.'),
+        code: 'NOT_FOUND',
+      }
+    }
 
     return {
       success: true,
-      message: `✅ Trigger "${name || triggerId}" removed.`,
-      data: { deleted: true },
+      message: `✅ Trigger "${trigger.name}" removed.`,
+      data: { deleted: true, triggerId: trigger.id, name: trigger.name },
     }
   } catch (error: any) {
     return { success: false, message: `Failed to delete trigger: ${error.message}`, error: error.message }
@@ -9777,11 +10428,25 @@ async function executeSetPermission(params: any, projectId: string): Promise<Exe
   try {
     const { applyPermissionPolicy } = await import('@/lib/services/workspace-rls')
 
+    // An ownership path named by its foreign-key column, checked against the
+    // live catalog. Without one, related_rows infers it, and refuses when two
+    // parents could own the row.
+    let via: RelatedRowsVia | undefined
+    if (template === 'related_rows' && typeof params.via === 'string' && params.via) {
+      const { resolveOwnershipPath } = await import('@/lib/services/rls-ownership')
+      const path = await resolveOwnershipPath(projectId, tableName, params.via)
+      if ('error' in path) {
+        return { success: false, message: `No policy was applied to "${tableName}". ${path.error}`, code: 'RLS_NOT_APPLIED' }
+      }
+      via = path.via
+    }
+
     const result = await applyPermissionPolicy(projectId, {
       tableName,
       template,
       userIdColumn,
       roleColumn: params.roleColumn,
+      ...(via ? { via } : {}),
       ...(Array.isArray(params.partyColumns) ? { partyColumns: params.partyColumns } : {}),
       ...(params.using ? { using: params.using } : {}),
       ...(params.withCheck ? { withCheck: params.withCheck } : {}),
@@ -9901,12 +10566,19 @@ async function executeRevokeKey(params: any, projectId: string): Promise<Executi
     const key = await prisma.apiKey.findFirst({ where: { id: keyId, projectId } })
     if (!key) return { success: false, message: `API key "${keyId}" not found` }
 
+    // history: GOVERNED_ACTIONS (REVOKE_KEY)
     await prisma.apiKey.delete({ where: { id: keyId } })
+    const { confirmPropagation, propagationSentence } = await import('@/lib/auth-projection/confirm')
+    const propagation = await confirmPropagation({ entity: 'api_key', entityId: keyId })
+    const where = propagationSentence(propagation)
 
     return {
       success: true,
-      message: `✅ API key \`${key.keyPrefix}...\` (${key.name}) revoked. It can no longer be used.`,
-      data: { revoked: true, keyId },
+      message:
+        propagation.status === 'pending'
+          ? `API key \`${key.keyPrefix}...\` (${key.name}) revoked at home. ${where}`
+          : `✅ API key \`${key.keyPrefix}...\` (${key.name}) revoked. It can no longer be used.${where ? ` ${where}` : ''}`,
+      data: { revoked: true, keyId, propagation },
     }
   } catch (error: any) {
     return { success: false, message: `Failed to revoke key: ${error.message}`, error: error.message }
@@ -9934,6 +10606,7 @@ async function executeRotateKey(params: any, projectId: string): Promise<Executi
     const newPrefix = newKeyValue.substring(0, 12)
     const newHash = crypto.createHash('sha256').update(newKeyValue).digest('hex')
 
+    // history: GOVERNED_ACTIONS (ROTATE_KEY)
     await prisma.apiKey.update({
       where: { id: keyId },
       // The rotated secret goes back to the caller below and is never stored.
@@ -9942,11 +10615,20 @@ async function executeRotateKey(params: any, projectId: string): Promise<Executi
       // one was not on the list. See lib/auth/api-key-plaintext.ts.
       data: { key: plaintextForStorage(), keyPrefix: newPrefix, keyHash: newHash },
     })
+    // The old secret stops working in the project's region once the region has
+    // the rotation (lib/auth-projection/confirm.ts).
+    const { confirmPropagation, propagationSentence } = await import('@/lib/auth-projection/confirm')
+    const propagation = await confirmPropagation({ entity: 'api_key', entityId: keyId })
+    const where = propagationSentence(propagation)
+    const oldKey =
+      propagation.status === 'pending'
+        ? `The old key is invalid at home. ${where}`
+        : `Old key is now invalid.${where ? ` ${where}` : ''}`
 
     return {
       success: true,
-      message: `✅ **API key rotated.**\n\n**New key (copy now — shown once):**\n\`\`\`\n${newKeyValue}\n\`\`\`\n\nOld key is now invalid.`,
-      data: { rotated: true, keyId, newKey: newKeyValue },
+      message: `✅ **API key rotated.**\n\n**New key (copy now — shown once):**\n\`\`\`\n${newKeyValue}\n\`\`\`\n\n${oldKey}`,
+      data: { rotated: true, keyId, newKey: newKeyValue, propagation },
     }
   } catch (error: any) {
     return { success: false, message: `Failed to rotate key: ${error.message}`, error: error.message }
@@ -9959,19 +10641,70 @@ async function executeRotateKey(params: any, projectId: string): Promise<Executi
 async function executeSetKeyPermissions(params: any, projectId: string): Promise<ExecutionResult> {
   const { keyId, permissions } = params
   if (!keyId) return { success: false, message: 'keyId is required' }
-  if (!Array.isArray(permissions)) return { success: false, message: 'permissions must be an array (e.g. ["read", "write"])' }
+  if (!Array.isArray(permissions) || permissions.length === 0) {
+    return { success: false, message: 'permissions must be a non-empty array (e.g. ["read", "write"])' }
+  }
+
+  // The runtime's whole vocabulary. Anything else would be written verbatim
+  // and silently match no gate — a key that LOOKS narrowed and isn't.
+  const KEY_PERMISSION_VOCABULARY = ['read', 'write', 'ai-only', 'admin']
+  const unknown = permissions.filter((p: unknown) => !KEY_PERMISSION_VOCABULARY.includes(String(p)))
+  if (unknown.length > 0) {
+    return {
+      success: false,
+      message:
+        `Unknown permission${unknown.length === 1 ? '' : 's'}: ${unknown.join(', ')}. ` +
+        `The runtime reads exactly: read, write, ai-only. ('admin' passes every gate and is not grantable here.)`,
+      error: 'UNKNOWN_PERMISSION',
+    }
+  }
 
   try {
     const { prisma } = await import('@/lib/db')
     const key = await prisma.apiKey.findFirst({ where: { id: keyId, projectId } })
     if (!key) return { success: false, message: `API key "${keyId}" not found` }
 
+    // A service-role key's access is not permission-driven: the runtime
+    // treats serviceRole as operator-grade before any permission is read.
+    // "Narrowing" one here would change nothing while reporting success.
+    if (key.serviceRole) {
+      return {
+        success: false,
+        message:
+          `\`${key.keyPrefix}...\` is a service-role key — its access does not come from the ` +
+          `permissions array, so editing it here would change nothing. Rotate or revoke it instead, ` +
+          `or create a publishable key with the scopes you want.`,
+        error: 'SERVICE_ROLE_KEY_NOT_PERMISSION_DRIVEN',
+      }
+    }
+
+    // 'admin' makes a key pass EVERY permission gate (server/lib/auth.ts) —
+    // granting it is privilege escalation, not scope adjustment, and it is
+    // the project owner's click to make in Settings, not a tool call's.
+    if (permissions.includes('admin') && !key.permissions.includes('admin')) {
+      return {
+        success: false,
+        message:
+          `Refused: adding 'admin' makes \`${key.keyPrefix}...\` pass every permission gate. ` +
+          `That escalation is the project owner's decision — grant it from Settings → API keys, ` +
+          `or have them create an Admin key there (New key → Admin).`,
+        error: 'ADMIN_ESCALATION_REQUIRES_HUMAN',
+      }
+    }
+
+    const before = key.permissions
+    // history: GOVERNED_ACTIONS (SET_KEY_PERMISSIONS)
     await prisma.apiKey.update({ where: { id: keyId }, data: { permissions } })
+    // A narrowed key keeps its old reach in its project's region until the
+    // region has the change (lib/auth-projection/confirm.ts).
+    const { confirmPropagation, propagationSentence } = await import('@/lib/auth-projection/confirm')
+    const propagation = await confirmPropagation({ entity: 'api_key', entityId: keyId })
+    const where = propagationSentence(propagation)
 
     return {
       success: true,
-      message: `✅ API key \`${key.keyPrefix}...\` permissions updated to: ${permissions.join(', ')}`,
-      data: { keyId, permissions },
+      message: `✅ API key \`${key.keyPrefix}...\` permissions updated: ${before.join(', ') || '(none)'} → ${permissions.join(', ')}${where ? ` ${where}` : ''}`,
+      data: { keyId, permissions, previousPermissions: before, propagation },
     }
   } catch (error: any) {
     return { success: false, message: `Failed to set permissions: ${error.message}`, error: error.message }
@@ -10012,16 +10745,23 @@ async function executeListFiles(params: any, projectId: string): Promise<Executi
       }
     }
 
-    const files = await prisma.storageFile.findMany({
+    // A regional project's names are kept in its region, so they are searched
+    // there and read back from there (lib/storage/file-names.ts).
+    const { fileIdsNamed, withFileNames } = await import('@/lib/storage/file-names')
+    const term = prefix || search
+    const namedIds = term ? await fileIdsNamed(projectId, term, prefix ? 'starts' : 'contains') : null
+    const rows = await prisma.storageFile.findMany({
       where: {
         projectId,
         ...(bucket ? { bucketId: bucket.id } : {}),
         deletedAt: null,
-        ...(prefix
-          ? { name: { startsWith: prefix } }
-          : search
-            ? { name: { contains: search, mode: 'insensitive' } }
-            : {}),
+        ...(namedIds
+          ? { id: { in: namedIds } }
+          : prefix
+            ? { name: { startsWith: prefix } }
+            : search
+              ? { name: { contains: search, mode: 'insensitive' } }
+              : {}),
       },
       take: limit,
       orderBy: { createdAt: 'desc' },
@@ -10035,6 +10775,7 @@ async function executeListFiles(params: any, projectId: string): Promise<Executi
         bucket: { select: { name: true } },
       },
     })
+    const files = await withFileNames(projectId, rows)
 
     if (files.length === 0) {
       return {
@@ -10082,20 +10823,28 @@ async function resolveStorageFile(
   params: any,
   projectId: string,
 ): Promise<
-  | { file: { id: string; name: string; isPublic: boolean } }
+  | { file: { id: string; name: string; isPublic: boolean; bucket: { name: string; accessPolicy: string } } }
   | { error: string }
 > {
   const { prisma } = await import('@/lib/db')
   const fileId: string | undefined = params.fileId
   const fileName: string | undefined = params.path ?? params.fileName
   const bucketName: string | undefined = params.bucketName
+  const fileSelect = {
+    id: true, name: true, isPublic: true,
+    bucket: { select: { name: true, accessPolicy: true } },
+  } as const
+
+  // A regional project's rows hold a stand-in for each name: a name is found
+  // by its stand-in, and the file is handed back with its real name.
+  const { storedFileName, withFileName } = await import('@/lib/storage/file-names')
 
   if (fileId) {
     const file = await prisma.storageFile.findFirst({
       where: { id: fileId, projectId, deletedAt: null },
-      select: { id: true, name: true, isPublic: true },
+      select: fileSelect,
     })
-    return file ? { file } : { error: `No file with id "${fileId}" in this project.` }
+    return file ? { file: await withFileName(projectId, file) } : { error: `No file with id "${fileId}" in this project.` }
   }
 
   if (!fileName) {
@@ -10115,12 +10864,12 @@ async function resolveStorageFile(
   }
 
   const file = await prisma.storageFile.findFirst({
-    where: { projectId, name: fileName, deletedAt: null, ...(bucketId ? { bucketId } : {}) },
-    select: { id: true, name: true, isPublic: true },
+    where: { projectId, name: await storedFileName(projectId, fileName), deletedAt: null, ...(bucketId ? { bucketId } : {}) },
+    select: fileSelect,
     orderBy: { createdAt: 'desc' },
   })
   return file
-    ? { file }
+    ? { file: await withFileName(projectId, file) }
     : {
         error: `File "${fileName}"${bucketName ? ` in bucket "${bucketName}"` : ''} not found. Run LIST_FILES first.`,
       }
@@ -10184,6 +10933,27 @@ async function executeGenerateSignedUrl(params: any, projectId: string): Promise
     }
     const { file } = resolved
 
+    // The bucket's CURRENT policy decides, as it does at the download route.
+    // owner_only exists so that no anonymous grant can read its objects: the
+    // route refuses a signed link (403), and on the S3 driver a presigned link
+    // would go straight to the bucket and read it anyway. Refuse to mint one.
+    const { normalisePolicy, policyAllowsPublic } = await import('@/lib/storage/access-policy')
+    const policy = normalisePolicy(file.bucket.accessPolicy)
+    if (policy === 'owner_only') {
+      return {
+        success: false,
+        message:
+          `"${file.bucket.name}" is an owner_only bucket, so no shareable link can be issued for ${file.name}: ` +
+          'a signed link cannot identify the uploader, and the download route refuses it. The end user who ' +
+          'uploaded the file reads it with their own signed-in session; change the bucket policy with ' +
+          'storage { "action": "set_policy" } if links should work.',
+        error: 'OWNER_ONLY_BUCKET',
+      }
+    }
+    // Public only when the policy permits public objects AND the file is
+    // marked public: a file's own flag outlives a bucket tightened to private.
+    const effectivePublic = policyAllowsPublic(policy) && file.isPublic
+
     // Use storageService.getFileUrl — it issues an HMAC-signed, time-limited
     // URL that /api/storage/files/{id}/download actually validates. The old
     // hand-rolled token pointed at a route that never checked it (and required
@@ -10203,7 +10973,7 @@ async function executeGenerateSignedUrl(params: any, projectId: string): Promise
       expiresIn >= 3600
         ? `${Math.round(expiresIn / 3600)}h`
         : `${Math.round(expiresIn / 60)}m`
-    const expiryNote = file.isPublic
+    const expiryNote = effectivePublic
       ? 'this file is public — the link does not expire'
       : `expires in ${ttlLabel}`
 
@@ -10214,8 +10984,9 @@ async function executeGenerateSignedUrl(params: any, projectId: string): Promise
         url: fullUrl,
         fileId: file.id,
         fileName: file.name,
-        isPublic: file.isPublic,
-        expiresInSeconds: file.isPublic ? null : expiresIn,
+        isPublic: effectivePublic,
+        bucketPolicy: policy,
+        expiresInSeconds: effectivePublic ? null : expiresIn,
       },
     }
   } catch (error: any) {
@@ -10273,19 +11044,23 @@ async function executeCreateAiFunction(params: any, projectId: string): Promise<
     return { success: false, message: 'triggerTable is required for database triggers' }
   }
 
-  // L3 Fix: Guard Stripe-related functions behind a verified stored key.
-  // Creating a Stripe webhook function without a key will silently fail at first invocation.
-  const isStripeRelated = /stripe|payment|checkout|webhook.*pay|pay.*webhook/i.test(description)
+  // Guard functions that call Stripe behind a stored Stripe key: one written
+  // without it fails at its first invocation. Only a description that names
+  // Stripe trips it. The old pattern also matched "payment" and "checkout", so
+  // a function adding a payments row's amount to a balance, on a project that
+  // uses no Stripe at all, was refused as a Stripe function (FN-15).
+  const isStripeRelated = /\bstripe\b/i.test(description)
   if (isStripeRelated) {
     try {
-      const { prisma: _guardPrisma } = await import('@/lib/db')
-      const stripeKey = await _guardPrisma.projectIntegrationKey.findFirst({
-        where: { projectId, integrationId: { in: ['stripe', 'STRIPE_SECRET_KEY'] } },
-      })
-      if (!stripeKey) {
+      const { hasIntegrationKey } = await import('@/lib/services/integrationKeyStore')
+      if (!(await hasIntegrationKey(projectId, 'stripe'))) {
         return {
           success: false,
-          message: `[BLOCKED] Cannot create Stripe function — no Stripe key is stored for this project.\n\nAction: Paste your Stripe secret key (\`sk_live_...\` or \`sk_test_...\`) in the chat to connect Stripe first, then re-request this function.`,
+          message:
+            'Cannot create this function yet: it calls Stripe, and no Stripe key is stored for this project. ' +
+            'Connect Stripe first with integrations { "action": "connect", "integrationId": "stripe", "apiKey": "<the key>" } ' +
+            'or on the Integrations page, then create the function again.',
+          error: 'INTEGRATION_NOT_CONNECTED',
         }
       }
     } catch { /* non-fatal — proceed if guard check itself fails */ }
@@ -10299,8 +11074,14 @@ async function executeCreateAiFunction(params: any, projectId: string): Promise<
     // This prevents the LLM from generating internal-sounding names like
     // "describe_ai_function_with_trigger" when the name-generation call gets confused.
     const suppliedName = typeof params.name === 'string' && params.name.trim()
-      ? params.name.trim().toLowerCase().replace(/[^a-z0-9_]/g, '_').replace(/__+/g, '_').replace(/^_|_$/g, '').slice(0, 50)
+      ? params.name.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '_').replace(/__+/g, '_').replace(/^[_-]|[_-]$/g, '').slice(0, 50)
       : null
+
+    // A name that is taken is answered before any model call is spent on it.
+    if (suppliedName) {
+      const taken = await existingFunctionResult(projectId, suppliedName, params.refuseExisting === true)
+      if (taken) return taken
+    }
 
     const generated = await generateFunctionCode(description, triggerType, triggerTable || null, projectId)
     const name = suppliedName || generated.name
@@ -10314,35 +11095,23 @@ async function executeCreateAiFunction(params: any, projectId: string): Promise<
       return { success: false, message: `Could not create AI function — ${fnValidation.reason}. Please provide a concrete description of what this function should do.` }
     }
 
-    // Deduplication: if a function with the same name already exists for this project, skip creation.
-    const existing = await prisma.aiFunction.findFirst({
-      where: { projectId, name },
-    })
-    if (existing) {
-      return {
-        success: true,
-        message: `AI function \`${name}\` already exists — skipped duplicate creation.`,
-        data: { id: existing.id, name: existing.name, status: existing.status },
-        artifacts: { functions: [name] },
-        verifiedAt: new Date().toISOString(),
-      }
+    // The generated name (when none was supplied) can collide as well.
+    if (!suppliedName) {
+      const taken = await existingFunctionResult(projectId, name, params.refuseExisting === true)
+      if (taken) return taken
     }
 
-    // Also deduplicate by trigger (same triggerType + triggerTable combo for non-manual triggers)
-    if (triggerType !== 'manual' && triggerType !== 'cron' && triggerTable) {
-      const sameTriggered = await prisma.aiFunction.findFirst({
-        where: { projectId, triggerType, triggerTable },
-      })
-      if (sameTriggered) {
-        return {
-          success: true,
-          message: `AI function \`${sameTriggered.name}\` already handles \`${triggerType}\` on \`${triggerTable}\` — skipped duplicate.`,
-          data: { id: sameTriggered.id, name: sameTriggered.name, status: sameTriggered.status },
-          artifacts: { functions: [sameTriggered.name] },
-          verifiedAt: new Date().toISOString(),
-        }
-      }
-    }
+    // Other active functions on the same event are not a reason to refuse: the
+    // runtime fires every active function for a trigger (and deploy_code allows
+    // several), so a second one is created and the overlap is named. The old
+    // dedup answered "skipped duplicate" with success and the OTHER function's
+    // id, and nothing was created (FN-08).
+    const sameEvent = triggerType !== 'manual' && triggerType !== 'cron'
+      ? await prisma.aiFunction.findMany({
+          where: { projectId, triggerType, triggerTable: triggerTable || null, status: 'active' },
+          select: { name: true },
+        })
+      : []
 
     let syntaxCheck = validateFunctionSyntax(code)
 
@@ -10366,7 +11135,9 @@ async function executeCreateAiFunction(params: any, projectId: string): Promise<
       } catch { /* keep original code + honest error status */ }
     }
 
-    const fn = await prisma.aiFunction.create({
+    // Only the save is a governed change: the model answered before the lock (GOVERNED_ACTIONS).
+    const { governedChange, withChangeAttribution } = await import('@/lib/changes/ledger')
+    const fn = await governedChange(projectId, `Create ${triggerType === 'cron' ? 'schedule' : 'function'} ${name}`, () => prisma.aiFunction.create({
       data: {
         projectId,
         name,
@@ -10378,7 +11149,7 @@ async function executeCreateAiFunction(params: any, projectId: string): Promise<
         // Store syntax error so the Functions tab can show an actionable message
         lastError: syntaxCheck.valid ? null : `Syntax error: ${syntaxCheck.error}`,
       },
-    })
+    }))
 
     const triggerLabel: Record<string, string> = {
       on_signup: 'every time a user signs up',
@@ -10416,25 +11187,72 @@ async function executeCreateAiFunction(params: any, projectId: string): Promise<
         .then(async (fixedCode) => {
           if (!fixedCode || fixedCode === code) return
           const recheckSyntax = validateFunctionSyntax(fixedCode)
-          await prisma.aiFunction.update({
+          // Backenly rewrote the code, so the history says Backenly did.
+          await withChangeAttribution({ source: 'autonomy' }, () => governedChange(projectId, `Fix the syntax of function ${fn.name}`, () => prisma.aiFunction.update({
             where: { id: fn.id },
             data: {
               generatedCode: fixedCode,
               status: recheckSyntax.valid ? 'active' : 'error',
               lastError: recheckSyntax.valid ? null : `Syntax error: ${recheckSyntax.error}`,
             },
-          })
+          })))
         })
         .catch(() => {/* non-fatal */ })
     }
 
+    const overlap = sameEvent.map((f) => f.name)
     return {
       success: syntaxCheck.valid,
-      message: baseMessage,
-      data: { functionId: fn.id, name: fn.name, triggerType, triggerTable, syntaxValid: syntaxCheck.valid },
+      message:
+        baseMessage +
+        (overlap.length
+          ? `\n\nAlso running on this event: ${overlap.join(', ')}. Every active function on an event runs; switch one off with set_active if they should not both run.`
+          : ''),
+      data: {
+        functionId: fn.id, name: fn.name, triggerType, triggerTable, syntaxValid: syntaxCheck.valid,
+        ...(overlap.length ? { alsoOnThisEvent: overlap } : {}),
+      },
     }
   } catch (error: any) {
     return { success: false, message: `Failed to create AI function: ${error.message}`, error: error.message }
+  }
+}
+
+/**
+ * What creating a function under a name that is taken answers. An agent's
+ * create (refuseExisting) is refused with ALREADY_EXISTS, naming the function
+ * and how to change it; it used to answer success with the existing
+ * function's id, so the agent reported a function that was never created
+ * (FN-08). Internal callers, such as integration auto-wiring re-run by a
+ * second connect, get an honest idempotent success that says nothing changed.
+ */
+async function existingFunctionResult(
+  projectId: string,
+  name: string,
+  refuseExisting: boolean,
+): Promise<ExecutionResult | null> {
+  const { resolveFunctionByName } = await import('@/lib/services/ai-functions/names')
+  const found = await resolveFunctionByName(projectId, name)
+  if (!found) return null
+  const names = 'ambiguous' in found ? found.ambiguous : [found.fn.name]
+  const fn = 'ambiguous' in found ? null : found.fn
+  if (refuseExisting) {
+    return {
+      success: false,
+      message:
+        `A function named ${names.join(' / ')} already exists` +
+        (fn ? ` (trigger ${fn.triggerType}${fn.triggerTable ? ` on ${fn.triggerTable}` : ''}, ${fn.status})` : '') +
+        '. Nothing was created. Pick another name, replace its code with deploy_code, or switch it with set_active.',
+      error: 'ALREADY_EXISTS',
+      data: fn ? { functionId: fn.id, name: fn.name, status: fn.status } : { names },
+    }
+  }
+  return {
+    success: true,
+    message: `AI function \`${names[0]}\` already exists; it was left unchanged.`,
+    data: fn ? { id: fn.id, name: fn.name, status: fn.status, existed: true } : { names, existed: true },
+    artifacts: { functions: [names[0]] },
+    verifiedAt: new Date().toISOString(),
   }
 }
 
@@ -10456,12 +11274,16 @@ async function executeFixAiFunction(params: any, projectId: string): Promise<Exe
       ? await prisma.aiFunction.findFirst({ where: { name: functionName, projectId } })
       : null
 
+    // A regional project's last errors are read from its region
+    // (lib/services/ai-functions/run-records.ts).
+    const { withLastErrors } = await import('@/lib/services/ai-functions/run-records')
+
     if (!fn) {
       // No specific function identified — list broken ones so the AI can pick
-      const broken = await prisma.aiFunction.findMany({
+      const broken = await withLastErrors(projectId, await prisma.aiFunction.findMany({
         where: { projectId, status: 'error' },
         select: { id: true, name: true, lastError: true },
-      })
+      }))
       if (broken.length === 0) {
         return { success: true, message: 'No functions are currently in an error state.' }
       }
@@ -10472,7 +11294,8 @@ async function executeFixAiFunction(params: any, projectId: string): Promise<Exe
       }
     }
 
-    const originalError = errorMessage || fn.lastError || 'unknown error'
+    const [withError] = await withLastErrors(projectId, [fn])
+    const originalError = errorMessage || withError.lastError || 'unknown error'
 
     const { generateFixedFunctionCode } = await import('@/lib/services/ai-functions/generator')
     const fixedCode = await generateFixedFunctionCode(
@@ -10493,14 +11316,21 @@ async function executeFixAiFunction(params: any, projectId: string): Promise<Exe
 
     const syntaxCheck = validateFunctionSyntax(fixedCode)
 
-    await prisma.aiFunction.update({
+    const { governedChange } = await import('@/lib/changes/ledger')
+    await governedChange(projectId, `Rewrite function ${fn.name} to fix an error`, () => prisma.aiFunction.update({
       where: { id: fn.id },
       data: {
         generatedCode: fixedCode,
         status: syntaxCheck.valid ? 'active' : 'error',
         lastError: syntaxCheck.valid ? null : `Syntax error: ${syntaxCheck.error}`,
       },
-    })
+    }))
+    // The runtime error the fix answered is no longer the last one, in the
+    // project's region either (a syntax error names the code, not the data).
+    if (fn.lastError !== null) {
+      const { rowLastError } = await import('@/lib/services/ai-functions/run-records')
+      await rowLastError(projectId, fn.id, null)
+    }
 
     if (!syntaxCheck.valid) {
       return {
@@ -10545,14 +11375,17 @@ async function executeListAiFunctions(projectId: string): Promise<ExecutionResul
     // `lastError` matters as much as the code: it is the difference between
     // "this function is wrong" and "this function is fine and the table it reads
     // has an RLS policy that matches nothing".
-    const functions = await prisma.aiFunction.findMany({
+    // A regional project's last errors and run logs are read from its region
+    // (lib/services/ai-functions/run-records.ts).
+    const { withLastErrors, withRunBodies } = await import('@/lib/services/ai-functions/run-records')
+    const functions = await withLastErrors(projectId, await prisma.aiFunction.findMany({
       where: { projectId },
       orderBy: { createdAt: 'desc' },
       select: {
         id: true, name: true, description: true, triggerType: true, triggerTable: true,
         status: true, runCount: true, lastRun: true, lastError: true, generatedCode: true,
       },
-    })
+    }))
 
     if (functions.length === 0) {
       return {
@@ -10570,8 +11403,8 @@ async function executeListAiFunctions(projectId: string): Promise<ExecutionResul
       where: { functionId: { in: functions.map(f => f.id) } },
       orderBy: { createdAt: 'desc' },
       take: 60,
-      select: { functionId: true, success: true, error: true, logs: true, createdAt: true, durationMs: true },
-    }).catch(() => [] as any[])
+      select: { id: true, functionId: true, success: true, error: true, logs: true, createdAt: true, durationMs: true },
+    }).then((runs) => withRunBodies(projectId, runs)).catch(() => [] as any[])
 
     const logsByFn = new Map<string, any[]>()
     for (const log of recentLogs) {
@@ -10693,15 +11526,17 @@ async function executeDeleteAiFunction(params: any, projectId: string): Promise<
 
   try {
     const { prisma } = await import('@/lib/db')
-    const fn = functionId
-      ? await prisma.aiFunction.findFirst({ where: { id: functionId, projectId } })
-      : await prisma.aiFunction.findFirst({ where: { name, projectId } })
+    const found = await findAiFunctionForAction(projectId, functionId, name)
+    if ('result' in found) return found.result
+    const fn = found
 
-    if (!fn) {
-      return { success: false, message: `AI function "${functionId || name}" not found` }
-    }
-
+    // history: GOVERNED_ACTIONS (DELETE_AI_FUNCTION)
     await prisma.aiFunction.delete({ where: { id: fn.id } })
+
+    // Deleting the last row-event subscriber takes the capture trigger off the
+    // tables, so an unused capture costs nothing.
+    const { syncCaptureForFunctionChange } = await import('@/lib/webhooks/capture')
+    await syncCaptureForFunctionChange(projectId, fn.triggerType)
 
     return {
       success: true,
@@ -10716,21 +11551,67 @@ async function executeDeleteAiFunction(params: any, projectId: string): Promise<
 /**
  * TOGGLE_AI_FUNCTION: Enable or disable an AI function
  */
+/**
+ * The function an action names: by id, or by name in any form it may be stored
+ * under (as given, kebab-case, snake_case; lib/services/ai-functions/names.ts).
+ * Returns the row, or the refusal to answer with: not found, or ambiguous.
+ */
+async function findAiFunctionForAction(
+  projectId: string,
+  functionId: unknown,
+  name: unknown,
+  where: Record<string, unknown> = {},
+): Promise<import('@prisma/client').AiFunction | { result: ExecutionResult }> {
+  const { prisma } = await import('@/lib/db')
+  if (typeof functionId === 'string' && functionId) {
+    const byId = await prisma.aiFunction.findFirst({ where: { ...where, id: functionId, projectId } })
+    return byId ?? { result: { success: false, message: `AI function "${functionId}" not found`, error: 'NOT_FOUND' } }
+  }
+  if (typeof name !== 'string' || !name.trim()) {
+    return { result: { success: false, message: 'functionId or name is required', error: 'INVALID_ARGUMENT' } }
+  }
+  const { resolveFunctionByName } = await import('@/lib/services/ai-functions/names')
+  const found = await resolveFunctionByName(projectId, name, where as any)
+  if (!found) return { result: { success: false, message: `AI function "${name}" not found`, error: 'NOT_FOUND' } }
+  if ('ambiguous' in found) {
+    return {
+      result: {
+        success: false,
+        message: `More than one function answers to "${name}" (${found.ambiguous.join(', ')}). Name it by functionId.`,
+        error: 'AMBIGUOUS_NAME',
+      },
+    }
+  }
+  return found.fn
+}
+
 async function executeToggleAiFunction(params: any, projectId: string): Promise<ExecutionResult> {
   const { functionId, name, active } = params
 
-  try {
-    const { prisma } = await import('@/lib/db')
-    const fn = functionId
-      ? await prisma.aiFunction.findFirst({ where: { id: functionId, projectId } })
-      : await prisma.aiFunction.findFirst({ where: { name, projectId } })
-
-    if (!fn) {
-      return { success: false, message: `AI function "${functionId || name}" not found` }
+  // A missing or non-boolean `active` is a question, not an instruction. The
+  // tool used to coerce it with !!, so set_active without it switched the
+  // function OFF (FN-13).
+  if (typeof active !== 'boolean') {
+    return {
+      success: false,
+      message: 'active must be true or false: set_active switches a function on or off, so it needs to be told which.',
+      error: 'INVALID_ARGUMENT',
     }
+  }
 
+  try {
+    const fn = await findAiFunctionForAction(projectId, functionId, name)
+    if ('result' in fn) return fn.result
+
+    const { prisma } = await import('@/lib/db')
     const newStatus = active ? 'active' : 'inactive'
+    // history: GOVERNED_ACTIONS (TOGGLE_AI_FUNCTION)
     await prisma.aiFunction.update({ where: { id: fn.id }, data: { status: newStatus } })
+
+    // A row-event function going on or off changes what the database-level
+    // capture must record; the sync derives the answer from the rows.
+    const { syncCaptureForFunctionChange } = await import('@/lib/webhooks/capture')
+    await syncCaptureForFunctionChange(projectId, fn.triggerType)
 
     return {
       success: true,
@@ -10745,69 +11626,46 @@ async function executeToggleAiFunction(params: any, projectId: string): Promise<
 // ─── Schema Version History (#13) ─────────────────────────────────────────────
 
 /**
- * LIST_SCHEMA_VERSIONS: Show all saved schema snapshots for this project
+ * LIST_SCHEMA_VERSIONS: the schema change history from the change ledger.
  */
 async function executeListSchemaVersions(projectId: string): Promise<ExecutionResult> {
   try {
-    const { listSchemaVersions } = await import('@/lib/versioning/schema-versions')
-    const versions = await listSchemaVersions(projectId)
-
-    if (versions.length === 0) {
+    const { listChanges } = await import('@/lib/changes/history')
+    const { changes, windowDays } = await listChanges(projectId, { limit: 10 })
+    if (changes.length === 0) {
       return {
         success: true,
-        message: 'No schema versions recorded yet. Versions are saved automatically before each schema change.',
-        data: { versions: [] },
+        message: 'No changes recorded yet. Each one is recorded with a checkpoint as it is made.',
+        data: { changes: [] },
       }
     }
-
-    const lines = versions.slice(0, 10).map(v => {
-      const date = new Date(v.createdAt).toLocaleString()
-      return `  v${v.versionNum} — ${date}: ${v.description}`
-    })
-
+    const lines = changes.map((c) =>
+      `  #${c.seq} · ${c.outcome.state} · ${new Date(c.createdAt).toLocaleString()} · ${c.actor.label}: ${c.summary}`)
     return {
       success: true,
-      message: `Schema version history (${versions.length} versions):\n${lines.join('\n')}\n\nTo rollback: "rollback to version 3" or "undo the auth I added"`,
-      data: { versions },
+      message:
+        `Change history (newest first):\n${lines.join('\n')}\n\n` +
+        'A person restores the state before a change from History, or a coding agent asks for it with ' +
+        'deploy { action: "revert_change", changeId } for a person to approve.',
+      data: { changes, windowDays },
     }
   } catch (error: any) {
-    return { success: false, message: `Failed to list versions: ${error.message}`, error: error.message }
+    return { success: false, message: `Failed to list schema changes: ${error.message}`, error: error.message }
   }
 }
 
 /**
- * ROLLBACK_TO_VERSION: Revert schema to a specific version
- * params: { versionNum?: number, versionId?: string, description?: string }
+ * ROLLBACK_TO_VERSION: never executes. Rolling back production is a person's
+ * decision; this says where it is made instead of making it.
  */
-async function executeRollbackToVersion(params: any, projectId: string): Promise<ExecutionResult> {
-  try {
-    const { listSchemaVersions, rollbackToVersion } = await import('@/lib/versioning/schema-versions')
-
-    let targetVersionId = params.versionId
-
-    // Resolve by version number if ID not provided
-    if (!targetVersionId && params.versionNum) {
-      const versions = await listSchemaVersions(projectId)
-      const match = versions.find(v => v.versionNum === Number(params.versionNum))
-      if (!match) {
-        return { success: false, message: `Version ${params.versionNum} not found. Use "show schema history" to see available versions.` }
-      }
-      targetVersionId = match.id
-    }
-
-    if (!targetVersionId) {
-      return { success: false, message: 'Specify a version number: "rollback to version 3" or "show schema history" to see versions.' }
-    }
-
-    const result = await rollbackToVersion(projectId, targetVersionId)
-
-    return {
-      success: result.success,
-      message: result.message,
-      data: { statementsExecuted: result.statementsExecuted },
-    }
-  } catch (error: any) {
-    return { success: false, message: `Rollback failed: ${error.message}`, error: error.message }
+async function executeRollbackToVersion(_params: any, _projectId: string): Promise<ExecutionResult> {
+  return {
+    success: false,
+    error: 'ROLLBACK_NEEDS_A_PERSON',
+    message:
+      'A person restores from History: "Restore previous state" on one change, or "Restore to this point" to undo ' +
+      'everything after one, newest first. A coding agent requests one change\'s restore with deploy { action: ' +
+      '"revert_change", changeId }, and it waits for approval. Nothing was changed.',
   }
 }
 
@@ -10826,11 +11684,11 @@ async function executeRollbackToVersion(params: any, projectId: string): Promise
  *   openai/anthropic → generates /ai/chat and /ai/embed endpoints with rate limiting
  */
 async function executeStoreIntegrationKey(params: any, projectId: string): Promise<ExecutionResult> {
-  const { integrationId, apiKey, webhookSecret } = params
-  if (!integrationId || !apiKey) {
+  const { integrationId: rawIntegrationId, apiKey, webhookSecret } = params
+  if (!rawIntegrationId || !apiKey) {
     // Friendly pending state — never a hard error. Show inline key prompt with skip option.
-    const providerName = integrationId
-      ? integrationId.charAt(0).toUpperCase() + integrationId.slice(1)
+    const providerName = rawIntegrationId
+      ? rawIntegrationId.charAt(0).toUpperCase() + rawIntegrationId.slice(1)
       : 'external provider'
     const KEY_EXAMPLES: Record<string, string> = {
       stripe: 'sk_live_... or sk_test_...',
@@ -10843,7 +11701,7 @@ async function executeStoreIntegrationKey(params: any, projectId: string): Promi
       runway: 'rw_...',
       luma: 'luma_...',
     }
-    const example = integrationId ? (KEY_EXAMPLES[integrationId.toLowerCase()] ?? `your ${providerName} API key`) : 'your API key'
+    const example = rawIntegrationId ? (KEY_EXAMPLES[rawIntegrationId.toLowerCase()] ?? `your ${providerName} API key`) : 'your API key'
     return {
       success: false,
       message: [
@@ -10856,6 +11714,28 @@ async function executeStoreIntegrationKey(params: any, projectId: string): Promi
       error: 'CREDENTIALS_PENDING',
     }
   }
+
+  // ── The id must name a provider the runtime actually serves ───────────────
+  //
+  // This used to store ANY id verbatim: an unknown id ("hubspot") was filed,
+  // marked connected, and promised a `ctx.integrations.hubspot.*` surface that
+  // does not exist; a capitalised id ("Stripe") was stored under a key the
+  // runtime, the receiver and the console all look up lowercased, so the
+  // credential existed and nothing could find it.
+  const { resolveProviderId, allProviderIds } = await import('@/lib/services/ai-functions/integration-registry')
+  const canonicalId = resolveProviderId(String(rawIntegrationId).trim())
+  if (!canonicalId) {
+    return {
+      success: false,
+      message:
+        `"${rawIntegrationId}" is not an integration this runtime serves. ` +
+        `Known providers: ${allProviderIds().sort().join(', ')}.`,
+      error: 'UNKNOWN_INTEGRATION',
+    }
+  }
+  // Every reference below — vault rows, auto-wiring, activeIntegrations, the
+  // ctx.integrations surface named in the receipt — uses the CANONICAL id.
+  const integrationId = canonicalId
 
   // ── Stripe without a webhook secret is a DEGRADED connect, not a refusal ───
   //
@@ -10870,11 +11750,11 @@ async function executeStoreIntegrationKey(params: any, projectId: string): Promi
   // Connect the key, do the work that does not need the secret, and say plainly
   // which capability is off until the real secret arrives. A missing credential
   // is a known gap; a fabricated one is a lie in the vault.
-  const webhookSecretPending = integrationId === 'stripe' && !webhookSecret
+  const webhookSecretPending = canonicalId === 'stripe' && !webhookSecret
 
   try {
     const { storeIntegrationKey } = await import('@/lib/services/integrationKeyStore')
-    const status = await storeIntegrationKey(projectId, integrationId, apiKey)
+    const status = await storeIntegrationKey(projectId, canonicalId, String(apiKey).trim())
     const keyValidationNote =
       status.verification === 'verified' ? ''
       : status.verification === 'unreachable' ? `\n\n⚠ ${status.verificationDetail}`
@@ -10886,7 +11766,33 @@ async function executeStoreIntegrationKey(params: any, projectId: string): Promi
       await storeIntegrationKey(projectId, `${integrationId}_webhook_secret`, webhookSecret)
     }
 
+    // OneSignal needs TWO values: the REST key (stored above) and the App ID.
+    // Only the chat-only enable_push_notifications tool could store the App
+    // ID, so the typed door could connect OneSignal and still never send a
+    // push. `appId` rides the same connect call now.
+    let oneSignalAppIdPending = false
+    if (integrationId === 'onesignal') {
+      if (params.appId) {
+        await storeIntegrationKey(projectId, 'onesignal_app_id', String(params.appId).trim())
+      } else {
+        const { hasIntegrationKey } = await import('@/lib/services/integrationKeyStore')
+        oneSignalAppIdPending = !(await hasIntegrationKey(projectId, 'onesignal_app_id'))
+      }
+    }
+
     const autoWiredSteps: string[] = []
+    // Each function this connect meant to wire and could not, with the reason:
+    // its code is written by Backenly's model, so a month with no AI credits
+    // left refuses it, and a generation can fail. The key is stored either way.
+    // These used to be dropped, so "stripe connected" could arrive with no word
+    // that the webhook handler was never made.
+    const notWired: string[] = []
+    const wiringFailed = (fn: string, result: ExecutionResult) => {
+      const reason = (result.data as any)?.syntaxValid === false
+        ? 'its generated code has a syntax error, so it is stored but will not run until fixed'
+        : String(result.error ?? result.message ?? 'it could not be generated').split('\n')[0]
+      notWired.push(`\`${fn}\`: ${reason}`)
+    }
 
     // ── PROMPT 2.1: Stripe auto-wiring ─────────────────────────────────────
     if (integrationId === 'stripe') {
@@ -10915,47 +11821,53 @@ async function executeStoreIntegrationKey(params: any, projectId: string): Promi
         if (col2.success) autoWiredSteps.push(`✅ Added \`status\` to \`${tableName}\``)
       }
 
-      // Generate POST /checkout/session endpoint
-      const { executeGenerateFunction } = await import('@/lib/ai/function-generator')
-
-      const checkoutResult = await executeGenerateFunction(
+      // SANDBOX functions, not route modules: ctx.integrations only exists in
+      // the sandbox runtime, and route modules deliberately cannot reach stored
+      // provider keys (their curated env withholds them). The old auto-wire
+      // generated route modules whose own description told the model to call a
+      // ctx that does not exist there — every generated endpoint was dead on
+      // arrival (ReferenceError or an empty key).
+      const checkoutResult = await executeCreateAiFunction(
         {
-          functionName: 'stripe-checkout-session',
+          name: 'stripe-checkout-session',
+          triggerType: 'manual',
           description: [
             'Create a Stripe Checkout session.',
-            'Accept { lineItems, successUrl, cancelUrl, customerEmail? } in the request body.',
+            'Read { lineItems, successUrl, cancelUrl, customerEmail? } from event.data.',
             'Call ctx.integrations.stripe.createCheckoutSession({ lineItems, successUrl, cancelUrl, customerEmail }) — it returns { id, url }.',
             'Each lineItem is { price: "price_xxx", quantity } or { priceData: { currency, unitAmount, productName, recurringInterval? }, quantity }.',
-            'Require authentication — reject unauthenticated requests with 401.',
+            'If event.data has no lineItems, return { error: "lineItems required" } without calling Stripe.',
             'Return { checkoutUrl: session.url, sessionId: session.id }.',
           ].join(' '),
-          method: 'POST',
         },
         projectId,
       )
-      if (checkoutResult.success) autoWiredSteps.push('✅ Generated `POST /checkout/session`')
+      if (checkoutResult.success) autoWiredSteps.push(`✅ Generated \`POST /api/v1/${projectId}/fn/stripe-checkout-session\``)
+      else wiringFailed('stripe-checkout-session', checkoutResult)
 
-      // Generate the Stripe webhook handler.
-      // The platform receiver at POST /api/v1/{projectId}/webhooks/stripe already
-      // verifies the Stripe-Signature header and runs deterministic order/subscription
-      // updates BEFORE this function fires — so this function works on an
-      // already-verified event.data payload and must NOT re-verify signatures.
-      const webhookResult = await executeGenerateFunction(
+      // The Stripe webhook handler: triggerType on_webhook / triggerTable
+      // 'stripe' — the ONLY shape the platform receiver fires. It used to be
+      // stored as a 'manual' route module, which the receiver never fires
+      // (functionsTriggered: 0 on every delivery) while readiness reported the
+      // integration Complete.
+      const webhookResult = await executeCreateAiFunction(
         {
-          functionName: 'stripe-webhook',
+          name: 'stripe-webhook',
+          triggerType: 'on_webhook',
+          triggerTable: 'stripe',
           description: [
             'Process a verified Stripe webhook event delivered in event.data.',
             'The platform webhook receiver has already verified the signature — do not re-verify.',
             'Read event.data.type for the Stripe event type and event.data.data.object for the payload.',
-            'On checkout.session.completed: update the matching order row status to "paid".',
-            'On payment_intent.succeeded: log the payment.',
+            'On checkout.session.completed: update the matching order row status to "paid" via ctx.db.',
+            'On payment_intent.succeeded: ctx.log the payment.',
             'Return { handled: true } for recognised events.',
           ].join(' '),
-          method: 'POST',
         },
         projectId,
       )
-      if (webhookResult.success) autoWiredSteps.push('✅ Generated `stripe-webhook` handler')
+      if (webhookResult.success) autoWiredSteps.push('✅ Generated `stripe-webhook` handler (fires on verified Stripe deliveries)')
+      else wiringFailed('stripe-webhook', webhookResult)
     }
 
     // ── PROMPT 2.2: Email triggers ──────────────────────────────────────────
@@ -10964,9 +11876,12 @@ async function executeStoreIntegrationKey(params: any, projectId: string): Promi
       const authEnabled = graph?.auth?.providers?.email?.enabled === true
 
       if (authEnabled) {
-        // Welcome email on user sign-up
+        // Welcome email on user sign-up. Named, like every function a connect
+        // wires, so connecting again finds it instead of paying to generate a
+        // second one that would send every new user two welcome emails.
         const welcomeResult = await executeCreateAiFunction(
           {
+            name: `${integrationId}-welcome-email`,
             description: `When a user signs up, send them a welcome email using ctx.integrations.${integrationId}.send(). Address the email to the user's email, use a friendly subject line, and include their name if available.`,
             triggerType: 'on_signup',
           },
@@ -10974,6 +11889,8 @@ async function executeStoreIntegrationKey(params: any, projectId: string): Promi
         )
         if (welcomeResult.success) {
           autoWiredSteps.push(`✅ Created welcome email trigger (on_signup → ${integrationId})`)
+        } else {
+          wiringFailed(`welcome email on sign-up (${integrationId})`, welcomeResult)
         }
 
         // Password-reset email when a reset record is inserted
@@ -10985,6 +11902,7 @@ async function executeStoreIntegrationKey(params: any, projectId: string): Promi
         if (resetTable) {
           const resetResult = await executeCreateAiFunction(
             {
+              name: `${integrationId}-password-reset-email`,
               description: `When a password reset record is inserted into \`${resetTable.name}\`, send a password reset email to the user using ctx.integrations.${integrationId}.send(). Include the reset token as a link. Log the delivery result.`,
               triggerType: 'on_db_insert',
               triggerTable: resetTable.name,
@@ -10993,6 +11911,8 @@ async function executeStoreIntegrationKey(params: any, projectId: string): Promi
           )
           if (resetResult.success) {
             autoWiredSteps.push(`✅ Created password reset trigger (${resetTable.name}.insert → ${integrationId})`)
+          } else {
+            wiringFailed(`password reset email on ${resetTable.name} insert (${integrationId})`, resetResult)
           }
         }
       }
@@ -11000,45 +11920,44 @@ async function executeStoreIntegrationKey(params: any, projectId: string): Promi
 
     // ── PROMPT 2.3: AI route generation ────────────────────────────────────
     if (integrationId === 'openai' || integrationId === 'anthropic') {
-      const { executeGenerateFunction } = await import('@/lib/ai/function-generator')
-
-      // POST /ai/chat — rate-limited, auth-protected
-      const chatResult = await executeGenerateFunction(
+      // Sandbox functions: ctx.integrations.<id>.complete/embed only exist in
+      // the sandbox runtime (see the Stripe note above).
+      const chatResult = await executeCreateAiFunction(
         {
-          functionName: `${integrationId}-chat`,
+          name: `${integrationId}-chat`,
+          triggerType: 'manual',
           description: [
-            `AI chat endpoint backed by ${integrationId}.`,
-            'Accept { prompt, systemPrompt?, maxTokens? } in the request body.',
+            `AI chat backed by ${integrationId}.`,
+            'Read { prompt, systemPrompt?, maxTokens? } from event.data.',
             `Call ctx.integrations.${integrationId}.complete(prompt, maxTokens, systemPrompt) — it returns the assistant reply as a string.`,
-            'Apply rate limiting of 10 requests per minute per authenticated user.',
-            'Require authentication — reject unauthenticated requests with 401.',
+            'If event.data has no prompt, return { error: "prompt required" } without calling the provider.',
             'Return { reply }.',
           ].join(' '),
-          method: 'POST',
         },
         projectId,
       )
-      if (chatResult.success) autoWiredSteps.push('✅ Generated `POST /ai/chat` (rate-limited, auth-protected)')
+      if (chatResult.success) autoWiredSteps.push(`✅ Generated \`POST /api/v1/${projectId}/fn/${integrationId}-chat\``)
+      else wiringFailed(`${integrationId}-chat`, chatResult)
 
-      // POST /ai/embed — OpenAI only. Anthropic has no embeddings API, so an
+      // Embeddings — OpenAI only. Anthropic has no embeddings API, so an
       // anthropic-embed function would be unrunnable — never generate it.
       if (integrationId === 'openai') {
-        const embedResult = await executeGenerateFunction(
+        const embedResult = await executeCreateAiFunction(
           {
-            functionName: 'openai-embed',
+            name: 'openai-embed',
+            triggerType: 'manual',
             description: [
-              'Text embedding endpoint backed by OpenAI.',
-              'Accept { text } in the request body.',
+              'Text embedding backed by OpenAI.',
+              'Read { text } from event.data.',
               'Call ctx.integrations.openai.embed(text) — it returns a number[] embedding vector.',
-              'Apply rate limiting of 20 requests per minute per authenticated user.',
-              'Require authentication — reject unauthenticated requests with 401.',
+              'If event.data has no text, return { error: "text required" } without calling the provider.',
               'Return { embedding }.',
             ].join(' '),
-            method: 'POST',
           },
           projectId,
         )
-        if (embedResult.success) autoWiredSteps.push('✅ Generated `POST /ai/embed` (rate-limited, auth-protected)')
+        if (embedResult.success) autoWiredSteps.push(`✅ Generated \`POST /api/v1/${projectId}/fn/openai-embed\``)
+        else wiringFailed('openai-embed', embedResult)
       }
     }
 
@@ -11058,6 +11977,7 @@ async function executeStoreIntegrationKey(params: any, projectId: string): Promi
       // "unreachable" to "confirmed", and the dashboard must never render
       // `enabled: true` as "connected" without saying whether the provider
       // actually confirmed the credential.
+      // history: GOVERNED_ACTIONS (STORE_INTEGRATION_KEY)
       await _syncPrisma.project.update({
         where: { id: projectId },
         data: {
@@ -11103,17 +12023,28 @@ async function executeStoreIntegrationKey(params: any, projectId: string): Promi
     const autoWiredMsg = autoWiredSteps.length > 0
       ? `\n\n**Auto-wired:**\n${autoWiredSteps.join('\n')}`
       : ''
+    const notWiredMsg = notWired.length > 0
+      ? `\n\n**Not wired:**\n${notWired.map((line) => `⚠ ${line}`).join('\n')}\n` +
+        'Connect again once that is resolved to wire them; what is already wired is kept.'
+      : ''
+
+    const appIdGap = oneSignalAppIdPending
+      ? `\n\n⚠ **Push sending is NOT active yet.** OneSignal also needs your App ID: ` +
+        `call integrations { "action": "connect", "integrationId": "onesignal", "apiKey": "<same REST key>", "appId": "<your App ID>" }.`
+      : ''
 
     return {
       success: true,
-      message: `${integrationId} connected. Key stored securely (${status.maskedKey}).${keyValidationNote}${webhookUrl}${webhookGap}${autoWiredMsg}\n\nAI functions can now use \`ctx.integrations.${integrationId}.*\` to call ${integrationId} APIs.`,
+      message: `${integrationId} connected. Key stored securely (${status.maskedKey}).${keyValidationNote}${webhookUrl}${webhookGap}${appIdGap}${autoWiredMsg}${notWiredMsg}\n\nAI functions can now use \`ctx.integrations.${integrationId}.*\` to call ${integrationId} APIs.`,
       data: {
         integrationId,
         maskedKey: status.maskedKey,
         verification: status.verification,
         verificationDetail: status.verificationDetail,
         webhookSecretPending,
+        oneSignalAppIdPending,
         autoWired: autoWiredSteps,
+        notWired,
       },
     }
   } catch (error: any) {
@@ -11202,17 +12133,53 @@ async function executeListIntegrationKeys(projectId: string): Promise<ExecutionR
  * params: { integrationId: string }
  */
 async function executeRemoveIntegrationKey(params: any, projectId: string): Promise<ExecutionResult> {
-  const { integrationId } = params
-  if (!integrationId) return { success: false, message: 'integrationId is required' }
+  const { integrationId: rawId } = params
+  if (!rawId) return { success: false, message: 'integrationId is required' }
 
   try {
     const { prisma: db } = await import('@/lib/db')
+    // Same canonical resolution as connect, so "Stripe" removes what
+    // "stripe" stored; an unknown id removes nothing and says so.
+    const { resolveProviderId } = await import('@/lib/services/ai-functions/integration-registry')
+    const integrationId = resolveProviderId(String(rawId).trim()) ?? String(rawId).trim().toLowerCase()
+
+    // history: GOVERNED_ACTIONS (REMOVE_INTEGRATION_KEY)
     await db.projectIntegrationKey.deleteMany({
       where: { projectId, integrationId: { startsWith: integrationId } },
     })
+
+    // The console reads project.activeIntegrations[id].enabled, which only
+    // the CONNECT paths wrote — so a disconnected provider kept rendering
+    // "Connected" and counting toward "N of 5 connected" forever.
+    try {
+      const proj = await db.project.findUnique({
+        where: { id: projectId },
+        select: { activeIntegrations: true },
+      })
+      const active = (proj?.activeIntegrations as Record<string, any>) ?? {}
+      if (active[integrationId]) {
+        // history: GOVERNED_ACTIONS (REMOVE_INTEGRATION_KEY)
+        await db.project.update({
+          where: { id: projectId },
+          data: {
+            activeIntegrations: {
+              ...active,
+              [integrationId]: {
+                ...active[integrationId],
+                enabled: false,
+                disconnectedAt: new Date().toISOString(),
+              },
+            },
+          },
+        })
+      }
+    } catch (err: any) {
+      console.warn('[executeRemoveIntegrationKey] activeIntegrations sync failed (non-fatal):', err?.message)
+    }
+
     return {
       success: true,
-      message: `${integrationId} disconnected. Key removed from vault.`,
+      message: `${integrationId} disconnected. Key removed from vault and the dashboard no longer shows it as connected.`,
     }
   } catch (error: any) {
     return { success: false, message: `Failed to remove key: ${error.message}` }
@@ -11223,42 +12190,11 @@ async function executeRemoveIntegrationKey(params: any, projectId: string): Prom
 // BACKGROUND JOBS / CRON SCHEDULING
 // ============================================================================
 
-/**
- * Translate human-readable schedule to a cron expression.
- * e.g. "every day at 9am" → "0 9 * * *"
- */
-function toCronExpression(schedule: string): string {
-  const s = schedule.toLowerCase().trim()
-
-  // Already a cron expression (5 parts)
-  if (/^[\d\*\/\-,]+ [\d\*\/\-,]+ [\d\*\/\-,]+ [\d\*\/\-,]+ [\d\*\/\-,]+$/.test(s)) {
-    return s
-  }
-
-  // Common patterns
-  if (s.includes('every minute') || s === 'minutely') return '* * * * *'
-  if (s.includes('every 5 min')) return '*/5 * * * *'
-  if (s.includes('every 15 min')) return '*/15 * * * *'
-  if (s.includes('every 30 min')) return '*/30 * * * *'
-  if (s.includes('every hour') || s === 'hourly') return '0 * * * *'
-  if (s.includes('every day') || s === 'daily') {
-    const hourMatch = s.match(/at (\d+)(am|pm)?/)
-    if (hourMatch) {
-      let hour = parseInt(hourMatch[1])
-      if (hourMatch[2] === 'pm' && hour < 12) hour += 12
-      if (hourMatch[2] === 'am' && hour === 12) hour = 0
-      return `0 ${hour} * * *`
-    }
-    return '0 9 * * *' // default 9am
-  }
-  if (s.includes('every week') || s === 'weekly') return '0 9 * * 1' // Monday 9am
-  if (s.includes('every month') || s === 'monthly') return '0 9 1 * *' // 1st of month 9am
-  if (s.includes('midnight')) return '0 0 * * *'
-  if (s.includes('noon')) return '0 12 * * *'
-
-  // Default: daily at 9am
-  return '0 9 * * *'
-}
+// Schedule parsing lives in lib/services/cron-expression.ts, shared with the
+// runner that fires the jobs. The parser that used to live here defaulted every
+// phrase it did not recognise to daily 09:00 UTC — including the console's own
+// example "Every night at 02:00" — and the job then silently ran seven hours
+// late. An unrecognised schedule is now a refusal, never a default.
 
 /**
  * CREATE_CRON_JOB: Create a scheduled background job (AI function + schedule)
@@ -11275,7 +12211,17 @@ async function executeCreateCronJob(params: any, projectId: string): Promise<Exe
   if (!schedule) return { success: false, message: 'schedule is required (e.g. "every day at 9am", "0 9 * * *")' }
 
   try {
-    const cronExpr = toCronExpression(schedule)
+    const { scheduleToCron } = await import('@/lib/services/cron-expression')
+    const cronExpr = scheduleToCron(schedule)
+    if (!cronExpr) {
+      return {
+        success: false,
+        message:
+          `Could not understand the schedule "${schedule}", so no job was created. ` +
+          `Pass a five-field cron expression (e.g. "0 2 * * *" for 02:00 UTC daily, "0 9 * * 1-5" for weekdays at 09:00 UTC) ` +
+          `or a phrase like "every 10 minutes", "every day at 21:30", "every weekday at 8am", "every monday at 9am". All times are UTC.`,
+      }
+    }
     const { generateFunctionCode } = await import('@/lib/services/ai-functions/generator')
     const { prisma: db } = await import('@/lib/db')
 
@@ -11290,8 +12236,9 @@ async function executeCreateCronJob(params: any, projectId: string): Promise<Exe
       return { success: false, message: `Could not create scheduled job — the generated name was invalid. Please describe what the job should do more clearly.` }
     }
 
-    // Store as AI function with triggerType='cron'
-    const fn = await db.aiFunction.create({
+    // Store as AI function with triggerType='cron'; only the save is a governed change.
+    const { governedChange } = await import('@/lib/changes/ledger')
+    const fn = await governedChange(projectId, `Create schedule ${validation.name}`, () => db.aiFunction.create({
       data: {
         projectId,
         name: validation.name,
@@ -11301,11 +12248,11 @@ async function executeCreateCronJob(params: any, projectId: string): Promise<Exe
         triggerTable: cronExpr, // reuse triggerTable field to store cron expression
         status: 'active',
       },
-    })
+    }))
 
     return {
       success: true,
-      message: `Scheduled job created: "${fn.name}"\n\nSchedule: ${schedule} (${cronExpr})\nDescription: ${description}\n\nThe job will run automatically on the configured schedule.`,
+      message: `Scheduled job created: "${fn.name}"\n\nSchedule: ${schedule} (${cronExpr}, UTC)\nDescription: ${description}\n\nThe job will run automatically on the configured schedule.`,
       data: { functionId: fn.id, name: fn.name, cron: cronExpr },
     }
   } catch (error: any) {
@@ -11349,19 +12296,25 @@ async function executeDeleteCronJob(params: any, projectId: string): Promise<Exe
 
   try {
     const { prisma: db } = await import('@/lib/db')
-    const job = await db.aiFunction.findFirst({
-      where: {
-        projectId,
-        triggerType: 'cron',
-        OR: [
-          ...(jobId ? [{ id: jobId }] : []),
-          ...(name ? [{ name: { contains: name, mode: 'insensitive' as const } }] : []),
-        ],
-      },
-    })
+    // The exact job, never a substring: "report" used to delete whichever of
+    // weekly_sales_report / daily_inventory_report the database returned
+    // first, while the approval card showed only "report" (FN-07). The name a
+    // person approves is now the job that is deleted.
+    const found = await findAiFunctionForAction(projectId, jobId, name, { triggerType: 'cron' })
+    if ('result' in found) {
+      if (found.result.error !== 'NOT_FOUND') return found.result
+      const jobs = await db.aiFunction.findMany({ where: { projectId, triggerType: 'cron' }, select: { name: true } })
+      return {
+        success: false,
+        message:
+          `No scheduled job is named "${name || jobId}". ` +
+          (jobs.length ? `The scheduled jobs are: ${jobs.map((j) => j.name).join(', ')}.` : 'This project has no scheduled jobs.'),
+        error: 'NOT_FOUND',
+      }
+    }
+    const job = found
 
-    if (!job) return { success: false, message: `Cron job "${name || jobId}" not found` }
-
+    // history: GOVERNED_ACTIONS (DELETE_CRON_JOB)
     await db.aiFunction.delete({ where: { id: job.id } })
     return { success: true, message: `Scheduled job "${job.name}" deleted.` }
   } catch (error: any) {
@@ -11526,6 +12479,7 @@ async function executeGenerateRestrictedEndpoint(params: any, projectId: string)
  * params: { issue?: string, provider?: string }
  */
 async function executeFixAuth(params: any, projectId: string): Promise<ExecutionResult> {
+  const db = await projectDb(projectId)
   const { issue, provider } = params ?? {}
   const fixes: string[] = []
   const warnings: string[] = []
@@ -11575,14 +12529,14 @@ async function executeFixAuth(params: any, projectId: string): Promise<Execution
 
     // ── 3. Ensure workspace users table exists ────────────────────────────────
     const schema = `workspace_${projectId}`
-    const rows = await prisma.$queryRawUnsafe<Array<{ table_name: string }>>(
+    const rows = await db.$queryRawUnsafe<Array<{ table_name: string }>>(
       `SELECT table_name FROM information_schema.tables WHERE table_schema = $1 AND table_name = 'users'`,
       schema
     ).catch(() => [] as Array<{ table_name: string }>)
 
     if (rows.length === 0) {
       // Bootstrap the users table — same DDL that the workspace creation uses
-      await prisma.$executeRawUnsafe(`
+      await db.$executeRawUnsafe(`
         CREATE TABLE IF NOT EXISTS "${schema}"."users" (
           "id"         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
           "email"      TEXT UNIQUE NOT NULL,
@@ -11749,6 +12703,7 @@ async function executeFixApi(params: any, projectId: string): Promise<ExecutionR
  * params: { tableName: string, missingColumns?: Array<{name:string,type:string}> }
  */
 async function executeFixTable(params: any, projectId: string): Promise<ExecutionResult> {
+  const db = await projectDb(projectId)
   const { tableName, missingColumns } = params ?? {}
   if (!tableName) return { success: false, message: 'tableName is required for FIX_TABLE' }
 
@@ -11779,7 +12734,7 @@ async function executeFixTable(params: any, projectId: string): Promise<Executio
     }
 
     // ── 1. Check Postgres table existence ────────────────────────────────────
-    const pgCheck = await prisma.$queryRawUnsafe<Array<{ table_name: string }>>(
+    const pgCheck = await db.$queryRawUnsafe<Array<{ table_name: string }>>(
       `SELECT table_name FROM information_schema.tables WHERE table_schema = $1 AND table_name = $2`,
       schema, tableName
     ).catch(() => [] as Array<{ table_name: string }>)
@@ -11796,7 +12751,7 @@ async function executeFixTable(params: any, projectId: string): Promise<Executio
           ].join(',\n  ')
         : `"id" UUID PRIMARY KEY DEFAULT gen_random_uuid(),\n  "createdAt" TIMESTAMP WITH TIME ZONE DEFAULT NOW()`
 
-      await prisma.$executeRawUnsafe(
+      await db.$executeRawUnsafe(
         `CREATE TABLE IF NOT EXISTS "${schema}"."${tableName}" (\n  ${colDefs}\n)`
       )
       fixes.push(`Recreated table \`${tableName}\` in database (${blueprint ? blueprint.length + 2 : 2} columns)`)
@@ -11812,7 +12767,7 @@ async function executeFixTable(params: any, projectId: string): Promise<Executio
       const colsToAdd: Array<{ name: string; type: string }> = missingColumns ?? []
 
       // Compare existing Postgres columns vs domain blueprint to find gaps
-      const pgCols = await prisma.$queryRawUnsafe<Array<{ column_name: string }>>(
+      const pgCols = await db.$queryRawUnsafe<Array<{ column_name: string }>>(
         `SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2`,
         schema, tableName
       ).catch(() => [] as Array<{ column_name: string }>)
@@ -11823,7 +12778,7 @@ async function executeFixTable(params: any, projectId: string): Promise<Executio
 
       for (const col of colsToAdd) {
         try {
-          await prisma.$executeRawUnsafe(
+          await db.$executeRawUnsafe(
             `ALTER TABLE "${schema}"."${tableName}" ADD COLUMN IF NOT EXISTS "${col.name}" ${pgTypeFor(col.type)}`
           )
           fixes.push(`Added missing column \`${col.name}\` (${col.type}) to \`${tableName}\``)
@@ -11990,6 +12945,7 @@ async function executeFixDeploy(params: any, projectId: string): Promise<Executi
  * params: { tableName?: string }
  */
 async function executeFixRealtime(params: any, projectId: string): Promise<ExecutionResult> {
+  const db = await projectDb(projectId)
   const { tableName } = params ?? {}
 
   try {
@@ -11999,11 +12955,10 @@ async function executeFixRealtime(params: any, projectId: string): Promise<Execu
       listTablesWithRealtimeTriggers,
     } = await import('@/lib/services/realtimeTriggers')
 
-    const { prisma } = await import('@/lib/db')
     const schema = `workspace_${projectId}`
 
     // ── 1. Discover all workspace tables ─────────────────────────────────────
-    const pgTables = await prisma.$queryRawUnsafe<Array<{ table_name: string }>>(
+    const pgTables = await db.$queryRawUnsafe<Array<{ table_name: string }>>(
       `SELECT table_name FROM information_schema.tables WHERE table_schema = $1 AND table_type = 'BASE TABLE' ORDER BY table_name`,
       schema
     ).catch(() => [] as Array<{ table_name: string }>)
@@ -12317,6 +13272,7 @@ async function executeFixIntegration(params: any, projectId: string): Promise<Ex
 // ============================================================================
 
 async function executeFixWorkflow(params: any, projectId: string): Promise<ExecutionResult> {
+  const db = await projectDb(projectId)
   const { workflow, missingComponents, details } = params ?? {}
   const components: string[] = Array.isArray(missingComponents) ? missingComponents : []
   const workflowName = workflow ?? details?.workflow ?? 'workflow'
@@ -12380,10 +13336,9 @@ async function executeFixWorkflow(params: any, projectId: string): Promise<Execu
       }
       if (key === 'user_data_rls') {
         // Find any table with a user_id column and protect it
-        const { prisma } = await import('@/lib/db')
         const { notReservedTableSql } = await import('@/lib/security/workspace-schema')
         const schema = `workspace_${projectId}`
-        const tables = await prisma.$queryRawUnsafe<Array<{ tablename: string }>>(
+        const tables = await db.$queryRawUnsafe<Array<{ tablename: string }>>(
           `SELECT DISTINCT t.tablename
            FROM pg_tables t
            JOIN information_schema.columns c
@@ -12474,6 +13429,7 @@ async function executeFixWorkflow(params: any, projectId: string): Promise<Execu
 // ============================================================================
 
 async function executeRegisterTable(params: any, projectId: string): Promise<ExecutionResult> {
+  const db = await projectDb(projectId)
   const tableName: string | undefined = params?.tableName
   if (!tableName) {
     return { success: false, message: 'tableName is required to register a table', error: 'Missing tableName' }
@@ -12489,7 +13445,7 @@ async function executeRegisterTable(params: any, projectId: string): Promise<Exe
     if (isReservedWorkspaceTable(tableName)) {
       return { success: false, message: `"${tableName}" is an internal Backenly table and cannot be registered.` }
     }
-    const exists = await prisma.$queryRawUnsafe<Array<{ one: number }>>(
+    const exists = await db.$queryRawUnsafe<Array<{ one: number }>>(
       `SELECT 1 AS one FROM information_schema.tables WHERE table_schema = $1 AND table_name = $2 LIMIT 1`,
       postgresSchema, tableName,
     ).catch(() => [])
@@ -12680,6 +13636,7 @@ async function executeHealDataPlane(projectId: string): Promise<ExecutionResult>
 // ============================================================================
 
 async function executeAddFulltextSearch(params: any, projectId: string): Promise<ExecutionResult> {
+  const db = await projectDb(projectId)
   const { tableName, columns } = params
   if (!tableName) return { success: false, message: 'tableName is required', error: 'Missing tableName' }
 
@@ -12695,7 +13652,7 @@ async function executeAddFulltextSearch(params: any, projectId: string): Promise
     const safeTable = safe(tableName)
 
     // Get actual columns that exist in the table
-    const existingCols = await prisma.$queryRawUnsafe<{column_name: string}[]>(
+    const existingCols = await db.$queryRawUnsafe<{column_name: string}[]>(
       `SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2`,
       postgresSchema, safeTable
     )
@@ -12714,7 +13671,7 @@ async function executeAddFulltextSearch(params: any, projectId: string): Promise
       .join(` || ' ' || `)
 
     // 1. Add tsvector column (idempotent)
-    await prisma.$executeRawUnsafe(`
+    await db.$executeRawUnsafe(`
       ALTER TABLE "${postgresSchema}"."${safeTable}"
       ADD COLUMN IF NOT EXISTS search_vector tsvector
       GENERATED ALWAYS AS (to_tsvector('english', ${vectorExpr})) STORED
@@ -12722,7 +13679,7 @@ async function executeAddFulltextSearch(params: any, projectId: string): Promise
 
     // 2. Create GIN index (idempotent)
     const idxName = `idx_${safeTable}_search_vector`
-    await prisma.$executeRawUnsafe(`
+    await db.$executeRawUnsafe(`
       CREATE INDEX IF NOT EXISTS "${idxName}"
       ON "${postgresSchema}"."${safeTable}" USING GIN (search_vector)
     `)
@@ -12781,6 +13738,7 @@ async function executeAddFulltextSearch(params: any, projectId: string): Promise
 // ============================================================================
 
 async function executeEnableVectorSearch(params: any, projectId: string): Promise<ExecutionResult> {
+  const db = await projectDb(projectId)
   const { tableName, sourceColumns } = params
   if (!tableName) {
     return { success: false, message: 'tableName is required', error: 'Missing tableName' }
@@ -12814,7 +13772,7 @@ async function executeEnableVectorSearch(params: any, projectId: string): Promis
     // 1. Ensure pgvector is installed. CREATE EXTENSION is database-level and
     //    superuser-only on some setups; surface a clear error if not allowed.
     try {
-      await prisma.$executeRawUnsafe(`CREATE EXTENSION IF NOT EXISTS vector`)
+      await db.$executeRawUnsafe(`CREATE EXTENSION IF NOT EXISTS vector`)
     } catch (extErr: any) {
       return {
         success: false,
@@ -12829,7 +13787,7 @@ async function executeEnableVectorSearch(params: any, projectId: string): Promis
     }
 
     // 2. Confirm columns exist on the table; filter requested → valid.
-    const existingCols = await prisma.$queryRawUnsafe<{ column_name: string; data_type: string; udt_name: string }[]>(
+    const existingCols = await db.$queryRawUnsafe<{ column_name: string; data_type: string; udt_name: string }[]>(
       `SELECT column_name, data_type, udt_name
          FROM information_schema.columns
         WHERE table_schema = $1 AND table_name = $2`,
@@ -12859,7 +13817,7 @@ async function executeEnableVectorSearch(params: any, projectId: string): Promis
     // 3. Add embedding column (idempotent).
     const EMBEDDING_COLUMN = 'embedding'
     const DIMENSIONS = EMBEDDING_DIMENSIONS
-    await prisma.$executeRawUnsafe(`
+    await db.$executeRawUnsafe(`
       ALTER TABLE "${postgresSchema}"."${safeTable}"
       ADD COLUMN IF NOT EXISTS "${EMBEDDING_COLUMN}" vector(${DIMENSIONS})
     `)
@@ -12870,7 +13828,7 @@ async function executeEnableVectorSearch(params: any, projectId: string): Promis
     const idxName = `idx_${safeTable}_embedding_hnsw`
     let indexKind = 'hnsw'
     try {
-      await prisma.$executeRawUnsafe(`
+      await db.$executeRawUnsafe(`
         CREATE INDEX IF NOT EXISTS "${idxName}"
         ON "${postgresSchema}"."${safeTable}"
         USING hnsw ("${EMBEDDING_COLUMN}" vector_cosine_ops)
@@ -12880,7 +13838,7 @@ async function executeEnableVectorSearch(params: any, projectId: string): Promis
       // ivfflat needs the table to have rows to train effectively, but the
       // index itself creates fine on an empty table — it just rebuilds as
       // data lands. lists=100 is the documented default for small/medium sets.
-      await prisma.$executeRawUnsafe(`
+      await db.$executeRawUnsafe(`
         CREATE INDEX IF NOT EXISTS "${idxName}"
         ON "${postgresSchema}"."${safeTable}"
         USING ivfflat ("${EMBEDDING_COLUMN}" vector_cosine_ops)
@@ -12975,6 +13933,7 @@ async function executeEnableVectorSearch(params: any, projectId: string): Promis
 // ============================================================================
 
 async function executeEnableTeams(params: any, projectId: string, apiKey?: string): Promise<ExecutionResult> {
+  const db = await projectDb(projectId)
   try {
     // 1. Ensure end-user auth is on — orgs need real users.
     const graph = await getActiveGraph(projectId).catch(() => null)
@@ -13026,31 +13985,33 @@ async function executeEnableTeams(params: any, projectId: string, apiKey?: strin
 
     const created: string[] = []
     const failed: string[] = []
+    // Never replanned: a failed step here is reported in `failed`. A model's
+    // substitute action could succeed and record the table as created when it
+    // was not.
     for (const t of tables) {
-      const r = await executeAction({ action: 'CREATE_TABLE', params: t }, projectId, apiKey)
+      const r = await executeAction({ action: 'CREATE_TABLE', params: t }, projectId, apiKey, 0, undefined, false)
       if (r.success) created.push(t.tableName)
       else failed.push(`${t.tableName}: ${r.error ?? r.message}`)
     }
 
     // 3. Generate the standard CRUD APIs for each table.
     for (const t of tables) {
-      await executeAction({ action: 'GENERATE_API', params: { tableName: t.tableName } }, projectId, apiKey).catch(() => {})
+      await executeAction({ action: 'GENERATE_API', params: { tableName: t.tableName } }, projectId, apiKey, 0, undefined, false).catch(() => {})
     }
 
     // 4. Indexes that matter for org lookup performance.
     try {
-      const { prisma } = await import('@/lib/db')
       const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
       const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
-      await prisma.$executeRawUnsafe(`
+      await db.$executeRawUnsafe(`
         CREATE INDEX IF NOT EXISTS idx_org_members_user
           ON "${postgresSchema}"."organization_members" (user_id)
       `)
-      await prisma.$executeRawUnsafe(`
+      await db.$executeRawUnsafe(`
         CREATE INDEX IF NOT EXISTS idx_org_members_org_user
           ON "${postgresSchema}"."organization_members" (organization_id, user_id)
       `)
-      await prisma.$executeRawUnsafe(`
+      await db.$executeRawUnsafe(`
         CREATE INDEX IF NOT EXISTS idx_org_invites_token
           ON "${postgresSchema}"."organization_invitations" (token)
       `)
@@ -13113,6 +14074,7 @@ async function executeRotateWebhookSecret(params: any, projectId: string): Promi
     }
     const crypto = await import('crypto')
     const newSecret = `whsec_${crypto.randomBytes(24).toString('hex')}`
+    // history: GOVERNED_ACTIONS (ROTATE_WEBHOOK_SECRET)
     await prisma.appTrigger.update({
       where: { id: trigger.id },
       data: { webhookSecret: newSecret },
@@ -13124,7 +14086,10 @@ async function executeRotateWebhookSecret(params: any, projectId: string): Promi
         `**New secret** (shown once — save it now):\n\n\`${newSecret}\`\n\n` +
         `Future deliveries to \`${trigger.webhookUrl}\` are signed with this secret as \`X-Backenly-Signature: sha256=<hmac>\`. ` +
         `Verify in your receiver before trusting any payload.`,
-      data: { triggerId: trigger.id, triggerName: trigger.name },
+      // The docs promise the secret in data.secret — an agent updating a
+      // receiver should not have to parse it out of prose. Shown once, as
+      // the message says; it is never readable again.
+      data: { triggerId: trigger.id, triggerName: trigger.name, secret: newSecret },
     }
   } catch (error: any) {
     return { success: false, message: `Failed to rotate webhook secret: ${error.message}`, error: error.message }
@@ -13154,10 +14119,14 @@ async function executeSendPush(params: any, projectId: string): Promise<Executio
       getIntegrationKey(projectId, 'onesignal_app_id'),
     ])
     if (!restApiKey || !appId) {
+      const missing = !restApiKey && !appId ? 'REST API Key and App ID' : !restApiKey ? 'REST API Key' : 'App ID'
       return {
         success: false,
         message:
-          `OneSignal isn't connected yet. Say "connect OneSignal" and paste your **App ID** and **REST API Key** (both on onesignal.com → Settings → Keys & IDs).`,
+          `OneSignal isn't fully connected: the ${missing} is missing (both are on onesignal.com → Settings → Keys & IDs). ` +
+          `Connect with the exact call: integrations { "action": "connect", "integrationId": "onesignal", ` +
+          `"apiKey": "<REST API Key>", "appId": "<App ID>" }.`,
+        error: 'ONESIGNAL_NOT_CONNECTED',
       }
     }
 
@@ -13221,20 +14190,16 @@ async function executeSendPush(params: any, projectId: string): Promise<Executio
 // ============================================================================
 
 async function executeAlterColumnType(params: any, projectId: string): Promise<ExecutionResult> {
+  const db = await projectDb(projectId)
   const { tableName, columnName, newType, castExpression } = params
   if (!tableName || !columnName || !newType) {
     return { success: false, message: 'tableName, columnName, and newType are required' }
   }
 
   try {
-    const { prisma } = await import('@/lib/db')
     const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
     const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
     const safe = (s: string) => s.replace(/[^a-z0-9_]/gi, '')
-
-    // Snapshot before mutating
-    const { snapshotSchema } = await import('@/lib/versioning/schema-versions')
-    await snapshotSchema(projectId, `Before ALTER COLUMN TYPE ${tableName}.${columnName} → ${newType}`, 'ai-executor').catch(() => {})
 
     const normalizedType = normalizeColumnType(newType, columnName)
 
@@ -13265,7 +14230,7 @@ async function executeAlterColumnType(params: any, projectId: string): Promise<E
     }
 
     // Get current column type
-    const colInfo = await prisma.$queryRawUnsafe<{data_type: string}[]>(
+    const colInfo = await db.$queryRawUnsafe<{data_type: string}[]>(
       `SELECT data_type FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2 AND column_name = $3`,
       postgresSchema, safe(tableName), safe(columnName)
     )
@@ -13276,12 +14241,18 @@ async function executeAlterColumnType(params: any, projectId: string): Promise<E
       || USING_CLAUSES[normalizedType]?.[currentType]
       || `"${safe(columnName)}"::${normalizedType}`
 
-    await prisma.$executeRawUnsafe(`
+    // A cast need not round-trip (numeric → integer rounds, text → date
+    // normalises), so inside a recorded change the original values are kept
+    // first and a rollback puts back exactly what was there.
+    const alterSql = `
       ALTER TABLE "${postgresSchema}"."${safe(tableName)}"
       ALTER COLUMN "${safe(columnName)}"
       TYPE ${normalizedType}
       USING ${usingExpr}
-    `)
+    `
+    const { keepColumnValues } = await import('@/lib/changes/preserve')
+    const kept = await keepColumnValues(projectId, postgresSchema, safe(tableName), safe(columnName), 'retyped', alterSql)
+    if (!kept.handled) await db.$executeRawUnsafe(alterSql)
 
     // Invalidate schema cache
     const { invalidateSchemaCache } = await import('@/lib/services/workspace-validator')

@@ -22,11 +22,16 @@
  */
 
 import { prisma } from '@/lib/db'
+import { isRegionError, workspaceRawClient, type WorkspaceRawClient } from '@/lib/data-plane/regional'
 import { hashPassword } from '@/lib/auth/password'
 import { executeWithUserContext } from '@/lib/services/workspace-rls'
 import { ensureAuthUsersTable, introspectAuthUsersTable, stampLastLogin, isReservedTestEmail, userIdCast } from '@/lib/services/end-user-auth-table'
 import { trackEndUserActive } from '@/lib/quota/kernel'
+import { emitEndUserCreated } from '@/lib/services/end-user-auth-events'
 import { resolveJwtSecret } from '@/lib/services/jwtSecretManager'
+// Existence and the signing secret, from the region's copy while it is fresh
+// (lib/auth-projection/read.ts): nothing else of the project is read here.
+import { authorizingProject } from '@/lib/auth-projection/read'
 import {
   mainAuthEnvironment,
   endUserTokenSecret,
@@ -66,7 +71,7 @@ export async function refreshEndUserToken(
   env: AuthEnvironment = mainAuthEnvironment(projectId),
 ): Promise<AuthFlowResult> {
   try {
-    const project = await prisma.project.findUnique({ where: { id: projectId } })
+    const project = await authorizingProject(projectId)
     if (!project) return err('NOT_FOUND', 'Project not found', 404)
 
     if (!rawToken) {
@@ -137,6 +142,7 @@ export async function refreshEndUserToken(
     // id is bound as the column's own type: a bare $1 arrives as text, and on a
     // uuid `id` (the canonical shape) every refresh failed with 42883.
     const users = await executeWithUserContext<any>(
+      projectId,
       '',
       true,
       `SELECT ${selectCols.map(c => `"${c}"`).join(', ')} FROM "${schemaName}"."users" WHERE id = $1${userIdCast(schema)} LIMIT 1`,
@@ -184,7 +190,7 @@ export async function logoutEndUser(
   env: AuthEnvironment = mainAuthEnvironment(projectId),
 ): Promise<AuthFlowResult> {
   try {
-    const project = await prisma.project.findUnique({ where: { id: projectId } })
+    const project = await authorizingProject(projectId)
     if (!project) return err('NOT_FOUND', 'Project not found', 404)
 
     if (rawToken) {
@@ -210,7 +216,11 @@ export async function logoutEndUser(
           ? new Date(payload.exp * 1000)
           : new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
 
-        await prisma.$executeRawUnsafe(`
+        // The blacklist the data routes read, in the project's database in
+        // its region.
+        const db = await workspaceRawClient(projectId)
+
+        await db.$executeRawUnsafe(`
           CREATE TABLE IF NOT EXISTS "${schemaName}"."_token_blacklist" (
             jti        TEXT        PRIMARY KEY,
             expires_at TIMESTAMPTZ NOT NULL,
@@ -219,11 +229,11 @@ export async function logoutEndUser(
         `)
 
         // Prune tokens that have already expired (keep the table small)
-        await prisma.$executeRawUnsafe(
+        await db.$executeRawUnsafe(
           `DELETE FROM "${schemaName}"."_token_blacklist" WHERE expires_at < NOW()`,
         )
 
-        await prisma.$executeRawUnsafe(
+        await db.$executeRawUnsafe(
           `INSERT INTO "${schemaName}"."_token_blacklist" (jti, expires_at)
            VALUES ($1, $2)
            ON CONFLICT (jti) DO NOTHING`,
@@ -236,6 +246,12 @@ export async function logoutEndUser(
     return ok({ message: 'Logged out successfully.' })
   } catch (error: any) {
     console.error('Logout error:', error?.message ?? error)
+    // A project whose region this process cannot reach was not logged out:
+    // its token is not on the blacklist the data routes read, so it is still
+    // live, and answering "logged out" would say otherwise.
+    if (isRegionError(error)) {
+      return err(error.code, 'The token could not be revoked: this project\'s data region is not reachable from this server.', 503)
+    }
     // Logout should never fail from the client's perspective
     return ok({ message: 'Logged out successfully.' })
   }
@@ -248,7 +264,7 @@ export async function logoutEndUser(
  */
 export async function forgotEndUserPassword(projectId: string, emailRaw: unknown): Promise<AuthFlowResult> {
   try {
-    const project = await prisma.project.findUnique({ where: { id: projectId } })
+    const project = await authorizingProject(projectId)
     if (!project) return err('NOT_FOUND', 'Project not found', 404)
 
     const email = typeof emailRaw === 'string' ? emailRaw.toLowerCase().trim() : undefined
@@ -283,9 +299,12 @@ export async function issueEndUserPasswordReset(
 ): Promise<{ found: boolean; emailSent: boolean }> {
   const email = emailRaw.toLowerCase().trim()
   const schemaName = `workspace_${projectId}`
+  // The project's database, in its region. Resolved before the user lookup's
+  // fail-soft catch, so an unreachable region is never read as "no user".
+  const db = await workspaceRawClient(projectId)
 
   // Lazily create the password resets table (no migration required)
-  await prisma.$executeRawUnsafe(`
+  await db.$executeRawUnsafe(`
     CREATE TABLE IF NOT EXISTS "${schemaName}"."_password_resets" (
       id         UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
       email      TEXT        NOT NULL,
@@ -295,19 +314,20 @@ export async function issueEndUserPasswordReset(
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `)
-  await prisma.$executeRawUnsafe(
+  await db.$executeRawUnsafe(
     `CREATE INDEX IF NOT EXISTS "_pw_resets_token_idx"
        ON "${schemaName}"."_password_resets" (token)`,
   )
 
   // Purge expired tokens so the table stays small
-  await prisma.$executeRawUnsafe(
+  await db.$executeRawUnsafe(
     `DELETE FROM "${schemaName}"."_password_resets" WHERE expires_at < NOW()`,
   )
 
   // Look up user — do NOT leak existence via the response.
   // Service-role: caller has no session user id yet, RLS would hide the row.
   const users = await executeWithUserContext<{ id: string; email: string }>(
+    projectId,
     '',
     true,
     `SELECT id, email FROM "${schemaName}"."users" WHERE email = $1 LIMIT 1`,
@@ -320,12 +340,12 @@ export async function issueEndUserPasswordReset(
     const expiresAt = new Date(Date.now() + 60 * 60 * 1000) // 1 hour
 
     // Invalidate any existing unused reset for this email
-    await prisma.$executeRawUnsafe(
+    await db.$executeRawUnsafe(
       `DELETE FROM "${schemaName}"."_password_resets" WHERE email = $1 AND used_at IS NULL`,
       email,
     )
 
-    await prisma.$executeRawUnsafe(
+    await db.$executeRawUnsafe(
       `INSERT INTO "${schemaName}"."_password_resets" (email, token, expires_at)
        VALUES ($1, $2, $3)`,
       email,
@@ -373,7 +393,7 @@ export async function resetEndUserPassword(
   passwordRaw: unknown,
 ): Promise<AuthFlowResult> {
   try {
-    const project = await prisma.project.findUnique({ where: { id: projectId } })
+    const project = await authorizingProject(projectId)
     if (!project) return err('NOT_FOUND', 'Project not found', 404)
 
     if (!project.jwtSecret || project.jwtSecret.length < 32) {
@@ -395,7 +415,11 @@ export async function resetEndUserPassword(
     // `password_hash` and `updatedAt` vs `updated_at` schema drift.
     const usersSchema = await ensureAuthUsersTable(projectId, { email: null })
 
-    const resets = await prisma.$queryRawUnsafe<any[]>(
+    // The project's database, in its region. Resolved before the token
+    // lookup's fail-soft catch: an unreachable region is not an invalid token.
+    const db = await workspaceRawClient(projectId)
+
+    const resets = await db.$queryRawUnsafe<any[]>(
       `SELECT id, email, expires_at, used_at
          FROM "${schemaName}"."_password_resets"
          WHERE token = $1
@@ -419,9 +443,10 @@ export async function resetEndUserPassword(
 
     // Fetch the user — service-role since the caller is not yet authenticated.
     const users = await executeWithUserContext<any>(
+      projectId,
       '',
       true,
-      `SELECT id, email, name FROM "${schemaName}"."users" WHERE email = $1 LIMIT 1`,
+      `SELECT id, email, name${usersSchema.hasIsBlocked ? ', is_blocked' : ''} FROM "${schemaName}"."users" WHERE email = $1 LIMIT 1`,
       [reset.email],
     ).catch(() => [] as any[])
 
@@ -430,27 +455,35 @@ export async function resetEndUserPassword(
     }
 
     const user = users[0]
+    // A suspended account is refused before its password changes or a session
+    // is issued, with the answer sign-in and refresh give it. The link stays
+    // unused.
+    if (user.is_blocked) return err('FORBIDDEN', 'This account has been suspended.', 403)
     const hashedPassword = await hashPassword(newPassword)
 
     // Update the user's password — service-role so the UPDATE bypasses
     // own_rows RLS that would otherwise gate the row on app.current_user_id.
-    // Column names come from the live schema descriptor, never hardcoded.
+    // Column names come from the live schema descriptor, never hardcoded, and
+    // the id is bound as the column's own type: a bare $2 arrives as text, and
+    // on a uuid `id` (the canonical shape) every reset failed with 42883.
     const setParts = [`"${usersSchema.passwordColumn}" = $1`]
     if (usersSchema.updatedAtColumn) setParts.push(`"${usersSchema.updatedAtColumn}" = NOW()`)
     await executeWithUserContext(
+      projectId,
       '',
       true,
       `UPDATE "${schemaName}"."users"
          SET ${setParts.join(', ')}
-         WHERE id = $2`,
+         WHERE id = $2${userIdCast(usersSchema)}`,
       [hashedPassword, user.id],
     )
 
-    // Mark the reset token as used (single-use enforcement)
-    await prisma.$executeRawUnsafe(
+    // Mark the reset token as used (single-use enforcement). The table's id is
+    // the uuid this file creates it with.
+    await db.$executeRawUnsafe(
       `UPDATE "${schemaName}"."_password_resets"
          SET used_at = NOW()
-         WHERE id = $1`,
+         WHERE id = $1::uuid`,
       reset.id,
     )
 
@@ -476,8 +509,8 @@ export async function resetEndUserPassword(
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /** Lazily create a single-use auth-token table (same pattern as _password_resets). */
-async function ensureTokenTable(schemaName: string, tableName: string): Promise<void> {
-  await prisma.$executeRawUnsafe(`
+async function ensureTokenTable(db: WorkspaceRawClient, schemaName: string, tableName: string): Promise<void> {
+  await db.$executeRawUnsafe(`
     CREATE TABLE IF NOT EXISTS "${schemaName}"."${tableName}" (
       id         UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
       email      TEXT        NOT NULL,
@@ -487,17 +520,17 @@ async function ensureTokenTable(schemaName: string, tableName: string): Promise<
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `)
-  await prisma.$executeRawUnsafe(
+  await db.$executeRawUnsafe(
     `CREATE INDEX IF NOT EXISTS "${tableName}_token_idx" ON "${schemaName}"."${tableName}" (token)`,
   )
   // Every resend/verify flow looks rows up by email. Reserved (_-prefixed)
   // tables are platform-managed and excluded from the autonomy probes, so this
   // table must ship with its indexes — nothing will retrofit them later.
-  await prisma.$executeRawUnsafe(
+  await db.$executeRawUnsafe(
     `CREATE INDEX IF NOT EXISTS "${tableName}_email_idx" ON "${schemaName}"."${tableName}" (email)`,
   )
   // Opportunistic cleanup keeps these tables tiny.
-  await prisma.$executeRawUnsafe(
+  await db.$executeRawUnsafe(
     `DELETE FROM "${schemaName}"."${tableName}" WHERE expires_at < NOW()`,
   ).catch(() => {})
 }
@@ -515,18 +548,21 @@ async function ensureTokenTable(schemaName: string, tableName: string): Promise<
  * Once the column exists this is a catalog read, not an ALTER, so it takes no
  * table lock on the sign-up path.
  */
-export async function ensureEmailVerifiedColumn(schemaName: string): Promise<void> {
-  const present = await prisma.$queryRawUnsafe<unknown[]>(
+export async function ensureEmailVerifiedColumn(projectId: string, schemaName: string): Promise<void> {
+  // The project's database, in its region. Outside the catches below: an
+  // unreachable region must fail the caller, not skip the column silently.
+  const db = await workspaceRawClient(projectId)
+  const present = await db.$queryRawUnsafe<unknown[]>(
     `SELECT 1 FROM information_schema.columns
       WHERE table_schema = $1 AND table_name = 'users' AND column_name = 'email_verified'`,
     schemaName,
   ).catch(() => [] as unknown[])
   if (present.length > 0) return
-  await prisma.$transaction([
-    prisma.$executeRawUnsafe(
+  await db.$transaction([
+    db.$executeRawUnsafe(
       `ALTER TABLE "${schemaName}"."users" ADD COLUMN IF NOT EXISTS "email_verified" BOOLEAN NOT NULL DEFAULT TRUE`,
     ),
-    prisma.$executeRawUnsafe(
+    db.$executeRawUnsafe(
       `ALTER TABLE "${schemaName}"."users" ALTER COLUMN "email_verified" SET DEFAULT FALSE`,
     ),
   ]).catch(() => {})
@@ -534,11 +570,12 @@ export async function ensureEmailVerifiedColumn(schemaName: string): Promise<voi
 
 /** Look up a single-use token row and validate expiry/reuse. */
 async function consumeToken(
+  db: WorkspaceRawClient,
   schemaName: string,
   tableName: string,
   token: string,
 ): Promise<{ email: string } | { error: string }> {
-  const rows = await prisma.$queryRawUnsafe<any[]>(
+  const rows = await db.$queryRawUnsafe<any[]>(
     `SELECT id, email, expires_at, used_at FROM "${schemaName}"."${tableName}" WHERE token = $1 LIMIT 1`,
     token,
   ).catch(() => [] as any[])
@@ -546,8 +583,10 @@ async function consumeToken(
   const row = rows[0]
   if (row.used_at) return { error: 'This link has already been used.' }
   if (new Date(row.expires_at) < new Date()) return { error: 'This link has expired. Please request a new one.' }
-  await prisma.$executeRawUnsafe(
-    `UPDATE "${schemaName}"."${tableName}" SET used_at = NOW() WHERE id = $1`,
+  // ensureTokenTable creates the id as uuid. A bare $1 arrives as text, which a
+  // uuid column refuses (42883), so no link could be consumed.
+  await db.$executeRawUnsafe(
+    `UPDATE "${schemaName}"."${tableName}" SET used_at = NOW() WHERE id = $1::uuid`,
     row.id,
   )
   return { email: row.email }
@@ -560,17 +599,19 @@ async function consumeToken(
  */
 export async function requestEmailVerification(projectId: string, emailRaw: unknown): Promise<AuthFlowResult> {
   try {
-    const project = await prisma.project.findUnique({ where: { id: projectId } })
+    const project = await authorizingProject(projectId)
     if (!project) return err('NOT_FOUND', 'Project not found', 404)
 
     const email = typeof emailRaw === 'string' ? emailRaw.toLowerCase().trim() : undefined
     if (!email) return err('BAD_REQUEST', 'email is required', 400)
 
     const schemaName = `workspace_${projectId}`
-    await ensureEmailVerifiedColumn(schemaName)
-    await ensureTokenTable(schemaName, '_email_verifications')
+    const db = await workspaceRawClient(projectId)
+    await ensureEmailVerifiedColumn(projectId, schemaName)
+    await ensureTokenTable(db, schemaName, '_email_verifications')
 
     const users = await executeWithUserContext<{ id: string; email_verified: boolean }>(
+      projectId,
       '', true,
       `SELECT id, "email_verified" FROM "${schemaName}"."users" WHERE email = $1 LIMIT 1`,
       [email],
@@ -578,11 +619,11 @@ export async function requestEmailVerification(projectId: string, emailRaw: unkn
 
     if (users.length > 0 && !users[0].email_verified) {
       const token = crypto.randomBytes(32).toString('hex')
-      await prisma.$executeRawUnsafe(
+      await db.$executeRawUnsafe(
         `DELETE FROM "${schemaName}"."_email_verifications" WHERE email = $1 AND used_at IS NULL`,
         email,
       )
-      await prisma.$executeRawUnsafe(
+      await db.$executeRawUnsafe(
         `INSERT INTO "${schemaName}"."_email_verifications" (email, token, expires_at) VALUES ($1, $2, $3)`,
         email, token, new Date(Date.now() + 24 * 60 * 60 * 1000),
       )
@@ -609,20 +650,22 @@ export async function requestEmailVerification(projectId: string, emailRaw: unkn
  */
 export async function verifyEndUserEmail(projectId: string, tokenRaw: unknown): Promise<AuthFlowResult> {
   try {
-    const project = await prisma.project.findUnique({ where: { id: projectId } })
+    const project = await authorizingProject(projectId)
     if (!project) return err('NOT_FOUND', 'Project not found', 404)
 
     const token = typeof tokenRaw === 'string' ? tokenRaw.trim() : undefined
     if (!token) return err('BAD_REQUEST', 'token is required', 400)
 
     const schemaName = `workspace_${projectId}`
-    await ensureEmailVerifiedColumn(schemaName)
-    await ensureTokenTable(schemaName, '_email_verifications')
+    const db = await workspaceRawClient(projectId)
+    await ensureEmailVerifiedColumn(projectId, schemaName)
+    await ensureTokenTable(db, schemaName, '_email_verifications')
 
-    const consumed = await consumeToken(schemaName, '_email_verifications', token)
+    const consumed = await consumeToken(db, schemaName, '_email_verifications', token)
     if ('error' in consumed) return err('BAD_REQUEST', consumed.error, 400)
 
     await executeWithUserContext(
+      projectId,
       '', true,
       `UPDATE "${schemaName}"."users" SET "email_verified" = TRUE WHERE email = $1`,
       [consumed.email],
@@ -643,7 +686,7 @@ export async function verifyEndUserEmail(projectId: string, tokenRaw: unknown): 
  */
 export async function requestMagicLink(projectId: string, emailRaw: unknown): Promise<AuthFlowResult> {
   try {
-    const project = await prisma.project.findUnique({ where: { id: projectId } })
+    const project = await authorizingProject(projectId)
     if (!project) return err('NOT_FOUND', 'Project not found', 404)
     if (!project.jwtSecret || project.jwtSecret.length < 32) {
       return err('INTERNAL_ERROR', 'Authentication is not configured for this project.', 503)
@@ -662,14 +705,15 @@ export async function requestMagicLink(projectId: string, emailRaw: unknown): Pr
     }
 
     const schemaName = `workspace_${projectId}`
-    await ensureTokenTable(schemaName, '_magic_links')
+    const db = await workspaceRawClient(projectId)
+    await ensureTokenTable(db, schemaName, '_magic_links')
 
     const token = crypto.randomBytes(32).toString('hex')
-    await prisma.$executeRawUnsafe(
+    await db.$executeRawUnsafe(
       `DELETE FROM "${schemaName}"."_magic_links" WHERE email = $1 AND used_at IS NULL`,
       email,
     )
-    await prisma.$executeRawUnsafe(
+    await db.$executeRawUnsafe(
       `INSERT INTO "${schemaName}"."_magic_links" (email, token, expires_at) VALUES ($1, $2, $3)`,
       email, token, new Date(Date.now() + 15 * 60 * 1000),
     )
@@ -694,7 +738,7 @@ export async function requestMagicLink(projectId: string, emailRaw: unknown): Pr
  */
 export async function verifyMagicLink(projectId: string, tokenRaw: unknown): Promise<AuthFlowResult> {
   try {
-    const project = await prisma.project.findUnique({ where: { id: projectId } })
+    const project = await authorizingProject(projectId)
     if (!project) return err('NOT_FOUND', 'Project not found', 404)
     if (!project.jwtSecret || project.jwtSecret.length < 32) {
       return err('INTERNAL_ERROR', 'Authentication is not configured for this project.', 503)
@@ -704,20 +748,26 @@ export async function verifyMagicLink(projectId: string, tokenRaw: unknown): Pro
     if (!token) return err('BAD_REQUEST', 'token is required', 400)
 
     const schemaName = `workspace_${projectId}`
-    await ensureTokenTable(schemaName, '_magic_links')
+    const db = await workspaceRawClient(projectId)
+    await ensureTokenTable(db, schemaName, '_magic_links')
 
-    const consumed = await consumeToken(schemaName, '_magic_links', token)
+    const consumed = await consumeToken(db, schemaName, '_magic_links', token)
     if ('error' in consumed) return err('BAD_REQUEST', consumed.error, 400)
     const email = consumed.email
 
     const usersSchema = await ensureAuthUsersTable(projectId, { email })
-    await ensureEmailVerifiedColumn(schemaName)
+    await ensureEmailVerifiedColumn(projectId, schemaName)
 
     let users = await executeWithUserContext<any>(
+      projectId,
       '', true,
-      `SELECT id, email${usersSchema.hasName ? ', name' : ''}${usersSchema.hasRole ? ', role' : ''} FROM "${schemaName}"."users" WHERE email = $1 LIMIT 1`,
+      `SELECT id, email${usersSchema.hasName ? ', name' : ''}${usersSchema.hasRole ? ', role' : ''}${usersSchema.hasIsBlocked ? ', is_blocked' : ''} FROM "${schemaName}"."users" WHERE email = $1 LIMIT 1`,
       [email],
     ).catch(() => [] as any[])
+
+    // A suspended account is refused before it is verified or signed in, with
+    // the answer sign-in and refresh give it.
+    if (users[0]?.is_blocked) return err('FORBIDDEN', 'This account has been suspended.', 403)
 
     if (users.length === 0) {
       // First sign-in: create the account with an unguessable password hash.
@@ -729,13 +779,22 @@ export async function verifyMagicLink(projectId: string, tokenRaw: unknown): Pro
         name: email.split('@')[0],
         email_verified: true,
       })
-      users = await executeWithUserContext<any>('', true, plan.sql, plan.values)
+      users = await executeWithUserContext<any>(projectId, '', true, plan.sql, plan.values)
       if (users.length === 0) {
         return err('INTERNAL_ERROR', 'Failed to create account', 500)
       }
+      // A first magic-link sign-in IS a sign-up — subscribers to
+      // auth.user.created must hear about it like any password sign-up.
+      void emitEndUserCreated(projectId, {
+        id: users[0]?.id,
+        email,
+        name: users[0]?.name ?? null,
+        created_at: users[0]?.created_at,
+      })
     } else {
       // Clicking the emailed link proves inbox ownership.
       await executeWithUserContext(
+        projectId,
         '', true,
         `UPDATE "${schemaName}"."users" SET "email_verified" = TRUE WHERE email = $1`,
         [email],

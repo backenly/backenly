@@ -149,6 +149,48 @@ export async function validateProjectOwnership(
 }
 
 /**
+ * Resolve the request's project AND require a capability on it.
+ *
+ * `getCurrentProjectId` answers "may this caller see this project", which is
+ * VIEWER and above. A route that changes the project, or removes something from
+ * it, needs a higher answer, and the guard (`canWriteProject`,
+ * `canAdministerProject`) is the only place that gives one. Pass the guard
+ * function the route needs as `may`.
+ *
+ * Refusals are shaped so they cannot become an existence oracle: a caller who
+ * may not see the project gets the same 404 whether it exists or not. A member
+ * whose role is too low gets 403, because they can already see it exists.
+ */
+export async function requireProjectCapability(
+  request: NextRequest,
+  may: (userId: string, projectId: string) => Promise<boolean>
+): Promise<{ userId: string; projectId: string }> {
+  const auth = await authenticateRequest(request)
+  if (!auth.authenticated || !auth.userId) {
+    throw new TenantIsolationError('Authentication required', 401, 'UNAUTHENTICATED')
+  }
+
+  let projectId: string
+  try {
+    projectId = await getCurrentProjectId(request)
+  } catch (err) {
+    if (err instanceof TenantIsolationError && (err.status === 403 || err.status === 404)) {
+      throw new TenantIsolationError('Project not found', 404, 'PROJECT_NOT_FOUND')
+    }
+    throw err
+  }
+
+  if (!(await may(auth.userId, projectId))) {
+    throw new TenantIsolationError(
+      'Your role in this project does not allow this change',
+      403,
+      'PROJECT_ROLE_INSUFFICIENT'
+    )
+  }
+  return { userId: auth.userId, projectId }
+}
+
+/**
  * Run a handler with the request's authorized project.
  *
  * The wrapper 22 routes use. It is deliberately the only ergonomic way to get

@@ -2,7 +2,7 @@
 
 Index: https://backenly.com/llms.txt
 
-Buckets and files, with per-project quotas and content-type validation. A bucket is private unless it is made public. Self-hosters can use local disk or any S3-compatible provider.
+Buckets and files, with per-project quotas and content-type validation. Every bucket carries one enforced access policy — `public_read`, `cdn_cacheable`, `private` (the default) or `owner_only` (each object readable only by the end user who uploaded it) — set with `set_policy`; `set_public` is the two-state shorthand. Self-hosters can use local disk or any S3-compatible provider.
 
 ## Actions
 
@@ -12,7 +12,8 @@ Call as `storage { action: "<action>", … }`.
 | Action | What it does | Needs | Read-only key | Approval |
 | --- | --- | --- | --- | --- |
 | `create_bucket` | a new bucket, private unless isPublic | `bucketName` | no | no |
-| `set_public` | make a bucket public or private | `bucketName`, `isPublic` | no | no |
+| `set_public` | make a bucket public or private (shorthand for the public_read / private policies) | `bucketName`, `isPublic` | no | no |
+| `set_policy` | set the enforced access policy: public_read, cdn_cacheable, private or owner_only | `bucketName`, `policy` | no | no |
 | `list_buckets` | every bucket with its visibility | nothing | yes | no |
 | `list_files` | the files in one bucket | `bucketName` | yes | no |
 | `signed_url` | a time-limited download link for one file | `bucketName`, `path` | yes | no |

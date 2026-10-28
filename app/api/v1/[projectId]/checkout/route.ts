@@ -2,9 +2,10 @@ export const dynamic = 'force-dynamic'
 
 import { NextRequest } from 'next/server'
 import { v1ApiMiddleware, requirePermission } from '@/lib/api/v1/middleware'
-import { createErrorResponse, createSuccessResponse, ErrorCodes } from '@/lib/api/v1/errors'
+import { createErrorResponse, createSuccessResponse, ErrorCodes, regionErrorResponse } from '@/lib/api/v1/errors'
 import { getCart, clearCart, resolveSessionId } from '@/lib/services/cart-store'
 import { prisma } from '@/lib/db'
+import { workspaceRawClient } from '@/lib/data-plane/regional'
 import { executeInWorkspaceSchema } from '@/lib/services/workspaceDatabase'
 import { recordedV1 } from '@/lib/traffic/recorded-v1'
 
@@ -67,8 +68,13 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
       return createErrorResponse(ErrorCodes.NOT_FOUND, 'order_items table not found. Create it first via your connected coding agent.', 404)
     }
 
+    // The project's database, in its region. Resolved before the product
+    // lookups' fail-soft catches, which would read an unreachable region as
+    // "product not found".
+    const db = await workspaceRawClient(context.projectId)
+
     // ── 2. Detect orders table schema (guest vs auth) ──────────────────────────
-    const colRows = await prisma.$queryRawUnsafe<Array<{ column_name: string }>>(
+    const colRows = await db.$queryRawUnsafe<Array<{ column_name: string }>>(
       `SELECT column_name FROM information_schema.columns
        WHERE table_schema = $1 AND table_name = 'orders'`,
       schemaName
@@ -79,7 +85,7 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
     const hasTotalCol = orderCols.has('total') ? 'total' : orderCols.has('total_amount') ? 'total_amount' : 'total'
 
     // Detect order_items columns
-    const itemColRows = await prisma.$queryRawUnsafe<Array<{ column_name: string }>>(
+    const itemColRows = await db.$queryRawUnsafe<Array<{ column_name: string }>>(
       `SELECT column_name FROM information_schema.columns
        WHERE table_schema = $1 AND table_name = 'order_items'`,
       schemaName
@@ -92,7 +98,7 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
     // stock check and over-selling the same product.
     if (productsTable) {
       for (const item of cart.items) {
-        const rows = await prisma.$transaction(async (tx) => {
+        const rows = await db.$transaction(async (tx) => {
           return tx.$queryRawUnsafe<any[]>(
             `SELECT id, name, price, stock, stock_quantity FROM "${schemaName}"."products"
              WHERE id = $1 LIMIT 1 FOR UPDATE`,
@@ -100,7 +106,7 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
           ).catch(() => [] as any[])
         }).catch(async () => {
           // FOR UPDATE may fail in pooled/read-replica setups — fall back to non-locking read
-          return prisma.$queryRawUnsafe<any[]>(
+          return db.$queryRawUnsafe<any[]>(
             `SELECT id, name, price, stock, stock_quantity FROM "${schemaName}"."products" WHERE id = $1 LIMIT 1`,
             item.productId
           ).catch(() => [] as any[])
@@ -208,7 +214,7 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
 
     // ── 7. Decrement stock (best-effort) ───────────────────────────────────────
     if (productsTable) {
-      const stockCol = (await prisma.$queryRawUnsafe<any[]>(
+      const stockCol = (await db.$queryRawUnsafe<any[]>(
         `SELECT column_name FROM information_schema.columns
          WHERE table_schema = $1 AND table_name = 'products' AND column_name IN ('stock', 'stock_quantity')
          LIMIT 1`,
@@ -234,9 +240,7 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
     // ── 9. Fire triggers (non-blocking) ───────────────────────────────────────
     try {
       const { fireTriggers } = await import('@/lib/services/trigger-service')
-      const { fireAiFunctions } = await import('@/lib/services/ai-functions/executor')
       fireTriggers(context.projectId, { type: 'insert', table: 'orders', data: order }).catch(() => {})
-      fireAiFunctions(context.projectId, { type: 'insert', table: 'orders', data: order }).catch(() => {})
     } catch { /* non-fatal */ }
 
     return createSuccessResponse({
@@ -247,7 +251,7 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
     })
   } catch (err: any) {
     console.error('[checkout POST]', err?.message, err?.stack)
-    return createErrorResponse(ErrorCodes.INTERNAL_ERROR, 'Checkout failed', 500)
+    return regionErrorResponse(err) ?? createErrorResponse(ErrorCodes.INTERNAL_ERROR, 'Checkout failed', 500)
   }
 }
 

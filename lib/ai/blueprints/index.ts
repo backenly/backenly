@@ -24,6 +24,7 @@
  */
 
 import type { Blueprint, BlueprintDomain, BlueprintMatch } from './types'
+import { clearDesigning, markDesigning } from './store'
 import { SOCIAL_MEDIA_BLUEPRINT } from './social-media'
 import { MARKETPLACE_BLUEPRINT } from './marketplace'
 import { SAAS_BLUEPRINT } from './saas'
@@ -269,6 +270,8 @@ export function shouldUseCuratedBlueprint(prompt: string): boolean {
 export async function getBlueprintForPrompt(
   prompt: string,
   projectId: string,
+  /** Called once the architect starts: a curated match never calls it. */
+  onDesign?: () => void,
 ): Promise<
   | { blueprint: Blueprint; match: BlueprintMatch; architectTokens: number }
   | { vague: true; askUser: string; architectTokens: number }
@@ -288,9 +291,17 @@ export async function getBlueprintForPrompt(
     )
   }
 
-  // No curated hit → ask the LLM architect to design the backend.
+  // No curated hit → ask the LLM architect to design the backend. Marked while
+  // it runs, since it can outlast the call that asked for it (store.ts).
   const { architectBackend } = await import('./architect')
-  const result = await architectBackend(prompt, projectId)
+  await markDesigning(projectId).catch((err) => console.error('[Blueprints] could not mark the design as running:', err))
+  onDesign?.()
+  let result: Awaited<ReturnType<typeof architectBackend>>
+  try {
+    result = await architectBackend(prompt, projectId)
+  } finally {
+    await clearDesigning(projectId)
+  }
   if (!result) return null
   if ('vague' in result) {
     // Architect ran but returned a clarifying question — those tokens are still

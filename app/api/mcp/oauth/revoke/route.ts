@@ -18,6 +18,7 @@ export const runtime = 'nodejs'
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db/prisma'
 import { hashToken, verifyAccessToken } from '@/lib/mcp/oauth'
+import { governedChange, withChangeAttribution } from '@/lib/changes/ledger'
 
 const HEADERS = {
   'cache-control': 'no-store',
@@ -30,9 +31,16 @@ export function OPTIONS() {
   return new NextResponse(null, { status: 204, headers: HEADERS })
 }
 
-/** Delete the connection row; cascades take its codes and refresh tokens. */
+/**
+ * Delete the connection row; cascades take its codes and refresh tokens. The
+ * agent ended its own connection, so the project's history says it did.
+ */
 async function revokeConnection(apiKeyId: string) {
-  await prisma.apiKey.delete({ where: { id: apiKeyId } }).catch(() => {})
+  const row = await prisma.apiKey.findUnique({ where: { id: apiKeyId }, select: { projectId: true, name: true, userId: true } })
+  if (!row) return
+  await withChangeAttribution({ source: 'mcp', apiKeyId, actorUserId: row.userId }, () =>
+    governedChange(row.projectId, `Disconnect agent ${row.name}`, () => prisma.apiKey.delete({ where: { id: apiKeyId } })),
+  ).catch(() => {})
 }
 
 export async function POST(request: NextRequest) {

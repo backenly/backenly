@@ -8,7 +8,7 @@
  */
 
 import { Router, Request, Response } from 'express'
-import { prisma } from '@/lib/db'
+import { workspaceRawClient } from '@/lib/data-plane/regional'
 import { v1AuthMiddleware } from '../lib/auth'
 import { workspaceChannelName } from '@/lib/security/workspace-schema'
 import { asyncRoute } from '../lib/async-route'
@@ -54,7 +54,10 @@ router.post('/:projectId/broadcast', asyncRoute(v1AuthMiddleware), asyncRoute(as
       return
     }
 
-    await prisma.$executeRawUnsafe(`SELECT pg_notify($1, $2)`, notifyChannel, notifyPayload)
+    // NOTIFY on the project's database, in its region: only listeners on that
+    // database hear it, and that is where the listener hub LISTENs for it.
+    const db = await workspaceRawClient(projectId)
+    await db.$executeRawUnsafe(`SELECT pg_notify($1, $2)`, notifyChannel, notifyPayload)
 
     res.json({ success: true })
   } catch (err: any) {

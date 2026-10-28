@@ -26,7 +26,8 @@
  *   AuditLog             every governed mutation, autonomous fix and approval
  *   SchemaDriftEvent     DDL that arrived over a direct psql/migration-tool
  *                        connection — the changes Backenly did NOT make, which
- *                        are the ones most worth surfacing here
+ *                        are the ones most worth surfacing here (read in the
+ *                        project's region, where they are captured)
  *   Deployment           the project's own deploys
  *   WorkspaceSchemaSnapshot  a version boundary, so "the schema changed here"
  *                        is answerable even when nothing else recorded it
@@ -35,6 +36,7 @@
  */
 
 import { prisma } from '@/lib/db/prisma'
+import { projectDriftEvents, unlessRegionError } from '@/lib/data-plane/regional'
 
 export interface CorrelatedChange {
   at: string
@@ -105,12 +107,14 @@ export async function changesBefore(
       take: MAX_CHANGES,
       select: { action: true, details: true, timestamp: true },
     }).catch(() => []),
-    prisma.schemaDriftEvent.findMany({
+    // In the project's region, where they are captured. A region this process
+    // cannot reach is not "no external changes".
+    projectDriftEvents(projectId).then((events) => events.findMany({
       where: { projectId, capturedAt: { gte: since, lte: deviationAt } },
       orderBy: { capturedAt: 'desc' },
       take: MAX_CHANGES,
       select: { commandTag: true, objectIdentity: true, roleName: true, capturedAt: true },
-    }).catch(() => []),
+    })).catch(unlessRegionError([])),
     prisma.deployment.findMany({
       where: { projectId, createdAt: { gte: since, lte: deviationAt } },
       orderBy: { createdAt: 'desc' },

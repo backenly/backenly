@@ -180,6 +180,18 @@ BEGIN
   FOR obj IN SELECT * FROM pg_event_trigger_ddl_commands()
   LOOP
     CONTINUE WHEN obj.schema_name IS NULL;
+
+    -- Something moved into a change's vault (workspace_<id>_r<seq>, where a
+    -- governed change keeps what it removed; lib/changes/preserve.ts) has left
+    -- the schema PostgREST serves, and this trigger sees only the schema it
+    -- moved to. PostgREST must forget it. A vault is never served, so nothing
+    -- is granted there.
+    IF obj.schema_name ~ '_r[0-9]+$'
+       AND regexp_replace(obj.schema_name, '_r[0-9]+$', '') = ANY (registered) THEN
+      touched := true;
+      CONTINUE;
+    END IF;
+
     CONTINUE WHEN NOT (obj.schema_name = ANY (registered));
 
     sch := obj.schema_name;
@@ -224,6 +236,44 @@ DROP EVENT TRIGGER IF EXISTS backenly_pgrst_ddl_sync;
 CREATE EVENT TRIGGER backenly_pgrst_ddl_sync
   ON ddl_command_end
   EXECUTE FUNCTION public.backenly_pgrst_on_ddl();
+
+-- ── React to drops ──────────────────────────────────────────────────────────
+-- ddl_command_end reports what a statement created or altered, never what it
+-- dropped: DROP TABLE, DROP VIEW and DROP FUNCTION reach the trigger above with
+-- nothing to look at. PostgREST then kept the dropped table in its cache and
+-- answered requests for it with a database error, and kept offering a dropped
+-- function, until something else reloaded it. sql_drop lists what went.
+--
+-- A dropped schema is left to the registry, which unregisters it and reloads
+-- (backenly_pgrst_on_schema_drop in postgrest-schema-registry.sql).
+CREATE OR REPLACE FUNCTION public.backenly_pgrst_on_drop()
+RETURNS event_trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $fn$
+DECLARE
+  registered text[];
+BEGIN
+  registered := string_to_array(public.backenly_pgrst_current_schemas(), ',');
+  IF registered IS NULL OR array_length(registered, 1) IS NULL THEN
+    RETURN;
+  END IF;
+
+  -- One notification per statement, however many objects it dropped.
+  IF EXISTS (
+    SELECT 1 FROM pg_event_trigger_dropped_objects() d
+     WHERE d.object_type <> 'schema' AND d.schema_name = ANY (registered)
+  ) THEN
+    NOTIFY pgrst, 'reload schema';
+  END IF;
+END;
+$fn$;
+
+DROP EVENT TRIGGER IF EXISTS backenly_pgrst_drop_sync;
+CREATE EVENT TRIGGER backenly_pgrst_drop_sync
+  ON sql_drop
+  EXECUTE FUNCTION public.backenly_pgrst_on_drop();
 
 REVOKE ALL ON FUNCTION public.backenly_pgrst_prepare_schema(text) FROM PUBLIC;
 

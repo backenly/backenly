@@ -128,7 +128,7 @@ export const BLOG_BLUEPRINT: Blueprint = {
     addRls('post_tags', 'public_read'),
     addRls('comments', 'public_read', 'Comments are public-read, owner-only write'),
     addRls('media', 'public_read'),
-    addRls('subscribers', 'owner_read_write'),
+    addRls('subscribers', 'admin_only', 'Subscribers are private: read and written by the server, never by a browser key'),
     addRls('drafts', 'owner_read_write'),
     addRls('revisions', 'owner_read_write'),
 

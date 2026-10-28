@@ -49,7 +49,7 @@
  * before the backfill, and NULL satisfies a CHECK.
  */
 
-import { prisma } from '@/lib/db'
+import { workspaceRawClient, type WorkspaceRawClient } from '@/lib/data-plane/regional'
 import { queryWorkspaceAsOwner, resolveWorkspaceSchema } from '@/lib/services/workspace-pool'
 import { asciiOnly, sqlLiteral, transformValue, type Transform } from '../transform'
 
@@ -81,8 +81,8 @@ export interface CarryConstraintsResult {
  * `pg_get_constraintdef` rather than the raw `consrc`, which was removed in
  * PostgreSQL 12 and would silently return nothing on every supported version.
  */
-async function sourceChecks(schema: string, table: string, column: string): Promise<string[]> {
-  const rows = await prisma.$queryRawUnsafe<Array<{ def: string }>>(
+async function sourceChecks(db: WorkspaceRawClient, schema: string, table: string, column: string): Promise<string[]> {
+  const rows = await db.$queryRawUnsafe<Array<{ def: string }>>(
     `SELECT pg_get_constraintdef(co.oid) AS def
        FROM pg_constraint co
        JOIN pg_class c ON c.oid = co.conrelid
@@ -139,9 +139,11 @@ export async function carryConstraints(
   }
 
   const schema = await resolveWorkspaceSchema(projectId)
+  // Every catalog read below is of the project's region.
+  const db = await workspaceRawClient(projectId)
 
   // ── The source's domain, from the catalog ──────────────────────────────────
-  const checks = await sourceChecks(schema, table, sourceColumn)
+  const checks = await sourceChecks(db, schema, table, sourceColumn)
   if (checks.length === 0) {
     return {
       applied: false,
@@ -229,7 +231,7 @@ export async function carryConstraints(
   }
 
   const constraintName = `bkn_cc_${table}_${targetColumn}`
-  const existing = await prisma.$queryRawUnsafe<Array<{ conname: string }>>(
+  const existing = await db.$queryRawUnsafe<Array<{ conname: string }>>(
     `SELECT co.conname FROM pg_constraint co
        JOIN pg_class c ON c.oid = co.conrelid
        JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -271,7 +273,7 @@ export async function carryConstraints(
   }
 
   // Proved from the catalog, not from the verb's return value.
-  const after = await prisma.$queryRawUnsafe<Array<{ conname: string }>>(
+  const after = await db.$queryRawUnsafe<Array<{ conname: string }>>(
     `SELECT co.conname FROM pg_constraint co
        JOIN pg_class c ON c.oid = co.conrelid
        JOIN pg_namespace n ON n.oid = c.relnamespace

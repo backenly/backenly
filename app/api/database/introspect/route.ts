@@ -31,11 +31,11 @@ export const GET = withProjectAccess(async (request: NextRequest, { user, projec
     let schemaExists = false
     
     try {
-      const schemas = await PostgresService.listSchemas()
-      schemaExists = schemas.includes(schemaName)
-      
+      // Asked of the project's own database, in its region.
+      schemaExists = await PostgresService.schemaExists(projectId, schemaName)
+
       if (schemaExists) {
-        const tables = await PostgresService.listTables(schemaName)
+        const tables = await PostgresService.listTables(projectId, schemaName)
         realTables = tables.map(t => t.name)
         console.log('[Introspect] Database says these tables exist:', realTables)
       } else {

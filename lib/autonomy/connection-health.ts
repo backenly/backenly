@@ -46,7 +46,7 @@
  * know what that work is.
  */
 
-import { Pool } from 'pg'
+import { projectPool } from '@/lib/data-plane/regional'
 import { directAccessRoleNames } from '@/lib/services/direct-access'
 import type { RawFinding } from '@/lib/core/types'
 
@@ -77,12 +77,6 @@ export const IDLE_TX_QUERY = `
      AND EXTRACT(EPOCH FROM (now() - state_change)) >= $2
    GROUP BY usename`
 
-let pool: Pool | null = null
-function getPool(): Pool {
-  if (!pool) pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 2 })
-  return pool
-}
-
 function fmtDuration(seconds: number): string {
   if (seconds >= 7200) return `${Math.floor(seconds / 3600)} hours`
   if (seconds >= 3600) return '1 hour'
@@ -100,8 +94,11 @@ export async function detectIdleInTransaction(projectId: string): Promise<RawFin
     max_idle_seconds: number
     max_txn_seconds: number | null
   }>
+  // The project's roles connect to the database in its region. Resolved before
+  // the try, so a region this process cannot reach fails as itself.
+  const pool = await projectPool(projectId, 'connection-health', { max: 2 })
   try {
-    const res = await getPool().query(IDLE_TX_QUERY, [roleList, IDLE_TX_MIN_SECONDS])
+    const res = await pool.query(IDLE_TX_QUERY, [roleList, IDLE_TX_MIN_SECONDS])
     rows = res.rows as typeof rows
   } catch (err: any) {
     // Same contract as every probe in this catalogue: an empty result must never

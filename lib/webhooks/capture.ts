@@ -59,8 +59,13 @@ import { prisma } from '@/lib/db/prisma'
 import { executeInWorkspaceSchema, queryWorkspaceSchema } from '@/lib/services/workspaceDatabase'
 import { workspaceSchemaName } from '@/lib/security/workspace-schema'
 import { ROW_EVENT_TYPES, type RowEventType, type WebhookEventType } from './events'
+import { skipUnreachable } from '@/lib/autonomy/region-skip'
 
-/** The trigger attached to every captured table. */
+/**
+ * The trigger attached to every captured table. These names are left out of
+ * the change history as plumbing this module derives; renaming one means
+ * renaming it in lib/changes/catalog.ts PLATFORM_OBJECTS too.
+ */
 const TRIGGER_NAME = 'backenly_webhook_capture'
 /** The per-schema function that trigger executes. */
 const FUNCTION_NAME = 'backenly_capture_webhook_event'
@@ -90,6 +95,24 @@ const EVENT_FOR_OPERATION: Record<string, RowEventType> = {
   INSERT: 'row.inserted',
   UPDATE: 'row.updated',
   DELETE: 'row.deleted',
+}
+
+/**
+ * Row-event AI functions ride the same capture. Their triggerType spelling
+ * (on_db_*) maps onto the capture's event vocabulary here, and onto
+ * fireAiFunctions' event.type below.
+ */
+const EVENT_FOR_FUNCTION_TRIGGER: Record<string, RowEventType> = {
+  on_db_insert: 'row.inserted',
+  on_db_update: 'row.updated',
+  on_db_delete: 'row.deleted',
+}
+const ROW_FUNCTION_TRIGGER_TYPES = Object.keys(EVENT_FOR_FUNCTION_TRIGGER)
+
+const FUNCTION_EVENT_FOR_OPERATION: Record<string, 'insert' | 'update' | 'delete'> = {
+  INSERT: 'insert',
+  UPDATE: 'update',
+  DELETE: 'delete',
 }
 
 // ── Eligibility ──────────────────────────────────────────────────────────────
@@ -306,36 +329,64 @@ export async function listCapturedTables(projectId: string): Promise<string[]> {
 // ── Subscription sync ────────────────────────────────────────────────────────
 
 /**
- * Make the database's triggers match the project's active webhooks.
+ * Which row events the project's active ROW-EVENT FUNCTIONS need captured.
  *
- * Called after every webhook create, edit, enable/disable and delete, and
- * after a table is added, so "which events are captured" is derived from the
- * webhook rows rather than tracked separately and allowed to drift.
+ * on_insert/on_update/on_delete functions were documented as firing "every
+ * time a row is inserted/updated/deleted", but they were only ever fired
+ * inline by the legacy /database/* routes — PostgREST (/api/v2 and
+ * /api/v1/{id}/db/*), MCP writes and SQL inside functions never passed
+ * through those handlers, so the documented data plane never fired them.
+ * The same database-level capture that fixed this for webhooks is the fix
+ * here, so "fires for every writer" has one implementation, not two.
+ */
+async function functionRowEvents(projectId: string): Promise<RowEventType[]> {
+  const fns = await prisma.aiFunction.findMany({
+    where: { projectId, status: { notIn: ['inactive', 'disabled', 'deleted'] }, triggerType: { in: ROW_FUNCTION_TRIGGER_TYPES } },
+    select: { triggerType: true },
+  })
+  return [...new Set(fns.map(f => EVENT_FOR_FUNCTION_TRIGGER[f.triggerType]).filter(Boolean))]
+}
+
+/**
+ * Make the database's triggers match the project's active row-event
+ * subscribers: webhooks AND row-event AI functions.
  *
- * With no active row webhook the triggers come off entirely. That is the
+ * Called after every webhook create, edit, enable/disable and delete, after a
+ * table is added, and after every function deploy/toggle/delete that touches a
+ * row-event trigger — so "which events are captured" is derived from the
+ * subscriber rows rather than tracked separately and allowed to drift.
+ *
+ * With no active row subscriber the triggers come off entirely. That is the
  * difference between a feature nobody enabled costing nothing and it costing
  * an extra write on every INSERT in the project forever.
  *
- * The outbox TABLE is deliberately left behind when the last webhook is
+ * The outbox TABLE is deliberately left behind when the last subscriber is
  * deleted: it may still hold undelivered events, and dropping it to tidy up
  * would discard them.
  */
-export async function syncWebhookCapture(projectId: string): Promise<{
-  events: RowEventType[]
-  tables: string[]
-}> {
+async function wantedRowEvents(projectId: string): Promise<RowEventType[]> {
   const active = await prisma.webhook.findMany({
     where: { projectId, active: true },
     select: { eventType: true },
   })
-
-  const wanted = [
-    ...new Set(
-      active
+  return [
+    ...new Set([
+      ...active
         .map(w => w.eventType)
         .filter((e): e is RowEventType => (ROW_EVENT_TYPES as readonly string[]).includes(e)),
-    ),
+      ...(await functionRowEvents(projectId)),
+    ]),
   ]
+}
+
+export async function syncWebhookCapture(projectId: string): Promise<{
+  events: RowEventType[]
+  tables: string[]
+  /** Eligible tables whose trigger could NOT be installed — each one is a
+   *  table whose row events silently never fire until this is surfaced. */
+  uncaptured: Array<{ table: string; reason: string }>
+}> {
+  const wanted = await wantedRowEvents(projectId)
 
   const captured = await listCapturedTables(projectId)
 
@@ -345,20 +396,24 @@ export async function syncWebhookCapture(projectId: string): Promise<{
         console.warn(`[webhooks] could not drop capture on ${table}:`, err?.message ?? err),
       )
     }
-    return { events: [], tables: [] }
+    return { events: [], tables: [], uncaptured: [] }
   }
 
   await ensureOutbox(projectId)
 
   const eligible = await capturableTables(projectId)
   const installed: string[] = []
+  const uncaptured: Array<{ table: string; reason: string }> = []
 
   for (const table of eligible) {
     try {
       await installCaptureTrigger(projectId, table, wanted)
       installed.push(table)
     } catch (err: any) {
+      // Kept, not just logged: a swallowed per-table failure meant create and
+      // update answered success while this table's row events never fired.
       console.warn(`[webhooks] could not capture ${table}:`, err?.message ?? err)
+      uncaptured.push({ table, reason: String(err?.message ?? err) })
     }
   }
 
@@ -369,7 +424,43 @@ export async function syncWebhookCapture(projectId: string): Promise<{
     if (!eligibleSet.has(table)) await uninstallCaptureTrigger(projectId, table).catch(() => {})
   }
 
-  return { events: wanted, tables: installed }
+  return { events: wanted, tables: installed, uncaptured }
+}
+
+/**
+ * Sync only when the tables carrying the trigger are not the ones that should:
+ * after a change or a restore added, removed or brought back tables
+ * (lib/changes/freshness.ts). The capture trigger is left out of the change
+ * history, as plumbing this module derives (lib/changes/catalog.ts), so this
+ * is what gives a table a restore brought back its row events again. Which
+ * events are captured changes only with the subscribers, whose own writes
+ * call syncWebhookCapture.
+ */
+export async function syncWebhookCaptureIfStale(projectId: string): Promise<void> {
+  const [wanted, captured] = await Promise.all([wantedRowEvents(projectId), listCapturedTables(projectId)])
+  if (wanted.length === 0 && captured.length === 0) return
+  const eligible = wanted.length === 0 ? [] : await capturableTables(projectId)
+  const has = new Set(captured)
+  if (eligible.length === captured.length && eligible.every(t => has.has(t))) return
+  await syncWebhookCapture(projectId)
+}
+
+/**
+ * Re-sync capture after a function lifecycle change (deploy, toggle, delete).
+ * A no-op for non-row triggers, so every call site can call it unconditionally
+ * with whatever trigger the function had. Non-fatal: a failed sync must not
+ * fail the lifecycle action itself — the next sync repairs it.
+ */
+export async function syncCaptureForFunctionChange(
+  projectId: string,
+  triggerType: string | null | undefined,
+): Promise<void> {
+  if (!triggerType || !(triggerType in EVENT_FOR_FUNCTION_TRIGGER)) return
+  try {
+    await syncWebhookCapture(projectId)
+  } catch (err: any) {
+    console.warn('[capture] function-change sync failed:', err?.message ?? err)
+  }
 }
 
 // ── Drain ────────────────────────────────────────────────────────────────────
@@ -423,6 +514,7 @@ async function drainProject(projectId: string): Promise<number> {
   if (!Array.isArray(claimed) || claimed.length === 0) return 0
 
   const { triggerWebhooks } = await import('./index')
+  const { fireAiFunctions } = await import('@/lib/services/ai-functions/executor')
   const deliveredIds: string[] = []
 
   for (const row of claimed) {
@@ -441,6 +533,21 @@ async function drainProject(projectId: string): Promise<number> {
         occurredAt: new Date(row.occurred_at).toISOString(),
         outboxId: String(row.id),
       })
+
+      // Row-event AI functions fire from the same captured event, so they fire
+      // for EVERY writer — PostgREST, MCP, SQL inside functions — not only the
+      // legacy routes that used to call them inline. Not awaited: a function
+      // runs customer code for up to 10s, and one slow handler must not stall
+      // the whole drain. fireAiFunctions matches trigger type + table itself
+      // and never throws. A crash between this and the delete below means the
+      // reclaim re-fires it — at-least-once, the same contract webhooks carry.
+      fireAiFunctions(projectId, {
+        type: FUNCTION_EVENT_FOR_OPERATION[row.event_type],
+        table: row.table_name,
+        data: row.row_data ?? {},
+        old: row.old_data ?? undefined,
+      }).catch(() => {})
+
       deliveredIds.push(row.id)
     } catch (err: any) {
       // Leave it claimed. The reclaim window brings it back rather than
@@ -472,22 +579,39 @@ function resolveEventType(row: OutboxRow): RowEventType | null {
 }
 
 /**
- * Drain every project that has an active row webhook.
+ * Drain every project that has an active row subscriber — a row webhook or a
+ * row-event AI function. A functions-only project must drain too, or its
+ * captured events sit in the outbox forever.
  *
  * Driven from `runSystemTasks`, beside the retry ladder it feeds. Projects are
  * processed independently so one unreachable schema cannot stall the rest.
  */
 export async function drainWebhookOutbox(): Promise<number> {
-  const projects = await prisma.webhook.findMany({
+  const withWebhooks = await prisma.webhook.findMany({
     // A paused project's outbox was emptied when it paused and nothing can
     // write to it since, so there is nothing to drain.
     where: { active: true, eventType: { in: [...ROW_EVENT_TYPES] }, project: { pausedAt: null } },
     select: { projectId: true },
     distinct: ['projectId'],
   })
+  const withRowFunctions = await prisma.aiFunction.findMany({
+    where: {
+      status: { notIn: ['inactive', 'disabled', 'deleted'] },
+      triggerType: { in: ROW_FUNCTION_TRIGGER_TYPES },
+      project: { pausedAt: null, deletedAt: null },
+    },
+    select: { projectId: true },
+    distinct: ['projectId'],
+  })
+  // A project whose region this process cannot reach is skipped and recorded
+  // (lib/autonomy/region-skip.ts); its captured events wait in its outbox.
+  const projects = await skipUnreachable(
+    [...new Set([...withWebhooks, ...withRowFunctions].map(p => p.projectId))].map(id => ({ id })),
+    'webhook-drain',
+  )
 
   let total = 0
-  for (const { projectId } of projects) {
+  for (const { id: projectId } of projects) {
     try {
       total += await drainProject(projectId)
     } catch (err: any) {

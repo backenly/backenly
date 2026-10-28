@@ -19,6 +19,8 @@ jest.mock('@/lib/db/prisma', () => ({
   prisma: {
     apiKeyUsage: { create: jest.fn(async (a: any) => { mockUsageRows.push(a.data); return a.data }) },
     auditLog: { create: jest.fn(async (a: any) => { mockAuditRows.push(a.data); return a.data }) },
+    // The project's region: p-virginia is kept in us-east-1, every other one at home.
+    project: { findUnique: jest.fn(async ({ where }: any) => ({ region: where.id === 'p-virginia' ? 'us-east-1' : null })) },
   },
 }))
 
@@ -82,9 +84,67 @@ describe('what is withheld', () => {
   })
 })
 
+describe('wherever a key sits in the text', () => {
+  // Stored copies are often JSON text, where a key on its own line follows the
+  // two characters "\" and "n", and a key can run straight into "_" or another
+  // word character. A word boundary sees neither as the edge of a key.
+  const ISSUED: Array<[string, string]> = [
+    ['a publishable project key', `proj_live_${'b2'.repeat(32)}`],
+    ['a service-role key', `svc_live_${'a1'.repeat(32)}`],
+    ['an MCP key', `mcp_live_${'c4'.repeat(32)}`],
+    ['a dashboard key', `dk_admin_${'d5'.repeat(32)}`],
+    ['a preview-branch key', `proj_preview_${'e6'.repeat(32)}`],
+    ['a preview-branch service-role key', `svc_preview_${'f7'.repeat(32)}`],
+    ['a legacy key', `sk_read_${'a8'.repeat(32)}`],
+    ['a rotated key with the old prefix', `sk_live_${'c3'.repeat(24)}`],
+    ['a webhook signing secret', `whsec_${'d4'.repeat(24)}`],
+    ['a project admin key', `bk_admin_${'e5'.repeat(16)}`],
+  ]
+  const PROVIDER: Array<[string, string]> = [
+    ['a Stripe secret key', `sk_live_${'Xy9'.repeat(10)}`],
+    ['an Anthropic key', `sk-ant-api03-${'Xy9'.repeat(12)}`],
+    ['an OpenAI project key', `sk-proj-${'Qw7'.repeat(10)}_${'Er4'.repeat(6)}-${'Ty2'.repeat(6)}`],
+    ['a Resend key', `re_Ab12Cd34_${'Ef56Gh78'.repeat(3)}`],
+    ['a SendGrid key', `SG.${'Xy9'.repeat(8)}.${'Zw4'.repeat(15)}`],
+    ['a PostHog key', `phc_${'Gh5'.repeat(10)}`],
+    ['a Replicate token', `r8_${'Jk6'.repeat(12)}`],
+  ]
+
+  it.each([...ISSUED, ...PROVIDER])('%s, after an escaped newline in JSON text', (_label, secret) => {
+    const json = JSON.stringify({ summary: `Copy this key (shown once):\n${secret}\nKeep it safe.` })
+    expect(json).toContain(`\\n${secret}`)
+    const stored = withholdSecrets(json)
+    expect(stored).not.toContain(secret)
+    expect(stored).toContain('Keep it safe.')
+  })
+
+  it.each([...ISSUED, ...PROVIDER])('%s, followed by an underscore or another word character', (_label, secret) => {
+    for (const after of ['_', '_backup', 'Z']) {
+      const stored = withholdSecrets(`saved ${secret}${after} for later`)
+      expect(stored).not.toContain(secret)
+      expect(stored).toContain('for later')
+    }
+  })
+
+  it('every occurrence of a provider key, not only the first', () => {
+    const first = `sk_live_${'Xy9'.repeat(10)}`
+    const second = `sk_live_${'Zw4'.repeat(10)}`
+    expect(withholdSecrets(`old ${first}, new ${second}`)).toBe('old [KEY_REDACTED], new [KEY_REDACTED]')
+  })
+
+  it('nothing from identifiers that merely contain a provider prefix', () => {
+    const plain = 'Renamed store_inventory_movements_history, future_release_notes and risk-assessmentproceduresforq3.'
+    expect(withholdSecrets(plain)).toBe(plain)
+  })
+})
+
+// recordMcpCall is fire-and-forget: its rows land once the project's region is read.
+const flush = () => new Promise((resolve) => setImmediate(resolve))
+
 describe('what recordMcpCall stores', () => {
-  it('keeps the new key out of the usage row and the audit row', () => {
+  it('keeps the new key out of the usage row and the audit row', async () => {
     recordMcpCall(CTX, { statusCode: 200, tool: 'connect.create_api_key', mutation: true, summary: createSummary, data: { apiKey: KEY } })
+    await flush()
     expect(JSON.stringify(mockUsageRows)).not.toContain(KEY)
     expect(JSON.stringify(mockAuditRows)).not.toContain(KEY)
     expect(mockUsageRows[0].metadata.summary).toContain('[withheld]')
@@ -92,9 +152,34 @@ describe('what recordMcpCall stores', () => {
     expect(JSON.stringify(mockUsageRows[0])).not.toContain('"data"')
   })
 
-  it('withholds the same way from an error', () => {
+  it('withholds the same way from an error', async () => {
     recordMcpCall(CTX, { statusCode: 400, tool: 'x', error: `failed near ${KEY}` })
+    await flush()
     expect(mockUsageRows[0].metadata.error).toBe('failed near [withheld]')
+  })
+
+  it('keeps no summary or error at all for a project kept in another region, only what ran', async () => {
+    // Both can quote the project's rows, which stay in its region (lib/data-plane/residency.ts).
+    const virginia = { ...CTX, projectId: 'p-virginia' }
+    recordMcpCall(virginia, { statusCode: 200, tool: 'db.insert', mutation: true, summary: 'Inserted alice@example.com' })
+    recordMcpCall(virginia, { statusCode: 409, tool: 'db.insert', error: 'Key (email)=(alice@example.com) already exists' })
+    await flush()
+    expect(mockUsageRows.map((row) => row.metadata)).toEqual([
+      { tool: 'db.insert', mutation: true, summary: undefined, error: undefined },
+      { tool: 'db.insert', mutation: false, summary: undefined, error: undefined },
+    ])
+    expect(JSON.parse(mockAuditRows[0].details)).toMatchObject({ tool: 'db.insert' })
+    expect(JSON.stringify([mockUsageRows, mockAuditRows])).not.toContain('alice@example.com')
+  })
+
+  it('still keeps an error code for a project kept in another region, which quotes nothing', async () => {
+    // The admin agent-ops view tells a partly applied migration from a refusal by this code.
+    const virginia = { ...CTX, projectId: 'p-virginia' }
+    recordMcpCall(virginia, { statusCode: 500, tool: 'apply_migration', mutation: true, error: 'MIGRATION_FAILED', summary: 'migration: 3 statement(s), failed at alice@example.com' })
+    recordMcpCall(virginia, { statusCode: 403, tool: 'db.delete', error: 'READ_ONLY_KEY' })
+    await flush()
+    expect(mockUsageRows.map((row) => row.metadata.error)).toEqual(['MIGRATION_FAILED', 'READ_ONLY_KEY'])
+    expect(JSON.stringify(mockUsageRows)).not.toContain('alice@example.com')
   })
 })
 

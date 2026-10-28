@@ -21,6 +21,7 @@
  */
 
 import { prisma } from '@/lib/db'
+import { workspaceRawClient } from '@/lib/data-plane/regional'
 import { executeInWorkspaceSchema, queryWorkspaceSchema } from './workspaceDatabase'
 import { rlsSessionSql, rlsSessionParams } from './rls-session'
 import {
@@ -784,7 +785,7 @@ export async function applyPermissionPolicy(
     // RLS call as already verified instead of owing a separate pass that a
     // wall clock then cuts.
     if (template !== 'all_access') {
-      const live = await readLivePolicies(schemaName, tableName)
+      const live = await readLivePolicies(projectId, schemaName, tableName)
       const covered = new Set(live.flatMap(commandsCoveredBy))
       const uncovered = RLS_COMMANDS.filter((c) => !covered.has(c))
       if (uncovered.length) {
@@ -1011,8 +1012,11 @@ async function readRlsState(
   schemaName: string,
   tableName: string,
 ): Promise<RlsTableState> {
+  // The catalog of the database holding the project's data, in its region.
+  // Outside the try: an unreachable region is not "RLS off, no policies".
+  const db = await workspaceRawClient(projectId)
   try {
-    const rows = await prisma.$queryRawUnsafe<Array<{ relrowsecurity: boolean; relforcerowsecurity: boolean }>>(
+    const rows = await db.$queryRawUnsafe<Array<{ relrowsecurity: boolean; relforcerowsecurity: boolean }>>(
       `SELECT relrowsecurity, relforcerowsecurity
          FROM pg_class
         WHERE relname = $1
@@ -1020,7 +1024,7 @@ async function readRlsState(
       tableName,
       schemaName,
     )
-    const policyRows = await prisma.$queryRawUnsafe<Array<{ count: bigint }>>(
+    const policyRows = await db.$queryRawUnsafe<Array<{ count: bigint }>>(
       `SELECT count(*)::bigint AS count
          FROM pg_policies
         WHERE schemaname = $1 AND tablename = $2 AND policyname LIKE 'backenly_%'`,
@@ -1236,11 +1240,15 @@ export interface LivePolicyRow {
  * live policies on one table reported "7 policies across 6 tables".
  */
 export async function readLivePolicies(
+  projectId: string,
   schemaName: string,
   tableName: string,
 ): Promise<LivePolicyRow[]> {
+  // The catalog of the database holding the project's data, in its region.
+  // Outside the try: an unreachable region is not "no policies".
+  const db = await workspaceRawClient(projectId)
   try {
-    const rows = await prisma.$queryRawUnsafe<Array<{
+    const rows = await db.$queryRawUnsafe<Array<{
       policyname: string
       cmd: string
       permissive: string
@@ -1313,7 +1321,7 @@ async function installCustomPolicySet(
 ): Promise<{ success: boolean; message: string }> {
   const targeted = plan.rules.map((r) => r.command)
   const preState = await readRlsState(projectId, schemaName, tableName)
-  const before = await readLivePolicies(schemaName, tableName)
+  const before = await readLivePolicies(projectId, schemaName, tableName)
 
   // ── A scoped edit cannot coexist with a FOR ALL policy ─────────────────────
   //
@@ -1379,7 +1387,7 @@ async function installCustomPolicySet(
     for (const stmt of statements) await executeInWorkspaceSchema(projectId, stmt)
 
     // ── Read-back: what does the database actually say now? ──────────────────
-    const after = await readLivePolicies(schemaName, tableName)
+    const after = await readLivePolicies(projectId, schemaName, tableName)
     const missing = targeted.filter(
       (c) => !after.some((p) => p.policyName === `backenly_custom_${c}`),
     )
@@ -1909,9 +1917,12 @@ async function detectOrgIdColumn(
 ): Promise<string | null> {
   const schemaName = `workspace_${projectId}`
   const candidates = ['organization_id', 'organizationId', 'org_id', 'orgId', 'team_id', 'teamId', 'workspace_id', 'workspaceId']
+  // The catalog of the database holding the project's data, in its region.
+  // Outside the try: an unreachable region is not "no organization column".
+  const db = await workspaceRawClient(projectId)
 
   try {
-    const rows = await prisma.$queryRawUnsafe<Array<{ column_name: string }>>(
+    const rows = await db.$queryRawUnsafe<Array<{ column_name: string }>>(
       `SELECT column_name FROM information_schema.columns
        WHERE table_schema = $1 AND table_name = $2
        AND column_name = ANY($3::text[])
@@ -2057,28 +2068,19 @@ export async function removePermissionPolicy(
 }
 
 /**
- * Set app.current_user_id in the current DB session.
- * Called by the v1 database API routes for every authenticated request.
- */
-export async function setCurrentUserInSession(
-  userId: string,
-  isServiceRole: boolean = false
-): Promise<void> {
-  await prisma.$executeRawUnsafe(
-    rlsSessionSql(),
-    ...rlsSessionParams({ userId, isServiceRole }),
-  )
-}
-
-/**
  * Execute a raw SQL query with RLS session context set atomically in the same
  * transaction.  Using `is_local = true` (the third arg to set_config) means
  * the settings revert at transaction end so they never leak to pooled connections.
  *
- * Always use this helper instead of calling setCurrentUserInSession + a separate
- * prisma.$queryRawUnsafe — those two calls may land on different connections in
- * the pool and therefore RLS would not be enforced.
+ * Always use this helper rather than setting the session context and querying
+ * in two separate calls: those may land on different pooled connections, and
+ * RLS would then not be enforced. (The separate setter that invited exactly
+ * that, setCurrentUserInSession, had no callers left and is gone.)
  *
+ * The query runs on the database holding the project's data, in the project's
+ * region (lib/data-plane/regional.ts), never on another region's.
+ *
+ * @param projectId     The project whose workspace the SQL addresses.
  * @param userId        End-user ID (from their project-scoped JWT).  Pass '' to
  *                      clear the context (policies will match no rows on own_rows
  *                      tables — secure default).
@@ -2087,6 +2089,7 @@ export async function setCurrentUserInSession(
  * @param values        Positional parameters for the SQL query.
  */
 export async function executeWithUserContext<T = any>(
+  projectId: string,
   userId: string,
   isServiceRole: boolean,
   sql: string,
@@ -2105,7 +2108,8 @@ export async function executeWithUserContext<T = any>(
   // hides its SQL, the verbatim statement is in the Postgres server log
   // (/var/log/postgresql/postgresql-16-main.log) on the STATEMENT: line, and a
   // stack log at the shared choke point beats another round of grepping.
-  return prisma.$transaction(async (tx) => {
+  const db = await workspaceRawClient(projectId)
+  return db.$transaction(async (tx) => {
     await tx.$executeRawUnsafe(
       rlsSessionSql(),
       ...rlsSessionParams({ userId, isServiceRole, userRole }),

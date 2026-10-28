@@ -81,7 +81,7 @@ Two headers, and they are not interchangeable:
 - `x-api-key: <project key>` identifies the **project**. Required on every request. Do not send the project key as `Authorization: Bearer`: the data API reads that header as an end-user JWT, and a project key is not one, so the request fails with 401.
 - `X-User-Token: <end-user JWT>` identifies the **end-user**; it is what row-level security reads. Without it the request is anonymous and RLS-protected rows come back empty rather than erroring.
 
-The project key is not the MCP key this page set up. Create the app's own with `connect { action: "create_api_key", description: "web app" }`: publishable by default (`proj_live_…`), safe in a browser and bound by row-level security; `serviceRole: true` issues a server-only `svc_live_…` key. The runtime refuses an MCP key from anywhere (`MCP_KEY_IN_APP`) and a service-role key from a browser (`SERVICE_ROLE_IN_BROWSER`). Without an end-user's `X-User-Token` a publishable key only reads, so an app with no sign-in writes through a Backenly function or its own server.
+The project key is not the MCP key this page set up. Create the app's own with `connect { action: "create_api_key", description: "web app" }`: publishable (`proj_live_…`), safe in a browser and bound by row-level security. A server-only service-role key (`svc_live_…`) is created by a person in Settings → API keys → New key → Admin; an agent asking for one is refused with `SERVICE_KEY_REQUIRES_HUMAN`. The runtime refuses an MCP key from anywhere (`MCP_KEY_IN_APP`) and a service-role key from a browser (`SERVICE_ROLE_IN_BROWSER`). Without an end-user's `X-User-Token` a publishable key only reads, so an app with no sign-in writes through a Backenly function or its own server.
 
 Data, two grammars over one engine:
 
@@ -104,7 +104,7 @@ await backend.auth.signUp({ email, password })
 await backend.posts.create({ title: "Hello" })
 await backend.posts.list({ filter: { published: true }, search: "launch" })
 await backend.storage.upload(file)
-backend.posts.subscribe(({ event, row }) => { /* … */ })
+backend.posts.subscribe((event) => { /* event.type, event.data, event.old */ })
 ```
 
 Query operators include `eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `in`, `isNull`, `ilike`, `search`, `count`, `sum`, `avg`. A supabase-js compatible entry point is `@backenly/sdk/supabase`. For a plain HTML page with no build step there are bundles at `https://backenly.com/backenly-sdk.js` and `https://backenly.com/backenly-sdk.esm.js`.

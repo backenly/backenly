@@ -62,10 +62,10 @@ function verifies(url: string): boolean {
   return v.verify(publicKey, Buffer.from(sig, 'base64'))
 }
 
-async function owner() {
+async function owner(region: string | null = null) {
   const user = await prisma.user.create({ data: { email: `cdn-${randomUUID()}@test.invalid`, name: 'CDN' }, select: { id: true } })
   users.push(user.id)
-  const project = await prisma.project.create({ data: { name: 'cdn', userId: user.id }, select: { id: true } })
+  const project = await prisma.project.create({ data: { name: 'cdn', userId: user.id, region }, select: { id: true } })
   return { userId: user.id, projectId: project.id }
 }
 
@@ -182,5 +182,47 @@ describe('delivery', () => {
     })
     invalidateRestrictions()
     expect(await storageService.getFileUrl(priv.id, projectId, 600)).toBe(`https://app.test.invalid/api/storage/files/${priv.id}/download`)
+  })
+})
+
+describe('a project kept in another region', () => {
+  // Its files are in its region's bucket, and the CDN fronts this region's
+  // bucket alone: a signed CDN URL for one of them would point at nothing.
+
+  it('is never redirected to the CDN, nor read from this region’s bucket', async () => {
+    const { projectId } = await owner('us-east-1')
+    const f = await file(projectId, 'public_read')
+
+    // Virginia's bucket is not configured here, so the download is refused as
+    // unavailable before any bucket is asked, and nothing is signed.
+    const res = await download(anonymous(), { params: Promise.resolve({ fileId: f.id }) })
+
+    expect(res.status).toBe(503)
+    expect(res.headers.get('location')).toBeNull()
+  })
+
+  it('gets presigned URLs from its own region’s bucket, and the app route for public files', async () => {
+    const { projectId } = await owner('us-east-1')
+    const priv = await file(projectId, 'private')
+    const pub = await file(projectId, 'public_read')
+    const keys = ['STORAGE_S3_BUCKET_US_EAST_1', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY'] as const
+    const saved = keys.map((k) => process.env[k])
+    process.env.STORAGE_S3_BUCKET_US_EAST_1 = 'example-files-us-east-1'
+    // Presigning is local arithmetic; credentials from the environment keep the
+    // SDK from asking any metadata service.
+    process.env.AWS_ACCESS_KEY_ID = 'test-access-key-id'
+    process.env.AWS_SECRET_ACCESS_KEY = 'test-secret-access-key'
+    try {
+      const url = new URL(await storageService.getFileUrl(priv.id, projectId, 600))
+      expect(url.hostname.startsWith('example-files-us-east-1.s3.')).toBe(true)
+      expect(url.searchParams.get('X-Amz-Credential')).toContain('/us-east-1/s3/')
+      expect(url.searchParams.get('X-Amz-Signature')).toBeTruthy()
+      expect(await storageService.getFileUrl(pub.id, projectId)).toBe(`https://app.test.invalid/api/storage/files/${pub.id}/download`)
+    } finally {
+      keys.forEach((k, i) => {
+        if (saved[i] === undefined) delete process.env[k]
+        else process.env[k] = saved[i]
+      })
+    }
   })
 })

@@ -157,7 +157,6 @@ describe('🔒 METHOD 2: Middleware & Route Protection Audit (White-box)', () =>
     { path: '/api/workspaces', method: 'GET', requiresAuth: true },
     { path: '/api/database/tables', method: 'GET', requiresAuth: true },
     { path: '/api/ai/chat', method: 'POST', requiresAuth: true },
-    { path: '/api/ai/execute', method: 'POST', requiresAuth: true },
     { path: '/api/auth/me', method: 'GET', requiresAuth: true },
     
     // Public routes (should NOT require auth)

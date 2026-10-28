@@ -30,6 +30,7 @@ import { checkSensorHealth } from '@/lib/autonomy/sensor-health'
 import { DEFAULT_LEVEL, coerceAutonomyLevel, isTierAutoAllowed, type AutonomyLevel } from '@/lib/autonomy/autonomy-level'
 import type { AutonomyTier } from '@/lib/autonomy/desired-state'
 import { resolveWorkspaceSchema } from '@/lib/services/workspace-pool'
+import { workspaceRawClient } from '@/lib/data-plane/regional'
 import { loopPrincipals, principalsToMetadata, type PrincipalSet } from '@/lib/principal'
 
 import { actionClassForFindingType } from './action-classes'
@@ -66,15 +67,21 @@ export function currentEnvironment(): 'development' | 'staging' | 'production' {
  * context the probes read through. A privileged context answering for a weaker
  * one is the Phase 0B finding, and it is why this does not simply ask whether
  * the schema exists in some other session.
+ *
+ * That connection is the project's region's (lib/data-plane/regional.ts), as
+ * the probes' is. Asked of the home database, a regional project's schema is
+ * never there, so every repair of it froze as unobservable; a region this
+ * process cannot reach leaves it unknown, which freezes too.
  */
 async function observe(projectId: string, resource: string): Promise<ObservationContext> {
   const observedAt = new Date().toISOString()
   try {
     const schema = await resolveWorkspaceSchema(projectId)
-    const who = await prisma.$queryRawUnsafe<
+    const db = await workspaceRawClient(projectId)
+    const who = await db.$queryRawUnsafe<
       Array<{ u: string; rolsuper: boolean; rolbypassrls: boolean }>
     >(`SELECT current_user AS u, rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user`)
-    const rows = await prisma.$queryRawUnsafe<Array<{ n: number }>>(
+    const rows = await db.$queryRawUnsafe<Array<{ n: number }>>(
       `SELECT count(*)::int AS n FROM pg_namespace WHERE nspname = $1`,
       schema,
     )
@@ -330,39 +337,28 @@ export async function enforceLegacyCompatibility(
 }
 
 /**
- * The one check for repairs that do not yet run through `runAutoFix`: the
- * observer's inline fixes, infra intelligence's hot-table indexes and
- * coevolution's filtered-column indexes.
+ * Why the deployment's flags or the owner's dial hold back a repair of this
+ * tier, or null when they let it run. It asks exactly what `runReconciler`
+ * asks, in the same order (flags, then dial), and then whether the dial allows
+ * the tier. It records nothing, so a caller that only reports the answer, as
+ * the observer does, leaves no trace of a repair that never ran.
  *
- * Each of those used to mutate a customer's schema on its own schedule with no
- * reference to the deployment's live-execution flag or the owner's dial, so
- * setting a project to Off stopped the reconciler and left three other writers
- * running, and `resolveExecutionMode` told the owner nothing was being
- * repaired. This asks exactly what `runReconciler` asks, in the same order
- * (flag, then dial), and then whether the dial allows the repair's tier.
- *
- * Only executions are recorded, as legacy-compatibility use. A refusal is not:
- * infra intelligence runs every minute and its counters keep a repaired table
- * flagged for a long time, so auditing refusals would write one row per project
- * per minute and say nothing the open finding does not.
+ * It replaced `permitInlineRepair`, the check three writers made before
+ * changing a schema on their own, outside `runAutoFix`: the observer's inline
+ * fixes, infra intelligence's hot-table indexes and coevolution's
+ * filtered-column indexes. None of them changes a schema any more; every
+ * autonomous repair runs through the governed kernel, held during an incident
+ * (lib/autonomy/change-freeze.ts).
  */
-export async function permitInlineRepair(
-  projectId: string,
-  findingType: string,
-  tier: AutonomyTier,
-): Promise<{ allowed: boolean; reason: string | null }> {
+export async function repairRefusal(projectId: string, tier: AutonomyTier): Promise<string | null> {
   const { resolveExecutionMode } = await import('@/lib/autonomy/execution-mode')
   const level = await projectLevel(projectId)
   const mode = resolveExecutionMode(level)
-  if (!mode.repairsAreApplied) return { allowed: false, reason: mode.explanation }
+  if (!mode.repairsAreApplied) return mode.explanation
   if (!isTierAutoAllowed(level, tier)) {
-    return {
-      allowed: false,
-      reason: `The ${level} autonomy mode does not apply tier ${tier} repairs on its own, so this is waiting for you.`,
-    }
+    return `The ${level} autonomy mode does not apply tier ${tier} repairs on its own, so this is waiting for you.`
   }
-  await recordCompatibilityUse(projectId, findingType, 'permitted', null)
-  return { allowed: true, reason: null }
+  return null
 }
 
 /**

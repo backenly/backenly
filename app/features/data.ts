@@ -23,7 +23,6 @@ import {
   Hand,
   HardDrive,
   KeyRound,
-  Layers,
   Link2,
   ListChecks,
   LockKeyhole,
@@ -43,9 +42,11 @@ import {
   Shield,
   SlidersHorizontal,
   Sparkles,
+  Split,
   Table2,
   Terminal,
   Timer,
+  Undo2,
   Upload,
   Users,
   Wand2,
@@ -55,7 +56,7 @@ import {
 } from 'lucide-react'
 
 /**
- * Features: the product catalog (/features) and its five deep-dive pages.
+ * Features: the product catalog (/features) and its seven deep-dive pages.
  *
  * Kept out of the route files because a Next.js page module may only export
  * its component, metadata and route config, and the index needs the deep-dive
@@ -96,12 +97,12 @@ const FEATURE_LIST: FeatureData[] = [
     slug: 'ai-backend-generation',
     name: 'Agent-built backends',
     icon: Sparkles,
-    metaTitle: 'AI Backend Generation: A Real Backend, Built by Your Coding Agent',
+    metaTitle: 'AI backend generation with your coding agent',
     metaDescription:
-      'Backenly turns a description into a running backend: PostgreSQL schema, REST APIs, authentication and storage, planned as typed actions, applied with approvals and restore points, and verified against the live runtime.',
-    headline: 'Your agent asks. Backenly builds it right.',
+      'Backenly turns a description into a running backend: PostgreSQL schema, REST APIs, auth and storage, applied with approvals and restore points, then verified.',
+    headline: 'Agent-built backends',
     subheadline:
-      'Tables, relations, APIs, auth and access rules, planned as typed actions, applied as one governed change and verified against the running backend.',
+      'Your agent describes what it needs. Backenly creates the tables, APIs, auth and access rules, then checks them against the running backend.',
     what: 'Backenly turns a description of what your product needs into a running backend. Your coding agent reaches it over MCP, either through typed tools that compile straight to SQL, or by describing the change in natural language and letting Backenly plan it. Either way the result is the same kind of object: ordinary PostgreSQL tables with real relations, served as REST, protected by row-level security, with auth and storage wired in.',
     how: 'Take a description like "an e-commerce app with products, orders and customers, where each order belongs to a customer and holds several products." Backenly extracts the entities and how they relate, chooses column types, adds foreign keys and indexes, and derives access policies from any rules you stated. All of it becomes a plan of typed actions that says what each step touches. Additive work applies as one atomic change behind a restore point; anything destructive waits for a person. Every new table is served as an API the moment it exists.',
     why: 'An agent can write backend code well. What it cannot do is remember the schema after the session ends, notice that a policy is wrong, or stop itself from dropping a table on a bad turn. Building inside a governed platform keeps what an agent is good at and removes what it is not: the schema persists, every change is checked against the running backend, and nothing destructive happens without you.',
@@ -132,23 +133,23 @@ const FEATURE_LIST: FeatureData[] = [
       },
       {
         q: 'Can I change my backend after it is generated?',
-        a: 'Yes. Describe the change at any time, whether a new table, a renamed column or a new relationship, and Backenly plans it against the live backend and applies it incrementally. Every change is recorded, and on Pro and above any recorded change can be rolled back.',
+        a: 'Yes. Describe the change at any time, whether a new table, a renamed column or a new relationship, and Backenly plans it against the live backend and applies it incrementally. Every change is recorded in the project\'s History, where it can be undone on its own, on every plan.',
       },
       {
         q: 'How complex can a backend be?',
         a: 'Backenly handles multi-entity schemas with relationships, business rules and role-based access control. It is built for real production applications, and the verification checks run against the live backend whatever its size.',
       },
     ],
-    relatedFeatures: ['database-setup', 'api-generation', 'authentication', 'deployment-ready-backends'],
+    relatedFeatures: ['database-setup', 'api-generation', 'authentication', 'deployment-ready-backends', 'undo-and-rollback'],
   },
   {
     slug: 'database-setup',
     name: 'Postgres database',
     icon: Database,
-    metaTitle: 'Automatic Database Setup: A PostgreSQL Schema Designed for You',
+    metaTitle: 'Automatic PostgreSQL schema design and setup',
     metaDescription:
-      'Backenly designs and applies a production PostgreSQL schema from a description: tables, relations, indexes and row-level security, in a schema isolated to your project, with direct connection strings and pg_dump exports.',
-    headline: 'Real PostgreSQL, designed for you',
+      'Backenly designs and applies a PostgreSQL schema from a description: tables, relations, indexes and row-level security, isolated to your project and exportable.',
+    headline: 'A real PostgreSQL database',
     subheadline:
       'Describe the data model. Backenly creates the tables, relations, indexes and row-level security, in a schema that belongs to your project alone.',
     what: 'Backenly designs and applies a complete PostgreSQL schema from a description of your data: the tables, columns and types, the foreign keys between them, the indexes and the row-level security policies. No schema design sessions and no hand-written migration files. What you get is ordinary PostgreSQL. Query it with standard SQL, or through the same PostgREST grammar Supabase serves, with embedded resources and the full filter vocabulary. The generation replaces the design work, not the API you already know.',
@@ -188,15 +189,15 @@ const FEATURE_LIST: FeatureData[] = [
         a: 'Your data is preserved across plan changes. Upgrading adds capacity; downgrading keeps your data within the limits of the new plan.',
       },
     ],
-    relatedFeatures: ['ai-backend-generation', 'api-generation', 'authentication', 'deployment-ready-backends'],
+    relatedFeatures: ['ai-backend-generation', 'api-generation', 'authentication', 'deployment-ready-backends', 'self-restructuring-schema'],
   },
   {
     slug: 'authentication',
     name: 'Authentication',
     icon: KeyRound,
-    metaTitle: 'Built-in Authentication: User Auth for Your Backend, Isolated per Project',
+    metaTitle: 'Built-in user authentication for your backend',
     metaDescription:
-      'Backenly includes complete end-user authentication on every plan: email and password, Google sign-in, magic links, email verification and JWT sessions, signed with a per-project secret and enforced by row-level security.',
+      'Email and password, Google sign-in, magic links, email verification and JWT sessions on every plan, signed with a per-project secret and enforced by RLS.',
     headline: 'Auth for your users, built in',
     subheadline:
       'Sign-up, sign-in, sessions and access control on every plan, signed with a secret that belongs to your project alone.',
@@ -243,10 +244,10 @@ const FEATURE_LIST: FeatureData[] = [
     slug: 'api-generation',
     name: 'REST API',
     icon: Zap,
-    metaTitle: 'Instant REST API on PostgREST: The API Is Your Schema',
+    metaTitle: 'Instant REST API from your Postgres schema',
     metaDescription:
-      'Every table in Backenly is served by PostgREST, the same engine Supabase runs, reading straight from the PostgreSQL catalog. Filters, ordering, pagination and embedded resources, with authorization enforced by Postgres grants and RLS.',
-    headline: 'The API is your schema',
+      'Every table is served by PostgREST, the engine Supabase runs: filters, ordering, pagination and embedded resources, with access enforced by grants and RLS.',
+    headline: 'REST APIs from your schema',
     subheadline:
       'Every table is served by PostgREST, straight from the PostgreSQL catalog. Nothing to regenerate: a table created a second ago is queryable now.',
     what: 'Every table in your project is served by PostgREST, the same engine Supabase runs, reading directly from the PostgreSQL catalog. There is no separate API registry to generate, deploy or keep in sync. The API is the schema, so a table created a second ago is queryable immediately, and a column renamed a second ago is reflected without a rebuild. You get filtering, ordering, pagination, full-text search and embedded resources, across two surfaces that share one engine and one authorization path.',
@@ -256,7 +257,7 @@ const FEATURE_LIST: FeatureData[] = [
       'Every endpoint is testable from the dashboard the moment it exists. The APIs view lists each route per table, and an inline tester sends real requests to your live backend: type a JSON body into POST /auth/signup, send it, read the actual HTTP response, then open the users table and see the row it created. From code, the SDK mirrors the API: backend.tasks.list({ where: { status: \'todo\' }, orderBy: \'due_date\', limit: 25 }) for filtered queries, backend.projects.list({ include: [\'tasks\'] }) to resolve relations server-side in one request, and backend.tasks.count(...) when you need numbers without rows. Because row-level security lives in the database, all of these return only what the calling user may see. There is no authorization check to forget in client code.',
     details: [
       {
-        title: 'Two surfaces, one engine',
+        title: 'Two API versions, one engine',
         body: '/api/v1 is Backenly\'s stable REST contract, with typed responses. /api/v2 is PostgREST\'s native grammar, passed through untouched. Both read the same catalog and share one authorization path.',
       },
       {
@@ -296,10 +297,10 @@ const FEATURE_LIST: FeatureData[] = [
     slug: 'deployment-ready-backends',
     name: 'Operations and autonomy',
     icon: Rocket,
-    metaTitle: 'Deployment-Ready Backends: Live Immediately, Operated Every Minute',
+    metaTitle: 'Self-healing backend, checked every minute',
     metaDescription:
-      'Backenly runs your backend on managed infrastructure. No Docker, no Kubernetes, no cloud console: a rollback snapshot before every deploy, and a self-healing loop that watches the live backend every minute on every plan.',
-    headline: 'Live at once, operated every minute',
+      'A backend that maintains itself: Backenly checks it every minute, fixes a short list of safe problems, verifies each fix and holds risky ones for your approval.',
+    headline: 'Live at once, checked every minute',
     subheadline:
       'No Docker, no Kubernetes, no cloud console. Backenly runs the backend, snapshots before every deploy, and watches it every minute once it is live.',
     what: 'Backenly deploys your backend as part of building it. When the schema and APIs exist, the backend is live at a public URL, with no deployment step on your part: no containers to build, no infrastructure to provision, no manifests to write. And it does not stop at deploy. A resident loop keeps operating the backend afterwards.',
@@ -314,18 +315,26 @@ const FEATURE_LIST: FeatureData[] = [
       },
       {
         title: 'History and rollback',
-        body: 'Every change creates a record, and a rollback snapshot is saved before every deploy. On Pro and above, roll back to an earlier version from the dashboard.',
+        body: 'Every change creates a record, and a rollback snapshot is saved before every deploy. On every plan, roll back to an earlier version from the dashboard, as far back as your plan keeps restore points.',
       },
       {
         title: 'Watched every minute',
         body: 'Request metrics, schema integrity, auth configuration and security policies, checked continuously, with the safe fixes applied and the rest reported.',
       },
       {
-        title: 'Nothing behind your back',
+        title: 'Nothing changes quietly',
         body: 'You never patch servers or babysit the database, and anything that needs a risky change is queued for your approval rather than done quietly.',
       },
     ],
     faq: [
+      {
+        q: 'What does Backenly fix on its own?',
+        a: 'A short list of problems whose fix is additive or touches no data: a missing index, a table left without row-level security, a broken access policy, a missing realtime trigger, a bloated table or index, a data API that stopped answering. Every fix is checked after it runs, and one that changes the schema is recorded in History, where you can undo it. Anything that touches auth or credentials, destroys data or cannot be undone waits for your approval, at every autonomy level.',
+      },
+      {
+        q: 'Does self-healing use AI credits?',
+        a: 'No. The checks and fixes are rule-based, so they never draw AI credits, and they run every minute on every plan, Free included.',
+      },
       {
         q: 'Where is my backend hosted?',
         a: 'On Backenly Cloud, we run it on managed infrastructure, with each project\'s data in its own isolated PostgreSQL schema. Backenly is also open source under Apache-2.0, so you can self-host the whole platform on your own infrastructure instead.',
@@ -339,7 +348,121 @@ const FEATURE_LIST: FeatureData[] = [
         a: 'Backenly is built for production use. SLA terms are available on Enterprise. Free and Pro run on the same infrastructure; there is no degraded tier.',
       },
     ],
-    relatedFeatures: ['ai-backend-generation', 'database-setup', 'api-generation'],
+    relatedFeatures: ['ai-backend-generation', 'database-setup', 'api-generation', 'self-restructuring-schema', 'undo-and-rollback'],
+  },
+  {
+    slug: 'self-restructuring-schema',
+    name: 'Self-restructuring schema',
+    icon: Split,
+    metaTitle: 'Self-restructuring Postgres schema',
+    metaDescription:
+      'As your app evolves, a table can start doing two jobs. Backenly rehearses moving one into its own table, runs it once you approve, and your apps keep working.',
+    headline: 'A schema that restructures itself',
+    subheadline:
+      'When a table starts doing two jobs, Backenly moves the second into a table of its own. It rehearses the move on a copy, waits for your approval, and your apps keep working throughout.',
+    what: 'Backenly watches the shape of your tables as well as their health. When a group of columns inside a table starts behaving as a job of its own, and keeping it there has a cost Backenly measured, it proposes moving that group into a new table and, once you approve, carries the move out without breaking the apps that use the table.',
+    how: 'The move is a ladder of steps, each one a governed change: rehearse on a copy, create the new table closed, keep it in step with the original in both directions, copy the existing rows across in batches, check that the two agree, then open the new table to reads and writes. Dropping the old columns is planned and shown, and left to you.',
+    why: 'A schema an agent builds quickly is rarely shaped for the app it becomes. Restructuring a live table by hand means syncing two tables, a backfill, checks and a cutover, which is why most teams never do it. Backenly runs the same steps in order, proves each one, and only with your consent.',
+    inPractice:
+      'Take an orders table that has grown refund_amount, refund_reason and refunded_at. Those columns are filled in on the same rows, late in an order\'s life, and changing them has been locking the whole table while it is in use. Backenly proposes order_refunds, rehearses the move on a copy, and asks you. Once you approve, it creates order_refunds, keeps it in step with orders in both directions, copies the existing refunds across, checks that the two agree, and opens it. Code that reads orders keeps working, new code can use order_refunds, and 30 and 90 days later Backenly measures again whether the change helped.',
+    details: [
+      {
+        title: 'It finds the second job',
+        body: 'Columns that are filled in on the same rows, or set later in a row\'s life, often form a job of their own, like refunds on an orders table. Backenly proposes moving them only when keeping them costs something it measured, such as changes that lock the whole table.',
+      },
+      {
+        title: 'Rehearsed, then approved',
+        body: 'Every move is rehearsed on a copy first, including who can read and write each row. You approve the exact plan on the Autonomy page; if the table changes before it runs, Backenly rehearses it again and asks again.',
+      },
+      {
+        title: 'Your apps keep working',
+        body: 'The new table is kept in step with the old one in both directions while the existing data is copied across, so code that uses the old table keeps working and new code can move when it is ready. Who can read or change the data stays the same.',
+      },
+      {
+        title: 'Undo, and the last step is yours',
+        body: 'Undo removes the new table and leaves the original exactly as it was, with no data lost, and is refused if it would lose a write. Dropping the old columns is in the plan for you to see; Backenly never runs it.',
+      },
+    ],
+    faq: [
+      {
+        q: 'What does Backenly restructure today?',
+        a: 'One kind of change: moving a group of columns that has become a job of its own out of a table and into a new one, such as refund_amount, refund_reason and refunded_at out of orders into order_refunds. It never changes what the data means, how many rows there are or who can see them; a redesign like that is suggested at most, never run. Auth, storage and functions are not restructured.',
+      },
+      {
+        q: 'Does it change anything without my approval?',
+        a: 'No. A restructuring runs only after an admin of your organization approves the exact plan on the project\'s Autonomy page. Your coding agent can read what Backenly proposes over MCP, but it cannot approve it. Most of the time the answer is that no change is needed: a table being large, busy or still changing is not a reason on its own.',
+      },
+      {
+        q: 'Will my app break while it runs?',
+        a: 'Apps that use the original table keep working unchanged. The new table is kept in step with it in both directions, the existing data is copied across in batches and checked to match before the new table opens to your apps, and nothing is removed from the original table.',
+      },
+      {
+        q: 'How do I undo a restructuring?',
+        a: 'From the Architecture changes card on the project\'s Autonomy page. Undo removes the new table and leaves the original exactly as it was, with no data lost. Backenly refuses to undo if that would lose a write and says why, and code that already uses the new table stops working once it is gone.',
+      },
+      {
+        q: 'Does it use AI credits, and which plans have it?',
+        a: 'It uses no AI model: finding, rehearsing and carrying out a restructuring are rule-based, so they draw no credits. On Backenly Cloud it is on for every project, on every plan. When you self-host, it runs once you turn on ENABLE_EVOLUTION_MUTATIONS and ENABLE_EVOLUTION_SCHEDULER.',
+      },
+    ],
+    relatedFeatures: ['deployment-ready-backends', 'undo-and-rollback', 'database-setup'],
+  },
+  {
+    slug: 'undo-and-rollback',
+    name: 'Undo and rollback',
+    icon: Undo2,
+    metaTitle: 'Undo and rollback for changes your AI agent makes',
+    metaDescription:
+      'Undo one change your coding agent made, or roll the backend back to a point or a published version, on every plan. Data your app wrote is never rewound.',
+    headline: 'Undo a change, keep your data',
+    subheadline:
+      'Every change to your backend is one entry in History. Restore the state before one change, or roll the backend back to a point or a published version, and the rows your app wrote since are never rewound.',
+    what: 'Backenly records every change to a project as one entry in its History, whoever made it: the schema, auth, storage, functions, webhooks, environment variables, API keys and integrations. Any entry can be undone on its own, or the whole backend restored to a point or to a published version, without rewinding the data your app wrote.',
+    how: 'Before a change runs, Backenly takes a checkpoint; after it runs, it verifies the result. A restore is planned from that record and from today\'s data: Backenly measures what it would do, refuses one it cannot run safely, and stops for a person before anything that would set data aside. A restore is itself a change in History, with its own restore point, so it can be reapplied.',
+    why: 'Agents make many changes quickly, and the one that broke something is rarely the last. Restoring a backup to undo it costs every row written since. Undoing that one change keeps them.',
+    inPractice:
+      'Your agent renamed orders.total to amount, and checkout, which still reads total, started failing. Open History, find the change and restore the state before it: Backenly measures the restore, shows that no data is set aside, and renames the column back. Every order placed in the meantime is still there. Or ask your agent, which requests the restore and waits while you approve it.',
+    details: [
+      {
+        title: 'One History for the backend',
+        body: 'Schema, auth, storage, functions, webhooks, environment variables, API keys and integrations: each change is one entry, with who made it and what it touched, whether your agent, Backenly or you made it.',
+      },
+      {
+        title: 'Undo one change',
+        body: 'Restore the state before a single change and leave everything else as it is. Backenly measures the restore first and says why when it cannot run one, for example when a later change touched the same table.',
+      },
+      {
+        title: 'Back to a point or a version',
+        body: 'Restore the backend to a moment in History or to a published version. The changes since are undone newest first, each one checked before it runs and verified after.',
+      },
+      {
+        title: 'Your data stays',
+        body: 'Rows your app wrote are never rewound. A restore that would set any data aside says exactly what and waits for a person, and a secret or a revoked key never comes back.',
+      },
+    ],
+    faq: [
+      {
+        q: 'How do I undo a change my AI agent made?',
+        a: 'Open History in your project and restore the state before that change. Or ask your agent: it can request a restore of one change, or of the whole backend to a published version, and a person approves it in the dashboard. An agent can ask for a restore; it can never approve one.',
+      },
+      {
+        q: 'Does rolling back delete data my users wrote?',
+        a: 'No. A restore never rewinds rows your app wrote. If undoing a change would set data aside, such as removing a column that has been filled in since, Backenly shows exactly what before anything runs and waits for a person to approve it. A restore is itself recorded in History, so you can reapply what you undid.',
+      },
+      {
+        q: 'Is rollback available on the Free plan?',
+        a: 'Yes, on every plan. The plan sets only how long a change stays restorable: 7 days on Free, 30 on Pro and 90 on Enterprise, or 365 when you self-host.',
+      },
+      {
+        q: 'How is this different from restoring a backup?',
+        a: 'A backup puts the whole database back to a moment, and every row written since is lost. History undoes one change, or the changes since a point, and leaves the data your app wrote where it is. Backenly Cloud keeps daily backups as well, for disasters.',
+      },
+      {
+        q: 'What can History not undo?',
+        a: 'A restore that crosses a later change to the same table is refused rather than merged, and a change older than your plan\'s window can no longer be restored. A secret or a revoked key never comes back. Row data your app writes is not versioned; only data a change itself removed or rewrote is kept.',
+      },
+    ],
+    relatedFeatures: ['deployment-ready-backends', 'self-restructuring-schema', 'ai-backend-generation'],
   },
 ]
 
@@ -348,21 +471,21 @@ export const FEATURE_SLUGS = FEATURE_LIST.map((f) => f.slug)
 
 /* ── The catalog on /features ────────────────────────────────────────────── */
 
-export type Capability = { icon: LucideIcon; name: string; body: string }
+/**
+ * One capability, as a chip on /features. `plan` names the plan a capability
+ * needs, shown on the chip itself, so nobody reads a Pro feature as a Free one.
+ * The longer explanations live on the deep-dive pages and in the docs
+ * (founders, 2026-10-15: the catalog shows names, not paragraphs).
+ */
+export type Capability = { icon: LucideIcon; name: string; plan?: 'Pro' | 'Enterprise' }
 
 /** Which drawing a group carries. Resolved to a component in the page. */
-export type AtlasVisual =
-  | 'connect'
-  | 'database'
-  | 'rest'
-  | 'auth'
-  | 'storage'
-  | 'realtime'
-  | 'functions'
+export type AtlasVisual = 'database' | 'rest' | 'auth' | 'storage' | 'realtime' | 'functions'
 
 export type AtlasGroup = {
   id: string
   title: string
+  /** One short sentence, in plain words. */
   lede: string
   items: Capability[]
   visual?: AtlasVisual
@@ -373,139 +496,139 @@ export const ATLAS: AtlasGroup[] = [
   {
     id: 'agents',
     title: 'Build with your agent',
-    lede: 'Your coding agent is the builder. It reaches the backend over MCP, with a key scoped to one project.',
-    visual: 'connect',
+    lede: 'Your coding agent builds the backend over MCP, with a key scoped to one project.',
     deepDive: { slug: 'ai-backend-generation', label: 'How agent-built backends work' },
     items: [
-      { icon: Plug, name: 'MCP server', body: 'Typed tools for schema, data, auth, storage and functions, local over stdio or remote over HTTP.' },
-      { icon: KeyRound, name: 'Scoped, revocable keys', body: 'One key per project, revocable from the dashboard, and mintable as read-only.' },
-      { icon: Hand, name: 'Requests, never approvals', body: 'An agent key can ask for a destructive change. Only a person can approve one.' },
-      { icon: Terminal, name: 'CLI', body: 'Schema, generated types, CI drift checks, logs and read-only SQL, with zero dependencies.' },
-      { icon: BookOpen, name: 'Agent skill', body: 'A canonical skill at backenly.com/skill.md, so an agent learns the platform first.' },
-      { icon: FileText, name: 'llms.txt and fetch_docs', body: 'The complete reference in one file, also fetchable by an agent at run time.' },
+      { icon: Plug, name: 'MCP server' },
+      { icon: KeyRound, name: 'Scoped, revocable keys' },
+      { icon: Hand, name: 'Approval for destructive changes' },
+      { icon: Terminal, name: 'CLI' },
+      { icon: BookOpen, name: 'Agent skill' },
+      { icon: FileText, name: 'llms.txt' },
     ],
   },
   {
     id: 'database',
     title: 'Database',
-    lede: 'Standard PostgreSQL in a schema of your own. Isolation is a Postgres grant, not a WHERE clause.',
+    lede: 'Standard PostgreSQL, in a schema of your own.',
     visual: 'database',
     deepDive: { slug: 'database-setup', label: 'The database in depth' },
     items: [
-      { icon: Table2, name: 'Tables and relations', body: 'Columns, foreign keys with their delete behaviour, indexes and CHECK constraints.' },
-      { icon: Boxes, name: 'pgvector', body: 'Store embeddings beside the rows they describe, and query both in SQL.' },
-      { icon: Link2, name: 'Direct connections', body: 'Read-only on demand, read-write when you arm it. psql, ORMs, any BI tool.' },
-      { icon: SearchCode, name: 'Read-only SQL', body: 'Joins, aggregates, CTEs and EXPLAIN, run as a SELECT-only role from the CLI or MCP.' },
-      { icon: DatabaseBackup, name: 'Daily backups', body: 'Taken every day and kept for seven days, on every plan.' },
-      { icon: Download, name: 'pg_dump exports', body: 'A full export that restores on any Postgres, Free plan included.' },
+      { icon: Table2, name: 'Tables and relations' },
+      { icon: Boxes, name: 'pgvector' },
+      { icon: Link2, name: 'Direct connections' },
+      { icon: SearchCode, name: 'Read-only SQL' },
+      { icon: DatabaseBackup, name: 'Daily backups' },
+      { icon: Download, name: 'pg_dump exports' },
     ],
   },
   {
     id: 'apis',
     title: 'REST APIs',
-    lede: 'PostgREST serves every table from the catalog. A table created a second ago is queryable now.',
+    lede: 'Every table is served by PostgREST the moment it exists.',
     visual: 'rest',
     deepDive: { slug: 'api-generation', label: 'The REST API in depth' },
     items: [
-      { icon: Filter, name: 'Filters and pagination', body: 'The full PostgREST grammar: operators, or-groups, ordering, ranges and full-text search.' },
-      { icon: Network, name: 'Embedded resources', body: '`?select=*,author(*)` returns a row and its relations in one round trip.' },
-      { icon: Layers, name: 'Two surfaces, one engine', body: '/api/v1 is the stable contract; /api/v2 passes PostgREST through untouched.' },
-      { icon: FileJson, name: 'OpenAPI and typed clients', body: 'Generated from the live schema by the CLI, never written by hand.' },
-      { icon: GitCompare, name: 'A drift gate for CI', body: '`backenly diff` fails the build when committed types drift from the schema.' },
-      { icon: Package, name: 'JavaScript SDK', body: 'CRUD, auth, storage and realtime from one typed client.' },
+      { icon: Filter, name: 'Filters and pagination' },
+      { icon: Network, name: 'Embedded resources' },
+      { icon: FileJson, name: 'OpenAPI and typed clients' },
+      { icon: GitCompare, name: 'Type checks in CI' },
+      { icon: Package, name: 'JavaScript SDK' },
     ],
   },
   {
     id: 'auth',
     title: 'Auth',
-    lede: 'Sign-up and sign-in for your users, isolated per project and signed with the project\'s own secret.',
+    lede: 'Sign-up and sign-in for your users, separate for every project.',
     visual: 'auth',
     deepDive: { slug: 'authentication', label: 'Authentication in depth' },
     items: [
-      { icon: Mail, name: 'Email and password', body: 'Sign-up, sign-in, sessions and refresh, from two SDK calls.' },
-      { icon: LogIn, name: 'Google sign-in', body: 'OAuth for your users, alongside email and password.' },
-      { icon: Wand2, name: 'Magic links and verification', body: 'Passwordless sign-in and verified emails, with hosted pages and branded mail.' },
-      { icon: Fingerprint, name: 'A secret per project', body: 'Tokens from one project are never accepted by another.' },
-      { icon: Shield, name: 'Row-level security by description', body: 'Say who can read and write what. Backenly writes and enforces the policies.' },
-      { icon: Building2, name: 'Teams for your product', body: 'Organizations, members and invitations for your own customers, scoped by policy.' },
+      { icon: Mail, name: 'Email and password' },
+      { icon: LogIn, name: 'Google sign-in' },
+      { icon: Wand2, name: 'Magic links and verification' },
+      { icon: Fingerprint, name: 'A secret per project' },
+      { icon: Shield, name: 'Row-level security' },
+      { icon: Building2, name: 'Organizations for your users' },
     ],
   },
   {
     id: 'storage',
     title: 'Storage',
-    lede: 'Buckets and files with their metadata, served publicly or through URLs that expire.',
+    lede: 'Buckets and files, public or shared through links that expire.',
     visual: 'storage',
     items: [
-      { icon: FolderOpen, name: 'Public and private buckets', body: 'Public files load anywhere; private ones need a session or a signed URL.' },
-      { icon: Upload, name: 'Uploads and metadata', body: 'Upload from the SDK, and every file keeps its metadata beside it.' },
-      { icon: Timer, name: 'Expiring signed URLs', body: 'Share a private file for a limited time, then never again.' },
-      { icon: HardDrive, name: 'Local disk or S3', body: 'Self-hosted installs choose local storage or any S3-compatible provider.' },
+      { icon: FolderOpen, name: 'Public and private buckets' },
+      { icon: Upload, name: 'Uploads and metadata' },
+      { icon: Timer, name: 'Expiring signed URLs' },
+      { icon: HardDrive, name: 'Local disk or S3 when self-hosted' },
     ],
   },
   {
     id: 'realtime',
     title: 'Realtime',
-    lede: 'Inserts, updates and deletes as they land, over server-sent events. No socket server to run.',
+    lede: 'Database changes, presence and broadcast, over server-sent events.',
     visual: 'realtime',
     items: [
-      { icon: Radio, name: 'Database changes', body: 'Subscribe to a table and receive every committed change as it lands.' },
-      { icon: Users, name: 'Presence', body: 'Who is online right now, with a sixty-second activity window.' },
-      { icon: Megaphone, name: 'Broadcast', body: 'Ephemeral messages between clients, up to 6 KB each.' },
-      { icon: RefreshCw, name: 'Automatic reconnect', body: 'The SDK reconnects by itself after a dropped connection.' },
+      { icon: Radio, name: 'Database changes' },
+      { icon: Users, name: 'Presence' },
+      { icon: Megaphone, name: 'Broadcast' },
+      { icon: RefreshCw, name: 'Automatic reconnect' },
     ],
   },
   {
     id: 'functions',
-    title: 'Functions and events',
-    lede: 'Run TypeScript when rows change, when a user signs up, on a schedule, or at a public HTTPS endpoint.',
+    title: 'Functions',
+    lede: 'TypeScript that runs on row changes, sign-ups, a schedule or an HTTPS call.',
     visual: 'functions',
     items: [
-      { icon: Code2, name: 'Serverless TypeScript', body: 'Your code, run by the platform, with no server to deploy.' },
-      { icon: Zap, name: 'Event triggers', body: 'Insert, update, delete and signup events call your function. Pro and Enterprise.' },
-      { icon: CalendarClock, name: 'Cron schedules', body: 'Run a function on a schedule you write as a cron expression.' },
-      { icon: Webhook, name: 'Outbound webhooks', body: 'Tell other systems when your data changes. Pro and Enterprise.' },
-      { icon: Activity, name: 'Rate limits', body: 'Built in, so one noisy caller cannot exhaust the rest.' },
-      { icon: Globe, name: 'Public endpoints', body: 'Expose a function at an HTTPS endpoint of its own.' },
+      { icon: Code2, name: 'Serverless TypeScript' },
+      { icon: Zap, name: 'Event triggers', plan: 'Pro' },
+      { icon: CalendarClock, name: 'Cron schedules' },
+      { icon: Webhook, name: 'Outbound webhooks', plan: 'Pro' },
+      { icon: Activity, name: 'Rate limits' },
+      { icon: Globe, name: 'Public endpoints' },
     ],
   },
   {
     id: 'governance',
-    title: 'Governed change',
-    lede: 'Every change, from you, your agent or the autonomy loop, goes through one path that plans it, gates it, applies it, verifies it and records it.',
+    title: 'Safe changes',
+    lede: 'Every schema change is checked and recorded, and the state before it can be restored. Destructive ones wait for a person.',
+    deepDive: { slug: 'undo-and-rollback', label: 'Undo and rollback in depth' },
     items: [
-      { icon: ListChecks, name: 'Typed actions', body: 'Ordinary SQL becomes named actions that say exactly what each one touches.' },
-      { icon: Hand, name: 'Review Queue', body: 'Destructive work waits for a person, with the live row count beside it.' },
-      { icon: Camera, name: 'Restore points', body: 'Captured before the first write, then the plan commits atomically.' },
-      { icon: BadgeCheck, name: 'Behavioural verification', body: 'Real requests as a stranger and as a signed-in user, with the evidence kept.' },
-      { icon: ScrollText, name: 'Change ledger', body: 'Every change with its actor, its diff and a way back.' },
-      { icon: GitBranch, name: 'Branches', body: 'Clone the backend, let your agent experiment, review the diff, merge what works.' },
+      { icon: Hand, name: 'Review queue' },
+      { icon: Camera, name: 'Restore points' },
+      { icon: BadgeCheck, name: 'Checks after every build' },
+      { icon: ScrollText, name: 'Change history' },
+      { icon: GitBranch, name: 'Branches' },
+      { icon: ListChecks, name: 'All or nothing' },
     ],
   },
   {
     id: 'autonomy',
-    title: 'Autonomy and operations',
-    lede: 'A resident loop checks every project every minute, fixes what is safe to fix, verifies the fix, and leaves you a receipt.',
-    deepDive: { slug: 'deployment-ready-backends', label: 'Operations and autonomy in depth' },
+    title: 'Self-healing',
+    lede: 'Backenly checks every project every minute, fixes what is safe and records every fix.',
+    deepDive: { slug: 'deployment-ready-backends', label: 'Operations and self-healing in depth' },
     items: [
-      { icon: Timer, name: 'Every minute, every plan', body: 'The same loop on Free as on Enterprise, never metered.' },
-      { icon: Cpu, name: 'No model calls', body: 'Repairs are deterministic, so healing never spends AI credits.' },
-      { icon: Camera, name: 'Snapshot first', body: 'Only reversible fixes apply on their own. The rest become proposals.' },
-      { icon: SlidersHorizontal, name: 'Your autonomy level', body: 'Review-only, or apply safe fixes and read about them afterwards.' },
-      { icon: Activity, name: 'Traffic watched', body: 'Requests, latency and error rates, checked for anomalies.' },
-      { icon: Receipt, name: 'Receipts', body: 'What was detected, what changed, and how the fix was verified.' },
+      { icon: Timer, name: 'Every minute, on every plan' },
+      { icon: Cpu, name: 'Never uses AI credits' },
+      { icon: Camera, name: 'Restore point before each fix' },
+      { icon: SlidersHorizontal, name: 'Your choice of autonomy level' },
+      { icon: Activity, name: 'Traffic and error monitoring' },
+      { icon: Receipt, name: 'A record of every fix' },
+      { icon: Split, name: 'Restructuring, on approval' },
     ],
   },
   {
     id: 'platform',
-    title: 'Teams, security and hosting',
-    lede: 'The questions a company asks before it trusts a backend with production.',
+    title: 'Teams and hosting',
+    lede: 'Roles for your team, logs, custom domains, single sign-on and self-hosting.',
     items: [
-      { icon: Users, name: 'Organizations and roles', body: 'Invite teammates with roles. Free includes two seats and Pro five.' },
-      { icon: Globe, name: 'Custom domains', body: 'Serve your backend from your own domain on Pro and Enterprise.' },
-      { icon: ScrollText, name: 'Logs', body: 'Kept for 7 days on Free, 30 on Pro and 90 on Enterprise.' },
-      { icon: LockKeyhole, name: 'Single sign-on', body: 'OIDC sign-on for your team, on Enterprise.' },
-      { icon: Github, name: 'Open source', body: 'The platform is Apache-2.0; the SDK, CLI, MCP server and skill are MIT.' },
-      { icon: Server, name: 'Self-host or Cloud', body: 'One codebase either way, with pg_dump to move between them.' },
+      { icon: Users, name: 'Organizations and roles' },
+      { icon: Globe, name: 'Custom domains', plan: 'Pro' },
+      { icon: ScrollText, name: 'Logs for 7, 30 or 90 days' },
+      { icon: LockKeyhole, name: 'Single sign-on', plan: 'Enterprise' },
+      { icon: Github, name: 'Open source' },
+      { icon: Server, name: 'Self-host or Cloud' },
     ],
   },
 ]

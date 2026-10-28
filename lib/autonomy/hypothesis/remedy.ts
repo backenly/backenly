@@ -14,7 +14,7 @@
  * for being allowed in this file at all.
  */
 
-import { prisma } from '@/lib/db/prisma'
+import { workspaceRawClient, type WorkspaceRawClient } from '@/lib/data-plane/regional'
 import type { InvestigationVerdict } from './types'
 
 export interface RemedyOutcome {
@@ -51,11 +51,15 @@ export async function applyRemedy(
   }
 
   const schema = `workspace_${projectId}`
+  // The registry, the grants and the schema cache all belong to the PostgREST
+  // in the project's region. Acting on another region's would reload, re-grant
+  // or prune a data plane that has nothing to do with this project.
+  const db = await workspaceRawClient(projectId)
 
   switch (remedy.action) {
     case 'POSTGREST_RELOAD_SCHEMA': {
       // Purely a cache rebuild — no data, no privileges, no schema change.
-      await prisma.$executeRawUnsafe(`SELECT public.backenly_pgrst_reload()`)
+      await db.$executeRawUnsafe(`SELECT public.backenly_pgrst_reload()`)
       return {
         applied: true,
         action: remedy.action,
@@ -67,8 +71,8 @@ export async function applyRemedy(
       // Restores the documented default rather than widening it, and
       // prepare_schema re-asserts the credential-table exclusion last, so this
       // cannot end with `users` readable.
-      await prisma.$executeRawUnsafe(`SELECT public.backenly_pgrst_prepare_schema($1)`, schema)
-      await prisma.$executeRawUnsafe(`SELECT public.backenly_pgrst_reload()`)
+      await db.$executeRawUnsafe(`SELECT public.backenly_pgrst_prepare_schema($1)`, schema)
+      await db.$executeRawUnsafe(`SELECT public.backenly_pgrst_reload()`)
       return {
         applied: true,
         action: remedy.action,
@@ -77,9 +81,9 @@ export async function applyRemedy(
     }
 
     case 'POSTGREST_PRUNE_AND_RESTART': {
-      const before = await registeredSchemas()
-      await prisma.$executeRawUnsafe(`SELECT public.backenly_pgrst_prune_schemas()`)
-      const after = await registeredSchemas()
+      const before = await registeredSchemas(db)
+      await db.$executeRawUnsafe(`SELECT public.backenly_pgrst_prune_schemas()`)
+      const after = await registeredSchemas(db)
       const pruned = before.filter(s => !after.includes(s))
 
       // The SQL half is done and is the part that makes a restart safe. The
@@ -132,8 +136,8 @@ export async function applyRemedy(
   }
 }
 
-async function registeredSchemas(): Promise<string[]> {
-  const rows = await prisma.$queryRawUnsafe<Array<{ list: string | null }>>(
+async function registeredSchemas(db: WorkspaceRawClient): Promise<string[]> {
+  const rows = await db.$queryRawUnsafe<Array<{ list: string | null }>>(
     `SELECT public.backenly_pgrst_current_schemas() AS list`,
   )
   return (rows[0]?.list ?? '').split(',').filter(Boolean)

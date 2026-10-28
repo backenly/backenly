@@ -28,7 +28,8 @@
  * start/finish audit entries.
  */
 
-import { Client as PgClient, Pool } from 'pg'
+import { Client as PgClient, type Pool } from 'pg'
+import { projectPool } from '@/lib/data-plane/regional'
 import { prisma } from '@/lib/db/prisma'
 import { executeAction } from '@/lib/ai/minimal-executor'
 import { ensureAuthUsersTable } from '@/lib/services/end-user-auth-table'
@@ -46,7 +47,6 @@ const DEFAULT_BUDGET_MS = 4 * 60 * 1000
 
 // Destination writes go through a module-local pool against the platform DB —
 // the same pattern schema-reader/schema-reconciler use.
-const destPool = new Pool({ connectionString: process.env.DATABASE_URL, max: 4 })
 
 export interface ImportOptions {
   maxRowsPerTable?: number
@@ -159,9 +159,12 @@ export async function runSupabaseImport(input: {
 
     // ── copy data ──────────────────────────────────────────────────────────────
     const schemaName = `workspace_${input.projectId}`
+    // The project's own database, in its region, where the tables were just
+    // created: rows copied anywhere else would land beside a schema that is not there.
+    const destPool = await projectPool(input.projectId, 'supabase-import', { max: 4 })
     for (const t of plan.tables) {
       if (overBudget()) throw new Error(`Import time budget exceeded while copying ${t.sourceName}`)
-      const tr = await copyTable(source, schemaName, t, maxRows, overBudget)
+      const tr = await copyTable(source, destPool, schemaName, t, maxRows, overBudget)
       report.tables.push(tr)
     }
 
@@ -181,7 +184,7 @@ export async function runSupabaseImport(input: {
     // ── auth identities ────────────────────────────────────────────────────────
     if (!input.options?.skipAuth) {
       try {
-        report.authUsersImported = await importAuthUsers(source, input.projectId, schemaName)
+        report.authUsersImported = await importAuthUsers(source, destPool, input.projectId, schemaName)
       } catch (e: any) {
         report.warnings.push(
           `auth.users could not be imported (${e?.message ?? 'no access'}) — end-users can be re-invited, or re-run with a service_role connection`,
@@ -300,6 +303,7 @@ async function introspectPolicies(source: PgClient): Promise<SourcePolicy[]> {
 
 async function copyTable(
   source: PgClient,
+  destPool: Pool,
   schemaName: string,
   t: TablePlan,
   maxRows: number,
@@ -363,7 +367,7 @@ async function copyTable(
 
 // ── auth identities ────────────────────────────────────────────────────────────
 
-async function importAuthUsers(source: PgClient, projectId: string, schemaName: string): Promise<number> {
+async function importAuthUsers(source: PgClient, destPool: Pool, projectId: string, schemaName: string): Promise<number> {
   const users = await source.query(`
     SELECT id, email, encrypted_password,
            email_confirmed_at IS NOT NULL AS verified,

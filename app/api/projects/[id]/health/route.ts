@@ -7,8 +7,11 @@
 
 export const dynamic = 'force-dynamic'
 
+import { EVOLUTION_FINDING_TYPE, isEvolutionApprovalFinding } from '@/lib/core/types'
 import { NextRequest, NextResponse } from 'next/server'
 import { withProjectValidation } from '@/lib/middleware/projectValidation'
+import { redactSecretParams } from '@/lib/mcp/withhold-secrets'
+import { withHeldActions } from '@/lib/operational-memory/held-action-targets'
 import { prisma } from '@/lib/db/prisma'
 import { sanitizeDiagnostic } from '@/lib/errors/diagnostic-sanitize'
 import { resolvePendingActionMemory } from '@/lib/operational-memory/ledger'
@@ -16,6 +19,8 @@ import { summariseFinding } from '@/lib/core/finding-summaries'
 import { getLastLoopTickAt } from '@/lib/autonomy/loop-tick'
 import { countRepairs, recentlyResolved } from '@/lib/autonomy/resolution'
 import { loadSensorState } from '@/lib/autonomy/sensor-state'
+import { countPendingAgentApprovals } from '@/lib/mcp/pending-approvals'
+import { countWaitingRequests } from '@/lib/evolution-engine/request'
 
 /**
  * How many findings the summary payload carries. A preview, not the truth —
@@ -37,7 +42,39 @@ const RESOLVED_WINDOW_MS = 10 * 60 * 1000
 
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000
 
+/**
+ * The findings the self-healing loop's readings count. An architecture change
+ * Backenly prepared is an approval request, not a broken guarantee: it waits in
+ * the Review Queue and is counted on its own (`architectureRequestsPending`).
+ */
+const LOOP_FINDING = { status: { in: ['open', 'pending_approval'] }, type: { not: EVOLUTION_FINDING_TYPE } }
+
 // ─── GET ──────────────────────────────────────────────────────────────────────
+
+
+/**
+ * A finding as it may be SERVED. Pending-action findings carry the parked
+ * call's executor params in `details`; the display copy is redacted at write
+ * since the sealed-params split, and this covers the legacy rows that stored
+ * them raw. The sealed copy is for the approval replay, not for clients.
+ */
+function withServableDetails<T extends { details: unknown }>(row: T): T {
+  const det = row.details as Record<string, unknown> | null
+  if (!det || typeof det !== 'object' || !('executorParams' in det)) return row
+  return {
+    ...row,
+    details: { ...det, executorParams: redactSecretParams(det.executorParams), executorParamsSealed: undefined },
+  }
+}
+
+/**
+ * Findings as they may be served, with a regional project's held actions read
+ * back from its region: their target and arguments are what the approver
+ * decides on (lib/operational-memory/held-action-targets.ts).
+ */
+async function servable<T extends { id: string; details: unknown }>(projectId: string, rows: T[]): Promise<T[]> {
+  return (await withHeldActions(projectId, rows)).map(withServableDetails)
+}
 
 export async function GET(request: NextRequest, props: { params: Promise<{ id: string }> }) {
   const params = await props.params
@@ -97,7 +134,7 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
             details: true,
             detectedAt: true,
           },
-        }),
+        }).then(rows => servable(projectId, rows)),
         prisma.platformNotification.findMany({
           where: {
             metadata: { path: ['projectId'], equals: projectId },
@@ -117,9 +154,9 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
     }
 
     // Default: health summary for the dashboard widget
-    const [findings, repairs, resolved, sensors, lastScan, project, lastLoopTick] = await Promise.all([
+    const [findings, repairs, resolved, sensors, lastScan, project, lastLoopTick, agentApprovals, architectureRequests] = await Promise.all([
       prisma.healthFinding.findMany({
-        where: { projectId, status: { in: ['open', 'pending_approval'] } },
+        where: { projectId, ...LOOP_FINDING },
         orderBy: [{ severity: 'asc' }, { detectedAt: 'desc' }],
         select: {
           id: true,
@@ -129,7 +166,7 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
           status: true,
           detectedAt: true,
         },
-      }),
+      }).then(rows => servable(projectId, rows)),
       // Repairs in the last 7 days, split by whether a re-check confirmed them.
       // Only the confirmed ones may be called fixed.
       countRepairs(projectId, new Date(Date.now() - WEEK_MS)),
@@ -152,6 +189,12 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
       // lastObservedAt below — see lib/autonomy/loop-tick.ts for why conflating
       // the daily observer with the per-minute reconciler is the bug this fixes.
       getLastLoopTickAt(projectId),
+      // The other queue that waits on the owner: calls their coding agent
+      // parked for approval. Not findings, so not in `findings` or
+      // `needsAttention`, and counted where every surface can read it.
+      countPendingAgentApprovals(projectId).catch(() => 0),
+      // Architecture changes Backenly prepared, waiting in the same queue.
+      countWaitingRequests(projectId).catch(() => 0),
     ])
 
     const critical = findings.filter(f => f.severity === 'critical')
@@ -185,6 +228,15 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
         autoFixedThisWeek: repairs.verified,
         unverifiedRepairsThisWeek: repairs.unverified,
         needsAttention: needsAction.length,
+        // Agent requests parked for approval, waiting in the Review Queue on
+        // the Autonomy page. Kept apart from needsAttention, which counts held
+        // FINDINGS (actionableTotal - needsAttention is the open findings).
+        // The Overview and the top bar read both; they read only the findings
+        // before, so a parked deploy or drop was invisible there (OV-1, AUT-08).
+        agentApprovalsPending: agentApprovals,
+        // Architecture changes Backenly prepared, waiting for approval in the
+        // same queue. Not broken guarantees, so in neither count above.
+        architectureRequestsPending: architectureRequests,
         criticalCount: critical.length,
         warningCount: warnings.length,
         // Uncapped count of everything still needing attention. `findings` below
@@ -220,9 +272,14 @@ export async function PATCH(request: NextRequest, props: { params: Promise<{ id:
   const params = await props.params
   return withProjectValidation<any>(request, async (validated) => {
     const { projectId } = validated
+    let skipped: { reason: 'served-elsewhere' | 'unreachable'; region: string | null } | null = null
     try {
       const { runObserverForProject } = await import('@/lib/services/workspace-observer')
-      await runObserverForProject(projectId)
+      const observed = await runObserverForProject(projectId)
+      // A project another region serves is checked by that region's worker on
+      // its schedule, and one this process cannot reach is not checked at all:
+      // nothing was scanned now, and the answer says so instead of a scan time.
+      if (observed.skipped) skipped = { reason: observed.skipped, region: observed.region ?? null }
     } catch (err: any) {
       return NextResponse.json(
         { success: false, error: sanitizeDiagnostic(err) || 'Health scan failed' },
@@ -233,10 +290,10 @@ export async function PATCH(request: NextRequest, props: { params: Promise<{ id:
     // Return a fresh health summary after the scan
     const [findings, repairs, resolved, sensors, project, lastLoopTick] = await Promise.all([
       prisma.healthFinding.findMany({
-        where: { projectId, status: { in: ['open', 'pending_approval'] } },
+        where: { projectId, ...LOOP_FINDING },
         orderBy: [{ severity: 'asc' }, { detectedAt: 'desc' }],
         select: { id: true, type: true, severity: true, details: true, status: true, detectedAt: true },
-      }),
+      }).then(rows => servable(projectId, rows)),
       countRepairs(projectId, new Date(Date.now() - WEEK_MS)),
       recentlyResolved(projectId, new Date(Date.now() - RESOLVED_WINDOW_MS)),
       loadSensorState(projectId),
@@ -253,8 +310,9 @@ export async function PATCH(request: NextRequest, props: { params: Promise<{ id:
     return NextResponse.json({
       success: true,
       data: {
-        scannedAt: new Date().toISOString(),
-        lastCheckedAt: project?.lastObservedAt ?? new Date().toISOString(),
+        scannedAt: skipped ? null : new Date().toISOString(),
+        lastCheckedAt: project?.lastObservedAt ?? (skipped ? null : new Date().toISOString()),
+        ...(skipped ? { notScanned: skipped } : {}),
         lastReconciledAt: lastLoopTick ? lastLoopTick.toISOString() : null,
         autoFixedThisWeek: repairs.verified,
         unverifiedRepairsThisWeek: repairs.unverified,
@@ -312,13 +370,21 @@ export async function POST(request: NextRequest, props: { params: Promise<{ id: 
       return NextResponse.json({ error: 'Finding not found' }, { status: 404 })
     }
 
+    // Declining an architecture change is a decision Backenly remembers, and
+    // it is made where approving it is: POST /architecture { action: 'dismiss' },
+    // at the same role floor. This route's floor is lower.
+    if (isEvolutionApprovalFinding(finding.type)) {
+      return NextResponse.json(
+        { error: 'Architecture changes are decided on the Autonomy page, by an organization admin.' },
+        { status: 409 },
+      )
+    }
+
     const details = (finding.details ?? {}) as Record<string, unknown>
-    await prisma.healthFinding.update({
-      where: { id: findingId },
-      // The time is recorded so the closure can be told apart from a repair
-      // (lib/autonomy/resolution.ts) and placed on a timeline.
-      data: { status: 'dismissed', details: { ...details, dismissedAt: new Date().toISOString() } as any },
-    })
+    // The time is recorded so the closure can be told apart from a repair
+    // (lib/autonomy/resolution.ts) and placed on a timeline.
+    const dismissed = { status: 'dismissed', details: { ...details, dismissedAt: new Date().toISOString() } as any }
+    await prisma.healthFinding.update({ where: { id: findingId }, data: dismissed })
 
     // Keep the Memory timeline in step with the Review-Queue decision so a
     // change the user acted on never lingers as "proposed" in the ledger.
@@ -355,7 +421,7 @@ export async function POST(request: NextRequest, props: { params: Promise<{ id: 
     }
 
     return NextResponse.json({ success: true })
-  })
+  }, { floor: 'write' })
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -399,7 +465,14 @@ function buildHealthSummary(findings: FindingRow[]) {
   ]
 
   return categories.map(cat => {
-    const catFindings = cat.types.flatMap(t => byType.get(t) ?? [])
+    // A failed verification scenario belongs to the category it checks
+    // (details.category: auth, rls, ...). Left out, the summary said "Auth
+    // integrity: No issues detected" beside an open critical saying auth could
+    // not function.
+    const catFindings = [
+      ...cat.types.flatMap(t => byType.get(t) ?? []),
+      ...(byType.get('verification_failed') ?? []).filter(f => f.details?.category === cat.key),
+    ]
     const critical = catFindings.some(f => f.severity === 'critical')
     const warning = catFindings.length > 0
 

@@ -74,11 +74,37 @@ async function handleGET(request: NextRequest, props: { params: Promise<{ projec
       }
     )
 
+    // Per-row policy, with the one decision function every serving path is
+    // supposed to call. This listing used to return EVERY file in a private or
+    // owner_only bucket to any read key — carrying a working signed URL per
+    // row — so "private" governed the download route while the list route
+    // handed out both the names and the links.
+    const { mayRead } = await import('@/lib/storage/access-policy')
+    const reader = context.endUserId
+      ? { kind: 'endUser' as const, userId: context.endUserId }
+      : context.apiKey.serviceRole || context.apiKey.role === 'admin'
+        ? { kind: 'operator' as const, userId: context.apiKey.userId }
+        : { kind: 'anonymous' as const }
+    const visible = files.filter((file) =>
+      mayRead(
+        { bucketPolicy: bucketRecord.accessPolicy, fileIsPublic: file.isPublic, uploadedBy: file.uploadedBy },
+        reader
+      ).allowed
+    )
+
     return createSuccessResponse(
-      files.map(file => ({
+      visible.map(file => ({
         id: file.id,
         name: file.name,
-        url: file.url,
+        // A working link is embedded only when the object is publicly readable
+        // anyway. A reader allowed by ownership mints a link through the
+        // download / signed-url endpoints, which re-check the policy.
+        url: mayRead(
+          { bucketPolicy: bucketRecord.accessPolicy, fileIsPublic: file.isPublic, uploadedBy: file.uploadedBy },
+          { kind: 'anonymous' }
+        ).allowed
+          ? file.url
+          : null,
         size: Number(file.size),
         contentType: file.mimeType,
         isPublic: file.isPublic,

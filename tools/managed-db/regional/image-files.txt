@@ -1,0 +1,21 @@
+# Every file the regional bootstrap image carries, as repository paths.
+#
+# build-and-push.sh copies exactly these into the image, at these paths, and
+# tests/integration/regional-bootstrap.spec.ts runs the procedure from a copy of
+# exactly these, so a file the procedure needs but this list forgets fails the
+# rehearsal rather than the first run in a region.
+tools/managed-db/regional/bootstrap.sh
+tools/managed-db/regional/sql/preflight.sql
+tools/managed-db/regional/sql/ledger.sql
+tools/managed-db/regional/sql/roles.sql
+tools/managed-db/regional/sql/extensions.sql
+tools/managed-db/regional/sql/verify.sql
+scripts/postgrest-install.sh
+scripts/lib/db-admin.sh
+scripts/sql/postgrest-schema-registry.sql
+scripts/sql/postgrest-ddl-sync.sql
+scripts/sql/function-roles.sql
+scripts/sql/schema-drift-events.sql
+scripts/sql/regional-bodies.sql
+scripts/sql/auth-projection.sql
+scripts/setup-direct-access.sql

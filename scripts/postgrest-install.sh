@@ -62,7 +62,8 @@ for fn in \
   backenly_pgrst_prepare_schema \
   backenly_pgrst_reload \
   backenly_fn_role_name \
-  backenly_fn_role_sync
+  backenly_fn_role_sync \
+  backenly_fn_role_drop
 do
   if [ "$(db_admin_psql -tAqc "SELECT count(*) FROM pg_proc WHERE proname = '$fn'" | tr -d '[:space:]')" = "0" ]; then
     echo "  MISSING function: $fn"
@@ -70,7 +71,7 @@ do
   fi
 done
 
-for trg in backenly_pgrst_schema_drop backenly_pgrst_ddl_sync
+for trg in backenly_pgrst_schema_drop backenly_pgrst_ddl_sync backenly_pgrst_drop_sync
 do
   if [ "$(db_admin_psql -tAqc "SELECT count(*) FROM pg_event_trigger WHERE evtname = '$trg'" | tr -d '[:space:]')" = "0" ]; then
     echo "  MISSING event trigger: $trg"
@@ -97,7 +98,7 @@ if [ "$missing" -ne 0 ]; then
   exit 1
 fi
 
-echo "  9 functions + 2 event triggers + 4 roles present."
+echo "  10 functions + 2 event triggers + 4 roles present."
 echo
 echo "  Registered schemas: $(db_admin_psql -tAqc 'SELECT public.backenly_pgrst_current_schemas()' | tr -d '[:space:]')"
 echo

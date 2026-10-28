@@ -19,15 +19,16 @@
  */
 
 import { useCallback, useEffect, useState } from 'react'
-import { useRouter, useSearchParams } from 'next/navigation'
+import { useSearchParams } from 'next/navigation'
 import { SlidersHorizontal, Users, Search, RefreshCw, X, Mail } from 'lucide-react'
-import { AuthConfiguration } from '@/components/auth/AuthConfiguration'
+import { AuthConfiguration, ProviderLabel } from '@/components/auth/AuthConfiguration'
 import { EmailSettingsPanel } from '@/components/auth/EmailSettingsPanel'
 import {
-  AgentPrompt, CommandBar, CopyField, EmptyState, IconButton, INPUT_BASE, KIT, KitTab, KitTabs, Spinner, Tag,
+  CommandBar, CopyField, EmptyState, IconButton, INPUT_BASE, KIT, KitTab, KitTabs, Spinner,
 } from '@/components/inspector/kit'
+import { AgentEmptyState } from '@/components/inspector/AgentEmptyState'
 import { FOCUS_INSET } from '@/components/console/tokens'
-import { useAgentConnection } from '@/lib/hooks/useAgentConnection'
+import { formatStamp } from '@/components/console/format'
 
 interface EndUser {
   id: string
@@ -48,6 +49,7 @@ export function AuthWorkbench({ projectId }: { projectId: string }) {
     return requested === 'users' || requested === 'email' ? requested : 'config'
   })
   const [users, setUsers] = useState<EndUser[]>([])
+  const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(true)
 
   const fetchUsers = useCallback(async () => {
@@ -57,9 +59,26 @@ export function AuthWorkbench({ projectId }: { projectId: string }) {
       const token = typeof window !== 'undefined' ? localStorage.getItem('auth-token') : null
       const headers: HeadersInit = { 'Content-Type': 'application/json', 'X-Project-Id': projectId }
       if (token) headers['Authorization'] = `Bearer ${token}`
-      const res = await fetch('/api/auth/users', { headers })
-      const data = await res.json()
-      setUsers(data.users || [])
+      // Page through the route's cap (it serves at most 200 per page). The
+      // old single uncapped call stored one 50-row page, so a 320-user
+      // project read "50 users" and users 51+ were unreachable — search
+      // filters the loaded array. Bounded so a huge project cannot hang the
+      // tab; the header is ALWAYS the server's total.
+      const all: any[] = []
+      let page = 1
+      let serverTotal = 0
+      const MAX_PAGES = 25 // 5,000 rows
+      for (;;) {
+        const res = await fetch(`/api/auth/users?limit=200&page=${page}`, { headers })
+        const data = await res.json()
+        all.push(...(data.users || []))
+        serverTotal = data.pagination?.total ?? all.length
+        const totalPages = data.pagination?.totalPages ?? 1
+        if (page >= totalPages || page >= MAX_PAGES || (data.users || []).length === 0) break
+        page++
+      }
+      setUsers(all)
+      setTotal(serverTotal)
     } catch (err) {
       console.error('Error fetching users:', err)
     } finally {
@@ -75,7 +94,7 @@ export function AuthWorkbench({ projectId }: { projectId: string }) {
         title="Auth & Users"
         context={
           <span className="tabular-nums">
-            {loading ? 'Loading users…' : `${users.length.toLocaleString()} ${users.length === 1 ? 'user' : 'users'}`}
+            {loading ? 'Loading users…' : `${total.toLocaleString()} ${total === 1 ? 'user' : 'users'}`}
           </span>
         }
       />
@@ -85,7 +104,7 @@ export function AuthWorkbench({ projectId }: { projectId: string }) {
           <SlidersHorizontal />
           Configuration
         </KitTab>
-        <KitTab active={tab === 'users'} onClick={() => setTab('users')} count={users.length > 0 ? users.length : undefined}>
+        <KitTab active={tab === 'users'} onClick={() => setTab('users')} count={total > 0 ? total : undefined}>
           <Users />
           Users
         </KitTab>
@@ -132,8 +151,6 @@ function UsersGrid({
   loading: boolean
   onRefresh: () => void
 }) {
-  const router = useRouter()
-  const agent = useAgentConnection(projectId)
   const [query, setQuery] = useState('')
   const [selectedId, setSelectedId] = useState<string | null>(null)
 
@@ -158,7 +175,7 @@ function UsersGrid({
         <div className="flex h-[44px] flex-shrink-0 items-center justify-between gap-3 border-b border-white/[0.06] px-3 sm:px-4">
           <div className="flex min-w-0 items-center gap-3">
             <h2 className="truncate text-[13px] font-medium text-zinc-100">All users</h2>
-            <span className="whitespace-nowrap text-[12px] tabular-nums text-zinc-500">
+            <span className="whitespace-nowrap text-[12px] tabular-nums text-faint">
               {query.trim() && filtered.length !== users.length
                 ? `${filtered.length.toLocaleString()} of ${users.length.toLocaleString()}`
                 : filtered.length.toLocaleString()}
@@ -188,31 +205,22 @@ function UsersGrid({
             </div>
           ) : filtered.length === 0 ? (
             <div className="flex min-h-full flex-col items-center justify-center px-6">
-              <EmptyState
-                icon={query ? Search : Users}
-                title={query ? 'No users match' : 'No users yet'}
-                description={
-                  query
-                    ? `Nothing matches “${query.trim()}”. Search covers email and sign-in provider.`
-                    : 'Accounts created in your app land here as they sign up, with how they signed in and when they were last active.'
-                }
-                action={
-                  !query ? (
-                    <div className="flex w-full flex-col items-center gap-4">
-                      <AgentPrompt prompt="Add email and password sign-up and sign-in to the app, with password reset." />
-                      {agent.needsConnect && (
-                        <button
-                          type="button"
-                          onClick={() => router.push(`/app/projects/${projectId}/connect`)}
-                          className="text-[13px] font-medium text-zinc-300 underline decoration-white/20 underline-offset-4 transition-colors hover:text-zinc-50 hover:decoration-white/50"
-                        >
-                          Connect your agent
-                        </button>
-                      )}
-                    </div>
-                  ) : undefined
-                }
-              />
+              {query ? (
+                <EmptyState
+                  icon={Search}
+                  title="No users match"
+                  description={`Nothing matches “${query.trim()}”. Search covers email and sign-in provider.`}
+                />
+              ) : (
+                <AgentEmptyState
+                  projectId={projectId}
+                  icon={Users}
+                  title="No users yet"
+                  description="People who sign up through your app appear here, with how they signed in and when they were last active."
+                  prompt="Add email and password sign-up and sign-in to the app, with password reset."
+                  docs="auth"
+                />
+              )}
             </div>
           ) : (
             <div className="min-w-full overflow-x-auto">
@@ -250,10 +258,12 @@ function UsersGrid({
                           </button>
                         </td>
                         <td className={TD}>
-                          <Tag mono>{u.provider}</Tag>
+                          <span className="text-[12.5px] text-zinc-300">
+                            <ProviderLabel provider={u.provider} />
+                          </span>
                         </td>
                         <td className={`${TD} hidden text-[12.5px] tabular-nums text-zinc-400 sm:table-cell`}>{formatDate(u.createdAt)}</td>
-                        <td className={`${TD} text-[12.5px] tabular-nums text-zinc-500`}>
+                        <td className={`${TD} text-[12.5px] tabular-nums text-faint`}>
                           {u.lastLogin ? formatDate(u.lastLogin) : 'Never'}
                         </td>
                       </tr>
@@ -295,14 +305,17 @@ function UsersGrid({
                 <p className="min-w-0 break-all text-[13px] font-medium text-zinc-50">{selected.email}</p>
               </div>
               <dl className="divide-y divide-white/[0.05]">
-                {[
-                  ['Provider', selected.provider],
-                  ['Signed up', new Date(selected.createdAt).toLocaleString()],
-                  ['Last active', selected.lastLogin ? new Date(selected.lastLogin).toLocaleString() : 'Never'],
-                ].map(([label, value]) => (
+                {([
+                  ['Provider', <ProviderLabel key="p" provider={selected.provider} />],
+                  ['Signed up', formatStamp(selected.createdAt)],
+                  ['Last active', selected.lastLogin ? formatStamp(selected.lastLogin) : 'Never'],
+                ] as Array<[string, React.ReactNode]>).map(([label, value]) => (
                   <div key={label} className="flex items-baseline justify-between gap-3 px-4 py-2.5">
-                    <dt className="flex-shrink-0 text-[13px] text-zinc-500">{label}</dt>
-                    <dd className="min-w-0 truncate text-right text-[13px] tabular-nums text-zinc-200" title={value}>
+                    <dt className="flex-shrink-0 text-[13px] text-faint">{label}</dt>
+                    <dd
+                      className="min-w-0 truncate text-right text-[13px] tabular-nums text-zinc-200"
+                      title={typeof value === 'string' ? value : undefined}
+                    >
                       {value}
                     </dd>
                   </div>
@@ -311,7 +324,7 @@ function UsersGrid({
               <div className="border-t border-white/[0.06] px-4 py-4">
                 <p className="mb-2 text-[13px] font-medium text-zinc-200">User ID</p>
                 <CopyField value={selected.id} />
-                <p className="mt-2 text-[12.5px] leading-[19px] text-zinc-500">
+                <p className="mt-2 text-[12.5px] leading-[19px] text-faint">
                   Use it in row-level policies, and as the foreign key from your own tables.
                 </p>
               </div>
@@ -323,5 +336,5 @@ function UsersGrid({
   )
 }
 
-const TH = 'h-[36px] whitespace-nowrap border-b border-white/[0.06] px-3 text-left text-[12px] font-medium text-zinc-500 first:pl-4'
+const TH = 'h-[36px] whitespace-nowrap border-b border-white/[0.06] px-3 text-left text-[12px] font-medium text-faint first:pl-4'
 const TD = 'h-[44px] whitespace-nowrap border-b border-white/[0.04] px-3 first:pl-4'

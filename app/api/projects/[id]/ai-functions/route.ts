@@ -4,6 +4,8 @@ import { authenticateRequest } from '@/lib/auth/middleware'
 import { generateFunctionCode } from '@/lib/services/ai-functions/generator'
 import { validateAiFunctionData } from '@/lib/ai/function-validation'
 import { canAccessProject, canWriteProject } from '@/lib/edition/guard'
+import { rowLastError, withLastErrors } from '@/lib/services/ai-functions/run-records'
+import { governedChange, withChangeAttribution } from '@/lib/changes/ledger'
 
 /**
  * GET /api/projects/[id]/ai-functions
@@ -17,10 +19,11 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
 
     if (!(await canAccessProject(auth.userId, params.id))) return NextResponse.json({ error: 'Project not found' }, { status: 404 })
 
-    const raw = await prisma.aiFunction.findMany({
+    // A regional project's last errors are read from its region.
+    const raw = await withLastErrors(params.id, await prisma.aiFunction.findMany({
       where: { projectId: params.id },
       orderBy: { createdAt: 'desc' },
-    })
+    }))
 
     // ── 1. Filter out phantom/placeholder functions ───────────────────────────
     // These were created before creation-time guards were in place. They have
@@ -44,14 +47,18 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
       fn => fn.status === 'active' && fn.triggerType !== 'manual',
     )
     if (dangerousPlaceholders.length > 0) {
-      Promise.allSettled(
-        dangerousPlaceholders.map(fn =>
-          prisma.aiFunction.update({
-            where: { id: fn.id },
-            data: { status: 'inactive' },
-          }),
-        ),
-      ).catch(() => {})
+      // Backenly's decision, not the viewer's, and in the history like any
+      // other: switching one back on is a restore away.
+      const only = dangerousPlaceholders.length === 1 ? dangerousPlaceholders[0].name : null
+      const title = dangerousPlaceholders.length > 1
+        ? `Switch off ${dangerousPlaceholders.length} placeholder functions`
+        : only ? `Switch off placeholder function ${only}` : 'Switch off a placeholder function'
+      withChangeAttribution({ source: 'autonomy' }, () => governedChange(params.id, title, () => prisma.aiFunction.updateMany({
+        where: { id: { in: dangerousPlaceholders.map(fn => fn.id) }, projectId: params.id },
+        data: { status: 'inactive' },
+      })))
+        .then(async () => (await import('@/lib/webhooks/capture')).syncWebhookCapture(params.id))
+        .catch(() => {})
     }
 
     // ── 2. Deduplicate by name — keep the most recent copy ───────────────────
@@ -83,12 +90,14 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
     if (toHeal.length > 0) {
       // Fire-and-forget — never blocks the response
       Promise.allSettled(
-        toHeal.map(fn =>
-          prisma.aiFunction.update({
+        toHeal.map(async fn => {
+          // history: how the last run went, not configuration (lib/changes/resources/functions.ts)
+          await prisma.aiFunction.update({
             where: { id: fn.id },
             data: { status: 'active', lastError: null },
           })
-        )
+          await rowLastError(params.id, fn.id, null)
+        })
       ).catch(() => {})
 
       // Return healed state immediately (don't make caller wait for DB)
@@ -169,7 +178,8 @@ export async function POST(request: NextRequest, props: { params: Promise<{ id: 
     }
     const name = validation.name
 
-    const fn = await prisma.aiFunction.create({
+    // Generated first, outside the history's lock; only the save is the change.
+    const fn = await governedChange(params.id, `Create ${triggerType === 'cron' ? 'schedule' : 'function'} ${name}`, () => prisma.aiFunction.create({
       data: {
         projectId: params.id,
         name,
@@ -179,7 +189,12 @@ export async function POST(request: NextRequest, props: { params: Promise<{ id: 
         triggerTable: triggerTable || null,
         status: 'active',
       },
-    })
+    }), { actorUserId: auth.userId })
+
+    // Row-event functions fire from the database-level capture; make sure the
+    // trigger is on the tables before this answer says the function is live.
+    const { syncCaptureForFunctionChange } = await import('@/lib/webhooks/capture')
+    await syncCaptureForFunctionChange(params.id, triggerType)
 
     return NextResponse.json({ function: fn }, { status: 201 })
   } catch (error: any) {

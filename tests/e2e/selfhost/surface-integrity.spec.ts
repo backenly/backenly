@@ -53,6 +53,7 @@ const NAV = [
   { id: 'integrations', path: '/integrations' },
   { id: 'autonomy', path: '/autonomy' },
   { id: 'monitoring', path: '/monitoring' },
+  { id: 'history', path: '/changes' },
   { id: 'deploy', path: '/deploy' },
   { id: 'connect', path: '/connect' },
   { id: 'webhooks', path: '/webhooks' },
@@ -158,12 +159,13 @@ test.describe('empty states are honest, not fabricated', () => {
     await expect(table.first().or(empty)).toBeVisible({ timeout: 30_000 })
   })
 
-  test('schema history shows real versions or states that there are none', async ({ page }) => {
-    await page.goto(`/app/projects/${projectId()}/database`)
-    await page.getByRole('tab', { name: 'History', exact: true }).click()
+  test('the change history shows real changes or states that there are none', async ({ page }) => {
+    // One history for the whole backend, in its own section (no longer a Database tab).
+    await page.goto(`/app/projects/${projectId()}/changes`)
 
-    const versions = page.locator('button', { hasText: /^v\d+/ })
-    const empty = page.getByText('No schema versions yet')
-    await expect(versions.first().or(empty)).toBeVisible({ timeout: 30_000 })
+    // A row per recorded change, or the empty state: never sample rows.
+    const changes = page.getByRole('button', { name: /^Change #\d+:/ })
+    const empty = page.getByText('No changes yet')
+    await expect(changes.first().or(empty)).toBeVisible({ timeout: 30_000 })
   })
 })

@@ -1,188 +1,28 @@
-import { NextRequest, NextResponse } from 'next/server'
-import { verifyToken } from '@/lib/auth/jwt'
-import { canAdministerProject } from '@/lib/edition/guard'
-import { sanitizeError } from '@/lib/errors/sanitize'
-import { createExecutionContextFromRequest } from '@/lib/context/execution-context'
-import { undoToGraph } from '@/lib/orchestration/graph-pointer'
-import { reconcileWorkspaceToGraph } from '@/lib/orchestration/graph-reconciler'
-import { recordRollbackMemory } from '@/lib/operational-memory/ledger'
-import { prisma } from '@/lib/db'
-import { getAccountEntitlements } from '@/lib/entitlements'
-import { billingAccountOf } from '@/lib/usage/account'
-import type { BackendStateGraph } from '@/lib/orchestration/backend-state-graph'
-
-const QUOTA_DISABLED = process.env.DISABLE_QUOTA_ENFORCEMENT === 'true'
-
 /**
- * POST /api/projects/[projectId]/restore
+ * POST /api/projects/[id]/restore: retired.
  *
- * Restore the backend to a specific previous state.
- * Requires Growth plan or higher (allowDeploymentRollback).
+ * "Restore points" on the Autonomy page called this. It moved the active-graph
+ * pointer to an earlier version, then re-created whatever that version named
+ * and the workspace lacked, as new forward changes recorded to nobody in
+ * particular. It removed nothing added since, so the backend was not put back
+ * to that version. Restoring is per governed change now: History,
+ * the change's ⋯ menu, Restore previous state (lib/changes/recovery.ts).
+ *
+ * Still answers only someone who administers the project, and 404 to anyone
+ * else, so it is not an oracle for which project ids exist.
  */
-export async function POST(request: NextRequest, props: { params: Promise<{ id: string }> }) {
-  const params = await props.params;
-  try {
-    const body = await request.json()
-    const { graphId, sequenceNumber } = body
-    
-    console.log(`[Restore API] Received restore request for project ${params.id}, graphId: ${graphId}, seq: ${sequenceNumber}`)
-    
-    if (!graphId && !sequenceNumber) {
-      return NextResponse.json(
-        { 
-          success: false,
-          error: 'No version specified',
-          message: 'Please provide graphId or sequenceNumber'
-        }, 
-        { status: 400 }
-      )
-    }
 
-    // 1. Authenticate user
-    const sessionToken = request.cookies.get('auth-token')?.value
-    if (!sessionToken) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: 'Authentication required',
-          message: 'Please log in to restore previous versions'
-        },
-        { status: 401 }
-      )
-    }
+import { NextRequest, NextResponse } from 'next/server'
+import { withAuth } from '@/lib/auth/route-protection'
+import { canAdministerProject } from '@/lib/edition/guard'
+import { movedToChanges } from '@/lib/changes/retired'
 
-    const decoded = await verifyToken(sessionToken)
-    const userId = decoded.userId
-    const projectId = params.id
+export const dynamic = 'force-dynamic'
 
-
-    // Ownership, which this route verified a token but never checked.
-    //
-    // It confirmed the caller was SOME signed-in user, checked THEIR plan
-    // entitlement, then rolled back the project named in the path. So any
-    // authenticated account on a qualifying plan could roll back another
-    // tenant's deployment. Authentication is not authorization, and an
-    // entitlement check is about the project's billing, not the caller's access.
-    //
-    // canAdministerProject, not canAccessProject: a rollback rewrites live
-    // state and is not something a read-only collaborator should trigger.
-    // 404 rather than 403 so the endpoint is not an oracle for project ids.
-    if (!(await canAdministerProject(userId, projectId))) {
-      return NextResponse.json(
-        { success: false, error: 'Project not found' },
-        { status: 404 },
-      )
-    }
-
-    // 2. Check plan entitlement (allowDeploymentRollback — Growth+), on the plan
-    //    of the account the project bills to
-    if (!QUOTA_DISABLED) {
-      const entitlements = await getAccountEntitlements((await billingAccountOf(projectId)) ?? userId)
-      if (!entitlements?.allowDeploymentRollback) {
-        return NextResponse.json(
-          {
-            success: false,
-            error: 'Deployment rollback is available on the Pro plan and higher.',
-            code: 'PLAN_LIMIT_EXCEEDED',
-            upgradeRequired: true,
-            currentPlan: entitlements?.planName || 'FREE',
-            requiredPlan: 'BUILDER',
-          },
-          { status: 403 }
-        )
-      }
-    }
-
-    // 3. Find target graph by ID or sequence number
-    let targetGraph = null
-    
-    if (graphId) {
-      targetGraph = await prisma.backendGraph.findFirst({
-        where: {
-          id: graphId,
-          projectId,
-        },
-      })
-    } else if (sequenceNumber) {
-      targetGraph = await prisma.backendGraph.findFirst({
-        where: {
-          projectId,
-          sequenceNumber,
-        },
-      })
-    }
-
-    if (!targetGraph) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: 'Version not found',
-          message: 'The selected version no longer exists'
-        },
-        { status: 404 }
-      )
-    }
-
-    console.log(`[Restore API] Found graph ${targetGraph.id} (seq ${targetGraph.sequenceNumber})`)
-
-    // Capture the pre-restore active graph for the memory record.
-    const previousProject = await prisma.project.findUnique({
-      where: { id: projectId },
-      select: { activeGraphId: true },
-    })
-
-    // 3. Perform restore (pointer-based undo with optimistic locking)
-    try {
-      await undoToGraph(projectId, targetGraph.id)
-    } catch (undoError: any) {
-      // Handle undo conflicts gracefully
-      if (undoError.message?.includes('UNDO_CONFLICT')) {
-        return NextResponse.json(
-          {
-            success: false,
-            error: 'Project was modified during restore. Please retry.',
-          },
-          { status: 409 }
-        )
-      }
-      throw undoError
-    }
-
-    // 4. Make the restore real: create whatever this version's graph says
-    // should exist but is currently missing (tables, columns, APIs, storage,
-    // base auth). Additive only — never drops anything added since. Failures
-    // here don't undo the pointer swap; they're surfaced in the response so
-    // the UI can be honest about what came back and what needs manual review.
-    const reconcile = await reconcileWorkspaceToGraph(
-      projectId,
-      targetGraph.graphData as unknown as BackendStateGraph,
-    ).catch((err) => {
-      console.error('[Restore API] Reconciliation failed:', err)
-      return { restored: [], notRestored: [] }
-    })
-
-    await recordRollbackMemory({
-      projectId,
-      actorId: userId,
-      summary: `Restored to version ${targetGraph.sequenceNumber}.`,
-      reason: 'User rolled back to a previously recorded backend version.',
-      beforeState: { graphId: previousProject?.activeGraphId ?? null },
-      afterState: { graphId: targetGraph.id, sequenceNumber: targetGraph.sequenceNumber, reconcile },
-      rollbackId: targetGraph.id,
-    }).catch((err) => {
-      console.error('[Restore API] Failed to record rollback memory:', err)
-    })
-
-    return NextResponse.json({
-      success: true,
-      message: 'Successfully restored to previous version',
-      reconcile,
-    })
-
-  } catch (error) {
-    console.error('[Restore API] Error:', error)
-    const sanitized = sanitizeError(error)
-
-    return NextResponse.json(sanitized, { status: 500 })
+export const POST = withAuth(async (_request: NextRequest, { user, params }) => {
+  const { id: projectId } = (await params) as { id: string }
+  if (!(await canAdministerProject(user.userId, projectId))) {
+    return NextResponse.json({ success: false, error: 'Project not found' }, { status: 404 })
   }
-}
+  return movedToChanges('Restoring the backend to a saved version')
+})

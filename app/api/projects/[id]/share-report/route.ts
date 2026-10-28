@@ -14,10 +14,18 @@ export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
 import { withProjectAccess } from '@/lib/auth/route-protection'
+import { canAdministerProject } from '@/lib/edition/guard'
 import { prisma } from '@/lib/db/prisma'
 import { hashShareToken, newShareToken } from '@/lib/reports/change-report'
 
 export const POST = withProjectAccess(async (req: NextRequest, { user, projectId }) => {
+  // This mints an UNAUTHENTICATED public URL onto the project's activity
+  // ledger — a credential in all but name. withProjectAccess alone admits a
+  // VIEWER, the rank that exists to look and not grant; issuing outward
+  // access is administration, the same floor the protection route applies.
+  if (!(await canAdministerProject(user.userId, projectId))) {
+    return NextResponse.json({ error: 'Your role in this project does not allow publishing a share link' }, { status: 403 })
+  }
   const raw = newShareToken()
   await prisma.shareToken.create({
     data: {

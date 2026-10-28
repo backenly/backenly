@@ -24,11 +24,14 @@
  * *-schema, ...) failed on every invocation path with:
  *   "Blocked: code contains forbidden pattern '\brequire\s*\('"
  *
- * Route modules are *first-party deterministic templates* from our own repo
- * (never user/LLM free-form), use only parameterised SQL, and need the real
- * `prisma` client + `verifyToken`. They are therefore run with first-party
- * privilege in an in-process vm — NOT in the locked ctx-only sandbox — behind
- * a hardened static denylist as defence in depth.
+ * Route modules were once *first-party deterministic templates* from our own
+ * repo. That premise no longer holds: functions deploy_code stores agent-written
+ * modules verbatim and the generator stores model-written ones, so the code
+ * here is free-form. They still run in an in-process vm — NOT the locked
+ * ctx-only sandbox — because they need the real `prisma` client + `verifyToken`,
+ * but every capability handed into that vm must now assume hostile code:
+ * the static denylist, the curated require/process shims, and outbound HTTP
+ * through the same egress guard as ctx.http (never the host's bare fetch).
  *
  * Security model:
  *  - Static signature check: must be a recognised route module (export GET/
@@ -56,6 +59,8 @@ import { loadProjectFnAuth, mintTestRunToken, ProjectFnAuth } from './project-fn
 import { makeRlsAwarePrisma, refusingPrisma, type RlsAwarePrisma } from './rls-aware-db'
 import { functionDbClient, forgetFunctionDbClient } from './function-db-role'
 import type { RlsIdentity } from '@/lib/services/rls-session'
+import { safeFetch } from '@/lib/security/outbound-guard'
+import { resolveEndUserFromToken } from '@/server/lib/end-user-identity'
 import { FORWARDABLE_FN_HEADERS } from './forward-headers'
 
 // esbuild is a native binary package — load it lazily through a non-bundled
@@ -181,14 +186,22 @@ function makeProjectVerifyToken(auth: ProjectFnAuth) {
  * this project's derived admin key. Never from the function body, and never
  * from an unverified claim in the payload.
  *
+ * A token that names a project is an end user's session, and it is resolved by
+ * the check every data door uses (server/lib/end-user-identity.ts), because it
+ * may not have passed one: it can arrive in the request body or in a header
+ * spelling the doors do not read, and the runtime's door serves a request whose
+ * token is revoked as no user rather than refusing it. Revoked, or its user
+ * blocked, it is no identity here either.
+ *
  * The default is `anon` (no user id, not service role), which is the secure
  * one: own-rows policies match nothing. That is a visibly empty result rather
  * than someone else's data.
  */
-function resolveCallerIdentity(
+async function resolveCallerIdentity(
+  projectId: string,
   headers: Record<string, string | undefined>,
   auth: ProjectFnAuth,
-): RlsIdentity {
+): Promise<RlsIdentity> {
   // An owner-issued admin key is a server-side decision, so it may name
   // service_role. Compared with timingSafeEqual because it is a secret.
   const presentedAdminKey = headers['x-admin-key']
@@ -200,22 +213,33 @@ function resolveCallerIdentity(
   const token = raw?.replace(/^Bearer\s+/i, '').trim()
   if (!token || !auth.jwtSecret) return { userId: null, isServiceRole: false }
 
+  let payload: any
   try {
     const realJwt: typeof jsonwebtoken = (jsonwebtoken as any).default ?? jsonwebtoken
-    const payload = realJwt.verify(token, auth.jwtSecret, { algorithms: ['HS256'] }) as any
-    // End-user tokens carry the id under a few historical names. `sub` is the
-    // one the claim predicates read, so any of them maps onto it.
-    const userId = payload?.sub ?? payload?.userId ?? payload?.user_id ?? payload?.id ?? null
-    if (!userId) return { userId: null, isServiceRole: false }
-    return {
-      userId: String(userId),
-      isServiceRole: false,
-      userRole: typeof payload?.role === 'string' ? payload.role : undefined,
-    }
+    payload = realJwt.verify(token, auth.jwtSecret, { algorithms: ['HS256'] }) as any
   } catch {
     // An unverifiable token is not an identity. Falling back to service_role
     // here would turn a bad token into full table access.
     return { userId: null, isServiceRole: false }
+  }
+
+  if (typeof payload?.projectId === 'string') {
+    // A status that cannot be read is no identity either.
+    const endUser = await resolveEndUserFromToken(projectId, token).catch(() => null)
+    if (!endUser || endUser === 'blocked') return { userId: null, isServiceRole: false }
+    return { userId: endUser.userId, isServiceRole: false, userRole: endUser.role }
+  }
+
+  // A token without a project claim was not issued by end-user auth: only code
+  // holding the project's secret, its own functions, signs one, and it is read
+  // as it always was. Such tokens carry the id under a few historical names.
+  // `sub` is the one the claim predicates read, so any of them maps onto it.
+  const userId = payload?.sub ?? payload?.userId ?? payload?.user_id ?? payload?.id ?? null
+  if (!userId) return { userId: null, isServiceRole: false }
+  return {
+    userId: String(userId),
+    isServiceRole: false,
+    userRole: typeof payload?.role === 'string' ? payload.role : undefined,
   }
 }
 
@@ -460,7 +484,12 @@ export function validateRouteModule(code: string, expectedMethod?: string | null
     ),
     console: { log() {}, error() {}, warn() {}, info() {} },
     URL, URLSearchParams, TextEncoder, TextDecoder, Buffer,
-    fetch, setTimeout, clearTimeout,
+    // Evaluation only defines the handlers, but TOP-LEVEL statements do run —
+    // and they must not reach the network, let alone through the host's fetch.
+    // A synchronous throw (not a rejected promise) so a fire-and-forget call
+    // fails the evaluation instead of surfacing as an unhandled rejection.
+    fetch: () => { throw new Error('fetch is not available while a function is being validated.') },
+    setTimeout, clearTimeout,
     Promise, JSON, Math, Date, Error, Object, Array, String, Number, Boolean, RegExp,
     process: makeCuratedProcess({ jwtSecret: null, adminKey: null }),
     global: undefined,
@@ -494,6 +523,19 @@ export function validateRouteModule(code: string, expectedMethod?: string | null
 }
 
 // ─── Public executor ──────────────────────────────────────────────────────────
+
+/**
+ * Thrown when the HANDLER itself failed — distinct from compile errors,
+ * timeouts and machinery failures, which stay plain Errors. The smoke test
+ * keys off this class to decide between "the function is broken" and "we
+ * could not test it".
+ */
+export class RouteModuleHandlerError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'RouteModuleHandlerError'
+  }
+}
 
 export interface RouteModuleRunResult {
   logs: string[]
@@ -613,7 +655,48 @@ export async function executeRouteModuleFunction(
   }
 
 
-  const callerIdentity = resolveCallerIdentity(headers, auth)
+  const callerIdentity = await resolveCallerIdentity(projectId, headers, auth)
+
+  // Outbound HTTP for module code: fetch's call shape, the egress guard's
+  // rules. The host's bare fetch reaches everything this PROCESS can reach —
+  // the cloud metadata service, the VPC, the loopback admin ports (PostgREST,
+  // the runtime) — and module code is free-form, so it goes through the same
+  // guard as ctx.http. The response is the guard's SafeResponse (ok/status/
+  // headers.get/json/text/arrayBuffer), the same shape ctx.http returns.
+  const guardedFetch = (input: any, init?: any) => {
+    const url =
+      typeof input === 'string' ? input
+        : input instanceof URL ? input.toString()
+          : typeof input?.url === 'string' ? input.url
+            : String(input)
+    const method = String(init?.method ?? (typeof input === 'object' && input?.method) ?? 'GET').toUpperCase()
+    const outHeaders: Record<string, string> = {}
+    const rawHeaders = init?.headers ?? (typeof input === 'object' ? input?.headers : undefined)
+    if (rawHeaders) {
+      if (typeof rawHeaders.forEach === 'function') {
+        rawHeaders.forEach((v: unknown, k: unknown) => { outHeaders[String(k)] = String(v) })
+      } else if (Array.isArray(rawHeaders)) {
+        for (const [k, v] of rawHeaders) outHeaders[String(k)] = String(v)
+      } else {
+        for (const [k, v] of Object.entries(rawHeaders)) outHeaders[k] = String(v)
+      }
+    }
+    let body: string | undefined
+    const rawBody = init?.body
+    if (rawBody !== undefined && rawBody !== null) {
+      if (typeof rawBody === 'string') body = rawBody
+      else if (Buffer.isBuffer(rawBody)) body = rawBody.toString('utf8')
+      else if (rawBody instanceof URLSearchParams) body = rawBody.toString()
+      else if (rawBody instanceof ArrayBuffer) body = Buffer.from(rawBody).toString('utf8')
+      else if (ArrayBuffer.isView(rawBody)) body = Buffer.from(rawBody.buffer, rawBody.byteOffset, rawBody.byteLength).toString('utf8')
+      else throw new TypeError('fetch body must be a string, Buffer, URLSearchParams or ArrayBuffer in function code — stringify JSON yourself')
+    }
+    const p = safeFetch(url, { method, headers: outHeaders, body, egressScope: 'function' })
+    // A module that fires-and-forgets a blocked fetch must not take the process
+    // down with an unhandled rejection; a caller that awaits still sees it.
+    p.catch(() => {})
+    return p
+  }
 
   // 2. Run the module in a vm with a curated require + console capture.
   const logs: string[] = []
@@ -633,7 +716,7 @@ export async function executeRouteModuleFunction(
     TextEncoder,
     TextDecoder,
     Buffer,
-    fetch,
+    fetch: guardedFetch,
     setTimeout,
     clearTimeout,
     Promise,
@@ -700,7 +783,15 @@ export async function executeRouteModuleFunction(
       ),
     ])
   } catch (err: any) {
-    throw new Error(err?.message || String(err))
+    const msg = err?.message || String(err)
+    // The 10s race cannot tell a hung handler from slow infrastructure, so a
+    // timeout stays a plain Error. Everything else thrown here came out of the
+    // HANDLER itself, and the type says so: callers that must distinguish "the
+    // function is broken" from "the machinery failed" check the class instead
+    // of sniffing message text, which misread any handler error that happened
+    // to mention "database" or "connect" as an infrastructure failure.
+    if (msg === 'Route function timed out after 10s') throw new Error(msg)
+    throw new RouteModuleHandlerError(msg)
   }
 
   // 5. Normalise the response.

@@ -24,6 +24,7 @@
  */
 
 import { prisma } from '@/lib/db/prisma'
+import { workspaceRawClient } from '@/lib/data-plane/regional'
 import { executeWithUserContext } from '@/lib/services/workspace-rls'
 import { generateToken, verifyToken } from '@/lib/auth/jwt'
 import { hashPassword } from '@/lib/auth/password'
@@ -198,8 +199,11 @@ interface ColInfo {
   column_default: string | null
 }
 
-async function loadColumns(schemaName: string, tableName: string): Promise<ColInfo[]> {
-  return prisma.$queryRawUnsafe<ColInfo[]>(
+async function loadColumns(projectId: string, schemaName: string, tableName: string): Promise<ColInfo[]> {
+  // The catalog of the project's database, in its region; resolved outside any
+  // catch, so an unreachable region fails the check rather than skipping it.
+  const db = await workspaceRawClient(projectId)
+  return db.$queryRawUnsafe<ColInfo[]>(
     `SELECT column_name, data_type, is_nullable, column_default
      FROM information_schema.columns
      WHERE table_schema = $1 AND table_name = $2
@@ -214,9 +218,12 @@ async function loadColumns(schemaName: string, tableName: string): Promise<ColIn
  * Return the names of tables that `tableName` has foreign-key constraints pointing to.
  * Uses pg_constraint directly (more reliable than information_schema for FK detection).
  */
-async function loadFkReferences(schemaName: string, tableName: string): Promise<string[]> {
+async function loadFkReferences(projectId: string, schemaName: string, tableName: string): Promise<string[]> {
+  // The catalog of the project's database, in its region; resolved outside any
+  // catch, so an unreachable region fails the check rather than skipping it.
+  const db = await workspaceRawClient(projectId)
   try {
-    const rows = await prisma.$queryRawUnsafe<{ foreign_table: string }[]>(
+    const rows = await db.$queryRawUnsafe<{ foreign_table: string }[]>(
       `SELECT DISTINCT ref.relname AS foreign_table
        FROM pg_constraint c
        JOIN pg_class t   ON t.oid = c.conrelid
@@ -252,11 +259,15 @@ interface FkColumnMapping {
 }
 
 async function loadFkColumnMappings(
+  projectId: string,
   schemaName: string,
   tableName: string,
 ): Promise<FkColumnMapping[]> {
+  // The catalog of the project's database, in its region; resolved outside any
+  // catch, so an unreachable region fails the check rather than skipping it.
+  const db = await workspaceRawClient(projectId)
   try {
-    const rows = await prisma.$queryRawUnsafe<{
+    const rows = await db.$queryRawUnsafe<{
       column: string
       foreign_table: string
       foreign_column: string
@@ -293,11 +304,15 @@ async function loadFkColumnMappings(
  * Used to avoid inserting synthetic values that violate enum-style checks.
  */
 async function loadCheckConstraintValues(
+  projectId: string,
   schemaName: string,
   tableName: string,
 ): Promise<Record<string, string>> {
+  // The catalog of the project's database, in its region; resolved outside any
+  // catch, so an unreachable region fails the check rather than skipping it.
+  const db = await workspaceRawClient(projectId)
   try {
-    const rows = await prisma.$queryRawUnsafe<{ attname: string; consrc: string }[]>(
+    const rows = await db.$queryRawUnsafe<{ attname: string; consrc: string }[]>(
       `SELECT a.attname, pg_get_constraintdef(c.oid) AS consrc
        FROM pg_constraint c
        JOIN pg_class t ON t.oid = c.conrelid
@@ -369,6 +384,7 @@ function buildInsertSql(
 // ─── CHECK 3.1 — CRUD lifecycle ───────────────────────────────────────────────
 
 async function checkCrudLifecycle(projectId: string): Promise<BehavioralCheck> {
+  const db = await workspaceRawClient(projectId)
   const base: BehavioralCheck = {
     id: 'crud_lifecycle',
     name: 'CRUD lifecycle (create → read → update → delete → post-delete read returns nothing)',
@@ -411,7 +427,7 @@ async function checkCrudLifecycle(projectId: string): Promise<BehavioralCheck> {
     // guessing produces a confusing 23503 instead of an honest skip — the same
     // line checkRlsIsolation draws.
     try {
-      const fkMaps = await loadFkColumnMappings(schemaName, lName)
+      const fkMaps = await loadFkColumnMappings(projectId, schemaName, lName)
       const unseedable = fkMaps.filter(m => m.foreignColumn !== 'id' && m.foreignTable !== lName)
       if (unseedable.length > 0) {
         base.details.push(
@@ -466,7 +482,7 @@ async function checkCrudLifecycle(projectId: string): Promise<BehavioralCheck> {
   const USER_ID_COLS = new Set(['user_id', 'userid', 'author_id', 'authorid', 'owner_id', 'ownerid', 'created_by', 'createdby'])
 
   try {
-    const cols = await loadColumns(schemaName, tableName)
+    const cols = await loadColumns(projectId, schemaName, tableName)
     if (cols.length === 0) {
       return { ...base, skipped: true, skipReason: `Table '${tableName}' has no columns in information_schema` }
     }
@@ -475,7 +491,7 @@ async function checkCrudLifecycle(projectId: string): Promise<BehavioralCheck> {
     // Authoritative mapping from pg_constraint, not column-name heuristics:
     // `author_id → users.id` and `parent_comment_id → comments.id` both need the
     // exact target, and guessing is what produced 23503 in the field.
-    const fkMappings = await loadFkColumnMappings(schemaName, tableName)
+    const fkMappings = await loadFkColumnMappings(projectId, schemaName, tableName)
     const fkOverrides: Record<string, string> = {}
     const mappingsByParent = new Map<string, FkColumnMapping[]>()
     for (const m of fkMappings) {
@@ -488,11 +504,11 @@ async function checkCrudLifecycle(projectId: string): Promise<BehavioralCheck> {
     }
 
     for (const [refTable, mappings] of mappingsByParent) {
-      const refCols = await loadColumns(schemaName, refTable)
+      const refCols = await loadColumns(projectId, schemaName, refTable)
       if (refCols.length === 0) continue
 
       const seedId = crypto.randomUUID()
-      const refCheckOverrides = await loadCheckConstraintValues(schemaName, refTable)
+      const refCheckOverrides = await loadCheckConstraintValues(projectId, schemaName, refTable)
       // buildInsertParts skips 'id', so prepend it — the seeded parent must land
       // on a known id, which is the value written into every FK pointing at it.
       const { insertCols: refInsertCols, insertVals: refInsertVals, colInfoMap: refColInfoMap } =
@@ -507,7 +523,7 @@ async function checkCrudLifecycle(projectId: string): Promise<BehavioralCheck> {
         buildInsertSql(schemaName, refTable, allRefCols, allRefVals, allRefColInfoMap)
 
       try {
-        const refInserted = await executeWithUserContext<any>(dummyUserId, true, refSql, refParams)
+        const refInserted = await executeWithUserContext<any>(projectId, dummyUserId, true, refSql, refParams)
         if (!refInserted[0]) continue
         const parentId = String(refInserted[0].id ?? refInserted[0][Object.keys(refInserted[0])[0]])
         // Recorded BEFORE anything else can fail, so cleanup can always find it.
@@ -531,7 +547,7 @@ async function checkCrudLifecycle(projectId: string): Promise<BehavioralCheck> {
     }
 
     // ── INSERT ────────────────────────────────────────────────────────────────
-    const checkOverrides = await loadCheckConstraintValues(schemaName, tableName)
+    const checkOverrides = await loadCheckConstraintValues(projectId, schemaName, tableName)
 
     // Fill owner and NOT NULL columns that weren't seeded via explicit FKs
     const ownerOverrides: Record<string, string> = {}
@@ -544,7 +560,7 @@ async function checkCrudLifecycle(projectId: string): Promise<BehavioralCheck> {
     const { insertCols, insertVals, colInfoMap } = buildInsertParts(cols, { ...checkOverrides, ...fkOverrides, ...ownerOverrides })
     const { sql: insertSql, params: insertParams } = buildInsertSql(schemaName, tableName, insertCols, insertVals, colInfoMap)
 
-    const inserted = await executeWithUserContext<any>(dummyUserId, true, insertSql, insertParams)
+    const inserted = await executeWithUserContext<any>(projectId, dummyUserId, true, insertSql, insertParams)
     if (!inserted[0]) {
       return { ...base, error: 'INSERT returned no row', details: [...base.details, '✗ INSERT failed'] }
     }
@@ -553,7 +569,7 @@ async function checkCrudLifecycle(projectId: string): Promise<BehavioralCheck> {
 
     // ── READ ──────────────────────────────────────────────────────────────────
     const readSql = `SELECT * FROM "${schemaName}"."${tableName}" WHERE id = $1::uuid`
-    const readRows = await executeWithUserContext<any>(dummyUserId, true, readSql, [testId])
+    const readRows = await executeWithUserContext<any>(projectId, dummyUserId, true, readSql, [testId])
     if (readRows.length === 0) {
       return { ...base, error: 'READ returned 0 rows after INSERT', details: [...base.details, '✗ READ failed'] }
     }
@@ -566,7 +582,7 @@ async function checkCrudLifecycle(projectId: string): Promise<BehavioralCheck> {
     )
     if (textCol) {
       const updateSql = `UPDATE "${schemaName}"."${tableName}" SET "${textCol.column_name}" = $1 WHERE id = $2::uuid RETURNING id`
-      const updated = await executeWithUserContext<any>(dummyUserId, true, updateSql, ['__bv_updated__', testId])
+      const updated = await executeWithUserContext<any>(projectId, dummyUserId, true, updateSql, ['__bv_updated__', testId])
       if (updated.length > 0) {
         base.details.push(`✓ UPDATE succeeded on column '${textCol.column_name}'`)
       } else {
@@ -578,7 +594,7 @@ async function checkCrudLifecycle(projectId: string): Promise<BehavioralCheck> {
 
     // ── DELETE ────────────────────────────────────────────────────────────────
     const deleteSql = `DELETE FROM "${schemaName}"."${tableName}" WHERE id = $1::uuid RETURNING id`
-    const deleted = await executeWithUserContext<any>(dummyUserId, true, deleteSql, [testId])
+    const deleted = await executeWithUserContext<any>(projectId, dummyUserId, true, deleteSql, [testId])
     if (deleted.length === 0) {
       return { ...base, error: 'DELETE matched 0 rows', details: [...base.details, '✗ DELETE failed'] }
     }
@@ -587,7 +603,7 @@ async function checkCrudLifecycle(projectId: string): Promise<BehavioralCheck> {
     base.details.push('✓ DELETE succeeded')
 
     // ── POST-DELETE READ — must return 0 rows ─────────────────────────────────
-    const postDeleteRows = await executeWithUserContext<any>(dummyUserId, true, readSql, [deletedId])
+    const postDeleteRows = await executeWithUserContext<any>(projectId, dummyUserId, true, readSql, [deletedId])
     if (postDeleteRows.length > 0) {
       return {
         ...base,
@@ -612,11 +628,11 @@ async function checkCrudLifecycle(projectId: string): Promise<BehavioralCheck> {
     // silently leaks the row rather than erroring.
     if (testId) {
       try {
-        await executeWithUserContext(dummyUserId, true, `DELETE FROM "${schemaName}"."${tableName}" WHERE id = $1::uuid`, [testId])
+        await executeWithUserContext(projectId, dummyUserId, true, `DELETE FROM "${schemaName}"."${tableName}" WHERE id = $1::uuid`, [testId])
       } catch {
         // Last resort: try without user context
         try {
-          await prisma.$executeRawUnsafe(`DELETE FROM "${schemaName}"."${tableName}" WHERE id = $1::uuid`, testId)
+          await db.$executeRawUnsafe(`DELETE FROM "${schemaName}"."${tableName}" WHERE id = $1::uuid`, testId)
         } catch { /* truly non-fatal at this point */ }
       }
     }
@@ -624,9 +640,9 @@ async function checkCrudLifecycle(projectId: string): Promise<BehavioralCheck> {
     for (const parent of [...seededParentRows].reverse()) {
       const delSql = `DELETE FROM "${schemaName}"."${parent.table}" WHERE id = $1::uuid`
       try {
-        await executeWithUserContext(dummyUserId, true, delSql, [parent.id])
+        await executeWithUserContext(projectId, dummyUserId, true, delSql, [parent.id])
       } catch {
-        try { await prisma.$executeRawUnsafe(delSql, parent.id) } catch { /* non-fatal */ }
+        try { await db.$executeRawUnsafe(delSql, parent.id) } catch { /* non-fatal */ }
       }
     }
   }
@@ -635,6 +651,7 @@ async function checkCrudLifecycle(projectId: string): Promise<BehavioralCheck> {
 // ─── CHECK 3.2 — Auth flow ────────────────────────────────────────────────────
 
 async function checkAuthFlow(projectId: string): Promise<BehavioralCheck> {
+  const db = await workspaceRawClient(projectId)
   const base: BehavioralCheck = {
     id: 'auth_flow',
     name: 'Auth flow (signup → token issuance → JWT verification → protected resource access)',
@@ -646,7 +663,7 @@ async function checkAuthFlow(projectId: string): Promise<BehavioralCheck> {
   const schemaName = `workspace_${projectId}`
 
   // 1. Check workspace users table exists (auth not enabled → skip)
-  const tableExists = await prisma.$queryRawUnsafe<{ exists: boolean }[]>(
+  const tableExists = await db.$queryRawUnsafe<{ exists: boolean }[]>(
     `SELECT EXISTS (
        SELECT 1 FROM information_schema.tables
        WHERE table_schema = $1 AND table_name = 'users'
@@ -668,7 +685,7 @@ async function checkAuthFlow(projectId: string): Promise<BehavioralCheck> {
 
   // 3. Introspect actual users table schema — avoids hardcoded column assumptions
   //    (OAuth-only tables have no password column; Prisma camelCase tables differ from snake_case)
-  const cols = await loadColumns(schemaName, 'users')
+  const cols = await loadColumns(projectId, schemaName, 'users')
   if (cols.length === 0) {
     return { ...base, skipped: true, skipReason: 'workspace users table has no columns in information_schema' }
   }
@@ -721,6 +738,7 @@ async function checkAuthFlow(projectId: string): Promise<BehavioralCheck> {
     // behavior, otherwise PG 42501 surfaces here even though the live
     // signup route would succeed.
     const signupResult = await executeWithUserContext<any>(
+      projectId,
       '',
       true,
       `INSERT INTO "${schemaName}"."users" (${colList}) VALUES (${placeholders})
@@ -780,6 +798,7 @@ async function checkAuthFlow(projectId: string): Promise<BehavioralCheck> {
     // resolving the user record from JWT claims is a privileged lookup, not
     // a user-scoped query, so RLS should not gate it.
     const protectedRead = await executeWithUserContext<any>(
+      projectId,
       '',
       true,
       `SELECT id, email FROM "${schemaName}"."users" WHERE id = $1::uuid`,
@@ -799,6 +818,7 @@ async function checkAuthFlow(projectId: string): Promise<BehavioralCheck> {
         // Service-role cleanup — RLS would otherwise hide the row from the
         // delete and the test user would persist across runs.
         await executeWithUserContext(
+          projectId,
           '',
           true,
           `DELETE FROM "${schemaName}"."users" WHERE id = $1::uuid`,
@@ -815,6 +835,7 @@ async function checkAuthFlow(projectId: string): Promise<BehavioralCheck> {
 // ─── CHECK 3.3 — RLS isolation ────────────────────────────────────────────────
 
 async function checkRlsIsolation(projectId: string): Promise<BehavioralCheck> {
+  const db = await workspaceRawClient(projectId)
   const base: BehavioralCheck = {
     id: 'rls_isolation',
     name: 'RLS two-user isolation (user A inserts row → user B sees nothing)',
@@ -826,7 +847,7 @@ async function checkRlsIsolation(projectId: string): Promise<BehavioralCheck> {
   const schemaName = `workspace_${projectId}`
 
   // Find tables with Backenly-managed RLS policies
-  const rlsTables = await prisma.$queryRawUnsafe<{ tablename: string }[]>(
+  const rlsTables = await db.$queryRawUnsafe<{ tablename: string }[]>(
     `SELECT DISTINCT tablename FROM pg_policies
      WHERE schemaname = $1 AND policyname LIKE 'backenly_%'`,
     schemaName,
@@ -842,7 +863,7 @@ async function checkRlsIsolation(projectId: string): Promise<BehavioralCheck> {
   let userIdCol: string | null = null
 
   for (const { tablename } of rlsTables) {
-    const cols = await prisma.$queryRawUnsafe<{ column_name: string }[]>(
+    const cols = await db.$queryRawUnsafe<{ column_name: string }[]>(
       `SELECT column_name FROM information_schema.columns
        WHERE table_schema = $1 AND table_name = $2`,
       schemaName, tablename,
@@ -866,7 +887,7 @@ async function checkRlsIsolation(projectId: string): Promise<BehavioralCheck> {
   const seededParentRows: Array<{ table: string; id: string }> = []
 
   try {
-    const cols = await loadColumns(schemaName, targetTable)
+    const cols = await loadColumns(projectId, schemaName, targetTable)
     if (cols.length === 0) {
       return { ...base, skipped: true, skipReason: `Table '${targetTable}' has no columns in information_schema` }
     }
@@ -877,7 +898,7 @@ async function checkRlsIsolation(projectId: string): Promise<BehavioralCheck> {
     // ("does user_id map to users.id?") miss compound cases like
     // `author_id → users.id` or `parent_comment_id → comments.id` and
     // produce the 23503 failure pattern seen in the field.
-    const fkMappings = await loadFkColumnMappings(schemaName, targetTable)
+    const fkMappings = await loadFkColumnMappings(projectId, schemaName, targetTable)
     const fkOverrides: Record<string, string> = {}
 
     // Group mappings by parent table so we seed each parent once even when
@@ -906,10 +927,10 @@ async function checkRlsIsolation(projectId: string): Promise<BehavioralCheck> {
     }
 
     for (const [refTable, mappings] of mappingsByParent) {
-      const refCols = await loadColumns(schemaName, refTable)
+      const refCols = await loadColumns(projectId, schemaName, refTable)
       if (refCols.length === 0) continue
 
-      const refCheckOverrides = await loadCheckConstraintValues(schemaName, refTable)
+      const refCheckOverrides = await loadCheckConstraintValues(projectId, schemaName, refTable)
       // buildInsertParts skips 'id', so we prepend it explicitly. This guarantees
       // the seeded parent row has id=userAId, which is the value we'll write
       // into every FK column that targets this parent.
@@ -923,7 +944,7 @@ async function checkRlsIsolation(projectId: string): Promise<BehavioralCheck> {
         buildInsertSql(schemaName, refTable, allRefCols, allRefVals, allRefColInfoMap)
 
       try {
-        const refInserted = await executeWithUserContext<any>(userAId, true, refSql, refParams)
+        const refInserted = await executeWithUserContext<any>(projectId, userAId, true, refSql, refParams)
         if (refInserted[0]) {
           const parentId = String(refInserted[0].id ?? refInserted[0][Object.keys(refInserted[0])[0]])
           seededParentRows.push({ table: refTable, id: parentId })
@@ -950,7 +971,7 @@ async function checkRlsIsolation(projectId: string): Promise<BehavioralCheck> {
     }
 
     // Build insert overriding the userIdCol to belong to user A + any FK overrides
-    const rlsCheckOverrides = await loadCheckConstraintValues(schemaName, targetTable)
+    const rlsCheckOverrides = await loadCheckConstraintValues(projectId, schemaName, targetTable)
     const { insertCols, insertVals, colInfoMap: rlsColInfoMap } = buildInsertParts(
       cols,
       { ...rlsCheckOverrides, ...fkOverrides, [userIdCol]: userAId },
@@ -958,7 +979,7 @@ async function checkRlsIsolation(projectId: string): Promise<BehavioralCheck> {
     const { sql: insertSql, params: insertParams } = buildInsertSql(schemaName, targetTable, insertCols, insertVals, rlsColInfoMap)
 
     // User A inserts via service role (bypass existing RLS for test setup)
-    const inserted = await executeWithUserContext<any>(userAId, true, insertSql, insertParams)
+    const inserted = await executeWithUserContext<any>(projectId, userAId, true, insertSql, insertParams)
     if (!inserted[0]) {
       return { ...base, error: `RLS test: INSERT as user A into '${targetTable}' failed`, details: base.details }
     }
@@ -967,7 +988,7 @@ async function checkRlsIsolation(projectId: string): Promise<BehavioralCheck> {
 
     // User B tries to read user A's row — must be denied by RLS
     const readSql = `SELECT id FROM "${schemaName}"."${targetTable}" WHERE id = $1::uuid`
-    const userBRows = await executeWithUserContext<any>(userBId, false, readSql, [testId])
+    const userBRows = await executeWithUserContext<any>(projectId, userBId, false, readSql, [testId])
 
     if (userBRows.length > 0) {
       return {
@@ -982,7 +1003,7 @@ async function checkRlsIsolation(projectId: string): Promise<BehavioralCheck> {
     base.details.push(`✓ User B (${userBId.slice(0, 8)}…) correctly denied — 0 rows returned`)
 
     // User A reads their own row — should succeed
-    const userARows = await executeWithUserContext<any>(userAId, false, readSql, [testId])
+    const userARows = await executeWithUserContext<any>(projectId, userAId, false, readSql, [testId])
     if (userARows.length > 0) {
       base.details.push('✓ User A can read their own row (self-access allowed)')
     } else {
@@ -994,7 +1015,7 @@ async function checkRlsIsolation(projectId: string): Promise<BehavioralCheck> {
     // what the workspace auth system sets as app.user_id, isolation silently breaks.
     // Fetch the actual policy expression from pg_policies and warn if it looks wrong.
     try {
-      const policyRows = await prisma.$queryRawUnsafe<{ qual: string | null; cmd: string }[]>(
+      const policyRows = await db.$queryRawUnsafe<{ qual: string | null; cmd: string }[]>(
         `SELECT qual, cmd FROM pg_policies
          WHERE schemaname = $1 AND tablename = $2 AND policyname LIKE 'backenly_%'
          LIMIT 5`,
@@ -1031,13 +1052,14 @@ async function checkRlsIsolation(projectId: string): Promise<BehavioralCheck> {
     if (testId && targetTable) {
       try {
         await executeWithUserContext(
+          projectId,
           '', true,
           `DELETE FROM "${schemaName}"."${targetTable}" WHERE id = $1::uuid`,
           [testId],
         )
       } catch {
         try {
-          await prisma.$executeRawUnsafe(`DELETE FROM "${schemaName}"."${targetTable}" WHERE id = $1::uuid`, testId)
+          await db.$executeRawUnsafe(`DELETE FROM "${schemaName}"."${targetTable}" WHERE id = $1::uuid`, testId)
         } catch { /* non-fatal */ }
       }
     }
@@ -1047,9 +1069,9 @@ async function checkRlsIsolation(projectId: string): Promise<BehavioralCheck> {
     for (const parent of [...seededParentRows].reverse()) {
       const delSql = `DELETE FROM "${schemaName}"."${parent.table}" WHERE id = $1::uuid`
       try {
-        await executeWithUserContext('', true, delSql, [parent.id])
+        await executeWithUserContext(projectId, '', true, delSql, [parent.id])
       } catch {
-        try { await prisma.$executeRawUnsafe(delSql, parent.id) } catch { /* non-fatal */ }
+        try { await db.$executeRawUnsafe(delSql, parent.id) } catch { /* non-fatal */ }
       }
     }
   }
@@ -1058,6 +1080,7 @@ async function checkRlsIsolation(projectId: string): Promise<BehavioralCheck> {
 // ─── CHECK 3.4 — Trigger execution ───────────────────────────────────────────
 
 async function checkTriggerExecution(projectId: string): Promise<BehavioralCheck> {
+  const db = await workspaceRawClient(projectId)
   const base: BehavioralCheck = {
     id: 'trigger_execution',
     name: 'Trigger/function execution (DB event → AI function lastRun advances)',
@@ -1088,7 +1111,7 @@ async function checkTriggerExecution(projectId: string): Promise<BehavioralCheck
   let testId: string | null = null
 
   // Verify the trigger table exists in the workspace schema
-  const tableExists = await prisma.$queryRawUnsafe<{ exists: boolean }[]>(
+  const tableExists = await db.$queryRawUnsafe<{ exists: boolean }[]>(
     `SELECT EXISTS (
        SELECT 1 FROM information_schema.tables
        WHERE table_schema = $1 AND table_name = $2
@@ -1106,7 +1129,7 @@ async function checkTriggerExecution(projectId: string): Promise<BehavioralCheck
   const seededTriggerParents: Array<{ table: string; id: string }> = []
 
   try {
-    const cols = await loadColumns(schemaName, triggerTable)
+    const cols = await loadColumns(projectId, schemaName, triggerTable)
     if (cols.length === 0) {
       return { ...base, skipped: true, skipReason: `Trigger table '${triggerTable}' has no columns` }
     }
@@ -1114,7 +1137,7 @@ async function checkTriggerExecution(projectId: string): Promise<BehavioralCheck
     // Seed parent tables to satisfy FK constraints before inserting test row.
     // Use the same precise FK metadata path as the RLS check so compound
     // FK names and multi-column references work correctly.
-    const triggerFkMappings = await loadFkColumnMappings(schemaName, triggerTable)
+    const triggerFkMappings = await loadFkColumnMappings(projectId, schemaName, triggerTable)
     const triggerFkOverrides: Record<string, string> = {}
 
     const unseedableTriggerFks = triggerFkMappings.filter(m => m.foreignColumn !== 'id')
@@ -1136,15 +1159,15 @@ async function checkTriggerExecution(projectId: string): Promise<BehavioralCheck
     }
 
     for (const [refTable, mappings] of triggerMappingsByParent) {
-      const refCols = await loadColumns(schemaName, refTable)
+      const refCols = await loadColumns(projectId, schemaName, refTable)
       if (refCols.length === 0) continue
-      const refCheckOverrides = await loadCheckConstraintValues(schemaName, refTable)
+      const refCheckOverrides = await loadCheckConstraintValues(projectId, schemaName, refTable)
       const seedId = crypto.randomUUID()
       const { insertCols: rc, insertVals: rv, colInfoMap: rcm } =
         buildInsertParts(refCols, { ...refCheckOverrides, id: seedId, email: `__bv_trg_${seedId.slice(0, 8)}@test.internal` })
       const { sql: rSql, params: rParams } = buildInsertSql(schemaName, refTable, rc, rv, rcm)
       try {
-        const rInserted = await executeWithUserContext<any>('', true, rSql, rParams)
+        const rInserted = await executeWithUserContext<any>(projectId, '', true, rSql, rParams)
         if (rInserted[0]) {
           const parentId = String(rInserted[0].id ?? rInserted[0][Object.keys(rInserted[0])[0]])
           seededTriggerParents.push({ table: refTable, id: parentId })
@@ -1163,7 +1186,7 @@ async function checkTriggerExecution(projectId: string): Promise<BehavioralCheck
       }
     }
 
-    const triggerCheckOverrides = await loadCheckConstraintValues(schemaName, triggerTable)
+    const triggerCheckOverrides = await loadCheckConstraintValues(projectId, schemaName, triggerTable)
     const { insertCols, insertVals, colInfoMap: triggerColInfoMap } = buildInsertParts(
       cols,
       { ...triggerCheckOverrides, ...triggerFkOverrides },
@@ -1174,7 +1197,7 @@ async function checkTriggerExecution(projectId: string): Promise<BehavioralCheck
     const beforeRunCount = fn.runCount ?? 0
 
     // Fire the triggering event (service role — bypass RLS for test setup)
-    const inserted = await executeWithUserContext<any>('', true, insertSql, insertParams)
+    const inserted = await executeWithUserContext<any>(projectId, '', true, insertSql, insertParams)
     if (!inserted[0]) {
       return { ...base, error: `Trigger test: INSERT into '${triggerTable}' returned no row`, details: base.details }
     }
@@ -1212,22 +1235,23 @@ async function checkTriggerExecution(projectId: string): Promise<BehavioralCheck
     if (testId) {
       try {
         await executeWithUserContext(
+          projectId,
           '', true,
           `DELETE FROM "${schemaName}"."${triggerTable}" WHERE id = $1::uuid`,
           [testId],
         )
       } catch {
         try {
-          await prisma.$executeRawUnsafe(`DELETE FROM "${schemaName}"."${triggerTable}" WHERE id = $1::uuid`, testId)
+          await db.$executeRawUnsafe(`DELETE FROM "${schemaName}"."${triggerTable}" WHERE id = $1::uuid`, testId)
         } catch { /* non-fatal */ }
       }
     }
     for (const parent of [...seededTriggerParents].reverse()) {
       const delSql = `DELETE FROM "${schemaName}"."${parent.table}" WHERE id = $1::uuid`
       try {
-        await executeWithUserContext('', true, delSql, [parent.id])
+        await executeWithUserContext(projectId, '', true, delSql, [parent.id])
       } catch {
-        try { await prisma.$executeRawUnsafe(delSql, parent.id) } catch { /* non-fatal */ }
+        try { await db.$executeRawUnsafe(delSql, parent.id) } catch { /* non-fatal */ }
       }
     }
   }
@@ -1419,7 +1443,7 @@ async function checkLiveApiEndpoints(projectId: string): Promise<BehavioralCheck
     if (SYSTEM_TABLES.has(lower)) continue
     if (!tablesWithApi.has(lower)) continue // skip: no API endpoint = 404
     try {
-      const fkRefs = await loadFkReferences(httpSchemaName, lower)
+      const fkRefs = await loadFkReferences(projectId, httpSchemaName, lower)
       if (fkRefs.filter(r => r !== lower).length > 0) continue
     } catch { /* non-fatal — include the table */ }
     candidate = t

@@ -134,6 +134,31 @@ describe('ConsoleTour', () => {
     expect(posts()).toHaveLength(1)
   })
 
+  it('records it once when the button that closed it is pressed again as it fades', async () => {
+    mountTargets()
+    await start({ available: true, seen: [] })
+    const skip = screen.getByRole('button', { name: 'Skip tour' })
+    fireEvent.click(skip)
+    // Hidden from assistive technology at once, but still on screen for the fade.
+    fireEvent.click(skip)
+    expect(posts()).toHaveLength(1)
+    act(() => {
+      jest.advanceTimersByTime(600)
+    })
+    expect(document.querySelector('[role="dialog"]')).toBeNull()
+  })
+
+  it('names the dialog after the arriving step while the last one fades out', async () => {
+    mountTargets()
+    await start({ available: true, seen: [] })
+    act(() => {
+      fireEvent.click(screen.getByRole('button', { name: /Next/ }))
+    })
+    // Both titles are on screen mid-crossover; only the arriving one names the dialog.
+    expect(screen.getByText('Connect your coding agent')).toBeInTheDocument()
+    expect(screen.getByRole('dialog', { name: 'Everything your agent builds lands here' })).toBeInTheDocument()
+  })
+
   it('moves with the arrow keys', async () => {
     mountTargets()
     await start({ available: true, seen: [] })

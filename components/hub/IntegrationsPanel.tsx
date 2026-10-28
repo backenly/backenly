@@ -117,6 +117,22 @@ function PostHogLogo({ className, style }: LogoProps) {
 interface KeyVaultStatus {
   maskedKey: string
   connectedAt: string
+  /** What the provider said about the stored key — never fold into a
+   *  boolean "connected": a rejected key rendering green is how dead
+   *  credentials sit unnoticed until a function fails with them. */
+  verification?: 'verified' | 'rejected' | 'unverifiable' | 'unreachable' | 'unchecked'
+  verificationDetail?: string
+}
+
+/** Tone + label for a stored key, from the provider's own verdict. */
+function keyVerificationBadge(status?: KeyVaultStatus): { tone: 'operational' | 'failed' | 'attention' | 'neutral'; label: string } {
+  switch (status?.verification) {
+    case 'verified':     return { tone: 'operational', label: 'Connected · key confirmed' }
+    case 'rejected':     return { tone: 'failed', label: 'Key rejected by the provider' }
+    case 'unreachable':  return { tone: 'attention', label: 'Stored · provider unreachable' }
+    case 'unverifiable': return { tone: 'neutral', label: 'Stored · cannot be confirmed' }
+    default:             return { tone: 'neutral', label: 'Stored · not yet checked' }
+  }
 }
 
 interface QuickOption {
@@ -574,7 +590,7 @@ function ActivationModal({
               <label className="block">
                 <span className="mb-1.5 flex items-baseline gap-2">
                   <span className="font-mono text-[12px] text-zinc-300">{provider.webhookKey.envVar}</span>
-                  <span className="text-[12px] text-zinc-600">Optional, add after deploying</span>
+                  <span className="text-[12px] text-faint">Optional, add after deploying</span>
                 </span>
                 <div className="relative">
                   <KitInput
@@ -609,7 +625,7 @@ function ActivationModal({
             </div>
           )}
 
-          <p className="flex items-start gap-2 text-[12px] leading-[18px] text-zinc-500">
+          <p className="flex items-start gap-2 text-[12px] leading-[18px] text-faint">
             <Lock className="mt-[2px] h-3.5 w-3.5 flex-shrink-0" />
             Encrypted with AES-256-GCM, and never sent back to the browser after this step.
           </p>
@@ -620,7 +636,7 @@ function ActivationModal({
         <div className="space-y-4">
           <fieldset>
             <legend className="text-[13px] font-medium text-zinc-100">What should {provider.name} do in this backend?</legend>
-            <p className="mb-3 mt-0.5 text-[12.5px] text-zinc-500">
+            <p className="mb-3 mt-0.5 text-[12.5px] text-faint">
               Pick one or more, or describe it yourself. Your agent builds exactly this in Backenly.
             </p>
             <div className="space-y-1.5">
@@ -702,12 +718,12 @@ function StepIndicator({ step }: { step: 1 | 2 }) {
                   ? 'bg-emerald-400/15 text-emerald-300'
                   : state === 'current'
                     ? 'bg-zinc-100 text-zinc-950'
-                    : 'border border-white/[0.14] text-zinc-500'
+                    : 'border border-white/[0.14] text-faint'
               }`}
             >
               {state === 'done' ? <Check className="h-3 w-3" strokeWidth={3} /> : n}
             </span>
-            <span className={state === 'next' ? 'text-zinc-500' : 'text-zinc-200'} aria-current={state === 'current' ? 'step' : undefined}>
+            <span className={state === 'next' ? 'text-faint' : 'text-zinc-200'} aria-current={state === 'current' ? 'step' : undefined}>
               {label}
             </span>
           </li>
@@ -741,7 +757,11 @@ function ConnectorCard({
       <div className="flex flex-1 flex-col p-5">
         <div className="mb-4 flex items-start justify-between gap-3">
           <ProviderMark provider={provider} category={category} size="lg" />
-          {provider.enabled && <StatusDot tone="operational" label="Connected" />}
+          {provider.enabled && (
+            provider.keyStatus
+              ? <StatusDot tone={keyVerificationBadge(provider.keyStatus).tone} label={keyVerificationBadge(provider.keyStatus).label} />
+              : <StatusDot tone="operational" label="Connected" />
+          )}
         </div>
 
         <h3 className="text-[14px] font-semibold leading-[20px] tracking-[-0.01em] text-zinc-50">{provider.name}</h3>
@@ -749,7 +769,7 @@ function ConnectorCard({
       </div>
 
       <div className="flex items-center justify-between gap-3 border-t border-white/[0.06] px-5 py-3">
-        <span className="truncate text-[12px] text-zinc-500">{category.title}</span>
+        <span className="truncate text-[12px] text-faint">{category.title}</span>
         <span className="flex flex-shrink-0 items-center gap-1 text-[12.5px] font-medium text-zinc-400 transition-colors group-hover:text-zinc-100">
           {provider.enabled ? 'Manage' : 'Connect'}
           <ChevronRight className="h-3.5 w-3.5 transition-transform duration-150 group-hover:translate-x-0.5" />
@@ -791,7 +811,10 @@ function ConnectorDetail({
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
               <h1 className="text-[22px] font-semibold leading-[28px] tracking-[-0.022em] text-zinc-50">{provider.name}</h1>
-              <StatusDot tone={provider.enabled ? 'operational' : 'neutral'} label={provider.enabled ? 'Connected' : 'Not connected'} />
+              <StatusDot
+                tone={!provider.enabled ? 'neutral' : provider.keyStatus ? keyVerificationBadge(provider.keyStatus).tone : 'operational'}
+                label={!provider.enabled ? 'Not connected' : provider.keyStatus ? keyVerificationBadge(provider.keyStatus).label : 'Connected'}
+              />
             </div>
             <p className="mt-0.5 text-[14px] text-zinc-400">{provider.tagline}</p>
           </div>
@@ -808,12 +831,16 @@ function ConnectorDetail({
             <div className="flex items-center justify-between gap-3 rounded-[10px] border border-white/[0.08] bg-[#0f1012] px-4 py-3.5">
               <div className="min-w-0">
                 <p className="font-mono text-[12.5px] text-zinc-100">{provider.envVar}</p>
-                <p className="mt-0.5 font-mono text-[12px] text-zinc-500">{provider.keyStatus.maskedKey}</p>
+                <p className="mt-0.5 font-mono text-[12px] text-faint">{provider.keyStatus.maskedKey}</p>
+                {(provider.keyStatus.verification === 'rejected' || provider.keyStatus.verification === 'unreachable') &&
+                  provider.keyStatus.verificationDetail && (
+                    <p className="mt-1 text-[12px] leading-[18px] text-amber-200/80">{provider.keyStatus.verificationDetail}</p>
+                  )}
               </div>
-              <StatusDot tone="operational" label="Stored" />
+              <StatusDot tone={keyVerificationBadge(provider.keyStatus).tone} label={keyVerificationBadge(provider.keyStatus).label} />
             </div>
           ) : (
-            <div className="rounded-[10px] border border-dashed border-white/[0.10]">
+            <div className="rounded-[10px] border border-white/[0.08] bg-[#0f1012]">
               <EmptyState
                 icon={KeyRound}
                 title="No key stored"
@@ -860,7 +887,7 @@ export function IntegrationsPanel() {
       if (!res.ok) { setFetchError(true); return }
       const { integrations, keyVault } = await res.json() as {
         integrations: Record<string, { enabled: boolean }>
-        keyVault: Record<string, { maskedKey: string; connectedAt: string }>
+        keyVault: Record<string, KeyVaultStatus>
       }
 
       setFetchError(false)
@@ -945,7 +972,7 @@ export function IntegrationsPanel() {
             description="Connect a provider’s key once. It becomes callable from functions, triggers and your agent through ctx.integrations, and never appears in code."
             meta={
               !loading ? (
-                <span className="text-[13px] tabular-nums text-zinc-500">
+                <span className="text-[13px] tabular-nums text-faint">
                   {totalEnabled} of {allProviders.length} connected
                 </span>
               ) : undefined
@@ -990,7 +1017,7 @@ export function IntegrationsPanel() {
                     }`}
                   >
                     {f.label}
-                    <span className={`tabular-nums ${on ? 'text-zinc-400' : 'text-zinc-600'}`}>{f.count}</span>
+                    <span className={`tabular-nums ${on ? 'text-zinc-400' : 'text-faint'}`}>{f.count}</span>
                   </button>
                 )
               })}
@@ -1022,7 +1049,7 @@ export function IntegrationsPanel() {
               ))}
             </div>
           ) : visible.length === 0 ? (
-            <div className="rounded-[10px] border border-dashed border-white/[0.10]">
+            <div className="rounded-[10px] border border-white/[0.08] bg-[#0f1012]">
               <EmptyState
                 icon={Search}
                 title="No connectors match"

@@ -13,7 +13,10 @@
  *     → persists delivery result to TriggerDeliveryLog (DLQ for failures)
  */
 
+import { Prisma } from '@prisma/client'
 import { prisma } from '@/lib/db'
+import { workspaceRawClient } from '@/lib/data-plane/regional'
+import { REGIONAL_BODY_RETENTION_DAYS, failureWithoutReply, regionalBodiesFor, type RegionalBodies } from '@/lib/data-plane/regional-bodies'
 import * as Sentry from '@sentry/nextjs'
 import crypto from 'crypto'
 
@@ -118,9 +121,11 @@ export async function fireTriggers(
         results.push(result)
       } catch (err: any) {
         console.error(`[Triggers] DB action failed for trigger "${trigger.name}":`, err.message)
+        // Identifiers only: the row that fired the trigger is the customer's
+        // data and never goes to the error reporter.
         Sentry.captureException(err, {
           tags: { trigger_id: trigger.id, trigger_name: trigger.name, action_type: trigger.actionType },
-          extra: { projectId, event },
+          extra: triggerReportContext(projectId, event),
         })
         results.push({
           triggerId: trigger.id,
@@ -164,18 +169,11 @@ async function fireWebhookWithDLQ(
     attempts = att
 
     // SUCCESS — log delivery
-    await prisma.triggerDeliveryLog.create({
-      data: {
-        triggerId: trigger.id,
-        projectId,
-        eventType: event.type,
-        table: event.table,
-        payload: payload as any,
-        status: 'SUCCESS',
-        attemptCount: attempts,
-        statusCode: lastStatusCode,
-        deliveredAt: new Date(),
-      },
+    await recordDelivery(projectId, trigger, event, payload, {
+      status: 'SUCCESS',
+      attemptCount: attempts,
+      statusCode: lastStatusCode,
+      deliveredAt: new Date(),
     })
 
     console.log(`[Triggers] ✅ Webhook fired to ${trigger.webhookUrl}`)
@@ -189,29 +187,25 @@ async function fireWebhookWithDLQ(
     lastError = err.message
 
     // DEAD — all retries exhausted, push to DLQ
-    await prisma.triggerDeliveryLog.create({
-      data: {
-        triggerId: trigger.id,
-        projectId,
-        eventType: event.type,
-        table: event.table,
-        payload: payload as any,
-        status: 'DEAD',
-        attemptCount: attempts,
-        statusCode: lastStatusCode,
-        error: lastError,
-      },
+    await recordDelivery(projectId, trigger, event, payload, {
+      status: 'DEAD',
+      attemptCount: attempts,
+      statusCode: lastStatusCode,
+      error: lastError,
     })
 
-    // Report to Sentry — this is a silent failure non-devs can't see
-    Sentry.captureException(err, {
+    // Report to Sentry — this is a silent failure non-devs can't see. Without
+    // the row, and without the receiver's path and query, which can carry a
+    // token: its host is enough to tell which endpoint is failing. Nor the
+    // receiver's reply, which can quote the row it was sent.
+    Sentry.captureException(withoutReply(err), {
       tags: {
         trigger_id: trigger.id,
         trigger_name: trigger.name,
-        webhook_url: trigger.webhookUrl,
+        webhook_host: hostOf(trigger.webhookUrl),
         project_id: projectId,
       },
-      extra: { event, attempts, lastStatusCode },
+      extra: { ...triggerReportContext(projectId, event), attempts, lastStatusCode },
     })
 
     console.error(`[Triggers] ☠️ Webhook permanently failed for trigger "${trigger.name}" after ${attempts} attempts — logged to DLQ`)
@@ -224,6 +218,40 @@ async function fireWebhookWithDLQ(
       error: lastError,
     }
   }
+}
+
+/**
+ * A delivery's log row, and its body where the project's data is kept: the
+ * payload and the receiver's reply on the row at home; in the project's region
+ * otherwise, written first and under the row's id, with only the HTTP status
+ * of a failure on the row (lib/data-plane/regional-bodies.ts).
+ */
+async function recordDelivery(
+  projectId: string,
+  trigger: { id: string },
+  event: TriggerEvent,
+  payload: Record<string, any>,
+  outcome: { status: 'SUCCESS' | 'DEAD'; attemptCount: number; statusCode?: number; error?: string; deliveredAt?: Date },
+): Promise<void> {
+  const bodies = await regionalBodiesFor(projectId)
+  const id = crypto.randomUUID()
+  await bodies.set('trigger', id, { payload, ...(outcome.error !== undefined ? { error: outcome.error } : {}) })
+
+  await prisma.triggerDeliveryLog.create({
+    data: {
+      id,
+      triggerId: trigger.id,
+      projectId,
+      eventType: event.type,
+      table: event.table,
+      payload: bodies.region ? Prisma.DbNull : (payload as any),
+      status: outcome.status,
+      attemptCount: outcome.attemptCount,
+      statusCode: outcome.statusCode,
+      deliveredAt: outcome.deliveredAt,
+      error: bodies.region ? failureWithoutReply(outcome.error, outcome.statusCode) : outcome.error,
+    },
+  })
 }
 
 /**
@@ -247,7 +275,15 @@ export async function replayDelivery(
     return { success: false, error: 'Trigger no longer has a webhook URL' }
   }
 
-  const payload = log.payload as Record<string, any>
+  const bodies: RegionalBodies = await regionalBodiesFor(projectId)
+  let payload = log.payload as Record<string, any> | null
+  if (payload === null) {
+    const held = await bodies.get('trigger', deliveryLogId)
+    if (!held) {
+      return { success: false, error: `The event is no longer kept in the project's region (${REGIONAL_BODY_RETENTION_DAYS} days)` }
+    }
+    payload = held.payload as Record<string, any>
+  }
 
   try {
     const { statusCode } = await executeWebhookRequest(trigger, payload)
@@ -263,6 +299,7 @@ export async function replayDelivery(
         attemptCount: { increment: 1 },
       },
     })
+    if (bodies.region) await bodies.set('trigger', deliveryLogId, { error: null })
 
     console.log(`[Triggers] ✅ Replayed delivery ${deliveryLogId} successfully`)
     return { success: true }
@@ -271,16 +308,42 @@ export async function replayDelivery(
     await prisma.triggerDeliveryLog.update({
       where: { id: deliveryLogId },
       data: {
-        error: err.message,
+        error: bodies.region ? failureWithoutReply(err.message, undefined) : err.message,
         attemptCount: { increment: 1 },
       },
     })
+    if (bodies.region) await bodies.set('trigger', deliveryLogId, { error: err.message })
 
-    Sentry.captureException(err, {
+    Sentry.captureException(withoutReply(err), {
       tags: { replay: true, delivery_log_id: deliveryLogId, project_id: projectId },
     })
 
     return { success: false, error: err.message }
+  }
+}
+
+/** A delivery failure as the error reporter may see it: the HTTP status, not the receiver's reply. */
+export function withoutReply(err: unknown): Error {
+  const message = err instanceof Error ? err.message : String(err)
+  const reported = new Error(failureWithoutReply(message, undefined) ?? 'Webhook delivery failed')
+  reported.name = err instanceof Error ? err.name : 'Error'
+  return reported
+}
+
+// ── Error-report context ──────────────────────────────────────────────────────
+
+/** What a trigger failure tells the error reporter: which event, never its row. */
+export function triggerReportContext(projectId: string, event: TriggerEvent): Record<string, string> {
+  return { projectId, table: event.table, eventType: event.type }
+}
+
+/** A webhook URL's host, or a placeholder for one that does not parse. */
+export function hostOf(url: string | null | undefined): string {
+  if (!url) return 'none'
+  try {
+    return new URL(url).host
+  } catch {
+    return 'unparseable'
   }
 }
 
@@ -323,16 +386,29 @@ async function executeWebhookRequest(
     headers['X-Backenly-Signature'] = `sha256=${signature}`
   }
 
-  const response = await fetch(trigger.webhookUrl, {
+  // safeFetch, NOT fetch — the same guard endpoint webhooks already deliver
+  // through (lib/webhooks/index.ts). A raw fetch on a stored URL from the web
+  // process is a server-side request forgery primitive with a persistence
+  // layer: the failure text below lands in TriggerDeliveryLog.error, which the
+  // agent reads back via webhooks {trigger_deliveries} — loopback services,
+  // the VPC and 169.254.169.254 included. The guard validates scheme and
+  // address at connect time, re-validates every redirect hop, and caps the
+  // response size.
+  const { safeFetch } = await import('@/lib/security/outbound-guard')
+  const response = await safeFetch(trigger.webhookUrl, {
     method: 'POST',
+    egressScope: 'webhook',
     headers,
     body,
-    signal: AbortSignal.timeout(30_000), // 30s timeout
+    timeoutMs: 30_000,
+    maxBytes: 64 * 1024,
   })
 
   if (!response.ok) {
     const text = await response.text().catch(() => '')
-    throw new Error(`Webhook returned ${response.status}: ${text}`)
+    // Diagnostic only, and served back to every reader of the delivery log:
+    // capped so a receiver cannot park kilobytes of its choosing there.
+    throw new Error(`Webhook returned ${response.status}: ${String(text).slice(0, 300)}`)
   }
 
   return { statusCode: response.status }
@@ -413,7 +489,9 @@ async function executeInsertRow(
     VALUES (${placeholders})
   `
 
-  await prisma.$executeRawUnsafe(sql, ...values)
+  // On the database holding the project's data, in its region.
+  const db = await workspaceRawClient(projectId)
+  await db.$executeRawUnsafe(sql, ...values)
 
   console.log(`[Triggers] ✅ Inserted row into "${trigger.targetTable}" via trigger "${trigger.name}"`)
 
@@ -467,7 +545,9 @@ async function executeUpdateRow(
     WHERE ${whereClauses.join(' AND ')}
   `
 
-  await prisma.$executeRawUnsafe(sql, ...setValues, ...whereValues)
+  // On the database holding the project's data, in its region.
+  const db = await workspaceRawClient(projectId)
+  await db.$executeRawUnsafe(sql, ...setValues, ...whereValues)
 
   console.log(`[Triggers] ✅ Updated rows in "${trigger.targetTable}" via trigger "${trigger.name}"`)
 
@@ -509,7 +589,9 @@ async function executeDeleteRows(
     WHERE ${whereClauses.join(' AND ')}
   `
 
-  await prisma.$executeRawUnsafe(sql, ...values)
+  // On the database holding the project's data, in its region.
+  const db = await workspaceRawClient(projectId)
+  await db.$executeRawUnsafe(sql, ...values)
 
   console.log(`[Triggers] ✅ Deleted rows from "${trigger.targetTable}" via trigger "${trigger.name}"`)
 
@@ -538,7 +620,18 @@ export async function createTrigger(
     webhookUrl?: string
   }
 ): Promise<{ id: string; name: string }> {
-  const trigger = await prisma.appTrigger.create({
+  // A stored URL is a standing instruction to the delivery worker. Refusing a
+  // blocked destination here answers the creator with the reason, instead of
+  // parking a trigger that fails on every fire; delivery still re-validates,
+  // because a hostname that is public today can point somewhere else tomorrow.
+  if (params.webhookUrl) {
+    const { assertAllowedUrl } = await import('@/lib/security/outbound-guard')
+    assertAllowedUrl(params.webhookUrl, 'webhook')
+  }
+
+  // One governed change, in the project's history (lib/changes/resources/webhooks.ts).
+  const { governedChange } = await import('@/lib/changes/ledger')
+  const trigger = await governedChange(projectId, `Create trigger ${params.name}`, () => prisma.appTrigger.create({
     data: {
       projectId,
       name: params.name,
@@ -552,7 +645,7 @@ export async function createTrigger(
       staticFields: params.staticFields || undefined,
       webhookUrl: params.webhookUrl,
     },
-  })
+  }))
 
   console.log(`[Triggers] Created trigger "${trigger.name}" (${trigger.id})`)
 
@@ -571,16 +664,32 @@ export async function listTriggers(projectId: string) {
       event: true,
       actionType: true,
       targetTable: true,
+      // The destination a webhook trigger posts to — the console renders it.
+      // webhookSecret is deliberately NOT selected: it never leaves the server.
+      webhookUrl: true,
       enabled: true,
       createdAt: true,
     },
   })
 }
 
-export async function deleteTrigger(projectId: string, triggerId: string): Promise<void> {
-  await prisma.appTrigger.deleteMany({
+/**
+ * Delete one trigger of this project. Returns whether a trigger was deleted, so
+ * a caller never reports a removal that did not happen (WH-F15).
+ *
+ * The id is checked before the query: Prisma drops an undefined filter, so
+ * `deleteMany({ where: { id: undefined, projectId } })` deletes EVERY trigger
+ * in the project.
+ */
+export async function deleteTrigger(projectId: string, triggerId: string): Promise<boolean> {
+  if (typeof triggerId !== 'string' || !triggerId) {
+    throw new Error('deleteTrigger needs the id of the trigger to delete')
+  }
+  const { governedChange } = await import('@/lib/changes/ledger')
+  const { count } = await governedChange(projectId, 'Delete a trigger', () => prisma.appTrigger.deleteMany({
     where: { id: triggerId, projectId },
-  })
+  }))
+  return count > 0
 }
 
 /**
@@ -590,6 +699,20 @@ export async function listDeliveryLogs(
   projectId: string,
   opts: { status?: 'SUCCESS' | 'FAILED' | 'DEAD'; limit?: number } = {}
 ) {
+  const rows = await deliveryLogRows(projectId, opts)
+
+  // A regional project's failure text is read from its region, for whoever
+  // asked; the platform row holds only the HTTP status.
+  const bodies = await regionalBodiesFor(projectId)
+  if (!bodies.region) return rows
+  const held = await bodies.getMany('trigger', rows.map((row) => row.id))
+  return rows.map((row) => {
+    const error = held.get(row.id)?.error
+    return error != null ? { ...row, error } : row
+  })
+}
+
+function deliveryLogRows(projectId: string, opts: { status?: 'SUCCESS' | 'FAILED' | 'DEAD'; limit?: number }) {
   return prisma.triggerDeliveryLog.findMany({
     where: {
       projectId,

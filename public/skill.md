@@ -48,7 +48,7 @@ Exactly **23** are advertised over MCP; `tools/list` (or `backenly tools`) is th
 
 Older tool names that are no longer advertised still run by name through `backenly call` (for example `enable_auth`, `create_bucket`, `set_env_var`). REST is automatic: `/db/<table>` exists the moment the table does, so there is no API-generation step.
 
-**Destructive operations escalate instead of executing.** Deploying, rolling back, deleting buckets or functions, revoking keys: call the domain action (`deploy { action: "deploy" }`, `functions { action: "delete" }` …) and the exact call is parked. Dropping or truncating a table: ask through `backend_chat`. Either way the response carries an `approval` id and nothing is changed until a human approves it on the Autonomy page; an approved domain call runs verbatim. Poll `check_approval` every 15–30s: `executed` (done), `rejected` (do not retry), `failed` (nothing applied), `partial` (some changes landed; verify, do not replay), `expired`.
+**Destructive operations escalate instead of executing.** Deploying, rolling back, deleting buckets or functions, revoking keys: call the domain action (`deploy { action: "deploy" }`, `functions { action: "delete" }` …) and the exact call is parked. Dropping or truncating a table: ask through `backend_chat`. Either way the response carries an `approval` id and nothing is changed until a human approves it on the Autonomy page; an approved domain call runs verbatim. Poll `check_approval` every 15–30s: `executed` (done), `rejected` (do not retry), `failed` (approved but incomplete — work may have partially landed; read state before retrying), `partial` (some changes landed; verify, do not replay), `expired`.
 
 ## Integrations
 
@@ -64,7 +64,7 @@ Two headers: `x-api-key: <project key>` on every request, and `X-User-Token: <en
 
 - `/api/v1/{projectId}/db/{table}`: `GET` (list), `POST`, `GET /{id}`, `PATCH /{id}` (`PUT` is accepted as the same update), `DELETE /{id}`.
 - `/api/v2/{projectId}/{table}`: PostgREST grammar: `?price=gte.100`, `?order=createdAt.desc`, `?select=*,author(*)`.
-- `/auth/signup`, `/auth/signin`, `/auth/refresh-token`, `/auth/logout`, `/auth/forgot-password`, `/auth/reset-password`, `/auth/me`, magic links, OAuth, email verification.
+- `/auth/signup`, `/auth/signin`, `/auth/refresh-token`, `/auth/logout`, `/auth/forgot-password`, `/auth/reset-password`, magic links, OAuth, email verification. Signup/signin answer `{ data: { user, token } }`; there is no `/auth/me`.
 - `/db/users` is never served; users live behind `/auth/*`.
 
 SDK: `npm install @backenly/sdk`, then `createClient({ projectId, apiKey })` with that project key.
@@ -72,17 +72,18 @@ SDK: `npm install @backenly/sdk`, then `createClient({ projectId, apiKey })` wit
 ## The workflow that works
 
 1. `read_backend_state`, then `get_table_schema` on anything you will touch. Never guess names.
-2. Change structure with `apply_migration` / `set_rls`, or `backend_chat` for the outcome.
+2. Change structure with `apply_migration` / `set_rls`, or `backend_chat` for the outcome. **Building an app:** design its whole data model first (every table its features need, with foreign keys) and send it as one `apply_migration`, parents first; then a storage bucket for each kind of upload, `auth`, and realtime where features need it. On a protected production, apply it with a `branchId` and merge. `backend_chat` answers within about 45 s; a longer request keeps running and answers `status: "running"`, and `backend_chat { "message": "status" }` collects its result. A response carrying `next` is not finished: make that call.
 3. Read the schema back after every migration. **Every new table gets four columns you did not ask for:** `id` (uuid), `"createdAt"` and `"updatedAt"` (camelCase), `"deleted_at"` (snake_case). Order by `createdAt`, filter soft deletes on `deleted_at`, and quote camelCase names in SQL. A `created_at` or `updated_at` you declare in `CREATE TABLE` is skipped in favour of these.
 4. `generate_types` (or `backenly types --client`), commit the output, regenerate after every schema change. `backenly diff` in CI fails when they drift.
 5. Build the app against the REST API or SDK.
 
 ## Errors
 
-Structured JSON: `{ ok: false, error, code }`. `RATE_LIMITED`: respect `retry-after`. `PLAN_LIMIT_EXCEEDED` / `AI_CREDITS_EXHAUSTED`: the human must act; do not retry in a loop (only `backend_chat` and `generate_function` spend credits). `READ_ONLY_KEY`: ask for a read-write key. `INVALID_KEY` / `NO_AUTH`: ask for a fresh key from Connect → Agents. `MCP_KEY_IN_APP` / `SERVICE_ROLE_IN_BROWSER`: the app holds the wrong key; give it a project key as above, and if the refused key was committed or shipped, tell your human to revoke it.
+Structured JSON: `{ ok: false, error, code }`. `RATE_LIMITED`: respect `retry-after`. `PLAN_LIMIT_EXCEEDED` / `AI_CREDITS_EXHAUSTED`: the human must act; do not retry in a loop (only Backenly's own model spends credits: `backend_chat`, `functions` `create` and `schedule`, and the functions `integrations` `connect` wires). `READ_ONLY_KEY`: ask for a read-write key. `INVALID_KEY` / `NO_AUTH`: ask for a fresh key from Connect → Agents. `MCP_KEY_IN_APP` / `SERVICE_ROLE_IN_BROWSER`: the app holds the wrong key; give it a project key as above, and if the refused key was committed or shipped, tell your human to revoke it.
 
 ## Worth telling your human
 
 - Every change is verified, snapshotted and reversible; the History page is the audit trail and the Autonomy page is the approvals inbox.
 - The backend is not static between sessions: the autonomy loop repairs what it safely can on every plan, so a gap you leave may already be closed next time.
+- When a table starts doing two jobs, Backenly may propose moving the second into a table of its own, with apps kept working throughout. `autonomy { action: "evolution" }` says what is proposed and why; only a person approves it, on the Autonomy page.
 - Docs index: https://backenly.com/llms.txt; each topic is https://backenly.com/docs/agents/<topic>.md, or `fetch_docs { topic }` · this file: https://backenly.com/skill.md

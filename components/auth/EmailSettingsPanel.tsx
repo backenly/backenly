@@ -37,6 +37,8 @@ import {
 import {
   KitButton, KitNote, KitField, KitInput, KitTextarea, KitModal, KitConfirmDialog, SettingsCard, Spinner, StatusDot,
 } from '@/components/inspector/kit'
+import { formatStamp } from '@/components/console/format'
+import { ago } from '@/components/changes/present'
 
 interface SmtpView {
   configured: boolean
@@ -70,6 +72,24 @@ interface FieldProblem {
   message: string
 }
 
+interface PolicyView {
+  appName: string | null
+  appUrl: string | null
+  requireEmailVerification: boolean
+  magicLinksEnabled: boolean
+  effectiveAppName: string
+  effectiveAppUrl: string | null
+}
+
+function formFromPolicy(p: PolicyView) {
+  return {
+    appName: p.appName ?? '',
+    appUrl: p.appUrl ?? '',
+    requireEmailVerification: p.requireEmailVerification,
+    magicLinksEnabled: p.magicLinksEnabled,
+  }
+}
+
 const SOURCE_LABEL: Record<SmtpView['activeSource'], string> = {
   project: 'This project’s SMTP',
   deployment: 'Deployment SMTP',
@@ -98,19 +118,29 @@ export function EmailSettingsPanel({ projectId }: { projectId: string }) {
   const [testTo, setTestTo] = useState('')
   const [confirmRemove, setConfirmRemove] = useState(false)
   const [editing, setEditing] = useState<TemplateRow | null>(null)
+  const [policy, setPolicy] = useState<PolicyView | null>(null)
+  const [policyForm, setPolicyForm] = useState({
+    appName: '', appUrl: '', requireEmailVerification: false, magicLinksEnabled: true,
+  })
+  const [policyProblems, setPolicyProblems] = useState<FieldProblem[]>([])
 
   const load = useCallback(async () => {
     setLoadError(null)
     try {
-      const [smtpRes, tplRes] = await Promise.all([
+      const [smtpRes, tplRes, policyRes] = await Promise.all([
         fetch(`/api/projects/${projectId}/email/smtp`),
         fetch(`/api/projects/${projectId}/email/templates`),
+        fetch(`/api/projects/${projectId}/auth-email-settings`),
       ])
       const smtpData = await smtpRes.json()
       const tplData = await tplRes.json()
+      const policyData = await policyRes.json()
       if (!smtpRes.ok) throw new Error(smtpData.error ?? 'Mail settings could not be loaded.')
       if (!tplRes.ok) throw new Error(tplData.error ?? 'Templates could not be loaded.')
+      if (!policyRes.ok) throw new Error(policyData.error ?? 'Sign-in email settings could not be loaded.')
 
+      setPolicy(policyData.settings)
+      setPolicyForm(formFromPolicy(policyData.settings))
       setSmtp(smtpData.smtp)
       setTemplates(tplData.templates ?? [])
       setVariables(tplData.variables ?? [])
@@ -216,6 +246,39 @@ export function EmailSettingsPanel({ projectId }: { projectId: string }) {
     }
   }
 
+  async function savePolicy() {
+    setBusy('policy')
+    setPolicyProblems([])
+    setMessage(null)
+    try {
+      const res = await fetch(`/api/projects/${projectId}/auth-email-settings`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          appName: policyForm.appName.trim() || null,
+          appUrl: policyForm.appUrl.trim() || null,
+          requireEmailVerification: policyForm.requireEmailVerification,
+          magicLinksEnabled: policyForm.magicLinksEnabled,
+        }),
+      })
+      const data = await res.json()
+      if (!res.ok) {
+        // A 400 names each field; a 409 is the no-sender refusal, in the server's words.
+        const details: Record<string, string[] | undefined> = data.details ?? {}
+        const fieldProblems = Object.entries(details).flatMap(([field, msgs]) => (msgs ?? []).map(m => ({ field, message: m })))
+        setPolicyProblems(fieldProblems.length ? fieldProblems : [{ message: data.error ?? 'These settings could not be saved.' }])
+        return
+      }
+      setPolicy(data.settings)
+      setPolicyForm(formFromPolicy(data.settings))
+      setMessage({ tone: 'success', text: 'Sign-in email settings saved.' })
+    } catch (err) {
+      setMessage({ tone: 'danger', text: err instanceof Error ? err.message : 'These settings could not be saved.' })
+    } finally {
+      setBusy(null)
+    }
+  }
+
   async function revertTemplate(kind: string) {
     setBusy(`revert-${kind}`)
     try {
@@ -232,7 +295,7 @@ export function EmailSettingsPanel({ projectId }: { projectId: string }) {
 
   if (loading) {
     return (
-      <div className="mx-auto flex w-full max-w-[1200px] items-center gap-2 px-4 py-8 text-[13px] text-zinc-500 sm:px-6 lg:px-8">
+      <div className="mx-auto flex w-full max-w-[1200px] items-center gap-2 px-4 py-8 text-[13px] text-faint sm:px-6 lg:px-8">
         <Spinner />
         Loading mail settings…
       </div>
@@ -290,7 +353,7 @@ export function EmailSettingsPanel({ projectId }: { projectId: string }) {
             <div className="mb-5">
               {smtp.lastTestAt && !smtp.lastTestError && (
                 <KitNote icon={CheckCircle2} tone="success">
-                  Last test delivered on {new Date(smtp.lastTestAt).toLocaleString()}.
+                  Last test delivered <time dateTime={smtp.lastTestAt} title={formatStamp(smtp.lastTestAt)}>{ago(smtp.lastTestAt)}</time>.
                 </KitNote>
               )}
               {smtp.lastTestAt && smtp.lastTestError && (
@@ -352,7 +415,7 @@ export function EmailSettingsPanel({ projectId }: { projectId: string }) {
             />
             <span className="min-w-0">
               <span className="block text-[13px] font-medium text-zinc-100">Send with these settings</span>
-              <span className="mt-0.5 block text-[12.5px] leading-[18px] text-zinc-500">
+              <span className="mt-0.5 block text-[12.5px] leading-[18px] text-faint">
                 {smtp?.deploymentFallbackAvailable
                   ? 'Unchecked, auth emails fall back to the deployment’s SMTP.'
                   : 'Unchecked, auth emails are only logged to the server console.'}
@@ -401,6 +464,83 @@ export function EmailSettingsPanel({ projectId }: { projectId: string }) {
           </form>
         </SettingsCard>
 
+        {/* ── When mail is required, and where its links go ────────── */}
+        {policy && (
+          <SettingsCard
+            title="Sign-in emails"
+            description="The name and address auth emails carry, and whether sign-in waits for them."
+            actions={
+              <KitButton variant="primary" size="sm" icon={busyIcon('policy', Save)} loading={busy === 'policy'} disabled={busy !== null && busy !== 'policy'} onClick={savePolicy}>
+                Save
+              </KitButton>
+            }
+          >
+            {policy.requireEmailVerification && smtp?.activeSource === 'none' && (
+              <div className="mb-5">
+                <KitNote icon={AlertTriangle} tone="danger" title="New users cannot sign in">
+                  Sign-in requires a verified email and nothing is configured to send one. Configure outgoing mail above, or turn verification off.
+                </KitNote>
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <KitField label="App name" hint={`Empty uses “${policy.effectiveAppName}”.`}>
+                <KitInput value={policyForm.appName} onChange={e => setPolicyForm({ ...policyForm, appName: e.target.value })} placeholder={policy.effectiveAppName} />
+              </KitField>
+              <KitField
+                label="App URL"
+                hint={policy.effectiveAppUrl ? 'Password reset links land here.' : 'Not set: password reset has no page to land on.'}
+              >
+                <KitInput type="url" value={policyForm.appUrl} onChange={e => setPolicyForm({ ...policyForm, appUrl: e.target.value })} placeholder={policy.effectiveAppUrl ?? 'https://app.example.com'} spellCheck={false} />
+              </KitField>
+            </div>
+
+            <div className="mt-5 space-y-2">
+              <label className={`flex items-start gap-3 rounded-[8px] border border-white/[0.07] bg-white/[0.02] px-3.5 py-3 ${smtp?.activeSource === 'none' && !policy.requireEmailVerification ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'}`}>
+                <input
+                  type="checkbox"
+                  checked={policyForm.requireEmailVerification}
+                  disabled={smtp?.activeSource === 'none' && !policy.requireEmailVerification}
+                  onChange={e => setPolicyForm({ ...policyForm, requireEmailVerification: e.target.checked })}
+                  className="mt-[3px] h-4 w-4 flex-shrink-0 accent-violet-400"
+                />
+                <span className="min-w-0">
+                  <span className="block text-[13px] font-medium text-zinc-100">Require a verified email to sign in</span>
+                  <span className="mt-0.5 block text-[12.5px] leading-[18px] text-faint">
+                    {smtp?.activeSource === 'none' && !policy.requireEmailVerification
+                      ? 'Configure and test outgoing mail first: without a sender, every new user would wait for an email that never arrives.'
+                      : 'Users who already exist are recorded as verified when this is turned on, so none of them are locked out.'}
+                  </span>
+                </span>
+              </label>
+              <label className="flex cursor-pointer items-start gap-3 rounded-[8px] border border-white/[0.07] bg-white/[0.02] px-3.5 py-3">
+                <input
+                  type="checkbox"
+                  checked={policyForm.magicLinksEnabled}
+                  onChange={e => setPolicyForm({ ...policyForm, magicLinksEnabled: e.target.checked })}
+                  className="mt-[3px] h-4 w-4 flex-shrink-0 accent-violet-400"
+                />
+                <span className="min-w-0">
+                  <span className="block text-[13px] font-medium text-zinc-100">Offer magic-link sign-in</span>
+                  <span className="mt-0.5 block text-[12.5px] leading-[18px] text-faint">
+                    Passwordless sign-in by an emailed link. Off, the magic-link endpoint refuses.
+                  </span>
+                </span>
+              </label>
+            </div>
+
+            {policyProblems.length > 0 && (
+              <div className="mt-4">
+                <KitNote icon={AlertTriangle} tone="danger" title="These settings were not saved">
+                  <ul className="list-disc pl-4">
+                    {policyProblems.map((p, i) => <li key={i}>{p.field ? `${p.field}: ` : ''}{p.message}</li>)}
+                  </ul>
+                </KitNote>
+              </div>
+            )}
+          </SettingsCard>
+        )}
+
         {/* ── What the mail says ──────────────────────────────────── */}
         <SettingsCard
           title="Auth email templates"
@@ -417,7 +557,7 @@ export function EmailSettingsPanel({ projectId }: { projectId: string }) {
               <li key={t.kind} className="flex flex-wrap items-center gap-3 px-5 py-3.5 sm:px-6">
                 <div className="min-w-0 flex-1">
                   <p className="text-[13px] font-medium text-zinc-100">{t.title}</p>
-                  <p className="mt-0.5 text-[12.5px] leading-[18px] text-zinc-500">{t.sends}</p>
+                  <p className="mt-0.5 text-[12.5px] leading-[18px] text-faint">{t.sends}</p>
                 </div>
                 <StatusDot tone={t.customised ? 'beta' : 'neutral'} label={t.customised ? 'Customised' : 'Built-in'} />
                 <div className="flex items-center gap-1">
@@ -577,7 +717,7 @@ function TemplateEditor({
 
         {preview && (
           <div>
-            <p className="mb-2 text-[12.5px] text-zinc-500">
+            <p className="mb-2 text-[12.5px] text-faint">
               Preview. Subject: <span className="text-zinc-200">{preview.subject}</span>
             </p>
             {/* Sandboxed with NO tokens: no scripts, no same-origin. Operator

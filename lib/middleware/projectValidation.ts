@@ -15,6 +15,7 @@ import { NextRequest, NextResponse } from 'next/server'
 
 import { requireAuth } from '@/lib/auth/middleware'
 import { getProjectResolver } from '@/lib/edition'
+import { canAdministerProject, canWriteProject } from '@/lib/edition/guard'
 import { ProjectResolutionError } from '@/lib/edition/types'
 import { touchProjectActivity } from '@/lib/projects/activity'
 
@@ -196,8 +197,29 @@ export function extractProjectId(
 }
 
 /**
+ * The authority a route needs beyond membership.
+ *
+ * `validateProjectAccess` answers "may this caller reach this project", which
+ * is VIEWER and above. That is the right default for the dashboard panels this
+ * wrapper mostly serves, and it is the wrong answer for a route that issues,
+ * rotates, revokes or exports something: an organization VIEWER could mint a
+ * full-write MCP key or download a database dump, because membership was the
+ * only question ever asked.
+ *
+ *   'write'      DEVELOPER+  (canWriteProject)      changes to the project
+ *   'administer' ADMIN+      (canAdministerProject) credentials, exports,
+ *                                                   irreversible operations
+ *
+ * The refusal is 403 with the same body `/api/api-keys` uses for the same
+ * decision. It is not a 404: the caller is a member and can already see the
+ * project exists, so there is nothing to hide, and a role refusal the UI can
+ * distinguish from "gone" renders as a permissions message rather than a bug.
+ */
+export type ProjectCapabilityFloor = 'write' | 'administer'
+
+/**
  * Middleware wrapper for API routes that require project validation
- * 
+ *
  * Usage:
  * ```ts
  * export async function GET(request: NextRequest) {
@@ -208,13 +230,31 @@ export function extractProjectId(
  *   })
  * }
  * ```
+ *
+ * Routes that grant more than a view pass the floor they need:
+ * ```ts
+ *   return withProjectValidation(request, handler, { floor: 'administer' })
+ * ```
  */
 export async function withProjectValidation<T>(
   request: NextRequest,
-  handler: (validated: ValidatedProjectRequest) => Promise<NextResponse<T>>
+  handler: (validated: ValidatedProjectRequest) => Promise<NextResponse<T>>,
+  opts?: { floor?: ProjectCapabilityFloor }
 ): Promise<NextResponse<T>> {
   try {
     const validated = await validateProjectAccess(request)
+    if (opts?.floor) {
+      const may = opts.floor === 'administer' ? canAdministerProject : canWriteProject
+      if (!(await may(validated.userId, validated.projectId))) {
+        return NextResponse.json(
+          {
+            error: 'Project not found or access denied',
+            code: 'PROJECT_ROLE_INSUFFICIENT',
+          },
+          { status: 403 }
+        ) as NextResponse<T>
+      }
+    }
     // A member CHANGING the project is using it. Reads are deliberately not
     // counted: this wrapper also serves history, usage, health and every other
     // panel the dashboard polls, and an open tab must not keep an abandoned
@@ -223,7 +263,10 @@ export async function withProjectValidation<T>(
     if (!SAFE_METHODS.has(request.method.toUpperCase())) {
       void touchProjectActivity(validated.projectId)
     }
-    return await handler(validated)
+    // A platform session is a person (lib/auth/middleware.ts accepts no agent
+    // key): any change this request makes is theirs, in the project's history.
+    const { withChangeAttribution } = await import('@/lib/changes/attribution')
+    return await withChangeAttribution({ source: 'dashboard', actorUserId: validated.userId }, () => handler(validated))
   } catch (error) {
     if (error instanceof NextResponse) {
       return error as NextResponse<T>

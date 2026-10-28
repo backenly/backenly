@@ -12,15 +12,18 @@
  *   - Checkpoint first. Before mutating, the affected table is copied to
  *     "_dm_backup_{ts}_{table}" inside the SAME transaction as the migration,
  *     so a failed migration leaves no backup litter and a successful one is
- *     restorable via rollbackDataMigration().
+ *     restorable through its governed change (lib/changes/recovery.ts).
  *   - Atomic. All operations in a migration run inside one transaction —
  *     either the whole migration lands or none of it does.
  *   - Dry-run first-class. estimateDataMigration() reports affected-row counts
  *     without touching anything, so the AI (and the user) can see the blast
  *     radius before approving.
+ *   - In the project's region. Its tables, and so its checkpoints, are only in
+ *     its region's database (lib/data-plane/regional.ts); a region this process
+ *     cannot reach is refused, and nothing runs anywhere else.
  */
 
-import { prisma } from '@/lib/db'
+import { workspaceRawClient, type WorkspaceRawClient } from '@/lib/data-plane/regional'
 import { rlsSessionSql, rlsSessionParams } from '@/lib/services/rls-session'
 
 // ── Operation types ────────────────────────────────────────────────────────────
@@ -83,7 +86,7 @@ export interface DataMigrationEstimate {
 export interface DataMigrationResult {
   success: boolean
   applied: Array<{ op: string; table: string; affectedRows: number }>
-  /** Name of the in-schema backup table (restore with rollbackDataMigration). */
+  /** Name of the in-schema backup table: the pre-image a governed change keeps as its restore point. */
   backupTables: Record<string, string>
   error?: string
 }
@@ -92,14 +95,29 @@ export interface DataMigrationResult {
 
 const IDENT_RE = /^[a-zA-Z_][a-zA-Z0-9_]*$/
 
+/** One migration is one transaction of at most this many operations. */
+const MAX_OPERATIONS = 20
+
+/**
+ * Why these operations cannot be one migration, or null when they can. The
+ * estimate asks it as well as the run: the gate estimates a real run before it
+ * waits for a person, so one that could never run is refused when it is asked
+ * for, not after someone has approved it.
+ */
+function operationCountRefusal(ops: unknown): string | null {
+  return Array.isArray(ops) && ops.length > 0 && ops.length <= MAX_OPERATIONS
+    ? null
+    : `A migration needs 1–${MAX_OPERATIONS} operations.`
+}
+
 function assertIdent(name: string, what: string): void {
   if (!IDENT_RE.test(name)) {
     throw new Error(`Invalid ${what} "${name}" — identifiers must match [a-zA-Z_][a-zA-Z0-9_]*`)
   }
 }
 
-async function loadColumns(schemaName: string, table: string): Promise<Map<string, string>> {
-  const rows = await prisma.$queryRawUnsafe<Array<{ column_name: string; data_type: string }>>(
+async function loadColumns(db: WorkspaceRawClient, schemaName: string, table: string): Promise<Map<string, string>> {
+  const rows = await db.$queryRawUnsafe<Array<{ column_name: string; data_type: string }>>(
     `SELECT column_name, data_type FROM information_schema.columns
      WHERE table_schema = $1 AND table_name = $2`,
     schemaName, table,
@@ -288,15 +306,18 @@ export async function estimateDataMigration(
   projectId: string,
   ops: DataMigrationOp[],
 ): Promise<DataMigrationEstimate[]> {
+  const refused = operationCountRefusal(ops)
+  if (refused) throw new Error(refused)
   const schemaName = `workspace_${projectId}`
+  const db = await workspaceRawClient(projectId)
   const out: DataMigrationEstimate[] = []
   for (const op of ops) {
     assertIdent(op.table, 'table')
-    const columns = await loadColumns(schemaName, op.table)
+    const columns = await loadColumns(db, schemaName, op.table)
     const built = buildOp(schemaName, columns, op)
     const [affected, total] = await Promise.all([
-      prisma.$queryRawUnsafe<{ n: number }[]>(built.countSql.sql, ...built.countSql.params),
-      prisma.$queryRawUnsafe<{ n: number }[]>(
+      db.$queryRawUnsafe<{ n: number }[]>(built.countSql.sql, ...built.countSql.params),
+      db.$queryRawUnsafe<{ n: number }[]>(
         `SELECT COUNT(*)::int AS n FROM "${schemaName}"."${op.table}"`,
       ),
     ])
@@ -321,9 +342,9 @@ export async function executeDataMigration(
   ops: DataMigrationOp[],
 ): Promise<DataMigrationResult> {
   const schemaName = `workspace_${projectId}`
-  if (!Array.isArray(ops) || ops.length === 0 || ops.length > 20) {
-    return { success: false, applied: [], backupTables: {}, error: 'A migration needs 1–20 operations.' }
-  }
+  const refused = operationCountRefusal(ops)
+  if (refused) return { success: false, applied: [], backupTables: {}, error: refused }
+  const db = await workspaceRawClient(projectId)
 
   // Validate + build everything BEFORE opening the transaction.
   let built: Array<{ op: DataMigrationOp; plan: BuiltOp }>
@@ -331,7 +352,7 @@ export async function executeDataMigration(
     built = []
     for (const op of ops) {
       assertIdent(op.table, 'table')
-      const columns = await loadColumns(schemaName, op.table)
+      const columns = await loadColumns(db, schemaName, op.table)
       built.push({ op, plan: buildOp(schemaName, columns, op) })
     }
   } catch (err: any) {
@@ -340,10 +361,11 @@ export async function executeDataMigration(
 
   const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14)
   const backupTables: Record<string, string> = {}
+  let captured: { commit: () => void } | null = null
   const applied: Array<{ op: string; table: string; affectedRows: number }> = []
 
   try {
-    await prisma.$transaction(async (tx) => {
+    await db.$transaction(async (tx) => {
       // Service-role RLS context — FORCE-RLS tables must be fully visible to a
       // migration or it would silently transform a subset of rows.
       await tx.$executeRawUnsafe(
@@ -367,6 +389,12 @@ export async function executeDataMigration(
         for (const stmt of plan.statements) {
           const n = await tx.$executeRawUnsafe(stmt.sql, ...stmt.params)
           if (stmt.sql.startsWith('UPDATE')) affectedRows = Number(n) || 0
+          // A PL/pgSQL trigger that already fired in this transaction (the
+          // updatedAt helper on every Backenly table) keeps returning rows of
+          // the table's old shape: an UPDATE after a column was added would
+          // drop the new column's values, and one after a retype would garble
+          // the retyped column. Re-plan after every change of shape.
+          if (stmt.sql.startsWith('ALTER TABLE')) await tx.$executeRawUnsafe('DISCARD PLANS')
         }
         if (op.op === 'cast_column') {
           const rows = await tx.$queryRawUnsafe<{ n: number }[]>(
@@ -376,8 +404,16 @@ export async function executeDataMigration(
         }
         applied.push({ op: op.op, table: op.table, affectedRows })
       }
+
+      // Inside a governed change, keep what this migration produced beside what
+      // it replaced (the checkpoint tables above), in this same transaction, so
+      // restoring the state before it can give original values back to the rows
+      // nobody has changed since and leave every later write alone.
+      const { captureRewrite } = await import('@/lib/changes/preserve')
+      captured = await captureRewrite(tx, projectId, schemaName, rewritesOf(built.map((b) => b.op)), backupTables)
     }, { timeout: 120_000, maxWait: 10_000 })
 
+    captured?.commit()
     return { success: true, applied, backupTables }
   } catch (err: any) {
     // Transaction rolled back — backups created inside it are gone too.
@@ -390,37 +426,21 @@ export async function executeDataMigration(
   }
 }
 
-/**
- * Restore a table from a migration checkpoint by swapping the backup into
- * place. LIMITATION (documented, not hidden): the checkpoint was created with
- * CREATE TABLE AS, which copies data but not constraints/indexes/defaults —
- * a rollback restores every row and column type exactly, but PK/FK/index
- * definitions must be re-applied (the observer's missing-FK/missing-index
- * detectors will flag and offer to fix them on the next scan).
- */
-export async function rollbackDataMigration(
-  projectId: string,
-  table: string,
-  backupTable: string,
-): Promise<{ success: boolean; error?: string }> {
-  const schemaName = `workspace_${projectId}`
-  try {
-    assertIdent(table, 'table')
-    if (!/^_dm_backup_\d{8,14}_[a-zA-Z_][a-zA-Z0-9_]*$/.test(backupTable)) {
-      throw new Error(`"${backupTable}" is not a data-migration backup table.`)
-    }
-    await prisma.$transaction(async (tx) => {
-      await tx.$executeRawUnsafe(
-        rlsSessionSql(),
-        ...rlsSessionParams({ userId: null, isServiceRole: true }),
-      )
-      await tx.$executeRawUnsafe(`DROP TABLE "${schemaName}"."${table}"`)
-      await tx.$executeRawUnsafe(
-        `ALTER TABLE "${schemaName}"."${backupTable}" RENAME TO "${table}"`,
-      )
-    }, { timeout: 60_000 })
-    return { success: true }
-  } catch (err: any) {
-    return { success: false, error: err?.message ?? String(err) }
+/** The columns each operation rewrites, by table. */
+function rewritesOf(ops: DataMigrationOp[]): Array<{ table: string; columns: string[] }> {
+  const by = new Map<string, string[]>()
+  for (const op of ops) {
+    const cols =
+      op.op === 'split_column' ? op.targets
+        : op.op === 'merge_columns' ? [op.target]
+          : [op.column]
+    by.set(op.table, [...(by.get(op.table) ?? []), ...cols])
   }
+  return [...by].map(([table, columns]) => ({ table, columns }))
 }
+
+// rollbackDataMigration, which dropped the live table and renamed the backup
+// into place outside the change ledger (and with it every row written since),
+// is retired. A data rewrite is undone by restoring the state before its
+// governed change, which puts back only rows nobody has changed since
+// (lib/changes/recovery.ts).

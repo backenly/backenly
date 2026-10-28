@@ -85,7 +85,9 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
         .replace(/_api_key|_secret_key|_webhook_secret|_key$/, '')
         .replace(/_/g, '_') // keep underscores intact for compound IDs like stripe_webhook_secret
 
-      // Check canonical ID and env-var-lowercased alias
+      // Check the derived id and the env-var name itself; the key store
+      // resolves an env-var name (google_client_id) to the row it is stored
+      // under (google).
       const [storedById, storedByEnvVar] = await Promise.all([
         hasIntegrationKey(projectId, integId),
         hasIntegrationKey(projectId, rawBlockedBy),
