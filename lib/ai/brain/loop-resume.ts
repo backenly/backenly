@@ -18,7 +18,13 @@
  * region keeps its words there (lib/data-plane/residency.ts), so its marker
  * stores neither the request nor the applied titles, which can name an end
  * user; the resumed turn finds both in the conversation, which stays in the
- * project's region.
+ * project's region. The one reader that needs the request itself is the
+ * architect's retry after it failed on the build (runBrain), so for that marker
+ * alone the request is kept in the region, as a `loop_resume` body: one per
+ * project, written before the marker, removed with it, and pruned with the
+ * region's logs if the marker lapses or is replaced first. The marker names the
+ * body it was saved with (`resumeId`), so a body an older marker left is never
+ * read as this one's.
  */
 
 import { prisma } from '@/lib/db/prisma'
@@ -32,6 +38,8 @@ const TTL_MS = 30 * 60 * 1000
 /** Bounds what one marker can carry, so a long run cannot grow the row without limit. */
 const MAX_REQUEST_CHARS = 8000
 const MAX_APPLIED = 200
+/** Where a project kept in another region keeps the request its architect retry needs. */
+const REGIONAL_KIND = 'loop_resume'
 
 export interface LoopResume {
   /** The request the stopped turn was working on, as the person put it. Empty when kept in its region. */
@@ -40,9 +48,11 @@ export interface LoopResume {
   applied: string[]
   /** Set for a project kept in another region: the request and titles stayed out of this row. */
   keptInRegion?: true
-  /** Why the turn stopped, for the model's context. */
+  /** The architect failed on the build this turn started, so "continue" tries its design again (runBrain). */
   architectFailed?: true
+  /** Kept in its region with architectFailed: names the request written there, so a stale one is never read. */
   resumeId?: string
+  /** Why the turn stopped, for the model's context. */
   reason: string
   createdAt: string
   expiresAt: string
@@ -66,31 +76,34 @@ export async function saveLoopResume(
   architectFailed = false,
 ): Promise<void> {
   const now = Date.now()
-  const resumeId = randomUUID()
   const quote = await quotesKeptHere(projectId)
+  // Written before the marker that names it, so a marker never names nothing.
+  // A region that cannot take it costs only the retry: the marker is saved
+  // without it and resumes the loop.
+  let resumeId: string | undefined
+  if (!quote && architectFailed) {
+    const id = randomUUID()
+    const payload = { request: request.slice(0, MAX_REQUEST_CHARS), resumeId: id }
+    resumeId = await regionalBodiesFor(projectId)
+      .then((bodies) => bodies.set(REGIONAL_KIND, projectId, { payload }))
+      .then(
+        () => id,
+        (err) => {
+          console.error('[Brain] could not keep the resume request in its region:', err)
+          return undefined
+        },
+      )
+  }
   const marker: LoopResume = {
     request: quote ? request.slice(0, MAX_REQUEST_CHARS) : '',
     applied: quote ? applied.slice(-MAX_APPLIED) : [],
     ...(quote ? {} : { keptInRegion: true as const }),
     ...(architectFailed ? { architectFailed: true as const } : {}),
-    resumeId,
+    ...(resumeId ? { resumeId } : {}),
     reason: STOP_REASON[stop],
     createdAt: new Date(now).toISOString(),
     expiresAt: new Date(now + TTL_MS).toISOString(),
   }
-
-  if (!quote) {
-    const bodies = await regionalBodiesFor(projectId)
-
-    await bodies.set('conversation_message', `brain-loop-resume:${resumeId}`, {
-      payload: {
-        request: request.slice(0, MAX_REQUEST_CHARS),
-        resumeId,
-      },
-    })
-  }
-
-
   await prisma.projectPreference.upsert({
     where: { projectId_type_key: { projectId, type: PREF_TYPE, key: PREF_KEY } },
     create: { projectId, type: PREF_TYPE, key: PREF_KEY, value: JSON.stringify(marker), confidence: 1 },
@@ -108,70 +121,50 @@ export async function loadLoopResume(projectId: string): Promise<LoopResume | nu
     if (typeof m.request !== 'string') return null
     if (!m.request.trim() && m.keptInRegion !== true) return null
     if (!Array.isArray(m.applied)) m.applied = []
-
     if (Date.parse(m.expiresAt) < Date.now()) return null
-
-    if (m.keptInRegion) {
-      if (!m.resumeId) return null
-
-      const bodies = await regionalBodiesFor(projectId)
-      const body = await bodies.get(
-        'conversation_message',
-        `brain-loop-resume:${m.resumeId}`,
-      )
-
-      const payload = body?.payload as
-        | { request?: unknown; resumeId?: unknown }
-        | undefined
-
-      if (
-        !payload ||
-        typeof payload.request !== 'string' ||
-        payload.resumeId !== m.resumeId
-      ) {
-        return null
-      }
-
-      m.request = payload.request
-    }
-
+    if (m.keptInRegion && m.resumeId) m.request = await requestKeptInRegion(projectId, m.resumeId)
     return m
-
   } catch {
     return null
   }
 }
 
+/**
+ * The request a marker kept in its region names, for the architect's retry.
+ * Unreadable or replaced, it is empty: the marker still resumes the loop, which
+ * reads the conversation instead.
+ */
+async function requestKeptInRegion(projectId: string, resumeId: string): Promise<string> {
+  try {
+    const body = await (await regionalBodiesFor(projectId)).get(REGIONAL_KIND, projectId)
+    const payload = body?.payload as { request?: unknown; resumeId?: unknown } | undefined
+    return payload?.resumeId === resumeId && typeof payload.request === 'string' ? payload.request : ''
+  } catch (err) {
+    console.error('[Brain] could not read the resume request kept in its region:', err)
+    return ''
+  }
+}
 
 export async function clearLoopResume(projectId: string): Promise<void> {
-  const marker = await prisma.projectPreference.findFirst({
-    where: { projectId, type: PREF_TYPE, key: PREF_KEY },
-  }).catch(() => null)
-
-  let data: LoopResume | null = null
+  const pref = await prisma.projectPreference
+    .findUnique({ where: { projectId_type_key: { projectId, type: PREF_TYPE, key: PREF_KEY } } })
+    .catch(() => null)
+  let keptInRegion = false
   try {
-    if (marker) data = JSON.parse(marker.value) as LoopResume
+    keptInRegion = !!pref && (JSON.parse(pref.value) as LoopResume).keptInRegion === true
   } catch {
-    // The marker is invalid; still delete the project preference below.
+    // An unreadable marker is still deleted below.
   }
-
-  if (data?.keptInRegion && data.resumeId) {
-    const bodies = await regionalBodiesFor(projectId)
-
-    await bodies.remove(
-      'conversation_message',
-      [`brain-loop-resume:${data.resumeId}`],
-    ).catch((err) => {
-      console.error('[Brain] could not clean up regional resume body:', err)
-    })
+  // A request the marker kept in its region goes with it.
+  if (keptInRegion) {
+    await regionalBodiesFor(projectId)
+      .then((bodies) => bodies.remove(REGIONAL_KIND, [projectId]))
+      .catch((err) => console.error('[Brain] could not remove the resume request kept in its region:', err))
   }
-
   await prisma.projectPreference
     .deleteMany({ where: { projectId, type: PREF_TYPE, key: PREF_KEY } })
     .catch(() => {})
 }
-
-
 
 /**
  * The message the model is sent in place of a bare "continue". It carries the

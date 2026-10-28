@@ -20,7 +20,8 @@ import {
 } from '@/lib/ai/llm/providers/scripted'
 import { memorySpendLedger, setSpendLedgerForTests } from '@/lib/ai/llm/spend'
 import { runBrain, type BrainInput } from '@/lib/ai/brain/agent'
-import { loadLoopResume, saveLoopResume, resumePrompt } from '@/lib/ai/brain/loop-resume'
+import { clearLoopResume, loadLoopResume, saveLoopResume, resumePrompt } from '@/lib/ai/brain/loop-resume'
+import { REGIONAL_BODY_RETENTION_DAYS, pruneRegionalBodies } from '@/lib/data-plane/regional-bodies'
 import fs from 'node:fs'
 import { Client } from 'pg'
 import { disconnectRegionalClients } from '@/lib/data-plane/regional'
@@ -58,6 +59,21 @@ function regionalDatabaseUrl(database: string): string {
   const url = new URL(testDatabaseUrl())
   url.pathname = `/${database}`
   return url.toString()
+}
+
+/** The region's resume requests for a project, read straight from its database. */
+async function requestsInRegion(project: string): Promise<Array<{ id: string; payload: { request?: string } }>> {
+  const client = new Client({ connectionString: regionalUrl })
+  await client.connect()
+  try {
+    const { rows } = await client.query(
+      `SELECT "id", "payload" FROM public.regional_bodies WHERE "kind" = 'loop_resume' AND "projectId" = $1`,
+      [project],
+    )
+    return rows
+  } finally {
+    await client.end().catch(() => {})
+  }
 }
 
 async function runSql(connectionString: string, sql: string): Promise<void> {
@@ -139,6 +155,8 @@ afterEach(() => {
 })
 
 afterAll(async () => {
+  if (previousAutonomyFlag === undefined) delete process.env.ENABLE_AUTONOMY_RECONCILER
+  else process.env.ENABLE_AUTONOMY_RECONCILER = previousAutonomyFlag
   await prisma.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`).catch(() => {})
   await prisma.auditLog.deleteMany({ where: { projectId } }).catch(() => {})
   await prisma.project.deleteMany({ where: { userId: ownerId } }).catch(() => {})
@@ -377,18 +395,44 @@ afterAll(async () => {
     })
     expect(row.value).not.toContain('alice@example.com')
     expect(row.value).not.toContain('audit table')
+    // The resumed loop reads the conversation, so nothing is kept in the region for it either.
+    expect(await requestsInRegion(regionalId)).toEqual([])
 
     const marker = await loadLoopResume(regionalId)
-    expect(marker).toMatchObject({
-      request: 'block alice@example.com and add her to the audit table',
-      applied: [],
-      keptInRegion: true,
-      reason: 'it ran out of steps',
-    })
+    expect(marker).toMatchObject({ request: '', applied: [], keptInRegion: true, reason: 'it ran out of steps' })
 
     const prompt = resumePrompt(marker!, 'continue')
     expect(prompt).toMatch(/in the conversation above/)
     expect(prompt).not.toMatch(/ORIGINAL REQUEST/)
+  })
+
+  it('keeps the request in the region for the architect\'s retry, and removes it with the marker', async () => {
+    const request = 'a clinic app where alice@example.com books appointments with her doctor'
+    await saveLoopResume(regionalId, request, ['Creating table appointments'], 'step_budget', true)
+
+    const row = await prisma.projectPreference.findFirstOrThrow({ where: { projectId: regionalId, key: 'loop_resume' } })
+    expect(row.value).not.toContain('alice@example.com')
+    expect(await requestsInRegion(regionalId)).toEqual([{ id: regionalId, payload: expect.objectContaining({ request }) }])
+
+    const marker = await loadLoopResume(regionalId)
+    expect(marker).toMatchObject({ request, applied: [], keptInRegion: true, architectFailed: true })
+    // The model is still pointed at the conversation, not handed the words.
+    expect(resumePrompt(marker!, 'continue')).not.toContain('alice@example.com')
+
+    await clearLoopResume(regionalId)
+    expect(await loadLoopResume(regionalId)).toBeNull()
+    expect(await requestsInRegion(regionalId)).toEqual([])
+  })
+
+  it('reads no request an older marker left there, and is pruned with the region\'s logs', async () => {
+    await saveLoopResume(regionalId, 'the first request', [], 'step_budget', true)
+    // A later stop that needs no request replaces the marker and leaves the body.
+    await saveLoopResume(regionalId, 'the second request', [], 'time_budget')
+    expect(await loadLoopResume(regionalId)).toMatchObject({ request: '', reason: 'it stopped to keep time for verification' })
+
+    const later = new Date(Date.now() + (REGIONAL_BODY_RETENTION_DAYS + 1) * 24 * 60 * 60 * 1000)
+    await pruneRegionalBodies('us-east-1', later)
+    expect(await requestsInRegion(regionalId)).toEqual([])
   })
 })
 

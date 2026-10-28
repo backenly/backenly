@@ -26,6 +26,9 @@
  *                       record keeps only as digests (lib/changes/residency.ts)
  *   brain_run           a backend_chat run: the request, the changes that
  *                       landed and the answer (lib/ai/brain/runs.ts)
+ *   loop_resume         the request a stopped turn resumes with, kept when the
+ *                       architect's design of it is to be tried again
+ *                       (lib/ai/brain/loop-resume.ts)
  *
  * For a project in the home region all of it stays on the platform rows, as
  * it always has. For a project in another region it never leaves that region
@@ -62,6 +65,7 @@ export type BodyKind =
   | 'approval_request'
   | 'change_catalog'
   | 'brain_run'
+  | 'loop_resume'
 
 /** How long a region keeps a log body (PRUNED_KINDS) after its last change. */
 export const REGIONAL_BODY_RETENTION_DAYS = 30
@@ -71,13 +75,14 @@ export const REGIONAL_BODY_RETENTION_DAYS = 30
  * conversation's words are not a log: the agent reads them back, and a home
  * project keeps them as long as the project. A regional project's are kept the
  * same way, until the messages or the project are deleted. A backfill's cursor
- * is needed only while its chain of batches runs, minutes or hours. A file's
+ * is needed only while its chain of batches runs, minutes or hours, and a
+ * resume request only while its marker lasts, half an hour. A file's
  * names last as long as its row, and so do a held action's target and arguments
  * and an approval request's words and call, which the daily cleanup deletes
  * with the request (lib/queue/worker.ts). A change's catalogs last as long as
  * its record, which is how long it can be restored and audited.
  */
-const PRUNED_KINDS: BodyKind[] = ['webhook', 'trigger', 'function_run', 'function_error', 'backfill_cursor', 'brain_run']
+const PRUNED_KINDS: BodyKind[] = ['webhook', 'trigger', 'function_run', 'function_error', 'backfill_cursor', 'brain_run', 'loop_resume']
 
 export interface Body {
   payload: unknown
