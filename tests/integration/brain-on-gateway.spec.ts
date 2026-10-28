@@ -239,6 +239,39 @@ describe('a turn on the gateway', () => {
     expect(mockRunEndpointTest).toHaveBeenCalledTimes(2)
   }, 60_000)
 
+  it('defers a finish beside a check only until the model has read a check made since its last change', async () => {
+    const readAndFinish = (summary: string) => scriptedMessage({ toolUse: [
+      { id: 'check', name: 'read_backend_state', input: {} },
+      { id: 'done', name: 'finish', input: { summary } },
+    ] })
+    const provider = scriptedProvider([
+      classified('MODIFY'), mutate(), readAndFinish('Unobserved.'), readAndFinish('Observed verification.'),
+    ])
+    const { result } = await turn(provider, 'make a small table')
+    // The second finish was written after the first read's result: deferring it
+    // again would hold the turn open until it ran out of steps.
+    expect(result).toMatchObject({ success: true, summary: 'Observed verification.' })
+    expect(provider.calls).toHaveLength(4)
+    expect(result.toolsRun).toEqual(['create_table', 'read_backend_state', 'read_backend_state', 'finish'])
+  }, 60_000)
+
+  it('counts a check as unread again after a change in the same response', async () => {
+    const read = { id: 'check', name: 'read_backend_state', input: {} }
+    const provider = scriptedProvider([
+      classified('MODIFY'), mutate(),
+      scriptedMessage({ toolUse: [read, { id: 'first', name: 'finish', input: { summary: 'Unobserved.' } }] }),
+      scriptedMessage({ toolUse: [
+        { id: 'second_change', name: 'create_table', input: { tableName: `verify_${crypto.randomBytes(5).toString('hex')}`, columns: [{ name: 'label', type: 'text' }] } },
+        read,
+        { id: 'second', name: 'finish', input: { summary: 'Written before the second change was read.' } },
+      ] }),
+      finish(),
+    ])
+    const { result } = await turn(provider, 'make two small tables')
+    expect(result).toMatchObject({ success: true, summary: 'Observed verification.' })
+    expect(provider.calls).toHaveLength(5)
+  }, 60_000)
+
   it('defers a finish sent with the verification turn\'s read instead of ending the turn', async () => {
     const provider = scriptedProvider([
       classified('MODIFY'), mutate(),

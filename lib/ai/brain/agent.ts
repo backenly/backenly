@@ -1535,6 +1535,11 @@ async function runAgentLoop(
   // that failed. A failed catalog read is different again: it says nothing
   // about the mutation, so it only leaves the mutation unverified (below).
   const failedChecks = new Set<string>()
+  // Checks (read_backend_state or run_test, with their arguments) whose results
+  // the model has read since the last mutation. A finish sent beside a check it
+  // has not read yet is deferred. Beside one it has, the check only repeats it,
+  // and deferring again would hold the turn open until its steps ran out.
+  const seenChecks = new Set<string>()
   // The model gets one chance to verify a mutation before the loop returns an
   // applied-but-unverified outcome. This is a phase, not a prompt alone: while
   // it is pending, another mutation must not be dispatched accidentally.
@@ -1800,17 +1805,20 @@ async function runAgentLoop(
     // Splitting results across turns teaches the model to stop calling tools in
     // parallel, and a call left unanswered is rejected outright.
     const results: Anthropic.ToolResultBlockParam[] = []
-    const hasVerification = toolCalls.some(({ name }) => name === 'read_backend_state' || name === 'run_test')
+    /** Checks this response ran after its last mutation: the model reads their results next. */
+    const checksRan: string[] = []
     let finished = false
     const verificationTurn = verificationSteered && mutated && !verifiedAfterMutation
     for (const toolCall of toolCalls) {
       const toolName = toolCall.name as ToolName
 
       // Inspect the whole batch: either order contains a summary written before
-      // the model could observe verification. Answer every call without accepting it.
+      // the model could observe verification. Answer every call without accepting it,
+      // unless every check in it repeats one the model has read since the last
+      // mutation, this response's included (seenChecks).
       // Checked ahead of the verification turn's guard, so a finish sent with the
       // one read that turn allows waits for that read instead of ending the turn.
-      if (toolName === 'finish' && hasVerification) {
+      if (toolName === 'finish' && toolCalls.some((c) => isCheck(c.name) && !seenChecks.has(checkKey(c.name, c.input)))) {
         results.push(toolResultBlock(toolCall.id, {
           ok: false,
           summary: 'Finish deferred. Read the verification results, then finish in a subsequent response with a truthful summary. Do not repeat completed verification unless state changes.',
@@ -1902,6 +1910,7 @@ async function runAgentLoop(
 
       // Track verification cadence. A read that failed is not verification, and
       // a run_test that failed is a failed check, including a handled exception.
+      if (isCheck(toolName)) checksRan.push(checkKey(toolName, args))
       if (toolName === 'read_backend_state' && mutated) verifiedAfterMutation = result.ok
       if (toolName === 'run_test' && mutated) {
         const check = `${String(args.tableName ?? '')}:${String(args.operation ?? 'list')}`
@@ -1939,6 +1948,8 @@ async function runAgentLoop(
         verifiedAfterMutation = result.ok && SELF_VERIFYING_TOOLS.has(toolName)
         // A check run before this mutation says nothing about the state after it.
         failedChecks.clear()
+        seenChecks.clear()
+        checksRan.length = 0
         // Recorded even when the turn later fails, so the caller can tell "the
         // run stopped" from "nothing changed" — the distinction that decides
         // whether retrying is safe or duplicates work.
@@ -1966,6 +1977,9 @@ async function runAgentLoop(
         finished = true
       }
     }
+    // These results go back to the model with the next call, whichever way the
+    // loop carries on from here.
+    for (const check of checksRan) seenChecks.add(check)
 
     if (finished) {
       // Steer the model to verify if it tried to finish after mutating. The
@@ -2168,6 +2182,12 @@ const CONFIRM_TOOL_BLOCKLIST = new Set<string>(['propose_plan'])
  * question.
  */
 const QUESTION_CONTROL_TOOLS = new Set<string>(['finish', 'ask_user', 'answer_question'])
+
+/** The calls that check what a turn changed: the catalog read and the endpoint test. */
+const isCheck = (name: string) => name === 'read_backend_state' || name === 'run_test'
+
+/** One check as the model asked for it, to tell a repeated check from a new one. */
+const checkKey = (name: string, input: unknown) => `${name}:${JSON.stringify(input ?? {})}`
 
 /**
  * The catalog as the brain's model is offered it, translated once at load so
