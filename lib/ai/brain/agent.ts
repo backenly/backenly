@@ -737,19 +737,25 @@ export async function runBrain(
     // A loop turn that stopped unfinished saved where it was. Resume the agent
     // loop on that request with what already landed, rather than searching the
     // history for a prompt that looks like one.
-
-
+    //
+    // Unless the architect failed on the build that turn started: then its
+    // design is tried again on the saved request. The architect designs a whole
+    // backend without reading what is already there, so only where the
+    // fallback this replaces would design: a project still empty, or a request
+    // that names its own tables. On a protected production a plan's tables are
+    // refused, so it says how the schema gets there instead.
     if (loopResume) {
-      if (loopResume.architectFailed && loopResume.request) {
-        const resolved = await resolveBlueprintWithHeartbeat(
-          loopResume.request,
-          input.projectId,
-          emit,
-        )
-
+      if (loopResume.architectFailed && loopResume.request && (isFreshProject || isExplicitSpec(loopResume.request))) {
+        if (schemaOnBranch) return await branchBuildTurn(curatedTables(loopResume.request), classification, emit, input)
+        const resolved = await resolveBlueprintWithHeartbeat(loopResume.request, input.projectId, emit)
         if (resolved && 'blueprint' in resolved) {
-          console.log('[Brain] route=LOOP_RESUME_REARCHITECT')
-
+          console.log(
+            `[Brain] route=LOOP_RESUME_REARCHITECT domain=${resolved.blueprint.domain} ` +
+            `steps=${resolved.blueprint.steps.length} architectTokens=${resolved.architectTokens}`,
+          )
+          // The plan carries the request from here, and its own resume queue
+          // carries whatever it leaves. A later "continue" must not design it again.
+          await clearLoopResume(input.projectId)
           return await blueprintExecuteTurn(
             resolved.blueprint.steps,
             resolved.architectTokens,
@@ -761,8 +767,7 @@ export async function runBrain(
             extractRequirements(loopResume.request),
           )
         }
-
-        console.log('[Brain] Architect retry failed; falling back to loop resume')
+        console.log('[Brain] the architect failed again; resuming the loop')
       }
 
       console.log(

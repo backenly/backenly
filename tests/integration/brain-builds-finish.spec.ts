@@ -271,6 +271,17 @@ describe('on a protected production', () => {
     expect(await tablesOf(fresh.schema)).toEqual([])
   }, 60_000)
 
+  it('a build the architect failed on is not designed again into the gate on "continue"', async () => {
+    await saveLoopResume(fresh.projectId, 'Build an e-commerce store backend.', [], 'step_budget', true)
+
+    const { result, provider } = await fresh.turn([classified('CONFIRM')], 'continue', MCP)
+
+    expect(provider.calls).toHaveLength(1)
+    expect(blueprints).not.toHaveBeenCalled()
+    expect(result.failureCode).toBe('BRANCH_REQUIRED')
+    expect(await tablesOf(fresh.schema)).toEqual([])
+  }, 60_000)
+
   it('the loop is told up front which calls are refused here', async () => {
     const { provider } = await built.turn([classified('MODIFY'), finished('Done.')], 'add a comments table', MCP)
     expect(systemOf(provider, 1)).toContain('PRODUCTION IS PROTECTED on this project: create_table, add_column')

@@ -31,6 +31,7 @@ import type { Blueprint } from '@/lib/ai/blueprints/types'
 import { getBlueprintForPrompt } from '@/lib/ai/blueprints'
 import { loadPendingPlan, loadResumeQueue, savePendingPlan, saveResumeQueue } from '@/lib/ai/blueprints/store'
 import { saveTurn } from '@/lib/ai/brain/memory'
+import { loadLoopResume, saveLoopResume } from '@/lib/ai/brain/loop-resume'
 import { setProviderForTests } from '@/lib/ai/llm'
 import {
   classified,
@@ -342,17 +343,57 @@ describe('CONFIRM with only a resume queue', () => {
 
 
 describe('CONFIRM when the plan was lost', () => {
-  it('does not call the architect on confirmation without a saved resume marker', async () => {
-    await saveTurn(
-      fresh.projectId,
-      ORIGINAL_REQUEST,
-      'Here is the plan.\n\nReply "go ahead" to run this, or tell me what to add or remove.',
-    )
+  it('does not design the request again from the history: the agent loop takes the confirmation', async () => {
+    await saveTurn(fresh.projectId, ORIGINAL_REQUEST, 'Here is the plan.\n\nReply "go ahead" to run this, or tell me what to add or remove.')
 
-    await fresh.turn([classified('CONFIRM')], 'go ahead')
+    const { provider } = await fresh.turn([classified('CONFIRM'), finished('No plan is stored.')], 'go ahead')
 
     expect(architect).not.toHaveBeenCalled()
-  })
+    expect(provider.calls).toHaveLength(2)
+    expect(toolNamesOf(provider, 1)).not.toContain('propose_plan')
+  }, 60_000)
+})
+
+describe('"continue" after the architect failed on a build', () => {
+  const reads = Array.from({ length: 12 }, (_, i) => toolCall('read_backend_state', {}, `toolu_read_${i}`))
+
+  it('saves that it failed when the loop it fell to stops, and designs the saved request again', async () => {
+    architect.mockResolvedValueOnce(null)
+    const first = await fresh.turn([classified('BUILD'), ...reads], ORIGINAL_REQUEST)
+    expect(first.result.failureCode).toBe('STEP_BUDGET_EXHAUSTED')
+    expect(await loadLoopResume(fresh.projectId)).toMatchObject({ request: ORIGINAL_REQUEST, architectFailed: true })
+
+    architect.mockResolvedValueOnce({ blueprint: planOf('designed_again'), match: matchOf, architectTokens: 500 })
+    const { result, provider } = await fresh.turn([classified('CONFIRM')], 'continue')
+
+    expect(architect).toHaveBeenCalledTimes(2)
+    expect(architect).toHaveBeenLastCalledWith(ORIGINAL_REQUEST, fresh.projectId, expect.any(Function))
+    expect(provider.calls).toHaveLength(1)
+    expect(await fresh.tableExists('designed_again')).toBe(true)
+    expect(result).toMatchObject({ success: true, toolsRun: ['create_table'] })
+    // The plan carries the request now, so a later "continue" does not design it a third time.
+    expect(await loadLoopResume(fresh.projectId)).toBeNull()
+  }, 60_000)
+
+  it('resumes the loop on the saved request when the architect fails again', async () => {
+    await saveLoopResume(fresh.projectId, ORIGINAL_REQUEST, [], 'step_budget', true)
+    architect.mockResolvedValueOnce(null)
+
+    const { provider } = await fresh.turn([classified('CONFIRM'), finished('Built what was missing.')], 'continue')
+
+    expect(architect).toHaveBeenCalledTimes(1)
+    expect(provider.calls).toHaveLength(2)
+    expect(JSON.stringify(provider.calls[1].params.messages)).toContain('ORIGINAL REQUEST')
+  }, 60_000)
+
+  it('resumes the loop on a project it already built on, which the architect would design over', async () => {
+    await saveLoopResume(built.projectId, ORIGINAL_REQUEST, ['Creating table keep_me'], 'step_budget', true)
+
+    const { provider } = await built.turn([classified('CONFIRM'), finished('Built what was missing.')], 'continue')
+
+    expect(architect).not.toHaveBeenCalled()
+    expect(JSON.stringify(provider.calls[1].params.messages)).toContain('ALREADY APPLIED')
+  }, 60_000)
 })
 
 describe('CONFIRM on a built project', () => {
@@ -374,7 +415,6 @@ describe('CONFIRM on a built project', () => {
     expect(systemOf(provider, 1)).toContain('CONFIRMED the plan')
   }, 60_000)
 })
-
 
 describe('APPLY_PROPOSAL on a built project', () => {
   it('enters the agent loop with the whole catalog and a hint to build what the conversation listed', async () => {
