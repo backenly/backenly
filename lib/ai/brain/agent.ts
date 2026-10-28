@@ -1239,7 +1239,7 @@ async function runAgentLoop(
   const messages = conversationFor(recent, input.message)
 
   let mutated = false
-  let verifiedAfterMutation = false
+  const verification: { status: 'pending' | 'passed' | 'failed' } = { status: 'pending' }
   let finalSummary = ''
   let success = false
   let needsUser = false
@@ -1378,7 +1378,7 @@ async function runAgentLoop(
     if (toolCalls.length === 0) {
       // Model answered without tools — accept its text as the final summary.
       finalSummary = text || 'Done.'
-      success = true
+      success = verification.status !== 'failed' && (!mutated || verification.status === 'passed')
       break
     }
 
@@ -1391,6 +1391,7 @@ async function runAgentLoop(
     // Splitting results across turns teaches the model to stop calling tools in
     // parallel, and a call left unanswered is rejected outright.
     const results: Anthropic.ToolResultBlockParam[] = []
+    const hasVerification = toolCalls.some(({ name }) => name === 'read_backend_state' || name === 'run_test')
     let finished = false
     for (const toolCall of toolCalls) {
       const toolName = toolCall.name as ToolName
@@ -1435,6 +1436,16 @@ async function runAgentLoop(
         continue
       }
 
+      // Inspect the whole batch: either order contains a summary written before
+      // the model could observe verification. Answer every call without accepting it.
+      if (toolName === 'finish' && hasVerification) {
+        results.push(toolResultBlock(toolCall.id, {
+          ok: false,
+          summary: 'Finish deferred. Read the verification results, then finish in a subsequent response with a truthful summary. Do not repeat completed verification unless state changes.',
+        }, true))
+        continue
+      }
+
       // Redacted for the log only; the call itself receives the real arguments.
       console.log(`[Brain] tool=${toolName} args=${JSON.stringify(redactArgs(args)).slice(0, 200)}`)
       const result = await dispatchTool(toolName, args, ctx)
@@ -1442,9 +1453,10 @@ async function runAgentLoop(
       toolStatuses.push(result.ok ? 'applied' : 'failed')
       console.log(`[Brain] tool=${toolName} ok=${result.ok} terminal=${!!result.terminal} summary="${result.summary.slice(0, 120)}"`)
 
-      // Track verification cadence
-      if (toolName === 'read_backend_state' && mutated) verifiedAfterMutation = true
-      if (toolName === 'run_test' && mutated) verifiedAfterMutation = true
+      // Failed checks invalidate earlier proof, including handled tool exceptions.
+      if (toolName === 'read_backend_state' || toolName === 'run_test') {
+        verification.status = result.ok ? 'passed' : 'failed'
+      }
       // Allowlist-driven: a mutation is anything that is NOT a control tool and
       // NOT a read-only tool. Adding a new read tool to tools.READ_ONLY_TOOLS
       // (or a control tool to CONTROL_TOOLS above) keeps this honest without
@@ -1467,7 +1479,7 @@ async function runAgentLoop(
         // it has already happened by the time we get here. Demanding a second
         // pass afterwards is what pushed the run into the time budget in the
         // first place.
-        verifiedAfterMutation = result.ok && SELF_VERIFYING_TOOLS.has(toolName)
+        verification.status = result.ok && SELF_VERIFYING_TOOLS.has(toolName) ? 'passed' : 'pending'
         // Recorded even when the turn later fails, so the caller can tell "the
         // run stopped" from "nothing changed" — the distinction that decides
         // whether retrying is safe or duplicates work.
@@ -1491,7 +1503,7 @@ async function runAgentLoop(
         finalSummary = result.summary || 'Done.'
         needsUser = !!result.needsUser
         terminalData = result.data ?? null
-        success = !needsUser && result.ok
+        success = !needsUser && result.ok && verification.status !== 'failed'
         finished = true
       }
     }
@@ -1500,7 +1512,7 @@ async function runAgentLoop(
       // Steer the model to verify if it tried to finish after mutating. The
       // steer rides in the same user turn as the results: the routed models
       // take no system message mid-conversation.
-      if (mutated && !verifiedAfterMutation && !needsUser) {
+      if (mutated && verification.status === 'pending' && !needsUser) {
         emit({ type: 'phase', phase: 'verify' })
         messages.push({
           role: 'user',

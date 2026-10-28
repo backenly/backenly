@@ -3,8 +3,8 @@
  *
  * Real database: the project, its workspace schema, the conversation log, the
  * usage rows and the tables a refused or cut-off step must leave untouched.
- * Only the model is scripted, so each test pins exactly what the brain sent
- * and what it did with each answer.
+ * The model and endpoint-verifier outcomes are scripted; schema and RLS tools
+ * use real PostgreSQL. Background reconciliation is disabled for this suite.
  *
  * Spend reservations go to the gateway's in-memory ledger. The Postgres ledger
  * has its own suite (tests/integration/ai-spend-ledger.spec.ts); writing this
@@ -21,6 +21,21 @@ import { memorySpendLedger, setSpendLedgerForTests, type MemorySpendLedger } fro
 import { classifierPrompt } from '@/lib/ai/brain/prompts'
 import { BRAIN_MODEL_TOOLS } from '@/lib/ai/brain/tools'
 import { runBrain, type BrainEvent, type BrainInput } from '@/lib/ai/brain/agent'
+import { runEndpointTest } from '@/lib/ai/brain/verifier'
+
+jest.mock('@/lib/ai/brain/verifier', () => ({
+  runEndpointTest: jest.fn(),
+}))
+
+// Preserve real history reads while preventing unawaited summary generation
+// from consuming responses queued for the scripted agent provider.
+jest.mock('@/lib/ai/conversation-summarizer', () => ({
+  ...jest.requireActual('@/lib/ai/conversation-summarizer'),
+  maybeSummarizeConversation: jest.fn(async () => {}),
+}))
+
+const mockRunEndpointTest = jest.mocked(runEndpointTest)
+let originalReconcilerFlag: string | undefined
 
 let ownerId: string
 let projectId: string
@@ -61,6 +76,9 @@ async function usageRows(expected: number) {
 }
 
 beforeAll(async () => {
+  // FLAGS reads this environment variable on each kick, not at module import.
+  originalReconcilerFlag = process.env.ENABLE_AUTONOMY_RECONCILER
+  process.env.ENABLE_AUTONOMY_RECONCILER = 'false'
   ownerId = (await prisma.user.create({
     data: { email: `brain-gw-${crypto.randomBytes(6).toString('hex')}@example.test`, password: 'not-a-real-hash', name: 'brain' },
   })).id
@@ -68,27 +86,187 @@ beforeAll(async () => {
   schema = `workspace_${projectId}`
   await prisma.$executeRawUnsafe(`CREATE SCHEMA IF NOT EXISTS "${schema}"`)
   await prisma.$executeRawUnsafe(`CREATE TABLE IF NOT EXISTS "${schema}"."keep_me" (id serial PRIMARY KEY, label text)`)
+  await prisma.$executeRawUnsafe(`CREATE TABLE "${schema}"."rls_custom_fixture" (id serial PRIMARY KEY)`)
+  await prisma.$executeRawUnsafe(`CREATE TABLE "${schema}"."rls_template_fixture" (id serial PRIMARY KEY)`)
 }, 60_000)
 
 beforeEach(async () => {
+  mockRunEndpointTest.mockReset()
+  if (!projectId || !ownerId) throw new Error('Fixture setup did not assign project and owner IDs; refusing cleanup')
   ledger = memorySpendLedger()
   setSpendLedgerForTests(ledger)
   await prisma.aiUsage.deleteMany({ where: { projectId } })
 })
 
 afterEach(() => {
+  jest.restoreAllMocks()
   setProviderForTests(null)
   setSpendLedgerForTests(null)
 })
 
 afterAll(async () => {
-  await prisma.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`).catch(() => {})
-  await prisma.auditLog.deleteMany({ where: { projectId } }).catch(() => {})
-  await prisma.project.deleteMany({ where: { userId: ownerId } }).catch(() => {})
-  await prisma.user.delete({ where: { id: ownerId } }).catch(() => {})
+  // Partial setup must never turn an undefined filter into an unscoped delete.
+  // Attempt independent cleanup steps, then surface every failure to Jest.
+  const failures: unknown[] = []
+  const cleanup = async (operation: () => Promise<unknown>) => {
+    try { await operation() } catch (error) { failures.push(error) }
+  }
+  if (schema) {
+    if (projectId && schema === `workspace_${projectId}` && /^[a-zA-Z0-9_-]+$/.test(schema)) {
+      await cleanup(() => prisma.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`))
+    } else {
+      failures.push(new Error('Refusing to drop an unexpected fixture schema'))
+    }
+  }
+  if (projectId) {
+    await cleanup(() => prisma.auditLog.deleteMany({ where: { projectId } }))
+    await cleanup(() => prisma.project.delete({ where: { id: projectId } }))
+  }
+  if (ownerId) await cleanup(() => prisma.user.delete({ where: { id: ownerId } }))
+  if (failures.length) throw new AggregateError(failures, 'Brain gateway fixture cleanup failed')
 }, 60_000)
 
+// A separate hook restores the flag even if fixture setup or cleanup fails.
+afterAll(() => {
+  if (originalReconcilerFlag === undefined) delete process.env.ENABLE_AUTONOMY_RECONCILER
+  else process.env.ENABLE_AUTONOMY_RECONCILER = originalReconcilerFlag
+})
+
 describe('a turn on the gateway', () => {
+  const finish = (summary = 'Observed verification.') =>
+    scriptedMessage({ toolUse: [{ id: 'done', name: 'finish', input: { summary } }] })
+  const read = () => scriptedMessage({ toolUse: [{ id: 'read', name: 'read_backend_state', input: {} }] })
+  const mutate = () => scriptedMessage({ toolUse: [{
+    id: 'mutation', name: 'create_table',
+    input: { tableName: `verify_${crypto.randomBytes(5).toString('hex')}`, columns: [{ name: 'label', type: 'text' }] },
+  }] })
+  const expectAppliedMutation = (provider: ScriptedProvider, nextCall: number) => {
+    const answers = provider.calls[nextCall].params.messages.at(-1)!.content as Anthropic.ToolResultBlockParam[]
+    expect(JSON.parse(answers[0].content as string)).toMatchObject({ ok: true })
+  }
+
+  it.each([
+    ['read_backend_state', false],
+    ['read_backend_state', true],
+    ['run_test', false],
+    ['run_test', true],
+  ] as const)('defers same-batch finish with %s (finish first: %s)', async (verificationTool, finishFirst) => {
+    const probe = verificationTool === 'run_test'
+      ? mockRunEndpointTest.mockResolvedValueOnce({
+          ok: true, summary: 'Endpoint verified.', endpoint: '/test-endpoint',
+          method: 'GET', statusCode: 200, bodyExcerpt: '[]',
+        })
+      : null
+    const check = {
+      id: 'check', name: verificationTool,
+      input: verificationTool === 'run_test' ? { tableName: 'keep_me', operation: 'list' } : {},
+    }
+    const premature = { id: 'premature', name: 'finish', input: { summary: 'Unobserved.' } }
+    const provider = scriptedProvider([
+      classified('MODIFY'), mutate(),
+      scriptedMessage({ toolUse: finishFirst ? [premature, check] : [check, premature] }),
+      finish(),
+    ])
+    const { result } = await turn(provider, 'make a small table')
+    expect(result).toMatchObject({ success: true, summary: 'Observed verification.' })
+    expect(provider.calls).toHaveLength(4)
+    expectAppliedMutation(provider, 2)
+    const answers = provider.calls[3].params.messages.at(-1)!.content as Anthropic.ToolResultBlockParam[]
+    expect(answers.map((a) => a.tool_use_id)).toEqual(finishFirst ? ['premature', 'check'] : ['check', 'premature'])
+    expect(JSON.parse(answers.find((a) => a.tool_use_id === 'check')!.content as string)).toMatchObject({ ok: true })
+    expect(answers.find((a) => a.tool_use_id === 'premature')).toMatchObject({ is_error: true })
+    expect(result.toolsRun.filter((name) => name === 'finish')).toHaveLength(1)
+    expect(result.toolsRun.filter((name) => name === verificationTool)).toHaveLength(1)
+    if (probe) {
+      expect(probe).toHaveBeenCalledTimes(1)
+      expect(probe).toHaveBeenCalledWith(expect.objectContaining({ projectId, tableName: 'keep_me', operation: 'list' }))
+      expect(JSON.parse(answers.find((a) => a.tool_use_id === 'check')!.content as string)).toMatchObject({ summary: 'Endpoint verified.' })
+    }
+  }, 60_000)
+
+  it.each(['failure', 'exception'])('allows honest completion after verification %s', async (kind) => {
+    const probe = mockRunEndpointTest
+    if (kind === 'exception') probe.mockRejectedValueOnce(new Error('verification unavailable'))
+    else probe.mockResolvedValueOnce({ ok: false, summary: 'verification unavailable', endpoint: '', method: 'GET', statusCode: null, bodyExcerpt: '' })
+    const provider = scriptedProvider([
+      classified('MODIFY'), mutate(), read(),
+      scriptedMessage({ toolUse: [
+        { id: 'check', name: 'run_test', input: { tableName: 'keep_me', operation: 'list' } },
+        { id: 'premature', name: 'finish', input: { summary: 'Unobserved.' } },
+      ] }),
+      finish('Changes applied, verification failed.'),
+    ])
+    const { result } = await turn(provider, 'make a small table')
+    expect(result).toMatchObject({ success: false, summary: 'Changes applied, verification failed.' })
+    expect(provider.calls).toHaveLength(5)
+    expectAppliedMutation(provider, 2)
+    expect(probe).toHaveBeenCalledTimes(1)
+    const answers = provider.calls[4].params.messages.at(-1)!.content as Anthropic.ToolResultBlockParam[]
+    expect(answers.find((a) => a.tool_use_id === 'check')).toMatchObject({ is_error: true })
+  }, 60_000)
+
+  it('invalidates verification after a later ordinary mutation', async () => {
+    const provider = scriptedProvider([
+      classified('MODIFY'), mutate(), read(), mutate(), finish('Too early.'), read(), finish(),
+    ])
+    const { result } = await turn(provider, 'make two small tables')
+    expect(result).toMatchObject({ success: true, summary: 'Observed verification.' })
+    expect(provider.calls).toHaveLength(7)
+    expectAppliedMutation(provider, 2)
+    expectAppliedMutation(provider, 4)
+    expect(JSON.stringify(provider.calls[5].params.messages.at(-1))).toContain('did not verify')
+  }, 60_000)
+
+  it('accepts separate-turn finish after successful verification without rechecking', async () => {
+    const provider = scriptedProvider([classified('MODIFY'), mutate(), read(), finish()])
+    const { result } = await turn(provider, 'make a small table')
+    expect(result.success).toBe(true)
+    expect(provider.calls).toHaveLength(4)
+    expectAppliedMutation(provider, 2)
+    expect(result.toolsRun).toEqual(['create_table', 'read_backend_state', 'finish'])
+  }, 60_000)
+
+  it('preserves successful self-verifying tools without another read', async () => {
+    const provider = scriptedProvider([
+      classified('MODIFY'),
+      scriptedMessage({ toolUse: [{ id: 'rls', name: 'set_rls', input: { tableName: 'rls_custom_fixture', select: { using: 'true' } } }] }),
+      finish('Policy verified by executor.'),
+    ])
+    const { result } = await turn(provider, 'set the rls_custom_fixture select policy')
+    expect(result).toMatchObject({ success: true, summary: 'Policy verified by executor.' })
+    expect(result.toolsRun).toEqual(['set_rls', 'finish'])
+    expect(provider.calls).toHaveLength(3)
+    const answers = provider.calls[2].params.messages.at(-1)!.content as Anthropic.ToolResultBlockParam[]
+    expect(JSON.parse(answers[0].content as string)).toMatchObject({ ok: true })
+    const policies = await prisma.$queryRawUnsafe<Array<{ cmd: string }>>(
+      'SELECT cmd FROM pg_policies WHERE schemaname = $1 AND tablename = $2',
+      schema, 'rls_custom_fixture',
+    )
+    expect(policies).toEqual(expect.arrayContaining([{ cmd: 'SELECT' }]))
+  }, 60_000)
+
+  it('preserves successful add_rls self-verification without another read', async () => {
+    const provider = scriptedProvider([
+      classified('MODIFY'),
+      scriptedMessage({ toolUse: [{ id: 'rls', name: 'add_rls', input: { tableName: 'rls_template_fixture', policy: 'admin_only' } }] }),
+      finish('Template policy verified by executor.'),
+    ])
+    const { result } = await turn(provider, 'restrict rls_template_fixture to service-role access')
+    expect(result).toMatchObject({ success: true, summary: 'Template policy verified by executor.' })
+    expect(result.toolsRun).toEqual(['add_rls', 'finish'])
+    expect(provider.calls).toHaveLength(3)
+    const answers = provider.calls[2].params.messages.at(-1)!.content as Anthropic.ToolResultBlockParam[]
+    expect(answers).toHaveLength(1)
+    expect(answers[0]).toMatchObject({ tool_use_id: 'rls' })
+    expect(answers[0]).not.toHaveProperty('is_error')
+    expect(JSON.parse(answers[0].content as string)).toMatchObject({ ok: true })
+    const policies = await prisma.$queryRawUnsafe<Array<{ policyname: string; cmd: string }>>(
+      'SELECT policyname, cmd FROM pg_policies WHERE schemaname = $1 AND tablename = $2',
+      schema, 'rls_template_fixture',
+    )
+    expect(policies).toEqual(expect.arrayContaining([{ policyname: 'backenly_admin_only', cmd: 'ALL' }]))
+  }, 60_000)
+
   it('classifies, runs tools, answers each call and bills what the model reports', async () => {
     const provider = scriptedProvider([
       classified('QUESTION'),
