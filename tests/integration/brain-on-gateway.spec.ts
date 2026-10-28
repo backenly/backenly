@@ -239,6 +239,39 @@ describe('a turn on the gateway', () => {
     expect(mockRunEndpointTest).toHaveBeenCalledTimes(2)
   }, 60_000)
 
+  it('defers a finish sent with the verification turn\'s read instead of ending the turn', async () => {
+    const provider = scriptedProvider([
+      classified('MODIFY'), mutate(),
+      scriptedMessage({ text: 'The table has been created.' }),
+      scriptedMessage({ toolUse: [
+        { id: 'check', name: 'read_backend_state', input: {} },
+        { id: 'premature', name: 'finish', input: { summary: 'Unobserved.' } },
+      ] }),
+      finish(),
+    ])
+    const { result } = await turn(provider, 'make a small table')
+    expect(result).toMatchObject({ success: true, summary: 'Observed verification.' })
+    expect(result.failureCode).toBeUndefined()
+    expect(result.toolsRun).toEqual(['create_table', 'read_backend_state', 'finish'])
+    const answers = provider.calls[4].params.messages.at(-1)!.content as Anthropic.ToolResultBlockParam[]
+    expect(answers.map((a) => a.tool_use_id)).toEqual(['check', 'premature'])
+    expect(answers.find((a) => a.tool_use_id === 'premature')).toMatchObject({ is_error: true })
+  }, 60_000)
+
+  it('does not fail a turn that changed nothing because a check it ran failed', async () => {
+    mockRunEndpointTest.mockResolvedValueOnce({
+      ok: false, summary: 'GET returned 404.', endpoint: '/keep_me', method: 'GET', statusCode: 404, bodyExcerpt: '',
+    })
+    const provider = scriptedProvider([
+      classified('FIX'),
+      scriptedMessage({ toolUse: [{ id: 'check', name: 'run_test', input: { tableName: 'keep_me', operation: 'list' } }] }),
+      finish('keep_me answers 404, so its route is not registered.'),
+    ])
+    const { result } = await turn(provider, 'why does keep_me answer 404?')
+    expect(result).toMatchObject({ success: true, summary: 'keep_me answers 404, so its route is not registered.' })
+    expect(result.failureCode).toBeUndefined()
+  }, 60_000)
+
   it('invalidates verification after a later ordinary mutation', async () => {
     const provider = scriptedProvider([
       classified('MODIFY'), mutate(), read(), mutate(), finish('Too early.'), read(), finish(),
