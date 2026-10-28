@@ -42,6 +42,51 @@ Agent: Not available over MCP. Sent to the
        Review Queue: 1,284 live rows.
        Approve it in the dashboard.`
 
+/**
+ * The restructuring and undo pages show the same kind of session. Restructuring
+ * reads a proposal the way autonomy { action: "evolution" } words it
+ * (lib/structural-evolution/words.ts); undo is a change that was verified and
+ * still broke the app, undone through the real deploy actions (changes,
+ * revert_change). In both, a person approves, never the agent.
+ */
+const RESTRUCTURE_SESSION = `You:   Why is Backenly asking about
+       orders?
+Agent: autonomy evolution
+       Move refund data out of orders
+       into its own table. The refund
+       columns are set later in an
+       order's life, and changing them
+       has been locking orders.
+       Rehearsed on a copy. Waiting
+       for your approval.
+You:   (approves it in the dashboard)
+       Later: is it done?
+Agent: autonomy evolution
+       order_refunds is open. Apps that
+       use orders keep working, and undo
+       puts orders back as it was.`
+
+const UNDO_SESSION = `You:   Checkout broke after the last
+       change. Undo it.
+Agent: deploy changes
+       #41 renamed orders.total to
+       amount. Verified.
+Agent: deploy revert_change #41
+       Parked for your approval:
+       amount goes back to total.
+       No data is set aside.
+You:   (approves it in the dashboard)
+Agent: check_approval: executed.
+       Checkout reads total again, and
+       every order since is still there.`
+
+/** The pages that show a session in place of a drawing. */
+const HERO_SESSIONS: Record<string, { code: string; label: string } | undefined> = {
+  'ai-backend-generation': { code: AGENT_SESSION, label: 'Your agent, over MCP' },
+  'self-restructuring-schema': { code: RESTRUCTURE_SESSION, label: 'A restructuring, over MCP' },
+  'undo-and-rollback': { code: UNDO_SESSION, label: 'Undoing a change, over MCP' },
+}
+
 export function generateStaticParams() {
   return FEATURE_SLUGS.map((slug) => ({ slug }))
 }
@@ -91,7 +136,7 @@ export default async function FeatureSlugPage(props: { params: Promise<{ slug: s
 
   const related = f.relatedFeatures.map((slug) => FEATURES[slug]).filter(Boolean)
   const Diagram = HERO_DIAGRAMS[f.slug]
-  const isAgentPage = f.slug === 'ai-backend-generation'
+  const session = HERO_SESSIONS[f.slug]
   const isOperationsPage = f.slug === 'deployment-ready-backends'
 
   return (
@@ -120,8 +165,8 @@ export default async function FeatureSlugPage(props: { params: Promise<{ slug: s
               <SpotlightPanel className="px-6 pb-6">
                 <Diagram />
               </SpotlightPanel>
-            ) : isAgentPage ? (
-              <CodeBlock code={AGENT_SESSION} label="Your agent, over MCP" language="text" />
+            ) : session ? (
+              <CodeBlock code={session.code} label={session.label} language="text" />
             ) : undefined
           }
         />

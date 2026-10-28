@@ -85,4 +85,5 @@ Structured JSON: `{ ok: false, error, code }`. `RATE_LIMITED`: respect `retry-af
 
 - Every change is verified, snapshotted and reversible; the History page is the audit trail and the Autonomy page is the approvals inbox.
 - The backend is not static between sessions: the autonomy loop repairs what it safely can on every plan, so a gap you leave may already be closed next time.
+- When a table starts doing two jobs, Backenly may propose moving the second into a table of its own, with apps kept working throughout. `autonomy { action: "evolution" }` says what is proposed and why; only a person approves it, on the Autonomy page.
 - Docs index: https://backenly.com/llms.txt; each topic is https://backenly.com/docs/agents/<topic>.md, or `fetch_docs { topic }` · this file: https://backenly.com/skill.md

@@ -13,7 +13,7 @@
 export const GUIDE_PATH = '/guides/safe-ai-database-changes'
 
 /** The last real edit of this guide. Sitemap lastmod and the article's dateModified. */
-export const GUIDE_UPDATED = '2026-10-24'
+export const GUIDE_UPDATED = '2026-10-28'
 
 const GITHUB = 'https://github.com/backenly/backenly/blob/main'
 export const SOURCES = {
@@ -26,6 +26,7 @@ export const SOURCES = {
   migrationParser: `${GITHUB}/lib/mcp/migration-parser.ts`,
   ladder: `${GITHUB}/lib/autonomy/maintenance/step.ts`,
   rollbackCapability: `${GITHUB}/lib/autonomy/maintenance/rollback-capability.ts`,
+  evolutionEngine: 'https://github.com/backenly/backenly/tree/main/lib/evolution-engine',
 } as const
 
 export const AUTHORITIES = [

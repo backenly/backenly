@@ -1,4 +1,5 @@
 import type { Metadata } from 'next'
+import Link from 'next/link'
 import { DatabaseBackup } from 'lucide-react'
 import type { ReactNode } from 'react'
 import { safeJsonLd } from '@/lib/security/safe-jsonld'
@@ -6,6 +7,7 @@ import { pageMetadata, SITE_URL } from '@/lib/seo/metadata'
 import { graph, ORGANIZATION_ID } from '@/lib/seo/schema'
 import { SiteShell } from '@/components/site/SiteShell'
 import { DataTable, JsonLd, NextLinks, Page, Steps } from '@/components/site/kit'
+import { PROSE_LINK } from '@/components/site/tokens'
 import {
   GuideCode as Code,
   GuideDocument,
@@ -247,6 +249,18 @@ export default function SafeChangesGuide() {
               exists. The restructuring offered today consolidates a table’s fragmented access policies, and its undo puts
               back the exact policy set that was there before. The rule is{' '}
               <Source href={SOURCES.rollbackCapability}>lib/autonomy/maintenance/rollback-capability.ts</Source>.
+            </p>
+            <p className={READ}>
+              Since 25 October 2026, Backenly Cloud also offers a second kind of restructuring. When a group of
+              columns has become a job of its own, such as refunds on an orders table, and keeping it there has a
+              measured cost, Backenly rehearses moving it into a table of its own on a copy and asks you to approve
+              the exact plan. Both tables are kept in step while the data is copied, so apps that use the old table
+              keep working, and dropping the old columns is again a person’s step. The engine is{' '}
+              <Source href={SOURCES.evolutionEngine}>lib/evolution-engine</Source>, and{' '}
+              <Link href="/features/self-restructuring-schema" className={PROSE_LINK}>
+                self-restructuring
+              </Link>{' '}
+              explains it without the code.
             </p>
           </Part>
 

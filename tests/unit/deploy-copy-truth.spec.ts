@@ -125,9 +125,13 @@ describe('every surface states the true model', () => {
   })
 
   it('no page says rollback is limited to paid plans', () => {
-    const gated = /Pro and (higher|above)|plan-gated|not available on Free|Pro:[^'"\n]*roll ?back/i
-    for (const f of ['app/docs/content.ts', 'app/features/data.ts', 'app/use-cases/data.ts', 'app/comparisons/data.ts', 'app/pricing/page.tsx', 'app/terms/page.tsx']) {
-      const claims = read(f).split(/(?<=[.!?])\s+|\n/).filter((s) => /roll ?back/i.test(s) && gated.test(s))
+    // "rolled back" and "undone" too: "on Pro and above any recorded change can
+    // be rolled back" sat in a features FAQ after every other line was fixed,
+    // because only "rollback" and "roll back" were looked for.
+    const rollback = /roll(?:ed|ing)? ?back|\bundo(?:ne)?\b/i
+    const gated = /Pro and (higher|above)|plan-gated|not available on Free|Pro:[^'"\n]*(?:roll(?:ed|ing)? ?back|\bundo)/i
+    for (const f of ['app/docs/content.ts', 'app/features/data.ts', 'app/use-cases/data.ts', 'app/comparisons/data.ts', 'app/pricing/page.tsx', 'app/terms/page.tsx', 'public/llms.txt']) {
+      const claims = read(f).split(/(?<=[.!?])\s+|\n/).filter((s) => rollback.test(s) && gated.test(s))
       expect([f, claims]).toEqual([f, []])
     }
   })
