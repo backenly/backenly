@@ -42,10 +42,11 @@ import { Prisma } from '@prisma/client'
 import { prisma } from '@/lib/db/prisma'
 import { installSqlRecorder, withSqlCapture, type RecordedStatement } from '@/lib/execution/sql-recorder'
 import { pickTables, type CatalogSnapshot } from './catalog'
-import { currentAttribution, type ChangeAttribution } from './attribution'
+import { currentAttribution, withChangeAttribution, type ChangeAttribution } from './attribution'
 import { openChangeContext, type ChangeContext } from './context'
 import { describeChange } from './describe'
 import { diffCatalogs, footprintObjects, footprintTables } from './diff'
+import { captureResources, describeOps, diffResources, pickItems, resourcesTouched, type ResourceOp } from './resources'
 import { refreshSchemaViews, tablesTouched } from './freshness'
 import { resultDataFor } from './impact'
 import { checkpointHash } from './integrity'
@@ -174,6 +175,26 @@ export interface GovernedChangeInput {
   autoRecover?: boolean
 }
 
+/**
+ * Run `fn` as one governed change titled `title` and return what it returns:
+ * for the services that change the rest of the backend (lib/changes/resources),
+ * whoever calls them, the console, an agent's tool or the executor. Inside a
+ * change already open it joins that change; outside the ledger it just runs.
+ */
+export async function governedChange<T>(
+  projectId: string | null | undefined,
+  title: string,
+  fn: () => Promise<T>,
+  /** The person, for a route that authenticated them itself; attribution set where the request was authenticated wins. */
+  opts: { actorUserId?: string } = {},
+): Promise<T> {
+  // An account-level key belongs to no project, and so to no project's history.
+  if (!projectId) return fn()
+  const run = async () => (await withGovernedChange({ projectId, title }, fn)).result
+  if (opts.actorUserId && !currentAttribution()) return withChangeAttribution({ source: 'dashboard', actorUserId: opts.actorUserId }, run)
+  return run()
+}
+
 /** Thrown inside a change to abandon it without leaving a record. */
 export class AbandonChange extends Error {
   constructor(readonly payload: unknown) {
@@ -289,6 +310,22 @@ function footprintBetween(before: CatalogSnapshot, after: CatalogSnapshot, prese
   return footprint
 }
 
+const RISK_ORDER: RiskClass[] = ['additive', 'transforming', 'destructive', 'data_rewrite']
+
+/** The database's risk class and the resources', whichever is higher. */
+function highestRisk(database: RiskClass | null, ops: ResourceOp[]): RiskClass {
+  const fromOps = ops.map((o): RiskClass => (!o.after ? 'destructive' : !o.before ? 'additive' : 'transforming'))
+  const all = [...(database ? [database] : []), ...fromOps]
+  return all.reduce<RiskClass>((hi, r) => (RISK_ORDER.indexOf(r) > RISK_ORDER.indexOf(hi) ? r : hi), 'additive')
+}
+
+/** A verification with one more check, its outcome recomputed. */
+function withCheck(v: ChangeVerification, check: ChangeVerification['checks'][number]): ChangeVerification {
+  const checks = [...v.checks, check]
+  const outcome = checks.some((c) => c.outcome === 'contradicted') ? 'contradicted' : checks.some((c) => c.outcome === 'inconclusive') ? 'inconclusive' : 'confirmed'
+  return { ...v, outcome, checks }
+}
+
 /** How much protection the change needed, from what it did. */
 export function classifyRisk(footprint: TableChange[], preserved: PreservedEntry[]): RiskClass {
   if (preserved.some((e) => e.kind === 'column' && e.reason === 'rewritten')) return 'data_rewrite'
@@ -338,6 +375,9 @@ export async function withGovernedChange<T>(
 
     const before = await readCatalogOn(client, schema)
     const platform = await readPlatformState(projectId)
+    // The rest of the backend, as the catalog is: read before, read after, the
+    // difference is what the change did to it (lib/changes/resources).
+    const resourcesBefore = await captureResources(projectId)
     // Whether this record may quote the work's text (lib/changes/residency.ts).
     // When it may not, the catalogs' definitions are kept in the region and
     // this record digests them under a key kept there with them.
@@ -385,7 +425,15 @@ export async function withGovernedChange<T>(
     }
 
     const after = await readCatalogOn(client, schema)
+    // What it filled into columns it added with a non-constant default, so a
+    // restore can tell those values from writes since (lib/changes/preserve.ts).
+    const { keepFilledValues } = await import('./preserve')
+    await keepFilledValues(change, before, after, diffCatalogs(before, after)).catch((err) =>
+      console.warn(`[ChangeLedger] change ${change.id}: the values it filled in were not kept:`, err instanceof Error ? err.message : err))
     const footprint = footprintBetween(before, after, change.preserved)
+    const resourcesAfter = await captureResources(projectId)
+    const resourceOps = diffResources(resourcesBefore.snapshot, resourcesAfter.snapshot)
+    const unread = [...new Set([...resourcesBefore.unread, ...resourcesAfter.unread])]
     // What the record keeps of it. Outside the home region, the same lines
     // from the catalogs' structure, which name definitions without quoting
     // them: equal definitions digest equal under one key.
@@ -399,7 +447,7 @@ export async function withGovernedChange<T>(
 
     // Nothing changed and nothing was kept: a no-op is not worth a row. (A
     // failure that touched nothing is: someone asked, and it was refused.)
-    if (footprint.length === 0 && change.preserved.length === 0 && verdict.ok && !change.verification) {
+    if (footprint.length === 0 && change.preserved.length === 0 && resourceOps.length === 0 && verdict.ok && !change.verification) {
       await discard()
       if (thrown) throw thrown
       return { result: result as T, change: null }
@@ -421,15 +469,18 @@ export async function withGovernedChange<T>(
     const kept = <S extends CatalogSnapshot>(snapshot: S): S => (key ? catalogStructure(snapshot, key) : snapshot)
     const checkpoint = {
       database: { ...kept(touchedBefore), platform: pickPlatform(platform, tables.before) },
+      ...(resourceOps.length > 0 ? { resources: pickItems(resourceOps, 'before') } : {}),
       ...(key ? { definitionsInRegion: true } : {}),
     }
     const added = footprint.filter((c) => !c.object && (c.kind === 'added' || c.kind === 'replaced') && c.after).map((c) => ({ name: c.after! }))
     const resultState = {
       ...kept(touchedAfter),
       data: await resultDataFor({ query: (sql, params) => client.query(sql, params as unknown[]) }, schema, added),
+      ...(resourceOps.length > 0 ? { resources: pickItems(resourceOps, 'after') } : {}),
     }
     const preserved: ChangePreservation | null = change.preserved.length > 0 ? { vault: change.vault, entries: change.preserved } : null
-    const summary = input.summary ?? describeChange(keptFootprint)
+    const touchedDatabase = keptFootprint.length > 0 || change.preserved.length > 0
+    const summary = input.summary ?? [touchedDatabase ? describeChange(keptFootprint) : '', describeOps(resourceOps)].filter(Boolean).join('. ')
     const evidence = {
       steps: keptSteps(verdict.steps, quote) as unknown as Prisma.InputJsonValue,
       // For a project kept in another region the SQL stays there: it can carry values.
@@ -439,7 +490,8 @@ export async function withGovernedChange<T>(
       footprint: keptFootprint as unknown as Prisma.InputJsonValue,
       preserved: preserved ? (preserved as unknown as Prisma.InputJsonValue) : Prisma.DbNull,
       summary: summary.slice(0, 300),
-      risk: classifyRisk(footprint, change.preserved),
+      risk: highestRisk(touchedDatabase ? classifyRisk(footprint, change.preserved) : null, resourceOps),
+      resources: [...(touchedDatabase ? ['database'] : []), ...resourcesTouched(resourceOps)],
     }
     const hash = checkpointHash({ checkpoint, resultState, footprint: keptFootprint })
     const principals = {
@@ -451,7 +503,7 @@ export async function withGovernedChange<T>(
     let status: ChangeStatus
     let verification: ChangeVerification | null = null
     if (!verdict.ok) {
-      status = footprint.length === 0 && change.preserved.length === 0 ? 'failed' : 'partially_applied'
+      status = footprint.length === 0 && change.preserved.length === 0 && resourceOps.length === 0 ? 'failed' : 'partially_applied'
       await transition(change.id, ['applying'], status, {
         ...evidence,
         error: keptText(verdict.error ?? 'failed', quote).slice(0, 2000),
@@ -465,7 +517,7 @@ export async function withGovernedChange<T>(
     } else {
       await transition(change.id, ['applying'], 'verifying', evidence)
       await recordEvent(change.id, projectId, 'applied', { objects: footprint.length, statements: statements.length })
-      verification = kind === 'recovery'
+      verification = kind === 'recovery' || kind === 'snapshot_restore'
         ? (change.verification ?? { outcome: 'inconclusive', checkedAt: new Date().toISOString(), checks: [] })
         : await verifyChange({
             schema,
@@ -477,6 +529,16 @@ export async function withGovernedChange<T>(
             source: attr.source,
             client,
           })
+      // A part of the backend that could not be read is a part of this change
+      // that is not on its record: said, and not called verified.
+      if (unread.length > 0) {
+        verification = withCheck(verification, {
+          id: 'resources_read',
+          label: 'Every part of the backend recorded',
+          outcome: 'inconclusive',
+          detail: `could not read ${unread.join(', ')} before and after the change, so what it did there is not recorded`,
+        })
+      }
       status = verification.outcome === 'confirmed' ? 'healthy' : verification.outcome === 'contradicted' ? 'verification_failed' : 'unverified'
       await transition(change.id, ['verifying'], status, {
         verification: keptVerification(verification, quote) as unknown as Prisma.InputJsonValue,
@@ -499,7 +561,7 @@ export async function withGovernedChange<T>(
     // cached view of it behind: the REST API's, the reconciler's baseline, this
     // process's table caches (lib/changes/freshness.ts). A recovery refreshes
     // them again where it settles.
-    if (kind === 'change' && (footprint.length > 0 || change.preserved.length > 0)) {
+    if ((kind === 'change' || kind === 'snapshot_restore') && (footprint.length > 0 || change.preserved.length > 0)) {
       await refreshSchemaViews(projectId, tablesTouched(footprint))
     }
 

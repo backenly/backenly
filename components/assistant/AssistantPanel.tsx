@@ -186,7 +186,7 @@ export function AssistantPanel() {
       <div className="flex items-center gap-2 h-11 px-3.5 border-b border-white/[0.07] flex-shrink-0">
         <Sparkles className="w-3.5 h-3.5 text-zinc-400" />
         <span className="text-[12.5px] font-semibold text-zinc-100">Assistant</span>
-        <span className="text-[12px] font-mono text-zinc-600 mt-px">answers only</span>
+        <span className="text-[12px] font-mono text-faint mt-px">answers only</span>
         <div className="ml-auto flex items-center gap-0.5">
           {messages.length > 0 && (
             <button
@@ -216,7 +216,7 @@ export function AssistantPanel() {
             <p className="text-[12.5px] text-zinc-300 font-medium mb-1">
               Ask about the platform.
             </p>
-            <p className="text-[12.5px] text-zinc-500 leading-relaxed mb-5">
+            <p className="text-[12.5px] text-faint leading-relaxed mb-5">
               How features work, where things live, how to wire your coding
               agent or frontend to this project. Building itself happens
               through your agent (Connect) or the Database section.
@@ -293,7 +293,7 @@ export function AssistantPanel() {
             }}
             placeholder="Ask how something works…"
             rows={1}
-            className="flex-1 resize-none bg-transparent text-[12px] text-zinc-100 placeholder-zinc-600 focus:outline-none leading-relaxed max-h-24 py-1"
+            className="flex-1 resize-none bg-transparent text-[12px] text-zinc-100 placeholder:text-zinc-500 focus:outline-none leading-relaxed max-h-24 py-1"
           />
           <button
             onClick={() => send(input)}
@@ -304,7 +304,7 @@ export function AssistantPanel() {
             <ArrowUp className="w-3.5 h-3.5" />
           </button>
         </div>
-        <p className="text-[12px] text-zinc-600 mt-1.5 px-0.5">
+        <p className="text-[12px] text-faint mt-1.5 px-0.5">
           Answers questions only. Building happens through your connected agent.
         </p>
       </div>

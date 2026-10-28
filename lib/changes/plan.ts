@@ -34,8 +34,8 @@
  * whatever search_path the transaction runs with.
  */
 
-import type { CatalogSnapshot, ColumnState, ConstraintState, ObjectState, PolicyState, TableState, TriggerState } from './catalog'
-import { sameObject, sameTable } from './catalog'
+import type { CatalogSnapshot, ColumnState, ConstraintState, GrantState, ObjectState, PolicyState, TableState, TriggerState } from './catalog'
+import { apiGrantsRemoved, CAPTURE_TRIGGER, enumLabels, isDomain, sameObject, sameTable } from './catalog'
 import { columnKey, describeTableChange } from './diff'
 import { AFTER_COLUMN, literal, qualified, quoteIdent as q, vaultTableName } from './names'
 import type { PreservedEntry, TableChange } from './types'
@@ -230,8 +230,14 @@ export function planRestore(input: PlanInput): RestorePlan {
       if (!B) plan.conflicts.push({ table: c.before, reason: `the record of this change is incomplete for ${noun} ${c.before}` })
       else if (live.objects?.[c.before]) plan.conflicts.push({ table: c.before, reason: `a ${noun} named ${B.name} was created after this change` })
     }
-    if (c.object === 'type' && c.kind === 'modified') {
-      plan.conflicts.push({ table: c.after ?? '?', reason: `values added to type ${c.after} cannot be removed again` })
+    if (c.object === 'type' && c.kind === 'modified' && !enumRenames(checkpoint.objects?.[c.before ?? ''], resultState.objects?.[c.after ?? ''])) {
+      const A = resultState.objects?.[c.after ?? '']
+      plan.conflicts.push({
+        table: c.after ?? '?',
+        reason: A && isDomain(A)
+          ? `domain ${c.after} was altered, and an altered domain is restored by a person, not automatically`
+          : `values added to type ${c.after} cannot be removed again`,
+      })
     }
   }
 
@@ -293,6 +299,10 @@ export function planRestore(input: PlanInput): RestorePlan {
     for (const g of A.triggers) {
       add(PHASE.DROP_TRIGGERS, `DROP TRIGGER ${q(g.name)} ON ${T(A.name)}`, `Drop trigger ${g.name} on ${A.name}; an archived table runs nothing.`)
     }
+    // Nor does row-event capture, which the catalog leaves out as Backenly's
+    // plumbing; its sync gives the table the trigger again if it comes back.
+    add(PHASE.DROP_TRIGGERS, `DROP TRIGGER IF EXISTS ${q(CAPTURE_TRIGGER)} ON ${T(A.name)}`,
+      `Stop capturing ${A.name}'s row events for webhooks and functions, if it was; an archived table sends none.`)
     for (const p of A.policies) {
       add(PHASE.DROP_TRIGGERS, `DROP POLICY ${q(p.name)} ON ${T(A.name)}`, `Drop policy ${p.name} on ${A.name}; nobody reads an archived table.`)
     }
@@ -365,8 +375,7 @@ export function planRestore(input: PlanInput): RestorePlan {
       if (g.enabled !== 'O') add(PHASE.TRIGGERS, triggerStateSql(B.name, g), `Restore trigger ${g.name}'s enabled state.`)
     }
     for (const gr of B.grants) {
-      add(PHASE.GRANTS, `GRANT ${gr.privilege} ON ${T(B.name)} TO ${gr.grantee === 'PUBLIC' ? 'PUBLIC' : q(gr.grantee)}`,
-        `Restore ${gr.grantee}'s ${gr.privilege} privilege.`)
+      if (GRANTABLE.test(gr.privilege)) add(PHASE.GRANTS, grantSql(B.name, gr), `Restore ${gr.grantee}'s ${gr.privilege} privilege.`)
     }
     if (B.comment) add(PHASE.GRANTS, `COMMENT ON TABLE ${T(B.name)} IS ${literal(B.comment)}`, `Restore ${B.name}'s description.`)
   }
@@ -615,6 +624,24 @@ export function planRestore(input: PlanInput): RestorePlan {
     if ((A.comment ?? null) !== (B.comment ?? null)) {
       add(PHASE.GRANTS, `COMMENT ON TABLE ${T(fin)} IS ${B.comment === null ? 'NULL' : literal(B.comment)}`, `Restore ${fin}'s description.`)
     }
+
+    // The API's privileges the change took away are given back, and only those.
+    // Grants also move for reasons that have nothing to do with the change (the
+    // data plane re-grants a schema's tables whenever one is created there), so
+    // a grant the change added is left alone, as is any made since; and other
+    // roles' grants are their own sync's (apiGrantsRemoved).
+    const regranted = apiGrantsRemoved(B, A).filter((g) => GRANTABLE.test(g.privilege))
+    for (const g of regranted) {
+      add(PHASE.GRANTS, grantSql(fin, g), `Give ${g.grantee} back the ${g.privilege} privilege on ${fin} that the change took away.`)
+    }
+    const checked = regranted.filter((g) => g.grantee !== 'PUBLIC')
+    if (checked.length > 0) {
+      plan.checks.push({
+        sql: `SELECT count(*)::bigint AS n FROM (VALUES ${checked.map((g) => `(${literal(g.grantee)}, ${literal(g.privilege)})`).join(', ')}) AS v(r, p) ` +
+          `WHERE EXISTS (SELECT 1 FROM pg_roles WHERE rolname = v.r) AND NOT has_table_privilege(v.r, ${literal(`${q(schema)}.${q(fin)}`)}, v.p)`,
+        describe: `Every privilege the change took away on ${fin} is back.`,
+      })
+    }
   }
 
   // ── Views, functions, types ────────────────────────────────────────────────
@@ -635,6 +662,24 @@ export function planRestore(input: PlanInput): RestorePlan {
     // would fail on every trigger and policy that calls it.
     if (now && then && now.kind === 'function') {
       createObject(then)
+      return
+    }
+    // An enum whose values were renamed: renamed back. Rows hold the value, not
+    // its label, so every row reads its old label again. Through a temporary
+    // label when one rename's target is another's source.
+    const renames = now && then ? enumRenames(then, now) : null
+    if (renames) {
+      const held = new Set(enumLabels(now) ?? [])
+      const swap = renames.some((r) => held.has(r.to))
+      renames.forEach((r, i) => {
+        const from = literal(r.from)
+        if (swap) {
+          add(PHASE.CREATE_TYPES, `ALTER TYPE ${T(now!.name)} RENAME VALUE ${from} TO ${literal(`__bkn_restore_${i}`)}`, `Move value ${r.from} of ${now!.name} out of the way.`)
+          add(PHASE.CREATE_TYPES + 0.05, `ALTER TYPE ${T(now!.name)} RENAME VALUE ${literal(`__bkn_restore_${i}`)} TO ${literal(r.to)}`, `Rename value ${r.from} of ${now!.name} back to ${r.to}.`)
+        } else {
+          add(PHASE.CREATE_TYPES, `ALTER TYPE ${T(now!.name)} RENAME VALUE ${from} TO ${literal(r.to)}`, `Rename value ${r.from} of ${now!.name} back to ${r.to}.`)
+        }
+      })
       return
     }
     if (now) dropObject(now, !then)
@@ -673,13 +718,28 @@ export function planRestore(input: PlanInput): RestorePlan {
       const col = A?.columns.find((x) => (o.kind === 'function' ? calls(x.default) : calls(x.type)))
       if (A && col) return `${A.name}.${col.name}, kept in the recovery snapshot,`
     }
+    // A copy this restore keeps of a column on a table that stays (one the
+    // change added, or the current values of one it retyped) has the column's
+    // type as it is now. A copy has no default, so only a type is held.
+    if (o.kind === 'type') {
+      for (const c of tableEntries) {
+        if (c.kind !== 'modified') continue
+        const A = c.after ? resultState.tables[c.after] : null
+        const B = c.before ? checkpoint.tables[c.before] : null
+        if (!A || !B) continue
+        const key = columnKey(A.oid === B.oid)
+        const then = new Map(B.columns.map((x) => [key(x), x]))
+        const col = A.columns.find((x) => calls(x.type) && then.get(key(x))?.type !== x.type)
+        if (col) return `${A.name}.${col.name}, kept in the recovery snapshot,`
+      }
+    }
     return null
   }
 
   function dropObject(o: ObjectState, added: boolean) {
     if (o.kind === 'view') add(PHASE.DROP_VIEWS, `DROP VIEW ${T(o.name)}`, `Remove view ${o.name}.`)
     else if (o.kind === 'function') add(added ? PHASE.DROP_ADDED_FUNCTIONS : PHASE.DROP_FUNCTIONS, `DROP FUNCTION ${qualified(schema, o.name)}(${o.identity.slice(o.name.length + 1, -1)})`, `Remove function ${o.identity}.`)
-    else if (o.kind === 'type') add(PHASE.DROP_TYPES, `DROP TYPE ${T(o.name)}`, `Remove type ${o.name}.`)
+    else if (o.kind === 'type') add(PHASE.DROP_TYPES, `DROP ${isDomain(o) ? 'DOMAIN' : 'TYPE'} ${T(o.name)}`, `Remove ${isDomain(o) ? 'domain' : 'type'} ${o.name}.`)
   }
 
   function createObject(o: ObjectState) {
@@ -729,7 +789,17 @@ export function planRestore(input: PlanInput): RestorePlan {
     const verb = g.enabled === 'D' ? 'DISABLE' : g.enabled === 'R' ? 'ENABLE REPLICA' : g.enabled === 'A' ? 'ENABLE ALWAYS' : 'ENABLE'
     return `ALTER TABLE ${T(table)} ${verb} TRIGGER ${q(g.name)}`
   }
+
+  /** A grant to a role that was dropped since has nobody to go back to, and is skipped rather than failing the restore. */
+  function grantSql(table: string, g: GrantState): string {
+    if (g.grantee === 'PUBLIC') return `GRANT ${g.privilege} ON ${T(table)} TO PUBLIC`
+    const grant = `GRANT ${g.privilege} ON ${T(table)} TO ${q(g.grantee)}`
+    return `DO $grant$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ${literal(g.grantee)}) THEN EXECUTE ${literal(grant)}; END IF; END $grant$`
+  }
 }
+
+/** Table privileges as aclexplode names them; nothing else is replayed into a GRANT. */
+const GRANTABLE = /^(SELECT|INSERT|UPDATE|DELETE|TRUNCATE|REFERENCES|TRIGGER|MAINTAIN)$/
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -775,6 +845,19 @@ function diffByName<X extends { name: string }>(
     if (!x || !equal(x, y)) ops.create(y)
     else if (ops.same) ops.same(x, y)
   }
+}
+
+/**
+ * The renames that turn enum `now` back into `then`: the same number of values,
+ * differing only in labels, position for position. Null when the two are not
+ * both enums of that shape (a value was added, or it is not an enum).
+ */
+export function enumRenames(then: ObjectState | undefined, now: ObjectState | undefined): Array<{ from: string; to: string }> | null {
+  const b = enumLabels(then)
+  const a = enumLabels(now)
+  if (!a || !b || a.length !== b.length) return null
+  const renames = a.flatMap((label, i) => (label !== b[i] ? [{ from: label, to: b[i] }] : []))
+  return renames.length > 0 ? renames : null
 }
 
 function findTableEntry(entries: PreservedEntry[], ...names: Array<string | undefined>) {

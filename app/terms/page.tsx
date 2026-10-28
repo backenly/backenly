@@ -1,6 +1,13 @@
 import { SiteShell } from '@/components/site/SiteShell'
-import { Page, PageHero } from '@/components/site/kit'
-import { LEGAL_TEXT, LegalBody, LegalFooter, LegalList, LegalSection as Clause } from '@/components/site/legal'
+import { Page } from '@/components/site/kit'
+import {
+  LEGAL_TEXT,
+  LegalContact,
+  LegalDocument,
+  LegalList,
+  LegalSection as Clause,
+  MetaDivider,
+} from '@/components/site/legal'
 
 type LegalSection = {
   id: string
@@ -50,7 +57,7 @@ const sections: LegalSection[] = [
     content: 'Backenly offers Free, Pro, and Enterprise plans. Payments for paid plans, and for usage beyond a plan, are processed by Stripe.',
     list: [
       'Free: one permanent live project with limited monthly capacity',
-      'Pro: additional capacity, custom domain, triggers, webhooks, rollback, team seats, and email support',
+      'Pro: additional capacity, custom domain, triggers, webhooks, longer restore point retention, team seats, and email support',
       'Enterprise: custom limits, SSO, priority support with an SLA, under an individual agreement',
       'Usage beyond a plan: on Pro, usage past the included quotas is paid for in advance, and only after you set a monthly spend limit above zero. Setting or raising the limit requires confirmation from your account email and a payment of whatever your prepaid usage balance does not already cover. Usage past the quotas is charged at the rates published on the pricing page and drawn from that balance when each month closes; a month’s draw will not exceed the spending limit in effect when that month closes, or the balance. Unused balance carries over to later months. You can lower or remove the limit at any time.',
     ],
@@ -136,18 +143,23 @@ export default function TermsPage() {
   return (
     <SiteShell>
       <Page>
-        <PageHero
-          size="compact"
-          trail={[{ label: 'Home', href: '/' }, { label: 'Terms of Service' }]}
-          title="Terms of Service"
-          lede="Please read these terms carefully before using Backenly. By using the service, you agree to be bound by them."
+        <LegalDocument
+          current="terms"
+          summary="Please read these terms carefully before using Backenly. By using the service, you agree to be bound by them."
+          meta={
+            <>
+              <span>
+                Last updated <span className="text-zinc-200">October 24, 2026</span>
+              </span>
+              <MetaDivider />
+              <span>
+                Contact <span className="text-zinc-200">support@backenly.com</span>
+              </span>
+            </>
+          }
+          numbered
+          toc={sections.map((section) => ({ id: `section-${section.id}`, label: section.title }))}
         >
-          <p className="mt-7 text-[14px] text-zinc-500">
-            Last updated <span className="text-zinc-300">October 3, 2026</span>
-          </p>
-        </PageHero>
-
-        <LegalBody numbered toc={sections.map((section) => ({ id: `section-${section.id}`, label: section.title }))}>
           {sections.map((section) => (
             <Clause key={section.id} id={`section-${section.id}`} number={Number(section.id)} title={section.title}>
               <p className={LEGAL_TEXT}>{section.content}</p>
@@ -156,13 +168,12 @@ export default function TermsPage() {
             </Clause>
           ))}
 
-          <LegalFooter
-            current="terms"
+          <LegalContact
             title="Questions about these terms?"
             body="We reply to legal and account questions at support@backenly.com."
             email="support@backenly.com"
           />
-        </LegalBody>
+        </LegalDocument>
       </Page>
     </SiteShell>
   )

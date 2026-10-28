@@ -18,6 +18,8 @@ const col = (n: string, t: BlueprintColumn['type'], o: Partial<BlueprintColumn> 
 const createTable = (label: string, tableName: string, columns: BlueprintColumn[]) => ({ label, tool: 'create_table', args: { tableName, columns } })
 const generateApi = (tableName: string) => ({ label: `Generate REST API for ${tableName}`, tool: 'generate_api', args: { tableName } })
 const addRls = (tableName: string, policy: string, label?: string) => ({ label: label ?? `Lock down ${tableName} with ${policy} RLS`, tool: 'add_rls', args: { tableName, policy } })
+/** A row owned through its parent: `via` names the foreign key, because inference refuses a table with two owned parents. */
+const addRlsVia = (tableName: string, via: string, label: string) => ({ label, tool: 'add_rls', args: { tableName, policy: 'owned_via_parent', via } })
 const enableRealtime = (tableName: string) => ({ label: `Stream realtime changes on ${tableName}`, tool: 'enable_realtime', args: { tableName } })
 const createTrigger = (tableName: string, on: 'insert' | 'update' | 'delete') => ({ label: `Add ${on} trigger on ${tableName}`, tool: 'create_trigger', args: { tableName, on, kind: 'notify' } })
 
@@ -190,9 +192,9 @@ export const MARKETPLACE_BLUEPRINT: Blueprint = {
     addRls('cart_items', 'owner_read_write'),
     addRls('wishlist', 'owner_read_write'),
     addRls('orders', 'owner_read_write'),
-    addRls('order_items', 'owner_read_write'),
+    addRlsVia('order_items', 'order_id', 'Order items follow their order: its buyer reads and writes them'),
     addRls('payments', 'owner_read_write'),
-    addRls('refunds', 'owner_read_write'),
+    addRlsVia('refunds', 'order_id', 'Refunds follow their order: its buyer reads and writes them'),
 
     enableRealtime('orders'),
     enableRealtime('payments'),

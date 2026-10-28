@@ -304,9 +304,14 @@ describe('schema_not_registered reaches a real repair', () => {
       .toMatchObject({ action: 'REGISTER_SCHEMA' })
   })
 
-  test('stays classified auto, and now has the action that rating implied', () => {
+  // This pinned `auto` with REGISTER_SCHEMA as the suggested action. The repair
+  // runs outside the change ledger, so History cannot undo it, and it is now
+  // rated `approval`. What the test defends still holds: an approval behind a
+  // real verb, so the button a person clicks runs REGISTER_SCHEMA.
+  test('is held for approval, with REGISTER_SCHEMA behind the button', () => {
     const c = classifyFix('schema_not_registered', { schema: 'workspace_abc' })
-    expect(c.decision).toBe('auto')
-    expect(c.suggestedAction).toBe('REGISTER_SCHEMA')
+    expect(c.decision).toBe('approval')
+    expect(c.reason).toMatch(/outside your change history/)
+    expect(hasExecutableFix('schema_not_registered', { schema: 'workspace_abc' })).toBe(true)
   })
 })

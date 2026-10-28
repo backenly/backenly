@@ -254,24 +254,23 @@ export const AUTONOMOUSLY_REPAIRABLE_FINDING_TYPES = Object.keys(FINDING_TYPE_TO
  * **This set may shrink. It may not grow casually.** Adding an entry means
  * choosing to ship an autonomous mutation whose dependencies are undeclared,
  * and that decision should be visible in a diff and argued for in review.
+ *
+ * It shrank from 16 to 8 when the repairs that run outside the change ledger
+ * (FIX_API, FIX_WORKFLOW, ADOPT_EXTERNAL_SCHEMA, REGISTER_SCHEMA) moved to
+ * approval: api_drift, external_schema_change, missing_api_crud,
+ * missing_api_definition, schema_not_registered, shadow_mutation,
+ * verification_failed and workflow_broken are no longer autonomous at all, so
+ * they have no place on a bridge for autonomous types.
  */
 export const LEGACY_AUTONOMY_COMPAT_TYPES: ReadonlySet<string> = new Set([
-  'api_drift',
-  'external_schema_change',
   'index_bloat',
   'infra_hot_table',
   'infra_table_bloat',
-  'missing_api_crud',
-  'missing_api_definition',
   'missing_rate_limit',
   'orphan_table',
   'realtime_gap',
   'rls_denies_everything',
-  'schema_not_registered',
-  'shadow_mutation',
   'unprotected_user_data',
-  'verification_failed',
-  'workflow_broken',
 ])
 
 /** Which path a finding type takes. Exhaustive: there is no fourth answer. */

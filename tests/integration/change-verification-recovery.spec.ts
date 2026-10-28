@@ -323,7 +323,7 @@ describe('declining a recovery', () => {
     expect(out.ok).toBe(true)
     const a = await prisma.agentApprovalRequest.findUniqueOrThrow({ where: { id: c.recovery!.approvalId! } })
     expect(a.status).toBe('executed')
-    expect(a.resultSummary).toMatch(/Already done from Database → Changes/)
+    expect(a.resultSummary).toMatch(/Already done from History/)
   })
 })
 

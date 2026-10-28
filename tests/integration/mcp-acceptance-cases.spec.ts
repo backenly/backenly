@@ -5,7 +5,8 @@
  * test that proves it. Most already had one; these did not:
  *
  *   approvals   a rejection, an expiry, an approved call that revokes a key
- *               (and the key then refused), and the exact args a rollback parks
+ *               (and the key then refused), and the measured list a rollback
+ *               parks
  *   RLS         a custom policy that admits its own end-user and denies another
  *               and the anonymous caller, read through the project's own
  *               function role; a read-only key cannot change it
@@ -146,11 +147,31 @@ describe('approvals', () => {
     expect(after.body.ok).toBe(false)
   }, 120_000)
 
-  it('DEPLOY-ROLLBACK-EXACT: a rollback is parked with exactly the arguments sent', async () => {
-    const parked = await call(RW, 'deploy', { action: 'rollback', version: 3 })
-    expect(parked.body.approval?.id).toBeTruthy()
-    const row = await prisma.agentApprovalRequest.findUnique({ where: { id: parked.body.approval.id } })
-    expect(row).toMatchObject({ tool: 'rollback_deploy', toolArgs: { version: 3 }, status: 'pending' })
+  it("DEPLOY-ROLLBACK-MEASURED: a rollback parks Backenly's list of what it would undo; a version never published is refused", async () => {
+    // A rollback is a restore to a published version (lib/changes/range.ts).
+    const missing = await call(RW, 'deploy', { action: 'rollback', version: 999 })
+    expect(missing.status).toBe(404)
+    expect(missing.body).toMatchObject({ ok: false, code: 'VERSION_NOT_FOUND' })
+
+    // v1 is published now; one change is made after it.
+    const published = await prisma.deployment.create({
+      data: { projectId, provider: 'backenly', environment: 'live', status: 'live', version: 1, completedAt: new Date() },
+    })
+    try {
+      const made = await call(RW, 'apply_migration', { sql: 'CREATE TABLE rollback_probe (id serial PRIMARY KEY, note text)' })
+      expect(made.body.ok).toBe(true)
+      const change = await prisma.backendChange.findFirstOrThrow({ where: { projectId, kind: 'change' }, orderBy: { seq: 'desc' } })
+
+      const parked = await call(RW, 'deploy', { action: 'rollback', version: 1 })
+      expect(parked.body.approval?.id).toBeTruthy()
+      const row = await prisma.agentApprovalRequest.findUniqueOrThrow({ where: { id: parked.body.approval.id } })
+      expect(row).toMatchObject({ tool: 'rollback_deploy', status: 'pending', toolArgs: { version: 1, steps: [change.id] } })
+      expect(row.target).toMatch(/^Restore the backend to v1, published .+: undo the 1 change made since$/)
+      expect(row.message).toContain(`#${change.seq} `)
+      await prisma.agentApprovalRequest.delete({ where: { id: row.id } })
+    } finally {
+      await prisma.deployment.delete({ where: { id: published.id } })
+    }
   }, 60_000)
 
   it('CONNECT-DISCONNECT-GOVERNED: disconnecting a frontend waits for a human, and nothing runs', async () => {

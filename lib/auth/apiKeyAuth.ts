@@ -135,6 +135,7 @@ async function validateApiKey(apiKey: string): Promise<AuthResult> {
     }
 
     // Update last used timestamp (fire and forget)
+    // history: usage bookkeeping (last used, rate-limit window), not configuration
     prisma.apiKey.update({
       where: { id: key.id },
       data: { lastUsed: new Date() },
@@ -310,7 +311,8 @@ export async function createApiKey(
   const keyPrefix = rawKey.substring(0, 16) // Safe prefix for display — no secret material
   const keyHash = hashApiKey(rawKey)         // SHA-256 hash — only this is persisted
 
-  const record = await prisma.apiKey.create({
+  const { governedChange } = await import('@/lib/changes/ledger')
+  const record = await governedChange(projectId, `Create API key ${options.name || 'API Key'}`, () => prisma.apiKey.create({
     data: {
       name: options.name || 'API Key',
       keyHash,    // SECURE: SHA-256 hash for validation — plaintext never stored
@@ -323,7 +325,7 @@ export async function createApiKey(
       keyType: 'public',
       serviceRole: false,
     },
-  })
+  }))
 
   // Return both — callers MUST surface rawKey to the user immediately
   return { rawKey, record }

@@ -2,8 +2,7 @@
  * PRIVACY POLICY CONTENT
  * ======================
  *
- * Separated from page.tsx for the same reason app/comparisons/data.ts and
- * app/use-cases/data.ts are: the integrity gate imports this, and a Next.js
+ * Separated from page.tsx for the same reason app/comparisons/data.ts is: the integrity gate imports this, and a Next.js
  * page module may only export a default component plus route segment config.
  *
  * WHAT THIS REWRITE FIXED
@@ -43,14 +42,28 @@
  * disclosure. Retention is the one place a limit IS named as absent, because a
  * reader asking "how long do you keep this" is owed the real answer.
  *
- * WHY SESSION REPLAY IS DISCLOSED IN THE PRESENT TENSE
+ * WHY SESSION REPLAY IS DISCLOSED IN THE PAST TENSE
  *
- * components/app/AmplitudeAnalytics.tsx on main no longer loads the replay
- * plugin at all. That commit is NOT deployed: the running release still calls
- * initAll() with sessionReplay sampleRate 1 from the root layout, so replay
- * covers the authenticated dashboard. Saying "we do not record sessions"
- * because the fix exists in git would describe a future state as current. The
- * disclosure comes out when the behaviour does, not before.
+ * It was disclosed in the present tense until the behaviour was gone from
+ * production, not merely fixed in git. It is gone: 724814f1 (2026-08-31)
+ * stopped loading the replay plugin, the first release on AWS (v3, 2026-09-13,
+ * public 1af57a1d) already contained it, and the production bundle checked on
+ * 2026-10-28 calls init() from @amplitude/analytics-browser with no replay
+ * plugin, which scripts/verify-analytics-posture.ts keeps out of the
+ * dependency tree. So it ended between 2026-08-31 and 2026-09-13, and "until
+ * September 2026" takes the later bound. What is still true is still said:
+ * recordings made before then stay with Amplitude under its retention.
+ *
+ * WHAT AMPLITUDE RECEIVES TODAY
+ *
+ * The Cloud overlay's components/app/AmplitudeAnalytics.tsx sends page views
+ * and sessions from every page. Each page view carries the referring page and
+ * any campaign tags in the URL (the SDK's page view plugin adds them whatever
+ * `attribution` is set to), and the SDK sends the IP address by default
+ * (trackingOptions.ipAddress), which Amplitude uses to estimate location. On
+ * marketing pages only (lib/marketing-surfaces.ts), and not in the startup
+ * application's form, it also records clicks on links and buttons: the words
+ * on them, where a link leads and the page. It never reads form fields.
  *
  * ANCHORS ARE SLUGS, NOT ORDINALS
  *
@@ -59,7 +72,7 @@
  * reordering; verify-content-integrity.ts enforces their uniqueness and shape.
  */
 
-export const EFFECTIVE_DATE = 'September 28, 2026'
+export const EFFECTIVE_DATE = 'October 28, 2026'
 export const PRIVACY_EMAIL = 'support@backenly.com'
 
 export type Provider = {
@@ -110,8 +123,8 @@ export const PROVIDERS: Provider[] = [
   },
   {
     name: 'Amplitude',
-    purpose: 'Product analytics and session replay',
-    data: 'Page views, sessions, browser identifiers, and recordings of how the web app is used',
+    purpose: 'Website and product analytics',
+    data: 'Page views, sessions, browser identifiers, IP addresses, referring pages and clicks on the public website, plus session recordings made before September 2026',
     href: 'https://amplitude.com/privacy',
   },
   {
@@ -166,7 +179,7 @@ export type PrivacySection = {
 export const PRIVACY_SUMMARY = [
   'We do not run advertising and do not share your data with advertisers or data brokers',
   'Each project database runs in its own PostgreSQL schema',
-  'We currently record sessions on the web app, including dashboard pages',
+  'Amplitude records page views, and clicks on the public website only. We do not record your screen or what you type',
   'Stripe processes your payments. We never see your card details',
   'The platform runs on Amazon Web Services in Mumbai, India',
   'You can export your project database at any time',
@@ -336,10 +349,12 @@ export const PRIVACY_SECTIONS: PrivacySection[] = [
     id: 'analytics',
     title: 'Analytics',
     content:
-      'Backenly uses Amplitude to understand how the product is used. It records page views and sessions, tied to a browser identifier rather than to your account.',
+      'Backenly uses Amplitude to understand how the website and the dashboard are used. It records page views and sessions, tied to a browser identifier rather than to your account.',
     list: [
-      'Backenly currently uses Amplitude Session Replay on the web application, including authenticated dashboard pages.',
-      'Session Replay records how pages are used, so it can capture what is displayed on screen. On a dashboard page that can include your project and table names and data shown in the interface.',
+      'With each page view, Amplitude receives the address of the page that linked you there, any campaign tags in the link (such as utm_source), and your IP address, which it uses to estimate your country and city.',
+      'On public pages such as the home page, pricing, docs and guides, Backenly also records which links and buttons are clicked: the words on them, where a link leads and the page they are on.',
+      'It does not record what you type, and it does not record clicks in the dashboard, on sign-in pages or in the startup application. There, Amplitude receives page views and sessions only.',
+      'Until September 2026, Backenly used Amplitude Session Replay on the web application, including dashboard pages, which could capture what was shown on screen. It no longer records sessions. Recordings made before then are kept by Amplitude under its retention settings.',
       'Backenly also uses Sentry to record errors. When something fails, Sentry receives the error, a stack trace and context about the request.',
     ],
     extra:

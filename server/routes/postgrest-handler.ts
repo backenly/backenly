@@ -168,6 +168,10 @@ export async function handleViaPostgrest(
   const recordId = path.length === 2 ? maybeId : undefined
   const operation = operationFor(req.method, recordId !== undefined)
   if (!operation) return false
+  // PUT is the same partial update as PATCH here, as the API documents. Sent
+  // through as PUT, PostgREST read it as its own full-row upsert and refused
+  // every one of them with 405 (found by fuzzing the data API).
+  const method = operation === 'update' ? 'PATCH' : req.method
 
   // The PostgREST serving the project's region. Without one, the request
   // falls through to the legacy handler, which also runs in the project's
@@ -285,7 +289,7 @@ export async function handleViaPostgrest(
     headers = buildUpstreamHeaders(req.headers as Record<string, string>, {
       projectId: ctx.projectId,
       internalToken: token,
-      method: req.method,
+      method,
       branchSchema: ctx.branchSchema,
     })
     headers['content-type'] = 'application/json'
@@ -303,7 +307,7 @@ export async function handleViaPostgrest(
     const timer = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS)
     try {
       upstream = await fetch(url, {
-        method: req.method,
+        method,
         headers,
         body,
         signal: controller.signal,
@@ -354,7 +358,7 @@ export async function handleViaPostgrest(
         const controller = new AbortController()
         const timer = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS)
         try {
-          const replayed = await fetch(url, { method: req.method, headers, body, signal: controller.signal })
+          const replayed = await fetch(url, { method, headers, body, signal: controller.signal })
           const replayedText = await replayed.text()
           upstream = replayed
           text = replayedText
@@ -399,7 +403,7 @@ export async function handleViaPostgrest(
         const controller = new AbortController()
         const timer = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS)
         try {
-          upstream = await fetch(url, { method: req.method, headers, body, signal: controller.signal })
+          upstream = await fetch(url, { method, headers, body, signal: controller.signal })
         } finally {
           clearTimeout(timer)
         }

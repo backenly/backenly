@@ -180,6 +180,30 @@ describe('restore round-trips a destroyed workspace', () => {
     // The pre-restore copy is only safe to keep until the restore is verified.
     expect(await asideSchemas(projectId)).toEqual([])
   }, 120_000)
+
+  it('is one entry in the project\'s history, by the person who asked, which History does not undo', async () => {
+    const projectId = await makeProject()
+    const asker = createdUserIds[createdUserIds.length - 1]
+    await seedWorkspace(projectId)
+    expect((await backupWorkspace(projectId)).success).toBe(true)
+    // The ledger records nothing in integration mode (lib/changes/ledger.ts ledgerEnabled).
+    const mode = process.env.ENGINE_MODE
+    process.env.ENGINE_MODE = 'runtime'
+    try {
+      expect((await restoreWorkspace(projectId, undefined, asker)).success).toBe(true)
+    } finally {
+      if (mode === undefined) delete process.env.ENGINE_MODE
+      else process.env.ENGINE_MODE = mode
+    }
+
+    const entry = await prisma.backendChange.findFirstOrThrow({ where: { projectId, kind: 'snapshot_restore' } })
+    expect(entry).toMatchObject({ status: 'healthy', source: 'dashboard', actorUserId: asker })
+    expect(entry.summary).toMatch(/^Restored the snapshot of /)
+    expect((entry.verification as any).checks.map((c: any) => `${c.label}:${c.outcome}`)).toEqual(['The snapshot is in place:confirmed'])
+    const { listChanges } = require('@/lib/changes/history')
+    const listed = (await listChanges(projectId)).changes.find((c: any) => c.id === entry.id)
+    expect(listed.action).toMatchObject({ available: false, code: 'NOT_RESTORABLE' })
+  }, 120_000)
 })
 
 describe('a restore that cannot succeed must not report success', () => {
@@ -200,6 +224,39 @@ describe('a restore that cannot succeed must not report success', () => {
     expect(restored.error).toBeTruthy()
 
     expect(await relationCount(s)).toBeGreaterThan(0)
+    expect(await rowCount(s)).toBe(5)
+    expect(await asideSchemas(projectId)).toEqual([])
+  }, 120_000)
+
+  // While the replay runs, every other session still reads the schema it is
+  // replacing. A restore that renamed it aside first left the registered
+  // schema missing for as long as the replay took, and a PostgREST reload in
+  // that window fails for every project it serves.
+  it('never leaves the schema missing while the replay runs', async () => {
+    const projectId = await makeProject()
+    const s = schemaOf(projectId)
+    await seedWorkspace(projectId)
+    const backup = await backupWorkspace(projectId)
+    expect(backup.success).toBe(true)
+
+    // The same dump, held open for two seconds at its end.
+    const zlib = require('zlib')
+    const dump = zlib.gunzipSync(fs.readFileSync(backup.filePath!)).toString()
+    fs.writeFileSync(backup.filePath!, zlib.gzipSync(Buffer.from(`${dump}\nSELECT pg_sleep(2);\n`)))
+
+    let done = false
+    const restoring = restoreWorkspace(projectId).finally(() => { done = true })
+    const seen: boolean[] = []
+    while (!done) {
+      const [{ present }] = await prisma.$queryRawUnsafe<{ present: boolean }[]>(
+        `SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = $1) AS present`, s,
+      )
+      seen.push(present)
+      await new Promise((r) => setTimeout(r, 50))
+    }
+    expect((await restoring).success).toBe(true)
+    expect(seen.length).toBeGreaterThan(10)
+    expect(seen.every(Boolean)).toBe(true)
     expect(await rowCount(s)).toBe(5)
     expect(await asideSchemas(projectId)).toEqual([])
   }, 120_000)

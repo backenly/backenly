@@ -42,7 +42,9 @@ import {
   KitTabs,
   PageHeader,
   SettingsCard,
+  StatusDot,
 } from '@/components/inspector/kit'
+import { useAgentConnection } from '@/lib/hooks/useAgentConnection'
 import { PAGE_GUTTER, PAGE_WIDTH } from '@/components/console/tokens'
 import { AgentInstallGuide, AgentCapabilitiesCard } from '@/components/connect/AgentInstallGuide'
 import { AgentKeysPanel } from '@/components/connect/AgentKeysPanel'
@@ -51,16 +53,16 @@ import { DirectDatabasePanel } from '@/components/connect/DirectDatabasePanel'
 
 type Tab = 'agents' | 'direct'
 
-const HEADERS: Record<Tab, { title: string; description: string }> = {
-  agents: {
-    title: 'Connect your coding agent',
-    description: 'One scoped key, one command. Your agent reads the real schema and builds through governed, reversible changes.',
-  },
-  direct: {
-    title: 'Direct access',
-    description: 'REST and Postgres coordinates for anything that doesn’t speak MCP: your frontend, scripts, BI tools, backups.',
-  },
-}
+/**
+ * The page is "Connect" on both tabs, like every section is its own name, with
+ * the agent's state beside the title. It used to read "Connect your coding
+ * agent" to someone whose agent had been connected for weeks.
+ */
+const DESCRIPTIONS = {
+  setup: 'One scoped key, one command. Your agent reads the real schema and builds through governed, reversible changes.',
+  connected: 'Your agent builds through governed, reversible changes. Add another agent or manage its keys here.',
+  direct: 'REST and Postgres coordinates for anything that doesn’t speak MCP: your frontend, scripts, BI tools, backups.',
+} as const
 
 export default function ProjectConnectPage() {
   const params = useParams()
@@ -68,6 +70,7 @@ export default function ProjectConnectPage() {
   const [tab, setTab] = useState<Tab>('agents')
   // Bumped when AgentInstallGuide mints a key so the keys list refreshes.
   const [keysVersion, setKeysVersion] = useState(0)
+  const agent = useAgentConnection(projectId)
 
   if (projectId && typeof window !== 'undefined') setCurrentProjectId(projectId)
   useEffect(() => {
@@ -91,8 +94,19 @@ export default function ProjectConnectPage() {
   return (
     <div className="pb-16">
       <PageHeader
-        title={HEADERS[tab].title}
-        description={HEADERS[tab].description}
+        title="Connect"
+        meta={
+          agent.status === 'loading' ? undefined : agent.connected ? (
+            <StatusDot
+              tone="operational"
+              label={agent.client ? `Connected through ${agent.client}` : 'Agent connected'}
+              className="text-[13px]"
+            />
+          ) : (
+            <StatusDot tone="neutral" label="No agent connected" className="text-[13px]" />
+          )
+        }
+        description={tab === 'direct' ? DESCRIPTIONS.direct : agent.connected ? DESCRIPTIONS.connected : DESCRIPTIONS.setup}
         tabs={
           <KitTabs>
             <KitTab active={tab === 'agents'} onClick={() => selectTab('agents')}>
@@ -156,7 +170,7 @@ function DirectTab({ projectId }: { projectId: string }) {
     project?.apiUrlProd || project?.apiUrlStaging || project?.apiUrlDev || project?.apiBaseUrl || null
 
   return (
-    <div className="max-w-[960px] space-y-6">
+    <div className="max-w-[960px] space-y-10">
       <SettingsCard
         title="REST API"
         description="Every table is served as governed REST endpoints. Authenticate with an API key."
@@ -187,7 +201,7 @@ function DirectTab({ projectId }: { projectId: string }) {
       >
         <DetailList>
           <DetailRow label="API base URL">
-            {apiBaseUrl ? <CopyField value={apiBaseUrl} /> : <span className="text-zinc-500">—</span>}
+            {apiBaseUrl ? <CopyField value={apiBaseUrl} /> : <span className="text-faint">—</span>}
           </DetailRow>
           <DetailRow label="Project ID">
             <CopyField value={projectId} />

@@ -270,7 +270,7 @@ export const ACCEPTANCE_CASES: AcceptanceCase[] = [
   { id: 'DEPLOY-READINESS-DB', area: 'Deploy', title: 'readiness changes nothing in the database', evidence: golden('reads readiness without changing anything, even from a read-only key') },
   { id: 'DEPLOY-REQUEST', area: 'Deploy', title: 'a deploy waits for a human, and a read-only key cannot ask', evidence: golden('asks a human before it deploys, and the read-only key cannot even ask') },
   { id: 'DEPLOY-STATUS-HISTORY', area: 'Deploy', title: 'status and history', evidence: ops('says plainly that nothing is published yet', 'lists published versions newest first') },
-  { id: 'DEPLOY-ROLLBACK-EXACT', area: 'Deploy', title: 'a rollback parks with exactly the arguments sent', evidence: gap('DEPLOY-ROLLBACK-EXACT') },
+  { id: 'DEPLOY-ROLLBACK-MEASURED', area: 'Deploy', title: "a rollback parks Backenly's list of what it would undo; a version never published is refused", evidence: gap('DEPLOY-ROLLBACK-MEASURED') },
   { id: 'DEPLOY-STAGING', area: 'Deploy', title: 'an approved deploy and rollback on the deployed pipeline', evidence: staging({
     // A rollback names its target; without one it is refused ("Provide
     // deploymentId or version"), correctly.
@@ -278,7 +278,7 @@ export const ACCEPTANCE_CASES: AcceptanceCase[] = [
       'npx -y @backenly/cli@0.2.0 call deploy action=deploy ; npx -y @backenly/cli@0.2.0 call check_approval id=<approval id> ; ' +
       'npx -y @backenly/cli@0.2.0 call deploy action=rollback version=<earlier version> ; npx -y @backenly/cli@0.2.0 call deploy action=history',
     env: ['BACKENLY_API_URL', 'BACKENLY_PROJECT_ID', 'BACKENLY_MCP_KEY'],
-    preconditions: `${THROWAWAY} ${CLI_READY} A dedicated qualification account on the Pro plan (BUILDER) for rollback. A human who can approve on the project's Autonomy page. Every table in the project must have RLS: readiness blocks a deploy otherwise (correctly), and the harness's hx_ tables have none, so run this on a project the harness has not touched.`,
+    preconditions: `${THROWAWAY} ${CLI_READY} A dedicated qualification account (rollback is on every plan). A human who can approve on the project's Autonomy page. Every table in the project must have RLS: readiness blocks a deploy otherwise (correctly), and the harness's hx_ tables have none, so run this on a project the harness has not touched.`,
     expected: 'each deploy parks with an approval id and check_approval reports executed; a rollback approval returns to the earlier version and deploy action=history lists it.',
     cleanup: 'None beyond the throwaway project.',
     why: 'Publishing runs the real deployment pipeline, which exists only on the deployed stack.',

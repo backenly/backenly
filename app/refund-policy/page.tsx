@@ -1,6 +1,13 @@
 import { SiteShell } from '@/components/site/SiteShell'
-import { DataTable, Page, PageHero } from '@/components/site/kit'
-import { LEGAL_TEXT, LegalBody, LegalFooter, LegalList, LegalSection } from '@/components/site/legal'
+import { DataTable, Page } from '@/components/site/kit'
+import {
+  LEGAL_TEXT,
+  LegalContact,
+  LegalDocument,
+  LegalList,
+  LegalSection,
+  MetaDivider,
+} from '@/components/site/legal'
 
 /**
  * The Refund Policy, set as a document like the Privacy Policy and the Terms.
@@ -72,18 +79,22 @@ export default function RefundPolicyPage() {
   return (
     <SiteShell>
       <Page>
-        <PageHero
-          size="compact"
-          trail={[{ label: 'Home', href: '/' }, { label: 'Refund Policy' }]}
-          title="Refund Policy"
-          lede="Straightforward billing terms for Backenly subscriptions: cancel anytime, keep access through the paid period, and contact us if something looks wrong."
+        <LegalDocument
+          current="refund"
+          summary="Straightforward billing terms for Backenly subscriptions: cancel anytime, keep access through the paid period, and contact us if something looks wrong."
+          meta={
+            <>
+              <span>
+                Last updated <span className="text-zinc-200">August 21, 2026</span>
+              </span>
+              <MetaDivider />
+              <span>
+                Contact <span className="text-zinc-200">support@backenly.com</span>
+              </span>
+            </>
+          }
+          toc={toc}
         >
-          <p className="mt-7 text-[14px] text-zinc-500">
-            Last updated <span className="text-zinc-300">March 28, 2026</span>
-          </p>
-        </PageHero>
-
-        <LegalBody toc={toc}>
           <LegalSection id="core-stance" title="Cancel anytime. No lock-in.">
             <p className={LEGAL_TEXT}>
               All Backenly subscriptions are monthly and non-refundable by default. You can cancel at
@@ -108,13 +119,12 @@ export default function RefundPolicyPage() {
             </LegalSection>
           ))}
 
-          <LegalFooter
-            current="refund"
+          <LegalContact
             title="Have a billing question?"
             body="Include your account email, charge date, and a short description of what happened."
             email="support@backenly.com"
           />
-        </LegalBody>
+        </LegalDocument>
       </Page>
     </SiteShell>
   )

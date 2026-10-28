@@ -97,10 +97,10 @@ export function RestoreDialog({
 
   const run = async (preview: RecoveryPreview) => {
     setPhase({ kind: 'running', preview })
-    const { ok, body } = await post(`/api/projects/${projectId}/changes/${recordId}/restore`, {
+    const { ok, status, body } = await post(`/api/projects/${projectId}/changes/${recordId}/restore`, {
       seq: preview.seq,
       ...(preview.safety === 'needs_approval' && preview.acknowledgement ? { acknowledged: preview.acknowledgement } : {}),
-    }).catch(() => ({ ok: false, status: 0, body: { error: 'Could not reach Backenly. Nothing was changed.' } }))
+    }).catch(() => ({ ok: false, status: 0, body: {} as any }))
     if (ok && body.success) {
       const kept = (body.impact?.items ?? []).filter((i: { effect: string }) => i.effect === 'writes_kept').length > 0
       setPhase({
@@ -125,6 +125,20 @@ export function RestoreDialog({
         setPhase({ kind: 'error', message: body.error, preview })
         return
       default:
+        if (!body.code && !body.error) {
+          // No answer from Backenly: the connection dropped, or a gateway gave
+          // up on a long restore that kept running. Whether it ran is not known
+          // here, so the list is read again rather than claiming nothing changed.
+          onDone()
+          setPhase({
+            kind: 'error',
+            message: `Backenly did not confirm the restore${status ? ` (HTTP ${status})` : ''}. It may still be finishing; the change's status in the list shows where it stands.`,
+            preview,
+          })
+          return
+        }
+        // Applied but not confirmed, or already being restored: the list shows it as it is now.
+        if (body.code === 'RECOVERY_FAILED' || body.code === 'IN_PROGRESS') onDone()
         setPhase({ kind: 'error', message: body.error || 'The restore did not run. Nothing was changed.', preview })
     }
   }
@@ -178,7 +192,7 @@ export function RestoreDialog({
           {['Restore point available', 'Current state protected', 'Recovery plan verified', 'No expected data loss'].map((label) => (
             <li key={label} className="flex items-center gap-2.5">
               <Skeleton className="h-4 w-4 rounded-full" />
-              <span className="text-[13px] text-zinc-500">{label}</span>
+              <span className="text-[13px] text-faint">{label}</span>
             </li>
           ))}
         </ul>
@@ -203,7 +217,7 @@ export function RestoreDialog({
                     </span>
                     <span className="min-w-0">
                       <span className="block text-[13px] text-zinc-100">{warn ? 'Data written since would be affected' : c.label}</span>
-                      {!c.ok && !warn && <span className="mt-0.5 block text-[12px] leading-[18px] text-zinc-500 [overflow-wrap:anywhere]">{c.detail}</span>}
+                      {!c.ok && !warn && <span className="mt-0.5 block text-[12px] leading-[18px] text-faint [overflow-wrap:anywhere]">{c.detail}</span>}
                     </span>
                   </li>
                 )
@@ -233,7 +247,7 @@ export function RestoreDialog({
                   <ul className="divide-y divide-white/[0.05]">
                     {affectedRows.map((i, n) => (
                       <li key={n} className="flex items-baseline gap-3 px-3 py-2 text-[12.5px]">
-                        <span className={`w-[11rem] flex-shrink-0 ${i.needsApproval ? 'text-zinc-200' : 'text-zinc-500'}`}>{EFFECT[i.effect] ?? i.effect}</span>
+                        <span className={`w-[11rem] flex-shrink-0 ${i.needsApproval ? 'text-zinc-200' : 'text-faint'}`}>{EFFECT[i.effect] ?? i.effect}</span>
                         <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-zinc-400" title={`${i.table}${i.column ? `.${i.column}` : ''}`}>
                           {i.table}{i.column ? `.${i.column}` : ''}
                         </span>
@@ -246,7 +260,7 @@ export function RestoreDialog({
                       <li key={`u${n}`} className="px-3 py-2 text-[12.5px] leading-[18px] text-zinc-300 [overflow-wrap:anywhere]">{u}</li>
                     ))}
                   </ul>
-                  <p className="border-t border-white/[0.05] bg-white/[0.015] px-3 py-2 text-[12px] leading-[17px] text-zinc-500">
+                  <p className="border-t border-white/[0.05] bg-white/[0.015] px-3 py-2 text-[12px] leading-[17px] text-faint">
                     Nothing is deleted. What is set aside is kept with this restore; reapplying the change brings it back.
                   </p>
                 </div>
@@ -256,7 +270,7 @@ export function RestoreDialog({
 
           {safety === 'blocked' && preview && preview.blockedBy.length > 0 && (
             <div className="space-y-1.5">
-              <p className="text-[12.5px] text-zinc-400">A later change touched the same tables. Restore it first:</p>
+              <p className="text-[12.5px] text-zinc-400">A later change touched the same tables or settings. Restore it first:</p>
               <ul className="space-y-1">
                 {preview.blockedBy.map((b) => (
                   <li key={b.id}>

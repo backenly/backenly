@@ -14,6 +14,10 @@
  *                        change, it would put back what the change removed.
  *   this process's       caches of table shapes. Other processes' validators
  *   caches               notice a changed table on use (workspace-validator).
+ *   row-event capture    the trigger that feeds webhooks and row-event
+ *                        functions, kept by its own sync and left out of the
+ *                        history (lib/changes/catalog.ts PLATFORM_OBJECTS): a
+ *                        table a change or restore brought in gets it here.
  *
  * Each step is best-effort: a view that could not be refreshed is logged, and
  * never fails the change or the restore that already happened.
@@ -37,7 +41,10 @@ function logFailure(projectId: string, what: string, err: unknown): void {
 export async function reloadServedSchema(projectId: string): Promise<void> {
   try {
     const db = await workspaceRawClient(projectId)
-    await db.$queryRawUnsafe(`SELECT pg_notify('pgrst', 'reload schema')`)
+    // Executed, not queried: pg_notify returns void, which a query cannot read
+    // back, so asking for its result failed every time and the cache was never
+    // told.
+    await db.$executeRawUnsafe(`SELECT pg_notify('pgrst', 'reload schema')`)
   } catch (err) {
     logFailure(projectId, 'the REST API schema cache', err)
   }
@@ -66,5 +73,14 @@ export async function refreshSchemaViews(projectId: string, tables: Iterable<str
     await captureSchemaSnapshot(projectId, 'post_migration')
   } catch (err) {
     logFailure(projectId, 'the schema baseline', err)
+  }
+
+  if (names.length > 0) {
+    try {
+      const { syncWebhookCaptureIfStale } = await import('@/lib/webhooks/capture')
+      await syncWebhookCaptureIfStale(projectId)
+    } catch (err) {
+      logFailure(projectId, 'row-event capture', err)
+    }
   }
 }

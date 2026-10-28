@@ -52,7 +52,7 @@ import {
 } from '@/lib/services/contract-verifier'
 import { isDataPlaneOutage } from '@/lib/core/fix-actions'
 import { reportPlatformFault, type PlatformFaultReport } from '@/lib/autonomy/platform-faults'
-import { reapUnattributableFindings } from '@/lib/core/finding-reaper'
+import { reapUnattributableFindings, withdrawFindings } from '@/lib/core/finding-reaper'
 import { recordContractSweepResult } from '@/lib/autonomy/data-plane-liveness'
 import { writeFixHistory, checkEscalation, buildResolutionText } from '@/lib/memory/fix-history'
 import { generateFixPlansFromRawFindings, type FixPlan } from '@/lib/core/fix-plan-generator'
@@ -548,26 +548,26 @@ async function observeProject(projectId: string, result: ObserverResult): Promis
       where: { projectId, type: 'workflow_broken', status: { in: ['open', 'pending_approval'] } },
       select: { id: true, details: true },
     })
-    const staleWorkflowIds = workflowRows
-      .filter((f) => !brokenNow.has(String((f.details as { workflow?: unknown } | null)?.workflow ?? '')))
-      .map((f) => f.id)
-    if (staleWorkflowIds.length > 0) {
-      await prisma.healthFinding.updateMany({
-        where: { id: { in: staleWorkflowIds } },
-        data: { status: 'auto_fixed', autoFixed: true, fixAppliedAt: new Date() },
-      })
-    }
+    // Withdrawn, not marked fixed: Backenly did not repair these, so they must
+    // not appear as "Backenly fixed …" (lib/autonomy/resolution.ts).
+    await withdrawFindings(
+      workflowRows.filter((f) => !brokenNow.has(String((f.details as { workflow?: unknown } | null)?.workflow ?? ''))),
+      'workflow_reaper',
+    )
   } catch { /* best-effort — a failed cleanup must never fail the scan */ }
 
   // Reap stale missing_fk findings by POSITIVELY verifying each one against the
   // live schema — never by absence from this scan (the FK probe swallows query
   // errors into an empty result, so "absent" can't be trusted to mean "gone").
   // A queued missing_fk row is closed only when we can prove it no longer holds:
-  //   • the FK constraint now exists          → auto_fixed (the loop/approve added it)
-  //   • the column no longer exists           → auto_fixed (table was reshaped)
-  //   • the column has no resolvable target    → dismissed (external/polymorphic id,
-  //                                               e.g. stripe_session_id — never a FK)
-  // Anything still genuinely missing its FK is left untouched. Best-effort.
+  //   • the FK constraint now exists
+  //   • the column no longer exists (table was reshaped)
+  //   • the column has no resolvable target (external/polymorphic id,
+  //     e.g. stripe_session_id — never a FK)
+  // Each is withdrawn, never marked fixed: a repair the loop or an approval ran
+  // has already closed its finding, so a row still open here was settled by
+  // something else (lib/autonomy/resolution.ts). Anything still genuinely
+  // missing its FK is left untouched. Best-effort.
   try {
     const openFk = await prisma.healthFinding.findMany({
       where: { projectId, type: 'missing_fk', status: { in: ['open', 'pending_approval'] } },
@@ -594,29 +594,16 @@ async function observeProject(projectId: string, result: ObserverResult): Promis
       const { buildWorkspaceTableNameMap, resolveReferencedTable } = await import('@/lib/ai/fk-repair')
       const tableMap = await buildWorkspaceTableNameMap(projectId).catch(() => new Map<string, string>())
 
-      const resolvedIds: string[] = []
-      const dismissedIds: string[] = []
+      const settled: typeof openFk = []
       for (const f of openFk) {
         const d = (f.details ?? {}) as { tableName?: unknown; columnName?: unknown }
         const table = typeof d.tableName === 'string' ? d.tableName : ''
         const column = typeof d.columnName === 'string' ? d.columnName : ''
         if (!table || !column) continue
         const key = `${table}.${column}`
-        if (fkSet.has(key) || !colSet.has(key)) { resolvedIds.push(f.id); continue }
-        if (!resolveReferencedTable(column, tableMap, table)) { dismissedIds.push(f.id) }
+        if (fkSet.has(key) || !colSet.has(key) || !resolveReferencedTable(column, tableMap, table)) settled.push(f)
       }
-      if (resolvedIds.length > 0) {
-        await prisma.healthFinding.updateMany({
-          where: { id: { in: resolvedIds } },
-          data: { status: 'auto_fixed', autoFixed: true, fixAppliedAt: new Date() },
-        })
-      }
-      if (dismissedIds.length > 0) {
-        await prisma.healthFinding.updateMany({
-          where: { id: { in: dismissedIds } },
-          data: { status: 'dismissed' },
-        })
-      }
+      await withdrawFindings(settled, 'fk_reaper')
     }
   } catch { /* best-effort — a failed cleanup must never fail the scan */ }
 
@@ -732,12 +719,14 @@ async function observeProject(projectId: string, result: ObserverResult): Promis
         )
       }
 
-      // Resolve verification_failed findings whose scenario now passes. A
+      // Withdraw verification_failed findings whose scenario now passes. A
       // verification finding is a claim about CURRENT structure — once the
       // check passes (the build fixed it, a detector false-positive was
       // corrected, or the user acted), keeping the row open shows the user a
       // problem that no longer exists. Without this, verification findings
       // were a one-way ratchet: written on failure, never closed on success.
+      // Withdrawn, not marked fixed: a scenario passing is not Backenly
+      // repairing anything (lib/autonomy/resolution.ts).
       if (verificationResult.passed.length > 0) {
         try {
           const passedScenarioIds = new Set(
@@ -751,44 +740,70 @@ async function observeProject(projectId: string, result: ObserverResult): Promis
             },
             select: { id: true, details: true },
           })
-          const clearedIds = openVerifications
-            .filter((f) => {
+          await withdrawFindings(
+            openVerifications.filter((f) => {
               const sid = (f.details as { scenarioId?: unknown } | null)?.scenarioId
               return typeof sid === 'string' && passedScenarioIds.has(sid)
-            })
-            .map((f) => f.id)
-          if (clearedIds.length > 0) {
-            await prisma.healthFinding.updateMany({
-              where: { id: { in: clearedIds } },
-              data: { status: 'auto_fixed', autoFixed: true, fixAppliedAt: new Date() },
-            })
-          }
+            }),
+            'verification_reaper',
+          )
         } catch { /* best-effort — a failed cleanup must never fail the scan */ }
       }
 
-      // Resolve any open missing_verification findings when structural checks
-      // pass. Includes pending_approval rows: a finding whose evidence no
-      // longer exists must leave the approval queue, not wait forever for a
-      // human to approve a fix for a problem that is already gone.
-      if (verificationResult.passed.length > 0) {
-        const passedCategories = new Set(verificationResult.passed.map(s => s.category))
-        if (passedCategories.has('auth')) {
-          await prisma.healthFinding.updateMany({
-            where: {
-              projectId,
-              type: { in: ['auth_jwt_missing', 'auth_users_table_missing'] },
-              status: { in: ['open', 'pending_approval'] },
-            },
-            data: { status: 'auto_fixed', autoFixed: true, fixAppliedAt: new Date() },
-          })
+      // Withdraw the auth and RLS findings a check now disproves. Includes
+      // pending_approval rows: a finding whose evidence no longer exists must
+      // leave the approval queue, not wait forever for a human to approve a fix
+      // for a problem that is already gone.
+      //
+      // Each is closed by the check of exactly its claim. This used to close
+      // them by CATEGORY: any passing auth scenario (the JWT secret was set)
+      // closed "users table missing" in the same pass that found the table
+      // missing, and the one RLS scenario, which only looks at tables with a
+      // user_id column, closed missing_rls on every table, as "Backenly fixed
+      // it". The deploy gate, which looks at every table, still failed, so the
+      // Autonomy page said resolved while Deploy said one check was failing.
+      try {
+        const passedScenarioIds = new Set(verificationResult.passed.map((s) => s.scenarioId))
+        const disproved: string[] = []
+        if (passedScenarioIds.has('builtin_auth_users_table')) disproved.push('auth_users_table_missing')
+        if (passedScenarioIds.has('builtin_auth_jwt_config')) disproved.push('auth_jwt_missing')
+        if (disproved.length > 0) {
+          await withdrawFindings(
+            await prisma.healthFinding.findMany({
+              where: { projectId, type: { in: disproved }, status: { in: ['open', 'pending_approval'] } },
+              select: { id: true, details: true },
+            }),
+            'verification_reaper',
+          )
         }
-        if (passedCategories.has('rls')) {
-          await prisma.healthFinding.updateMany({
-            where: { projectId, type: 'missing_rls', status: { in: ['open', 'pending_approval'] } },
-            data: { status: 'auto_fixed', autoFixed: true, fixAppliedAt: new Date() },
-          })
+        // missing_rls, table by table: protected when the catalog shows RLS on
+        // with at least one permissive policy, which is what the detector and
+        // the deploy gate ask of it.
+        const openRls = await prisma.healthFinding.findMany({
+          where: { projectId, type: 'missing_rls', status: { in: ['open', 'pending_approval'] } },
+          select: { id: true, details: true },
+        })
+        if (openRls.length > 0) {
+          const rows = await queryWorkspaceSchema(
+            projectId,
+            `SELECT c.relname FROM pg_class c
+               JOIN pg_namespace n ON n.oid = c.relnamespace
+              WHERE n.nspname = $1 AND c.relkind IN ('r', 'p') AND c.relrowsecurity
+                AND EXISTS (SELECT 1 FROM pg_policy p WHERE p.polrelid = c.oid AND p.polpermissive)`,
+            `workspace_${projectId}`,
+          )
+          const protectedTables = new Set(
+            (((rows as any)?.rows ?? rows ?? []) as Array<{ relname: string }>).map((r) => r.relname),
+          )
+          await withdrawFindings(
+            openRls.filter((f) => {
+              const table = (f.details as { tableName?: unknown } | null)?.tableName
+              return typeof table === 'string' && protectedTables.has(table)
+            }),
+            'verification_reaper',
+          )
         }
-      }
+      } catch { /* best-effort — a failed cleanup must never fail the scan */ }
     } catch (err: any) {
       result.errors.push(`[verification] ${err?.message ?? String(err)}`)
     }

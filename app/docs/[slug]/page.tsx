@@ -4,6 +4,8 @@ import Link from 'next/link'
 import { ArrowLeft, ArrowRight } from 'lucide-react'
 import type { ReactNode } from 'react'
 import { safeJsonLd } from '@/lib/security/safe-jsonld'
+import { pageMetadata } from '@/lib/seo/metadata'
+import { ORGANIZATION_ID } from '@/lib/seo/schema'
 import { SiteShell } from '@/components/site/SiteShell'
 import { CodeBlock } from '@/components/site/CodeBlock'
 import { JsonLd, Page, Steps, Trail } from '@/components/site/kit'
@@ -12,6 +14,7 @@ import { CONTAINER, DISPLAY, HEADING, PANEL, TITLE } from '@/components/site/tok
 import { DOC_ICONS } from '@/components/docs/DocIcon'
 import { DocsMobileNav, DocsSidebar, DocTag } from '@/components/docs/DocsNav'
 import { DocVideo } from '@/components/docs/DocVideo'
+import { ICON_CHIP, READ, ROW_RULE } from '@/components/docs/tokens'
 import { rich } from '@/components/docs/rich'
 import { consolePath, DOC_HEADINGS, DOC_SECTIONS, DOCS_BY_SLUG, DOCS_UPDATED, type DocSection } from '../content'
 import { DOC_VIDEOS } from '../videos'
@@ -31,41 +34,39 @@ export async function generateMetadata(props: { params: Promise<{ slug: string }
   const doc = findDoc(slug)
   if (!doc) return { title: 'Not Found' }
 
-  const url = `${APP_URL}/docs/${doc.slug}`
-  return {
-    title: `${doc.title}: Backenly docs`,
+  // "Database: Postgres tables, REST API and RLS | Backenly Docs": what the
+  // section covers first, then whose docs these are.
+  return pageMetadata({
+    title: `${doc.metaTitle} | Backenly Docs`,
+    brandInTitle: true,
     description: doc.metaDescription,
-    openGraph: {
-      title: `${doc.title}: Backenly docs`,
-      description: doc.metaDescription,
-      url,
-      type: 'article',
-      modifiedTime: DOCS_UPDATED.iso,
-    },
-    twitter: { card: 'summary_large_image', title: `${doc.title}: Backenly docs`, description: doc.metaDescription },
-    alternates: { canonical: url },
-  }
+    path: `/docs/${doc.slug}`,
+    type: 'article',
+    modifiedTime: DOCS_UPDATED.iso,
+  })
 }
 
-/** Reading copy: a step up from marketing body, and a step brighter. */
-const READ = 'text-[16px] leading-[1.8] tracking-[-0.006em] text-zinc-300 [text-wrap:pretty]'
+/** A small dot that marks a list item, aligned to the first line of 15-16px copy. */
+function Dot() {
+  return <span aria-hidden className="mt-[11px] h-[4px] w-[4px] shrink-0 rounded-full bg-zinc-600" />
+}
 
 /** One of the four fixed sections, with a linkable heading. */
 function DocBlock({ id, label, children }: { id: string; label: string; children: ReactNode }) {
   return (
-    <section id={id} className="scroll-mt-[100px]">
-      <h2 className={`group text-[24px] text-white md:text-[28px] ${TITLE}`}>
+    <section id={id} aria-labelledby={`${id}-heading`} className="scroll-mt-[100px]">
+      <h2 id={`${id}-heading`} className={`group text-[23px] text-white md:text-[26px] ${TITLE}`}>
         <a
           href={`#${id}`}
           className="rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300"
         >
           {label}
-          <span aria-hidden className="ml-2 text-zinc-600 opacity-0 transition-opacity duration-200 group-hover:opacity-100">
+          <span aria-hidden className="ml-[8px] text-zinc-600 opacity-0 transition-opacity duration-200 group-hover:opacity-100">
             #
           </span>
         </a>
       </h2>
-      <div className="mt-6 flex flex-col gap-6">{children}</div>
+      <div className="mt-[20px] flex flex-col gap-[20px]">{children}</div>
     </section>
   )
 }
@@ -74,13 +75,19 @@ function DocBlock({ id, label, children }: { id: string; label: string; children
    One console section, documented.
 
    Every page has the same shape, so two sections can be compared at a glance:
-   what it is (the paragraph under the title), the walkthrough video, then why
-   you would need it, how it works, how to try it, and what to know.
+   what it is (the paragraph under the title), then why you would need it, how
+   it works, how to try it, and what to know. A walkthrough video sits under
+   the header only when app/docs/videos.ts lists one.
 
    Three columns at xl: every section on the left, grouped like the console
    sidebar; the page at a reading measure in the middle; "On this page" on the
    right, following the scroll. At lg the right column folds away, and below lg
    the section list moves into a menu at the top of the page.
+
+   The landing's system (components/landing-v7/shared.tsx): bento surfaces for
+   the examples and the previous/next cards, the ink chip for the icon, hairline
+   rows for the notes. Violet marks one thing, the section you are reading in
+   the "On this page" rail.
 ───────────────────────────────────────────────────────────── */
 
 export default async function DocPage(props: { params: Promise<{ slug: string }> }) {
@@ -89,6 +96,7 @@ export default async function DocPage(props: { params: Promise<{ slug: string }>
   if (!doc) notFound()
 
   const Icon = DOC_ICONS[doc.slug]
+  const video = DOC_VIDEOS[doc.slug]
   const url = `${APP_URL}/docs/${doc.slug}`
 
   const order = DOC_SECTIONS.findIndex((d) => d.slug === doc.slug)
@@ -104,26 +112,24 @@ export default async function DocPage(props: { params: Promise<{ slug: string }>
     headline: doc.title,
     description: doc.metaDescription,
     dateModified: DOCS_UPDATED.iso,
-    author: { '@type': 'Organization', name: 'Backenly', url: APP_URL },
-    publisher: {
-      '@type': 'Organization',
-      name: 'Backenly',
-      url: APP_URL,
-      logo: { '@type': 'ImageObject', url: `${APP_URL}/backenly-icon-hd.svg` },
-    },
+    // The organization node is the root layout's (lib/seo/schema.ts).
+    author: { '@id': ORGANIZATION_ID },
+    publisher: { '@id': ORGANIZATION_ID },
     url,
     mainEntityOfPage: { '@type': 'WebPage', '@id': url },
   }
 
+  // Two levels: the docs have no index page to name as a parent (2026-10-15).
   const breadcrumbSchema = {
     '@context': 'https://schema.org',
     '@type': 'BreadcrumbList',
     itemListElement: [
       { '@type': 'ListItem', position: 1, name: 'Home', item: APP_URL },
-      { '@type': 'ListItem', position: 2, name: 'Documentation', item: `${APP_URL}/docs` },
-      { '@type': 'ListItem', position: 3, name: doc.title, item: url },
+      { '@type': 'ListItem', position: 2, name: doc.title, item: url },
     ],
   }
+
+  const pager = `group flex min-w-0 flex-col gap-[8px] p-[20px] transition-colors duration-200 hover:border-white/[0.13] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300 ${PANEL}`
 
   return (
     <SiteShell>
@@ -136,60 +142,66 @@ export default async function DocPage(props: { params: Promise<{ slug: string }>
           className="pointer-events-none absolute -top-[260px] left-[-12%] h-[820px] w-[1100px] max-w-none bg-[radial-gradient(closest-side,rgba(255,255,255,0.06),transparent)]"
         />
 
-        <div className={`${CONTAINER} relative pb-[120px] pt-[32px] md:pt-[56px]`}>
-          <div className="grid gap-12 lg:grid-cols-[220px_minmax(0,1fr)] lg:gap-14 xl:grid-cols-[220px_minmax(0,1fr)_200px] xl:gap-16">
-            <aside className="hidden lg:block">
+        <div className={`${CONTAINER} relative pb-[120px] pt-[28px] md:pt-[48px]`}>
+          <div className="grid gap-[40px] lg:grid-cols-[232px_minmax(0,1fr)] lg:gap-[48px] xl:grid-cols-[232px_minmax(0,1fr)_200px] xl:gap-[64px]">
+            <aside className="hidden border-r border-white/[0.06] pr-[20px] lg:block">
               <DocsSidebar current={doc.slug} />
             </aside>
 
-            <article className="min-w-0 max-w-[760px]">
+            <article className="min-w-0 max-w-[760px] lg:pt-[4px]">
               <DocsMobileNav current={doc.slug} />
 
-              <header className="hero-enter mt-[28px] lg:mt-0">
+              <header className={`hero-enter mt-[28px] border-b pb-[36px] lg:mt-0 ${ROW_RULE}`}>
                 <Trail
                   items={[
                     { label: 'Home', href: '/' },
-                    { label: 'Documentation', href: '/docs' },
+                    // Not a link: there is no docs index page; the sidebar is the map.
+                    { label: 'Documentation' },
                     { label: doc.title },
                   ]}
                 />
-                <div className="mt-7 flex items-center gap-4">
-                  <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border border-white/[0.10] bg-white/[0.035]">
-                    <Icon aria-hidden strokeWidth={1.75} className="h-[22px] w-[22px] text-violet-300" />
+                <div className="mt-[28px] flex items-center gap-[14px]">
+                  <span className={`h-[44px] w-[44px] rounded-[8px] text-zinc-200 ${ICON_CHIP}`}>
+                    <Icon aria-hidden strokeWidth={1.75} className="h-[20px] w-[20px]" />
                   </span>
                   <h1
-                    className={`bg-gradient-to-b from-white from-40% to-zinc-400 bg-clip-text pb-1 text-[36px] text-transparent sm:text-[44px] md:text-[50px] ${DISPLAY}`}
+                    className={`min-w-0 bg-gradient-to-b from-white from-40% to-zinc-400 bg-clip-text pb-[4px] text-[34px] text-transparent sm:text-[40px] md:text-[46px] ${DISPLAY}`}
                   >
                     {doc.title}
                   </h1>
-                  {doc.tag && <DocTag className="text-[12px]">{doc.tag}</DocTag>}
+                  {doc.tag && <DocTag className="mt-[6px]">{doc.tag}</DocTag>}
                 </div>
-                <p className="mt-6 text-[18px] leading-[1.65] tracking-[-0.012em] text-zinc-400 [text-wrap:pretty]">
+                <p className="mt-[20px] max-w-[64ch] text-[17px] leading-[1.65] tracking-[-0.012em] text-zinc-400 [text-wrap:pretty] md:text-[18px]">
                   {rich(doc.summary)}
                 </p>
-                <p className="mt-6 flex flex-wrap items-center gap-x-3 gap-y-1 text-[13px] text-zinc-500">
+                <p className="mt-[20px] flex flex-wrap items-center gap-x-[12px] gap-y-[4px] text-[13px] text-zinc-500">
                   <span>
-                    In the console:{' '}
-                    <span className="text-zinc-300">{consolePath(doc)}</span>
+                    In the console: <span className="text-zinc-300">{consolePath(doc)}</span>
                   </span>
-                  <span aria-hidden className="h-3 w-px bg-white/[0.12]" />
+                  <span aria-hidden className="h-[12px] w-px bg-white/[0.12]" />
                   <span>Updated {DOCS_UPDATED.display}</span>
                 </p>
               </header>
 
-              <div className="mt-10">
-                <DocVideo title={doc.title} icon={Icon} video={DOC_VIDEOS[doc.slug]} />
-              </div>
+              {video && (
+                <div className="mt-[40px]">
+                  <DocVideo title={doc.title} video={video} />
+                </div>
+              )}
 
-              <div className="mt-[56px] flex flex-col gap-16">
+              <div className="mt-[48px] flex flex-col gap-[64px]">
                 <DocBlock id="why" label="Why you need it">
                   <p className={READ}>{rich(doc.why)}</p>
-                  <div className={`p-5 md:p-6 ${PANEL}`}>
+                  <div className={`p-[20px] md:p-[24px] ${PANEL}`}>
                     <p className={`text-[15px] text-white ${HEADING}`}>For example</p>
-                    <ul className="mt-3 flex list-disc flex-col gap-2.5 pl-5 marker:text-zinc-600">
+                    <ul className="mt-[12px] flex flex-col gap-[10px]">
                       {doc.examples.map((example) => (
-                        <li key={example} className="pl-1.5 text-[15px] leading-[1.7] text-zinc-300 [text-wrap:pretty]">
-                          {rich(example)}
+                        <li
+                          key={example}
+                          className="flex gap-[12px] text-[15px] leading-[1.7] text-zinc-300 [text-wrap:pretty]"
+                        >
+                          <Dot />
+                          <span className="min-w-0">{rich(example)}</span>
                         </li>
                       ))}
                     </ul>
@@ -219,24 +231,22 @@ export default async function DocPage(props: { params: Promise<{ slug: string }>
                 )}
 
                 <DocBlock id="notes" label="Good to know">
-                  <ul className="flex list-disc flex-col gap-3 pl-5 marker:text-zinc-600">
+                  <ul className={`border-t ${ROW_RULE}`}>
                     {doc.notes.map((note) => (
-                      <li key={note} className={`pl-1.5 ${READ}`}>
-                        {rich(note)}
+                      <li key={note} className={`flex gap-[12px] border-b py-[16px] ${ROW_RULE}`}>
+                        <Dot />
+                        <span className={`min-w-0 ${READ}`}>{rich(note)}</span>
                       </li>
                     ))}
                   </ul>
                 </DocBlock>
               </div>
 
-              <nav aria-label="Previous and next section" className="mt-20 grid gap-3 sm:grid-cols-2">
+              <nav aria-label="Previous and next section" className="mt-[72px] grid gap-[12px] sm:grid-cols-2">
                 {previous ? (
-                  <Link
-                    href={`/docs/${previous.slug}`}
-                    className={`group flex flex-col gap-2 p-5 transition-colors duration-200 hover:border-white/[0.16] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300 ${PANEL}`}
-                  >
-                    <span className="inline-flex items-center gap-1.5 text-[13px] text-zinc-500">
-                      <ArrowLeft aria-hidden className="h-3.5 w-3.5 transition-transform duration-200 group-hover:-translate-x-0.5" />
+                  <Link href={`/docs/${previous.slug}`} className={pager}>
+                    <span className="inline-flex items-center gap-[6px] text-[13px] text-zinc-500">
+                      <ArrowLeft aria-hidden className="h-[14px] w-[14px] transition-transform duration-200 group-hover:-translate-x-0.5" />
                       Previous
                     </span>
                     <span className={`text-[16px] text-white ${HEADING}`}>{previous.title}</span>
@@ -245,13 +255,10 @@ export default async function DocPage(props: { params: Promise<{ slug: string }>
                   <span className="hidden sm:block" />
                 )}
                 {next && (
-                  <Link
-                    href={`/docs/${next.slug}`}
-                    className={`group flex flex-col items-end gap-2 p-5 text-right transition-colors duration-200 hover:border-white/[0.16] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300 ${PANEL}`}
-                  >
-                    <span className="inline-flex items-center gap-1.5 text-[13px] text-zinc-500">
+                  <Link href={`/docs/${next.slug}`} className={`${pager} items-end text-right`}>
+                    <span className="inline-flex items-center gap-[6px] text-[13px] text-zinc-500">
                       Next
-                      <ArrowRight aria-hidden className="h-3.5 w-3.5 transition-transform duration-200 group-hover:translate-x-0.5" />
+                      <ArrowRight aria-hidden className="h-[14px] w-[14px] transition-transform duration-200 group-hover:translate-x-0.5" />
                     </span>
                     <span className={`text-[16px] text-white ${HEADING}`}>{next.title}</span>
                   </Link>
@@ -260,8 +267,8 @@ export default async function DocPage(props: { params: Promise<{ slug: string }>
             </article>
 
             <aside className="hidden xl:block">
-              <div className="sticky top-[100px]">
-                <p className="mb-3 text-[13px] font-medium text-zinc-500">On this page</p>
+              <div className="sticky top-[100px] pt-[4px]">
+                <p className="mb-[12px] text-[13px] font-medium text-zinc-500">On this page</p>
                 <ScrollSpy label="On this page" items={toc} />
               </div>
             </aside>

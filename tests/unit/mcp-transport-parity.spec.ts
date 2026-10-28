@@ -71,6 +71,23 @@ const mockChatAnswers: Record<string, Record<string, unknown>> = {
     events: [{ type: 'tool_ok', tool: 'create_table' }, { type: 'tool_fail', tool: 'create_table', error: 'rate limited' }],
     timing: { ms: 900 },
   },
+  // A build the brain stopped with work left, and saved where it was: what
+  // carries it on is the call it names, not a retry or a different request.
+  'build a store': {
+    ok: false,
+    summary: 'I made progress but ran out of steps before fully finishing.',
+    code: 'STEP_BUDGET_EXHAUSTED',
+    retryable: false,
+    applied: ['Creating table products', 'Creating table orders'],
+    next: {
+      tool: 'backend_chat',
+      arguments: { message: 'continue' },
+      why: 'This request is not finished. What already landed stays in place; this carries on with the rest.',
+    },
+    toolsRun: ['create_table', 'create_table'],
+    iterations: 12,
+    timing: { ms: 74000 },
+  },
 }
 
 jest.mock('@/app/api/mcp/tool/route', () => ({
@@ -154,6 +171,7 @@ const CALLS: Array<[string, Record<string, unknown>]> = [
   ['no_such_tool', {}],
   ['backend_chat', { message: 'drop posts' }],
   ['backend_chat', { message: 'build a shop' }],
+  ['backend_chat', { message: 'build a store' }],
   ['backend_chat', {}],
 ]
 
@@ -238,6 +256,14 @@ describe('what the results carry', () => {
     expect(result.structuredContent).not.toHaveProperty('timing')
     expect(result.content[1].text).toMatch(/may already be applied/)
     expect(result.content[1].text).toMatch(/worth retrying after 30s/)
+  })
+
+  it('names the call that carries an unfinished request on, rather than saying to change the request', async () => {
+    const result: any = await remote.callTool({ name: 'backend_chat', arguments: { message: 'build a store' } })
+    expect(result.structuredContent.next).toMatchObject({ tool: 'backend_chat', arguments: { message: 'continue' } })
+    expect(result.content[1].text).toMatch(/ALREADY APPLIED, do not repeat: Creating table products; Creating table orders/)
+    expect(result.content[1].text).toContain('Next: call backend_chat with {"message":"continue"}. This request is not finished.')
+    expect(result.content[1].text).not.toMatch(/change the request/)
   })
 
   it('says a failure without a reason is a bug, rather than inventing one', async () => {

@@ -31,6 +31,7 @@ import {
   Cable,
   Webhook,
   GitBranch,
+  History,
   Settings,
   type LucideIcon,
 } from 'lucide-react'
@@ -81,6 +82,8 @@ const NAV: NavSection[] = [
     items: [
       { id: 'autonomy',   title: 'Autonomy',   icon: Bot,      href: '/autonomy',   match: ['/autonomy'] },
       { id: 'monitoring', title: 'Monitoring', icon: Activity, href: '/monitoring', match: ['/monitoring'] },
+      // One history for the whole backend, and the way back from any change.
+      { id: 'history',    title: 'History',    icon: History,  href: '/changes',    match: ['/changes'] },
       // Preview branches are a Cloud capability: the engine refuses off Cloud
       // (lib/branches/engine.ts) and the routes answer 404, so listing the item
       // here would offer a control for work that cannot happen.

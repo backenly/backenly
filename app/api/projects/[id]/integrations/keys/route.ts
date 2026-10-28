@@ -17,6 +17,7 @@ export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
 import { withProjectAccess } from '@/lib/auth/route-protection'
+import { governedChange } from '@/lib/changes/ledger'
 import { prisma } from '@/lib/db/prisma'
 import {
   storeIntegrationKey,
@@ -128,35 +129,38 @@ export const DELETE = withProjectAccess(async (req: NextRequest, { projectId }) 
   // The key and any legacy alias row beside it. Deleting the exact id alone
   // left `stripe_secret_key`, which the runtime still read as Stripe's key.
   const vaultId = canonicalVaultId(integrationId)
-  await removeIntegrationKey(projectId, vaultId)
+  // The key and the switch are one change in the project's history.
+  await governedChange(projectId, `Disconnect ${vaultId}`, async () => {
+    await removeIntegrationKey(projectId, vaultId)
 
-  // The dashboard derives "Connected" from activeIntegrations[id].enabled,
-  // which only the connect paths wrote — without this, a removed key kept
-  // rendering as connected and counting toward "N of 5 connected".
-  try {
-    const proj = await prisma.project.findUnique({
-      where: { id: projectId },
-      select: { activeIntegrations: true },
-    })
-    const active = (proj?.activeIntegrations as Record<string, any>) ?? {}
-    if (active[vaultId]) {
-      await prisma.project.update({
+    // The dashboard derives "Connected" from activeIntegrations[id].enabled,
+    // which only the connect paths wrote — without this, a removed key kept
+    // rendering as connected and counting toward "N of 5 connected".
+    try {
+      const proj = await prisma.project.findUnique({
         where: { id: projectId },
-        data: {
-          activeIntegrations: {
-            ...active,
-            [vaultId]: {
-              ...active[vaultId],
-              enabled: false,
-              disconnectedAt: new Date().toISOString(),
+        select: { activeIntegrations: true },
+      })
+      const active = (proj?.activeIntegrations as Record<string, any>) ?? {}
+      if (active[vaultId]) {
+        await prisma.project.update({
+          where: { id: projectId },
+          data: {
+            activeIntegrations: {
+              ...active,
+              [vaultId]: {
+                ...active[vaultId],
+                enabled: false,
+                disconnectedAt: new Date().toISOString(),
+              },
             },
           },
-        },
-      })
+        })
+      }
+    } catch {
+      // non-fatal — the vault row is already gone
     }
-  } catch {
-    // non-fatal — the vault row is already gone
-  }
+  })
 
   await prisma.auditLog.create({
     data: {

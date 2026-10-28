@@ -66,6 +66,7 @@ export async function GET(request: NextRequest) {
 
   let diagnosed = 0
   const maintenance: Partial<Record<SweepDisposition, number>> = {}
+  const evolution: Record<string, number> = {}
 
   for (let i = 0; i < activeProjects.length; i += CONCURRENCY) {
     const batch = activeProjects.slice(i, i + CONCURRENCY)
@@ -117,6 +118,25 @@ export async function GET(request: NextRequest) {
       }
       maintenance[s.value.disposition] = (maintenance[s.value.disposition] ?? 0) + 1
     }
+
+    // Tier D — the Architecture Evolution Engine. It never approves anything
+    // and never starts a change a person did not approve. Per project, at most:
+    // observe the changes that are cut over (reads only), advance one approved
+    // change past its backfill (only when mutations are on), and once a day
+    // look for new changes worth asking about (assessment and a rehearsal that
+    // is always rolled back). Behind its own switch, loaded only when on.
+    if (FLAGS.ENABLE_EVOLUTION_SCHEDULER) {
+      const { sweepArchitecture } = await import('@/lib/evolution-engine/engine')
+      const evo = await Promise.allSettled(batch.map(p => sweepArchitecture({ projectId: p.id })))
+      for (let j = 0; j < evo.length; j++) {
+        const e = evo[j]
+        if (e.status === 'rejected') {
+          errors.push(`${batch[j].id} evolution: ${String(e.reason?.message ?? e.reason)}`)
+          continue
+        }
+        evolution[e.value.disposition] = (evolution[e.value.disposition] ?? 0) + 1
+      }
+    }
   }
 
   return NextResponse.json({
@@ -132,6 +152,7 @@ export async function GET(request: NextRequest) {
     // Counts per disposition, so a quiet estate reads as quiet rather than as
     // nothing having run: mostly `no_finding`, some `awaiting_approval`.
     maintenance,
+    evolution,
     errors: errors.slice(0, 10),
   })
 }

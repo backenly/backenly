@@ -25,6 +25,10 @@ export interface ResolvedRow {
 /**
  * The headline and body for a project with nothing open. An absence of findings
  * is evidence of health only for checks that ran, recently, and could see.
+ *
+ * `caveat` is true when the page cannot vouch for the backend: the latest load
+ * failed, the loop's last pass is stale, or a check could not run. The
+ * Overview shows the quiet state only then; otherwise the loop says it all.
  */
 export function quietState(args: {
   /** null until the first load succeeds. */
@@ -35,16 +39,17 @@ export function quietState(args: {
   /** When the payload was read (epoch ms). Not known means not fresh. */
   now: number
   formatAgo: (iso: string) => string
-}): { headline: string; body: string } {
+}): { headline: string; body: string; caveat: boolean } {
   const { health, healthError, autonomyOff, now, formatAgo } = args
 
   if (healthError) {
     return {
       headline: 'Can’t confirm health right now',
       body: 'The latest health check did not load, so this page is not claiming anything either way. It retries on its own.',
+      caveat: true,
     }
   }
-  if (!health) return { headline: 'Checking your backend', body: 'Loading the latest checks.' }
+  if (!health) return { headline: 'Checking your backend', body: 'Loading the latest checks.', caveat: false }
 
   const reconciledMs = health.lastReconciledAt ? Date.parse(health.lastReconciledAt) : NaN
   const loopFresh =
@@ -55,6 +60,7 @@ export function quietState(args: {
       body: health.lastReconciledAt
         ? `The self-healing loop last checked this backend ${formatAgo(health.lastReconciledAt)}, so this page cannot speak for its current state.`
         : 'The self-healing loop has not checked this backend recently, so this page cannot speak for its current state.',
+      caveat: true,
     }
   }
 
@@ -67,6 +73,7 @@ export function quietState(args: {
         `No issues were found by the checks that ran, but ` +
         `${blind.map((b) => b.title).slice(0, 3).join(', ')}${blind.length > 3 ? ' and others' : ''} ` +
         `could not complete, so problems there would not show up here.`,
+      caveat: true,
     }
   }
 
@@ -83,6 +90,7 @@ export function quietState(args: {
       (autonomyOff
         ? 'Self-healing is off for this project, so Backenly reports issues but does not repair them.'
         : 'Backenly keeps re-checking and repairs safe issues on its own. Only auth or destructive changes wait for you.'),
+    caveat: false,
   }
 }
 

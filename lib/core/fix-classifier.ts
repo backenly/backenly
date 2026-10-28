@@ -10,7 +10,8 @@
  *
  * Rules:
  *  - A fix is AUTO only when: it adds protection/data/indexes and cannot delete or corrupt.
- *  - A fix is APPROVAL when: it touches auth, removes endpoints, or changes external services.
+ *  - A fix is APPROVAL when: it touches auth, removes endpoints, changes external
+ *    services, or runs outside the change ledger (nothing could restore it).
  *  - Everything else is NOTIFY_ONLY.
  */
 
@@ -47,7 +48,6 @@ export interface FixClassification {
 const AUTO_SAFE = new Set<FindingType>([
   'missing_rls',            // Adding RLS protection is always safe
   'rls_denies_everything',  // Installing a policy on a default-deny table RESTORES service
-  'api_drift',              // Re-generating a missing API is additive
   // 'missing_fk' was here until 2026-08-09, described as "safe when data is
   // consistent". Two things were wrong with that.
   //
@@ -84,33 +84,36 @@ const AUTO_SAFE = new Set<FindingType>([
   // not an estimate, and the finding closes on the next tick because the size
   // change invalidates the measurement.
   'index_bloat',
-  'missing_api_definition', // Generating a missing API definition
-  'missing_api_crud',       // Generating missing CRUD endpoints
   'missing_rate_limit',     // Applying rate limit — additive protection
   'unprotected_user_data',  // Applying RLS to protect user rows
   'rls_expression_invalid', // Replacing a broken RLS expression with a correct one
   'realtime_gap',           // Installing a missing NOTIFY trigger
-  'external_schema_change', // Adopting observed external DDL — bookkeeping only, never DDL
-  // Self-healing default (2026-07-18): every fix below is additive and
-  // snapshot-protected — the loop heals without asking. Only auth, external
-  // credentials and destructive/irreversible changes still gate on a human.
+  // Self-healing default (2026-07-18): the fix below is additive and
+  // snapshot-protected — the loop heals without asking.
   'orphan_table',           // ADOPT path only (REGISTER_TABLE): metadata + API around existing data — never drops
-  'shadow_mutation',        // FIX_API re-syncs the API layer to the observed schema — adopts, never reverts
-  'workflow_broken',        // FIX_WORKFLOW adds the missing components — additive, snapshotted
-  'verification_failed',    // FIX_WORKFLOW structural repair for the failing check — additive, snapshotted
-  // Registering a workspace schema with PostgREST. Additive and idempotent: it
-  // restores exactly the state a correctly-created project is already in, and
-  // re-asserts the credential-table revocation on the way, so it cannot widen
-  // access. Left un-auto-fixed it means one customer's entire /db/* plane stays
-  // dead — which is what happened to five projects before anyone noticed.
-  'schema_not_registered',
 ])
 
 // ── Requires human confirmation before executing ─────────────────────────────
 
-// The 1% that always gates on a human — auth, external credentials, and
-// anything destructive/irreversible. This is the safety floor, not a dial.
+// The 1% that always gates on a human — auth, external credentials, anything
+// destructive/irreversible, and any repair nothing could restore. This is the
+// safety floor, not a dial.
 const NEEDS_APPROVAL = new Set<FindingType>([
+  // Repairs that run outside the governed change ledger: FIX_API, FIX_WORKFLOW,
+  // ADOPT_EXTERNAL_SCHEMA and REGISTER_SCHEMA (REPAIRS_OUTSIDE_THE_CHANGE_LEDGER
+  // in fix-actions.ts). Each was rated AUTO for being additive, and additive is
+  // not the same as restorable: History cannot roll any of them back, so a
+  // person approves each one. tests/core/repairs-outside-the-ledger.test.ts
+  // fails if any finding type whose repair is one of the four is rated AUTO.
+  'api_drift',              // FIX_API
+  'missing_api_definition', // FIX_API
+  'missing_api_crud',       // FIX_API
+  'shadow_mutation',        // FIX_API, re-syncing the API layer to the observed schema
+  'workflow_broken',        // FIX_WORKFLOW
+  'verification_failed',    // FIX_WORKFLOW
+  'external_schema_change', // ADOPT_EXTERNAL_SCHEMA
+  'schema_not_registered',  // REGISTER_SCHEMA
+
   // Rewrites what writes and deletes the database will accept, with a cascade
   // rule inferred from a column name. See the note in AUTO_SAFE above.
   'missing_fk',
@@ -378,6 +381,21 @@ export function classifyFix(
     }
   }
 
+  // An approval request for a prepared architecture change. notify_only
+  // because no generic fix path may act on it: consent is bound to one exact
+  // plan version and given through the evolution route, never "Approve & fix".
+  if (type === 'architecture_evolution') {
+    return {
+      decision: 'notify_only',
+      reason:
+        'Backenly prepared and rehearsed this change and is asking before it runs. Restructuring a table ' +
+        'always waits for you.',
+      riskNote:
+        'Existing clients keep working throughout and every step can be undone; dropping the old columns is ' +
+        'never done for you.',
+    }
+  }
+
   if (type === 'subsystem_repeat_failure') {
     const n = Number(details?.confirmedRepairCount ?? 0)
     const area = String(details?.membership ?? '')
@@ -481,7 +499,19 @@ const AUTO_ACTION_MAP: Partial<Record<FindingType, string>> = {
   contract_surface_broken:  'HEAL_DATA_PLANE',
 }
 
+// Shared by every finding whose repair runs outside the change ledger. The
+// Review Queue shows it as the reason the finding is waiting for a person.
+const OUTSIDE_LEDGER_REASON = 'it runs outside your change history, so History could not undo it.'
+
 const APPROVAL_REASON_MAP: Partial<Record<FindingType, string>> = {
+  api_drift:                    `Backenly can regenerate this table's API, but ${OUTSIDE_LEDGER_REASON}`,
+  missing_api_definition:       `Backenly can regenerate this table's API, but ${OUTSIDE_LEDGER_REASON}`,
+  missing_api_crud:             `Backenly can regenerate this table's API, but ${OUTSIDE_LEDGER_REASON}`,
+  shadow_mutation:              `Backenly can re-sync this table's API to the columns it has now, but ${OUTSIDE_LEDGER_REASON}`,
+  workflow_broken:              `Backenly can add what this workflow is missing, but ${OUTSIDE_LEDGER_REASON}`,
+  verification_failed:          `Backenly can repair what this check found missing, but ${OUTSIDE_LEDGER_REASON}`,
+  external_schema_change:       `Backenly can adopt these changes into your APIs, schema baseline and access grants, but ${OUTSIDE_LEDGER_REASON}`,
+  schema_not_registered:        `Backenly can register this project's schema with the data plane again, but ${OUTSIDE_LEDGER_REASON}`,
   missing_fk:                   'Adding a foreign key changes which writes the database accepts from that moment on, and the delete rule is inferred from the column name — so it is stated for you to approve rather than applied.',
   broken_webhook:               'Webhook repair requires action in an external dashboard (e.g. Stripe, GitHub).',
   broken_auth:                  'Auth configuration changes carry high risk of locking out all end-users.',

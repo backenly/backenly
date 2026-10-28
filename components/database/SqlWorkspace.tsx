@@ -199,7 +199,7 @@ export function SqlWorkspace({ projectId }: { projectId: string }) {
           spellCheck={false}
           aria-label="SQL query"
           placeholder="SELECT * FROM your_table LIMIT 10"
-          className={`h-[156px] flex-shrink-0 resize-none border-b ${RULE} ${KIT.well} px-4 py-3 font-mono text-[16px] leading-[22px] text-zinc-100 placeholder:text-zinc-600 focus:outline-none sm:px-5 sm:text-[12.5px] sm:leading-[20px]`}
+          className={`h-[156px] flex-shrink-0 resize-none border-b ${RULE} ${KIT.well} px-4 py-3 font-mono text-[16px] leading-[22px] text-zinc-100 placeholder:text-zinc-500 focus:outline-none sm:px-5 sm:text-[12.5px] sm:leading-[20px]`}
         />
 
         <div className="min-h-0 flex-1 overflow-auto">
@@ -216,32 +216,32 @@ export function SqlWorkspace({ projectId }: { projectId: string }) {
                       // refusal and an answer.
                       <p className="mt-2 text-[13px] leading-[20px] text-zinc-300">{failure.suggestion}</p>
                     )}
-                    {failure.code && <p className="mt-1.5 font-mono text-[12px] text-zinc-500">{failure.code}</p>}
+                    {failure.code && <p className="mt-1.5 font-mono text-[12px] text-faint">{failure.code}</p>}
                   </div>
                 </div>
               </div>
             </div>
           ) : running && !result ? (
-            <div className="flex h-full items-center justify-center gap-2 text-[12.5px] text-zinc-500">
+            <div className="flex h-full items-center justify-center gap-2 text-[12.5px] text-faint">
               <Spinner className="h-3.5 w-3.5" /> Running
             </div>
           ) : !result ? (
             <div className="flex h-full flex-col items-center justify-center px-8 text-center">
               <Terminal className="mb-3 h-[18px] w-[18px] text-zinc-600" strokeWidth={1.75} aria-hidden />
               <p className="text-[13px] font-medium text-zinc-300">Run a query to see results.</p>
-              <p className="mt-1 max-w-[52ch] text-[12.5px] leading-[19px] text-zinc-500">
+              <p className="mt-1 max-w-[52ch] text-[12.5px] leading-[19px] text-faint">
                 SELECT, WITH and EXPLAIN. Writes and DDL are refused by the database, not by this page.
               </p>
             </div>
           ) : result.rows.length === 0 ? (
             <div className="flex h-full flex-col items-center justify-center px-8 text-center">
               <p className="text-[13px] font-medium text-zinc-300">No rows.</p>
-              <p className="mt-1 text-[12px] tabular-nums text-zinc-500">{result.ms}ms</p>
+              <p className="mt-1 text-[12px] tabular-nums text-faint">{result.ms}ms</p>
             </div>
           ) : (
             <div className="min-w-full">
               <div className={`flex min-h-[36px] flex-wrap items-center gap-2 border-b ${RULE} px-4 py-1.5 sm:px-5`}>
-                <span className="text-[12px] tabular-nums text-zinc-500">
+                <span className="text-[12px] tabular-nums text-faint">
                   {result.rowCount} {result.rowCount === 1 ? 'row' : 'rows'} · {result.ms}ms
                 </span>
                 {result.truncated && (
@@ -278,7 +278,7 @@ export function SqlWorkspace({ projectId }: { projectId: string }) {
                         {result.fields.map((f) => (
                           <td key={f.name} className="border-b border-white/[0.04] px-4 py-[9px] font-mono text-[12px] text-zinc-300">
                             {row[f.name] === null || row[f.name] === undefined ? (
-                              <span className="italic text-zinc-600">null</span>
+                              <span className="italic text-faint">null</span>
                             ) : typeof row[f.name] === 'object' ? (
                               JSON.stringify(row[f.name])
                             ) : (
@@ -323,7 +323,7 @@ export function SqlWorkspace({ projectId }: { projectId: string }) {
         </div>
         <div className="min-h-0 flex-1 overflow-auto p-2">
           {history.length === 0 ? (
-            <p className="px-2.5 py-1.5 text-[12.5px] leading-[19px] text-zinc-500">Queries you run appear here.</p>
+            <p className="px-2.5 py-1.5 text-[12.5px] leading-[19px] text-faint">Queries you run appear here.</p>
           ) : (
             history.map((h, i) => (
               <button
@@ -334,7 +334,7 @@ export function SqlWorkspace({ projectId }: { projectId: string }) {
                   editorRef.current?.focus()
                 }}
                 title={h}
-                className={`mb-0.5 flex w-full items-start gap-2 rounded-[6px] px-2.5 py-[7px] text-left font-mono text-[12px] text-zinc-500 transition-colors hover:bg-white/[0.04] hover:text-zinc-200 ${FOCUS_INSET}`}
+                className={`mb-0.5 flex w-full items-start gap-2 rounded-[6px] px-2.5 py-[7px] text-left font-mono text-[12px] text-faint transition-colors hover:bg-white/[0.04] hover:text-zinc-200 ${FOCUS_INSET}`}
               >
                 <Clock className="mt-[3px] h-3 w-3 flex-shrink-0" strokeWidth={1.75} />
                 <span className="truncate">{h.replace(/\s+/g, ' ')}</span>

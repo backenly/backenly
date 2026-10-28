@@ -477,15 +477,19 @@ export function assertDeliverableUrl(targetUrl: string): void {
   assertAllowedUrl(targetUrl, 'webhook')
 }
 
+/** Each write below is one governed change, in the project's history (lib/changes/resources/webhooks.ts). */
+const governed = async <T>(projectId: string, title: string, fn: () => Promise<T>) => (await import('@/lib/changes/ledger')).governedChange(projectId, title, fn)
+
 export async function createWebhook(
   projectId: string,
   eventType: WebhookEventType,
   targetUrl: string
 ) {
   assertDeliverableUrl(targetUrl)
-  return prisma.webhook.create({
-    data: { projectId, eventType, targetUrl, secret: crypto.randomBytes(32).toString('hex') },
-  })
+  return governed(projectId, `Create a webhook for ${eventType}`, () =>
+    prisma.webhook.create({
+      data: { projectId, eventType, targetUrl, secret: crypto.randomBytes(32).toString('hex') },
+    }))
 }
 
 export async function getProjectWebhooks(projectId: string) {
@@ -561,7 +565,7 @@ export async function updateWebhook(
   })
   if (!existing) return null
 
-  return prisma.webhook.update({ where: { id: webhookId }, data: changes })
+  return governed(projectId, 'Change a webhook', () => prisma.webhook.update({ where: { id: webhookId }, data: changes }))
 }
 
 /**
@@ -580,7 +584,7 @@ export async function rotateWebhookSecret(projectId: string, webhookId: string) 
   if (!existing) return null
 
   const secret = crypto.randomBytes(32).toString('hex')
-  await prisma.webhook.update({ where: { id: webhookId }, data: { secret } })
+  await governed(projectId, "Rotate a webhook's signing secret", () => prisma.webhook.update({ where: { id: webhookId }, data: { secret } }))
   return { secret }
 }
 
@@ -704,9 +708,10 @@ async function deliverOnceAndRecord(
 }
 
 export async function deleteWebhook(webhookId: string, projectId: string) {
-  return prisma.webhook.deleteMany({ where: { id: webhookId, projectId } })
+  return governed(projectId, 'Delete a webhook', () => prisma.webhook.deleteMany({ where: { id: webhookId, projectId } }))
 }
 
 export async function toggleWebhook(webhookId: string, projectId: string, active: boolean) {
-  return prisma.webhook.updateMany({ where: { id: webhookId, projectId }, data: { active } })
+  return governed(projectId, active ? 'Turn a webhook on' : 'Turn a webhook off', () =>
+    prisma.webhook.updateMany({ where: { id: webhookId, projectId }, data: { active } }))
 }

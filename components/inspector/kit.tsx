@@ -20,6 +20,9 @@
  */
 
 import {
+  Fragment,
+  cloneElement,
+  isValidElement,
   useCallback,
   useEffect,
   useId,
@@ -30,6 +33,7 @@ import {
   type ComponentType,
   type KeyboardEvent as ReactKeyboardEvent,
 } from 'react'
+import Link from 'next/link'
 import { Check, ChevronRight, Copy, Info, MoreHorizontal, X, type LucideIcon } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
@@ -97,7 +101,7 @@ export const KIT = {
   text:        'text-zinc-50',
   textMute:    'text-zinc-300',
   textDim:     'text-zinc-400',
-  textFaint:   'text-zinc-500',
+  textFaint:   'text-faint',
 
   radius:      R_PANEL,
   radiusSm:    R_CONTROL,
@@ -146,7 +150,7 @@ export function KitCardHeader({
     <div className={`flex items-center justify-between gap-3 border-b ${RULE} px-4 py-3 ${className}`}>
       <div className="min-w-0">
         <h3 className="text-[13px] font-medium leading-[20px] tracking-[-0.006em] text-zinc-100">{title}</h3>
-        {description && <p className="mt-0.5 text-[12px] leading-[17px] text-zinc-500">{description}</p>}
+        {description && <p className="mt-0.5 text-[12px] leading-[17px] text-faint">{description}</p>}
       </div>
       {actions && <div className="flex flex-shrink-0 items-center gap-2">{actions}</div>}
     </div>
@@ -164,7 +168,7 @@ export function KitCardBody({ children, className = '' }: { children: ReactNode;
  * tracked micro-label; those are gone from the console by rule.
  */
 export function SectionLabel({ children, className = '' }: { children: ReactNode; className?: string }) {
-  return <p className={`text-[12px] font-medium leading-[16px] text-zinc-500 ${className}`}>{children}</p>
+  return <p className={`text-[12px] font-medium leading-[16px] text-faint ${className}`}>{children}</p>
 }
 
 export function SectionTitle({
@@ -210,7 +214,7 @@ const DOT: Record<StatusTone, string> = {
 const DOT_TEXT: Record<StatusTone, string> = {
   operational: 'text-zinc-300',
   managed:     'text-zinc-400',
-  paused:      'text-zinc-500',
+  paused:      'text-faint',
   attention:   'text-amber-200',
   failed:      'text-rose-300',
   beta:        'text-violet-200',
@@ -301,7 +305,7 @@ const TONE_ICON = {
 export function StatTile({ label, value, delta, tone = 'neutral', loading }: StatTileProps) {
   return (
     <div className={`${PLATE} border ${EDGE} ${R_PANEL} px-4 py-3.5`}>
-      <p className="text-[12px] leading-[16px] text-zinc-500">{label}</p>
+      <p className="text-[12px] leading-[16px] text-faint">{label}</p>
       <div className="mt-2 flex items-baseline gap-2">
         {loading ? (
           <Skeleton className="h-[22px] w-16" />
@@ -317,7 +321,7 @@ export function StatTile({ label, value, delta, tone = 'neutral', loading }: Sta
 }
 
 function Delta({ value, suffix }: { value: number; suffix?: string }) {
-  if (!value) return <span className="text-[12px] tabular-nums text-zinc-600">±0%</span>
+  if (!value) return <span className="text-[12px] tabular-nums text-faint">±0%</span>
   const up = value > 0
   return (
     <span className={`text-[12px] font-medium tabular-nums ${up ? 'text-emerald-300' : 'text-rose-300'}`}>
@@ -364,7 +368,7 @@ export function Stat({
     tone === 'good' ? 'text-emerald-300' : tone === 'warn' ? 'text-amber-200' : tone === 'bad' ? 'text-rose-300' : 'text-zinc-50'
   return (
     <div className={`${PLATE} min-w-0 px-4 py-3.5`}>
-      <p className="truncate text-[12px] leading-[16px] text-zinc-500">{label}</p>
+      <p className="truncate text-[12px] leading-[16px] text-faint">{label}</p>
       {loading ? (
         <Skeleton className="mt-2 h-[22px] w-14" />
       ) : (
@@ -372,7 +376,7 @@ export function Stat({
           {value}
         </p>
       )}
-      {hint && <p className="mt-0.5 truncate text-[12px] leading-[16px] text-zinc-500">{hint}</p>}
+      {hint && <p className="mt-0.5 truncate text-[12px] leading-[16px] text-faint">{hint}</p>}
     </div>
   )
 }
@@ -384,6 +388,12 @@ interface EmptyStateProps {
   title: string
   description: string
   action?: ReactNode
+  /**
+   * What this place will hold, drawn where the icon would be: a
+   * <GhostPreview>. Give it to a section's first-run state; errors and
+   * "nothing matches" keep the icon.
+   */
+  preview?: ReactNode
   className?: string
 }
 
@@ -392,20 +402,189 @@ interface EmptyStateProps {
  * it gets its first thing. Pair with <AgentPrompt> when the next step is
  * something to ask the coding agent for.
  */
-export function EmptyState({ icon: Icon, title, description, action, className = '' }: EmptyStateProps) {
+export function EmptyState({ icon: Icon, title, description, action, preview, className = '' }: EmptyStateProps) {
   return (
     <div className={`flex flex-col items-center justify-center px-6 py-14 text-center ${className}`}>
-      <span
-        className={`mb-4 flex h-[40px] w-[40px] items-center justify-center ${R_PANEL} border ${EDGE} bg-white/[0.03] shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]`}
-        aria-hidden
-      >
-        <Icon className="h-[18px] w-[18px] text-zinc-400" strokeWidth={1.75} />
-      </span>
-      <h3 className="text-[14px] font-semibold leading-[20px] tracking-[-0.01em] text-zinc-100">{title}</h3>
-      <p className="mt-1.5 max-w-[46ch] text-[13px] leading-[20px] text-zinc-400 [text-wrap:pretty]">{description}</p>
-      {action && <div className="mt-5 flex flex-wrap items-center justify-center gap-2">{action}</div>}
+      {preview ? (
+        <div className="mb-6 flex w-full justify-center">{preview}</div>
+      ) : (
+        <span
+          className={`mb-4 flex h-[40px] w-[40px] items-center justify-center ${R_PANEL} border ${EDGE} bg-white/[0.03] shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]`}
+          aria-hidden
+        >
+          <Icon className="h-[18px] w-[18px] text-zinc-400" strokeWidth={1.75} />
+        </span>
+      )}
+      <h3 className="text-[15px] font-semibold leading-[22px] tracking-[-0.012em] text-zinc-100 [text-wrap:balance]">{title}</h3>
+      <p className="mt-1.5 max-w-[50ch] text-[13px] leading-[20px] text-zinc-400 [text-wrap:pretty]">{description}</p>
+      {action && <div className="mt-6 flex w-full flex-wrap items-center justify-center gap-2">{action}</div>}
     </div>
   )
+}
+
+// ─── Ghost preview ───────────────────────────────────────────────────────────
+
+export type GhostKind = 'table' | 'files' | 'code' | 'events' | 'chart' | 'list'
+
+/**
+ * The outline of what a section will hold, drawn over its first-run empty
+ * state: a grid for tables, tiles for files, lines for code, rows for a list.
+ * It replaced a lone icon in a box, which said nothing about the place.
+ *
+ * Shapes only, never words or numbers, so nothing in it can be read as data
+ * the project has. Faded at the foot, decorative, hidden from assistive tech.
+ */
+export function GhostPreview({ kind, className = '' }: { kind: GhostKind; className?: string }) {
+  return (
+    <div
+      aria-hidden
+      className={`relative w-[312px] max-w-full overflow-hidden ${R_PANEL} border ${EDGE} ${PLATE} text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] [mask-image:linear-gradient(to_bottom,black_50%,transparent)] ${className}`}
+    >
+      {GHOSTS[kind]()}
+    </div>
+  )
+}
+
+/** One silhouette line: a rounded bar of the given width. */
+function GhostBar({ w, tone = 'bg-white/[0.06]', h = 'h-[6px]' }: { w: string; tone?: string; h?: string }) {
+  return <span className={`block ${h} flex-shrink-0 rounded-full ${tone}`} style={{ width: w }} />
+}
+
+/** A small outlined chip: an operation, a method, a status. */
+function GhostChip({ w = 'w-[34px]' }: { w?: string }) {
+  return <span className={`block h-[14px] ${w} flex-shrink-0 rounded-[4px] border border-white/[0.09] bg-white/[0.025]`} />
+}
+
+const GHOSTS: Record<GhostKind, () => ReactNode> = {
+  table: () => (
+    <div>
+      <div className={`grid grid-cols-[18px_1.1fr_0.8fr_1.2fr] items-center gap-3 border-b ${RULE} ${GRID_HEAD} px-3 py-[9px]`}>
+        <GhostBar w="8px" tone="bg-white/[0.08]" />
+        <GhostBar w="64%" tone="bg-white/[0.12]" />
+        <GhostBar w="70%" tone="bg-white/[0.12]" />
+        <GhostBar w="52%" tone="bg-white/[0.12]" />
+      </div>
+      {[
+        ['82%', '46%', '74%'],
+        ['66%', '60%', '52%'],
+        ['74%', '38%', '68%'],
+        ['58%', '52%', '80%'],
+      ].map((row, i) => (
+        <div key={i} className={`grid grid-cols-[18px_1.1fr_0.8fr_1.2fr] items-center gap-3 border-b ${RULE} px-3 py-[9px] last:border-b-0`}>
+          <GhostBar w="6px" tone="bg-white/[0.05]" />
+          {row.map((w, j) => (
+            <GhostBar key={j} w={w} />
+          ))}
+        </div>
+      ))}
+    </div>
+  ),
+  files: () => (
+    <div className="grid grid-cols-4 gap-2 p-3">
+      {['72%', '54%', '66%', '80%', '60%', '76%', '48%', '68%'].map((w, i) => (
+        <div key={i} className={`rounded-[7px] border ${RULE} bg-white/[0.015] p-1.5`}>
+          <div className="flex aspect-[4/3] items-center justify-center rounded-[5px] bg-white/[0.035]">
+            <span className="block h-[10px] w-[10px] rounded-[3px] border border-white/[0.12]" />
+          </div>
+          <span className="mt-1.5 block">
+            <GhostBar w={w} h="h-[5px]" />
+          </span>
+        </div>
+      ))}
+    </div>
+  ),
+  code: () => (
+    <div>
+      <div className={`flex items-center gap-2 border-b ${RULE} px-3 py-2`}>
+        <GhostChip w="w-[42px]" />
+        <GhostBar w="34%" tone="bg-white/[0.10]" />
+      </div>
+      <div className="space-y-[9px] py-3 pl-3 pr-4">
+        {[
+          [0, '42%', true],
+          [1, '64%', false],
+          [2, '48%', false],
+          [2, '58%', true],
+          [1, '36%', false],
+          [0, '12%', true],
+        ].map(([indent, w, strong], i) => (
+          <div key={i} className="flex items-center gap-3">
+            <GhostBar w="8px" tone="bg-white/[0.04]" />
+            <span className="flex min-w-0 flex-1" style={{ paddingLeft: (indent as number) * 14 }}>
+              <GhostBar w={w as string} tone={strong ? 'bg-white/[0.11]' : 'bg-white/[0.055]'} />
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  ),
+  events: () => (
+    <div className={`divide-y ${KIT.divide}`}>
+      {[
+        ['50%', '14%'],
+        ['62%', '12%'],
+        ['40%', '16%'],
+        ['56%', '12%'],
+        ['46%', '14%'],
+      ].map(([w, t], i) => (
+        <div key={i} className="flex items-center gap-2.5 px-3 py-[9px]">
+          <span className="block h-[6px] w-[6px] flex-shrink-0 rounded-full bg-white/[0.16]" />
+          <GhostChip w="w-[44px]" />
+          <span className="flex min-w-0 flex-1">
+            <GhostBar w={w} />
+          </span>
+          <GhostBar w={t} tone="bg-white/[0.04]" />
+        </div>
+      ))}
+    </div>
+  ),
+  chart: () => (
+    <div className="px-3 pb-2 pt-3">
+      <div className="mb-3 grid grid-cols-3 gap-3">
+        {['54%', '62%', '46%'].map((w, i) => (
+          <div key={i} className="space-y-1.5">
+            <GhostBar w={w} h="h-[5px]" tone="bg-white/[0.05]" />
+            <GhostBar w="40%" h="h-[9px]" tone="bg-white/[0.10]" />
+          </div>
+        ))}
+      </div>
+      <svg viewBox="0 0 288 84" preserveAspectRatio="none" className="block h-[84px] w-full">
+        {[14, 42, 70].map((y) => (
+          <line key={y} x1="0" x2="288" y1={y} y2={y} stroke="rgba(255,255,255,0.05)" strokeWidth="1" vectorEffect="non-scaling-stroke" />
+        ))}
+        <path
+          d="M0 62 C 24 58, 36 48, 60 50 S 96 36, 120 40 S 158 22, 182 30 S 222 16, 246 22 S 276 12, 288 14 L 288 84 L 0 84 Z"
+          fill="rgba(255,255,255,0.035)"
+        />
+        <path
+          d="M0 62 C 24 58, 36 48, 60 50 S 96 36, 120 40 S 158 22, 182 30 S 222 16, 246 22 S 276 12, 288 14"
+          fill="none"
+          stroke="rgba(255,255,255,0.16)"
+          strokeWidth="1.25"
+          vectorEffect="non-scaling-stroke"
+        />
+      </svg>
+    </div>
+  ),
+  list: () => (
+    <div className={`divide-y ${KIT.divide}`}>
+      {[
+        ['54%', '34%'],
+        ['42%', '28%'],
+        ['60%', '38%'],
+        ['48%', '30%'],
+      ].map(([w, sub], i) => (
+        <div key={i} className="flex items-center gap-3 px-3 py-2.5">
+          <span className="block h-[20px] w-[20px] flex-shrink-0 rounded-full bg-white/[0.06]" />
+          <span className="flex min-w-0 flex-1 flex-col gap-1.5">
+            <GhostBar w={w} tone="bg-white/[0.09]" />
+            <GhostBar w={sub} h="h-[5px]" tone="bg-white/[0.045]" />
+          </span>
+          <GhostChip w="w-[40px]" />
+        </div>
+      ))}
+    </div>
+  ),
 }
 
 // ─── Badges & chips ──────────────────────────────────────────────────────────
@@ -458,6 +637,53 @@ export function Tag({
   )
 }
 
+// ─── Meta row ────────────────────────────────────────────────────────────────
+
+/**
+ * The facts under an item's title: what it is, where, how old, its state.
+ * Each fact is its own child, spaced apart rather than strung together with
+ * middle dots, and the row is set in Geist. These rows used to be one mono
+ * string ("missing_fk_index · watchlist_items · 1d ago · re-checked and
+ * confirmed"), which made sentences and counts read as machine output. Wrap
+ * the machine parts (a finding type, a table) in <MetaCode>.
+ */
+export function MetaRow({ children, className = '' }: { children: ReactNode; className?: string }) {
+  return (
+    <p className={`mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] leading-[16px] text-faint ${className}`}>
+      {children}
+    </p>
+  )
+}
+
+/**
+ * Server text that marks identifiers with backticks ("column `spoilers` on
+ * `reviews`"), with each marked span set as code instead of printing the
+ * backticks.
+ */
+export function TextWithCode({ text, codeClassName = 'text-zinc-300' }: { text: string; codeClassName?: string }) {
+  const parts = text.split('`')
+  // An unmatched backtick leaves an even number of parts: print it as written.
+  if (parts.length % 2 === 0) return <>{text}</>
+  return (
+    <>
+      {parts.map((part, i) =>
+        i % 2 === 1 ? (
+          <code key={i} className={`font-mono text-[12px] ${codeClassName}`}>
+            {part}
+          </code>
+        ) : (
+          part
+        ),
+      )}
+    </>
+  )
+}
+
+/** A machine identifier inside a <MetaRow>. */
+export function MetaCode({ children }: { children: ReactNode }) {
+  return <code className="font-mono text-[12px] text-zinc-400">{children}</code>
+}
+
 // ─── Buttons ─────────────────────────────────────────────────────────────────
 
 interface KitButtonProps {
@@ -476,19 +702,25 @@ interface KitButtonProps {
   'aria-label'?: string
 }
 
-export const BUTTON_BASE = `inline-flex items-center justify-center gap-1.5 whitespace-nowrap font-medium ${R_CONTROL} transition-[background-color,border-color,color,transform] duration-150 active:scale-[0.98] disabled:pointer-events-none disabled:opacity-40 ${FOCUS}`
+export const BUTTON_BASE = `inline-flex items-center justify-center gap-1.5 whitespace-nowrap font-medium ${R_CONTROL} transition-[background-color,border-color,color,box-shadow,transform] duration-150 active:scale-[0.98] disabled:pointer-events-none ${FOCUS}`
 
 export const BUTTON_SIZES = {
   sm: 'h-[28px] px-2.5 text-[12px]',
   md: 'h-[32px] px-3 text-[13px]',
 } as const
 
+/**
+ * Each variant carries its own disabled look. A blanket 40% opacity turned the
+ * white primary into a mid-grey slab with dark text, which read as a broken
+ * control rather than an unavailable one; a disabled primary is now a quiet
+ * outlined well with muted text, so a page's next step is still legible.
+ */
 export const BUTTON_VARIANTS = {
   // White on dark: the landing page's primary recipe, scaled for a tool.
-  primary:   'bg-white font-semibold text-zinc-950 shadow-[0_1px_0_rgba(255,255,255,0.25)_inset,0_1px_2px_rgba(0,0,0,0.4)] hover:bg-zinc-200',
-  secondary: 'border border-white/[0.10] bg-white/[0.04] text-zinc-100 hover:border-white/[0.16] hover:bg-white/[0.07]',
-  ghost:     'text-zinc-400 hover:bg-white/[0.05] hover:text-zinc-100',
-  danger:    'border border-rose-400/25 bg-rose-500/[0.08] text-rose-200 hover:border-rose-400/40 hover:bg-rose-500/[0.14]',
+  primary:   'bg-white font-semibold text-zinc-950 shadow-[0_1px_0_rgba(255,255,255,0.25)_inset,0_1px_2px_rgba(0,0,0,0.4)] hover:bg-zinc-200 disabled:bg-white/[0.06] disabled:text-zinc-500 disabled:shadow-[inset_0_0_0_1px_rgba(255,255,255,0.08)]',
+  secondary: 'border border-white/[0.10] bg-white/[0.04] text-zinc-100 hover:border-white/[0.16] hover:bg-white/[0.07] disabled:border-white/[0.07] disabled:bg-transparent disabled:text-zinc-500',
+  ghost:     'text-zinc-400 hover:bg-white/[0.05] hover:text-zinc-100 disabled:text-zinc-600',
+  danger:    'border border-rose-400/25 bg-rose-500/[0.08] text-rose-200 hover:border-rose-400/40 hover:bg-rose-500/[0.14] disabled:border-rose-400/15 disabled:bg-transparent disabled:text-rose-200/40',
 } as const
 
 export function KitButton({
@@ -520,6 +752,43 @@ export function KitButton({
       {children}
       {IconRight && <IconRight className={iconSize} strokeWidth={2} />}
     </button>
+  )
+}
+
+/**
+ * Navigation that looks like a KitButton. It stays a real link (prefetch,
+ * Cmd-click, one focus stop) instead of a button inside an anchor, which is
+ * invalid markup and a double tab stop for keyboard users.
+ */
+export function KitButtonLink({
+  href,
+  children,
+  variant = 'secondary',
+  size = 'md',
+  icon: Icon,
+  external = false,
+  className = '',
+}: {
+  href: string
+  children: ReactNode
+  variant?: keyof typeof BUTTON_VARIANTS
+  size?: keyof typeof BUTTON_SIZES
+  icon?: IconLike
+  /** Opens in a new tab, and says so to screen readers. */
+  external?: boolean
+  className?: string
+}) {
+  const iconSize = size === 'sm' ? 'h-3.5 w-3.5' : 'h-[15px] w-[15px]'
+  return (
+    <Link
+      href={href}
+      {...(external ? { target: '_blank', rel: 'noopener noreferrer' } : {})}
+      className={`${BUTTON_BASE} ${BUTTON_SIZES[size]} ${BUTTON_VARIANTS[variant]} ${className}`}
+    >
+      {Icon && <Icon aria-hidden className={iconSize} strokeWidth={2} />}
+      {children}
+      {external && <span className="sr-only">(opens in a new tab)</span>}
+    </Link>
   )
 }
 
@@ -595,13 +864,13 @@ export function KitTab({
       aria-selected={active}
       onClick={onClick}
       className={`group relative -mb-px flex h-[40px] flex-shrink-0 items-center whitespace-nowrap px-2.5 text-[13px] font-medium transition-colors duration-150 ${FOCUS_INSET} ${
-        active ? 'text-zinc-50' : 'text-zinc-500 hover:text-zinc-200'
+        active ? 'text-zinc-50' : 'text-faint hover:text-zinc-200'
       }`}
     >
       <span className="flex items-center gap-1.5 [&_svg]:h-[15px] [&_svg]:w-[15px]">
         {children}
         {typeof count === 'number' && (
-          <span className={`text-[12px] font-normal tabular-nums ${active ? 'text-zinc-400' : 'text-zinc-600'}`}>
+          <span className={`text-[12px] font-normal tabular-nums ${active ? 'text-zinc-400' : 'text-faint'}`}>
             {count}
           </span>
         )}
@@ -657,7 +926,7 @@ export function Segmented<T extends string>({
             className={`inline-flex items-center gap-1.5 rounded-[5px] font-medium transition-[background-color,color] duration-150 ${h} ${FOCUS_INSET} ${
               on
                 ? 'bg-white/[0.09] text-zinc-50 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]'
-                : 'text-zinc-500 hover:text-zinc-200'
+                : 'text-faint hover:text-zinc-200'
             }`}
           >
             {OptIcon && <OptIcon className="h-3.5 w-3.5" strokeWidth={1.75} />}
@@ -695,7 +964,7 @@ export function ListRow({ icon: Icon, iconTone = 'neutral', title, subtitle, rig
       {Icon && <Icon className={`h-4 w-4 flex-shrink-0 ${TONE_ICON[iconTone]}`} strokeWidth={1.75} />}
       <div className="min-w-0 flex-1">
         <div className="truncate text-[13px] font-medium text-zinc-200">{title}</div>
-        {subtitle && <div className="mt-0.5 truncate text-[12px] text-zinc-500">{subtitle}</div>}
+        {subtitle && <div className="mt-0.5 truncate text-[12px] text-faint">{subtitle}</div>}
       </div>
       {right && <div className="flex flex-shrink-0 items-center gap-2">{right}</div>}
     </Wrapper>
@@ -722,6 +991,7 @@ export function PageHeader({
   actions,
   meta,
   tabs,
+  breadcrumb,
   className = '',
 }: {
   title: ReactNode
@@ -729,10 +999,13 @@ export function PageHeader({
   actions?: ReactNode
   meta?: ReactNode
   tabs?: ReactNode
+  /** A <Breadcrumbs> trail above the title, for a page one level down. */
+  breadcrumb?: ReactNode
   className?: string
 }) {
   return (
     <header className={`${PAGE_WIDTH} ${PAGE_GUTTER} pt-7 sm:pt-9 ${className}`}>
+      {breadcrumb && <div className="mb-3">{breadcrumb}</div>}
       <div className={`flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between ${tabs ? 'pb-5' : 'pb-6'}`}>
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
@@ -772,10 +1045,45 @@ export function CommandBar({
     >
       <div className="flex min-w-0 items-center gap-3">
         <h1 className="truncate text-[15px] font-semibold leading-[22px] tracking-[-0.014em] text-zinc-50">{title}</h1>
-        {context && <div className="flex min-w-0 items-center gap-3 text-[12px] text-zinc-500">{context}</div>}
+        {context && <div className="flex min-w-0 items-center gap-3 text-[12px] text-faint">{context}</div>}
       </div>
       {children && <div className="flex flex-shrink-0 flex-wrap items-center gap-2">{children}</div>}
     </div>
+  )
+}
+
+/**
+ * Where a page sits, for one level down (Support / Case #1). Every crumb but
+ * the last is a real link; the last is the page itself, marked current.
+ */
+export function Breadcrumbs({ items }: { items: Array<{ label: ReactNode; href?: string }> }) {
+  return (
+    <nav aria-label="Breadcrumb">
+      <ol className="flex min-w-0 flex-wrap items-center gap-1.5 text-[12.5px] leading-[18px]">
+        {items.map((item, i) => {
+          const last = i === items.length - 1
+          return (
+            <li key={i} className="flex min-w-0 items-center gap-1.5">
+              {item.href && !last ? (
+                <Link
+                  href={item.href}
+                  className={`${R_TAG} truncate text-faint transition-colors duration-150 hover:text-zinc-100 ${FOCUS}`}
+                >
+                  {item.label}
+                </Link>
+              ) : (
+                <span aria-current={last ? 'page' : undefined} className="truncate text-zinc-300">
+                  {item.label}
+                </span>
+              )}
+              {!last && (
+                <ChevronRight aria-hidden className="h-3.5 w-3.5 flex-shrink-0 text-zinc-600" strokeWidth={1.75} />
+              )}
+            </li>
+          )
+        })}
+      </ol>
+    </nav>
   )
 }
 
@@ -836,6 +1144,7 @@ export function SettingsCard({
   actions,
   danger = false,
   onSubmit,
+  layout = 'stacked',
   className = '',
 }: {
   title: ReactNode
@@ -847,17 +1156,34 @@ export function SettingsCard({
   actions?: ReactNode
   danger?: boolean
   onSubmit?: () => void
+  /**
+   * 'split' sets the title and sentence in a column beside the card from lg
+   * up, the way a settings page reads: what the setting is on the left, the
+   * control on the right. A stacked card in a settings page's narrow column
+   * left half of a wide screen empty.
+   */
+  layout?: 'stacked' | 'split'
   className?: string
 }) {
   const edge = danger ? 'border-rose-400/25' : EDGE
+  const split = layout === 'split'
+  const heading = (
+    <>
+      <h3 className={`text-[15px] font-semibold leading-[22px] tracking-[-0.012em] ${danger && split ? 'text-rose-100' : 'text-zinc-50'}`}>
+        {title}
+      </h3>
+      {description && (
+        <div className="mt-1 max-w-[68ch] text-[13px] leading-[20px] text-zinc-400 [text-wrap:pretty]">{description}</div>
+      )}
+    </>
+  )
   const inner = (
     <>
       <div className="px-5 pb-5 pt-5 sm:px-6">
-        <h3 className="text-[15px] font-semibold leading-[22px] tracking-[-0.012em] text-zinc-50">{title}</h3>
-        {description && (
-          <div className="mt-1 max-w-[68ch] text-[13px] leading-[20px] text-zinc-400 [text-wrap:pretty]">{description}</div>
-        )}
-        {children && <div className="mt-4">{children}</div>}
+        {/* In a split layout the heading also stays here below lg, where the
+            two columns stack and the card must still say what it is. */}
+        <div className={split ? 'lg:hidden' : ''}>{heading}</div>
+        {children && <div className={split ? 'mt-4 lg:mt-0' : 'mt-4'}>{children}</div>}
       </div>
       {(footer || actions) && (
         <div
@@ -865,27 +1191,35 @@ export function SettingsCard({
             danger ? 'border-rose-400/20 bg-rose-500/[0.04]' : `${RULE} bg-white/[0.015]`
           }`}
         >
-          <div className="min-w-0 text-[12.5px] leading-[18px] text-zinc-500">{footer}</div>
+          <div className="min-w-0 text-[12.5px] leading-[18px] text-faint">{footer}</div>
           {actions && <div className="flex flex-shrink-0 items-center gap-2">{actions}</div>}
         </div>
       )}
     </>
   )
-  const cls = `overflow-hidden ${PLATE} border ${edge} ${R_PANEL} ${className}`
-  if (onSubmit) {
-    return (
-      <form
-        className={cls}
-        onSubmit={(e) => {
-          e.preventDefault()
-          onSubmit()
-        }}
-      >
-        {inner}
-      </form>
-    )
+  const cls = `overflow-hidden ${PLATE} border ${edge} ${R_PANEL} ${split ? '' : className}`
+  const card = onSubmit ? (
+    <form
+      className={cls}
+      onSubmit={(e) => {
+        e.preventDefault()
+        onSubmit()
+      }}
+    >
+      {inner}
+    </form>
+  ) : (
+    <div className={cls}>{inner}</div>
+  )
+  if (!split) {
+    return onSubmit ? card : <section className={cls}>{inner}</section>
   }
-  return <section className={cls}>{inner}</section>
+  return (
+    <section className={`grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,280px)_minmax(0,1fr)] lg:gap-10 ${className}`}>
+      <div className="hidden min-w-0 lg:block lg:pt-1">{heading}</div>
+      <div className="min-w-0">{card}</div>
+    </section>
+  )
 }
 
 /** A label/value list for read-only facts (ids, URLs, regions). */
@@ -899,6 +1233,49 @@ export function DetailRow({ label, children }: { label: ReactNode; children: Rea
       <dt className="text-[13px] text-zinc-400">{label}</dt>
       <dd className="min-w-0 text-[13px] text-zinc-200">{children}</dd>
     </div>
+  )
+}
+
+// ─── Switch ──────────────────────────────────────────────────────────────────
+
+/**
+ * An on/off setting that takes effect the moment it is flipped. A checkbox
+ * stays the control for a choice that is sent with a form. On is the white of
+ * the primary action, not violet: violet is an accent, never a fill.
+ */
+export function KitSwitch({
+  checked,
+  onChange,
+  label,
+  disabled = false,
+  className = '',
+}: {
+  checked: boolean
+  onChange: (next: boolean) => void
+  /** Accessible name: what is switched on or off. */
+  label: string
+  disabled?: boolean
+  className?: string
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      disabled={disabled}
+      onClick={() => onChange(!checked)}
+      className={`relative inline-flex h-[20px] w-[34px] flex-shrink-0 items-center rounded-full transition-[background-color,box-shadow] duration-150 disabled:pointer-events-none disabled:opacity-50 ${FOCUS} ${
+        checked ? 'bg-zinc-100' : 'bg-white/[0.10] shadow-[inset_0_0_0_1px_rgba(255,255,255,0.06)]'
+      } ${className}`}
+    >
+      <span
+        aria-hidden
+        className={`absolute left-[3px] h-[14px] w-[14px] rounded-full shadow-[0_1px_2px_rgba(0,0,0,0.45)] transition-[transform,background-color] duration-150 ${
+          checked ? 'translate-x-[14px] bg-[#0c0d0f]' : 'translate-x-0 bg-zinc-400'
+        }`}
+      />
+    </button>
   )
 }
 
@@ -984,17 +1361,59 @@ export function KitChecklist({ items }: { items: string[] }) {
 
 // ─── Fields ──────────────────────────────────────────────────────────────────
 
-export function KitField({ label, hint, children }: { label: ReactNode; hint?: ReactNode; children: ReactNode }) {
+/**
+ * A labelled field. The label names its control and the hint describes it.
+ * With one element as the child, the field wires both itself: it gives the
+ * control an id (keeping one it already has), points the label's htmlFor at
+ * it and adds the hint to the control's aria-describedby. A field whose
+ * control sits deeper passes `htmlFor` (the control's id) and `hintId`, and
+ * points the control's aria-describedby at `hintId` itself.
+ */
+export function KitField({
+  label,
+  hint,
+  htmlFor,
+  hintId,
+  children,
+}: {
+  label: ReactNode
+  hint?: ReactNode
+  htmlFor?: string
+  hintId?: string
+  children: ReactNode
+}) {
+  const autoId = useId()
+  const describedBy = hintId ?? `${autoId}-hint`
+  // A fragment takes no props, and a caller that names the control wires it itself.
+  const only =
+    !htmlFor && isValidElement<{ id?: string; 'aria-describedby'?: string }>(children) && children.type !== Fragment
+      ? children
+      : null
+  const controlId = htmlFor ?? (only ? only.props.id ?? autoId : undefined)
+  const control = only
+    ? cloneElement(only, {
+        id: controlId,
+        'aria-describedby': hint
+          ? [only.props['aria-describedby'], describedBy].filter(Boolean).join(' ')
+          : only.props['aria-describedby'],
+      })
+    : children
   return (
     <div>
-      <label className="mb-1.5 block text-[12.5px] font-medium leading-[18px] text-zinc-300">{label}</label>
-      {children}
-      {hint && <p className="mt-1.5 text-[12px] leading-[17px] text-zinc-500">{hint}</p>}
+      <label htmlFor={controlId} className="mb-1.5 block text-[12.5px] font-medium leading-[18px] text-zinc-300">
+        {label}
+      </label>
+      {control}
+      {hint && (
+        <p id={describedBy} className="mt-1.5 text-[12px] leading-[17px] text-faint">
+          {hint}
+        </p>
+      )}
     </div>
   )
 }
 
-export const INPUT_BASE = `w-full ${WELL} border ${EDGE} ${R_CONTROL} text-[16px] text-zinc-100 placeholder:text-zinc-600 shadow-[inset_0_1px_2px_rgba(0,0,0,0.35)] transition-[border-color,box-shadow] duration-150 hover:border-white/[0.12] focus:border-violet-300/50 focus:outline-none focus:ring-[3px] focus:ring-violet-400/15 disabled:opacity-50 sm:text-[13px]`
+export const INPUT_BASE = `w-full ${WELL} border ${EDGE} ${R_CONTROL} text-[16px] text-zinc-100 placeholder:text-zinc-500 shadow-[inset_0_1px_2px_rgba(0,0,0,0.35)] transition-[border-color,box-shadow] duration-150 hover:border-white/[0.12] focus:border-violet-300/50 focus:outline-none focus:ring-[3px] focus:ring-violet-400/15 disabled:opacity-50 sm:text-[13px]`
 
 export const KitInput = forwardRef<HTMLInputElement, React.InputHTMLAttributes<HTMLInputElement>>(function KitInput(
   props,
@@ -1076,7 +1495,7 @@ export function CopyButton({
       className={`inline-flex h-[26px] flex-shrink-0 items-center justify-center gap-1.5 ${R_CONTROL} ${
         showLabel ? 'px-2' : 'w-[26px]'
       } text-[12px] font-medium transition-colors duration-150 ${FOCUS} ${
-        copied ? 'text-emerald-300' : 'text-zinc-500 hover:bg-white/[0.06] hover:text-zinc-100'
+        copied ? 'text-emerald-300' : `${showLabel ? 'text-faint' : 'text-zinc-500'} hover:bg-white/[0.06] hover:text-zinc-100`
       } ${className}`}
     >
       {copied ? <Check className="h-3.5 w-3.5" strokeWidth={2.25} /> : <Copy className="h-3.5 w-3.5" strokeWidth={1.75} />}
@@ -1098,18 +1517,33 @@ export function CopyField({ value, display, className = '' }: { value: string; d
 /**
  * The console's empty-state next step. Building happens through the user's
  * coding agent, so the most useful thing an empty section can offer is the
- * sentence to send it: shown as a prompt, one click to copy.
+ * request to send it, one click to copy. Pass several to offer a choice.
+ *
+ * A request is prose, so it is set in Geist. It used to be mono behind a `›`
+ * glyph, which read as a terminal the user could type into, and broke the
+ * rule that mono is for machine text.
  */
-export function AgentPrompt({ prompt, className = '' }: { prompt: string; className?: string }) {
+export function AgentPrompt({
+  prompt,
+  label = 'Ask your agent',
+  className = '',
+}: {
+  prompt: string | readonly string[]
+  label?: string
+  className?: string
+}) {
+  const prompts = typeof prompt === 'string' ? [prompt] : prompt
   return (
-    <div
-      className={`group flex w-full max-w-[520px] items-start gap-3 ${R_CONTROL} border ${EDGE} ${WELL} py-2.5 pl-3.5 pr-1.5 text-left ${className}`}
-    >
-      <span aria-hidden className="mt-[1px] select-none font-mono text-[12px] leading-[20px] text-violet-300/80">
-        ›
-      </span>
-      <p className="min-w-0 flex-1 font-mono text-[12px] leading-[20px] text-zinc-300">{prompt}</p>
-      <CopyButton value={prompt} label="Copy prompt" />
+    <div className={`w-full overflow-hidden ${R_PANEL} border ${EDGE} ${WELL} text-left ${className}`}>
+      <p className={`border-b ${RULE} px-3.5 py-2 text-[12px] leading-[16px] text-faint`}>{label}</p>
+      <ul className={`divide-y ${KIT.divide}`}>
+        {prompts.map((p) => (
+          <li key={p} className="flex items-start gap-3 py-2 pl-3.5 pr-1.5">
+            <p className="min-w-0 flex-1 py-[3px] text-[13px] leading-[20px] text-zinc-200 [text-wrap:pretty]">{p}</p>
+            <CopyButton value={p} label="Copy prompt" />
+          </li>
+        ))}
+      </ul>
     </div>
   )
 }

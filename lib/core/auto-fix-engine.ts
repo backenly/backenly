@@ -83,6 +83,11 @@ export interface AutoFixResult {
   // throws proves nothing about the repair. It is its own outcome so callers
   // cannot count it as a fix, and so the reconciler can stop making dependent
   // repairs on state it has not confirmed.
+  // 'held' = an architecture change is working on the finding's table
+  // (lib/evolution-engine/holds.ts). Nothing ran and the finding stays OPEN; it
+  // is repaired on the first pass after the change is in place. Unlike
+  // 'deferred' it says nothing about the rest of the pass: other tables'
+  // repairs go on.
   outcome:
     | 'auto_fixed'
     | 'applied_unverified'
@@ -90,6 +95,7 @@ export interface AutoFixResult {
     | 'notify_only'
     | 'escalated'
     | 'deferred'
+    | 'held'
   findingId: string
   message: string
   rollbackData?: Record<string, unknown>
@@ -322,6 +328,27 @@ export async function runAutoFix(
       await import('@/lib/authority/gate')
     const { authorityPathFor } = await import('@/lib/authority/action-classes')
 
+    const tableName =
+      typeof details.tableName === 'string'
+        ? details.tableName
+        : typeof details.table === 'string'
+          ? (details.table as string)
+          : null
+
+    // An architecture change carrying itself out on the table this repair
+    // changes holds Backenly's own repairs of it until the change is in place
+    // (lib/evolution-engine/holds.ts): the change stops if its table moves under
+    // it, and a repair of ours must not be what moved it. Asked once the repair
+    // is cleared to run, so one that needs a person is still put in front of
+    // them, and again inside the build lock (_executeAutoFix). Unknown is not
+    // held: a failed read costs the change a stop, never a repair its delay.
+    const holds = await import('@/lib/evolution-engine/holds')
+    const hold = { table: holds.repairedTable(finding.type, details), action: buildFixAction(finding.type, details)?.action ?? null }
+    const held = async (): Promise<AutoFixResult | null> => {
+      const why = await holds.repairHold(projectId, hold).catch(() => null)
+      return why ? { findingId, outcome: 'held', message: `Held: ${why}.` } : null
+    }
+
     const path = authorityPathFor(finding.type)
 
     // ── Neither declared nor enumerated ──────────────────────────────────
@@ -350,15 +377,10 @@ export async function runAutoFix(
       if (!compat.allowed) {
         return { findingId, outcome: 'deferred', message: compat.reason ?? 'not permitted' }
       }
-      return _executeAutoFix(finding.id, projectId, type, details, opts)
+      const waiting = await held()
+      if (waiting) return waiting
+      return _executeAutoFix(finding.id, projectId, type, details, { ...opts, hold })
     }
-
-    const tableName =
-      typeof details.tableName === 'string'
-        ? details.tableName
-        : typeof details.table === 'string'
-          ? (details.table as string)
-          : null
 
     const gate = await authorizeAutonomousFix({
       projectId,
@@ -408,6 +430,8 @@ export async function runAutoFix(
         message: `Authority lapsed before execution: ${still.reason}`,
       }
     }
+    const waiting = await held()
+    if (waiting) return waiting
 
     // The repair applies what the declared intent says, not what the executor
     // would infer. See applyIntentToFixDetails.
@@ -420,7 +444,7 @@ export async function runAutoFix(
       projectId,
       type,
       applyIntentToFixDetails(gate.decision, details),
-      { ...opts, recovery: gate.decision.capability.recovery },
+      { ...opts, recovery: gate.decision.capability.recovery, hold },
     )
   }
 
@@ -1121,6 +1145,18 @@ export function revertEligibility(
     }
   }
 
+  // Nothing recorded to put back: a fix that changed no schema and kept no
+  // earlier platform value (an approved held action setting a secret or a key's
+  // permissions) has no undo. Offered anyway, it reported "Fix reverted." and
+  // reopened the finding with the change still in place.
+  if (rollbackData.schemaTouching !== true && !rollbackData.preMetadata) {
+    return {
+      revertible: false,
+      requiresConfirmation: false,
+      reason: 'Backenly kept no earlier state for what this fix changed, so it cannot be undone automatically.',
+    }
+  }
+
   const baseType = (normalizeFindingType(findingType, det)?.base ?? findingType) as string
   return { revertible: true, requiresConfirmation: RLS_PROTECTION_TYPES.has(baseType) }
 }
@@ -1162,7 +1198,7 @@ export async function revertAutoFix(
     return {
       success: false,
       message:
-        `${eligibility.reason} Undo it manually from the Database section, or ask your coding agent.`,
+        `${eligibility.reason} Undo it by hand, or ask your coding agent.`,
     }
   }
   if (!rollbackData) {
@@ -1188,7 +1224,7 @@ export async function revertAutoFix(
   // with the same checks as Restore previous state: refused if a later change
   // touched the same tables, and never silently setting aside data written
   // since. A restore that would affect such data is not done from here: it
-  // belongs in Database → Changes, where the person sees exactly what is kept.
+  // belongs in History, where the person sees exactly what is kept.
   let appliedSteps = 0
   let schemaMessage = ''
   if (rollbackData.schemaTouching === true) {
@@ -1196,20 +1232,38 @@ export async function revertAutoFix(
     const { currentAttribution } = await import('@/lib/changes/attribution')
     const ids = Array.isArray(rollbackData.changeIds) ? (rollbackData.changeIds as string[]) : []
     let restored = 0
+    // Said first when a refusal comes after an earlier change was restored, so
+    // the result never reads as "nothing happened" when part of it did.
+    const lead = (seqs: number[]) =>
+      seqs.length === 0 ? 'Not undone: ' : `Partly undone: the state before ${seqs.map((s) => `#${s}`).join(', ')} is back, verified, but `
+    const restoredSeqs: number[] = []
     for (const id of ids) {
       const preview = await previewRecovery(projectId, id)
-      if (!preview || preview.safety === 'unavailable') continue // already restored, or never in effect
+      if (!preview) continue
+      if (preview.safety === 'unavailable') {
+        // Restored or recovered already, or it never took effect: nothing left
+        // of it to undo. Any other reason (its restore point expired or failed
+        // its integrity check, Backenly is still working on it) leaves the fix
+        // in place, and the undo says so rather than reporting it reverted.
+        const now = await prisma.backendChange.findUnique({ where: { id }, select: { status: true } })
+        if (now && ['restored', 'recovered', 'failed'].includes(now.status)) continue
+        return {
+          success: false,
+          message: `${lead(restoredSeqs)}${preview.reason ?? 'its restore point is not available'} Undo it manually from the Database section, or ask your coding agent.`,
+        }
+      }
       if (preview.safety !== 'lossless') {
         return {
           success: false,
           message:
-            `Not undone: ${preview.reason ?? 'it cannot be restored automatically'}. ` +
-            'Open Database → Changes to restore it there, where you can see exactly what would be kept.',
+            `${lead(restoredSeqs)}${preview.reason ?? 'it cannot be restored automatically'}. ` +
+            'Open History to restore it there, where you can see exactly what would be kept.',
         }
       }
       const out = await recoverChange(projectId, id, { mode: 'manual', actorUserId: currentAttribution()?.actorUserId ?? null })
-      if (!out.ok) return { success: false, message: `Not undone: ${(out as { error: string }).error}` }
+      if (!out.ok) return { success: false, message: `${lead(restoredSeqs)}${(out as { error: string }).error}` }
       restored++
+      restoredSeqs.push(preview.seq)
     }
     appliedSteps = restored
     schemaMessage = restored > 0
@@ -1485,6 +1539,9 @@ export async function processOpenFindings(
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
+/** An architecture change holds this repair (lib/evolution-engine/holds.ts); its message says why. */
+class ArchitectureHold extends Error {}
+
 async function _executeAutoFix(
   findingId: string,
   projectId: string,
@@ -1493,8 +1550,12 @@ async function _executeAutoFix(
   /**
    * `recovery` is the declared recovery of the action class that authorized
    * this repair. Set only on the authority path; the legacy path has none.
+   *
+   * `hold` is set only for an autonomous repair: the table and action whose
+   * architecture hold (lib/evolution-engine/holds.ts) is asked again inside
+   * the build lock, so an approval that landed since the first ask holds it.
    */
-  opts: { skipCooldown?: boolean; recovery?: string } = {},
+  opts: { skipCooldown?: boolean; recovery?: string; hold?: { table: string | null; action: string | null } } = {},
 ): Promise<AutoFixResult> {
   const baseType = (normalizeFindingType(type, details)?.base ?? type) as FindingType
   const fixAction = buildFixAction(type, details)
@@ -1563,6 +1624,11 @@ async function _executeAutoFix(
       projectId,
       'modify',
       async () => {
+        if (opts.hold) {
+          const { repairHold } = await import('@/lib/evolution-engine/holds')
+          const why = await repairHold(projectId, opts.hold).catch(() => null)
+          if (why) throw new ArchitectureHold(why)
+        }
         const r = await executeAction(
           { action: fixAction.action as AIAction['action'], params: fixAction.params },
           projectId,
@@ -1589,6 +1655,8 @@ async function _executeAutoFix(
     }
     result = governed.result
   } catch (err: any) {
+    // Held inside the lock: nothing ran, and the finding stays open.
+    if (err instanceof ArchitectureHold) return { findingId, outcome: 'held', message: `Held: ${err.message}.` }
     const msg = `Execution threw: ${err.message}`
     return _isTransientGovernanceError(err?.message)
       ? _deferred(findingId, projectId, type, details, msg)
@@ -1598,7 +1666,7 @@ async function _executeAutoFix(
   if (!result!.success) {
     const reason = result!.error ?? result!.message
     const recovered = policyPre
-      ? await _recoverPolicies(findingId, projectId, type, policyPre, policyPost, reason)
+      ? await _recoverPolicies(findingId, projectId, type, policyPre, policyPost, reason, changeIds)
       : null
     const full = recovered ? `${reason} ${recovered}` : reason
     return _isTransientGovernanceError(reason)
@@ -1706,7 +1774,7 @@ async function _executeAutoFix(
       (outcome && outcome.regressions.length > 0)
     if (rejected) {
       const recovered = policyPre
-        ? await _recoverPolicies(findingId, projectId, type, policyPre, policyPost, outcome.reason)
+        ? await _recoverPolicies(findingId, projectId, type, policyPre, policyPost, outcome.reason, changeIds)
         : null
       return _escalate(findingId, projectId, type, details,
         recovered ? `${outcome.reason} ${recovered}` : outcome.reason)
@@ -1892,10 +1960,20 @@ async function _recoverPolicies(
   pre: PolicyCapture,
   post: PolicyCapture | null,
   rejectedBecause: string,
+  changeIds: string[] = [],
 ): Promise<string> {
   let status: string
   let message: string
-  if (!post) {
+  if (changeIds.length > 0) {
+    // The repair's governed changes are restored through the ledger, so the
+    // history shows the repair undone (lib/changes/recovery.ts). The direct
+    // policy restore below is for a repair that recorded no change.
+    const { recoverRejectedRepair } = await import('@/lib/changes/recovery')
+    ;({ status, message } = await recoverRejectedRepair(projectId, changeIds).catch((err: any) => ({
+      status: 'failed' as const,
+      message: `Restore threw: ${err?.message ?? err}`,
+    })))
+  } else if (!post) {
     // Without the state this execution left, the stale guard has nothing to
     // compare against, and restoring anyway could overwrite a later change.
     status = 'blocked_stale'

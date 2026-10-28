@@ -6,12 +6,15 @@
 import type { CatalogSnapshot } from './catalog'
 
 /**
- * change    something someone asked for.
- * recovery  Backenly or a person restoring the state before another change. It
- *           is recorded like any change, with its own checkpoint, so the state
- *           it replaced is protected the same way.
+ * change            something someone asked for.
+ * recovery          Backenly or a person restoring the state before another
+ *                   change. It is recorded like any change, with its own
+ *                   checkpoint, so the state it replaced is protected the same way.
+ * snapshot_restore  a person replacing the whole database from a snapshot
+ *                   (lib/services/workspace-backup.ts). In the history, and not
+ *                   restorable from it: going back is restoring another snapshot.
  */
-export type ChangeKind = 'change' | 'recovery'
+export type ChangeKind = 'change' | 'recovery' | 'snapshot_restore'
 
 /**
  * Where a change came from. Recorded so the history can say who did what:
@@ -105,9 +108,12 @@ export type PreservedEntry =
       column: string
       /**
        * Why the values were kept: the column was dropped, retyped by a cast that
-       * may not round-trip, or its values were rewritten by a data migration.
+       * may not round-trip, or its values were rewritten by a data migration; or
+       * (filled) it is a column the change added whose default is not a constant
+       * (now(), gen_random_uuid(), an identity), and these are the values the
+       * change itself filled in, so a restore can tell them from writes since.
        */
-      reason: 'dropped' | 'retyped' | 'rewritten'
+      reason: 'dropped' | 'retyped' | 'rewritten' | 'filled'
       /** Primary-key columns the values are keyed by; empty when the table had none. */
       keyColumns: string[]
       vault: string
@@ -123,6 +129,17 @@ export type PreservedEntry =
       /** For a rewrite: the vault table holding the values from before it. */
       beforeTable?: string
     }
+
+/**
+ * The change a restore request (`revert_schema_change`) names. A project kept in
+ * another region keeps only the call's shape on the request's row, the change's
+ * id among it (lib/mcp/approval-request-bodies.ts), so both are read.
+ */
+export function restoreRequestChangeId(toolArgs: unknown): string | null {
+  const args = toolArgs as { changeId?: unknown; shape?: { changeId?: unknown } } | null
+  const id = args?.changeId ?? args?.shape?.changeId
+  return typeof id === 'string' ? id : null
+}
 
 export interface ChangePreservation {
   vault: string
@@ -155,9 +172,10 @@ export interface ChangeStep {
   ok: boolean
 }
 
-/** The resources a checkpoint covers. Only `database` is captured today. */
+/** The resources a checkpoint covers: the database, and the rest of the backend (lib/changes/resources). */
 export interface Checkpoint {
   database: CatalogSnapshot & { platform?: unknown }
+  resources?: import('./resources').ResourceSnapshot
 }
 
 /** What the ledger stores for a change, typed. */

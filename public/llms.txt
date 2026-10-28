@@ -1,15 +1,16 @@
 # Backenly
 
-> Backenly is an autonomous backend platform built for coding agents. Coding agents can build a real production backend with Postgres, APIs, auth, storage, realtime and functions through MCP. Once it's built, Backenly autonomously maintains the backend, detects and fixes issues, and can restructure the system as it evolves, while keeping risky or destructive actions human-controlled, verified and reversible.
+> Backenly is the autonomous backend for AI coding agents. Coding agents build production backends on it over MCP: PostgreSQL, REST APIs, auth, storage, realtime and functions. Backenly then maintains each one on its own: it repairs safe problems every minute, restructures the schema when a table starts doing two jobs (once a person approves), and records every change in one History that can undo it without rewinding the app's data. Risky actions always wait for a human.
 
 ## What Backenly is
 
-- **Built through your coding agent.** Claude Code, Codex, Cursor, Antigravity, Cline or any other MCP client builds the backend through Backenly's MCP server or CLI. The dashboard is for oversight: inspecting the backend, approving parked actions, reading the change history.
-- **A real backend.** Each project has its own PostgreSQL schema, and REST endpoints are live the moment a table exists, served by PostgREST. Each project also gets auth for the app's own users, file storage, realtime, functions with schedules, signed webhooks, provider integrations (Stripe, Resend, OpenAI, Anthropic, PostHog), deploys with rollback, and preview branches on Backenly Cloud.
-- **Governed change.** Every structural change made through Backenly is checkpointed before it runs, applied, and verified against the live database by checks the caller cannot weaken; one that fails is recovered automatically when that is provably lossless, and otherwise waits for a person, who can also restore the state before any change. Reads stay open: read-only SQL or a direct Postgres connection.
-- **Autonomous maintenance.** A loop watches each active project. On its own it applies only additive, snapshotted fixes it can verify and reverse: missing indexes, drift it can reconcile, broken triggers. Schema restructuring runs as a staged expand-and-contract plan, only with the owner's consent and only when every step can be undone; the final step, dropping the old structure, is always left to a human. Anything the loop will not apply becomes a finding with evidence. It runs no model and draws no AI credits.
-- **Humans approve the risky calls.** Destructive or irreversible actions, such as dropping a table, deploying, rolling back or revoking a key, are parked until a human approves them on the project's **Autonomy** page. The approved call runs exactly as it was made.
-- **Open source.** The platform, autonomy engine included, is Apache-2.0 at https://github.com/backenly/backenly, and the SDK, CLI and MCP server are MIT. Self-host it (one deployment serves one project) or use Backenly Cloud at https://backenly.com, which has a free plan. Current plans and prices: https://backenly.com/pricing.
+- **Built through your coding agent.** Claude Code, Codex, Cursor, Antigravity, Cline or any other MCP client builds the backend through Backenly's MCP server or CLI. The dashboard is for oversight.
+- **A real backend.** Each project has its own PostgreSQL schema, REST endpoints served by PostgREST the moment a table exists, auth for the app's own users, file storage, realtime, functions with schedules, signed webhooks, provider integrations (Stripe, Resend, OpenAI, Anthropic, PostHog), and preview branches on Backenly Cloud.
+- **Self-healing.** Every minute a loop checks each active project and fixes a short list of problems on its own (a missing index, a table without row-level security, a missing realtime trigger), verifying each fix. Anything else becomes a finding with evidence for a person. The fixes are rule-based and never draw AI credits: https://backenly.com/features/deployment-ready-backends
+- **Self-restructuring schema.** When a table starts doing two jobs (refund columns on `orders`) and that has a measured cost, Backenly rehearses moving the second job into its own table on a copy and waits for an admin to approve the exact plan. It keeps both tables in step while it copies the data, so apps keep working and access stays the same. Undo puts the table back with no data lost; dropping the old columns is left to a person. On for every project on Backenly Cloud: https://backenly.com/features/self-restructuring-schema
+- **Undo and rollback.** Every change to the schema, auth, storage, functions, webhooks, env vars, keys and integrations is one History entry. Schema changes are checkpointed and verified against the live database by checks the caller cannot weaken, and a failed one is recovered automatically when that is provably lossless. Restore one change, the backend to a point, or a published version, on every plan. Data the app wrote is never rewound, a restore that would set any aside waits for a person, and a revoked key never comes back: https://backenly.com/features/undo-and-rollback
+- **Humans approve the risky calls.** Destructive or irreversible actions, such as dropping a table, deploying, rolling back or revoking a key, are parked until a human approves them on the project's **Autonomy** page, and the approved call runs exactly as it was made. Reads stay open: read-only SQL or a direct Postgres connection.
+- **Open source.** The platform, autonomy engine included, is Apache-2.0 at https://github.com/backenly/backenly, and the SDK, CLI and MCP server are MIT. Self-host it (one deployment serves one project) or use Backenly Cloud at https://backenly.com, which has a free plan. Plans and prices: https://backenly.com/pricing.
 
 The rest of this file is the index for coding agents. Each topic below is its own document: fetch one with `fetch_docs { topic: "<topic>" }` or from its URL.
 
@@ -49,7 +50,7 @@ Exactly **23** tools are advertised; `tools/list` is the authority. Every tool e
 
 | Tool | What it is for |
 | --- | --- |
-| `read_backend_state` | The read door for state. No arguments: the overview. `section` drills in: `schema`, `instructions`, `tables`, `apis`, `buckets`, `files`, `keys`, `users`, `rls`, `triggers`, `functions`, `cron`, `integrations`, `apps`, `env`, `webhooks`, `deliveries`, `findings`, `incidents`, `metrics`, `errors`, `usage`, `deploy`, `readiness`, `autonomy`, `maintenance`, `realtime`. |
+| `read_backend_state` | The read door for state. No arguments: the overview. `section` drills in: `schema`, `instructions`, `tables`, `apis`, `buckets`, `files`, `keys`, `users`, `rls`, `triggers`, `functions`, `cron`, `integrations`, `apps`, `env`, `webhooks`, `deliveries`, `findings`, `incidents`, `metrics`, `errors`, `usage`, `deploy`, `readiness`, `autonomy`, `maintenance`, `evolution`, `realtime`. |
 | `get_table_schema` | One table in full: columns, keys, indexes, CHECK constraints with their permitted values, triggers, RLS policies. |
 | `run_query` | Read-only SQL over the project's schema, as a SELECT-only role. |
 | `apply_migration` | Schema changes as SQL. Every statement is checked before any runs, and anything it cannot map is refused with the tool to use instead; a statement that fails while running stops the migration, and the response lists what was applied and what remains. With `branchId`, it changes that preview branch only. |
@@ -72,7 +73,7 @@ One tool per dashboard section, each with an `action`:
 | `realtime` | `enable`, `status`; `disable` waits for approval | https://backenly.com/docs/agents/realtime.md |
 | `integrations` | `list`, `capabilities`, `verify`, `connect`, `send_push`; `disconnect` waits for approval | https://backenly.com/docs/agents/integrations.md |
 | `monitoring` | `metrics`, `errors`, `usage`, `incidents`, `request_logs` | https://backenly.com/docs/agents/monitoring.md |
-| `autonomy` | `status`, `findings`, `maintenance`, `set_level` | https://backenly.com/docs/agents/autonomy.md |
+| `autonomy` | `status`, `findings`, `maintenance`, `evolution`, `set_level` | https://backenly.com/docs/agents/autonomy.md |
 | `webhooks` | `list`, `create`, `update`, `test`, `logs`, `replay`, `rotate_secret`, `triggers`, `trigger_deliveries`, `replay_trigger_delivery`, `rotate_trigger_secret`; `delete` waits for approval | https://backenly.com/docs/agents/webhooks.md |
 | `deploy` | `status`, `history`, `readiness`, `changes`; `deploy`, `rollback`, `revert_change` wait for approval | https://backenly.com/docs/agents/deploy.md |
 | `connect` | `whoami`, `create_api_key`, `list_api_keys`, `set_key_permissions`, `set_env`, `list_env`, `database_credentials`, `connect_frontend`, `list_apps`; `revoke_api_key`, `delete_env`, `disconnect_frontend` wait for approval | https://backenly.com/docs/agents/connect.md |
@@ -108,7 +109,7 @@ Each is `https://backenly.com/docs/agents/<topic>.md`, or `fetch_docs { topic }`
 - [openai](https://backenly.com/docs/agents/openai.md): completions and embeddings from functions
 - [anthropic](https://backenly.com/docs/agents/anthropic.md): Claude completions from functions
 - [posthog](https://backenly.com/docs/agents/posthog.md): analytics events and feature flags from functions
-- [autonomy](https://backenly.com/docs/agents/autonomy.md): the maintenance loop, findings, and how a parked action is approved and polled
+- [autonomy](https://backenly.com/docs/agents/autonomy.md): the maintenance loop, findings, architecture changes, and how a parked action is approved and polled
 - [monitoring](https://backenly.com/docs/agents/monitoring.md): metrics, errors, request logs, usage
 - [branches](https://backenly.com/docs/agents/branches.md): preview branches: create, build, test (data API and end-user auth), diff, merge (Backenly Cloud)
 - [deploy](https://backenly.com/docs/agents/deploy.md): readiness, publishing, history and rollback

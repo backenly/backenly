@@ -20,8 +20,11 @@
 --                                     (hardened: connection limit, timeouts,
 --                                     search_path pinned to the one schema).
 --   3. backenly_direct_set_password — rotate.
---   4. backenly_direct_drop_role    — terminate sessions, strip policies,
---                                     reassign owned objects, drop.
+--   4. backenly_direct_drop_role    — take the role's privileges, terminate
+--                                     sessions, strip policies, reassign owned
+--                                     objects, drop; or, when another database
+--                                     on the cluster still names the role,
+--                                     retire it (NOLOGIN, no password).
 --   5. backenly_direct_sync_schema  — idempotent grants/ownership/RLS-policy
 --                                     sync for a workspace schema, including the
 --                                     backup role's read, which every workspace
@@ -173,19 +176,61 @@ $fn$;
 
 REVOKE ALL ON FUNCTION public.backenly_direct_set_password(text, text) FROM PUBLIC;
 -- ── 4. Drop a role cleanly ────────────────────────────────────────────────────
+--
+-- The definer needs the PRIVILEGES of the role it drops, not only ADMIN over
+-- it: REASSIGN OWNED and DROP OWNED require them, and so does terminating the
+-- role's sessions without pg_signal_backend. PostgreSQL 16 gives a CREATEROLE
+-- role that is not a superuser ADMIN on a role it creates and nothing more. On
+-- Amazon RDS the master is not made a member at all (pg_has_role still reports
+-- its ADMIN), and createrole_self_grant has no effect; both measured on
+-- staging. So on a managed database, where this definer is the master, every
+-- login it created failed here with "permission denied to reassign objects",
+-- and so did deleting any project that had one. ADMIN is what lets the definer
+-- grant the role to itself first. That is done only when the privileges are
+-- missing (a superuser has them all), and the grant goes with the role in the
+-- DROP ROLE below.
+--
+-- A role is cluster-wide, but REASSIGN OWNED and DROP OWNED reach only the
+-- current database, and a definer that is not a superuser cannot revoke a
+-- database-level privilege another role granted. When anything outside this
+-- database still names the role (a grant, a default privilege or an object in
+-- another database, or such a database-level privilege), DROP ROLE fails with
+-- 2BP01, and so did every deletion of a project whose login it was. A database
+-- restored beside this one from a dump that carried the grants is enough. This
+-- function touches nothing outside this database, which may hold anyone's
+-- data. It retires the login instead: NOLOGIN with no password, so it cannot
+-- authenticate by any means, and it returns false. A session that logged in
+-- after the termination above outlives it until this transaction commits, so
+-- the caller calls again after its commit to end it. The privileges taken
+-- above are given back, because the grant no longer goes with the role. The
+-- login stays retired, since nothing calls this again on its own: an operator
+-- removes what names it elsewhere, then calls this function to drop it.
+--
+-- Returns true when the role is gone (dropped now, or never existed), false
+-- when it was retired.
 CREATE OR REPLACE FUNCTION public.backenly_direct_drop_role(
   p_role text
 ) RETURNS boolean
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public
 AS $fn$
 DECLARE
-  pol record;
+  pol     record;
+  granted boolean := false;
 BEGIN
   IF p_role !~ '^bkn_(ro|rw)_[0-9a-f]{12}$' THEN
     RAISE EXCEPTION 'backenly_direct_drop_role: invalid role name %', p_role;
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = p_role) THEN
     RETURN true; -- already gone — idempotent
+  END IF;
+
+  -- Before anything that needs them (see above). WITH INHERIT exists from
+  -- PostgreSQL 16; before it a membership is inherited by an INHERIT member.
+  IF NOT pg_has_role(current_user, p_role, 'USAGE') THEN
+    EXECUTE format(CASE WHEN current_setting('server_version_num')::int >= 160000
+                        THEN 'GRANT %I TO %I WITH INHERIT TRUE, SET FALSE'
+                        ELSE 'GRANT %I TO %I' END, p_role, current_user);
+    granted := true;
   END IF;
 
   PERFORM pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = p_role;
@@ -203,6 +248,21 @@ BEGIN
   -- role so the backend they describe keeps working after revocation.
   EXECUTE format('REASSIGN OWNED BY %I TO %I', p_role, public.backenly_app_role());
   EXECUTE format('DROP OWNED BY %I', p_role); -- strips remaining grants
+
+  -- Whatever still names the role is outside this database (see above): retire it.
+  IF EXISTS (
+    SELECT 1 FROM pg_shdepend s
+     WHERE s.refclassid = 'pg_authid'::regclass
+       AND s.refobjid = (SELECT oid FROM pg_roles WHERE rolname = p_role)
+       AND s.dbid <> (SELECT oid FROM pg_database WHERE datname = current_database())
+  ) THEN
+    EXECUTE format('ALTER ROLE %I NOLOGIN PASSWORD NULL', p_role);
+    IF granted THEN
+      EXECUTE format('REVOKE %I FROM %I', p_role, current_user);
+    END IF;
+    RETURN false;
+  END IF;
+
   EXECUTE format('DROP ROLE %I', p_role);
   RETURN true;
 END

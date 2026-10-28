@@ -17,7 +17,7 @@
  * test that only checks the first half.
  */
 
-import { PrismaClient } from '@prisma/client'
+import { PrismaClient, type Prisma } from '@prisma/client'
 import { randomUUID } from 'crypto'
 
 import {
@@ -36,29 +36,46 @@ const TABLE = 'notes'
 const USER_A = randomUUID()
 const USER_B = randomUUID()
 
-/** Impersonate a JWT holder for the duration of one callback. */
+type Db = Prisma.TransactionClient
+
+/**
+ * Impersonate a JWT holder for the duration of one callback, on ONE connection.
+ *
+ * Non-superuser context: FORCE RLS applies to the table owner too, but a
+ * superuser still bypasses, so the case runs as a dedicated role. The role,
+ * the claims and the case's own queries share one interactive transaction:
+ * separate `prisma` calls are served by any connection in the pool, so a role
+ * set by one call did not reach the next. A query that landed on another
+ * connection ran as the suite's superuser and saw every row, which failed the
+ * exposure case at random and could let a stale role or claim pass a case as the
+ * wrong user. SET LOCAL and set_config(..., true) end with the transaction, so
+ * nothing is left on the pooled connection either.
+ */
 async function asClaims<T>(
   claims: Record<string, string> | null,
-  fn: () => Promise<T>,
+  fn: (db: Db) => Promise<T>,
 ): Promise<T> {
-  // Non-superuser context: FORCE RLS applies to the table owner too, but a
-  // superuser still bypasses. The suite therefore runs as a dedicated role.
-  await prisma.$executeRawUnsafe(`SET ROLE ${ROLE_NAME}`)
-  await prisma.$executeRawUnsafe(
-    `SELECT set_config('request.jwt.claims', $1, false)`,
-    claims ? JSON.stringify(claims) : '',
-  )
-  try {
-    return await fn()
-  } finally {
-    await prisma.$executeRawUnsafe(`RESET ROLE`)
-  }
+  return prisma.$transaction(async (tx) => {
+    await tx.$executeRawUnsafe(`SET LOCAL ROLE ${ROLE_NAME}`)
+    await tx.$executeRawUnsafe(
+      `SELECT set_config('request.jwt.claims', $1, true)`,
+      claims ? JSON.stringify(claims) : '',
+    )
+    // Proof the case really runs impersonated, read on the connection it runs on.
+    const [ctx] = await tx.$queryRawUnsafe<Array<{ who: string; claims: string }>>(
+      `SELECT current_user::text AS who, current_setting('request.jwt.claims', true) AS claims`,
+    )
+    if (ctx?.who !== ROLE_NAME || ctx?.claims !== (claims ? JSON.stringify(claims) : '')) {
+      throw new Error(`not impersonating: running as ${ctx?.who} with claims ${ctx?.claims}`)
+    }
+    return fn(tx)
+  }, { timeout: 30_000, maxWait: 30_000 })
 }
 
 const ROLE_NAME = 'pgrst_test_authenticated'
 
-async function rowCount(): Promise<number> {
-  const rows = await prisma.$queryRawUnsafe<Array<{ n: bigint }>>(
+async function rowCount(db: Db): Promise<number> {
+  const rows = await db.$queryRawUnsafe<Array<{ n: bigint }>>(
     `SELECT count(*)::bigint AS n FROM "${schema}"."${TABLE}"`,
   )
   return Number(rows[0]?.n ?? 0)
@@ -115,8 +132,8 @@ describe('translated own-rows policies isolate tenants', () => {
   }, 60_000)
 
   it('a user CANNOT see another user\'s row — the exposure case', async () => {
-    const rows = await asClaims({ sub: USER_A, role: 'authenticated' }, async () =>
-      prisma.$queryRawUnsafe<Array<{ body: string }>>(
+    const rows = await asClaims({ sub: USER_A, role: 'authenticated' }, async (db) =>
+      db.$queryRawUnsafe<Array<{ body: string }>>(
         `SELECT body FROM "${schema}"."${TABLE}"`,
       ),
     )
@@ -125,8 +142,8 @@ describe('translated own-rows policies isolate tenants', () => {
   }, 60_000)
 
   it('the other user symmetrically sees only theirs', async () => {
-    const rows = await asClaims({ sub: USER_B, role: 'authenticated' }, async () =>
-      prisma.$queryRawUnsafe<Array<{ body: string }>>(
+    const rows = await asClaims({ sub: USER_B, role: 'authenticated' }, async (db) =>
+      db.$queryRawUnsafe<Array<{ body: string }>>(
         `SELECT body FROM "${schema}"."${TABLE}"`,
       ),
     )
@@ -147,18 +164,19 @@ describe('translated own-rows policies isolate tenants', () => {
 
   it('a user cannot INSERT a row owned by someone else', async () => {
     await expect(
-      asClaims({ sub: USER_A, role: 'authenticated' }, async () =>
-        prisma.$executeRawUnsafe(
+      asClaims({ sub: USER_A, role: 'authenticated' }, async (db) =>
+        db.$executeRawUnsafe(
           `INSERT INTO "${schema}"."${TABLE}" (user_id, body) VALUES ($1::uuid, 'forged')`,
           USER_B,
         ),
       ),
-    ).rejects.toThrow()
+      // The policy's refusal, not any error: a failed impersonation also throws.
+    ).rejects.toThrow(/row-level security/)
   }, 60_000)
 
   it('a user cannot UPDATE another user\'s row', async () => {
-    const updated = await asClaims({ sub: USER_A, role: 'authenticated' }, async () =>
-      prisma.$executeRawUnsafe(
+    const updated = await asClaims({ sub: USER_A, role: 'authenticated' }, async (db) =>
+      db.$executeRawUnsafe(
         `UPDATE "${schema}"."${TABLE}" SET body = 'hijacked' WHERE user_id = $1::uuid`,
         USER_B,
       ),
@@ -167,8 +185,8 @@ describe('translated own-rows policies isolate tenants', () => {
   }, 60_000)
 
   it('a user cannot DELETE another user\'s row', async () => {
-    const deleted = await asClaims({ sub: USER_A, role: 'authenticated' }, async () =>
-      prisma.$executeRawUnsafe(
+    const deleted = await asClaims({ sub: USER_A, role: 'authenticated' }, async (db) =>
+      db.$executeRawUnsafe(
         `DELETE FROM "${schema}"."${TABLE}" WHERE user_id = $1::uuid`,
         USER_B,
       ),

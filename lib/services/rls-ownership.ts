@@ -608,6 +608,40 @@ export async function inferRlsPlan(projectId: string, tableName: string, schemaN
 }
 
 /**
+ * The ownership path through one named foreign key: the parent it points at,
+ * and every column of that parent naming an owner.
+ *
+ * Inference takes a parent path only when exactly one owned parent exists,
+ * because choosing between two is a security decision it has no basis for.
+ * `order_items(order_id → orders, seller_id → sellers)` is the common case, and
+ * left to inference it stayed without row-level security. Naming the column
+ * makes that decision explicit, and it is checked against the live catalog:
+ * the column must be a foreign key to a parent that has an owner.
+ */
+export async function resolveOwnershipPath(
+  projectId: string,
+  tableName: string,
+  column: string,
+  schemaName?: string,
+): Promise<{ via: RelatedRowsVia } | { error: string }> {
+  const catalog = await loadOwnershipCatalog(projectId, schemaName)
+  const fk = parentLinksOf(catalog, tableName).find((link) => link.childColumn === column)
+  if (!fk) {
+    return { error: `"${tableName}"."${column}" is not a foreign key, so it cannot name the parent that owns a row.` }
+  }
+  if (fk.parentTable === tableName) {
+    return { error: `"${tableName}"."${column}" points at "${tableName}" itself, which cannot pass ownership down.` }
+  }
+  const parentOwnerColumns = allOwnerColumnsOf(catalog, fk.parentTable)
+  if (parentOwnerColumns.length === 0) {
+    return { error: `"${fk.parentTable}", which "${tableName}"."${column}" points at, has no column naming an owner.` }
+  }
+  return {
+    via: { localColumn: fk.childColumn, parentTable: fk.parentTable, parentColumn: fk.parentColumn, parentOwnerColumns },
+  }
+}
+
+/**
  * How bad is it that this table has RLS disabled?
  *
  * A product catalog with RLS off is a real finding — its writes are open — but

@@ -7,7 +7,7 @@ import { Toast } from '@/components/ui/Toast'
 import { getProject } from '@/lib/api/projects'
 import { Mail, Shield, ExternalLink, KeyRound, ArrowRight } from 'lucide-react'
 import {
-  CopyField, KitButton, KitChecklist, KitField, KitInput, KitModal, KitNote, SettingsCard, Stat, StatStrip,
+  CopyField, KitButton, KitField, KitInput, KitModal, KitNote, SettingsCard, Stat, StatStrip,
   StatusDot,
 } from '@/components/inspector/kit'
 
@@ -66,6 +66,26 @@ function FacebookMark({ className = '' }: { className?: string }) {
     <svg viewBox="0 0 24 24" className={className} fill="currentColor" aria-hidden>
       <path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073Z" />
     </svg>
+  )
+}
+
+/**
+ * How a user's sign-in method reads: the provider's own mark and its name.
+ * Lists and the users table used to print the raw value, "google" in lower-
+ * case mono, as if it were an identifier rather than a choice the user made.
+ */
+export function ProviderLabel({ provider, className = '' }: { provider: string | null | undefined; className?: string }) {
+  const id = (provider || 'email').toLowerCase()
+  const meta = (PROVIDER_META as Record<string, (typeof PROVIDER_META)[ProviderId] | undefined>)[id]
+  return (
+    <span className={`inline-flex min-w-0 items-center gap-1.5 ${className}`}>
+      {meta ? (
+        <meta.Mark className="h-3.5 w-3.5 flex-shrink-0" />
+      ) : (
+        <Mail className="h-3.5 w-3.5 flex-shrink-0 text-zinc-500" strokeWidth={1.75} aria-hidden />
+      )}
+      <span className="truncate">{meta ? meta.name : id === 'email' ? 'Email' : id.charAt(0).toUpperCase() + id.slice(1)}</span>
+    </span>
   )
 }
 
@@ -409,7 +429,7 @@ export function AuthConfiguration() {
               </span>
               <div className="min-w-0 flex-1">
                 <p className="text-[13px] font-medium text-zinc-100">Email and password</p>
-                <p className="mt-0.5 text-[12.5px] leading-[18px] text-zinc-500">
+                <p className="mt-0.5 text-[12.5px] leading-[18px] text-faint">
                   {/* "Active" only once auth is genuinely on: the agent enabled
                       it, or real end users exist. A bare jwtSecret (seeded at
                       creation) is not activation. */}
@@ -432,7 +452,7 @@ export function AuthConfiguration() {
                   </span>
                   <div className="min-w-0 flex-1">
                     <p className="text-[13px] font-medium text-zinc-100">{meta.name}</p>
-                    <p className="mt-0.5 text-[12.5px] leading-[18px] text-zinc-500">{meta.tagline}</p>
+                    <p className="mt-0.5 text-[12.5px] leading-[18px] text-faint">{meta.tagline}</p>
                   </div>
                   <div className="flex flex-shrink-0 items-center gap-3">
                     {enabled && <StatusDot tone="operational" label="Connected" className="hidden sm:inline-flex" />}
@@ -457,7 +477,7 @@ export function AuthConfiguration() {
               )}
             </div>
             {recent.length === 0 ? (
-              <p className="rounded-[10px] border border-dashed border-white/[0.08] px-4 py-5 text-[12.5px] leading-[19px] text-zinc-500">
+              <p className="rounded-[10px] border border-white/[0.07] bg-[#111214] px-4 py-5 text-[12.5px] leading-[19px] text-faint">
                 No one has signed up yet. The first account created from your app appears here straight away.
               </p>
             ) : (
@@ -469,8 +489,9 @@ export function AuthConfiguration() {
                     </span>
                     <span className="min-w-0 flex-1">
                       <span className="block truncate text-[13px] text-zinc-200">{u.email}</span>
-                      <span className="mt-0.5 block truncate text-[12px] tabular-nums text-zinc-500">
-                        {(u.provider || 'email').toLowerCase()} · {timeAgo(u.createdAt)}
+                      <span className="mt-0.5 flex items-center gap-3 text-[12px] tabular-nums text-faint">
+                        <ProviderLabel provider={u.provider} />
+                        <span className="flex-shrink-0">{timeAgo(u.createdAt)}</span>
                       </span>
                     </span>
                   </li>
@@ -479,16 +500,24 @@ export function AuthConfiguration() {
             )}
           </section>
 
+          {/* Facts about how this project's sign-in works, set as a definition
+              list. They were a row of green ticks under "How identities are
+              protected", which read as the landing page inside the console. */}
           <section>
-            <h2 className="mb-3 text-[13px] font-medium text-zinc-100">How identities are protected</h2>
-            <KitChecklist
-              items={[
-                'Tokens signed with this project’s own secret',
-                'Passwords hashed with bcrypt, never reversible',
-                'Identities kept in this project’s own schema',
-                'Sessions revocable server-side on sign-out',
-              ]}
-            />
+            <h2 className="mb-3 text-[13px] font-medium text-zinc-100">Security</h2>
+            <dl className="overflow-hidden rounded-[10px] border border-white/[0.07] bg-[#111214] divide-y divide-white/[0.05]">
+              {[
+                ['Tokens', 'Signed with this project’s own secret'],
+                ['Passwords', 'Hashed with bcrypt'],
+                ['User records', 'This project’s own schema'],
+                ['Sign-out', 'Revokes the session on the server'],
+              ].map(([label, value]) => (
+                <div key={label} className="flex items-baseline justify-between gap-4 px-4 py-2.5">
+                  <dt className="flex-shrink-0 text-[12.5px] text-faint">{label}</dt>
+                  <dd className="min-w-0 text-right text-[12.5px] text-zinc-300">{value}</dd>
+                </div>
+              ))}
+            </dl>
           </section>
         </div>
       </div>
@@ -503,7 +532,7 @@ export function AuthConfiguration() {
         footer={
           modalProvider && modalMeta ? (
             <>
-              <span className="mr-auto hidden items-center gap-1.5 text-[12.5px] text-zinc-500 sm:inline-flex">
+              <span className="mr-auto hidden items-center gap-1.5 text-[12.5px] text-faint sm:inline-flex">
                 <KeyRound className="h-3.5 w-3.5" /> Encrypted at rest
               </span>
               <KitButton variant="ghost" onClick={() => setShowWorkspaceOAuthModal(null)}>
@@ -544,7 +573,7 @@ export function AuthConfiguration() {
               {apiBaseUrl ? (
                 <CopyField value={callbackUrl(modalProvider)} />
               ) : (
-                <span className="text-zinc-500">The project&apos;s address is not available. Reload the page to try again.</span>
+                <span className="text-faint">The project&apos;s address is not available. Reload the page to try again.</span>
               )}
             </OAuthStep>
             <OAuthStep n={3} title={`Paste the credentials ${modalMeta.name} gives you`}>

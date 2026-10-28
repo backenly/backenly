@@ -23,8 +23,9 @@
 
 import { Prisma } from '@prisma/client'
 import { randomUUID } from 'crypto'
+import { Client } from 'pg'
 import { prisma } from '@/lib/db/prisma'
-import { deleteProjectCompletely, ORPHANED_PROJECT_MODELS } from '@/lib/projects/delete'
+import { deleteProjectCompletely, ORPHANED_PROJECT_MODELS, PURGE_JOB_TYPE } from '@/lib/projects/delete'
 import { functionRoleName } from '@/lib/services/ai-functions/function-db-role'
 
 const DB_URL = process.env.TEST_DATABASE_URL
@@ -191,3 +192,167 @@ it('deletes the project, every orphaned row, and the cluster roles', async () =>
   )
   expect(roles).toHaveLength(0)
 }, 120_000)
+
+describe('a login another database on the cluster still names', () => {
+  // A role is cluster-wide, but DROP OWNED and REASSIGN OWNED reach only the
+  // current database. A second database that still grants the login, as a copy
+  // restored from an older dump does, made DROP ROLE fail with 2BP01 and the
+  // deletion with it, for every project whose login it named. The login is now
+  // retired instead: NOLOGIN with no password. The other database is not the
+  // deletion's to change, and is left exactly as it was.
+  const PASSWORD = 'del-test-elsewhere-pass-1'
+  const refuse = `refuse_delete_${randomUUID().replace(/-/g, '').slice(0, 8)}`
+  let owner = ''
+  let project = ''
+  let workspace = ''
+  let login = ''
+  let other = ''
+
+  const testDatabase = () => new URL(DB_URL!).pathname.slice(1)
+  function urlFor(database: string, user?: string, password?: string): string {
+    const u = new URL(DB_URL!)
+    u.pathname = `/${database}`
+    if (user) {
+      u.username = user
+      u.password = password ?? ''
+    }
+    return u.toString()
+  }
+  async function run<T = Record<string, unknown>>(url: string, sql: string, params: unknown[] = []): Promise<T[]> {
+    const client = new Client({ connectionString: url })
+    client.on('error', () => {})
+    await client.connect()
+    try {
+      return (await client.query(sql, params)).rows as T[]
+    } finally {
+      await client.end().catch(() => {})
+    }
+  }
+  /** True when the login connects with its password, else the refusal. */
+  async function logsIn(): Promise<true | string> {
+    try {
+      await run(urlFor(testDatabase(), login, PASSWORD), 'SELECT 1')
+      return true
+    } catch (err) {
+      return err instanceof Error ? err.message : String(err)
+    }
+  }
+  const loginState = () =>
+    prisma.$queryRawUnsafe<{ login: boolean; noPassword: boolean }[]>(
+      `SELECT rolcanlogin AS login, rolpassword IS NULL AS "noPassword" FROM pg_authid WHERE rolname = $1`,
+      login,
+    )
+  const purgeJobs = async () =>
+    (await prisma.backgroundJob.findMany({ where: { type: PURGE_JOB_TYPE }, select: { payload: true } })).filter(
+      (j) => (j.payload as { projectId?: string } | null)?.projectId === project,
+    ).length
+  const otherAcl = () =>
+    run<{ acl: string }>(urlFor(other), `SELECT relacl::text AS acl FROM pg_class WHERE oid = to_regclass($1)`, [`"${workspace}".kept`])
+
+  beforeAll(async () => {
+    assertSafeTestDatabase()
+    owner = (
+      await prisma.user.create({
+        data: { email: `del-elsewhere-${randomUUID()}@test.invalid`, name: 'Deletion Test (elsewhere)' },
+        select: { id: true },
+      })
+    ).id
+    project = (
+      await prisma.project.create({ data: { name: `del-else-${randomUUID().slice(0, 8)}`, userId: owner }, select: { id: true } })
+    ).id
+    workspace = `workspace_${project}`
+    await prisma.$executeRawUnsafe(`CREATE SCHEMA "${workspace}"`)
+    await prisma.$executeRawUnsafe(`CREATE TABLE "${workspace}"."things" (id int)`)
+    await prisma.$executeRawUnsafe(`INSERT INTO "${workspace}"."things" VALUES (1), (2), (3)`)
+
+    login = `bkn_ro_${randomUUID().replace(/-/g, '').slice(0, 12)}`
+    await prisma.$executeRawUnsafe(`CREATE ROLE "${login}" LOGIN PASSWORD '${PASSWORD}'`)
+    await prisma.$executeRawUnsafe(`GRANT USAGE ON SCHEMA "${workspace}" TO "${login}"`)
+    await prisma.$executeRawUnsafe(`GRANT SELECT ON "${workspace}"."things" TO "${login}"`)
+    await prisma.databaseCredential.create({
+      data: { projectId: project, mode: 'READ_ONLY', roleName: login, passwordCipher: 'c', passwordIv: 'i', passwordTag: 't' },
+    })
+
+    // The other database: an older copy of the project's schema that grants the login.
+    other = `${testDatabase()}_elsewhere_${randomUUID().replace(/-/g, '').slice(0, 8)}`
+    await run(urlFor(testDatabase()), `CREATE DATABASE "${other}"`)
+    await run(urlFor(other), `CREATE SCHEMA "${workspace}"`)
+    await run(urlFor(other), `CREATE TABLE "${workspace}".kept (id int)`)
+    await run(urlFor(other), `INSERT INTO "${workspace}".kept VALUES (1), (2)`)
+    await run(urlFor(other), `GRANT USAGE ON SCHEMA "${workspace}" TO "${login}"`)
+    await run(urlFor(other), `GRANT SELECT ON "${workspace}".kept TO "${login}"`)
+    expect(await logsIn()).toBe(true)
+  }, 120_000)
+
+  afterAll(async () => {
+    if (other) await run(urlFor(testDatabase()), `DROP DATABASE IF EXISTS "${other}" WITH (FORCE)`).catch(() => {})
+    await prisma.$executeRawUnsafe(`DROP TRIGGER IF EXISTS "${refuse}" ON public.projects`).catch(() => {})
+    await prisma.$executeRawUnsafe(`DROP FUNCTION IF EXISTS public."${refuse}"()`).catch(() => {})
+    if (login) {
+      await prisma.$executeRawUnsafe(`DROP OWNED BY "${login}"`).catch(() => {})
+      await prisma.$executeRawUnsafe(`DROP ROLE IF EXISTS "${login}"`).catch(() => {})
+    }
+    await prisma.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${workspace}" CASCADE`).catch(() => {})
+    await prisma.databaseCredential.deleteMany({ where: { projectId: project } }).catch(() => {})
+    await prisma.project.deleteMany({ where: { id: project } }).catch(() => {})
+    await prisma.user.deleteMany({ where: { id: owner } }).catch(() => {})
+    await prisma.auditLog
+      .deleteMany({ where: { action: 'DATABASE_LOGIN_RETIRED', details: { contains: project } } })
+      .catch(() => {})
+  })
+
+  it('rolls a deletion that fails after the login was retired back whole, the login included', async () => {
+    // Fails the deletion at its last step, after the schema drop and the
+    // login's retirement in the same transaction, and says what the login was
+    // at that moment, so the test shows the retirement did happen and was undone.
+    await prisma.$executeRawUnsafe(
+      `CREATE FUNCTION public."${refuse}"() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+         RAISE EXCEPTION 'refused for the test: the login was %',
+           (SELECT CASE WHEN rolcanlogin THEN 'able to log in' ELSE 'retired' END FROM pg_roles WHERE rolname = '${login}');
+       END $$`,
+    )
+    await prisma.$executeRawUnsafe(
+      `CREATE TRIGGER "${refuse}" BEFORE DELETE ON public.projects FOR EACH ROW WHEN (OLD.id = '${project}') EXECUTE FUNCTION public."${refuse}"()`,
+    )
+    try {
+      await expect(deleteProjectCompletely(project)).rejects.toThrow(/refused for the test: the login was retired/)
+    } finally {
+      await prisma.$executeRawUnsafe(`DROP TRIGGER IF EXISTS "${refuse}" ON public.projects`)
+      await prisma.$executeRawUnsafe(`DROP FUNCTION IF EXISTS public."${refuse}"()`)
+    }
+
+    expect(await prisma.project.findUnique({ where: { id: project }, select: { id: true } })).toEqual({ id: project })
+    expect(await prisma.$queryRawUnsafe(`SELECT count(*)::int AS n FROM "${workspace}"."things"`)).toEqual([{ n: 3 }])
+    expect(await prisma.databaseCredential.count({ where: { projectId: project } })).toBe(1)
+    expect(await purgeJobs()).toBe(0)
+    expect(await loginState()).toEqual([{ login: true, noPassword: false }])
+    expect(await logsIn()).toBe(true)
+  }, 120_000)
+
+  it('completes the deletion with the login retired, and leaves the other database as it was', async () => {
+    const before = await otherAcl()
+    expect(before[0]?.acl).toContain(login)
+
+    const result = await deleteProjectCompletely(project)
+
+    expect(result.retiredLogins).toEqual([login])
+    expect(result.schemasDropped).toEqual([workspace])
+    expect(await prisma.project.findUnique({ where: { id: project } })).toBeNull()
+    expect(await prisma.$queryRawUnsafe(`SELECT 1 FROM pg_namespace WHERE nspname = $1`, workspace)).toEqual([])
+    expect(await prisma.databaseCredential.count({ where: { projectId: project } })).toBe(0)
+    expect(await purgeJobs()).toBe(1)
+    // Kept only as a name: no login, no password, refused at the door.
+    expect(await loginState()).toEqual([{ login: false, noPassword: true }])
+    expect(await logsIn()).toMatch(/not permitted to log in|password authentication failed/)
+    // The other database is exactly as it was.
+    expect(await otherAcl()).toEqual(before)
+    expect(await run(urlFor(other), `SELECT count(*)::int AS n FROM "${workspace}".kept`)).toEqual([{ n: 2 }])
+    // And the retirement is on record outside the project's cascade.
+    const audit = await prisma.auditLog.findFirst({
+      where: { action: 'DATABASE_LOGIN_RETIRED', details: { contains: project } },
+      select: { projectId: true, details: true },
+    })
+    expect(audit?.projectId).toBeNull()
+    expect(JSON.parse(String(audit?.details))).toEqual({ projectId: project, region: 'ap-south-1', logins: [login], via: 'project deletion' })
+  }, 120_000)
+})

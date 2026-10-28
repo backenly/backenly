@@ -130,6 +130,7 @@ BEGIN
       ('public.backenly_pgrst_revoke_internal(text)',                   true),
       ('public.backenly_pgrst_prepare_schema(text)',                    true),
       ('public.backenly_fn_role_sync(text,text)',                       true),
+      ('public.backenly_fn_role_drop(text)',                            true),
       ('public.backenly_direct_create_role(text,text,text,text)',       true),
       ('public.backenly_direct_set_password(text,text)',                true),
       ('public.backenly_direct_drop_role(text)',                        true),

@@ -22,6 +22,7 @@ import {
   isSupportCategory,
   isSupportSeverity,
   severityAllowedOnPlan,
+  supportAiRetryAllowed,
   SUPPORT_SEVERITIES,
   TICKET_BODY_MAX,
   TICKET_BODY_MIN,
@@ -69,6 +70,8 @@ const ticketListSelect = {
   severity: true,
   status: true,
   aiState: true,
+  aiError: true,
+  aiAttempts: true,
   projectId: true,
   lastMessageAt: true,
   lastMessageBy: true,
@@ -160,6 +163,12 @@ export async function listTickets(userId: string, opts: { status?: 'open' | 'res
   return { tickets, level: supportLevelOf(ent) }
 }
 
+/** The account's support level, for the case page's own summary. */
+export async function getSupportLevel(userId: string): Promise<SupportLevel> {
+  assertCloudEdition('Support cases')
+  return supportLevelOf(await getUserEntitlements(userId))
+}
+
 export async function getTicket(userId: string, ticketId: string) {
   assertCloudEdition('Support cases')
   return prisma.supportTicket.findFirst({
@@ -223,6 +232,31 @@ export async function reopenTicket(userId: string, ticketId: string) {
     where: { id: ticket.id },
     data: { status: 'open', resolvedAt: null, resolvedBy: null, lastMessageAt: new Date() },
   })
+}
+
+/**
+ * The customer asks for the instant answer again after the AI first responder
+ * gave up. Only a failure a later attempt can get past qualifies, within the
+ * case's attempt cap (supportAiRetryAllowed); the route dispatches the attempt.
+ * The update is conditional on the row as read, so a double click queues one
+ * attempt, not two.
+ */
+export async function retryAiAnswer(userId: string, ticketId: string) {
+  assertCloudEdition('Support cases')
+  const ticket = await prisma.supportTicket.findFirst({ where: { id: ticketId, userId } })
+  if (!ticket) throw new SupportError(404, 'CASE_NOT_FOUND', 'Case not found.')
+  if (!supportAiRetryAllowed(ticket)) {
+    throw new SupportError(409, 'AI_RETRY_UNAVAILABLE', 'The instant answer cannot be retried on this case. The team has it and replies here.')
+  }
+  // The old reason goes: this is a fresh attempt, and the next outcome records its own.
+  const moved = await prisma.supportTicket.updateMany({
+    where: { id: ticket.id, aiState: 'failed', aiAttempts: ticket.aiAttempts },
+    data: { aiState: 'none', aiNextAttemptAt: null, aiError: null },
+  })
+  if (moved.count === 0) {
+    throw new SupportError(409, 'AI_RETRY_UNAVAILABLE', 'An answer is already being written for this case.')
+  }
+  return prisma.supportTicket.findUniqueOrThrow({ where: { id: ticket.id } })
 }
 
 // ─── Staff side (Cloud admin; the overlay's routes call these) ────────────────

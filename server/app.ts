@@ -278,6 +278,18 @@ app.use((err: any, _req: express.Request, res: express.Response, next: express.N
   // handler destroys the socket, which is the only correct answer.
   if (res.headersSent) return next(err)
 
+  // A body the JSON parser could not read, or one over its limit: the caller's
+  // to fix, and body-parser marks it so (its own 4xx status, `expose`). Answered
+  // as a 500, a client's malformed JSON read as the platform failing, in the
+  // response and in every error count (found by fuzzing the data API).
+  if (err?.expose === true && Number.isInteger(err.status) && err.status >= 400 && err.status < 500) {
+    res.status(err.status).json({
+      error: err.type === 'entity.parse.failed' ? 'The request body is not valid JSON.' : 'The request body could not be read.',
+      code: 'BAD_REQUEST',
+    })
+    return
+  }
+
   // The project's data is in a region this process has no connection to, or
   // its row names a region this build does not know. Nothing was read from
   // another region's database instead (lib/data-plane/regional.ts). Retryable

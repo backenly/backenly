@@ -98,8 +98,10 @@ describe('the topics and their files', () => {
 
   it('keeps the index an index: well under one response', () => {
     // The index opens with a short account of what Backenly is, because
-    // assistants read llms.txt as the product's own description.
-    expect(INDEX.length).toBeLessThanOrEqual(14_000)
+    // assistants read llms.txt as the product's own description. Since
+    // 2026-10-28 it says what self-healing, self-restructuring and History do,
+    // which left the generated tables too little room under 14,000.
+    expect(INDEX.length).toBeLessThanOrEqual(15_000)
     for (const [file, text] of DOCS) expect([file, text.length <= DOCS_MAX_CHARS]).toEqual([file, true])
   })
 })

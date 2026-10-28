@@ -98,10 +98,10 @@ export default function NotFound() {
                 Pricing
               </Link>
               <Link
-                href="/use-cases"
+                href="/docs/database"
                 style={{ color: '#6b6b88', fontSize: '0.9rem', textDecoration: 'none' }}
               >
-                Use cases
+                Docs
               </Link>
               <Link
                 href="/auth/signup"

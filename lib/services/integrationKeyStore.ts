@@ -227,7 +227,10 @@ export async function storeIntegrationKey(
   const maskedKey = maskApiKey(rawKey)
   const verifiedAt = verification.status === 'verified' ? new Date() : null
 
-  const record = await prisma.projectIntegrationKey.upsert({
+  // The write alone is one governed change: the provider's verification above
+  // runs outside the change lock (lib/changes/resources/integrations.ts).
+  const { governedChange } = await import('@/lib/changes/ledger')
+  const record = await governedChange(projectId, `Store the ${vaultId} key`, () => prisma.projectIntegrationKey.upsert({
     where: { projectId_integrationId: { projectId, integrationId: vaultId } },
     create: {
       projectId, integrationId: vaultId, encryptedKey, maskedKey,
@@ -241,7 +244,7 @@ export async function storeIntegrationKey(
       verificationDetail: verification.detail,
       verifiedAt,
     },
-  })
+  }))
 
   const result: KeyVaultStatus & { formatWarning?: string } = {
     integrationId: vaultId,
@@ -315,6 +318,7 @@ export async function recheckIntegrationKey(
   if (!raw) return null
 
   const verification = await verifyIntegrationKey(vaultId, raw)
+  // history: a verification result, not configuration
   const record = await prisma.projectIntegrationKey.update({
     where: { projectId_integrationId: { projectId, integrationId: vaultId } },
     data: {
@@ -354,7 +358,8 @@ export async function hasIntegrationKey(
  */
 export async function removeIntegrationKey(projectId: string, integrationId: string): Promise<number> {
   const vaultId = canonicalVaultId(integrationId)
-  const { count } = await prisma.projectIntegrationKey.deleteMany({
+  const { governedChange } = await import('@/lib/changes/ledger')
+  const { count } = await governedChange(projectId, `Remove the ${vaultId} key`, () => prisma.projectIntegrationKey.deleteMany({
     where: {
       projectId,
       // Case-insensitive: older writers filed ids verbatim ("Stripe",
@@ -363,6 +368,6 @@ export async function removeIntegrationKey(projectId: string, integrationId: str
         integrationId: { equals: id, mode: 'insensitive' as const },
       })),
     },
-  })
+  }))
   return count
 }

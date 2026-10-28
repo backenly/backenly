@@ -10,6 +10,8 @@ import { consume, AUTH_LIMITS, clientIp } from '@/lib/security/auth-rate-limit'
 import { googleVerifiedEmail } from '@/lib/auth/oauth/verified-email'
 import { providerSignInRefusal } from '@/lib/auth/oauth/second-factor'
 import { oauthMayCreateAccount } from '@/lib/auth/setup-token'
+import { fetchGoogleProfilePhoto } from '@/lib/auth/oauth/google-photo'
+import { recordAvatar } from '@/lib/auth/avatar'
 
 /**
  * Platform-level Google OAuth callback.
@@ -20,7 +22,7 @@ import { oauthMayCreateAccount } from '@/lib/auth/setup-token'
  *   2. Verify signed state (HS256, JWT_SECRET, ≤5 min old, scope=platform-google).
  *   3. Sanitize redirectTo — must be a same-origin path.
  *   4. Exchange code → tokens with platform OAuth creds.
- *   5. Fetch Google userinfo → find/create user.
+ *   5. Fetch Google userinfo → find/create user, and record its own photo.
  *   6. Issue session JWT into an HttpOnly cookie ONLY. Never in URL.
  *   7. 302 to safeRedirect (no token in query).
  */
@@ -178,6 +180,12 @@ export async function GET(request: NextRequest) {
       include: { role: true },
     })
   }
+
+  // The console avatar: the Google account's own photo, or initials when it
+  // has none. Undefined means Google could not say, so the recorded photo
+  // stays as it was; nothing about the photo can fail the sign-in.
+  const photo = await fetchGoogleProfilePhoto(tokens.access_token)
+  if (photo !== undefined) await recordAvatar(user.id, photo)
 
   // 6. Issue session — HttpOnly cookie only. No JWT in URL.
   const { token } = await createSession(

@@ -33,6 +33,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { withProjectValidation } from '@/lib/middleware/projectValidation'
 import { prisma } from '@/lib/db/prisma'
 import { hashApiKey } from '@/lib/auth/apiKeyAuth'
+import { governedChange } from '@/lib/changes/ledger'
 
 function generateMcpKey(): string {
   // 32 random bytes → 64 hex chars. The mcp_live_ prefix is a strong visual
@@ -139,7 +140,7 @@ export async function POST(
     const keyHash = hashApiKey(rawKey)
     const keyPrefix = rawKey.substring(0, 16) // "mcp_live_xxxxxxx"
 
-    const record = await prisma.apiKey.create({
+    const record = await governedChange(projectId, `Create agent key ${name}`, () => prisma.apiKey.create({
       data: {
         name,
         keyHash,
@@ -157,7 +158,7 @@ export async function POST(
         mcpReadOnly: readOnly,
         mcpClientLabel: label,
       },
-    })
+    }))
 
     // Audit-log so the owner can see who minted MCP keys + when.
     await prisma.auditLog.create({

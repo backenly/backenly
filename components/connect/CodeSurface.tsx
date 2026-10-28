@@ -56,7 +56,7 @@ function cliLine(line: string): ReactNode {
     let cls = 'text-zinc-400'
     if (EXECS.has(t)) cls = 'text-zinc-100 font-medium'
     else if (t === 'mcp' || t === 'add' || t === 'backenly' || t.startsWith('@backenly')) cls = 'text-zinc-300'
-    else if (t === '--' || t === '-y' || t.startsWith('--')) cls = 'text-zinc-600'
+    else if (t === '--' || t === '-y' || t.startsWith('--')) cls = 'text-faint'
     else if (isSecret(t)) cls = 'text-violet-300'
     else if (isUuid(t)) cls = 'text-zinc-400'
     return (
@@ -91,13 +91,13 @@ function jsonLine(line: string): ReactNode {
       )
       if (m[2] !== undefined)
         nodes.push(
-          <span key={k++} className="text-zinc-600">
+          <span key={k++} className="text-faint">
             {m[2]}
           </span>,
         )
     } else if (m[3] !== undefined) {
       nodes.push(
-        <span key={k++} className="text-zinc-600">
+        <span key={k++} className="text-faint">
           {m[3]}
         </span>,
       )

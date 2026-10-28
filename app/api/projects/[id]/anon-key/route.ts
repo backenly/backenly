@@ -33,6 +33,7 @@ export async function GET(req: NextRequest) {
 
     await prisma.$transaction([
       // Register in ApiKey table so existing hash-based auth validation works
+      // history: the anon key is one with Project.anonKey and provisioned with the project (lib/changes/resources/keys.ts)
       prisma.apiKey.create({
         data: {
           name: 'Public Anon Key',

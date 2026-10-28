@@ -2,7 +2,7 @@
  * RESTORING A CHANGE, THROUGH A BROWSER
  * =====================================
  * Every change to production is checked after it applies, and the way back is
- * one menu item on its row in Database → Changes. What matters here is the path
+ * one menu item on its row in History. What matters here is the path
  * a person actually takes, end to end against the deployment:
  *
  *   a change made in the dashboard shows up as applied and verified;
@@ -12,7 +12,8 @@
  *   the result is verified and the row says Restored;
  *   the technical detail is there, behind View details, and not before.
  *
- * And there is no separate Changes section in the sidebar.
+ * And History is one section for the whole backend, in the sidebar; the
+ * Database page no longer keeps a list of its own, and its old link lands here.
  */
 
 import { test, expect } from '@playwright/test'
@@ -31,7 +32,7 @@ test('a dashboard change is restored from its row, with four checks and nothing 
   })
   expect(made.ok(), `create-table failed (${made.status()}): ${await made.text()}`).toBe(true)
 
-  await page.goto(`/app/projects/${projectId()}/database?view=changes`)
+  await page.goto(`/app/projects/${projectId()}/changes`)
   const row = page.getByRole('button', { name: new RegExp(`Created table ${table}`) }).first()
   await expect(row).toBeVisible({ timeout: 60_000 })
   await expect(row).toHaveAccessibleName(/Applied · Verified/)
@@ -72,7 +73,7 @@ test('technical detail is behind View details, and the SQL behind one more click
   })
   expect(made.ok()).toBe(true)
 
-  await page.goto(`/app/projects/${projectId()}/database?view=changes`)
+  await page.goto(`/app/projects/${projectId()}/changes`)
   const row = page.getByRole('button', { name: new RegExp(`Created table ${table}`) }).first()
   await expect(row).toBeVisible({ timeout: 60_000 })
   await expect(page.getByText('CREATE TABLE')).toHaveCount(0)
@@ -87,20 +88,21 @@ test('technical detail is behind View details, and the SQL behind one more click
   await expect(dialog.getByText(/CREATE TABLE/)).toBeVisible()
 })
 
-test('Changes is a tab of the Database page, not a section of its own', async ({ page }) => {
-  await page.goto(`/app/projects/${projectId()}/database`)
-  const tab = page.getByRole('tab', { name: 'Changes', exact: true })
-  await expect(tab).toBeVisible({ timeout: 60_000 })
-  await tab.click()
+test('History is one section for the whole backend, and the old Database link lands there', async ({ page }) => {
+  await page.goto(`/app/projects/${projectId()}/database?view=changes`)
+  await expect(page).toHaveURL(/\/changes(\?|$)/, { timeout: 60_000 })
   const empty = page.getByText('No changes yet')
   const rows = page.getByRole('button', { name: /^Change #\d+:/ })
   await expect(empty.or(rows.first())).toBeVisible({ timeout: 30_000 })
-  await expect(page.getByRole('link', { name: 'Changes', exact: true })).toHaveCount(0)
+  await expect(page.getByRole('link', { name: 'History', exact: true })).toBeVisible()
+  await page.goto(`/app/projects/${projectId()}/database`)
+  await expect(page.getByRole('tab', { name: 'Tables', exact: true })).toBeVisible({ timeout: 60_000 })
+  await expect(page.getByRole('tab', { name: 'Changes', exact: true })).toHaveCount(0)
 })
 
 test('on a phone the list fits the screen', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 })
-  await page.goto(`/app/projects/${projectId()}/database?view=changes`)
+  await page.goto(`/app/projects/${projectId()}/changes`)
   const empty = page.getByText('No changes yet')
   const rows = page.getByRole('button', { name: /^Change #\d+:/ })
   await expect(empty.or(rows.first())).toBeVisible({ timeout: 60_000 })

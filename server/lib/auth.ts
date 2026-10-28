@@ -186,6 +186,7 @@ async function enforceHardRateLimit(apiKeyRecord: any): Promise<RateLimitDecisio
 
   // Window expired → reset and allow
   if (!apiKeyRecord.resetAt || apiKeyRecord.resetAt <= now) {
+    // history: usage bookkeeping (last used, rate-limit window), not configuration
     await prisma.apiKey.update({
       where: { id: apiKeyRecord.id },
       data: { requestCount: 1, resetAt: windowEnd, lastUsed: now },
@@ -194,6 +195,7 @@ async function enforceHardRateLimit(apiKeyRecord: any): Promise<RateLimitDecisio
   }
 
   // Within window: atomic increment (only succeeds if count is still under limit)
+  // history: usage bookkeeping (last used, rate-limit window), not configuration
   const updated = await prisma.apiKey.updateMany({
     where: { id: apiKeyRecord.id, requestCount: { lt: limit } },
     data: { requestCount: { increment: 1 }, lastUsed: now },
