@@ -2,50 +2,56 @@ import type { Metadata } from 'next'
 import Link from 'next/link'
 import { ArrowRight } from 'lucide-react'
 import { safeJsonLd } from '@/lib/security/safe-jsonld'
+import { pageMetadata } from '@/lib/seo/metadata'
 import { SiteShell } from '@/components/site/SiteShell'
-import { ButtonLink, HorizonClose, JsonLd, NextLinks, Page, PageHero, Section, SectionHead } from '@/components/site/kit'
-import { Reveal } from '@/components/site/Reveal'
-import { SpotlightPanel } from '@/components/site/SpotlightPanel'
+import { BentoCell, CellBody, CellTitle } from '@/components/landing-v7/shared'
+import { ButtonLink, HorizonClose, JsonLd, Page, PageHero, Section } from '@/components/site/kit'
 import { StartButton } from '@/components/site/StartButton'
-import { TITLE } from '@/components/site/tokens'
+import { CRITERIA } from '../alternatives/data'
 import { COMPARISON_LIST } from './data'
 
 const APP_URL = 'https://backenly.com'
 
-export const metadata: Metadata = {
-  title: 'Backenly comparisons: how it differs from other backend platforms',
+export const metadata: Metadata = pageMetadata({
+  title: 'Backenly comparisons: Supabase, Firebase and more',
+  brandInTitle: true,
   description:
-    'Four comparisons against Supabase, Firebase, integrated app builders, and building a backend yourself. Each one says where the other option is the better choice.',
-  keywords: [
-    'Backenly vs Supabase',
-    'Backenly vs Firebase',
-    'backend platform comparison',
-    'Postgres backend platform',
-  ],
-  openGraph: {
-    title: 'Backenly comparisons: how it differs from other backend platforms',
-    description:
-      'Comparisons against Supabase, Firebase, integrated app builders, and building it yourself. Each one says where the other option wins.',
-    url: `${APP_URL}/comparisons`,
-    type: 'website',
-  },
-  twitter: {
-    card: 'summary_large_image',
+    'How Backenly compares with Supabase, Firebase, no-code app builders and building your own backend, including when the other option is the better choice.',
+  path: '/comparisons',
+  social: {
     title: 'Backenly comparisons',
     description: 'How Backenly differs from Supabase, Firebase, app builders, and building it yourself.',
   },
-  alternates: { canonical: `${APP_URL}/comparisons` },
-}
+})
 
-/** "Backenly vs. no-code app builders" -> "No-code app builders". */
-function opponent(headline: string) {
-  const name = headline.replace(/^Backenly vs\.\s*/, '')
-  return name.charAt(0).toUpperCase() + name.slice(1)
-}
+/* ─────────────────────────────────────────────────────────────
+   /comparisons (2026-10-15, founders: "no jargon, no lots of text, no big
+   banners, clean and professional").
+
+   One job: pick a comparison. A short header, then the landing's bento
+   (components/landing-v7/PrimitivesV7.tsx) with its own parts, so the page
+   reads like the rest of the site (2026-10-23, founders: match the landing):
+   one cell per comparison with the landing's cell title and body, its
+   category as the landing's fact chip, and the whole cell as the link. The
+   guide for readers earlier than a shortlist closes the grid as a wide cell,
+   set like the landing's lead cell: words on the left, its six questions
+   beside them.
+───────────────────────────────────────────────────────────── */
+
+/** The landing bento's fact chip (PrimitivesV7), restated: strings from its client module arrive here as client references. */
+const CHIP = 'rounded-md border border-white/[0.08] bg-white/[0.03] px-2.5 py-1 text-[12.5px] text-zinc-300'
+
+/** The cell's call to action: the landing's text link, as a label (the cell is the link). */
+const ACTION =
+  'inline-flex items-center gap-1.5 text-[15px] font-medium tracking-[-0.006em] text-zinc-300 transition-colors duration-200 group-hover:text-white'
+
+/** The link's box covers the whole cell, so the cell is the target. */
+const CELL_LINK =
+  'after:absolute after:inset-0 after:rounded-2xl focus-visible:outline-none focus-visible:after:ring-2 focus-visible:after:ring-inset focus-visible:after:ring-violet-300'
 
 export default function ComparisonsPage() {
   /**
-   * An ItemList of exactly the four cards rendered below. No product, offer, or
+   * An ItemList of exactly the cards rendered below. No product, offer, or
    * rating schema: none of it would correspond to anything on this page.
    */
   const itemListSchema = {
@@ -65,96 +71,81 @@ export default function ComparisonsPage() {
       <JsonLd json={safeJsonLd(itemListSchema)} />
       <Page>
         <PageHero
+          readableTrail
           trail={[{ label: 'Home', href: '/' }, { label: 'Comparisons' }]}
-          title="How Backenly differs from other backend platforms"
-          lede="Four comparisons, each written to be useful to someone who might not pick us. Every page says where the other option is stronger."
-          actions={
-            <>
-              <StartButton />
-              <ButtonLink href="/alternatives" variant="secondary">
-                How to evaluate an alternative
-              </ButtonLink>
-            </>
-          }
+          title="Comparisons"
+          lede="How Backenly compares with the main alternatives, including when to pick them instead."
         />
 
-        <Section flush aria-label="Comparison pages">
+        <Section flush aria-labelledby="all-comparisons">
+          {/* The cells' titles are the landing's h3s, so the grid takes the h2. */}
+          <h2 id="all-comparisons" className="sr-only">
+            All comparisons
+          </h2>
           <ul className="grid gap-3 md:grid-cols-2">
-            {COMPARISON_LIST.map((c, index) => (
-              <Reveal as="li" key={c.slug} delay={(index % 2) * 0.06} className="h-full">
-                <SpotlightPanel className="h-full">
-                  <Link
-                    href={`/comparisons/${c.slug}`}
-                    className="group flex h-full flex-col p-7 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-violet-300 md:p-9"
-                  >
-                    <span className="text-[14px] text-zinc-500">Backenly vs.</span>
-                    <span className={`mt-2 block text-[32px] text-white md:text-[40px] ${TITLE}`}>{opponent(c.headline)}</span>
-                    <span className="mt-2 block text-[14px] text-zinc-500">{c.category}</span>
-                    <span className="mt-8 block max-w-[52ch] flex-1 text-[16px] leading-[1.7] text-zinc-400 [text-wrap:pretty]">
-                      {c.positioning}
-                    </span>
-                    <span className="mt-8 inline-flex items-center gap-1.5 text-[15px] font-medium text-zinc-300 transition-colors duration-200 group-hover:text-white">
+            {COMPARISON_LIST.map((c, i) => (
+              // An odd count leaves the last comparison alone in its row; it takes the
+              // row's full width, like the guide card below it, rather than half of it.
+              <li
+                key={c.slug}
+                className={`min-w-0 ${COMPARISON_LIST.length % 2 === 1 && i === COMPARISON_LIST.length - 1 ? 'md:col-span-2' : ''}`}
+              >
+                <BentoCell className="h-full">
+                  <CellTitle>
+                    <Link href={`/comparisons/${c.slug}`} className={CELL_LINK}>
+                      {c.headline}
+                    </Link>
+                  </CellTitle>
+                  <CellBody>{c.positioning}</CellBody>
+                  <div className="mt-auto flex flex-wrap items-center justify-between gap-x-6 gap-y-4 pt-8">
+                    <span className={CHIP}>{c.category}</span>
+                    <span aria-hidden className={ACTION}>
                       Read the comparison
-                      <ArrowRight aria-hidden className="h-4 w-4 transition-transform duration-200 group-hover:translate-x-0.5" />
+                      <ArrowRight className="h-4 w-4 transition-transform duration-200 group-hover:translate-x-0.5" />
                     </span>
-                  </Link>
-                </SpotlightPanel>
-              </Reveal>
+                  </div>
+                </BentoCell>
+              </li>
             ))}
+
+            {/* The guide, wide: the landing's lead-cell layout, words beside the six questions it asks. */}
+            <li className="min-w-0 md:col-span-2">
+              <BentoCell className="h-full">
+                <div className="grid h-full gap-8 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.1fr)]">
+                  <div className="flex h-full flex-col">
+                    <CellTitle>
+                      <Link href="/alternatives" className={CELL_LINK}>
+                        Choosing a backend platform
+                      </Link>
+                    </CellTitle>
+                    <CellBody>
+                      Six questions to ask any platform, this one included, and when to stay where you are.
+                    </CellBody>
+                    <div className="mt-auto flex flex-wrap items-center gap-x-6 gap-y-4 pt-8">
+                      <span className={CHIP}>A guide for before you have a shortlist</span>
+                      <span aria-hidden className={ACTION}>
+                        Read the guide
+                        <ArrowRight className="h-4 w-4 transition-transform duration-200 group-hover:translate-x-0.5" />
+                      </span>
+                    </div>
+                  </div>
+                  <ol aria-label="The six questions" className="border-t border-white/[0.08] lg:border-t-0">
+                    {CRITERIA.map((criterion) => (
+                      <li
+                        key={criterion.question}
+                        className="border-b border-white/[0.08] py-[11px] text-[14px] leading-[1.55] text-zinc-300 [text-wrap:pretty] lg:first:border-t"
+                      >
+                        {criterion.question}
+                      </li>
+                    ))}
+                  </ol>
+                </div>
+              </BentoCell>
+            </li>
           </ul>
         </Section>
 
-        <Section aria-labelledby="actually-different">
-          <div className="grid gap-10 lg:grid-cols-[minmax(0,4fr)_minmax(0,8fr)] lg:gap-16">
-            <Reveal>
-              <SectionHead id="actually-different" title="What is actually different" />
-            </Reveal>
-            <Reveal delay={0.06} className="flex max-w-[68ch] flex-col gap-6 text-[17px] leading-[1.75] tracking-[-0.008em] text-zinc-400 [text-wrap:pretty]">
-              <p>
-                Backenly is a backend platform on PostgreSQL: a database, a REST API, authentication,
-                file storage, realtime and functions. That list is fairly ordinary for this category,
-                and it is not where the difference is.
-              </p>
-              <p className="text-zinc-200">
-                The difference is what happens around those parts. Structural changes go through one
-                audited path that records what changed and takes a restore point before
-                schema-touching work. Destructive operations stop for human approval rather than
-                executing on request. A loop reconciles the running backend against a set of declared
-                invariants on a schedule, repairing a narrow class of problems automatically and
-                reporting the rest with their evidence.
-              </p>
-              <p>
-                That is a trade rather than an upgrade. It suits a team that would rather not own
-                migrations, policy review and incident response. It suits a team that wants direct
-                control over all three considerably less well. The pages above are written on that
-                basis.
-              </p>
-            </Reveal>
-          </div>
-        </Section>
-
-        <Section aria-labelledby="earlier-than-that">
-          <Reveal>
-            <SectionHead
-              id="earlier-than-that"
-              title="Not sure what you are comparing against?"
-              lede="These pages assume a shortlist. If you are earlier than that, deciding whether to move at all, start with the criteria that decide it, where Backenly does not fit, and when the right answer is to stay where you are."
-            />
-          </Reveal>
-          <Reveal delay={0.06}>
-            <NextLinks
-              className="mt-10"
-              items={[
-                { href: '/alternatives', title: 'How to evaluate an alternative', body: 'The six questions that decide it, and who should not switch.' },
-                { href: '/use-cases', title: 'Use cases', body: 'Five workflows, with what Backenly does and what stays yours.' },
-                { href: '/features', title: 'Every feature', body: 'The whole product, capability by capability.' },
-                { href: '/pricing', title: 'Pricing', body: 'Free, Pro at $25 a month, and Enterprise.' },
-              ]}
-            />
-          </Reveal>
-        </Section>
-
-        <HorizonClose title="Try Backenly yourself" lede="One free project, kept permanently. No credit card.">
+        <HorizonClose title="Try Backenly free" lede="One free project, kept permanently. No credit card.">
           <StartButton />
           <ButtonLink href="/pricing" variant="secondary">
             See pricing

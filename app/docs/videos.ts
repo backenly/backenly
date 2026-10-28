@@ -3,8 +3,8 @@ import type { DocSlug } from './content'
 /**
  * Walkthrough videos for /docs, one short film per console section.
  *
- * A section with no entry here renders a "coming soon" frame in the same 16:9
- * slot, so publishing a video is one line in this file and nothing else.
+ * A section with no entry here renders nothing where the video would go, so
+ * publishing a video is one line in this file and nothing else.
  *
  * To add one:
  *

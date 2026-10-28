@@ -274,7 +274,7 @@ export function AgentInstallGuide({
             <p className="text-[13px] font-medium text-zinc-100">
               {key ? 'Key ready' : 'One key for this project, scoped and revocable'}
             </p>
-            <p className="mt-0.5 text-[12.5px] text-zinc-500">
+            <p className="mt-0.5 text-[12.5px] text-faint">
               {key ? 'It is in the command below, for your agent only: an app gets its own key. Revoke it any time from the list.' : 'Never a root key. It can request a destructive change, never approve one.'}
             </p>
           </div>
@@ -312,7 +312,7 @@ export function AgentInstallGuide({
           onSelectionCopy={copySelection}
           footer={
             <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
-              <p className="min-w-0 text-[12.5px] leading-[18px] text-zinc-500 [&_code]:font-mono [&_code]:text-[12px] [&_code]:text-zinc-300">
+              <p className="min-w-0 text-[12.5px] leading-[18px] text-faint [&_code]:font-mono [&_code]:text-[12px] [&_code]:text-zinc-300">
                 {variant.next}
               </p>
               <Segmented<Transport>
@@ -360,7 +360,7 @@ function AgentTabs({ value, onChange }: { value: string; onChange: (id: string) 
             aria-checked={active}
             onClick={() => onChange(a.id)}
             className={`group relative flex h-[40px] flex-shrink-0 items-center gap-1 px-[6px] text-[13px] font-medium transition-colors first:pl-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-violet-300/60 ${
-              active ? 'text-zinc-50' : 'text-zinc-500 hover:text-zinc-200'
+              active ? 'text-zinc-50' : 'text-faint hover:text-zinc-200'
             }`}
           >
             <Icon size={14} className={active ? '' : 'opacity-60 transition-opacity group-hover:opacity-100'} />
@@ -457,13 +457,13 @@ export function AgentCapabilitiesCard() {
         {HEADLINE_TOOLS.map((t) => (
           <div key={t.name} className="flex items-baseline justify-between gap-4 px-4 py-2.5">
             <dt><code className="font-mono text-[12px] text-zinc-100">{t.name}</code></dt>
-            <dd className="truncate text-right text-[12.5px] text-zinc-500">{t.gloss}</dd>
+            <dd className="truncate text-right text-[12.5px] text-faint">{t.gloss}</dd>
           </div>
         ))}
       </dl>
       <div className="flex items-center gap-2 border-t border-white/[0.06] px-4 py-2.5">
         <ShieldCheck className="h-3.5 w-3.5 flex-shrink-0 text-zinc-500" />
-        <span className="truncate text-[12.5px] text-zinc-500">Drops and truncates are never exposed over MCP.</span>
+        <span className="truncate text-[12.5px] text-faint">Drops and truncates are never exposed over MCP.</span>
       </div>
     </div>
   )

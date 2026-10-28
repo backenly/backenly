@@ -33,7 +33,9 @@ export async function executeFunctionIntegration(
     }
   }
 
-  const fn = await prisma.aiFunction.create({
+  // Only the save is a governed change: the model answered before it.
+  const { governedChange } = await import('@/lib/changes/ledger')
+  const fn = await governedChange(projectId, `Create function ${generated.name}`, () => prisma.aiFunction.create({
     data: {
       projectId,
       name: generated.name,
@@ -43,7 +45,7 @@ export async function executeFunctionIntegration(
       generatedCode: generated.code,
       status: 'active',
     },
-  })
+  }))
 
   return {
     success: true,

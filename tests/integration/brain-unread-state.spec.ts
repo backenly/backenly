@@ -155,7 +155,6 @@ describe('a project whose state was read and is empty', () => {
     await turn(provider, freshProjectId, 'add a comments table linked to posts')
 
     expect(systemOf(provider, 0)).toContain('this project is brand new')
-    // With the turn's signal, which cancels its design call (turn-clock.ts).
-    expect(architect).toHaveBeenCalledWith('add a comments table linked to posts', freshProjectId, expect.any(AbortSignal))
+    expect(architect).toHaveBeenCalledWith('add a comments table linked to posts', freshProjectId, expect.any(Function))
   }, 60_000)
 })

@@ -17,9 +17,10 @@ export const dynamic = 'force-dynamic'
  *   requiresConfirmation until called with confirm=true.
  */
 
+import { isEvolutionApprovalFinding } from '@/lib/core/types'
 import { NextRequest, NextResponse } from 'next/server'
 import { withProjectAccess } from '@/lib/auth/route-protection'
-import { canWriteProject } from '@/lib/edition/guard'
+import { canAdministerProject, canWriteProject } from '@/lib/edition/guard'
 import { prisma } from '@/lib/db/prisma'
 import { executeApprovedFix, revertAutoFix } from '@/lib/core/auto-fix-engine'
 import { quotedError, quotesKeptHere, recordedResultMessage, recordedStatements } from '@/lib/data-plane/residency'
@@ -64,6 +65,10 @@ export const POST = withProjectAccess(async (req: NextRequest, { user, project, 
       { success: false, error: 'Finding not found' },
       { status: 404 },
     )
+  }
+
+  if (isEvolutionApprovalFinding(finding.type)) {
+    return NextResponse.json({ success: false, error: 'This is an architecture change awaiting approval. Approve it from the approval queue on the Autonomy page, which binds your consent to the exact version Backenly rehearsed.' }, { status: 409 })
   }
 
   if (finding.status === 'auto_fixed') {
@@ -153,9 +158,13 @@ export const POST = withProjectAccess(async (req: NextRequest, { user, project, 
       lower.includes('in progress') ||
       lower.includes('another auto-fix') ||
       lower.includes('try again')
+    // A repair that ran and said why it could not apply is an answer, not a
+    // server fault. The workflow repair's report ("Needs your action: …") was
+    // missing here, so an approval it could not complete was counted as a 500.
     const needsUserAction =
       lower.includes('needs your manual review') ||
-      lower.includes('needs your api key')
+      lower.includes('needs your api key') ||
+      lower.includes('needs your action')
 
     // 503: the project's region, which keeps what a held action replays, could
     // not be reached, so nothing ran.
@@ -280,6 +289,16 @@ export const DELETE = withProjectAccess(async (req: NextRequest, { user, project
     return NextResponse.json(
       { success: false, error: 'Finding not found or not in auto_fixed state' },
       { status: 404 },
+    )
+  }
+
+  // Undoing a fix that changed the schema restores the state before its
+  // governed changes, which takes admin rights, as Restore previous state does.
+  const schemaTouching = ((finding.details ?? {}) as { rollbackData?: { schemaTouching?: boolean } }).rollbackData?.schemaTouching === true
+  if (schemaTouching && !(await canAdministerProject(user.userId, projectId))) {
+    return NextResponse.json(
+      { success: false, error: 'Only a project admin can undo a fix that changed the schema: it restores the state before that change.', code: 'PROJECT_ROLE_INSUFFICIENT' },
+      { status: 403 },
     )
   }
 

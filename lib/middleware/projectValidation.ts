@@ -263,7 +263,10 @@ export async function withProjectValidation<T>(
     if (!SAFE_METHODS.has(request.method.toUpperCase())) {
       void touchProjectActivity(validated.projectId)
     }
-    return await handler(validated)
+    // A platform session is a person (lib/auth/middleware.ts accepts no agent
+    // key): any change this request makes is theirs, in the project's history.
+    const { withChangeAttribution } = await import('@/lib/changes/attribution')
+    return await withChangeAttribution({ source: 'dashboard', actorUserId: validated.userId }, () => handler(validated))
   } catch (error) {
     if (error instanceof NextResponse) {
       return error as NextResponse<T>

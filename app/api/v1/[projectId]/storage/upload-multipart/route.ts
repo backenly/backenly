@@ -94,6 +94,7 @@ async function handleInitiate(request: NextRequest, context: { projectId: string
     where: { projectId: context.projectId, name: bucketName },
   })
   if (!bucketRecord) {
+    // history: provisioned by the first upload, on the data plane, which never waits for the change lock
     bucketRecord = await prisma.storageBucket.create({
       data: { name: bucketName, projectId: context.projectId, isPublic: Boolean(isPublic), maxFileSizeBytes: BigInt(MAX_ASSEMBLED_BYTES) },
     })

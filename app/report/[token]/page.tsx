@@ -7,9 +7,17 @@
  * Server-rendered, no client JS needed.
  */
 
+import type { Metadata } from 'next'
 import { resolveShareToken, buildChangeReport } from '@/lib/reports/change-report'
 
 export const dynamic = 'force-dynamic'
+
+// A report is one project's change history, shared by link. A link posted
+// publicly must not make it a search result.
+export const metadata: Metadata = {
+  title: 'Change report',
+  robots: { index: false, follow: false },
+}
 
 function timeAgo(iso: string): string {
   const s = Math.floor((Date.now() - new Date(iso).getTime()) / 1000)

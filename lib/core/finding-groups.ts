@@ -122,6 +122,15 @@ export function severityLabel(sev: string): { label: string; dot: string; text: 
   }
 }
 
+/** A severity as a word, for a finding's meta row: "Critical", "Warning", "Info". */
+export function severityWord(sev: string): string {
+  switch (sev) {
+    case 'critical': return 'Critical'
+    case 'warning':  return 'Warning'
+    default:         return 'Info'
+  }
+}
+
 // ── Cause signature ──────────────────────────────────────────────────────────
 
 function str(v: unknown): string | undefined {

@@ -199,7 +199,9 @@ export async function POST(request: NextRequest) {
   // and the read-only enforcement all apply with no new code paths. It carries
   // no usable plaintext key — `keyHash` is random and matches nothing a caller
   // could present, so this row is reachable only by an access token naming it.
-  const connection = await prisma.apiKey.create({
+  // In the project's history, by the person who consented; restoring it ends the connection.
+  const { governedChange } = await import('@/lib/changes/ledger')
+  const connection = await governedChange(project.id, `Connect agent ${client.clientName}${readOnly ? ' (read-only)' : ''}`, () => prisma.apiKey.create({
     data: {
       name: client.clientName,
       keyHash: `oauth:${randomToken(32)}`,
@@ -214,7 +216,7 @@ export async function POST(request: NextRequest) {
       mcpReadOnly: readOnly,
       mcpClientLabel: client.clientName,
     },
-  })
+  }), { actorUserId: uid })
 
   const code = randomToken(32)
   await prisma.mcpOAuthCode.create({

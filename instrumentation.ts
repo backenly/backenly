@@ -596,6 +596,47 @@ export async function register() {
         }
       })
 
+      // ── Tier D: the Architecture Evolution Engine ──────────────────────────
+      //
+      // `sweepArchitecture` was reached only through GET /api/cron/autonomy,
+      // which nothing calls on AWS or a self-hosted box (see Tier C above): the
+      // observation passes that decide whether a change counts as done, the
+      // resumption of what a person approved, and the daily look for changes
+      // worth asking about would simply never have run. Every region schedules
+      // it for the projects it serves, as the fleet scheduler hands them out, so
+      // a regional project's change is watched and resumed where its tables are.
+      //
+      // Nothing is relaxed by being reached from here: the scheduler flag is read
+      // inside the sweep too, a project with autonomy OFF is skipped, resuming
+      // also needs the mutation flag, and the sweep never approves anything or
+      // starts what a person did not approve. Every 10 minutes, like Tier C.
+      cron.schedule('*/10 * * * *', async () => {
+        const { FLAGS } = await import('./lib/config/flags')
+        if (!FLAGS.ENABLE_EVOLUTION_SCHEDULER) return
+
+        const { sweepArchitecture } = await import('./lib/evolution-engine/engine')
+        const { getFleetScheduler } = await import('./lib/edition')
+
+        const activeProjects = await getFleetScheduler().activeTargets()
+        if (activeProjects.length === 0) return
+
+        const CONCURRENCY = 5
+        const tally: Record<string, number> = {}
+        for (let i = 0; i < activeProjects.length; i += CONCURRENCY) {
+          const batch = activeProjects.slice(i, i + CONCURRENCY)
+          const results = await Promise.allSettled(batch.map(p => sweepArchitecture({ projectId: p.id })))
+          for (const r of results) {
+            const key = r.status === 'fulfilled' ? r.value.disposition : 'errored'
+            tally[key] = (tally[key] ?? 0) + 1
+          }
+        }
+        // `disabled` (autonomy OFF) is a condition, not news; anything else is logged.
+        const events = Object.entries(tally).filter(([k]) => k !== 'disabled')
+        if (events.length > 0) {
+          console.log(`[ArchitectureSweep] ${activeProjects.length} projects — ${events.map(([k, n]) => `${k}: ${n}`).join(', ')}`)
+        }
+      })
+
       // ── Database behaviour baseline — hourly, on the hour ───────────────────
       //
       // Records query latency, sequential scans, table size and connection

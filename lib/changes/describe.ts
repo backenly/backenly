@@ -79,7 +79,7 @@ function factsOf(c: TableChange): Fact[] {
   const optional: string[] = []
   const defaults: string[] = []
   const rewritten: string[] = []
-  const counts = { index: [0, 0, 0], constraint: [0, 0, 0], policy: 0, trigger: 0 }
+  const counts = { index: [0, 0, 0], constraint: [0, 0, 0], policy: 0, trigger: 0, privilege: 0 }
   let renamedFrom: string | null = null
   let rls: 'on' | 'off' | 'changed' | null = null
   let other = 0
@@ -100,6 +100,7 @@ function factsOf(c: TableChange): Fact[] {
     else if ((m = /^([+−~]) (primary key|unique|check|foreign key|exclusion|constraint) /.exec(line))) counts.constraint[sign(m[1])]++
     else if (/^[+−~] policy /.test(line)) counts.policy++
     else if (/^[+−~] trigger /.test(line)) counts.trigger++
+    else if (/^− privilege /.test(line)) counts.privilege++
     else if ((m = /^row-level security (enabled|disabled)$/.exec(line))) rls = m[1] === 'enabled' ? 'on' : 'off'
     else if (/^row-level security/.test(line)) rls = rls ?? 'changed'
     else other++
@@ -120,6 +121,7 @@ function factsOf(c: TableChange): Fact[] {
   pushCounted(facts, counts.constraint, 'a constraint', 'constraints', t)
   if (counts.policy) facts.push({ short: 'changed its access policies', full: `Changed the access policies on ${t}` })
   if (counts.trigger) facts.push({ short: 'changed its triggers', full: `Changed the triggers on ${t}` })
+  if (counts.privilege) facts.push({ short: 'took away API access to it', full: `Took away API access to ${t}` })
   if (rls === 'on') facts.push({ short: 'turned on row-level security', full: `Turned on row-level security for ${t}` })
   else if (rls === 'off') facts.push({ short: 'turned off row-level security', full: `Turned off row-level security for ${t}` })
   else if (rls === 'changed') facts.push({ short: 'changed row-level security', full: `Changed row-level security for ${t}` })

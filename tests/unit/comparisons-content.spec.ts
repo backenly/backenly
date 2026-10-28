@@ -40,10 +40,11 @@ import sitemap from '@/app/sitemap'
 const APP_URL = 'https://backenly.com'
 
 describe('the comparison set', () => {
-  it('has the four routes and no duplicates', () => {
+  it('has the five routes and no duplicates', () => {
     expect(COMPARISON_SLUGS).toEqual([
       'backenly-vs-supabase',
       'backenly-vs-firebase',
+      'backenly-vs-insforge',
       'backenly-vs-no-code-builders',
       'backenly-vs-traditional-backend-development',
     ])
@@ -256,7 +257,9 @@ describe('route metadata', () => {
       const meta = await generateMetadata({ params: Promise.resolve({ slug }) })
       expect(meta.alternates.canonical).toBe(`${APP_URL}/comparisons/${slug}`)
       expect(meta.openGraph.url).toBe(`${APP_URL}/comparisons/${slug}`)
-      expect(typeof meta.title).toBe('string')
+      // Absolute: the title already leads with "Backenly vs", so the layout's
+      // " | Backenly" suffix would repeat the brand.
+      expect(meta.title.absolute).toMatch(/^Backenly vs /)
       expect((meta.description as string).length).toBeGreaterThan(50)
     }
   })

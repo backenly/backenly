@@ -25,7 +25,7 @@
  * Features:
  *  - Daily scheduled backups (triggered by cron-runner.ts)
  *  - On-demand backup via AI chat BACKUP_DATABASE action
- *  - Restore via AI chat RESTORE_DATABASE action
+ *  - Restore by a project admin from Database → Snapshots (never from an AI action)
  *  - 7-day retention (older backups auto-pruned)
  *  - Backups stored in BACKUP_DIR (default: ./backups/) as compressed SQL
  *
@@ -330,7 +330,7 @@ export async function requestRestore(
   requestedBy?: string | null,
 ): Promise<SnapshotRequest<RestoreResult>> {
   const region = await projectRegion(projectId)
-  if (region === serviceRegion()) return { kind: 'done', result: await restoreWorkspace(projectId, backupId) }
+  if (region === serviceRegion()) return { kind: 'done', result: await restoreWorkspace(projectId, backupId, requestedBy) }
   const backup = backupId
     ? await prisma.workspaceBackup.findFirst({ where: { id: backupId, projectId, status: 'completed' }, select: { id: true } })
     : await prisma.workspaceBackup.findFirst({
@@ -485,11 +485,18 @@ export interface RestoreResult {
 /**
  * Restore workspace_{projectId} from a backup file.
  * DROP + recreate the schema, then psql the dump into it.
- * Requires confirmation — only called by the AI after user approval.
+ * A project admin's decision, from Database → Snapshots; the executor's
+ * RESTORE_DATABASE refuses rather than run it (lib/ai/minimal-executor.ts).
+ *
+ * It is an entry in the project's history, the biggest change of all, by the
+ * person who asked (`requestedBy`, carried by a queued restore). History does
+ * not undo it (lib/changes/recovery.ts NOT_RESTORABLE): restoring an earlier
+ * snapshot does.
  */
 export async function restoreWorkspace(
   projectId: string,
-  backupId?: string
+  backupId?: string,
+  requestedBy?: string | null,
 ): Promise<RestoreResult> {
   const schemaName = `workspace_${projectId}`
   // The schema, and every statement below that renames, replays or checks it,
@@ -554,7 +561,8 @@ export async function restoreWorkspace(
       fs.createWriteStream(/*turbopackIgnore: true*/ sqlPath)
     )
 
-    // Move the live schema aside rather than dropping it.
+    // Move the live schema aside, replay the dump and check what it made, in
+    // ONE transaction.
     //
     // The previous implementation ran DROP + CREATE and then fed in a dump
     // whose own first statement is `CREATE SCHEMA`. That collided, the
@@ -562,43 +570,89 @@ export async function restoreWorkspace(
     // ON_ERROR_STOP was not set, and the function reported success over a
     // schema it had just emptied. Every restore was silent total data loss.
     //
-    // Renaming keeps the old data recoverable for the whole operation, so a
-    // failure anywhere below is survivable instead of terminal.
-    await db.$executeRawUnsafe(
-      `ALTER SCHEMA "${schemaName}" RENAME TO "${asideName}"`
-    ).then(
-      () => { renamed = true },
-      // Nothing to move aside is fine: restoring into an absent schema is the
-      // disaster-recovery case, and the dump creates it.
-      () => { renamed = false },
-    )
+    // The rename that replaced it ran on its own, before the replay, so for as
+    // long as the replay took (up to five minutes) the registered schema did
+    // not exist. Any DDL anywhere in the region in that window asks PostgREST to
+    // reload, and a reload naming a schema that is not there fails for every
+    // project that PostgREST serves (scripts/sql/postgrest-schema-registry.sql,
+    // backenly_pgrst_reload). Inside the replay's transaction nobody ever sees
+    // the schema missing: until COMMIT every other session reads the old one,
+    // and a failure anywhere rolls the rename back with everything else.
+    //
+    // Nothing to move aside is fine: restoring into an absent schema is the
+    // disaster-recovery case, and the dump creates it. ON_ERROR_STOP is what
+    // makes psql's exit code mean anything; the closing check is there because
+    // a dump that creates nothing exits 0 too.
+    const moveAside =
+      `DO $restore$ BEGIN IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = '${schemaName}') THEN ` +
+      `ALTER SCHEMA "${schemaName}" RENAME TO "${asideName}"; END IF; END $restore$`
+    const holdsRelations =
+      `DO $restore$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace ` +
+      `WHERE n.nspname = '${schemaName}' AND c.relkind IN ('r', 'v', 'm', 'p')) THEN ` +
+      `RAISE EXCEPTION 'restore produced an empty schema: psql reported success but ${schemaName} holds no relations'; ` +
+      `END IF; END $restore$`
+    // One entry in the project's history, under its change lock, so no
+    // governed change applies, verifies or is restored while the schema is
+    // replaced under it (lib/changes/ledger.ts). Its own check is the one that
+    // decides it: the replay committed and the schema holds relations again.
+    // Never recovered automatically: there is nothing to put back but the
+    // schema it replaced, and that is a person's call.
+    const { withGovernedChange, withChangeAttribution, currentAttribution, currentChange } = await import('@/lib/changes/ledger')
+    const taken = backup.createdAt.toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit', timeZone: 'UTC' })
+    const replay = async () => {
+      await withGovernedChange(
+        { projectId, title: `Restore snapshot ${backup.filename}`, kind: 'snapshot_restore', summary: `Restored the snapshot of ${taken} UTC`, autoRecover: false },
+        async () => {
+          await execFileAsync(
+            'psql',
+            [...conn.args, '--single-transaction', '-v', 'ON_ERROR_STOP=1', '-c', moveAside, '--file', sqlPath, '-c', holdsRelations],
+            { timeout: 300_000, env: conn.env },
+          )
+          const open = currentChange(projectId)
+          if (open) {
+            open.verification = {
+              outcome: 'confirmed',
+              checkedAt: new Date().toISOString(),
+              checks: [{
+                id: 'snapshot',
+                label: 'The snapshot is in place',
+                outcome: 'confirmed',
+                detail: `Replayed from ${backup.filename} in one transaction, and the schema holds its tables again.`,
+              }],
+            }
+          }
+        },
+      )
+    }
+    if (!currentAttribution() && requestedBy) await withChangeAttribution({ source: 'dashboard', actorUserId: requestedBy }, replay)
+    else await replay()
+    renamed = true
 
-    // ON_ERROR_STOP is what makes psql's exit code mean anything. Without it
-    // the restore above reported success over an aborted transaction.
-    await execFileAsync(
-      'psql',
-      [...conn.args, '--file', sqlPath, '--single-transaction', '-v', 'ON_ERROR_STOP=1'],
-      { timeout: 300_000, env: conn.env },
-    )
-
-    // Belt and braces: psql exiting 0 is necessary, not sufficient. Confirm the
-    // schema exists and actually holds relations before destroying the aside.
-    const [{ count }] = await db.$queryRawUnsafe<{ count: bigint }[]>(
+    // From here the restore has happened: nothing below may report it failed.
+    const [{ count }] = await db.$queryRawUnsafe<{ count: bigint | string }[]>(
       `SELECT count(*)::bigint AS count
          FROM pg_class c
          JOIN pg_namespace n ON n.oid = c.relnamespace
         WHERE n.nspname = $1 AND c.relkind IN ('r', 'v', 'm', 'p')`,
       schemaName,
-    )
-    if (Number(count) === 0) {
-      throw new Error(
-        `restore produced an empty schema: psql reported success but ${schemaName} holds no relations`
-      )
-    }
+    ).catch(() => [{ count: 'an unread number of' }])
 
-    // Only now is the old copy safe to destroy.
-    if (renamed) {
-      await db.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${asideName}" CASCADE`)
+    // Committed: the old copy is no longer needed. It goes unless something
+    // outside it still uses what it holds (a change vault's kept column of one
+    // of its enum types), which CASCADE would take with it; then it stays,
+    // named, rather than cost kept data. A failure here is not a failed
+    // restore: the restored schema is in place.
+    const { schemaReaders, describeReaders } = await import('@/lib/changes/dependents')
+    const readers = await schemaReaders(<R>(sql: string, params: unknown[]) => db.$queryRawUnsafe<R[]>(sql, ...params), asideName).catch(() => null)
+    if (readers && readers.length === 0) {
+      await db.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${asideName}" CASCADE`).catch((dropErr: any) => {
+        console.warn(`[Restore] Restored ${projectId}; its previous schema is left as "${asideName}": ${sanitizeError(dropErr?.message ?? '')}`)
+      })
+    } else {
+      console.warn(
+        `[Restore] Restored ${projectId}; its previous schema is kept as "${asideName}" because ` +
+          (readers ? `objects outside it use it: ${describeReaders(readers)}` : 'what uses it could not be read'),
+      )
     }
     await fs.promises.unlink(/*turbopackIgnore: true*/ sqlPath).catch(() => {})
     if (fromS3) await fs.promises.unlink(/*turbopackIgnore: true*/ gzPath).catch(() => {})
@@ -618,6 +672,13 @@ export async function restoreWorkspace(
       )
     }
 
+    // Every view of the schema follows it, as after a governed change: the REST
+    // API's cache, the reconciler's baseline (measured against the replaced
+    // schema it would re-create what the restore removed), this process's
+    // table caches. Best-effort, logged inside.
+    const { refreshSchemaViews } = await import('@/lib/changes/freshness')
+    await refreshSchemaViews(projectId, [])
+
     console.log(`[Restore] Restored ${projectId} from ${backup.filename} (${count} relations)`)
 
     return { success: true, restoredFrom: backup.filename }
@@ -625,9 +686,17 @@ export async function restoreWorkspace(
     const message = sanitizeError(err?.message ?? '')
     console.error(`[Restore] Failed for ${projectId}:`, message)
 
-    // Put the project back. The half-restored schema is the thing to discard;
-    // the aside is the thing to keep.
-    if (renamed) {
+    // The replay's transaction rolled back, rename included: the project is
+    // as it was. A failure after COMMIT (dropping the old copy) leaves the
+    // restored schema in place, and is not a reason to put the old one back.
+    // What remains is the case of an aside with no live schema, which only a
+    // process stopped between those steps by hand could leave.
+    const [{ live, aside }] = await db.$queryRawUnsafe<Array<{ live: boolean; aside: boolean }>>(
+      `SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = $1) AS live,
+              EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = $2) AS aside`,
+      schemaName, asideName,
+    ).catch(() => [{ live: true, aside: false }])
+    if (renamed && aside && !live) {
       try {
         await db.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schemaName}" CASCADE`)
         await db.$executeRawUnsafe(`ALTER SCHEMA "${asideName}" RENAME TO "${schemaName}"`)

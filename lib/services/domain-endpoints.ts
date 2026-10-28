@@ -37,6 +37,7 @@ export async function registerDomainEndpoints(
         status: 'active',
       }
       const existing = await prisma.aiFunction.findFirst({ where: { projectId, name: ep.name }, select: { id: true } })
+      // history: a table's generated endpoints follow the table (lib/changes/recovery.ts generatedEndpointsFollow)
       if (existing) await prisma.aiFunction.update({ where: { id: existing.id }, data })
       else await prisma.aiFunction.create({ data: { projectId, name: ep.name, ...data } })
     } catch (err: any) {
@@ -128,6 +129,7 @@ export async function deleteGeneratedEndpoints(projectId: string, rows: AiFuncti
       const now = await tx.aiFunction.findFirst({ where: still })
       if (!now) continue
       // The same condition again, so a deploy committed after that read is not removed either.
+      // history: a table's generated endpoints follow the table (lib/changes/recovery.ts generatedEndpointsFollow)
       const { count } = await tx.aiFunction.deleteMany({ where: still })
       if (count > 0) taken.push(asRemoved(now))
     }
@@ -161,6 +163,7 @@ export async function restoreDomainEndpoints(projectId: string, rows: RemovedEnd
     try {
       if (await prisma.aiFunction.findFirst({ where: { projectId, name: r.name }, select: { id: true } })) continue
       const taken = await prisma.aiFunction.findUnique({ where: { id: r.id }, select: { id: true } })
+      // history: a table's generated endpoints follow the table (lib/changes/recovery.ts generatedEndpointsFollow)
       await prisma.aiFunction.create({
         data: {
           ...(taken ? {} : { id: r.id }),

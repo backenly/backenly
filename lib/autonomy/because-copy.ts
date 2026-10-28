@@ -382,7 +382,9 @@ export function explainHeldBack(details: { wouldHaveApplied?: unknown; health?: 
       ? `Backenly held back its fixes${n > 0 ? ` for ${n === 1 ? 'a failing check' : `${n} failing checks`}` : ''}`
       : details?.via === 'function_heal'
         ? `Backenly held back repairing ${n === 1 ? 'a function' : n > 1 ? `${n} functions` : 'its functions'}`
-        : `Backenly held back ${n === 1 ? 'a repair' : n > 1 ? `${n} repairs` : 'its repairs'}`
+        : details?.via === 'architecture_evolution'
+          ? 'Backenly held back the next step of an architecture change you approved'
+          : `Backenly held back ${n === 1 ? 'a repair' : n > 1 ? `${n} repairs` : 'its repairs'}`
   const why =
     'the project is mid-incident, and changing a backend that is already failing can make it worse.' +
     (signals.length > 0 ? ` ${signals.join(' ')}` : '')

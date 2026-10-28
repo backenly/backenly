@@ -92,6 +92,7 @@ export async function executePostHogIntegration(
       select: { activeIntegrations: true },
     })
     const existing = (project?.activeIntegrations as Record<string, any>) ?? {}
+    // history: inside dispatchIntegration's change (./index.ts)
     await prisma.project.update({
       where: { id: projectId },
       data: {
@@ -193,6 +194,7 @@ export async function executePostHogIntegration(
     select: { activeIntegrations: true },
   })
   const existingIntegrations = (proj?.activeIntegrations as Record<string, any>) ?? {}
+  // history: inside dispatchIntegration's change (./index.ts)
   await prisma.project.update({
     where: { id: projectId },
     data: {

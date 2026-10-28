@@ -47,7 +47,22 @@ export async function listProjectTemplates(projectId: string) {
 }
 
 /** Save an override, or say why it cannot be used. */
+/** One governed change each (lib/changes/resources/auth.ts). */
+const governed = async <T>(projectId: string, title: string, fn: () => Promise<T>) => (await import('@/lib/changes/ledger')).governedChange(projectId, title, fn)
+
 export async function saveProjectTemplate(
+  projectId: string,
+  kind: TemplateKind,
+  subject: string,
+  bodyHtml: string,
+): Promise<
+  | { ok: true; template: { kind: string; subject: string; bodyHtml: string; customised: true; updatedAt: string } }
+  | { ok: false; errors: TemplateValidationError[] }
+> {
+  return governed(projectId, `Save the ${kind.replace(/_/g, ' ')} email template`, () => writeProjectTemplate(projectId, kind, subject, bodyHtml))
+}
+
+async function writeProjectTemplate(
   projectId: string,
   kind: TemplateKind,
   subject: string,
@@ -70,6 +85,8 @@ export async function saveProjectTemplate(
 
 /** Drop an override, so the default is sent again. True when there was one. */
 export async function revertProjectTemplate(projectId: string, kind: TemplateKind): Promise<boolean> {
-  const { count } = await prisma.projectEmailTemplate.deleteMany({ where: { projectId, kind } })
-  return count > 0
+  return governed(projectId, `Reset the ${kind.replace(/_/g, ' ')} email template`, async () => {
+    const { count } = await prisma.projectEmailTemplate.deleteMany({ where: { projectId, kind } })
+    return count > 0
+  })
 }

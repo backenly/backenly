@@ -59,13 +59,22 @@ export async function cleanupOldArchives(
   
   for (const archive of oldArchives) {
     try {
-      const quotedSchema = `"${schema}"`
-      const quotedTable = `"${capitalizeTableName(archive.archivedName)}"`
-      
-      // NOW we can safely DROP (after 90 days)
-      await db.$executeRawUnsafe(
-        `DROP TABLE IF EXISTS ${quotedSchema}.${quotedTable} CASCADE`
+      // The retired writer quoted the name capitalised when it renamed the
+      // table (capitalizeTableName), so that is normally the table's name; the
+      // name as recorded is the other candidate. Whichever is there is dropped.
+      const candidates = [...new Set([capitalizeTableName(archive.archivedName), archive.archivedName])]
+      const present = await db.$queryRawUnsafe<Array<{ relname: string }>>(
+        `SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+          WHERE n.nspname = $1 AND c.relname = ANY($2::text[]) AND c.relkind IN ('r', 'p')`,
+        schema,
+        candidates,
       )
+      for (const { relname } of present) {
+        // Without CASCADE: a view or a foreign key that still reads the table
+        // makes the DROP fail, and the archive stays, named in the log below,
+        // instead of taking the reader with it (lib/changes/dependents.ts).
+        await db.$executeRawUnsafe(`DROP TABLE "${schema}"."${relname}"`)
+      }
       
       // Mark as deleted
       await prisma.tableArchive.update({

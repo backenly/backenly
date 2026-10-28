@@ -3,6 +3,7 @@ export const dynamic = 'force-dynamic'
 import { NextRequest, NextResponse } from 'next/server';
 import { withAuth } from '@/lib/auth/route-protection';
 import { prisma } from '@/lib/db/postgres';
+import { readAvatarUrl } from '@/lib/auth/avatar';
 
 /**
  * GET /api/auth/me - Get current user profile
@@ -61,6 +62,9 @@ export const GET = withAuth(async (request: NextRequest, { user }) => {
       lastLogin: userDetails.lastLogin,
       tier: userDetails.tier,
       projectsCount: userDetails.projects.length,
+      // The Google account's own photo, or null: the console shows initials.
+      // Read apart from the user so a missing table cannot fail this request.
+      avatarUrl: await readAvatarUrl(userDetails.id),
     }
 
     return NextResponse.json({

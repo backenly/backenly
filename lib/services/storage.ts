@@ -10,6 +10,9 @@ import { signExportToken } from '@/lib/storage/export-token'
 import { getProjectQuota } from '@/lib/services/storageQuota'
 import { UploadRejectedError, assertFileAllowed, assertFileSize } from '@/lib/storage/upload-policy'
 
+/** Bucket writes are governed changes (lib/changes/ledger.ts); one made inside another change joins it. */
+const governed = async <T>(projectId: string, title: string, fn: () => Promise<T>) => (await import('@/lib/changes/ledger')).governedChange(projectId, title, fn)
+
 export interface StorageService {
   // Bucket operations
   createBucket(name: string, projectId: string, isPublic?: boolean): Promise<{ id: string; name: string; isPublic: boolean }>
@@ -91,7 +94,12 @@ class LocalStorageService implements StorageService {
     await fs.mkdir(bucketDir, { recursive: true })
   }
 
+  /** One change in the project's history, whoever asks (lib/changes/resources/storage.ts). */
   async createBucket(name: string, projectId: string, isPublic: boolean = false) {
+    return governed(projectId, `Create bucket ${name}`, () => this.createBucketNow(name, projectId, isPublic))
+  }
+
+  private async createBucketNow(name: string, projectId: string, isPublic: boolean) {
     if (!projectId) {
       throw new Error('Project ID is required for tenant isolation')
     }
@@ -159,7 +167,13 @@ class LocalStorageService implements StorageService {
     }))
   }
 
+  /** One change, files and all, so the history knows what the bucket held when it went. */
   async deleteBucket(bucketId: string, projectId: string) {
+    const row = await prisma.storageBucket.findUnique({ where: { id: bucketId }, select: { name: true } })
+    return governed(projectId, `Delete bucket ${row?.name ?? bucketId}`, () => this.deleteBucketNow(bucketId, projectId))
+  }
+
+  private async deleteBucketNow(bucketId: string, projectId: string) {
     if (!projectId) {
       throw new Error('Project ID is required for tenant isolation')
     }
@@ -184,6 +198,7 @@ class LocalStorageService implements StorageService {
     }
 
     // Delete bucket from database
+    // history: governed by deleteBucket
     await prisma.storageBucket.delete({
       where: { id: bucketId },
     })

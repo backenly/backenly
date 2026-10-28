@@ -27,7 +27,8 @@ function body() {
     authorization_servers: [appOrigin()],
     scopes_supported: SUPPORTED_SCOPES,
     bearer_methods_supported: ['header'],
-    resource_documentation: `${appOrigin()}/docs/mcp`,
+    // /docs/mcp never existed; the connect guide is the MCP documentation.
+    resource_documentation: `${appOrigin()}/docs/connect`,
   }
 }
 

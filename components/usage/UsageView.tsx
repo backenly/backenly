@@ -142,12 +142,12 @@ function Meter({
         <span className={`text-[20px] font-semibold leading-[26px] tracking-[-0.02em] tabular-nums ${over ? 'text-rose-300' : warn ? 'text-amber-200' : 'text-zinc-50'}`}>
           {format(used)}
         </span>
-        {max !== null && <span className="text-[12.5px] tabular-nums text-zinc-500">of {format(max)}</span>}
+        {max !== null && <span className="text-[12.5px] tabular-nums text-faint">of {format(max)}</span>}
       </div>
 
       {/* No bar without a limit: a part-filled bar reads as a ceiling coming up. */}
       {max === null ? (
-        <p className="mt-2 text-[12px] text-zinc-500">Unlimited</p>
+        <p className="mt-2 text-[12px] text-faint">Unlimited</p>
       ) : (
         <div
           className="mt-2.5 h-[5px] overflow-hidden rounded-full bg-white/[0.06]"
@@ -160,8 +160,8 @@ function Meter({
           <div className={`h-full rounded-full ${bar} transition-[width] duration-700`} style={{ width: `${Math.max(p, used > 0 ? 2 : 0)}%` }} />
         </div>
       )}
-      {note && <p className="mt-2 text-[12px] leading-[17px] text-zinc-500">{note}</p>}
-      {resetNote && <p className="mt-1.5 text-[12px] tabular-nums text-zinc-500">{resetNote}</p>}
+      {note && <p className="mt-2 text-[12px] leading-[17px] text-faint">{note}</p>}
+      {resetNote && <p className="mt-1.5 text-[12px] tabular-nums text-faint">{resetNote}</p>}
     </div>
   )
 }
@@ -364,7 +364,7 @@ function OverageCard({
         actions={
           <span className="inline-flex items-baseline gap-1.5">
             <span className="text-[20px] font-medium tabular-nums leading-none text-white">{fmtCents(usage.overage.estimatedCents)}</span>
-            <span className="text-[12px] text-zinc-500">so far · ≈ {fmtCents(usage.overage.projectedCents)} by month end</span>
+            <span className="text-[12px] text-faint">so far · ≈ {fmtCents(usage.overage.projectedCents)} by month end</span>
           </span>
         }
       />
@@ -398,7 +398,7 @@ function OverageCard({
           <KitButton variant="secondary" size="sm" onClick={save} disabled={!!pending} loading={busy && !pending}>
 Save
           </KitButton>
-          <span className="text-[12.5px] text-zinc-500">Current: {currentCents === 0 ? 'Off' : fmtCents(currentCents)}</span>
+          <span className="text-[12.5px] text-faint">Current: {currentCents === 0 ? 'Off' : fmtCents(currentCents)}</span>
         </div>
         {limit && (
           <p className="mt-2 text-[12.5px] tabular-nums text-zinc-400">
@@ -428,7 +428,7 @@ Save
           </div>
         )}
         {shown && <p className="mt-2 text-[12.5px] text-zinc-400">{shown}</p>}
-        <p className="mt-3 max-w-[72ch] text-[12.5px] leading-[19px] text-zinc-500">
+        <p className="mt-3 max-w-[72ch] text-[12.5px] leading-[19px] text-faint">
           Usage past your plan is paid for in advance. Raising the limit takes a code from your email and, when your balance does
           not cover it, a card payment through Stripe for the difference. Each month&apos;s usage past the plan is drawn from the
           balance, never past your limit, and the rest carries over. With the limit off, every quota is a hard cap. Limits are
@@ -535,7 +535,7 @@ export function UsageView({ orgId }: { orgId?: string | null }) {
         <PageHeader
           className="!px-0"
           title="Usage"
-          meta={usage ? <span className="text-[13px] text-zinc-500">{usage.planName} plan</span> : undefined}
+          meta={usage ? <span className="text-[13px] text-faint">{usage.planName} plan</span> : undefined}
           description={
             orgId
               ? 'Everything this organization has used in the current billing cycle, pooled across all of its projects.'
@@ -607,7 +607,7 @@ export function UsageView({ orgId }: { orgId?: string | null }) {
                   actions={
                     <span className="inline-flex items-baseline gap-1.5">
                       <span className="text-[20px] font-medium tabular-nums leading-none text-white">{fmtNum(activity.runsThisCycle)}</span>
-                      <span className="text-[12px] text-zinc-500">runs this cycle</span>
+                      <span className="text-[12px] text-faint">runs this cycle</span>
                     </span>
                   }
                 />
@@ -624,7 +624,7 @@ export function UsageView({ orgId }: { orgId?: string | null }) {
               </KitNote>
             </div>
 
-            <p className="mt-4 text-[12.5px] text-zinc-500">
+            <p className="mt-4 text-[12.5px] text-faint">
               Need more headroom?{' '}
               <Link href={hrefs.billing} className="font-medium text-zinc-200 underline-offset-2 hover:underline">
                 Compare plans
@@ -650,8 +650,8 @@ function AutonomyChart({ perDay }: { perDay: { date: string; count: number }[] }
   if (total === 0) {
     return (
       <div className="flex items-center gap-2 py-2">
-        <ShieldCheck className="h-3.5 w-3.5 flex-shrink-0 text-zinc-600" />
-        <p className="text-[12px] text-zinc-500">
+        <ShieldCheck className="h-3.5 w-3.5 flex-shrink-0 text-zinc-500" />
+        <p className="text-[12px] text-faint">
           No autonomy runs recorded yet this cycle. The loop reports here as it works.
         </p>
       </div>
@@ -682,7 +682,7 @@ function AutonomyChart({ perDay }: { perDay: { date: string; count: number }[] }
           )
         })}
       </div>
-      <div className="mt-2 flex items-center justify-between text-[12px] tabular-nums text-zinc-500">
+      <div className="mt-2 flex items-center justify-between text-[12px] tabular-nums text-faint">
         <span>{label}</span>
         <span>Today</span>
       </div>

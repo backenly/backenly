@@ -33,6 +33,8 @@
  * Measured this way, two things a superuser install hides were found and are
  * now part of the procedure (sql/roles.sql): the definers need the privileges of
  * the application role, and must be able to become the roles they create for it.
+ * A third is in the definers themselves: dropping a login needs its privileges,
+ * which its creator does not hold (see the block on logins below).
  *
  * What only a throwaway RDS instance can add is RDS's own role patches; that
  * rehearsal needs AWS and is not this suite.
@@ -54,7 +56,7 @@ import { prisma } from '@/lib/db/prisma'
 import { driftCaptureHealth, driftEventBacklog } from '@/lib/autonomy/drift-event-upkeep'
 import { hasCapability, resetCapabilityCache } from '@/lib/autonomy/platform-capabilities'
 import { createProvisionedProject } from '@/lib/projects/provision'
-import { directAccessRoleNames, syncDirectAccessGrants } from '@/lib/services/direct-access'
+import { directAccessRoleNames, revokeDirectAccess, syncDirectAccessGrants } from '@/lib/services/direct-access'
 import { generatePassword, scramSha256Verifier } from '@/tools/managed-db/regional/scram'
 
 jest.setTimeout(300_000)
@@ -638,6 +640,340 @@ describe('a project without direct access, which the application makes in the re
     const result = bootstrap({ DATABASE_URL: adminUrl(), BOOTSTRAP_MODE: 'check', EXPECT_DATABASE: DB })
     expect(result.output).toContain('Check only: nothing was written. Every step is recorded, and the database verifies.')
     expect(result.status).toBe(0)
+  })
+})
+
+describe('a project’s logins, held by the definer as Amazon RDS holds them', () => {
+  // Deleting a project drops its bkn_ro_ / bkn_rw_ / bkn_fn_ logins, and
+  // revoking direct access drops one. Both failed on RDS with 42501
+  // ("permission denied to reassign objects"; for bkn_fn_, which a deletion
+  // dropped as the application, "permission denied to drop objects"): REASSIGN
+  // OWNED and DROP OWNED need the login's privileges, and on RDS the master that
+  // owns the definers administers every login they make without being a member
+  // of any, and createrole_self_grant has no effect (measured on staging).
+  // Stock PostgreSQL 16 grants a login back to its creator when that setting
+  // asks for it, as this database's sessions of backenly_app do (sql/roles.sql),
+  // so the logins here are made in sessions with it unset. The definer then
+  // holds ADMIN on each and none of its privileges, as on RDS.
+  const REGION = 'us-east-1'
+  const saved = { edition: process.env.BACKENLY_EDITION }
+  let ownerId = ''
+  /** Every project made here, for the audit rows a retirement leaves outside its cascade. */
+  const created: string[] = []
+
+  /** As the application, in a session where createrole_self_grant is unset. */
+  async function asAppWithoutSelfGrant<T = Record<string, unknown>>(sql: string, params: unknown[]): Promise<T[]> {
+    const client = new Client({ connectionString: loginUrl('backenly_app') })
+    client.on('error', () => {})
+    await client.connect()
+    try {
+      await client.query(`SET createrole_self_grant = ''`)
+      return (await client.query(sql, params)).rows as T[]
+    } finally {
+      await client.end().catch(() => {})
+    }
+  }
+
+  /** A project in the region with every login it can have: read-only, read-write and its functions'. */
+  async function projectWithLogins() {
+    const project = await createProvisionedProject({ name: `regional logins ${randomUUID()}`, userId: ownerId, region: REGION })
+    created.push(project.id)
+    const schema = project.postgresSchema
+    const { ro, rw, owner } = directAccessRoleNames(project.id)
+    const passwords: Record<string, string> = { [ro]: generatePassword(), [rw]: generatePassword() }
+    const fnPassword = generatePassword()
+    await asAppWithoutSelfGrant(`SELECT public.backenly_direct_create_role($1, $2, $3, 'READ_ONLY')`, [ro, passwords[ro], schema])
+    await asAppWithoutSelfGrant(`SELECT public.backenly_direct_create_role($1, $2, $3, 'READ_WRITE')`, [rw, passwords[rw], schema])
+    const [{ fn }] = await asAppWithoutSelfGrant<{ fn: string }>(`SELECT public.backenly_fn_role_sync($1, $2) AS fn`, [schema, fnPassword])
+    passwords[fn] = fnPassword
+    // The grants and the owner role, as provisioning syncs them.
+    await rows(loginUrl('backenly_app'), `SELECT public.backenly_direct_sync_schema($1, $2, $3, $4)`, [schema, ro, rw, owner])
+    for (const [mode, roleName] of [['READ_ONLY', ro], ['READ_WRITE', rw]] as const) {
+      await prisma.databaseCredential.create({
+        data: { projectId: project.id, mode, roleName, passwordCipher: 'x', passwordIv: 'x', passwordTag: 'x' },
+      })
+    }
+    const logins = [ro, rw, fn].sort()
+    const held = await rows(
+      superUrl(),
+      `SELECT rolname, pg_has_role($1, oid, 'USAGE') AS privileges, pg_has_role($1, oid, 'MEMBER WITH ADMIN OPTION') AS admin
+         FROM pg_roles WHERE rolname = ANY($2) ORDER BY rolname`,
+      [ADMIN, logins],
+    )
+    expect(held).toEqual(logins.map((rolname) => ({ rolname, privileges: false, admin: true })))
+    return { projectId: project.id, schema, rw, logins, passwords }
+  }
+
+  /**
+   * A second database on the cluster that still names these logins, as a copy
+   * restored there from an older dump does: the project's schema again, with a
+   * table granted to each.
+   */
+  async function anotherDatabaseNaming(schema: string, logins: string[]): Promise<string> {
+    const other = `regional_elsewhere_${randomUUID().replace(/-/g, '').slice(0, 8)}`
+    await rows(superUrl(), `CREATE DATABASE ${other}`)
+    await rows(superUrl(other), `CREATE SCHEMA "${schema}"`)
+    await rows(superUrl(other), `CREATE TABLE "${schema}".kept (id int)`)
+    await rows(superUrl(other), `INSERT INTO "${schema}".kept VALUES (1), (2)`)
+    for (const login of logins) {
+      await rows(superUrl(other), `GRANT USAGE ON SCHEMA "${schema}" TO "${login}"`)
+      await rows(superUrl(other), `GRANT SELECT ON "${schema}".kept TO "${login}"`)
+    }
+    return other
+  }
+
+  const loginStates = (logins: string[]) =>
+    rows(
+      superUrl(),
+      `SELECT rolname, rolcanlogin AS login, rolpassword IS NULL AS no_password FROM pg_authid WHERE rolname = ANY($1) ORDER BY 1`,
+      [logins],
+    )
+  const REFUSED = /password authentication failed|not permitted to log in/
+
+  beforeAll(async () => {
+    process.env.DATABASE_URL_US_EAST_1 = loginUrl('backenly_app')
+    process.env.BACKENLY_EDITION = 'cloud'
+    ownerId = (
+      await prisma.user.create({
+        data: { email: `regional-logins-${randomUUID()}@example.test`, name: 'regional logins fixture' },
+        select: { id: true },
+      })
+    ).id
+  })
+
+  afterAll(async () => {
+    if (saved.edition === undefined) delete process.env.BACKENLY_EDITION
+    else process.env.BACKENLY_EDITION = saved.edition
+    if (ownerId) {
+      const projects = (await prisma.project.findMany({ where: { userId: ownerId }, select: { id: true } })).map((p) => p.id)
+      await prisma.databaseCredential.deleteMany({ where: { projectId: { in: projects } } }).catch(() => {})
+      await prisma.project.deleteMany({ where: { userId: ownerId } }).catch(() => {})
+      await prisma.user.deleteMany({ where: { id: ownerId } }).catch(() => {})
+    }
+    if (created.length) {
+      await prisma.auditLog
+        .deleteMany({ where: { action: 'DATABASE_LOGIN_RETIRED', OR: created.map((id) => ({ details: { contains: id } })) } })
+        .catch(() => {})
+      // The deletions here leave their projects' purge jobs waiting for the
+      // region's scheduler, which this process is not. Left in the shared test
+      // database, they fill the scheduler's batch for the next suite that runs
+      // it (project-region.spec.ts), so they go with the projects.
+      await prisma.backgroundJob
+        .deleteMany({ where: { type: 'purge_project', OR: created.map((id) => ({ payload: { path: ['projectId'], equals: id } })) } })
+        .catch(() => {})
+    }
+  })
+
+  it('are all dropped with their project, and nothing of them is left', async () => {
+    const { deleteProjectCompletely } = await import('@/lib/projects/delete')
+    const { projectId, schema, logins } = await projectWithLogins()
+    const oids = (await rows<{ oid: string }>(superUrl(), `SELECT oid::text AS oid FROM pg_roles WHERE rolname = ANY($1)`, [logins])).map((r) => r.oid)
+    expect(oids).toHaveLength(3)
+    const others = `SELECT roleid::regrole::text AS role, admin_option, inherit_option, set_option
+                      FROM pg_auth_members WHERE member = $1::regrole AND NOT roleid = ANY($2::oid[]) ORDER BY 1`
+    const adminElsewhere = await rows(superUrl(), others, [ADMIN, oids])
+
+    const result = await deleteProjectCompletely(projectId)
+
+    expect(result.schemasDropped).toContain(schema)
+    expect(await rows(superUrl(), `SELECT 1 FROM pg_namespace WHERE nspname = $1`, [schema])).toEqual([])
+    expect(await rows(superUrl(), `SELECT rolname FROM pg_roles WHERE rolname = ANY($1)`, [logins])).toEqual([])
+    expect(
+      await rows(superUrl(), `SELECT 1 FROM pg_auth_members WHERE roleid = ANY($1::oid[]) OR member = ANY($1::oid[])`, [oids]),
+    ).toEqual([])
+    // The privileges the definer took for each drop went with the login.
+    expect(await rows(superUrl(), others, [ADMIN, oids])).toEqual(adminElsewhere)
+    expect(await prisma.project.findUnique({ where: { id: projectId } })).toBeNull()
+    expect(await prisma.databaseCredential.count({ where: { projectId } })).toBe(0)
+  })
+
+  it('are revoked one at a time, and a table the read-write login owns passes to the application', async () => {
+    const { projectId, schema, rw } = await projectWithLogins()
+    // Owned by the login, as a table made over direct access is. Made by the
+    // administrator and handed over, so that only the revocation is under test
+    // here, not the DDL that runs when a developer creates a table.
+    await rows(adminUrl(), `CREATE TABLE "${schema}".made_directly (id int)`)
+    await rows(superUrl(), `ALTER TABLE "${schema}".made_directly OWNER TO "${rw}"`)
+
+    await revokeDirectAccess(projectId, 'READ_WRITE')
+
+    expect(await rows(superUrl(), `SELECT rolname FROM pg_roles WHERE rolname = $1`, [rw])).toEqual([])
+    expect(
+      await rows(superUrl(), `SELECT pg_get_userbyid(relowner) AS owner FROM pg_class WHERE oid = to_regclass($1)`, [`"${schema}".made_directly`]),
+    ).toEqual([{ owner: 'backenly_app' }])
+    expect(await prisma.databaseCredential.findMany({ where: { projectId }, select: { mode: true } })).toEqual([{ mode: 'READ_ONLY' }])
+  })
+
+  // DROP OWNED and REASSIGN OWNED reach only the current database, so a login
+  // that another database on the cluster still names failed DROP ROLE with
+  // 2BP01, and the deletion of its project with it. Such a login is now retired
+  // (NOLOGIN, no password) and the other database is left untouched.
+  it('that another database still names are retired with their project, unable to log in, and that database is left as it was', async () => {
+    const { deleteProjectCompletely } = await import('@/lib/projects/delete')
+    const { projectId, schema, logins, passwords } = await projectWithLogins()
+    const other = await anotherDatabaseNaming(schema, logins)
+    const oids = (await rows<{ oid: string }>(superUrl(), `SELECT oid::text AS oid FROM pg_roles WHERE rolname = ANY($1)`, [logins])).map((r) => r.oid)
+    const memberships = `SELECT roleid::regrole::text AS role, admin_option, inherit_option, set_option, grantor::regrole::text AS grantor
+                           FROM pg_auth_members WHERE member = $1::regrole ORDER BY 1, 5`
+    const membershipsBefore = await rows(superUrl(), memberships, [ADMIN])
+    const kept = `SELECT relacl::text AS acl, (SELECT count(*)::int FROM "${schema}".kept) AS n FROM pg_class WHERE oid = to_regclass($1)`
+    const keptBefore = await rows(superUrl(other), kept, [`"${schema}".kept`])
+    for (const login of logins) expect(await refusal(url(login, passwords[login]), 'SELECT 1')).toBeNull()
+
+    try {
+      const result = await deleteProjectCompletely(projectId)
+
+      expect([...result.retiredLogins].sort()).toEqual(logins)
+      expect(await rows(superUrl(), `SELECT 1 FROM pg_namespace WHERE nspname = $1`, [schema])).toEqual([])
+      expect(await prisma.project.findUnique({ where: { id: projectId } })).toBeNull()
+      expect(await prisma.databaseCredential.count({ where: { projectId } })).toBe(0)
+      expect(await loginStates(logins)).toEqual(logins.map((rolname) => ({ rolname, login: false, no_password: true })))
+      for (const login of logins) expect(await refusal(url(login, passwords[login]), 'SELECT 1')).toMatch(REFUSED)
+      // Nothing of them is left in this database, and the other is as it was.
+      expect(
+        await rows(
+          superUrl(),
+          `SELECT count(*)::int AS n FROM pg_shdepend s JOIN pg_database d ON d.oid = s.dbid WHERE d.datname = $1 AND s.refobjid = ANY($2::oid[])`,
+          [DB, oids],
+        ),
+      ).toEqual([{ n: 0 }])
+      expect(await rows(superUrl(other), kept, [`"${schema}".kept`])).toEqual(keptBefore)
+      // The privileges the definer took to retire them were given back.
+      expect(await rows(superUrl(), memberships, [ADMIN])).toEqual(membershipsBefore)
+      // The retirement outlives the project's cascade in the audit trail.
+      const audit = await prisma.auditLog.findFirst({
+        where: { action: 'DATABASE_LOGIN_RETIRED', details: { contains: projectId } },
+        select: { projectId: true, details: true },
+      })
+      expect(audit?.projectId).toBeNull()
+      expect(JSON.parse(String(audit?.details))).toMatchObject({ projectId, region: REGION, via: 'project deletion' })
+      expect([...JSON.parse(String(audit?.details)).logins].sort()).toEqual(logins)
+
+      // Once nothing else names them, the next drop removes them.
+      await rows(superUrl(), `DROP DATABASE ${other} WITH (FORCE)`)
+      for (const login of logins) {
+        const helper = login.startsWith('bkn_fn_') ? 'backenly_fn_role_drop' : 'backenly_direct_drop_role'
+        expect(await rows(loginUrl('backenly_app'), `SELECT public.${helper}($1) AS gone`, [login])).toEqual([{ gone: true }])
+      }
+      expect(await rows(superUrl(), `SELECT rolname FROM pg_roles WHERE rolname = ANY($1)`, [logins])).toEqual([])
+    } finally {
+      await rows(superUrl(), `DROP DATABASE IF EXISTS ${other} WITH (FORCE)`)
+    }
+  })
+
+  it('a revoked login another database still names is retired, and provisioning the mode again gives it back', async () => {
+    const { projectId, schema, logins, passwords } = await projectWithLogins()
+    const ro = logins.find((login) => login.startsWith('bkn_ro_'))!
+    const other = await anotherDatabaseNaming(schema, [ro])
+    try {
+      await revokeDirectAccess(projectId, 'READ_ONLY')
+
+      expect(await loginStates([ro])).toEqual([{ rolname: ro, login: false, no_password: true }])
+      expect(await refusal(url(ro, passwords[ro]), 'SELECT 1')).toMatch(REFUSED)
+      expect(await prisma.databaseCredential.findMany({ where: { projectId }, select: { mode: true } })).toEqual([{ mode: 'READ_WRITE' }])
+      const audit = await prisma.auditLog.findFirst({
+        where: { projectId, action: 'DIRECT_ACCESS_REVOKED' },
+        orderBy: { timestamp: 'desc' },
+        select: { details: true },
+      })
+      expect(JSON.parse(String(audit?.details))).toEqual({ mode: 'READ_ONLY', roleName: ro, login: 'retired' })
+
+      // The same name, logging in again with the new password only. It comes
+      // back with whatever the other database still grants it, as it had
+      // before the revocation: retiring changes nothing outside this database.
+      const fresh = generatePassword()
+      await asAppWithoutSelfGrant(`SELECT public.backenly_direct_create_role($1, $2, $3, 'READ_ONLY')`, [ro, fresh, schema])
+      expect(await refusal(url(ro, fresh), 'SELECT 1')).toBeNull()
+      expect(await refusal(url(ro, passwords[ro]), 'SELECT 1')).toMatch(REFUSED)
+    } finally {
+      await rows(superUrl(), `DROP DATABASE IF EXISTS ${other} WITH (FORCE)`)
+    }
+  })
+
+  it('a login retired by revocation is dropped with its project, once what named it is gone', async () => {
+    // The revocation deleted its credential row, so only the name derived from
+    // the project leads the deletion back to it.
+    const { deleteProjectCompletely } = await import('@/lib/projects/delete')
+    const { projectId, schema, logins } = await projectWithLogins()
+    const ro = logins.find((login) => login.startsWith('bkn_ro_'))!
+    const other = await anotherDatabaseNaming(schema, [ro])
+    try {
+      await revokeDirectAccess(projectId, 'READ_ONLY')
+      expect(await loginStates([ro])).toEqual([{ rolname: ro, login: false, no_password: true }])
+      expect(await prisma.databaseCredential.count({ where: { projectId, roleName: ro } })).toBe(0)
+    } finally {
+      await rows(superUrl(), `DROP DATABASE IF EXISTS ${other} WITH (FORCE)`)
+    }
+
+    const result = await deleteProjectCompletely(projectId)
+
+    expect(result.retiredLogins).toEqual([])
+    expect(await rows(superUrl(), `SELECT rolname FROM pg_roles WHERE rolname = ANY($1)`, [logins])).toEqual([])
+  })
+
+  it('a function login a failed deletion retired in the region is found and recorded by the retry', async () => {
+    // The region's step commits before the platform's (dropRegionalProjectData).
+    // When the platform step then fails, the region's schema is already gone, so
+    // the retry cannot derive the function login from it: the name comes from
+    // the project instead, and the retry records the retirement.
+    const { deleteProjectCompletely } = await import('@/lib/projects/delete')
+    const { projectId, schema, logins } = await projectWithLogins()
+    const fn = logins.find((login) => login.startsWith('bkn_fn_'))!
+    const other = await anotherDatabaseNaming(schema, [fn])
+    const refuse = `refuse_regional_${randomUUID().replace(/-/g, '').slice(0, 8)}`
+    await prisma.$executeRawUnsafe(
+      `CREATE FUNCTION public."${refuse}"() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'refused for the test'; END $$`,
+    )
+    await prisma.$executeRawUnsafe(
+      `CREATE TRIGGER "${refuse}" BEFORE DELETE ON public.projects FOR EACH ROW WHEN (OLD.id = '${projectId}') EXECUTE FUNCTION public."${refuse}"()`,
+    )
+    try {
+      await expect(deleteProjectCompletely(projectId)).rejects.toThrow(/refused for the test/)
+    } finally {
+      await prisma.$executeRawUnsafe(`DROP TRIGGER IF EXISTS "${refuse}" ON public.projects`)
+      await prisma.$executeRawUnsafe(`DROP FUNCTION IF EXISTS public."${refuse}"()`)
+    }
+    try {
+      // The region's step stands: its schema is gone and the login retired.
+      // The platform's rolled back: the project is still there.
+      expect(await rows(superUrl(), `SELECT 1 FROM pg_namespace WHERE nspname = $1`, [schema])).toEqual([])
+      expect(await loginStates([fn])).toEqual([{ rolname: fn, login: false, no_password: true }])
+      expect(await prisma.project.findUnique({ where: { id: projectId }, select: { id: true } })).toEqual({ id: projectId })
+
+      const result = await deleteProjectCompletely(projectId)
+
+      expect(result.retiredLogins).toEqual([fn])
+      const audit = await prisma.auditLog.findFirst({
+        where: { action: 'DATABASE_LOGIN_RETIRED', details: { contains: projectId } },
+        select: { details: true },
+      })
+      expect(JSON.parse(String(audit?.details))).toMatchObject({ projectId, region: REGION, logins: [fn] })
+    } finally {
+      await rows(superUrl(), `DROP DATABASE IF EXISTS ${other} WITH (FORCE)`)
+    }
+    expect(await rows(loginUrl('backenly_app'), `SELECT public.backenly_fn_role_drop($1) AS gone`, [fn])).toEqual([{ gone: true }])
+  })
+
+  it('that only a database-level privilege the definer cannot revoke still names are retired, not left to fail the deletion', async () => {
+    // A database privilege granted by another role survives the definer's DROP
+    // OWNED: a definer that is not a superuser revokes only what it can, and
+    // the grant is recorded server-wide, in no one database. Granted here on a
+    // database the superuser owns, so the grant is the superuser's.
+    const { deleteProjectCompletely } = await import('@/lib/projects/delete')
+    const { projectId, logins, passwords } = await projectWithLogins()
+    const ro = logins.find((login) => login.startsWith('bkn_ro_'))!
+    await rows(superUrl(), `GRANT TEMPORARY ON DATABASE postgres TO "${ro}"`)
+    try {
+      const result = await deleteProjectCompletely(projectId)
+
+      expect(result.retiredLogins).toEqual([ro])
+      expect(await loginStates(logins)).toEqual([{ rolname: ro, login: false, no_password: true }])
+      expect(await refusal(url(ro, passwords[ro]), 'SELECT 1')).toMatch(REFUSED)
+    } finally {
+      await rows(superUrl(), `REVOKE TEMPORARY ON DATABASE postgres FROM "${ro}"`).catch(() => {})
+    }
+    expect(await rows(loginUrl('backenly_app'), `SELECT public.backenly_direct_drop_role($1) AS gone`, [ro])).toEqual([{ gone: true }])
+    expect(await rows(superUrl(), `SELECT rolname FROM pg_roles WHERE rolname = $1`, [ro])).toEqual([])
   })
 })
 

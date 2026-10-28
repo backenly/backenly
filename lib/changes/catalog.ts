@@ -108,14 +108,15 @@ export interface TableState {
 }
 
 export interface ObjectState {
-  /** view · materialized_view · function · type (an enum) */
+  /** view · materialized_view · function · type (an enum or a domain: see isDomain) */
   kind: 'view' | 'materialized_view' | 'function' | 'type'
   name: string
   /** Unique within the schema: the name, or for a function `name(argument types)`. */
   identity: string
   /**
    * What defines it: a view's query (pg_get_viewdef), a function's complete
-   * CREATE OR REPLACE FUNCTION (pg_get_functiondef), an enum's CREATE TYPE.
+   * CREATE OR REPLACE FUNCTION (pg_get_functiondef), an enum's CREATE TYPE, a
+   * domain's CREATE DOMAIN.
    */
   definition: string
   /** A view's reloptions, e.g. `security_invoker=true`. */
@@ -134,6 +135,27 @@ export interface CatalogSnapshot {
 export interface QueryRunner {
   query<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T[]>
 }
+
+/**
+ * Backenly's own plumbing in a workspace schema, which no change makes and no
+ * restore puts back: row-event capture for webhooks and functions, derived
+ * from their rows by lib/webhooks/capture.ts, and presence, set up by
+ * server/routes/presence.ts. Each is kept by its own sync, outside the lock.
+ * Read as part of a table, every capture sync would make the table look
+ * changed since and block its restores, and a restore could take the trigger
+ * away and silently stop delivery. Left out the way other roles' grants are;
+ * a restore asks the sync to look again (lib/changes/freshness.ts).
+ * Realtime's trigger is not here: it is turned on and off by a person, and
+ * lives only in the trigger, so it belongs to the history.
+ */
+export const CAPTURE_TRIGGER = 'backenly_webhook_capture'
+export const PLATFORM_OBJECTS = {
+  tables: ['_backenly_webhook_outbox', '_backenly_presence'],
+  triggers: [CAPTURE_TRIGGER, 'backenly_presence_notify'],
+  functions: ['backenly_capture_webhook_event', 'backenly_notify_presence'],
+} as const
+
+const sqlNames = (names: readonly string[]) => `ARRAY[${names.map((n) => `'${n}'`).join(', ')}]::name[]`
 
 /**
  * The whole schema in one statement. Kept as one statement on purpose: a
@@ -219,7 +241,7 @@ FROM (
         'enabled', tg.tgenabled::text
       ) ORDER BY tg.tgname), '[]'::json)
       FROM pg_trigger tg
-      WHERE tg.tgrelid = c.oid AND NOT tg.tgisinternal
+      WHERE tg.tgrelid = c.oid AND NOT tg.tgisinternal AND tg.tgname <> ALL (${sqlNames(PLATFORM_OBJECTS.triggers)})
     ) AS triggers,
     (
       SELECT coalesce(json_agg(json_build_object(
@@ -232,6 +254,7 @@ FROM (
   FROM pg_class c
   JOIN pg_namespace n ON n.oid = c.relnamespace
   WHERE n.nspname = $1 AND c.relkind IN ('r', 'p') AND NOT c.relispartition
+    AND c.relname <> ALL (${sqlNames(PLATFORM_OBJECTS.tables)})
 ) t) AS tables,
 (SELECT coalesce(json_agg(o ORDER BY o.identity), '[]'::json)
 FROM (
@@ -253,6 +276,7 @@ FROM (
     FROM pg_proc p
     JOIN pg_namespace n ON n.oid = p.pronamespace
    WHERE n.nspname = $1 AND p.prokind IN ('f', 'p')
+     AND p.proname <> ALL (${sqlNames(PLATFORM_OBJECTS.functions)})
      AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e')
   UNION ALL
   SELECT 'type',
@@ -264,6 +288,20 @@ FROM (
     FROM pg_type t
     JOIN pg_namespace n ON n.oid = t.typnamespace
    WHERE n.nspname = $1 AND t.typtype = 'e'
+     AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_type'::regclass AND d.objid = t.oid AND d.deptype = 'e')
+  UNION ALL
+  SELECT 'type',
+         t.typname,
+         t.typname,
+         'CREATE DOMAIN ' || quote_ident(n.nspname) || '.' || quote_ident(t.typname) || ' AS ' || format_type(t.typbasetype, t.typtypmod) ||
+           CASE WHEN t.typdefaultbin IS NOT NULL THEN ' DEFAULT ' || pg_get_expr(t.typdefaultbin, 0) ELSE '' END ||
+           CASE WHEN t.typnotnull THEN ' NOT NULL' ELSE '' END ||
+           coalesce((SELECT string_agg(' CONSTRAINT ' || quote_ident(c.conname) || ' ' || pg_get_constraintdef(c.oid), '' ORDER BY c.conname)
+                       FROM pg_constraint c WHERE c.contypid = t.oid), ''),
+         '[]'::json
+    FROM pg_type t
+    JOIN pg_namespace n ON n.oid = t.typnamespace
+   WHERE n.nspname = $1 AND t.typtype = 'd'
      AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_type'::regclass AND d.objid = t.oid AND d.deptype = 'e')
 ) o) AS objects
 `
@@ -341,6 +379,19 @@ export function pickTables(
   return { schema: snapshot.schema, capturedAt: snapshot.capturedAt, tables, objects }
 }
 
+/** A type captured as a domain rather than an enum: it is dropped with DROP DOMAIN. */
+export function isDomain(o: Pick<ObjectState, 'kind' | 'definition'>): boolean {
+  return o.kind === 'type' && o.definition.startsWith('CREATE DOMAIN ')
+}
+
+/** An enum's labels in order, read from the CREATE TYPE the catalog built; null for anything else. */
+export function enumLabels(o: Pick<ObjectState, 'kind' | 'definition'> | undefined): string[] | null {
+  if (!o || o.kind !== 'type') return null
+  const at = o.definition.indexOf(' AS ENUM (')
+  if (!o.definition.startsWith('CREATE TYPE ') || at < 0) return null
+  return [...o.definition.slice(at).matchAll(/'((?:[^']|'')*)'/g)].map((m) => m[1].replace(/''/g, "'"))
+}
+
 /** Objects compare equal when they would behave the same: kind, definition, options. */
 export function sameObject(a: ObjectState, b: ObjectState): boolean {
   return a.kind === b.kind && a.definition === b.definition && JSON.stringify([...a.options].sort()) === JSON.stringify([...b.options].sort())
@@ -349,6 +400,15 @@ export function sameObject(a: ObjectState, b: ObjectState): boolean {
 // ── Comparison ───────────────────────────────────────────────────────────────
 
 const byName = <T extends { name: string }>(a: T, b: T) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)
+
+/** The data plane's soft-delete policy (backenly_pgrst_apply_soft_delete). */
+export const DATA_PLANE_POLICY = 'bkn_pgrst_soft_delete'
+
+/** The owner default backenly_pgrst_apply_owner_defaults sets, as pg_get_expr renders it. */
+const DATA_PLANE_OWNER_DEFAULT = /^\(?(?:"[^"]+"|[A-Za-z_][A-Za-z0-9_$]*)\.backenly_jwt_claim\('sub'::text\)\)?(?:::uuid)?$/
+
+const comparableDefault = (d: string | null | undefined) =>
+  d != null && DATA_PLANE_OWNER_DEFAULT.test(d) ? null : d
 
 /**
  * The parts of a table a rollback promises to restore, in a form that compares
@@ -364,18 +424,40 @@ const byName = <T extends { name: string }>(a: T, b: T) => (a.name < b.name ? -1
  *     every table when they are issued, so grants move for reasons that have
  *     nothing to do with this table. They are restored, but not compared.
  *   - comments, which describe and do not decide.
+ *   - what the same installer adds to a table it serves, by its own sync
+ *     (scripts/sql/postgrest-schema-registry.sql): the soft-delete policy and
+ *     the owner column's default to the caller's `sub` claim. Registering a
+ *     schema again (the PGRST106 self-heal, the schema_not_registered repair)
+ *     adds both to every table outside any change, and compared, they made
+ *     every earlier change "changed since" and refused its restore.
  */
 export function tableSignature(t: TableState): string {
   return JSON.stringify({
-    columns: [...t.columns].sort(byName).map((c) => [c.name, c.type, c.notNull, c.default, c.identity, c.generated]),
+    columns: [...t.columns].sort(byName).map((c) => [c.name, c.type, c.notNull, comparableDefault(c.default), c.identity, c.generated]),
     constraints: [...t.constraints].sort(byName).map((c) => [c.name, c.type, c.definition]),
     indexes: [...t.indexes].sort(byName).map((i) => [i.name, i.definition]),
     rls: [t.rls.enabled, t.rls.forced],
-    policies: [...t.policies].sort(byName).map((p) => [p.name, p.cmd, p.permissive, [...p.roles].sort(), p.using, p.check]),
+    policies: [...t.policies].filter((p) => p.name !== DATA_PLANE_POLICY).sort(byName)
+      .map((p) => [p.name, p.cmd, p.permissive, [...p.roles].sort(), p.using, p.check]),
     triggers: [...t.triggers].sort(byName).map((g) => [g.name, g.definition, g.enabled]),
   })
 }
 
 export function sameTable(a: TableState, b: TableState): boolean {
   return tableSignature(a) === tableSignature(b)
+}
+
+/**
+ * The roles the REST API serves requests as. Their privileges on a table are
+ * the API's access to it, so a change that takes one away has changed the
+ * table, and its restore gives it back. Every other role's grants (direct
+ * access, backups) are kept by their own sync (lib/services/direct-access.ts)
+ * and stay out of both: the reason grants are left out of tableSignature.
+ */
+export const API_GRANTEES: ReadonlySet<string> = new Set(['anon', 'authenticated', 'service_role'])
+
+/** The API roles' privileges `then` held that `now` does not. */
+export function apiGrantsRemoved(then: TableState, now: TableState): GrantState[] {
+  const held = new Set(now.grants.map((g) => `${g.grantee}\u0000${g.privilege}`))
+  return then.grants.filter((g) => API_GRANTEES.has(g.grantee) && !held.has(`${g.grantee}\u0000${g.privilege}`))
 }

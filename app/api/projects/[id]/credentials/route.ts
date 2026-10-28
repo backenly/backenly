@@ -15,6 +15,7 @@ export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
 import { withProjectValidation } from '@/lib/middleware/projectValidation'
+import { governedChange } from '@/lib/changes/ledger'
 import { storeIntegrationKey, vaultIdForEnvVar } from '@/lib/services/integrationKeyStore'
 import { prisma } from '@/lib/db/prisma'
 import { WorkspaceOAuthService } from '@/lib/services/workspaceOAuth'
@@ -45,65 +46,75 @@ export async function POST(request: NextRequest, props: { params: Promise<{ id: 
     }
 
     // ── 1. Store each key securely ────────────────────────────────────────────
+    // Steps 1 and 2 are one change in the project's history: the keys and the
+    // switch that says the integration is connected (lib/changes/resources).
     const stored: string[] = []
-    for (const [envVar, rawKey] of Object.entries(values)) {
-      const trimmed = rawKey?.trim()
-      if (!trimmed) continue
+    let refused = null as NextResponse | null
+    const connect = async () => {
+      for (const [envVar, rawKey] of Object.entries(values)) {
+        const trimmed = rawKey?.trim()
+        if (!trimmed) continue
 
-      // One row, under the vault id every reader looks up. This used to write
-      // a second row under the lowercased env-var name, which listed as its
-      // own integration and kept Stripe connected after a disconnect; a lookup
-      // by env-var name now resolves to this row inside the key store.
-      const vaultId = vaultIdForEnvVar(envVar) ?? integrationId
-      try {
-        await storeIntegrationKey(projectId, vaultId, trimmed)
-      } catch (err: any) {
-        // Surface format/dangerous-secret errors as a proper 422 so the UI can
-        // display the real message ("must start with sk_live_…") instead of a
-        // generic 500 that comes from withProjectValidation's catch-all.
-        return NextResponse.json(
-          { error: err?.message ?? 'Failed to store credential' },
-          { status: err?.isFormatError ? 422 : 400 }
-        )
+        // One row, under the vault id every reader looks up. This used to write
+        // a second row under the lowercased env-var name, which listed as its
+        // own integration and kept Stripe connected after a disconnect; a lookup
+        // by env-var name now resolves to this row inside the key store.
+        const vaultId = vaultIdForEnvVar(envVar) ?? integrationId
+        try {
+          await storeIntegrationKey(projectId, vaultId, trimmed)
+        } catch (err: any) {
+          // Surface format/dangerous-secret errors as a proper 422 so the UI can
+          // display the real message ("must start with sk_live_…") instead of a
+          // generic 500 that comes from withProjectValidation's catch-all.
+          refused = NextResponse.json(
+            { error: err?.message ?? 'Failed to store credential' },
+            { status: err?.isFormatError ? 422 : 400 }
+          )
+          return
+        }
+
+        stored.push(envVar)
       }
 
-      stored.push(envVar)
-    }
+      if (stored.length === 0) return
 
+      // ── 2. Sync project.activeIntegrations so the dashboard reflects real state ─
+      // The integrations page reads project.activeIntegrations[id].enabled.
+      // Without this, the dashboard shows "Not provisioned" while the key IS stored.
+      try {
+        const existingProject = await prisma.project.findUnique({
+          where: { id: projectId },
+          select: { activeIntegrations: true },
+        })
+        const existing = (existingProject?.activeIntegrations as Record<string, any>) ?? {}
+        if (!existing[integrationId]?.enabled) {
+          // history: inside the Connect change above
+          await prisma.project.update({
+            where: { id: projectId },
+            data: {
+              activeIntegrations: {
+                ...existing,
+                [integrationId]: {
+                  enabled: true,
+                  activatedAt: new Date().toISOString(),
+                  activatedBy: 'credential_modal',
+                  stored,
+                },
+              },
+            },
+          })
+        }
+      } catch {
+        // non-fatal — dashboard sync is best-effort
+      }
+    }
+    await governedChange(projectId, `Connect ${integrationId}`, connect)
+    if (refused) return refused
     if (stored.length === 0) {
       return NextResponse.json(
         { error: 'No valid credential values provided' },
         { status: 400 }
       )
-    }
-
-    // ── 2. Sync project.activeIntegrations so the dashboard reflects real state ─
-    // The integrations page reads project.activeIntegrations[id].enabled.
-    // Without this, the dashboard shows "Not provisioned" while the key IS stored.
-    try {
-      const existingProject = await prisma.project.findUnique({
-        where: { id: projectId },
-        select: { activeIntegrations: true },
-      })
-      const existing = (existingProject?.activeIntegrations as Record<string, any>) ?? {}
-      if (!existing[integrationId]?.enabled) {
-        await prisma.project.update({
-          where: { id: projectId },
-          data: {
-            activeIntegrations: {
-              ...existing,
-              [integrationId]: {
-                enabled: true,
-                activatedAt: new Date().toISOString(),
-                activatedBy: 'credential_modal',
-                stored,
-              },
-            },
-          },
-        })
-      }
-    } catch {
-      // non-fatal — dashboard sync is best-effort
     }
 
     // ── 4. For OAuth providers: wire ADD_PROVIDER + write directly to workspaceOAuthConfig ─

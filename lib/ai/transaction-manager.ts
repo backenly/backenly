@@ -105,6 +105,7 @@ async function rollbackEffect(projectId: string, effect: SideEffect): Promise<vo
       })
       const existing = (project?.activeIntegrations as Record<string, any>) ?? {}
       const { [integrationId]: _removed, ...rest } = existing
+      // history: undoes a failed connect inside dispatchIntegration's change (lib/integrations/index.ts)
       await prisma.project.update({
         where: { id: projectId },
         data: { activeIntegrations: rest },
@@ -115,6 +116,7 @@ async function rollbackEffect(projectId: string, effect: SideEffect): Promise<vo
     case 'key_stored': {
       const { integrationId } = effect.payload
       // Delete the stored key
+      // history: undoes a failed connect inside dispatchIntegration's change (lib/integrations/index.ts)
       await prisma.projectIntegrationKey.deleteMany({
         where: { projectId, integrationId },
       })

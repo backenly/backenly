@@ -36,7 +36,8 @@ function body() {
     token_endpoint_auth_methods_supported: ['none'],
     revocation_endpoint_auth_methods_supported: ['none'],
     scopes_supported: SUPPORTED_SCOPES,
-    service_documentation: `${origin}/docs/mcp`,
+    // /docs/mcp never existed; the connect guide is the MCP documentation.
+    service_documentation: `${origin}/docs/connect`,
   }
 }
 

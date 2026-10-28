@@ -4,8 +4,8 @@ All notable changes to `@backenly/mcp-server` are documented here. Follows [Sema
 
 ## [Unreleased]
 
-### Fixed
-- **A change still running when `backend_chat` hit its time limit is no longer "Nothing was applied."** Backenly now reports it as `stillRunning`: it was left to finish, so it may take effect. The guidance block says so and to check with `read_backend_state`, instead of telling the agent nothing was applied and to change the request, which could run the change twice.
+### Changed
+- **A failure that names `next` says to make that call.** A request Backenly stopped with work still waiting (a build out of steps, for one) carries `next`: the call that carries it on, usually `backend_chat { "message": "continue" }`. The guidance block told the agent the identical request would fail and to change it, so it rephrased or gave up; it now says to make the `next` call. The body carries `next` on every version of this package.
 
 ## [0.4.0] — 2026-09-26
 

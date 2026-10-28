@@ -64,25 +64,26 @@ export function failureGuidance(lean: Record<string, unknown>): string | null {
   const applied = Array.isArray(lean.applied) ? lean.applied : []
   const trail = Array.isArray(lean.whatRanBeforeItFailed) ? lean.whatRanBeforeItFailed : []
   const toolsRun = Array.isArray(lean.toolsRun) ? lean.toolsRun : []
-  // Changes that were still running when the run stopped, left to finish: not
-  // applied yet, and not "nothing applied" either.
-  const stillRunning = Array.isArray(lean.stillRunning) ? lean.stillRunning : []
   if (applied.length) {
     const named = applied.map((a) => (typeof a === 'string' ? a : (a as { summary?: string })?.summary ?? JSON.stringify(a)))
     parts.push(`ALREADY APPLIED, do not repeat: ${named.join('; ')}. Verify with read_backend_state and ask only for what is missing.`)
-  } else if (lean.partial === false && !stillRunning.length) {
+  } else if (lean.partial === false) {
     parts.push('Nothing was applied.')
-  } else if (!stillRunning.length && (toolsRun.length || trail.length)) {
+  } else if (toolsRun.length || trail.length) {
     parts.push('Steps ran before it stopped, so some of this may already be applied: check with read_backend_state before retrying.')
   }
-  if (stillRunning.length) {
-    parts.push(`STILL RUNNING when it stopped, and left to finish, so it may take effect: ${stillRunning.join('; ')}. Check with read_backend_state before asking for it again.`)
-  }
 
-  if (lean.retryable === true) {
+  // A request that stopped with work left names the call that carries it on.
+  // That call, not a retry or a different request, is the next step.
+  const next = lean.next && typeof lean.next === 'object' ? (lean.next as Record<string, unknown>) : null
+  if (next && typeof next.tool === 'string') {
+    const wait = typeof next.afterMs === 'number' ? ` in about ${Math.round(next.afterMs / 1000)}s` : ''
+    const why = typeof next.why === 'string' ? ` ${next.why}` : ''
+    parts.push(`Next: call ${next.tool} with ${JSON.stringify(next.arguments ?? {})}${wait}.${why}`)
+  } else if (lean.retryable === true) {
     const ms = typeof lean.retryAfterMs === 'number' ? lean.retryAfterMs : null
     parts.push(`This is transient: the same request is worth retrying after ${ms ? `${Math.round(ms / 1000)}s` : 'a moment'}.`)
-  } else if (lean.retryable === false && !stillRunning.length) {
+  } else if (lean.retryable === false) {
     parts.push('Retrying the identical request will fail the same way; change the request.')
   }
 

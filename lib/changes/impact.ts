@@ -145,7 +145,9 @@ export async function measureImpact(db: Runner, input: ImpactInput): Promise<Imp
     // ── Columns the restore removes ───────────────────────────────────────
     for (const [k, ac] of after) {
       if (before.has(k) || ac.generated) continue
-      const rewritten = findEntry(preserved, A.name, ac.name, 'rewritten')
+      // The values the change produced in it, when it kept them: a data
+      // migration's output, or what a volatile default filled in.
+      const rewritten = findEntry(preserved, A.name, ac.name, 'rewritten') ?? findEntry(preserved, A.name, ac.name, 'filled')
       let where: string
       if (rewritten && rewritten.keyColumns.length > 0 && rewritten.afterColumn) {
         const match = rewritten.keyColumns.map((kc) => `a.${q(kc)} = t.${q(kc)}`).join(' AND ')
@@ -203,9 +205,13 @@ export async function measureImpact(db: Runner, input: ImpactInput): Promise<Imp
   }
 
   // ── Tables the restore brings back ──────────────────────────────────────
+  // A table dropped and created again under its name comes back as one removed
+  // does, so its rows are measured the same way. Matched by either name, as the
+  // plan finds them (planRestore): a restore that will bring a table back empty
+  // always has an item here, or it would need an approval nothing could give.
   for (const c of footprint) {
-    if (c.object || c.kind !== 'removed' || !c.before) continue
-    if (!preserved.some((e) => e.kind === 'table' && e.table === c.before)) {
+    if (c.object || (c.kind !== 'removed' && c.kind !== 'replaced') || !c.before) continue
+    if (!preserved.some((e) => e.kind === 'table' && (e.table === c.before || e.table === c.after))) {
       add('restore_incomplete', c.before, undefined, 1,
         `${c.before} would come back empty: its rows were not kept when it was removed.`)
     }
@@ -291,7 +297,7 @@ function findEntry(
   preserved: PreservedEntry[],
   table: string,
   column: string,
-  reason: 'dropped' | 'retyped' | 'rewritten',
+  reason: 'dropped' | 'retyped' | 'rewritten' | 'filled',
 ): Extract<PreservedEntry, { kind: 'column' }> | undefined {
   return preserved.find(
     (e): e is Extract<PreservedEntry, { kind: 'column' }> =>

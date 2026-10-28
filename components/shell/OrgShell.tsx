@@ -3,15 +3,16 @@
 /**
  * OrgShell: the account-level frame (IA restructure §5).
  *
- * Projects, Usage, Members, Billing and Settings, in the same frame as the
- * project workspace (ConsoleFrame) so the two levels read as one product. The
- * bar here carries no project switcher and no environment, because there is no
- * project in scope: brand, the account, search, and the account menu.
+ * Projects, Usage, Members, Billing, then Help (Support and the docs), with
+ * Settings and the plan at the foot, in the same frame as the project
+ * workspace (ConsoleFrame) so the two levels read as one product. The bar here
+ * carries no project switcher and no environment, because there is no project
+ * in scope: brand, the account, search, and the account menu.
  */
 
 import { type ReactNode } from 'react'
 import { usePathname } from 'next/navigation'
-import { FolderKanban, Gauge, Users, CreditCard, LifeBuoy, Settings } from 'lucide-react'
+import { BookOpen, FolderKanban, Gauge, Users, CreditCard, LifeBuoy, Settings } from 'lucide-react'
 import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
 import { useOrgHrefs } from '@cloud/org-routing'
 import {
@@ -26,6 +27,7 @@ import {
   NavItem,
   SearchTrigger,
   SidebarNav,
+  SidebarPlan,
 } from './ConsoleChrome'
 
 /**
@@ -56,11 +58,6 @@ const NAV = [
         { id: 'usage',    title: 'Usage',             icon: Gauge,        match: (p: string) => p.startsWith('/app/usage') || ORG_USAGE.test(p) },
         { id: 'members',  title: 'Members',           icon: Users,        match: (p: string) => p.startsWith('/app/members') || ORG_MEMBERS.test(p) },
         { id: 'billing',  title: 'Billing', icon: CreditCard,   match: (p: string) => p.startsWith('/app/billing') || ORG_BILLING.test(p) },
-        // Support is Cloud-gated for the same reason as Usage: behind the form
-        // is Backenly's support team, which a self-hosted deployment does not
-        // have. Cases belong to the person, not an organization, so the href is
-        // static rather than org-routed.
-        { id: 'support',  title: 'Support', icon: LifeBuoy,     href: '/app/support', match: (p: string) => p.startsWith('/app/support') },
       ] as const)
     : ([] as const)),
   // HIDDEN 2026-07-19 — referral program parked for now. Backend (signup ?ref=,
@@ -68,14 +65,34 @@ const NAV = [
   // the Gift icon, and REFERRAL_HIDDEN in app/app/referral/page.tsx.
 ] as const
 
+/**
+ * Where to get help, kept together and in the same place on every account
+ * page. Support is Cloud-gated for the same reason as Usage: behind the form
+ * is Backenly's support team, which a self-hosted deployment does not have.
+ * Cases belong to the person, not an organization, so its href is static.
+ * The docs are public on Backenly Cloud; a self-hosted build serves no /docs
+ * (middleware sends marketing paths to /app), so it links to backenly.com's.
+ */
+const HELP = [
+  ...(CLOUD_CONTROL_PLANE
+    ? ([{ id: 'support', title: 'Support', icon: LifeBuoy, href: '/app/support', external: false, match: (p: string) => p.startsWith('/app/support') }] as const)
+    : ([] as const)),
+  {
+    id: 'docs',
+    title: 'Documentation',
+    icon: BookOpen,
+    href: CLOUD_CONTROL_PLANE ? '/docs' : 'https://backenly.com/docs',
+    external: true,
+    match: () => false,
+  },
+] as const
+
 export function OrgShell({ children }: { children: ReactNode }) {
   const pathname = usePathname() ?? ''
   const settingsActive = pathname.startsWith('/app/settings')
   const orgHrefs = useOrgHrefs()
-  // Org-scoped surfaces take their hrefs from the org-routing seam; an item
-  // with its own `href` (Support) is account-level on every edition.
-  const hrefOf = (item: (typeof NAV)[number]) =>
-    'href' in item ? item.href : orgHrefs[item.id as keyof typeof orgHrefs]
+  // Org-scoped surfaces take their hrefs from the org-routing seam.
+  const hrefOf = (item: (typeof NAV)[number]) => orgHrefs[item.id as keyof typeof orgHrefs]
 
   const bar = (
     <ConsoleBar>
@@ -95,14 +112,29 @@ export function OrgShell({ children }: { children: ReactNode }) {
   const sidebar = (
     <SidebarNav
       footer={
-        <ul>
-          <NavItem href="/app/settings" icon={Settings} label="Settings" active={settingsActive} />
-        </ul>
+        <>
+          <SidebarPlan billingHref={orgHrefs.billing} />
+          <ul>
+            <NavItem href="/app/settings" icon={Settings} label="Settings" active={settingsActive} />
+          </ul>
+        </>
       }
     >
       <NavGroup first>
         {NAV.map((item) => (
           <NavItem key={item.id} href={hrefOf(item)} icon={item.icon} label={item.title} active={item.match(pathname)} />
+        ))}
+      </NavGroup>
+      <NavGroup label="Help">
+        {HELP.map((item) => (
+          <NavItem
+            key={item.id}
+            href={item.href}
+            icon={item.icon}
+            label={item.title}
+            active={item.match(pathname)}
+            external={item.external}
+          />
         ))}
       </NavGroup>
     </SidebarNav>

@@ -6,6 +6,7 @@ import { prisma } from '@/lib/db/postgres'
 import { requireAuth } from '@/lib/auth/middleware'
 import { apiKeyRateCeilingViolation } from '@/lib/quota/kernel'
 import { z } from 'zod'
+import { governedChange } from '@/lib/changes/ledger'
 
 const updateApiKeySchema = z.object({
   name: z.string().min(1).optional(),
@@ -110,13 +111,14 @@ export async function PUT(request: NextRequest, props: { params: Promise<{ id: s
       }
     }
 
-    const apiKey = await prisma.apiKey.updateMany({
+    const owner = await prisma.apiKey.findFirst({ where: { id: params.id, userId: auth.userId }, select: { projectId: true, name: true } })
+    const apiKey = await governedChange(owner?.projectId, `Change API key ${owner?.name ?? ''}`.trim(), () => prisma.apiKey.updateMany({
       where: {
         id: params.id,
         userId: auth.userId,
       },
       data: updateData,
-    })
+    }), { actorUserId: auth.userId })
 
     if (apiKey.count === 0) {
       return NextResponse.json(
@@ -182,7 +184,7 @@ export async function DELETE(request: NextRequest, props: { params: Promise<{ id
     // a personal key (no project) stays own-row.
     const row = await prisma.apiKey.findUnique({
       where: { id: params.id },
-      select: { id: true, userId: true, projectId: true },
+      select: { id: true, userId: true, projectId: true, name: true },
     })
     if (!row) {
       return NextResponse.json({ error: 'API key not found' }, { status: 404 })
@@ -201,9 +203,9 @@ export async function DELETE(request: NextRequest, props: { params: Promise<{ id
       return NextResponse.json({ error: 'API key not found' }, { status: 404 })
     }
 
-    const result = await prisma.apiKey.deleteMany({
+    const result = await governedChange(row.projectId, `Revoke API key ${row.name}`, () => prisma.apiKey.deleteMany({
       where: { id: params.id },
-    })
+    }), { actorUserId: auth.userId })
 
     if (result.count === 0) {
       return NextResponse.json(

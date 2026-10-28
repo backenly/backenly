@@ -126,6 +126,50 @@ export function generateDomainEndpoints(
   return endpoints
 }
 
+/**
+ * The `<table>-<suffix>` endpoints above, and the kind of table each is
+ * generated for. Every other generated endpoint has a fixed name.
+ */
+const TABLE_ENDPOINT_SUFFIXES: Record<string, (t: string) => boolean> = {
+  create: (t) => isJobTable(t) || isPaymentTable(t),
+  cancel: (t) => isJobTable(t) || isSubscriptionTable(t),
+  retry: (t) => isJobTable(t),
+  progress: (t) => isJobTable(t),
+  balance: (t) => isWalletTable(t),
+  deduct: (t) => isWalletTable(t),
+  topup: (t) => isWalletTable(t),
+  subscribe: (t) => isSubscriptionTable(t),
+  upgrade: (t) => isSubscriptionTable(t),
+  full: (t) => isParentTable(t),
+  webhook: (t) => isPaymentTable(t),
+  schema: () => true,
+}
+
+/** A project with a table of every kind, so every fixed name is generated. */
+const EVERY_KIND = ['users', 'jobs', 'credits', 'subscriptions', 'projects', 'payments', 'audit_logs', 'orders', 'sales', 'sellers', 'products', 'inventory', 'transactions']
+let fixedEndpointNames: Set<string> | null = null
+
+/**
+ * Whether a function by this name is one generateDomainEndpoints registers for
+ * some table, as opposed to one a person or a model named. From the name
+ * alone, so the answer never changes while the tables do: the change history
+ * leaves these rows to follow their table (lib/changes/resources/functions.ts)
+ * and must not see one appear because its table went. Checked against
+ * the builders in tests/unit/domain-endpoint-names.spec.ts.
+ */
+export function isDomainEndpointName(name: string): boolean {
+  fixedEndpointNames ??= new Set(
+    EVERY_KIND.flatMap((t) => generateDomainEndpoints(t, 'p', EVERY_KIND))
+      .map((ep) => ep.name)
+      .filter((n) => !EVERY_KIND.some((t) => n.startsWith(`${t}-`))),
+  )
+  if (fixedEndpointNames.has(name)) return true
+  const dash = name.lastIndexOf('-')
+  if (dash <= 0) return false
+  const kind = TABLE_ENDPOINT_SUFFIXES[name.slice(dash + 1)]
+  return !!kind && kind(name.slice(0, dash).toLowerCase())
+}
+
 // ─── PHASE 4 — Flag-gated state-machine endpoint preview (shadow mode) ──────
 //
 // Phase 4 wiring: lets callers preview the additional endpoints that the

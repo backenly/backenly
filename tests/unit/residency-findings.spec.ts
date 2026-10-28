@@ -57,6 +57,7 @@ jest.mock('@/lib/db/prisma', () => {
       if (key === 'OR') return want.some((clause: any) => matches(row, clause))
       if (key === 'details') return row.details?.[want.path[0]] === want.equals
       if (want && typeof want === 'object' && Array.isArray(want.in)) return want.in.includes(row[key])
+      if (want && typeof want === 'object' && 'not' in want) return row[key] !== want.not
       return row[key] === want
     })
   // Copies, as a database returns them: a caller's object is never the stored row.

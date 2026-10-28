@@ -255,14 +255,14 @@ export function CommandPalette() {
                   aria-autocomplete="list"
                   autoComplete="off"
                   spellCheck={false}
-                  className="h-[52px] w-full bg-transparent pl-11 pr-4 text-[16px] text-zinc-50 placeholder:text-zinc-600 focus:outline-none sm:text-[14px]"
+                  className="h-[52px] w-full bg-transparent pl-11 pr-4 text-[16px] text-zinc-50 placeholder:text-zinc-500 focus:outline-none sm:text-[14px]"
                 />
               </div>
 
               <div ref={listRef} id={listId} role="listbox" className="max-h-[min(360px,55vh)] overflow-y-auto overscroll-contain p-1.5">
                 {Object.entries(groupedCommands).map(([category, cmds]) => (
                   <div key={category} role="group" aria-label={category} className="pb-1">
-                    <div className="px-2.5 pb-1 pt-2 text-[12px] font-medium text-zinc-500">{category}</div>
+                    <div className="px-2.5 pb-1 pt-2 text-[12px] font-medium text-faint">{category}</div>
                     {cmds.map((cmd) => {
                       const globalIndex = filteredCommands.indexOf(cmd)
                       const isSelected = globalIndex === selectedIndex
@@ -292,12 +292,12 @@ export function CommandPalette() {
                 ))}
                 {filteredCommands.length === 0 && (
                   <div className="px-4 py-10 text-center">
-                    <p className="text-[13px] text-zinc-500">Nothing matches “{search}”.</p>
+                    <p className="text-[13px] text-faint">Nothing matches “{search}”.</p>
                   </div>
                 )}
               </div>
 
-              <div className="hidden items-center justify-between border-t border-white/[0.07] px-4 py-2.5 text-[12px] text-zinc-500 sm:flex">
+              <div className="hidden items-center justify-between border-t border-white/[0.07] px-4 py-2.5 text-[12px] text-faint sm:flex">
                 <div className="flex items-center gap-4">
                   <span className="flex items-center gap-1.5">
                     <PaletteKey>↑</PaletteKey>

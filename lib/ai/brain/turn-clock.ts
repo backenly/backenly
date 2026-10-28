@@ -1,18 +1,18 @@
 /**
  * WHEN A TURN STOPS STARTING WORK
  * ===============================
- * backend_chat gives a turn 90 seconds and answers when they are up. The brain
- * used to carry on after that answer: the deadline was read once per agent-loop
- * iteration, and nowhere in the blueprint executor or the architect, so tools
- * ran and changes landed after the agent had been told what the turn did, and
- * an agent that took the timeout's `retryable` at its word ran the same request
- * twice (#247).
+ * A backend_chat request is a run with its own time limit (lib/ai/brain/runs.ts),
+ * and the brain keeps a verification reserve at the end of it. The deadline was
+ * read once per agent-loop iteration, and nowhere in the blueprint executor, so
+ * the calls of a model answer that came back just before the reserve all ran
+ * past it, and a long plan and its post-build fixes ran on past the limit for
+ * as long as they took (#247).
  *
  * A turn now has one clock. It stops when the verification reserve begins (the
- * reserve is spent proving what landed) or when the caller gives up, whichever
- * comes first. From then on nothing new starts: no model call, tool, blueprint
- * step or fix, and a model call in flight is cancelled. A tool already running
- * is left to finish, because stopping DDL halfway is worse than letting it end.
+ * reserve is spent proving what landed). From then on nothing new starts: no
+ * agent-loop model call, tool, blueprint step or fix, and a model call in
+ * flight is cancelled. A tool already running is left to finish, because
+ * stopping DDL halfway is worse than letting it end.
  *
  * `stopped()` reads the time as well as the signal, so a step is not let
  * through just because the timer has not fired yet.
@@ -23,32 +23,26 @@ export interface TurnClock {
   readonly signal: AbortSignal
   /** True once nothing new may start. */
   stopped(): boolean
-  /** Clears the timer and the listener on the caller's signal. Call when the turn ends. */
+  /** Clears the timer. Call when the turn ends. */
   dispose(): void
 }
 
 /**
  * Start a turn's clock. `stopAt` is when the turn stops starting work (epoch
- * ms); `callerSignal` is the caller giving up. With neither, it never stops.
+ * ms); without it, it never stops.
  */
-export function startTurnClock(stopAt: number | undefined, callerSignal?: AbortSignal): TurnClock {
+export function startTurnClock(stopAt: number | undefined): TurnClock {
   const stop = new AbortController()
-  const giveUp = () => stop.abort()
   let timer: ReturnType<typeof setTimeout> | undefined
   if (stopAt !== undefined) {
-    timer = setTimeout(giveUp, Math.max(0, stopAt - Date.now()))
+    timer = setTimeout(() => stop.abort(), Math.max(0, stopAt - Date.now()))
     timer.unref?.()
   }
-  if (callerSignal?.aborted) giveUp()
-  else callerSignal?.addEventListener('abort', giveUp, { once: true })
 
   return {
     signal: stop.signal,
     stopped: () => stop.signal.aborted || (stopAt !== undefined && Date.now() >= stopAt),
-    dispose: () => {
-      clearTimeout(timer)
-      callerSignal?.removeEventListener('abort', giveUp)
-    },
+    dispose: () => clearTimeout(timer),
   }
 }
 

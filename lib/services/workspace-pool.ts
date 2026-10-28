@@ -33,6 +33,7 @@ import { Pool, PoolClient, QueryResult } from 'pg'
 import { prisma } from '@/lib/db/prisma'
 import { projectDatabaseUrl } from '@/lib/data-plane/regional'
 import { getWorkspaceDatabaseNames } from './databaseProvisioning'
+import { noteStatement } from '@/lib/execution/sql-recorder'
 
 const POOL_MAX = parseInt(process.env.WORKSPACE_POOL_MAX ?? '5', 10)
 const POOL_IDLE_MS = parseInt(process.env.WORKSPACE_POOL_IDLE_MS ?? '10000', 10)
@@ -306,6 +307,11 @@ export async function executeWorkspace(
   params: unknown[] = []
 ): Promise<number> {
   assertParamArity(projectId, sql, params)
+  // On the record of the governed change it runs in, as statements sent through
+  // the Prisma clients are (lib/execution/sql-recorder.ts). Without it a type
+  // dropped here was a removal no statement named, which verification reads as
+  // a CASCADE side effect, and the change kept no SQL of what it ran.
+  noteStatement(sql, params)
   const client = await acquireWorkspaceClient(projectId)
   try {
     const result = await client.query(sql, params)
@@ -325,9 +331,22 @@ export async function withWorkspaceTransaction<T>(
   fn: (client: PoolClient) => Promise<T>
 ): Promise<T> {
   const client = await acquireWorkspaceClient(projectId)
+  // Every statement the callback sends is on the record, as executeWorkspace's are.
+  const noted = new Proxy(client, {
+    get(target, prop, receiver) {
+      if (prop === 'query') {
+        return (text: unknown, ...rest: unknown[]) => {
+          if (typeof text === 'string') noteStatement(text, Array.isArray(rest[0]) ? (rest[0] as unknown[]) : undefined)
+          return (target.query as (...args: unknown[]) => unknown)(text, ...rest)
+        }
+      }
+      const value = Reflect.get(target, prop, receiver)
+      return typeof value === 'function' ? value.bind(target) : value
+    },
+  })
   try {
     await client.query('BEGIN')
-    const result = await fn(client)
+    const result = await fn(noted)
     await client.query('COMMIT')
     return result
   } catch (err) {

@@ -34,6 +34,13 @@ export interface MutationOptions {
   snapshotBefore?: boolean    // take schema snapshot before executing (enables rollback)
   emitRefresh?:    boolean    // emit schema.changed for UI sync (default: true)
   auditAction?:    string     // override AuditLog action string (defaults to KIND_ACTION)
+  title?:          string     // what the change history calls it (defaults to the action, in words)
+}
+
+/** 'delete_bucket' → 'Delete bucket'. */
+function humanAction(action: string): string {
+  const words = action.replace(/_/g, ' ').trim()
+  return words.charAt(0).toUpperCase() + words.slice(1)
 }
 
 export interface MutationResult<T = unknown> {
@@ -102,7 +109,10 @@ export async function runMutation<T>(
     }
 
     // ── 2. Execute ─────────────────────────────────────────────────────────
-    const data = await fn()
+    // As one governed change: checkpointed, verified, in the project's history
+    // and restorable from it, whatever it touches (lib/changes/ledger.ts).
+    const { governedChange } = await import('@/lib/changes/ledger')
+    const data = await governedChange(projectId, opts.title ?? humanAction(action), fn)
 
     // ── 3. Audit log (fire-and-forget) ─────────────────────────────────────
     prisma.auditLog.create({

@@ -278,6 +278,8 @@ describe.each(RUNS)('golden workflow: a realtime chat backend (run %i)', (run) =
 
   it('builds users and messages, locked to their author', async () => {
     await ok(env.rw, 'auth', { action: 'enable' })
+    // Enabling auth creates the end-user table, so the build can point at it.
+    expect(await columns(env.schema, 'users')).toEqual(expect.arrayContaining(['id', 'email']))
     await ok(env.rw, 'apply_migration', {
       sql: 'CREATE TABLE messages (room text NOT NULL, body text NOT NULL, author_id uuid NOT NULL);\nCREATE INDEX messages_room_idx ON messages (room)',
     })
@@ -314,6 +316,13 @@ describe.each(RUNS)('golden workflow: a realtime chat backend (run %i)', (run) =
         return NextResponse.json({ stored: rows[0].n })
       }
     `
+    // The author is a real end user. users exists from the moment auth is
+    // enabled, so messages.author_id was created as a key into it, the key the
+    // repair loop used to add after the first sign-up.
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO "${env.schema}".users (id, email) VALUES ('00000000-0000-4000-8000-000000000001', $1) ON CONFLICT (id) DO NOTHING`,
+      `author-${run}@example.test`,
+    )
     const d = await ok(env.rw, 'functions', { action: 'deploy_code', name: 'post-message', trigger: 'http', code })
     expect(d.data.endpoint).toMatchObject({ method: 'POST' })
     const run1 = await ok(env.rw, 'functions', { action: 'invoke', functionId: d.data.functionId, event: { room: 'lobby', body: `hello ${run}` } })

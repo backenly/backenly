@@ -103,6 +103,35 @@ describe('the Overview’s agent panel', () => {
     expect(await screen.findByRole('heading', { name: 'Waiting on your review' }, { timeout: 3000 })).toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: 'Your agent is waiting on you' })).toBeNull()
   })
+
+  it('is not rendered on a built backend where nothing waits and every check could see', async () => {
+    // The state that showed "Built and standing by": the deep scan says structure_ready.
+    global.fetch = jest.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.split('?')[0].endsWith('/build-status')) {
+        return Promise.resolve(json(200, { blocked: [], failed: [], summary: { statusLabel: 'Ready', verdict: 'structure_ready' } }))
+      }
+      return Promise.resolve(answer(url))
+    }) as unknown as typeof fetch
+    renderOverview()
+    await settle()
+    expect(await screen.findByRole('heading', { name: 'Self-healing loop' }, { timeout: 3000 })).toBeInTheDocument()
+    // /health has loaded (the loop prints when it last checked), so the panel's absence is not just the loading state.
+    expect(await screen.findByText(/^Checked /, {}, { timeout: 3000 })).toBeInTheDocument()
+    expect(screen.queryByText('Autonomy mode')).toBeNull()
+    expect(screen.queryByRole('heading', { name: /No issues detected|Built and standing by/ })).toBeNull()
+  })
+
+  it('still says so when a check could not run', async () => {
+    const now = new Date().toISOString()
+    health = healthWith({
+      sensors: { at: now, total: 3, ran: 2, errored: [{ id: 'fk', title: 'Foreign keys indexed', error: 'x' }], disabled: [] },
+    })
+    renderOverview()
+    await settle()
+    expect(await screen.findByRole('heading', { name: '1 check could not run' }, { timeout: 3000 })).toBeInTheDocument()
+    expect(screen.getByText('Autonomy mode')).toBeInTheDocument()
+  })
 })
 
 describe('the top bar’s review inbox', () => {

@@ -91,12 +91,12 @@ export async function detectUnregisteredSchema(projectId: string): Promise<RawFi
         // Per-project, because that is what this finding is about and what
         // every edition can do. The instance-wide repair sweep is fleet tooling
         // and lives in the Cloud control plane; naming it here would send a
-        // self-hoster looking for a script their checkout does not ship. The
-        // fix below performs this repair automatically anyway.
+        // self-hoster looking for a script their checkout does not ship.
         remediation:
           'Re-register this project schema with ensureSchemaRegistered(projectId) ' +
-          '(lib/postgrest/registration.ts). Autonomy applies this fix itself when ' +
-          'live execution is enabled.',
+          '(lib/postgrest/registration.ts). Autonomy does not do this on its own: ' +
+          'the re-registration runs outside the change history, so it waits for ' +
+          'your approval on the Autonomy page.',
       },
       // Auto-fixable, and safely so. Registration is idempotent, additive, and
       // restores the state a correctly-created project would already be in: it

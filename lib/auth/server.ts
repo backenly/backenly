@@ -206,6 +206,7 @@ export async function validateApiKey(apiKey: string) {
   }
 
   // Update last used timestamp
+  // history: usage bookkeeping (last used, rate-limit window), not configuration
   await prisma.apiKey.update({
     where: { id: key.id },
     data: { lastUsed: new Date() },

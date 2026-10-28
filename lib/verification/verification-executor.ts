@@ -318,16 +318,17 @@ async function checkAuthUsersTable(projectId: string): Promise<CheckResult> {
     )
     const count = parseInt(String((rows?.rows ?? rows)?.[0]?.cnt ?? '0'), 10)
     if (count === 0) {
-      // The users table is created lazily by the first signup. Missing is only
-      // a failure when the developer configured auth surface that depends on it.
+      // The users table is created on first use (sign-up, OAuth, enabling auth,
+      // a key into it). Missing is only a failure when it existed and is gone,
+      // the same evidence the drift detector reads (usersTableExpected).
       const { getEndUserAuthUsage } = await import('@/lib/services/auth-status')
       const usage = await getEndUserAuthUsage(projectId)
-      if (!usage.configuredEvidence) {
+      if (!usage.usersTableExpected) {
         return {
           stepId: 'auth_users_table',
           description: 'Workspace users table exists',
           passed: true,
-          message: 'End-user auth not in use yet — the users table is provisioned automatically on first signup',
+          message: 'No users table yet — it is created on first use (sign-up, sign-in with a provider, or enabling auth)',
         }
       }
     }
@@ -337,7 +338,7 @@ async function checkAuthUsersTable(projectId: string): Promise<CheckResult> {
       passed: count > 0,
       message: count > 0
         ? 'users table found in workspace schema'
-        : `users table is missing from schema "${schemaName}" — auth cannot function`,
+        : `users table is missing from schema "${schemaName}" although it existed — sign-ups create it again, without the users it held`,
     }
   } catch (err) {
     return {

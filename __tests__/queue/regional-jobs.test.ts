@@ -51,7 +51,7 @@ function assertSafeTestDatabase(): void {
 /** A queued job for a project that need not exist: the queue has no foreign key to projects. */
 async function job(type: 'workspace_backup' | 'workspace_restore', region: string, maxAttempts?: number): Promise<{ id: string; projectId: string }> {
   const projectId = randomUUID()
-  const { id } = await enqueueRegionalJob(type, projectId, region, type === 'workspace_restore' ? { backupId: 'b1' } : {}, { maxAttempts })
+  const { id } = await enqueueRegionalJob(type, projectId, region, type === 'workspace_restore' ? { backupId: 'b1', requestedBy: 'u_owner' } : {}, { maxAttempts })
   created.push(id)
   return { id, projectId }
 }
@@ -124,13 +124,14 @@ describe('processing a region’s jobs', () => {
     expect(await row(id)).toMatchObject({ status: 'completed', result: { filename: 'snap.sql.gz', sizeBytes: 2048 } })
   })
 
-  it('restores from the snapshot named, once', async () => {
+  it('restores from the snapshot named, once, for the person who asked', async () => {
     const { id, projectId } = await job('workspace_restore', 'ap-southeast-1', 1)
     mockRestore.mockResolvedValue({ success: true, restoredFrom: 'snap.sql.gz' })
 
     await processRegionalJobs('ap-southeast-1')
 
-    expect(mockRestore).toHaveBeenCalledWith(projectId, 'b1')
+    // The person rides along, so the restore is theirs in the project's history.
+    expect(mockRestore).toHaveBeenCalledWith(projectId, 'b1', 'u_owner')
     expect(await row(id)).toMatchObject({ status: 'completed', result: { restoredFrom: 'snap.sql.gz' } })
   })
 

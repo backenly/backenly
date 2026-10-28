@@ -39,7 +39,7 @@
  * failure mode this whole file exists to prevent.
  */
 
-import { PrismaClient } from '@prisma/client'
+import { PrismaClient, type Prisma } from '@prisma/client'
 import { randomUUID } from 'crypto'
 
 const prisma = new PrismaClient()
@@ -51,21 +51,33 @@ const SCHEMA = `workspace_pq_${suffix}`
 const ANON = `pq_anon_${suffix}`
 const AUTHED = `pq_authed_${suffix}`
 
-async function asRole<T>(role: string, fn: () => Promise<T>): Promise<T> {
-  await prisma.$executeRawUnsafe(`SET ROLE "${role}"`)
-  try {
-    return await fn()
-  } finally {
-    await prisma.$executeRawUnsafe(`RESET ROLE`)
-  }
+type Db = Prisma.TransactionClient
+
+/**
+ * Run as `role` on ONE connection: the role and the case's own queries share an
+ * interactive transaction. Separate `prisma` calls are served by any pooled
+ * connection, so a role set by one call did not reach the next, and a query that
+ * landed elsewhere ran as the suite's superuser: a refusal case failed at random,
+ * and an "allowed" case passed without having been tested as the role at all.
+ * SET LOCAL ends with the transaction, so the pooled connection keeps nothing.
+ */
+async function asRole<T>(role: string, fn: (db: Db) => Promise<T>): Promise<T> {
+  return prisma.$transaction(async (tx) => {
+    await tx.$executeRawUnsafe(`SET LOCAL ROLE "${role}"`)
+    const [ctx] = await tx.$queryRawUnsafe<Array<{ who: string }>>(`SELECT current_user::text AS who`)
+    if (ctx?.who !== role) throw new Error(`not impersonating: running as ${ctx?.who}`)
+    return fn(tx)
+  }, { timeout: 30_000, maxWait: 30_000 })
 }
 
+/** true when `role` is refused with a permission error; any other failure is not an answer, so it is rethrown. */
 async function denied(role: string, sql: string): Promise<boolean> {
   try {
-    await asRole(role, () => prisma.$executeRawUnsafe(sql))
+    await asRole(role, (db) => db.$executeRawUnsafe(sql))
     return false
   } catch (err) {
-    return /permission denied/i.test(err instanceof Error ? err.message : String(err))
+    if (/permission denied/i.test(err instanceof Error ? err.message : String(err))) return true
+    throw err
   }
 }
 
@@ -129,6 +141,12 @@ beforeAll(async () => {
   await prisma.$executeRawUnsafe(`ALTER TABLE "${SCHEMA}".posts ENABLE ROW LEVEL SECURITY`)
   await prisma.$executeRawUnsafe(
     `CREATE POLICY posts_read ON "${SCHEMA}".posts FOR SELECT TO "${ANON}", "${AUTHED}" USING (true)`)
+  // And a permissive write policy, as an ordinary writable table has: with RLS on
+  // and no INSERT policy every insert is refused by RLS, so "an authenticated
+  // user can write one" could never pass for the right reason. It passed only
+  // because a refusal that was not "permission denied" counted as allowed.
+  await prisma.$executeRawUnsafe(
+    `CREATE POLICY posts_write ON "${SCHEMA}".posts FOR INSERT TO "${AUTHED}" WITH CHECK (true)`)
   await prisma.$executeRawUnsafe(`INSERT INTO "${SCHEMA}".users VALUES (1,'a@b.c','$2b$10$hash')`)
   await prisma.$executeRawUnsafe(`INSERT INTO "${SCHEMA}"._password_resets VALUES (1,'single-use-token')`)
 
@@ -182,8 +200,8 @@ describe('parity: reserved plumbing (v1 404s any _-prefixed table)', () => {
 
 describe('parity: ordinary tables still work (or the plane is useless)', () => {
   it('anon can read a normal table', async () => {
-    const rows = await asRole(ANON, () =>
-      prisma.$queryRawUnsafe<Array<{ id: number }>>(`SELECT id FROM "${SCHEMA}".posts`),
+    const rows = await asRole(ANON, (db) =>
+      db.$queryRawUnsafe<Array<{ id: number }>>(`SELECT id FROM "${SCHEMA}".posts`),
     )
     expect(rows.length).toBeGreaterThan(0)
   })
@@ -195,8 +213,8 @@ describe('parity: ordinary tables still work (or the plane is useless)', () => {
 
 describe('parity: soft delete (v1 filters deleted_at IS NULL)', () => {
   it('hides soft-deleted rows from anon', async () => {
-    const rows = await asRole(ANON, () =>
-      prisma.$queryRawUnsafe<Array<{ id: number }>>(`SELECT id FROM "${SCHEMA}".posts`),
+    const rows = await asRole(ANON, (db) =>
+      db.$queryRawUnsafe<Array<{ id: number }>>(`SELECT id FROM "${SCHEMA}".posts`),
     )
     expect(rows.map((r) => r.id)).not.toContain(2)
   })
@@ -205,8 +223,8 @@ describe('parity: soft delete (v1 filters deleted_at IS NULL)', () => {
     // The paired positive. A RESTRICTIVE policy with no permissive policy to AND
     // against returns nothing, which would satisfy the assertion above while
     // having broken the table completely.
-    const rows = await asRole(ANON, () =>
-      prisma.$queryRawUnsafe<Array<{ id: number }>>(`SELECT id FROM "${SCHEMA}".posts`),
+    const rows = await asRole(ANON, (db) =>
+      db.$queryRawUnsafe<Array<{ id: number }>>(`SELECT id FROM "${SCHEMA}".posts`),
     )
     expect(rows.map((r) => r.id)).toContain(1)
   })

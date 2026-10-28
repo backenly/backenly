@@ -225,6 +225,18 @@ describe('request forwarding', () => {
     expect(captured!.url).not.toContain('status=eq.anything')
   })
 
+  // The documented contract is that PUT is the same partial update as PATCH.
+  // Forwarded as PUT, PostgREST read it as its full-row upsert and answered 405
+  // to every one (found by fuzzing the data API against its OpenAPI document).
+  it('sends a PUT upstream as the PATCH it is documented to be', async () => {
+    stubUpstream(200, [{ id: 7, name: 'x' }])
+    const res = mockRes()
+    await handleViaPostgrest(mockReq('PUT', {}, { name: 'x' }), res, ['orders', '7'], { projectId: PROJECT })
+    expect(captured!.init.method).toBe('PATCH')
+    expect(captured!.url).toContain('id=eq.7')
+    expect(res.statusCode).toBe(200)
+  })
+
   it('mints service_role only from a server decision', async () => {
     stubUpstream(200, [])
     await handleViaPostgrest(mockReq('GET'), mockRes(), ['orders'], {

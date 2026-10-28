@@ -61,7 +61,11 @@ import { workspaceSchemaName } from '@/lib/security/workspace-schema'
 import { ROW_EVENT_TYPES, type RowEventType, type WebhookEventType } from './events'
 import { skipUnreachable } from '@/lib/autonomy/region-skip'
 
-/** The trigger attached to every captured table. */
+/**
+ * The trigger attached to every captured table. These names are left out of
+ * the change history as plumbing this module derives; renaming one means
+ * renaming it in lib/changes/catalog.ts PLATFORM_OBJECTS too.
+ */
 const TRIGGER_NAME = 'backenly_webhook_capture'
 /** The per-schema function that trigger executes. */
 const FUNCTION_NAME = 'backenly_capture_webhook_event'
@@ -360,19 +364,12 @@ async function functionRowEvents(projectId: string): Promise<RowEventType[]> {
  * deleted: it may still hold undelivered events, and dropping it to tidy up
  * would discard them.
  */
-export async function syncWebhookCapture(projectId: string): Promise<{
-  events: RowEventType[]
-  tables: string[]
-  /** Eligible tables whose trigger could NOT be installed — each one is a
-   *  table whose row events silently never fire until this is surfaced. */
-  uncaptured: Array<{ table: string; reason: string }>
-}> {
+async function wantedRowEvents(projectId: string): Promise<RowEventType[]> {
   const active = await prisma.webhook.findMany({
     where: { projectId, active: true },
     select: { eventType: true },
   })
-
-  const wanted = [
+  return [
     ...new Set([
       ...active
         .map(w => w.eventType)
@@ -380,6 +377,16 @@ export async function syncWebhookCapture(projectId: string): Promise<{
       ...(await functionRowEvents(projectId)),
     ]),
   ]
+}
+
+export async function syncWebhookCapture(projectId: string): Promise<{
+  events: RowEventType[]
+  tables: string[]
+  /** Eligible tables whose trigger could NOT be installed — each one is a
+   *  table whose row events silently never fire until this is surfaced. */
+  uncaptured: Array<{ table: string; reason: string }>
+}> {
+  const wanted = await wantedRowEvents(projectId)
 
   const captured = await listCapturedTables(projectId)
 
@@ -418,6 +425,24 @@ export async function syncWebhookCapture(projectId: string): Promise<{
   }
 
   return { events: wanted, tables: installed, uncaptured }
+}
+
+/**
+ * Sync only when the tables carrying the trigger are not the ones that should:
+ * after a change or a restore added, removed or brought back tables
+ * (lib/changes/freshness.ts). The capture trigger is left out of the change
+ * history, as plumbing this module derives (lib/changes/catalog.ts), so this
+ * is what gives a table a restore brought back its row events again. Which
+ * events are captured changes only with the subscribers, whose own writes
+ * call syncWebhookCapture.
+ */
+export async function syncWebhookCaptureIfStale(projectId: string): Promise<void> {
+  const [wanted, captured] = await Promise.all([wantedRowEvents(projectId), listCapturedTables(projectId)])
+  if (wanted.length === 0 && captured.length === 0) return
+  const eligible = wanted.length === 0 ? [] : await capturableTables(projectId)
+  const has = new Set(captured)
+  if (eligible.length === captured.length && eligible.every(t => has.has(t))) return
+  await syncWebhookCapture(projectId)
 }
 
 /**

@@ -60,7 +60,7 @@ function timeAgo(iso: string): string {
 function Row({ label, value, mono = true }: { label: string; value: string; mono?: boolean }) {
   return (
     <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-3">
-      <span className="w-[150px] flex-shrink-0 text-[12.5px] text-zinc-500">{label}</span>
+      <span className="w-[150px] flex-shrink-0 text-[12.5px] text-faint">{label}</span>
       <div className="flex min-w-0 items-center gap-1">
         <code className={`min-w-0 truncate text-[12.5px] text-zinc-200 ${mono ? 'font-mono' : ''}`}>{value}</code>
         <CopyButton value={value} label={`Copy ${label.toLowerCase()}`} />
@@ -141,7 +141,7 @@ export function BranchPreviewCard({
       />
       <KitCardBody>
         <div className="space-y-5">
-          <p className="max-w-[72ch] text-[12.5px] leading-[19px] text-zinc-500">
+          <p className="max-w-[72ch] text-[12.5px] leading-[19px] text-faint">
             Same URL as production. A key bound to this branch is what makes a request reach it, and every data
             and auth response says which environment answered. The data API and end-user sign-up, sign-in, refresh
             and logout are branch-scoped; users signed up here exist only on the branch. Functions, storage, realtime
@@ -183,7 +183,7 @@ export function BranchPreviewCard({
                 <KitButton size="sm" variant="ghost" loading={issuing === 'service'} onClick={() => issue(true)}>
                   Server-side key
                 </KitButton>
-                <span className="text-[12px] text-zinc-500">Keys start with proj_preview_ and stop working when the branch is merged or discarded.</span>
+                <span className="text-[12px] text-faint">Keys start with proj_preview_ and stop working when the branch is merged or discarded.</span>
               </div>
             )}
             {error && (
@@ -228,9 +228,9 @@ export function BranchPreviewCard({
               <IconButton icon={RefreshCw} label="Refresh requests" onClick={loadRequests} />
             </div>
             {requests === null ? (
-              <p className="mt-1.5 text-[12.5px] text-zinc-500">Loading…</p>
+              <p className="mt-1.5 text-[12.5px] text-faint">Loading…</p>
             ) : requests.length === 0 ? (
-              <p className="mt-1.5 text-[12.5px] text-zinc-500">
+              <p className="mt-1.5 text-[12.5px] text-faint">
                 None yet. Requests made with this branch&apos;s keys appear here, and never in production monitoring.
               </p>
             ) : (
@@ -240,8 +240,8 @@ export function BranchPreviewCard({
                     <span className="w-[56px] flex-shrink-0 font-mono text-zinc-400">{r.method}</span>
                     <span className="min-w-0 flex-1 truncate font-mono text-zinc-200">{r.path}</span>
                     <Tag tone={r.status >= 500 ? 'bad' : r.status >= 400 ? 'warn' : 'good'} mono>{r.status}</Tag>
-                    <span className="w-[56px] flex-shrink-0 text-right tabular-nums text-zinc-500">{r.latency}ms</span>
-                    <span className="hidden w-[64px] flex-shrink-0 text-right text-zinc-600 sm:inline">{timeAgo(r.timestamp)}</span>
+                    <span className="w-[56px] flex-shrink-0 text-right tabular-nums text-faint">{r.latency}ms</span>
+                    <span className="hidden w-[64px] flex-shrink-0 text-right text-faint sm:inline">{timeAgo(r.timestamp)}</span>
                   </li>
                 ))}
               </ul>

@@ -145,7 +145,7 @@ describe('the console and docs say the same thing', () => {
     expect(panel).toContain("custom: 'Publishable'")
     expect(panel).toContain('>Expires</th>')
     expect(panel).not.toContain(": 'Full access'")
-    expect(panel).toContain('Service role — bypasses row security')
+    expect(panel).toContain('Service role: bypasses row security')
   })
 
   it('connect.md states the no-silent-expiry contract', () => {

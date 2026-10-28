@@ -139,10 +139,14 @@ describe('normalizeFindingType — real production dynamic types', () => {
   // is already live and snapshots first — it adopts the observed state, it never
   // reverts the user's DDL. The point the test was defending (it must not be
   // SILENT notify_only) still holds and is asserted directly.
+  //
+  // Updated again: FIX_API runs outside the change ledger, so History cannot
+  // undo it, and shadow_mutation is now rated `approval`. Still actionable, and
+  // still one click: the approve-route leg below dispatches it.
   test('schema_drift (353 in prod) is actionable, never silent notify_only', () => {
     const c = classifyFix('schema_drift', { description: 'column added outside AI' })
     expect(c.decision).not.toBe('notify_only')
-    expect(c.decision).toBe('auto')
+    expect(c.decision).toBe('approval')
   })
 
   test('an entirely unknown type still returns a friendly hint, never a hard dead end', () => {

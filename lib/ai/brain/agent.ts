@@ -56,14 +56,17 @@ import {
   type ToolName,
   type ToolResult,
 } from './tools'
-import { getBlueprintForPrompt, isExplicitSpec } from '../blueprints'
+import { getBlueprintForPrompt, getCuratedBlueprintForPrompt, isExplicitSpec, shouldUseCuratedBlueprint } from '../blueprints'
 import { looksLikeBuildDescription } from './build-signals'
 import { findOriginalBuildPrompt } from './resume-routing'
 import { saveLoopResume, loadLoopResume, clearLoopResume, resumePrompt, type LoopResume, type LoopStop } from './loop-resume'
 import {
   savePendingPlan, loadPendingPlan, clearPendingPlan,
   saveResumeQueue, loadResumeQueue, clearResumeQueue,
+  designInProgress,
 } from '../blueprints/store'
+import { GATED_SCHEMA_TOOLS, isProductionProtected } from '@/lib/branches/protection'
+import { CONTINUE, GO_AHEAD_LATER, type NextCall } from './next-call'
 import type { Blueprint, BlueprintMatch, BlueprintStep } from '../blueprints/types'
 import {
   extractRequirements,
@@ -166,29 +169,23 @@ export interface BrainInput {
    * that most needed proof were exactly the ones that never got any.
    *
    * With a deadline the turn stops starting NEW work while `VERIFY_RESERVE_MS`
-   * still remains: no model call, tool, blueprint step or fix (turn-clock.ts).
-   * The agent loop spends that reserve on a deterministic verification pass.
-   * Verification is no longer a step the model may or may not reach; it is a
-   * budget line item that is spent first from the end.
+   * still remains: no step of the agent loop or of a plan, and no post-build
+   * fix (turn-clock.ts). The agent loop spends that reserve on a deterministic
+   * verification pass. Verification is no longer a step the model may or may
+   * not reach; it is a budget line item that is spent first from the end.
    *
    * Omit it and the turn has no wall clock of its own. backend_chat always
-   * passes one, from its 90s cap.
+   * passes one: its run's own limit (lib/ai/brain/runs.ts, RUN_LIMITS.maxMs),
+   * not the call's, since a run keeps going after the call has answered.
    */
   deadlineAt?: number
   /**
-   * The caller giving up on the turn. backend_chat aborts it when its 90s cap
-   * fires and it answers the agent, so nothing new starts after that answer
-   * (turn-clock.ts). A tool already running is left to finish.
-   */
-  signal?: AbortSignal
-  /**
    * ── Token reporting that survives an abort ─────────────────────────────────
    *
-   * `BrainResult.tokensUsed` is only readable when the turn RETURNS. Callers
-   * that race this function against a wall clock (the MCP transport caps at
-   * 90s) never see it on the timeout path, because the race rejects and the
-   * result is discarded — so a run that spent 80s of model time was billed
-   * nothing at all. That is the most expensive kind of turn to lose.
+   * `BrainResult.tokensUsed` is only readable when the turn RETURNS. A turn
+   * that throws, and one a caller races against a wall clock, never return it,
+   * so a run that spent 80s of model time was billed nothing at all. That is
+   * the most expensive kind of turn to lose.
    *
    * This fires after every completion, as the tokens are actually consumed, so
    * a caller can accumulate them itself and charge what was spent even when the
@@ -201,7 +198,8 @@ export interface BrainInput {
 }
 
 export type BrainEvent =
-  | { type: 'phase'; phase: 'understand' | 'classify' | 'route' | 'execute' | 'verify' | 'finish' }
+  /** `design`: the architect started designing a plan, a single call that can take minutes. */
+  | { type: 'phase'; phase: 'understand' | 'classify' | 'route' | 'design' | 'execute' | 'verify' | 'finish' }
   | { type: 'classification'; intent: BrainIntent; confidence: number; reasoning: string }
   | { type: 'thinking'; text: string }
   | { type: 'tool_start'; tool: string; title: string }
@@ -276,12 +274,12 @@ export interface BrainResult {
    */
   applied?: string[]
   /**
-   * The loop stopped early to protect its verification reserve, and DID verify.
+   * The loop, or a plan, stopped early to protect its verification reserve.
    *
    * Distinct from every failure code: nothing went wrong, the run simply ran out
-   * of wall clock with work still queued. `summary` carries the verified live
-   * state, so the caller can report a truthful partial result instead of a
-   * timeout the agent has to guess about.
+   * of wall clock with work still queued. `summary` carries the live state as
+   * read back (`verified`), so the caller can report a truthful partial result
+   * instead of a timeout the agent has to guess about.
    */
   budgetStopped?: boolean
   /** True when a verification pass actually ran and its result is in `summary`. */
@@ -303,6 +301,20 @@ export interface BrainResult {
    * precisely what the human read, never a re-derivation from the message.
    */
   blockedCalls?: BlockedCall[]
+  /**
+   * The call that carries this request on, when the turn ended without
+   * finishing it.
+   *
+   * A stopped build used to say "say continue" in its summary and nothing
+   * else, and the transport reported the turn `ok: true, partial: true`. An
+   * agent reading that took the two tables it had as the build and moved on;
+   * nothing told it the rest was waiting. Set only when the call will find
+   * something: a resume point that was actually saved, the branch to build on,
+   * or a design still running.
+   */
+  next?: NextCall
+  /** Set while the architect is still designing: nothing ran, and `next` collects the design. */
+  inProgress?: 'designing'
 }
 
 export type BrainFailureCode =
@@ -326,6 +338,8 @@ export type BrainFailureCode =
   | 'TOOL_REFUSED'
   /** A mutation may have landed, but the requested verification did not. */
   | 'UNVERIFIED'
+  /** Production is protected: the schema is built on a preview branch, which `next` starts. */
+  | 'BRANCH_REQUIRED'
 
 const MAX_ITERATIONS = 12
 
@@ -413,7 +427,8 @@ const ARCHITECT_HEARTBEAT_MESSAGES = [
  * The LLM architect is a SINGLE 30–180s design call that emits nothing on its
  * own (`architectBackend` budgets up to 180s per attempt), so these lines are
  * all the turn's events show meanwhile; backend_chat returns them in `events`.
- * They extend nothing: backend_chat's 90s cap is a hard wall clock.
+ * A call not done waiting by then answers that the request is still running
+ * (lib/ai/brain/runs.ts), and these lines are its progress.
  */
 async function withHeartbeat<T>(
   emit: (e: BrainEvent) => void,
@@ -437,17 +452,15 @@ async function withHeartbeat<T>(
 /**
  * Resolve a Blueprint for a prompt, emitting progress during the long
  * architect call. Never throws — a failure resolves to null so the caller
- * falls back to the agent loop exactly as it does today. The turn's clock
- * cancels the architect's call (turn-clock.ts); the caller checks it on null.
+ * falls back to the agent loop exactly as it does today.
  */
 async function resolveBlueprintWithHeartbeat(
   message: string,
   projectId: string,
   emit: (e: BrainEvent) => void,
-  clock: TurnClock,
 ): Promise<Awaited<ReturnType<typeof getBlueprintForPrompt>>> {
   return withHeartbeat(emit, ARCHITECT_HEARTBEAT_MESSAGES, () =>
-    getBlueprintForPrompt(message, projectId, clock.signal),
+    getBlueprintForPrompt(message, projectId, () => emit({ type: 'phase', phase: 'design' })),
   ).catch((err) => {
     console.error('[Brain] blueprint resolution failed:', err)
     return null
@@ -460,12 +473,9 @@ export async function runBrain(
   input: BrainInput,
   emit: (e: BrainEvent) => void,
 ): Promise<BrainResult> {
-  // One clock for the whole turn: once the verification reserve begins, or the
-  // caller gives up, nothing new starts on any path (turn-clock.ts).
-  const clock = startTurnClock(
-    input.deadlineAt === undefined ? undefined : input.deadlineAt - VERIFY_RESERVE_MS,
-    input.signal,
-  )
+  // One clock for the whole turn: once the verification reserve begins,
+  // nothing new starts on any path (turn-clock.ts).
+  const clock = startTurnClock(input.deadlineAt === undefined ? undefined : input.deadlineAt - VERIFY_RESERVE_MS)
   try {
     return await runTurn(input, emit, clock)
   } finally {
@@ -522,11 +532,12 @@ async function runTurn(
 
   // ── CLASSIFY ────────────────────────────────────────────────────────────
   emit({ type: 'phase', phase: 'classify' })
-  const [hasPendingProposal, hasResumeQueue, hasPendingBlueprint, loopResume] = await Promise.all([
+  const [hasPendingProposal, hasResumeQueue, hasPendingBlueprint, loopResume, designing] = await Promise.all([
     hasActiveProposal(input.projectId),
     loadResumeQueue(input.projectId).then(q => q !== null).catch(() => false),
     loadPendingPlan(input.projectId).then(p => p !== null).catch(() => false),
     loadLoopResume(input.projectId).catch(() => null),
+    designInProgress(input.projectId).catch(() => false),
   ])
   let classification: Classification
   try {
@@ -540,7 +551,9 @@ async function runTurn(
       // "finish it" / "resume" are CONFIRM, not UNCLEAR. Without this, the
       // classifier defaulted to UNCLEAR ("could you tell me a bit more
       // about 'continue'") and the user burned credits in confused loops.
-      hasPendingPlan: hasPendingBlueprint || hasResumeQueue || loopResume !== null || detectPendingPlan(memory.history),
+      // A design still running counts too: the "go ahead" that collects it is
+      // a confirmation of a plan that is about to exist.
+      hasPendingPlan: hasPendingBlueprint || hasResumeQueue || loopResume !== null || designing || detectPendingPlan(memory.history),
       // On an empty project, an app description has one meaning: build it. This
       // stops the classifier dead-ending "Users can post recipes and follow
       // each other" in a canned clarification.
@@ -579,6 +592,7 @@ async function runTurn(
     !hasResumeQueue &&
     !hasPendingBlueprint &&
     loopResume === null &&
+    !designing &&
     !detectPendingPlan(memory.history)
   ) {
     emit({ type: 'phase', phase: 'finish' })
@@ -627,6 +641,15 @@ async function runTurn(
     return await singleToolTurn('answer_question', { question: input.message }, dispatchCtx, classification, emit, input)
   }
 
+  // ── Protected production: tables are built on a branch ────────────────────
+  // The gate refuses every table an agent's turn would create on main
+  // (lib/branches/protection.ts). A plan run here is a refusal per table, a
+  // failure for every step on those tables, and a resume queue "continue" can
+  // only refuse again, so no plan is designed or run for a protected project:
+  // the turn says how the schema reaches it instead (branchBuildTurn).
+  const schemaOnBranch = dispatchCtx.agentSurface === true && (await isProductionProtected(input.projectId).catch(() => false))
+  const plansSchema = (steps: BlueprintStep[]) => steps.some((s) => GATED_SCHEMA_TOOLS.has(s.tool))
+
   // UNCLEAR → ask one clarifying question, never build anything.
   if (classification.intent === 'UNCLEAR') {
     // SAFETY NET (the "describe your backend" contract): the classifier is an
@@ -639,13 +662,14 @@ async function runTurn(
     // "could you tell me a bit more?" reply on a fresh project.
     if (isFreshProject && looksLikeBuildDescription(input.message)) {
       console.log(`[Brain] route=UNCLEAR→ARCHITECT (fresh project + build-shaped description) msg="${input.message.slice(0, 80)}"`)
-      const resolved = await resolveBlueprintWithHeartbeat(input.message, input.projectId, emit, clock)
       const buildClass: Classification = {
         intent: 'BUILD',
         confidence: classification.confidence,
         reasoning: 'fresh project + product description — routed to architect (classifier hedged UNCLEAR)',
       }
-      if (!resolved && clock.stopped()) return designOutOfTime(buildClass, emit, toolsRun, input)
+      if (schemaOnBranch) return await branchBuildTurn(curatedTables(input.message), buildClass, emit, input)
+      if (designing) return stillDesigningTurn(buildClass, emit)
+      const resolved = await resolveBlueprintWithHeartbeat(input.message, input.projectId, emit)
       if (resolved && 'vague' in resolved && resolved.vague) {
         return await singleToolTurn('ask_user', { question: resolved.askUser, options: [] }, dispatchCtx, buildClass, emit, input)
       }
@@ -674,8 +698,13 @@ async function runTurn(
   // re-derivation, no partial coverage, no run_test → fix_backend loop.
   if (classification.intent === 'BUILD' || classification.intent === 'APPLY_PROPOSAL') {
     if (isFreshProject) {
-      const resolved = await resolveBlueprintWithHeartbeat(input.message, input.projectId, emit, clock)
-      if (!resolved && clock.stopped()) return designOutOfTime(classification, emit, toolsRun, input)
+      if (schemaOnBranch) {
+        console.log(`[Brain] route=BRANCH_REQUIRED (protected production, fresh build)`)
+        return await branchBuildTurn(curatedTables(input.message), classification, emit, input)
+      }
+      // A design already running for this project answers this build too.
+      if (designing) return stillDesigningTurn(classification, emit)
+      const resolved = await resolveBlueprintWithHeartbeat(input.message, input.projectId, emit)
       if (resolved && 'vague' in resolved && resolved.vague) {
         console.log(`[Brain] route=ARCHITECT_VAGUE — surfacing clarifying question`)
         return await singleToolTurn('ask_user', { question: resolved.askUser, options: [] }, dispatchCtx, classification, emit, input)
@@ -698,9 +727,14 @@ async function runTurn(
   if (classification.intent === 'CONFIRM') {
     const pending = await loadPendingPlan(input.projectId).catch(() => null)
     if (pending) {
+      if (schemaOnBranch && plansSchema(pending.steps)) return await branchBuildTurn(tablesOf(pending.steps), classification, emit, input)
       console.log(`[Brain] route=BLUEPRINT_EXECUTE domain=${pending.blueprintDomain} steps=${pending.steps.length} architectTokens=${pending.architectTokens}`)
       return await blueprintExecuteTurn(pending.steps, pending.architectTokens, dispatchCtx, classification, emit, input, clock, pending.blueprintDomain, pending.ledger)
     }
+
+    // The design this "go ahead" confirms has not finished yet. Re-architecting
+    // below would start a second one; it answers when to ask again instead.
+    if (designing) return stillDesigningTurn(classification, emit)
 
     // No fresh proposal but a resume queue from a partial earlier run → keep
     // going deterministically on the remaining steps. "continue" / "finish it"
@@ -709,8 +743,9 @@ async function runTurn(
     // — those were charged on the original proposal/execute pair.
     const resume = await loadResumeQueue(input.projectId).catch(() => null)
     if (resume) {
+      if (schemaOnBranch && plansSchema(resume.steps)) return await branchBuildTurn(tablesOf(resume.steps), classification, emit, input)
       console.log(`[Brain] route=BLUEPRINT_RESUME domain=${resume.domain} steps=${resume.steps.length}`)
-      return await blueprintExecuteTurn(resume.steps, 0, dispatchCtx, classification, emit, input, clock, resume.domain)
+      return await blueprintExecuteTurn(resume.steps, 0, dispatchCtx, classification, emit, input, clock, resume.domain, undefined, true)
     }
 
     // A loop turn that stopped unfinished saved where it was. Resume the agent
@@ -742,8 +777,8 @@ async function runTurn(
     // the project is still empty and the original ask was a substantial build.
     const originalBuild = findOriginalBuildPrompt(memory.history)
     if (originalBuild && (isExplicitSpec(originalBuild) || (isFreshProject && originalBuild.length > 200))) {
-      const resolved = await resolveBlueprintWithHeartbeat(originalBuild, input.projectId, emit, clock)
-      if (!resolved && clock.stopped()) return designOutOfTime(classification, emit, toolsRun, input)
+      if (schemaOnBranch) return await branchBuildTurn(curatedTables(originalBuild), classification, emit, input)
+      const resolved = await resolveBlueprintWithHeartbeat(originalBuild, input.projectId, emit)
       if (resolved && 'blueprint' in resolved) {
         console.log(
           `[Brain] route=CONFIRM_REARCHITECT domain=${resolved.blueprint.domain} ` +
@@ -913,6 +948,8 @@ async function blueprintExecuteTurn(
   clock: TurnClock,
   domain?: string,
   ledger?: RequirementsLedger,
+  /** The steps are a resume queue an earlier run of the plan left. */
+  resumed = false,
 ): Promise<BrainResult> {
   emit({ type: 'phase', phase: 'execute' })
 
@@ -934,8 +971,8 @@ async function blueprintExecuteTurn(
 
   for (const [i, step] of steps.entries()) {
     // Every step used to run whatever the time: the executor never read the
-    // deadline, so a long plan kept changing the backend after backend_chat
-    // had answered the agent (#247).
+    // deadline, so a long plan ran on past the run's own limit, changing the
+    // backend for as long as it took (#247).
     if (clock.stopped()) {
       notStarted = steps.slice(i)
       break
@@ -985,10 +1022,21 @@ async function blueprintExecuteTurn(
 
     try {
       const result = await dispatchTool(step.tool as ToolName, step.args, ctx)
-      toolsRun.push(step.tool)
-      toolStatuses.push(result.ok ? 'applied' : 'failed')
-      if (result.ok) {
-        succeeded.push(step.label)
+      // A plan's create_table asks for the table to exist. The dispatcher
+      // refuses to create one that does (TABLE_EXISTS), which is right for an
+      // agent's own call and wrong here: a resumed or re-run plan meets the
+      // tables its earlier run made, and counting each as a failure put it
+      // back in the resume queue, so "continue" could never finish. Nothing
+      // ran, so it is not recorded as a tool run either.
+      const alreadyThere = !result.ok && step.tool === 'create_table' && result.code === 'TABLE_EXISTS'
+      if (alreadyThere) {
+        attemptedTools.pop()
+      } else {
+        toolsRun.push(step.tool)
+        toolStatuses.push(result.ok ? 'applied' : 'failed')
+      }
+      if (result.ok || alreadyThere) {
+        succeeded.push(alreadyThere ? `${step.label} (already there)` : step.label)
         succeededSteps.push(step)
       } else {
         failed.push({ label: step.label, detail: result.summary.slice(0, 200), step })
@@ -1010,8 +1058,15 @@ async function blueprintExecuteTurn(
   // work with the same deterministic executor — not a confused LLM loop. The
   // failed steps all come earlier in the plan than the ones not started, so
   // the queue keeps the plan's order.
-  if (failed.length > 0 || notStarted.length > 0) {
-    await saveResumeQueue(
+  //
+  // Except a resumed run in which every step failed again. What failed twice
+  // the same way fails a third time, and an agent now follows `next`, so
+  // offering "continue" there would send it round forever. The queue is
+  // cleared and the summary says each step needs a different request.
+  const stalled = resumed && failed.length === steps.length
+  let resumeSaved = false
+  if ((failed.length > 0 || notStarted.length > 0) && !stalled) {
+    resumeSaved = await saveResumeQueue(
       input.projectId,
       domain ?? 'custom',
       [...failed.map(f => f.step), ...notStarted],
@@ -1019,7 +1074,7 @@ async function blueprintExecuteTurn(
         failed.length ? `${failed.length} step(s) need a second pass after the first run.` : '',
         notStarted.length ? `${notStarted.length} step(s) did not start before the time ran out.` : '',
       ].filter(Boolean).join(' '),
-    ).catch(() => {})
+    ).then(() => true, () => false)
   } else {
     await clearResumeQueue(input.projectId).catch(() => {})
   }
@@ -1116,6 +1171,8 @@ async function blueprintExecuteTurn(
       ? `Reply "continue" to run the ${notStarted.length + failed.length} remaining step${notStarted.length + failed.length === 1 ? '' : 's'}.`
       : failed.length === 0
         ? 'Open the dashboard tabs to explore: Database, APIs, Storage, Realtime, Auth & Users. Reply with what you want to change next.'
+        : stalled
+          ? 'These failed again on a second pass, so asking again will not change them: each needs a different request.'
         : 'Reply "continue" and I\'ll work the follow-ups one by one.',
   ].filter(Boolean).join('\n')
 
@@ -1144,6 +1201,7 @@ async function blueprintExecuteTurn(
     // as the agent loop reports its own budget stop, so backend_chat answers
     // it as a partial result rather than a failure to retry.
     ...(notStarted.length > 0 ? { budgetStopped: true, verified: !!finalProof, applied: succeeded } : {}),
+    ...(resumeSaved ? { next: CONTINUE } : {}),
   }
 }
 
@@ -1285,8 +1343,17 @@ async function describeDanger(
     }
     case 'trigger_deploy':
       return { tool, target: 'a production deploy', rowCount: null, reversible: true, confirmPhrase: 'Confirm — deploy to production' }
-    case 'rollback_deploy':
-      return { tool, target: 'a production rollback', rowCount: null, reversible: true, confirmPhrase: 'Confirm — roll back the deploy' }
+    case 'rollback_deploy': {
+      const version = Number.isInteger(args.version) ? String(args.version) : str('version')
+      return {
+        tool,
+        target: version ? `the backend as it was when v${version} was published (every change since undone)` : 'the backend as it was at an earlier published version',
+        rowCount: null,
+        // Each step is a restore, which keeps what it removes and can be reapplied.
+        reversible: true,
+        confirmPhrase: `Confirm — restore the backend to ${version ? `v${version}` : 'that version'}`,
+      }
+    }
     case 'revoke_api_key':
       return { tool, target: 'an API key (every client using it stops working immediately)', rowCount: null, reversible: false, confirmPhrase: 'Confirm — revoke the API key' }
     case 'rotate_api_key':
@@ -1493,11 +1560,20 @@ async function runAgentLoop(
   // step of a multi-step build reads the previous steps from the cache.
   const system = agentSystemPrompt()
   const intentHint = buildIntentHint(classification.intent)
+  // Said up front on a protected project: otherwise the model spends a step per
+  // table learning that each one is refused.
+  const schemaOnBranch = ctx.agentSurface === true && (await isProductionProtected(input.projectId).catch(() => false))
   const context =
     `${understandingBlock}\n\n` +
     (rolledSummary ? `EARLIER CONTEXT:\n${rolledSummary}\n\n` : '') +
     `INTENT CLASSIFICATION (advisory): ${classification.intent} (${classification.confidence.toFixed(2)}) — ${classification.reasoning}\n` +
     `${intentHint}\n` +
+    (schemaOnBranch
+      ? `PRODUCTION IS PROTECTED on this project: ${[...GATED_SCHEMA_TOOLS].join(', ')} are refused here. ` +
+        `Its schema changes are made on a preview branch, with branch and apply_migration, and reach production ` +
+        `through a merge a person approves; the coding agent that asked does that. Do every other part of the ` +
+        `request, and for the schema part finish by naming the exact tables and columns to create on the branch.\n`
+      : '') +
     currentPageContext(input.surface)
   // On a resumed turn the model is sent the saved request and the applied list
   // instead of the bare "continue"; the conversation keeps the person's words.
@@ -1625,8 +1701,7 @@ async function runAgentLoop(
     // Checked at the iteration boundary as well as before each tool (below): a
     // model round trip plus a tool can easily be 10-20s, so starting one with
     // less than the reserve left is what guaranteed the run died during
-    // verification instead of before it. The turn's clock also stops when the
-    // caller gives up.
+    // verification instead of before it.
     if (clock.stopped()) {
       budgetStopped = true
       break
@@ -1776,12 +1851,13 @@ async function runAgentLoop(
 
       // ── Nothing new starts once the turn's clock has stopped ───────────────
       //
-      // An answer can come back after the reserve began or the caller gave up,
-      // and its calls run one after another, each of which can take seconds.
-      // Checking only between model calls let every call of such an answer run
-      // past the deadline (#247). This call and the rest of the answer do not
-      // run, and the reserve is spent verifying what landed, as at the top of
-      // an iteration. finish and ask_user start nothing, so they still end it.
+      // An answer that comes back just before the reserve begins has its calls
+      // run one after another, up to six tables in one answer, each of which
+      // can take seconds. Checking only between model calls let every call of
+      // such an answer run past the deadline (#247). This call and the rest of
+      // the answer do not run, and the reserve is spent verifying what landed,
+      // as at the top of an iteration. finish and ask_user start nothing, so
+      // they still end it.
       if (!ENDS_TURN_TOOLS.has(toolName) && clock.stopped()) {
         for (const c of toolCalls.slice(index)) {
           if (ENDS_TURN_TOOLS.has(c.name)) continue
@@ -2023,8 +2099,8 @@ async function runAgentLoop(
     emit({
       type: 'error',
       message:
-        `Stopped taking new steps ${VERIFY_RESERVE_MS / 1000}s before the deadline, or when the caller gave up, ` +
-        `to guarantee a verification pass — verification is budgeted, never dropped.`,
+        `Stopped ${VERIFY_RESERVE_MS / 1000}s before the deadline to guarantee a verification pass — ` +
+        `verification is budgeted, never dropped.`,
     })
   }
 
@@ -2041,13 +2117,20 @@ async function runAgentLoop(
   // changes the backend for a new request, clears the marker so a later "yes"
   // cannot revive work that is done or replaced. A read-only turn in between
   // ("what tables do I have?") leaves it, so "continue" still works after it.
+  let resumeSaved = false
   if (stoppedUnfinished) {
-    await saveLoopResume(
+    resumeSaved = await saveLoopResume(
       input.projectId,
       resumeRequest,
       [...(resume?.applied ?? []), ...appliedMutationTitles],
       stoppedUnfinished,
-    ).catch((err) => console.error('[Brain] could not save the resume point:', err))
+    ).then(
+      () => true,
+      (err) => {
+        console.error('[Brain] could not save the resume point:', err)
+        return false
+      },
+    )
   } else if (resume || mutated) {
     await clearLoopResume(input.projectId)
   }
@@ -2099,6 +2182,10 @@ async function runAgentLoop(
     ...(refusedMutations.length ? { refused: refusedMutations } : {}),
     ...(budgetStopped ? { budgetStopped: true, verified } : {}),
     ...(blockedCalls.length ? { blockedCalls } : {}),
+    // A resumed turn that changed nothing earns no further `next`: an agent
+    // follows it, so each "continue" it is offered has to have moved the
+    // request on. The resume point stays for a person who asks again.
+    ...(resumeSaved && (!resume || appliedMutationTitles.length > 0) ? { next: CONTINUE } : {}),
   }
 }
 
@@ -2192,22 +2279,33 @@ function stoppedBeforeStarting(
 }
 
 /**
- * The turn's clock stopped the architect before a design was ready. Nothing was
- * changed, and nothing else starts: the agent loop this used to fall through
- * to would begin past the reserve, where the same clock stops it.
+ * A build asked of a project whose production is protected.
+ *
+ * Every table this turn would create on main is refused there
+ * (lib/branches/protection.ts). Run anyway, a plan was a refusal per table, a
+ * failure for every step on those tables, and a resume queue that "continue"
+ * could only refuse again. The schema reaches a protected production one way,
+ * a preview branch and a merge a person approves, and the agent holds the
+ * tools for it, so this says so before anything runs, with the calls in order.
+ * `tables` is a design to start from when one is at hand without a model call.
  */
-async function designOutOfTime(
+async function branchBuildTurn(
+  tables: string[],
   classification: Classification,
   emit: (e: BrainEvent) => void,
-  toolsRun: string[],
   input: BrainInput,
 ): Promise<BrainResult> {
-  const failure: ModelFailure = {
-    code: 'MODEL_TIMEOUT',
-    reason: "designing the backend took longer than this request's time limit",
-    retryable: true,
-  }
-  const summary = `${nothingChangedBecause(failure)} If it happens again, ask for part of the backend at a time.`
+  const summary =
+    `This project's production is protected, so I can't create its tables: a schema change reaches it through ` +
+    `a preview branch and a merge a person approves. Nothing was changed.\n\n` +
+    `To build it:\n` +
+    `1. branch { "action": "create", "name": "<short-name>" }\n` +
+    `2. apply_migration { "sql": "<every CREATE TABLE the app needs, parents first>", "branchId": "<id>" }: the whole data model in one migration\n` +
+    `3. Try it against the branch's preview endpoint, seeded with db_insert and the branchId\n` +
+    `4. branch { "action": "merge", "branchId": "<id>" }, which your human approves in the Review Queue while you poll check_approval\n\n` +
+    `Storage buckets and auth are not schema changes, so the storage and auth tools set them up now. ` +
+    `Realtime and functions on the new tables follow the merge.` +
+    (tables.length ? `\n\nA data model to start from: ${tables.join(', ')}.` : '')
   emit({ type: 'final', summary, needsUser: false })
   await saveTurn(input.projectId, input.message, summary, input.requestId ?? null)
   return {
@@ -2215,19 +2313,62 @@ async function designOutOfTime(
     summary,
     needsUser: false,
     iterations: 0,
-    toolsRun,
+    toolsRun: [],
     classification,
     tokensUsed: 0,
-    failureCode: failure.code,
-    retryable: failure.retryable,
+    failureCode: 'BRANCH_REQUIRED',
+    retryable: false,
     applied: [],
+    next: {
+      tool: 'branch',
+      arguments: { action: 'create', name: 'build' },
+      why: "This project's production is protected: its tables are built on a preview branch and merged once a person approves.",
+    },
   }
+}
+
+/**
+ * A build, or a "go ahead", that arrives while the architect is still
+ * designing this project's backend (lib/ai/blueprints/store.ts). A second
+ * design would spend minutes and credits on the same backend, and there is
+ * nothing to execute yet, so this says where it stands and when to ask again.
+ */
+function stillDesigningTurn(classification: Classification, emit: (e: BrainEvent) => void): BrainResult {
+  const summary =
+    `I'm still designing this backend: one design takes one to three minutes, and nothing has been built yet. ` +
+    `Say "go ahead" in about a minute and I'll build it once the design is ready. ` +
+    `Asking for the build again would only start a second design.`
+  emit({ type: 'final', summary, needsUser: false })
+  return {
+    success: true,
+    summary,
+    needsUser: false,
+    iterations: 0,
+    toolsRun: [],
+    classification,
+    tokensUsed: 0,
+    inProgress: 'designing',
+    next: GO_AHEAD_LATER,
+  }
+}
+
+/** The tables a curated design would give this request, found without a model call. */
+function curatedTables(message: string): string[] {
+  if (!shouldUseCuratedBlueprint(message)) return []
+  return tablesOf(getCuratedBlueprintForPrompt(message)?.blueprint.steps ?? [])
+}
+
+function tablesOf(steps: BlueprintStep[]): string[] {
+  return steps
+    .filter((s) => s.tool === 'create_table')
+    .map((s) => String((s.args as { tableName?: unknown }).tableName ?? ''))
+    .filter(Boolean)
 }
 
 function buildIntentHint(intent: BrainIntent): string {
   switch (intent) {
     case 'BUILD':
-      return 'Hint: this is a BUILD request. If it touches 2+ resources or changes >1 subsystem, call propose_plan first. For a single small add, proceed directly.'
+      return 'Hint: this is a BUILD request. Build it now, without proposing a plan first: the tables in dependency order, several per response, then storage, realtime, triggers and functions together in the next response.'
     case 'MODIFY':
       return 'Hint: this is a MODIFY request on an existing resource. Use add_column / generate_api / add_rls etc. Do NOT recreate the table.'
     case 'FIX':
@@ -2243,7 +2384,7 @@ function buildIntentHint(intent: BrainIntent): string {
     case 'CONFIRM':
       return [
         'Hint: the user has CONFIRMED the plan you proposed in the previous assistant turn (e.g. "go ahead", "yes", "do it").',
-        'EXECUTE that plan now — call the actual mutation tools (create_table / generate_api / enable_auth / add_rls / etc.) one by one, then read_backend_state to verify, then finish.',
+        'EXECUTE that plan now with the actual mutation tools, several calls per response in dependency order (tables before the tables that reference them, then storage, realtime, triggers and functions), then read_backend_state once to verify, then finish.',
         'The propose_plan tool is intentionally unavailable on this turn — re-proposing what they just confirmed would loop them forever, so it has been removed from your tool surface.',
         'Do NOT ask the user to confirm again. Do NOT restate the plan as prose. Do the work.',
       ].join(' ')

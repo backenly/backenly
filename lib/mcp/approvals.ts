@@ -25,7 +25,11 @@
  *   • A restore (`revert_schema_change`) is parked with Backenly's own
  *     measurement of what it would set aside, whatever arguments the door that
  *     asked passed: the person approves what was measured, never an agent's
- *     own counts (createApprovalRequest).
+ *     own counts (createApprovalRequest). A rollback to a published version
+ *     (`rollback_deploy`) is parked the same way, with Backenly's list of the
+ *     changes it would undo, and approving runs exactly that list or nothing.
+ *   • Deciding a restore of either kind takes admin rights on the project, as
+ *     running one from the console does.
  *   • Requests expire (default 24h). Expired requests cannot be approved.
  *   • A request executes at most once (atomic pending → approved claim).
  *   • Execution happens server-side at decision time, by the approver's
@@ -42,6 +46,8 @@ import { prisma } from '@/lib/db/prisma'
 import { NOT_QUOTED, quotesKeptHere } from '@/lib/data-plane/residency'
 import { dispatchTool, type ToolDispatchContext, type ToolResult } from '@/lib/ai/brain/tools'
 import type { RestoreRequest } from '@/lib/changes/recovery'
+import type { VersionRestoreRequest } from '@/lib/changes/range'
+import { restoreRequestChangeId } from '@/lib/changes/types'
 import {
   forgetApprovalRequests,
   keepApprovalRequest,
@@ -107,6 +113,21 @@ async function measuredRestore(projectId: string, args: Record<string, unknown>)
   return { target, rowCount, toolArgs }
 }
 
+/** Backenly's own measurement of the rollback a request names, taken now. */
+async function measuredVersionRestore(projectId: string, args: Record<string, unknown>): Promise<VersionRestoreRequest> {
+  const { describeVersionRestore } = await import('@/lib/changes/range')
+  const d = await describeVersionRestore(projectId, { version: args.version, deploymentId: args.deploymentId })
+  if (!d.ok) {
+    const refused = d as Extract<typeof d, { ok: false }>
+    throw new RestoreRequestRefusedError(refused.status, refused.code, refused.error)
+  }
+  const { target, detail, toolArgs } = d as Extract<typeof d, { ok: true }>
+  return { target, detail, toolArgs }
+}
+
+/** Tools whose request is a restore: Backenly measures it, and a project admin decides it. */
+const RESTORE_TOOLS: ReadonlySet<string> = new Set(['revert_schema_change', 'rollback_deploy'])
+
 export async function createApprovalRequest(input: {
   projectId: string
   userId: string
@@ -127,6 +148,12 @@ export async function createApprovalRequest(input: {
    * it is measured here.
    */
   restore?: RestoreRequest
+  /**
+   * For a rollback to a published version: Backenly's measurement of it, when
+   * the caller has just taken one (describeVersionRestore). Left out, it is
+   * measured here.
+   */
+  versionRestore?: VersionRestoreRequest
 }) {
   // A restore is parked with what Backenly measured it would do, whichever door
   // asked: a brain run's parked call carries the model's own arguments, counts
@@ -134,10 +161,25 @@ export async function createApprovalRequest(input: {
   // cannot happen throws RestoreRequestRefusedError, and nothing is queued.
   let danger = input.danger
   let toolArgs = input.toolArgs
+  let message = input.message
   if (danger.tool === 'revert_schema_change') {
     const restore = input.restore ?? (await measuredRestore(input.projectId, input.toolArgs))
     danger = { ...danger, target: restore.target, rowCount: restore.rowCount, reversible: true }
     toolArgs = { ...restore.toolArgs }
+    // A restore card shows its words as Backenly's, under Backenly's own
+    // measurement. Words a model wrote (a brain run's message) are quoted as the
+    // agent's, so "verified lossless" from an agent never reads as Backenly's.
+    if (!input.restore) message = `Requested by an agent: ${restore.target}\nThe agent wrote: “${input.message}”`
+  }
+  // A rollback to a published version, likewise: the card lists the changes
+  // Backenly measured it would undo, and approval runs that list or nothing.
+  if (danger.tool === 'rollback_deploy') {
+    const restore = input.versionRestore ?? (await measuredVersionRestore(input.projectId, input.toolArgs))
+    danger = { ...danger, target: restore.target, rowCount: null, reversible: true }
+    toolArgs = { ...restore.toolArgs }
+    message = input.versionRestore
+      ? message
+      : `Requested by an agent.\n${restore.detail}\nThe agent wrote: “${input.message}”`
   }
 
   // The request's words, its target and its exact call are what the approver
@@ -149,7 +191,7 @@ export async function createApprovalRequest(input: {
   const id = randomUUID()
   const quote = await quotesKeptHere(input.projectId)
   const request = {
-    message: input.message.slice(0, 4000),
+    message: message.slice(0, 4000),
     target: danger.target.slice(0, 300),
     toolArgs,
   }
@@ -374,7 +416,9 @@ export async function listApprovals(projectId: string) {
       // its checks and could not be recovered without a person).
       requestedBy: r.apiKeyId ? ('agent' as const) : ('backenly' as const),
       // The change a restore request is about, so the inbox can link to it.
-      changeId: r.tool === 'revert_schema_change' ? ((r.toolArgs as { changeId?: string } | null)?.changeId ?? null) : null,
+      changeId: r.tool === 'revert_schema_change' ? restoreRequestChangeId(r.toolArgs) : null,
+      // The published version a rollback request restores the backend to.
+      version: r.tool === 'rollback_deploy' ? versionOf(r.toolArgs) : null,
       rowCount: r.rowCount,
       reversible: r.reversible,
       message: r.message,
@@ -389,6 +433,11 @@ export async function listApprovals(projectId: string) {
       shownDigest: view.status === 'pending' && r.readable ? digestOf(r) : null,
     }
   })
+}
+
+function versionOf(toolArgs: unknown): number | null {
+  const v = (toolArgs as { version?: unknown } | null)?.version
+  return typeof v === 'number' && Number.isInteger(v) ? v : null
 }
 
 /** The digest of a request as a card shows it, or null when none can be made. */
@@ -433,7 +482,7 @@ export async function decideApproval(input: {
   // running one from the console: admin rights on the project, not access.
   // Declining one is a decision too (it keeps a change that failed its checks),
   // so it takes the same.
-  if (row.tool === 'revert_schema_change') {
+  if (RESTORE_TOOLS.has(row.tool)) {
     const { canAdministerProject } = await import('@/lib/edition/guard')
     if (!(await canAdministerProject(input.approverUserId, input.projectId))) {
       return { ok: false, status: 'forbidden', error: 'Only a project admin can decide whether to restore a previous state.' }
@@ -446,11 +495,14 @@ export async function decideApproval(input: {
       data: { status: 'rejected', decidedBy: input.approverUserId, decidedAt: new Date() },
     })
     await auditDecision(input, row.tool, row.target, 'AGENT_APPROVAL_REJECTED')
-    // Declining to restore a change that failed its checks is a decision to
-    // keep it. A no-op for a change that was not waiting on one (an agent
-    // asking to restore a healthy change, say).
-    if (row.tool === 'revert_schema_change') {
-      const changeId = (row.toolArgs as { changeId?: string } | null)?.changeId
+    // Declining Backenly's own request to recover a change that failed its
+    // checks is a decision to keep it. Declining an agent's request is not: it
+    // answers that request only, and a recovery Backenly is waiting on keeps
+    // waiting for its own answer. Backenly's requests are the ones no agent key
+    // made (listApprovals' `requestedBy`); a project kept in another region
+    // keeps the call's shape on its row, the change's id in it.
+    if (row.tool === 'revert_schema_change' && !row.apiKeyId) {
+      const changeId = restoreRequestChangeId(row.toolArgs)
       if (changeId) {
         const { keepChange } = await import('@/lib/changes/recovery')
         await keepChange(input.projectId, changeId, input.approverUserId, { via: 'approval' }).catch(() => {})

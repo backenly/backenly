@@ -73,6 +73,42 @@ export function isDataPlaneOutage(details: Record<string, unknown> | null | unde
   return code === 502 || code === 503 || code === 504
 }
 
+// ── Repairs that run outside the change ledger ───────────────────────────────
+
+/**
+ * The repair actions that run outside the governed change ledger, and so leave
+ * nothing History can restore.
+ *
+ * `executeAction` records an action as a governed change (lib/changes/ledger.ts:
+ * a checkpoint before it, verification after it, a restore point) only when it
+ * is in GOVERNED_ACTIONS in lib/ai/minimal-executor.ts. These four are
+ * not, and each changes more than the platform could put back:
+ *
+ *   FIX_API                regenerates a table's API layer
+ *   FIX_WORKFLOW           runs the sub-repairs a broken workflow names
+ *                          (auth, policies, APIs) as direct calls
+ *   ADOPT_EXTERNAL_SCHEMA  rewrites the stored contract and grants to match DDL
+ *                          run over a direct connection, and prunes the
+ *                          metadata of tables that are gone
+ *   REGISTER_SCHEMA        re-registers the workspace schema with PostgREST
+ *
+ * So no autonomous loop applies one on its own: a person approves it first. The
+ * classifier rates every finding these repair `approval` (fix-classifier.ts),
+ * the reconciler parks those findings in the Review Queue, and the agentic fix
+ * loop skips a candidate naming one. A developer's agent asking for one by name
+ * (fix_backend, adopt_external_schema) is not autonomy, and runs as asked.
+ */
+export const REPAIRS_OUTSIDE_THE_CHANGE_LEDGER: ReadonlySet<string> = new Set([
+  'FIX_API',
+  'FIX_WORKFLOW',
+  'ADOPT_EXTERNAL_SCHEMA',
+  'REGISTER_SCHEMA',
+])
+
+export function runsOutsideChangeLedger(action: string | null | undefined): boolean {
+  return typeof action === 'string' && REPAIRS_OUTSIDE_THE_CHANGE_LEDGER.has(action)
+}
+
 // ── Fix action mapping ────────────────────────────────────────────────────────
 
 /**
@@ -465,6 +501,15 @@ export function getManualRemediationHint(
         `jumped far past its usual daily level. ${where} If it is expected growth, dismiss this; if it is not, ` +
         'fix the cause before it reaches your plan limit or spend limit (the Usage page shows both).'
       )
+    }
+
+    case 'architecture_evolution': {
+      const ev = (details?.evolution ?? {}) as { summary?: { change?: string; reason?: string } }
+      return (
+        `${ev.summary?.change ?? 'Backenly prepared a change to how part of your data is stored.'} ` +
+        `${ev.summary?.reason ?? ''} Review it in the approval queue on the Autonomy page: approve it there, ` +
+        'or dismiss it and Backenly will not raise it again without new evidence.'
+      ).replace(/\s+/g, ' ').trim()
     }
 
     case 'subsystem_repeat_failure': {

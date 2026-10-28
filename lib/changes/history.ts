@@ -16,7 +16,8 @@ import { checkpointIntact } from './integrity'
 import type { StoredSnapshot } from './ledger'
 import { rollbackWindowDays } from './policy'
 import { availabilityOf, type Availability } from './recovery'
-import type { ChangePreservation, ChangeStep, TableChange } from './types'
+import { restoreRequestChangeId, type ChangePreservation, type ChangeStep, type TableChange } from './types'
+import { describeOp, opsOf, type ResourceOp, type ResourceSnapshot } from './resources'
 import type { ChangeVerification } from './verify'
 import { quotesKeptHere } from './residency'
 
@@ -52,8 +53,10 @@ export interface ChangeSummary {
   status: string
   createdAt: string
   actor: ChangeActor
-  /** Tables and objects it touched. */
+  /** Tables, objects and the rest of the backend it touched. */
   touched: string[]
+  /** The parts of the backend it touched: database, auth, storage, functions, webhooks, env, keys, integrations. */
+  resources: string[]
   outcome: {
     state: ChangeOutcomeState
     /** Why, when it is not simply applied and verified. Plain language. */
@@ -78,6 +81,8 @@ export interface ChangeDetail extends ChangeSummary {
   steps: ChangeStep[]
   statements: Array<{ sql: string; params?: string[] }>
   footprint: TableChange[]
+  /** What it did to the rest of the backend, one sentence per item ("Changed function sendWelcome: power"). */
+  resourceChanges: string[]
   /** Each touched table before and after. */
   before: Record<string, TableState>
   after: Record<string, TableState>
@@ -141,6 +146,11 @@ function footprintOf(r: Row): TableChange[] {
   return (r.footprint as unknown as TableChange[] | null) ?? []
 }
 
+/** What it did to the rest of the backend (lib/changes/resources). */
+function resourceOpsOf(r: Row): ResourceOp[] {
+  return opsOf((r.checkpoint as { resources?: ResourceSnapshot } | null)?.resources, (r.resultState as { resources?: ResourceSnapshot } | null)?.resources)
+}
+
 function failingNote(r: Row): string | null {
   const v = r.verification as unknown as ChangeVerification | null
   const failing = v?.checks.find((c) => c.outcome === 'contradicted')
@@ -181,11 +191,24 @@ function outcomeOf(r: Row, recovery: Row | null, recoveryActor: ChangeActor | nu
   }
 }
 
-function availabilityFor(r: Row, windowDays: number, targetStatus: string | null): Availability {
+/** For a recovery record, `target` is the change it restored. */
+function availabilityFor(r: Row, windowDays: number, target: Row | null): Availability {
   return availabilityOf(
-    { kind: r.kind, status: r.status, footprint: footprintOf(r), createdAt: r.createdAt, intact: checkpointIntact(r) },
+    {
+      kind: r.kind,
+      status: r.status,
+      footprint: footprintOf(r),
+      createdAt: r.createdAt,
+      intact: checkpointIntact(r),
+      sealed: !!r.checkpointHash,
+      resourceOps: resourceOpsOf(r),
+      groupId: r.groupId,
+    },
     windowDays,
-    { targetStatus },
+    {
+      targetStatus: target?.status ?? null,
+      targetVerified: (target?.verification as unknown as ChangeVerification | null)?.outcome === 'confirmed',
+    },
   )
 }
 
@@ -203,7 +226,7 @@ async function summarize(projectId: string, rows: Row[], windowDays: number): Pr
   })
   const approvalFor = new Map<string, string>()
   for (const a of approvals) {
-    const id = (a.toolArgs as { changeId?: string } | null)?.changeId
+    const id = restoreRequestChangeId(a.toolArgs)
     if (id) approvalFor.set(id, a.id)
   }
 
@@ -213,7 +236,7 @@ async function summarize(projectId: string, rows: Row[], windowDays: number): Pr
     const outcome = outcomeOf(r, recovery, recovery ? actors.get(recovery.id) ?? null : null)
     let action: ChangeSummary['action'] = null
     if (r.status === 'restored' && recovery) {
-      action = { ...availabilityFor(recovery, windowDays, r.status), kind: 'reapply', recordId: recovery.id }
+      action = { ...availabilityFor(recovery, windowDays, r), kind: 'reapply', recordId: recovery.id }
     } else if (r.status !== 'recovered' && r.status !== 'failed') {
       action = { ...availabilityFor(r, windowDays, null), kind: 'restore', recordId: r.id }
     }
@@ -227,7 +250,8 @@ async function summarize(projectId: string, rows: Row[], windowDays: number): Pr
       status: r.status,
       createdAt: r.createdAt.toISOString(),
       actor: actors.get(r.id)!,
-      touched: footprint.map((c) => c.after ?? c.before ?? '').filter(Boolean),
+      touched: [...footprint.map((c) => c.after ?? c.before ?? ''), ...resourceOpsOf(r).map((o) => (o.after ?? o.before)!.label)].filter(Boolean),
+      resources: r.resources,
       outcome,
       action,
       approvalId: approvalFor.get(r.id) ?? null,
@@ -242,11 +266,19 @@ async function summarize(projectId: string, rows: Row[], windowDays: number): Pr
  */
 export async function listChanges(
   projectId: string,
-  opts: { limit?: number; beforeSeq?: number } = {},
+  /** `resource`: only the changes that touched it ('database', or a lib/changes/resources id). */
+  opts: { limit?: number; beforeSeq?: number; resource?: string } = {},
 ): Promise<{ changes: ChangeSummary[]; windowDays: number; nextBeforeSeq: number | null }> {
   const limit = Math.min(Math.max(opts.limit ?? 30, 1), 100)
   const rows = await prisma.backendChange.findMany({
-    where: { projectId, kind: 'change', status: { not: 'failed' }, ...(opts.beforeSeq ? { seq: { lt: opts.beforeSeq } } : {}) },
+    // Snapshot restores are in the history too: the biggest change of all.
+    where: {
+      projectId,
+      kind: { in: ['change', 'snapshot_restore'] },
+      status: { not: 'failed' },
+      ...(opts.beforeSeq ? { seq: { lt: opts.beforeSeq } } : {}),
+      ...(opts.resource ? { resources: { has: opts.resource } } : {}),
+    },
     orderBy: { seq: 'desc' },
     take: limit + 1,
   })
@@ -282,6 +314,7 @@ export async function getChange(projectId: string, changeId: string): Promise<Ch
       ...(s.params ? { params: s.params } : {}),
     })),
     footprint: footprintOf(r),
+    resourceChanges: resourceOpsOf(r).map(describeOp),
     before: checkpoint?.tables ?? {},
     after: resultState?.tables ?? {},
     verification: (r.verification as unknown as ChangeVerification | null) ?? null,

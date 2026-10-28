@@ -18,6 +18,7 @@ export const dynamic = 'force-dynamic'
  * clicking through without reading ends up with.
  */
 
+import type { Metadata } from 'next'
 import { cookies } from 'next/headers'
 import { redirect } from 'next/navigation'
 import { prisma } from '@/lib/db/prisma'
@@ -25,6 +26,11 @@ import { verifyToken } from '@/lib/auth/jwt'
 import { getProjectResolver } from '@/lib/edition'
 import { CONFIRM_TYP, REQ_TYP, signAuthzToken, verifyAuthzToken } from '@/lib/mcp/oauth-authz'
 import { SCOPE_WRITE } from '@/lib/mcp/oauth'
+
+export const metadata: Metadata = {
+  title: 'Authorize an agent',
+  robots: { index: false, follow: false },
+}
 
 function Shell({ title, children }: { title: string; children: React.ReactNode }) {
   return (

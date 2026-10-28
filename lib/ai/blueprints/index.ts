@@ -24,6 +24,7 @@
  */
 
 import type { Blueprint, BlueprintDomain, BlueprintMatch } from './types'
+import { clearDesigning, markDesigning } from './store'
 import { SOCIAL_MEDIA_BLUEPRINT } from './social-media'
 import { MARKETPLACE_BLUEPRINT } from './marketplace'
 import { SAAS_BLUEPRINT } from './saas'
@@ -265,14 +266,12 @@ export function shouldUseCuratedBlueprint(prompt: string): boolean {
  *   • Architect success   → { blueprint, match: { domain, confidence, matchedOn: 'llm-architect' } }
  *   • Architect VAGUE     → { vague: true, askUser }
  *   • Architect failure   → null  (caller falls back to the standard agent loop)
- *
- * `signal` cancels the architect's model call, and no attempt starts after it
- * fires (the brain's turn clock, lib/ai/brain/turn-clock.ts).
  */
 export async function getBlueprintForPrompt(
   prompt: string,
   projectId: string,
-  signal?: AbortSignal,
+  /** Called once the architect starts: a curated match never calls it. */
+  onDesign?: () => void,
 ): Promise<
   | { blueprint: Blueprint; match: BlueprintMatch; architectTokens: number }
   | { vague: true; askUser: string; architectTokens: number }
@@ -292,9 +291,17 @@ export async function getBlueprintForPrompt(
     )
   }
 
-  // No curated hit → ask the LLM architect to design the backend.
+  // No curated hit → ask the LLM architect to design the backend. Marked while
+  // it runs, since it can outlast the call that asked for it (store.ts).
   const { architectBackend } = await import('./architect')
-  const result = await architectBackend(prompt, projectId, signal)
+  await markDesigning(projectId).catch((err) => console.error('[Blueprints] could not mark the design as running:', err))
+  onDesign?.()
+  let result: Awaited<ReturnType<typeof architectBackend>>
+  try {
+    result = await architectBackend(prompt, projectId)
+  } finally {
+    await clearDesigning(projectId)
+  }
   if (!result) return null
   if ('vague' in result) {
     // Architect ran but returned a clarifying question — those tokens are still

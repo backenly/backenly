@@ -2,24 +2,13 @@ import type { Metadata } from 'next'
 import type { ComponentType } from 'react'
 import { notFound } from 'next/navigation'
 import { safeJsonLd } from '@/lib/security/safe-jsonld'
+import { pageMetadata } from '@/lib/seo/metadata'
 import { SiteShell } from '@/components/site/SiteShell'
 import { CodeBlock } from '@/components/site/CodeBlock'
 import { AuthDiagram, DatabaseDiagram, RestApiDiagram } from '@/components/landing/CapabilityDiagrams'
 import { ChangePath } from '@/components/landing/ChangePath'
-import {
-  ButtonLink,
-  Facts,
-  HorizonClose,
-  JsonLd,
-  NextLinks,
-  Page,
-  PageHero,
-  Section,
-  SectionHead,
-  withCode,
-} from '@/components/site/kit'
+import { ButtonLink, HorizonClose, JsonLd, NextLinks, Page, PageHero, Section, SectionHead, withCode } from '@/components/site/kit'
 import { Faq } from '@/components/site/Faq'
-import { Reveal } from '@/components/site/Reveal'
 import { SpotlightPanel } from '@/components/site/SpotlightPanel'
 import { StartButton } from '@/components/site/StartButton'
 import { HEADING, TITLE } from '@/components/site/tokens'
@@ -35,8 +24,7 @@ const HERO_DIAGRAMS: Record<string, ComponentType | undefined> = {
 }
 
 /**
- * The agent page shows a session rather than a drawing. The exchange is the
- * one on the agent-driven use case page, which names real tools
+ * The agent page shows a session rather than a drawing. It names real tools
  * (read_backend_state, apply_migration) and the real refusal path.
  */
 const AGENT_SESSION = `You:   What tables does this project have?
@@ -54,6 +42,51 @@ Agent: Not available over MCP. Sent to the
        Review Queue: 1,284 live rows.
        Approve it in the dashboard.`
 
+/**
+ * The restructuring and undo pages show the same kind of session. Restructuring
+ * reads a proposal the way autonomy { action: "evolution" } words it
+ * (lib/structural-evolution/words.ts); undo is a change that was verified and
+ * still broke the app, undone through the real deploy actions (changes,
+ * revert_change). In both, a person approves, never the agent.
+ */
+const RESTRUCTURE_SESSION = `You:   Why is Backenly asking about
+       orders?
+Agent: autonomy evolution
+       Move refund data out of orders
+       into its own table. The refund
+       columns are set later in an
+       order's life, and changing them
+       has been locking orders.
+       Rehearsed on a copy. Waiting
+       for your approval.
+You:   (approves it in the dashboard)
+       Later: is it done?
+Agent: autonomy evolution
+       order_refunds is open. Apps that
+       use orders keep working, and undo
+       puts orders back as it was.`
+
+const UNDO_SESSION = `You:   Checkout broke after the last
+       change. Undo it.
+Agent: deploy changes
+       #41 renamed orders.total to
+       amount. Verified.
+Agent: deploy revert_change #41
+       Parked for your approval:
+       amount goes back to total.
+       No data is set aside.
+You:   (approves it in the dashboard)
+Agent: check_approval: executed.
+       Checkout reads total again, and
+       every order since is still there.`
+
+/** The pages that show a session in place of a drawing. */
+const HERO_SESSIONS: Record<string, { code: string; label: string } | undefined> = {
+  'ai-backend-generation': { code: AGENT_SESSION, label: 'Your agent, over MCP' },
+  'self-restructuring-schema': { code: RESTRUCTURE_SESSION, label: 'A restructuring, over MCP' },
+  'undo-and-rollback': { code: UNDO_SESSION, label: 'Undoing a change, over MCP' },
+}
+
 export function generateStaticParams() {
   return FEATURE_SLUGS.map((slug) => ({ slug }))
 }
@@ -62,14 +95,19 @@ export async function generateMetadata(props: { params: Promise<{ slug: string }
   const params = await props.params
   const f = FEATURES[params.slug]
   if (!f) return { title: 'Not Found' }
-  return {
-    title: f.metaTitle,
-    description: f.metaDescription,
-    openGraph: { title: f.metaTitle, description: f.metaDescription, url: `${APP_URL}/features/${f.slug}`, type: 'website' },
-    twitter: { card: 'summary_large_image', title: f.metaTitle, description: f.metaDescription },
-    alternates: { canonical: `${APP_URL}/features/${f.slug}` },
-  }
+
+  return pageMetadata({ title: f.metaTitle, description: f.metaDescription, path: `/features/${f.slug}` })
 }
+
+/* ─────────────────────────────────────────────────────────────
+   One capability in depth (2026-10-15, founders: clean, no jargon, no lots of
+   text, no big banners). A compact header beside the capability's drawing,
+   then what you get as four cells, the change path on the operations page,
+   questions, related capabilities, the close.
+
+   The long-form fields in data.ts (what / how / why / inPractice) are no
+   longer rendered: they were three essays between the header and the cells.
+───────────────────────────────────────────────────────────── */
 
 export default async function FeatureSlugPage(props: { params: Promise<{ slug: string }> }) {
   const params = await props.params
@@ -98,7 +136,7 @@ export default async function FeatureSlugPage(props: { params: Promise<{ slug: s
 
   const related = f.relatedFeatures.map((slug) => FEATURES[slug]).filter(Boolean)
   const Diagram = HERO_DIAGRAMS[f.slug]
-  const isAgentPage = f.slug === 'ai-backend-generation'
+  const session = HERO_SESSIONS[f.slug]
   const isOperationsPage = f.slug === 'deployment-ready-backends'
 
   return (
@@ -127,90 +165,54 @@ export default async function FeatureSlugPage(props: { params: Promise<{ slug: s
               <SpotlightPanel className="px-6 pb-6">
                 <Diagram />
               </SpotlightPanel>
-            ) : isAgentPage ? (
-              <CodeBlock code={AGENT_SESSION} label="Your agent, over MCP" language="text" />
+            ) : session ? (
+              <CodeBlock code={session.code} label={session.label} language="text" />
             ) : undefined
           }
         />
 
-        {/* In practice first: the concrete walkthrough is the most convincing
-            thing on the page, so it opens the page rather than closing it. */}
-        <Section flush aria-labelledby="in-practice">
-          <Reveal className="grid gap-8 lg:grid-cols-[minmax(0,4fr)_minmax(0,8fr)] lg:gap-16">
-            <h2 id="in-practice" className={`text-[26px] text-white md:text-[34px] ${TITLE}`}>
-              In practice
-            </h2>
-            <p className="max-w-[64ch] text-[17px] leading-[1.75] tracking-[-0.01em] text-zinc-300 [text-wrap:pretty] md:text-[18px]">
-              {withCode(f.inPractice)}
-            </p>
-          </Reveal>
-        </Section>
-
-        {isOperationsPage && (
-          <Section aria-label="One day and night on production">
-            <Reveal>
-              <ChangePath />
-            </Reveal>
-          </Section>
-        )}
-
-        <Section aria-label={`What ${f.name} is, how it works and why it matters`}>
-          <Reveal>
-            <Facts
-              items={[
-                { title: 'What it is', body: withCode(f.what) },
-                { title: 'How it works', body: withCode(f.how) },
-                { title: 'Why it matters', body: withCode(f.why) },
-              ]}
-            />
-          </Reveal>
-        </Section>
-
-        <Section aria-labelledby="what-you-get">
-          <Reveal>
-            <SectionHead id="what-you-get" title="What you get" />
-          </Reveal>
-          <Reveal delay={0.06} className="mt-12 grid gap-3 md:grid-cols-2">
+        <Section flush aria-labelledby="what-you-get">
+          <SectionHead id="what-you-get" size="sm" title="What you get" />
+          <div className="mt-[40px] grid gap-[12px] md:grid-cols-2">
             {f.details.map((detail) => (
-              <SpotlightPanel key={detail.title} className="p-6 md:p-8">
-                <h3 className={`text-[19px] text-white ${HEADING}`}>{detail.title}</h3>
-                <p className="mt-3 max-w-[52ch] text-[15px] leading-[1.7] tracking-[-0.004em] text-zinc-400 [text-wrap:pretty]">
+              <SpotlightPanel key={detail.title} className="p-[24px] md:p-[28px]">
+                <h3 className={`text-[17px] text-white ${HEADING}`}>{detail.title}</h3>
+                <p className="mt-[10px] max-w-[52ch] text-[15px] leading-[1.7] tracking-[-0.004em] text-zinc-400 [text-wrap:pretty]">
                   {withCode(detail.body)}
                 </p>
               </SpotlightPanel>
             ))}
-          </Reveal>
+          </div>
         </Section>
 
+        {isOperationsPage && (
+          <Section aria-label="One day and night on production">
+            <ChangePath />
+          </Section>
+        )}
+
         <Section aria-labelledby="feature-faq">
-          <div className="grid gap-10 lg:grid-cols-[minmax(0,4fr)_minmax(0,7fr)] lg:gap-16">
-            <Reveal className="lg:sticky lg:top-28 lg:self-start">
-              <SectionHead id="feature-faq" title="Common questions" />
-            </Reveal>
-            <Reveal delay={0.06}>
-              <Faq items={f.faq} />
-            </Reveal>
+          <div className="grid gap-[40px] lg:grid-cols-[minmax(0,4fr)_minmax(0,7fr)] lg:gap-[64px]">
+            <div className="lg:sticky lg:top-[112px] lg:self-start">
+              <SectionHead id="feature-faq" size="sm" title="Questions" />
+            </div>
+            <Faq items={f.faq} />
           </div>
         </Section>
 
         {related.length > 0 && (
           <Section aria-labelledby="related-features">
-            <Reveal>
-              <h2 id="related-features" className={`text-[22px] text-white md:text-[26px] ${TITLE}`}>
-                Related features
-              </h2>
-              <NextLinks
-                className="mt-8"
-                items={related.map((r) => ({ href: `/features/${r.slug}`, title: r.name, body: r.subheadline }))}
-              />
-            </Reveal>
+            <h2 id="related-features" className={`text-[22px] text-white md:text-[26px] ${TITLE}`}>
+              Related features
+            </h2>
+            <NextLinks
+              className="mt-[32px]"
+              items={related.map((r) => ({ href: `/features/${r.slug}`, title: r.name }))}
+            />
           </Section>
         )}
 
-        <HorizonClose
-          title={`Try it on a live project`}
-          lede="One free project, no card. Connect your agent over MCP and read the verification evidence yourself."
-        >
+        <HorizonClose title="Try it on a live project" lede="One free project, no credit card.">
           <StartButton />
           <ButtonLink href="/docs/connect" variant="secondary">
             Connect your agent

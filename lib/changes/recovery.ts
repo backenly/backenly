@@ -48,6 +48,7 @@ import type { CatalogSnapshot } from './catalog'
 import { describeChange } from './describe'
 import {
   acknowledgementOf,
+  fingerprintOf,
   impactCovered,
   measureImpact,
   type AcknowledgedImpact,
@@ -65,10 +66,24 @@ import {
 import { refreshSchemaViews, tablesTouched } from './freshness'
 import { claimRecovery, recordEvent, recordTiming, releaseRecovery, RECOVERY_LEASE_MS, transition } from './lifecycle'
 import { ChangeInProgressError, readCatalogOn, withChangeLock } from './lock'
+import { describeReaders, vaultReaders, type VaultReader } from './dependents'
+import {
+  afterCommitResources,
+  applyResources,
+  assessResources,
+  compensateResources,
+  opKeys,
+  opsOf,
+  verifyResources,
+  adapterFor,
+  type ResourceAssessment,
+  type ResourceOp,
+  type ResourceSnapshot,
+} from './resources'
 import { createVaultStatements, qualified, vaultSchemaName } from './names'
 import { planRestore, verifyAgainstCheckpoint, type PlanConflict, type PlannedStep, type RestorePlan } from './plan'
 import { rollbackWindowDays, windowEndsAt } from './policy'
-import { IN_EFFECT, RECOVERY_OWED, type ChangePreservation, type ChangeStatus, type PreservedEntry, type TableChange } from './types'
+import { IN_EFFECT, RECOVERY_OWED, restoreRequestChangeId, type ChangePreservation, type ChangeStatus, type PreservedEntry, type TableChange } from './types'
 import { catalogStructure, definitionsFromRegion, keptText, quotesKeptHere } from './residency'
 import type { ChangeVerification, VerificationCheck } from './verify'
 
@@ -85,6 +100,8 @@ interface LoadedChange {
   source: string
   apiKeyId: string | null
   actorUserId: string | null
+  /** Several changes made for one request (ledger attribution). */
+  groupId: string | null
   createdAt: Date
   recoversId: string | null
   recoveredById: string | null
@@ -103,6 +120,10 @@ interface LoadedChange {
   catalogKey: string | null
   /** Its definitions are kept in its region, which holds none that match its record. */
   definitionsMissing: boolean
+  /** Its record was sealed when it closed (a change interrupted before then never was). */
+  sealed: boolean
+  /** What it did to the rest of the backend, item by item (lib/changes/resources). */
+  resourceOps: ResourceOp[]
 }
 
 async function load(projectId: string, changeId: string): Promise<LoadedChange | null> {
@@ -130,6 +151,7 @@ async function load(projectId: string, changeId: string): Promise<LoadedChange |
     source: row.source,
     apiKeyId: row.apiKeyId,
     actorUserId: row.actorUserId,
+    groupId: row.groupId,
     createdAt: row.createdAt,
     recoversId: row.recoversId,
     recoveredById: row.recoveredById,
@@ -142,6 +164,11 @@ async function load(projectId: string, changeId: string): Promise<LoadedChange |
     intact: !!checkpoint && checkpointIntact(row) && (!inRegion || definitions !== null),
     catalogKey: definitions?.key ?? null,
     definitionsMissing: inRegion && definitions === null,
+    sealed: !!row.checkpointHash,
+    resourceOps: opsOf(
+      (row.checkpoint as { resources?: ResourceSnapshot } | null)?.resources,
+      (row.resultState as { resources?: ResourceSnapshot } | null)?.resources,
+    ),
   }
 }
 
@@ -211,15 +238,54 @@ async function intactEntries(client: PoolClient, entries: PreservedEntry[]): Pro
 
 // ── Eligibility ──────────────────────────────────────────────────────────────
 
-export type RecoveryMode = 'automatic' | 'manual' | 'approved'
+/**
+ * automatic  Backenly, right after a change failed its checks
+ * repair     Backenly, undoing one of its own repairs its verifier rejected
+ *            (lib/core/auto-fix-engine.ts): the change passed protected
+ *            verification and still did not fix what it was meant to
+ * manual     a person, from the console
+ * approved   a person approving a request
+ *
+ * Backenly's own (automatic, repair) run only when lossless and leave the
+ * change recovered; a person's leave it restored.
+ */
+export type RecoveryMode = 'automatic' | 'repair' | 'manual' | 'approved'
+
+const byBackenly = (mode: RecoveryMode) => mode === 'automatic' || mode === 'repair'
 
 export interface Availability {
   available: boolean
   /** Plain sentence, when it is not. */
   reason?: string
-  code?: 'NOT_RESTORABLE' | 'IN_PROGRESS' | 'EXPIRED' | 'CHECKPOINT_INVALID' | 'NOTHING_TO_RESTORE' | 'FAILED_CHANGE_REAPPLY'
+  code?:
+    | 'NOT_RESTORABLE'
+    | 'IN_PROGRESS'
+    | 'EXPIRED'
+    | 'CHECKPOINT_INVALID'
+    | 'NOTHING_TO_RESTORE'
+    | 'FAILED_CHANGE_REAPPLY'
+    | 'NOT_REVERSIBLE'
+    | 'PART_OF_ARCHITECTURE_CHANGE'
   expiresAt?: string
 }
+
+/**
+ * The group of every change an architecture change makes, its undo included
+ * (lib/structural-evolution: execute.ts, rollback.ts). Such a change is one
+ * step of a whole: its new table and the syncs that keep it equal to its parent
+ * are added, and removed, together, and the engine's own undo first proves that
+ * removing them loses nothing. Restoring one step alone would leave the two
+ * tables apart — the parent's writes no longer mirrored, or a mirror with no
+ * table — so a person is pointed to that undo instead.
+ */
+export const ARCHITECTURE_CHANGE_GROUP = 'evolution:'
+
+/**
+ * Marks the engine's own undo within that group (`evolution:<plan>:undo`), so
+ * History can tell a change that is still in place from one undone in full,
+ * which leaves nothing of it behind (lib/changes/range.ts).
+ */
+export const ARCHITECTURE_UNDO_SUFFIX = ':undo'
 
 /** The statuses a restore may start from, by mode. */
 function restorableFrom(mode: RecoveryMode): ChangeStatus[] {
@@ -230,27 +296,71 @@ function restorableFrom(mode: RecoveryMode): ChangeStatus[] {
 /**
  * Can a restore be offered at all? Cheap: no catalog read. The preview proves
  * the rest. `targetStatus` is, for a recovery record, the status of the change
- * it restored.
+ * it restored, and `targetVerified` whether protected verification confirmed
+ * that change when it was made. Reapplying puts a change back as healthy on the
+ * strength of that verification, so a change it did not confirm (it failed its
+ * checks, could not be checked, or failed part-way) is not reapplied: asked for
+ * again, it is checked again.
  */
 export function availabilityOf(
-  change: { kind: string; status: string; footprint: TableChange[]; createdAt: Date; intact: boolean },
+  change: {
+    kind: string
+    status: string
+    footprint: TableChange[]
+    createdAt: Date
+    intact: boolean
+    sealed?: boolean
+    resourceOps?: ResourceOp[]
+    groupId?: string | null
+  },
   windowDays: number,
-  opts: { now?: Date; mode?: RecoveryMode; targetStatus?: string | null } = {},
+  opts: { now?: Date; mode?: RecoveryMode; targetStatus?: string | null; targetVerified?: boolean } = {},
 ): Availability {
   const mode = opts.mode ?? 'manual'
   const ends = windowEndsAt(change.createdAt, windowDays)
+  if (change.kind === 'snapshot_restore') {
+    return { available: false, code: 'NOT_RESTORABLE', reason: 'A snapshot restore replaced the whole database. To go back, restore an earlier snapshot from Database → Snapshots.' }
+  }
   if (change.status === 'recovering' || change.status === 'applying' || change.status === 'verifying') {
     return { available: false, code: 'IN_PROGRESS', reason: 'Backenly is still working on this change.' }
+  }
+  if (mode !== 'automatic' && change.groupId?.startsWith(ARCHITECTURE_CHANGE_GROUP)) {
+    return {
+      available: false,
+      code: 'PART_OF_ARCHITECTURE_CHANGE',
+      reason: 'This is one step of an architecture change. Undo the whole change from the Autonomy page instead.',
+    }
   }
   if (!restorableFrom(mode).includes(change.status as ChangeStatus)) {
     return { available: false, code: 'NOT_RESTORABLE', reason: change.status === 'failed' ? 'This change did not alter anything.' : 'This change is no longer in effect.' }
   }
   if (change.kind === 'recovery' && opts.targetStatus !== 'restored') {
-    return { available: false, code: 'FAILED_CHANGE_REAPPLY', reason: 'That change failed verification. Ask for it again instead of reapplying it.' }
+    return opts.targetStatus === 'recovered'
+      ? { available: false, code: 'FAILED_CHANGE_REAPPLY', reason: 'That change failed verification. Ask for it again instead of reapplying it.' }
+      : { available: false, code: 'NOT_RESTORABLE', reason: 'Only the latest restore of a change can be reapplied, from that change.' }
   }
-  if (change.footprint.length === 0) return { available: false, code: 'NOTHING_TO_RESTORE', reason: 'This change did not alter anything.' }
-  if (!change.intact) return { available: false, code: 'CHECKPOINT_INVALID', reason: 'Its restore point did not pass its integrity check.' }
-  if (mode !== 'automatic' && ends.getTime() < (opts.now ?? new Date()).getTime()) {
+  if (change.kind === 'recovery' && opts.targetVerified !== true) {
+    return { available: false, code: 'FAILED_CHANGE_REAPPLY', reason: 'That change was not verified when it was made. Ask for it again, so it is checked, instead of reapplying it.' }
+  }
+  const ops = change.resourceOps ?? []
+  if (change.footprint.length === 0 && ops.length === 0) return { available: false, code: 'NOTHING_TO_RESTORE', reason: 'This change did not alter anything.' }
+  // Only what cannot come back (a revoked key, a replaced secret): there is no
+  // restore to offer, and the reason is the answer.
+  if (change.footprint.length === 0) {
+    const reasons = ops.map((op) => adapterFor(op.resource).irreversible(op, ops))
+    if (reasons.every((r) => r && !r.partial)) return { available: false, code: 'NOT_REVERSIBLE', reason: reasons.map((r) => r!.reason).join(' ') }
+  }
+  if (!change.intact) {
+    return {
+      available: false,
+      code: 'CHECKPOINT_INVALID',
+      // A change that stopped before it closed was never sealed: not tampered with, never finished.
+      reason: change.sealed === false
+        ? 'This change stopped before it finished, so it has no sealed restore point to restore from.'
+        : 'Its restore point did not pass its integrity check.',
+    }
+  }
+  if (!byBackenly(mode) && ends.getTime() < (opts.now ?? new Date()).getTime()) {
     return { available: false, code: 'EXPIRED', reason: `Restore points are kept for ${windowDays} days on this plan, and this one has expired.`, expiresAt: ends.toISOString() }
   }
   return { available: true, expiresAt: ends.toISOString() }
@@ -272,6 +382,25 @@ class ImpactRefusal extends Error {
   }
 }
 
+/**
+ * The restore would leave something outside its vault reading what it moved
+ * in: a view over a table the change created, a policy on another table that
+ * reads it (lib/changes/dependents.ts). A conflict like a later change to the
+ * same table, found by running the plan, since only PostgreSQL knows every
+ * dependency.
+ */
+class VaultReadersConflict extends Error {
+  readonly conflicts: PlanConflict[]
+  /** What the readers belong to, for naming the later changes that made them. */
+  readonly owners: string[]
+  constructor(readers: VaultReader[]) {
+    super(describeReaders(readers))
+    this.name = 'VaultReadersConflict'
+    this.conflicts = readers.map((r) => ({ table: r.reads.replace(/^\S+ /, ''), reason: `${r.dependent} reads ${r.reads} and was created after this change` }))
+    this.owners = [...new Set(readers.map((r) => r.owner).filter((o): o is string => !!o))]
+  }
+}
+
 const runner = (client: PoolClient) => ({ query: (sql: string, params?: unknown[]) => client.query(sql, params as unknown[]) })
 
 /**
@@ -284,7 +413,18 @@ const runner = (client: PoolClient) => ({ query: (sql: string, params?: unknown[
 async function runPlan(
   client: PoolClient,
   plan: RestorePlan & { schema: string },
-  opts: { commit: boolean; vault: string | null; measure: () => Promise<Impact>; gate: (impact: Impact) => void },
+  opts: {
+    commit: boolean
+    vault: string | null
+    measure: () => Promise<Impact>
+    gate: (impact: Impact) => void
+    /**
+     * Runs once every statement and check has passed, before COMMIT: the rest
+     * of the backend's part of the restore, in its own transaction on the
+     * platform database. If it throws, nothing commits.
+     */
+    beforeCommit?: () => Promise<void>
+  },
 ): Promise<Impact> {
   await client.query('BEGIN')
   let index = -1
@@ -303,15 +443,26 @@ async function runPlan(
       await client.query(plan.steps[index].sql)
     }
     index = plan.steps.length
+    if (opts.vault) {
+      const readers = await vaultReaders(async <R>(sql: string, params: unknown[]) => (await client.query(sql, params)).rows as R[], opts.vault)
+      if (readers.length > 0) throw new VaultReadersConflict(readers)
+    }
     for (const check of plan.checks) {
       const r = await client.query<{ n: string }>(check.sql)
       if (Number(r.rows[0]?.n ?? 0) !== 0) throw new RecoveryStepError(-1, null, `${check.describe} — ${r.rows[0]?.n} did not.`)
+    }
+    if (opts.beforeCommit) {
+      try {
+        await opts.beforeCommit()
+      } catch (err: any) {
+        throw new RecoveryStepError(-1, null, `the rest of the backend could not be put back: ${err?.message ?? err}`)
+      }
     }
     await client.query(opts.commit ? 'COMMIT' : 'ROLLBACK')
     return impact
   } catch (err: any) {
     await client.query('ROLLBACK').catch(() => {})
-    if (err instanceof ImpactRefusal || err instanceof RecoveryStepError) throw err
+    if (err instanceof ImpactRefusal || err instanceof RecoveryStepError || err instanceof VaultReadersConflict) throw err
     if (index >= 0 && index < plan.steps.length) throw new RecoveryStepError(index, plan.steps[index], err?.message ?? String(err))
     throw err
   }
@@ -339,6 +490,8 @@ export interface RecoveryPreview {
   strategy: RecoveryStrategy
   /** Why it is not lossless, in one plain sentence. */
   reason: string | null
+  /** Why it is unavailable, as a code, when it is. */
+  unavailableCode: Availability['code'] | null
   checks: RecoveryCheckRow[]
   impact: Impact | null
   /** What approving would cover, when it needs approval. */
@@ -351,28 +504,81 @@ export interface RecoveryPreview {
   /** For View details only. */
   details: {
     steps: Array<{ sql: string; describe: string }>
+    /** What it puts back outside the database, one sentence each (lib/changes/resources). */
+    resourceSteps: string[]
     proof: { ok: boolean; ms: number; failedStep?: number; error?: string } | null
   }
 }
 
-/** Later changes still in effect that touched one of the same tables. */
-async function laterOverlapping(projectId: string, change: LoadedChange) {
-  const names = new Set(change.footprint.flatMap((c) => [c.before, c.after]).filter((n): n is string => !!n))
+/**
+ * Later changes still in effect that touched one of the same tables, or one of
+ * `also`: what the objects reading this change's tables belong to.
+ */
+async function laterOverlapping(projectId: string, change: LoadedChange, also: string[] = [], keys: string[] = []) {
+  const names = new Set([...change.footprint.flatMap((c) => [c.before, c.after]), ...also].filter((n): n is string => !!n))
+  const items = new Set(keys)
+  // Changes only: a restore or reapply in the way is acted on from the change
+  // it belongs to, and the history lists no record of its own for it.
   const later = await prisma.backendChange.findMany({
-    where: { projectId, seq: { gt: change.seq }, status: { in: [...IN_EFFECT, ...RECOVERY_OWED] } },
+    where: { projectId, kind: 'change', seq: { gt: change.seq }, status: { in: [...IN_EFFECT, ...RECOVERY_OWED] } },
     orderBy: { seq: 'desc' },
-    select: { id: true, seq: true, summary: true, title: true, footprint: true },
+    select: { id: true, seq: true, summary: true, title: true, footprint: true, ...(items.size > 0 ? { checkpoint: true, resultState: true } : {}) },
     take: 50,
   })
+  const touchesItems = (l: { checkpoint?: unknown; resultState?: unknown }) =>
+    items.size > 0 &&
+    opKeys(opsOf((l.checkpoint as { resources?: ResourceSnapshot } | null)?.resources, (l.resultState as { resources?: ResourceSnapshot } | null)?.resources))
+      .some((k) => items.has(k))
   return later
-    .filter((l) => ((l.footprint as unknown as TableChange[] | null) ?? []).some((c) => names.has(c.before ?? '') || names.has(c.after ?? '')))
+    .filter((l) => ((l.footprint as unknown as TableChange[] | null) ?? []).some((c) => names.has(c.before ?? '') || names.has(c.after ?? '')) || touchesItems(l))
     .map((l) => ({ id: l.id, seq: l.seq, summary: l.summary ?? l.title }))
 }
 
-async function targetStatusOf(change: LoadedChange): Promise<string | null> {
-  if (change.kind !== 'recovery' || !change.recoversId) return null
-  const t = await prisma.backendChange.findUnique({ where: { id: change.recoversId }, select: { status: true } })
-  return t?.status ?? null
+/** The rest of the backend's part of a restore, as approval items: what does not come back. */
+function withResourceItems(impact: Impact, resources: ResourceAssessment): Impact {
+  if (resources.irreversible.length === 0) return impact
+  const items = [
+    ...impact.items,
+    ...resources.irreversible.map((i) => ({
+      effect: 'restore_incomplete' as const,
+      table: `${i.op.resource}:${i.op.key}`,
+      count: 1,
+      needsApproval: true,
+      detail: i.reason,
+    })),
+  ]
+  return { ...impact, items, needsApproval: true, fingerprint: fingerprintOf(items) }
+}
+
+/** The proof of the rest of the backend's part: applied in a transaction that is then rolled back. */
+async function rehearseResources(projectId: string, ops: ResourceOp[]): Promise<void> {
+  const rehearsal = new Error('rehearsal')
+  try {
+    await prisma.$transaction(async (tx) => {
+      await applyResources(tx, projectId, ops)
+      throw rehearsal
+    })
+  } catch (err) {
+    if (err !== rehearsal) throw err
+  }
+}
+
+/**
+ * For a recovery record, the change it restored as availabilityOf reads it: its
+ * status, and whether protected verification confirmed it. Only the restore
+ * that is how a change ended can be reapplied: one that restored another
+ * restore (a reapply) or that a later restore of the same change superseded
+ * would act on the schema while the change it names stayed reported as it was,
+ * so for those there is no target.
+ */
+async function targetOf(change: LoadedChange): Promise<{ targetStatus: string | null; targetVerified: boolean }> {
+  if (change.kind !== 'recovery' || !change.recoversId) return { targetStatus: null, targetVerified: false }
+  const t = await prisma.backendChange.findUnique({
+    where: { id: change.recoversId },
+    select: { status: true, kind: true, recoveredById: true, verification: true },
+  })
+  if (!t || t.kind !== 'change' || t.recoveredById !== change.id) return { targetStatus: null, targetVerified: false }
+  return { targetStatus: t.status, targetVerified: (t.verification as { outcome?: string } | null)?.outcome === 'confirmed' }
 }
 
 export async function previewRecovery(projectId: string, changeId: string): Promise<RecoveryPreview | null> {
@@ -380,7 +586,7 @@ export async function previewRecovery(projectId: string, changeId: string): Prom
   const change = await load(projectId, changeId)
   if (!change) return null
   const windowDays = await rollbackWindowDays(projectId)
-  const availability = availabilityOf(change, windowDays, { targetStatus: await targetStatusOf(change) })
+  const availability = availabilityOf(change, windowDays, await targetOf(change))
   const base: RecoveryPreview = {
     changeId: change.id,
     seq: change.seq,
@@ -389,6 +595,7 @@ export async function previewRecovery(projectId: string, changeId: string): Prom
     safety: 'unavailable',
     strategy: 'manual',
     reason: availability.reason ?? null,
+    unavailableCode: availability.available ? null : availability.code ?? null,
     checks: [],
     impact: null,
     acknowledgement: null,
@@ -396,7 +603,7 @@ export async function previewRecovery(projectId: string, changeId: string): Prom
     blockedBy: [],
     unrecoverable: [],
     expiresAt: availability.expiresAt ?? null,
-    details: { steps: [], proof: null },
+    details: { steps: [], resourceSteps: [], proof: null },
   }
   if (!availability.available) {
     base.checks = [{ id: 'restore_point', ok: false, label: 'Restore point available', detail: availability.reason ?? 'Not available.' }]
@@ -419,18 +626,20 @@ export async function previewRecovery(projectId: string, changeId: string): Prom
     const last = await prisma.backendChange.findFirst({ where: { projectId }, orderBy: { seq: 'desc' }, select: { seq: true } })
     const vault = vaultSchemaName(projectId, (last?.seq ?? 0) + 1)
     const plan = { ...planRestore({ schema, footprint: change.footprint, checkpoint: change.checkpoint, resultState: change.resultState, preserved: intact, live, vault }), schema }
+    const resources = await assessResources(projectId, change.resourceOps)
+    plan.conflicts.push(...resources.conflicts)
     const out: RecoveryPreview = {
       ...base,
       strategy: 'reverse_migration',
       conflicts: plan.conflicts,
       unrecoverable: plan.unrecoverable,
-      details: { steps: plan.steps.map((s) => ({ sql: s.sql, describe: s.describe })), proof: null },
+      details: { steps: plan.steps.map((s) => ({ sql: s.sql, describe: s.describe })), resourceSteps: resources.steps, proof: null },
     }
     const restorePoint: RecoveryCheckRow = { id: 'restore_point', ok: true, label: 'Restore point available', detail: 'Its checkpoint and kept data passed their integrity checks.' }
     const protectedNow: RecoveryCheckRow = { id: 'current_state', ok: true, label: 'Current state protected', detail: 'The current state is saved first, and anything this removes is kept, so it can be brought back.' }
 
     if (plan.conflicts.length > 0) {
-      out.blockedBy = await laterOverlapping(projectId, change)
+      out.blockedBy = await laterOverlapping(projectId, change, [], opKeys(change.resourceOps))
       out.safety = 'blocked'
       out.reason = plan.conflicts.map((c) => c.reason).join('; ')
       out.checks = [restorePoint, protectedNow, { id: 'plan', ok: false, label: 'Recovery plan verified', detail: out.reason }]
@@ -444,11 +653,25 @@ export async function previewRecovery(projectId: string, changeId: string): Prom
       impact = await runPlan(client, plan, {
         commit: false,
         vault: plan.archives.length > 0 ? vault : null,
-        measure: () => measureImpact(runner(client), { schema, footprint: change.footprint, checkpoint: change.checkpoint, resultState: change.resultState, preserved: intact }),
+        measure: async () => withResourceItems(
+          await measureImpact(runner(client), { schema, footprint: change.footprint, checkpoint: change.checkpoint, resultState: change.resultState, preserved: intact }),
+          resources,
+        ),
         gate: (i) => { if (i.blockers.length > 0) throw new ImpactRefusal('BLOCKED', i) },
+        // The rest of the backend's part too, rolled back with the rest.
+        beforeCommit: resources.apply.length > 0 ? () => rehearseResources(projectId, resources.apply) : undefined,
       })
       out.details.proof = { ok: true, ms: Date.now() - started }
     } catch (err: any) {
+      if (err instanceof VaultReadersConflict) {
+        out.conflicts = err.conflicts
+        out.blockedBy = await laterOverlapping(projectId, change, err.owners)
+        out.safety = 'blocked'
+        out.reason = err.conflicts.map((c) => c.reason).join('; ')
+        out.details.proof = { ok: false, ms: Date.now() - started, error: out.reason }
+        out.checks = [restorePoint, protectedNow, { id: 'plan', ok: false, label: 'Recovery plan verified', detail: out.reason }]
+        return out
+      }
       if (err instanceof ImpactRefusal) {
         impact = err.impact
         out.details.proof = { ok: false, ms: Date.now() - started, error: impact.blockers.join(' ') }
@@ -531,8 +754,7 @@ export async function recoverChange(projectId: string, changeId: string, opts: R
     ({ ok: false, code, error, changeId, status: change.status, ...extra })
 
   const windowDays = await rollbackWindowDays(projectId)
-  const targetStatus = await targetStatusOf(change)
-  const availability = availabilityOf(change, windowDays, { mode: opts.mode, targetStatus })
+  const availability = availabilityOf(change, windowDays, { mode: opts.mode, ...(await targetOf(change)) })
   if (!availability.available) {
     return fail(availability.code === 'IN_PROGRESS' ? 'IN_PROGRESS' : availability.code === 'CHECKPOINT_INVALID' ? 'INTEGRITY' : 'NOT_AVAILABLE', availability.reason ?? 'Not available.')
   }
@@ -543,8 +765,8 @@ export async function recoverChange(projectId: string, changeId: string, opts: R
     return { ok: false, code: 'IN_PROGRESS', error: 'This change is already being recovered, or was just recovered.', changeId, status: now?.status ?? change.status }
   }
   const principals = {
-    requestedBy: opts.mode === 'automatic' ? { kind: 'backenly', reason: 'verification' } : opts.actorUserId ? { kind: 'user', userId: opts.actorUserId } : { kind: 'unknown' },
-    authorizedBy: opts.mode === 'automatic' ? { kind: 'backenly', policy: 'lossless_only' } : opts.actorUserId ? { kind: 'user', userId: opts.actorUserId, source: opts.mode === 'approved' ? 'explicit_approval' : 'dashboard' } : null,
+    requestedBy: byBackenly(opts.mode) ? { kind: 'backenly', reason: opts.mode === 'repair' ? 'repair_rejected' : 'verification' } : opts.actorUserId ? { kind: 'user', userId: opts.actorUserId } : { kind: 'unknown' },
+    authorizedBy: byBackenly(opts.mode) ? { kind: 'backenly', policy: 'lossless_only' } : opts.actorUserId ? { kind: 'user', userId: opts.actorUserId, source: opts.mode === 'approved' ? 'explicit_approval' : 'dashboard' } : null,
     executedBy: { kind: 'backenly' },
   }
   await recordEvent(change.id, projectId, 'recovery_started', { mode: opts.mode, from: claim.from, claim: claim.claim, ...(opts.approvalId ? { approvalId: opts.approvalId } : {}), ...principals })
@@ -554,10 +776,14 @@ export async function recoverChange(projectId: string, changeId: string, opts: R
     ? `Reapply #${targetSeqOf(change)}`
     : opts.mode === 'automatic'
       ? `Automatic recovery of #${change.seq}`
-      : `Restore the state before #${change.seq}`
+      : opts.mode === 'repair'
+        ? `Undo Backenly's repair #${change.seq}`
+        : `Restore the state before #${change.seq}`
   const summary = reapply ? `Reapplied the change restored by #${change.seq}` : `Restored the state before #${change.seq}`
   const attr = opts.mode === 'automatic'
     ? { source: 'system' as const, actorUserId: null, apiKeyId: null }
+    : opts.mode === 'repair'
+      ? { source: 'autonomy' as const, actorUserId: null, apiKeyId: null }
     : { source: opts.mode === 'approved' ? ('approval' as const) : ('dashboard' as const), actorUserId: opts.actorUserId ?? null }
 
   let committed = false
@@ -571,29 +797,51 @@ export async function recoverChange(projectId: string, changeId: string, opts: R
         const { intact, altered } = await intactEntries(open.client, await candidateEntries(projectId, change))
         if (altered.length > 0) throw new AbandonChange({ code: 'INTEGRITY', reason: `The data kept for ${altered.join(', ')} was altered after it was kept.` })
         const plan = { ...planRestore({ schema: open.schema, footprint: change.footprint, checkpoint: change.checkpoint, resultState: change.resultState, preserved: intact, live: open.before, vault: open.vault }), schema: open.schema }
-        if (plan.conflicts.length > 0) throw new AbandonChange({ code: 'CONFLICT', conflicts: plan.conflicts })
+        const resources = await assessResources(projectId, change.resourceOps)
+        plan.conflicts.push(...resources.conflicts)
+        if (plan.conflicts.length > 0) throw new AbandonChange({ code: 'CONFLICT', conflicts: plan.conflicts, keys: opKeys(change.resourceOps) })
 
         const acknowledged = opts.acknowledged && Object.keys(opts.acknowledged).length > 0 ? opts.acknowledged : null
+        // The platform database commits the rest of the backend's part just
+        // before the workspace commits the schema's; if the second fails, the
+        // first is put back as the change had left it.
+        let resourcesCommitted = false
         try {
           measured = await runPlan(open.client, plan, {
             commit: true,
             vault: plan.archives.length > 0 ? open.vault : null,
-            measure: () => measureImpact(runner(open.client), { schema: open.schema, footprint: change.footprint, checkpoint: change.checkpoint, resultState: change.resultState, preserved: intact }),
+            beforeCommit: resources.apply.length > 0
+              ? async () => {
+                  await prisma.$transaction((tx) => applyResources(tx, projectId, resources.apply))
+                  resourcesCommitted = true
+                }
+              : undefined,
+            measure: async () => withResourceItems(
+              await measureImpact(runner(open.client), { schema: open.schema, footprint: change.footprint, checkpoint: change.checkpoint, resultState: change.resultState, preserved: intact }),
+              resources,
+            ),
             gate: (impact) => {
               if (impact.blockers.length > 0) throw new ImpactRefusal('BLOCKED', impact)
               const needsApproval = impact.needsApproval || plan.unrecoverable.length > 0
               if (!needsApproval) return
-              if (opts.mode === 'automatic' || !acknowledged) throw new ImpactRefusal('NEEDS_APPROVAL', impact)
+              if (byBackenly(opts.mode) || !acknowledged) throw new ImpactRefusal('NEEDS_APPROVAL', impact)
               if (!impactCovered(impact, acknowledged)) throw new ImpactRefusal('IMPACT_CHANGED', impact)
             },
           })
         } catch (e) {
+          if (resourcesCommitted) {
+            await prisma.$transaction((tx) => compensateResources(tx, projectId, resources.apply)).catch((err) =>
+              console.error(`[Recovery] project=${projectId}: the rest of the backend was restored and the schema was not, and putting it back failed:`, err instanceof Error ? err.message : err))
+          }
           // Refused before anything ran: withdrawn, not a failed recovery.
           if (e instanceof ImpactRefusal) throw new AbandonChange({ code: 'IMPACT', refusal: e })
+          // Rolled back: something outside the change reads what it would move aside.
+          if (e instanceof VaultReadersConflict) throw new AbandonChange({ code: 'CONFLICT', conflicts: e.conflicts, owners: e.owners })
           throw e
         }
         committed = true
         if (plan.archives.length > 0) open.vaultCreated = true
+        await afterCommitResources(projectId, resources.apply)
 
         // What the restore kept, with real counts and checksums, so reapplying
         // brings it back and can trust it.
@@ -614,8 +862,15 @@ export async function recoverChange(projectId: string, changeId: string, opts: R
           detail: c.detail,
         }))
         checks.push({ id: 'values', label: 'Kept values back on their rows', outcome: 'confirmed', detail: `${plan.checks.length} value check${plan.checks.length === 1 ? '' : 's'} passed before commit` })
+        // The rest of the backend, read back the same way.
+        const partial = new Set(resources.irreversible.filter((i) => i.partial).map((i) => `${i.op.resource}:${i.op.key}`))
+        const resourceChecks = await verifyResources(projectId, resources.apply, partial)
+        for (const c of resourceChecks) checks.push({ id: c.id, label: c.label, outcome: c.ok ? 'confirmed' : 'contradicted', detail: c.detail })
+        for (const i of resources.irreversible) {
+          checks.push({ id: `kept_${i.op.resource}_${i.op.key}`, label: (i.op.after ?? i.op.before)!.label, outcome: 'confirmed', detail: `left as the change made it, as approved: ${i.reason}` })
+        }
         open.verification = {
-          outcome: against.ok ? 'confirmed' : 'contradicted',
+          outcome: against.ok && resourceChecks.every((c) => c.ok) ? 'confirmed' : 'contradicted',
           checkedAt: new Date().toISOString(),
           checks,
         }
@@ -633,7 +888,7 @@ export async function recoverChange(projectId: string, changeId: string, opts: R
       return fail('RECOVERY_FAILED', 'The restore ran, but the result did not match the restore point. Automatic recovery has stopped; a person needs to look.', { recoveryId: record.id })
     }
 
-    const finalStatus: 'recovered' | 'restored' = opts.mode === 'automatic' ? 'recovered' : 'restored'
+    const finalStatus: 'recovered' | 'restored' = byBackenly(opts.mode) ? 'recovered' : 'restored'
     await releaseRecovery(change.id, claim.claim, finalStatus, { recoveredById: record.id, recoveredAt: new Date() })
     await recordEvent(change.id, projectId, 'recovery_verified', { recoveryId: record.id, seq: record.seq, checks: closed.verification?.checks.length ?? 0 })
     await recordEvent(change.id, projectId, reapply ? 'reapplied' : finalStatus === 'recovered' ? 'recovery_completed' : 'restored', {
@@ -664,13 +919,13 @@ export async function recoverChange(projectId: string, changeId: string, opts: R
       err = (err.payload as { refusal: ImpactRefusal }).refusal
     }
     if (err instanceof AbandonChange) {
-      const payload = err.payload as { code: 'CONFLICT' | 'INTEGRITY'; conflicts?: PlanConflict[]; reason?: string }
+      const payload = err.payload as { code: 'CONFLICT' | 'INTEGRITY'; conflicts?: PlanConflict[]; reason?: string; owners?: string[]; keys?: string[] }
       await releaseRecovery(change.id, claim.claim, back)
       await recordEvent(change.id, projectId, 'recovery_failed', { phase: 'plan', code: payload.code, reason: payload.reason ?? payload.conflicts?.map((c) => c.reason).join('; ') })
       if (payload.code === 'CONFLICT') {
         return fail('CONFLICT', `Not restored: ${payload.conflicts!.map((c) => c.reason).join('; ')}. Nothing was changed.`, {
           conflicts: payload.conflicts,
-          blockedBy: await laterOverlapping(projectId, change),
+          blockedBy: await laterOverlapping(projectId, change, payload.owners, payload.keys),
           status: back,
         })
       }
@@ -872,7 +1127,8 @@ export async function reconcileChange(projectId: string, changeId: string, now =
         })
         const record = await prisma.backendChange.findFirst({ where: { projectId, kind: 'recovery', recoversId: changeId }, orderBy: { seq: 'desc' }, select: { id: true } })
         let to: ChangeStatus
-        if (restored) to = info.mode === 'automatic' ? 'recovered' : 'restored'
+        const backenly = info.mode === 'automatic' || info.mode === 'repair'
+        if (restored) to = backenly ? 'recovered' : 'restored'
         else if (untouched && info.mode !== 'automatic' && info.from) to = info.from
         else to = 'manual_intervention_required'
         const released = await releaseRecovery(changeId, change.recoveryClaim, to, restored && record ? { recoveredById: record.id, recoveredAt: now } : {})
@@ -1096,12 +1352,14 @@ async function afterRecovery(projectId: string, change: LoadedChange, recoverySe
 
   // The Autonomy page's activity feed and its "Rolled back" count read these.
   // A reapply undoes a restore: it is not counted as a rollback.
-  const what = reapply ? 'CHANGE_REAPPLIED' : opts.mode === 'automatic' ? 'ROLLBACK_CHANGE_RECOVERED' : 'ROLLBACK_CHANGE_RESTORED'
+  const what = reapply ? 'CHANGE_REAPPLIED' : byBackenly(opts.mode) ? 'ROLLBACK_CHANGE_RECOVERED' : 'ROLLBACK_CHANGE_RESTORED'
   const sentence = reapply
     ? `Reapplied a change that had been restored (#${recoverySeq})`
     : opts.mode === 'automatic'
       ? `Recovered automatically: change #${change.seq} (${change.summary}) failed verification; the previous state is back and verified`
-      : `Restored the state before change #${change.seq} (${change.summary}), verified`
+      : opts.mode === 'repair'
+        ? `Undid its own repair: change #${change.seq} (${change.summary}) did not fix what it was meant to; the previous state is back and verified`
+        : `Restored the state before change #${change.seq} (${change.summary}), verified`
   await audit(projectId, opts.actorUserId ?? null, what, { changeId: change.id, seq: change.seq, recoverySeq, tables: [...tables], summary: sentence })
 
   // Any other request to restore this change is answered now. Left pending, it
@@ -1111,7 +1369,7 @@ async function afterRecovery(projectId: string, change: LoadedChange, recoverySe
     const pending = await prisma.agentApprovalRequest
       .findMany({ where: { projectId, status: 'pending', tool: 'revert_schema_change' }, select: { id: true, toolArgs: true } })
       .catch(() => [] as Array<{ id: string; toolArgs: unknown }>)
-    const ids = pending.filter((p) => (p.toolArgs as { changeId?: string } | null)?.changeId === change.id).map((p) => p.id)
+    const ids = pending.filter((p) => restoreRequestChangeId(p.toolArgs) === change.id).map((p) => p.id)
     if (ids.length > 0) {
       const now = new Date()
       await prisma.agentApprovalRequest
@@ -1122,7 +1380,8 @@ async function afterRecovery(projectId: string, change: LoadedChange, recoverySe
             decidedBy: opts.actorUserId ?? null,
             decidedAt: now,
             executedAt: now,
-            resultSummary: opts.mode === 'automatic' ? `Already done: ${sentence}.` : `Already done from Database → Changes: ${sentence}.`,
+            // Through another approval, or automatically: not from History.
+            resultSummary: opts.mode === 'manual' ? `Already done from History: ${sentence}.` : `Already done: ${sentence}.`,
           },
         })
         .catch(() => {})
@@ -1134,13 +1393,55 @@ async function afterRecovery(projectId: string, change: LoadedChange, recoverySe
       recordRollbackMemory({
         projectId,
         actorId: opts.actorUserId ?? null,
-        actorType: opts.mode === 'automatic' ? 'system' : 'user',
+        actorType: byBackenly(opts.mode) ? 'system' : 'user',
         summary: sentence,
-        reason: opts.mode === 'automatic' ? 'Protected verification failed after the change.' : 'A person restored the previous state.',
+        reason: opts.mode === 'automatic'
+          ? 'Protected verification failed after the change.'
+          : opts.mode === 'repair'
+            ? "The repair's own check found it did not fix what it was meant to."
+            : 'A person restored the previous state.',
         rollbackId: change.id,
       }),
     )
     .catch(() => {})
+}
+
+// ── Undoing a repair its own check rejected ──────────────────────────────────
+
+/**
+ * Backenly's repair loop made governed changes that passed protected
+ * verification, then its own check found they did not fix what they were meant
+ * to. They are restored here, newest first, through the ledger like any other
+ * restore: lossless only, verified against their restore points, and recorded,
+ * so the history says the repair was undone instead of showing it in effect.
+ * This replaces the policy restore that ran beside the ledger
+ * (lib/autonomy/maintenance/primitives/recovery-restore-policies.ts), which
+ * remains only for a repair that recorded no change.
+ *
+ * `verified`: everything it changed is back. `not_needed`: the ledger had
+ * already put it back (a repair that failed part-way is recovered when it
+ * closes). Anything else stops at the first change that could not be restored
+ * and says why; a person decides from the finding.
+ */
+export async function recoverRejectedRepair(
+  projectId: string,
+  changeIds: string[],
+): Promise<{ status: 'verified' | 'not_needed' | 'blocked_stale' | 'failed'; message: string }> {
+  const restored: number[] = []
+  for (const id of changeIds) {
+    const out = await recoverChange(projectId, id, { mode: 'repair' })
+    if (out.ok) {
+      restored.push((await prisma.backendChange.findUnique({ where: { id }, select: { seq: true } }))?.seq ?? 0)
+      continue
+    }
+    const failed = out as Extract<RecoveryOutcome, { ok: false }>
+    if (failed.code === 'NOT_AVAILABLE' && ['recovered', 'restored', 'failed'].includes(failed.status)) continue
+    const done = restored.length > 0 ? ` The state before ${restored.map((n) => `#${n}`).join(', ')} is back.` : ''
+    return { status: failed.code === 'CONFLICT' ? 'blocked_stale' : 'failed', message: `${failed.error}${done}` }
+  }
+  return restored.length > 0
+    ? { status: 'verified', message: `Restored the state before ${restored.map((n) => `#${n}`).join(', ')} through the change history, verified.` }
+    : { status: 'not_needed', message: 'The change history had already put it back.' }
 }
 
 // ── Keeping a change ─────────────────────────────────────────────────────────
@@ -1185,7 +1486,7 @@ export async function keepChange(
     const pending = await prisma.agentApprovalRequest
       .findMany({ where: { projectId, status: 'pending', tool: 'revert_schema_change' }, select: { id: true, toolArgs: true } })
       .catch(() => [] as Array<{ id: string; toolArgs: unknown }>)
-    const ids = pending.filter((p) => (p.toolArgs as { changeId?: string } | null)?.changeId === change.id).map((p) => p.id)
+    const ids = pending.filter((p) => restoreRequestChangeId(p.toolArgs) === change.id).map((p) => p.id)
     if (ids.length > 0) {
       await prisma.agentApprovalRequest
         .updateMany({
@@ -1219,6 +1520,19 @@ export interface RestoreRequest {
   toolArgs: RestoreRequestArgs
 }
 
+/** Agents' restore proofs per project per minute, in this process (describeRestoreRequest). */
+export const AGENT_PROOFS_PER_MINUTE = 6
+const agentProofs = new Map<string, number[]>()
+
+function agentProofAllowed(projectId: string): boolean {
+  const now = Date.now()
+  const recent = (agentProofs.get(projectId) ?? []).filter((t) => now - t < 60_000)
+  const allowed = recent.length < AGENT_PROOFS_PER_MINUTE
+  if (allowed) recent.push(now)
+  agentProofs.set(projectId, recent)
+  return allowed
+}
+
 /**
  * What an agent's request to restore a change will ask a person to approve,
  * proven now: an impossible request is answered at once instead of parked for
@@ -1230,6 +1544,18 @@ export async function describeRestoreRequest(
   changeId: string,
 ): Promise<({ ok: true } & RestoreRequest) | { ok: false; status: number; code: string; error: string }> {
   if (!changeId) return { ok: false, status: 400, code: 'CHANGE_ID_REQUIRED', error: 'revert_change needs { changeId }.' }
+  // Proving a restore locks the tables it touches for as long as the proof
+  // runs, so a project takes only so many proofs a minute from its agents.
+  // Requests are not merged: each door's request is its own decision, beside
+  // Backenly's own for the same change.
+  if (!agentProofAllowed(projectId)) {
+    return {
+      ok: false,
+      status: 429,
+      code: 'RESTORE_REQUESTS_THROTTLED',
+      error: `This project takes ${AGENT_PROOFS_PER_MINUTE} restore requests a minute from its agents, because checking each one locks the tables it touches. Try again in a minute.`,
+    }
+  }
   let preview: RecoveryPreview | null
   try {
     preview = await previewRecovery(projectId, changeId)

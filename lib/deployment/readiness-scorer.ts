@@ -119,7 +119,7 @@ export async function scoreReadiness(
     checkRlsApplied(projectId, entities, policies, autoFix),
     checkWebhookSecurity(triggers),
     checkApiExposure(projectId),
-    checkEndUserAuthTable(projectId, project, autoFix),  // auth enabled → users table must exist
+    checkEndUserAuthTable(projectId, project),           // auth enabled → users table ready (or created on first sign-up)
     checkMonitoringBasics(projectId),
     checkBehavioralVerification(projectId),
     checkSecurityAudit(projectId),          // #31/#7 security — blocks deploy on critical/high findings
@@ -746,14 +746,12 @@ async function checkBehavioralVerification(projectId: string): Promise<Readiness
 
 /**
  * CHECK 7b — end_user_auth_table (blocking)
- * If the project has auth enabled (jwtSecret set + authManifest.enabled), the
- * workspace must contain a `users` table. Without it, end-user sign-up/sign-in
- * will fail with a SQL error at runtime.
+ * Whether end-user auth is on, and its `users` table ready. A table not created
+ * yet is not a failure: the first sign-up creates it.
  */
 async function checkEndUserAuthTable(
   projectId: string,
-  project: { jwtSecret: string | null; authManifest: any },
-  autoFix: boolean,
+  project: { authManifest: any },
 ): Promise<ReadinessCheck> {
   const base: Omit<ReadinessCheck, 'status' | 'message' | 'details' | 'fixApplied'> = {
     id: 'end_user_auth_table',
@@ -762,9 +760,12 @@ async function checkEndUserAuthTable(
     severity: 'blocking',
   }
 
-  const jwtReady = !!project.jwtSecret && project.jwtSecret.length >= 32
-  const manifestEnabled = (project.authManifest as any)?.enabled === true
-  const authEnabled = jwtReady && manifestEnabled
+  // Whether auth is on, as every other surface says it (isEndUserAuthEnabled).
+  // This read `authManifest.enabled`, which nothing that enables auth sets, so
+  // after the first sign-up every auth project failed here until a person
+  // pressed Apply safe fixes, and before it the check said auth was off.
+  const { isEndUserAuthEnabled } = await import('@/lib/services/auth-status')
+  const authEnabled = await isEndUserAuthEnabled(projectId, project.authManifest)
 
   const schemaName = `workspace_${projectId}`
 
@@ -781,40 +782,6 @@ async function checkEndUserAuthTable(
     )
     const usersTableExists = parseInt(rows[0]?.count ?? '0', 10) > 0
 
-    // Auth manifest flag not set but users table + jwtSecret already exist → auto-correct the flag.
-    // This happens when Google OAuth is connected but the AI build flow skipped the manifest write.
-    // Only when fixing was asked for: a read (autoFix false) reports it and changes nothing.
-    if (!authEnabled && jwtReady && usersTableExists && !autoFix) {
-      return {
-        ...base,
-        severity: 'auto-fixable',
-        status: 'fail',
-        message: 'Auth is not marked enabled although the users table and a JWT secret exist',
-        details: ['→ Applying safe fixes sets authManifest.enabled'],
-        fixApplied: false,
-      }
-    }
-    if (!authEnabled && jwtReady && usersTableExists) {
-      try {
-        const existing = (typeof project.authManifest === 'object' && project.authManifest !== null)
-          ? (project.authManifest as Record<string, unknown>)
-          : {}
-        await prisma.project.update({
-          where: { id: projectId },
-          data: { authManifest: { ...existing, enabled: true } },
-        })
-      } catch { /* non-fatal — check still passes below */ }
-
-      return {
-        ...base,
-        status: 'pass',
-        message: `workspace_${projectId}.users table exists — authManifest.enabled auto-corrected`,
-        details: ['✓ Auth manifest was missing enabled:true — auto-set because users table and jwtSecret exist'],
-        fixApplied: true,
-      }
-    }
-
-    // Auth is intentionally not enabled and no users table → skip (not a problem)
     if (!authEnabled) {
       return {
         ...base,
@@ -826,25 +793,24 @@ async function checkEndUserAuthTable(
       }
     }
 
-    // Auth is enabled — users table must exist
     if (usersTableExists) {
       return {
         ...base,
         status: 'pass',
-        message: `workspace_${projectId}.users table exists — end-user auth is ready`,
+        message: 'The users table exists — end-user auth is ready',
         details: [],
         fixApplied: false,
       }
     }
 
+    // Not a defect: sign-up, OAuth sign-in and enabling auth each create the
+    // table, with its policy, on first use (ensureAuthUsersTable). Auth
+    // enabled before that happened has none until someone signs up.
     return {
       ...base,
-      status: 'fail',
-      message: 'Auth is enabled but the workspace `users` table does not exist',
-      details: [
-        '✗ Sign-up and sign-in routes will fail with a table-not-found error',
-        '→ Ask the AI to "set up user authentication" or re-run the build to create the users table',
-      ],
+      status: 'pass',
+      message: 'End-user auth is on — the users table is created on the first sign-up',
+      details: [],
       fixApplied: false,
     }
   } catch (err: any) {
@@ -1024,10 +990,11 @@ async function checkFunctionTriggers(projectId: string, autoFix: boolean): Promi
     }
     if (toDeactivate.length > 0 && autoFix) {
       try {
-        await prisma.aiFunction.updateMany({
-          where: { id: { in: toDeactivate } },
+        const { governedChange } = await import('@/lib/changes/ledger')
+        await governedChange(projectId, `Switch off ${toDeactivate.length === 1 ? 'a placeholder function' : `${toDeactivate.length} placeholder functions`} with live triggers`, () => prisma.aiFunction.updateMany({
+          where: { id: { in: toDeactivate }, projectId },
           data: { status: 'inactive' },
-        })
+        }))
         fixApplied = true
         issues.push(`✓ Auto-deactivated ${toDeactivate.length} placeholder function${toDeactivate.length !== 1 ? 's' : ''} that had live triggers`)
       } catch { /* non-fatal */ }

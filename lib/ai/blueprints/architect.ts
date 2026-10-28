@@ -229,20 +229,14 @@ export interface ArchitectVague {
  * shared client's 30s timeout killed the architect mid-generation and the
  * whole request fell into the agent loop, losing the users→profiles rule,
  * requested-vs-applied coverage, and post-build verification.
- *
- * `signal` is the caller's turn running out: it cancels the call in flight,
- * and no attempt starts once it has fired. A call it cancelled fails as
- * aborted, which a smaller spec cannot help, so it is never retried.
  */
 export async function architectBackend(
   userPrompt: string,
   projectId: string,
-  signal?: AbortSignal,
 ): Promise<ArchitectResult | ArchitectVague | null> {
   let totalTokens = 0
   for (const omitSeeds of [false, true]) {
-    if (signal?.aborted) break
-    const attempt = await architectOnce(userPrompt, projectId, omitSeeds, signal)
+    const attempt = await architectOnce(userPrompt, projectId, omitSeeds)
     totalTokens += attempt.tokensUsed
     if (attempt.kind === 'ok') {
       return { blueprint: attempt.blueprint, rawSpec: attempt.rawSpec, tokensUsed: totalTokens }
@@ -301,7 +295,6 @@ async function architectOnce(
   userPrompt: string,
   projectId: string,
   omitSeeds: boolean,
-  signal?: AbortSignal,
 ): Promise<ArchitectAttempt> {
   let raw: string
   let tokensUsed = 0
@@ -329,7 +322,6 @@ async function architectOnce(
       messages: [{ role: 'user', content: userPrompt.slice(0, 12000) }],
       billing: { projectId },
       label: 'architect',
-      signal,
     })
     tokensUsed = effectiveTokensOf(reply.model, reply.usage)
     cutOff = reply.message.stop_reason === 'max_tokens'
