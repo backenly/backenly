@@ -143,16 +143,18 @@ describe('the loop is told to build a request whole, in a few responses', () => 
 describe('a build that stops early names the call that carries it on', () => {
   it('a stop at the wall clock, after changes, returns next: continue with the resume point saved', async () => {
     const deadlineAt = Date.now() + 60_000
+    // The answer after the first table comes back past the deadline: none of its calls run.
     const pastTheDeadline = () => {
       jest.spyOn(Date, 'now').mockReturnValue(deadlineAt + 3_600_000)
-      return createNotes('landed_in_time')
+      return createNotes('too_late')
     }
 
-    const { result } = await built.turn([classified('BUILD'), pastTheDeadline], 'build the store', { deadlineAt })
+    const { result } = await built.turn([classified('BUILD'), createNotes('landed_in_time'), pastTheDeadline], 'build the store', { deadlineAt })
 
     expect(result).toMatchObject({ budgetStopped: true, verified: true, next: CONTINUE })
     expect(result.next!.why).toContain('not finished')
     expect(await built.tableExists('landed_in_time')).toBe(true)
+    expect(await built.tableExists('too_late')).toBe(false)
     expect((await loadLoopResume(built.projectId))!.applied).toHaveLength(1)
   }, 60_000)
 
