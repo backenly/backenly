@@ -224,7 +224,7 @@ export const DOMAIN_TOOLS: DomainTool[] = [
       list_env: { tool: 'list_env_vars', gloss: 'variable names with 4-character previews' },
       delete_env: { tool: 'delete_env_var', gloss: 'remove a variable' },
       database_credentials: { tool: 'get_database_credentials', gloss: 'a Postgres connection string (read-write only after a human arms it)' },
-      connect_frontend: { tool: 'connect_frontend', gloss: 'allow a frontend origin (CORS); binds at once, and connected origins become the project\'s CORS allowlist' },
+      connect_frontend: { tool: 'connect_frontend', gloss: 'allow a frontend origin (CORS); binds at once, and once a deployed (non-localhost) origin is connected, connected origins become the project\'s CORS allowlist' },
       disconnect_frontend: { tool: 'disconnect_frontend', gloss: 'remove a frontend origin' },
       list_apps: { tool: 'list_connected_apps', gloss: 'the frontends connected to this backend' },
     },

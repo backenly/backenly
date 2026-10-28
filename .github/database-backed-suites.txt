@@ -852,6 +852,35 @@ tests/integration/runtime-generate.spec.ts
 # workspace schema and its conversation, so it needs a real Postgres.
 tests/integration/brain-iterations.spec.ts
 
+# A build asked of backend_chat runs to the end or names the call that carries
+# it on: the loop is told to build several tables per response without a plan
+# first, and one response creates them all; a stop at the wall clock or the step
+# budget returns next: continue only when its resume point was saved; a resumed
+# plan counts tables its first run made as done; on a protected production a
+# build designs and runs nothing and says how the schema reaches it on a branch;
+# and a design still running answers a second build or a "go ahead" instead of
+# starting another. It builds real workspace tables and reads the saved plans,
+# queues and resume points, so it needs a real Postgres.
+tests/integration/brain-builds-finish.spec.ts
+
+# A backend_chat request is a run that outlives its call: one done inside the
+# window answers at once; one that is not answers status "running" and keeps
+# going, and "status", check_approval with its run id, or any message sent
+# meanwhile collects its result; a run nobody collected is charged when it ends
+# and reported to the next request; a run whose process stopped is closed as
+# interrupted with a resume point; and a project kept in another region keeps
+# the run's words there. It writes the run rows, resume points and conversation,
+# so it needs a real Postgres.
+tests/integration/brain-runs.spec.ts
+
+# Every curated blueprint runs to the end with no follow-ups, and the
+# row-level security it asks for applies: a child table names the parent that
+# owns it (add_rls via), every org-scoped table carries organization_id, and a
+# `via` that is not a foreign key is refused with the reason. It builds each
+# plan's tables and policies in a real workspace schema, so it needs a real
+# Postgres.
+tests/integration/curated-blueprints-apply.spec.ts
+
 # Escalated findings: the deterministic investigation first, then the model
 # investigator with real read-only probes, a checked hypothesis stored as one,
 # once per evidence, with backoff after failures. The probes read the
@@ -1606,3 +1635,18 @@ tests/integration/brain-loop-edges.spec.ts
 # the table-by-table reader read. What PostgreSQL's catalog returns is the
 # property, so it needs a real Postgres.
 tests/integration/workspace-schema-snapshot-reader.spec.ts
+
+# A project whose agent turned auth on before anyone signed up: enabling auth
+# creates the users table, a key into users works on a fresh project (directly
+# and as a merge replays it), the loop files no false auth alarms, findings
+# that clear are withdrawn by the check of their own claim and never credited as
+# fixes, and the deploy gate reads auth as every other surface does. The
+# executor, migration dispatch, observer and gate run their real DDL and catalog
+# reads, so it needs a real Postgres.
+tests/integration/auth-before-first-signup.spec.ts
+
+# A request body the runtime cannot parse is answered 400 with the v1 error
+# shape, never 500, and a valid body still reaches the route. Boots the real
+# Express app (server/app.ts), whose modules open the platform database, so it
+# runs with one.
+tests/integration/runtime-rejects-bad-bodies.spec.ts

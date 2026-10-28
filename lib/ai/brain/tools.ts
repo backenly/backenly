@@ -595,6 +595,13 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
         items: { type: 'string' },
         description: 'For `participants`: the columns naming each user party to a row, e.g. ["requester_id","addressee_id"].',
       },
+      via: {
+        type: 'string',
+        description:
+          'For `owned_via_parent`: the foreign-key column whose parent row decides access, e.g. "order_id". ' +
+          'Omit and it is inferred, which is refused when the row could belong to more than one parent ' +
+          '(order_items points at both orders and sellers).',
+      },
       using: {
         type: 'string',
         description:
@@ -1683,6 +1690,7 @@ export const TOOL_TO_ACTION: Record<string, (args: any) => AIAction> = {
             custom: 'custom',
           } as Record<string, string>)[String(a.policy)] ?? String(a.policy),
       ...(Array.isArray(a.partyColumns) ? { partyColumns: a.partyColumns } : {}),
+      ...(typeof a.via === 'string' && a.via ? { via: a.via } : {}),
       ...(a.using ? { using: a.using } : {}),
       ...(a.withCheck ? { withCheck: a.withCheck } : {}),
       // Per-command rules. Forwarded as-is: the executor validates every
@@ -1933,13 +1941,26 @@ const FIX_TARGET_TO_ACTION: Record<string, AIAction['action']> = {
  * iterate against the validator in private; users only see real work.
  */
 /**
- * Refuse a create_table of a table that exists, or an add_column on one that
- * does not, with the wording apply_migration uses. Reads the catalog through
- * the same helper apply_migration does, on the database in the project's
- * region, so the doors cannot disagree.
+ * Calls that act on a table that must already exist. Given a missing one, the
+ * executor's dependency resolver creates it first (resolveDependencies in
+ * minimal-executor.ts), with columns it guesses from the name. So a typo made a
+ * stray table, and generate_api, which the protected-production gate does not
+ * stop because it changes no schema of its own, created tables on a protected
+ * production: a blueprint's create_table steps were refused there and its
+ * generate_api steps built each table anyway, on main, unapproved.
+ */
+const NEEDS_EXISTING_TABLE: ReadonlySet<string> = new Set([
+  'add_column', 'generate_api', 'create_index', 'rename_column', 'add_constraint',
+])
+
+/**
+ * Refuse a create_table of a table that exists, or a NEEDS_EXISTING_TABLE call
+ * on one that does not, with the wording apply_migration uses. Reads the
+ * catalog through the same helper apply_migration does, on the database in the
+ * project's region, so the doors cannot disagree.
  */
 async function tableExistencePreflight(
-  name: 'create_table' | 'add_column',
+  name: string,
   args: Record<string, unknown>,
   projectId: string,
 ): Promise<ToolResult | null> {
@@ -1962,13 +1983,13 @@ async function tableExistencePreflight(
         `To add columns use add_column; get_table_schema shows what ${table} has now.`,
     }
   }
-  if (name === 'add_column' && !exists) {
+  if (NEEDS_EXISTING_TABLE.has(name) && !exists) {
     const suggestion = await closestTableName(projectId, schema, table)
     return {
       ok: false,
       code: 'TABLE_NOT_FOUND',
       summary:
-        `There is no table ${table} in this project, so add_column cannot run. Nothing was changed.` +
+        `There is no table ${table} in this project, so ${name} cannot run. Nothing was changed.` +
         (suggestion ? ` Did you mean ${suggestion}?` : '') +
         ' If it is a new table, create it first with create_table.',
     }
@@ -2068,7 +2089,20 @@ function preflightValidate(
       return null
     }
     case 'generate_function': {
-      const trigger = String(args.trigger || 'http').toLowerCase()
+      const validTriggers = ['on_signup', 'on_insert', 'on_update', 'on_delete', 'http', 'manual'] as const
+      const rawTrigger = args.trigger === undefined || args.trigger === null ? '' : String(args.trigger).trim()
+      const trigger = (rawTrigger || 'http').toLowerCase()
+      if (!validTriggers.includes(trigger as (typeof validTriggers)[number])) {
+        const soundsTimeBased = /cron|schedul|timer|interval|periodic|hourly|daily|weekly|monthly|every|time/i.test(rawTrigger)
+        return {
+          ok: false,
+          code: 'INVALID_ARGUMENT',
+          summary:
+            `generate_function rejected: unknown \`trigger\` "${rawTrigger}". ` +
+            `Valid triggers are: ${validTriggers.join(' | ')}.` +
+            (soundsTimeBased ? ' For recurring or time-based work, use `create_cron_job` instead.' : ''),
+        }
+      }
       const dbEvents = new Set(['on_insert', 'on_update', 'on_delete'])
       if (dbEvents.has(trigger) && !(typeof args.table === 'string' && args.table.trim())) {
         return {
@@ -2141,9 +2175,12 @@ export async function dispatchTool(
   // apply_migration's rule (checkPlan), on the typed doors too: create_table of
   // an existing table changed nothing and answered "Created", and add_column on
   // a missing table CREATED it, so a typo made a stray one-column table while
-  // the agent believed it had changed the real one (DB-06). Internal callers of
-  // the executor (blueprints, auto-wiring) keep their idempotent create.
-  if (name === 'create_table' || name === 'add_column') {
+  // the agent believed it had changed the real one (DB-06). generate_api,
+  // create_index, rename_column and add_constraint made the same stray table,
+  // and generate_api made it past the protected-production gate
+  // (NEEDS_EXISTING_TABLE). Internal callers of the executor (auto-wiring)
+  // keep their idempotent create.
+  if (name === 'create_table' || NEEDS_EXISTING_TABLE.has(name)) {
     const refusal = await tableExistencePreflight(name, args, ctx.projectId)
     if (refusal) return refusal
   }
@@ -2218,10 +2255,12 @@ export async function dispatchTool(
         '- Other sections: `tables`, `apis`, `functions`, `rls`, `triggers`, `keys`, `users`, `buckets`, `files`, `cron`, `env`, `integrations`, `apps`, `webhooks`, `deliveries`, `metrics`, `errors`, `usage`, `deploy`, `readiness`, `findings`, `incidents`, `autonomy`, `maintenance`, `realtime`.',
         '',
         '## 2. Build',
+        '- **Building an app?** Design its whole data model before writing any of it: every table its features need, with foreign keys, CHECKs and indexes. Send it as ONE `apply_migration`, parents first; it lands as one governed, verified, reversible change, with REST and row-level security on every table. Then `storage { action: "create_bucket" }` for each kind of upload, `auth { action: "enable" }`, and realtime on the tables that update live. A table at a time, or the app described to `backend_chat`, takes many more calls to reach the same backend.',
+        '- On a project whose production is protected, `apply_migration` without a `branchId` is refused with BRANCH_REQUIRED, and so is a schema change asked of `backend_chat`: build the schema on a branch (below) and merge it.',
         '- `apply_migration { sql }` for schema. Ordinary PostgreSQL DDL: CREATE TABLE, ALTER TABLE ADD COLUMN / RENAME COLUMN / ADD CONSTRAINT, CREATE INDEX. Multiple statements, semicolon-separated. Your DDL is applied AS WRITTEN — declared NOT NULL, DEFAULT and nullability are honoured exactly. Every table also gets `id`, `"createdAt"`, `"updatedAt"` (camelCase) and `"deleted_at"`; a declared `id`, `created_at` or `updated_at` is skipped in their favour and reported, so order by `"createdAt"`.',
         '- One tool per dashboard section, each with an `action`: `auth`, `storage`, `functions`, `realtime`, `integrations`, `monitoring`, `autonomy`, `webhooks`, `deploy`, `connect`. Each tool\'s description lists its actions and the arguments they need, e.g. `auth { action: "enable" }`, `storage { action: "create_bucket", bucketName }`, `integrations { action: "connect", integrationId, apiKey }`.',
         '- `set_rls` for row-level security as exact SQL; `generate_types` for TypeScript types after a schema change.',
-        '- `backend_chat { message }` for anything you would rather describe than specify ("add likes and comments to posts"), or that no tool above covers. The brain plans, executes and verifies, and draws AI credits.',
+        '- `backend_chat { message }` for anything you would rather describe than specify ("add likes and comments to posts"), or that no tool above covers. The brain plans, executes and verifies, and draws AI credits. A call answers within about 45 s; a request that takes longer keeps running and answers `status: "running"` with a run id, and `backend_chat { message: "status" }` waits for it and returns its result. Whenever an answer carries `next`, the request is not finished: make that call.',
         '- **Unsure about a migration? Stage it.** `branch { action: "create", name: "add-payments" }` clones this project\'s schema into an isolated PostgreSQL schema; it starts EMPTY unless you pass `includeData: true`. Build against it, `branch { action: "diff", branchId }` to see exactly what would land, then `branch { action: "merge", branchId }`. `branch { action: "list" }` for ids. Up to 5 active. A merge applies new tables through the governed kernel and returns added columns / type changes / drops as review items rather than reshaping a live column silently. Discarding a branch is destructive — ask via `backend_chat`.',
         '- A table is served over REST as soon as it exists — exposure is derived from the live catalog, so there is no separate "generate the API" step, and no tool for one. If you are looking for something to call after creating a table: there is nothing to call.',
         '',

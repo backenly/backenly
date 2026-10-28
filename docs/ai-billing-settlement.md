@@ -56,12 +56,14 @@ Customer-paid calls go through a `CustomerSpendHook`. The default is the credit 
 
 | State | When | Counts against the cap |
 |---|---|---|
-| `reserved` | Before the call is sent, taken under a per-account lock only if credits already charged + every live hold + this call's worst case fit. Otherwise the call is refused unsent with `credits_exhausted`. | Its worst case |
+| `reserved` | Before the call is sent, taken under a per-account lock while any credit is left once credits already charged + every live hold are counted. Otherwise the call is refused unsent with `credits_exhausted`. | Its worst case |
 | `used` | The call ran inside a turn. | What it actually used, until the turn is charged |
 | `charged` | The turn was charged (`closeCreditTurn`). | No, the usage is in the charged total now |
 | `released` | The call never ran, its answer was lost, its turn was charged nothing, or it ran outside any turn. | No |
 
-`closeCreditTurn` charges first, then marks the turn's holds charged. In between, usage is counted twice, which is the safe direction; it is never counted zero times, so a finished call can no longer leave a gap another call slips into. If the charge fails, the holds stay counted until they expire: a billing fault can cost revenue but never lets an account overspend. The charge is Cloud's commercial write (`recordAiConsumption`), which is why the two steps are ordered rather than one transaction.
+The last call may go over. A call starts while any credit is left, not only when its worst case fits: a model call's worst case (a full prompt and its whole output ceiling) is several times what a call uses, so requiring it locked an account out with a large part of its allowance unspent. Its hold still counts that worst case, so the next call waits for it to settle. An account therefore goes over its credits by at most one call, and only by what that call used. Nothing past the account's credits is billed.
+
+`closeCreditTurn` charges first, then marks the turn's holds charged. In between, usage is counted twice, which is the safe direction; it is never counted zero times, so a finished call can no longer leave a gap another call slips into. If the charge fails, the holds stay counted until they expire: a billing fault can cost revenue but never frees credits a call used. The charge is Cloud's commercial write (`recordAiConsumption`), which is why the two steps are ordered rather than one transaction.
 
 Settling only moves a hold out of `reserved`, so a late settlement after its turn closed changes nothing. A reserved hold expires with the gateway's own reservation; a used one 15 minutes after its call. Each hold expires on its own, so a busy account never keeps a stranded one alive.
 

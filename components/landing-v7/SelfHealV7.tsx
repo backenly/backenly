@@ -1,18 +1,21 @@
 'use client'
 
-import { OperatedScene } from './OperatedScene'
+import { FeatureArt } from './FeatureArt'
+import { healArt } from './art/heal-art'
 import { CONTAINER, SECTION, SECTION_BODY_GAP, SECTION_TITLE } from './shared'
 
 /* ─────────────────────────────────────────────────────────────
-   Self-healing, and how Backenly differs from a typical backend platform.
-   Set in the bento's system (./shared): the same two-tone title, no eyebrow,
-   and the scene in a BentoCell with a CellTitle, the narration as its
-   CellBody, and fact chips as the toggle (./OperatedScene).
+   Self-healing. Set in the bento's system (./shared): the same two-tone
+   title, no eyebrow, and the body in a BentoCell.
 
-   The title says what the scene shows (founders, 2026-10-15, on the old
+   The title says what the film shows (founders, 2026-10-15, on the old
    "Other backends flag problems" line: "not matching"): the backend repairs
-   itself, safe fixes land on their own, risky changes wait. The comparison
-   with a typical backend is the scene's toggle, not the headline.
+   itself, safe fixes land on their own, risky changes wait.
+
+   2026-10-28 (founders: the grey, pencil-drawn scene read as generated; "use
+   colors ... icons and symbols"): the body is a colour illustration that
+   plays the five steps (./FeatureArt, ./art/heal-art). The comparison with a
+   typical backend went with the old scene: the art shows what Backenly does.
 ───────────────────────────────────────────────────────────── */
 
 export function SelfHealV7() {
@@ -28,7 +31,7 @@ export function SelfHealV7() {
           </h2>
         </div>
         <div className={SECTION_BODY_GAP}>
-          <OperatedScene />
+          <FeatureArt make={healArt} note="An illustration, with an example store's tables." />
         </div>
       </div>
     </section>

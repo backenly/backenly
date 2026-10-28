@@ -75,6 +75,12 @@ export function buildMcpInstructions(projectLabel: string, toolCount: number | n
     `  proposing or making changes. Never guess at tables or config.`,
     `- For precise work use run_query, apply_migration, set_rls, db_* and the section tools. Use`,
     `  backend_chat for what you would rather describe than specify.`,
+    `- To build an app, design its whole data model first, every table its features need with their`,
+    `  foreign keys, and send it as ONE apply_migration: one governed, reversible change, with REST and`,
+    `  row-level security on every table. Then a storage bucket for each kind of upload, and auth and`,
+    `  realtime where the features need them. On a protected production, apply it on a preview branch`,
+    `  and merge it; a person approves the merge.`,
+    `- A response that carries \`next\` did not finish the request: make that call to carry it on.`,
     `- Your connection key (mcp_live_…) drives these tools only; the runtime API refuses it. Never`,
     `  put it in app code or an app's env. An app's key comes from connect { action: "create_api_key" }:`,
     `  publishable and safe in a browser. A server's service-role key is created by your human in`,
@@ -138,7 +144,14 @@ export function failureGuidance(lean: Record<string, unknown>): string | null {
     parts.push('Steps ran before it stopped, so some of this may already be applied: check with read_backend_state before retrying.')
   }
 
-  if (lean.retryable === true) {
+  // A request that stopped with work left names the call that carries it on.
+  // That call, not a retry or a different request, is the next step.
+  const next = lean.next && typeof lean.next === 'object' ? (lean.next as Record<string, unknown>) : null
+  if (next && typeof next.tool === 'string') {
+    const wait = typeof next.afterMs === 'number' ? ` in about ${Math.round(next.afterMs / 1000)}s` : ''
+    const why = typeof next.why === 'string' ? ` ${next.why}` : ''
+    parts.push(`Next: call ${next.tool} with ${JSON.stringify(next.arguments ?? {})}${wait}.${why}`)
+  } else if (lean.retryable === true) {
     const ms = typeof lean.retryAfterMs === 'number' ? lean.retryAfterMs : null
     parts.push(`This is transient: the same request is worth retrying after ${ms ? `${Math.round(ms / 1000)}s` : 'a moment'}.`)
   } else if (lean.retryable === false) {

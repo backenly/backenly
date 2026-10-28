@@ -42,9 +42,11 @@ import {
   Shield,
   SlidersHorizontal,
   Sparkles,
+  Split,
   Table2,
   Terminal,
   Timer,
+  Undo2,
   Upload,
   Users,
   Wand2,
@@ -54,7 +56,7 @@ import {
 } from 'lucide-react'
 
 /**
- * Features: the product catalog (/features) and its five deep-dive pages.
+ * Features: the product catalog (/features) and its seven deep-dive pages.
  *
  * Kept out of the route files because a Next.js page module may only export
  * its component, metadata and route config, and the index needs the deep-dive
@@ -131,14 +133,14 @@ const FEATURE_LIST: FeatureData[] = [
       },
       {
         q: 'Can I change my backend after it is generated?',
-        a: 'Yes. Describe the change at any time, whether a new table, a renamed column or a new relationship, and Backenly plans it against the live backend and applies it incrementally. Every change is recorded, and on Pro and above any recorded change can be rolled back.',
+        a: 'Yes. Describe the change at any time, whether a new table, a renamed column or a new relationship, and Backenly plans it against the live backend and applies it incrementally. Every change is recorded in the project\'s History, where it can be undone on its own, on every plan.',
       },
       {
         q: 'How complex can a backend be?',
         a: 'Backenly handles multi-entity schemas with relationships, business rules and role-based access control. It is built for real production applications, and the verification checks run against the live backend whatever its size.',
       },
     ],
-    relatedFeatures: ['database-setup', 'api-generation', 'authentication', 'deployment-ready-backends'],
+    relatedFeatures: ['database-setup', 'api-generation', 'authentication', 'deployment-ready-backends', 'undo-and-rollback'],
   },
   {
     slug: 'database-setup',
@@ -187,7 +189,7 @@ const FEATURE_LIST: FeatureData[] = [
         a: 'Your data is preserved across plan changes. Upgrading adds capacity; downgrading keeps your data within the limits of the new plan.',
       },
     ],
-    relatedFeatures: ['ai-backend-generation', 'api-generation', 'authentication', 'deployment-ready-backends'],
+    relatedFeatures: ['ai-backend-generation', 'api-generation', 'authentication', 'deployment-ready-backends', 'self-restructuring-schema'],
   },
   {
     slug: 'authentication',
@@ -295,9 +297,9 @@ const FEATURE_LIST: FeatureData[] = [
     slug: 'deployment-ready-backends',
     name: 'Operations and autonomy',
     icon: Rocket,
-    metaTitle: 'Operations and self-healing, checked every minute',
+    metaTitle: 'Self-healing backend, checked every minute',
     metaDescription:
-      'Backenly checks your running backend every minute, fixes a short list of safe problems itself, verifies each fix and holds anything risky for your approval.',
+      'A backend that maintains itself: Backenly checks it every minute, fixes a short list of safe problems, verifies each fix and holds risky ones for your approval.',
     headline: 'Live at once, checked every minute',
     subheadline:
       'No Docker, no Kubernetes, no cloud console. Backenly runs the backend, snapshots before every deploy, and watches it every minute once it is live.',
@@ -326,6 +328,14 @@ const FEATURE_LIST: FeatureData[] = [
     ],
     faq: [
       {
+        q: 'What does Backenly fix on its own?',
+        a: 'A short list of problems whose fix is additive or touches no data: a missing index, a table left without row-level security, a broken access policy, a missing realtime trigger, a bloated table or index, a data API that stopped answering. Every fix is checked after it runs, and one that changes the schema is recorded in History, where you can undo it. Anything that touches auth or credentials, destroys data or cannot be undone waits for your approval, at every autonomy level.',
+      },
+      {
+        q: 'Does self-healing use AI credits?',
+        a: 'No. The checks and fixes are rule-based, so they never draw AI credits, and they run every minute on every plan, Free included.',
+      },
+      {
         q: 'Where is my backend hosted?',
         a: 'On Backenly Cloud, we run it on managed infrastructure, with each project\'s data in its own isolated PostgreSQL schema. Backenly is also open source under Apache-2.0, so you can self-host the whole platform on your own infrastructure instead.',
       },
@@ -338,7 +348,121 @@ const FEATURE_LIST: FeatureData[] = [
         a: 'Backenly is built for production use. SLA terms are available on Enterprise. Free and Pro run on the same infrastructure; there is no degraded tier.',
       },
     ],
-    relatedFeatures: ['ai-backend-generation', 'database-setup', 'api-generation'],
+    relatedFeatures: ['ai-backend-generation', 'database-setup', 'api-generation', 'self-restructuring-schema', 'undo-and-rollback'],
+  },
+  {
+    slug: 'self-restructuring-schema',
+    name: 'Self-restructuring schema',
+    icon: Split,
+    metaTitle: 'Self-restructuring Postgres schema',
+    metaDescription:
+      'As your app evolves, a table can start doing two jobs. Backenly rehearses moving one into its own table, runs it once you approve, and your apps keep working.',
+    headline: 'A schema that restructures itself',
+    subheadline:
+      'When a table starts doing two jobs, Backenly moves the second into a table of its own. It rehearses the move on a copy, waits for your approval, and your apps keep working throughout.',
+    what: 'Backenly watches the shape of your tables as well as their health. When a group of columns inside a table starts behaving as a job of its own, and keeping it there has a cost Backenly measured, it proposes moving that group into a new table and, once you approve, carries the move out without breaking the apps that use the table.',
+    how: 'The move is a ladder of steps, each one a governed change: rehearse on a copy, create the new table closed, keep it in step with the original in both directions, copy the existing rows across in batches, check that the two agree, then open the new table to reads and writes. Dropping the old columns is planned and shown, and left to you.',
+    why: 'A schema an agent builds quickly is rarely shaped for the app it becomes. Restructuring a live table by hand means syncing two tables, a backfill, checks and a cutover, which is why most teams never do it. Backenly runs the same steps in order, proves each one, and only with your consent.',
+    inPractice:
+      'Take an orders table that has grown refund_amount, refund_reason and refunded_at. Those columns are filled in on the same rows, late in an order\'s life, and changing them has been locking the whole table while it is in use. Backenly proposes order_refunds, rehearses the move on a copy, and asks you. Once you approve, it creates order_refunds, keeps it in step with orders in both directions, copies the existing refunds across, checks that the two agree, and opens it. Code that reads orders keeps working, new code can use order_refunds, and 30 and 90 days later Backenly measures again whether the change helped.',
+    details: [
+      {
+        title: 'It finds the second job',
+        body: 'Columns that are filled in on the same rows, or set later in a row\'s life, often form a job of their own, like refunds on an orders table. Backenly proposes moving them only when keeping them costs something it measured, such as changes that lock the whole table.',
+      },
+      {
+        title: 'Rehearsed, then approved',
+        body: 'Every move is rehearsed on a copy first, including who can read and write each row. You approve the exact plan on the Autonomy page; if the table changes before it runs, Backenly rehearses it again and asks again.',
+      },
+      {
+        title: 'Your apps keep working',
+        body: 'The new table is kept in step with the old one in both directions while the existing data is copied across, so code that uses the old table keeps working and new code can move when it is ready. Who can read or change the data stays the same.',
+      },
+      {
+        title: 'Undo, and the last step is yours',
+        body: 'Undo removes the new table and leaves the original exactly as it was, with no data lost, and is refused if it would lose a write. Dropping the old columns is in the plan for you to see; Backenly never runs it.',
+      },
+    ],
+    faq: [
+      {
+        q: 'What does Backenly restructure today?',
+        a: 'One kind of change: moving a group of columns that has become a job of its own out of a table and into a new one, such as refund_amount, refund_reason and refunded_at out of orders into order_refunds. It never changes what the data means, how many rows there are or who can see them; a redesign like that is suggested at most, never run. Auth, storage and functions are not restructured.',
+      },
+      {
+        q: 'Does it change anything without my approval?',
+        a: 'No. A restructuring runs only after an admin of your organization approves the exact plan on the project\'s Autonomy page. Your coding agent can read what Backenly proposes over MCP, but it cannot approve it. Most of the time the answer is that no change is needed: a table being large, busy or still changing is not a reason on its own.',
+      },
+      {
+        q: 'Will my app break while it runs?',
+        a: 'Apps that use the original table keep working unchanged. The new table is kept in step with it in both directions, the existing data is copied across in batches and checked to match before the new table opens to your apps, and nothing is removed from the original table.',
+      },
+      {
+        q: 'How do I undo a restructuring?',
+        a: 'From the Architecture changes card on the project\'s Autonomy page. Undo removes the new table and leaves the original exactly as it was, with no data lost. Backenly refuses to undo if that would lose a write and says why, and code that already uses the new table stops working once it is gone.',
+      },
+      {
+        q: 'Does it use AI credits, and which plans have it?',
+        a: 'It uses no AI model: finding, rehearsing and carrying out a restructuring are rule-based, so they draw no credits. On Backenly Cloud it is on for every project, on every plan. When you self-host, it runs once you turn on ENABLE_EVOLUTION_MUTATIONS and ENABLE_EVOLUTION_SCHEDULER.',
+      },
+    ],
+    relatedFeatures: ['deployment-ready-backends', 'undo-and-rollback', 'database-setup'],
+  },
+  {
+    slug: 'undo-and-rollback',
+    name: 'Undo and rollback',
+    icon: Undo2,
+    metaTitle: 'Undo and rollback for changes your AI agent makes',
+    metaDescription:
+      'Undo one change your coding agent made, or roll the backend back to a point or a published version, on every plan. Data your app wrote is never rewound.',
+    headline: 'Undo a change, keep your data',
+    subheadline:
+      'Every change to your backend is one entry in History. Restore the state before one change, or roll the backend back to a point or a published version, and the rows your app wrote since are never rewound.',
+    what: 'Backenly records every change to a project as one entry in its History, whoever made it: the schema, auth, storage, functions, webhooks, environment variables, API keys and integrations. Any entry can be undone on its own, or the whole backend restored to a point or to a published version, without rewinding the data your app wrote.',
+    how: 'Before a change runs, Backenly takes a checkpoint; after it runs, it verifies the result. A restore is planned from that record and from today\'s data: Backenly measures what it would do, refuses one it cannot run safely, and stops for a person before anything that would set data aside. A restore is itself a change in History, with its own restore point, so it can be reapplied.',
+    why: 'Agents make many changes quickly, and the one that broke something is rarely the last. Restoring a backup to undo it costs every row written since. Undoing that one change keeps them.',
+    inPractice:
+      'Your agent renamed orders.total to amount, and checkout, which still reads total, started failing. Open History, find the change and restore the state before it: Backenly measures the restore, shows that no data is set aside, and renames the column back. Every order placed in the meantime is still there. Or ask your agent, which requests the restore and waits while you approve it.',
+    details: [
+      {
+        title: 'One History for the backend',
+        body: 'Schema, auth, storage, functions, webhooks, environment variables, API keys and integrations: each change is one entry, with who made it and what it touched, whether your agent, Backenly or you made it.',
+      },
+      {
+        title: 'Undo one change',
+        body: 'Restore the state before a single change and leave everything else as it is. Backenly measures the restore first and says why when it cannot run one, for example when a later change touched the same table.',
+      },
+      {
+        title: 'Back to a point or a version',
+        body: 'Restore the backend to a moment in History or to a published version. The changes since are undone newest first, each one checked before it runs and verified after.',
+      },
+      {
+        title: 'Your data stays',
+        body: 'Rows your app wrote are never rewound. A restore that would set any data aside says exactly what and waits for a person, and a secret or a revoked key never comes back.',
+      },
+    ],
+    faq: [
+      {
+        q: 'How do I undo a change my AI agent made?',
+        a: 'Open History in your project and restore the state before that change. Or ask your agent: it can request a restore of one change, or of the whole backend to a published version, and a person approves it in the dashboard. An agent can ask for a restore; it can never approve one.',
+      },
+      {
+        q: 'Does rolling back delete data my users wrote?',
+        a: 'No. A restore never rewinds rows your app wrote. If undoing a change would set data aside, such as removing a column that has been filled in since, Backenly shows exactly what before anything runs and waits for a person to approve it. A restore is itself recorded in History, so you can reapply what you undid.',
+      },
+      {
+        q: 'Is rollback available on the Free plan?',
+        a: 'Yes, on every plan. The plan sets only how long a change stays restorable: 7 days on Free, 30 on Pro and 90 on Enterprise, or 365 when you self-host.',
+      },
+      {
+        q: 'How is this different from restoring a backup?',
+        a: 'A backup puts the whole database back to a moment, and every row written since is lost. History undoes one change, or the changes since a point, and leaves the data your app wrote where it is. Backenly Cloud keeps daily backups as well, for disasters.',
+      },
+      {
+        q: 'What can History not undo?',
+        a: 'A restore that crosses a later change to the same table is refused rather than merged, and a change older than your plan\'s window can no longer be restored. A secret or a revoked key never comes back. Row data your app writes is not versioned; only data a change itself removed or rewrote is kept.',
+      },
+    ],
+    relatedFeatures: ['deployment-ready-backends', 'self-restructuring-schema', 'ai-backend-generation'],
   },
 ]
 
@@ -469,6 +593,7 @@ export const ATLAS: AtlasGroup[] = [
     id: 'governance',
     title: 'Safe changes',
     lede: 'Every schema change is checked and recorded, and the state before it can be restored. Destructive ones wait for a person.',
+    deepDive: { slug: 'undo-and-rollback', label: 'Undo and rollback in depth' },
     items: [
       { icon: Hand, name: 'Review queue' },
       { icon: Camera, name: 'Restore points' },
@@ -490,6 +615,7 @@ export const ATLAS: AtlasGroup[] = [
       { icon: SlidersHorizontal, name: 'Your choice of autonomy level' },
       { icon: Activity, name: 'Traffic and error monitoring' },
       { icon: Receipt, name: 'A record of every fix' },
+      { icon: Split, name: 'Restructuring, on approval' },
     ],
   },
   {

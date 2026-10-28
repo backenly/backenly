@@ -401,6 +401,15 @@ export function sameObject(a: ObjectState, b: ObjectState): boolean {
 
 const byName = <T extends { name: string }>(a: T, b: T) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)
 
+/** The data plane's soft-delete policy (backenly_pgrst_apply_soft_delete). */
+export const DATA_PLANE_POLICY = 'bkn_pgrst_soft_delete'
+
+/** The owner default backenly_pgrst_apply_owner_defaults sets, as pg_get_expr renders it. */
+const DATA_PLANE_OWNER_DEFAULT = /^\(?(?:"[^"]+"|[A-Za-z_][A-Za-z0-9_$]*)\.backenly_jwt_claim\('sub'::text\)\)?(?:::uuid)?$/
+
+const comparableDefault = (d: string | null | undefined) =>
+  d != null && DATA_PLANE_OWNER_DEFAULT.test(d) ? null : d
+
 /**
  * The parts of a table a rollback promises to restore, in a form that compares
  * equal exactly when two tables are the same table to a client.
@@ -415,14 +424,21 @@ const byName = <T extends { name: string }>(a: T, b: T) => (a.name < b.name ? -1
  *     every table when they are issued, so grants move for reasons that have
  *     nothing to do with this table. They are restored, but not compared.
  *   - comments, which describe and do not decide.
+ *   - what the same installer adds to a table it serves, by its own sync
+ *     (scripts/sql/postgrest-schema-registry.sql): the soft-delete policy and
+ *     the owner column's default to the caller's `sub` claim. Registering a
+ *     schema again (the PGRST106 self-heal, the schema_not_registered repair)
+ *     adds both to every table outside any change, and compared, they made
+ *     every earlier change "changed since" and refused its restore.
  */
 export function tableSignature(t: TableState): string {
   return JSON.stringify({
-    columns: [...t.columns].sort(byName).map((c) => [c.name, c.type, c.notNull, c.default, c.identity, c.generated]),
+    columns: [...t.columns].sort(byName).map((c) => [c.name, c.type, c.notNull, comparableDefault(c.default), c.identity, c.generated]),
     constraints: [...t.constraints].sort(byName).map((c) => [c.name, c.type, c.definition]),
     indexes: [...t.indexes].sort(byName).map((i) => [i.name, i.definition]),
     rls: [t.rls.enabled, t.rls.forced],
-    policies: [...t.policies].sort(byName).map((p) => [p.name, p.cmd, p.permissive, [...p.roles].sort(), p.using, p.check]),
+    policies: [...t.policies].filter((p) => p.name !== DATA_PLANE_POLICY).sort(byName)
+      .map((p) => [p.name, p.cmd, p.permissive, [...p.roles].sort(), p.using, p.check]),
     triggers: [...t.triggers].sort(byName).map((g) => [g.name, g.definition, g.enabled]),
   })
 }

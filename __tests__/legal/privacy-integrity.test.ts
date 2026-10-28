@@ -186,24 +186,45 @@ describe('claims that were false before this rewrite', () => {
 })
 
 describe('disclosures that must be present while the behaviour is live', () => {
-  it('discloses session replay in the present tense', () => {
-    // The running release still calls initAll() with sessionReplay sampleRate 1
-    // from the root layout. Removing this disclosure requires the behaviour to
-    // be gone from production, not merely fixed on main.
-    const analytics = PRIVACY_SECTIONS.find((s) => s.id === 'analytics')
-    expect(analytics).toBeDefined()
-    expect(JSON.stringify(analytics)).toMatch(/currently uses Amplitude Session Replay/i)
+  it('says session replay ended, where it ran, and that its recordings remain', () => {
+    // This test used to require the present tense, because removing the
+    // disclosure needed the behaviour gone from production, not merely fixed on
+    // main. It is gone: release v3 (2026-09-13, public 1af57a1d) contains
+    // 724814f1, which stopped loading the plugin, and the production bundle on
+    // 2026-10-28 calls init() with no replay plugin. Stopping replay deleted
+    // none of the recordings, so those are still disclosed.
+    const analytics = JSON.stringify(PRIVACY_SECTIONS.find((s) => s.id === 'analytics'))
+    expect(analytics).toMatch(/Until September 2026, Backenly used Amplitude Session Replay/)
+    expect(analytics).toMatch(/including dashboard pages/)
+    expect(analytics).toMatch(/Recordings made before then are kept by Amplitude/)
   })
 
-  it('says session replay reaches authenticated dashboard pages', () => {
-    // The component is mounted in the ROOT layout and there is no marketing
-    // route group, so /app/* is covered. A disclosure that implied marketing
-    // pages only would understate it.
-    expect(JSON.stringify(PRIVACY_SECTIONS)).toMatch(/authenticated dashboard pages/i)
+  it('does not claim sessions are recorded today', () => {
+    const corpus =
+      JSON.stringify(PRIVACY_SECTIONS) + JSON.stringify(PRIVACY_SUMMARY) + JSON.stringify(PROVIDERS)
+    expect(corpus).not.toMatch(/currently[^.]*(session replay|record sessions)/i)
   })
 
-  it('does not promise when session replay will be removed', () => {
-    expect(JSON.stringify(PRIVACY_SECTIONS)).not.toMatch(/we are removing this/i)
+  it('discloses what Amplitude receives with every page view', () => {
+    // The SDK's page view plugin adds the referrer and campaign tags whatever
+    // `attribution` is set to, and the SDK sends the IP address by default.
+    const analytics = JSON.stringify(PRIVACY_SECTIONS.find((s) => s.id === 'analytics'))
+    expect(analytics).toMatch(/page that linked you there/)
+    expect(analytics).toMatch(/campaign tags/)
+    expect(analytics).toMatch(/IP address/)
+  })
+
+  it('confines click recording to the public website, and says where it stops', () => {
+    // Cloud records clicks only on pages lib/marketing-surfaces.ts calls
+    // marketing, and not in the startup application's form. Implying the
+    // dashboard would overstate it; leaving the dashboard unmentioned would
+    // leave the reader to guess.
+    const analytics = JSON.stringify(PRIVACY_SECTIONS.find((s) => s.id === 'analytics'))
+    expect(analytics).toMatch(/links and buttons are clicked/)
+    expect(analytics).toMatch(
+      /does not record clicks in the dashboard, on sign-in pages or in the startup application/,
+    )
+    expect(analytics).toMatch(/does not record what you type/)
   })
 
   it('separates subscription cancellation from account deletion', () => {

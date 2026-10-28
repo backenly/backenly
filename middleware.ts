@@ -4,6 +4,8 @@ import { jwtVerify } from 'jose'
 import { domainRoutingMiddleware, shouldUseDomainRouting } from '@/lib/middleware/domainRouting'
 import { exceededBodyLimit, isUploadRoute, MAX_BUFFERED_UPLOAD_FILE_BYTES } from '@/lib/storage/body-limits'
 import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
+import { allowsAnyOrigin } from '@/lib/security/development-origin'
+import { isMarketingPath } from '@/lib/marketing-surfaces'
 
 // Inlined rather than imported from lib/auth/jwt, which pulls jsonwebtoken and
 // node:crypto into the Edge middleware bundle.
@@ -90,58 +92,9 @@ const publicPathPrefixes = [
   '/agents',        // per-agent setup pages (app/agents)
 ]
 
-// ✅ MARKETING SURFACES — the hosted service's shop window.
-//
-// A self-hosted deployment is somebody's own infrastructure. Serving Backenly's
-// landing page, pricing and competitor comparisons there is wrong twice over:
-// the operator has already installed the product so there is nothing to sell
-// them, and their internal host ends up publishing our marketing to whoever can
-// reach it. Supabase self-hosted puts the dashboard at `/` and ships no
-// marketing at all; this matches that.
-//
-// These redirect to /app rather than 404 so that an indexed or bookmarked link
-// lands the operator in the product instead of on an error page. `/login`,
-// `/signup` and `/auth/*` are NOT here — they are how you reach the product.
-const marketingRoutes = [
-  '/',
-  '/pricing',
-  '/contact',
-  '/privacy',
-  '/terms',
-  '/refund-policy',
-]
-const marketingPrefixes = [
-  '/alternatives',
-  '/comparisons',
-  '/features',
-  '/use-cases',
-  '/docs',
-  '/resources',
-  '/mcp',
-  '/quickstart',
-  '/startups',
-  '/guides',
-  '/agents',
-]
-
-// Served under a marketing prefix but not marketing. The published CLI and
-// older MCP setup prompts fetch /docs/llms.txt (rewritten to /llms.txt in
-// next.config.js), and an agent on a self-hosted install needs that answered
-// rather than bounced to /app. Middleware runs before rewrites, so the
-// exemption has to be by path here.
-//
-// /mcp/authorize is the OAuth CONSENT PAGE — the only place an authorization
-// code is minted. A self-hosted install serves the 401 challenge and the
-// OAuth metadata, the agent's host opens the browser at the consent URL, and
-// this redirect used to bounce it to /app: the dashboard opened, no code was
-// ever issued, and the host waited on a callback that never came.
-const marketingExemptions = ['/docs/llms.txt', '/mcp/authorize']
-
-function isMarketingPath(pathname: string): boolean {
-  if (marketingExemptions.includes(pathname)) return false
-  if (marketingRoutes.includes(pathname)) return true
-  return marketingPrefixes.some(prefix => pathname === prefix || pathname.startsWith(prefix + '/'))
-}
+// ✅ MARKETING SURFACES — the hosted service's shop window. The lists, and why a
+// self-hosted install sends them to /app, live in lib/marketing-surfaces.ts,
+// which Backenly Cloud's click analytics reads as well.
 
 // 🔑 SIGNED-IN SURFACES — where an anonymous visitor is sent to sign in.
 //
@@ -286,7 +239,10 @@ async function handleCORS(request: NextRequest): Promise<NextResponse | null> {
 
     if (projectId) {
       const projectOrigins = await getProjectAllowedOrigins(projectId)
-      if (projectOrigins.length === 0) {
+      // Connected development origins (localhost, a LAN address) never make
+      // the list exclusive: connecting the dev server used to lock out the
+      // app's deployed origin (lib/security/development-origin.ts).
+      if (allowsAnyOrigin(projectOrigins)) {
         allowedOrigin = origin
       } else {
         allowedOrigin = projectOrigins.includes(origin) ? origin : null

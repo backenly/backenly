@@ -48,12 +48,14 @@ export interface LoopResume {
   expiresAt: string
 }
 
-export type LoopStop = 'step_budget' | 'time_budget' | 'model_failure'
+export type LoopStop = 'step_budget' | 'time_budget' | 'model_failure' | 'interrupted'
 
 const STOP_REASON: Record<LoopStop, string> = {
   step_budget: 'it ran out of steps',
   time_budget: 'it stopped to keep time for verification',
   model_failure: 'the AI model failed partway',
+  // The process running it stopped (a deploy, a crash): lib/ai/brain/runs.ts.
+  interrupted: 'Backenly restarted while it was running',
 }
 
 export async function saveLoopResume(
@@ -181,7 +183,7 @@ export function resumePrompt(marker: LoopResume, said: string): string {
     return (
       `The person said "${said.trim().slice(0, 200)}" to continue their previous request, which stopped unfinished because ${marker.reason}. ` +
       `That request and the changes it already made are in the conversation above; they stay in this project's region, so they are not repeated here.\n\n` +
-      `Read the live backend state, then finish only what is still missing and verify it. ` +
+      `The live backend state is given to you above, so compare it with the request and finish only what is still missing, then verify it. ` +
       `Do not redo what is already there, and do not start a different task.`
     )
   }
@@ -192,7 +194,7 @@ export function resumePrompt(marker: LoopResume, said: string): string {
     `The person said "${said.trim().slice(0, 200)}" to continue the request below, which stopped unfinished because ${marker.reason}.\n\n` +
     `ORIGINAL REQUEST:\n${marker.request}\n\n` +
     `${applied}\n\n` +
-    `Read the live backend state, then finish only what is still missing and verify it. ` +
+    `The live backend state is given to you above, so compare it with the request and finish only what is still missing, then verify it. ` +
     `Do not start a different task.`
   )
 }

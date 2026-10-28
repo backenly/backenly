@@ -191,6 +191,18 @@ describe('protected production', () => {
     expect(r.code).toBe('BRANCH_REQUIRED')
     expect(await columns(mainSchema, 'orders')).not.toContain('sneaky')
   }, 60_000)
+
+  it('does not build a table through generate_api, which a refused create_table used to be followed by', async () => {
+    // A blueprint run here had every create_table refused and then its
+    // generate_api steps created each table anyway, on main, with guessed
+    // columns: the executor creates the table an API is asked for.
+    const r = await dispatchTool('generate_api', { tableName: 'invoices' }, {
+      projectId, userId: ownerId, agentSurface: true, createdThisTurn: new Set<string>(),
+    })
+    expect(r.ok).toBe(false)
+    expect(r.code).toBe('TABLE_NOT_FOUND')
+    expect(await tableExists(mainSchema, 'invoices')).toBe(false)
+  }, 60_000)
 })
 
 describe('building on a branch', () => {

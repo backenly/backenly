@@ -21,7 +21,7 @@ import { ATLAS, type AtlasGroup, type AtlasVisual } from './data'
 export const metadata: Metadata = pageMetadata({
   title: 'Features: Postgres, APIs, auth, storage, realtime',
   description:
-    'Everything in Backenly: PostgreSQL with pgvector, PostgREST APIs, auth, storage, realtime, functions, governed changes with restore points, and self-healing.',
+    'Everything in Backenly: PostgreSQL with pgvector, PostgREST APIs, auth, storage, realtime, functions, undo for any change, self-healing and restructuring.',
   path: '/features',
   social: {
     title: 'Backenly Features: the complete backend, operated for you',

@@ -2,6 +2,11 @@
 
 All notable changes to `@backenly/mcp-server` are documented here. Follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- **A failure that names `next` says to make that call.** A request Backenly stopped with work still waiting (a build out of steps, for one) carries `next`: the call that carries it on, usually `backend_chat { "message": "continue" }`. The guidance block told the agent the identical request would fail and to change it, so it rephrased or gave up; it now says to make the `next` call. The body carries `next` on every version of this package.
+
 ## [0.4.0] — 2026-09-26
 
 ### Changed

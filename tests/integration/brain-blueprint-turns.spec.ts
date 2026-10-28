@@ -234,17 +234,21 @@ describe('a plan\'s run', () => {
     expect((await loadResumeQueue(brain.projectId))!.steps[0].tool).toBe('drop_table')
   }, 60_000)
 
-  it('keeps a step that fails again in the resume queue after "continue"', async () => {
+  it('runs a queued step again on "continue", and stops queueing it once it fails the same way twice', async () => {
     const plan = planWith([createNotes('second_pass'), { label: 'Unknown', tool: 'no_such_tool', args: {} }])
     await savePendingPlan(brain.projectId, plan, match, 0)
     const first = await brain.turn([classified('CONFIRM')], 'go ahead')
     expect(first.result.success).toBe(false)
+    expect(first.result.next).toMatchObject({ tool: 'backend_chat', arguments: { message: 'continue' } })
     expect((await loadResumeQueue(brain.projectId))!.steps).toHaveLength(1)
 
-    // "continue" runs the queued step again; it fails again, and stays queued.
+    // "continue" runs the queued step again and it fails again. It is not
+    // queued a third time: an agent follows `next`, and would loop on it.
     const second = await brain.turn([classified('CONFIRM')], 'continue')
     expect(second.result).toMatchObject({ success: false, tokensUsed: expect.any(Number) })
-    expect((await loadResumeQueue(brain.projectId))!.steps).toHaveLength(1)
+    expect(second.result.next).toBeUndefined()
+    expect(second.result.summary).toContain('failed again on a second pass')
+    expect(await loadResumeQueue(brain.projectId)).toBeNull()
   }, 60_000)
 })
 

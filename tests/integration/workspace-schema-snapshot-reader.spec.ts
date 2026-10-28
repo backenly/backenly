@@ -255,6 +255,8 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (schema) await ddl(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`).catch(() => {})
+  // Snapshots have no relation to the project, so deleting it leaves them.
+  if (projectId) await prisma.workspaceSchemaSnapshot.deleteMany({ where: { projectId } }).catch(() => {})
   if (projectId) await prisma.project.delete({ where: { id: projectId } }).catch(() => {})
   if (ownerId) await prisma.user.delete({ where: { id: ownerId } }).catch(() => {})
   process.env.BACKENLY_EDITION = originalEdition

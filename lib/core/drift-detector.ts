@@ -518,10 +518,13 @@ export async function checkAuthIntegrity(
     })
   }
 
-  // 2. users table missing while auth is configured beyond the platform
-  //    defaults (enabled OAuth provider or an enabled policy on users). A
-  //    missing table with no such evidence is normal — signup creates it.
-  if (!usage.usersTableExists && usage.configuredEvidence) {
+  // 2. users table missing although it existed: a policy was installed on it.
+  //    Auth being configured is not that evidence. Enabling email auth made
+  //    `configuredEvidence` true at once, while the table is created on first
+  //    use (sign-up, OAuth, enabling auth, a key into it), so every project that
+  //    turned auth on was reported critical, then "fixed", before anyone could
+  //    have signed up.
+  if (!usage.usersTableExists && usage.usersTableExpected) {
     findings.push({
       type: 'auth_users_table_missing',
       severity: 'critical',

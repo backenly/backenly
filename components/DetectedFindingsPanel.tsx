@@ -47,6 +47,7 @@ import { IconButton, KIT, KitButton, MetaCode, MetaRow } from '@/components/insp
 import {
   groupFindings, CATEGORY_LABEL, severityLabel, severityWord, type FindingGroup,
 } from '@/lib/core/finding-groups'
+import { hasExecutableFix } from '@/lib/core/fix-actions'
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -96,15 +97,24 @@ function timeAgo(iso: string | null): string {
  * claiming "Backenly fixes these itself" under Review-only would be a lie —
  * in that mode the next pass raises them for approval instead of applying.
  */
-function dispositionCopy(level: Level | undefined): string {
+function dispositionCopy(level: Level | undefined, allRepairable: boolean): string {
   if (level === 'CONSERVATIVE') {
     return 'Backenly found these and has not acted yet. On its next pass, Review-only applies the silent additive ones (indexes, API definitions) and raises everything else for your approval. You can also fix any of them now.'
   }
   if (level === 'OFF') {
     return 'Backenly found these while checking the runtime. Autonomy is off, so nothing will be applied until you pick a mode or fix them here.'
   }
+  // Only what Backenly has a repair for is queued. A finding with none (a
+  // failed verification, a probe of the live API) was promised a next pass
+  // that never fixed it.
+  if (!allRepairable) {
+    return 'Backenly found these. The ones with Fix now are queued for its next pass and need no approval from you; the others have no repair Backenly can run, so hand them to your coding agent.'
+  }
   return 'Backenly found these and can fix them itself. They are queued for its next pass and need no approval from you. Fix now to skip the wait, or hand one to your coding agent.'
 }
+
+/** Whether Backenly can run a repair for any member (the same test the Review Queue uses). */
+const repairable = (g: FindingGroup<HealthFinding>) => g.members.some(m => hasExecutableFix(m.type, m.details))
 
 /** The prompt handed to the user's coding agent — same contract as the approval queue. */
 function agentPrompt(g: FindingGroup<HealthFinding>): string {
@@ -295,7 +305,7 @@ export function DetectedFindingsPanel({
       </div>
 
       <div className="border-b border-white/[0.06] px-5 py-2.5">
-        <p className="text-[12.5px] leading-relaxed text-faint">{dispositionCopy(level)}</p>
+        <p className="text-[12.5px] leading-relaxed text-faint">{dispositionCopy(level, groups.every(repairable))}</p>
       </div>
 
       <ul className="divide-y divide-white/[0.04]">
@@ -304,7 +314,7 @@ export function DetectedFindingsPanel({
             key={g.key}
             group={g}
             state={rowState[g.key] ?? { phase: 'idle' }}
-            onFix={() => fixGroup(g)}
+            onFix={repairable(g) ? () => fixGroup(g) : undefined}
             onDismiss={() => dismissGroup(g)}
             onResetError={() => setRow(g.key, { phase: 'idle' })}
           />
@@ -333,7 +343,8 @@ function DetectedRow({
 }: {
   group: FindingGroup<HealthFinding>
   state: RowState
-  onFix: () => void
+  /** Absent when Backenly has no repair to run: approving would only fail. */
+  onFix?: () => void
   onDismiss: () => void
   onResetError: () => void
 }) {
@@ -420,11 +431,13 @@ function DetectedRow({
             <KitButton variant="primary" onClick={onResetError}>Try again</KitButton>
           ) : (
             <>
-              <KitButton variant="primary" onClick={onFix} disabled={busy}>
-                {state.phase === 'applying'
-                  ? <><Loader2 className="size-3.5 animate-spin" /> {many ? `Fixing ${g.members.length}…` : 'Fixing…'}</>
-                  : <><CheckCircle2 className="size-3.5" /> {many ? `Fix all ${g.members.length}` : 'Fix now'}</>}
-              </KitButton>
+              {onFix && (
+                <KitButton variant="primary" onClick={onFix} disabled={busy}>
+                  {state.phase === 'applying'
+                    ? <><Loader2 className="size-3.5 animate-spin" /> {many ? `Fixing ${g.members.length}…` : 'Fixing…'}</>
+                    : <><CheckCircle2 className="size-3.5" /> {many ? `Fix all ${g.members.length}` : 'Fix now'}</>}
+                </KitButton>
+              )}
               <KitButton variant="secondary" onClick={handToAgent} disabled={busy}>
                 {copied ? <Check className="size-3.5 text-emerald-400" /> : <ClipboardCopy className="size-3.5" />}
                 {copied ? 'Copied' : 'Hand to my agent'}

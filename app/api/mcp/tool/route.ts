@@ -403,6 +403,31 @@ async function handleCall(request: NextRequest, auth: McpGuardAuth, startedAt: n
         { status: 400 },
       ))
     }
+    // A backend_chat run still going answers here too, by the id its "running"
+    // answer gave: what has landed, or its result once it is done
+    // (lib/ai/brain/runs.ts). Ids are uuids, so the two kinds never collide.
+    const { getRun, markDelivered, outcomeOf } = await import('@/lib/ai/brain/runs')
+    const run = await getRun(auth.projectId, id)
+    if (run) {
+      recordMcpCall(
+        { ...auth, endpoint: ENDPOINT, startedAt },
+        { statusCode: 200, tool, mutation: false, summary: `run ${run.state}` },
+      )
+      if (run.state === 'running') {
+        const { runningBody } = await import('@/lib/mcp/chat-turn')
+        return withCors(NextResponse.json({ ...runningBody(run), data: { kind: 'build_run', id: run.id, status: 'running' } }))
+      }
+      const outcome = await outcomeOf(run)
+      await markDelivered(run.id)
+      return withCors(NextResponse.json({
+        ok: true,
+        summary: `Run ${run.id.slice(0, 8)}… is ${run.state}. Its result is in data.result.`,
+        data: { kind: 'build_run', id: run.id, status: run.state, result: outcome?.body ?? null },
+        needsUser: false,
+        timing: { ms: Date.now() - startedAt, heavy: false },
+      }))
+    }
+
     const { getApprovalForProject, getParkedActionForProject } = await import('@/lib/mcp/approvals')
     // Two kinds of parked request answer here: destructive-gate approvals
     // (agentApprovalRequest) and executor-gated actions queued as Review
