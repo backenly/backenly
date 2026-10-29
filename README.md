@@ -22,6 +22,8 @@ change planned, verified, and reversible.
 [![LinkedIn](https://img.shields.io/badge/LinkedIn-Backenly-0A66C2?style=for-the-badge&logo=linkedin&logoColor=white)](https://www.linkedin.com/company/117034579)
 [![Star on GitHub](https://img.shields.io/badge/Star-on%20GitHub-181717?style=for-the-badge&logo=github&logoColor=white)](https://github.com/backenly/backenly)
 
+<a href="https://www.producthunt.com/products/backenly-2?embed=true&amp;utm_source=badge-featured&amp;utm_medium=badge&amp;utm_campaign=badge-backenly-2" target="_blank" rel="noopener noreferrer"><img alt="Backenly - The autonomous backend for AI coding agents | Product Hunt" width="250" height="54" src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1297694&amp;theme=neutral&amp;t=1793308302959"></a>
+
 **[backenly.com](https://backenly.com)** &nbsp;·&nbsp; [Docs](https://backenly.com/docs) &nbsp;·&nbsp; [Pricing](https://backenly.com/pricing) &nbsp;·&nbsp; [Client libraries](https://github.com/backenly/backenly-js)
 
 https://github.com/user-attachments/assets/2b215d72-4b1b-4a4c-8290-a94553be192d
