@@ -1,13 +1,15 @@
 /**
- * The Product Hunt launch, and the Pro offer that runs until launch day ends.
+ * The Product Hunt launch, and the Pro offer that runs for a week after it.
  *
  * TEMPORARY, like the launch bar it feeds (components/site/LaunchBar.tsx): it
- * comes out after the launch, together with the offer on /pricing.
+ * comes out after the offer ends, together with the offer on /pricing.
  *
  * Times are Product Hunt's. A Product Hunt day runs from 12:01 AM to 11:59 PM
  * Pacific, and October 31, 2026 is still daylight time (UTC-7): daylight time
  * ends on November 1. So the launch goes live at 07:01 UTC on October 31 and
- * launch day ends at 07:00 UTC on November 1.
+ * launch day ends at 07:00 UTC on November 1. The offer ends a week later, in
+ * standard time (UTC-8): 11:59 PM on November 7 is over at 08:00 UTC on
+ * November 8.
  *
  * Plain values and pure functions, no React: the pages read the clock through
  * lib/hooks/useMinuteClock.ts, and the tests pass their own.
@@ -24,22 +26,26 @@ export const PRODUCT_HUNT_LAUNCH = {
 
 /**
  * The launch offer: 50% off monthly Pro for the first three months, with a
- * code, until launch day ends. $12.50 a month, then $25. Yearly billing gets
- * no offer (founder, 2026-10-24).
+ * code, until the end of November 7, a week after launch day (founder,
+ * 2026-10-30; it first ended with launch day). $12.50 a month, then $25.
+ * Yearly billing gets no offer (founder, 2026-10-24).
  *
  * The code only works because Stripe knows it. The Cloud overlay's
- * scripts/create-launch-promo-code.ts creates the coupon and the promotion code
- * with this same code, percentage, duration and expiry, and Checkout takes
- * promotion codes on the monthly price only, which is what keeps yearly out.
- * Change one side and you must change the other.
+ * scripts/fleet/create-launch-promo-code.ts creates the coupon and the
+ * promotion code with this same code, percentage, duration and expiry, and
+ * Checkout takes promotion codes on the monthly price only, which is what
+ * keeps yearly out. Change one side and you must change the other.
  */
 export const LAUNCH_OFFER = {
   code: 'PRODUCTHUNT50',
   percentOff: 50,
   months: 3,
-  endsAt: PRODUCT_HUNT_LAUNCH.endsAt,
+  /** Midnight PST after November 7, 2026, when the offer is over. */
+  endsAt: Date.UTC(2026, 10, 8, 8, 0),
   /** The deadline in Product Hunt's own time, for the page. */
-  endsLabel: 'Oct 31, 11:59 PM PT',
+  endsLabel: 'Nov 7, 11:59 PM PT',
+  /** The offer's last day, as the bar writes it. */
+  lastDayLabel: 'Nov 7',
 } as const
 
 export type LaunchPhase = 'upcoming' | 'live' | 'over'

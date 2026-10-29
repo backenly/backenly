@@ -35,7 +35,6 @@ import {
 import {
   LAUNCH_OFFER,
   launchOfferActive,
-  launchPhase,
   launchPrice,
   spokenTimeLeft,
   timeLeft,
@@ -332,7 +331,7 @@ export default function PricingPage() {
   const published = usagePricingPublished()
   const [cadence, setCadence] = useState<Cadence>('monthly')
   const plans = plansFor(published)
-  // The launch offer shows until launch day ends. Before hydration there is no
+  // The launch offer shows until it ends. Before hydration there is no
   // visitor clock (see useMinuteClock), and the page is built before the
   // launch, so it renders with the offer and only drops it on a later visit.
   const now = useMinuteClock()
@@ -642,10 +641,13 @@ function PlanColumn({
  * TEMPORARY, with the launch bar; the facts are lib/pricing/launch-offer.ts.
  *
  * Its job is to hand over the code. Stripe Checkout takes it and enforces the
- * deadline, so a page left open past launch day cannot stretch the offer.
+ * deadline, so a page left open past the deadline cannot stretch the offer.
  */
 function LaunchOfferPanel({ now, yearly }: { now: number | null; yearly: boolean }) {
-  const left = now !== null && launchPhase(now) === 'live' ? timeLeft(LAUNCH_OFFER.endsAt, now) : null
+  // The deadline counts down in hours and minutes on the offer's last day, and
+  // reads as the date before it.
+  const remaining = now !== null && launchOfferActive(now) ? timeLeft(LAUNCH_OFFER.endsAt, now) : null
+  const left = remaining && remaining.days === 0 ? remaining : null
 
   return (
     // From lg up the panel's right edge is drawn one pixel into the next
