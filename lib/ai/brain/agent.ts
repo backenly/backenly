@@ -1584,6 +1584,19 @@ async function runAgentLoop(
 
   let mutated = false
   let verifiedAfterMutation = false
+  // run_test checks that failed after the last mutation, by table and
+  // operation. The model has seen a check fail, so it may finish and say so,
+  // but the turn is not a success. Only that same check passing clears one: a
+  // pass on another endpoint, or a catalog read, says nothing about the one
+  // that failed. A failed catalog read is different again: it says nothing
+  // about the mutation, so it only leaves the mutation unverified (below).
+  const failedChecks = new Set<string>()
+  // Checks (read_backend_state or run_test, with their arguments) whose results
+  // the model has read since the last change took effect. A finish sent beside
+  // a check it has not read yet, or beside a change, is deferred. Beside checks
+  // it has read, they only repeat them, and deferring again would hold the turn
+  // open until its steps ran out.
+  const seenChecks = new Set<string>()
   // The model gets one chance to verify a mutation before the loop returns an
   // applied-but-unverified outcome. This is a phase, not a prompt alone: while
   // it is pending, another mutation must not be dispatched accidentally.
@@ -1811,7 +1824,7 @@ async function runAgentLoop(
       // Preserve a no-tool reply too. When it follows a mutation, the next
       // model call must see the answer it is being asked to substantiate.
       messages.push({ role: 'assistant', content: reply.message.content })
-      if (mutated && !verifiedAfterMutation) {
+      if (mutated && !verifiedAfterMutation && failedChecks.size === 0) {
         if (verificationSteered) {
           finalSummary = await unverifiedMutationSummary()
           success = false
@@ -1831,7 +1844,7 @@ async function runAgentLoop(
       // Model answered without tools and there is no outstanding mutation to
       // verify — accept its text as the final summary.
       finalSummary = text || 'Done.'
-      success = true
+      success = failedChecks.size === 0
       break
     }
 
@@ -1844,10 +1857,27 @@ async function runAgentLoop(
     // Splitting results across turns teaches the model to stop calling tools in
     // parallel, and a call left unanswered is rejected outright.
     const results: Anthropic.ToolResultBlockParam[] = []
+    /** Checks this response ran after its last change: the model reads their results next. */
+    const checksRan: string[] = []
+    /** A change in this response took effect. */
+    let changed = false
+    /** finish calls, answered once the rest of the response has run, in their own slots. */
+    const heldFinishes: Array<{ call: (typeof toolCalls)[number]; at: number }> = []
     let finished = false
     const verificationTurn = verificationSteered && mutated && !verifiedAfterMutation
     for (const [index, toolCall] of toolCalls.entries()) {
       const toolName = toolCall.name as ToolName
+
+      // A finish's summary was written before any result of this response, so
+      // whether it is blind depends on what the other calls do, in whatever
+      // order they came. It is answered after them (below), and ahead of the
+      // verification turn's guard, so a finish sent with the one read that turn
+      // allows waits for that read instead of ending the turn.
+      if (toolName === 'finish') {
+        heldFinishes.push({ call: toolCall, at: results.length })
+        results.push(toolResultBlock(toolCall.id, { ok: false, summary: '' }, true))
+        continue
+      }
 
       // ── Nothing new starts once the turn's clock has stopped ───────────────
       //
@@ -1950,9 +1980,23 @@ async function runAgentLoop(
       toolStatuses.push(result.ok ? 'applied' : 'failed')
       console.log(`[Brain] tool=${toolName} ok=${result.ok} terminal=${!!result.terminal} summary="${result.summary.slice(0, 120)}"`)
 
-      // Track verification cadence. A read that failed is not verification.
+      // Track verification cadence. A read that failed is not verification, and
+      // a run_test that failed is a failed check, including a handled exception.
+      // A run_test that did not exercise its route (no row it could build or
+      // fetch, no one to write as, a refusal the table is designed to give)
+      // says nothing either way: it neither verifies the change nor fails it,
+      // nor clears what the same check found before.
+      if (isCheck(toolName)) checksRan.push(checkKey(toolName, args))
       if (toolName === 'read_backend_state' && mutated) verifiedAfterMutation = result.ok
-      if (toolName === 'run_test' && mutated) verifiedAfterMutation = true
+      if (toolName === 'run_test' && mutated && (result.data as { exercised?: boolean } | undefined)?.exercised !== false) {
+        const check = `${String(args.tableName ?? '')}:${String(args.operation ?? 'list')}`
+        if (result.ok) {
+          verifiedAfterMutation = true
+          failedChecks.delete(check)
+        } else {
+          failedChecks.add(check)
+        }
+      }
       // Allowlist-driven: a mutation is anything that is NOT a control tool and
       // NOT a read. Adding a new read tool to tools.READ_ONLY_TOOLS (or a
       // control tool to CONTROL_TOOLS above) keeps this honest without editing
@@ -1978,6 +2022,14 @@ async function runAgentLoop(
         // pass afterwards is what pushed the run into the time budget in the
         // first place.
         verifiedAfterMutation = result.ok && SELF_VERIFYING_TOOLS.has(toolName)
+        // A check run before a change says nothing about the state after it. A
+        // mutation that was refused changed nothing, so what a check found stands.
+        if (result.ok) {
+          changed = true
+          failedChecks.clear()
+          seenChecks.clear()
+          checksRan.length = 0
+        }
         // Recorded even when the turn later fails, so the caller can tell "the
         // run stopped" from "nothing changed" — the distinction that decides
         // whether retrying is safe or duplicates work.
@@ -2001,16 +2053,60 @@ async function runAgentLoop(
         finalSummary = result.summary || 'Done.'
         needsUser = !!result.needsUser
         terminalData = result.data ?? null
-        success = !needsUser && result.ok
+        success = !needsUser && result.ok && failedChecks.size === 0
         finished = true
       }
     }
+    // ── finish, answered last ────────────────────────────────────────────────
+    //
+    // Its summary is blind when this response changed something, or ran a check
+    // the model has not read since the last change, whatever the order of the
+    // calls: it is then deferred, so the model finishes having read the results.
+    // Checks it has already read only repeat them, so the deferral is bounded:
+    // an unchanged state with the same checks lets the next finish through.
+    const blind = toolCalls.some((c) => isCheck(c.name) && (changed || !seenChecks.has(checkKey(c.name, c.input))))
+    for (const { call, at } of heldFinishes) {
+      if (blind) {
+        results[at] = toolResultBlock(call.id, {
+          ok: false,
+          summary: 'Finish deferred. Read the verification results, then finish in a subsequent response with a truthful summary. Do not repeat completed verification unless state changes.',
+        }, true)
+        continue
+      }
+      // Still in the one bounded verification turn, and this response did not
+      // verify: finish ends it with the honest outcome, as any call but the read does.
+      if (verificationSteered && mutated && !verifiedAfterMutation) {
+        verificationToolRejected = true
+        finalSummary = await unverifiedMutationSummary()
+        success = false
+        break agentLoop
+      }
+      if (!call.input || typeof call.input !== 'object' || Array.isArray(call.input)) {
+        results[at] = toolResultBlock(call.id, {
+          ok: false,
+          summary: '`finish` was NOT run: its arguments were not a JSON object. Send the call again with its arguments as one JSON object.',
+        }, true)
+        continue
+      }
+      const result = await dispatchTool('finish', call.input as Record<string, unknown>, ctx)
+      toolsRun.push('finish')
+      toolStatuses.push(result.ok ? 'applied' : 'failed')
+      results[at] = toolResultBlock(call.id, { ok: result.ok, summary: result.summary.slice(0, 500) }, !result.ok)
+      finalSummary = result.summary || 'Done.'
+      needsUser = !!result.needsUser
+      terminalData = result.data ?? null
+      success = !needsUser && result.ok && failedChecks.size === 0
+      finished = true
+    }
+    // These results go back to the model with the next call, whichever way the
+    // loop carries on from here.
+    for (const check of checksRan) seenChecks.add(check)
 
     if (finished) {
       // Steer the model to verify if it tried to finish after mutating. The
       // steer rides in the same user turn as the results: the routed models
       // take no system message mid-conversation.
-      if (mutated && !verifiedAfterMutation && !needsUser) {
+      if (mutated && !verifiedAfterMutation && failedChecks.size === 0 && !needsUser) {
         if (verificationSteered) {
           finalSummary = await unverifiedMutationSummary()
           success = false
@@ -2212,6 +2308,12 @@ const CONFIRM_TOOL_BLOCKLIST = new Set<string>(['propose_plan'])
  * question.
  */
 const QUESTION_CONTROL_TOOLS = new Set<string>(['finish', 'ask_user', 'answer_question'])
+
+/** The calls that check what a turn changed: the catalog read and the endpoint test. */
+const isCheck = (name: string) => name === 'read_backend_state' || name === 'run_test'
+
+/** One check as the model asked for it, to tell a repeated check from a new one. */
+const checkKey = (name: string, input: unknown) => `${name}:${JSON.stringify(input ?? {})}`
 
 /**
  * Tools that end the turn and start nothing: still answered after the turn's

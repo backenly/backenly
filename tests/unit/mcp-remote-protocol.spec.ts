@@ -231,6 +231,24 @@ describe.each<Era>(['legacy', 'modern'])('remote endpoint, %s era', (era) => {
   it('refuses a client with no credential, with the challenge that starts OAuth', async () => {
     await expect(connect(era)).rejects.toThrow()
   })
+
+  it('serves a call under the 1 MiB body limit and refuses a larger one with 413 before any handler runs', async () => {
+    const c = await connect(era, { headers: RW })
+    try {
+      const section = 'x'.repeat(512 * 1024)
+      const served: any = await c.callTool({ name: 'read_backend_state', arguments: { section } })
+      expect(served.isError).toBe(false)
+      expect(mockCalls).toEqual([{ path: '/api/mcp/tool', body: { tool: 'read_backend_state', args: { section } } }])
+
+      mockCalls.length = 0
+      const refused = await c.callTool({ name: 'read_backend_state', arguments: { section: 'x'.repeat(1024 * 1024) } }).catch((e) => e)
+      expect(refused).toMatchObject({ data: { status: 413 } })
+      expect(refused.message).toContain('must not exceed 1048576 bytes')
+      expect(mockCalls).toEqual([])
+    } finally {
+      await c.close()
+    }
+  })
 })
 
 describe('the remote endpoint on the wire', () => {

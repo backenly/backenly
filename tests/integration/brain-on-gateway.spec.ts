@@ -3,8 +3,8 @@
  *
  * Real database: the project, its workspace schema, the conversation log, the
  * usage rows and the tables a refused or cut-off step must leave untouched.
- * Only the model is scripted, so each test pins exactly what the brain sent
- * and what it did with each answer.
+ * The model and endpoint-verifier outcomes are scripted; schema and RLS tools
+ * use real PostgreSQL. Background reconciliation is disabled for this suite.
  *
  * Spend reservations go to the gateway's in-memory ledger. The Postgres ledger
  * has its own suite (tests/integration/ai-spend-ledger.spec.ts); writing this
@@ -22,11 +22,19 @@ import { classifierPrompt } from '@/lib/ai/brain/prompts'
 import { BRAIN_MODEL_TOOLS, isReadOnlyTool } from '@/lib/ai/brain/tools'
 import { runBrain, type BrainEvent, type BrainInput } from '@/lib/ai/brain/agent'
 import { collectProof } from '@/lib/ai/proof-system'
+import { runEndpointTest } from '@/lib/ai/brain/verifier'
 
 jest.mock('@/lib/ai/proof-system', () => {
   const actual = jest.requireActual<typeof import('@/lib/ai/proof-system')>('@/lib/ai/proof-system')
   return { ...actual, collectProof: jest.fn(actual.collectProof) }
 })
+
+jest.mock('@/lib/ai/brain/verifier', () => ({
+  runEndpointTest: jest.fn(),
+}))
+
+const mockRunEndpointTest = jest.mocked(runEndpointTest)
+let originalReconcilerFlag: string | undefined
 
 let ownerId: string
 let projectId: string
@@ -67,6 +75,9 @@ async function usageRows(expected: number) {
 }
 
 beforeAll(async () => {
+  // FLAGS reads this environment variable on each kick, not at module import.
+  originalReconcilerFlag = process.env.ENABLE_AUTONOMY_RECONCILER
+  process.env.ENABLE_AUTONOMY_RECONCILER = 'false'
   ownerId = (await prisma.user.create({
     data: { email: `brain-gw-${crypto.randomBytes(6).toString('hex')}@example.test`, password: 'not-a-real-hash', name: 'brain' },
   })).id
@@ -74,9 +85,13 @@ beforeAll(async () => {
   schema = `workspace_${projectId}`
   await prisma.$executeRawUnsafe(`CREATE SCHEMA IF NOT EXISTS "${schema}"`)
   await prisma.$executeRawUnsafe(`CREATE TABLE IF NOT EXISTS "${schema}"."keep_me" (id serial PRIMARY KEY, label text)`)
+  await prisma.$executeRawUnsafe(`CREATE TABLE "${schema}"."rls_custom_fixture" (id serial PRIMARY KEY)`)
+  await prisma.$executeRawUnsafe(`CREATE TABLE "${schema}"."rls_template_fixture" (id serial PRIMARY KEY)`)
 }, 60_000)
 
 beforeEach(async () => {
+  mockRunEndpointTest.mockReset()
+  if (!projectId || !ownerId) throw new Error('Fixture setup did not assign project and owner IDs; refusing cleanup')
   ledger = memorySpendLedger()
   setSpendLedgerForTests(ledger)
   await prisma.aiUsage.deleteMany({ where: { projectId } })
@@ -87,18 +102,367 @@ beforeEach(async () => {
 })
 
 afterEach(() => {
+  jest.restoreAllMocks()
   setProviderForTests(null)
   setSpendLedgerForTests(null)
 })
 
 afterAll(async () => {
-  await prisma.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`).catch(() => {})
-  await prisma.auditLog.deleteMany({ where: { projectId } }).catch(() => {})
-  await prisma.project.deleteMany({ where: { userId: ownerId } }).catch(() => {})
-  await prisma.user.delete({ where: { id: ownerId } }).catch(() => {})
+  // Partial setup must never turn an undefined filter into an unscoped delete.
+  // Attempt independent cleanup steps, then surface every failure to Jest.
+  const failures: unknown[] = []
+  const cleanup = async (operation: () => Promise<unknown>) => {
+    try { await operation() } catch (error) { failures.push(error) }
+  }
+  if (schema) {
+    if (projectId && schema === `workspace_${projectId}` && /^[a-zA-Z0-9_-]+$/.test(schema)) {
+      await cleanup(() => prisma.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`))
+    } else {
+      failures.push(new Error('Refusing to drop an unexpected fixture schema'))
+    }
+  }
+  if (projectId) {
+    await cleanup(() => prisma.auditLog.deleteMany({ where: { projectId } }))
+    await cleanup(() => prisma.project.delete({ where: { id: projectId } }))
+  }
+  if (ownerId) await cleanup(() => prisma.user.delete({ where: { id: ownerId } }))
+  if (failures.length) throw new AggregateError(failures, 'Brain gateway fixture cleanup failed')
 }, 60_000)
 
+// A separate hook restores the flag even if fixture setup or cleanup fails.
+afterAll(() => {
+  if (originalReconcilerFlag === undefined) delete process.env.ENABLE_AUTONOMY_RECONCILER
+  else process.env.ENABLE_AUTONOMY_RECONCILER = originalReconcilerFlag
+})
+
 describe('a turn on the gateway', () => {
+  const finish = (summary = 'Observed verification.') =>
+    scriptedMessage({ toolUse: [{ id: 'done', name: 'finish', input: { summary } }] })
+  const read = () => scriptedMessage({ toolUse: [{ id: 'read', name: 'read_backend_state', input: {} }] })
+  const mutate = () => scriptedMessage({ toolUse: [{
+    id: 'mutation', name: 'create_table',
+    input: { tableName: `verify_${crypto.randomBytes(5).toString('hex')}`, columns: [{ name: 'label', type: 'text' }] },
+  }] })
+  const expectAppliedMutation = (provider: ScriptedProvider, nextCall: number) => {
+    const answers = provider.calls[nextCall].params.messages.at(-1)!.content as Anthropic.ToolResultBlockParam[]
+    expect(JSON.parse(answers[0].content as string)).toMatchObject({ ok: true })
+  }
+
+  it.each([
+    ['read_backend_state', false],
+    ['read_backend_state', true],
+    ['run_test', false],
+    ['run_test', true],
+  ] as const)('defers same-batch finish with %s (finish first: %s)', async (verificationTool, finishFirst) => {
+    const probe = verificationTool === 'run_test'
+      ? mockRunEndpointTest.mockResolvedValueOnce({
+          ok: true, summary: 'Endpoint verified.', endpoint: '/test-endpoint',
+          method: 'GET', statusCode: 200, bodyExcerpt: '[]',
+        })
+      : null
+    const check = {
+      id: 'check', name: verificationTool,
+      input: verificationTool === 'run_test' ? { tableName: 'keep_me', operation: 'list' } : {},
+    }
+    const premature = { id: 'premature', name: 'finish', input: { summary: 'Unobserved.' } }
+    const provider = scriptedProvider([
+      classified('MODIFY'), mutate(),
+      scriptedMessage({ toolUse: finishFirst ? [premature, check] : [check, premature] }),
+      finish(),
+    ])
+    const { result } = await turn(provider, 'make a small table')
+    expect(result).toMatchObject({ success: true, summary: 'Observed verification.' })
+    expect(provider.calls).toHaveLength(4)
+    expectAppliedMutation(provider, 2)
+    const answers = provider.calls[3].params.messages.at(-1)!.content as Anthropic.ToolResultBlockParam[]
+    expect(answers.map((a) => a.tool_use_id)).toEqual(finishFirst ? ['premature', 'check'] : ['check', 'premature'])
+    expect(JSON.parse(answers.find((a) => a.tool_use_id === 'check')!.content as string)).toMatchObject({ ok: true })
+    expect(answers.find((a) => a.tool_use_id === 'premature')).toMatchObject({ is_error: true })
+    expect(result.toolsRun.filter((name) => name === 'finish')).toHaveLength(1)
+    expect(result.toolsRun.filter((name) => name === verificationTool)).toHaveLength(1)
+    if (probe) {
+      expect(probe).toHaveBeenCalledTimes(1)
+      expect(probe).toHaveBeenCalledWith(expect.objectContaining({ projectId, tableName: 'keep_me', operation: 'list' }))
+      expect(JSON.parse(answers.find((a) => a.tool_use_id === 'check')!.content as string)).toMatchObject({ summary: 'Endpoint verified.' })
+    }
+  }, 60_000)
+
+  it.each(['failure', 'exception'])('allows honest completion after verification %s', async (kind) => {
+    const probe = mockRunEndpointTest
+    if (kind === 'exception') probe.mockRejectedValueOnce(new Error('verification unavailable'))
+    else probe.mockResolvedValueOnce({ ok: false, summary: 'verification unavailable', endpoint: '', method: 'GET', statusCode: null, bodyExcerpt: '' })
+    const provider = scriptedProvider([
+      classified('MODIFY'), mutate(), read(),
+      scriptedMessage({ toolUse: [
+        { id: 'check', name: 'run_test', input: { tableName: 'keep_me', operation: 'list' } },
+        { id: 'premature', name: 'finish', input: { summary: 'Unobserved.' } },
+      ] }),
+      finish('Changes applied, verification failed.'),
+    ])
+    const { result } = await turn(provider, 'make a small table')
+    expect(result).toMatchObject({ success: false, summary: 'Changes applied, verification failed.' })
+    expect(provider.calls).toHaveLength(5)
+    expectAppliedMutation(provider, 2)
+    expect(probe).toHaveBeenCalledTimes(1)
+    const answers = provider.calls[4].params.messages.at(-1)!.content as Anthropic.ToolResultBlockParam[]
+    expect(answers.find((a) => a.tool_use_id === 'check')).toMatchObject({ is_error: true })
+  }, 60_000)
+
+  it('does not let a passing check or a catalog read hide a check that failed', async () => {
+    mockRunEndpointTest
+      .mockResolvedValueOnce({ ok: false, summary: 'POST returned 400.', endpoint: '/keep_me', method: 'POST', statusCode: 400, bodyExcerpt: '' })
+      .mockResolvedValueOnce({ ok: true, summary: 'GET returned 200.', endpoint: '/keep_me', method: 'GET', statusCode: 200, bodyExcerpt: '[]' })
+    const provider = scriptedProvider([
+      classified('MODIFY'), mutate(),
+      scriptedMessage({ toolUse: [
+        { id: 'create', name: 'run_test', input: { tableName: 'keep_me', operation: 'create' } },
+        { id: 'list', name: 'run_test', input: { tableName: 'keep_me', operation: 'list' } },
+      ] }),
+      read(),
+      finish('Listing works; creating a row returned 400.'),
+    ])
+    const { result } = await turn(provider, 'make a small table')
+    expect(result).toMatchObject({ success: false, summary: 'Listing works; creating a row returned 400.' })
+    expect(provider.calls).toHaveLength(5)
+    expect(mockRunEndpointTest).toHaveBeenCalledTimes(2)
+  }, 60_000)
+
+  it('clears a failed check when the same check passes again', async () => {
+    mockRunEndpointTest
+      .mockResolvedValueOnce({ ok: false, summary: 'The request timed out.', endpoint: '/keep_me', method: 'GET', statusCode: null, bodyExcerpt: '' })
+      .mockResolvedValueOnce({ ok: true, summary: 'GET returned 200.', endpoint: '/keep_me', method: 'GET', statusCode: 200, bodyExcerpt: '[]' })
+    const check = (id: string) =>
+      scriptedMessage({ toolUse: [{ id, name: 'run_test', input: { tableName: 'keep_me', operation: 'list' } }] })
+    const provider = scriptedProvider([classified('MODIFY'), mutate(), check('first'), check('again'), finish()])
+    const { result } = await turn(provider, 'make a small table')
+    expect(result).toMatchObject({ success: true, summary: 'Observed verification.' })
+    expect(mockRunEndpointTest).toHaveBeenCalledTimes(2)
+  }, 60_000)
+
+  it('defers a finish beside a check only until the model has read a check made since its last change', async () => {
+    const readAndFinish = (summary: string) => scriptedMessage({ toolUse: [
+      { id: 'check', name: 'read_backend_state', input: {} },
+      { id: 'done', name: 'finish', input: { summary } },
+    ] })
+    const provider = scriptedProvider([
+      classified('MODIFY'), mutate(), readAndFinish('Unobserved.'), readAndFinish('Observed verification.'),
+    ])
+    const { result } = await turn(provider, 'make a small table')
+    // The second finish was written after the first read's result: deferring it
+    // again would hold the turn open until it ran out of steps.
+    expect(result).toMatchObject({ success: true, summary: 'Observed verification.' })
+    expect(provider.calls).toHaveLength(4)
+    expect(result.toolsRun).toEqual(['create_table', 'read_backend_state', 'read_backend_state', 'finish'])
+  }, 60_000)
+
+  it('counts a check as unread again after a change in the same response', async () => {
+    const read = { id: 'check', name: 'read_backend_state', input: {} }
+    const provider = scriptedProvider([
+      classified('MODIFY'), mutate(),
+      scriptedMessage({ toolUse: [read, { id: 'first', name: 'finish', input: { summary: 'Unobserved.' } }] }),
+      scriptedMessage({ toolUse: [
+        { id: 'second_change', name: 'create_table', input: { tableName: `verify_${crypto.randomBytes(5).toString('hex')}`, columns: [{ name: 'label', type: 'text' }] } },
+        read,
+        { id: 'second', name: 'finish', input: { summary: 'Written before the second change was read.' } },
+      ] }),
+      finish(),
+    ])
+    const { result } = await turn(provider, 'make two small tables')
+    expect(result).toMatchObject({ success: true, summary: 'Observed verification.' })
+    expect(provider.calls).toHaveLength(5)
+  }, 60_000)
+
+  it('defers a finish sent before a change and a check it had already read, whatever the order', async () => {
+    const read = { id: 'check', name: 'read_backend_state', input: {} }
+    const provider = scriptedProvider([
+      classified('MODIFY'), mutate(),
+      scriptedMessage({ toolUse: [read] }),
+      // The read repeats one the model has seen, but the change between makes its result news.
+      scriptedMessage({ toolUse: [
+        { id: 'blind', name: 'finish', input: { summary: 'Written before the second change.' } },
+        { id: 'second_change', name: 'create_table', input: { tableName: `verify_${crypto.randomBytes(5).toString('hex')}`, columns: [{ name: 'label', type: 'text' }] } },
+        read,
+      ] }),
+      finish(),
+    ])
+    const { result } = await turn(provider, 'make two small tables')
+    expect(result).toMatchObject({ success: true, summary: 'Observed verification.' })
+    expect(provider.calls).toHaveLength(5)
+    const answers = provider.calls[4].params.messages.at(-1)!.content as Anthropic.ToolResultBlockParam[]
+    // Every call is answered in the order it was sent, the finish as deferred.
+    expect(answers.map((a) => a.tool_use_id)).toEqual(['blind', 'second_change', 'check'])
+    expect(answers[0]).toMatchObject({ is_error: true })
+    expect(answers[0].content).toContain('Finish deferred')
+  }, 60_000)
+
+  it('lets a finish through beside a refused change and a check it has read: nothing changed', async () => {
+    const read = { id: 'check', name: 'read_backend_state', input: {} }
+    const provider = scriptedProvider([
+      classified('MODIFY'), mutate(),
+      scriptedMessage({ toolUse: [read] }),
+      scriptedMessage({ toolUse: [
+        // Refused: keep_me already exists.
+        { id: 'refused', name: 'create_table', input: { tableName: 'keep_me', columns: [{ name: 'label', type: 'text' }] } },
+        read,
+        { id: 'done', name: 'finish', input: { summary: 'One table added; keep_me already existed.' } },
+      ] }),
+    ])
+    const { result } = await turn(provider, 'make a small table and keep_me')
+    expect(result).toMatchObject({ success: true, summary: 'One table added; keep_me already existed.' })
+    expect(provider.calls).toHaveLength(4)
+    expect(result.refused).toEqual([expect.objectContaining({ title: expect.stringContaining('keep_me') })])
+  }, 60_000)
+
+  it('defers a finish sent with the verification turn\'s read instead of ending the turn', async () => {
+    const provider = scriptedProvider([
+      classified('MODIFY'), mutate(),
+      scriptedMessage({ text: 'The table has been created.' }),
+      scriptedMessage({ toolUse: [
+        { id: 'check', name: 'read_backend_state', input: {} },
+        { id: 'premature', name: 'finish', input: { summary: 'Unobserved.' } },
+      ] }),
+      finish(),
+    ])
+    const { result } = await turn(provider, 'make a small table')
+    expect(result).toMatchObject({ success: true, summary: 'Observed verification.' })
+    expect(result.failureCode).toBeUndefined()
+    expect(result.toolsRun).toEqual(['create_table', 'read_backend_state', 'finish'])
+    const answers = provider.calls[4].params.messages.at(-1)!.content as Anthropic.ToolResultBlockParam[]
+    expect(answers.map((a) => a.tool_use_id)).toEqual(['check', 'premature'])
+    expect(answers.find((a) => a.tool_use_id === 'premature')).toMatchObject({ is_error: true })
+  }, 60_000)
+
+  it('does not fail a turn that changed nothing because a check it ran failed', async () => {
+    mockRunEndpointTest.mockResolvedValueOnce({
+      ok: false, summary: 'GET returned 404.', endpoint: '/keep_me', method: 'GET', statusCode: 404, bodyExcerpt: '',
+    })
+    const provider = scriptedProvider([
+      classified('FIX'),
+      scriptedMessage({ toolUse: [{ id: 'check', name: 'run_test', input: { tableName: 'keep_me', operation: 'list' } }] }),
+      finish('keep_me answers 404, so its route is not registered.'),
+    ])
+    const { result } = await turn(provider, 'why does keep_me answer 404?')
+    expect(result).toMatchObject({ success: true, summary: 'keep_me answers 404, so its route is not registered.' })
+    expect(result.failureCode).toBeUndefined()
+  }, 60_000)
+
+  // run_test answers that did not exercise the route (lib/ai/brain/verify-create.ts,
+  // verifier.ts): they say nothing either way about the change.
+  const unexercised = (ok: boolean, failureKind: string | undefined, summary: string) => ({
+    ok, summary, endpoint: '/api/v1/p/db/keep_me', method: 'POST', statusCode: ok ? 403 : null, bodyExcerpt: '',
+    ...(failureKind ? { failureKind } : {}), exercised: false as const,
+  })
+  const createCheck = (id: string) =>
+    scriptedMessage({ toolUse: [{ id, name: 'run_test', input: { tableName: 'keep_me', operation: 'create' } }] })
+
+  it.each([
+    ['no row could be built', 'no_valid_row', 'No valid row could be built for "keep_me".'],
+    ['no test user could sign up', 'unauthenticated', 'Could not sign a test user up, so no row was written and nothing was verified.'],
+    ['there was no row to fetch', 'no_rows', 'The list gave no row to fetch by id, so the get route was not exercised.'],
+    ['there was no address to call', 'no_app_url', 'Skipped runtime verification: no NEXT_PUBLIC_APP_URL configured to call.'],
+  ])('does not fail a change when %s', async (_why, failureKind, summary) => {
+    mockRunEndpointTest.mockResolvedValueOnce(unexercised(false, failureKind, summary) as never)
+    const provider = scriptedProvider([
+      classified('MODIFY'), mutate(), createCheck('inconclusive'), read(), finish(),
+    ])
+    const { result } = await turn(provider, 'make a small table')
+    // Neither a failed check nor verification: the read verifies, and the turn succeeds.
+    expect(result).toMatchObject({ success: true, summary: 'Observed verification.' })
+    expect(result.failureCode).toBeUndefined()
+    expect(provider.calls).toHaveLength(5)
+  }, 60_000)
+
+  const notExercisedPasses = [
+    ['a table only the service role writes', 'signed-in users may not insert into "keep_me"; the insert path itself was not exercised.'],
+    ['a project without end-user sign-up', 'This project has no end-user sign-up, so there was no one to write as, and the insert path itself was not exercised.'],
+  ]
+
+  it.each(notExercisedPasses)('does not count a pass for %s as verification', async (_why, summary) => {
+    mockRunEndpointTest.mockResolvedValueOnce(unexercised(true, undefined, summary) as never)
+    const provider = scriptedProvider([
+      classified('MODIFY'), mutate(), createCheck('not_exercised'), finish('Done.'), read(), finish(),
+    ])
+    const { result } = await turn(provider, 'make a small table')
+    // The finish after it is steered to a read, as after no check at all.
+    expect(provider.calls).toHaveLength(6)
+    expect(JSON.stringify(provider.calls[4].params.messages.at(-1))).toContain('did not verify')
+    expect(result).toMatchObject({ success: true, summary: 'Observed verification.' })
+  }, 60_000)
+
+  it.each(notExercisedPasses)('does not let a pass for %s clear a failure of the same check', async (_why, summary) => {
+    mockRunEndpointTest
+      .mockResolvedValueOnce({ ok: false, summary: 'POST returned 500.', endpoint: '/api/v1/p/db/keep_me', method: 'POST', statusCode: 500, bodyExcerpt: '', failureKind: 'server_error' })
+      .mockResolvedValueOnce(unexercised(true, undefined, summary) as never)
+    const provider = scriptedProvider([
+      classified('MODIFY'), mutate(), createCheck('failing'), createCheck('not_exercised'), finish('The create route answered 500.'),
+    ])
+    const { result } = await turn(provider, 'make a small table')
+    expect(result).toMatchObject({ success: false, summary: 'The create route answered 500.' })
+    expect(provider.calls).toHaveLength(5)
+  }, 60_000)
+
+  it('invalidates verification after a later ordinary mutation', async () => {
+    const provider = scriptedProvider([
+      classified('MODIFY'), mutate(), read(), mutate(), finish('Too early.'), read(), finish(),
+    ])
+    const { result } = await turn(provider, 'make two small tables')
+    expect(result).toMatchObject({ success: true, summary: 'Observed verification.' })
+    expect(provider.calls).toHaveLength(7)
+    expectAppliedMutation(provider, 2)
+    expectAppliedMutation(provider, 4)
+    expect(JSON.stringify(provider.calls[5].params.messages.at(-1))).toContain('did not verify')
+  }, 60_000)
+
+  it('accepts separate-turn finish after successful verification without rechecking', async () => {
+    const provider = scriptedProvider([classified('MODIFY'), mutate(), read(), finish()])
+    const { result } = await turn(provider, 'make a small table')
+    expect(result.success).toBe(true)
+    expect(provider.calls).toHaveLength(4)
+    expectAppliedMutation(provider, 2)
+    expect(result.toolsRun).toEqual(['create_table', 'read_backend_state', 'finish'])
+  }, 60_000)
+
+  it('preserves successful self-verifying tools without another read', async () => {
+    const provider = scriptedProvider([
+      classified('MODIFY'),
+      scriptedMessage({ toolUse: [{ id: 'rls', name: 'set_rls', input: { tableName: 'rls_custom_fixture', select: { using: 'true' } } }] }),
+      finish('Policy verified by executor.'),
+    ])
+    const { result } = await turn(provider, 'set the rls_custom_fixture select policy')
+    expect(result).toMatchObject({ success: true, summary: 'Policy verified by executor.' })
+    expect(result.toolsRun).toEqual(['set_rls', 'finish'])
+    expect(provider.calls).toHaveLength(3)
+    const answers = provider.calls[2].params.messages.at(-1)!.content as Anthropic.ToolResultBlockParam[]
+    expect(JSON.parse(answers[0].content as string)).toMatchObject({ ok: true })
+    const policies = await prisma.$queryRawUnsafe<Array<{ cmd: string }>>(
+      'SELECT cmd FROM pg_policies WHERE schemaname = $1 AND tablename = $2',
+      schema, 'rls_custom_fixture',
+    )
+    expect(policies).toEqual(expect.arrayContaining([{ cmd: 'SELECT' }]))
+  }, 60_000)
+
+  it('preserves successful add_rls self-verification without another read', async () => {
+    const provider = scriptedProvider([
+      classified('MODIFY'),
+      scriptedMessage({ toolUse: [{ id: 'rls', name: 'add_rls', input: { tableName: 'rls_template_fixture', policy: 'admin_only' } }] }),
+      finish('Template policy verified by executor.'),
+    ])
+    const { result } = await turn(provider, 'restrict rls_template_fixture to service-role access')
+    expect(result).toMatchObject({ success: true, summary: 'Template policy verified by executor.' })
+    expect(result.toolsRun).toEqual(['add_rls', 'finish'])
+    expect(provider.calls).toHaveLength(3)
+    const answers = provider.calls[2].params.messages.at(-1)!.content as Anthropic.ToolResultBlockParam[]
+    expect(answers).toHaveLength(1)
+    expect(answers[0]).toMatchObject({ tool_use_id: 'rls' })
+    expect(answers[0]).not.toHaveProperty('is_error')
+    expect(JSON.parse(answers[0].content as string)).toMatchObject({ ok: true })
+    const policies = await prisma.$queryRawUnsafe<Array<{ policyname: string; cmd: string }>>(
+      'SELECT policyname, cmd FROM pg_policies WHERE schemaname = $1 AND tablename = $2',
+      schema, 'rls_template_fixture',
+    )
+    expect(policies).toEqual(expect.arrayContaining([{ policyname: 'backenly_admin_only', cmd: 'ALL' }]))
+  }, 60_000)
+
   it('classifies, runs tools, answers each call and bills what the model reports', async () => {
     const provider = scriptedProvider([
       classified('QUESTION'),

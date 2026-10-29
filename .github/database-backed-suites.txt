@@ -1110,6 +1110,15 @@ tests/integration/agent-doors-agree.spec.ts
 # schema and reads its conversation, so it needs a real Postgres.
 tests/integration/brain-cut-off-tool-calls.spec.ts
 
+# run_test create inserts a real row as a throwaway signed-in user, through the
+# real runtime, and removes the row and the user: a trigger that refuses the
+# row fails with the database's reason, CHECKs, defaults, owners and a required
+# parent are filled in, a service-role-only table and a project without
+# sign-up pass as not exercised, and a missing grant or a policy refusing users
+# their own rows fail. Real tables, policies, grants and users are the
+# property, so it needs a real Postgres.
+tests/integration/run-test-create-writes.spec.ts
+
 # A parked executor action is pollable: the APPROVAL_REQUIRED refusal carries
 # the Review Queue finding's id and the poll call, check_approval resolves
 # parked findings alongside destructive-gate approvals with one status

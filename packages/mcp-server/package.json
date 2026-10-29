@@ -43,10 +43,10 @@
     "agentic"
   ],
   "dependencies": {
-    "@modelcontextprotocol/server": "^2.1.0"
+    "@modelcontextprotocol/server": "^2.4.0"
   },
   "devDependencies": {
-    "@modelcontextprotocol/client": "^2.1.0",
+    "@modelcontextprotocol/client": "^2.4.0",
     "@types/node": "^20.0.0",
     "typescript": "^5.0.0"
   },
