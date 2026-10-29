@@ -272,6 +272,47 @@ describe('a turn on the gateway', () => {
     expect(provider.calls).toHaveLength(5)
   }, 60_000)
 
+  it('defers a finish sent before a change and a check it had already read, whatever the order', async () => {
+    const read = { id: 'check', name: 'read_backend_state', input: {} }
+    const provider = scriptedProvider([
+      classified('MODIFY'), mutate(),
+      scriptedMessage({ toolUse: [read] }),
+      // The read repeats one the model has seen, but the change between makes its result news.
+      scriptedMessage({ toolUse: [
+        { id: 'blind', name: 'finish', input: { summary: 'Written before the second change.' } },
+        { id: 'second_change', name: 'create_table', input: { tableName: `verify_${crypto.randomBytes(5).toString('hex')}`, columns: [{ name: 'label', type: 'text' }] } },
+        read,
+      ] }),
+      finish(),
+    ])
+    const { result } = await turn(provider, 'make two small tables')
+    expect(result).toMatchObject({ success: true, summary: 'Observed verification.' })
+    expect(provider.calls).toHaveLength(5)
+    const answers = provider.calls[4].params.messages.at(-1)!.content as Anthropic.ToolResultBlockParam[]
+    // Every call is answered in the order it was sent, the finish as deferred.
+    expect(answers.map((a) => a.tool_use_id)).toEqual(['blind', 'second_change', 'check'])
+    expect(answers[0]).toMatchObject({ is_error: true })
+    expect(answers[0].content).toContain('Finish deferred')
+  }, 60_000)
+
+  it('lets a finish through beside a refused change and a check it has read: nothing changed', async () => {
+    const read = { id: 'check', name: 'read_backend_state', input: {} }
+    const provider = scriptedProvider([
+      classified('MODIFY'), mutate(),
+      scriptedMessage({ toolUse: [read] }),
+      scriptedMessage({ toolUse: [
+        // Refused: keep_me already exists.
+        { id: 'refused', name: 'create_table', input: { tableName: 'keep_me', columns: [{ name: 'label', type: 'text' }] } },
+        read,
+        { id: 'done', name: 'finish', input: { summary: 'One table added; keep_me already existed.' } },
+      ] }),
+    ])
+    const { result } = await turn(provider, 'make a small table and keep_me')
+    expect(result).toMatchObject({ success: true, summary: 'One table added; keep_me already existed.' })
+    expect(provider.calls).toHaveLength(4)
+    expect(result.refused).toEqual([expect.objectContaining({ title: expect.stringContaining('keep_me') })])
+  }, 60_000)
+
   it('defers a finish sent with the verification turn\'s read instead of ending the turn', async () => {
     const provider = scriptedProvider([
       classified('MODIFY'), mutate(),

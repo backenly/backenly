@@ -1536,9 +1536,10 @@ async function runAgentLoop(
   // about the mutation, so it only leaves the mutation unverified (below).
   const failedChecks = new Set<string>()
   // Checks (read_backend_state or run_test, with their arguments) whose results
-  // the model has read since the last mutation. A finish sent beside a check it
-  // has not read yet is deferred. Beside one it has, the check only repeats it,
-  // and deferring again would hold the turn open until its steps ran out.
+  // the model has read since the last change took effect. A finish sent beside
+  // a check it has not read yet, or beside a change, is deferred. Beside checks
+  // it has read, they only repeat them, and deferring again would hold the turn
+  // open until its steps ran out.
   const seenChecks = new Set<string>()
   // The model gets one chance to verify a mutation before the loop returns an
   // applied-but-unverified outcome. This is a phase, not a prompt alone: while
@@ -1805,24 +1806,25 @@ async function runAgentLoop(
     // Splitting results across turns teaches the model to stop calling tools in
     // parallel, and a call left unanswered is rejected outright.
     const results: Anthropic.ToolResultBlockParam[] = []
-    /** Checks this response ran after its last mutation: the model reads their results next. */
+    /** Checks this response ran after its last change: the model reads their results next. */
     const checksRan: string[] = []
+    /** A change in this response took effect. */
+    let changed = false
+    /** finish calls, answered once the rest of the response has run, in their own slots. */
+    const heldFinishes: Array<{ call: (typeof toolCalls)[number]; at: number }> = []
     let finished = false
     const verificationTurn = verificationSteered && mutated && !verifiedAfterMutation
     for (const toolCall of toolCalls) {
       const toolName = toolCall.name as ToolName
 
-      // Inspect the whole batch: either order contains a summary written before
-      // the model could observe verification. Answer every call without accepting it,
-      // unless every check in it repeats one the model has read since the last
-      // mutation, this response's included (seenChecks).
-      // Checked ahead of the verification turn's guard, so a finish sent with the
-      // one read that turn allows waits for that read instead of ending the turn.
-      if (toolName === 'finish' && toolCalls.some((c) => isCheck(c.name) && !seenChecks.has(checkKey(c.name, c.input)))) {
-        results.push(toolResultBlock(toolCall.id, {
-          ok: false,
-          summary: 'Finish deferred. Read the verification results, then finish in a subsequent response with a truthful summary. Do not repeat completed verification unless state changes.',
-        }, true))
+      // A finish's summary was written before any result of this response, so
+      // whether it is blind depends on what the other calls do, in whatever
+      // order they came. It is answered after them (below), and ahead of the
+      // verification turn's guard, so a finish sent with the one read that turn
+      // allows waits for that read instead of ending the turn.
+      if (toolName === 'finish') {
+        heldFinishes.push({ call: toolCall, at: results.length })
+        results.push(toolResultBlock(toolCall.id, { ok: false, summary: '' }, true))
         continue
       }
 
@@ -1946,10 +1948,14 @@ async function runAgentLoop(
         // pass afterwards is what pushed the run into the time budget in the
         // first place.
         verifiedAfterMutation = result.ok && SELF_VERIFYING_TOOLS.has(toolName)
-        // A check run before this mutation says nothing about the state after it.
-        failedChecks.clear()
-        seenChecks.clear()
-        checksRan.length = 0
+        // A check run before a change says nothing about the state after it. A
+        // mutation that was refused changed nothing, so what a check found stands.
+        if (result.ok) {
+          changed = true
+          failedChecks.clear()
+          seenChecks.clear()
+          checksRan.length = 0
+        }
         // Recorded even when the turn later fails, so the caller can tell "the
         // run stopped" from "nothing changed" — the distinction that decides
         // whether retrying is safe or duplicates work.
@@ -1976,6 +1982,47 @@ async function runAgentLoop(
         success = !needsUser && result.ok && failedChecks.size === 0
         finished = true
       }
+    }
+    // ── finish, answered last ────────────────────────────────────────────────
+    //
+    // Its summary is blind when this response changed something, or ran a check
+    // the model has not read since the last change, whatever the order of the
+    // calls: it is then deferred, so the model finishes having read the results.
+    // Checks it has already read only repeat them, so the deferral is bounded:
+    // an unchanged state with the same checks lets the next finish through.
+    const blind = toolCalls.some((c) => isCheck(c.name) && (changed || !seenChecks.has(checkKey(c.name, c.input))))
+    for (const { call, at } of heldFinishes) {
+      if (blind) {
+        results[at] = toolResultBlock(call.id, {
+          ok: false,
+          summary: 'Finish deferred. Read the verification results, then finish in a subsequent response with a truthful summary. Do not repeat completed verification unless state changes.',
+        }, true)
+        continue
+      }
+      // Still in the one bounded verification turn, and this response did not
+      // verify: finish ends it with the honest outcome, as any call but the read does.
+      if (verificationSteered && mutated && !verifiedAfterMutation) {
+        verificationToolRejected = true
+        finalSummary = await unverifiedMutationSummary()
+        success = false
+        break agentLoop
+      }
+      if (!call.input || typeof call.input !== 'object' || Array.isArray(call.input)) {
+        results[at] = toolResultBlock(call.id, {
+          ok: false,
+          summary: '`finish` was NOT run: its arguments were not a JSON object. Send the call again with its arguments as one JSON object.',
+        }, true)
+        continue
+      }
+      const result = await dispatchTool('finish', call.input as Record<string, unknown>, ctx)
+      toolsRun.push('finish')
+      toolStatuses.push(result.ok ? 'applied' : 'failed')
+      results[at] = toolResultBlock(call.id, { ok: result.ok, summary: result.summary.slice(0, 500) }, !result.ok)
+      finalSummary = result.summary || 'Done.'
+      needsUser = !!result.needsUser
+      terminalData = result.data ?? null
+      success = !needsUser && result.ok && failedChecks.size === 0
+      finished = true
     }
     // These results go back to the model with the next call, whichever way the
     // loop carries on from here.
