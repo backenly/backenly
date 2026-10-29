@@ -346,6 +346,61 @@ describe('a turn on the gateway', () => {
     expect(result.failureCode).toBeUndefined()
   }, 60_000)
 
+  // run_test answers that did not exercise the route (lib/ai/brain/verify-create.ts,
+  // verifier.ts): they say nothing either way about the change.
+  const unexercised = (ok: boolean, failureKind: string | undefined, summary: string) => ({
+    ok, summary, endpoint: '/api/v1/p/db/keep_me', method: 'POST', statusCode: ok ? 403 : null, bodyExcerpt: '',
+    ...(failureKind ? { failureKind } : {}), exercised: false as const,
+  })
+  const createCheck = (id: string) =>
+    scriptedMessage({ toolUse: [{ id, name: 'run_test', input: { tableName: 'keep_me', operation: 'create' } }] })
+
+  it.each([
+    ['no row could be built', 'no_valid_row', 'No valid row could be built for "keep_me".'],
+    ['no test user could sign up', 'unauthenticated', 'Could not sign a test user up, so no row was written and nothing was verified.'],
+    ['there was no row to fetch', 'no_rows', 'The list gave no row to fetch by id, so the get route was not exercised.'],
+    ['there was no address to call', 'no_app_url', 'Skipped runtime verification: no NEXT_PUBLIC_APP_URL configured to call.'],
+  ])('does not fail a change when %s', async (_why, failureKind, summary) => {
+    mockRunEndpointTest.mockResolvedValueOnce(unexercised(false, failureKind, summary) as never)
+    const provider = scriptedProvider([
+      classified('MODIFY'), mutate(), createCheck('inconclusive'), read(), finish(),
+    ])
+    const { result } = await turn(provider, 'make a small table')
+    // Neither a failed check nor verification: the read verifies, and the turn succeeds.
+    expect(result).toMatchObject({ success: true, summary: 'Observed verification.' })
+    expect(result.failureCode).toBeUndefined()
+    expect(provider.calls).toHaveLength(5)
+  }, 60_000)
+
+  const notExercisedPasses = [
+    ['a table only the service role writes', 'signed-in users may not insert into "keep_me"; the insert path itself was not exercised.'],
+    ['a project without end-user sign-up', 'This project has no end-user sign-up, so there was no one to write as, and the insert path itself was not exercised.'],
+  ]
+
+  it.each(notExercisedPasses)('does not count a pass for %s as verification', async (_why, summary) => {
+    mockRunEndpointTest.mockResolvedValueOnce(unexercised(true, undefined, summary) as never)
+    const provider = scriptedProvider([
+      classified('MODIFY'), mutate(), createCheck('not_exercised'), finish('Done.'), read(), finish(),
+    ])
+    const { result } = await turn(provider, 'make a small table')
+    // The finish after it is steered to a read, as after no check at all.
+    expect(provider.calls).toHaveLength(6)
+    expect(JSON.stringify(provider.calls[4].params.messages.at(-1))).toContain('did not verify')
+    expect(result).toMatchObject({ success: true, summary: 'Observed verification.' })
+  }, 60_000)
+
+  it.each(notExercisedPasses)('does not let a pass for %s clear a failure of the same check', async (_why, summary) => {
+    mockRunEndpointTest
+      .mockResolvedValueOnce({ ok: false, summary: 'POST returned 500.', endpoint: '/api/v1/p/db/keep_me', method: 'POST', statusCode: 500, bodyExcerpt: '', failureKind: 'server_error' })
+      .mockResolvedValueOnce(unexercised(true, undefined, summary) as never)
+    const provider = scriptedProvider([
+      classified('MODIFY'), mutate(), createCheck('failing'), createCheck('not_exercised'), finish('The create route answered 500.'),
+    ])
+    const { result } = await turn(provider, 'make a small table')
+    expect(result).toMatchObject({ success: false, summary: 'The create route answered 500.' })
+    expect(provider.calls).toHaveLength(5)
+  }, 60_000)
+
   it('invalidates verification after a later ordinary mutation', async () => {
     const provider = scriptedProvider([
       classified('MODIFY'), mutate(), read(), mutate(), finish('Too early.'), read(), finish(),

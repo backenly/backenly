@@ -1912,9 +1912,13 @@ async function runAgentLoop(
 
       // Track verification cadence. A read that failed is not verification, and
       // a run_test that failed is a failed check, including a handled exception.
+      // A run_test that did not exercise its route (no row it could build or
+      // fetch, no one to write as, a refusal the table is designed to give)
+      // says nothing either way: it neither verifies the change nor fails it,
+      // nor clears what the same check found before.
       if (isCheck(toolName)) checksRan.push(checkKey(toolName, args))
       if (toolName === 'read_backend_state' && mutated) verifiedAfterMutation = result.ok
-      if (toolName === 'run_test' && mutated) {
+      if (toolName === 'run_test' && mutated && (result.data as { exercised?: boolean } | undefined)?.exercised !== false) {
         const check = `${String(args.tableName ?? '')}:${String(args.operation ?? 'list')}`
         if (result.ok) {
           verifiedAfterMutation = true

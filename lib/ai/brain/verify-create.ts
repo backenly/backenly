@@ -381,7 +381,7 @@ async function signUpTestUser(target: CreateTestTarget, tag: string): Promise<Si
 async function refusalVerdict(
   target: CreateTestTarget,
   head: string,
-): Promise<Pick<EndpointTestResult, 'ok' | 'summary' | 'failureKind'>> {
+): Promise<Pick<EndpointTestResult, 'ok' | 'summary' | 'failureKind' | 'exercised'>> {
   const { projectId, schema, tableName } = target
   const db = await workspaceRawClient(projectId)
   const granted = await db
@@ -416,6 +416,7 @@ async function refusalVerdict(
     summary:
       `${head}: signed-in users may not insert into "${tableName}". Its rows belong to no end user and only ` +
       'the service role writes it, which is by design, so nothing is wrong; the insert path itself was not exercised.',
+    exercised: false,
   }
 }
 
@@ -443,6 +444,7 @@ export async function verifyCreate(target: CreateTestTarget): Promise<EndpointTe
       statusCode: null,
       bodyExcerpt: '',
       failureKind: 'unauthenticated',
+      exercised: false,
     })
   }
   const userId = signup.kind === 'user' ? signup.userId : null
@@ -458,6 +460,7 @@ export async function verifyCreate(target: CreateTestTarget): Promise<EndpointTe
         statusCode: null,
         bodyExcerpt: '',
         failureKind: 'no_valid_row',
+        exercised: false,
       })
     }
 
@@ -526,6 +529,7 @@ export async function verifyCreate(target: CreateTestTarget): Promise<EndpointTe
             'there was no one to write as, and the insert path itself was not exercised.',
           statusCode: status,
           bodyExcerpt: excerpt,
+          exercised: false,
         })
       }
       if (status === 403 && body?.code === 'FORBIDDEN') {
