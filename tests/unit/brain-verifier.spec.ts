@@ -100,6 +100,8 @@ describe('run_test get', () => {
       endpoint: `/api/v1/p1/db/posts/${ROW_ID}`,
       statusCode: 200,
     })
+    // The route was exercised, so the agent loop counts it as verification.
+    expect(result.exercised).toBeUndefined()
   })
 
   it('fetches a numeric id the same way', async () => {
@@ -118,7 +120,7 @@ describe('run_test get', () => {
     const result = await get()
 
     expect(sent).toHaveLength(1)
-    expect(result).toMatchObject({ ok: false, failureKind: 'no_rows', statusCode: 200 })
+    expect(result).toMatchObject({ ok: false, failureKind: 'no_rows', statusCode: 200, exercised: false })
     expect(result.summary).toMatch(/not exercised/)
   })
 
@@ -137,7 +139,7 @@ describe('run_test get', () => {
     const result = await get()
 
     expect(sent).toHaveLength(1)
-    expect(result).toMatchObject({ ok: false, failureKind: 'no_rows', statusCode: answer.status })
+    expect(result).toMatchObject({ ok: false, failureKind: 'no_rows', statusCode: answer.status, exercised: false })
   })
 
   it('reports a list that fails as that failure', async () => {
@@ -180,5 +182,32 @@ describe('no request lists a table without a limit', () => {
     const lists = sent.filter((s) => s.method === 'GET' && new URL(s.url).pathname === '/api/v1/p1/db/posts')
     expect(lists).toHaveLength(1)
     expect(new URL(lists[0].url).searchParams.get('limit')).toBe('1')
+  })
+})
+
+// The agent loop counts a check that did not exercise its route as neither
+// verification nor a failure (lib/ai/brain/agent.ts), so each such answer says so.
+describe('a check that could not exercise the route', () => {
+  const list = () => runEndpointTest({ projectId: 'p1', tableName: 'posts', operation: 'list' })
+
+  it('says so when there is no address to call', async () => {
+    delete process.env.NEXT_PUBLIC_APP_URL
+    const appUrl = process.env.APP_URL
+    delete process.env.APP_URL
+    try {
+      expect(await list()).toMatchObject({ ok: false, failureKind: 'no_app_url', exercised: false })
+    } finally {
+      if (appUrl !== undefined) process.env.APP_URL = appUrl
+    }
+  })
+
+  it('says so when there is no credential to send', async () => {
+    mockFindProject.mockResolvedValue({ anonKey: null })
+    const sent = runtime({ [`${TABLE_URL}?limit=1`]: { status: 401, body: { error: 'Unauthorized' } } })
+
+    const result = await list()
+
+    expect(sent).toEqual([{ method: 'GET', url: `${TABLE_URL}?limit=1`, apiKey: undefined }])
+    expect(result).toMatchObject({ ok: false, failureKind: 'unauthenticated', exercised: false })
   })
 })

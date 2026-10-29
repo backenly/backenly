@@ -65,6 +65,14 @@ export interface EndpointTestResult {
     | 'forbidden'
     /** create: no row the table accepts could be built (a reference the test does not create). */
     | 'no_valid_row'
+  /**
+   * The route was not exercised, so the answer says nothing either way about
+   * whether it works: no row could be built or fetched, there was no one to
+   * write as or no credential to send, no address to call, or the table refuses
+   * signed-in users by design. `ok` still says what the model is told; the agent
+   * loop counts the check as neither verification nor a failure.
+   */
+  exercised?: false
 }
 
 const APP_URL_ENV = ['NEXT_PUBLIC_APP_URL', 'APP_URL'] as const
@@ -200,6 +208,7 @@ export async function runEndpointTest(input: EndpointTestInput): Promise<Endpoin
       statusCode: listed.statusCode,
       bodyExcerpt: listed.bodyExcerpt,
       failureKind: 'no_rows',
+      exercised: false,
     }
   }
   return requestEndpoint(input, listed.firstRowId)
@@ -244,6 +253,7 @@ async function requestEndpoint(input: EndpointTestInput, rowId?: string): Promis
       statusCode: null,
       bodyExcerpt: '',
       failureKind: 'no_app_url',
+      exercised: false,
     }
   }
 
@@ -349,6 +359,7 @@ async function requestEndpoint(input: EndpointTestInput, rowId?: string): Promis
         statusCode: status,
         bodyExcerpt: excerpt,
         failureKind: 'unauthenticated',
+        exercised: false,
       }
     }
     // Credentialed and still refused: the route is wired and enforcing access

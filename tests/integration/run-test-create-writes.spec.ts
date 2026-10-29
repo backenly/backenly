@@ -53,6 +53,8 @@ let ownerId: string
 let projectId: string
 /** A project without it. */
 let bareProjectId: string
+/** A project with sign-up that refuses every new user. */
+let brokenSignupProjectId: string
 let runtime: http.Server
 let postgrest: http.Server
 let pool: Pool
@@ -202,12 +204,15 @@ beforeAll(async () => {
     `CREATE TABLE ${s()}.categories (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), name text NOT NULL)`,
     // Owned, but signed-in users have no INSERT grant.
     `CREATE TABLE ${s()}.locked (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), user_id uuid NOT NULL ${ref('users')}, note text NOT NULL)`,
+    // Owned, and each row must answer another row of the table, which the test does not build.
+    `CREATE TABLE ${s()}.replies (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), user_id uuid NOT NULL ${ref('users')},
+       reply_to uuid NOT NULL REFERENCES ${s()}.replies(id), body text NOT NULL)`,
     // Owned, but a policy refuses users their own new rows.
     `CREATE TABLE ${s()}.refusing (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), user_id uuid NOT NULL ${ref('users')}, note text NOT NULL)`,
   ]) await prisma.$executeRawUnsafe(ddl)
   await grantDataPlane(projectId)
   await prisma.$executeRawUnsafe(`REVOKE INSERT ON ${s()}.locked FROM authenticated`)
-  for (const table of ['notes', 'gated', 'drafts', 'stamped', 'lists', 'list_items', 'locked', 'refusing']) {
+  for (const table of ['notes', 'gated', 'drafts', 'stamped', 'lists', 'list_items', 'locked', 'refusing', 'replies']) {
     await autoApplyRlsIfNeeded(projectId, table)
   }
   const installed = await applyPermissionPolicy(projectId, { tableName: 'categories', template: 'public_read' })
@@ -215,6 +220,20 @@ beforeAll(async () => {
   await prisma.$executeRawUnsafe(
     `CREATE POLICY no_new_rows ON ${s()}.refusing AS RESTRICTIVE FOR INSERT TO authenticated WITH CHECK (false)`,
   )
+
+  brokenSignupProjectId = await newProject('run-test-create-broken-signup', crypto.randomBytes(32).toString('hex'))
+  const b = `"${schemaOf(brokenSignupProjectId)}"`
+  for (const ddl of [
+    `CREATE TABLE ${b}.users (
+       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), email text UNIQUE NOT NULL, password text NOT NULL,
+       name text, role text DEFAULT 'user', is_blocked boolean NOT NULL DEFAULT false,
+       created_at timestamptz NOT NULL DEFAULT now())`,
+    `CREATE FUNCTION ${b}.refuse_signup() RETURNS trigger LANGUAGE plpgsql AS $$
+       BEGIN RAISE EXCEPTION 'sign-up is closed'; END $$`,
+    `CREATE TRIGGER refuse BEFORE INSERT ON ${b}.users FOR EACH ROW EXECUTE FUNCTION ${b}.refuse_signup()`,
+    `CREATE TABLE ${b}.memos (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), user_id uuid NOT NULL REFERENCES ${b}.users(id), body text NOT NULL)`,
+  ]) await prisma.$executeRawUnsafe(ddl)
+  await grantDataPlane(brokenSignupProjectId)
 
   bareProjectId = await newProject('run-test-create-bare', null)
   await prisma.$executeRawUnsafe(`CREATE TABLE "${schemaOf(bareProjectId)}".open_notes (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), body text NOT NULL)`)
@@ -239,7 +258,7 @@ afterAll(async () => {
     if (v === undefined) delete process.env[k]
     else process.env[k] = v
   }
-  for (const id of [projectId, bareProjectId]) {
+  for (const id of [projectId, bareProjectId, brokenSignupProjectId]) {
     if (!id) continue
     await prisma.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schemaOf(id)}" CASCADE`).catch(() => {})
     await prisma.apiKey.deleteMany({ where: { projectId: id } }).catch(() => {})
@@ -278,6 +297,8 @@ describe('run_test create, as a signed-in test user', () => {
     const result = await create('notes')
 
     expect(result).toMatchObject({ ok: true, statusCode: 201 })
+    // It was exercised, so the agent loop counts it as verification.
+    expect(result.exercised).toBeUndefined()
     expect(inserts).toHaveLength(1)
     expect(inserts[0]).toMatchObject({ table: 'notes', role: 'authenticated' })
     expect(inserts[0].row.user_id).toBe(inserts[0].sub)
@@ -296,7 +317,8 @@ describe('run_test create, as a signed-in test user', () => {
   it('passes a table only the service role writes, saying the insert path was not exercised', async () => {
     const result = await create('categories')
 
-    expect(result).toMatchObject({ ok: true, statusCode: 403 })
+    // Not exercised, so the agent loop counts it as neither verification nor a failure.
+    expect(result).toMatchObject({ ok: true, statusCode: 403, exercised: false })
     expect(result.summary).toMatch(/signed-in users may not insert into "categories"/)
     expect(result.summary).toMatch(/the insert path itself was not exercised/)
     await expectNothingLeft('categories')
@@ -308,6 +330,15 @@ describe('run_test create, as a signed-in test user', () => {
     expect(result).toMatchObject({ ok: false, failureKind: 'forbidden', statusCode: 403 })
     expect(result.summary).toMatch(/\(authenticated\) has no INSERT grant on "locked"/)
     await expectNothingLeft('locked')
+  })
+
+  it('says it could not exercise the insert path when no valid row could be built', async () => {
+    const result = await create('replies')
+
+    expect(result).toMatchObject({ ok: false, failureKind: 'no_valid_row', exercised: false, statusCode: null })
+    expect(result.summary).toMatch(/must reference another row of this table/)
+    expect(inserts).toEqual([])
+    await expectNothingLeft('replies')
   })
 
   it('fails when the policy refuses users a row of their own', async () => {
@@ -323,7 +354,7 @@ describe('run_test create on a project without end-user sign-up', () => {
   it('counts the anon key being refused as a pass, and says the insert path was not exercised', async () => {
     const result = await create('open_notes', bareProjectId)
 
-    expect(result).toMatchObject({ ok: true, statusCode: 401 })
+    expect(result).toMatchObject({ ok: true, statusCode: 401, exercised: false })
     expect(result.summary).toMatch(/This project has no end-user sign-up, so there was no one to write as/)
     expect(result.summary).toMatch(/not exercised/)
     expect(await count(`SELECT count(*)::int AS n FROM "${schemaOf(bareProjectId)}".open_notes`)).toBe(0)
@@ -331,5 +362,16 @@ describe('run_test create on a project without end-user sign-up', () => {
     expect(await count(
       `SELECT count(*)::int AS n FROM information_schema.tables WHERE table_schema = '${schemaOf(bareProjectId)}' AND table_name = 'users'`,
     )).toBe(0)
+  })
+})
+
+describe('run_test create when no test user can sign up', () => {
+  it('says it could not exercise the insert path, and writes nothing', async () => {
+    const result = await create('memos', brokenSignupProjectId)
+
+    expect(result).toMatchObject({ ok: false, failureKind: 'unauthenticated', exercised: false, statusCode: null })
+    expect(result.summary).toMatch(/Could not sign a test user up, so no row was written and nothing was verified/)
+    expect(inserts).toEqual([])
+    expect(await count(`SELECT count(*)::int AS n FROM "${schemaOf(brokenSignupProjectId)}".memos`)).toBe(0)
   })
 })
