@@ -2,7 +2,8 @@
  * The Product Hunt launch and its offer run on Product Hunt's clock.
  *
  *   - The launch goes live at 12:01 AM Pacific on October 31, 2026, and launch
- *     day, with the offer, ends at midnight Pacific. The labels the page prints
+ *     day ends at midnight Pacific. The offer runs a week longer, to the end of
+ *     November 7, after daylight time has ended. The labels the page prints
  *     are those same moments, so a typo in a UTC constant cannot pass.
  *   - The countdown rounds up, so it reads 00m only once the moment has come.
  *   - The offer is half of monthly Pro, $12.50 for three months. Yearly billing
@@ -45,11 +46,17 @@ describe('the launch runs on Product Hunt time', () => {
     ).toBe(PRODUCT_HUNT_LAUNCH.dateLabel)
   })
 
-  it('ends with launch day, at midnight Pacific, and the offer with it', () => {
+  it('ends launch day at midnight Pacific', () => {
     expect(pacific(PRODUCT_HUNT_LAUNCH.endsAt)).toBe('Nov 1, 12:00 AM')
-    expect(LAUNCH_OFFER.endsAt).toBe(PRODUCT_HUNT_LAUNCH.endsAt)
-    // The label is the last minute the code works.
+  })
+
+  it('ends the offer a week later, at midnight Pacific after November 7', () => {
+    // Standard time by then (UTC-8), so an hour later in UTC than launch day's end.
+    expect(new Date(LAUNCH_OFFER.endsAt).toISOString()).toBe('2026-11-08T08:00:00.000Z')
+    expect(pacific(LAUNCH_OFFER.endsAt)).toBe('Nov 8, 12:00 AM')
+    // The labels are the last minute the code works, and its day.
     expect(`${pacific(LAUNCH_OFFER.endsAt - MINUTE)} PT`).toBe(LAUNCH_OFFER.endsLabel)
+    expect(LAUNCH_OFFER.endsLabel.startsWith(`${LAUNCH_OFFER.lastDayLabel},`)).toBe(true)
   })
 
   it('moves from upcoming to live to over at exactly those moments', () => {
@@ -60,9 +67,10 @@ describe('the launch runs on Product Hunt time', () => {
     expect(launchPhase(PRODUCT_HUNT_LAUNCH.endsAt)).toBe('over')
   })
 
-  it('keeps the offer through launch day and not a moment after', () => {
+  it('keeps the offer through launch day and the week after, and not a moment longer', () => {
     expect(launchOfferActive(Date.UTC(2026, 9, 24))).toBe(true)
     expect(launchOfferActive(PRODUCT_HUNT_LAUNCH.startsAt)).toBe(true)
+    expect(launchOfferActive(PRODUCT_HUNT_LAUNCH.endsAt)).toBe(true)
     expect(launchOfferActive(LAUNCH_OFFER.endsAt - 1)).toBe(true)
     expect(launchOfferActive(LAUNCH_OFFER.endsAt)).toBe(false)
   })
