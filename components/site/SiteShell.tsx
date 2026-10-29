@@ -10,6 +10,7 @@ import { Menu, X } from 'lucide-react'
 import { registerSiteIcons } from '@/lib/icons/registry'
 import { BrandMark } from '@/components/site/BrandMark'
 import { LaunchBar } from '@/components/site/LaunchBar'
+import { ProductHuntBadge } from '@/components/site/ProductHuntBadge'
 import { useUserSession } from '@/lib/hooks/useUserSession'
 
 // Synchronously load all marketing-site icons into the Iconify cache so
@@ -43,18 +44,16 @@ export const ROUTES = {
   x: 'https://x.com/Backenly',
   linkedin: 'https://www.linkedin.com/company/117034579',
   /**
-   * Product Hunt.
+   * Product Hunt: Backenly's launch, scheduled for October 31, 2026.
    *
-   * INTERIM AND DELIBERATE: this is Product Hunt's own home page, not a
-   * Backenly page. Founder's call, so the launch bar above the navbar has
-   * somewhere valid to point while Backenly's upcoming page does not exist yet.
-   * It is not a defect and does not block a release.
-   *
-   * Swap for Backenly's coming-soon URL once it exists
-   * (producthunt.com/products/<slug>), then for the live post URL on launch
-   * day. This constant is the ONLY reference in the codebase.
+   * The launch bar above the navbar links here. Until 2026-10-30 this was
+   * Product Hunt's own home page, held there on purpose until Backenly's page
+   * existed. Product Hunt gave the product the slug `backenly-2`, and this URL
+   * opens that launch before, during and after launch day, so it needs no
+   * second swap. The footer badge (./ProductHuntBadge) carries Product Hunt's
+   * own embed link to the same product.
    */
-  productHunt: 'https://www.producthunt.com',
+  productHunt: 'https://www.producthunt.com/products/backenly-2?launch=backenly-2',
   // The flagship open-source platform repo. Must be public for this link to
   // resolve for anonymous visitors. The navbar links to it with a bare icon:
   // the star count used to be rendered beside it and was deliberately removed.
@@ -554,6 +553,7 @@ export function SiteFooter() {
                 <Icon icon="ri:linkedin-fill" width={17} />
               </a>
             </div>
+            <ProductHuntBadge className="mt-2" />
           </div>
           <FooterCol title="Product" links={product} />
           <FooterCol title="Developers" links={developers} />
