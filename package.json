@@ -57,7 +57,7 @@
     "@iconify-json/ri": "^1.2.10",
     "@iconify-json/solar": "^1.2.5",
     "@iconify/react": "^6.0.2",
-    "@modelcontextprotocol/server": "2.1.0",
+    "@modelcontextprotocol/server": "2.4.0",
     "@monaco-editor/react": "^4.6.0",
     "@prisma/client": "^5.7.1",
     "@radix-ui/react-slot": "^1.2.4",
@@ -116,7 +116,7 @@
   },
   "devDependencies": {
     "@iconify-json/simple-icons": "^1.2.84",
-    "@modelcontextprotocol/client": "2.1.0",
+    "@modelcontextprotocol/client": "2.4.0",
     "@playwright/test": "^1.57.0",
     "@testing-library/jest-dom": "^6.1.5",
     "@testing-library/react": "^14.1.2",

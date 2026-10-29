@@ -9,8 +9,10 @@
  *   - LIST verification: GET the endpoint, accept 200/401/403, fail on 404/500.
  *     Auth-required responses are PASS because they prove the endpoint is
  *     wired and enforcing security.
- *   - CREATE verification: POST a synthesised sample row, accept 201/401/403,
- *     fail on 400/500. 400 means schema mismatch — flagged for the brain.
+ *   - CREATE verification: insert a real row as a throwaway signed-in end
+ *     user, and remove the row and the user again (verify-create.ts). A
+ *     refusal passes only when there was no one allowed to write as: no
+ *     end-user sign-up, or a table only the service role writes.
  *   - GET verification: list one row, then GET it by id, accept 200/401/403,
  *     fail on 404/500. With no row to fetch the route was not exercised,
  *     which is a fail, never a pass.
@@ -33,6 +35,7 @@
 
 import { prisma } from '@/lib/db/prisma'
 import { workspaceRawClient } from '@/lib/data-plane/regional'
+import { verifyCreate } from './verify-create'
 
 export interface EndpointTestInput {
   projectId: string
@@ -55,7 +58,13 @@ export interface EndpointTestResult {
   /** For a list that answered with a row: that row's id, which get then fetches. */
   firstRowId?: string
   /** When ok=false, why. */
-  failureKind?: 'not_found' | 'server_error' | 'bad_request' | 'no_endpoint' | 'no_app_url' | 'no_table' | 'fetch_failed' | 'unauthenticated' | 'no_rows' | 'timeout'
+  failureKind?:
+    | 'not_found' | 'server_error' | 'bad_request' | 'no_endpoint' | 'no_app_url' | 'no_table' | 'fetch_failed'
+    | 'unauthenticated' | 'no_rows' | 'timeout'
+    /** create, as a signed-in user: refused where that user should be able to insert. */
+    | 'forbidden'
+    /** create: no row the table accepts could be built (a reference the test does not create). */
+    | 'no_valid_row'
 }
 
 const APP_URL_ENV = ['NEXT_PUBLIC_APP_URL', 'APP_URL'] as const
@@ -171,6 +180,7 @@ function sampleValueFor(type: string, name: string): unknown {
  * and behaving — including auth-required responses, which prove it's wired.
  */
 export async function runEndpointTest(input: EndpointTestInput): Promise<EndpointTestResult> {
+  if (input.operation === 'create') return createAsTestUser(input)
   if (input.operation !== 'get') return requestEndpoint(input)
 
   // get is the get-by-id route, so it needs the id of a row that exists: list
@@ -193,6 +203,28 @@ export async function runEndpointTest(input: EndpointTestInput): Promise<Endpoin
     }
   }
   return requestEndpoint(input, listed.firstRowId)
+}
+
+/**
+ * create inserts a real row as a signed-in test user (verify-create.ts). The
+ * anon key's own refusal used to be its whole result, and that passed on every
+ * table whatever its insert path did (#248). Without an address to call or a
+ * key to send, there is nothing to insert with, and requestEndpoint says which;
+ * a table whose columns cannot be read falls back the same way.
+ */
+async function createAsTestUser(input: EndpointTestInput): Promise<EndpointTestResult> {
+  const appUrl = resolveAppUrl()
+  const anonKey = await resolveAnonKey(input.projectId)
+  if (!appUrl || !anonKey) return requestEndpoint(input)
+  const created = await verifyCreate({
+    projectId: input.projectId,
+    tableName: input.tableName,
+    schema: await resolveWorkspaceSchema(input.projectId),
+    appUrl,
+    anonKey,
+    timeoutMs: input.timeoutMs ?? REQUEST_TIMEOUT_MS,
+  })
+  return created ?? requestEndpoint(input)
 }
 
 /**

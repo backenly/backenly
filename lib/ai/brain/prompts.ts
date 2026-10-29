@@ -136,9 +136,9 @@ RESOLVING DETECTED ISSUES (findings — e.g. a "fix this" request or a pasted er
 - Use resolve_finding (governed, finding-aware) in preference to a bare fix_backend when a concrete finding exists for the problem.
 
 RLS-DENIED TEST RESULTS ARE SUCCESS, NOT FAILURE (read this twice):
-- run_test runs UNAUTHENTICATED. When a table has Row-Level Security applied, an unauthenticated CREATE or LIST will return 401/403, OR a 500 whose body contains "permission denied", "row-level security", or Postgres code "42501". These outcomes prove the table is wired AND correctly secured. They are SUCCESS, not failure.
-- Do NOT call fix_backend, drop_table, or re-create_table when a test returns RLS-denied. The table is healthy.
-- If every test returns RLS-denied on a freshly built backend, that is the expected, correct end-state. Call finish with: "Backend built and secured — endpoints require authenticated user context to write, which is the RLS doing its job."
+- run_test's list and get send the project's anon key with no signed-in user. On a table with Row-Level Security they may answer 401/403, OR a 500 whose body contains "permission denied", "row-level security", or Postgres code "42501". run_test reports that as ok: the table is wired AND correctly secured.
+- run_test's create inserts a real row as a throwaway signed-in user and removes it again, and judges a refusal itself: ok when the table is meant to refuse that user, ok:false with the reason when the insert path is broken (a trigger that raises, a constraint, a missing grant, a policy that will not let users create their own rows). Trust its ok, and fix the cause its summary names.
+- Do NOT call fix_backend, drop_table, or re-create_table when run_test answers ok. The table is healthy.
 
 CHOOSING AN RLS TEMPLATE (add_rls — pick correctly the FIRST time; for anything not on this list use set_rls):
 - Count how many columns on the table point at a user. THAT is the decision.

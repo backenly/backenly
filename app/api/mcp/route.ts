@@ -42,11 +42,21 @@ import { corsHeaders, optionsResponse } from '@/lib/mcp/cors'
 import { prisma } from '@/lib/db/prisma'
 import { buildRemoteServer, type BackenlyCaller } from '@/lib/mcp/protocol/remote-server'
 
+/**
+ * The largest request body this endpoint reads, below the SDK's 4 MiB default.
+ * A tool call carries names, a message, one row, SQL or a function's source
+ * (at most 64 KB), so 1 MiB fits every call and bounds what one request can
+ * make the server parse. The era check and both eras' transports read under
+ * this one bound, so they agree: a larger body is answered 413 unparsed.
+ */
+const MAX_REQUEST_BODY_BYTES = 1024 * 1024
+
 const modern = createMcpHandler(buildRemoteServer, {
   // 2025-era traffic is routed below instead, so it keeps its JSON answers.
   legacy: 'reject',
   // No handler emits anything before its result, so there is nothing to stream.
   responseMode: 'json',
+  maxRequestBodySize: MAX_REQUEST_BODY_BYTES,
   onerror: (err) => console.warn('[mcp] modern exchange:', err.message),
 })
 
@@ -81,7 +91,7 @@ export async function POST(request: NextRequest) {
   if (!auth.success) return withCors(authChallenge(auth))
 
   const authInfo = await authInfoFor(auth)
-  const response = (await isLegacyRequest(request))
+  const response = (await isLegacyRequest(request, undefined, { maxRequestBodySize: MAX_REQUEST_BODY_BYTES }))
     ? await serveLegacy(request, authInfo)
     : await modern.fetch(request, { authInfo })
   return withCors(response)
@@ -103,7 +113,11 @@ async function serveLegacy(request: NextRequest, authInfo: AuthInfo): Promise<Re
     : new Request(request, { headers: withHeader(request.headers, 'accept', 'application/json, text/event-stream') })
 
   const server = buildRemoteServer({ authInfo, requestInfo: request })
-  const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true })
+  const transport = new WebStandardStreamableHTTPServerTransport({
+    sessionIdGenerator: undefined,
+    enableJsonResponse: true,
+    maxRequestBodySize: MAX_REQUEST_BODY_BYTES,
+  })
   await server.connect(transport)
   try {
     return await transport.handleRequest(forwarded, { authInfo })
