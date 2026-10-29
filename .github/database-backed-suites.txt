@@ -1363,6 +1363,13 @@ tests/integration/parked-approvals-visible.spec.ts
 # and workspace table are the property, so it needs a real Postgres.
 tests/integration/brain-data-migration-approval.spec.ts
 
+# A backend_chat turn starts nothing once its run's time is up: a model answer
+# that came back after the reserve began has none of its calls run, and a
+# blueprint stops between steps, queues the rest for "continue" and runs no
+# post-build fixes. Real projects, tables, plans and resume queues are the
+# property, so it needs a real Postgres.
+tests/integration/brain-turn-deadline.spec.ts
+
 # The dashboard's resource cards answer the real table count with a card-sized
 # list in the card's shape: 15 real workspace tables give tableCount 15 and
 # twelve { name, rowCount, estimated } entries with exact counts, and the

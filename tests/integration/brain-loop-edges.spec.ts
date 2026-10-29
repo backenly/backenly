@@ -388,9 +388,11 @@ describe('a stop that invites "continue" saves what "continue" resumes', () => {
         classified('MODIFY'),
         // Refused: it already exists.
         toolCall('create_table', { tableName: 'keep_me', columns: [{ name: 'title', type: 'text' }] }, 'toolu_dup'),
-        jump(createNotes('landed_in_time')),
+        createNotes('landed_in_time'),
+        // The next answer comes back past the deadline, so none of its calls run.
+        jump(createNotes('too_late')),
       ],
-      'add two tables',
+      'add three tables',
       { deadlineAt },
     )
 
@@ -398,8 +400,10 @@ describe('a stop that invites "continue" saves what "continue" resumes', () => {
     expect(result.summary).toContain('Applied and verified (1)')
     expect(result.summary).toContain('Attempted and REFUSED (1)')
     expect(result.summary).toContain('landed_in_time')
+    expect(result.summary).toContain('Not started, because the time ran out (1): Creating table too_late')
     expect(result.summary).toContain('Say "continue" for the rest')
     expect(await built.tableExists('landed_in_time')).toBe(true)
+    expect(await built.tableExists('too_late')).toBe(false)
     const marker = await loadLoopResume(built.projectId)
     expect(marker!.applied).toHaveLength(1)
   }, 60_000)

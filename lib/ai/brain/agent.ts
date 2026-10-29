@@ -83,6 +83,7 @@ import { needsApproval } from '@/lib/mcp/domains'
 import type { DataMigrationEstimate } from '@/lib/execution/data-migration'
 import { redactArgs } from './redact'
 import { currentPageContext, isAgentDoor, type BrainDoor } from './input-context'
+import { callSignal, startTurnClock, type TurnClock } from './turn-clock'
 
 /**
  * One tool call the approval gate stopped, carried verbatim so the caller can
@@ -167,12 +168,13 @@ export interface BrainInput {
    * "reached its time budget during final verification" — meaning the operations
    * that most needed proof were exactly the ones that never got any.
    *
-   * With a deadline the loop stops taking NEW work while `VERIFY_RESERVE_MS`
-   * still remains and spends that reserve on a deterministic verification pass
-   * (see `verifyWithinBudget`). Verification is no longer a step the model may or
-   * may not reach; it is a budget line item that is spent first from the end.
+   * With a deadline the turn stops starting NEW work while `VERIFY_RESERVE_MS`
+   * still remains: no step of the agent loop or of a plan, and no post-build
+   * fix (turn-clock.ts). The agent loop spends that reserve on a deterministic
+   * verification pass. Verification is no longer a step the model may or may
+   * not reach; it is a budget line item that is spent first from the end.
    *
-   * Omit it and the loop has no wall clock of its own. backend_chat always
+   * Omit it and the turn has no wall clock of its own. backend_chat always
    * passes one: its run's own limit (lib/ai/brain/runs.ts, RUN_LIMITS.maxMs),
    * not the call's, since a run keeps going after the call has answered.
    */
@@ -272,12 +274,12 @@ export interface BrainResult {
    */
   applied?: string[]
   /**
-   * The loop stopped early to protect its verification reserve, and DID verify.
+   * The loop, or a plan, stopped early to protect its verification reserve.
    *
    * Distinct from every failure code: nothing went wrong, the run simply ran out
-   * of wall clock with work still queued. `summary` carries the verified live
-   * state, so the caller can report a truthful partial result instead of a
-   * timeout the agent has to guess about.
+   * of wall clock with work still queued. `summary` carries the live state as
+   * read back (`verified`), so the caller can report a truthful partial result
+   * instead of a timeout the agent has to guess about.
    */
   budgetStopped?: boolean
   /** True when a verification pass actually ran and its result is in `summary`. */
@@ -470,6 +472,21 @@ async function resolveBlueprintWithHeartbeat(
 export async function runBrain(
   input: BrainInput,
   emit: (e: BrainEvent) => void,
+): Promise<BrainResult> {
+  // One clock for the whole turn: once the verification reserve begins,
+  // nothing new starts on any path (turn-clock.ts).
+  const clock = startTurnClock(input.deadlineAt === undefined ? undefined : input.deadlineAt - VERIFY_RESERVE_MS)
+  try {
+    return await runTurn(input, emit, clock)
+  } finally {
+    clock.dispose()
+  }
+}
+
+async function runTurn(
+  input: BrainInput,
+  emit: (e: BrainEvent) => void,
+  clock: TurnClock,
 ): Promise<BrainResult> {
   const toolsRun: string[] = []
 
@@ -712,7 +729,7 @@ export async function runBrain(
     if (pending) {
       if (schemaOnBranch && plansSchema(pending.steps)) return await branchBuildTurn(tablesOf(pending.steps), classification, emit, input)
       console.log(`[Brain] route=BLUEPRINT_EXECUTE domain=${pending.blueprintDomain} steps=${pending.steps.length} architectTokens=${pending.architectTokens}`)
-      return await blueprintExecuteTurn(pending.steps, pending.architectTokens, dispatchCtx, classification, emit, input, pending.blueprintDomain, pending.ledger)
+      return await blueprintExecuteTurn(pending.steps, pending.architectTokens, dispatchCtx, classification, emit, input, clock, pending.blueprintDomain, pending.ledger)
     }
 
     // The design this "go ahead" confirms has not finished yet. Re-architecting
@@ -728,7 +745,7 @@ export async function runBrain(
     if (resume) {
       if (schemaOnBranch && plansSchema(resume.steps)) return await branchBuildTurn(tablesOf(resume.steps), classification, emit, input)
       console.log(`[Brain] route=BLUEPRINT_RESUME domain=${resume.domain} steps=${resume.steps.length}`)
-      return await blueprintExecuteTurn(resume.steps, 0, dispatchCtx, classification, emit, input, resume.domain, undefined, true)
+      return await blueprintExecuteTurn(resume.steps, 0, dispatchCtx, classification, emit, input, clock, resume.domain, undefined, true)
     }
 
     // A loop turn that stopped unfinished saved where it was. Resume the agent
@@ -736,7 +753,7 @@ export async function runBrain(
     // history for a prompt that looks like one.
     if (loopResume) {
       console.log(`[Brain] route=LOOP_RESUME applied=${loopResume.applied.length} reason="${loopResume.reason}"`)
-      return await runAgentLoop(input, classification, memory.summary, understandingBlock, recent, dispatchCtx, emit, toolsRun, loopResume)
+      return await runAgentLoop(input, classification, memory.summary, understandingBlock, recent, dispatchCtx, emit, toolsRun, clock, loopResume)
     }
 
     // No stored plan at all — but the user is confirming/continuing a build.
@@ -774,6 +791,7 @@ export async function runBrain(
           classification,
           emit,
           input,
+          clock,
           resolved.blueprint.domain,
           extractRequirements(originalBuild),
         )
@@ -790,7 +808,7 @@ export async function runBrain(
   console.log(`[Brain] route=AGENT_LOOP intent=${classification.intent}`)
 
   // BUILD / MODIFY / FIX / QUESTION / DESTRUCTIVE / CONFIRM / APPLY_PROPOSAL → agent loop
-  return await runAgentLoop(input, classification, memory.summary, understandingBlock, recent, dispatchCtx, emit, toolsRun)
+  return await runAgentLoop(input, classification, memory.summary, understandingBlock, recent, dispatchCtx, emit, toolsRun, clock)
 }
 
 /**
@@ -915,6 +933,9 @@ function groupStepsForProposal(steps: BlueprintStep[]): Array<{ label: string }>
  *   • A failure on one step does NOT abort the rest — we keep going and
  *     surface a truthful per-step summary at the end. A funded platform
  *     does not stop at the first hiccup; it reports what landed.
+ *   • No step starts once the turn's clock has stopped (turn-clock.ts). The
+ *     ones left wait in the resume queue, after any that failed, so
+ *     "continue" runs them; the post-build fix loop does not start either.
  *   • The pending plan is cleared once execution finishes (success or fail).
  */
 async function blueprintExecuteTurn(
@@ -924,6 +945,7 @@ async function blueprintExecuteTurn(
   classification: Classification,
   emit: (e: BrainEvent) => void,
   input: BrainInput,
+  clock: TurnClock,
   domain?: string,
   ledger?: RequirementsLedger,
   /** The steps are a resume queue an earlier run of the plan left. */
@@ -944,8 +966,17 @@ async function blueprintExecuteTurn(
   /** Per-table outcomes from the deterministic seed runner. */
   const seedResults: SeedTableResult[] = []
   const seedCtx = createSeedContext(input.projectId)
+  /** Steps the turn's clock stopped before they started, in plan order. */
+  let notStarted: BlueprintStep[] = []
 
-  for (const step of steps) {
+  for (const [i, step] of steps.entries()) {
+    // Every step used to run whatever the time: the executor never read the
+    // deadline, so a long plan ran on past the run's own limit, changing the
+    // backend for as long as it took (#247).
+    if (clock.stopped()) {
+      notStarted = steps.slice(i)
+      break
+    }
     attemptedTools.push(step.tool)
 
     // `seed_rows` is a blueprint-executor step, not an LLM tool — route it to
@@ -1022,9 +1053,11 @@ async function blueprintExecuteTurn(
   // Done — clear the pending plan so a stray future "go ahead" cannot re-fire.
   await clearPendingPlan(input.projectId).catch(() => {})
 
-  // If anything failed, save the failed steps as a resume queue so the user's
-  // next "continue" / "finish it" message picks up the remaining work with
-  // the same deterministic executor — not a confused LLM loop.
+  // If anything failed or never started, save those steps as a resume queue so
+  // the user's next "continue" / "finish it" message picks up the remaining
+  // work with the same deterministic executor — not a confused LLM loop. The
+  // failed steps all come earlier in the plan than the ones not started, so
+  // the queue keeps the plan's order.
   //
   // Except a resumed run in which every step failed again. What failed twice
   // the same way fails a third time, and an agent now follows `next`, so
@@ -1032,12 +1065,15 @@ async function blueprintExecuteTurn(
   // cleared and the summary says each step needs a different request.
   const stalled = resumed && failed.length === steps.length
   let resumeSaved = false
-  if (failed.length > 0 && !stalled) {
+  if ((failed.length > 0 || notStarted.length > 0) && !stalled) {
     resumeSaved = await saveResumeQueue(
       input.projectId,
       domain ?? 'custom',
-      failed.map(f => f.step),
-      `${failed.length} step(s) need a second pass after the first run.`,
+      [...failed.map(f => f.step), ...notStarted],
+      [
+        failed.length ? `${failed.length} step(s) need a second pass after the first run.` : '',
+        notStarted.length ? `${notStarted.length} step(s) did not start before the time ran out.` : '',
+      ].filter(Boolean).join(' '),
     ).then(() => true, () => false)
   } else {
     await clearResumeQueue(input.projectId).catch(() => {})
@@ -1051,12 +1087,21 @@ async function blueprintExecuteTurn(
   // trigger execution, live HTTP endpoints. The agentic fix loop repairs
   // what it can and re-verifies. Bounded at 2 rounds; failures that survive
   // are reported honestly, never swallowed.
+  //
+  // It runs live checks and applies fixes, so it does not start once the
+  // turn's clock has stopped, and it is passed the clock's signal: it stops
+  // between phases and before each fix when the signal fires.
   let verificationBlock = ''
-  if (succeededSteps.length > 0) {
+  let ranFixLoop = false
+  if (succeededSteps.length > 0 && clock.stopped()) {
+    verificationBlock = '**Verification** · not run: the time ran out first. Reply "continue" to finish the build, and it is verified then.'
+  } else if (succeededSteps.length > 0) {
+    ranFixLoop = true
     try {
       const { runAgenticFixLoop } = await import('../agentic-fix-loop')
       const fixResult = await runAgenticFixLoop(input.projectId, input.userId, {
         maxRounds: 2,
+        signal: clock.signal,
         emit: (e) => {
           if (e.type === 'fix_loop_verify_start') {
             emit({ type: 'tool_start', tool: 'run_test', title: e.round === 0 ? 'Verifying the live backend' : `Re-verifying (round ${e.round})` })
@@ -1108,9 +1153,12 @@ async function blueprintExecuteTurn(
   }
 
   const summary = [
-    failed.length === 0
-      ? `**Backend built.** ${succeeded.length} steps applied.`
-      : `**${succeeded.length} steps applied.** ${failed.length} item${failed.length === 1 ? '' : 's'} need a follow-up.`,
+    notStarted.length > 0
+      ? `**${succeeded.length} steps applied.** The time ran out before ${notStarted.length} more could start` +
+        (failed.length ? `, and ${failed.length} item${failed.length === 1 ? '' : 's'} need a follow-up.` : '.')
+      : failed.length === 0
+        ? `**Backend built.** ${succeeded.length} steps applied.`
+        : `**${succeeded.length} steps applied.** ${failed.length} item${failed.length === 1 ? '' : 's'} need a follow-up.`,
     ...(coverageBlock ? ['', coverageBlock] : []),
     ...(verificationBlock ? ['', verificationBlock] : []),
     '',
@@ -1119,16 +1167,19 @@ async function blueprintExecuteTurn(
       ? ['', `**Follow-ups pending** · ${failed.length}`, ...failed.slice(0, 8).map((f, i) => `${i + 1}. ${f.label}: ${f.detail}`)]
       : []),
     '',
-    failed.length === 0
-      ? 'Open the dashboard tabs to explore: Database, APIs, Storage, Realtime, Auth & Users. Reply with what you want to change next.'
-      : stalled
-        ? 'These failed again on a second pass, so asking again will not change them: each needs a different request.'
+    notStarted.length > 0
+      ? `Reply "continue" to run the ${notStarted.length + failed.length} remaining step${notStarted.length + failed.length === 1 ? '' : 's'}.`
+      : failed.length === 0
+        ? 'Open the dashboard tabs to explore: Database, APIs, Storage, Realtime, Auth & Users. Reply with what you want to change next.'
+        : stalled
+          ? 'These failed again on a second pass, so asking again will not change them: each needs a different request.'
         : 'Reply "continue" and I\'ll work the follow-ups one by one.',
   ].filter(Boolean).join('\n')
 
+  const finishedPlan = failed.length === 0 && notStarted.length === 0
   emit({ type: 'final', summary, needsUser: false })
   await saveTurn(input.projectId, input.message, summary, input.requestId ?? null)
-  await recordBrainOperationalMemory(input, toolsRun, summary, failed.length === 0 ? 'applied' : 'failed', toolStatuses)
+  await recordBrainOperationalMemory(input, toolsRun, summary, finishedPlan ? 'applied' : 'failed', toolStatuses)
 
   // Bill = architect spend (real, from the propose turn) + per-step proxy
   // for every tool we actually dispatched. We bill attempts (not just
@@ -1138,14 +1189,18 @@ async function blueprintExecuteTurn(
   const tokensUsed = architectTokens + proxyTokensForSteps(attemptedTools)
 
   return {
-    success: failed.length === 0,
+    success: finishedPlan,
     summary,
     needsUser: false,
-    iterations: steps.length,
+    iterations: steps.length - notStarted.length,
     toolsRun,
     classification,
     tokensUsed,
-    verifiedInline: succeededSteps.length > 0,
+    verifiedInline: ranFixLoop,
+    // Stopped by the clock: what landed and whether the state was read back,
+    // as the agent loop reports its own budget stop, so backend_chat answers
+    // it as a partial result rather than a failure to retry.
+    ...(notStarted.length > 0 ? { budgetStopped: true, verified: !!finalProof, applied: succeeded } : {}),
     ...(resumeSaved ? { next: CONTINUE } : {}),
   }
 }
@@ -1489,6 +1544,7 @@ async function runAgentLoop(
   ctx: ToolDispatchContext,
   emit: (e: BrainEvent) => void,
   toolsRun: string[],
+  clock: TurnClock,
   resume: LoopResume | null = null,
 ): Promise<BrainResult> {
   const turnTools = toolsForIntent(classification.intent)
@@ -1644,6 +1700,8 @@ async function runAgentLoop(
 
   /** Set when the loop stopped to protect its verification reserve. */
   let budgetStopped = false
+  /** Calls of the model's last answer that the turn's clock stopped before they ran. */
+  const notStarted: string[] = []
 
   // Model calls that came back with an answer, which BrainResult.iterations
   // reports. Not `iter`: every exit but running out of steps is a break, which
@@ -1653,11 +1711,11 @@ async function runAgentLoop(
   agentLoop: for (; iter < MAX_ITERATIONS; iter++) {
     // ── Spend the verification reserve BEFORE it can be taken ────────────────
     //
-    // Checked at the iteration boundary rather than mid-tool: a model round trip
-    // plus a tool can easily be 10-20s, so starting one with less than the
-    // reserve left is what guaranteed the run died during verification instead
-    // of before it.
-    if (input.deadlineAt && Date.now() > input.deadlineAt - VERIFY_RESERVE_MS) {
+    // Checked at the iteration boundary as well as before each tool (below): a
+    // model round trip plus a tool can easily be 10-20s, so starting one with
+    // less than the reserve left is what guaranteed the run died during
+    // verification instead of before it.
+    if (clock.stopped()) {
       budgetStopped = true
       break
     }
@@ -1665,17 +1723,10 @@ async function runAgentLoop(
     // ── The model call never eats the verification reserve ───────────────────
     //
     // The check above only runs between steps, and one model step can take tens
-    // of seconds. A call still running when the reserve begins is cancelled and
+    // of seconds. A call still running when the clock stops is cancelled and
     // the loop stops exactly as if the check had fired, so the reserve is spent
     // on verifying what landed instead of on a step the caller will never see.
-    const call = new AbortController()
-    let reserveReached = false
-    const reserveTimer = input.deadlineAt
-      ? setTimeout(() => {
-          reserveReached = true
-          call.abort()
-        }, Math.max(0, input.deadlineAt - VERIFY_RESERVE_MS - Date.now()))
-      : undefined
+    const call = callSignal(clock)
 
     // Retries live in the gateway, which repeats only a request the provider
     // refused before running it. A timeout is never repeated here: the request
@@ -1694,7 +1745,7 @@ async function runAgentLoop(
         label: 'brain-agent',
       })
     } catch (err) {
-      if (reserveReached) {
+      if (call.signal.aborted) {
         budgetStopped = true
         break
       }
@@ -1718,7 +1769,7 @@ async function runAgentLoop(
       modelFailure = modelFailureOf(err)
       break
     } finally {
-      clearTimeout(reserveTimer)
+      call.release()
     }
 
     modelCalls++
@@ -1814,7 +1865,7 @@ async function runAgentLoop(
     const heldFinishes: Array<{ call: (typeof toolCalls)[number]; at: number }> = []
     let finished = false
     const verificationTurn = verificationSteered && mutated && !verifiedAfterMutation
-    for (const toolCall of toolCalls) {
+    for (const [index, toolCall] of toolCalls.entries()) {
       const toolName = toolCall.name as ToolName
 
       // A finish's summary was written before any result of this response, so
@@ -1826,6 +1877,25 @@ async function runAgentLoop(
         heldFinishes.push({ call: toolCall, at: results.length })
         results.push(toolResultBlock(toolCall.id, { ok: false, summary: '' }, true))
         continue
+      }
+
+      // ── Nothing new starts once the turn's clock has stopped ───────────────
+      //
+      // An answer that comes back just before the reserve begins has its calls
+      // run one after another, up to six tables in one answer, each of which
+      // can take seconds. Checking only between model calls let every call of
+      // such an answer run past the deadline (#247). This call and the rest of
+      // the answer do not run, and the reserve is spent verifying what landed,
+      // as at the top of an iteration. finish and ask_user start nothing, so
+      // they still end it.
+      if (!ENDS_TURN_TOOLS.has(toolName) && clock.stopped()) {
+        for (const c of toolCalls.slice(index)) {
+          if (ENDS_TURN_TOOLS.has(c.name)) continue
+          const cArgs = c.input && typeof c.input === 'object' && !Array.isArray(c.input) ? c.input as Record<string, unknown> : {}
+          notStarted.push(humanTitle(c.name, cArgs))
+        }
+        budgetStopped = true
+        break agentLoop
       }
 
       // The verifier has one bounded turn. Never let a model response in that
@@ -2101,6 +2171,9 @@ async function runAgentLoop(
     const proof = await collectProof(input.projectId).catch(() => null)
     verified = !!proof
     const state = proof && !proof.nothingBuilt ? formatProof(proof) : ''
+    const notStartedNote = notStarted.length
+      ? `Not started, because the time ran out (${notStarted.length}): ${notStarted.join('; ')}.\n\n`
+      : ''
     finalSummary = appliedMutationTitles.length
       ? `I ran out of time budget with work still queued, so I stopped taking new steps and spent the ` +
         `remaining budget VERIFYING what had already landed.\n\n` +
@@ -2112,9 +2185,11 @@ async function runAgentLoop(
           ? `Attempted and REFUSED (${refusedMutations.length}) — these did NOT take effect:\n` +
             refusedMutations.map((r) => `  • ${r.title} — ${r.reason}`).join('\n') + '\n\n'
           : '') +
+        notStartedNote +
         `Nothing else was attempted. Say "continue" for the rest — do NOT replay the whole request, ` +
         `the changes above are already in place.`
       : `I ran out of time budget before changing anything. Nothing was applied. ` +
+        notStartedNote +
         `Say "continue" to retry with a fresh budget.` +
         (state ? `\n\nCurrent state, unchanged:\n\n${state}` : '')
     emit({
@@ -2239,6 +2314,12 @@ const isCheck = (name: string) => name === 'read_backend_state' || name === 'run
 
 /** One check as the model asked for it, to tell a repeated check from a new one. */
 const checkKey = (name: string, input: unknown) => `${name}:${JSON.stringify(input ?? {})}`
+
+/**
+ * Tools that end the turn and start nothing: still answered after the turn's
+ * clock has stopped. answer_question is not one, because it calls a model.
+ */
+const ENDS_TURN_TOOLS = new Set<string>(['finish', 'ask_user'])
 
 /**
  * The catalog as the brain's model is offered it, translated once at load so
