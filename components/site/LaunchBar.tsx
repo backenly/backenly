@@ -38,7 +38,8 @@ import {
  *
  * It follows the launch on its own, on Product Hunt's clock: a countdown to
  * 12:01 AM Pacific on October 31, then "live" for launch day, then a plain
- * link once launch day is over, when the offer leaves with it.
+ * link once launch day is over. The offer outlives launch day by a week and
+ * leaves the bar when it ends (lib/pricing/launch-offer.ts).
  *
  * The sentence links to the launch (Product Hunt, external, so it carries the
  * up-right arrow); from md up the offer links to /pricing#launch-offer. On a
@@ -100,8 +101,10 @@ export function LaunchBar({ href }: { href: string }) {
           href="/pricing#launch-offer"
           className="hidden shrink-0 items-center font-medium text-violet-200 underline decoration-violet-200/40 underline-offset-[5px] transition-[text-decoration-color] duration-200 hover:decoration-violet-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-violet-300 md:flex"
         >
-          {/* On launch day the offer ends at midnight Pacific: "today only". */}
-          {phase === 'live' ? `Get ${LAUNCH_OFFER.percentOff}% off Pro, today only` : `Get ${LAUNCH_OFFER.percentOff}% off Pro`}
+          {/* Once the launch is live, the offer carries its last day. */}
+          {phase === 'upcoming'
+            ? `Get ${LAUNCH_OFFER.percentOff}% off Pro`
+            : `Get ${LAUNCH_OFFER.percentOff}% off Pro until ${LAUNCH_OFFER.lastDayLabel}`}
         </Link>
       )}
     </aside>
