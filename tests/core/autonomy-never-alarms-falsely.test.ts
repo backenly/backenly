@@ -549,6 +549,42 @@ describe('the critical email tells the truth', () => {
     }
   })
 
+  it('stores the issues as the review queue folds them, and the email says since when they waited', async () => {
+    // Two tables whose owner Backenly cannot work out: one cause, so one row in
+    // the queue and in the email, waiting since the older was first seen.
+    const p = await builtProject()
+    const undecidable = (tableName: string): RawFinding => ({
+      type: 'missing_rls',
+      severity: 'critical',
+      autoFixable: false,
+      details: { tableName, rlsTemplate: null, rlsBasis: 'undecidable' },
+    })
+    const older = ago(3 * 24 * 60 * 60 * 1000)
+    try {
+      await notifyCritical(p.projectId, [
+        { finding: undecidable('todos'), firstDetectedAt: ago(CRITICAL_ALERT_CONFIRM_MS + 1000) },
+        { finding: undecidable('notes'), firstDetectedAt: older },
+      ])
+      const { title, metadata } = send.mock.calls[0][0]
+      expect(metadata.projectName).toBe('To-do list')
+      expect(metadata.firstDetectedAt).toBe(older.toISOString())
+      expect(metadata.issues).toEqual([
+        expect.objectContaining({
+          title: '2 tables exposing user data have no row-level security',
+          subjects: ['todos', 'notes'],
+          findings: 2,
+        }),
+      ])
+
+      const { subject, text } = buildNotificationEmail('health_alert', title, '', metadata)
+      expect(subject).toBe('2 critical issues in To-do list')
+      expect(text).toContain('Backenly will not enable row-level security on these tables until it knows who owns a row')
+      expect(text).toMatch(/They’re waiting for you on the Autonomy page, the oldest since \w+ \d+, \d{4}\./)
+    } finally {
+      await dropProject(p)
+    }
+  })
+
   it('sends exactly one email when two scans race', async () => {
     const p = await builtProject()
     try {

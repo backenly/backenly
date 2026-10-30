@@ -33,6 +33,7 @@ import {
 import { notReservedTableSql, isReservedWorkspaceTable } from '@/lib/security/workspace-schema'
 import { createPlatformNotification } from '@/lib/notifications/platform'
 import { summariseFinding } from '@/lib/core/finding-summaries'
+import { criticalAlertIssues } from '@/lib/autonomy/critical-alert'
 import {
   detectFkColumnsMissingConstraints,
   detectTablesWithNoApiDefinition,
@@ -490,7 +491,8 @@ async function observeProject(projectId: string, result: ObserverResult): Promis
       finding.details = {
         ...finding.details,
         escalated: true,
-        escalationReason: 'This issue was previously auto-fixed but has re-appeared — requires manual review',
+        // Said to the owner in the critical-issue email (lib/autonomy/critical-alert.ts).
+        escalationReason: 'Backenly fixed this before and it came back, so it is waiting for you rather than being fixed again.',
       }
     }
 
@@ -1087,6 +1089,10 @@ export async function notifyCritical(
     const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'https://backenly.com'
     const count = confirmed.length
     const summaries = confirmed.map(o => summariseFinding(o.finding.type, o.finding.details))
+    // The email lists them as the review queue does, and says since when the
+    // oldest has waited when this is a reminder (lib/autonomy/critical-alert.ts).
+    const issues = criticalAlertIssues(confirmed.map(o => o.finding))
+    const firstDetectedAt = new Date(Math.min(...confirmed.map(o => o.firstDetectedAt.getTime())))
 
     await createPlatformNotification({
       userId: project.userId,
@@ -1098,9 +1104,12 @@ export async function notifyCritical(
           : 'Backenly found a problem it could not resolve on its own. It is waiting for you on the Autonomy page.',
       metadata: {
         projectId,
+        projectName: project.name,
         count,
         types: confirmed.map(o => o.finding.type),
         summaries,
+        issues,
+        firstDetectedAt: firstDetectedAt.toISOString(),
         actionUrl: `${appUrl}/app/projects/${projectId}/autonomy`,
       },
     })
