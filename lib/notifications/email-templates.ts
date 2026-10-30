@@ -3,14 +3,16 @@
  * =============================
  * One HTML template per PlatformNotificationType.
  * They share the dark-branded shell used in lib/auth/email.ts, except the
- * payment receipt, which is built as mail clients need it
- * (./payment-receipt-email).
+ * payment receipt and the critical-issue alert, which are built as mail
+ * clients need them (./payment-receipt-email, ./health-alert-email).
  */
 
 import { PlatformNotificationType } from './platform'
 import { backenlyMarkAttachment } from '@/lib/email/backenly-mark'
+import { isCloudEdition } from '@/lib/edition/cloud-only'
 import { planDisplayName } from '@/lib/entitlements/plan-names'
 import { RECEIPT_REPLY_TO, renderPaymentReceiptEmail } from './payment-receipt-email'
+import { HEALTH_ALERT_REPLY_TO, renderHealthAlertEmail, type HealthAlertIssue } from './health-alert-email'
 
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL || 'https://backenly.com'
 
@@ -82,7 +84,7 @@ export function buildNotificationEmail(
     case 'system':
       return buildSystemEmail(title, body, metadata)
     case 'health_alert':
-      return buildHealthAlertEmail(title, body, metadata)
+      return buildHealthAlertEmail(title, metadata)
     case 'support_update':
       return buildSupportUpdateEmail(title, body, metadata)
     case 'approval_requested':
@@ -262,30 +264,38 @@ function buildSystemEmail(title: string, body: string, metadata: Record<string, 
 }
 
 /**
- * A confirmed critical in one of the recipient's backends. Lists what was
- * found in words (finding summaries), not internal type names: "contract
- * surface broken" told a customer nothing and implied a fix they could not
- * find. Everything interpolated is escaped.
+ * A confirmed critical in one of the recipient's backends
+ * (./health-alert-email), from what notifyCritical stored: the issues as the
+ * review queue folds them, each with why it waits for a person. Metadata
+ * stored before it carried them still renders, from the summaries and the
+ * project the title names. On Backenly Cloud replies reach support; a
+ * self-hosted install's alert names no reply. The mark travels with the
+ * message either way.
  */
-function buildHealthAlertEmail(
-  title: string,
-  body: string,
-  metadata: Record<string, any> = {},
-): NotificationEmailContent {
-  const actionUrl = typeof metadata.actionUrl === 'string' ? metadata.actionUrl : APP_URL + '/app'
-  const summaries: string[] = Array.isArray(metadata.summaries) ? metadata.summaries.slice(0, 5) : []
-  const html = shell(`
-    <h1 style="font-size:22px;font-weight:800;margin:0 0 8px;color:#ffffff;">${escapeHtml(title)}</h1>
-    <p style="color:#9ca3af;margin:0 0 20px;font-size:15px;line-height:1.6;">${escapeHtml(body)}</p>
-    ${summaries.length ? `
-      <div style="background:#16171d;border:1px solid #2a2b33;border-radius:8px;padding:12px 16px;margin-bottom:20px;">
-        <ul style="margin:0;padding-left:16px;">
-          ${summaries.map(t => `<li style="color:#e4e4e7;font-size:13px;margin:4px 0;line-height:1.5;">${escapeHtml(t)}</li>`).join('')}
-        </ul>
-      </div>` : ''}
-    ${button('Open Autonomy', escapeHtml(actionUrl))}
-  `)
-  return { subject: `${title} — Backenly`, html }
+function buildHealthAlertEmail(title: string, metadata: Record<string, any> = {}): NotificationEmailContent {
+  const str = (v: unknown) => (typeof v === 'string' && v.trim() ? v : null)
+  const issues: HealthAlertIssue[] = Array.isArray(metadata.issues)
+    ? metadata.issues
+        .filter((i: any) => i && str(i.title))
+        .map((i: any) => ({
+          title: i.title,
+          subjects: Array.isArray(i.subjects) ? i.subjects.filter((s: unknown) => typeof s === 'string') : [],
+          findings: typeof i.findings === 'number' ? i.findings : 1,
+          explanation: str(i.explanation),
+        }))
+    : (Array.isArray(metadata.summaries) ? metadata.summaries : []).filter(str).map((t: string) => ({ title: t }))
+  const firstSeen = str(metadata.firstDetectedAt) ? new Date(metadata.firstDetectedAt) : null
+  const cloud = isCloudEdition()
+  const email = renderHealthAlertEmail({
+    project: str(metadata.projectName) ?? /\bin "(.+)"$/.exec(title)?.[1] ?? null,
+    issues,
+    count: typeof metadata.count === 'number' ? metadata.count : issues.reduce((n, i) => n + (i.findings ?? 1), 0),
+    firstSeen,
+    actionUrl: str(metadata.actionUrl) ?? `${APP_URL}/app`,
+    appUrl: APP_URL,
+    cloud,
+  })
+  return { ...email, ...(cloud ? { replyTo: HEALTH_ALERT_REPLY_TO } : {}), attachments: [backenlyMarkAttachment()] }
 }
 
 /**
