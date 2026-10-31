@@ -1,5 +1,6 @@
 'use client'
 
+import { useState } from 'react'
 import { useMinuteClock } from '@/lib/hooks/useMinuteClock'
 
 /**
@@ -21,9 +22,12 @@ import { useMinuteClock } from '@/lib/hooks/useMinuteClock'
  * URL, and their embed code fixes `t` at the moment it was copied, so every
  * visitor shared one copy and the count on it could be four hours old. Once the
  * visitor's clock is known, `t` moves every five minutes instead: visitors still
- * share one copy at a time, and an open page's count moves on its own. The
- * README carries the neutral theme of the same badge, which reads on GitHub's
- * light and dark modes alike.
+ * share one copy at a time, and an open page's count moves on its own. A fresh
+ * copy is a miss in Product Hunt's cache, so if one fails to load, the badge
+ * goes back to the embed's own URL (the copy their cache holds) for the rest of
+ * the visit rather than leave a broken image in the hero. The README carries
+ * the neutral theme of the same badge, which reads on GitHub's light and dark
+ * modes alike.
  */
 const BADGE_HREF =
   'https://www.producthunt.com/products/backenly-2?embed=true&utm_source=badge-featured&utm_medium=badge&utm_campaign=badge-backenly-2'
@@ -34,7 +38,8 @@ const REFRESH_MS = 5 * 60_000
 
 export function ProductHuntBadge({ className = '', eager = false }: { className?: string; eager?: boolean }) {
   const now = useMinuteClock()
-  const t = now === null ? EMBED_T : now - (now % REFRESH_MS)
+  const [failed, setFailed] = useState(false)
+  const t = now === null || failed ? EMBED_T : now - (now % REFRESH_MS)
 
   return (
     <a
@@ -51,6 +56,7 @@ export function ProductHuntBadge({ className = '', eager = false }: { className?
         height={54}
         loading={eager ? 'eager' : 'lazy'}
         decoding="async"
+        onError={() => setFailed(true)}
         className="block"
       />
       <span className="sr-only"> (opens in a new tab)</span>
