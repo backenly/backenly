@@ -5,6 +5,7 @@ import Link from 'next/link'
 import { ArrowRight } from 'lucide-react'
 import { Icon } from '@iconify/react'
 import { AGENT_MARKS, AgentGlyph } from '@/components/landing/AgentMarks'
+import { ProductHuntBadge } from '@/components/site/ProductHuntBadge'
 import { ROUTES } from '@/components/site/SiteShell'
 import { LEDE } from '@/components/site/tokens'
 import { useSettledReducedMotion } from '@/lib/hooks/useSettledReducedMotion'
@@ -83,7 +84,7 @@ export function HeroV7() {
   const { isLoggedIn } = useUserSession()
 
   return (
-    <section aria-labelledby="hero-heading" className="relative isolate pt-[56px] sm:pt-[72px] md:pt-[96px]">
+    <section aria-labelledby="hero-heading" className="relative isolate pt-[32px] sm:pt-[48px] md:pt-[64px]">
       <style>{'@keyframes v7-fill{from{transform:scaleX(0)}to{transform:scaleX(1)}}' + CONSOLE_KEYFRAMES}</style>
 
       {/* Key light, top left, behind the headline (as on the live page). */}
@@ -95,10 +96,17 @@ export function HeroV7() {
           hero is the one place the page keeps the brand's purple shade. */}
       <div
         aria-hidden
-        className="pointer-events-none absolute left-1/2 top-[420px] -z-10 h-[900px] w-[1500px] max-w-none -translate-x-1/2 bg-[radial-gradient(closest-side,rgba(139,92,246,0.16),rgba(139,92,246,0.04)_55%,transparent)]"
+        className="pointer-events-none absolute left-1/2 top-[476px] -z-10 h-[900px] w-[1500px] max-w-none -translate-x-1/2 bg-[radial-gradient(closest-side,rgba(139,92,246,0.16),rgba(139,92,246,0.04)_55%,transparent)]"
       />
 
       <div className={CONTAINER}>
+        {/* Product Hunt's badge with its upvote count, for the launch (founders,
+            2026-10-31). To keep the buttons on a laptop's first screen it takes
+            24-32px of the section's top padding, so the copy moves down 54-58px,
+            and the violet fill moves down 56px with the demo. To take it out,
+            delete it and restore pt-[56px] sm:pt-[72px] md:pt-[96px] and top-[420px]. */}
+        <ProductHuntBadge eager className="landing-rise mb-7 md:mb-8" />
+
         <h1
           id="hero-heading"
           // One vertical falloff across the whole headline, white to a cool grey (live page).
