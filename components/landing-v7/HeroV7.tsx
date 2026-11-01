@@ -84,7 +84,7 @@ export function HeroV7() {
   const { isLoggedIn } = useUserSession()
 
   return (
-    <section aria-labelledby="hero-heading" className="relative isolate pt-[32px] sm:pt-[48px] md:pt-[64px]">
+    <section aria-labelledby="hero-heading" className="relative isolate pt-[56px] sm:pt-[72px] md:pt-[96px]">
       <style>{'@keyframes v7-fill{from{transform:scaleX(0)}to{transform:scaleX(1)}}' + CONSOLE_KEYFRAMES}</style>
 
       {/* Key light, top left, behind the headline (as on the live page). */}
@@ -96,17 +96,10 @@ export function HeroV7() {
           hero is the one place the page keeps the brand's purple shade. */}
       <div
         aria-hidden
-        className="pointer-events-none absolute left-1/2 top-[476px] -z-10 h-[900px] w-[1500px] max-w-none -translate-x-1/2 bg-[radial-gradient(closest-side,rgba(139,92,246,0.16),rgba(139,92,246,0.04)_55%,transparent)]"
+        className="pointer-events-none absolute left-1/2 top-[420px] -z-10 h-[900px] w-[1500px] max-w-none -translate-x-1/2 bg-[radial-gradient(closest-side,rgba(139,92,246,0.16),rgba(139,92,246,0.04)_55%,transparent)]"
       />
 
       <div className={CONTAINER}>
-        {/* Product Hunt's badge with its upvote count, for the launch (founders,
-            2026-10-31). To keep the buttons on a laptop's first screen it takes
-            24-32px of the section's top padding, so the copy moves down 54-58px,
-            and the violet fill moves down 56px with the demo. To take it out,
-            delete it and restore pt-[56px] sm:pt-[72px] md:pt-[96px] and top-[420px]. */}
-        <ProductHuntBadge eager className="landing-rise mb-7 md:mb-8" />
-
         <h1
           id="hero-heading"
           // One vertical falloff across the whole headline, white to a cool grey (live page).
@@ -125,7 +118,7 @@ export function HeroV7() {
           and holding anything risky for you.
         </p>
 
-        <div className="landing-rise [--enter-delay:250ms] relative z-10 mt-9 flex flex-col gap-3 sm:flex-row sm:items-center">
+        <div className="landing-rise [--enter-delay:250ms] relative z-10 mt-9 flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center">
           <Link href={isLoggedIn ? ROUTES.app : ROUTES.signup} className={PRIMARY_CTA}>
             {isLoggedIn ? 'Go to console' : 'Start free'}
             <ArrowRight aria-hidden className="h-4 w-4 transition-transform duration-200 group-hover:translate-x-0.5" />
@@ -134,6 +127,17 @@ export function HeroV7() {
             <Icon icon="ri:github-fill" width={18} aria-hidden />
             Star on GitHub
           </a>
+          {/* Product Hunt's award, #4 Product of the Day (founders, 2026-11-01).
+              The upvote badge sat above the headline, so Product Hunt's box was
+              the first thing read; here the headline leads again, as it did
+              before launch day, and the award sits where a visitor decides.
+              From lg it is in the row at the buttons' height, after a divider
+              like the navbar's; below lg it takes its own line under the
+              buttons, centred on a phone, whose buttons fill the width. */}
+          <span aria-hidden className="mx-2 hidden h-6 w-px bg-white/[0.12] lg:block" />
+          <div className="mt-3 flex justify-center sm:basis-full sm:justify-start lg:mt-0 lg:basis-auto">
+            <ProductHuntBadge eager imgClassName="h-[46px] w-auto" />
+          </div>
         </div>
 
         <div className="landing-film-rise [--enter-delay:350ms] relative mt-[56px] md:mt-[80px]">

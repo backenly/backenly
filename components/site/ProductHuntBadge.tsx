@@ -1,46 +1,40 @@
-'use client'
-
-import { useState } from 'react'
-import { useMinuteClock } from '@/lib/hooks/useMinuteClock'
-
 /**
- * Product Hunt's launch badge, in the footer of every marketing page and above
- * the landing headline.
+ * Product Hunt's award badge: Backenly was #4 Product of the Day on its launch,
+ * October 31, 2026. Beside the landing hero's buttons and in the footer of
+ * every marketing page.
  *
- * The founders asked for it on 2026-10-30, the day before the launch, with the
- * embed code from the launch's embed page (producthunt.com/posts/backenly-2/embed).
- * The dark theme is the one that belongs on this site: white on near-black, so
- * it adds no Product Hunt orange to a page whose only colour is violet. (The
- * neutral theme is slate on a white box.) The launch bar above the navbar keeps
- * its own rule (no logo, no orange) and stays a plain sentence. On launch day
- * the founders asked for the badge in the hero too, for its upvote count.
+ * Until launch day ended this was Product Hunt's "featured" badge, with the
+ * upvote count, in the footer (founders, 2026-10-30) and then above the landing
+ * headline (2026-10-31). On 2026-11-01, with the voting over, the founders
+ * asked for the rank in its place.
  *
- * Product Hunt draws the image and its count, so the markup is theirs as given:
- * their embed link with its badge UTM parameters, and a plain img for their SVG
- * (the site's img-src allows https:). All but `t`. Product Hunt serves the image
- * cached for four hours (max-age=14400, measured 2026-10-31), keyed on the whole
- * URL, and their embed code fixes `t` at the moment it was copied, so every
- * visitor shared one copy and the count on it could be four hours old. Once the
- * visitor's clock is known, `t` moves every five minutes instead: visitors still
- * share one copy at a time, and an open page's count moves on its own. A fresh
- * copy is a miss in Product Hunt's cache, so if one fails to load, the badge
- * goes back to the embed's own URL (the copy their cache holds) for the rest of
- * the visit rather than leave a broken image in the hero. The README carries
- * the neutral theme of the same badge, which reads on GitHub's light and dark
- * modes alike.
+ * The dark theme, of the three Product Hunt offers: white on near-black, the
+ * medal its one colour. The light theme is a white box with Product Hunt orange
+ * type and the neutral one a white box with slate type; beside the hero's
+ * white "Start free" either reads as a second primary button. The README
+ * carries the neutral one, which reads on GitHub's light and dark modes alike.
+ *
+ * The image is Product Hunt's own SVG, byte for byte the file their embed code
+ * points at (embed-image/v1/top-post-badge.svg, post 1297694, theme dark,
+ * period daily), served from public/ rather than their API: the rank is final,
+ * so there is no count to keep fresh, and from our origin it paints with the
+ * page instead of after a request to a third party, which ad blockers may also
+ * refuse. The link is their embed link, with its badge UTM parameters.
  */
 const BADGE_HREF =
-  'https://www.producthunt.com/products/backenly-2?embed=true&utm_source=badge-featured&utm_medium=badge&utm_campaign=badge-backenly-2'
-const BADGE_SRC = 'https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1297694&theme=dark'
-/** The `t` from Product Hunt's embed code, for the HTML, before the visitor's clock is known. */
-const EMBED_T = 1793308135226
-const REFRESH_MS = 5 * 60_000
+  'https://www.producthunt.com/products/backenly-2?embed=true&utm_source=badge-top-post-badge&utm_medium=badge&utm_campaign=badge-backenly-2'
+const BADGE_SRC = '/media/product-hunt/top-post-badge-dark.svg'
 
-export function ProductHuntBadge({ className = '', eager = false }: { className?: string; eager?: boolean }) {
-  const now = useMinuteClock()
-  const [failed, setFailed] = useState(false)
-  const t = now === null || failed ? EMBED_T : now - (now % REFRESH_MS)
-
+export function ProductHuntBadge({
+  className = '',
+  imgClassName = '',
+  eager = false,
+}: {
+  className?: string
+  /** Sizes the badge; the box keeps Product Hunt's 250 by 54 proportions. */
+  imgClassName?: string
+  eager?: boolean
+}) {
   return (
     <a
       href={BADGE_HREF}
@@ -50,14 +44,13 @@ export function ProductHuntBadge({ className = '', eager = false }: { className?
     >
       {/* eslint-disable-next-line @next/next/no-img-element */}
       <img
-        src={`${BADGE_SRC}&t=${t}`}
-        alt="Backenly - The autonomous backend for AI coding agents | Product Hunt"
+        src={BADGE_SRC}
+        alt="#4 Product of the Day on Product Hunt"
         width={250}
         height={54}
         loading={eager ? 'eager' : 'lazy'}
         decoding="async"
-        onError={() => setFailed(true)}
-        className="block"
+        className={`block ${imgClassName}`}
       />
       <span className="sr-only"> (opens in a new tab)</span>
     </a>
