@@ -57,6 +57,15 @@ tests/security-isolation.test.ts
 tests/security/webhook-security.test.ts
 tests/verification/execution.test.ts
 
+# An AI outage must be visible, and a throttle must not end an investigation.
+# The gateway logs one marker line per call that failed for the deployment's
+# reasons (no provider, quota, access, spend, throttling), which alarms match;
+# a throttle that ran nothing is not one of a finding's investigation attempts.
+# Database-free: a scripted provider, the in-memory spend ledger, and pure
+# functions over a finding's bookkeeping.
+tests/ai/ai-failure-markers.test.ts
+tests/ai/investigation-attempts.test.ts
+
 __tests__/email/send-outcome.test.ts
 __tests__/legal/privacy-integrity.test.ts
 __tests__/observability/pgrst-clock-diagnostic.test.ts
