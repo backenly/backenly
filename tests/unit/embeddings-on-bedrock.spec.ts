@@ -81,6 +81,37 @@ afterAll(() => {
   }
 })
 
+// The AWS SDK's HTTP exchange, answered by a test: what was sent, and a canned answer.
+type Sent = { hostname: string; path: string; method: string; body: unknown; requestTimeout: unknown }
+const answer = (statusCode: number, body: unknown, headers: Record<string, string> = {}) => ({
+  response: new HttpResponse({
+    statusCode,
+    headers: { 'content-type': 'application/json', ...headers },
+    body: Readable.from([Buffer.from(JSON.stringify(body))]),
+  }),
+})
+const throttled = () =>
+  answer(429, { message: 'Too many requests, please wait before trying again.' }, { 'x-amzn-errortype': 'ThrottlingException' })
+const stubHttp = (impl: (sent: Sent) => ReturnType<typeof answer>) => {
+  const sent: Sent[] = []
+  http.mockImplementation((async (
+    request: { hostname: string; path: string; method: string; body: unknown },
+    options?: { requestTimeout?: number },
+  ) => {
+    const raw = typeof request.body === 'string' ? request.body : Buffer.from(request.body as Uint8Array).toString('utf8')
+    const one: Sent = {
+      hostname: request.hostname,
+      path: request.path,
+      method: request.method,
+      body: JSON.parse(raw),
+      requestTimeout: options?.requestTimeout,
+    }
+    sent.push(one)
+    return impl(one)
+  }) as never)
+  return sent
+}
+
 describe('which embedding model the environment selects', () => {
   it('keeps the old behaviour while EMBEDDING_PROVIDER is unset: OpenAI with a key, otherwise none', () => {
     expect(embeddingConfig({ OPENAI_API_KEY: 'k' })).toEqual(OPENAI_DEFAULT)
@@ -386,36 +417,6 @@ describe('through the AWS SDK itself, with only the HTTP exchange stubbed', () =
   // A region no other test here uses: a client of its own, with a fresh retry quota.
   const ENV = { ...BEDROCK, EMBEDDING_REGION: 'us-west-2' }
 
-  type Sent = { hostname: string; path: string; method: string; body: unknown; requestTimeout: unknown }
-  const answer = (statusCode: number, body: unknown, headers: Record<string, string> = {}) => ({
-    response: new HttpResponse({
-      statusCode,
-      headers: { 'content-type': 'application/json', ...headers },
-      body: Readable.from([Buffer.from(JSON.stringify(body))]),
-    }),
-  })
-  const throttled = () =>
-    answer(429, { message: 'Too many requests, please wait before trying again.' }, { 'x-amzn-errortype': 'ThrottlingException' })
-  const stubHttp = (impl: (sent: Sent) => ReturnType<typeof answer>) => {
-    const sent: Sent[] = []
-    http.mockImplementation((async (
-      request: { hostname: string; path: string; method: string; body: unknown },
-      options?: { requestTimeout?: number },
-    ) => {
-      const raw = typeof request.body === 'string' ? request.body : Buffer.from(request.body as Uint8Array).toString('utf8')
-      const one: Sent = {
-        hostname: request.hostname,
-        path: request.path,
-        method: request.method,
-        body: JSON.parse(raw),
-        requestTimeout: options?.requestTimeout,
-      }
-      sent.push(one)
-      return impl(one)
-    }) as never)
-    return sent
-  }
-
   it('posts the JSON body to the model’s invoke path, with the timeout, and reads the vector back', async () => {
     const sent = stubHttp(() => answer(200, { embedding: new Array<number>(1024).fill(0.5), inputTextTokenCount: 2 }))
 
@@ -521,5 +522,106 @@ describe('a table’s stored vectors under a Bedrock deployment', () => {
   it('refuses every table while no model is configured, and says why', () => {
     const none = embeddingConfig({ EMBEDDING_PROVIDER: 'bedrock' })
     expect(vectorConfigMismatch({ model: TITAN, dimensions: 1024 }, none)).toMatch(/BEDROCK_REGION/)
+  })
+})
+
+describe('a failed embedding logs the gateway’s marker line, once, after the retries', () => {
+  // A region of its own: a fresh client and a full SDK retry quota.
+  const ENV = { ...BEDROCK, EMBEDDING_REGION: 'eu-west-1' }
+  let errors: jest.SpyInstance
+  let send: jest.SpyInstance | undefined
+  /** Every marker line logged, in order (lib/ai/llm/alerts.ts). */
+  const markers = () => errors.mock.calls.map((args) => String(args[0])).filter((line) => line.startsWith('BACKENLY_AI_'))
+
+  beforeEach(() => {
+    errors = jest.spyOn(console, 'error').mockImplementation(() => {})
+  })
+  afterEach(() => {
+    errors.mockRestore()
+    send?.mockRestore()
+    send = undefined
+  })
+
+  it('a Titan call still throttled after the SDK’s four attempts: one BACKENLY_AI_THROTTLED', async () => {
+    const sent = stubHttp(throttled)
+
+    await expect(embed(['hello'], ENV)).rejects.toMatchObject({ kind: 'rate_limited', attempts: 4 })
+
+    expect(sent).toHaveLength(4)
+    expect(markers()).toEqual([`BACKENLY_AI_THROTTLED kind=rate_limited provider=bedrock purpose=embeddings model=${TITAN}`])
+  }, 20_000)
+
+  it('a Titan call AWS refuses: one BACKENLY_AI_UNAVAILABLE, and nothing of the provider’s words in the log', async () => {
+    stubHttp(() =>
+      answer(
+        403,
+        { message: 'User: arn:aws:sts::123456789012:assumed-role/web-task/abc is not authorized to perform: bedrock:InvokeModel' },
+        { 'x-amzn-errortype': 'AccessDeniedException' },
+      ),
+    )
+
+    await expect(embed(['hello'], ENV)).rejects.toMatchObject({ kind: 'access_denied' })
+
+    expect(markers()).toEqual([`BACKENLY_AI_UNAVAILABLE kind=access_denied provider=bedrock purpose=embeddings model=${TITAN}`])
+    expect(errors.mock.calls.flat().join('\n')).not.toContain('123456789012')
+  })
+
+  it('one line per call, however many of its requests fail', async () => {
+    send = jest.spyOn(BedrockRuntimeClient.prototype, 'send').mockImplementation((async () => {
+      throw new ThrottlingException({ message: 'Too many requests', $metadata: { httpStatusCode: 429, attempts: 4 } })
+    }) as never)
+
+    await expect(embed(Array.from({ length: 10 }, (_, i) => `text-${i}`), BEDROCK)).rejects.toMatchObject({ kind: 'rate_limited' })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+
+    // Four requests were in flight and all four failed: still one failed call.
+    expect(send.mock.calls.length).toBe(4)
+    expect(markers()).toEqual([`BACKENLY_AI_THROTTLED kind=rate_limited provider=bedrock purpose=embeddings model=${TITAN}`])
+  })
+
+  it('names the model the deployment configured', async () => {
+    const arn = 'arn:aws:bedrock:eu-west-1::foundation-model/amazon.titan-embed-text-v2:0'
+    send = jest.spyOn(BedrockRuntimeClient.prototype, 'send').mockImplementation((async () => {
+      throw new AccessDeniedException({ message: 'not authorized', $metadata: { httpStatusCode: 403 } })
+    }) as never)
+
+    await expect(embed(['hello'], { ...BEDROCK, EMBEDDING_MODEL: arn })).rejects.toMatchObject({ kind: 'access_denied' })
+
+    expect(markers()).toEqual([`BACKENLY_AI_UNAVAILABLE kind=access_denied provider=bedrock purpose=embeddings model=${arn}`])
+  })
+
+  it.each([
+    ['refuses the key', () => new OpenAI.AuthenticationError(401, { message: 'Incorrect API key provided.' }, 'Incorrect API key provided.', new Headers()), 'BACKENLY_AI_UNAVAILABLE kind=access_denied'],
+    ['throttles past the SDK’s retries', () => new OpenAI.RateLimitError(429, { message: 'Rate limit reached' }, 'Rate limit reached', new Headers()), 'BACKENLY_AI_THROTTLED kind=rate_limited'],
+  ])('on OpenAI too, when it %s', async (_label, failure, line) => {
+    const create = jest.spyOn(OpenAI.Embeddings.prototype, 'create').mockImplementation((async () => {
+      throw failure()
+    }) as never)
+    try {
+      await expect(embed(['a'], { OPENAI_API_KEY: 'k' })).rejects.toMatchObject({ provider: 'openai' })
+      expect(markers()).toEqual([`${line} provider=openai purpose=embeddings model=text-embedding-3-small`])
+    } finally {
+      create.mockRestore()
+    }
+  })
+
+  it('and when no embedding model is configured at all', async () => {
+    await expect(embed(['a'], { EMBEDDING_PROVIDER: 'bedrock' })).rejects.toMatchObject({ kind: 'not_configured' })
+    expect(markers()).toEqual(['BACKENLY_AI_UNAVAILABLE kind=not_configured provider=unknown purpose=embeddings model=unknown'])
+  })
+
+  it('logs nothing for a failure of the request itself, or for a call that succeeds', async () => {
+    send = jest.spyOn(BedrockRuntimeClient.prototype, 'send').mockImplementation((async () => {
+      throw new ValidationException({ message: 'Malformed input request', $metadata: { httpStatusCode: 400 } })
+    }) as never)
+    await expect(embed(['a'], BEDROCK)).rejects.toMatchObject({ kind: 'invalid_request' })
+
+    send.mockImplementation((async () => ({ body: Buffer.from(JSON.stringify({ embedding: [1, 2, 3] })), $metadata: {} })) as never)
+    await expect(embed(['a'], BEDROCK)).rejects.toMatchObject({ kind: 'output_invalid' })
+
+    send.mockImplementation((async () => ({ body: Buffer.from(JSON.stringify({ embedding: new Array<number>(1024).fill(0) })), $metadata: {} })) as never)
+    await expect(embed(['a'], BEDROCK)).resolves.toHaveLength(1)
+
+    expect(markers()).toEqual([])
   })
 })

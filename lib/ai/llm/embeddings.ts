@@ -25,7 +25,9 @@
  * Titan takes one input per request, and its on-demand quota is counted in
  * requests a minute and can be small. So few requests run at once, and the
  * SDK's own retry, backing off, absorbs a burst over the quota before a call
- * that is still throttled becomes rate_limited.
+ * that is still throttled becomes rate_limited. A failed call logs the
+ * gateway's marker line once, after those retries (lib/ai/llm/alerts.ts), so a
+ * throttled or refused embedding model is as visible to an alarm as chat.
  *
  * Vectors compare only with vectors from the same model at the same size, so
  * vector search records `embeddingConfig()` when it is enabled on a table and
@@ -36,6 +38,7 @@
 
 import { BedrockRuntimeClient, InvokeModelCommand } from '@aws-sdk/client-bedrock-runtime'
 import OpenAI from 'openai'
+import { reportAiFailure } from './alerts'
 import { AiError, classifyAwsError, classifyProviderError } from './errors'
 
 type Env = Record<string, string | undefined>
@@ -121,10 +124,21 @@ export function embeddingAvailability(env: Env = process.env): { available: true
  */
 export async function embed(inputs: string[], env: Env = process.env): Promise<number[][]> {
   const r = resolve(env)
-  if ('reason' in r) throw new AiError('not_configured', r.reason, { consumption: 'none' })
-  if (inputs.length === 0) return []
-  const { setup } = r
+  const setup = 'setup' in r ? r.setup : undefined
+  try {
+    if ('reason' in r) throw new AiError('not_configured', r.reason, { consumption: 'none' })
+    if (inputs.length === 0) return []
+    return await embedWith(r.setup, inputs)
+  } catch (err) {
+    // Every way a call ends in failure passes here once, after the SDK's
+    // retries: no model, the provider's refusal, or an answer of the wrong
+    // shape. Several of a call's requests failing still make one call.
+    if (err instanceof AiError) reportAiFailure(err, { purpose: 'embeddings', provider: setup?.provider, model: setup?.model })
+    throw err
+  }
+}
 
+async function embedWith(setup: BedrockSetup | OpenAISetup, inputs: string[]): Promise<number[][]> {
   const vectors = setup.provider === 'bedrock' ? await embedOnBedrock(setup, inputs) : await embedOnOpenAI(setup, inputs)
 
   // A vector of another size can neither be stored in the table's column nor
