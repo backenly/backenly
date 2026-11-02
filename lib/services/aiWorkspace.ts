@@ -1,5 +1,4 @@
 import { projectWorkspaceDir } from '@/lib/workspace/paths'
-import OpenAI from 'openai'
 import { prisma } from '@/lib/db'
 import { workspaceRawClient } from '@/lib/data-plane/regional'
 import { chat } from '@/lib/ai/llm/chat'
@@ -1102,7 +1101,9 @@ Your response must be valid JSON:
 }
 
 /**
- * Generate a backend change plan using OpenAI (2-STAGE APPROACH)
+ * Generate a backend change plan through the AI gateway (2-STAGE APPROACH).
+ * Both stages are `build.plan` calls, so the deployment's provider and model
+ * serve them (lib/ai/llm/config.ts).
  */
 export async function generateBackendChangePlan(
   prompt: string,
@@ -1110,16 +1111,16 @@ export async function generateBackendChangePlan(
 ): Promise<BackendChangePlan> {
   const context = await getProjectContext(projectId)
 
-  // 🔥 STAGE 1: Generate Architecture (GPT-4o)
+  // 🔥 STAGE 1: Generate Architecture
   console.log('\n========== 🏛️ STAGE 1: ARCHITECTURE PLANNING ==========')  
-  console.log('[STAGE 1] Generating production-ready architecture with GPT-4o...')
+  console.log('[STAGE 1] Generating production-ready architecture...')
   const architecture = await generateBackendArchitecture(prompt, context)
   console.log(`[STAGE 1] ✅ Architecture complete: ${architecture.routes?.length || 0} routes planned`)
   console.log('====================================================\n')
 
-  // 🔥 STAGE 2: Generate Code (GPT-4o-mini)
+  // 🔥 STAGE 2: Generate Code
   console.log('\n========== 💻 STAGE 2: CODE GENERATION ==========')  
-  console.log('[STAGE 2] Generating code with GPT-4o-mini...')
+  console.log('[STAGE 2] Generating code...')
   
   const codeGenStartTime = Date.now()
 
@@ -1624,7 +1625,7 @@ IMPORTANT CODE GENERATION RULES:
 
 IMPORTANT: You MUST implement ALL ${architecture.routes?.length || 0} routes from the architecture plan. Do not skip any routes.`
 
-  console.log('[AI Generation] Starting GPT-4o-mini code generation for ' + (architecture.routes?.length || 0) + ' routes...') 
+  console.log('[AI Generation] Starting code generation for ' + (architecture.routes?.length || 0) + ' routes...')
   console.log('[AI Generation] User prompt: "' + prompt.substring(0, 100) + '..."')
   const startTime = Date.now()
 
@@ -1650,7 +1651,7 @@ IMPORTANT: You MUST implement ALL ${architecture.routes?.length || 0} routes fro
     const response = JSON.parse(responseText)
 
     // Log the raw response for debugging
-    console.log('OpenAI Response:', JSON.stringify(response, null, 2))
+    console.log('Model response:', JSON.stringify(response, null, 2))
 
     // Validate that changes have code
     const validatedChanges = (response.changes || []).map((change: any, index: number) => {
@@ -1664,7 +1665,7 @@ IMPORTANT: You MUST implement ALL ${architecture.routes?.length || 0} routes fro
       }
       // Ensure code is a string - DO NOT use empty string as fallback
       if (!change.code || change.code.trim().length === 0) {
-        throw new Error('Change ' + index + ' (' + change.target + ') has no code. OpenAI must generate code for each change.')
+        throw new Error('Change ' + index + ' (' + change.target + ') has no code. The model must generate code for each change.')
       }
       return {
         ...change,
@@ -1724,7 +1725,7 @@ IMPORTANT: You MUST implement ALL ${architecture.routes?.length || 0} routes fro
       },
     }
   } catch (error: any) {
-    console.error('OpenAI API error:', error)
+    console.error('[generate-plan] Plan generation failed:', error)
     throw new Error('Failed to generate plan: ' + error.message)
   }
 }

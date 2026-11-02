@@ -1,22 +1,38 @@
 /**
  * EMBEDDINGS
  * ==========
- * OpenAI text-embedding-3-small wrapper used by Backenly's vector search.
+ * What Backenly's vector search embeds with. The model is the deployment's
+ * (EMBEDDING_PROVIDER, lib/ai/llm/embeddings.ts):
  *
- *   model:       text-embedding-3-small
- *   dimensions:  1536  (default, what pgvector(1536) columns expect)
- *   pricing:     ~$0.02 / 1M input tokens (Jan 2026)
+ *   bedrock  amazon.titan-embed-text-v2:0, 1024 dimensions unless
+ *            EMBEDDING_DIMENSIONS says 256 or 512; one input per request
+ *   openai   text-embedding-3-small, 1536 dimensions
  *
- * Batched: pass an array of strings; OpenAI accepts up to ~2048 inputs per
- * call. We cap at 96 per batch to stay well under TPM limits on smaller
- * plans and to fail fast on a misuse instead of timing out.
+ * Batched: pass an array of strings. They go to the provider 96 at a time, to
+ * stay well under rate limits on smaller plans and to fail fast on a misuse
+ * instead of timing out.
+ *
+ * Every input is trimmed to 8,000 characters whichever provider serves it.
+ * That is under Titan's 50,000-character limit, and for ordinary text far
+ * under both providers' token limits (8,191 for OpenAI, 8,192 for Titan), so a
+ * long row is embedded by its beginning rather than refused. Text that
+ * tokenizes unusually densely can still pass a token limit, and is then the
+ * provider's invalid_request on either.
  */
 
-import { embed, embeddingAvailability, EMBEDDING_DIMENSIONS, EMBEDDING_MODEL } from './llm/embeddings'
+import { embed, embeddingAvailability, embeddingConfig, type EmbeddingConfig } from './llm/embeddings'
 
-export { embeddingAvailability, EMBEDDING_DIMENSIONS, EMBEDDING_MODEL }
+export { embeddingAvailability, embeddingConfig }
+export type { EmbeddingConfig }
 const MAX_BATCH = 96
 const MAX_INPUT_CHARS = 8000
+
+/**
+ * What a table whose vector search was enabled before the model and size were
+ * recorded was made with: text-embedding-3-small at 1536, the only model
+ * vector search used then.
+ */
+export const UNRECORDED_VECTOR_CONFIG = { model: 'text-embedding-3-small', dimensions: 1536 } as const
 
 /**
  * Embed one or more strings. Returns `number[][]` aligned with input order.
@@ -57,23 +73,33 @@ export async function embedTexts(inputs: string[]): Promise<number[][]> {
 
 /**
  * Why a table's stored vectors cannot be searched with the model configured
- * now, or null when they can.
+ * now (`configured`, the deployment's by default), or null when they can.
  *
  * A query vector from one model compared with row vectors from another returns
- * confident nonsense, not an error, so the model and dimensions recorded when
- * vector search was enabled must match before anything is embedded. A table
- * enabled before they were recorded used text-embedding-3-small at 1536, the
- * only model this has ever used.
+ * confident nonsense, not an error, and vectors of two sizes cannot be compared
+ * at all, so the model and dimensions recorded when vector search was enabled
+ * must match the configured ones before anything is embedded. A table enabled
+ * before they were recorded is UNRECORDED_VECTOR_CONFIG. With no model
+ * configured, nothing can be searched, and that is the reason given.
  */
-export function vectorConfigMismatch(recorded: { model?: unknown; dimensions?: unknown }): string | null {
-  const model = typeof recorded.model === 'string' ? recorded.model : 'text-embedding-3-small'
-  const dimensions = typeof recorded.dimensions === 'number' ? recorded.dimensions : 1536
-  if (model === EMBEDDING_MODEL && dimensions === EMBEDDING_DIMENSIONS) return null
-  return (
+export function vectorConfigMismatch(
+  recorded: { model?: unknown; dimensions?: unknown },
+  configured: EmbeddingConfig = embeddingConfig(),
+): string | null {
+  if ('reason' in configured) return configured.reason
+  const model = typeof recorded.model === 'string' ? recorded.model : UNRECORDED_VECTOR_CONFIG.model
+  const dimensions = typeof recorded.dimensions === 'number' ? recorded.dimensions : UNRECORDED_VECTOR_CONFIG.dimensions
+  if (model === configured.model && dimensions === configured.dimensions) return null
+  const made =
     `This table's vectors were made with ${model} (${dimensions} dimensions), and this deployment embeds ` +
-    `with ${EMBEDDING_MODEL} (${EMBEDDING_DIMENSIONS}). Comparing the two would return meaningless matches, ` +
-    'so the search was not run. The stored vectors need to be made again with the current model.'
-  )
+    `with ${configured.model} (${configured.dimensions} dimensions). `
+  return dimensions === configured.dimensions
+    ? made +
+        'Comparing the two would return meaningless matches, so the search was not run. ' +
+        `The stored vectors need to be made again with ${configured.model}.`
+    : made +
+        'Vectors of different sizes cannot be compared, so the search was not run. ' +
+        `The embedding column needs to hold ${configured.dimensions}-dimension vectors, made again with ${configured.model}.`
 }
 
 /** Embed a single string. Convenience wrapper. Returns [] on empty. */

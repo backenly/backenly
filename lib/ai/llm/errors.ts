@@ -136,3 +136,68 @@ export function classifyProviderError(err: unknown, provider: ProviderId): AiErr
   }
   return new AiError('unavailable', message, { provider, consumption: 'unknown' })
 }
+
+/**
+ * A failure from an AWS SDK client (Bedrock Runtime's InvokeModel), which
+ * throws its own error types rather than the Anthropic or OpenAI ones above.
+ *
+ * The SDK names each failure (`err.name`) and, when the service answered,
+ * carries its status in `err.$metadata.httpStatusCode`. The name decides
+ * first, because Bedrock files some failures under another kind's status
+ * (ModelNotReadyException is a 429, ServiceQuotaExceededException a 400); the
+ * status decides the rest, as it does for the other providers. The SDK has
+ * already retried what it treats as transient, so `attempts` is what it sent.
+ */
+export function classifyAwsError(err: unknown, provider: ProviderId): AiError {
+  if (err instanceof AiError) return err
+  const message = err instanceof Error ? err.message : String(err)
+  const fields = (typeof err === 'object' && err !== null ? err : {}) as {
+    name?: unknown
+    code?: unknown
+    $metadata?: { httpStatusCode?: unknown; attempts?: unknown }
+  }
+  const name = typeof fields.name === 'string' ? fields.name : ''
+  const status = typeof fields.$metadata?.httpStatusCode === 'number' ? fields.$metadata.httpStatusCode : undefined
+  const base = { provider, status }
+
+  const classified = ((): AiError => {
+    switch (name) {
+      case 'ThrottlingException':
+        return new AiError('rate_limited', message, { ...base, consumption: 'none', retryable: true })
+      case 'AccessDeniedException':
+      // The model id does not exist in the region, or is not enabled for the account.
+      case 'ResourceNotFoundException':
+        return new AiError('access_denied', message, { ...base, consumption: 'none' })
+      case 'ServiceQuotaExceededException':
+        return new AiError('quota_exhausted', message, { ...base, consumption: 'none' })
+      case 'ValidationException':
+        return new AiError('invalid_request', message, { ...base, consumption: 'none' })
+      // Refused before any inference: overloaded, or the model is still loading.
+      case 'ServiceUnavailableException':
+      case 'ModelNotReadyException':
+        return new AiError('unavailable', message, { ...base, consumption: 'none', retryable: true })
+      case 'ModelTimeoutException':
+        return new AiError('timeout', message, { ...base, consumption: 'unknown' })
+      // The model failed while it ran (a 424): the request was not at fault.
+      case 'ModelErrorException':
+        return new AiError('unavailable', message, { ...base, consumption: 'unknown' })
+      // No AWS credentials could be found, so nothing was sent.
+      case 'CredentialsProviderError':
+        return new AiError('not_configured', message, { provider, consumption: 'none' })
+      case 'AbortError':
+        return new AiError('aborted', message, { provider, consumption: 'unknown' })
+      // The SDK's HTTP/1 handler also names a reset connection or a broken pipe
+      // TimeoutError; those are network failures, not a request that ran long.
+      case 'TimeoutError':
+        return fields.code === 'ECONNRESET' || fields.code === 'EPIPE'
+          ? new AiError('unavailable', message, { provider, consumption: 'unknown' })
+          : new AiError('timeout', message, { provider, consumption: 'unknown' })
+    }
+    if (status !== undefined) return fromStatus(status, message, undefined, provider)
+    // A network failure, or anything else that got no answer from the service.
+    return new AiError('unavailable', message, { provider, consumption: 'unknown' })
+  })()
+
+  if (typeof fields.$metadata?.attempts === 'number') classified.attempts = fields.$metadata.attempts
+  return classified
+}
