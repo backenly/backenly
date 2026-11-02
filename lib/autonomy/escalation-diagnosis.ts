@@ -25,6 +25,10 @@
  *     changes); at most MAX_ATTEMPTS failed attempts, spaced 10m, 1h, 6h;
  *     and the deployment's own monthly AI budget (autonomy.* is
  *     platform-paid), which stops every call when it is used up.
+ *   • An attempt is a call that ran. When the provider refuses an
+ *     investigation's first call before inference (throttled, no provider,
+ *     no budget), nothing ran: it waits and the tick stops calling the model,
+ *     but no attempt is spent (nextInvestigationState).
  *   • Fail-silent per finding — a model error never breaks the autonomy tick.
  *
  * Runs on Backenly's servers 24/7 — the "laptop open at 3am" is not required;
@@ -39,7 +43,7 @@ import { classifyFix } from '@/lib/core/fix-classifier'
 import { resolveWorkspaceSchema } from '@/lib/services/workspace-pool'
 import { workspaceRawClient, type WorkspaceRawClient } from '@/lib/data-plane/regional'
 import { quotesKeptHere } from '@/lib/data-plane/residency'
-import { investigateFinding, type CatalogTable, type Investigation } from './investigator'
+import { investigateFinding, type CatalogTable, type Investigation, type InvestigationProgress } from './investigator'
 import { evidenceFingerprint } from './finding-fingerprint'
 import { proposableFor, proposeRepair } from './ai-proposals'
 
@@ -47,7 +51,7 @@ const MAX_PER_TICK = 2
 /** Model investigations per project per 24h. Deterministic ones are not counted. */
 const DAILY_CAP = 5
 const MAX_ATTEMPTS = 3
-/** Wait after the 1st, 2nd and 3rd failed attempt. */
+/** Wait after the 1st, 2nd and 3rd failed attempt. A throttle that ran nothing waits the first. */
 const BACKOFF_MS = [10 * 60_000, 60 * 60_000, 6 * 60 * 60_000]
 /** Wait while no model can be called at all (no provider, no budget). Not an attempt. */
 const UNAVAILABLE_WAIT_MS = 60 * 60_000
@@ -67,15 +71,32 @@ export interface FindingDiagnosis {
 }
 
 /** This module's own bookkeeping on a finding. */
-interface InvestigationState {
+export interface InvestigationState {
   fingerprint: string
+  /** Investigations that ran a model call, answered or failed. */
   attempts: number
   nextAt?: string
   lastError?: string
+  /**
+   * Whether the last failure was an attempt. Absent on states written before
+   * an attempt had to run something, when every throttle counted.
+   */
+  lastCounted?: boolean
   history?: Array<{ at: string; verdict: string; rootCause: string }>
 }
 
 export { evidenceFingerprint }
+
+/**
+ * Whether the last failure was not an attempt, so it cannot be what used up
+ * the finding's attempts. A state from before the rule does not say. Its
+ * `rate_limited` was a call refused before inference (an `unavailable` may be
+ * a lost answer), so a finding throttles used up is investigated again, until
+ * a failure that counts gives it up for good.
+ */
+function lastFailureNotAnAttempt(state: InvestigationState): boolean {
+  return state.lastCounted === undefined ? state.lastError === 'rate_limited' : !state.lastCounted
+}
 
 /** Whether a finding should be investigated on this tick. */
 export function isDue(details: Record<string, unknown>, fingerprint: string, now = Date.now()): boolean {
@@ -84,8 +105,54 @@ export function isDue(details: Record<string, unknown>, fingerprint: string, now
   if (diagnosis && (diagnosis.fingerprint ?? fingerprint) === fingerprint) return false
   const state = details.investigation as InvestigationState | undefined
   if (!state || state.fingerprint !== fingerprint) return true
-  if (state.attempts >= MAX_ATTEMPTS) return false
+  if (state.attempts >= MAX_ATTEMPTS && !lastFailureNotAnAttempt(state)) return false
   return !state.nextAt || Date.parse(state.nextAt) <= now
+}
+
+/**
+ * The bookkeeping a failed investigation leaves, and whether this tick may
+ * still call the model.
+ *
+ * An attempt is a call that ran. A provider that refused the investigation's
+ * first call before inference (AiError consumption `none`) ran nothing, so no
+ * attempt is spent, and the tick stops calling a provider that is refusing:
+ *   not retryable (no provider, no budget, quota, access)  waits UNAVAILABLE_WAIT_MS
+ *   retryable (throttled, overloaded)                     waits BACKOFF_MS[0]
+ *
+ * The same refusal after earlier calls of the investigation returned is an
+ * attempt: those calls ran and were paid for, and not counting them would
+ * repeat that spend every ten minutes for as long as the throttling lasts.
+ * Anything else (a timeout, a lost answer, a refusal or bad output from the
+ * model, an error of ours) is an attempt, backed off by its number.
+ */
+export function nextInvestigationState(
+  prior: InvestigationState | undefined,
+  fingerprint: string,
+  err: unknown,
+  now: number,
+  /** Model calls of this investigation that returned before it failed. */
+  callsRan = 0,
+): { state: InvestigationState; stopTick: boolean } {
+  const ai = err instanceof AiError ? err : null
+  const refused = ai !== null && ai.consumption === 'none'
+  const counted = !refused || callsRan > 0
+  const attempts = (prior?.attempts ?? 0) + (counted ? 1 : 0)
+  const wait = counted
+    ? BACKOFF_MS[Math.min(attempts - 1, BACKOFF_MS.length - 1)]
+    : ai?.retryable
+      ? BACKOFF_MS[0]
+      : UNAVAILABLE_WAIT_MS
+  return {
+    state: {
+      fingerprint,
+      attempts,
+      nextAt: new Date(now + wait).toISOString(),
+      lastError: ai?.kind ?? 'error',
+      lastCounted: counted,
+      history: prior?.history ?? [],
+    },
+    stopTick: refused,
+  }
 }
 
 /** Table and column names of the project's workspace schema. Names only, never rows. */
@@ -257,6 +324,7 @@ export async function diagnoseEscalatedFindings(projectId: string): Promise<numb
 
         const state = details.investigation as InvestigationState | undefined
         const prior = state?.fingerprint === fingerprint ? state : undefined
+        const progress: InvestigationProgress = { modelCalls: 0 }
         let investigation: Investigation
         try {
           investigation = await investigateFinding(
@@ -280,26 +348,18 @@ export async function diagnoseEscalatedFindings(projectId: string): Promise<numb
             },
             (probe, probeTable) => PROBE_REGISTRY[probe]({ projectId, table: probeTable ?? table }),
             Object.keys(PROBE_REGISTRY),
+            progress,
           )
         } catch (err) {
-          const ai = err instanceof AiError ? err : null
-          // No provider, or no budget: nothing ran and nothing will this tick.
-          // Not counted as an attempt, so the finding is investigated once AI
-          // is available again.
-          const unavailable = ai !== null && ai.consumption === 'none' && !ai.retryable
-          if (unavailable) modelUnavailable = true
-          const attempts = (prior?.attempts ?? 0) + (unavailable ? 0 : 1)
-          const wait = unavailable ? UNAVAILABLE_WAIT_MS : BACKOFF_MS[Math.min(attempts - 1, BACKOFF_MS.length - 1)]
-          const next: InvestigationState = {
-            fingerprint,
-            attempts,
-            nextAt: new Date(Date.now() + wait).toISOString(),
-            lastError: ai?.kind ?? 'error',
-            history: prior?.history ?? [],
-          }
+          // A provider that refused before anything ran (throttled, no
+          // provider, no budget) spends no attempt, so the finding is
+          // investigated once AI is available again; a provider refusing calls
+          // stops this tick's model calls either way.
+          const failed = nextInvestigationState(prior, fingerprint, err, Date.now(), progress.modelCalls)
+          if (failed.stopTick) modelUnavailable = true
           await prisma.healthFinding.update({
             where: { id: finding.id },
-            data: { details: { ...details, investigation: next } as any },
+            data: { details: { ...details, investigation: failed.state } as any },
           }).catch(() => {})
           continue
         }

@@ -194,11 +194,23 @@ export function validateAnswer(
   return { ok: problems.length === 0, problems }
 }
 
+/** How far an investigation got: its model calls that returned an answer. */
+export interface InvestigationProgress {
+  modelCalls: number
+}
+
 /**
- * Investigate one finding. Throws the gateway's AiError when the model could
- * not be used (no provider, no budget); the caller records the attempt.
+ * Investigate one finding. Throws the gateway's AiError when a model call
+ * fails; the caller records the attempt. `progress` counts the calls that
+ * returned before that, so the caller can tell a failure after part of the
+ * investigation ran from one where none of it did.
  */
-export async function investigateFinding(input: InvestigationInput, runProbe: ProbeRunner, probes: string[]): Promise<Investigation> {
+export async function investigateFinding(
+  input: InvestigationInput,
+  runProbe: ProbeRunner,
+  probes: string[],
+  progress: InvestigationProgress = { modelCalls: 0 },
+): Promise<Investigation> {
   const evidence: EvidenceEntry[] = []
   const tools = [probeTool(probes), COLUMNS_TOOL]
   const messages: Anthropic.MessageParam[] = [{ role: 'user', content: brief(input) }]
@@ -215,6 +227,7 @@ export async function investigateFinding(input: InvestigationInput, runProbe: Pr
       billing: { projectId: input.projectId },
       label: 'autonomy-investigation',
     })
+    progress.modelCalls++
 
     const calls = reply.message.content.filter((b): b is Anthropic.ToolUseBlock => b.type === 'tool_use')
     if (calls.length === 0) {

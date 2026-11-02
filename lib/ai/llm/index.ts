@@ -19,6 +19,9 @@
  *     inference may have run (lib/ai/llm/errors.ts);
  *   - a failure is retried only when the provider rejected it before inference,
  *     so a retry can never run, and bill, a request twice;
+ *   - a call that fails for the deployment's reasons (no provider, no quota or
+ *     access, a spend limit, throttling past the retries) logs one marker line
+ *     an alarm can count, once, after the retries (lib/ai/llm/alerts.ts);
  *   - usage comes back in one shape with cache reads and writes kept apart, and
  *     priced at the model's own cache rates (lib/ai/cost-tracker.ts);
  *   - every customer-paid call that ran is reported to the credit meter of the
@@ -31,6 +34,7 @@
 import type Anthropic from '@anthropic-ai/sdk'
 import { recordAiUsage } from '../cost-tracker'
 import { activeTokenScope, recordTokens } from '../token-meter'
+import { reportAiFailure } from './alerts'
 import { aiAvailability as configuredAvailability, resolveProvider, routeFor, type ProviderConfig } from './config'
 import { AiError, classifyProviderError } from './errors'
 import { buildParams, shouldStream } from './params'
@@ -154,9 +158,23 @@ function finish(
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
 
 export async function generate(req: GenerateRequest): Promise<GenerateResult> {
-  const provider = currentProvider()
-  // A scripted provider stands in for Claude, so it is routed as Claude.
-  const route = routeFor(req.purpose, provider.id === 'scripted' ? 'anthropic' : provider.id)
+  let routed: { provider: ProviderId; model: string } | undefined
+  try {
+    const provider = currentProvider()
+    // A scripted provider stands in for Claude, so it is routed as Claude.
+    const route = routeFor(req.purpose, provider.id === 'scripted' ? 'anthropic' : provider.id)
+    routed = { provider: provider.id, model: route.model }
+    return await callModel(provider, route, req)
+  } catch (err) {
+    // Every way a call ends in failure passes here once, after the retries:
+    // no provider, a spend refusal before sending, or the provider itself.
+    if (err instanceof AiError) reportAiFailure(err, { purpose: req.purpose, ...routed })
+    throw err
+  }
+}
+
+/** One call: reserved, sent (again only while the provider refused it before inference), settled. */
+async function callModel(provider: LlmProvider, route: PurposeRoute, req: GenerateRequest): Promise<GenerateResult> {
   const params = buildParams(route, req)
   const stream = shouldStream(route, params.max_tokens) || !!req.onText
   const payment = paymentOf(req)
