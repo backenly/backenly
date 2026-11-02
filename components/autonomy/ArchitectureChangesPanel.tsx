@@ -44,8 +44,9 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ChevronDown, Layers, Loader2, Pause, Play, Undo2, XCircle } from 'lucide-react'
-import { KIT, KitButton, Tag } from '@/components/inspector/kit'
+import { Layers, Loader2, Pause, Play, Undo2, XCircle } from 'lucide-react'
+import { KitButton, Tag } from '@/components/inspector/kit'
+import { Disclosure, Fact, Facts, Panel, Row, RowList, RowNote, ROW_TEXT, ROW_TITLE, Section } from '@/components/autonomy/rows'
 import type { ArchitectureChangeView } from '@/lib/evolution-engine/views'
 import { ADMIN_ONLY, announceArchitectureChange } from './architecture-decisions'
 
@@ -60,7 +61,6 @@ type RowState =
 /** How many changes the card lists. Older ones are in the activity feed. */
 const MAX_ROWS = 5
 
-const CARD = `relative overflow-hidden ${KIT.radius} border ${KIT.border} ${KIT.surface} ${KIT.inset}`
 
 const TONE: Record<ArchitectureChangeView['status']['tone'], 'neutral' | 'warn' | 'violet' | 'good' | 'bad'> = {
   neutral: 'neutral',
@@ -135,16 +135,9 @@ export function ArchitectureChangesPanel({
   const shown = changes.slice(0, MAX_ROWS)
 
   return (
-    <section className={CARD} aria-labelledby="architecture-changes">
-      <div className="flex items-center gap-2 border-b border-white/[0.06] px-5 py-3.5">
-        <Layers className="size-3.5 text-zinc-400" />
-        <h3 id="architecture-changes" className="text-[13px] font-semibold tracking-tight text-zinc-100">
-          Architecture changes
-        </h3>
-        <span className="text-[12px] tabular-nums text-zinc-400">{shown.length}</span>
-      </div>
-
-      <ul className="divide-y divide-white/[0.04]">
+    <Section id="architecture-changes" title="Architecture changes" count={shown.length}>
+      <Panel>
+      <RowList>
         {shown.map(c => (
           <ChangeRow
             key={c.decisionId}
@@ -158,8 +151,9 @@ export function ArchitectureChangesPanel({
             onCancel={() => setRow(c.decisionId, { phase: 'idle' })}
           />
         ))}
-      </ul>
-    </section>
+      </RowList>
+      </Panel>
+    </Section>
   )
 }
 
@@ -203,40 +197,15 @@ function ChangeRow({
   const announced = note ?? (state.phase === 'confirm_undo' ? `Undo? ${undoEffect}` : '')
 
   return (
-    <li className={`px-5 py-3.5 ${state.phase === 'error' ? 'bg-rose-500/[0.03]' : ''}`}>
-      <p className="sr-only" role="status" aria-live="polite">{announced}</p>
-      <div className="flex items-start gap-3">
-        <div className="min-w-0 flex-1">
-          <p className="text-[13px] font-medium leading-snug text-zinc-100">{c.headline}</p>
-          {c.detail && <p className="mt-1 text-[12.5px] leading-snug text-zinc-400">{c.detail}</p>}
-          {c.waiting && <p className="mt-1 text-[12.5px] leading-snug text-zinc-400">{c.waiting}</p>}
-          {c.outcome?.plain && <p className="mt-1 text-[12.5px] leading-snug text-zinc-300">{c.outcome.plain}</p>}
-          <div className="mt-1.5 flex flex-wrap items-center gap-2">
-            <Tag tone={TONE[c.status.tone] ?? 'neutral'}>{c.status.label}</Tag>
-            <span className="text-[12px] tabular-nums text-zinc-400">{timeAgo(c.at)}</span>
-          </div>
-          {queued && <p className="mt-1.5 text-[12px] text-zinc-400">Waiting on you in the queue above.</p>}
-          {note && <p className="mt-1.5 text-[12.5px] leading-snug text-zinc-400">{note}</p>}
-
-          <Details projectId={projectId} decisionId={c.decisionId} measured={c.outcome?.summary} />
-
-          {state.phase === 'confirm_undo' && (
-            <div className="mt-2 flex items-start gap-2 rounded-md border border-white/[0.08] bg-white/[0.02] px-3 py-2">
-              <Undo2 className="mt-px size-3.5 shrink-0 text-zinc-400" />
-              <p className="text-[12.5px] leading-snug text-zinc-300">{undoEffect}</p>
-            </div>
-          )}
-
-          {state.phase === 'error' && (
-            <div className="mt-2 flex items-start gap-2">
-              <XCircle className="mt-px size-3.5 shrink-0 text-rose-400" />
-              <p role="alert" className="text-[12.5px] leading-snug text-rose-300/90">{state.message}</p>
-            </div>
-          )}
-        </div>
-
-        {!queued && (
-          <div ref={buttons} className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+    <Row
+      icon={Layers}
+      tone={c.status.tone === 'bad' ? 'danger' : c.status.tone === 'good' ? 'done' : 'neutral'}
+      busy={busy}
+      className={state.phase === 'error' ? 'bg-rose-500/[0.03]' : ''}
+      title={<p className={ROW_TITLE}>{c.headline}</p>}
+      actions={
+        queued ? undefined : (
+          <div ref={buttons} className="flex flex-wrap items-center justify-end gap-2">
             {state.phase === 'error' ? (
               <KitButton variant="secondary" onClick={onCancel}>Try again</KitButton>
             ) : state.phase === 'confirm_undo' ? (
@@ -269,9 +238,33 @@ function ChangeRow({
               </>
             )}
           </div>
-        )}
-      </div>
-    </li>
+        )
+      }
+    >
+      <p className="sr-only" role="status" aria-live="polite">{announced}</p>
+      {c.detail && <p className={ROW_TEXT}>{c.detail}</p>}
+      {c.waiting && <p className={ROW_TEXT}>{c.waiting}</p>}
+      {c.outcome?.plain && <p className={`${ROW_TEXT} !text-zinc-300`}>{c.outcome.plain}</p>}
+      <Facts>
+        <Tag tone={TONE[c.status.tone] ?? 'neutral'}>{c.status.label}</Tag>
+        <Fact><span className="tabular-nums">{timeAgo(c.at)}</span></Fact>
+      </Facts>
+      {queued && <RowNote>Waiting on you in the queue above.</RowNote>}
+      {note && <RowNote>{note}</RowNote>}
+
+      <Details projectId={projectId} decisionId={c.decisionId} measured={c.outcome?.summary} />
+
+      {state.phase === 'confirm_undo' && (
+        <div className="mt-2.5 flex items-start gap-2.5 rounded-[7px] border border-white/[0.08] bg-white/[0.02] px-3.5 py-2.5">
+          <Undo2 className="mt-px h-3.5 w-3.5 flex-shrink-0 text-zinc-400" strokeWidth={1.75} />
+          <p className="text-[13px] leading-[19px] text-zinc-200">{undoEffect}</p>
+        </div>
+      )}
+
+      {state.phase === 'error' && (
+        <RowNote tone="danger" icon={XCircle} role="alert">{state.message}</RowNote>
+      )}
+    </Row>
   )
 }
 
@@ -301,20 +294,12 @@ function Details({ projectId, decisionId, measured }: { projectId: string; decis
   }
 
   return (
-    <div className="mt-1.5">
-      <button
-        type="button"
-        onClick={toggle}
-        aria-expanded={open}
-        className="inline-flex items-center gap-1 text-[12.5px] font-medium text-zinc-400 transition-colors hover:text-zinc-200"
-      >
-        View details
-        <ChevronDown className={`size-3 transition-transform ${open ? 'rotate-180' : ''}`} />
-      </button>
-      {history.phase === 'loading' && <p className="mt-1 text-[12.5px] text-zinc-400">Reading its history…</p>}
-      {history.phase === 'error' && <p role="alert" className="mt-1 text-[12.5px] text-rose-300/90">Its history could not be read. Try again in a moment.</p>}
+    <div>
+      <Disclosure open={open} onToggle={() => { void toggle() }}>View details</Disclosure>
+      {history.phase === 'loading' && <p className="mt-1.5 text-[12.5px] text-zinc-400">Reading its history…</p>}
+      {history.phase === 'error' && <p role="alert" className="mt-1.5 text-[12.5px] text-rose-300/90">Its history could not be read. Try again in a moment.</p>}
       {history.phase === 'open' && (
-        <div className="mt-2 space-y-2 border-l border-white/[0.08] pl-3 text-[12.5px] leading-snug">
+        <div className="mt-2.5 space-y-2 border-l-2 border-white/[0.08] pl-3 text-[13px] leading-[19px]">
           {measured && (
             <div>
               <p className="font-medium text-zinc-300">What was measured</p>

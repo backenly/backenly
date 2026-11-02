@@ -40,13 +40,13 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  Radar, RefreshCw, CheckCircle2, Loader2, XCircle, ChevronDown,
-  ClipboardCopy, Check,
+  RefreshCw, CheckCircle2, Loader2, XCircle, ClipboardCopy, Check, Gauge, ShieldAlert, Activity, Wrench,
 } from 'lucide-react'
-import { IconButton, KIT, KitButton, MetaCode, MetaRow } from '@/components/inspector/kit'
+import { IconButton, KitButton, MetaCode, OverflowMenu, StatusDot, TextWithCode } from '@/components/inspector/kit'
 import {
-  groupFindings, CATEGORY_LABEL, severityLabel, severityWord, type FindingGroup,
+  groupFindings, CATEGORY_LABEL, severityWord, type FindingCategory, type FindingGroup,
 } from '@/lib/core/finding-groups'
+import { Disclosure, Fact, Facts, Panel, Row, RowList, RowNote, ROW_TITLE, Section } from '@/components/autonomy/rows'
 import { hasExecutableFix } from '@/lib/core/fix-actions'
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -79,9 +79,6 @@ type RowState =
   | { phase: 'verified' }
   | { phase: 'error'; message: string }
 
-const CARD =
-  `relative overflow-hidden ${KIT.radius} border ${KIT.border} ${KIT.surface} ${KIT.inset}`
-
 function timeAgo(iso: string | null): string {
   if (!iso) return 'unknown'
   const s = Math.floor((Date.now() - new Date(iso).getTime()) / 1000)
@@ -99,18 +96,18 @@ function timeAgo(iso: string | null): string {
  */
 function dispositionCopy(level: Level | undefined, allRepairable: boolean): string {
   if (level === 'CONSERVATIVE') {
-    return 'Backenly found these and has not acted yet. On its next pass, Review-only applies the silent additive ones (indexes, API definitions) and raises everything else for your approval. You can also fix any of them now.'
+    return 'On its next pass, Review-only applies the silent additive ones (indexes, API definitions) and asks you about the rest. You can also fix any of them now.'
   }
   if (level === 'OFF') {
-    return 'Backenly found these while checking the runtime. Autonomy is off, so nothing will be applied until you pick a mode or fix them here.'
+    return 'Autonomy is off, so nothing here is applied until you pick a mode or fix it here.'
   }
   // Only what Backenly has a repair for is queued. A finding with none (a
   // failed verification, a probe of the live API) was promised a next pass
   // that never fixed it.
   if (!allRepairable) {
-    return 'Backenly found these. The ones with Fix now are queued for its next pass and need no approval from you; the others have no repair Backenly can run, so hand them to your coding agent.'
+    return 'Ones with Fix now are queued for Backenly’s next pass and need no approval. The others have no repair Backenly can run, so hand them to your coding agent.'
   }
-  return 'Backenly found these and can fix them itself. They are queued for its next pass and need no approval from you. Fix now to skip the wait, or hand one to your coding agent.'
+  return 'Queued for Backenly’s next pass, with no approval needed. Fix now to skip the wait.'
 }
 
 /** Whether Backenly can run a repair for any member (the same test the Review Queue uses). */
@@ -283,52 +280,51 @@ export function DetectedFindingsPanel({
   if (loading || error || groups.length === 0) return null
 
   return (
-    <section className={CARD}>
-      <div className="flex items-center gap-2.5 border-b border-white/[0.06] px-5 py-3.5">
-        <Radar className="size-3.5 text-violet-300" />
-        <h3 className="text-[13px] font-semibold tracking-tight text-zinc-100">Detected</h3>
-        <span className="text-[12px] font-medium tabular-nums text-violet-300">
-          {openTotal}
+    <Section
+      id="autonomy-detected"
+      title="Detected"
+      count={openTotal}
+      description={dispositionCopy(level, groups.every(repairable))}
+      aside={
+        <>
           {groups.length < openTotal && (
-            <span className="ml-1.5 font-normal text-faint">
+            <span className="text-[12.5px] tabular-nums text-faint">
               in {groups.length} {groups.length === 1 ? 'issue' : 'issues'}
             </span>
           )}
-        </span>
-        <IconButton
-          icon={RefreshCw}
-          label="Refresh findings"
-          onClick={() => fetchHealth(true)}
-          disabled={refreshing}
-          className={`ml-auto ${refreshing ? '[&_svg]:animate-spin' : ''}`}
-        />
-      </div>
-
-      <div className="border-b border-white/[0.06] px-5 py-2.5">
-        <p className="text-[12.5px] leading-relaxed text-faint">{dispositionCopy(level, groups.every(repairable))}</p>
-      </div>
-
-      <ul className="divide-y divide-white/[0.04]">
-        {groups.map(g => (
-          <DetectedRow
-            key={g.key}
-            group={g}
-            state={rowState[g.key] ?? { phase: 'idle' }}
-            onFix={repairable(g) ? () => fixGroup(g) : undefined}
-            onDismiss={() => dismissGroup(g)}
-            onResetError={() => setRow(g.key, { phase: 'idle' })}
+          <IconButton
+            icon={RefreshCw}
+            label="Refresh findings"
+            onClick={() => fetchHealth(true)}
+            disabled={refreshing}
+            className={refreshing ? '[&_svg]:animate-spin' : ''}
           />
-        ))}
-      </ul>
+        </>
+      }
+    >
+      <Panel>
+        <RowList>
+          {groups.map(g => (
+            <DetectedRow
+              key={g.key}
+              group={g}
+              state={rowState[g.key] ?? { phase: 'idle' }}
+              onFix={repairable(g) ? () => fixGroup(g) : undefined}
+              onDismiss={() => dismissGroup(g)}
+              onResetError={() => setRow(g.key, { phase: 'idle' })}
+            />
+          ))}
+        </RowList>
 
-      {/* The preview cap is stated rather than hidden: a project over 50
-          actionable rows would otherwise look like it had exactly 50. */}
-      {openTotal > openFindings.length && (
-        <p className="border-t border-white/[0.06] px-5 py-2.5 text-[12px] tabular-nums text-faint">
-          Showing {openFindings.length} of {openTotal}. The rest appear as these clear.
-        </p>
-      )}
-    </section>
+        {/* The preview cap is stated rather than hidden: a project over 50
+            actionable rows would otherwise look like it had exactly 50. */}
+        {openTotal > openFindings.length && (
+          <p className="border-t border-white/[0.06] px-5 py-3 text-[12.5px] tabular-nums text-faint">
+            Showing {openFindings.length} of {openTotal}. The rest appear as these clear.
+          </p>
+        )}
+      </Panel>
+    </Section>
   )
 }
 
@@ -352,20 +348,16 @@ function DetectedRow({
   const [copied, setCopied] = useState(false)
   const head = g.members[0]
   const many = g.members.length > 1
-  const sev = severityLabel(g.severity)
+  const title = <p className={ROW_TITLE}><TextWithCode text={g.title} codeClassName="text-zinc-100" /></p>
 
   if (state.phase === 'verified') {
     return (
-      <li className="flex items-start gap-3 px-5 py-3.5 animate-fade-in">
-        <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-emerald-400" />
-        <div className="min-w-0 flex-1">
-          <p className="text-[12.5px] font-medium text-zinc-200">{g.title}</p>
-          <MetaRow className="!mt-1">
-            <span>Fixed{many ? ` on ${g.members.length} tables` : ''}</span>
-            <span>Rollback snapshot captured</span>
-          </MetaRow>
-        </div>
-      </li>
+      <Row icon={CheckCircle2} tone="done" title={title} className="animate-fade-in">
+        <Facts>
+          <Fact>Fixed{many ? ` on ${g.members.length} tables` : ''}</Fact>
+          <Fact>Rollback snapshot captured</Fact>
+        </Facts>
+      </Row>
     )
   }
 
@@ -380,75 +372,72 @@ function DetectedRow({
   }
 
   return (
-    <li className={`px-5 py-3.5 transition-colors ${state.phase === 'error' ? 'bg-rose-500/[0.03]' : ''}`}>
-      <div className="flex items-start gap-3">
-        <span
-          className={`mt-1.5 size-1.5 shrink-0 rounded-full ${sev.dot} ${
-            state.phase === 'applying' ? 'animate-pulse' : ''
-          }`}
-        />
-        <div className="min-w-0 flex-1">
-          <p className="text-[12.5px] leading-snug text-zinc-100">{g.title}</p>
-          <MetaRow>
-            <MetaCode>{head.type}</MetaCode>
-            <span>{severityWord(g.severity)}</span>
-            {!many && g.subjects[0] && <MetaCode>{g.subjects[0]}</MetaCode>}
-            <span className="tabular-nums">{timeAgo(head.detectedAt)}</span>
-          </MetaRow>
-
-          {many && (
-            <div className="mt-2">
-              <button
-                onClick={() => setExpanded(v => !v)}
-                aria-expanded={expanded}
-                className="inline-flex items-center gap-1 text-[12.5px] font-medium text-faint transition-colors hover:text-zinc-300"
-              >
-                {g.members.length} findings, one cause
-                <ChevronDown className={`size-3 transition-transform ${expanded ? 'rotate-180' : ''}`} />
-              </button>
-              {expanded && (
-                <ul className="mt-2 space-y-1 border-l border-white/[0.08] pl-3">
-                  {g.members.map((m, i) => (
-                    <li key={m.id} className="font-mono text-[12px] leading-relaxed text-faint">
-                      {g.subjects[i] ?? m.type}
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-          )}
-
-          {state.phase === 'error' && (
-            <div className="mt-2 flex items-start gap-2">
-              <XCircle className="mt-px size-3.5 shrink-0 text-rose-400" />
-              <p className="text-[12.5px] leading-snug text-rose-300/90">{state.message}</p>
-            </div>
-          )}
-        </div>
-
-        <div className="flex shrink-0 items-center gap-2">
-          {state.phase === 'error' ? (
-            <KitButton variant="primary" onClick={onResetError}>Try again</KitButton>
-          ) : (
-            <>
-              {onFix && (
-                <KitButton variant="primary" onClick={onFix} disabled={busy}>
-                  {state.phase === 'applying'
-                    ? <><Loader2 className="size-3.5 animate-spin" /> {many ? `Fixing ${g.members.length}…` : 'Fixing…'}</>
-                    : <><CheckCircle2 className="size-3.5" /> {many ? `Fix all ${g.members.length}` : 'Fix now'}</>}
-                </KitButton>
-              )}
-              <KitButton variant="secondary" onClick={handToAgent} disabled={busy}>
-                {copied ? <Check className="size-3.5 text-emerald-400" /> : <ClipboardCopy className="size-3.5" />}
-                {copied ? 'Copied' : 'Hand to my agent'}
+    <Row
+      icon={CATEGORY_ICON[g.category] ?? Activity}
+      tone={g.severity === 'critical' ? 'danger' : 'neutral'}
+      busy={state.phase === 'applying'}
+      className={state.phase === 'error' ? 'bg-rose-500/[0.03]' : ''}
+      title={title}
+      actions={
+        state.phase === 'error' ? (
+          <KitButton variant="primary" onClick={onResetError}>Try again</KitButton>
+        ) : (
+          <>
+            {onFix && (
+              <KitButton variant="secondary" onClick={onFix} disabled={busy}>
+                {state.phase === 'applying'
+                  ? <><Loader2 className="size-3.5 animate-spin" /> {many ? `Fixing ${g.members.length}…` : 'Fixing…'}</>
+                  : <><Wrench className="size-3.5" /> {many ? `Fix all ${g.members.length}` : 'Fix now'}</>}
               </KitButton>
-              <KitButton variant="secondary" onClick={onDismiss} disabled={busy}>
-                {state.phase === 'dismissing' ? '…' : 'Dismiss'}
-              </KitButton>
-            </>
+            )}
+            <OverflowMenu
+              label={`More actions for: ${g.title}`}
+              disabled={busy}
+              width="w-[230px]"
+              items={[
+                { label: 'Hand to my agent', icon: ClipboardCopy, onClick: () => { void handToAgent() } },
+                { label: state.phase === 'dismissing' ? 'Dismissing…' : 'Dismiss', icon: XCircle, onClick: onDismiss },
+              ]}
+            />
+          </>
+        )
+      }
+    >
+      <Facts>
+        <StatusDot tone={g.severity === 'critical' ? 'failed' : g.severity === 'warning' ? 'attention' : 'neutral'} label={severityWord(g.severity)} />
+        <Fact>{CATEGORY_LABEL[g.category]}</Fact>
+        {!many && g.subjects[0] && !head.type.includes(g.subjects[0]) && <Fact><MetaCode>{g.subjects[0]}</MetaCode></Fact>}
+        <Fact><span className="tabular-nums">{timeAgo(head.detectedAt)}</span></Fact>
+        {copied && <Fact icon={Check} strong>Copied for your agent</Fact>}
+      </Facts>
+
+      {many && (
+        <>
+          <Disclosure open={expanded} onToggle={() => setExpanded(v => !v)}>
+            {g.members.length} findings, one cause
+          </Disclosure>
+          {expanded && (
+            <ul className="mt-2 space-y-1 border-l-2 border-white/[0.08] pl-3">
+              {g.members.map((m, i) => (
+                <li key={m.id} className="font-mono text-[12px] leading-[19px] text-zinc-400">
+                  {g.subjects[i] ?? m.type}
+                </li>
+              ))}
+            </ul>
           )}
-        </div>
-      </div>
-    </li>
+        </>
+      )}
+
+      {state.phase === 'error' && (
+        <RowNote tone="danger" icon={XCircle} role="alert">{state.message}</RowNote>
+      )}
+    </Row>
   )
+}
+
+/** What a finding is about, as the row's tile. */
+const CATEGORY_ICON: Record<FindingCategory, typeof Gauge> = {
+  security: ShieldAlert,
+  performance: Gauge,
+  reliability: Activity,
 }

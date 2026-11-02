@@ -56,8 +56,9 @@
  */
 
 import { useEffect, useRef, useState } from 'react'
-import { CheckCircle2, ChevronDown, Info, Loader2, Undo2, XCircle } from 'lucide-react'
+import { CheckCircle2, Info, Layers, Lock, Loader2, Undo2, XCircle } from 'lucide-react'
 import { KitButton, Tag } from '@/components/inspector/kit'
+import { CodeBlock, Disclosure, Fact, Facts, Row, RowNote, ROW_TEXT, ROW_TITLE } from '@/components/autonomy/rows'
 import type { EvolutionRequestDetails } from '@/lib/evolution-engine/request'
 import type { RiskLevel } from '@/lib/evolution-engine/policy'
 import { ADMIN_ONLY, announceArchitectureChange } from './architecture-decisions'
@@ -223,23 +224,20 @@ export function EvolutionRequestRow({
   // A row this page cannot read is still a row the person can set aside.
   if (!ev) {
     return (
-      <li className="px-5 py-3.5">
-        <div className="flex items-start gap-3">
-          <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-zinc-500" />
-          <div className="min-w-0 flex-1">
-            <p className="text-[12.5px] leading-snug text-zinc-100">{request.reason || 'An architecture change is waiting'}</p>
-            <p className="mt-1 text-[12.5px] leading-snug text-zinc-500">
-              This page cannot read the request. Refresh, or set it aside.
-            </p>
-            {state.phase === 'error' && (
-              <p role="alert" className="mt-1 text-[12.5px] leading-snug text-rose-300/90">{state.message}</p>
-            )}
-          </div>
+      <Row
+        icon={Layers}
+        title={<p className={ROW_TITLE}>{request.reason || 'An architecture change is waiting'}</p>}
+        actions={
           <KitButton variant="secondary" onClick={dismiss} disabled={state.phase === 'busy'}>
             Not now
           </KitButton>
-        </div>
-      </li>
+        }
+      >
+        <p className={ROW_TEXT}>This page cannot read the request. Refresh, or set it aside.</p>
+        {state.phase === 'error' && (
+          <RowNote tone="danger" icon={XCircle} role="alert">{state.message}</RowNote>
+        )}
+      </Row>
     )
   }
 
@@ -249,13 +247,9 @@ export function EvolutionRequestRow({
 
   if (state.phase === 'done') {
     return (
-      <li className="flex items-start gap-3 px-5 py-3.5 animate-fade-in">
-        <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-emerald-400" />
-        <div className="min-w-0 flex-1">
-          <p className="text-[12.5px] font-medium text-zinc-200">{s.headline}</p>
-          <p role="status" aria-live="polite" className="mt-1 text-[12.5px] leading-snug text-zinc-400">{state.message}</p>
-        </div>
-      </li>
+      <Row icon={CheckCircle2} tone="done" title={<p className={ROW_TITLE}>{s.headline}</p>} className="animate-fade-in">
+        <p role="status" aria-live="polite" className={ROW_TEXT}>{state.message}</p>
+      </Row>
     )
   }
 
@@ -266,85 +260,14 @@ export function EvolutionRequestRow({
   const accessChecked = ev.rehearsal?.authorization === 'passed'
 
   return (
-    <li className={`px-5 py-3.5 transition-colors ${state.phase === 'error' ? 'bg-rose-500/[0.03]' : ''}`}>
-      <p className="sr-only" role="status" aria-live="polite">{announced}</p>
-      <div className="flex items-start gap-3">
-        <span
-          className={`mt-1.5 size-1.5 shrink-0 rounded-full ${asksApproval ? 'bg-violet-400' : 'bg-amber-400'} ${
-            busy ? 'animate-pulse' : ''
-          }`}
-        />
-        <div className="min-w-0 flex-1">
-          <p className="text-[13px] font-medium leading-snug text-zinc-100">{s.headline}</p>
-
-          {asksApproval ? (
-            <>
-              {s.change && <p className="mt-1 text-[12.5px] leading-snug text-zinc-400">{s.change}</p>}
-              {s.reason && <p className="mt-1 text-[12.5px] leading-snug text-zinc-400">{s.reason}</p>}
-              {RISK_LABEL[ev.risk] && (
-                <div className="mt-2">
-                  <Tag tone={RISK_TONE[ev.risk]}>{RISK_LABEL[ev.risk]}</Tag>
-                </div>
-              )}
-              <p className="mt-2 text-[12.5px] leading-snug text-zinc-400">
-                {s.compatibility}{' '}
-                {accessChecked
-                  ? s.access ?? ''
-                  : 'Who can read or change this data was not checked on the copy, so Backenly does not promise it stays the same.'}
-              </p>
-              {s.rollback && <p className="mt-1 text-[12.5px] leading-snug text-zinc-400">{s.rollback}</p>}
-              {rehearsed ? (
-                <p className="mt-2 text-[12px] leading-snug text-zinc-400">
-                  {accessChecked
-                    ? 'Rehearsed on a copy of your data, including who can read and change it.'
-                    : 'Rehearsed on a copy of your data.'}
-                </p>
-              ) : (
-                <p className="mt-2 text-[12px] leading-snug text-zinc-400">
-                  Not rehearsed yet. Backenly rehearses a change on a copy of your data before it can be approved.
-                </p>
-              )}
-            </>
-          ) : (
-            <p className="mt-1 text-[12.5px] leading-snug text-zinc-400">
-              {ev.stoppedBecause ? `It stopped because ${lowerFirst(ev.stoppedBecause)}` : 'It stopped part-way.'}
-              {keeps ? ' It is still in place. Keep it, or undo it.' : ' Resume it, or undo it.'}
-            </p>
-          )}
-
-          <p className="mt-1.5 text-[12px] tabular-nums text-zinc-400">{timeAgo(request.detectedAt)}</p>
-
-          <TechnicalDetails
-            ev={ev}
-            projectId={projectId}
-            findingId={request.id}
-            open={showTechnical}
-            onToggle={() => setShowTechnical(v => !v)}
-          />
-
-          {state.phase === 'confirm_undo' && (
-            <div className="mt-2 flex items-start gap-2 rounded-md border border-white/[0.08] bg-white/[0.02] px-3 py-2">
-              <Undo2 className="mt-px size-3.5 shrink-0 text-zinc-400" />
-              <p className="text-[12.5px] leading-snug text-zinc-300">{s.rollback || `Undo puts ${ev.subject} back exactly as it was.`}</p>
-            </div>
-          )}
-
-          {state.phase === 'moved' && (
-            <div className="mt-2 flex items-start gap-2">
-              <Info className="mt-px size-3.5 shrink-0 text-amber-400" />
-              <p className="text-[12.5px] leading-snug text-amber-200/90">{state.message}</p>
-            </div>
-          )}
-
-          {state.phase === 'error' && (
-            <div className="mt-2 flex items-start gap-2">
-              <XCircle className="mt-px size-3.5 shrink-0 text-rose-400" />
-              <p role="alert" className="text-[12.5px] leading-snug text-rose-300/90">{state.message}</p>
-            </div>
-          )}
-        </div>
-
-        <div ref={actions} className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+    <Row
+      icon={Layers}
+      tone={asksApproval ? 'accent' : 'attention'}
+      busy={busy}
+      className={state.phase === 'error' ? 'bg-rose-500/[0.03]' : ''}
+      title={<p className={ROW_TITLE}>{s.headline}</p>}
+      actions={
+        <div ref={actions} className="flex flex-wrap items-center justify-end gap-2">
           {state.phase === 'error' ? (
             <KitButton variant="secondary" onClick={() => setState({ phase: 'idle' })}>
               Try again
@@ -361,7 +284,7 @@ export function EvolutionRequestRow({
           ) : asksApproval ? (
             <>
               <KitButton variant="secondary" onClick={dismiss} disabled={busy}>
-                {busyWith('dismiss') ? <Loader2 className="size-3 animate-spin" /> : null}
+                {busyWith('dismiss') ? <Loader2 className="size-3.5 animate-spin" /> : null}
                 Decline
               </KitButton>
               {rehearsed && (
@@ -377,7 +300,7 @@ export function EvolutionRequestRow({
           ) : (
             <>
               <KitButton variant="secondary" onClick={dismiss} disabled={busy}>
-                {busyWith('dismiss') ? <Loader2 className="size-3 animate-spin" /> : null}
+                {busyWith('dismiss') ? <Loader2 className="size-3.5 animate-spin" /> : null}
                 Not now
               </KitButton>
               <KitButton variant="secondary" onClick={() => setState({ phase: 'confirm_undo' })} disabled={busy}>
@@ -392,8 +315,74 @@ export function EvolutionRequestRow({
             </>
           )}
         </div>
-      </div>
-    </li>
+      }
+    >
+      <p className="sr-only" role="status" aria-live="polite">{announced}</p>
+
+      {asksApproval ? (
+        <>
+          {s.change && <p className={`${ROW_TEXT} !text-zinc-300`}>{s.change}</p>}
+          {s.reason && <p className={ROW_TEXT}>{s.reason}</p>}
+          {/* What a person weighs before saying yes, one labelled line each. */}
+          <dl className="mt-3 grid grid-cols-1 gap-x-5 gap-y-2.5 rounded-[8px] border border-white/[0.07] bg-white/[0.02] px-4 py-3 sm:grid-cols-[132px_minmax(0,1fr)]">
+            <dt className="text-[12.5px] font-medium leading-[19px] text-zinc-300">Apps keep working</dt>
+            <dd className="text-[13px] leading-[19px] text-zinc-400">
+              {s.compatibility}{' '}
+              {accessChecked
+                ? s.access ?? ''
+                : 'Who can read or change this data was not checked on the copy, so Backenly does not promise it stays the same.'}
+            </dd>
+            {s.rollback && (
+              <>
+                <dt className="text-[12.5px] font-medium leading-[19px] text-zinc-300">If you undo it</dt>
+                <dd className="text-[13px] leading-[19px] text-zinc-400">{s.rollback}</dd>
+              </>
+            )}
+            <dt className="text-[12.5px] font-medium leading-[19px] text-zinc-300">Rehearsal</dt>
+            <dd className="text-[13px] leading-[19px] text-zinc-400">
+              {rehearsed
+                ? accessChecked
+                  ? 'Rehearsed on a copy of your data, including who can read and change it.'
+                  : 'Rehearsed on a copy of your data.'
+                : 'Not rehearsed yet. Backenly rehearses a change on a copy of your data before it can be approved.'}
+            </dd>
+          </dl>
+        </>
+      ) : (
+        <p className={ROW_TEXT}>
+          {ev.stoppedBecause ? `It stopped because ${lowerFirst(ev.stoppedBecause)}` : 'It stopped part-way.'}
+          {keeps ? ' It is still in place. Keep it, or undo it.' : ' Resume it, or undo it.'}
+        </p>
+      )}
+
+      <Facts>
+        {asksApproval && RISK_LABEL[ev.risk] && <Tag tone={RISK_TONE[ev.risk]}>{RISK_LABEL[ev.risk]}</Tag>}{' '}
+        <Fact><span className="tabular-nums">{timeAgo(request.detectedAt)}</span></Fact>
+      </Facts>
+
+      <TechnicalDetails
+        ev={ev}
+        projectId={projectId}
+        findingId={request.id}
+        open={showTechnical}
+        onToggle={() => setShowTechnical(v => !v)}
+      />
+
+      {state.phase === 'confirm_undo' && (
+        <div className="mt-2.5 flex items-start gap-2.5 rounded-[7px] border border-white/[0.08] bg-white/[0.02] px-3.5 py-2.5">
+          <Undo2 className="mt-px h-3.5 w-3.5 flex-shrink-0 text-zinc-400" strokeWidth={1.75} />
+          <p className="text-[13px] leading-[19px] text-zinc-200">{s.rollback || `Undo puts ${ev.subject} back exactly as it was.`}</p>
+        </div>
+      )}
+
+      {state.phase === 'moved' && (
+        <RowNote tone="attention" icon={Info}>{state.message}</RowNote>
+      )}
+
+      {state.phase === 'error' && (
+        <RowNote tone="danger" icon={XCircle} role="alert">{state.message}</RowNote>
+      )}
+    </Row>
   )
 }
 
@@ -449,24 +438,16 @@ function TechnicalDetails({
   const migration = t.clientMigration ?? []
 
   return (
-    <div className="mt-2">
-      <button
-        type="button"
-        onClick={onToggle}
-        aria-expanded={open}
-        className="inline-flex items-center gap-1 text-[12.5px] font-medium text-zinc-500 transition-colors hover:text-zinc-300"
-      >
-        Technical details
-        <ChevronDown className={`size-3 transition-transform ${open ? 'rotate-180' : ''}`} />
-      </button>
+    <div>
+      <Disclosure open={open} onToggle={onToggle}>Technical details</Disclosure>
 
       {open && (
-        <div className="mt-2 space-y-3 border-l border-white/[0.08] pl-3 text-[12.5px] leading-snug">
+        <div className="mt-2.5 space-y-4 rounded-[8px] border border-white/[0.07] bg-white/[0.015] px-4 py-3.5 text-[13px] leading-[19px]">
           {steps.length > 0 && (
             <div>
-              <p className="font-medium text-zinc-400">Steps</p>
+              <p className={TECH_HEADING}>Steps</p>
               {t.sqlWithheld && (
-                <p className="mt-0.5 text-zinc-500">
+                <p className="mt-1 text-zinc-400">
                   {live.phase === 'shown' && !live.current
                     ? 'The table changed since this was prepared. Backenly rehearses it again and asks about the new version.'
                     : live.phase === 'error'
@@ -479,7 +460,7 @@ function TechnicalDetails({
                         type="button"
                         onClick={showLive}
                         disabled={live.phase === 'loading'}
-                        className="font-medium text-zinc-400 transition-colors hover:text-zinc-200 disabled:opacity-50"
+                        className="font-medium text-zinc-200 underline decoration-white/20 underline-offset-2 transition-colors hover:text-zinc-50 disabled:opacity-50"
                       >
                         {live.phase === 'loading' ? 'Reading it…' : 'Show it'}
                       </button>
@@ -487,34 +468,34 @@ function TechnicalDetails({
                   )}
                 </p>
               )}
-              <ol className="mt-1 space-y-2">
+              <ol className="mt-2 space-y-3">
                 {steps.map((st, i) => (
                   <li key={i}>
-                    <p className="text-zinc-300">
-                      {i + 1}. {st.title}
-                    </p>
-                    {st.why && <p className="mt-0.5 text-zinc-500">{st.why}</p>}
-                    {st.humanOnly && (
-                      <p className="mt-0.5 text-zinc-500">Left to a person. Backenly never runs this step.</p>
-                    )}
-                    {sqlOf(i, st.sql).length > 0 && (
-                      <div className="mt-1">
-                        <button
-                          type="button"
-                          onClick={() => setSqlOpen(prev => ({ ...prev, [i]: !prev[i] }))}
-                          aria-expanded={!!sqlOpen[i]}
-                          className="inline-flex items-center gap-1 text-[12px] text-zinc-500 transition-colors hover:text-zinc-300"
-                        >
-                          SQL{sqlOf(i, st.sql).length > 1 ? ` (${sqlOf(i, st.sql).length} statements)` : ''}
-                          <ChevronDown className={`size-3 transition-transform ${sqlOpen[i] ? 'rotate-180' : ''}`} />
-                        </button>
-                        {sqlOpen[i] && (
-                          <pre className="mt-1 overflow-x-auto whitespace-pre-wrap break-words rounded-md border border-white/[0.07] bg-[#08090a] px-3 py-2 font-mono text-[12px] leading-relaxed text-zinc-300">
-                            {sqlOf(i, st.sql).join('\n\n')}
-                          </pre>
-                        )}
-                      </div>
-                    )}
+                    <div className="min-w-0">
+                      <p className="font-medium tabular-nums text-zinc-200">
+                        {i + 1}. {st.title}
+                      </p>
+                      {st.why && <p className="mt-0.5 text-zinc-400">{st.why}</p>}
+                      {st.humanOnly && (
+                        <p className="mt-1 inline-flex items-center gap-1.5 text-zinc-200">
+                          <Lock className="h-3.5 w-3.5 flex-shrink-0 text-zinc-400" strokeWidth={1.75} />
+                          Left to a person. Backenly never runs this step.
+                        </p>
+                      )}
+                      {sqlOf(i, st.sql).length > 0 && (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => setSqlOpen(prev => ({ ...prev, [i]: !prev[i] }))}
+                            aria-expanded={!!sqlOpen[i]}
+                            className="mt-1 block text-[12.5px] text-zinc-400 underline decoration-white/15 underline-offset-2 transition-colors hover:text-zinc-100"
+                          >
+                            {sqlOpen[i] ? 'Hide the SQL' : `SQL${sqlOf(i, st.sql).length > 1 ? ` (${sqlOf(i, st.sql).length} statements)` : ''}`}
+                          </button>
+                          {sqlOpen[i] && <CodeBlock className="!mt-1.5">{sqlOf(i, st.sql).join('\n\n')}</CodeBlock>}
+                        </>
+                      )}
+                    </div>
                   </li>
                 ))}
               </ol>
@@ -523,16 +504,18 @@ function TechnicalDetails({
 
           {(evidence.length > 0 || pressure.length > 0) && (
             <div>
-              <p className="font-medium text-zinc-400">Evidence</p>
-              <ul className="mt-1 space-y-0.5">
+              <p className={TECH_HEADING}>Evidence</p>
+              <ul className="mt-1.5 space-y-1">
                 {evidence.map((e, i) => (
-                  <li key={`e${i}`} className="text-zinc-500">
-                    <span className="text-zinc-400">{VERDICT_LABEL[e.verdict] ?? e.verdict}:</span> {e.detail}
+                  <li key={`e${i}`} className="grid grid-cols-[104px_minmax(0,1fr)] gap-x-3">
+                    <span className="text-zinc-300">{VERDICT_LABEL[e.verdict] ?? e.verdict}</span>
+                    <span className="text-zinc-400">{e.detail}</span>
                   </li>
                 ))}
                 {pressure.map((p, i) => (
-                  <li key={`p${i}`} className="text-zinc-500">
-                    <span className="text-zinc-400">Cost:</span> {p.detail}
+                  <li key={`p${i}`} className="grid grid-cols-[104px_minmax(0,1fr)] gap-x-3">
+                    <span className="text-zinc-300">Cost</span>
+                    <span className="text-zinc-400">{p.detail}</span>
                   </li>
                 ))}
               </ul>
@@ -541,28 +524,26 @@ function TechnicalDetails({
 
           {t.semanticBoundary && (
             <div>
-              <p className="font-medium text-zinc-400">What this does not decide</p>
-              <p className="mt-1 text-zinc-500">{t.semanticBoundary}</p>
+              <p className={TECH_HEADING}>What this does not decide</p>
+              <p className="mt-1 text-zinc-400">{t.semanticBoundary}</p>
             </div>
           )}
 
           {caveats.length > 0 && (
-            <ul className="space-y-0.5">
+            <ul className="space-y-1">
               {caveats.map((c, i) => (
-                <li key={i} className="text-zinc-500">{c}</li>
+                <li key={i} className="text-zinc-400">{c}</li>
               ))}
             </ul>
           )}
 
           {blockers.length > 0 && (
             <div>
-              <p className="font-medium text-zinc-400">Before the old columns could ever be removed</p>
-              <p className="mt-1 text-zinc-500">
-                They stay in place after this change. Someone would first have to migrate:
-              </p>
-              <ul className="mt-1 list-disc space-y-0.5 pl-4">
+              <p className={TECH_HEADING}>Before the old columns could ever be removed</p>
+              <p className="mt-1 text-zinc-400">They stay in place after this change. Someone would first have to migrate:</p>
+              <ul className="mt-1 list-disc space-y-0.5 pl-4 marker:text-zinc-600">
                 {blockers.map((b, i) => (
-                  <li key={i} className="text-zinc-500">{b}</li>
+                  <li key={i} className="text-zinc-400">{b}</li>
                 ))}
               </ul>
             </div>
@@ -570,13 +551,16 @@ function TechnicalDetails({
 
           {migration.length > 0 && (
             <div>
-              <p className="font-medium text-zinc-400">For your client code, when you are ready</p>
-              <ul className="mt-1 space-y-1.5">
+              <p className={TECH_HEADING}>For your client code, when you are ready</p>
+              <ul className="mt-1.5 space-y-2">
                 {migration.map((m, i) => (
                   <li key={i}>
-                    <p className="text-zinc-500">To {m.purpose}:</p>
-                    <p className="font-mono text-[12px] text-zinc-500">before {m.before}</p>
-                    <p className="font-mono text-[12px] text-zinc-400">after&nbsp; {m.after}</p>
+                    <p className="text-zinc-400">To {m.purpose}:</p>
+                    {/* Not a <pre>: the only statements on this row sit behind their SQL toggles. */}
+                    <div className="mt-1 space-y-0.5 rounded-[7px] border border-white/[0.08] bg-[#08090a] px-3.5 py-2.5 font-mono text-[12px] leading-[19px] [overflow-wrap:anywhere]">
+                      <p className="text-zinc-500">before&nbsp; {m.before}</p>
+                      <p className="text-zinc-300">after&nbsp;&nbsp; {m.after}</p>
+                    </div>
                   </li>
                 ))}
               </ul>
@@ -587,3 +571,5 @@ function TechnicalDetails({
     </div>
   )
 }
+
+const TECH_HEADING = 'text-[12.5px] font-medium text-zinc-300'

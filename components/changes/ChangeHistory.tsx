@@ -1,14 +1,20 @@
 'use client'
 
 /**
- * History: every change to the backend, one line each, newest first.
+ * History: every change to the backend, newest first, under the day it was made.
  *
- *   #184  Added column likes to posts            Applied · Verified        2h ago  ⋯
- *         Claude Code · Database
- *   #185  Created bucket avatars                 Recovered automatically   1h ago  ⋯
- *         Backenly · Storage
- *         Production healthy · View details
+ *   Today
+ *   (D)  Added column likes to posts                          ✓ Verified   2h ago  ⋯
+ *        demo@example.com, approving Claude Code's request  [Database]  #184
+ *   (✦)  Created bucket avatars                   ● Recovered automatically  1h ago  ⋯
+ *        Backenly  [Storage]  #185
+ *        Production healthy · View details
  *   ── Published v3 · Added billing                                       2d ago  ⋯
+ *
+ * Who made a change is the row's mark: a person's initial, the agent, or
+ * Backenly. A change that applied and verified, which is most of them, says so
+ * quietly; only a state that asks for a look (restored, recovered, waiting,
+ * failed) is set as a status.
  *
  * One history for the schema and the rest of the backend: buckets, functions,
  * webhooks, environment, keys, auth and integrations are rows here like a
@@ -25,8 +31,9 @@
 
 import { Fragment, useCallback, useEffect, useState } from 'react'
 import { useSearchParams } from 'next/navigation'
-import { AlertTriangle, Bot, Check, FileText, History, Redo2, Rocket, RotateCcw, Sparkles, Undo2, User } from 'lucide-react'
-import { EmptyState, KitButton, KitConfirmDialog, KitNote, OverflowMenu, Skeleton, StatusDot } from '@/components/inspector/kit'
+import { AlertTriangle, Bot, Check, FileText, History, Redo2, Rocket, RotateCcw, Undo2 } from 'lucide-react'
+import { EmptyState, KitButton, KitConfirmDialog, KitNote, OverflowMenu, Skeleton, StatusDot, Tag } from '@/components/inspector/kit'
+import { BrandMark } from '@/components/site/BrandMark'
 import { FOCUS_INSET } from '@/components/console/tokens'
 import type { ChangeSummary } from '@/lib/changes/history'
 import type { PublishedVersion } from '@/lib/deployment/published-versions'
@@ -42,9 +49,78 @@ interface Page {
   canManage?: boolean
 }
 
-function ActorIcon({ type }: { type: ChangeSummary['actor']['type'] }) {
-  const Icon = type === 'agent' ? Bot : type === 'person' ? User : Sparkles
-  return <Icon className="h-3.5 w-3.5 flex-shrink-0 text-zinc-600" strokeWidth={1.75} aria-hidden />
+/** Who made the change, as the row's mark: a person's initial, the agent, or Backenly. */
+function ActorMark({ actor }: { actor: ChangeSummary['actor'] }) {
+  const base = 'flex h-[30px] w-[30px] flex-shrink-0 items-center justify-center'
+  if (actor.type === 'person') {
+    return (
+      <span aria-hidden className={`${base} rounded-full border border-white/[0.10] bg-zinc-800 text-[12.5px] font-medium uppercase text-zinc-200`}>
+        {(actor.label.trim()[0] ?? '?').toUpperCase()}
+      </span>
+    )
+  }
+  if (actor.type === 'agent') {
+    return (
+      <span aria-hidden className={`${base} rounded-[8px] border border-white/[0.08] bg-white/[0.035]`}>
+        <Bot className="h-[15px] w-[15px] text-zinc-300" strokeWidth={1.75} />
+      </span>
+    )
+  }
+  return (
+    <span aria-hidden className={base}>
+      <BrandMark size={30} />
+    </span>
+  )
+}
+
+/** "demo@example.com, approving Claude Code's request": the who, then the rest. */
+function ActorWords({ label }: { label: string }) {
+  const at = label.indexOf(', ')
+  if (at === -1) return <span className="text-zinc-300">{label}</span>
+  return (
+    <>
+      <span className="text-zinc-300">{label.slice(0, at)}</span>
+      {label.slice(at)}
+    </>
+  )
+}
+
+/** A change that applied and verified says so quietly; anything else is a status. */
+function Outcome({ c, className = '' }: { c: ChangeSummary; className?: string }) {
+  const s = outcomeOf(c)
+  if (c.outcome.state === 'healthy') {
+    return (
+      <span className={`inline-flex items-center gap-1.5 text-[12.5px] leading-[16px] text-faint ${className}`}>
+        <Check className="h-3.5 w-3.5 text-zinc-500" strokeWidth={2} aria-hidden />
+        Verified
+      </span>
+    )
+  }
+  if (c.outcome.state === 'restored') {
+    return (
+      <span className={`inline-flex items-center gap-1.5 text-[12.5px] leading-[16px] text-zinc-200 ${className}`}>
+        <RotateCcw className="h-3.5 w-3.5 text-zinc-400" strokeWidth={1.75} aria-hidden />
+        {s.label}
+      </span>
+    )
+  }
+  return <StatusDot tone={s.tone} label={s.label} className={`!text-[12.5px] ${className}`} />
+}
+
+/** The day a change belongs under: Today, Yesterday, or "Sun 2 Nov". */
+function dayOf(iso: string): string {
+  const d = new Date(iso)
+  const today = new Date()
+  const start = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime()
+  const days = Math.round((start(today) - start(d)) / 86_400_000)
+  if (days === 0) return 'Today'
+  if (days === 1) return 'Yesterday'
+  return d.toLocaleDateString('en-GB', {
+    weekday: 'short',
+    day: 'numeric',
+    month: 'short',
+    ...(d.getFullYear() !== today.getFullYear() ? { year: 'numeric' } : {}),
+  })
 }
 
 /** The line under the meta, when there is something to know. */
@@ -61,15 +137,15 @@ function SecondLine({ c, onDetails, onDecide }: { c: ChangeSummary; onDetails: (
   )
   switch (c.outcome.state) {
     case 'recovered':
-      return <>Production healthy · {link('View details', onDetails)}</>
+      return <>Production healthy. {link('View details', onDetails)}</>
     case 'restored':
-      return <>{c.outcome.by ? `By ${c.outcome.by.label}` : 'Restored'}{c.outcome.at ? ` · ${ago(c.outcome.at)}` : ''}</>
+      return <>{c.outcome.by ? `Restored by ${c.outcome.by.label}` : 'Restored'}{c.outcome.at ? `, ${ago(c.outcome.at)}` : ''}</>
     case 'awaiting_approval':
     case 'needs_attention':
       return (
         <>
           <span className="[overflow-wrap:anywhere]">{c.outcome.note ?? 'A person needs to decide what happens to this change.'}</span>
-          {onDecide && <> · {link('Review', onDecide)}</>}
+          {onDecide && <>{' '}{link('Review', onDecide)}</>}
         </>
       )
     case 'kept':
@@ -236,13 +312,13 @@ export function ChangeHistory({ projectId, resource = null }: { projectId: strin
 
   const marker = (v: PublishedVersion) => (
     <li key={`v${v.id}`} className="group relative">
-      <div className="grid grid-cols-[2.75rem_minmax(0,1fr)_auto] items-center gap-x-2 bg-white/[0.012] px-4 py-2.5 pr-12 sm:px-5 sm:pr-14">
-        <Rocket className="h-3.5 w-3.5 text-zinc-500" strokeWidth={1.75} aria-hidden />
+      <div className="grid grid-cols-[30px_minmax(0,1fr)_auto] items-center gap-x-3.5 bg-white/[0.015] px-4 py-2.5 pr-12 sm:px-5 sm:pr-14">
+        <span className="flex justify-center"><Rocket className="h-3.5 w-3.5 text-zinc-500" strokeWidth={1.75} aria-hidden /></span>
         <span className="min-w-0 truncate text-[12.5px] text-zinc-300">
           Published v{v.version}
           {v.changeSummary && v.changeSummary !== 'Published' && <span className="text-faint"> · {v.changeSummary}</span>}
         </span>
-        <span className="w-[56px] text-right text-[12px] tabular-nums text-faint" title={new Date(v.publishedAt).toLocaleString()}>
+        <span className="w-[64px] text-right text-[12.5px] tabular-nums text-faint" title={new Date(v.publishedAt).toLocaleString()}>
           {ago(v.publishedAt)}
         </span>
       </div>
@@ -297,59 +373,61 @@ export function ChangeHistory({ projectId, resource = null }: { projectId: strin
           className="!py-12"
         />
       ) : (
-        <ul className="divide-y divide-white/[0.05]">
+        <ul className="divide-y divide-white/[0.06]">
           {changes.map((c, idx) => {
             const s = outcomeOf(c)
             const decide = canManage && awaitsDecision(c) && c.action?.available ? () => setRestoreFor(c) : null
             const second = <SecondLine c={c} onDetails={() => setDetailsFor(c.id)} onDecide={decide} />
             const hasSecond = !['healthy', 'in_progress', 'failed'].includes(c.outcome.state) &&
               !((c.outcome.state === 'kept' || c.outcome.state === 'unverified') && !c.outcome.note)
+            const day = dayOf(c.createdAt)
+            const newDay = idx === 0 || dayOf(changes[idx - 1].createdAt) !== day
             return (
               <Fragment key={c.id}>
+                {newDay && (
+                  <li aria-hidden className="bg-white/[0.012] px-4 py-2 text-[12px] font-medium leading-[16px] text-faint sm:px-5">
+                    {day}
+                  </li>
+                )}
                 {(markers.get(idx) ?? []).map(marker)}
                 <li className="group relative transition-colors hover:bg-white/[0.025]">
                   {/* The summary is the row's one button, stretched over the row (after:inset-0),
                       so the whole row opens the details while the links and the menu in it stay
                       their own controls, not controls inside a control. */}
-                  <div className="grid grid-cols-[2.75rem_minmax(0,1fr)_auto] items-start gap-x-2 px-4 py-3 pr-12 sm:px-5 sm:pr-14">
-                    <span className="pt-px font-mono text-[12.5px] tabular-nums text-faint">#{c.seq}</span>
+                  <div className="grid grid-cols-[30px_minmax(0,1fr)_auto] items-start gap-x-3.5 px-4 py-3.5 pr-12 sm:px-5 sm:pr-14">
+                    <ActorMark actor={c.actor} />
                     <span className="min-w-0">
                       <button
                         type="button"
                         onClick={() => setDetailsFor(c.id)}
                         aria-label={`Change #${c.seq}: ${c.summary}. ${s.label}`}
                         title={c.summary}
-                        className="block w-full truncate text-left text-[13px] text-zinc-100 after:absolute after:inset-0 after:content-[''] focus-visible:outline-none focus-visible:after:ring-2 focus-visible:after:ring-inset focus-visible:after:ring-violet-300/60"
+                        className="block w-full truncate text-left text-[13.5px] font-medium leading-[20px] tracking-[-0.006em] text-zinc-50 after:absolute after:inset-0 after:content-[''] focus-visible:outline-none focus-visible:after:ring-2 focus-visible:after:ring-inset focus-visible:after:ring-violet-300/60"
                       >
                         {c.summary}
                       </button>
                       {/* Wraps rather than truncates: a name cut to "Y…" says nothing. */}
-                      <span className="mt-1 flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[12px] text-faint">
-                        <span className="flex min-w-0 max-w-full items-center gap-1.5">
-                          <ActorIcon type={c.actor.type} />
-                          <span className="truncate">{c.actor.label}</span>
+                      <span className="mt-1 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-[12.5px] leading-[18px] text-faint">
+                        <span className="min-w-0 [overflow-wrap:anywhere]">
+                          <ActorWords label={c.actor.label} />
                         </span>
-                        {!resource && (
-                          <>
-                            <span className="text-zinc-700" aria-hidden>·</span>
-                            <span>{resourceLabels(c.resources)}</span>
-                          </>
-                        )}
+                        {!resource && <Tag>{resourceLabels(c.resources)}</Tag>}
+                        <span className="tabular-nums">#{c.seq}</span>
                         {/* On a phone the status takes its own line under the meta. */}
                         <span className="basis-full sm:hidden">
-                          <StatusDot tone={s.tone} label={s.label} />
+                          <Outcome c={c} />
                         </span>
                       </span>
-                      {hasSecond && <span className="mt-1 block text-[12px] leading-[18px] text-faint">{second}</span>}
+                      {hasSecond && <span className="mt-1 block text-[12.5px] leading-[18px] text-zinc-400">{second}</span>}
                     </span>
-                    <span className="flex items-center gap-4 pt-px">
-                      <StatusDot tone={s.tone} label={s.label} className="hidden sm:inline-flex" />
-                      <span className="w-[56px] text-right text-[12px] tabular-nums text-faint" title={new Date(c.createdAt).toLocaleString()}>
+                    <span className="flex items-center gap-4 pt-[2px]">
+                      <Outcome c={c} className="hidden sm:inline-flex" />
+                      <span className="w-[64px] text-right text-[12.5px] tabular-nums text-faint" title={new Date(c.createdAt).toLocaleString()}>
                         {ago(c.createdAt)}
                       </span>
                     </span>
                   </div>
-                  <div className="absolute right-2 top-2.5 z-[1] sm:right-3">
+                  <div className="absolute right-2 top-3 z-[1] sm:right-3">
                     <OverflowMenu label={`Actions for change #${c.seq}`} items={menuFor(c, idx === 0 && !resource)} width="w-[220px]" />
                   </div>
                 </li>

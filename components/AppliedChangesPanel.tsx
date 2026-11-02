@@ -40,11 +40,9 @@
  */
 
 import { useCallback, useMemo, useState } from 'react'
-import {
-  History, Undo2, Loader2, XCircle, ShieldAlert, Lock, ChevronDown,
-  ClipboardCopy, Check,
-} from 'lucide-react'
-import { KIT, KitButton, MetaCode, MetaRow, StatusDot } from '@/components/inspector/kit'
+import { Undo2, Loader2, XCircle, ShieldAlert, Lock, Wrench, CheckCircle2 } from 'lucide-react'
+import { CopyButton, KitButton, MetaCode, StatusDot } from '@/components/inspector/kit'
+import { CodeBlock, Disclosure, Fact, Facts, Panel, Row, RowList, RowNote, ROW_TEXT, ROW_TITLE, Section } from '@/components/autonomy/rows'
 
 export interface AppliedChange {
   findingId: string
@@ -68,8 +66,6 @@ type RowState =
   | { phase: 'reverted'; message: string }
   | { phase: 'error'; message: string }
 
-const CARD =
-  `relative overflow-hidden ${KIT.radius} border ${KIT.border} ${KIT.surface} ${KIT.inset}`
 
 function timeAgo(iso: string): string {
   const s = Math.floor((Date.now() - new Date(iso).getTime()) / 1000)
@@ -150,42 +146,22 @@ export function AppliedChangesPanel({
   if (changes.length === 0) return null
 
   return (
-    <section className={CARD}>
-      <div className="flex items-center justify-between border-b border-white/[0.06] px-5 py-3.5">
-        <div className="flex items-center gap-2">
-          <History className="size-3.5 text-zinc-400" />
-          <h3 className="text-[13px] font-semibold tracking-tight text-zinc-100">
-            Changes Backenly made
-          </h3>
-          <span className="text-[12px] tabular-nums text-faint">
-            {changes.length}
-          </span>
-        </div>
-        <span className="text-[12px] tabular-nums text-faint">
-          {revertibleCount} undoable
-        </span>
-      </div>
-
-      <div className="border-b border-white/[0.06] px-5 py-2.5">
-        <p className="text-[12.5px] leading-relaxed text-faint">
-          Applied without waiting for you, because each one was additive and snapshotted first.
-          Undo restores the exact state captured before the fix ran.
-        </p>
-      </div>
-
-      <ul className="divide-y divide-white/[0.04]">
-        {changes.map(c => (
-          <ChangeRow
-            key={c.findingId}
-            change={c}
-            state={rowState[c.findingId] ?? { phase: 'idle' }}
-            onUndo={() => revert(c, false)}
-            onConfirmUndo={() => revert(c, true)}
-            onCancel={() => setRow(c.findingId, { phase: 'idle' })}
-          />
-        ))}
-      </ul>
-    </section>
+    <Section id="autonomy-applied" title="Changes Backenly made" count={changes.length}>
+      <Panel>
+        <RowList>
+          {changes.map(c => (
+            <ChangeRow
+              key={c.findingId}
+              change={c}
+              state={rowState[c.findingId] ?? { phase: 'idle' }}
+              onUndo={() => revert(c, false)}
+              onConfirmUndo={() => revert(c, true)}
+              onCancel={() => setRow(c.findingId, { phase: 'idle' })}
+            />
+          ))}
+        </RowList>
+      </Panel>
+    </Section>
   )
 }
 
@@ -205,143 +181,122 @@ function ChangeRow({
   onCancel: () => void
 }) {
   const [showSql, setShowSql] = useState(false)
-  const [copied, setCopied] = useState<number | null>(null)
   const statements = c.statements ?? []
-
-  const copySql = async (sql: string) => {
-    const i = statements.findIndex(s => s.sql === sql)
-    try {
-      await navigator.clipboard.writeText(sql)
-      setCopied(i)
-      setTimeout(() => setCopied(null), 1800)
-    } catch { /* clipboard blocked — no-op */ }
-  }
+  const { title, reason } = describe(c)
 
   if (state.phase === 'reverted') {
     return (
-      <li className="flex items-start gap-3 px-5 py-3.5 animate-fade-in">
-        <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-emerald-400" />
-        <div className="min-w-0 flex-1">
-          <p className="text-[12.5px] font-medium text-zinc-200">{c.summary}</p>
-          <p className="mt-1 text-[12px] leading-[18px] text-faint">{state.message}</p>
-        </div>
-      </li>
+      <Row icon={CheckCircle2} tone="done" title={<p className={ROW_TITLE}>{title}</p>} className="animate-fade-in">
+        <p className={ROW_TEXT}>{state.message}</p>
+      </Row>
     )
   }
 
   const busy = state.phase === 'reverting'
 
   return (
-    <li className={`px-5 py-3.5 ${state.phase === 'error' ? 'bg-rose-500/[0.03]' : ''}`}>
-      <div className="flex items-start gap-3">
-        <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-zinc-600" />
-        <div className="min-w-0 flex-1">
-          <p className="text-[12.5px] leading-snug text-zinc-100">{c.summary}</p>
-          <MetaRow>
-            <MetaCode>{c.type}</MetaCode>
-            {c.resource && <MetaCode>{c.resource}</MetaCode>}
-            <span className="tabular-nums">{timeAgo(c.at)}</span>
-            {/* Never claim verification the kernel did not perform. Types no
-                probe can re-detect are recorded honestly as unchecked. */}
-            <StatusDot
-              tone={c.verified ? 'operational' : 'neutral'}
-              label={c.verified ? 'Re-checked and confirmed' : 'Not independently re-checked'}
-            />
-          </MetaRow>
-
-          {/* The exact statements, on demand. Collapsed by default because the
-              summary above is what most people want; expanded it is the answer
-              to "what did it actually run", which used to require diffing two
-              schema snapshots by hand. Absent when nothing was captured — a
-              change applied before the recorder existed shows no toggle rather
-              than an empty panel implying it ran nothing. */}
-          {statements.length > 0 && (
-            <div className="mt-2">
-              <button
-                onClick={() => setShowSql(v => !v)}
-                aria-expanded={showSql}
-                className="inline-flex items-center gap-1 text-[12.5px] font-medium text-faint transition-colors hover:text-zinc-300"
-              >
-                {statements.length === 1 ? '1 statement' : `${statements.length} statements`}
-                <ChevronDown className={`size-3 transition-transform ${showSql ? 'rotate-180' : ''}`} />
-              </button>
-              {showSql && (
-                <div className="mt-2 space-y-2">
-                  {statements.map((st, i) => (
-                    <div key={i} className="rounded-md border border-white/[0.07] bg-[#08090a]">
-                      <div className="flex items-start gap-2 px-3 py-2">
-                        <pre className="min-w-0 flex-1 overflow-x-auto whitespace-pre-wrap break-words font-mono text-[12px] leading-relaxed text-zinc-300">
-{st.sql}
-                        </pre>
-                        <button
-                          onClick={() => copySql(st.sql)}
-                          className="shrink-0 text-zinc-500 transition-colors hover:text-zinc-300"
-                          aria-label="Copy statement"
-                        >
-                          {copied === i
-                            ? <Check className="size-3 text-emerald-400" />
-                            : <ClipboardCopy className="size-3" />}
-                        </button>
-                      </div>
-                      {st.params && st.params.length > 0 && (
-                        <p className="border-t border-white/[0.05] px-3 py-1.5 font-mono text-[12px] text-faint">
-                          {st.params.map((p, j) => `$${j + 1} = ${p}`).join('  ·  ')}
-                        </p>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-
-          {state.phase === 'confirming' && (
-            <div className="mt-2 flex items-start gap-2 rounded-md border border-rose-500/20 bg-rose-500/[0.05] px-3 py-2">
-              <ShieldAlert className="mt-px size-3.5 shrink-0 text-rose-400" />
-              <p className="text-[12.5px] leading-snug text-rose-200/90">{state.message}</p>
-            </div>
-          )}
-
-          {state.phase === 'error' && (
-            <div className="mt-2 flex items-start gap-2">
-              <XCircle className="mt-px size-3.5 shrink-0 text-rose-400" />
-              <p className="text-[12.5px] leading-snug text-rose-300/90">{state.message}</p>
-            </div>
-          )}
-
-          {!c.revertible && c.revertBlockedReason && (
-            <div className="mt-2 flex items-start gap-2">
-              <Lock className="mt-px size-3 shrink-0 text-zinc-600" />
-              <p className="text-[12.5px] leading-snug text-faint">{c.revertBlockedReason}</p>
-            </div>
-          )}
-        </div>
-
-        <div className="flex shrink-0 items-center gap-2">
-          {!c.revertible ? null : state.phase === 'confirming' ? (
-            <>
-              <KitButton variant="danger" onClick={onConfirmUndo} disabled={busy}>
-                <Undo2 className="size-3.5" /> Undo anyway
-              </KitButton>
-              <KitButton variant="secondary" onClick={onCancel} disabled={busy}>
-                Keep it
-              </KitButton>
-            </>
-          ) : state.phase === 'error' ? (
-            <KitButton variant="secondary" onClick={onCancel}>Try again</KitButton>
-          ) : (
-            <KitButton
-              variant={c.requiresConfirmation ? 'danger' : 'secondary'}
-              onClick={onUndo}
-              disabled={busy}
-            >
-              {busy
-                ? <><Loader2 className="size-3.5 animate-spin" /> Undoing…</>
-                : <><Undo2 className="size-3.5" /> Undo</>}
+    <Row
+      icon={Wrench}
+      busy={busy}
+      className={state.phase === 'error' ? 'bg-rose-500/[0.03]' : ''}
+      title={<p className={ROW_TITLE}>{title}</p>}
+      actions={
+        !c.revertible ? undefined : state.phase === 'confirming' ? (
+          <>
+            <KitButton variant="secondary" onClick={onCancel} disabled={busy}>
+              Keep it
             </KitButton>
+            <KitButton variant="danger" onClick={onConfirmUndo} disabled={busy}>
+              <Undo2 className="size-3.5" /> Undo anyway
+            </KitButton>
+          </>
+        ) : state.phase === 'error' ? (
+          <KitButton variant="secondary" onClick={onCancel}>Try again</KitButton>
+        ) : (
+          <KitButton
+            variant={c.requiresConfirmation ? 'danger' : 'secondary'}
+            onClick={onUndo}
+            disabled={busy}
+          >
+            {busy
+              ? <><Loader2 className="size-3.5 animate-spin" /> Undoing…</>
+              : <><Undo2 className="size-3.5" /> Undo</>}
+          </KitButton>
+        )
+      }
+    >
+      {reason && <p className={ROW_TEXT}>{reason}</p>}
+      <Facts>
+        {/* Never claim verification the kernel did not perform. Types no
+            probe can re-detect are recorded honestly as unchecked. */}
+        <StatusDot
+          tone={c.verified ? 'operational' : 'neutral'}
+          label={c.verified ? 'Re-checked and confirmed' : 'Not independently re-checked'}
+        />
+        {c.resource && <Fact><MetaCode>{c.resource}</MetaCode></Fact>}
+        <Fact><span className="tabular-nums">{timeAgo(c.at)}</span></Fact>
+      </Facts>
+
+      {/* The exact statements, on demand. Collapsed by default because the
+          sentence above is what most people want; expanded it is the answer
+          to "what did it actually run". Absent when nothing was captured: a
+          change applied before the recorder existed shows no toggle rather
+          than an empty panel implying it ran nothing. */}
+      {statements.length > 0 && (
+        <>
+          <Disclosure open={showSql} onToggle={() => setShowSql(v => !v)}>
+            {statements.length === 1 ? 'Show the statement' : `Show ${statements.length} statements`}
+          </Disclosure>
+          {showSql && (
+            <div className="relative">
+              <CodeBlock className="pr-10">
+                {statements.map((st, i) =>
+                  `${st.sql}${st.params && st.params.length > 0 ? `\n-- ${st.params.map((p, j) => `$${j + 1} = ${p}`).join(', ')}` : ''}${i < statements.length - 1 ? '\n\n' : ''}`,
+                ).join('')}
+              </CodeBlock>
+              <div className="absolute right-1.5 top-[16px]">
+                <CopyButton value={statements.map(st => st.sql).join(';\n') + ';'} label="Copy the statements" />
+              </div>
+            </div>
           )}
-        </div>
-      </div>
-    </li>
+        </>
+      )}
+
+      {state.phase === 'confirming' && (
+        <RowNote tone="danger" icon={ShieldAlert}>{state.message}</RowNote>
+      )}
+      {state.phase === 'error' && (
+        <RowNote tone="danger" icon={XCircle} role="alert">{state.message}</RowNote>
+      )}
+      {!c.revertible && c.revertBlockedReason && (
+        <RowNote icon={Lock}>{c.revertBlockedReason}</RowNote>
+      )}
+    </Row>
   )
+}
+
+/**
+ * The row's headline and its reason, from the server's one sentence
+ * ("Backenly fixed slow query missing index on "events" because …"). An index
+ * says what it is ("Added an index on events (customer)"), read from the
+ * statement it ran; anything else keeps the server's words, split at "because".
+ */
+function describe(c: AppliedChange): { title: string; reason: string | null } {
+  const at = c.summary.indexOf(' because ')
+  const head = (at === -1 ? c.summary : c.summary.slice(0, at)).replace(/^Backenly\s+/, '')
+  const reason = at === -1 ? null : capitalise(c.summary.slice(at + ' because '.length).trim())
+  const statements = c.statements ?? []
+  const indexes = statements.map(st => st.sql.match(INDEX_SQL)).filter((m): m is RegExpMatchArray => !!m)
+  if (statements.length > 0 && indexes.length === statements.length) {
+    const [, table, columns] = indexes[0]
+    const cols = columns.split(',').map(x => x.trim().replace(/^"|"$/g, '')).join(', ')
+    return { title: `Added an index on ${table} (${cols})`, reason }
+  }
+  return { title: capitalise(head), reason }
+}
+
+const INDEX_SQL = /^CREATE\s+(?:UNIQUE\s+)?INDEX\b[^(]*?\bON\s+(?:"[^"]+"\.)?"?([^"\s(]+)"?\s*\(([^)]+)\)/i
+
+function capitalise(text: string): string {
+  return text.charAt(0).toUpperCase() + text.slice(1)
 }

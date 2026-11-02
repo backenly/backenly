@@ -9,31 +9,32 @@
  * their way back and the recent-activity feed. Restoring the state before any
  * change is History.
  *
- * Rebuilt 2026-10-02 on the console kit: a document page with the standard
- * header, the mode as two radio cards, the scoreboard as one stat strip and
- * every section as a hairline panel. The upgrade link goes to Billing, which
- * exists only on Cloud, instead of a Settings tab that never existed.
+ * Rebuilt 2026-10-02 on the console kit, and again 2026-11-03 so it reads as
+ * one product rather than a stack of explained cards: the mode is a switch in
+ * the header with its one-sentence meaning as the page's lede, every section
+ * carries its heading above its panel, every list uses the same row
+ * (components/autonomy/rows.tsx), and the activity feed shows what Backenly
+ * did in words, with the loop's own bookkeeping folded away. The upgrade link
+ * goes to Billing, which exists only on Cloud.
  */
 
 import { useEffect, useState, useCallback } from 'react'
 import Link from 'next/link'
-import { Activity, AlertTriangle, CheckCircle2, Lock, RefreshCw, ShieldCheck } from 'lucide-react'
+import { Activity, AlertTriangle, CheckCircle2, Layers, Lock, RefreshCw, Undo2, Wrench } from 'lucide-react'
 import {
   EmptyState,
-  KIT,
   KitButton,
   KitCard,
-  KitCardHeader,
   KitNote,
   PageHeader,
+  Segmented,
   Skeleton,
   Spinner,
-  Stat,
-  StatStrip,
   StatusDot,
   type StatusTone,
 } from '@/components/inspector/kit'
-import { EDGE, FOCUS, FOCUS_INSET, PAGE_GUTTER, PAGE_WIDTH, RULE, R_PANEL } from '@/components/console/tokens'
+import { FOCUS, FOCUS_INSET, PAGE_GUTTER, PAGE_WIDTH } from '@/components/console/tokens'
+import { EmptyLine, Panel, Section } from '@/components/autonomy/rows'
 import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
 import { ReviewQueuePanel } from '@/components/ReviewQueuePanel'
 import { DetectedFindingsPanel } from '@/components/DetectedFindingsPanel'
@@ -130,15 +131,31 @@ function timeAgo(iso: string): string {
 
 // ── Shell ─────────────────────────────────────────────────────────────────────
 
-function Shell({ level, shadow, children }: { level?: Level; shadow?: boolean; children: React.ReactNode }) {
+function Shell({
+  level,
+  shadow,
+  description = 'Choose what Backenly may fix on its own and what waits for your approval. Auth, destructive and irreversible changes always wait, in every mode.',
+  actions,
+  children,
+}: {
+  level?: Level
+  shadow?: boolean
+  /** The mode's meaning in one sentence, once the mode is known. */
+  description?: string
+  /** The mode switch. */
+  actions?: React.ReactNode
+  children: React.ReactNode
+}) {
   // Shadow wins over the dial. The dial is what the owner ASKED for; the mode
   // is what the deployment is doing, and rendering the ask as though it were
   // the outcome is what let a backend read "Autopilot" while the loop could
   // not apply a single fix.
   const badge: { label: string; tone: StatusTone } | undefined = shadow
     ? { label: 'Shadow', tone: 'attention' }
-    : level
-      ? { label: labelFor(level), tone: level === 'OFF' ? 'paused' : 'operational' }
+    : level === 'OFF'
+      // The mode switch in the header says which mode is on; a badge says so
+      // only for a legacy OFF row, which lights neither option.
+      ? { label: labelFor(level), tone: 'paused' }
       : undefined
   return (
     <div className={`${PAGE_WIDTH} ${PAGE_GUTTER} pb-16`}>
@@ -146,7 +163,8 @@ function Shell({ level, shadow, children }: { level?: Level; shadow?: boolean; c
         className="!px-0"
         title="Autonomy"
         meta={badge ? <StatusDot tone={badge.tone} label={badge.label} /> : undefined}
-        description="Choose what Backenly may fix on its own and what waits for your approval. Auth, destructive and irreversible changes always wait, in every mode."
+        description={description}
+        actions={actions}
       />
       {children}
     </div>
@@ -159,6 +177,7 @@ export function AutonomyGuardrailsSettings({ projectId }: { projectId: string })
   const [error, setError] = useState(false)
   const [saving, setSaving] = useState<Level | null>(null)
   const [banner, setBanner] = useState<{ tone: 'ok' | 'gate'; text: string } | null>(null)
+  const [showAll, setShowAll] = useState(false)
 
   const fetchReport = useCallback(async () => {
     setError(false)
@@ -250,10 +269,53 @@ export function AutonomyGuardrailsSettings({ projectId }: { projectId: string })
   const verified = data.scoreboard.verifiedRate
   const capLabel = labelFor(data.cap)
   const upgradeHref = '/app/billing'
+  const current = displayLevel(data.level)
+  const blurb = LEVELS.find((l) => l.id === current)?.blurb
+
+  const modeSwitch = (
+    <div className="flex flex-wrap items-center gap-2.5">
+      <span id="autonomy-mode" className="text-[12.5px] text-faint">Mode</span>
+      <Segmented<Level>
+        label="Autonomy mode"
+        value={current}
+        onChange={(l) => void setLevel(l)}
+        options={LEVELS.map((l) => {
+          const locked = LEVEL_RANK[l.id] > LEVEL_RANK[data.cap]
+          const next = locked ? nextPlanFor(l.id) : null
+          return {
+            value: l.id,
+            icon: locked ? Lock : undefined,
+            title: locked && next ? `${l.label} is included in ${next.name} (${next.cadence}).` : l.blurb,
+            label: saving === l.id ? <><Spinner className="h-3 w-3" /> {l.label}</> : l.label,
+          }
+        })}
+      />
+    </div>
+  )
+
+  // The loop's own bookkeeping ("autonomy investigation", written by a step
+  // with no sentence of its own) is folded away by default; what Backenly did,
+  // in words, is the feed.
+  const isBookkeeping = (a: TrustReport['recentActivity'][number]) =>
+    (a.kind === 'other' || !a.kind) && a.summary.trim().toLowerCase() === a.action.replace(/[_-]+/g, ' ').trim().toLowerCase()
+  const said = data.recentActivity.filter((a) => !isBookkeeping(a))
+  const folded = data.recentActivity.length - said.length
+  const activity = showAll ? data.recentActivity : said
+  const stats = [
+    { label: 'Fixed on its own', value: data.scoreboard.autonomousFixes.toLocaleString() },
+    { label: 'Rolled back', value: data.scoreboard.rollbacks.toLocaleString() },
+    { label: 'Verified after the fix', value: verified === null ? '—' : `${Math.round(verified * 100)}%` },
+  ]
+  const anyStats = data.scoreboard.autonomousFixes > 0 || data.scoreboard.rollbacks > 0 || verified !== null
 
   return (
-    <Shell level={data.level} shadow={data.executionMode?.mode === 'shadow'}>
-      <div className="space-y-6">
+    <Shell
+      level={data.level}
+      shadow={data.executionMode?.mode === 'shadow'}
+      description={blurb ? `${blurb}${current === 'CONSERVATIVE' ? ' Auth, destructive and irreversible changes always wait.' : ''}` : undefined}
+      actions={modeSwitch}
+    >
+      <div className="space-y-9">
         {banner && (
           <div role="status" aria-live="polite">
             <KitNote
@@ -291,113 +353,6 @@ export function AutonomyGuardrailsSettings({ projectId }: { projectId: string })
         {/* A structural ladder renders nothing unless one is actually waiting. */}
         <MaintenanceLadderPanel projectId={projectId} />
 
-        {/* ── Mode ───────────────────────────────────────────────── */}
-        <section aria-labelledby="autonomy-mode" className={`overflow-hidden border ${EDGE} ${R_PANEL} ${KIT.surface}`}>
-          <div className="flex flex-wrap items-start justify-between gap-3 px-5 pb-4 pt-5 sm:px-6">
-            <div>
-              <h2 id="autonomy-mode" className="text-[15px] font-semibold leading-[22px] tracking-[-0.012em] text-zinc-50">
-                Mode
-              </h2>
-              <p className="mt-1 text-[13px] leading-[20px] text-zinc-400">
-                How much Backenly may do between your visits.
-              </p>
-            </div>
-            <p className="text-[12.5px] text-faint">
-              {data.plan} plan <span className="text-zinc-700">·</span> up to{' '}
-              <span className="text-zinc-300">{capLabel}</span>
-            </p>
-          </div>
-
-          <div role="radiogroup" aria-labelledby="autonomy-mode" className="grid grid-cols-1 gap-3 px-5 pb-5 sm:grid-cols-2 sm:px-6">
-            {LEVELS.map((l) => {
-              const active = displayLevel(data.level) === l.id
-              const busy = saving === l.id
-              const locked = LEVEL_RANK[l.id] > LEVEL_RANK[data.cap]
-              const next = locked ? nextPlanFor(l.id) : null
-              return (
-                <button
-                  key={l.id}
-                  type="button"
-                  role="radio"
-                  aria-checked={active}
-                  disabled={saving !== null || locked}
-                  onClick={() => setLevel(l.id)}
-                  title={locked && next ? `${l.label} is included in ${next.name} (${next.cadence}).` : undefined}
-                  className={`relative rounded-[9px] border p-4 text-left transition-[border-color,background-color] duration-150 disabled:cursor-not-allowed ${FOCUS} ${
-                    active
-                      ? 'border-white/[0.22] bg-white/[0.05] shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]'
-                      : locked
-                        ? 'border-white/[0.06] bg-white/[0.01] opacity-60'
-                        : 'border-white/[0.08] bg-white/[0.015] hover:border-white/[0.16] hover:bg-white/[0.03]'
-                  }`}
-                >
-                  <span className="flex items-center justify-between gap-3">
-                    <span className="flex items-center gap-2.5">
-                      <span
-                        aria-hidden
-                        className={`flex h-[16px] w-[16px] items-center justify-center rounded-full border ${
-                          active ? 'border-zinc-100' : 'border-white/25'
-                        }`}
-                      >
-                        {active && <span className="h-[8px] w-[8px] rounded-full bg-zinc-100" />}
-                      </span>
-                      <span className={`text-[14px] font-semibold tracking-[-0.01em] ${locked ? 'text-faint' : 'text-zinc-50'}`}>
-                        {l.label}
-                      </span>
-                    </span>
-                    {busy ? (
-                      <Spinner className="h-3.5 w-3.5 text-zinc-400" />
-                    ) : locked ? (
-                      <span className="inline-flex items-center gap-1 text-[12px] text-faint">
-                        <Lock className="h-3 w-3" /> {next?.name ?? 'Upgrade'}
-                      </span>
-                    ) : null}
-                  </span>
-                  <span className={`mt-2 block pl-[26px] text-[13px] leading-[19px] ${locked ? 'text-faint' : 'text-zinc-400'}`}>
-                    {l.blurb}
-                  </span>
-                </button>
-              )
-            })}
-          </div>
-
-          <div className={`flex items-start gap-2.5 border-t ${RULE} bg-white/[0.015] px-5 py-3 sm:px-6`}>
-            <ShieldCheck className="mt-[2px] h-4 w-4 flex-shrink-0 text-zinc-500" strokeWidth={1.75} />
-            <p className="text-[12.5px] leading-[18px] text-faint">
-              Auth, destructive and irreversible changes always require your approval. No mode can apply them on its
-              own.
-              {data.cap !== 'AGGRESSIVE' && CLOUD_CONTROL_PLANE && (
-                <>
-                  {' '}
-                  <Link href={upgradeHref} className="font-medium text-zinc-300 underline-offset-2 hover:underline">
-                    Compare plans
-                  </Link>{' '}
-                  to unlock higher modes.
-                </>
-              )}
-            </p>
-          </div>
-        </section>
-
-        {/* ── Trust scoreboard: one strip, three counters ─────────── */}
-        <section aria-labelledby="autonomy-score">
-          <div className="mb-3 flex items-baseline justify-between gap-3">
-            <h2 id="autonomy-score" className="text-[15px] font-semibold tracking-[-0.012em] text-zinc-50">
-              Track record
-            </h2>
-            <span className="text-[12.5px] tabular-nums text-faint">Last {data.scoreboard.windowDays} days</span>
-          </div>
-          <StatStrip className="!grid-cols-3 lg:!grid-cols-none">
-            <Stat label="Fixed on its own" value={data.scoreboard.autonomousFixes.toLocaleString()} />
-            <Stat label="Rolled back" value={data.scoreboard.rollbacks.toLocaleString()} />
-            <Stat
-              label="Verified after the fix"
-              value={verified === null ? '—' : `${Math.round(verified * 100)}%`}
-              tone={verified === null ? 'neutral' : verified >= 0.95 ? 'good' : verified >= 0.8 ? 'warn' : 'bad'}
-            />
-          </StatStrip>
-        </section>
-
         {/* ── Changes Backenly made, each with its way back ─────────── */}
         <AppliedChangesPanel projectId={projectId} changes={data.appliedChanges ?? []} onReverted={fetchReport} />
 
@@ -408,81 +363,83 @@ export function AutonomyGuardrailsSettings({ projectId }: { projectId: string })
           onChanged={fetchReport}
         />
 
-        {/* ── Recent guardrail actions: an audit log, read as a table ── */}
-        <KitCard className="overflow-hidden">
-          <KitCardHeader
-            title={
-              <span className="flex items-center gap-2">
-                <Activity className="h-4 w-4 text-zinc-500" strokeWidth={1.75} />
-                Recent guardrail actions
-                {data.recentActivity.length > 0 && (
-                  <span className="text-[12px] font-normal tabular-nums text-faint">{data.recentActivity.length}</span>
-                )}
-              </span>
-            }
-            actions={<span className="text-[12px] tabular-nums text-faint">Last {data.scoreboard.windowDays} days</span>}
-          />
-          {data.recentActivity.length === 0 ? (
-            <p className="px-4 py-8 text-center text-[13px] text-faint">Nothing yet. Backenly has not needed to act.</p>
-          ) : (
-            <div tabIndex={0} role="region" aria-label="Recent guardrail actions" className={`max-h-[380px] overflow-y-auto ${FOCUS_INSET}`}>
-              <table className="w-full border-separate border-spacing-0">
-                <thead className="sticky top-0 z-10">
-                  <tr className={KIT.gridHead}>
-                    <th scope="col" className={`w-24 border-b ${RULE} px-4 py-2 text-left text-[12px] font-normal text-faint`}>
-                      When
-                    </th>
-                    <th scope="col" className={`w-36 border-b ${RULE} px-3 py-2 text-left text-[12px] font-normal text-faint`}>
-                      Kind
-                    </th>
-                    <th scope="col" className={`border-b ${RULE} px-3 py-2 text-left text-[12px] font-normal text-faint`}>
-                      Action
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {data.recentActivity.map((a, i) => (
-                    <tr key={i} className={`transition-colors ${KIT.rowHoverOn}`}>
-                      <td className="whitespace-nowrap border-b border-white/[0.04] px-4 py-2.5 align-top text-[12px] tabular-nums text-faint">
-                        {timeAgo(a.at)}
-                      </td>
-                      <td className="border-b border-white/[0.04] px-3 py-2.5 align-top">
-                        <span className="text-[12.5px] text-zinc-400">{kindLabel(a.kind || a.action)}</span>
-                      </td>
-                      <td className="border-b border-white/[0.04] px-3 py-2.5 text-[13px] leading-[19px] text-zinc-300">
-                        {a.summary}
-                        {/* An unresolved finding is re-escalated every tick, so
-                            one decision you haven't made writes one row a
-                            minute. Folded server-side; the count keeps the
-                            fold honest rather than a truncation. */}
-                        {(a.repeat ?? 1) > 1 && <span className="ml-2 text-[12px] tabular-nums text-faint">×{a.repeat}</span>}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+        {/* ── Activity: what Backenly did lately, and its track record ── */}
+        <Section
+          id="autonomy-activity"
+          title="Activity"
+          aside={<span className="text-[12.5px] tabular-nums text-faint">Last {data.scoreboard.windowDays} days</span>}
+        >
+          <Panel>
+            {anyStats && (
+              <dl className="grid grid-cols-3 divide-x divide-white/[0.06] border-b border-white/[0.06]">
+                {stats.map((st) => (
+                  <div key={st.label} className="px-5 py-3.5">
+                    <dt className="text-[12px] leading-[16px] text-faint">{st.label}</dt>
+                    <dd className="mt-1 text-[18px] font-semibold leading-[24px] tabular-nums tracking-[-0.01em] text-zinc-50">{st.value}</dd>
+                  </div>
+                ))}
+              </dl>
+            )}
+            {activity.length === 0 ? (
+              <EmptyLine icon={Activity}>Nothing yet. Backenly has not needed to act.</EmptyLine>
+            ) : (
+              <ul
+                tabIndex={0}
+                aria-label="Recent guardrail actions"
+                className={`max-h-[420px] divide-y divide-white/[0.06] overflow-y-auto ${FOCUS_INSET}`}
+              >
+                {activity.map((a, i) => {
+                  const Icon = KIND_ICON[a.kind] ?? Activity
+                  return (
+                    <li key={i} className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-6 px-5 py-3">
+                      <span className="flex min-w-0 items-start gap-3">
+                        <Icon className="mt-[3px] h-3.5 w-3.5 flex-shrink-0 text-zinc-500" strokeWidth={1.75} aria-hidden />
+                        <span className="min-w-0 text-[13px] leading-[20px] text-zinc-300 [overflow-wrap:anywhere]">
+                          {a.summary}
+                          {/* An unresolved finding is re-escalated every tick, so
+                              one decision you haven't made writes one row a
+                              minute. Folded server-side; the count keeps the
+                              fold honest rather than a truncation. */}
+                          {(a.repeat ?? 1) > 1 && <span className="ml-1.5 tabular-nums text-faint">{a.repeat} times</span>}
+                        </span>
+                      </span>
+                      <span className="pt-px text-[12.5px] tabular-nums text-faint">{timeAgo(a.at)}</span>
+                    </li>
+                  )
+                })}
+              </ul>
+            )}
+            {folded > 0 && (
+              <button
+                type="button"
+                onClick={() => setShowAll((v) => !v)}
+                aria-expanded={showAll}
+                className={`block w-full border-t border-white/[0.06] px-5 py-2.5 text-left text-[12.5px] text-faint transition-colors hover:text-zinc-200 ${FOCUS_INSET}`}
+              >
+                {showAll ? 'Hide system events' : `Show ${folded} system ${folded === 1 ? 'event' : 'events'}`}
+              </button>
+            )}
+          </Panel>
+          {data.cap !== 'AGGRESSIVE' && CLOUD_CONTROL_PLANE && (
+            <p className="mt-3 text-[12.5px] text-faint">
+              Your plan goes up to {capLabel}.{' '}
+              <Link href={upgradeHref} className="font-medium text-zinc-300 underline-offset-2 hover:underline">
+                Compare plans
+              </Link>
+            </p>
           )}
-        </KitCard>
-
-        {/* There is no "Restore points" panel here any more: it moved the active
-            version and re-created what that version named, and removed nothing.
-            Restoring is one thing now, the state before a governed change, from
-            History. The footer says what is actually reversible: a
-            repair's own changes, while their restore point is still usable. */}
-        <p className="flex items-start gap-2 text-[12.5px] leading-[18px] text-faint">
-          <Lock className="mt-[2px] h-3.5 w-3.5 flex-shrink-0 text-zinc-600" />
-          Every autonomous action is written to the audit log. Its repairs are recorded as changes with a restore point:
-          while one can still be restored, it can be undone above or from History.
-        </p>
+        </Section>
       </div>
     </Shell>
   )
 }
 
-/** An audit row's kind as words: "auto_fix" reads "Auto fix". */
-function kindLabel(kind: string | null | undefined): string {
-  if (!kind) return '—'
-  const words = kind.replace(/[_-]+/g, ' ').trim().toLowerCase()
-  return words.charAt(0).toUpperCase() + words.slice(1)
+/** An activity row's mark: what kind of thing Backenly did. */
+const KIND_ICON: Record<string, typeof Activity> = {
+  rollback: Undo2,
+  architecture: Layers,
+  auto_fix: Wrench,
+  fix: Wrench,
+  repair: Wrench,
+  escalation: AlertTriangle,
 }
