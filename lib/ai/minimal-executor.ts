@@ -104,7 +104,7 @@ export interface AIAction {
     | 'BACKUP_DATABASE' | 'RESTORE_DATABASE' | 'LIST_BACKUPS'
     // Full-text search
     | 'ADD_FULLTEXT_SEARCH'
-    // Vector / similarity search (pgvector + OpenAI text-embedding-3-small)
+    // Vector / similarity search (pgvector + the deployment's embedding model)
     | 'ENABLE_VECTOR_SEARCH'
     // Team / org multi-tenancy primitive (orgs + members + invitations)
     | 'ENABLE_TEAMS'
@@ -13721,11 +13721,13 @@ async function executeAddFulltextSearch(params: any, projectId: string): Promise
 }
 
 // ============================================================================
-// VECTOR / SIMILARITY SEARCH (pgvector + OpenAI text-embedding-3-small)
+// VECTOR / SIMILARITY SEARCH (pgvector + the deployment's embedding model,
+// lib/ai/llm/embeddings.ts)
 //
 // Enables semantic / RAG-style search on an existing table by:
 //   1. Creating the `vector` extension if absent
-//   2. Adding an `embedding vector(1536)` column to the table (idempotent)
+//   2. Adding an `embedding vector(<configured dimensions>)` column to the
+//      table (idempotent; an existing one of another size is refused)
 //   3. Building an HNSW index for cosine similarity (idempotent; falls back
 //      to ivfflat if the installed pgvector predates HNSW)
 //   4. Recording the source columns, model and dimensions in
@@ -13752,12 +13754,12 @@ async function executeEnableVectorSearch(params: any, projectId: string): Promis
 
   // Before any DDL: a search column nothing can query is a feature that only
   // looks enabled.
-  const { embeddingAvailability, EMBEDDING_DIMENSIONS, EMBEDDING_MODEL } = await import('@/lib/ai/embeddings')
-  const available = embeddingAvailability()
-  if ('reason' in available) {
+  const { embeddingConfig } = await import('@/lib/ai/embeddings')
+  const embedding = embeddingConfig()
+  if ('reason' in embedding) {
     return {
       success: false,
-      message: `Vector search was not enabled on **${tableName}**: ${available.reason}`,
+      message: `Vector search was not enabled on **${tableName}**: ${embedding.reason}`,
       error: 'EMBEDDINGS_UNAVAILABLE',
     }
   }
@@ -13814,9 +13816,35 @@ async function executeEnableVectorSearch(params: any, projectId: string): Promis
       }
     }
 
-    // 3. Add embedding column (idempotent).
+    // 3. Add embedding column (idempotent), sized for the configured model.
+    //    A column an earlier enable made keeps its size, because ADD COLUMN IF
+    //    NOT EXISTS leaves it alone: one of another size cannot hold this
+    //    model's vectors, and recording the model over it would say it can.
     const EMBEDDING_COLUMN = 'embedding'
-    const DIMENSIONS = EMBEDDING_DIMENSIONS
+    const DIMENSIONS = embedding.dimensions
+    const MODEL = embedding.model
+    if (existingCols.some(c => c.column_name === EMBEDDING_COLUMN && c.udt_name === 'vector')) {
+      // pgvector keeps a column's dimensions as its type modifier (-1: unsized).
+      const [column] = await db.$queryRawUnsafe<{ dims: number }[]>(
+        `SELECT a.atttypmod AS dims
+           FROM pg_attribute a
+           JOIN pg_class c ON c.oid = a.attrelid
+           JOIN pg_namespace n ON n.oid = c.relnamespace
+          WHERE n.nspname = $1 AND c.relname = $2 AND a.attname = $3 AND NOT a.attisdropped`,
+        postgresSchema, safeTable, EMBEDDING_COLUMN,
+      )
+      if (column && column.dims > 0 && column.dims !== DIMENSIONS) {
+        return {
+          success: false,
+          message:
+            `Vector search was not enabled on **${tableName}**: its \`${EMBEDDING_COLUMN}\` column holds ` +
+            `${column.dims}-dimension vectors, and this deployment embeds with ${MODEL} at ${DIMENSIONS} ` +
+            `dimensions, so nothing was changed. The column has to hold ${DIMENSIONS}-dimension vectors made ` +
+            `with ${MODEL} before vector search can use it.`,
+          error: 'EMBEDDING_MODEL_MISMATCH',
+        }
+      }
+    }
     await db.$executeRawUnsafe(`
       ALTER TABLE "${postgresSchema}"."${safeTable}"
       ADD COLUMN IF NOT EXISTS "${EMBEDDING_COLUMN}" vector(${DIMENSIONS})
@@ -13857,7 +13885,7 @@ async function executeEnableVectorSearch(params: any, projectId: string): Promis
           enabled: true,
           embeddingColumn: EMBEDDING_COLUMN,
           dimensions: DIMENSIONS,
-          model: EMBEDDING_MODEL,
+          model: MODEL,
           sourceColumns: validSources,
           indexName: idxName,
           indexKind,
@@ -13890,11 +13918,11 @@ async function executeEnableVectorSearch(params: any, projectId: string): Promis
       message:
         `✅ Vector search enabled on **${tableName}**.\n\n` +
         `- **Indexed source**: ${validSources.join(', ')}\n` +
-        `- **Embedding column**: \`${EMBEDDING_COLUMN} vector(${DIMENSIONS})\` (${EMBEDDING_MODEL})\n` +
+        `- **Embedding column**: \`${EMBEDDING_COLUMN} vector(${DIMENSIONS})\` (${MODEL})\n` +
         `- **Index**: \`${idxName}\` (${indexKind}, cosine similarity)\n` +
         `- **Search endpoint**: \`GET /api/v1/${projectId}/db/${tableName}/vector-search?q=your+question&limit=10\`\n\n` +
         `Only rows with an \`${EMBEDDING_COLUMN}\` value are searched, and Backenly does not compute it when a row ` +
-        `is written yet: write it with the row (${DIMENSIONS} numbers from ${EMBEDDING_MODEL} over ` +
+        `is written yet: write it with the row (${DIMENSIONS} numbers from ${MODEL} over ` +
         `${validSources.join(', ')}). Queries are plain text; Backenly embeds them.`,
       data: {
         tableName,
@@ -13903,6 +13931,7 @@ async function executeEnableVectorSearch(params: any, projectId: string): Promis
         indexName: idxName,
         indexKind,
         dimensions: DIMENSIONS,
+        model: MODEL,
       },
     }
   } catch (error: any) {

@@ -9,14 +9,13 @@
  *   2. Query live row counts from workspace schema via pg_stat_user_tables
  *   3. Parse scenarioInput into a SimulationScenario
  *   4. Run heuristic bottleneck detection (no LLM — fast path)
- *   5. Call OpenAI for deeper SQL-level analysis
+ *   5. Ask the model (through the AI gateway) for deeper SQL-level analysis
  *   6. Merge + deduplicate bottlenecks from both sources
  *   7. Compute overallRiskScore, return SimulationResult
  *
  * Never throws — all errors are caught and surfaced in result.summary.
  */
 
-import OpenAI from 'openai'
 import { Pool } from 'pg'
 import { loadProjectMemory } from '@/lib/ai/project-memory'
 import { getWorkspaceDatabaseNames } from '@/lib/services/databaseProvisioning'
@@ -250,7 +249,7 @@ SELECT * FROM "${row.tablename}"
   return results
 }
 
-// ── OpenAI deep analysis ──────────────────────────────────────────────────────
+// ── Model deep analysis ───────────────────────────────────────────────────────
 
 interface LLMBottleneck {
   table: string

@@ -759,7 +759,7 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
     },
     ['name', 'description', 'trigger']),
   fn('enable_vector_search',
-    'Enable semantic / similarity search (pgvector + OpenAI text-embedding-3-small) on a table. Adds an embedding column, builds a cosine-similarity index and registers the /vector-search endpoint, which embeds the query text. Rows are searched only once their embedding column is filled, which Backenly does not do when a row is written: the app writes it. Refused where no embedding model is configured. Use this whenever the user wants RAG, similarity recommendations, semantic search, "find similar X", or any AI-app feature that needs embeddings. sourceColumns are the human-readable text columns the embedding is built from (defaults to title/name/body/description/content/text if omitted).',
+    'Enable semantic / similarity search (pgvector + the configured embedding model) on a table. Adds an embedding column, builds a cosine-similarity index and registers the /vector-search endpoint, which embeds the query text. Rows are searched only once their embedding column is filled, which Backenly does not do when a row is written: the app writes it. Refused where no embedding model is configured. Use this whenever the user wants RAG, similarity recommendations, semantic search, "find similar X", or any AI-app feature that needs embeddings. sourceColumns are the human-readable text columns the embedding is built from (defaults to title/name/body/description/content/text if omitted).',
     {
       tableName: { type: 'string' },
       sourceColumns: { type: 'array', items: { type: 'string' } },

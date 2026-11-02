@@ -303,7 +303,7 @@ export const TOOL_CAPABILITIES: Capability[] = [
   {
     id: 'enable_vector_search',
     name: 'Semantic / vector search (RAG)',
-    what: 'Enable pgvector + OpenAI embeddings on a table — adds an embedding column, a cosine-similarity index, and a /vector-search endpoint. Queries are natural-language; rows are searched once the app writes their embedding, which Backenly does not compute on write. Use for RAG, chatbots, "find similar X", recommendations, and any modern AI app.',
+    what: 'Enable pgvector + embeddings on a table — adds an embedding column, a cosine-similarity index, and a /vector-search endpoint. Queries are natural-language; rows are searched once the app writes their embedding, which Backenly does not compute on write. Use for RAG, chatbots, "find similar X", recommendations, and any modern AI app.',
     tool: 'enable_vector_search',
   },
   {

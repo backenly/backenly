@@ -8,10 +8,10 @@ export const maxDuration = 30
  *   GET  /api/v1/{projectId}/db/{tableName}/vector-search?q=...&limit=10
  *
  * Returns the rows in `{tableName}` whose embedding column is closest (cosine
- * similarity) to the embedded `q`. The embedding column, source columns, and
- * dimensions are recorded in ApiDefinition.config.vectorSearch when the
+ * similarity) to the embedded `q`. The embedding column, source columns, model
+ * and dimensions are recorded in ApiDefinition.config.vectorSearch when the
  * enable_vector_search tool ran. The embedding itself is stripped from the
- * response — it's 1536 floats, the client never wants it.
+ * response — it's hundreds of floats, the client never wants it.
  *
  * Only rows whose embedding column is filled are searched. Nothing fills it
  * when a row is written yet, so an empty result says how many rows have none
@@ -23,7 +23,14 @@ export const maxDuration = 30
 import { NextRequest, NextResponse } from 'next/server'
 import { v1ApiMiddleware } from '@/lib/api/v1/middleware'
 import { prisma } from '@/lib/db'
-import { embeddingAvailability, embedText, formatVectorLiteral, vectorConfigMismatch } from '@/lib/ai/embeddings'
+import {
+  embeddingAvailability,
+  embedText,
+  formatVectorLiteral,
+  UNRECORDED_VECTOR_CONFIG,
+  vectorConfigMismatch,
+} from '@/lib/ai/embeddings'
+import { AiError } from '@/lib/ai/llm/errors'
 import { getWorkspaceDatabaseNames } from '@/lib/services/databaseProvisioning'
 import { executeWithUserContext } from '@/lib/services/workspace-rls'
 import { recordedV1 } from '@/lib/traffic/recorded-v1'
@@ -108,8 +115,11 @@ async function handleGET(
     try {
       queryVec = await embedText(q)
     } catch (e: any) {
+      // The provider's own words stay in the log: a Bedrock refusal names the
+      // AWS account and role, which are not the caller's to read.
+      console.error('[vector-search] embedding the query failed:', e)
       return NextResponse.json(
-        { error: 'Embedding failed', code: 'EMBED_FAILED', detail: e?.message },
+        { error: 'Embedding failed', code: 'EMBED_FAILED', detail: e instanceof AiError ? e.userMessage : undefined },
         { status: 502 },
       )
     }
@@ -194,7 +204,7 @@ async function handleGET(
         query: q,
         limit,
         returned: data.length,
-        model: vs.model ?? 'text-embedding-3-small',
+        model: vs.model ?? UNRECORDED_VECTOR_CONFIG.model,
         sourceColumns: vs.sourceColumns ?? [],
         indexKind: vs.indexKind ?? 'hnsw',
         ...(hint ? { hint } : {}),
