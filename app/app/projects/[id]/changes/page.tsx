@@ -39,7 +39,7 @@ export default function HistoryPage() {
       <PageHeader
         className="!px-0"
         title="History"
-        description="Every change to your backend, from your coding agents, from Backenly and from you. Each one is checked after it applies, and any of them can be restored from here."
+        description="Every change to your backend, from your coding agents, from Backenly and from you. Each is checked after it applies, and any can be restored."
         tabs={
           <KitTabs>
             <KitTab active={!resource} onClick={() => show(null)}>All</KitTab>

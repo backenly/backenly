@@ -498,10 +498,11 @@ describe('in the "Waiting on you" queue', () => {
     const header = screen.getByText('Waiting on you').parentElement!
     expect(header.textContent).toContain('3')
     expect(header.textContent).not.toMatch(/in \d+ issue/)
-    // The ordinary finding still renders as it always did, with its own fix.
-    const ordinary = screen.getByText('missing_index').parentElement!
-    expect(within(ordinary).getByText('Warning')).toBeTruthy()
-    expect(screen.getByRole('button', { name: /Approve & fix/ })).toBeTruthy()
+    // The ordinary finding still renders as its own row, with its severity and
+    // its own fix. Its type is not on the row: the title says it in words.
+    const ordinary = screen.getByText('Warning').closest('li')!
+    expect(within(ordinary).queryByText('missing_index')).toBeNull()
+    expect(within(ordinary).getByRole('button', { name: /Approve & fix/ })).toBeTruthy()
   })
 
   it('re-reads when a change is decided on the Architecture changes card, and not for its own decisions', async () => {

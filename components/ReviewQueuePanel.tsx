@@ -44,17 +44,20 @@
  */
 
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
-import { useRouter } from 'next/navigation'
-import { IconButton, KIT, KitButton, MetaCode, MetaRow, TextWithCode } from '@/components/inspector/kit'
+import { IconButton, KitButton, MetaCode, OverflowMenu, Skeleton, StatusDot, TextWithCode } from '@/components/inspector/kit'
 import {
-  AlertTriangle, RefreshCw, CheckCircle2, Loader2, XCircle, ArrowRight, Inbox,
-  ChevronDown, ClipboardCopy, Check,
+  AlertTriangle, RefreshCw, CheckCircle2, Loader2, XCircle, Inbox, ClipboardCopy, Check,
+  Bot, Database, GitMerge, Gauge, History as HistoryIcon, Rows, ShieldAlert, ShieldCheck, Sparkles, Trash2, Activity,
+  Undo2, Wrench, Lock,
 } from 'lucide-react'
-import { groupFindings, CATEGORY_LABEL, severityWord, type FindingGroup } from '@/lib/core/finding-groups'
+import { groupFindings, CATEGORY_LABEL, severityWord, type FindingCategory, type FindingGroup } from '@/lib/core/finding-groups'
 import { hasExecutableFix } from '@/lib/core/fix-actions'
 import { isEvolutionApprovalFinding } from '@/lib/core/types'
 import { EvolutionRequestRow } from '@/components/autonomy/EvolutionRequestRow'
 import { onArchitectureChange } from '@/components/autonomy/architecture-decisions'
+import {
+  CodeBlock, Disclosure, EmptyLine, Fact, Facts, Panel, Row, RowList, RowNote, ROW_TEXT, ROW_TITLE, Section, rows,
+} from '@/components/autonomy/rows'
 
 interface PendingApproval {
   id: string
@@ -144,11 +147,12 @@ const GUARDRAIL_GATED_TYPES = new Set([
   'deploy_failure', 'auth_spike', 'auth_jwt_missing', 'auth_users_table_missing',
 ])
 
-// One card shell shared by the loading / error / populated states so every
-// phase of the panel reads as the same inspector surface. Composed from the
-// kit's tokens so it can't drift from KitCard.
-const CARD =
-  `relative overflow-hidden ${KIT.radius} border ${KIT.border} ${KIT.surface} ${KIT.inset}`
+/** What a finding is about, as the row's tile. */
+const CATEGORY_ICON: Record<FindingCategory, typeof Gauge> = {
+  security: ShieldAlert,
+  performance: Gauge,
+  reliability: Activity,
+}
 
 /**
  * Why this specific item needs a human. Deliberately distinct from p.reason
@@ -167,7 +171,7 @@ function reasonForApproval(p: PendingApproval): string {
   if (p.severity === 'critical') {
     return 'High-risk and hard to reverse. No autonomy mode can apply this without you.'
   }
-  return 'Waiting for your review.'
+  return WAITING_FOR_REVIEW
 }
 
 /**
@@ -208,7 +212,7 @@ function timeAgo(iso: string): string {
 }
 
 export function ReviewQueuePanel({ projectId }: { projectId: string }) {
-  const router = useRouter()
+
   const [data, setData] = useState<TrustReportShape | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(false)
@@ -477,31 +481,30 @@ export function ReviewQueuePanel({ projectId }: { projectId: string }) {
 
   if (loading) {
     return (
-      <section className={CARD}>
-        <PanelHeader count={null} refreshing={false} onRefresh={() => {}} disabled />
-        <div className="animate-pulse divide-y divide-white/[0.04]">
-          <div className="h-[76px]" />
-          <div className="h-[76px]" />
-        </div>
-      </section>
+      <QueueSection count={null} refreshing={false} onRefresh={() => {}} disabled>
+        <Panel>
+          <div className="space-y-3 px-5 py-5" aria-hidden>
+            <Skeleton className="h-[14px] w-2/5" />
+            <Skeleton className="h-[12px] w-3/5" />
+          </div>
+        </Panel>
+      </QueueSection>
     )
   }
 
   if (error || !data) {
     return (
-      <section className={CARD}>
-        <PanelHeader count={null} refreshing={refreshing} onRefresh={() => fetchReport()} />
-        <div className="px-5 py-10 text-center">
-          <AlertTriangle className="mx-auto mb-3 size-5 text-amber-400/70" />
-          <p className="text-[13px] font-medium text-zinc-300">Review queue is unavailable right now</p>
-          <button
-            onClick={() => fetchReport()}
-            className="mt-4 inline-flex items-center gap-1.5 rounded-lg border border-white/[0.10] bg-white/[0.03] px-3 py-1.5 text-[12px] font-medium text-zinc-300 transition-colors hover:border-white/[0.18] hover:bg-white/[0.06]"
-          >
-            <RefreshCw className="size-3" /> Retry
-          </button>
-        </div>
-      </section>
+      <QueueSection count={null} refreshing={refreshing} onRefresh={() => fetchReport()}>
+        <Panel>
+          <div className="flex flex-wrap items-center gap-3.5 px-5 py-4">
+            <AlertTriangle className="h-4 w-4 flex-shrink-0 text-amber-300" strokeWidth={1.75} />
+            <p className="min-w-0 flex-1 text-[13px] text-zinc-300">The queue is unavailable right now.</p>
+            <KitButton variant="secondary" icon={RefreshCw} onClick={() => fetchReport()}>
+              Retry
+            </KitButton>
+          </div>
+        </Panel>
+      </QueueSection>
     )
   }
 
@@ -520,47 +523,29 @@ export function ReviewQueuePanel({ projectId }: { projectId: string }) {
   const total = data.pendingApprovals.length + pendingAgents.length + stuckAgents.length
 
   return (
-    <section className={CARD}>
-      <PanelHeader
-        count={total}
-        groupCount={groups.length + evolutionRequests.length + pendingAgents.length + stuckAgents.length}
-        refreshing={refreshing}
-        onRefresh={() => fetchReport(true)}
-      />
-
-      <div className="border-b border-white/[0.06] px-5 py-2.5">
-        <p className="text-[12.5px] leading-relaxed text-faint">
-          Backenly deliberately did not act on these. They need your call; everything else it handles itself.
-          {' '}Once you decide, each change settles into the agent journal on{' '}
-          <button
-            onClick={() => router.push(`/app/projects/${projectId}`)}
-            className="inline-flex items-center gap-0.5 font-medium text-violet-300/90 transition-colors hover:text-violet-200"
-          >
-            Overview<ArrowRight className="size-3" />
-          </button>
-        </p>
-      </div>
-
+    <QueueSection
+      count={total}
+      groupCount={groups.length + evolutionRequests.length + pendingAgents.length + stuckAgents.length}
+      refreshing={refreshing}
+      onRefresh={() => fetchReport(true)}
+    >
+      <Panel>
       {banner && (
-        <div className="flex items-center gap-2.5 border-b border-white/[0.06] bg-emerald-500/[0.04] px-5 py-2.5 animate-slide-up">
-          <CheckCircle2 className="size-3.5 shrink-0 text-emerald-400" />
-          <p className="min-w-0 text-[12px] font-medium text-zinc-200">
+        <div role="status" className="flex items-center gap-2.5 border-b border-white/[0.06] bg-emerald-400/[0.04] px-5 py-3 animate-slide-up">
+          <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-300" strokeWidth={1.75} />
+          <p className="min-w-0 text-[13px] font-medium text-zinc-100">
             {banner.title}
             {banner.detail && (
-              <span className="ml-2 text-[12px] font-normal text-faint">{banner.detail}</span>
+              <span className="ml-2 font-normal text-zinc-400">{banner.detail}</span>
             )}
           </p>
         </div>
       )}
 
       {total === 0 && runningAgents.length === 0 ? (
-        <div className="px-5 py-12 text-center">
-          <CheckCircle2 className="mx-auto mb-3 size-5 text-emerald-400/70" />
-          <p className="text-[13px] font-medium text-zinc-300">Nothing waiting on you</p>
-          <p className="mt-1 text-[12px] text-faint">Risk-flagged changes show up here before they apply.</p>
-        </div>
+        <EmptyLine icon={Inbox}>Nothing is waiting on you. Risk-flagged changes show up here before they apply.</EmptyLine>
       ) : (
-        <ul className="divide-y divide-white/[0.04]">
+        <RowList>
           {groups.map(g => (
             <ApprovalRow
               key={g.key}
@@ -598,22 +583,25 @@ export function ReviewQueuePanel({ projectId }: { projectId: string }) {
           {stuckAgents.map(a => (
             <AgentOutcomeRow key={a.id} request={a} />
           ))}
-        </ul>
+        </RowList>
       )}
-    </section>
+      </Panel>
+    </QueueSection>
   )
 }
 
-// ── Card header ───────────────────────────────────────────────────────────────
-// The ONE "Waiting on you" title — mirrors "Recent guardrail actions" below it
-// (icon + 13px title + trailing mono meta).
+// ── Section ───────────────────────────────────────────────────────────────────
+// The ONE "Waiting on you" heading, above its panel like every section on the
+// page. The count is the findings to clear; when grouping folds several into
+// one row, the rows are said too, so the fold never reads as findings missing.
 
-function PanelHeader({
+function QueueSection({
   count,
   groupCount,
   refreshing,
   onRefresh,
   disabled,
+  children,
 }: {
   count: number | null
   /** Rows actually rendered. Shown alongside `count` whenever the fold is
@@ -622,35 +610,32 @@ function PanelHeader({
   refreshing: boolean
   onRefresh: () => void
   disabled?: boolean
+  children: React.ReactNode
 }) {
   return (
-    <div className="flex items-center gap-2.5 border-b border-white/[0.06] px-5 py-3.5">
-      {/* The warning mark only while something waits: an empty queue under an
-          amber triangle read as a problem that was not there. */}
-      {typeof count === 'number' && count > 0 ? (
-        <AlertTriangle className="size-3.5 text-amber-400" />
-      ) : (
-        <Inbox className="size-3.5 text-zinc-500" strokeWidth={1.75} />
-      )}
-      <h3 className="text-[13px] font-semibold tracking-tight text-zinc-100">Waiting on you</h3>
-      {typeof count === 'number' && count > 0 && (
-        <span className="text-[12px] font-medium tabular-nums text-amber-300">
-          {count}
-          {typeof groupCount === 'number' && groupCount < count && (
-            <span className="ml-1.5 font-normal text-faint">
+    <Section
+      id="autonomy-waiting"
+      title="Waiting on you"
+      count={count}
+      aside={
+        <>
+          {typeof count === 'number' && typeof groupCount === 'number' && groupCount < count && (
+            <span className="text-[12.5px] tabular-nums text-faint">
               in {groupCount} {groupCount === 1 ? 'issue' : 'issues'}
             </span>
           )}
-        </span>
-      )}
-      <IconButton
-        icon={RefreshCw}
-        label="Refresh the queue"
-        onClick={onRefresh}
-        disabled={disabled || refreshing}
-        className={`ml-auto ${refreshing ? '[&_svg]:animate-spin' : ''}`}
-      />
-    </div>
+          <IconButton
+            icon={RefreshCw}
+            label="Refresh the queue"
+            onClick={onRefresh}
+            disabled={disabled || refreshing}
+            className={refreshing ? '[&_svg]:animate-spin' : ''}
+          />
+        </>
+      }
+    >
+      {children}
+    </Section>
   )
 }
 
@@ -720,96 +705,131 @@ function AgentRequestRow({
   // Backenly's list of the changes it would undo as the card's text.
   const restore = a.tool === 'revert_schema_change' || a.tool === 'rollback_deploy'
   const fromBackenly = a.requestedBy === 'backenly'
+  const destructive = DESTRUCTIVE_TOOL.test(a.tool)
   // The card is the ONLY thing the human reads before approving — a merge
   // message carries the exact statements that reach production, and cutting
-  // it at 180 characters asked them to approve what they could not see.
+  // it at 180 characters asked them to approve what they could not see. The
+  // statements are machine text, so they are set as code, in full up to
+  // MAX_STATEMENTS and behind "Show the full request" past that.
   const [showFull, setShowFull] = useState(false)
-  const long = a.message.length > 180
-  const shown = long && !showFull ? clip(a.message, 180) : a.message
+  const { prose, statements } = splitRequest(a.message, a.target)
+  const long = statements.length > 0 ? statements.length > MAX_STATEMENTS : prose.length > 180
+  const shownProse = statements.length === 0 && long && !showFull ? clip(prose, 180) : prose
+  const shownStatements = showFull ? statements : statements.slice(0, MAX_STATEMENTS)
   // A card that could only show stand-ins is not something a human read, so it
   // cannot be approved. Rejecting it needs nothing from the region.
   const unreadable = a.readable === false
   return (
-    <li className="px-5 py-3.5">
-      <div className="flex items-start gap-3">
-        <span className={`mt-1.5 size-1.5 shrink-0 rounded-full ${restore ? 'bg-amber-400' : 'bg-violet-400'}`} />
-        <div className="min-w-0 flex-1">
-          <p className="text-[13px] font-medium text-zinc-100">
-            {restore ? (
-              a.target
-            ) : (
-              <>Your coding agent wants to run <span className="font-mono text-[12px] text-violet-200">{a.tool}</span> on <TextWithCode text={a.target} /></>
-            )}
-          </p>
-          <p className="mt-1 whitespace-pre-wrap break-words text-[12px] leading-relaxed text-faint">
-            {restore || fromBackenly ? shown : `“${shown}”`}
-          </p>
-          {long && (
-            <button
-              onClick={() => setShowFull(v => !v)}
-              className="mt-1 text-[12px] font-medium text-violet-300/90 underline underline-offset-2 transition-colors hover:text-violet-200"
-            >
-              {showFull ? 'Show less' : 'Show the full request'}
-            </button>
-          )}
-          <MetaRow>
-            {a.rowCount !== null && a.rowCount > 0 && (
-              <span className="tabular-nums text-amber-200/90">
-                {a.rowCount.toLocaleString()} row{a.rowCount === 1 ? '' : 's'} affected
-              </span>
-            )}
-            <span>{restore ? 'Current state protected first' : a.reversible ? 'Restore point available' : 'Not auto-reversible'}</span>
-            <span>{fromBackenly ? 'From Backenly' : 'From your agent'}</span>
-            <span className="tabular-nums">{timeAgo(a.createdAt)}</span>
-            {restore && a.changeId && (
-              <a
-                href={`/app/projects/${projectId}/changes?change=${encodeURIComponent(a.changeId)}`}
-                className="text-zinc-400 underline underline-offset-2 hover:text-zinc-200"
-              >
-                View details
-              </a>
-            )}
-            {a.tool === 'rollback_deploy' && (
-              <a
-                href={`/app/projects/${projectId}/changes`}
-                className="text-zinc-400 underline underline-offset-2 hover:text-zinc-200"
-              >
-                Open History
-              </a>
-            )}
-          </MetaRow>
-          {unreadable && (
-            <p className="mt-2 text-[12px] text-amber-200/80">
-              The exact call is kept in the project’s region and could not be read just now. Refresh to try again.
-            </p>
-          )}
-          {state.phase === 'error' && (
-            <p className="mt-2 text-[12px] text-rose-300/90">
-              {state.message}{' '}
-              <button onClick={onResetError} className="text-faint underline underline-offset-2 hover:text-zinc-300">retry</button>
-            </p>
-          )}
-        </div>
-        <div className="flex shrink-0 items-center gap-2">
-          {state.phase === 'verified' ? (
-            <span className="inline-flex items-center gap-1.5 text-[12.5px] font-medium text-emerald-300">
-              <CheckCircle2 className="size-3.5" /> Done
-            </span>
+    <Row
+      icon={restore ? HistoryIcon : a.tool === 'merge_branch' ? GitMerge : destructive ? Trash2 : Database}
+      tone={restore ? 'attention' : destructive ? 'danger' : 'neutral'}
+      busy={state.phase === 'applying'}
+      title={
+        <p className={ROW_TITLE}>
+          {restore || a.tool === 'merge_branch' ? (
+            <TextWithCode text={a.target} codeClassName="text-zinc-100" />
+          ) : destructive && a.tool === 'drop_table' ? (
+            <>Drop <TextWithCode text={a.target} codeClassName="text-zinc-100" /></>
           ) : (
-            <>
-              <GhostAction onClick={onReject} disabled={busy}>
-                {state.phase === 'dismissing' ? <Loader2 className="size-3 animate-spin" /> : <XCircle className="size-3.5" />}
-                Reject
-              </GhostAction>
-              <PrimaryAction onClick={onApprove} busy={state.phase === 'applying'} busyLabel={restore ? 'Restoring…' : 'Running…'} disabled={unreadable}>
-                <CheckCircle2 className="size-3.5" /> {restore ? 'Approve restore' : <>Approve &amp; run</>}
-              </PrimaryAction>
-            </>
+            <>Run <span className="font-mono text-[12.5px] text-zinc-200">{a.tool}</span> on <TextWithCode text={a.target} codeClassName="text-zinc-100" /></>
           )}
-        </div>
-      </div>
-    </li>
+        </p>
+      }
+      actions={
+        state.phase === 'verified' ? (
+          <span className="inline-flex items-center gap-1.5 text-[13px] font-medium text-emerald-300">
+            <CheckCircle2 className="h-4 w-4" strokeWidth={1.75} /> Done
+          </span>
+        ) : (
+          <>
+            <GhostAction onClick={onReject} disabled={busy}>
+              {state.phase === 'dismissing' ? <Loader2 className="size-3.5 animate-spin" /> : <XCircle className="size-3.5" />}
+              Reject
+            </GhostAction>
+            <PrimaryAction onClick={onApprove} busy={state.phase === 'applying'} busyLabel={restore ? 'Restoring…' : 'Running…'} disabled={unreadable}>
+              <CheckCircle2 className="size-3.5" /> {restore ? 'Approve restore' : <>Approve &amp; run</>}
+            </PrimaryAction>
+          </>
+        )
+      }
+    >
+      {shownProse && (
+        // The agent's own words are quoted, so they never read as Backenly's.
+        restore || fromBackenly || statements.length > 0 ? (
+          <p className={`${ROW_TEXT} whitespace-pre-wrap`}>{shownProse}</p>
+        ) : (
+          <p className={`${ROW_TEXT} whitespace-pre-wrap border-l-2 border-white/[0.10] pl-3`}>“{shownProse}”</p>
+        )
+      )}
+      {shownStatements.length > 0 && <CodeBlock>{shownStatements.join('\n')}</CodeBlock>}
+      {long && (
+        <Disclosure open={showFull} onToggle={() => setShowFull(v => !v)}>
+          {showFull ? 'Show less' : 'Show the full request'}
+        </Disclosure>
+      )}
+      <Facts>
+        <Fact icon={fromBackenly ? Sparkles : Bot}>{fromBackenly ? 'From Backenly' : 'From your agent'}</Fact>
+        {a.rowCount !== null && a.rowCount > 0 && (
+          <Fact icon={Rows} strong>
+            <span className="tabular-nums">{rows(a.rowCount)} affected</span>
+          </Fact>
+        )}
+        <Fact icon={restore || a.reversible ? ShieldCheck : Lock}>
+          {restore ? 'Current state protected first' : a.reversible ? 'Restore point available' : 'Not auto-reversible'}
+        </Fact>
+        <Fact><span className="tabular-nums">{timeAgo(a.createdAt)}</span></Fact>
+        {restore && a.changeId && (
+          <a
+            href={`/app/projects/${projectId}/changes?change=${encodeURIComponent(a.changeId)}`}
+            className="text-zinc-300 underline decoration-white/20 underline-offset-2 hover:text-zinc-50"
+          >
+            View details
+          </a>
+        )}
+        {a.tool === 'rollback_deploy' && (
+          <a
+            href={`/app/projects/${projectId}/changes`}
+            className="text-zinc-300 underline decoration-white/20 underline-offset-2 hover:text-zinc-50"
+          >
+            Open History
+          </a>
+        )}
+      </Facts>
+      {unreadable && (
+        <RowNote tone="attention" icon={AlertTriangle}>
+          The exact call is kept in the project’s region and could not be read just now. Refresh to try again.
+        </RowNote>
+      )}
+      {state.phase === 'error' && (
+        <RowNote tone="danger" icon={XCircle} role="alert">
+          {state.message}{' '}
+          <button onClick={onResetError} className="text-zinc-400 underline underline-offset-2 hover:text-zinc-200">retry</button>
+        </RowNote>
+      )}
+    </Row>
   )
+}
+
+/** A request whose approval removes data. */
+const DESTRUCTIVE_TOOL = /^(drop|delete|truncate|remove|purge)_/
+/** Statements shown before "Show the full request". */
+const MAX_STATEMENTS = 6
+
+/**
+ * A request's text, split where a merge lists what it applies: the sentence
+ * that introduces them, and the statements, one per line. The headline already
+ * names the target, so the sentence that repeats it, and the "Requested by an
+ * agent over MCP" prefix the facts say again, are left out of the sentence.
+ */
+function splitRequest(message: string, target: string): { prose: string; statements: string[] } {
+  const at = message.search(/in order:\s*\n/)
+  let prose = at === -1 ? message : message.slice(0, message.indexOf(':', at) + 1)
+  const statements = at === -1
+    ? []
+    : message.slice(message.indexOf(':', at) + 1).split('\n').map(s => s.trim()).filter(Boolean)
+  prose = prose.replace(/^Requested by an agent over MCP:\s*/, '')
+  if (statements.length > 0 && prose.startsWith(`${target}.`)) prose = prose.slice(target.length + 1).trim()
+  return { prose: prose.trim(), statements }
 }
 
 /**
@@ -821,25 +841,23 @@ function AgentRequestRow({
  */
 function AgentOutcomeRow({ request: a, running }: { request: AgentApproval; running?: boolean }) {
   return (
-    <li className="px-5 py-3.5">
-      <div className="flex items-start gap-3">
-        <span className={`mt-1.5 size-1.5 shrink-0 rounded-full ${running ? 'bg-sky-400' : 'bg-amber-400'}`} />
-        <div className="min-w-0 flex-1">
-          <p className="text-[13px] font-medium text-zinc-100">
-            {running ? 'Approved, running now: ' : 'Approved, but the outcome is unknown: '}
-            <span className="font-mono text-[12px] text-violet-200">{a.tool}</span> on <TextWithCode text={a.target} />
-          </p>
-          {!running && a.resultSummary && (
-            <p className="mt-1 break-words text-[12px] leading-relaxed text-amber-200/80">{a.resultSummary}</p>
-          )}
-          <MetaRow>
-            <span>From your agent</span>
-            <span className="tabular-nums">{timeAgo(a.createdAt)}</span>
-          </MetaRow>
-        </div>
-        {running && <Loader2 className="size-3.5 shrink-0 animate-spin text-zinc-500" />}
-      </div>
-    </li>
+    <Row
+      icon={running ? Loader2 : AlertTriangle}
+      tone={running ? 'neutral' : 'attention'}
+      title={
+        <p className={ROW_TITLE}>
+          {running ? 'Approved, running now: ' : 'Approved, but the outcome is unknown: '}
+          <span className="font-mono text-[12.5px] text-zinc-200">{a.tool}</span> on <TextWithCode text={a.target} codeClassName="text-zinc-100" />
+        </p>
+      }
+      actions={running ? <Loader2 className="h-4 w-4 animate-spin text-zinc-500" strokeWidth={1.75} /> : undefined}
+    >
+      {!running && a.resultSummary && <p className={`${ROW_TEXT} text-amber-200/90`}>{a.resultSummary}</p>}
+      <Facts>
+        <Fact icon={Bot}>From your agent</Fact>
+        <Fact><span className="tabular-nums">{timeAgo(a.createdAt)}</span></Fact>
+      </Facts>
+    </Row>
   )
 }
 
@@ -885,19 +903,16 @@ function ApprovalRow({
   const many = g.members.length > 1
   // A proposal is bound to one finding, so it is offered on single rows only.
   const proposal = !many ? head.proposal : undefined
+  const title = <p className={ROW_TITLE}><TextWithCode text={g.title} codeClassName="text-zinc-100" /></p>
 
   if (state.phase === 'verified') {
     return (
-      <li className="flex items-start gap-3 px-5 py-3.5 animate-fade-in">
-        <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-emerald-400" />
-        <div className="min-w-0 flex-1">
-          <p className="text-[12.5px] font-medium text-zinc-200">{g.title}</p>
-          {/* Only what is true of every fix: not every fix is verified, nor keeps a restore point. */}
-          <MetaRow className="!mt-1">
-            <span>Fixed{many ? ` on ${g.members.length} tables` : ''}</span>
-          </MetaRow>
-        </div>
-      </li>
+      <Row icon={CheckCircle2} tone="done" title={title} className="animate-fade-in">
+        {/* Only what is true of every fix: not every fix is verified, nor keeps a restore point. */}
+        <Facts>
+          <Fact>Fixed{many ? ` on ${g.members.length} tables` : ''}</Fact>
+        </Facts>
+      </Row>
     )
   }
 
@@ -911,144 +926,134 @@ function ApprovalRow({
     } catch { /* clipboard blocked — no-op */ }
   }
 
+  // "Waiting for your review" under a heading that already says so says
+  // nothing; every other reason (a guardrail, an escalation) is the point.
+  const reason = reasonForApproval(head)
+  const diag = diagnosisOf(head)
+
   return (
-    <li className={`px-5 py-3.5 transition-colors ${state.phase === 'error' ? 'bg-rose-500/[0.03]' : ''}`}>
-      <div className="flex items-start gap-3">
-        <span
-          className={`mt-1.5 size-1.5 shrink-0 rounded-full ${critical ? 'bg-rose-500' : 'bg-amber-400'} ${
-            state.phase === 'applying' ? 'animate-pulse' : ''
-          }`}
-        />
-        <div className="min-w-0 flex-1">
-          <p className="text-[12.5px] leading-snug text-zinc-100">{g.title}</p>
-          {heldKindLabel(head) && (
-            <p className="mt-1 text-[12px] font-medium text-amber-400/80">
-              {heldKindLabel(head)}
-            </p>
-          )}
-          <p className="mt-1 text-[12.5px] leading-snug text-faint">{reasonForApproval(head)}</p>
-          {(() => {
-            const diag = diagnosisOf(head)
-            if (!diag) return null
-            return (
-              <div className="mt-1.5 border-l border-white/[0.08] pl-3">
-                <p className="mb-0.5 text-[12px] font-medium text-faint">
-                  {diag.provenance === 'investigation'
-                    ? `Confirmed by investigation${diag.observations ? ` · ${diag.observations} observation${diag.observations === 1 ? '' : 's'}` : ''}`
-                    : 'AI hypothesis · not verified'}
-                </p>
-                {diag.rootCause && (
-                  <p className="text-[12.5px] leading-snug text-zinc-400">{diag.rootCause}</p>
-                )}
-                {diag.recommendation && (
-                  <p className="mt-0.5 text-[12.5px] leading-snug text-faint">
-                    <span className="text-zinc-400">Recommended:</span> {diag.recommendation}
-                  </p>
-                )}
-              </div>
-            )
-          })()}
-          <MetaRow>
-            <MetaCode>{head.type}</MetaCode>
-            <span>{severityWord(g.severity)}</span>
-            {!many && head.resource && <MetaCode>{head.resource}</MetaCode>}
-            {head.source && head.source !== 'autonomy' && (
-              <span>{head.source === 'brain-risk' ? 'Raised by an AI agent' : 'From the backend build'}</span>
+    <Row
+      icon={CATEGORY_ICON[g.category] ?? Activity}
+      tone={critical ? 'danger' : 'attention'}
+      busy={state.phase === 'applying'}
+      className={state.phase === 'error' ? 'bg-rose-500/[0.03]' : ''}
+      title={title}
+      actions={
+        state.phase === 'error' ? (
+          <PrimaryAction onClick={onResetError} busy={false} busyLabel="">
+            Try again
+          </PrimaryAction>
+        ) : (
+          <>
+            <GhostAction onClick={onDismiss} disabled={busy}>
+              {state.phase === 'dismissing' ? <Loader2 className="size-3.5 animate-spin" /> : null}
+              Dismiss
+            </GhostAction>
+            {/* The fix button exists only when a fix does. `fixableCount` is
+                computed from the executor's own action mapping, so this can
+                never promise a repair the engine does not have. */}
+            {proposal && (
+              <PrimaryAction onClick={() => onApproveProposal(proposal)} busy={state.phase === 'applying'} busyLabel="Applying…">
+                Approve & fix
+              </PrimaryAction>
             )}
-            <span className="tabular-nums">{timeAgo(head.detectedAt)}</span>
-          </MetaRow>
-
-          {/* The fold is never a hiding place: every member is one click away,
-              and the count is stated before you click. */}
-          {many && (
-            <div className="mt-2">
-              <button
-                onClick={() => setExpanded(v => !v)}
-                aria-expanded={expanded}
-                className="inline-flex items-center gap-1 text-[12.5px] font-medium text-faint transition-colors hover:text-zinc-300"
+            {!proposal && g.actionable && (
+              <PrimaryAction
+                onClick={onApprove}
+                busy={state.phase === 'applying'}
+                busyLabel={g.fixableCount > 1 ? `Applying ${g.fixableCount}…` : 'Applying…'}
               >
-                {g.members.length} findings, one cause
-                <ChevronDown className={`size-3 transition-transform ${expanded ? 'rotate-180' : ''}`} />
-              </button>
-              {expanded && (
-                <ul className="mt-2 space-y-1 border-l border-white/[0.08] pl-3">
-                  {g.members.map((m, i) => (
-                    <li key={m.id} className="font-mono text-[12px] leading-relaxed text-faint">
-                      {g.subjects[i] ?? m.resource ?? m.reason}
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-          )}
-
-          {/* No auto-repair exists for this row. Say so HERE, before the user
-              spends a click discovering it — and say what to do instead. The
-              hint is the same sentence the approve route would have returned,
-              read from the one fix mapping (lib/core/fix-actions.ts). */}
-          {proposal && state.phase !== 'error' && (
-            <div className="mt-2 border-l border-violet-400/30 pl-3">
-              <p className="mb-0.5 text-[11.5px] font-medium uppercase tracking-wide text-violet-300/80">
-                AI-proposed repair · needs your approval
-              </p>
-              <p className="text-[12.5px] leading-snug text-zinc-300">{proposal.summary}</p>
-              <p className="mt-0.5 text-[12px] leading-snug text-faint">
-                Recorded as fixed only if it is in the catalog, the issue is gone on re-check and nothing else broke. Undo restores the state before it.
-              </p>
-            </div>
-          )}
-
-          {!g.actionable && !proposal && state.phase !== 'error' && g.manualHint && (
-            <p className="mt-2 border-l border-white/[0.08] pl-3 text-[12.5px] leading-snug text-zinc-400">
-              {g.manualHint}
+                {g.fixableCount > 1 ? `Approve & fix all ${g.fixableCount}` : 'Approve & fix'}
+              </PrimaryAction>
+            )}
+            <OverflowMenu
+              label={`More actions for: ${g.title}`}
+              disabled={busy}
+              width="w-[230px]"
+              items={[{ label: 'Hand to my agent', icon: ClipboardCopy, onClick: () => { void handToAgent() } }]}
+            />
+          </>
+        )
+      }
+    >
+      {heldKindLabel(head) && (
+        <p className="mt-1 text-[12.5px] font-medium leading-[18px] text-amber-200">{heldKindLabel(head)}</p>
+      )}
+      {reason !== WAITING_FOR_REVIEW && <p className={ROW_TEXT}>{reason}</p>}
+      {diag && (
+        <div className="mt-2.5 border-l-2 border-white/[0.08] pl-3">
+          <p className="text-[12px] font-medium leading-[16px] text-faint">
+            {diag.provenance === 'investigation'
+              ? `Confirmed by investigation${diag.observations ? `, ${diag.observations} observation${diag.observations === 1 ? '' : 's'}` : ''}`
+              : 'AI hypothesis, not verified'}
+          </p>
+          {diag.rootCause && <p className="mt-1 text-[13px] leading-[19px] text-zinc-300">{diag.rootCause}</p>}
+          {diag.recommendation && (
+            <p className="mt-1 text-[13px] leading-[19px] text-zinc-400">
+              <span className="text-zinc-300">Recommended:</span> {diag.recommendation}
             </p>
           )}
+        </div>
+      )}
+      <Facts>
+        <StatusDot tone={critical ? 'failed' : 'attention'} label={severityWord(g.severity)} />
+        <Fact>{CATEGORY_LABEL[g.category]}</Fact>
+        {!many && head.resource && <Fact><MetaCode>{head.resource}</MetaCode></Fact>}
+        {head.source && head.source !== 'autonomy' && (
+          <Fact icon={head.source === 'brain-risk' ? Bot : Wrench}>
+            {head.source === 'brain-risk' ? 'Raised by an AI agent' : 'From the backend build'}
+          </Fact>
+        )}
+        <Fact><span className="tabular-nums">{timeAgo(head.detectedAt)}</span></Fact>
+        {copied && <Fact icon={Check} strong>Copied for your agent</Fact>}
+      </Facts>
 
-          {state.phase === 'error' && (
-            <div className="mt-2 flex items-start gap-2">
-              <XCircle className="mt-px size-3.5 shrink-0 text-rose-400" />
-              <p className="text-[12.5px] leading-snug text-rose-300/90">{state.message}</p>
-            </div>
+      {/* The fold is never a hiding place: every member is one click away,
+          and the count is stated before you click. */}
+      {many && (
+        <>
+          <Disclosure open={expanded} onToggle={() => setExpanded(v => !v)}>
+            {g.members.length} findings, one cause
+          </Disclosure>
+          {expanded && (
+            <ul className="mt-2 space-y-1 border-l-2 border-white/[0.08] pl-3">
+              {g.members.map((m, i) => (
+                <li key={m.id} className="font-mono text-[12px] leading-[19px] text-zinc-400">
+                  {g.subjects[i] ?? m.resource ?? m.reason}
+                </li>
+              ))}
+            </ul>
           )}
+        </>
+      )}
+
+      {proposal && state.phase !== 'error' && (
+        <div className="mt-2.5 rounded-[7px] border border-white/[0.08] bg-white/[0.02] px-3.5 py-2.5">
+          <p className="text-[12px] font-medium leading-[16px] text-zinc-300">AI-proposed repair, needs your approval</p>
+          <p className="mt-1 text-[13px] leading-[19px] text-zinc-200">{proposal.summary}</p>
+          <p className="mt-1 text-[12.5px] leading-[18px] text-faint">
+            Recorded as fixed only if it is in the catalog, the issue is gone on re-check and nothing else broke. Undo restores the state before it.
+          </p>
         </div>
-        <div className="flex shrink-0 items-center gap-2">
-          {state.phase === 'error' ? (
-            <PrimaryAction onClick={onResetError} busy={false} busyLabel="">
-              Try again
-            </PrimaryAction>
-          ) : (
-            <>
-              {/* The fix button exists only when a fix does. `fixableCount` is
-                  computed from the executor's own action mapping, so this can
-                  never promise a repair the engine does not have. */}
-              {proposal && (
-                <PrimaryAction onClick={() => onApproveProposal(proposal)} busy={state.phase === 'applying'} busyLabel="Applying…">
-                  Approve & fix
-                </PrimaryAction>
-              )}
-              {!proposal && g.actionable && (
-                <PrimaryAction
-                  onClick={onApprove}
-                  busy={state.phase === 'applying'}
-                  busyLabel={g.fixableCount > 1 ? `Applying ${g.fixableCount}…` : 'Applying…'}
-                >
-                  {g.fixableCount > 1 ? `Approve & fix all ${g.fixableCount}` : 'Approve & fix'}
-                </PrimaryAction>
-              )}
-              <GhostAction onClick={handToAgent} disabled={busy}>
-                {copied ? <Check className="size-3.5 text-emerald-400" /> : <ClipboardCopy className="size-3.5" />}
-                {copied ? 'Copied' : 'Hand to my agent'}
-              </GhostAction>
-              <GhostAction onClick={onDismiss} disabled={busy}>
-                {state.phase === 'dismissing' ? '…' : 'Dismiss'}
-              </GhostAction>
-            </>
-          )}
-        </div>
-      </div>
-    </li>
+      )}
+
+      {/* No auto-repair exists for this row. Say so HERE, before the user
+          spends a click discovering it — and say what to do instead. The
+          hint is the same sentence the approve route would have returned,
+          read from the one fix mapping (lib/core/fix-actions.ts). */}
+      {!g.actionable && !proposal && state.phase !== 'error' && g.manualHint && (
+        <p className="mt-2.5 border-l-2 border-white/[0.08] pl-3 text-[13px] leading-[19px] text-zinc-400">{g.manualHint}</p>
+      )}
+
+      {state.phase === 'error' && (
+        <RowNote tone="danger" icon={XCircle} role="alert">{state.message}</RowNote>
+      )}
+    </Row>
   )
 }
+
+/** The fallback reason, which the "Waiting on you" heading already says. */
+const WAITING_FOR_REVIEW = 'Waiting for your review.'
 
 /** Cut at the last word boundary within `max` characters and mark the cut. */
 function clip(text: string, max: number): string {
