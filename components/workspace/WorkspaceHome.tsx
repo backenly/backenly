@@ -1091,16 +1091,6 @@ function SelfHealingLoop({
                           : off ? 'text-zinc-600' : 'text-[#B4C6EE]'
                       }`}
                     />
-                    {/* Top-right micro stage index badge */}
-                    <span
-                      className={`absolute -top-2 -right-1.5 font-mono text-[9px] font-medium px-1.5 py-0.5 rounded-[3px] border transition-colors shadow-sm ${
-                        active
-                          ? 'bg-[#0d0e14] border-violet-400/50 text-violet-200'
-                          : 'bg-[#0A0A0C] border-[#2D2D35] text-[#E2E8F0]'
-                      }`}
-                    >
-                      {idx + 1}
-                    </span>
                   </span>
 
                   <span
