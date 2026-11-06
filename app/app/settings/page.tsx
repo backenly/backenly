@@ -43,6 +43,8 @@ interface UserProfile {
   provider?: string
   emailVerified?: boolean
   twoFactorEnabled?: boolean
+  /** False for an account with no password yet; absent from an older API. */
+  hasPassword?: boolean
   createdAt?: string
   lastLogin?: string | null
   tier?: string
@@ -620,6 +622,7 @@ function SecuritySection({
   onLogout: () => void
 }) {
   const isEmailUser = user?.provider === 'email' || !user?.provider
+  const noPassword = user?.hasPassword === false
   const twoFAOn = !!user?.twoFactorEnabled
 
   return (
@@ -635,7 +638,9 @@ function SecuritySection({
             <div className="min-w-0 flex-1">
               <p className="text-[13px] font-medium text-zinc-100">{providerLabel(user?.provider)}</p>
               <p className="mt-0.5 text-[12.5px] text-zinc-500">
-                {isEmailUser ? 'Signed in with email and password' : `Managed by ${providerLabel(user?.provider)}`}
+                {isEmailUser
+                  ? noPassword ? 'Signed in with a code we email you' : 'Signed in with email and password'
+                  : `Managed by ${providerLabel(user?.provider)}`}
               </p>
             </div>
             <KitBadge tone="operational">Active</KitBadge>
@@ -672,7 +677,10 @@ function SecuritySection({
 
       {/* Password */}
       <KitCard>
-        <KitCardHeader title="Password" description="Reset your password via email" />
+        <KitCardHeader
+          title="Password"
+          description={noPassword ? 'Set one to sign in without a code' : 'Change it with a code we email you'}
+        />
         <KitCardBody>
           {isEmailUser ? (
             <div className="flex items-center gap-3">
@@ -680,11 +688,11 @@ function SecuritySection({
                 <Lock className="h-4 w-4 text-zinc-500" />
               </div>
               <div className="min-w-0 flex-1">
-                <p className="text-[13px] font-medium text-zinc-100">Send password reset link</p>
-                <p className="mt-0.5 text-[12.5px] text-zinc-500">We&apos;ll email a secure link to {user?.email}.</p>
+                <p className="text-[13px] font-medium text-zinc-100">{noPassword ? 'Set a password' : 'Change your password'}</p>
+                <p className="mt-0.5 text-[12.5px] text-zinc-500">We&apos;ll email a code to {user?.email}.</p>
               </div>
               <KitButton variant="secondary" size="sm" icon={resetLoading ? undefined : Mail} onClick={onPasswordReset} disabled={resetLoading}>
-                {resetLoading ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Sending…</> : 'Send link'}
+                {resetLoading ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Opening…</> : noPassword ? 'Set password' : 'Change password'}
               </KitButton>
             </div>
           ) : (

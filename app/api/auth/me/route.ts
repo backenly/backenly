@@ -26,6 +26,8 @@ export const GET = withAuth(async (request: NextRequest, { user }) => {
         // accounts (all trusted) are untouched.
         trustLevel: true,
         twoFactorEnabled: true,
+        // Read only to say whether one is set; the hash never leaves this route.
+        password: true,
         createdAt: true,
         lastLogin: true,
         tier: true,
@@ -58,6 +60,10 @@ export const GET = withAuth(async (request: NextRequest, { user }) => {
       emailVerified: userDetails.emailVerified,
       trustLevel: userDetails.trustLevel,
       twoFactorEnabled: userDetails.twoFactorEnabled,
+      // An account can have no password: Google and GitHub signups, and an
+      // account Backenly Cloud's founders created for an enterprise customer,
+      // which signs in with an emailed code until it chooses one.
+      hasPassword: !!userDetails.password,
       createdAt: userDetails.createdAt,
       lastLogin: userDetails.lastLogin,
       tier: userDetails.tier,

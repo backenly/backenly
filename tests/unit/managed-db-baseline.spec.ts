@@ -121,6 +121,7 @@ const FORWARD_MIGRATIONS = [
   '20261018120000_backend_change_ledger',
   '20261023120000_support_ai_attempts',
   '20261023130000_user_avatars',
+  '20261107120000_enterprise_contracts',
 ]
 
 describe('the assembled migration workspace', () => {

@@ -372,6 +372,9 @@ describe('overlay-allowlist.json', () => {
         'app/api/billing/**',
         'app/api/cron/grace-check/route.ts',
         'app/api/cron/process-grace-periods/route.ts',
+        // Backenly Enterprise: the code sign-in for the customers the founders
+        // add, and choosing a password after it. The contract table is public.
+        'app/api/enterprise/**',
         'app/api/org/**',
         'app/api/projects/[id]/access/route.ts',
         // Whether a paused project may resume, and resuming it: Cloud's
@@ -391,6 +394,9 @@ describe('overlay-allowlist.json', () => {
         'app/app/org/**',
         'app/app/organizations/**',
         'app/app/referral/**',
+        // The Enterprise sign-in page, a directory of its own among the public
+        // sign-in pages.
+        'app/auth/enterprise/**',
         'app/startups/**',
         'components/app/AmplitudeAnalytics.tsx',
         'components/cloud/**',

@@ -83,6 +83,7 @@ model User {
   referralGrantsMade      ReferralGrant[]          @relation("ReferralReferrer")
   referralGrantReceived   ReferralGrant?           @relation("ReferralReferee")
   startupApplication      StartupApplication?
+  enterpriseContracts     EnterpriseContract[]
   // ── Organization relations (Phase 6) ──────────────────────────────────────
   ownedOrganizations      Organization[]           @relation("OrgOwner")
   orgMemberships          OrganizationMember[]
@@ -1651,6 +1652,62 @@ model StartupApplication {
   @@map("startup_applications")
 }
 
+// Backenly Enterprise: a contract the founders negotiated, recorded when they
+// added the customer in the Cloud admin console. Backenly never charges it;
+// Stripe invoices it. The row says who is on Enterprise, for which term and
+// what the deal is worth, so the console can show it and remind the founders
+// before the term ends. Written and read only by the Backenly Cloud overlay, so
+// a self-hosted install keeps it empty.
+model EnterpriseContract {
+  id                  String    @id @default(uuid())
+  // The account the founders added: the organization's owner, and the contact
+  // the welcome went to.
+  userId              String?
+  // The organization on Enterprise: the contact's own organization.
+  organizationId      String?
+  // The subscription row the contract put on Enterprise, so ending it can only
+  // ever touch that row and never a subscription the account paid for later.
+  subscriptionId      String?
+  // active | ended
+  status              String    @default("active")
+  companyName         String
+  contactName         String?
+  contactEmail        String
+  termStartsAt        DateTime
+  termEndsAt          DateTime
+  // What the deal is worth per billing period, for the console only.
+  amountCents         Int?
+  currency            String    @default("usd")
+  // year | quarter | month | once
+  billingPeriod       String?
+  stripeCustomerId    String?
+  // The founders' own words near the top of the welcome email.
+  note                String?
+  welcomeSentAt       DateTime?
+  // The contact's first sign-in, which the console shows until it happens.
+  firstSignInAt       DateTime?
+  // The founders' renewal reminders, each sent once per term by the daily
+  // check, and the last weekly one once a term has ended without a renewal.
+  // Renewing clears them.
+  reminder30SentAt    DateTime?
+  reminder7SentAt     DateTime?
+  endedNoticeSentAt   DateTime?
+  lastOverdueNoticeAt DateTime?
+  endedAt             DateTime?
+  createdById         String?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  user         User?         @relation(fields: [userId], references: [id], onDelete: SetNull)
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+
+  @@index([status])
+  @@index([termEndsAt])
+  @@index([userId])
+  @@index([organizationId])
+  @@map("enterprise_contracts")
+}
+
 // ─── Organizations (Phase 6 — team accounts) ────────────────────────────────
 // A platform-level account that owns projects and (org-based) billing. Every
 // user gets one personal Organization lazily. Teams are formed by
@@ -1664,12 +1721,13 @@ model Organization {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  owner          User                 @relation("OrgOwner", fields: [ownerId], references: [id], onDelete: Cascade)
-  members        OrganizationMember[]
-  invites        OrganizationInvite[]
-  projectMembers ProjectMember[]
-  projects       Project[]
-  subscriptions  Subscription[]
+  owner               User                 @relation("OrgOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  members             OrganizationMember[]
+  invites             OrganizationInvite[]
+  projectMembers      ProjectMember[]
+  projects            Project[]
+  subscriptions       Subscription[]
+  enterpriseContracts EnterpriseContract[]
 
   @@index([ownerId])
   @@map("organizations")

@@ -169,6 +169,9 @@ const publicApiRoutes = [
   '/api/startups/',                 // Startup program (Cloud overlay): applying is anonymous, gated by
                                     // Turnstile, rate limits and an emailed code; the status and claim
                                     // routes authenticate the session themselves
+  '/api/enterprise/sign-in/',       // Backenly Enterprise code sign-in (Cloud overlay): anonymous by
+                                    // nature, gated by rate limits and an emailed code. Choosing a
+                                    // password after it (/api/enterprise/password) needs the session.
   '/api/connect/',                  // Legacy provider handshake flow (routes self-authenticate; flagged for removal)
 ]
 
