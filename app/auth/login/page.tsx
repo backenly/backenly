@@ -8,6 +8,7 @@ import { login, LoginError } from '@/lib/api/auth'
 import { useUserSession } from '@/lib/hooks/useUserSession'
 import { GlobalLoading } from '@/components/ui/GlobalLoading'
 import { registerSiteIcons } from '@/lib/icons/registry'
+import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
 import {
   AuthChrome,
   AuthCard,
@@ -293,6 +294,20 @@ function LoginForm() {
               <Icon icon="solar:arrow-right-up-linear" width={11} />
             </Link>
           </p>
+          {/* Backenly Cloud's enterprise customers sign in with an emailed code
+              until they choose a password. The page says the same thing for
+              every address, so linking it reveals nothing about who has one. */}
+          {CLOUD_CONTROL_PLANE && (
+            <p className="mt-2 text-xs text-zinc-400">
+              On Backenly Enterprise?{' '}
+              <Link
+                href="/auth/enterprise"
+                className="text-violet-300 hover:text-violet-200 transition-colors font-medium"
+              >
+                Sign in with an emailed code
+              </Link>
+            </p>
+          )}
         </div>
       </AuthCard>
 

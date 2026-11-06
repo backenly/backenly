@@ -34,7 +34,20 @@ import { AUTH_LIMITS, consume, type RateLimitResult } from '@/lib/security/auth-
 // what the account may be charged; only the person who reads that mail can.
 // startup_application: an applicant to Backenly Cloud's startup program proving
 // they read mail at the startup's own domain, before anyone reviews them.
-export type EmailCodePurpose = 'signup' | 'password_reset' | 'spend_limit' | 'startup_application'
+// enterprise_*: Backenly Cloud's sign-in for the enterprise customers its
+// founders add. enterprise_signin is the code mailed to the customer;
+// enterprise_2fa and enterprise_password are never mailed. The sign-in hands
+// them back to the browser that just proved the mailed code, as single-use
+// grants for the authenticator step and for choosing a password, so neither
+// needs a second email and neither can be used without the first.
+export type EmailCodePurpose =
+  | 'signup'
+  | 'password_reset'
+  | 'spend_limit'
+  | 'startup_application'
+  | 'enterprise_signin'
+  | 'enterprise_2fa'
+  | 'enterprise_password'
 
 export const EMAIL_CODE_LENGTH = 6
 export const EMAIL_CODE_TTL_MS = 10 * 60_000

@@ -190,6 +190,7 @@ jest-integration.json
 /app/api/billing/
 /app/api/cron/grace-check/route.ts
 /app/api/cron/process-grace-periods/route.ts
+/app/api/enterprise/
 /app/api/org/
 /app/api/projects/\[id\]/access/route.ts
 /app/api/projects/\[id\]/availability/
@@ -203,6 +204,7 @@ jest-integration.json
 /app/app/org/
 /app/app/organizations/
 /app/app/referral/
+/app/auth/enterprise/
 /app/startups/
 /components/app/AmplitudeAnalytics.tsx
 /components/cloud/

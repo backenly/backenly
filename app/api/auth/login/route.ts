@@ -119,10 +119,18 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // 4. OAuth-only accounts can't use password login
+    // 4. An account with no password can't use password login. Google and
+    // GitHub signups have none; so does an account Backenly Cloud's founders
+    // created for an enterprise customer, until it chooses one. Telling an
+    // email account to "sign in with your provider" sent it nowhere.
     if (!user.password) {
+      const viaProvider = user.provider === 'google' || user.provider === 'github'
       return NextResponse.json(
-        { error: 'This account uses OAuth login. Please sign in with your provider.' },
+        {
+          error: viaProvider
+            ? 'This account uses OAuth login. Please sign in with your provider.'
+            : 'This account has no password yet. Choose one with “Forgot password?”.',
+        },
         { status: 401 }
       )
     }
