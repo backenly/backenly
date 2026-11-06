@@ -661,9 +661,6 @@ function OverviewPage({ view, quiet }: { view: View; quiet: boolean }) {
                   }}
                 >
                   <NodeIcon className="h-[15px] w-[15px]" strokeWidth={1.8} />
-                  <span className="absolute -right-[7px] -top-[7px] flex h-[14px] w-[14px] items-center justify-center rounded-[3px] border border-white/[0.15] bg-[#16161b] text-[9px] text-zinc-300">
-                    {i + 1}
-                  </span>
                 </span>
                 <span className={`mt-[14px] text-[13px] ${lit ? 'text-zinc-50' : 'text-zinc-300'}`}>{node.label}</span>
                 <span

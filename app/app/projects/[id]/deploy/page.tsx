@@ -435,7 +435,7 @@ export default function PublishPage() {
         meta={<StatusDot tone={runtimeStatus.tone} label={runtimeStatus.label} pulse={runtimeStatus.pulse} />}
         description={runtimeTagline}
         actions={
-          hasRealBackend && status !== 'DEPLOYING' ? publishButton(isLive ? 'Publish update' : 'Publish now') : undefined
+          isLive && hasRealBackend ? publishButton('Publish update') : undefined
         }
       />
 
