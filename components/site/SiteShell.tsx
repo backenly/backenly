@@ -9,7 +9,6 @@ import { AnimatePresence, motion } from 'framer-motion'
 import { Menu, X } from 'lucide-react'
 import { registerSiteIcons } from '@/lib/icons/registry'
 import { BrandMark } from '@/components/site/BrandMark'
-import { LaunchBar } from '@/components/site/LaunchBar'
 import { ProductHuntBadge } from '@/components/site/ProductHuntBadge'
 import { useUserSession } from '@/lib/hooks/useUserSession'
 
@@ -43,17 +42,6 @@ export const ROUTES = {
   founder: 'https://calendly.com/adarsh-c-jose/30min',
   x: 'https://x.com/Backenly',
   linkedin: 'https://www.linkedin.com/company/117034579',
-  /**
-   * Product Hunt: Backenly's launch, scheduled for October 31, 2026.
-   *
-   * The launch bar above the navbar links here. Until 2026-10-30 this was
-   * Product Hunt's own home page, held there on purpose until Backenly's page
-   * existed. Product Hunt gave the product the slug `backenly-2`, and this URL
-   * opens that launch before, during and after launch day, so it needs no
-   * second swap. The footer badge (./ProductHuntBadge) carries Product Hunt's
-   * own embed link to the same product.
-   */
-  productHunt: 'https://www.producthunt.com/products/backenly-2?launch=backenly-2',
   // The flagship open-source platform repo. Must be public for this link to
   // resolve for anonymous visitors. The navbar links to it with a bare icon:
   // the star count used to be rendered beside it and was deliberately removed.
@@ -80,13 +68,6 @@ export const ROUTES = {
  * navbar and the mobile menu at once, without hunting through the JSX.
  */
 const SHOW_DISCORD = true
-
-/**
- * One switch for the Product Hunt launch bar above the navbar (see
- * components/site/LaunchBar.tsx). Flip to false to pull it from every
- * marketing page at once.
- */
-const SHOW_LAUNCH_BAR = true
 
 const NAV_LINKS = [
   { label: 'Product', href: '/#platform', activePath: '/' },
@@ -174,7 +155,6 @@ export function SiteShell({ children }: { children: React.ReactNode }) {
           >
             Skip to content
           </a>
-          {SHOW_LAUNCH_BAR && <LaunchBar href={ROUTES.productHunt} />}
           <NavBar />
           {children}
           <SiteFooter />
