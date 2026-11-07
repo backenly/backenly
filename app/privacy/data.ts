@@ -65,6 +65,21 @@
  * application's form, it also records clicks on links and buttons: the words
  * on them, where a link leads and the page. It never reads form fields.
  *
+ * WHAT ENDORSELY RECEIVES
+ *
+ * The Cloud overlay's components/cloud/EndorselyScript.tsx loads
+ * assets.endorsely.com/endorsely.js on every page, so Endorsely sees the IP
+ * address and user agent of each page load. Read on 2026-11-08, the script
+ * does more only when the URL carries ref, aff, via, _by, by or utm_source and
+ * no endorsely_referral cookie exists yet: it POSTs that tag, every other query
+ * parameter and the path to app.endorsely.com/api/public/track, and when
+ * Endorsely answers with a referral it stores it in the endorsely_referral
+ * cookie. Checkout copies that referral into the Stripe Checkout Session's
+ * metadata, and Endorsely, connected to Backenly's Stripe account, reads the
+ * payments from there ("transaction history or user IDs", section 1c of
+ * Endorsely's own policy). What an affiliate partner can see of a referred
+ * customer is not documented by Endorsely, so the policy says nothing about it.
+ *
  * ANCHORS ARE SLUGS, NOT ORDINALS
  *
  * These were #section-1 … #section-12, derived from array position, so any
@@ -72,7 +87,7 @@
  * reordering; verify-content-integrity.ts enforces their uniqueness and shape.
  */
 
-export const EFFECTIVE_DATE = 'October 28, 2026'
+export const EFFECTIVE_DATE = 'November 8, 2026'
 export const PRIVACY_EMAIL = 'support@backenly.com'
 
 export type Provider = {
@@ -138,6 +153,12 @@ export const PROVIDERS: Provider[] = [
     purpose: 'Processes payments for subscriptions and for usage beyond a plan',
     data: 'Your email address, your plan and any usage charges. Stripe collects payment details directly',
     href: 'https://stripe.com/privacy',
+  },
+  {
+    name: 'Endorsely',
+    purpose: 'Tracks referrals from affiliate partners so they can be paid commission',
+    data: 'IP addresses and browser user agents, the tags in a referral link and the page it led to, and for referred customers, their email address and payments, which it reads from Stripe',
+    href: 'https://endorsely.com/privacy-policy',
   },
   {
     name: 'Cloudflare',
@@ -372,6 +393,17 @@ export const PRIVACY_SECTIONS: PrivacySection[] = [
     ],
   },
   {
+    id: 'affiliate-referrals',
+    title: 'Affiliate referrals',
+    content:
+      'Backenly runs an affiliate program: partners who refer customers to Backenly are paid a commission. Endorsely tracks those referrals for us.',
+    list: [
+      'Every page on backenly.com loads Endorsely’s script from Endorsely’s servers, so Endorsely receives your IP address and browser user agent when a page loads.',
+      'If you arrive through a link carrying a referral or campaign tag, such as ref, via or utm_source, the script sends Endorsely that tag, the other tags in the link and the page you landed on. When the tag belongs to one of our partners, it stores a referral identifier in a cookie named endorsely_referral.',
+      'If you then subscribe, Backenly adds that referral identifier to your Stripe checkout. Endorsely is connected to Backenly’s Stripe account and can read the payments made under the referral, including your email address and the amounts paid, so the partner can be paid.',
+    ],
+  },
+  {
     id: 'email',
     title: 'Email',
     content:
@@ -425,7 +457,7 @@ export const PRIVACY_SECTIONS: PrivacySection[] = [
       'Security and anti-abuse records are kept afterwards, including blocklist entries, so that abuse cannot be reset by deleting and recreating an account. Some billing and audit records are also kept.',
     ],
     extra:
-      'Copies held by the providers listed above are subject to their own retention. Deleting your Backenly account does not delete analytics data held by Amplitude, error reports held by Sentry, or the payment records Stripe keeps.',
+      'Copies held by the providers listed above are subject to their own retention. Deleting your Backenly account does not delete analytics data held by Amplitude, error reports held by Sentry, referral records held by Endorsely, or the payment records Stripe keeps.',
   },
   {
     id: 'export',
