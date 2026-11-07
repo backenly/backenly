@@ -138,6 +138,9 @@ describe('provider disclosure', () => {
       'Amplitude',
       'Sentry',
       'Stripe',
+      // Cloud's affiliate tracking: the overlay loads Endorsely's script on
+      // every page, and next.config.js allows its two origins.
+      'Endorsely',
       'Cloudflare',
       'Google',
       'GitHub',
