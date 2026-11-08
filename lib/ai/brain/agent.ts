@@ -83,6 +83,7 @@ import type { DataMigrationEstimate } from '@/lib/execution/data-migration'
 import { redactArgs } from './redact'
 import { currentPageContext, isAgentDoor, type BrainDoor } from './input-context'
 import { callSignal, startTurnClock, type TurnClock } from './turn-clock'
+import { findOriginalBuildPrompt } from './resume-routing'
 
 /**
  * One tool call the approval gate stopped, carried verbatim so the caller can
@@ -868,6 +869,7 @@ if (loopResume) {
     dispatchCtx,
     emit,
     toolsRun,
+    clock,
     null,
     architectFailedThisTurn,
   )
