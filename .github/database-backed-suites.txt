@@ -1136,6 +1136,13 @@ tests/integration/storage-policy-action.spec.ts
 # project-wide disable stops. Real workspace tables and NOTIFY triggers are
 # the property.
 tests/integration/realtime-scope-truth.spec.ts
+# A large realtime change still says which row changed: an update that fits
+# without its old row keeps the new row and reduces the old one to its key, one
+# too large either way carries the primary key and reaches only streams that
+# may read the row, and a schema on the older notify function is brought up to
+# date; presence metadata over 4 KB is refused with 413 on both runtimes, not
+# failed with a 500. Real triggers, notifications and policies are the property.
+tests/integration/realtime-large-changes.spec.ts
 # The storage runtime is correct on both drivers: the S3 driver clamps a
 # requested isPublic to the bucket policy at write time like the local one,
 # multipart complete leaves exactly one real row and counts the bytes once,

@@ -17,6 +17,7 @@ Every tool and route answers failures as JSON: `{ ok: false, error, code }`, oft
 | `DESTRUCTIVE_NEEDS_APPROVAL` | A destructive tool was called directly | Use the section tool's action, which parks it for approval (`autonomy`) |
 | `INVALID_KEY` / `NO_AUTH` | The key is missing, wrong or revoked | Ask your human for a new key from Connect → Agents |
 | `PROJECT_PAUSED` | The project is paused | Your human resumes it in the dashboard |
+| `PRESENCE_METADATA_TOO_LARGE` | Presence metadata is over 4 KB as JSON (413) | Keep it to small display fields, such as a name or an avatar URL, and send it again |
 | `UNKNOWN_ACTION` | A section tool got an action it does not have | The response lists `supported` |
 | `UNKNOWN_PARAMS` | An argument the tool does not take | The response lists `unsupported` and `supported` |
 | `UNSUPPORTED_PARAMS` | An argument asking for work the tool cannot do (`select`, `groupBy`, `join` on a row tool) | Use the tool the `hint` names, usually `run_query` |

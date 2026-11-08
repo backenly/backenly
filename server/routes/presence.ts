@@ -18,6 +18,7 @@ import { workspaceRawClient, type WorkspaceRawClient } from '@/lib/data-plane/re
 import { v1AuthMiddleware } from '../lib/auth'
 import { resolveEndUserFromToken } from '../lib/end-user-identity'
 import { workspaceSchemaName, workspaceChannelName, quoteIdent } from '@/lib/security/workspace-schema'
+import { presenceMetadataTooLarge } from '@/lib/realtime/presence-metadata'
 import { asyncRoute } from '../lib/async-route'
 
 const router = Router()
@@ -168,6 +169,12 @@ router.post('/:projectId/presence', asyncRoute(v1AuthMiddleware), asyncRoute(asy
     }
     if (userId.length > 255) {
       res.status(400).json({ error: 'userId too long (max 255)' })
+      return
+    }
+    // Refused here, not by pg_notify in the trigger, where it failed the upsert with a 500.
+    const tooLarge = presenceMetadataTooLarge(metadata)
+    if (tooLarge) {
+      res.status(tooLarge.status).json(tooLarge.body)
       return
     }
 
