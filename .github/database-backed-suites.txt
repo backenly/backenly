@@ -70,6 +70,14 @@ tests/integration/realtime-ticket-broadcast.spec.ts
 tests/integration/export-database-rls.spec.ts
 tests/integration/postgres-admin.spec.ts
 
+# A realtime stream's end user comes from a ticket, never from its URL: Next
+# reads no user token from the query string and takes it from X-User-Token, the
+# runtime gives a ?apiKey= stream no end user, and a ticket minted with the
+# user's header speaks for them when redeemed; the agent realtime doc says so,
+# and describes `old` as it is delivered. Real project, users table, key and
+# ticket, so it needs a real Postgres.
+tests/integration/realtime-stream-identity.spec.ts
+
 # Needs a real Postgres AND a git worktree of an older release.
 #
 # It builds a genuine old install from that release's own schema.prisma rather
