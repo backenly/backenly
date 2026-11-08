@@ -9,6 +9,7 @@
 
 jest.mock('@/lib/db/prisma', () => ({ prisma: {} }))
 
+import { format } from 'util'
 import {
   CHANGES_NOT_DELIVERED,
   changesNotDelivered,
@@ -235,7 +236,7 @@ describe('a check that fails', () => {
       expect(JSON.stringify(sent)).not.toContain('secret')
       // Logged once per failed query: the first batch (n1, n2) and the second (n3).
       expect(error).toHaveBeenCalledTimes(2)
-      expect(String(error.mock.calls[0][0])).toMatch(/visibility check on .*\/notes failed after retries; 2 change\(s\) for 2 row\(s\)/)
+      expect(format(...error.mock.calls[0])).toMatch(/visibility check on .*\/notes failed after retries; 2 change\(s\) for 2 row\(s\)/)
 
       // The database answers again: the next change is delivered, and a later failure is reported anew.
       down = false
@@ -277,6 +278,35 @@ describe('the report of changes not delivered', () => {
       expect(frame).toMatchObject({ type: 'error', code: CHANGES_NOT_DELIVERED, table })
       expect(fatalCodes).not.toContain(frame.code)
       expect(String(frame.message)).not.toMatch(/reached its limit|api key|unauthor/i)
+    }
+  })
+})
+
+describe('what a failed check logs', () => {
+  it('prints a project id or table name holding format specifiers as written, with the error after it', async () => {
+    // console.error reads its first argument as a format string (util.format):
+    // a %s in a value placed there swallowed the error that followed it.
+    const error = jest.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const table = 'audit%s%d%j'
+      const rowsDown = createVisibilityChecker(
+        { primaryKey: async () => KEY, visibleRows: async () => { throw new Error('pool timeout') } },
+        { retryDelaysMs: [] },
+      )
+      await expect(rowsDown.canSelect(alice, table, KEY, ['n1'])).rejects.toBeInstanceOf(VisibilityCheckFailed)
+      const keyDown = createVisibilityChecker(
+        { primaryKey: async () => { throw new Error('region unreachable') }, visibleRows: async () => new Set<number>() },
+        { retryDelaysMs: [] },
+      )
+      await expect(keyDown.primaryKey('p%s', table)).rejects.toBeInstanceOf(VisibilityCheckFailed)
+
+      // As Node prints them.
+      expect(error.mock.calls.map((call) => format(...call))).toEqual([
+        `[Realtime] visibility check on ${PROJECT}/audit%s%d%j failed after retries; 1 change(s) for 1 row(s) reported to their streams as not delivered: pool timeout`,
+        '[Realtime] primary key lookup for p%s/audit%s%d%j failed after retries: region unreachable',
+      ])
+    } finally {
+      error.mockRestore()
     }
   })
 })

@@ -277,7 +277,8 @@ export function createVisibilityChecker(deps: VisibilityDeps, options: Visibilit
           return key
         })
         .catch((err) => {
-          console.error(`[Realtime] primary key lookup for ${projectId}/${table} failed after retries:`, err instanceof Error ? err.message : err)
+          // A constant format: a project id or table name holding %s must not be read as one.
+          console.error('[Realtime] primary key lookup for %s/%s failed after retries: %s', projectId, table, err instanceof Error ? err.message : String(err))
           throw new VisibilityCheckFailed(table, err)
         })
         .finally(() => keyLookups.delete(id))
@@ -343,9 +344,12 @@ export function createVisibilityChecker(deps: VisibilityDeps, options: Visibilit
       const rows = take()
       const waiting = rows.reduce((n, row) => n + row.waiters.length, 0)
       console.error(
-        `[Realtime] visibility check on ${group.subscriber.projectId}/${group.table} failed after retries; ` +
-          `${waiting} change(s) for ${rows.length} row(s) reported to their streams as not delivered:`,
-        err instanceof Error ? err.message : err,
+        '[Realtime] visibility check on %s/%s failed after retries; %d change(s) for %d row(s) reported to their streams as not delivered: %s',
+        group.subscriber.projectId,
+        group.table,
+        waiting,
+        rows.length,
+        err instanceof Error ? err.message : String(err),
       )
       const failed = new VisibilityCheckFailed(group.table, err)
       rows.forEach((row) => row.waiters.forEach((w) => w.reject(failed)))
