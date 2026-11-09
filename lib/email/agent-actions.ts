@@ -63,7 +63,10 @@ function senderLine(smtp: Awaited<ReturnType<typeof getSmtpConfigView>>): string
 
 function policyLine(policy: AuthEmailPolicyView): string {
   return (
-    `Emails are branded "${policy.effectiveAppName}" and link back to ${policy.effectiveAppUrl ?? 'no app URL (set appUrl so password reset has a page to land on)'}. ` +
+    `Emails are branded "${policy.effectiveAppName}" and ` +
+    (policy.effectiveAppUrl
+      ? `link back to ${policy.effectiveAppUrl}. `
+      : 'have no app URL to link back to: password reset links open a page Backenly hosts, and magic links cannot sign anyone in until appUrl is set. ') +
     `Sign-in ${policy.requireEmailVerification ? 'requires' : 'does not require'} a verified email; ` +
     `magic links are ${policy.magicLinksEnabled ? 'on' : 'off'}.`
   )

@@ -35,10 +35,14 @@ export interface AuthEmailContext {
 export async function getAuthEmailContext(projectId: string): Promise<AuthEmailContext> {
   const project = await prisma.project.findUnique({
     where: { id: projectId },
-    select: { name: true, publicUrl: true, authConfig: true },
+    select: { name: true, authConfig: true },
   })
   const cfg = project?.authConfig
-  const rawUrl = cfg?.appUrl || project?.publicUrl || null
+  // Only the App URL the developer set. project.publicUrl is the project's API
+  // base (lib/deployment/go-live.ts), never a page a person can use: read as
+  // the app's address, it sent every reset link of a published project to the
+  // API's JSON descriptor.
+  const rawUrl = cfg?.appUrl || null
   return {
     appName: cfg?.appName || project?.name || 'your app',
     appUrl: rawUrl ? rawUrl.replace(/\/+$/, '') : null,
@@ -51,8 +55,9 @@ export async function getAuthEmailContext(projectId: string): Promise<AuthEmailC
  * Where auth links land. Verification and magic links go to Backenly-hosted
  * GET endpoints (they complete server-side, then redirect to the app), so
  * they work even when the developer has configured nothing. Password reset
- * links need a page with a form, so they go to the app URL with the token in
- * the query — the app exchanges it via auth.resetPassword().
+ * needs a page with a form: the app's, when it has an App URL (the token in
+ * the query, exchanged via auth.resetPassword()), otherwise the one Backenly
+ * hosts (lib/services/end-user-hosted-pages.ts).
  */
 export function hostedAuthUrl(projectId: string, path: string): string {
   const base = (process.env.NEXT_PUBLIC_APP_URL || 'https://backenly.com').replace(/\/+$/, '')
@@ -190,10 +195,10 @@ export async function sendEndUserPasswordResetEmail(
 ): Promise<boolean> {
   // Reset needs a form, so the link goes to the developer's app when
   // configured (?backenly_reset_token=…); the app calls auth.resetPassword().
-  // Fallback: platform-hosted generic reset page.
+  // Otherwise to the reset page Backenly hosts for the project.
   const resetUrl = ctx.appUrl
     ? `${ctx.appUrl}?backenly_reset_token=${encodeURIComponent(token)}`
-    : `${(process.env.NEXT_PUBLIC_APP_URL || 'https://backenly.com').replace(/\/+$/, '')}/reset-password?token=${encodeURIComponent(token)}&projectId=${encodeURIComponent(projectId)}`
+    : hostedAuthUrl(projectId, `reset?token=${encodeURIComponent(token)}`)
   const html = shell(
     ctx.appName,
     'Reset your password',

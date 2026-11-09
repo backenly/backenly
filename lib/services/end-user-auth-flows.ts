@@ -29,6 +29,7 @@ import { ensureAuthUsersTable, introspectAuthUsersTable, stampLastLogin, isReser
 import { trackEndUserActive } from '@/lib/quota/kernel'
 import { emitEndUserCreated } from '@/lib/services/end-user-auth-events'
 import { resolveJwtSecret } from '@/lib/services/jwtSecretManager'
+import { workspaceSchemaName } from '@/lib/security/workspace-schema'
 // Existence and the signing secret, from the region's copy while it is fresh
 // (lib/auth-projection/read.ts): nothing else of the project is read here.
 import { authorizingProject } from '@/lib/auth-projection/read'
@@ -382,6 +383,44 @@ export async function issueEndUserPasswordReset(
   return { found: users.length > 0, emailSent }
 }
 
+/** The shortest password a reset accepts: the API and the hosted reset page check the same number. */
+export const MIN_END_USER_PASSWORD_LENGTH = 8
+
+export type PasswordResetLinkState =
+  | { state: 'usable'; email: string }
+  | { state: 'invalid' | 'used' | 'expired' }
+
+/**
+ * Whether a password reset link can still be used, without using it, and the
+ * address it was sent to. The hosted reset page (lib/services/end-user-hosted-pages.ts)
+ * asks before it shows its form, so a spent or expired link says so before
+ * anyone types a password.
+ */
+export async function passwordResetLinkState(projectId: string, tokenRaw: unknown): Promise<PasswordResetLinkState> {
+  const token = typeof tokenRaw === 'string' ? tokenRaw.trim() : ''
+  let schemaName: string
+  try {
+    schemaName = workspaceSchemaName(projectId)
+  } catch {
+    return { state: 'invalid' }
+  }
+  if (!token || !(await authorizingProject(projectId))) return { state: 'invalid' }
+
+  // Resolved before the lookup's fail-soft catch: an unreachable region is
+  // not an invalid link. No table yet means no reset was ever issued.
+  const db = await workspaceRawClient(projectId)
+  const rows = await db.$queryRawUnsafe<Array<{ email: string; expires_at: Date; used_at: Date | null }>>(
+    `SELECT email, expires_at, used_at FROM "${schemaName}"."_password_resets" WHERE token = $1 LIMIT 1`,
+    token,
+  ).catch(() => [] as Array<{ email: string; expires_at: Date; used_at: Date | null }>)
+
+  const reset = rows[0]
+  if (!reset) return { state: 'invalid' }
+  if (reset.used_at) return { state: 'used' }
+  if (new Date(reset.expires_at) < new Date()) return { state: 'expired' }
+  return { state: 'usable', email: reset.email }
+}
+
 /**
  * POST /auth/reset-password
  * Consumes a reset token, updates the password, and returns a fresh JWT so
@@ -404,8 +443,8 @@ export async function resetEndUserPassword(
     const newPassword = typeof passwordRaw === 'string' ? passwordRaw : undefined
 
     if (!token) return err('BAD_REQUEST', '"token" is required', 400)
-    if (!newPassword || newPassword.length < 8) {
-      return err('BAD_REQUEST', '"password" must be at least 8 characters', 400)
+    if (!newPassword || newPassword.length < MIN_END_USER_PASSWORD_LENGTH) {
+      return err('BAD_REQUEST', `"password" must be at least ${MIN_END_USER_PASSWORD_LENGTH} characters`, 400)
     }
 
     const schemaName = `workspace_${projectId}`
