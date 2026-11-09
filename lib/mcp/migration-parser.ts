@@ -348,8 +348,10 @@ const TYPE_MODIFIER: Record<string, RegExp> = {
  */
 export function exactSqlType(rawType: string): string | undefined {
   const trimmed = rawType.trim().toLowerCase().replace(/\s+/g, ' ')
-  const array = /^(.*?)\s*(?:\[\s*\d*\s*\])+$/.exec(trimmed) ?? /^(.*?)\s+array(?:\s*\[\s*\d*\s*\])?$/.exec(trimmed)
-  const scalar = (array ? array[1] : trimmed).trim()
+  // The same array reading mapType applied, so the two cannot disagree.
+  const element = arrayElementOf(trimmed)
+  const array = element !== null
+  const scalar = (element ?? trimmed).trim()
   const modifier = /\(([^)]*)\)/.exec(scalar)?.[1]?.replace(/\s+/g, '')
   // `timestamp(3) with time zone` puts the modifier before the words.
   const base = scalar.replace(/\([^)]*\)/g, '').replace(/\s+/g, ' ').trim()
