@@ -1526,6 +1526,12 @@ tests/integration/change-restore-to.spec.ts
 # written since a change is measured in rows only the service role can see.
 tests/integration/change-restore-forced-rls.spec.ts
 
+# Restore to a point proves every step, each against the schema the newer steps
+# leave, in one rolled-back transaction before running any: a step that would
+# stop it is named and nothing runs (it used to undo the newer ones and stop
+# half-way), and a step whose conflict the newer steps clear still runs whole.
+tests/integration/change-restore-to-proves-first.spec.ts
+
 # An agent's rollback is a request to restore the backend to a published
 # version: parked with Backenly's list of the changes it would undo, whichever
 # door asked; a project admin's approval undoes exactly that list, by the

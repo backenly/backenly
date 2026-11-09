@@ -44,7 +44,7 @@ import type { PoolClient } from 'pg'
 import { Prisma } from '@prisma/client'
 import { prisma } from '@/lib/db/prisma'
 import type { RemovedEndpoint } from '@/lib/services/domain-endpoints'
-import type { CatalogSnapshot } from './catalog'
+import { readCatalog, type CatalogSnapshot } from './catalog'
 import { describeChange } from './describe'
 import {
   acknowledgementOf,
@@ -431,7 +431,6 @@ async function runPlan(
   },
 ): Promise<Impact> {
   await client.query('BEGIN')
-  let index = -1
   try {
     // As Backenly, seeing every row: what it measures, the keys it puts back
     // and the checks it runs are about the whole table, not about the rows an
@@ -451,24 +450,7 @@ async function runPlan(
     // every request behind it, so it gives up instead and says why.
     await client.query(`SET LOCAL lock_timeout = '5s'`)
     await client.query(`SET LOCAL statement_timeout = '${opts.commit ? '10min' : '2min'}'`)
-    for (const t of plan.lockTables) {
-      await client.query(`LOCK TABLE ${qualified(plan.schema, t)} IN ACCESS EXCLUSIVE MODE`)
-    }
-    const impact = await opts.measure()
-    opts.gate(impact)
-    if (opts.vault) for (const sql of createVaultStatements(opts.vault)) await client.query(sql)
-    for (index = 0; index < plan.steps.length; index++) {
-      await client.query(plan.steps[index].sql)
-    }
-    index = plan.steps.length
-    if (opts.vault) {
-      const readers = await vaultReaders(async <R>(sql: string, params: unknown[]) => (await client.query(sql, params)).rows as R[], opts.vault)
-      if (readers.length > 0) throw new VaultReadersConflict(readers)
-    }
-    for (const check of plan.checks) {
-      const r = await client.query<{ n: string }>(check.sql)
-      if (Number(r.rows[0]?.n ?? 0) !== 0) throw new RecoveryStepError(-1, null, `${check.describe} — ${r.rows[0]?.n} did not.`)
-    }
+    const impact = await runPlanSteps(client, plan, opts)
     if (opts.beforeCommit) {
       try {
         await opts.beforeCommit()
@@ -480,10 +462,187 @@ async function runPlan(
     return impact
   } catch (err: any) {
     await client.query('ROLLBACK').catch(() => {})
-    if (err instanceof ImpactRefusal || err instanceof RecoveryStepError || err instanceof VaultReadersConflict) throw err
-    if (index >= 0 && index < plan.steps.length) throw new RecoveryStepError(index, plan.steps[index], err?.message ?? String(err))
     throw err
   }
+}
+
+/**
+ * Everything a restore does inside its transaction, once the transaction and
+ * its context are open: lock, measure, gate, move into the vault, run every
+ * statement, prove nothing reads the vault, run the checks. Shared by one
+ * restore (runPlan) and by the proof of a whole sequence (proveSequence),
+ * which runs several of these in one transaction.
+ */
+async function runPlanSteps(
+  client: PoolClient,
+  plan: RestorePlan & { schema: string },
+  opts: { vault: string | null; measure: () => Promise<Impact>; gate: (impact: Impact) => void },
+): Promise<Impact> {
+  for (const t of plan.lockTables) {
+    await client.query(`LOCK TABLE ${qualified(plan.schema, t)} IN ACCESS EXCLUSIVE MODE`)
+  }
+  const impact = await opts.measure()
+  opts.gate(impact)
+  if (opts.vault) for (const sql of createVaultStatements(opts.vault)) await client.query(sql)
+  for (let index = 0; index < plan.steps.length; index++) {
+    try {
+      await client.query(plan.steps[index].sql)
+    } catch (err: any) {
+      throw new RecoveryStepError(index, plan.steps[index], err?.message ?? String(err))
+    }
+  }
+  if (opts.vault) {
+    const readers = await vaultReaders(async <R>(sql: string, params: unknown[]) => (await client.query(sql, params)).rows as R[], opts.vault)
+    if (readers.length > 0) throw new VaultReadersConflict(readers)
+  }
+  for (const check of plan.checks) {
+    const r = await client.query<{ n: string }>(check.sql)
+    if (Number(r.rows[0]?.n ?? 0) !== 0) throw new RecoveryStepError(-1, null, `${check.describe} — ${r.rows[0]?.n} did not.`)
+  }
+  return impact
+}
+
+// ── Proving a sequence ───────────────────────────────────────────────────────
+
+export type SequenceProof =
+  | { ok: true; ms: number }
+  | {
+      ok: false
+      /** The record that would stop it (a change, or the restore a reapply undoes). */
+      recordId: string
+      seq: number
+      code: 'NEEDS_APPROVAL' | 'BLOCKED' | 'UNAVAILABLE'
+      reason: string
+    }
+
+/** Statements that would open or end a transaction. */
+const TRANSACTION_CONTROL = /^\s*(begin|start\s+transaction|commit|end|abort|rollback(?!\s+to\b)|prepare\s+transaction)\b/i
+
+/**
+ * The client a proof's steps get: the same connection and transaction, but a
+ * statement that would end the transaction (and so make the proof's restores
+ * real) or open another is refused instead of run.
+ */
+function inProof(client: PoolClient): PoolClient {
+  return new Proxy(client, {
+    get(target, prop, receiver) {
+      if (prop !== 'query') return Reflect.get(target, prop, receiver)
+      return (text: unknown, ...rest: unknown[]) => {
+        const sql = typeof text === 'string' ? text : (text as { text?: unknown } | null)?.text
+        if (typeof sql === 'string' && TRANSACTION_CONTROL.test(sql)) {
+          return Promise.reject(new Error(`A proof may not run "${sql.trim().split(/\s+/)[0]}": it would end or open a transaction.`))
+        }
+        return (target.query as (...a: unknown[]) => unknown)(text, ...rest)
+      }
+    },
+  })
+}
+
+/**
+ * Prove restoring every one of `recordIds`, in order, before running any.
+ *
+ * Restore to a point (lib/changes/range.ts) runs one restore after another,
+ * each proved just before it runs. A step that could not run was therefore
+ * found only after the steps before it had run and been recorded: on
+ * production (2026-11-09) "Restore to v1" undid #46, then stopped at #45, and
+ * left the backend between v1 and where it was.
+ *
+ * So every step is proved first, in one transaction that is rolled back:
+ * each step is planned against the schema the steps before it leave, and runs
+ * exactly as its restore would (as Backenly, every row visible, with its
+ * measurement and gate), so a step whose conflict only the steps before it
+ * clear is proved as it will run. The first that would stop the sequence is
+ * named, with why, and nothing runs. What it proves is the database; the rest
+ * of the backend each step puts back (keys, functions, storage, …) is checked
+ * when that step runs, against what the steps before it left, as before.
+ *
+ * A change only a credential rule keeps (NOT_REVERSIBLE) is passed over, as
+ * restoreTo passes over it.
+ */
+export async function proveSequence(projectId: string, recordIds: string[]): Promise<SequenceProof> {
+  const windowDays = await rollbackWindowDays(projectId)
+  const changes: LoadedChange[] = []
+  for (const id of recordIds) {
+    const change = await load(projectId, id)
+    if (!change) return { ok: false, recordId: id, seq: -1, code: 'UNAVAILABLE', reason: 'One of the changes could not be read.' }
+    const availability = availabilityOf(change, windowDays, await targetOf(change))
+    if (!availability.available) {
+      if (availability.code === 'NOT_REVERSIBLE') continue
+      return { ok: false, recordId: id, seq: change.seq, code: 'UNAVAILABLE', reason: availability.reason ?? `#${change.seq} cannot be restored.` }
+    }
+    changes.push(change)
+  }
+  if (changes.length === 0) return { ok: true, ms: 0 }
+
+  const started = Date.now()
+  return withChangeLock(projectId, async (client) => {
+    const { resolveWorkspaceSchema } = await import('@/lib/services/workspace-pool')
+    const schema = await resolveWorkspaceSchema(projectId)
+    const last = await prisma.backendChange.findFirst({ where: { projectId }, orderBy: { seq: 'desc' }, select: { seq: true } })
+    // Kept data is checked as previewRecovery checks it, before the
+    // transaction and its context: each checksum is compared the way it was
+    // taken. Each step's vault is its own, so the steps before it leave it as is.
+    const kept: Array<{ intact: PreservedEntry[]; altered: string[] }> = []
+    for (const change of changes) kept.push(await intactEntries(client, await candidateEntries(projectId, change)))
+    // Everything below runs inside ONE transaction that is rolled back, so no
+    // step may end it: a COMMIT there would make the proof's restores real.
+    // readCatalogOn, for one, opens and commits its own transaction; the
+    // catalog is read on this transaction instead, and the client the steps
+    // get refuses any statement that would end or open one.
+    const tx = inProof(client)
+    const readLive = async () => {
+      const prev = (await tx.query<{ search_path: string }>('SHOW search_path')).rows[0]?.search_path ?? '"$user", public'
+      // Pinned to pg_catalog while it reads, as readCatalogOn does, so every
+      // definition comes back schema-qualified.
+      await tx.query(`SELECT set_config('search_path', 'pg_catalog', true)`)
+      try {
+        return await readCatalog({ query: async (sql, params) => (await tx.query(sql, params as unknown[])).rows }, schema)
+      } finally {
+        await tx.query(`SELECT set_config('search_path', $1, true)`, [prev])
+      }
+    }
+    await client.query('BEGIN')
+    try {
+      // The context and limits runPlan gives one restore's proof.
+      await client.query(rlsSessionSql(), rlsSessionParams(PLATFORM_CONTEXT))
+      await client.query(`SET LOCAL lock_timeout = '5s'`)
+      await client.query(`SET LOCAL statement_timeout = '2min'`)
+      for (const [n, change] of changes.entries()) {
+        const stop = (code: 'NEEDS_APPROVAL' | 'BLOCKED', reason: string): SequenceProof => ({ ok: false, recordId: change.id, seq: change.seq, code, reason })
+        const { intact, altered } = kept[n]
+        if (altered.length > 0) {
+          return stop('BLOCKED', `The data kept for ${altered.join(', ')} has been altered since it was kept, so it cannot be trusted.`)
+        }
+        // Each step gets the vault its own restore record would.
+        const vault = vaultSchemaName(projectId, (last?.seq ?? 0) + 1 + n)
+        const live = await readLive()
+        const plan = { ...planRestore({ schema, footprint: change.footprint, checkpoint: change.checkpoint, resultState: change.resultState, preserved: intact, live, vault }), schema }
+        if (plan.conflicts.length > 0) return stop('BLOCKED', plan.conflicts.map((c) => c.reason).join('; '))
+        try {
+          await runPlanSteps(tx, plan, {
+            vault: plan.archives.length > 0 ? vault : null,
+            measure: () => measureImpact(runner(tx), { schema, footprint: change.footprint, checkpoint: change.checkpoint, resultState: change.resultState, preserved: intact }),
+            gate: (impact) => {
+              if (impact.blockers.length > 0) throw new ImpactRefusal('BLOCKED', impact)
+              if (impact.needsApproval || plan.unrecoverable.length > 0) throw new ImpactRefusal('NEEDS_APPROVAL', impact)
+            },
+          })
+        } catch (err: any) {
+          if (err instanceof ImpactRefusal) {
+            return err.code === 'BLOCKED'
+              ? stop('BLOCKED', err.impact.blockers[0] ?? `Restoring #${change.seq} is blocked.`)
+              : stop('NEEDS_APPROVAL', err.impact.items.find((i) => i.needsApproval)?.detail ?? plan.unrecoverable[0] ?? `Restoring #${change.seq} needs your approval.`)
+          }
+          if (err instanceof VaultReadersConflict) return stop('BLOCKED', err.conflicts.map((c) => c.reason).join('; '))
+          const cause = err instanceof RecoveryStepError ? err.cause : err?.message ?? String(err)
+          return stop('BLOCKED', `The restore would fail against today's data: ${cause}`)
+        }
+      }
+      return { ok: true, ms: Date.now() - started }
+    } finally {
+      await client.query('ROLLBACK').catch(() => {})
+    }
+  }, { waitMs: 10_000 })
 }
 
 // ── Preview ──────────────────────────────────────────────────────────────────
