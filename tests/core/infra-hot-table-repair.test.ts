@@ -54,7 +54,8 @@ describe('infra_hot_table is a registered, dispatchable finding type', () => {
     const action = buildFixAction('infra_hot_table_notes', REPAIRABLE)
     expect(action).toEqual({
       action: 'CREATE_INDEX',
-      params: { tableName: 'notes', columnName: 'user_id' },
+      // Built online: the table is live (lib/execution/online-index.ts).
+      params: { tableName: 'notes', columnName: 'user_id', online: true },
     })
   })
 
