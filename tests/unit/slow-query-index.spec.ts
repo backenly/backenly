@@ -40,6 +40,39 @@ describe('extractIndexCandidate — recognises the shape it is sure about', () =
   })
 })
 
+describe('extractIndexCandidate — PostgREST statements (/api/v2 and v1 /db)', () => {
+  // Real schema names keep the project id's hyphens, which an identifier
+  // pattern cannot match. PostgREST qualifies every column with schema and
+  // table, so the parser has to find the table-and-column pair inside a
+  // three-part name.
+  const S = 'workspace_24b616e2-060b-4d6e-96f1-35cbb1e5a2fe'
+  const qi = `"${S}"."product_views"`
+  const wrap = (read: string) =>
+    `WITH pgrst_source AS ( ${read} )  SELECT null::bigint AS total_result_set, pg_catalog.count(_postgrest_t) AS page_total, ` +
+    `coalesce(json_agg(_postgrest_t), $4) AS body FROM ( SELECT * FROM pgrst_source ) _postgrest_t`
+
+  it('reads an eq filter', () => {
+    const q = wrap(`SELECT ${qi}.* FROM ${qi} WHERE  ${qi}."referrer" = $1   LIMIT $2 OFFSET $3`)
+    expect(extractIndexCandidate(q, S)).toEqual({ table: 'product_views', column: 'referrer' })
+  })
+
+  it('reads an in filter, which PostgREST writes as = ANY', () => {
+    const q = wrap(`SELECT ${qi}.* FROM ${qi} WHERE  ${qi}."country" = ANY ($1)    LIMIT $2 OFFSET $3`)
+    expect(extractIndexCandidate(q, S)).toEqual({ table: 'product_views', column: 'country' })
+  })
+
+  it('skips the soft-delete predicate v1 /db adds and reads the filter', () => {
+    const q = wrap(`SELECT ${qi}.* FROM ${qi} WHERE  ${qi}."deleted_at" IS NULL AND  ${qi}."session_key" = $1   LIMIT $2 OFFSET $3`)
+    expect(extractIndexCandidate(q, S)).toEqual({ table: 'product_views', column: 'session_key' })
+  })
+
+  it('does not take a branch schema for the project schema', () => {
+    const b = `"${S}_br_scratch"."product_views"`
+    const q = wrap(`SELECT ${b}.* FROM ${b} WHERE  ${b}."referrer" = $1   LIMIT $2 OFFSET $3`)
+    expect(extractIndexCandidate(q, S)).toBeNull()
+  })
+})
+
 describe('extractIndexCandidate — refuses to guess', () => {
   it('returns null for another tenant schema', () => {
     // The whole cross-tenant safety property. pg_stat_statements is per-database

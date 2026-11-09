@@ -52,6 +52,17 @@ export const SLOW_QUERY_MIN_AVG_MS = 100
 /** Statements below this call count are noise: a one-off report, a migration. */
 export const SLOW_QUERY_MIN_CALLS = 20
 
+/**
+ * How much of each statement is read back for parsing.
+ *
+ * PostgREST, which serves both /api/v2 and v1 /db, writes every column fully
+ * qualified (`"workspace_<uuid>"."orders"."status"`, about 70 characters each)
+ * inside a `WITH pgrst_source AS (…)` wrapper, so its WHERE clause starts well
+ * past the first 400 characters as soon as a client selects a few columns. A
+ * statement cut before its predicate parses to nothing.
+ */
+const STATEMENT_TEXT_CHARS = 4000
+
 interface StatementRow {
   query: string
   calls: string | number
@@ -73,8 +84,13 @@ interface VerifiedCandidate extends IndexCandidate {
  * carry a permanently failing invariant nobody can act on. Genuine query
  * failures still throw, per probeQueryFailed.
  */
-export async function detectSlowQueryMissingIndexes(projectId: string): Promise<RawFinding[]> {
+export async function detectSlowQueryMissingIndexes(
+  projectId: string,
+  thresholds: { minAvgMs?: number; minCalls?: number } = {},
+): Promise<RawFinding[]> {
   const schema = `workspace_${projectId}`
+  const minAvgMs = thresholds.minAvgMs ?? SLOW_QUERY_MIN_AVG_MS
+  const minCalls = thresholds.minCalls ?? SLOW_QUERY_MIN_CALLS
 
   // No bind parameters, so none are passed. queryWorkspaceSchema forwards its
   // rest args straight to Postgres, and supplying an argument a statement has no
@@ -102,15 +118,25 @@ export async function detectSlowQueryMissingIndexes(projectId: string): Promise<
     //
     // `position()` rather than LIKE: `_` is a single-character wildcard in LIKE,
     // so `workspace_<id>` would also match schemas that merely resemble it.
-    `SELECT LEFT(query, 400)                                   AS query,
+    //
+    // No `NOT LIKE '%pg_catalog%'`. It was meant to drop catalog introspection,
+    // and it dropped the app's own traffic instead: every statement PostgREST
+    // runs selects `pg_catalog.count(_postgrest_t)`, and PostgREST serves both
+    // /api/v2 and v1 /db. Measured on production (2026-11-09): 120 slow v2 reads
+    // and 80 slow v1 /db reads on a 1.14M-row table produced no finding in 20
+    // minutes, while 40 reads through /database/query, Backenly's own SQL,
+    // produced one within a minute. What keeps introspection out is what always
+    // did: extractIndexCandidate needs `FROM "<this schema>"."<table>"` and an
+    // equality on a quoted column, and the catalog check below needs that
+    // column to exist, unindexed, on a table in this schema.
+    `SELECT LEFT(query, ${STATEMENT_TEXT_CHARS})              AS query,
             calls,
             ROUND((total_exec_time / NULLIF(calls, 0))::numeric, 2) AS avg_ms
        FROM pg_stat_statements
       WHERE position($1 in query) > 0
-        AND query NOT LIKE '%pg_catalog%'
         AND query NOT LIKE '%information_schema%'
-        AND calls >= ${SLOW_QUERY_MIN_CALLS}
-        AND (total_exec_time / NULLIF(calls, 0)) > ${SLOW_QUERY_MIN_AVG_MS}
+        AND calls >= ${Math.max(1, Math.floor(minCalls))}
+        AND (total_exec_time / NULLIF(calls, 0)) > ${Math.max(0, Number(minAvgMs) || 0)}
       ORDER BY avg_ms DESC
       LIMIT 20`,
     schema,
