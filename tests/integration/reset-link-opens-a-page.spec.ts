@@ -238,6 +238,12 @@ describe('a published project with no App URL', () => {
     expect(missing.status).toBe(400)
     expect(await missing.text()).toContain('Link not valid')
 
+    const elsewhere = await fetch(`${baseUrl}/api/v1/${crypto.randomUUID()}/auth/reset?token=${tokenOf(link)}`)
+    expect(elsewhere.status).toBe(400)
+    const elsewhereHtml = await elsewhere.text()
+    expect(elsewhereHtml).toContain('Link not valid')
+    expect(elsewhereHtml).not.toContain('Corner Shop')
+
     const stale = await requestReset()
     await prisma.$executeRawUnsafe(
       `UPDATE "${schema}"."_password_resets" SET expires_at = now() - interval '1 minute' WHERE token = $1`,

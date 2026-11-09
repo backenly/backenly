@@ -18,7 +18,7 @@
  * app/api/v1/[projectId]/[...unmatched].
  */
 
-import { getAuthEmailContext } from '@/lib/services/end-user-auth-email'
+import { prisma } from '@/lib/db'
 import {
   MIN_END_USER_PASSWORD_LENGTH,
   passwordResetLinkState,
@@ -66,16 +66,17 @@ function esc(text: string): string {
     .replace(/'/g, '&#39;')
 }
 
-function page(appName: string, title: string, body: string): string {
+/** The app's name heads every page; a link to no known project has none. */
+function page(appName: string | null, title: string, body: string): string {
   return (
     '<!doctype html><html lang="en"><head><meta charset="utf-8">' +
     '<meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex">' +
     `<title>${esc(title)}</title><style>${STYLE}</style></head>` +
-    `<body><main><p class="app">${esc(appName)}</p><h1>${esc(title)}</h1>${body}</main></body></html>`
+    `<body><main>${appName ? `<p class="app">${esc(appName)}</p>` : ''}<h1>${esc(title)}</h1>${body}</main></body></html>`
   )
 }
 
-function notice(status: number, appName: string, title: string, message: string): ResetPage {
+function notice(status: number, appName: string | null, title: string, message: string): ResetPage {
   return { status, html: page(appName, title, `<p>${esc(message)}</p>`) }
 }
 
@@ -100,7 +101,7 @@ function resetForm(appName: string, projectId: string, token: string, email: str
   )
 }
 
-function linkProblem(appName: string, state: Exclude<PasswordResetLinkState['state'], 'usable'>): ResetPage {
+function linkProblem(appName: string | null, state: Exclude<PasswordResetLinkState['state'], 'usable'>): ResetPage {
   switch (state) {
     case 'used':
       return notice(
@@ -133,13 +134,24 @@ function passwordProblem(password: string, confirm: string): string | null {
   return null
 }
 
-async function appNameFor(projectId: string): Promise<string> {
-  return (await getAuthEmailContext(projectId).catch(() => null))?.appName ?? 'your app'
+/**
+ * The project the link names, as stored: its id and the name its emails use.
+ * Everything after this works from the stored id, never the one in the URL, so
+ * a link to no known project is answered before any workspace is touched.
+ */
+async function storedProject(projectIdRaw: unknown): Promise<{ id: string; appName: string } | null> {
+  if (typeof projectIdRaw !== 'string' || !projectIdRaw) return null
+  const row = await prisma.project
+    .findUnique({ where: { id: projectIdRaw }, select: { id: true, name: true, authConfig: { select: { appName: true } } } })
+    .catch(() => null)
+  return row ? { id: row.id, appName: row.authConfig?.appName || row.name } : null
 }
 
 /** GET /auth/reset?token=…: the form, or why the link cannot be used. */
-export async function resetPasswordPage(projectId: string, tokenRaw: unknown): Promise<ResetPage> {
-  const appName = await appNameFor(projectId)
+export async function resetPasswordPage(projectIdRaw: string, tokenRaw: unknown): Promise<ResetPage> {
+  const project = await storedProject(projectIdRaw)
+  if (!project) return linkProblem(null, 'invalid')
+  const { id: projectId, appName } = project
   const token = typeof tokenRaw === 'string' ? tokenRaw.trim() : ''
   const link = await passwordResetLinkState(projectId, token)
   if (link.state !== 'usable') return linkProblem(appName, link.state)
@@ -147,8 +159,10 @@ export async function resetPasswordPage(projectId: string, tokenRaw: unknown): P
 }
 
 /** POST /auth/reset: the form's submission (token, password, confirm). */
-export async function submitResetPasswordForm(projectId: string, fields: Record<string, unknown>): Promise<ResetPage> {
-  const appName = await appNameFor(projectId)
+export async function submitResetPasswordForm(projectIdRaw: string, fields: Record<string, unknown>): Promise<ResetPage> {
+  const project = await storedProject(projectIdRaw)
+  if (!project) return linkProblem(null, 'invalid')
+  const { id: projectId, appName } = project
   const token = typeof fields.token === 'string' ? fields.token.trim() : ''
   const link = await passwordResetLinkState(projectId, token)
   if (link.state !== 'usable') return linkProblem(appName, link.state)
@@ -180,8 +194,8 @@ export async function submitResetPasswordForm(projectId: string, fields: Record<
 }
 
 /** A submission the recovery rate limit refused: 429 when the budget ran out, 503 when the limiter could not be asked. */
-export async function throttledResetPage(projectId: string, status: 429 | 503, retryAfterSeconds: number): Promise<ResetPage> {
-  const appName = await appNameFor(projectId)
+export async function throttledResetPage(projectIdRaw: string, status: 429 | 503, retryAfterSeconds: number): Promise<ResetPage> {
+  const appName = (await storedProject(projectIdRaw))?.appName ?? null
   if (status === 503) {
     return notice(503, appName, 'Try again in a minute', 'Password reset is unavailable for a moment. Nothing was changed.')
   }
