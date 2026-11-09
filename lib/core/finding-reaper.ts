@@ -20,7 +20,7 @@
  */
 
 import { prisma } from '@/lib/db/prisma'
-import { builtEvidenceWhere } from '@/lib/projects/backend-presence'
+import { builtEvidenceWhere, literalPrefix } from '@/lib/projects/backend-presence'
 
 export type WithdrawnBy =
   | 'evolution_reaper'
@@ -160,7 +160,7 @@ export async function reapCoevolutionFindings(
   if (!cleanScan) return 0
 
   const open = await prisma.healthFinding.findMany({
-    where: { projectId, status: { in: ['open', 'pending_approval'] }, type: { startsWith: 'coevo_' } },
+    where: { projectId, status: { in: ['open', 'pending_approval'] }, type: { startsWith: literalPrefix('coevo_') } },
     select: { id: true, type: true, details: true },
   }).catch(() => [] as Array<{ id: string; type: string; details: unknown }>)
   if (open.length === 0) return 0

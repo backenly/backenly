@@ -1278,6 +1278,12 @@ tests/integration/structural-evolution-identities.spec.ts
 # declined where it is approved. Real finding rows.
 tests/integration/architecture-requests-not-broken-guarantees.spec.ts
 
+# A request waiting for a person stays in the queue through the observer's
+# stale-finding pass (whose 'arch_%' LIKE once matched architecture_evolution),
+# and one taken out by anything but the person or the engine is asked again on
+# the next pass instead of being skipped as "already awaiting approval".
+tests/integration/evolution-request-survives-cleanups.spec.ts
+
 # Whether a user's coding agent is connected: an MCP key or OAuth connection
 # their agent authenticated with (authenticateMcp's stamp), unexpired, for this
 # user and this project only, and the console status route built on it: owner
