@@ -1965,6 +1965,11 @@ async function runAgentLoop(
           blocked: 'not_offered',
           summary: `\`${toolName}\` was NOT run: it is not one of the tools offered for this turn. Use one that is.`,
         }, true))
+        // Reported with the turn's refused changes, as dispatch reported a tool
+        // it did not know, so the caller can tell it did not take effect.
+        if (isMutationCall(toolName, args)) {
+          refusedMutations.push({ title: humanTitle(toolName, args), reason: 'not one of the tools offered for this turn' })
+        }
         continue
       }
 

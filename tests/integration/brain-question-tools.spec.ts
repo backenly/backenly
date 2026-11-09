@@ -193,5 +193,6 @@ describe('the tools a turn is offered', () => {
     )
     expect(left[0].n).toBe(1)
     expect(result.toolsRun).toEqual(['finish'])
+    expect(result.refused).toEqual([{ title: 'Dropping constraint notes_body_present from notes', reason: 'not one of the tools offered for this turn' }])
   }, 120_000)
 })
