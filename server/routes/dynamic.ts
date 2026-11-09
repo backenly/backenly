@@ -530,6 +530,8 @@ async function handleDynamicRequest(req: Request, res: Response) {
         endUserId,
         endUserRole: userRole,
         serviceRole: isServiceRole,
+        // Recorded as an HTTP call, which it is; the event keeps type 'manual'.
+        trigger: 'http',
         headers: fwdHeaders,
       })
 

@@ -1671,3 +1671,8 @@ tests/integration/auth-before-first-signup.spec.ts
 # Express app (server/app.ts), whose modules open the platform database, so it
 # runs with one.
 tests/integration/runtime-rejects-bad-bodies.spec.ts
+# A function run is recorded as it happened: a call through /fn as http, the
+# status the function answered at the end of its log, a 5xx answer as a failed
+# run. A route function reads the project's variables as process.env.KEY, and
+# none replaces a variable Backenly sets.
+tests/integration/function-run-record.spec.ts

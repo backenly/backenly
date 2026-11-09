@@ -98,6 +98,12 @@ export interface FunctionCallerContext {
    */
   testRun?: boolean
   /**
+   * How the run was asked for, as its record says it (`http` for a call
+   * through /fn or /functions). The event the function sees keeps its own
+   * `type`, which code may branch on; only the record changes.
+   */
+  trigger?: string
+  /**
    * Whether a failure hands the function to the model-backed auto-fixer, which
    * rewrites its code. On by default. An agent invoking a function to test it
    * turns it off: it needs the error, and code that changes under it without a
@@ -889,7 +895,20 @@ export async function executeAiFunction(
         { headers: caller.headers, testRun: caller.testRun }
       )
       const durationMs = Date.now() - startMs
-      await persistExecutionLog(functionId, projectId, true, logs, undefined, durationMs, event.type)
+      // The run's record says what the handler answered. A 4xx is the caller's
+      // error and the run still succeeded; a 5xx is the function's own, and the
+      // run is recorded as failed with that status. Neither is a thrown error,
+      // so neither touches the function's state or starts the self-heal below.
+      const answered = typeof returnValue?.status === 'number' ? returnValue.status : 200
+      await persistExecutionLog(
+        functionId,
+        projectId,
+        answered < 500,
+        [...logs, `answered HTTP ${answered}`],
+        answered >= 500 ? `The function answered HTTP ${answered}.` : undefined,
+        durationMs,
+        caller.trigger ?? event.type,
+      )
       // history: how the last run went, not configuration (lib/changes/resources/functions.ts)
       prisma.aiFunction.update({
         where: { id: functionId },
@@ -912,7 +931,7 @@ export async function executeAiFunction(
     } catch (err: any) {
       const durationMs = Date.now() - startMs
       const errorMsg = err?.message || 'Route function error'
-      await persistExecutionLog(functionId, projectId, false, [], errorMsg, durationMs, event.type)
+      await persistExecutionLog(functionId, projectId, false, [], errorMsg, durationMs, caller.trigger ?? event.type)
       rowLastError(projectId, functionId, errorMsg)
         // history: how the last run went, not configuration (lib/changes/resources/functions.ts)
         .then((lastError) => prisma.aiFunction.update({
@@ -968,7 +987,7 @@ export async function executeAiFunction(
       const durationMs = Date.now() - startMs
 
       // Persist execution log
-      await persistExecutionLog(functionId, projectId, true, logs, undefined, durationMs, event.type)
+      await persistExecutionLog(functionId, projectId, true, logs, undefined, durationMs, caller.trigger ?? event.type)
 
       // history: how the last run went, not configuration (lib/changes/resources/functions.ts)
       prisma.aiFunction.update({
@@ -992,7 +1011,7 @@ export async function executeAiFunction(
   const logs: string[] = lastError instanceof SandboxRunError ? lastError.logs : []
 
   // Persist error log
-  await persistExecutionLog(functionId, projectId, false, logs, errorMsg, durationMs, event.type)
+  await persistExecutionLog(functionId, projectId, false, logs, errorMsg, durationMs, caller.trigger ?? event.type)
 
   rowLastError(projectId, functionId, errorMsg)
     // history: how the last run went, not configuration (lib/changes/resources/functions.ts)

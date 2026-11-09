@@ -198,7 +198,7 @@ export function EnvVarsPanel({ projectId }: EnvVarsPanelProps) {
           <p className="px-3 py-3 text-[12.5px] text-faint">Loading…</p>
         ) : vars.length === 0 ? (
           <div className="px-3 py-3.5 text-[12px] text-faint leading-5">
-            None yet. Save secrets like Stripe webhook signing keys or third-party API tokens here. They&apos;re encrypted at rest and available inside AI functions as <code className="font-mono text-violet-300">ctx.env.KEY</code>.
+            None yet. Save secrets like Stripe webhook signing keys or third-party API tokens here. They&apos;re encrypted at rest. Functions read them as <code className="font-mono text-violet-300">ctx.env.KEY</code>, or <code className="font-mono text-violet-300">process.env.KEY</code> in a route module.
           </div>
         ) : (
           <ul className="divide-y divide-white/[0.04]">
