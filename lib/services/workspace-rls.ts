@@ -93,6 +93,7 @@ function splitSql(sql: string): string[] {
 
 export type PolicyTemplate =
   | 'own_rows'          // user_id = auth.uid()
+  | 'own_rows_read'     // reads: user_id = auth.uid() | writes: service_role only (rows that grant access)
   | 'party_rows'        // ANY of several party columns = auth.uid() (connections, conversations, messages)
   | 'related_rows'      // owned through a FK to a user-owned parent (order_items → orders)
   | 'public_read'       // SELECT: all | INSERT/UPDATE/DELETE: owner only
@@ -539,7 +540,7 @@ async function installPermissionPolicy(
       return { success: false, message: plan.reason }
     }
     template = plan.template
-    if (plan.kind === 'own_rows') userIdColumn = userIdColumn ?? plan.userIdColumn
+    if (plan.kind === 'own_rows' || plan.kind === 'own_rows_read') userIdColumn = userIdColumn ?? plan.userIdColumn
     if (plan.kind === 'party_rows') partyColumns = partyColumns ?? plan.partyColumns
     if (plan.kind === 'related_rows') via = via ?? plan.via
   } else {
@@ -657,7 +658,7 @@ async function installPermissionPolicy(
   // leave the table FORCE-RLS'd with zero usable policies (default-deny).
   // Returning a clean failure here is what a multimillion-platform does:
   // tell the user exactly what's wrong, do not corrupt their schema.
-  const OWNER_REQUIRED: PolicyTemplate[] = ['own_rows', 'admin_read_all', 'role_based', 'moderator_access']
+  const OWNER_REQUIRED: PolicyTemplate[] = ['own_rows', 'own_rows_read', 'admin_read_all', 'role_based', 'moderator_access']
   if (OWNER_REQUIRED.includes(template) && !detectedOwner) {
     // The refusal now reports what was ACTUALLY checked — foreign keys as well as
     // names — and offers the two templates that were missing from it. The old
@@ -723,6 +724,10 @@ async function installPermissionPolicy(
     switch (template) {
       case 'own_rows':
         await installOwnRowsPolicy(projectId, tableName, uidColumn, schemaName)
+        break
+
+      case 'own_rows_read':
+        await installOwnRowsReadPolicy(projectId, tableName, uidColumn, schemaName)
         break
 
       case 'party_rows':
@@ -1153,6 +1158,44 @@ async function installOwnRowsPolicy(
         ${serviceRoleClause(schemaName)}
         OR "${uidColumn}"::text = ${claimExpr(schemaName, SUBJECT_CLAIM)}
       );
+  `)
+}
+
+/**
+ * own_rows_read: each user reads their own rows; only the service role writes.
+ *
+ * For tables whose rows grant access (lib/services/rls-ownership.ts,
+ * isGrantTable): with own_rows a user could INSERT the row that makes them an
+ * admin, or a member of someone else's team. Writes there are the server's: an
+ * invitation accepted, a role assigned.
+ */
+async function installOwnRowsReadPolicy(
+  projectId: string,
+  tableName: string,
+  uidColumn: string,
+  schemaName: string
+) {
+  await execStatements(projectId, `
+    ALTER TABLE "${schemaName}"."${tableName}" FORCE ROW LEVEL SECURITY;
+
+    CREATE POLICY backenly_own_rows_read_select ON "${schemaName}"."${tableName}"
+      FOR SELECT
+      USING (
+        ${serviceRoleClause(schemaName)}
+        OR "${uidColumn}"::text = ${claimExpr(schemaName, SUBJECT_CLAIM)}
+      );
+
+    CREATE POLICY backenly_own_rows_read_insert ON "${schemaName}"."${tableName}"
+      FOR INSERT
+      WITH CHECK (${serviceRoleClause(schemaName)});
+
+    CREATE POLICY backenly_own_rows_read_update ON "${schemaName}"."${tableName}"
+      FOR UPDATE
+      USING (${serviceRoleClause(schemaName)});
+
+    CREATE POLICY backenly_own_rows_read_delete ON "${schemaName}"."${tableName}"
+      FOR DELETE
+      USING (${serviceRoleClause(schemaName)});
   `)
 }
 
@@ -2240,7 +2283,7 @@ export async function autoApplyRlsIfNeeded(
   const result = await applyPermissionPolicy(projectId, {
     tableName,
     template: plan.template,
-    ...(plan.kind === 'own_rows' ? { userIdColumn: plan.userIdColumn } : {}),
+    ...(plan.kind === 'own_rows' || plan.kind === 'own_rows_read' ? { userIdColumn: plan.userIdColumn } : {}),
     ...(plan.kind === 'party_rows' ? { partyColumns: plan.partyColumns } : {}),
     ...(plan.kind === 'related_rows' ? { via: plan.via } : {}),
   }, target)
@@ -2250,7 +2293,13 @@ export async function autoApplyRlsIfNeeded(
   } else {
     console.warn(`[AutoRLS] ⚠️ Failed to apply policy on "${tableName}": ${result.message}`)
   }
-  return { template: result.success ? plan.template : null, applied: result.success, closedByDefault: false, notice: null }
+  // Rows that grant access are written by the server: an app that inserts
+  // them from the browser has to be told why it cannot.
+  const notice =
+    result.success && plan.basis === 'grant_table'
+      ? `"${tableName}": ${plan.reason} To let users write rows under a rule of your own, set it with add_rls custom.`
+      : null
+  return { template: result.success ? plan.template : null, applied: result.success, closedByDefault: false, notice }
 }
 
 // ── Closed by default ────────────────────────────────────────────────────────
@@ -2339,7 +2388,7 @@ export async function reconcileAutoRls(
     const result = await applyPermissionPolicy(projectId, {
       tableName,
       template: plan.template,
-      ...(plan.kind === 'own_rows' ? { userIdColumn: plan.userIdColumn } : {}),
+      ...(plan.kind === 'own_rows' || plan.kind === 'own_rows_read' ? { userIdColumn: plan.userIdColumn } : {}),
       ...(plan.kind === 'party_rows' ? { partyColumns: plan.partyColumns } : {}),
       ...(plan.kind === 'related_rows' ? { via: plan.via } : {}),
     })
@@ -2390,7 +2439,7 @@ async function resolveOwnership(
 ): Promise<{ ownerColumn: string | null; partyColumns: string[] }> {
   try {
     const plan = await inferRlsPlan(projectId, tableName, schemaName)
-    if (plan.kind === 'own_rows') return { ownerColumn: plan.userIdColumn, partyColumns: [plan.userIdColumn] }
+    if (plan.kind === 'own_rows' || plan.kind === 'own_rows_read') return { ownerColumn: plan.userIdColumn, partyColumns: [plan.userIdColumn] }
     if (plan.kind === 'party_rows') return { ownerColumn: plan.partyColumns[0], partyColumns: plan.partyColumns }
     // `related_rows` and `public_read` have no LOCAL owner column, and reporting
     // one would install an owner check against a column that does not exist.
@@ -2409,6 +2458,7 @@ function getUsingExpression(
 ): string {
   switch (template) {
     case 'own_rows': return `"${uidColumn}"::text = current_user_id`
+    case 'own_rows_read': return `reads: "${uidColumn}"::text = current_user_id; writes: service_role only`
     case 'party_rows': return (partyColumns ?? [uidColumn])
       .map((c) => `"${c}"::text = current_user_id`).join(' OR ')
     case 'related_rows': return via
@@ -2433,6 +2483,7 @@ function getPolicyDescription(
 ): string {
   switch (template) {
     case 'own_rows': return `Users can only access rows where "${uidColumn}" matches their user ID`
+    case 'own_rows_read': return `Users can read rows where "${uidColumn}" matches their user ID; only service-role API keys can write, because these rows grant access`
     case 'party_rows': {
       const parties = partyColumns ?? [uidColumn]
       return (

@@ -107,7 +107,34 @@ const REFERENCE_TABLE_PATTERNS = [
   'tax_rates', 'coupons', 'promotions', 'banners', 'announcements',
 ]
 
-export type InferredTemplate = 'own_rows' | 'party_rows' | 'related_rows' | 'public_read'
+export type InferredTemplate = 'own_rows' | 'own_rows_read' | 'party_rows' | 'related_rows' | 'public_read' | 'admin_only'
+
+/**
+ * Last words of a table name that say its rows GRANT access: roles,
+ * permissions, memberships, participation, invitations.
+ */
+const GRANT_NOUNS = new Set([
+  'role', 'roles', 'permission', 'permissions', 'grant', 'grants', 'entitlement', 'entitlements', 'acl', 'acls',
+  'admin', 'admins', 'administrator', 'administrators', 'moderator', 'moderators', 'staff',
+  'member', 'members', 'membership', 'memberships', 'participant', 'participants', 'collaborator', 'collaborators',
+  'invitation', 'invitations', 'invite', 'invites',
+])
+
+/**
+ * Does a row in this table grant access to something?
+ *
+ * `user_roles(user_id, role)`, `team_members(team_id, user_id)`,
+ * `conversation_participants`, `project_invites`, `admins(user_id)`. The app
+ * reads these to decide who may do what, so a user who can write their own row
+ * can grant themselves access: a role, a seat in another team, a place in
+ * another conversation. The table's last word decides (`user_roles`,
+ * `team_members`), or a leading `role_` / `permission_` (`role_assignments`).
+ */
+export function isGrantTable(tableName: string): boolean {
+  const words = tableName.toLowerCase().split('_').filter(Boolean)
+  if (words.length === 0) return false
+  return GRANT_NOUNS.has(words[words.length - 1]) || ['role', 'roles', 'permission', 'permissions'].includes(words[0])
+}
 
 export interface RelatedRowsVia {
   /** Column on THIS table holding the parent reference (e.g. `order_id`). */
@@ -185,6 +212,27 @@ export type RlsPlan =
       kind: 'public_read'
       template: 'public_read'
       basis: 'reference_table'
+      reason: string
+    }
+  | {
+      /**
+       * Each user reads their own rows; only service-role keys write them.
+       *
+       * For a table whose rows grant access (isGrantTable). `own_rows` lets a
+       * user INSERT a row naming themselves, and in `user_roles` that row is
+       * `role = 'admin'`, in `team_members` it is a seat in any team.
+       */
+      kind: 'own_rows_read'
+      template: 'own_rows_read'
+      userIdColumn: string
+      basis: 'grant_table'
+      reason: string
+    }
+  | {
+      /** A grant table whose rows name several users: service-role keys only. */
+      kind: 'admin_only'
+      template: 'admin_only'
+      basis: 'grant_table'
       reason: string
     }
   | {
@@ -398,6 +446,39 @@ function allOwnerColumnsOf(catalog: OwnershipCatalog, tableName: string): string
  * Decide the RLS policy shape for one table. Pure — pass a catalog loaded once.
  */
 export function inferRlsPlanFromCatalog(
+  catalog: OwnershipCatalog,
+  tableName: string,
+): RlsPlan {
+  const plan = inferOwnershipFromCatalog(catalog, tableName)
+  if (!isGrantTable(tableName)) return plan
+
+  // A row here grants access, so whoever writes it grants it. The owner reads
+  // their own; writing is the server's (an invite accepted, a role assigned).
+  const why =
+    `Rows in "${tableName}" grant access (roles, memberships, permissions or invitations), so a user ` +
+    `who could write a row naming themselves could grant themselves that access.`
+  if (plan.kind === 'own_rows') {
+    return {
+      kind: 'own_rows_read',
+      template: 'own_rows_read',
+      userIdColumn: plan.userIdColumn,
+      basis: 'grant_table',
+      reason: `${why} Each user reads their own rows (by "${plan.userIdColumn}"); only service-role keys write them.`,
+    }
+  }
+  if (plan.kind === 'party_rows') {
+    return {
+      kind: 'admin_only',
+      template: 'admin_only',
+      basis: 'grant_table',
+      reason: `${why} Its rows name several users (${plan.partyColumns.join(', ')}), so only service-role keys read or write them.`,
+    }
+  }
+  return plan
+}
+
+/** Who owns a row, from the schema alone (the rules in the header). */
+function inferOwnershipFromCatalog(
   catalog: OwnershipCatalog,
   tableName: string,
 ): RlsPlan {
