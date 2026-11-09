@@ -117,47 +117,62 @@ function buildSummary(
   return `${total} requests from ${groups.length} origins failed in the ${windowLabel} — see breakdown below`
 }
 
+/** One group of the last day's events, counted by the database. */
+interface EventGroup {
+  kind: 'auth_failure' | 'bootstrap'
+  origin: string | null
+  failureKind: string | null
+  sentKeyShape: string | null
+  n: number
+  lastHour: number
+  lastSeen: Date
+}
+
 export async function GET(req: NextRequest) {
   return withProjectValidation(req, async ({ projectId }) => {
     const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000)
     const since1h = new Date(Date.now() - 60 * 60 * 1000)
 
-    const [events, project] = await Promise.all([
-      prisma.securityEvent.findMany({
-        where: {
-          projectId,
-          kind: { in: ['auth_failure', 'bootstrap'] },
-          createdAt: { gte: since24h },
-        },
-        select: {
-          kind: true,
-          createdAt: true,
-          detail: true,
-        },
-        orderBy: { createdAt: 'desc' },
-        take: 5000,
-      }),
+    // Counted where the rows are. This read every event of the last day, up
+    // to 5,000 rows with their JSON, to count them here: about 65 ms of the
+    // web task's CPU per call for a busy app, and every console page asks
+    // two to five times (production QA, 2026-11-09). Grouped by what the
+    // buckets below key on, a day is a handful of rows, and nothing is capped.
+    // "createdAt" holds UTC without a zone, so the bounds are given in UTC
+    // whatever the session's time zone.
+    const [groups, project] = await Promise.all([
+      prisma.$queryRaw<EventGroup[]>`
+        SELECT kind,
+               detail->>'origin'       AS origin,
+               detail->>'kind'         AS "failureKind",
+               detail->>'sentKeyShape' AS "sentKeyShape",
+               count(*)::int AS n,
+               (count(*) FILTER (WHERE "createdAt" >= (${since1h}::timestamptz AT TIME ZONE 'UTC')))::int AS "lastHour",
+               max("createdAt") AS "lastSeen"
+          FROM security_events
+         WHERE "projectId" = ${projectId}
+           AND kind IN ('auth_failure', 'bootstrap')
+           AND "createdAt" >= (${since24h}::timestamptz AT TIME ZONE 'UTC')
+         GROUP BY 1, 2, 3, 4`,
       prisma.project.findUnique({
         where: { id: projectId },
         select: { anonKey: true },
       }),
     ])
 
-    // ── Bucket events by kind ────────────────────────────────────────────────
+    // ── Bucket the groups by kind ────────────────────────────────────────────
     // Drop events whose origin is the platform itself (backenly.com,
     // localhost). The v1 middleware already suppresses these at write-time,
     // but historical rows predating that fix still live in the SecurityEvent
     // table for 24h — filtering here makes the pill go green immediately
     // instead of trickling out as old rows age off.
-    const customerEvents = events.filter(ev => {
-      const detail = (ev.detail as Record<string, unknown> | null) ?? {}
-      return !isInternalOrigin((detail.origin as string | null) ?? null)
-    })
+    const customerGroups = groups.filter(g => !isInternalOrigin(g.origin))
 
     const failureMap = new Map<string, FailureGroup>()  // key: origin|kind|sentKeyShape
     const successMap = new Map<string, SuccessGroup>()  // key: origin
     let failures1h = 0
     let attributableFailures24h = 0
+    let bootstraps24h = 0
 
     // Origin-less rejections cannot be a browser frontend: browsers always
     // attach an Origin header to cross-origin fetch/XHR, and the hosted SDK is
@@ -166,46 +181,45 @@ export async function GET(req: NextRequest) {
     // — quietly — but they must never paint the "Frontend failing" pill red on
     // a healthy backend (evidence-first: a frontend finding needs a frontend).
     let probeCount = 0
-    let probeLastSeen: string | null = null
+    let probeLastSeen: Date | null = null
+    const later = (a: string, b: Date) => (b.toISOString() > a ? b.toISOString() : a)
 
-    for (const ev of customerEvents) {
-      const detail = (ev.detail as Record<string, unknown> | null) ?? {}
-      const rawOrigin = (detail.origin as string | null) ?? null
-      const origin = shortenOrigin(rawOrigin)
-      const lastSeen = ev.createdAt.toISOString()
+    for (const g of customerGroups) {
+      const origin = shortenOrigin(g.origin)
 
-      if (ev.kind === 'auth_failure') {
-        if (!rawOrigin) {
-          probeCount += 1
-          // Events are DESC — the first probe we touch is the most recent.
-          if (!probeLastSeen) probeLastSeen = lastSeen
+      if (g.kind === 'auth_failure') {
+        if (!g.origin) {
+          probeCount += g.n
+          if (!probeLastSeen || g.lastSeen > probeLastSeen) probeLastSeen = g.lastSeen
           continue
         }
-        attributableFailures24h += 1
-        if (ev.createdAt >= since1h) failures1h += 1
-        const kind = classifyKind(detail.kind)
-        const sentKeyShape = (detail.sentKeyShape as string | null) ?? null
+        attributableFailures24h += g.n
+        failures1h += g.lastHour
+        const kind = classifyKind(g.failureKind)
+        const sentKeyShape = g.sentKeyShape ?? null
         const key = `${origin}|${kind}|${sentKeyShape ?? ''}`
         const existing = failureMap.get(key)
         if (existing) {
-          existing.count += 1
-          // Keep the most recent lastSeen (events are in DESC order, so the
-          // first time we touch a key is the most recent).
+          existing.count += g.n
+          existing.lastSeen = later(existing.lastSeen, g.lastSeen)
         } else {
           failureMap.set(key, {
             origin,
             kind,
             sentKeyShape,
-            count: 1,
-            lastSeen,
+            count: g.n,
+            lastSeen: g.lastSeen.toISOString(),
             hint: HINTS_BY_KIND[kind],
             fixPrompt: FIX_PROMPTS_BY_KIND[kind](projectId, project?.anonKey ?? null),
           })
         }
-      } else if (ev.kind === 'bootstrap') {
+      } else if (g.kind === 'bootstrap') {
+        bootstraps24h += g.n
         const existing = successMap.get(origin)
-        if (existing) existing.count += 1
-        else successMap.set(origin, { origin, count: 1, lastSeen })
+        if (existing) {
+          existing.count += g.n
+          existing.lastSeen = later(existing.lastSeen, g.lastSeen)
+        } else successMap.set(origin, { origin, count: g.n, lastSeen: g.lastSeen.toISOString() })
       }
     }
 
@@ -217,12 +231,12 @@ export async function GET(req: NextRequest) {
       successes,
       probes: {
         count: probeCount,
-        lastSeen: probeLastSeen,
+        lastSeen: probeLastSeen ? (probeLastSeen as Date).toISOString() : null,
       },
       totals: {
         failures24h: attributableFailures24h,
         failures1h,
-        bootstraps24h: customerEvents.filter(e => e.kind === 'bootstrap').length,
+        bootstraps24h,
         distinctOriginsFailing: new Set(failures.map(f => f.origin)).size,
         distinctOriginsConnected: successes.length,
       },
