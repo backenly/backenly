@@ -490,11 +490,13 @@ describe('a data migration that rewrote values', () => {
 
 // ── Guarantees removed, keys moved, tables consolidated ──────────────────────
 //
-// No agent path does any of these: apply_migration refuses DROP CONSTRAINT,
-// DROP INDEX and every primary-key change (change-classes-executor.spec.ts),
-// and moves no rows between tables. A person's governed change still can, and
-// its restore must put each back exactly, or refuse where today's rows would
-// break what it puts back. Never offered as lossless and then failed.
+// No agent does any of these to production on its own: its DROP CONSTRAINT or
+// DROP INDEX runs on a branch and reaches production through a merge a person
+// approves (migrations-drop-index-and-constraint.spec.ts), apply_migration
+// refuses every primary-key change, and it moves no rows between tables. A
+// person's governed change still can, and its restore must put each back
+// exactly, or refuse where today's rows would break what it puts back. Never
+// offered as lossless and then failed.
 
 describe('a dropped CHECK, UNIQUE and FOREIGN KEY constraint', () => {
   let changeId: string

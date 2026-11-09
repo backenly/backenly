@@ -127,6 +127,42 @@ export async function existingTables(projectId: string, schema: string, names: s
   return new Set(found.map((r) => r.table_name))
 }
 
+/**
+ * A drop Backenly refuses by rule, refused before anything runs so it is
+ * answered like any other refused statement: nothing applied, nothing
+ * recorded. The primary key is that rule: a Backenly table's managed `id` is
+ * what its API, its policies and the foreign keys pointing at it stand on.
+ * Production's catalog decides, on a branch too, since a migration names
+ * production's objects and the merge replays it there. The executor refuses
+ * it as well, for any other caller.
+ */
+export async function refusedDrop(projectId: string, mainSchema: string, planned: PlannedAction[]): Promise<MigrationRefusal | null> {
+  const drops = planned.filter((p) => p.tool === 'drop_constraint')
+  if (drops.length === 0) return null
+  const db = await workspaceRawClient(projectId)
+  const keys = await db.$queryRaw<Array<{ table_name: string; conname: string }>>`
+    SELECT t.relname AS table_name, c.conname
+      FROM pg_constraint c
+      JOIN pg_class t     ON t.oid = c.conrelid
+      JOIN pg_namespace n ON n.oid = t.relnamespace
+     WHERE n.nspname = ${mainSchema} AND c.contype = 'p'`
+  for (const step of drops) {
+    const table = String(step.args.tableName ?? '')
+    if (keys.some((k) => k.table_name === table && k.conname === step.args.constraintName)) {
+      return {
+        ok: false,
+        code: 'PRIMARY_KEY',
+        error:
+          `"${step.source}" would drop ${table}'s primary key. Backenly does not: the table's API, its row policies ` +
+          `and the foreign keys pointing at it depend on it. Nothing was applied.`,
+        statement: step.source,
+        applied: [],
+      }
+    }
+  }
+  return null
+}
+
 const tableOf = (p: { args: Record<string, unknown> }) => String(p.args.tableName ?? '')
 
 /** Every table a plan names. */
@@ -269,6 +305,29 @@ export function migrationTitle(planned: PlannedAction[]): string {
  * the protected-production gate in dispatchTool keys on; a merge replay that a
  * human approved does not set it.
  */
+/**
+ * Steps an agent's migration may not run on production directly. Dropping an
+ * index or a constraint loses no row, but it is a change a person reviews
+ * before production has it, as Backenly's own index drops are: the agent makes
+ * it on a branch, and the merge, which a person approves, carries it over. A
+ * person's own migration, and a merge replaying the branch, run it.
+ */
+const REVIEWED_BEFORE_PRODUCTION = new Set(['drop_index', 'drop_constraint'])
+
+function reviewedBeforeProduction(step: PlannedAction): MigrationRefusal {
+  const what = step.tool === 'drop_index' ? 'an index' : 'a constraint'
+  return {
+    ok: false,
+    code: 'DROP_NEEDS_REVIEW',
+    error: `"${step.source}" removes ${what} from production, which a person reviews first. Nothing was applied.`,
+    hint:
+      'Make the change on a branch: branch { action: "create" }, then apply_migration { sql, branchId }, then ' +
+      'branch { action: "merge", branchId }. The merge waits for a person and carries the drop to production.',
+    statement: step.source,
+    applied: [],
+  }
+}
+
 export async function applyMigrationToMain(
   projectId: string,
   userId: string,
@@ -278,9 +337,15 @@ export async function applyMigrationToMain(
   const plan = planMigration(sql)
   if (!plan.ok) return plan as MigrationRefusal
   const planned = (plan as { ok: true; planned: PlannedAction[] }).planned
+  if (opts.agentSurface === true) {
+    const drop = planned.find((p) => REVIEWED_BEFORE_PRODUCTION.has(p.tool))
+    if (drop) return reviewedBeforeProduction(drop)
+  }
   const existing = await existingTables(projectId, opts.workspaceSchema, tablesNamed(planned))
   const checked = checkPlan(planned, existing)
   if (!checked.ok) return checked as MigrationRefusal
+  const refused = await refusedDrop(projectId, opts.workspaceSchema, planned)
+  if (refused) return refused
   const ok = checked as Extract<typeof checked, { ok: true }>
   const { dispatchTool } = await import('@/lib/ai/brain/tools')
   const run = () => runPlan(ok.planned, ok.notes, (step) =>

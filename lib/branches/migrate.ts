@@ -37,6 +37,7 @@ import {
   existingTables,
   fullyAppliedStatements,
   planMigration,
+  refusedDrop,
   runPlan,
   tablesNamed,
   type MigrationOutcome,
@@ -81,6 +82,9 @@ export async function applyBranchMigration(
   const existing = await existingTables(projectId, branch.schemaName, tablesNamed(planned))
   const checked = checkPlan(planned, existing, `on branch "${branch.name}"`)
   if (!checked.ok) return checked as MigrationRefusal
+  const { workspaceSchemaName } = await import('@/lib/security/workspace-schema')
+  const refused = await refusedDrop(projectId, workspaceSchemaName(projectId), planned)
+  if (refused) return refused
   const ok = checked as Extract<typeof checked, { ok: true }>
 
   const { executeBranchSchemaAction } = await import('@/lib/ai/minimal-executor')

@@ -177,6 +177,10 @@ export type ToolName =
   | 'apply_proposal'
   | 'list_findings'
   | 'resolve_finding'
+  // apply_migration's DROP INDEX and ALTER TABLE … DROP CONSTRAINT. Not offered
+  // to a model: only the migration parser plans them (lib/mcp/migration-parser.ts).
+  | 'drop_index'
+  | 'drop_constraint'
   // Destructive
   | 'drop_table'
   | 'truncate_table'
@@ -1846,6 +1850,14 @@ export const TOOL_TO_ACTION: Record<string, (args: any) => AIAction> = {
   drop_table: (a) => ({ action: 'DROP_TABLE', params: { tableName: a.tableName } }),
   truncate_table: (a) => ({ action: 'TRUNCATE_TABLE', params: { tableName: a.tableName } }),
   drop_column: (a) => ({ action: 'DROP_COLUMN', params: { tableName: a.tableName, columnName: a.columnName } }),
+  drop_index: (a) => ({
+    action: 'DROP_INDEX',
+    params: { indexName: a.indexName, ifExists: a.ifExists === true, dropUniqueness: a.dropUniqueness === true },
+  }),
+  drop_constraint: (a) => ({
+    action: 'DROP_CONSTRAINT',
+    params: { tableName: a.tableName, constraintName: a.constraintName, ifExists: a.ifExists === true },
+  }),
   disable_realtime: (a) => ({ action: 'DISABLE_REALTIME', params: { tableName: a.tableName } }),
 
   // Reads — pure executor passthrough (no special handling)
@@ -3857,6 +3869,8 @@ export function humanTitle(name: string, args: Record<string, unknown>): string 
     case 'drop_table': return `Dropping table ${args.tableName ?? ''}`.trim()
     case 'truncate_table': return `Truncating ${args.tableName ?? ''}`.trim()
     case 'drop_column': return `Dropping column ${args.columnName ?? ''} from ${args.tableName ?? ''}`.trim()
+    case 'drop_index': return `Dropping index ${args.indexName ?? ''}`.trim()
+    case 'drop_constraint': return `Dropping constraint ${args.constraintName ?? ''} from ${args.tableName ?? ''}`.trim()
     case 'disable_realtime': return args.tableName ? `Disabling realtime on ${args.tableName}` : 'Disabling realtime project-wide'
     case 'rename_column': return `Renaming ${args.oldName ?? ''} → ${args.newName ?? ''} on ${args.tableName ?? ''}`.trim()
     case 'add_constraint': {

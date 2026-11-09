@@ -997,6 +997,103 @@ function checkAction(tableName: string, check: ParsedCheck, source: string): Pla
 }
 
 /**
+ * A trailing CASCADE or RESTRICT, read without a regex that could backtrack.
+ * CASCADE is refused: it also drops whatever depends on the object, which the
+ * author did not name and nobody would have read.
+ */
+function withoutDropBehaviour(rest: string, what: string, stmt: string): string {
+  const lower = rest.toLowerCase()
+  for (const word of ['cascade', 'restrict']) {
+    if (lower.endsWith(word) && /\s/.test(rest.charAt(rest.length - word.length - 1))) {
+      if (word === 'cascade') {
+        throw new MigrationParseError(
+          `${what} … CASCADE is not supported.`,
+          'UNSUPPORTED_STATEMENT',
+          `CASCADE also drops whatever depends on it. Drop those first, then this.`,
+          stmt,
+        )
+      }
+      return rest.slice(0, rest.length - word.length).trimEnd()
+    }
+  }
+  return rest
+}
+
+/**
+ * ALTER TABLE t DROP CONSTRAINT [IF EXISTS] name [RESTRICT].
+ *
+ * Removes a rule, never a row, so it is translated rather than refused like the
+ * other DROPs. It runs on a branch, and reaches production through a merge a
+ * person approved or a person's own migration: an agent's on production is
+ * refused (lib/mcp/apply-migration.ts).
+ */
+function translateDropConstraint(tableName: string, action: string, stmt: string): PlannedAction[] {
+  let rest = action.replace(/^drop\s+constraint\s+/i, '').trim()
+  let ifExists = false
+  const ie = /^if\s+exists\s+/i.exec(rest)
+  if (ie) {
+    ifExists = true
+    rest = rest.slice(ie[0].length)
+  }
+  rest = withoutDropBehaviour(rest, 'DROP CONSTRAINT', stmt)
+  const name = /^("(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$]*)$/.exec(rest)
+  if (!name) {
+    throw new MigrationParseError(
+      `Could not read the constraint to drop from "${action.slice(0, 60)}".`,
+      'BAD_STATEMENT',
+      `One constraint per statement: ALTER TABLE ${tableName} DROP CONSTRAINT <name>;`,
+      stmt,
+    )
+  }
+  return [{
+    tool: 'drop_constraint',
+    args: { tableName, constraintName: unquoteIdent(name[1]), ...(ifExists ? { ifExists: true } : {}) },
+    source: stmt,
+  }]
+}
+
+/**
+ * DROP INDEX [CONCURRENTLY] [IF EXISTS] name [, …] [RESTRICT].
+ *
+ * Removes an index, never a row, so it is translated rather than refused like
+ * the other DROPs, and runs where a constraint drop does. A unique index may be
+ * dropped too: in a migration that is exactly what the author asked for, and it
+ * is how a UNIQUE that Backenly made as an index is removed. CONCURRENTLY is
+ * accepted and said not to apply, since a migration runs as one governed change
+ * inside a transaction.
+ */
+function translateDropIndex(stmt: string): PlannedAction[] {
+  let rest = stmt.replace(/^drop\s+index\s+/i, '').trim()
+  const notes: string[] = []
+  const concurrently = /^concurrently\s+/i.exec(rest)
+  if (concurrently) {
+    rest = rest.slice(concurrently[0].length)
+    notes.push(
+      'Dropped without CONCURRENTLY: a migration runs as one governed change, inside a transaction, where ' +
+      'Postgres does not allow it. The drop holds a brief exclusive lock on the table.',
+    )
+  }
+  let ifExists = false
+  const ie = /^if\s+exists\s+/i.exec(rest)
+  if (ie) {
+    ifExists = true
+    rest = rest.slice(ie[0].length)
+  }
+  rest = withoutDropBehaviour(rest, 'DROP INDEX', stmt)
+  const names = splitTopLevel(rest).map((n) => unquoteIdent(n))
+  if (names.length === 0 || names.some((n) => !n)) {
+    throw new MigrationParseError('DROP INDEX names no index.', 'BAD_STATEMENT', 'e.g. DROP INDEX orders_email_key;', stmt)
+  }
+  for (const n of names) assertUnqualified(n, stmt)
+  return names.map((indexName, i) => ({
+    tool: 'drop_index',
+    args: { indexName, ...(ifExists ? { ifExists: true } : {}), dropUniqueness: true },
+    source: stmt,
+    ...(i === 0 && notes.length ? { notes } : {}),
+  }))
+}
+
+/**
  * Translate `ADD [CONSTRAINT name] <body>` into the governed action that
  * installs it.
  *
@@ -1204,6 +1301,9 @@ function translateAlterTable(stmt: string): PlannedAction[] {
   // ADD CONSTRAINT ... / ADD UNIQUE (...) / ADD FOREIGN KEY (...)
   if (add) return translateAddConstraint(tableName, add[1].trim(), stmt)
 
+  // DROP CONSTRAINT [IF EXISTS] name [RESTRICT]: removes a rule, not a row.
+  if (/^drop\s+constraint\b/i.test(action)) return translateDropConstraint(tableName, action, stmt)
+
   // Everything else on ALTER TABLE is destructive or unmodelled.
   if (/^drop\b/i.test(action)) {
     throw new MigrationParseError(
@@ -1355,6 +1455,8 @@ function translateStatement(stmt: string): PlannedAction[] {
 
   const dml = /^(insert|update|delete)\b/i.exec(s)
   if (dml) return translateDml(s, dml[1])
+
+  if (/^drop\s+index\b/i.test(s)) return translateDropIndex(s)
 
   if (DESTRUCTIVE_VERBS.test(s)) {
     throw new MigrationParseError(
