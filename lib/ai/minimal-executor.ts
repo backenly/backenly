@@ -4748,15 +4748,21 @@ async function executeCreateTable(
     }
 
     // ── Phase 4.1: Deterministic auto-RLS ─────────────────────────────────────
-    // Inspect the column list now (not the AI prompt) and auto-apply own_rows
-    // if an ownership column is present.  This runs unconditionally so security
-    // is never dependent on the AI "remembering" to call SET_PERMISSION.
+    // Inspect the schema now (not the AI prompt) and protect the table: the
+    // owner's rows when an owner can be inferred, closed to all but
+    // service-role keys when not (lib/services/workspace-rls.ts). This runs
+    // unconditionally so security never depends on the AI "remembering" to call
+    // SET_PERMISSION, and the caller is told when the table starts closed.
+    let rlsNotice: string | null = null
     try {
       const { autoApplyRlsIfNeeded } = await import('@/lib/services/workspace-rls')
-      await autoApplyRlsIfNeeded(projectId, tableName, safeColumns)
+      rlsNotice = (await autoApplyRlsIfNeeded(projectId, tableName, safeColumns, {}, { closeWhenUndecidable: true })).notice
     } catch (rlsErr: any) {
       // Non-fatal — table is created; RLS can be applied manually via SET_PERMISSION
       console.warn(`[AI Executor] Auto-RLS failed (non-fatal):`, rlsErr?.message)
+      rlsNotice =
+        `Backenly could not set row-level security on "${tableName}" (${rlsErr?.message ?? rlsErr}). ` +
+        `Until it has a rule, its rows can be read with the publishable key and written by any signed-in user: set one with add_rls.`
     }
 
     // ── Domain endpoint generation ────────────────────────────────────────────
@@ -4896,7 +4902,11 @@ async function executeCreateTable(
       // The information is worth surfacing — a payments table with no Stripe key
       // really is inert. It just has to be a field the caller can render, ignore
       // or act on, rather than text welded to the outcome of the operation.
-      message: `✅ Created table "${tableName}" with ${safeColumns.length + 3} columns (including id, createdAt, updatedAt)`,
+      // Who may read and write the new table is part of what was created, so
+      // a table that starts closed says so here, where agents read.
+      message:
+        `✅ Created table "${tableName}" with ${safeColumns.length + 3} columns (including id, createdAt, updatedAt)` +
+        (rlsNotice ? `\n\n${rlsNotice}` : ''),
       data: {
         tableName,
         schema: postgresSchema,
@@ -5076,9 +5086,27 @@ async function executeCreateJunctionTable(
     const indexASQL = `CREATE INDEX IF NOT EXISTS "idx_${finalName}_${singularA}Id" ON "${postgresSchema}"."${finalName}"("${singularA}Id")`
     const indexBSQL = `CREATE INDEX IF NOT EXISTS "idx_${finalName}_${singularB}Id" ON "${postgresSchema}"."${finalName}"("${singularB}Id")`
 
+    const [{ existed }] = await db.$queryRawUnsafe<Array<{ existed: boolean }>>(
+      `SELECT to_regclass($1) IS NOT NULL AS existed`,
+      `"${postgresSchema}"."${finalName}"`,
+    )
     await db.$executeRawUnsafe(createTableSQL)
     await db.$executeRawUnsafe(indexASQL)
     await db.$executeRawUnsafe(indexBSQL)
+
+    // A new junction table is protected as a new table is (executeCreateTable):
+    // the rows of an owned parent's, or closed until someone says the rule.
+    let rlsNotice: string | null = null
+    if (!existed) {
+      try {
+        const { autoApplyRlsIfNeeded } = await import('@/lib/services/workspace-rls')
+        rlsNotice = (await autoApplyRlsIfNeeded(projectId, finalName, [], {}, { closeWhenUndecidable: true })).notice
+      } catch (rlsErr: any) {
+        rlsNotice =
+          `Backenly could not set row-level security on "${finalName}" (${rlsErr?.message ?? rlsErr}). ` +
+          `Until it has a rule, its rows can be read with the publishable key and written by any signed-in user: set one with add_rls.`
+      }
+    }
 
     // Save metadata
     const existingMeta = await prisma.table.findFirst({ where: { projectId, name: finalName } })
@@ -5096,7 +5124,9 @@ async function executeCreateJunctionTable(
     const extraColNames = isMembershipTable ? ', role, status, joinedAt' : ''
     return {
       success: true,
-      message: `✅ Created junction table **${finalName}** linking **${tableA}** ↔ **${tableB}**.\n\nColumns: id, ${singularA}Id (FK→${first}), ${singularB}Id (FK→${second})${extraColNames}, createdAt`,
+      message:
+        `✅ Created junction table **${finalName}** linking **${tableA}** ↔ **${tableB}**.\n\nColumns: id, ${singularA}Id (FK→${first}), ${singularB}Id (FK→${second})${extraColNames}, createdAt` +
+        (rlsNotice ? `\n\n${rlsNotice}` : ''),
       data: { junctionName: finalName, tableA, tableB },
     }
   } catch (error: any) {

@@ -503,6 +503,22 @@ export async function applyPermissionPolicy(
   config: PolicyConfig,
   target: RlsTarget = {},
 ): Promise<{ success: boolean; message: string }> {
+  const result = await installPermissionPolicy(projectId, config, target)
+  // A rule someone chose replaces the one Backenly closed a table with when it
+  // could not tell who owns a row: from here on it is theirs, and the
+  // reconciler leaves it alone. (autoApplyRlsIfNeeded marks the table again
+  // when it is the one closing it.)
+  if (result.success) {
+    await forgetClosedByDefault(projectId, target.schemaName ?? `workspace_${projectId}`, config.tableName).catch(() => {})
+  }
+  return result
+}
+
+async function installPermissionPolicy(
+  projectId: string,
+  config: PolicyConfig,
+  target: RlsTarget,
+): Promise<{ success: boolean; message: string }> {
   const { tableName, roleColumn, role = 'authenticated' } = config
   const branchMode = !!target.schemaName
   const schemaName = target.schemaName ?? `workspace_${projectId}`
@@ -799,7 +815,13 @@ export async function applyPermissionPolicy(
     }
 
     // Step 4: Save policy metadata (main's; a branch's policies live only in
-    // its catalog and arrive on main through the merge).
+    // its catalog and arrive on main through the merge). The rules Step 2
+    // dropped lose their records too, as the custom path's do: a table whose
+    // rule changed (closed by default, then opened through its parent) used to
+    // keep the old rule's record beside the new one.
+    if (!branchMode) await prisma.permissionPolicy.deleteMany({
+      where: { projectId, tableName, policyName: { startsWith: 'backenly_' }, NOT: { policyName: `backenly_${template}` } },
+    })
     if (!branchMode) await prisma.permissionPolicy.upsert({
       where: {
         projectId_tableName_policyName: {
@@ -2005,6 +2027,7 @@ export async function removePermissionPolicy(
   const schemaName = `workspace_${projectId}`
 
   await dropBackenlyPolicies(projectId, schemaName, tableName)
+  await forgetClosedByDefault(projectId, schemaName, tableName).catch(() => {})
 
   let disableError: string | null = null
   try {
@@ -2143,17 +2166,74 @@ export async function executeWithUserContext<T = any>(
  * only — the catalog is the source of truth, because a FK declared in the same
  * statement is not visible in the in-memory column list.
  */
+/** What automatic row-level security did to a table, and what to tell whoever created it. */
+export interface AutoRlsOutcome {
+  /** The rule now on the table, or null when none was applied. */
+  template: PolicyTemplate | null
+  applied: boolean
+  /** Closed to everything but service-role keys because no owner could be inferred. */
+  closedByDefault: boolean
+  /** Words for whoever created the table, when there is something they must know. */
+  notice: string | null
+}
+
+/**
+ * Protect a table Backenly just created or adopted.
+ *
+ * A table whose owner cannot be inferred is CLOSED when `closeWhenUndecidable`
+ * (tables Backenly creates): row-level security on, service-role keys only
+ * (admin_only), and the creator is told how to open it. Every workspace table
+ * is granted to the REST API's roles (anon reads, authenticated writes), so
+ * leaving row-level security off, as this did before, left a new table
+ * readable with the app's publishable key and writable by any signed-in end
+ * user. A new table has no clients yet, so closed is a starting point, not an
+ * outage: the person or agent creating it says the rule, or Backenly opens it
+ * itself once a column or foreign key shows who owns a row (reconcileAutoRls).
+ *
+ * A table adopted from the database (REGISTER_TABLE) may already be serving an
+ * app, so it is left as it is and reported.
+ */
 export async function autoApplyRlsIfNeeded(
   projectId: string,
   tableName: string,
   _columns: Array<{ name: string }> = [],
   target: RlsTarget = {},
-): Promise<void> {
+  opts: { closeWhenUndecidable?: boolean } = {},
+): Promise<AutoRlsOutcome> {
   const plan = await inferRlsPlan(projectId, tableName, target.schemaName)
+  const schemaName = target.schemaName ?? `workspace_${projectId}`
 
   if (plan.kind === 'undecidable') {
-    console.log(`[AutoRLS] Ownership undecidable for "${tableName}" — leaving RLS off. ${plan.reason}`)
-    return
+    if (!opts.closeWhenUndecidable) {
+      console.log(`[AutoRLS] Ownership undecidable for "${tableName}" — leaving RLS off. ${plan.reason}`)
+      return { template: null, applied: false, closedByDefault: false, notice: null }
+    }
+    const closed = await applyPermissionPolicy(projectId, { tableName, template: 'admin_only' }, target)
+    if (!closed.success) {
+      console.warn(`[AutoRLS] ⚠️ Could not close "${tableName}": ${closed.message}`)
+      return {
+        template: null,
+        applied: false,
+        closedByDefault: false,
+        notice:
+          `Backenly could not tell who owns a row in "${tableName}" and could not close it either (${closed.message}). ` +
+          `Its rows can be read with the publishable key and written by any signed-in user until it has a rule: ` +
+          `set one with add_rls.`,
+      }
+    }
+    await rememberClosedByDefault(projectId, schemaName, tableName, plan.reason)
+    console.log(`[AutoRLS] "${tableName}" closed by default (service-role keys only): ${plan.reason}`)
+    return {
+      template: 'admin_only',
+      applied: true,
+      closedByDefault: true,
+      notice:
+        `"${tableName}" is closed: only service-role keys can read or write it, because Backenly could not tell who ` +
+        `owns its rows (${plan.reason}) ` +
+        `To open it, set its rule with add_rls: own_rows on the column naming the owning user, public_read for rows ` +
+        `everyone may read, or custom for a rule of your own. Backenly also opens it when a foreign key to users, or ` +
+        `to a table whose rows users own, shows who owns a row.`,
+    }
   }
 
   console.log(`[AutoRLS] "${tableName}" → ${plan.template} (${plan.basis}): ${plan.reason}`)
@@ -2170,6 +2250,49 @@ export async function autoApplyRlsIfNeeded(
   } else {
     console.warn(`[AutoRLS] ⚠️ Failed to apply policy on "${tableName}": ${result.message}`)
   }
+  return { template: result.success ? plan.template : null, applied: result.success, closedByDefault: false, notice: null }
+}
+
+// ── Closed by default ────────────────────────────────────────────────────────
+//
+// Which tables carry admin_only because Backenly could not tell who owns a row,
+// rather than because someone chose it: project_preferences type
+// `rls_closed_by_default`, key `<schema>.<table>`, as the autonomy ledgers keep
+// theirs. Any rule applied afterwards (applyPermissionPolicy) or removed
+// (removePermissionPolicy) forgets the mark, so the reconciler only ever opens
+// a table nobody has decided about.
+
+const CLOSED_BY_DEFAULT = 'rls_closed_by_default'
+
+async function rememberClosedByDefault(projectId: string, schemaName: string, tableName: string, reason: string): Promise<void> {
+  const key = `${schemaName}.${tableName}`
+  const value = JSON.stringify({ closedAt: new Date().toISOString(), reason: reason.slice(0, 500) })
+  await prisma.projectPreference
+    .upsert({
+      where: { projectId_type_key: { projectId, type: CLOSED_BY_DEFAULT, key } },
+      create: { projectId, type: CLOSED_BY_DEFAULT, key, value, confidence: 1 },
+      update: { value, lastSeen: new Date() },
+    })
+    .catch((err) => console.warn(`[AutoRLS] "${tableName}" closed, but the mark that lets Backenly open it later was not kept:`, err?.message))
+}
+
+async function forgetClosedByDefault(projectId: string, schemaName: string, tableName: string): Promise<void> {
+  await prisma.projectPreference.deleteMany({ where: { projectId, type: CLOSED_BY_DEFAULT, key: `${schemaName}.${tableName}` } })
+}
+
+/** Tables in `schemaName` Backenly closed by default and nobody has decided about since. */
+export async function closedByDefaultTables(projectId: string, schemaName: string): Promise<Set<string>> {
+  const rows = await prisma.projectPreference.findMany({
+    where: { projectId, type: CLOSED_BY_DEFAULT, key: { startsWith: `${schemaName}.` } },
+    select: { key: true },
+  })
+  return new Set(rows.map((r) => r.key.slice(schemaName.length + 1)))
+}
+
+/** The table still has exactly the rule Backenly closed it with, and no other. */
+async function stillClosedByDefault(projectId: string, schemaName: string, tableName: string): Promise<boolean> {
+  const live = await readLivePolicies(projectId, schemaName, tableName)
+  return live.length === 1 && live[0].policyName === 'backenly_admin_only'
 }
 
 /**
@@ -2195,14 +2318,22 @@ export async function reconcileAutoRls(
     select: { tableName: true },
   })
   const alreadyManaged = new Set(managed.map((p) => p.tableName))
+  // A table closed only because its owner could not be told is not a rule
+  // anyone stated: it opens as soon as the schema says who owns a row.
+  const closed = await closedByDefaultTables(projectId, schemaName).catch(() => new Set<string>())
 
   for (const tableName of catalog.columns.keys()) {
-    if (alreadyManaged.has(tableName)) continue
+    if (alreadyManaged.has(tableName) && !closed.has(tableName)) continue
     if (tableName.startsWith('_')) continue
 
     const plan = inferRlsPlanFromCatalog(catalog, tableName)
     if (plan.kind === 'undecidable') {
       out.push({ tableName, template: null, applied: false, message: plan.reason })
+      continue
+    }
+    if (closed.has(tableName) && !(await stillClosedByDefault(projectId, schemaName, tableName))) {
+      // Someone changed its rules outside Backenly: theirs now.
+      await forgetClosedByDefault(projectId, schemaName, tableName).catch(() => {})
       continue
     }
     const result = await applyPermissionPolicy(projectId, {
