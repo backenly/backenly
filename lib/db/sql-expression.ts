@@ -89,6 +89,18 @@ export const EXPR_FUNCTIONS = new Set([
  * `ok` is kept alongside it because `if (!checked.ok)` is what a reader expects
  * to write; `kind` is what makes it typecheck.
  */
+/**
+ * Whether an index predicate says "every row": `true`, in any case, with or
+ * without parentheses. It is how a caller asks for a UNIQUE index that also
+ * counts soft-deleted rows, which is the only kind an ON CONFLICT upsert can
+ * target. It names no column, so the constraint grammar below would refuse it.
+ */
+export function isEveryRowPredicate(expr: string): boolean {
+  let e = expr.trim()
+  while (e.startsWith('(') && e.endsWith(')')) e = e.slice(1, -1).trim()
+  return /^true$/i.test(e)
+}
+
 export type ExpressionCheck =
   | { kind: 'ok'; ok: true; expression: string; columns: string[] }
   | { kind: 'rejected'; ok: false; reason: string; hint: string }

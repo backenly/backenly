@@ -35,7 +35,7 @@
  * That difference is most of the reliability gap we are closing.
  */
 
-import { validateBooleanExpression } from '@/lib/db/sql-expression'
+import { isEveryRowPredicate, validateBooleanExpression } from '@/lib/db/sql-expression'
 import { describeTarget, type DeclaredForeignKey, type ReferentialAction } from '@/lib/db/declared-foreign-key'
 
 /**
@@ -1046,7 +1046,8 @@ function translateAddConstraint(tableName: string, body: string, stmt: string): 
         // scopes a UNIQUE index on a soft-delete table to live rows, because an
         // unscoped one collides with rows the app can no longer see.
         `If ${tableName} carries \`deleted_at\` (every Backenly-created table does), the index is scoped ` +
-        `\`WHERE deleted_at IS NULL\` so it does not collide with soft-deleted rows.`,
+        `\`WHERE deleted_at IS NULL\` so it does not collide with soft-deleted rows. An upsert cannot ` +
+        `target a scoped index; for one over every row, write CREATE UNIQUE INDEX … WHERE true.`,
       ],
     }]
   }
@@ -1292,14 +1293,19 @@ function translateCreateIndex(stmt: string): PlannedAction[] {
         stmt,
       )
     }
-    assertSafeCheckExpression(where[1], stmt)
+    // `WHERE true` is an index over every row: what an upsert needs on a
+    // soft-delete table, where a UNIQUE index is otherwise scoped to live rows.
+    // It names no column, so it is passed on as itself rather than checked as a
+    // predicate, which would refuse it.
+    const everyRow = isEveryRowPredicate(where[1])
+    if (!everyRow) assertSafeCheckExpression(where[1], stmt)
     return [{
       tool: 'create_index',
       args: {
         tableName, columns: indexColumns(paren.body), unique,
         ...(method ? { method } : {}),
         ...(indexName ? { indexName } : {}),
-        where: where[1].trim(),
+        where: everyRow ? 'true' : where[1].trim(),
       },
       source: stmt,
     }]

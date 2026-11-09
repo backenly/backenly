@@ -273,6 +273,20 @@ describe('record envelopes', () => {
  *  2. That message enumerates every OTHER tenant's schema. A real user's
  *     unrelated key was handed four other customers' project ids.
  */
+describe('toApiError — an upsert with no conflict target', () => {
+  it('names the problem and how to make an index an upsert can use', () => {
+    const out = toApiError(400, {
+      code: '42P10',
+      message: 'there is no unique or exclusion constraint matching the ON CONFLICT specification',
+    })
+    expect(out.status).toBe(400)
+    expect(out.body.code).toBe('UPSERT_TARGET_NOT_UNIQUE')
+    expect(out.body.error).toMatch(/on_conflict columns/)
+    expect(out.body.hint).toMatch(/WHERE deleted_at IS NULL/)
+    expect(out.body.hint).toMatch(/where: "true"/)
+  })
+})
+
 describe('toApiError — data-plane provisioning errors', () => {
   it('maps PGRST106 to 503, never a 4xx', () => {
     const out = toApiError(406, {
@@ -366,6 +380,20 @@ describe('stripUpstreamError — v2 passthrough', () => {
     expect(out.status).toBe(403)
     expect(out.body.code).toBe('FORBIDDEN')
     expect(JSON.stringify(out.body)).not.toMatch(/users/)
+  })
+
+  it('says why an upsert found no conflict target, and how to make one', () => {
+    const out = stripUpstreamError(400, {
+      code: '42P10',
+      message: 'there is no unique or exclusion constraint matching the ON CONFLICT specification',
+      details: null,
+      hint: null,
+    })
+    expect(out.status).toBe(400)
+    expect(out.body.code).toBe('42P10')
+    expect(out.body.message).toBe('there is no unique or exclusion constraint matching the ON CONFLICT specification')
+    expect(out.body.hint).toMatch(/where: "true"/)
+    expect(out.body.hint).toMatch(/WHERE true/)
   })
 
   it('reduces anything unrecognised rather than forwarding it', () => {

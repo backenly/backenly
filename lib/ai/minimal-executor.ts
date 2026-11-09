@@ -8996,7 +8996,7 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
   // Identifiers reach raw DDL, so they are VALIDATED rather than stripped. The
   // old `replace(/[^a-z0-9_]/gi, '')` silently turned `user-id` into `userid` and
   // indexed a column that does not exist — or worse, a different one that does.
-  const { SAFE_IDENT, validateBooleanExpression } = await import('@/lib/db/sql-expression')
+  const { SAFE_IDENT, validateBooleanExpression, isEveryRowPredicate } = await import('@/lib/db/sql-expression')
   for (const ident of [tableName, ...columns, params.indexName].filter(Boolean)) {
     if (!SAFE_IDENT.test(String(ident))) {
       return {
@@ -9008,8 +9008,13 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
     }
   }
 
+  // `where: "true"` asks for an index over every row, soft-deleted ones
+  // included: the only kind of UNIQUE index an ON CONFLICT upsert can target.
+  // It names no column, so it is not a predicate to validate, and it is never
+  // scoped to live rows below.
+  const everyRow = !!where && isEveryRowPredicate(where)
   let wherePredicate = ''
-  if (where) {
+  if (where && !everyRow) {
     const checked = validateBooleanExpression(where, { requireColumn: true })
     if (checked.kind !== 'ok') {
       return {
@@ -9052,7 +9057,7 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
     // question.
     let softDeleteScoped = false
     let effectiveWhere = wherePredicate
-    if (unique && !wherePredicate && (await hasSoftDeleteColumn(db, postgresSchema, tableName))) {
+    if (unique && !wherePredicate && !everyRow && (await hasSoftDeleteColumn(db, postgresSchema, tableName))) {
       effectiveWhere = '"deleted_at" IS NULL'
       softDeleteScoped = true
     }
@@ -9073,9 +9078,13 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
     )
     if (existing.length > 0) {
       const def = existing[0].indexdef
+      const existingShape = indexDefShape(def)
       const sameUnique = /CREATE UNIQUE/i.test(def) === unique
-      const sameCols = indexDefColumns(def).join(',') === columns.map((c) => c.toLowerCase()).join(',')
-      if (sameUnique && sameCols) {
+      const sameCols = existingShape.columns.join(',') === columns.map((c) => c.toLowerCase()).join(',')
+      // A partial index is a different index: one scoped to live rows cannot
+      // serve a request for one over every row, which an upsert needs.
+      const samePredicate = samePredicateText(existingShape.where, effectiveWhere)
+      if (sameUnique && sameCols && samePredicate) {
         return {
           success: true,
           message: `Index "${idxName}" already exists on ${tableName} (${columns.join(', ')})${unique ? ', unique' : ''} — nothing to do.`,
@@ -9088,11 +9097,12 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
           `An index named "${idxName}" already exists on ${tableName} with a DIFFERENT definition, ` +
           `so the requested one was not created.\n` +
           `  existing:  ${def}\n` +
-          `  requested: ${unique ? 'UNIQUE ' : ''}(${columns.join(', ')})\n` +
+          `  requested: ${unique ? 'UNIQUE ' : ''}(${columns.join(', ')})` +
+          `${effectiveWhere ? ` WHERE ${effectiveWhere}` : everyRow ? ' over every row' : ''}\n` +
           `Pass a different indexName, or drop the existing index first (destructive — route it through backend_chat).`,
         error: 'Index name conflict',
         code: 'INDEX_CONFLICT',
-        data: { indexName: idxName, existingDefinition: def, requested: { columns, unique } },
+        data: { indexName: idxName, existingDefinition: def, requested: { columns, unique, where: effectiveWhere || (everyRow ? 'true' : null) } },
       }
     }
 
@@ -9132,12 +9142,17 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
       // to know it did not get that.
       message:
         `✅ Created ${shape} as "${idxName}"` +
+        (everyRow && unique
+          ? `\n\nIt covers every row, soft-deleted ones included, so an upsert (ON CONFLICT, or on_conflict ` +
+            `on the REST API) can target it.`
+          : '') +
         (softDeleteScoped
           ? `\n\nScoped to \`WHERE deleted_at IS NULL\`, because "${tableName}" uses soft delete: a client ` +
             `DELETE sets \`deleted_at\` instead of removing the row. An unscoped UNIQUE index would keep ` +
             `enforcing uniqueness against rows the app can no longer see — so a user who deleted their ` +
             `record and created a new one would hit a unique violation against an invisible row. ` +
-            `If you DO want uniqueness across deleted rows, pass \`where\` explicitly (e.g. "true").`
+            `An upsert cannot target a scoped index. If you want uniqueness across deleted rows too, or an ` +
+            `upsert on these columns, pass \`where: "true"\`.`
           : ''),
       data: {
         tableName,
@@ -9145,6 +9160,7 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
         unique,
         method: method || 'btree',
         where: effectiveWhere || null,
+        everyRow,
         softDeleteScoped,
         indexName: idxName,
         definition: def,
@@ -9228,25 +9244,84 @@ export function defaultIndexName(tableName: string, columns: string[], unique: b
   return `${prefix}_${tableName}`.slice(0, 54) + `_${hash}`
 }
 
+/**
+ * The column list and the WHERE predicate of a pg_indexes definition: the
+ * columns lower-cased for comparison, the predicate as Postgres wrote it, null
+ * for an index over every row.
+ *
+ * The column list is the parenthesised group after `USING <method>`. Reading
+ * the LAST group, as this used to, read a partial index's predicate as its
+ * columns, so an index scoped to live rows never matched the request that made
+ * it, and nothing could tell it from one over every row.
+ */
+export function indexDefShape(indexdef: string): { columns: string[]; where: string | null } {
+  const using = /\bUSING\s+[A-Za-z_][A-Za-z0-9_]*\s*\(/i.exec(indexdef)
+  if (!using) return { columns: [], where: null }
+  const open = using.index + using[0].length - 1
+  let depth = 0
+  let quoted = false
+  let close = -1
+  for (let i = open; i < indexdef.length; i++) {
+    const ch = indexdef[i]
+    if (ch === '"') quoted = !quoted
+    if (quoted) continue
+    if (ch === '(') depth++
+    else if (ch === ')' && --depth === 0) {
+      close = i
+      break
+    }
+  }
+  if (close === -1) return { columns: [], where: null }
+
+  const columns: string[] = []
+  let part = ''
+  depth = 0
+  quoted = false
+  for (const ch of indexdef.slice(open + 1, close)) {
+    if (ch === '"') quoted = !quoted
+    if (!quoted && ch === '(') depth++
+    if (!quoted && ch === ')') depth--
+    if (!quoted && depth === 0 && ch === ',') {
+      columns.push(part)
+      part = ''
+    } else {
+      part += ch
+    }
+  }
+  columns.push(part)
+
+  const where = /^\s*(?:INCLUDE\s*\([^)]*\)\s*)?WHERE\s+(\S[\s\S]*)$/i.exec(indexdef.slice(close + 1))
+  return {
+    columns: columns
+      // Sort modifiers are stripped BEFORE the quotes. The other order leaves
+      // `"createdAt" DESC` as `createdat"` — the closing quote is no longer at
+      // the end of the string once DESC follows it.
+      .map((c) =>
+        c.trim()
+          .replace(/\s+(ASC|DESC|NULLS\s+(FIRST|LAST))$/i, '')
+          .trim()
+          .replace(/^"|"$/g, '')
+          .toLowerCase(),
+      )
+      .filter(Boolean),
+    where: where ? where[1].trim() : null,
+  }
+}
+
 /** Column list of a pg_indexes definition, lower-cased for comparison. */
 export function indexDefColumns(indexdef: string): string[] {
-  const open = indexdef.lastIndexOf('(')
-  const close = indexdef.indexOf(')', open)
-  if (open === -1 || close === -1) return []
-  return indexdef
-    .slice(open + 1, close)
-    .split(',')
-    // Sort modifiers are stripped BEFORE the quotes. The other order leaves
-    // `"createdAt" DESC` as `createdat"` — the closing quote is no longer at the
-    // end of the string once DESC follows it.
-    .map((c) =>
-      c.trim()
-        .replace(/\s+(ASC|DESC|NULLS\s+(FIRST|LAST))$/i, '')
-        .trim()
-        .replace(/^"|"$/g, '')
-        .toLowerCase(),
-    )
-    .filter(Boolean)
+  return indexDefShape(indexdef).columns
+}
+
+/**
+ * Whether two index predicates are the same text once quoting, parentheses,
+ * spacing and case are set aside: how Postgres writes a predicate back
+ * (`(deleted_at IS NULL)`) differs from how it was asked for
+ * (`"deleted_at" IS NULL`). No predicate matches only no predicate.
+ */
+function samePredicateText(a: string | null | undefined, b: string | null | undefined): boolean {
+  const norm = (p: string | null | undefined) => (p ?? '').replace(/["()\s]/g, '').toLowerCase()
+  return norm(a) === norm(b)
 }
 
 /**
