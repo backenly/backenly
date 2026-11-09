@@ -481,6 +481,12 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
           required: ['name', 'type'],
         },
       },
+      asWritten: {
+        type: 'boolean',
+        description:
+          'true: create exactly these columns with exactly the flags given, inferring nothing from their names ' +
+          '(no UNIQUE on email, no CHECK on status, no foreign key on *_id). apply_migration sets it for CREATE TABLE.',
+      },
     },
     ['tableName', 'columns']),
   fn('add_column',
@@ -1229,6 +1235,13 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
           'Every column the constraint covers. Required for a composite UNIQUE (["user_a","user_b"]) and ' +
           'for a CHECK spanning several columns. Order matters for UNIQUE — it is the index column order.',
       },
+      asWritten: {
+        type: 'boolean',
+        description:
+          'For UNIQUE: true makes a real UNIQUE constraint over every row, soft-deleted rows included, which ' +
+          'ON CONFLICT (…) can target. Without it, on a table with soft delete, uniqueness is enforced by an ' +
+          'index over live rows only. apply_migration sets it for UNIQUE written in SQL.',
+      },
       constraintType: {
         type: 'string',
         enum: ['not_null', 'drop_not_null', 'unique', 'check', 'foreign_key', 'set_default', 'drop_default'],
@@ -1569,7 +1582,11 @@ function fn(
  */
 export const TOOL_TO_ACTION: Record<string, (args: any) => AIAction> = {
   adopt_external_schema: () => ({ action: 'ADOPT_EXTERNAL_SCHEMA', params: {} }),
-  create_table: (a) => ({ action: 'CREATE_TABLE', params: { tableName: a.tableName, columns: a.columns } }),
+  create_table: (a) => ({
+    action: 'CREATE_TABLE',
+    // `asWritten`: from SQL (lib/mcp/migration-parser.ts), so nothing is inferred.
+    params: { tableName: a.tableName, columns: a.columns, ...(a.asWritten === true ? { asWritten: true } : {}) },
+  }),
   add_column: (a) => ({
     action: 'ADD_COLUMN',
     params: {
@@ -1613,6 +1630,8 @@ export const TOOL_TO_ACTION: Record<string, (args: any) => AIAction> = {
       referencedTable: a.referencedTable,
       // A foreign key exactly as declared (lib/db/declared-foreign-key.ts).
       references: a.references,
+      // From SQL: a UNIQUE is a real constraint, as written.
+      ...(a.asWritten === true ? { asWritten: true } : {}),
     },
   }),
   generate_api: (a) => ({ action: 'GENERATE_API', params: { tableName: a.tableName } }),

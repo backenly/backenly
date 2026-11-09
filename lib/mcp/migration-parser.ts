@@ -950,19 +950,21 @@ function translateCreateTable(stmt: string): PlannedAction[] {
     notes.push(`${dropped.join(', ')} skipped: ${MANAGED_REPLACEMENT}. Order by "createdAt", not created_at.`)
   }
 
+  // The table is created as written: the columns, keys, uniques and checks the
+  // statement declares, and nothing a column's name suggests
+  // (lib/ai/minimal-executor.ts, executeCreateTable).
   const actions: PlannedAction[] = [{
     tool: 'create_table',
-    args: { tableName, columns },
+    args: { tableName, columns, asWritten: true },
     source: stmt,
     ...(notes.length ? { notes } : {}),
   }]
 
   for (const cols of compositeUniques) {
     actions.push({
-      tool: 'create_index',
-      args: { tableName, columns: cols, unique: true },
+      tool: 'add_constraint',
+      args: { tableName, columns: cols, constraintType: 'unique', asWritten: true },
       source: `${stmt} → UNIQUE (${cols.join(', ')})`,
-      notes: [`UNIQUE (${cols.join(', ')}) on ${tableName} applied as a unique index — that is how Postgres enforces it.`],
     })
   }
 
@@ -1025,29 +1027,21 @@ function translateAddConstraint(tableName: string, body: string, stmt: string): 
         stmt,
       )
     }
-    if (cols.length === 1) {
-      return [{
-        tool: 'add_constraint',
-        args: { tableName, columnName: cols[0], constraintType: 'unique', ...(constraintName ? { constraintName } : {}) },
-        source: stmt,
-      }]
-    }
-    // Multi-column UNIQUE. Postgres implements a UNIQUE constraint AS a unique
-    // index, so this is the same guarantee under a different name — not a
-    // downgrade, and no longer a refusal (defect #10).
+    // A UNIQUE constraint, one column or several, exactly as written: a real
+    // constraint over every row, which ON CONFLICT (…) can target. It used to
+    // become a unique index scoped to live rows, which no ON CONFLICT naming
+    // only the columns can use (42P10), under a name the SQL never gave.
     return [{
-      tool: 'create_index',
-      args: { tableName, columns: cols, unique: true, ...(constraintName ? { indexName: constraintName } : {}) },
+      tool: 'add_constraint',
+      args: {
+        tableName,
+        ...(cols.length === 1 ? { columnName: cols[0] } : {}),
+        columns: cols,
+        constraintType: 'unique',
+        asWritten: true,
+        ...(constraintName ? { constraintName } : {}),
+      },
       source: stmt,
-      notes: [
-        `Multi-column UNIQUE (${cols.join(', ')}) applied as a unique index on ${tableName} — ` +
-        `that is how PostgreSQL enforces a composite UNIQUE constraint. The guarantee is identical.`,
-        // Named up front rather than discovered in production. The executor
-        // scopes a UNIQUE index on a soft-delete table to live rows, because an
-        // unscoped one collides with rows the app can no longer see.
-        `If ${tableName} carries \`deleted_at\` (every Backenly-created table does), the index is scoped ` +
-        `\`WHERE deleted_at IS NULL\` so it does not collide with soft-deleted rows.`,
-      ],
     }]
   }
 

@@ -4181,6 +4181,17 @@ async function executeCreateTable(
     }
   }
 
+  // ── Declared in SQL: exactly as written ──────────────────────────────────
+  //
+  // A table from apply_migration gets the columns, keys, uniques, checks and
+  // defaults its statement declares, and nothing its column names suggest: no
+  // UNIQUE on `email`, no CHECK value list on `status`, no foreign key with
+  // ON DELETE CASCADE on `user_id`, no NOT NULL the statement left out. Those
+  // guesses are for a table the brain designs from a description; on SQL they
+  // rewrote what the author said. The platform's own columns (id, "createdAt",
+  // "updatedAt", "deleted_at") are still added, and the result says so.
+  const asWritten = params.asWritten === true
+
   try {
     // Import Prisma and database utility functions
     const { prisma } = await import('@/lib/db')
@@ -4287,7 +4298,7 @@ async function executeCreateTable(
     ]
 
     const alreadyHasStatusConstraint = checkConstraints.some(c => c.columnName === 'status')
-    if (!alreadyHasStatusConstraint) {
+    if (!asWritten && !alreadyHasStatusConstraint) {
       for (const rule of STATUS_DOMAIN_MAP) {
         if (!rule.pattern.test(tableName)) continue
         const colExists = safeColumns.some(c => c.name.toLowerCase() === rule.column)
@@ -4309,7 +4320,9 @@ async function executeCreateTable(
         existingCols.add(colLower)
 
         const normalizedType = normalizeColumnType(col.type, col.name)
-        const constraints = deriveConstraints(col.name, normalizedType, tableName)
+        const constraints = asWritten
+          ? { isPrimaryKey: false, isUnique: false, isRequired: false, hasDefault: false, foreignKey: undefined }
+          : deriveConstraints(col.name, normalizedType, tableName)
         // Hand the column the value set its CHECK will enforce, so its DEFAULT
         // is derived from that list rather than guessed from its name. A default
         // outside the CHECK is what made every generated `orders` table reject
@@ -4736,6 +4749,16 @@ async function executeCreateTable(
     // ── Global FK repair: also fix FKs on OTHER tables that reference THIS newly created table
     // e.g., if 'orders' was created before 'users', orders.userId had its REFERENCES stripped.
     // Now that we just created 'users', repair orders.userId → users.id
+    // A table declared in SQL is kept out of the name-based key repair, now and
+    // on every later run of it (lib/db/declared-tables.ts); one built from a
+    // description takes part, whatever an earlier table of its name was.
+    try {
+      const { markDeclaredInSql, unmarkDeclaredInSql } = await import('@/lib/db/declared-tables')
+      if (asWritten) await markDeclaredInSql(projectId, tableName)
+      else await unmarkDeclaredInSql(projectId, tableName)
+    } catch (markErr: any) {
+      console.warn(`[AI Executor] Could not record how "${tableName}" was declared:`, markErr?.message)
+    }
     try {
       const { repairForeignKeysGlobally } = await import('./fk-repair')
       const repairedCount = await repairForeignKeysGlobally(projectId)
@@ -4896,7 +4919,10 @@ async function executeCreateTable(
       // The information is worth surfacing — a payments table with no Stripe key
       // really is inert. It just has to be a field the caller can render, ignore
       // or act on, rather than text welded to the outcome of the operation.
-      message: `✅ Created table "${tableName}" with ${safeColumns.length + 3} columns (including id, createdAt, updatedAt)`,
+      message: asWritten
+        ? `✅ Created table "${tableName}" as written: ${safeColumns.length} declared column(s), and the four every ` +
+          `table gets: id (uuid primary key), "createdAt", "updatedAt" and "deleted_at" (a client DELETE sets it).`
+        : `✅ Created table "${tableName}" with ${safeColumns.length + 3} columns (including id, createdAt, updatedAt)`,
       data: {
         tableName,
         schema: postgresSchema,
@@ -9628,7 +9654,12 @@ async function executeAddConstraint(params: any, projectId: string, schemaTarget
       // is routed to executeCreateIndex, which applies the `deleted_at IS NULL`
       // scoping and reports it. Uniqueness is delivered; only the catalog object
       // differs, and the response says so.
-      if (await hasSoftDeleteColumn(db, postgresSchema, tableName)) {
+      //
+      // Not for a UNIQUE declared in SQL (`asWritten`): the author named a
+      // constraint, and ON CONFLICT on its columns needs a real one; a scoped
+      // index is refused there (42P10). It is made as written, and the result
+      // says what soft delete means for it.
+      if (params.asWritten !== true && (await hasSoftDeleteColumn(db, postgresSchema, tableName))) {
         const idxResult = await executeCreateIndex(
           { tableName, columns, unique: true, ...(constraintName ? { indexName: constraintName } : {}) },
           projectId,
@@ -9759,7 +9790,15 @@ async function executeAddConstraint(params: any, projectId: string, schemaTarget
       success: true,
       // The ACTUAL installed definition is echoed, so a caller can see what it
       // got rather than trusting that it matches what it sent.
-      message: `✅ Added constraint "${cName}" to ${tableName}: ${after[0].def}`,
+      message:
+        `✅ Added constraint "${cName}" to ${tableName}: ${after[0].def}` +
+        // A UNIQUE over every row counts the rows a client DELETE only marks
+        // deleted, which is what the author asked for and worth saying once.
+        (ct === 'unique' && params.asWritten === true && (await hasSoftDeleteColumn(db, postgresSchema, tableName))
+          ? `\n\nIt covers every row, soft-deleted ones too: a client DELETE on ${tableName} sets "deleted_at" and keeps ` +
+            `the row, so its value stays taken. For uniqueness among live rows only, create a unique index ` +
+            `WHERE deleted_at IS NULL instead (ON CONFLICT then has to name that WHERE).`
+          : ''),
       data: { tableName, constraintName: cName, constraintDefinition: after[0].def, columns },
     }
   } catch (error: any) {

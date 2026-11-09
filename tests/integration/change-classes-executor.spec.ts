@@ -598,10 +598,8 @@ changeClass('ADD CONSTRAINT … UNIQUE', {
   act: () => migrated('ALTER TABLE badges ADD CONSTRAINT badges_code_key UNIQUE (code)'),
   risk: 'additive',
   recorded: (row, after) => {
-    // A soft-delete table gets the uniqueness as a partial unique index (lib/ai/minimal-executor.ts).
-    const idx = after.cat.tables.badges.indexes.find((i) => i.name === 'badges_code_key')!
-    expect(idx).toMatchObject({ unique: true })
-    expect(idx.definition).toMatch(/\(code\) WHERE \(deleted_at IS NULL\)/)
+    // Declared in SQL: the constraint as written, over every row, by its name (lib/ai/minimal-executor.ts).
+    expect(after.cat.tables.badges.constraints.find((c) => c.name === 'badges_code_key')).toMatchObject({ type: 'u', definition: 'UNIQUE (code)' })
   },
 })
 
