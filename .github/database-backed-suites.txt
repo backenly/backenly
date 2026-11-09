@@ -1490,6 +1490,13 @@ tests/integration/branch-merge-governed.spec.ts
 # Real provisioned project, branch, migrations and approval rows.
 tests/integration/merge-cards-say-what-lands.spec.ts
 
+# A merge that would fail on production's rows (NOT NULL over empty values, a
+# UNIQUE over duplicates, a CHECK some rows break, a foreign key to nothing, a
+# NOT NULL column with no default) is refused before anyone is asked, through
+# MCP and backend_chat, with columns followed through renames. Real provisioned
+# project, branches and production rows.
+tests/integration/merge-preflight.spec.ts
+
 # A restore point that cannot bring everything back says so: kept data lost
 # outside Backenly makes a restore need a person who approves exactly what comes
 # back empty, never a lossless one; retention purges a vault only past the

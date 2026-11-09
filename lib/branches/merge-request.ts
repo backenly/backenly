@@ -3,7 +3,8 @@
  * `branch { action: "merge" }` (app/api/mcp/tool/route.ts) and backend_chat's
  * merge_branch, which its approval gate parks (lib/mcp/approvals.ts).
  *
- * The request pins the statements its card lists (`approvedMigrations`), so
+ * A merge that would fail on production's rows is refused before anyone is
+ * asked (./merge-preflight.ts). The request pins the statements its card lists (`approvedMigrations`), so
  * approval replays exactly those or refuses with MERGE_STALE
  * (lib/branches/engine.ts, mergeBranch). backend_chat's merges used to be
  * parked with the branch id alone, so they replayed whatever the branch held
@@ -43,6 +44,25 @@ export async function mergeRequest(projectId: string, branchId: string, requeste
         `Main has changed ${d.conflicts.join(', ')} since branch "${d.branch}" was cut, and its migrations touch ` +
         `${d.conflicts.length === 1 ? 'it' : 'them'}. Nothing was requested.`,
       hint: 'Create a new branch from main as it is now and apply the change there.',
+    }
+  }
+
+  // A merge that would fail on production's rows is not put to a person: a
+  // branch has none of them, so it cannot tell (./merge-preflight.ts).
+  const { mergeWouldFail } = await import('./merge-preflight')
+  const wouldFail = await mergeWouldFail(projectId, d.migrations).catch(() => [] as string[])
+  if (wouldFail.length > 0) {
+    return {
+      kind: 'refused',
+      status: 409,
+      code: 'MERGE_WOULD_FAIL',
+      error:
+        `Merging branch "${d.branch}" would fail on production's rows as they are now: ${wouldFail.join('; ')}. ` +
+        `Nothing was requested.`,
+      hint:
+        'A branch is cut without production\'s rows, so these held there. Fix the rows on production first ' +
+        '(db_update, or a data migration a person approves), or apply a migration that accounts for them on a new ' +
+        'branch, then ask again.',
     }
   }
 
