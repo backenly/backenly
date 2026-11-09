@@ -45,7 +45,7 @@ describe('extractIndexCandidate — PostgREST statements (/api/v2 and v1 /db)', 
   // pattern cannot match. PostgREST qualifies every column with schema and
   // table, so the parser has to find the table-and-column pair inside a
   // three-part name.
-  const S = 'workspace_24b616e2-060b-4d6e-96f1-35cbb1e5a2fe'
+  const S = 'workspace_5f0c2a9e-7d41-4b8e-9a63-0e2d7c1b8f44'
   const qi = `"${S}"."product_views"`
   const wrap = (read: string) =>
     `WITH pgrst_source AS ( ${read} )  SELECT null::bigint AS total_result_set, pg_catalog.count(_postgrest_t) AS page_total, ` +
