@@ -400,25 +400,46 @@ export interface IndexCandidate {
 export function extractIndexCandidate(
   queryText: string,
   schemaName: string,
+  opts: {
+    /**
+     * The schema's tables, for a statement this project's own role ran (its
+     * functions' or its direct connections'). Such a statement need not name
+     * the schema: its search path is the project's schema, so an unqualified
+     * table name counts, but only when it is one of these.
+     */
+    tables?: ReadonlySet<string>
+  } = {},
 ): IndexCandidate | null {
   if (!queryText || !schemaName) return null
 
   // The table must be named with THIS project's schema. A bare "orders" could
-  // belong to any tenant sharing the database.
+  // belong to any tenant sharing the database. The schema is always quoted (its
+  // name has hyphens); the table after it may be quoted or not.
   const esc = schemaName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  const fromRe = new RegExp(`(?:FROM|JOIN|UPDATE|INTO)\\s+"${esc}"\\."([A-Za-z_][A-Za-z0-9_]*)"`, 'i')
+  const fromRe = new RegExp(`(?:FROM|JOIN|UPDATE|INTO)\\s+"${esc}"\\.${IDENT}${WORD_END}`, 'i')
   const fromMatch = fromRe.exec(queryText)
-  if (!fromMatch) return null
-  const table = fromMatch[1]
+  let table: string | null = fromMatch ? nameAt(fromMatch, 1) : null
+  if (!table && opts.tables) {
+    const unqualified = new RegExp(`(?:FROM|JOIN|UPDATE|INTO)\\s+${IDENT}${WORD_END}(?!\\s*\\.)`, 'gi')
+    for (let m = unqualified.exec(queryText); m; m = unqualified.exec(queryText)) {
+      const name = nameAt(m, 1)
+      if (opts.tables.has(name)) {
+        table = name
+        break
+      }
+    }
+  }
+  if (!table) return null
 
   const whereIdx = queryText.search(/\bWHERE\b/i)
   if (whereIdx === -1) return null
-  const predicate = queryText.slice(whereIdx)
+  const predicate = queryText.slice(whereIdx + 5)
 
-  // Qualified first ("orders"."status" = $1), then bare ("status" = $1). Only
-  // equality and IN: a range or a LIKE '%x' does not necessarily benefit from a
-  // plain btree index, and proposing one there would be cargo cult.
-  const qualified = /"([A-Za-z_][A-Za-z0-9_]*)"\."([A-Za-z_][A-Za-z0-9_]*)"\s*(?:=|IN)\s*/i.exec(predicate)
+  // Qualified first ("orders"."status" = $1), then bare (status = $1), each
+  // quoted or not. Only equality and IN: a range or a LIKE '%x' does not
+  // necessarily benefit from a plain btree index, and proposing one there would
+  // be cargo cult.
+  const qualified = new RegExp(`${IDENT}\\.${IDENT}${WORD_END}\\s*(?:=|IN\\b)`, 'i').exec(predicate)
   if (qualified) {
     // The predicate named its table explicitly. If that is not the table we
     // matched in FROM, this filter belongs to a JOINed relation and we know
@@ -430,12 +451,29 @@ export function extractIndexCandidate(
     // identifier immediately before the `=`) and attributes it to `orders`,
     // producing CREATE INDEX on a column `orders` does not have. Answering null
     // is the honest result.
-    return qualified[1] === table ? sane(table, qualified[2]) : null
+    return nameAt(qualified, 1) === table ? sane(table, nameAt(qualified, 3)) : null
   }
-  const bare = /"([A-Za-z_][A-Za-z0-9_]*)"\s*(?:=|IN)\s*/i.exec(predicate)
-  if (bare) return sane(table, bare[1])
+  const bare = new RegExp(`(?<![.A-Za-z0-9_$"])${IDENT}${WORD_END}\\s*(?:=|IN\\b)`, 'gi')
+  for (let m = bare.exec(predicate); m; m = bare.exec(predicate)) {
+    // `NOT IN (…)` reads as a name followed by IN; a keyword is never a column.
+    if (m[1] === undefined && PREDICATE_KEYWORDS.has(m[2].toLowerCase())) continue
+    return sane(table, nameAt(m, 1))
+  }
 
   return null
+}
+
+/**
+ * A name as SQL writes it: quoted, which keeps its case, or unquoted, which
+ * PostgreSQL folds to lower case. Two groups: the quoted text, the bare name.
+ */
+const IDENT = '(?:"((?:[^"]|"")+)"|([A-Za-z_][A-Za-z0-9_$]*))'
+/** The end of a bare name: no backtracking into `othe` from `other.t`. */
+const WORD_END = '(?![A-Za-z0-9_$])'
+const PREDICATE_KEYWORDS = new Set(['not', 'and', 'or', 'is', 'in', 'on', 'where', 'any', 'all', 'some', 'exists', 'between', 'like', 'ilike', 'similar', 'case', 'when', 'then', 'else', 'end'])
+
+function nameAt(m: RegExpExecArray, group: number): string {
+  return m[group] !== undefined ? m[group].replace(/""/g, '"') : m[group + 1].toLowerCase()
 }
 
 /**
