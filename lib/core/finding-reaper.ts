@@ -209,6 +209,9 @@ export async function reapArchFindings(projectId: string): Promise<number> {
  * the withdrawal on the same cadence as the claim.
  */
 const INVARIANT_REAPABLE_TYPES = [
+  // Its probe reads the run log on every pass, so a function whose next run
+  // succeeds stops being reported and the finding withdraws itself.
+  'function_failing',
   // Withdraws when repairs stop recurring in that area, and ALSO when the
   // component's membership changes: the identity carries a membership hash, so
   // a table joining or leaving produces a different gap and leaves the old

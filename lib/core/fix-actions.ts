@@ -22,6 +22,7 @@
  */
 
 import { normalizeFindingType } from './types'
+import { triggerPhrase } from './function-trigger-words'
 import type { AIAction } from '@/lib/ai/minimal-executor'
 import { WITHHELD } from '@/lib/mcp/withhold-secrets'
 import { unsealParams } from '@/lib/operational-memory/sealed-params'
@@ -595,6 +596,22 @@ ${details.migration}` : ''
 
 If the column is deliberately different now, tell your coding agent to rebuild it ` +
         `through Backenly so the recorded intent matches what you actually have.`
+      )
+    }
+
+    // The function's code is its owner's: the hint is what the run log shows
+    // and what to ask for.
+    case 'function_failing': {
+      const name = typeof details?.functionName === 'string' ? details.functionName : 'This function'
+      const failures = Number(details?.failures ?? 0)
+      const runs = Number(details?.runs ?? 0)
+      const hours = Number(details?.windowHours ?? 24)
+      const error = typeof details?.lastError === 'string' ? `\n\nThe last failure: ${details.lastError}` : ''
+      return (
+        `${name} ${triggerPhrase(details?.trigger, details?.tableName)}, and it failed ${failures} of its ` +
+        `${runs} runs in the last ${hours} hours, the latest one included.${error}` +
+        `\n\nAsk your coding agent to fix ${name} and deploy it again. Its runs are on the Functions ` +
+        `page, and this clears once a run succeeds.`
       )
     }
 

@@ -128,6 +128,12 @@ export type FindingType =
   // depends entirely on a cause that is not in the data. The finding carries the
   // measurement and what changed on the backend just before it.
   | 'behavioural_regression'
+  // ── A function that keeps failing: at least three failed runs in a day, the
+  // latest among them (lib/autonomy/function-failures.ts).
+  //
+  // notify_only: the remedy is a change to the function's code, which belongs
+  // to whoever wrote it. The finding carries the run log's evidence.
+  | 'function_failing'
   // ── What a migration that did not finish left behind.
   //
   // A FAILED migration is not directly observable: the DDL event triggers
@@ -357,6 +363,8 @@ export const ALL_FINDING_TYPES = [
   'usage_anomaly',
   // Added 2026-10-05 in the same commit that introduced it.
   'architecture_evolution',
+  // Added 2026-11-10 in the same commit that introduced it.
+  'function_failing',
 ] as const satisfies ReadonlyArray<FindingType>
 
 /** The finding type that carries an architecture-change approval request. */

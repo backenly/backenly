@@ -907,6 +907,8 @@ async function writeFinding(
     // One row per drifted column (`table.column`): two missing columns are two
     // repairs, and each one's proposal is bound to its own finding.
     intent_drift: 'location',
+    // One row per function: two failing functions are two fixes.
+    function_failing: 'functionId',
     // The gaps the repair loop repairs: one row per gap, keyed as the loop keys
     // its own (gapIdentity, lib/autonomy/desired-state.ts), so the row the
     // observer records is the one the loop acts on. Keyed by type alone, one

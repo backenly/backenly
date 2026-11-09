@@ -346,6 +346,21 @@ export function classifyFix(
     }
   }
 
+  // ── A function that keeps failing ─────────────────────────────
+  //
+  // The repair is a change to the function's code, and the code belongs to
+  // whoever wrote it: a coding agent, a person, or Backenly's own generator,
+  // whose functions the executor already tries to fix as they fail. The
+  // finding is the run log's evidence and the next step.
+  if (type === 'function_failing') {
+    return {
+      decision: 'notify_only',
+      reason:
+        'This function keeps failing on real runs. The fix is a change to its code, so Backenly ' +
+        'shows what failed and leaves the change to whoever owns the function.',
+    }
+  }
+
   // ── Migration residue ─────────────────────────────────────────
   //
   // One type, three different residues, three different answers — decided on
