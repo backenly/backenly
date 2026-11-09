@@ -305,11 +305,75 @@ function mapType(rawType: string, stmt: string): string {
 /** Named once so the error text and the docs can never disagree. */
 const SUPPORTED_TYPE_LIST = 'text, int, bigint, boolean, timestamp, uuid, jsonb, numeric'
 
+/**
+ * Declared types, each with the one spelling the executor creates.
+ *
+ * The vocabulary above (TYPE_MAP) is Backenly's eight column kinds, and it is
+ * lossy: `timestamptz`, `date` and `time` all become `timestamp`, and
+ * `numeric(10,2)` loses its scale. The executor then built the column from the
+ * kind, and from the column's NAME where the kind was text, so on production
+ * (2026-11-09) `session_id text` was created as uuid and a merge turned
+ * `refunded_at timestamptz` into `timestamp without time zone`. A statement's
+ * type is a declaration, so it is now carried exactly.
+ *
+ * Left on the vocabulary, as before: `serial`/`bigserial` (they are a sequence
+ * and a default, not a type), `citext` (an extension) and `name`.
+ */
+const EXACT_TYPES: Record<string, string> = {
+  text: 'text', varchar: 'varchar', 'character varying': 'varchar', char: 'char', character: 'char',
+  int: 'integer', integer: 'integer', int4: 'integer', smallint: 'smallint', int2: 'smallint',
+  bigint: 'bigint', int8: 'bigint',
+  boolean: 'boolean', bool: 'boolean',
+  timestamp: 'timestamp', 'timestamp without time zone': 'timestamp',
+  timestamptz: 'timestamptz', 'timestamp with time zone': 'timestamptz',
+  date: 'date', time: 'time', 'time without time zone': 'time',
+  uuid: 'uuid', json: 'json', jsonb: 'jsonb',
+  numeric: 'numeric', decimal: 'numeric', real: 'real', float4: 'real', float8: 'double precision',
+  'double precision': 'double precision', money: 'money',
+}
+
+/** Length, precision or scale a declared type may carry through. */
+const TYPE_MODIFIER: Record<string, RegExp> = {
+  varchar: /^\d{1,5}$/,
+  char: /^\d{1,4}$/,
+  numeric: /^\d{1,4}(?:,\d{1,4})?$/,
+  timestamp: /^[0-6]$/,
+  timestamptz: /^[0-6]$/,
+  time: /^[0-6]$/,
+}
+
+/**
+ * The declared type in its canonical spelling, or undefined where the
+ * vocabulary is kept. `rawType` has already passed mapType.
+ */
+export function exactSqlType(rawType: string): string | undefined {
+  const trimmed = rawType.trim().toLowerCase().replace(/\s+/g, ' ')
+  const array = /^(.*?)\s*(?:\[\s*\d*\s*\])+$/.exec(trimmed) ?? /^(.*?)\s+array(?:\s*\[\s*\d*\s*\])?$/.exec(trimmed)
+  const scalar = (array ? array[1] : trimmed).trim()
+  const modifier = /\(([^)]*)\)/.exec(scalar)?.[1]?.replace(/\s+/g, '')
+  // `timestamp(3) with time zone` puts the modifier before the words.
+  const base = scalar.replace(/\([^)]*\)/g, '').replace(/\s+/g, ' ').trim()
+  const exact = EXACT_TYPES[base]
+  if (!exact) return undefined
+  let out = exact
+  if (modifier !== undefined) {
+    if (!TYPE_MODIFIER[exact]?.test(modifier)) return undefined
+    out = `${exact}(${modifier})`
+  }
+  return array ? `${out}[]` : out
+}
+
 // ── Column definition parsing ────────────────────────────────────────────────
 
 interface ParsedColumn {
   name: string
   type: string
+  /**
+   * The type exactly as the statement declared it, in one canonical spelling
+   * (`timestamptz`, `date`, `numeric(10,2)`, `text`). The executor creates this
+   * type and never one inferred from the column's name (exactSqlType).
+   */
+  sqlType?: string
   nullable?: boolean
   unique?: boolean
   /** The referenced table, as the executor's `fkTo` contract has always named it. */
@@ -654,6 +718,8 @@ function parseColumnDef(def: string, stmt: string, checksOut?: ParsedCheck[]): P
   }
 
   const col: ParsedColumn = { name, type: mapType(rawType, stmt) }
+  const declared = exactSqlType(rawType)
+  if (declared) col.sqlType = declared
 
   // ── Nullability: absence is a statement, not a gap ──────────────────────────
   //
@@ -1191,6 +1257,7 @@ function translateAlterTable(stmt: string): PlannedAction[] {
     const col = parseColumnDef(add[1], stmt, checks)
     if (!col) throw new MigrationParseError('Could not parse the added column.', 'BAD_COLUMN_DEF', undefined, stmt)
     const column: Record<string, unknown> = { name: col.name, type: col.type }
+    if (col.sqlType !== undefined) column.sqlType = col.sqlType
     if (col.nullable !== undefined) column.nullable = col.nullable
     if (col.default !== undefined) column.default = col.default
     if (col.unique !== undefined) column.unique = col.unique
