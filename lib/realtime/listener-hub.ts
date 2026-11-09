@@ -66,8 +66,10 @@ function upgradeNotifyFunction(projectId: string): void {
   import('@/lib/services/realtimeTriggers')
     .then(({ ensureRealtimeFunctionCurrent }) => ensureRealtimeFunctionCurrent(projectId))
     .catch((err) => {
+      // A constant format: the project id is passed as a value, never read as a format.
       console.warn(
-        `[ListenerHub] could not bring the realtime notify function of ${projectId} up to date:`,
+        '[ListenerHub] could not bring the realtime notify function of %s up to date:',
+        projectId,
         err instanceof Error ? err.message : err,
       )
     })
