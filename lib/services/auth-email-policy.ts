@@ -20,6 +20,7 @@ import { prisma } from '@/lib/db'
 import { getSmtpConfigView } from '@/lib/email/project-smtp'
 import { workspaceSchemaName } from '@/lib/security/workspace-schema'
 import { ensureEmailVerifiedColumn } from '@/lib/services/end-user-auth-flows'
+import { linkableAppUrl } from '@/lib/services/end-user-auth-email'
 
 export interface AuthEmailPolicyView {
   appName: string | null
@@ -33,7 +34,16 @@ export interface AuthEmailPolicyView {
 
 export const AUTH_EMAIL_POLICY_INPUT = z.object({
   appName: z.string().trim().max(80).nullable().optional(),
-  appUrl: z.string().trim().url().max(500).nullable().optional().or(z.literal('').transform(() => null)),
+  // Links in auth emails and on the pages Backenly hosts for the app's users
+  // point here, so only an http(s) address with a plain hostname is accepted.
+  appUrl: z
+    .string()
+    .trim()
+    .max(500)
+    .refine((value) => linkableAppUrl(value) !== null, { message: 'must be an http:// or https:// address' })
+    .nullable()
+    .optional()
+    .or(z.literal('').transform(() => null)),
   requireEmailVerification: z.boolean().optional(),
   magicLinksEnabled: z.boolean().optional(),
 })
@@ -61,7 +71,7 @@ export async function getAuthEmailPolicy(projectId: string): Promise<AuthEmailPo
     requireEmailVerification: cfg?.requireEmailVerification ?? false,
     magicLinksEnabled: cfg?.magicLinksEnabled ?? true,
     effectiveAppName: cfg?.appName || project.name,
-    effectiveAppUrl: cfg?.appUrl || project.publicUrl || null,
+    effectiveAppUrl: linkableAppUrl(cfg?.appUrl) ?? linkableAppUrl(project.publicUrl),
   }
 }
 

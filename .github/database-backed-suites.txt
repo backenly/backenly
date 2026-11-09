@@ -1019,6 +1019,12 @@ tests/integration/user-avatar.spec.ts
 # DDL for the grandfathered email_verified column.
 tests/integration/auth-email-policy.spec.ts
 
+# A project's App URL is saved only as an http(s) address with a plain
+# hostname, and one stored before that check never reaches the hosted auth
+# pages or the auth emails; a real one still gets its links. Real workspace
+# users and the real runtime, so it needs a real Postgres.
+tests/integration/app-url-stays-a-link.spec.ts
+
 # rotate_trigger_secret keeps its advertised contract: the docs print the
 # declared triggerName-or-triggerId alternative instead of "nothing", the
 # new secret rides data.secret and really rotates the row, and a call with

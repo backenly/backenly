@@ -38,13 +38,36 @@ export async function getAuthEmailContext(projectId: string): Promise<AuthEmailC
     select: { name: true, publicUrl: true, authConfig: true },
   })
   const cfg = project?.authConfig
-  const rawUrl = cfg?.appUrl || project?.publicUrl || null
   return {
     appName: cfg?.appName || project?.name || 'your app',
-    appUrl: rawUrl ? rawUrl.replace(/\/+$/, '') : null,
+    appUrl: linkableAppUrl(cfg?.appUrl) ?? linkableAppUrl(project?.publicUrl),
     requireEmailVerification: cfg?.requireEmailVerification ?? false,
     magicLinksEnabled: cfg?.magicLinksEnabled ?? true,
   }
+}
+
+/**
+ * An App URL as something safe to link or redirect to: an http(s) address
+ * whose host is a plain hostname or IP, in the form the URL parser writes it
+ * (so a quote or an angle bracket in the path, query or fragment arrives
+ * percent-encoded), without a trailing slash. Anything else is no App URL.
+ *
+ * The parser does not encode a quote in a host, and it accepts any scheme,
+ * javascript: and data: included, so neither "it parsed" nor "it was saved"
+ * is enough: a value stored before saving checked this is read through here.
+ */
+export function linkableAppUrl(raw: string | null | undefined): string | null {
+  const value = raw?.trim()
+  if (!value) return null
+  let url: URL
+  try {
+    url = new URL(value)
+  } catch {
+    return null
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return null
+  if (!/^[a-z0-9._\-[\]:]+$/i.test(url.hostname)) return null
+  return url.href.replace(/\/+$/, '')
 }
 
 /**
@@ -69,12 +92,12 @@ function shell(appName: string, heading: string, body: string, ctaText: string, 
       <p style="color: #8b5cf6; font-weight: 700; font-size: 13px; letter-spacing: 0.08em; text-transform: uppercase; margin: 0 0 16px;">${esc(appName)}</p>
       <h1 style="font-size: 22px; font-weight: 800; margin: 0 0 8px; color: #ffffff;">${heading}</h1>
       <p style="color: #9ca3af; margin: 0 0 24px; font-size: 15px;">${body}</p>
-      <a href="${ctaUrl}" style="display: inline-block; background: #8b5cf6; color: #ffffff; font-weight: 700; font-size: 15px; text-decoration: none; padding: 12px 28px; border-radius: 12px; margin-bottom: 24px;">${ctaText}</a>
+      <a href="${esc(ctaUrl)}" style="display: inline-block; background: #8b5cf6; color: #ffffff; font-weight: 700; font-size: 15px; text-decoration: none; padding: 12px 28px; border-radius: 12px; margin-bottom: 24px;">${ctaText}</a>
       <p style="color: #6b7280; font-size: 13px; margin: 0;">
         ${footer}
         <br/><br/>
         Or copy this URL into your browser:<br/>
-        <span style="color: #a78bfa; word-break: break-all;">${ctaUrl}</span>
+        <span style="color: #a78bfa; word-break: break-all;">${esc(ctaUrl)}</span>
       </p>
     </div>
   `

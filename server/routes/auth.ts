@@ -576,7 +576,8 @@ async function handleMagicLinkVerify(req: Request, res: Response) {
 
 /** Minimal hosted page for emailed links — works with zero developer setup. */
 function hostedPage(title: string, message: string, appUrl: string | null, appName: string): string {
-  const esc = (t: string) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  const esc = (t: string) =>
+    t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;')
   const back = appUrl
     ? `<a href="${esc(appUrl)}" style="display:inline-block;margin-top:20px;background:#8b5cf6;color:#fff;font-weight:700;text-decoration:none;padding:12px 28px;border-radius:12px;">Back to ${esc(appName)}</a>`
     : ''
