@@ -400,7 +400,7 @@ function buildProposal(
         title: `Generate REST endpoint for "${tableName}"`,
         action: 'ADD_ENDPOINT',
         autoApprove: false,
-        rationale: `Requests to "${tableName}" are returning 404 because no REST API is configured. Use the AI chat to generate one.`,
+        rationale: `Requests to "${tableName}" are returning 404 because no REST API is configured. Ask your coding agent to generate one.`,
       }
     }
 

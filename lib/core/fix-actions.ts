@@ -477,7 +477,7 @@ export function getManualRemediationHint(
       const measured = scans !== undefined && pct !== undefined
         ? ` It was read ${scans.toLocaleString()}× with ${pct}% index coverage.`
         : ''
-      return `"${t}" is taking heavy sequential scans and Backenly could not find a column it is safe to index automatically.${measured} Add an index on whichever column your queries filter or sort by — in the AI chat, say "add an index on <table>.<column>".`
+      return `"${t}" is taking heavy sequential scans and Backenly could not find a column it is safe to index automatically.${measured} Add an index on the column your queries on "${t}" filter or sort by: ask your coding agent to add it with apply_migration (CREATE INDEX ON ${t} (<column>)).`
     }
 
     // No executable repair exists and none is coming: the finding's whole claim
@@ -684,7 +684,8 @@ If the column is deliberately different now, tell your coding agent to rebuild i
       return (
         `Queries against "${t}"${timing} are scanning rather than using an index, and Backenly ` +
         `could not confirm which column to index safely. Add an index on the column your ` +
-        `queries filter by, or say "add an index on ${t}.<column>" in the AI chat.`
+        `queries filter by: ask your coding agent to add it with apply_migration ` +
+        `(CREATE INDEX ON ${t} (<column>)).`
       )
     }
 
@@ -706,10 +707,14 @@ If the column is deliberately different now, tell your coding agent to rebuild i
       return `${problem ? problem + ' ' : ''}Run this when you are ready:\n\n${sql}`
     }
 
-    case 'missing_archival_job':
-      return 'This table will keep growing without bound. In the AI chat, say "schedule a nightly cleanup on <table> older than 90 days" — Backenly will create the cron + the cleanup function with the retention you pick.'
-    case 'missing_token_cleanup_cron':
-      return 'Expired tokens are accumulating. In the AI chat, say "schedule a daily cron to delete expired rows from <table>" — Backenly will create the cleanup job.'
+    case 'missing_archival_job': {
+      const t = (details?.tableName ?? details?.table ?? 'this table') as string
+      return `${t} will keep growing without bound. If its old rows can go after a while, ask your coding agent to deploy a scheduled function that deletes ${t}'s rows older than the retention you choose (90 days, say).`
+    }
+    case 'missing_token_cleanup_cron': {
+      const t = (details?.tableName ?? details?.table ?? 'the token table') as string
+      return `Expired tokens are accumulating in ${t}. Ask your coding agent to deploy a scheduled function that deletes the expired rows from ${t} once a day.`
+    }
 
     // Informational by design: an integration you connected has no code path
     // using it yet. There is nothing to repair — the finding exists so a
@@ -728,7 +733,7 @@ If the column is deliberately different now, tell your coding agent to rebuild i
     // getting it wrong the other way exposes rows. It states the repair
     // precisely instead, so the user (or their coding agent) can apply it.
     case 'runtime_engine_mismatch':
-      return 'One or more RLS policies on this project read the legacy app.* session variables, which the current data plane never sets — so those policies match no rows and the API returns an empty list instead of an error. Nothing looks broken from the outside, which is why this is flagged rather than waited on. Ask your coding agent to rewrite the affected policies to the claim form (current_setting(\'request.jwt.claims\', true)::json ->> \'sub\'), or say "fix my RLS identity" in the AI chat. Backenly does not rewrite live policies on its own.'
+      return 'One or more RLS policies on this project read the legacy app.* session variables, which the current data plane never sets — so those policies match no rows and the API returns an empty list instead of an error. Nothing looks broken from the outside, which is why this is flagged rather than waited on. Ask your coding agent to rewrite the affected policies to the claim form (current_setting(\'request.jwt.claims\', true)::json ->> \'sub\'). Backenly does not rewrite live policies on its own.'
 
     // A gated action re-runs from the exact AIAction recorded in its details.
     // Without that payload there is nothing to re-run, and inventing one from
@@ -743,7 +748,7 @@ If the column is deliberately different now, tell your coding agent to rebuild i
       if (details?.executorAction && !heldArguments(details)) {
         return 'The exact arguments of this held change could not be opened, so nothing was run: the copy shown here has its secret values withheld and is never replayed in their place. Dismiss it and ask your agent to make the change again; it will be held again for your approval.'
       }
-      return 'The details of this queued change were not recorded, so it cannot be replayed automatically. Dismiss it and ask the AI chat to make the change again — it will re-queue with a full record.'
+      return 'The details of this queued change were not recorded, so it cannot be replayed automatically. Dismiss it and ask your coding agent to make the change again; it will be held again with a full record.'
 
     // Surface probes that are NOT a data-plane outage. Named per surface,
     // because "check your dashboard" is useless for a fault whose cause is in
@@ -767,7 +772,7 @@ If the column is deliberately different now, tell your coding agent to rebuild i
       // Unrecognized type with no executable fix — give a generic, non-dev
       // friendly next step instead of a silent dead end.
       if (!norm) {
-        return 'Backenly flagged this but has no automatic repair for it yet. Open the relevant section of your dashboard, or describe the problem in the AI chat and it will help you resolve it.'
+        return 'Backenly flagged this but has no automatic repair for it yet. Open the relevant section of your dashboard, or ask your coding agent to look into it.'
       }
       return null
   }

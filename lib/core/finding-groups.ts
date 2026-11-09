@@ -263,7 +263,7 @@ function repairability<T extends GroupableFinding>(
     actionable: false,
     manualHint:
       getManualRemediationHint(head.type, head.details) ??
-      'This one needs your judgement — open the relevant section of your dashboard, or ask the AI chat to walk through it with you.',
+      'This one needs your judgement — open the relevant section of your dashboard, or ask your coding agent to walk through it with you.',
   }
 }
 

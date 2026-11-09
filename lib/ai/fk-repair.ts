@@ -268,7 +268,7 @@ export async function repairForeignKeyColumn(
   if (!refTable) {
     return {
       success: false,
-      message: `Could not determine which table "${tableName}.${columnName}" should reference — no matching table found. Leave it, or add the relation explicitly in the AI chat.`,
+      message: `Could not determine which table "${tableName}.${columnName}" should reference — no matching table found. Leave it, or ask your coding agent to add the relation explicitly.`,
     }
   }
   // Self-references (parent_post_id → posts) are a legitimate, common shape for
