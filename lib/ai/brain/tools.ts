@@ -2465,6 +2465,45 @@ export async function dispatchTool(
       }
     }
 
+    // ── An agent's migration a person approved ─────────────────────────────
+    // apply_migration holds an agent's migration whose steps a person reviews
+    // first (app/api/mcp/tool/route.ts, parkMigration). This runs it once they
+    // approve, exactly as sent, as their change. No model is offered this
+    // name and the MCP door serves apply_migration itself, so the only way
+    // here is runApprovedCall, which sets destructiveConfirmed.
+    if (name === 'apply_migration') {
+      if (ctx.destructiveConfirmed !== true) {
+        return finalize({
+          ok: false,
+          summary: 'apply_migration runs here only once a person has approved the migration.',
+          code: 'NOT_APPROVED',
+        })
+      }
+      const sql = typeof args.sql === 'string' ? args.sql : ''
+      const { applyMigrationToMain } = await import('@/lib/mcp/apply-migration')
+      const { workspaceSchemaName } = await import('@/lib/security/workspace-schema')
+      const outcome = await applyMigrationToMain(ctx.projectId, ctx.userId ?? '', sql, {
+        agentSurface: false,
+        workspaceSchema: workspaceSchemaName(ctx.projectId),
+      })
+      if (outcome.ok) {
+        const done = outcome as import('@/lib/mcp/apply-migration').MigrationSuccess
+        return finalize({
+          ok: true,
+          summary: done.change
+            ? `${done.summary} Recorded as change #${done.change.seq}${done.change.verified ? ', verified' : ''}.`
+            : done.summary,
+          data: { applied: done.applied, ...(done.change ? { change: done.change } : {}) },
+        })
+      }
+      const failed = outcome as { error: string; detail?: string; hint?: string; code: string }
+      return finalize({
+        ok: false,
+        summary: [failed.error, failed.detail, failed.hint].filter(Boolean).join(' '),
+        code: failed.code,
+      })
+    }
+
     // ── Preview branches ───────────────────────────────────────────────────
     // Direct calls into lib/branches/engine.ts — there is no executor action
     // for these, so they do not go through TOOL_TO_ACTION.
@@ -3899,6 +3938,7 @@ export function humanTitle(name: string, args: Record<string, unknown>): string 
     case 'list_branches': return 'Listing preview branches'
     case 'diff_branch': return `Diffing branch ${args.branchId ?? ''}`.trim()
     case 'merge_branch': return `Merging branch ${args.branchId ?? ''} into production`.replace(/\s+/g, ' ')
+    case 'apply_migration': return 'Applying an approved migration to production'
     case 'discard_branch': return `Discarding branch ${args.branchId ?? ''}`.trim()
     case 'list_integration_keys': return 'Listing integrations'
     case 'list_connected_apps': return 'Listing connected frontends'

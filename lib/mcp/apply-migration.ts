@@ -77,7 +77,24 @@ export interface MigrationSuccess {
   change?: MigrationChange
 }
 
-export type MigrationOutcome = MigrationRefusal | MigrationFailure | MigrationSuccess
+/**
+ * An agent's migration that a person reviews before it reaches production
+ * (REVIEWED_BEFORE_PRODUCTION). Nothing ran. The MCP route holds it in the
+ * project's approval queue with its exact SQL, and approving it runs that SQL
+ * as one governed change, under the approver's name.
+ */
+export interface MigrationNeedsReview {
+  ok: false
+  code: 'NEEDS_REVIEW'
+  error: string
+  /** Why a person looks first: one sentence for each kind of step that needs it. */
+  reasons: string[]
+  /** The migration's statements, in the order they will run. */
+  statements: string[]
+  applied: []
+}
+
+export type MigrationOutcome = MigrationRefusal | MigrationNeedsReview | MigrationFailure | MigrationSuccess
 
 export interface AppliedStep {
   statement: string
@@ -299,18 +316,13 @@ export function migrationTitle(planned: PlannedAction[]): string {
 }
 
 /**
- * Apply a migration to a project's MAIN schema through the brain's dispatch,
- * so approval gates, the intent ledger and rollback behave exactly as a typed
- * call would. `agentSurface` marks a coding agent as the caller, which is what
- * the protected-production gate in dispatchTool keys on; a merge replay that a
- * human approved does not set it.
- */
-/**
- * Steps an agent's migration may not run on production directly. Dropping a
+ * Steps an agent's migration may not run on production by itself. Dropping a
  * constraint, or an index that enforces uniqueness, loses no row but changes
- * which rows production accepts, so a person reviews it first: the agent makes
- * it on a branch, and the merge, which a person approves, carries it over. A
- * person's own migration, and a merge replaying the branch, run it.
+ * which rows production accepts, so a person reviews it first. The migration
+ * is held, whole and exactly as sent, in the project's approval queue, and
+ * approving it runs it; on a protected production the agent makes it on a
+ * branch instead, and the merge a person approves carries it over. A merge,
+ * and a migration a person approved, run it.
  *
  * Dropping an ordinary index changes how fast queries run and never what data
  * is allowed, so it runs: online (DROP INDEX CONCURRENTLY, so no query waits on
@@ -342,20 +354,34 @@ async function dropsOrdinaryIndex(projectId: string, schema: string, step: Plann
   return rows.length === 0 || rows[0].ordinary === true
 }
 
-function reviewedBeforeProduction(step: PlannedAction): MigrationRefusal {
-  const what = step.tool === 'drop_index' ? 'a unique index' : 'a constraint'
+/** Why a person reviews a step before production runs it, in the words the approval card shows. */
+function whyReviewed(step: PlannedAction): string {
+  return step.tool === 'drop_index'
+    ? 'It removes a unique index, which changes which rows production accepts.'
+    : 'It removes a constraint, which changes which rows production accepts.'
+}
+
+function needsReview(planned: PlannedAction[], held: PlannedAction[]): MigrationNeedsReview {
   return {
     ok: false,
-    code: 'DROP_NEEDS_REVIEW',
-    error: `"${step.source}" removes ${what} from production, which a person reviews first. Nothing was applied.`,
-    hint:
-      'Make the change on a branch: branch { action: "create" }, then apply_migration { sql, branchId }, then ' +
-      'branch { action: "merge", branchId }. The merge waits for a person and carries the drop to production.',
-    statement: step.source,
+    code: 'NEEDS_REVIEW',
+    error:
+      `"${held[0].source}"${held.length > 1 ? ` and ${held.length - 1} more statement${held.length === 2 ? '' : 's'}` : ''} ` +
+      `change${held.length === 1 ? 's' : ''} which rows production accepts, so a person reviews the migration before it runs. Nothing was applied.`,
+    reasons: [...new Set(held.map(whyReviewed))],
+    statements: [...new Set(planned.map((p) => p.source.split(' → ')[0]))],
     applied: [],
   }
 }
 
+/**
+ * Apply a migration to a project's MAIN schema through the brain's dispatch,
+ * so approval gates, the intent ledger and rollback behave exactly as a typed
+ * call would. `agentSurface` marks a coding agent as the caller, which is what
+ * the protected-production gate in dispatchTool keys on, and what holds a step
+ * in REVIEWED_BEFORE_PRODUCTION for a person; a merge replay, and a migration
+ * a person approved, do not set it.
+ */
 export async function applyMigrationToMain(
   projectId: string,
   userId: string,
@@ -365,13 +391,6 @@ export async function applyMigrationToMain(
   const plan = planMigration(sql)
   if (!plan.ok) return plan as MigrationRefusal
   const planned = (plan as { ok: true; planned: PlannedAction[] }).planned
-  if (opts.agentSurface === true) {
-    for (const step of planned) {
-      if (!REVIEWED_BEFORE_PRODUCTION.has(step.tool)) continue
-      if (await dropsOrdinaryIndex(projectId, opts.workspaceSchema, step)) continue
-      return reviewedBeforeProduction(step)
-    }
-  }
   // Production is live: every index it loses goes CONCURRENTLY, whoever asked.
   for (const step of planned) if (step.tool === 'drop_index') step.args = { ...step.args, online: true }
   const existing = await existingTables(projectId, opts.workspaceSchema, tablesNamed(planned))
@@ -380,6 +399,17 @@ export async function applyMigrationToMain(
   const refused = await refusedDrop(projectId, opts.workspaceSchema, planned)
   if (refused) return refused
   const ok = checked as Extract<typeof checked, { ok: true }>
+  // Checked first, so what a person is asked to approve is a migration that
+  // would run as it stands.
+  if (opts.agentSurface === true) {
+    const held: PlannedAction[] = []
+    for (const step of ok.planned) {
+      if (!REVIEWED_BEFORE_PRODUCTION.has(step.tool)) continue
+      if (await dropsOrdinaryIndex(projectId, opts.workspaceSchema, step)) continue
+      held.push(step)
+    }
+    if (held.length > 0) return needsReview(ok.planned, held)
+  }
   const { dispatchTool } = await import('@/lib/ai/brain/tools')
   const run = () => runPlan(ok.planned, ok.notes, (step) =>
     dispatchTool(step.tool, step.args, {

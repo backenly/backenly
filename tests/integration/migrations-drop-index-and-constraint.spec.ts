@@ -16,8 +16,9 @@
  *  2. The merge a person approves carries them to production.
  *  3. With protection off, an agent's drop of an ordinary index runs on
  *     production, online, as a governed change that restoring puts back; its
- *     drop of a unique index or a constraint is refused with the branch
- *     route; a person's own migration runs it.
+ *     drop of a unique index or a constraint waits for a person in the
+ *     approval queue, exactly as sent, and runs only once they approve it;
+ *     a person's own migration runs it.
  *  4. The primary key is never dropped; a unique index named as a constraint
  *     says to use DROP INDEX; a missing index fails unless IF EXISTS.
  */
@@ -46,6 +47,7 @@ import { createProvisionedProject } from '@/lib/projects/provision'
 import { POST } from '@/app/api/mcp/tool/route'
 import { createBranch } from '@/lib/branches/engine'
 import { decideApproval } from '@/lib/mcp/approvals'
+import { dispatchTool } from '@/lib/ai/brain/tools'
 import { forgetProtection } from '@/lib/branches/protection'
 import { withChangeAttribution } from '@/lib/changes/attribution'
 import { applyMigrationToMain, type MigrationFailure, type MigrationSuccess } from '@/lib/mcp/apply-migration'
@@ -207,21 +209,57 @@ describe('on an unprotected production', () => {
     expect(await indexes(mainSchema)).toEqual(expect.arrayContaining(['orders_total_idx']))
   }, 120_000)
 
-  it('refuses an agent\'s drop of a unique index with the branch route, changing nothing', async () => {
+  it('holds an agent\'s drop of a unique index for a person, and approving runs it as their change', async () => {
     await migrated('CREATE UNIQUE INDEX orders_contact_once ON orders (contact)')
     const r = await call('apply_migration', { sql: 'DROP INDEX orders_contact_once' })
-    expect(r.status).toBe(400)
-    expect(r.body).toMatchObject({ ok: false, code: 'DROP_NEEDS_REVIEW', applied: [] })
-    expect(r.body.error).toMatch(/removes a unique index from production/)
-    expect(r.body.hint).toMatch(/branch \{ action: "merge", branchId \}/)
+    expect(r.status).toBe(200)
+    expect(r.body).toMatchObject({
+      ok: true,
+      status: 'awaiting_approval',
+      needsUser: true,
+      data: { statements: ['DROP INDEX orders_contact_once'] },
+      approval: { status: 'pending' },
+    })
+    expect(r.body.summary).toMatch(/changes which rows production accepts/)
     expect(await indexes(mainSchema)).toEqual(expect.arrayContaining(['orders_contact_once']))
-    await migrated('DROP INDEX orders_contact_once')
+
+    // The request keeps the SQL as sent; the card lists its statements and says why.
+    const request = await prisma.agentApprovalRequest.findUniqueOrThrow({ where: { id: r.body.approval.id } })
+    expect(request).toMatchObject({ tool: 'apply_migration', status: 'pending', toolArgs: { sql: 'DROP INDEX orders_contact_once' } })
+    expect(request.message).toContain(
+      'It removes a unique index, which changes which rows production accepts. ' +
+      'These statements will be applied to production, in order:\n  DROP INDEX orders_contact_once',
+    )
+
+    const decided = await decideApproval({ projectId, approvalId: request.id, approverUserId: ownerId, decision: 'approve' })
+    expect(decided).toMatchObject({ ok: true, status: 'executed' })
+    expect(await indexes(mainSchema)).not.toEqual(expect.arrayContaining(['orders_contact_once']))
+    // One governed change, recorded as the person's approval of the agent's call.
+    const change = await prisma.backendChange.findFirst({ where: { projectId }, orderBy: { seq: 'desc' } })
+    expect(change).toMatchObject({ source: 'approval', actorUserId: ownerId, status: 'healthy' })
+    expect(JSON.stringify(change!.statements)).toContain('DROP INDEX CONCURRENTLY')
+  }, 120_000)
+
+  it('holds an agent\'s constraint drop, and rejecting it changes nothing', async () => {
+    const r = await call('apply_migration', { sql: 'ALTER TABLE orders DROP CONSTRAINT total_positive' })
+    expect(r.body).toMatchObject({ ok: true, status: 'awaiting_approval' })
+    expect(await constraints(mainSchema)).toContain('total_positive')
+
+    const decided = await decideApproval({ projectId, approvalId: r.body.approval.id, approverUserId: ownerId, decision: 'reject' })
+    expect(decided.status).toBe('rejected')
+    expect(await constraints(mainSchema)).toContain('total_positive')
   }, 60_000)
 
-  it('refuses an agent\'s constraint drop with the branch route, changing nothing', async () => {
-    const r = await call('apply_migration', { sql: 'ALTER TABLE orders DROP CONSTRAINT total_positive' })
-    expect(r.status).toBe(400)
-    expect(r.body).toMatchObject({ ok: false, code: 'DROP_NEEDS_REVIEW', applied: [] })
+  it('runs a held migration only as a call a person approved', async () => {
+    const direct = await dispatchTool(
+      'apply_migration',
+      { sql: 'ALTER TABLE orders DROP CONSTRAINT total_positive' },
+      { projectId, userId: ownerId, sessionToken: undefined, createdThisTurn: new Set<string>() },
+    )
+    expect(direct).toMatchObject({ ok: false, code: 'NOT_APPROVED' })
+    // Nor does the MCP door dispatch the parser's own drop by name.
+    const byName = await call('drop_constraint', { tableName: 'orders', constraintName: 'total_positive' })
+    expect(byName.status).toBe(404)
     expect(await constraints(mainSchema)).toContain('total_positive')
   }, 60_000)
 
