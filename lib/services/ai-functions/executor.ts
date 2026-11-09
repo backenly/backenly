@@ -67,6 +67,12 @@ export interface FunctionExecutionResult {
    * looks.
    */
   httpStatus?: number
+  /**
+   * For a route module (a function written as a Next.js route handler), its
+   * answer as it wrote it: status, body and headers. /fn/{name} sends exactly
+   * this (lib/services/ai-functions/reply.ts). Absent for any other function.
+   */
+  answer?: { status: number; body: unknown; headers: Record<string, string> }
   error?: string
   errorCode?: 'PLAN_LIMIT_EXCEEDED' | 'NOT_FOUND'
   upgradeRequired?: boolean
@@ -875,7 +881,7 @@ export async function executeAiFunction(
   // correct behaviour, not a failure). Only thrown errors / timeouts fail.
   if (isRouteModuleFunction(fn.generatedCode)) {
     try {
-      const { logs, returnValue } = await executeRouteModuleFunction(
+      const { logs, returnValue, headers } = await executeRouteModuleFunction(
         fn.generatedCode,
         projectId,
         event,
@@ -895,7 +901,14 @@ export async function executeAiFunction(
       // means the function ran without throwing, `httpStatus` means what it
       // decided to answer. The invocation route needs the second one — see the
       // note in server/routes/dynamic.ts about every function replying 200.
-      return { success: true, logs, returnValue, httpStatus: returnValue?.status, durationMs }
+      return {
+        success: true,
+        logs,
+        returnValue,
+        httpStatus: returnValue?.status,
+        answer: { status: returnValue.status, body: returnValue.body, headers: headers ?? {} },
+        durationMs,
+      }
     } catch (err: any) {
       const durationMs = Date.now() - startMs
       const errorMsg = err?.message || 'Route function error'

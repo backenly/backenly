@@ -540,6 +540,8 @@ export class RouteModuleHandlerError extends Error {
 export interface RouteModuleRunResult {
   logs: string[]
   returnValue: { status: number; body: any }
+  /** The headers the handler set on its response (NextResponse.json's init.headers, content type included). */
+  headers: Record<string, string>
 }
 
 export interface RouteModuleRunOptions {
@@ -797,7 +799,8 @@ export async function executeRouteModuleFunction(
   // 5. Normalise the response.
   const status = typeof raw?.status === 'number' ? raw.status : 200
   const body = raw && raw.__backenlyResponse ? raw.body : (raw ?? null)
-  return { logs, returnValue: { status, body } }
+  const answerHeaders: Record<string, string> = raw && raw.__backenlyResponse && raw.headers ? raw.headers : {}
+  return { logs, returnValue: { status, body }, headers: answerHeaders }
 }
 
 function stringify(v: any): string {
