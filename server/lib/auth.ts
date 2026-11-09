@@ -269,20 +269,9 @@ export async function enforceRateLimitByKeyId(keyId: string, client: string | nu
  * Express middleware: validates API key + project ownership + rate limit.
  * Attaches V1ApiContext to req.v1Context on success.
  * Sets standard X-RateLimit-* headers on every response.
+ * `countRequest` is false only for a presence write (v1PresenceAuthMiddleware).
  */
-export async function v1AuthMiddleware(req: Request, res: Response, next: NextFunction) {
-  return authenticateV1(req, res, next, true)
-}
-
-/**
- * v1AuthMiddleware for a presence write, which spends nothing of the key's
- * limit: the presence route counts it per user (lib/security/shared-key-rate.ts).
- */
-export async function v1PresenceAuthMiddleware(req: Request, res: Response, next: NextFunction) {
-  return authenticateV1(req, res, next, false)
-}
-
-async function authenticateV1(req: Request, res: Response, next: NextFunction, countRequest: boolean) {
+export async function v1AuthMiddleware(req: Request, res: Response, next: NextFunction, countRequest = true) {
   const projectId = req.params.projectId
 
   if (!projectId) {
@@ -479,6 +468,15 @@ async function authenticateV1(req: Request, res: Response, next: NextFunction, c
   void touchProjectActivity(projectId)
 
   next()
+}
+
+/**
+ * v1AuthMiddleware for a presence write, which spends nothing of the key's
+ * limit: the presence route counts it per address and per user instead
+ * (lib/security/shared-key-rate.ts).
+ */
+export async function v1PresenceAuthMiddleware(req: Request, res: Response, next: NextFunction) {
+  return v1AuthMiddleware(req, res, next, false)
 }
 
 // ── Permission helpers ─────────────────────────────────────────────────────────
