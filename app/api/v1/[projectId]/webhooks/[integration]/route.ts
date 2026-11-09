@@ -21,6 +21,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db/prisma'
 import { getIntegrationKey } from '@/lib/services/integrationKeyStore'
 import { executeAiFunction, FunctionEvent } from '@/lib/services/ai-functions/executor'
+import { RUNNABLE_FUNCTION_STATUS_FILTER, isFunctionSwitchedOff } from '@/lib/services/ai-functions/status'
 import { ERROR_TAXONOMY } from '@/lib/errors/taxonomy'
 import { recordedV1 } from '@/lib/traffic/recorded-v1'
 
@@ -246,26 +247,28 @@ async function handlePOST(
   const functions = await prisma.aiFunction.findMany({
     where: {
       projectId,
-      status: 'active',
+      status: RUNNABLE_FUNCTION_STATUS_FILTER,
       triggerType: 'on_webhook',
       triggerTable: integrationLower,
     },
-    select: { id: true, name: true },
+    select: { id: true, name: true, status: true },
   })
+  const runnableFunctions = functions.filter(fn => !isFunctionSwitchedOff(fn.status))
 
-  if (functions.length === 0) {
+  if (runnableFunctions.length === 0) {
     // Also check for wildcard webhook functions (triggerTable = null or 'any')
     const wildcardFunctions = await prisma.aiFunction.findMany({
       where: {
         projectId,
-        status: 'active',
+        status: RUNNABLE_FUNCTION_STATUS_FILTER,
         triggerType: 'on_webhook',
         triggerTable: null,
       },
-      select: { id: true, name: true },
+      select: { id: true, name: true, status: true },
     })
+    const runnableWildcards = wildcardFunctions.filter(fn => !isFunctionSwitchedOff(fn.status))
 
-    if (wildcardFunctions.length === 0) {
+    if (runnableWildcards.length === 0) {
       // No functions registered — still return 200 so the provider doesn't retry
       console.log(`[Webhook] No active on_webhook functions for ${integrationLower} on project ${projectId}`)
       return NextResponse.json({ received: true, functionsTriggered: 0 })
@@ -273,18 +276,18 @@ async function handlePOST(
 
     // Execute wildcard functions
     await Promise.allSettled(
-      wildcardFunctions.map(fn => executeAiFunction(fn.id, projectId, event))
+      runnableWildcards.map(fn => executeAiFunction(fn.id, projectId, event))
     )
-    return NextResponse.json({ received: true, functionsTriggered: wildcardFunctions.length })
+    return NextResponse.json({ received: true, functionsTriggered: runnableWildcards.length })
   }
 
   // Execute matching functions in parallel (non-blocking from caller's perspective)
   await Promise.allSettled(
-    functions.map(fn => executeAiFunction(fn.id, projectId, event))
+    runnableFunctions.map(fn => executeAiFunction(fn.id, projectId, event))
   )
 
-  console.log(`[Webhook] Fired ${functions.length} function(s) for ${integrationLower} webhook on project ${projectId}`)
-  return NextResponse.json({ received: true, functionsTriggered: functions.length })
+  console.log(`[Webhook] Fired ${runnableFunctions.length} function(s) for ${integrationLower} webhook on project ${projectId}`)
+  return NextResponse.json({ received: true, functionsTriggered: runnableFunctions.length })
 }
 
 // ── Stripe business logic ─────────────────────────────────────────────────────

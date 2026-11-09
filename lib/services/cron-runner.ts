@@ -38,6 +38,7 @@ import type { CloudRegionId } from '@/lib/regions'
 import { mirrorRateWindows, pruneRateWindows, regionalRateCounting } from '@/lib/auth-projection/rate'
 import { matchesCronExpression } from '@/lib/services/cron-expression'
 import { executeAiFunction, FunctionEvent } from '@/lib/services/ai-functions/executor'
+import { RUNNABLE_FUNCTION_STATUS_FILTER, isFunctionSwitchedOff } from '@/lib/services/ai-functions/status'
 import { retryFailedWebhooks } from '@/lib/webhooks/index'
 import { drainWebhookOutbox } from '@/lib/webhooks/capture'
 import { pruneRegionalBodies } from '@/lib/data-plane/regional-bodies'
@@ -80,14 +81,20 @@ export interface DueCronJob {
  */
 export async function dueCronJobs(now: Date = new Date()): Promise<{ checked: number; due: DueCronJob[] }> {
   const cronJobs = await prisma.aiFunction.findMany({
-    // A paused or deleted project's schedule does not fire. The function stays
-    // `active`, so it resumes on its next tick after the project does.
-    where: { status: 'active', triggerType: 'cron', project: { pausedAt: null, deletedAt: null } },
-    select: { id: true, name: true, projectId: true, triggerTable: true },
+    // A paused or deleted project's schedule does not fire. An errored job
+    // remains runnable so it can recover on its next tick; only deliberate
+    // OFF states ('inactive', 'disabled', 'deleted') refuse invocation.
+    where: {
+      status: RUNNABLE_FUNCTION_STATUS_FILTER,
+      triggerType: 'cron',
+      project: { pausedAt: null, deletedAt: null },
+    },
+    select: { id: true, name: true, projectId: true, triggerTable: true, status: true },
   })
-  const due = cronJobs.filter(job => matchesCronExpression(job.triggerTable || '0 9 * * *', now))
+  const runnable = cronJobs.filter(job => !isFunctionSwitchedOff(job.status))
+  const due = runnable.filter(job => matchesCronExpression(job.triggerTable || '0 9 * * *', now))
   const { served } = await partitionServed(due.map(job => ({ id: job.projectId, job })))
-  return { checked: cronJobs.length, due: served.map(s => s.job) }
+  return { checked: runnable.length, due: served.map(s => s.job) }
 }
 
 /**

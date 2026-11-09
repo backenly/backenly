@@ -60,6 +60,7 @@ import { executeInWorkspaceSchema, queryWorkspaceSchema } from '@/lib/services/w
 import { workspaceSchemaName } from '@/lib/security/workspace-schema'
 import { ROW_EVENT_TYPES, type RowEventType, type WebhookEventType } from './events'
 import { skipUnreachable } from '@/lib/autonomy/region-skip'
+import { RUNNABLE_FUNCTION_STATUS_FILTER } from '@/lib/services/ai-functions/status'
 
 /**
  * The trigger attached to every captured table. These names are left out of
@@ -341,7 +342,7 @@ export async function listCapturedTables(projectId: string): Promise<string[]> {
  */
 async function functionRowEvents(projectId: string): Promise<RowEventType[]> {
   const fns = await prisma.aiFunction.findMany({
-    where: { projectId, status: { notIn: ['inactive', 'disabled', 'deleted'] }, triggerType: { in: ROW_FUNCTION_TRIGGER_TYPES } },
+    where: { projectId, status: RUNNABLE_FUNCTION_STATUS_FILTER, triggerType: { in: ROW_FUNCTION_TRIGGER_TYPES } },
     select: { triggerType: true },
   })
   return [...new Set(fns.map(f => EVENT_FOR_FUNCTION_TRIGGER[f.triggerType]).filter(Boolean))]
@@ -596,7 +597,7 @@ export async function drainWebhookOutbox(): Promise<number> {
   })
   const withRowFunctions = await prisma.aiFunction.findMany({
     where: {
-      status: { notIn: ['inactive', 'disabled', 'deleted'] },
+      status: RUNNABLE_FUNCTION_STATUS_FILTER,
       triggerType: { in: ROW_FUNCTION_TRIGGER_TYPES },
       project: { pausedAt: null, deletedAt: null },
     },
