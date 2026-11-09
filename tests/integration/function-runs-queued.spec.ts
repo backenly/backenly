@@ -40,6 +40,7 @@ let projectId = ''
 let schema = ''
 let countFnId = ''
 let throwFnId = ''
+let changeFnId = ''
 
 const count = async (table: string): Promise<number> => {
   const rows = (await queryWorkspaceSchema(projectId, `SELECT count(*)::int AS n FROM "${schema}"."${table}"`)) as Array<{ n: number }>
@@ -82,7 +83,7 @@ beforeAll(async () => {
   projectId = (await prisma.project.create({ data: { name: `fn-queue-${randomUUID().slice(0, 8)}`, userId: ownerId }, select: { id: true } })).id
   schema = workspaceSchemaName(projectId)
   await prisma.$executeRawUnsafe(`CREATE SCHEMA "${schema}"`)
-  await prisma.$executeRawUnsafe(`CREATE TABLE "${schema}"."orders" (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), n integer NOT NULL)`)
+  await prisma.$executeRawUnsafe(`CREATE TABLE "${schema}"."orders" (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), n integer NOT NULL, "updatedAt" timestamptz DEFAULT now())`)
   await prisma.$executeRawUnsafe(`CREATE TABLE "${schema}"."refunds" (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), n integer NOT NULL)`)
 
   const counted = await deployFunctionCode(
@@ -97,6 +98,12 @@ beforeAll(async () => {
   )
   if (!throwing.ok) throw new Error(`deploy failed: ${JSON.stringify(throwing)}`)
   throwFnId = (throwing.data as any).functionId
+  const changed = await deployFunctionCode(
+    { userId: ownerId, projectId },
+    { name: 'order-changed', trigger: 'on_update', table: 'orders', code: `ctx.log('changed', event.data.n); return {}` },
+  )
+  if (!changed.ok) throw new Error(`deploy failed: ${JSON.stringify(changed)}`)
+  changeFnId = (changed.data as any).functionId
   await ensureFunctionJobs(projectId)
 }, 120_000)
 
@@ -186,6 +193,20 @@ it('tells an agent reading the run log how many runs are queued and not started 
   const after = await listFunctionLogs({ userId: ownerId, projectId }, { name: 'count-order' })
   expect(after).toMatchObject({ ok: true, data: { queued: 0 } })
   expect(after.summary).not.toMatch(/queued/)
+}, 120_000)
+
+it('runs no update function for an update that changed nothing but the update stamp', async () => {
+  await executeInWorkspaceSchema(projectId, `INSERT INTO "${schema}"."orders" (n) VALUES (5001)`)
+  await drainWebhookOutbox()
+  await settled()
+  // Nothing changed, then only the stamp, then a value.
+  await executeInWorkspaceSchema(projectId, `UPDATE "${schema}"."orders" SET n = n WHERE n = 5001`)
+  await executeInWorkspaceSchema(projectId, `UPDATE "${schema}"."orders" SET "updatedAt" = now() + interval '1 second' WHERE n = 5001`)
+  await executeInWorkspaceSchema(projectId, `UPDATE "${schema}"."orders" SET n = 5002 WHERE n = 5001`)
+  await drainWebhookOutbox()
+  await settled()
+  const changes = await runs(changeFnId)
+  expect(changes.map((r) => r.logs[0])).toEqual(['changed 5002'])
 }, 120_000)
 
 it('discards queued runs with the outbox when the project is paused', async () => {

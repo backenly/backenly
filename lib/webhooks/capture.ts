@@ -551,7 +551,11 @@ async function drainProject(projectId: string): Promise<number> {
       // run at a bounded pace (lib/services/ai-functions/run-queue.ts).
       const type = FUNCTION_EVENT_FOR_OPERATION[row.event_type]
       const event = { type, table: row.table_name, data: row.row_data ?? {}, ...(row.old_data ? { old: row.old_data } : {}) }
-      for (const fn of rowFunctions) {
+      // An update that changed nothing but Backenly's own "updatedAt" stamp
+      // runs no function: nothing a function could act on changed. Webhooks
+      // still receive it, as they always have.
+      const unchanged = type === 'update' && changedNothing(row.row_data, row.old_data)
+      for (const fn of unchanged ? [] : rowFunctions) {
         if (fn.triggerType !== `on_db_${type}` || fn.triggerTable !== row.table_name) continue
         // An update that changed none of the columns a function watches is not
         // queued for it at all (deploy_code's `columns`).
@@ -572,6 +576,24 @@ async function drainProject(projectId: string): Promise<number> {
   await enqueueReleasingOutbox(projectId, functionJobs, OUTBOX_TABLE, deliveredIds)
 
   return deliveredIds.length
+}
+
+/** The column Backenly stamps on every update of its tables. */
+const UPDATE_STAMP = 'updatedAt'
+
+/**
+ * Whether an update left every value as it was, apart from the update stamp.
+ * Without both rows (a payload too large to capture) a change cannot be ruled
+ * out. Values are compared as the capture trigger stored them (jsonb, whose
+ * keys PostgreSQL keeps in one order).
+ */
+export function changedNothing(after: Record<string, unknown> | null, before: Record<string, unknown> | null): boolean {
+  if (!after || !before) return false
+  for (const key of new Set([...Object.keys(after), ...Object.keys(before)])) {
+    if (key === UPDATE_STAMP) continue
+    if (JSON.stringify(after[key] ?? null) !== JSON.stringify(before[key] ?? null)) return false
+  }
+  return true
 }
 
 /**
