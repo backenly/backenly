@@ -163,6 +163,20 @@ export function tablesTouched(statements: string[]): string[] {
 }
 
 /**
+ * The reason a replayed statement failed, without the statement again: the
+ * merge already names it (`failedAt`), and "Migration stopped at: <it>" in front
+ * of the reason read the statement twice in the merge's error, its change's
+ * history and its recovery. A step of the statement (`→ UNIQUE (…)`) is kept.
+ */
+function whyItStopped(stmt: string, fail: MigrationRefusal | { error: string; detail: string }): string {
+  if (!('detail' in fail)) return fail.error
+  const at = fail.error.replace(/^Migration stopped at: /, '')
+  if (at === stmt) return fail.detail
+  if (at.startsWith(`${stmt} → `)) return `${at.slice(stmt.length + 3)}: ${fail.detail}`
+  return `${fail.error}: ${fail.detail}`
+}
+
+/**
  * Replay a branch's logged statements onto main.
  *
  * Statement by statement through the main path, stopping at the first failure
@@ -185,8 +199,7 @@ export async function replayOntoMain(
       // This tsconfig does not narrow on a boolean discriminant, so the failure
       // arms are named explicitly.
       const fail = outcome as MigrationRefusal | { error: string; detail: string }
-      const detail = 'detail' in fail ? `${fail.error}: ${fail.detail}` : fail.error
-      return { ok: false, applied, failedAt: stmt, detail, remaining: statements.slice(i + 1) }
+      return { ok: false, applied, failedAt: stmt, detail: whyItStopped(stmt, fail), remaining: statements.slice(i + 1) }
     }
     applied.push(stmt)
   }
