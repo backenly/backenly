@@ -169,8 +169,9 @@ export const DOMAIN_TOOLS: DomainTool[] = [
     title: 'Webhooks',
     summary:
       'Endpoints that receive signed POSTs when rows change or an end user signs up (the Webhooks page), and ' +
-      'table triggers whose action calls a URL. Endpoint deliveries carry X-Webhook-Signature: ' +
-      'sha256=<HMAC-SHA256 of the raw body>; a secret is returned once, in data.secret.',
+      'table triggers whose action calls a URL. Endpoint deliveries carry X-Webhook-Timestamp and ' +
+      'X-Webhook-Signature-V2: sha256=<HMAC-SHA256 of "<timestamp>.<X-Webhook-Delivery>.<raw body>">; verify it and ' +
+      'refuse stale timestamps. A secret is returned once, in data.secret.',
     openWorld: true,
     actions: {
       list: { tool: 'list_webhooks', gloss: 'every endpoint with its event, URL, on/off state and capture health' },

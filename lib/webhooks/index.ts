@@ -67,6 +67,52 @@ export function generateWebhookSignature(payload: string, secret: string): strin
   return 'sha256=' + crypto.createHmac('sha256', secret).update(payload).digest('hex')
 }
 
+/**
+ * How old a timestamped delivery may be before a receiver should refuse it.
+ * The same window the signature's own verifier applies.
+ */
+export const WEBHOOK_TIMESTAMP_TOLERANCE_SECONDS = 300
+
+/**
+ * The timestamped signature: HMAC-SHA256 over `<timestamp>.<delivery id>.<raw body>`,
+ * sent as X-Webhook-Signature-V2 beside X-Webhook-Timestamp.
+ *
+ * X-Webhook-Signature signs the body alone, so a delivery anyone captured (a
+ * proxy's log, a receiver's error report) verified forever and could be sent
+ * again at will. Signing the time and the delivery's id with the body lets a
+ * receiver refuse a stale delivery and drop a repeated id. The body-only
+ * header is still sent, for receivers that check it today.
+ */
+export function generateTimestampedSignature(timestamp: number, deliveryId: string, payload: string, secret: string): string {
+  return 'sha256=' + crypto.createHmac('sha256', secret).update(`${timestamp}.${deliveryId}.${payload}`).digest('hex')
+}
+
+/**
+ * Verify a timestamped delivery: the signature over exactly these bytes, this
+ * delivery id and this timestamp, and a timestamp within the tolerance of now.
+ */
+export function verifyTimestampedSignature(input: {
+  payload: string
+  deliveryId: string
+  timestamp: string | number
+  signature: string
+  secret: string
+  toleranceSeconds?: number
+  now?: number
+}): boolean {
+  const ts = typeof input.timestamp === 'number' ? input.timestamp : Number.parseInt(String(input.timestamp), 10)
+  if (!Number.isFinite(ts)) return false
+  const nowSeconds = Math.floor((input.now ?? Date.now()) / 1000)
+  if (Math.abs(nowSeconds - ts) > (input.toleranceSeconds ?? WEBHOOK_TIMESTAMP_TOLERANCE_SECONDS)) return false
+  const provided = input.signature.startsWith('sha256=') ? input.signature.slice(7) : input.signature
+  const expected = generateTimestampedSignature(ts, input.deliveryId, input.payload, input.secret).slice(7)
+  try {
+    return crypto.timingSafeEqual(Buffer.from(provided), Buffer.from(expected))
+  } catch {
+    return false
+  }
+}
+
 /** Constant-time signature comparison. */
 export function verifyWebhookSignature(
   payload: string,
@@ -105,6 +151,9 @@ export async function deliverSingleAttempt(
 ): Promise<WebhookDeliveryResult> {
   const payloadString = JSON.stringify(payload)
   const signature = generateWebhookSignature(payloadString, secret)
+  // Each attempt is signed at the time it is sent: a retry is a new attempt.
+  const timestamp = Math.floor(Date.now() / 1000)
+  const timedSignature = generateTimestampedSignature(timestamp, logId, payloadString, secret)
 
   try {
     // safeFetch, NOT fetch. This function used to call `fetch(targetUrl)` on a
@@ -126,6 +175,8 @@ export async function deliverSingleAttempt(
       headers: {
         'Content-Type': 'application/json',
         'X-Webhook-Signature': signature,
+        'X-Webhook-Timestamp': String(timestamp),
+        'X-Webhook-Signature-V2': timedSignature,
         'X-Webhook-Event': payload.event,
         'X-Webhook-Attempt': String(attemptNumber),
         'X-Webhook-ID': webhookId,
