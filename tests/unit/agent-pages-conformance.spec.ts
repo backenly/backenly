@@ -55,7 +55,9 @@ const STDIO_CLI = read('packages/mcp-server/src/cli.ts')
 const STDIO_PACKAGE = JSON.parse(read('packages/mcp-server/package.json')) as { engines: { node: string } }
 const CHANGELOG = read('packages/mcp-server/CHANGELOG.md')
 const DOCS_LIMIT = read('lib/mcp/docs-limit.ts')
-const CONSENT = read('app/mcp/authorize/page.tsx')
+// The consent screen: the page, and the form it renders (a client component so
+// it can navigate to the MCP client's callback, which the CSP blocks a form from).
+const CONSENT = read('app/mcp/authorize/page.tsx') + read('app/mcp/authorize/ConsentForm.tsx')
 const MCP_AUTH = read('lib/mcp/auth.ts')
 
 const CLI = path.join(process.cwd(), 'packages', 'cli', 'bin', 'backenly.mjs')
