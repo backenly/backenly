@@ -1,7 +1,7 @@
 export const dynamic = 'force-dynamic'
 
 import { NextRequest } from 'next/server'
-import { v1ApiMiddleware, requirePermission } from '@/lib/api/v1/middleware'
+import { v1ApiMiddleware, requirePermission, requireStorageWriter } from '@/lib/api/v1/middleware'
 import { createErrorResponse, createSuccessResponse, ErrorCodes } from '@/lib/api/v1/errors'
 import { prisma } from '@/lib/db'
 import { incrementStorageUsed } from '@/lib/services/storageQuota'
@@ -34,6 +34,8 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
 
     const permCheck = requirePermission(context, ['write', 'admin'])
     if (permCheck) return permCheck
+    const writerCheck = requireStorageWriter(context)
+    if (writerCheck) return writerCheck
 
     let fileId: string | undefined
     try {

@@ -1,7 +1,7 @@
 export const dynamic = 'force-dynamic'
 
 import { NextRequest } from 'next/server'
-import { v1ApiMiddleware, requirePermission } from '@/lib/api/v1/middleware'
+import { v1ApiMiddleware, requirePermission, requireStorageWriter } from '@/lib/api/v1/middleware'
 import { createErrorResponse, createSuccessResponse, ErrorCodes } from '@/lib/api/v1/errors'
 import { prisma } from '@/lib/db'
 import { assertQuotaAvailable, incrementStorageUsed, QuotaExceededError } from '@/lib/services/storageQuota'
@@ -64,7 +64,7 @@ function safeChunkPath(uploadId: string, partFile?: string): string | null {
  */
 
 // ── INITIATE ──────────────────────────────────────────────────────────────────
-async function handleInitiate(request: NextRequest, context: { projectId: string; apiKey: any }) {
+async function handleInitiate(request: NextRequest, context: { projectId: string; apiKey: any; endUserId: string | null }) {
   let body: any
   try { body = await request.json() } catch {
     return createErrorResponse(ErrorCodes.BAD_REQUEST, 'Request body must be JSON', 400)
@@ -135,6 +135,9 @@ async function handleInitiate(request: NextRequest, context: { projectId: string
           size: BigInt(contentLength),
           mimeType: contentType,
           isPublic: Boolean(isPublic),
+          // The end user who started it (requireStorageWriter): it may be aborted
+          // by them, and the finished file is theirs under owner_only.
+          uploadedBy: context.endUserId ?? null,
           metadata: { uploadId, s3UploadId, s3Key, status: 'uploading' },
         },
       })
@@ -170,6 +173,7 @@ async function handleInitiate(request: NextRequest, context: { projectId: string
       size: BigInt(contentLength),
       mimeType: contentType,
       isPublic: Boolean(isPublic),
+      uploadedBy: context.endUserId ?? null,
       metadata: { uploadId, chunkDir, status: 'uploading', contentType, bucketId: bucketRecord.id },
     },
   })
@@ -344,10 +348,9 @@ async function handleComplete(request: NextRequest, uploadId: string, totalParts
     bucket.id,
     // The real name: a regional project's tracking row holds only its stand-in.
     { name: (await withFileName(projectId, fileRecord)).name, buffer: assembled, mimeType: fileRecord.mimeType || 'application/octet-stream' },
-    // Multipart's initiate step carries no end-user identity yet, so the
-    // uploader is unknown, not ''. Null reads as operator-only under
-    // owner_only — closed rather than broken.
-    { isPublic: fileRecord.isPublic, projectId, uploadedBy: undefined }
+    // The uploader recorded when it started: the end user, or null for a
+    // service-key upload, which reads as operator-only under owner_only.
+    { isPublic: fileRecord.isPublic, projectId, uploadedBy: fileRecord.uploadedBy ?? undefined }
   )
   // Clean up temp chunks
   fs.rm(chunkDir, { recursive: true, force: true }).catch(() => null)
@@ -374,6 +377,8 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
   const { context } = middleware
   const permCheck = requirePermission(context, ['write', 'admin'])
   if (permCheck) return permCheck
+  const writerCheck = requireStorageWriter(context)
+  if (writerCheck) return writerCheck
 
   const action = request.nextUrl.searchParams.get('action')
 
@@ -397,6 +402,8 @@ async function handlePUT(request: NextRequest, props: { params: Promise<{ projec
   const { context } = middleware
   const permCheck = requirePermission(context, ['write', 'admin'])
   if (permCheck) return permCheck
+  const writerCheck = requireStorageWriter(context)
+  if (writerCheck) return writerCheck
 
   const uploadId = request.nextUrl.searchParams.get('uploadId') || ''
   const partNumber = parseInt(request.nextUrl.searchParams.get('partNumber') || '0', 10)
@@ -410,6 +417,12 @@ async function handleDELETE(request: NextRequest, props: { params: Promise<{ pro
   const middleware = await v1ApiMiddleware(request, params)
   if (middleware.response) return middleware.response
   const { context } = middleware
+  // Aborting removes the upload's file record, so it is held to what writing
+  // is: it used to need no permission at all, from any key.
+  const permCheck = requirePermission(context, ['write', 'admin'])
+  if (permCheck) return permCheck
+  const writerCheck = requireStorageWriter(context)
+  if (writerCheck) return writerCheck
 
   const uploadId = request.nextUrl.searchParams.get('uploadId') || ''
   if (!uploadId) return createErrorResponse(ErrorCodes.BAD_REQUEST, 'uploadId is required', 400)
@@ -418,6 +431,11 @@ async function handleDELETE(request: NextRequest, props: { params: Promise<{ pro
   const fileRecord = await prisma.storageFile.findFirst({
     where: { projectId: context.projectId, metadata: { path: ['uploadId'], equals: uploadId } },
   }).catch(() => null)
+
+  // An end user aborts only an upload they started.
+  if (fileRecord && !context.apiKey.serviceRole && fileRecord.uploadedBy !== context.endUserId) {
+    return createErrorResponse(ErrorCodes.FORBIDDEN, 'Only the end user who started this upload, or a server-side service key, may abort it.', 403)
+  }
 
   if (fileRecord) {
     await prisma.storageFile.delete({ where: { id: fileRecord.id } }).catch(() => null)

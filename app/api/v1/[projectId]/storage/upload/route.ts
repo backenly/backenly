@@ -2,7 +2,7 @@ export const dynamic = 'force-dynamic'
 
 import { NextRequest } from 'next/server'
 import { clampIsPublic } from '@/lib/storage/access-policy'
-import { v1ApiMiddleware, requirePermission, requireCapability } from '@/lib/api/v1/middleware'
+import { v1ApiMiddleware, requirePermission, requireCapability, requireStorageWriter } from '@/lib/api/v1/middleware'
 import { createErrorResponse, createSuccessResponse, ErrorCodes } from '@/lib/api/v1/errors'
 import { storageService } from '@/lib/services/storage'
 import { prisma } from '@/lib/db'
@@ -69,6 +69,8 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
     if (permissionCheck) {
       return permissionCheck
     }
+    const writerCheck = requireStorageWriter(context)
+    if (writerCheck) return writerCheck
 
     const capabilityCheck = requireCapability(context, request.nextUrl.pathname)
     if (capabilityCheck) {
