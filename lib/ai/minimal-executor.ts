@@ -6286,14 +6286,17 @@ async function addColumnToTable(
  *   • Schema snapshot is captured before this runs (SCHEMA_MUTATING_ACTIONS),
  *     so the change is reversible via LIST_SCHEMA_VERSIONS / ROLLBACK_TO_VERSION
  */
-async function executeDropColumn(params: any, projectId: string): Promise<ExecutionResult> {
+async function executeDropColumn(params: any, projectId: string, target: SchemaTarget = {}): Promise<ExecutionResult> {
   const db = await projectDb(projectId)
   const tableName = String(params?.tableName ?? '').trim()
   const columnName = String(params?.columnName ?? '').trim()
-
+  const ifExists = params?.ifExists === true
+  // A migration's DROP COLUMN runs as written: without CASCADE, so PostgreSQL
+  // refuses it while a view, a row policy or another table's foreign key
+  // depends on the column (lib/mcp/migration-parser.ts, translateDropColumn).
+  const asWritten = params?.asWritten === true
   if (!tableName) return { success: false, message: 'Table name is required' }
   if (!columnName) return { success: false, message: 'Column name is required' }
-
   const RESERVED = new Set(['id', 'createdAt', 'updatedAt'])
   if (RESERVED.has(columnName)) {
     return {
@@ -6302,11 +6305,11 @@ async function executeDropColumn(params: any, projectId: string): Promise<Execut
       error: 'RESERVED_COLUMN',
     }
   }
-
   try {
     const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
-    const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
-
+    const mainSchema = getWorkspaceDatabaseNames(projectId).postgresSchema
+    const postgresSchema = target.targetSchema ?? mainSchema
+    const onBranch = !!target.targetSchema
     // Verify the column actually exists before issuing the DDL — gives a
     // truthful "no such column" error rather than the cryptic Postgres one.
     const exists = await db.$queryRawUnsafe<Array<{ exists: boolean }>>(
@@ -6317,28 +6320,68 @@ async function executeDropColumn(params: any, projectId: string): Promise<Execut
       postgresSchema, tableName, columnName,
     )
     if (!exists[0]?.exists) {
+      if (ifExists) {
+        return {
+          success: true,
+          message: `${tableName} has no column "${columnName}", so there was nothing to drop.`,
+          data: { tableName, columnName, alreadyAbsent: true },
+        }
+      }
       return {
         success: false,
         message: `Column \`${columnName}\` does not exist on \`${tableName}\`.`,
         error: 'COLUMN_NOT_FOUND',
       }
     }
+    const { quoteIdent } = await import('@/lib/changes/names')
+    const table = `${quoteIdent(postgresSchema)}.${quoteIdent(tableName)}`
+    // Otherwise CASCADE, so any view / trigger / index that references this
+    // column is also dropped — without it Postgres refuses on dependent objects.
+    const dropSql = asWritten
+      ? `ALTER TABLE ${table} DROP COLUMN ${quoteIdent(columnName)}`
+      : `ALTER TABLE ${table} DROP COLUMN IF EXISTS ${quoteIdent(columnName)} CASCADE`
 
-    // CASCADE so any view / trigger / index that references this column is
-    // also dropped — without it Postgres refuses on dependent objects.
-    //
-    // Inside a recorded change its values are kept first, in the same
-    // transaction, so rolling the change back restores them row by row.
-    const dropSql = `ALTER TABLE "${postgresSchema}"."${tableName}" DROP COLUMN IF EXISTS "${columnName}" CASCADE`
-    const { keepColumnValues } = await import('@/lib/changes/preserve')
-    const kept = await keepColumnValues(projectId, postgresSchema, tableName, columnName, 'dropped', dropSql)
-    if (!kept.handled) await db.$executeRawUnsafe(dropSql)
+    let kept: Awaited<ReturnType<typeof import('@/lib/changes/preserve').keepColumnValues>> = { handled: false }
+    try {
+      if (onBranch) {
+        // A branch keeps no vault: it is a copy, and discarding it is the undo.
+        await db.$executeRawUnsafe(dropSql)
+      } else {
+        // Inside a recorded change its values are kept first, in the same
+        // transaction, so rolling the change back restores them row by row.
+        const { keepColumnValues } = await import('@/lib/changes/preserve')
+        kept = await keepColumnValues(projectId, postgresSchema, tableName, columnName, 'dropped', dropSql)
+        if (!kept.handled) await db.$executeRawUnsafe(dropSql)
+      }
+    } catch (err: any) {
+      const text = `${err?.code ?? ''} ${err?.message ?? ''}`
+      if (!asWritten || !/2BP01|other objects depend on it/i.test(text)) throw err
+      const dependents = await columnDependents(db, postgresSchema, tableName, columnName).catch(() => [] as string[])
+      return {
+        success: false,
+        message:
+          `Column \`${columnName}\` was not dropped from \`${tableName}\`: ` +
+          (dependents.length
+            ? `${dependents.join(', ')} ${dependents.length === 1 ? 'depends' : 'depend'} on it. `
+            : `other objects depend on it. `) +
+          `Remove or change ${dependents.length === 1 ? 'that' : 'those'} first, then drop the column.`,
+        error: 'Column has dependents',
+        code: 'COLUMN_HAS_DEPENDENTS',
+      } as ExecutionResult
+    }
+
+    if (onBranch) {
+      return {
+        success: true,
+        message: `Dropped column ${columnName} from ${tableName} on the branch. Merging the branch drops it from production, keeping its values with the change.`,
+        data: { tableName, columnName },
+      }
+    }
 
     // The drop was asked for, so the column is no longer requested: without
     // this the intent ledger would report it missing (lib/autonomy/intent-conformance).
     const { supersedeSchemaIntent } = await import('@/lib/autonomy/intent-conformance')
     await supersedeSchemaIntent(projectId, { kind: 'drop_column', tableName, columnName })
-
     // Regenerate the REST API for this table so the column disappears from
     // its generated CRUD payloads. Non-fatal — the column is gone either way.
     try {
@@ -6346,7 +6389,6 @@ async function executeDropColumn(params: any, projectId: string): Promise<Execut
     } catch {
       // intentional — drop succeeded, API regen is best-effort
     }
-
     // Evict cached validation schemas so the next request sees the new shape.
     import('@/lib/services/workspace-validator')
       .then(({ invalidateSchemaCache }) => invalidateSchemaCache(projectId, tableName))
@@ -6374,6 +6416,36 @@ async function executeDropColumn(params: any, projectId: string): Promise<Execut
       error: err.message,
     }
   }
+}
+
+/**
+ * What stops a column being dropped without CASCADE: the objects with a
+ * normal dependency on it (row policies, views, other tables' foreign keys),
+ * as PostgreSQL describes them. Indexes and the table's own constraints on the
+ * column go with it, so they are not listed.
+ */
+async function columnDependents(
+  db: Awaited<ReturnType<typeof projectDb>>,
+  schema: string,
+  tableName: string,
+  column: string,
+): Promise<string[]> {
+  const { quoteIdent } = await import('@/lib/changes/names')
+  const table = `${quoteIdent(schema)}.${quoteIdent(tableName)}`
+  const rows = await db.$queryRawUnsafe<Array<{ what: string }>>(
+    `SELECT DISTINCT pg_describe_object(d.classid, d.objid, d.objsubid) AS what
+       FROM pg_depend d
+       JOIN pg_attribute a ON a.attrelid = d.refobjid AND a.attnum = d.refobjsubid
+      WHERE d.refclassid = 'pg_class'::regclass
+        AND d.refobjid = $1::regclass
+        AND a.attname = $2
+        AND d.deptype = 'n'
+      ORDER BY 1`,
+    table,
+    column,
+  )
+  // Names in the project's own schema read bare, as the migration wrote them.
+  return rows.map((r) => r.what.split(`${quoteIdent(schema)}.`).join('').split(`${schema}.`).join(''))
 }
 
 /**
@@ -9715,6 +9787,8 @@ export async function executeBranchSchemaAction(
     case 'ADD_CONSTRAINT': return executeAddConstraint(action.params, projectId, target)
     case 'DROP_INDEX':     return executeDropIndex(action.params, projectId, target)
     case 'DROP_CONSTRAINT': return executeDropConstraint(action.params, projectId, target)
+    case 'DROP_COLUMN':    return executeDropColumn(action.params, projectId, target)
+    case 'ALTER_COLUMN_TYPE': return executeAlterColumnType(action.params, projectId, target)
     default:
       return {
         success: false,
@@ -14584,86 +14658,157 @@ async function executeSendPush(params: any, projectId: string): Promise<Executio
 // Safe, AI-managed column type migration with automatic data casting.
 // ============================================================================
 
-async function executeAlterColumnType(params: any, projectId: string): Promise<ExecutionResult> {
+async function executeAlterColumnType(params: any, projectId: string, target: SchemaTarget = {}): Promise<ExecutionResult> {
   const db = await projectDb(projectId)
-  const { tableName, columnName, newType, castExpression } = params
-  if (!tableName || !columnName || !newType) {
+  const tableName = String(params?.tableName ?? '').trim()
+  const columnName = String(params?.columnName ?? '').trim()
+  const { newType, castExpression } = params ?? {}
+  // A migration's ALTER COLUMN … TYPE (lib/mcp/migration-parser.ts): the
+  // declared type exactly, and PostgreSQL's own conversion unless it says USING.
+  const asWritten = params?.asWritten === true
+  if (!tableName || !columnName || (!newType && !params?.sqlType)) {
     return { success: false, message: 'tableName, columnName, and newType are required' }
   }
+  if (['id', 'createdAt', 'updatedAt'].includes(columnName)) {
+    return {
+      success: false,
+      message: `"${columnName}" is a column Backenly keeps on every table; its type is not changed.`,
+      error: 'RESERVED_COLUMN',
+      code: 'RESERVED_COLUMN',
+    } as ExecutionResult
+  }
 
+  let type = ''
   try {
     const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
-    const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
-    const safe = (s: string) => s.replace(/[^a-z0-9_]/gi, '')
+    const mainSchema = getWorkspaceDatabaseNames(projectId).postgresSchema
+    const postgresSchema = target.targetSchema ?? mainSchema
+    const onBranch = !!target.targetSchema
+    const { quoteIdent: q } = await import('@/lib/changes/names')
+    const table = `${q(postgresSchema)}.${q(tableName)}`
+    const column = q(columnName)
 
-    const normalizedType = normalizeColumnType(newType, columnName)
-
-    // Smart USING clause for common type migrations
-    const USING_CLAUSES: Record<string, Record<string, string>> = {
-      'INTEGER': {
-        'TEXT': `"${safe(columnName)}"::INTEGER`,
-        'DECIMAL': `"${safe(columnName)}"::INTEGER`,
-        'FLOAT': `"${safe(columnName)}"::INTEGER`,
-      },
-      'DECIMAL': {
-        'INTEGER': `"${safe(columnName)}"::DECIMAL`,
-        'TEXT': `"${safe(columnName)}"::DECIMAL`,
-      },
-      'TEXT': {
-        'INTEGER': `"${safe(columnName)}"::TEXT`,
-        'DECIMAL': `"${safe(columnName)}"::TEXT`,
-        'BOOLEAN': `CASE WHEN "${safe(columnName)}" THEN 'true' ELSE 'false' END`,
-        'TIMESTAMP': `"${safe(columnName)}"::TEXT`,
-      },
-      'BOOLEAN': {
-        'TEXT': `"${safe(columnName)}"::BOOLEAN`,
-        'INTEGER': `("${safe(columnName)}"::BOOLEAN)::INTEGER`,
-      },
-      'TIMESTAMP': {
-        'TEXT': `"${safe(columnName)}"::TIMESTAMP`,
-      },
+    const typeOf = () =>
+      db.$queryRawUnsafe<Array<{ t: string; data_type: string }>>(
+        `SELECT format_type(a.atttypid, a.atttypmod) AS t, upper(c.data_type) AS data_type
+           FROM pg_attribute a
+           JOIN information_schema.columns c ON c.table_schema = $1 AND c.table_name = $2 AND c.column_name = a.attname
+          WHERE a.attrelid = to_regclass($3) AND a.attname = $4 AND a.attnum > 0 AND NOT a.attisdropped`,
+        postgresSchema, tableName, table, columnName,
+      )
+    const before = await typeOf()
+    if (before.length === 0) {
+      return { success: false, message: `Column \`${columnName}\` does not exist on \`${tableName}\`.`, error: 'COLUMN_NOT_FOUND' }
     }
+    const currentType = before[0].t
 
-    // Get current column type
-    const colInfo = await db.$queryRawUnsafe<{data_type: string}[]>(
-      `SELECT data_type FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2 AND column_name = $3`,
-      postgresSchema, safe(tableName), safe(columnName)
-    )
-    const currentType = colInfo[0]?.data_type?.toUpperCase() || 'TEXT'
+    // The declared type when a migration gave one; the vocabulary's otherwise.
+    const declared = declaredSqlType(params)
+    if (asWritten && !declared) {
+      return { success: false, message: `"${params?.sqlType ?? newType}" is not a type a migration can change a column to.`, code: 'VALIDATION' } as ExecutionResult
+    }
+    type = declared ?? normalizeColumnType(newType, columnName)
 
-    // Build USING clause: castExpression > auto-derived > direct cast
-    const usingExpr = castExpression
-      || USING_CLAUSES[normalizedType]?.[currentType]
-      || `"${safe(columnName)}"::${normalizedType}`
+    // A conversion someone wrote (USING, or the older castExpression) runs over
+    // every row as the platform, so it is held to the closed grammar here too,
+    // whichever door it came through. Otherwise a migration gets PostgreSQL's
+    // own conversion, and every other caller the usual cast.
+    let usingExpr: string | null = null
+    const written = typeof params?.using === 'string' ? params.using : typeof castExpression === 'string' && castExpression.trim() ? castExpression : undefined
+    if (written !== undefined) {
+      const { validateConversionExpression } = await import('@/lib/db/sql-expression')
+      const { exactSqlType } = await import('@/lib/mcp/migration-parser')
+      const checked = validateConversionExpression(written, { column: columnName, castType: (t) => exactSqlType(t) !== undefined })
+      if (checked.kind !== 'ok') {
+        return {
+          success: false,
+          message: `USING ${written} cannot run here: ${checked.reason} ${checked.hint}`,
+          error: 'Unsafe conversion',
+          code: 'UNSAFE_EXPRESSION',
+        } as ExecutionResult
+      }
+      usingExpr = checked.expression
+    } else if (!asWritten) {
+      // Smart USING clause for common type migrations
+      const USING_CLAUSES: Record<string, Record<string, string>> = {
+        'INTEGER': { 'TEXT': `${column}::INTEGER`, 'DECIMAL': `${column}::INTEGER`, 'FLOAT': `${column}::INTEGER` },
+        'DECIMAL': { 'INTEGER': `${column}::DECIMAL`, 'TEXT': `${column}::DECIMAL` },
+        'TEXT': {
+          'INTEGER': `${column}::TEXT`,
+          'DECIMAL': `${column}::TEXT`,
+          'BOOLEAN': `CASE WHEN ${column} THEN 'true' ELSE 'false' END`,
+          'TIMESTAMP': `${column}::TEXT`,
+        },
+        'BOOLEAN': { 'TEXT': `${column}::BOOLEAN`, 'INTEGER': `(${column}::BOOLEAN)::INTEGER` },
+        'TIMESTAMP': { 'TEXT': `${column}::TIMESTAMP` },
+      }
+      usingExpr = USING_CLAUSES[type]?.[before[0].data_type] || `${column}::${type}`
+    }
 
     // A cast need not round-trip (numeric → integer rounds, text → date
     // normalises), so inside a recorded change the original values are kept
-    // first and a rollback puts back exactly what was there.
-    const alterSql = `
-      ALTER TABLE "${postgresSchema}"."${safe(tableName)}"
-      ALTER COLUMN "${safe(columnName)}"
-      TYPE ${normalizedType}
-      USING ${usingExpr}
-    `
-    const { keepColumnValues } = await import('@/lib/changes/preserve')
-    const kept = await keepColumnValues(projectId, postgresSchema, safe(tableName), safe(columnName), 'retyped', alterSql)
-    if (!kept.handled) await db.$executeRawUnsafe(alterSql)
+    // first and a rollback puts back exactly what was there. The statement runs
+    // with search_path set to pg_catalog: every function, operator and type in
+    // it is then a built-in, whatever the project's schema holds.
+    const alterSql = `ALTER TABLE ${table} ALTER COLUMN ${column} TYPE ${type}${usingExpr ? ` USING ${usingExpr}` : ''}`
+    const underCatalogPath = () =>
+      db.$transaction(async (tx) => {
+        await tx.$executeRawUnsafe('SET LOCAL search_path TO pg_catalog, pg_temp')
+        await tx.$executeRawUnsafe(alterSql)
+      }, { maxWait: 10_000, timeout: 30 * 60_000 })
 
-    // Invalidate schema cache
+    let kept: Awaited<ReturnType<typeof import('@/lib/changes/preserve').keepColumnValues>> = { handled: false }
+    if (onBranch) {
+      await underCatalogPath()
+    } else {
+      const { keepColumnValues } = await import('@/lib/changes/preserve')
+      kept = await keepColumnValues(projectId, postgresSchema, tableName, columnName, 'retyped', alterSql, { catalogSearchPath: true })
+      if (!kept.handled) await underCatalogPath()
+    }
+    const now = (await typeOf())[0]?.t ?? type
+
+    if (onBranch) {
+      return {
+        success: true,
+        message: `On the branch, ${tableName}.${columnName} is now ${now} (was ${currentType}). Merging the branch changes it on production, keeping the values before with the change.`,
+        data: { tableName, columnName, oldType: currentType, newType: now },
+      }
+    }
+
+    // The new type is what is requested now, not drift (lib/autonomy/intent-conformance).
+    const { supersedeSchemaIntent } = await import('@/lib/autonomy/intent-conformance')
+    await supersedeSchemaIntent(projectId, { kind: 'retype_column', tableName, columnName, type: now })
+    // The generated API describes the column's type; regenerate it, best effort.
+    try {
+      await executeGenerateAPI({ tableName }, projectId)
+    } catch {
+      // the type changed either way
+    }
     const { invalidateSchemaCache } = await import('@/lib/services/workspace-validator')
     try { invalidateSchemaCache(projectId, tableName) } catch { /* best-effort */ }
+    import('@/lib/ai/execution-cache')
+      .then(({ invalidateSchemaCache: invalidate }) => invalidate(projectId))
+      .catch(() => {})
 
     return {
       success: true,
-      message: `✅ Column **${columnName}** in **${tableName}** changed from \`${currentType}\` → \`${normalizedType}\`.\n\nExisting data was automatically cast using: \`${usingExpr}\``,
-      data: { tableName, columnName, oldType: currentType, newType: normalizedType },
+      message: kept.handled
+        ? `✅ ${tableName}.${columnName} is now ${now} (was ${currentType})${usingExpr ? `, converted with ${usingExpr}` : ''}. ` +
+          `Its ${kept.rows} value${kept.rows === 1 ? '' : 's'} before ${kept.rows === 1 ? 'is' : 'are'} kept: restoring the state before change #${kept.seq} puts them back.`
+        : `✅ ${tableName}.${columnName} is now ${now} (was ${currentType})${usingExpr ? `, converted with ${usingExpr}` : ''}.`,
+      data: { tableName, columnName, oldType: currentType, newType: now },
     }
   } catch (error: any) {
+    const reason = String(error?.meta?.message ?? error?.message ?? error)
+    const noCast = /cannot be cast automatically/i.test(reason)
     return {
       success: false,
-      message: `Failed to change column type: ${error.message}\n\nThis usually means existing data cannot be safely cast. Try exporting your data first, or specify a custom cast expression.`,
-      error: error.message,
-    }
+      message:
+        `${tableName}.${columnName} was not changed${type ? ` to ${type}` : ''}: ${reason}` +
+        (noCast ? ` Say how to convert it with USING, e.g. USING ${columnName}::${type.toLowerCase() || 'integer'}.` : ''),
+      error: reason,
+      code: noCast ? 'NEEDS_USING' : 'RETYPE_FAILED',
+    } as ExecutionResult
   }
 }
 

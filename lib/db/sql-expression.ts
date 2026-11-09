@@ -180,9 +180,15 @@ export function referencedColumns(expr: string): string[] {
  */
 export function validateBooleanExpression(
   expr: unknown,
-  opts: { requireColumn?: boolean; maxLength?: number; exists?: ExistsContext } = {},
+  opts: {
+    requireColumn?: boolean
+    maxLength?: number
+    exists?: ExistsContext
+    /** Functions allowed besides EXPR_FUNCTIONS (validateConversionExpression's). */
+    extraFunctions?: ReadonlySet<string>
+  } = {},
 ): ExpressionCheck {
-  const { requireColumn = true, maxLength = 2000, exists } = opts
+  const { requireColumn = true, maxLength = 2000, exists, extraFunctions } = opts
 
   if (typeof expr !== 'string' || !expr.trim()) {
     return {
@@ -286,7 +292,7 @@ export function validateBooleanExpression(
     }
     const fn = m[1].toLowerCase()
     if (EXPR_KEYWORDS.has(fn)) continue          // `IN (`, `NOT (`, `AND (` …
-    if (!EXPR_FUNCTIONS.has(fn)) {
+    if (!EXPR_FUNCTIONS.has(fn) && !extraFunctions?.has(fn)) {
       return {
         kind: 'rejected',
         ok: false,
@@ -324,6 +330,156 @@ export function validateBooleanExpression(
   }
 
   return { kind: 'ok', ok: true, expression: emitted, columns }
+}
+
+// ── Column conversions: ALTER COLUMN … TYPE … USING ───────────────────────────
+
+/**
+ * Functions a column conversion may call besides EXPR_FUNCTIONS: the built-in
+ * conversions a type change needs (epoch seconds to a time, text to a date or a
+ * number, a delimited string to an array, a value to json). Pure, and none of
+ * them reads a table.
+ */
+export const CONVERSION_FUNCTIONS: ReadonlySet<string> = new Set([
+  'to_timestamp', 'to_date', 'to_number', 'to_char',
+  'string_to_array', 'array_to_string', 'to_jsonb', 'timezone',
+])
+
+/** A type as a cast writes it: `integer`, `double precision`, `numeric(10,2)`, `timestamp with time zone`, `text[]`. */
+const CAST_TYPE =
+  /^[A-Za-z_][A-Za-z0-9_]*(?:\s+(?:precision|varying))?(?:\s*\(\s*\d+\s*(?:,\s*\d+\s*)?\))?(?:\s+with(?:out)?\s+time\s+zone)?(?:\s*\[\s*\])*/
+
+/**
+ * The expression after USING in `ALTER COLUMN c TYPE t USING …`: how each row's
+ * new value is computed from its old one.
+ *
+ * It runs once over every row, as the platform, so it is held to the closed
+ * grammar above and to more:
+ *   - it reads one column, the one being converted;
+ *   - it calls only EXPR_FUNCTIONS and CONVERSION_FUNCTIONS, and nothing is
+ *     reached through a schema or a table: a qualified name is refused;
+ *   - a cast (`::t`, `CAST(x AS t)`) names a type `castType` accepts (the
+ *     migration parser's declared types), never a catalog type like regclass;
+ *   - AT TIME ZONE takes a literal zone name, and `interval` a literal;
+ *   - no backslash, no E'…' or other prefixed string, no `$`: what is checked
+ *     here is read exactly as PostgreSQL will read it.
+ * The caller runs it with search_path set to pg_catalog, so every name it uses
+ * is a built-in, whatever the project's own schema holds.
+ *
+ * The expression is returned as written.
+ */
+export function validateConversionExpression(
+  expr: unknown,
+  opts: { column: string; castType: (type: string) => boolean },
+): ExpressionCheck {
+  const refuse = (reason: string, hint: string): ExpressionRejection => ({ kind: 'rejected', ok: false, reason, hint })
+  const example = `e.g. USING ${opts.column}::integer, or USING NULLIF(${opts.column}, '')::numeric`
+  if (typeof expr !== 'string' || !expr.trim()) return refuse('it is empty.', `Write how the new value is computed from the old one, ${example}.`)
+  const written = expr.trim().replace(/;\s*$/, '').trim()
+  if (written.length > 1000) return refuse('it exceeds 1000 characters.', 'Convert in steps: add a column, fill it with run_data_migration, then drop the old one.')
+
+  // Literals out first, so nothing below can mistake text inside one for code.
+  const literals: string[] = []
+  let shape = ''
+  for (let i = 0; i < written.length; ) {
+    const ch = written[i]
+    if (ch === '\\' || ch === '$') return refuse(`it contains "${ch}".`, `Use plain single-quoted literals, ${example}.`)
+    if (ch === '"') {
+      const end = closingQuote(written, i, '"')
+      if (end < 0) return refuse('a quoted name is not closed.', 'Check that every " has a match.')
+      shape += written.slice(i, end + 1)
+      i = end + 1
+      continue
+    }
+    if (ch === "'") {
+      if (i > 0 && /[A-Za-z0-9_&]/.test(written[i - 1])) {
+        return refuse('it contains a prefixed string such as E\'…\'.', `Use plain single-quoted literals, ${example}.`)
+      }
+      const end = closingQuote(written, i, "'")
+      if (end < 0) return refuse('a string literal is not closed.', "Check that every ' has a match.")
+      literals.push(written.slice(i, end + 1))
+      shape += ` __lit${literals.length - 1}__ `
+      i = end + 1
+      continue
+    }
+    shape += ch
+    i++
+  }
+  const literal = (n: string) => literals[Number(n)].slice(1, -1).replace(/''/g, "'")
+
+  if (/[A-Za-z0-9_"]\s*\.\s*[A-Za-z_"]/.test(shape)) {
+    return refuse('it names something through a schema or a table.', `Use the column's bare name and built-in functions, ${example}.`)
+  }
+
+  // AT TIME ZONE '<zone>' and interval '<literal>' are literals, not names.
+  for (const m of shape.matchAll(/\bat\s+time\s+zone\s+__lit(\d+)__/gi)) {
+    if (!/^[A-Za-z][A-Za-z0-9_+\-/]{0,63}$/.test(literal(m[1]))) {
+      return refuse(`"${literal(m[1])}" is not a time zone name.`, "Name the zone, e.g. AT TIME ZONE 'UTC' or 'Asia/Kolkata'.")
+    }
+  }
+  shape = shape.replace(/\bat\s+time\s+zone\s+__lit\d+__/gi, ' ').replace(/\binterval\s+__lit\d+__/gi, ' ')
+
+  // CAST(x AS t) reads as (x) once t is a type it may name.
+  for (let m = /\bcast\s*\(/i.exec(shape); m; m = /\bcast\s*\(/i.exec(shape)) {
+    const open = m.index + m[0].length - 1
+    const close = matchParen(shape, open)
+    if (close < 0) return refuse('a CAST has no closing parenthesis.', 'Check that every ( has a matching ).')
+    const body = shape.slice(open + 1, close)
+    let as = -1
+    let depth = 0
+    for (let k = 0; k < body.length; k++) {
+      if (body[k] === '(') depth++
+      else if (body[k] === ')') depth--
+      else if (depth === 0 && /\bas\b/i.test(body.slice(k, k + 3)) && /\s/.test(body[k - 1] ?? '') && /\s/.test(body[k + 2] ?? '')) as = k
+    }
+    const type = as < 0 ? '' : body.slice(as + 2).trim()
+    if (as < 0 || CAST_TYPE.exec(type)?.[0] !== type || !opts.castType(type)) {
+      return refuse(`CAST(… AS ${type || '?'}) names a type that cannot be used here.`, 'Cast to one of the column types a migration declares: text, integer, bigint, numeric, boolean, date, timestamptz, uuid, jsonb, …')
+    }
+    shape = `${shape.slice(0, m.index)}(${body.slice(0, as)})${shape.slice(close + 1)}`
+  }
+
+  // x::t reads as x once t is a type it may name.
+  for (let m = /::\s*/.exec(shape); m; m = /::\s*/.exec(shape)) {
+    const rest = shape.slice(m.index + m[0].length)
+    const type = CAST_TYPE.exec(rest)?.[0]
+    if (!type || !opts.castType(type.trim())) {
+      return refuse(`::${(type ?? rest).trim().slice(0, 40)} names a type that cannot be used here.`, 'Cast to one of the column types a migration declares: text, integer, bigint, numeric, boolean, date, timestamptz, uuid, jsonb, …')
+    }
+    shape = `${shape.slice(0, m.index)} ${rest.slice(type.length)}`
+  }
+
+  const checked = validateBooleanExpression(shape.replace(/__lit\d+__/g, "''"), {
+    requireColumn: true,
+    maxLength: 2000,
+    extraFunctions: CONVERSION_FUNCTIONS,
+  })
+  if (checked.kind !== 'ok') {
+    return refuse(
+      checked.reason,
+      `A conversion computes each row's new value from the column's own value, with casts and built-in functions ` +
+      `such as nullif, trim, round, lower, to_timestamp, to_date, to_number and string_to_array (${example}). ` +
+      `To use other columns or tables, add a column and fill it with run_data_migration.`,
+    )
+  }
+  const other = checked.columns.filter((c) => c !== opts.column)
+  if (other.length > 0) {
+    return refuse(
+      `it reads ${other.map((c) => `"${c}"`).join(', ')}, and a conversion reads only the column it converts ("${opts.column}").`,
+      'To compute a value from other columns, add a new column and fill it with run_data_migration.',
+    )
+  }
+  return { kind: 'ok', ok: true, expression: written, columns: checked.columns }
+}
+
+/** Index of the quote closing the one at `open` (a doubled quote is part of the text), or -1. */
+function closingQuote(s: string, open: number, quote: string): number {
+  for (let i = open + 1; i < s.length; i++) {
+    if (s[i] !== quote) continue
+    if (s[i + 1] === quote) { i++; continue }
+    return i
+  }
+  return -1
 }
 
 /**

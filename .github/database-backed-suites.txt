@@ -1484,6 +1484,14 @@ tests/integration/change-classes-executor.spec.ts
 # MCP route.
 tests/integration/migrations-drop-index-and-constraint.spec.ts
 
+# DROP COLUMN and ALTER COLUMN … TYPE in a migration: on a branch they run, the
+# merge a person approves carries them to production with the values before
+# kept in the change's vault (restoring puts them back), an agent's on
+# production waits for a person, the declared type is created exactly, a USING
+# expression calls built-ins only, and a drop runs without CASCADE. Real
+# provisioned project, branch schemas, governed changes and catalog reads.
+tests/integration/migrations-drop-column-and-retype.spec.ts
+
 # Every view of a project's schema is current once a change or restore settles:
 # the REST API is asked to reload, the reconciler's baseline follows, validators
 # see a table another process changed, a restore supersedes the request behind

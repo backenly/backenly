@@ -35,7 +35,7 @@
  * That difference is most of the reliability gap we are closing.
  */
 
-import { validateBooleanExpression } from '@/lib/db/sql-expression'
+import { validateBooleanExpression, validateConversionExpression } from '@/lib/db/sql-expression'
 import { describeTarget, type DeclaredForeignKey, type ReferentialAction } from '@/lib/db/declared-foreign-key'
 
 /**
@@ -162,8 +162,9 @@ function splitTopLevel(s: string): string[] {
       }
       continue
     }
-    if (ch === '(') depth++
-    if (ch === ')') depth--
+    // Brackets too: a comma inside ARRAY['a','b'] separates elements, not items.
+    if (ch === '(' || ch === '[') depth++
+    if (ch === ')' || ch === ']') depth--
     if (ch === ',' && depth === 0) {
       if (cur.trim()) out.push(cur.trim())
       cur = ''
@@ -1034,8 +1035,10 @@ function translateCreateTable(stmt: string): PlannedAction[] {
     })
   }
 
+  // Each expansion has a source of its own, so a run that stops between the
+  // table and one of its rules is reported as not fully applied.
   for (const check of checks) {
-    actions.push(checkAction(tableName, check, stmt))
+    actions.push(checkAction(tableName, check, `${stmt} → CHECK (${check.expression})`))
   }
 
   return actions
@@ -1288,7 +1291,27 @@ function translateAlterTable(stmt: string): PlannedAction[] {
 
   const tableName = unquoteIdent(head[1])
   assertUnqualified(tableName, stmt)
-  const action = head[2].trim()
+
+  // `ALTER TABLE t DROP COLUMN a, DROP COLUMN b`: several actions, each its own
+  // step. Each step's source names its action, so a run that stops between two
+  // of them reports exactly which took effect (fullyAppliedStatements).
+  // Without the split the comma ran into the first action, and
+  // `ADD COLUMN a numeric DEFAULT 0, ADD COLUMN b int` read as one column whose
+  // default was "0, ADD COLUMN b int".
+  const actions = splitTopLevel(head[2].trim())
+  if (actions.length > 1) {
+    return actions.flatMap((part) =>
+      translateAlterAction(tableName, part, stmt).map((step) => ({
+        ...step,
+        source: `${stmt} → ${part}${step.source.slice(stmt.length)}`,
+      })),
+    )
+  }
+  return translateAlterAction(tableName, head[2].trim(), stmt)
+}
+
+/** One action of an ALTER TABLE. `stmt` is the whole statement, for sources and errors. */
+function translateAlterAction(tableName: string, action: string, stmt: string): PlannedAction[] {
 
   // RENAME COLUMN a TO b
   const rename = /^rename\s+(?:column\s+)?("(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$]*)\s+to\s+("(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$]*)/i.exec(action)
@@ -1300,9 +1323,15 @@ function translateAlterTable(stmt: string): PlannedAction[] {
     }]
   }
 
-  // ALTER COLUMN c SET NOT NULL — the one ALTER COLUMN form that maps cleanly
-  // onto a governed constraint. Type changes deliberately do not (they are a
-  // data migration, not a constraint) and fall through to the refusal below.
+  // ALTER [COLUMN] c [SET DATA] TYPE t [USING expr]: the column keeps its rows
+  // and takes the declared type exactly. It runs on a branch, and reaches
+  // production through a merge a person approved or through a person's
+  // approval of the migration; either way the values before are kept with the
+  // change (lib/changes/preserve.ts), so restoring puts them back.
+  const retype = /^alter\s+(?:column\s+)?("(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$]*)\s+(?:set\s+data\s+)?type\s+([\s\S]+)$/i.exec(action)
+  if (retype) return translateRetype(tableName, unquoteIdent(retype[1]), retype[2].trim(), stmt)
+
+  // ALTER COLUMN c SET NOT NULL — maps cleanly onto a governed constraint.
   const setNotNull = /^alter\s+(?:column\s+)?("(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$]*)\s+set\s+not\s+null/i.exec(action)
   if (setNotNull) {
     return [{
@@ -1363,7 +1392,7 @@ function translateAlterTable(stmt: string): PlannedAction[] {
     if (col.fkTo !== undefined) column.fkTo = col.fkTo
     if (col.references !== undefined) column.references = col.references
     const actions: PlannedAction[] = [{ tool: 'add_column', args: { tableName, column }, source: stmt }]
-    for (const check of checks) actions.push(checkAction(tableName, check, stmt))
+    for (const check of checks) actions.push(checkAction(tableName, check, `${stmt} → CHECK (${check.expression})`))
     return actions
   }
 
@@ -1373,21 +1402,126 @@ function translateAlterTable(stmt: string): PlannedAction[] {
   // DROP CONSTRAINT [IF EXISTS] name [RESTRICT]: removes a rule, not a row.
   if (/^drop\s+constraint\b/i.test(action)) return translateDropConstraint(tableName, action, stmt)
 
-  // Everything else on ALTER TABLE is destructive or unmodelled.
-  if (/^drop\b/i.test(action)) {
-    throw new MigrationParseError(
-      `Dropping columns is destructive and cannot run over MCP.`,
-      'DESTRUCTIVE_REFUSED',
-      `Describe it via backend_chat — it is parked in the Review Queue for human approval and you get an approval id to poll with check_approval.`,
-      stmt,
-    )
-  }
+  // DROP [COLUMN] [IF EXISTS] c [RESTRICT]. Its values are kept with the change.
+  if (/^drop\s+/i.test(action)) return translateDropColumn(tableName, action, stmt)
+
   throw new MigrationParseError(
     `ALTER TABLE action not supported: "${action.slice(0, 60)}".`,
     'UNSUPPORTED_STATEMENT',
-    `Supported: ADD COLUMN, RENAME COLUMN, ADD CONSTRAINT. For type changes or anything else, use backend_chat and describe the intent.`,
+    `Supported: ADD COLUMN, DROP COLUMN, RENAME COLUMN, ALTER COLUMN … TYPE / SET|DROP NOT NULL / SET|DROP DEFAULT, ` +
+    `ADD CONSTRAINT and DROP CONSTRAINT. For anything else, use backend_chat and describe the intent.`,
     stmt,
   )
+}
+
+/**
+ * Backenly's own columns, which a migration neither drops nor retypes: a
+ * table's API, its policies and the foreign keys into it stand on `id`, and
+ * the update trigger writes "updatedAt". Production's catalog decides the
+ * primary key itself (lib/mcp/apply-migration.ts, refusedDrop); these names
+ * are refused here already, before anything is asked of it.
+ */
+const KEPT_COLUMNS = new Set(['id', 'createdAt', 'updatedAt'])
+
+function assertNotKeptColumn(columnName: string, what: string, stmt: string): void {
+  if (!KEPT_COLUMNS.has(columnName)) return
+  throw new MigrationParseError(
+    `"${columnName}" is a column Backenly keeps on every table, so a migration does not ${what} it.`,
+    'RESERVED_COLUMN',
+    columnName === 'id'
+      ? `The table's API, its row policies and the foreign keys into it depend on "id". To remove the table, describe it via backend_chat.`
+      : `Backenly writes "${columnName}" on every row. Add a column of your own if you need another time.`,
+    stmt,
+  )
+}
+
+/**
+ * ALTER TABLE t DROP [COLUMN] [IF EXISTS] c [RESTRICT].
+ *
+ * Run as written: without CASCADE, so PostgreSQL refuses it while a view, a
+ * row policy or a foreign key from another table depends on the column, and
+ * says which. CASCADE is refused, since it would remove those too.
+ */
+function translateDropColumn(tableName: string, action: string, stmt: string): PlannedAction[] {
+  let rest = action.replace(/^drop\s+(?:column\s+)?/i, '').trim()
+  let ifExists = false
+  const ie = /^if\s+exists\s+/i.exec(rest)
+  if (ie) {
+    ifExists = true
+    rest = rest.slice(ie[0].length)
+  }
+  rest = withoutDropBehaviour(rest, 'DROP COLUMN', stmt)
+  const name = /^("(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$]*)$/.exec(rest)
+  if (!name) {
+    throw new MigrationParseError(
+      `Could not read the column to drop from "${action.slice(0, 60)}".`,
+      'BAD_STATEMENT',
+      `One column per action: ALTER TABLE ${tableName} DROP COLUMN <name>, DROP COLUMN <other>;`,
+      stmt,
+    )
+  }
+  const columnName = unquoteIdent(name[1])
+  assertNotKeptColumn(columnName, 'drop', stmt)
+  return [{
+    tool: 'drop_column',
+    args: { tableName, columnName, ...(ifExists ? { ifExists: true } : {}), asWritten: true },
+    source: stmt,
+  }]
+}
+
+/**
+ * ALTER [COLUMN] c [SET DATA] TYPE t [USING expr].
+ *
+ * The new type is the declared one, exactly (exactSqlType), never one chosen
+ * from the column's name. Without USING, PostgreSQL's own conversion applies,
+ * and it refuses one it does not have (text to integer), saying to add USING.
+ * A USING expression converts the column's own value with built-in functions
+ * and casts (validateConversionExpression); anything else is refused, since it
+ * runs over every row as the platform.
+ */
+function translateRetype(tableName: string, columnName: string, rest: string, stmt: string): PlannedAction[] {
+  assertNotKeptColumn(columnName, 'change the type of', stmt)
+  const parts = /^([\s\S]+?)(?:\s+using\s+([\s\S]+))?$/i.exec(rest)
+  const typeText = (parts?.[1] ?? '').trim()
+  const using = parts?.[2]?.trim()
+  if (/\bcollate\b/i.test(typeText)) {
+    throw new MigrationParseError(
+      `COLLATE is not supported on a type change.`,
+      'UNSUPPORTED_STATEMENT',
+      `Change the type without COLLATE: ALTER TABLE ${tableName} ALTER COLUMN ${columnName} TYPE ${typeText.replace(/\s+collate\b[\s\S]*$/i, '')};`,
+      stmt,
+    )
+  }
+  const newType = mapType(typeText, stmt)
+  const sqlType = exactSqlType(typeText)
+  if (!sqlType) {
+    throw new MigrationParseError(
+      `"${typeText}" cannot be a column's new type.`,
+      'UNSUPPORTED_TYPE',
+      /serial/i.test(typeText)
+        ? `serial and bigserial are a sequence and a default, not a type. Change the type to integer or bigint.`
+        : `Use one of: text, varchar(n), integer, bigint, smallint, numeric(p,s), real, double precision, boolean, date, ` +
+          `timestamp, timestamptz, time, uuid, json, jsonb, or an array of one of them.`,
+      stmt,
+    )
+  }
+  const args: Record<string, unknown> = { tableName, columnName, newType, sqlType, asWritten: true }
+  if (using !== undefined) {
+    const checked = validateConversionExpression(using, {
+      column: columnName,
+      castType: (t) => exactSqlType(t) !== undefined,
+    })
+    if (checked.kind !== 'ok') {
+      throw new MigrationParseError(
+        `USING ${using.length > 60 ? `${using.slice(0, 59)}…` : using} cannot run here: ${checked.reason}`,
+        'UNSAFE_EXPRESSION',
+        checked.hint,
+        stmt,
+      )
+    }
+    args.using = checked.expression
+  }
+  return [{ tool: 'alter_column_type', args, source: stmt }]
 }
 
 /**

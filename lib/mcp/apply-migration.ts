@@ -145,20 +145,22 @@ export async function existingTables(projectId: string, schema: string, names: s
 }
 
 /**
- * A drop Backenly refuses by rule, refused before anything runs so it is
- * answered like any other refused statement: nothing applied, nothing
- * recorded. The primary key is that rule: a Backenly table's managed `id` is
- * what its API, its policies and the foreign keys pointing at it stand on.
- * Production's catalog decides, on a branch too, since a migration names
- * production's objects and the merge replays it there. The executor refuses
- * it as well, for any other caller.
+ * A drop or retype Backenly refuses by rule, refused before anything runs so it
+ * is answered like any other refused statement: nothing applied, nothing
+ * recorded. The primary key is that rule, as a constraint or as a column: a
+ * Backenly table's managed `id` is what its API, its policies and the foreign
+ * keys pointing at it stand on. Production's catalog decides, on a branch too,
+ * since a migration names production's objects and the merge replays it there.
+ * The executors refuse it as well, for any other caller.
  */
 export async function refusedDrop(projectId: string, mainSchema: string, planned: PlannedAction[]): Promise<MigrationRefusal | null> {
   const drops = planned.filter((p) => p.tool === 'drop_constraint')
-  if (drops.length === 0) return null
+  const columnSteps = planned.filter((p) => p.tool === 'drop_column' || p.tool === 'alter_column_type')
+  if (drops.length === 0 && columnSteps.length === 0) return null
   const db = await workspaceRawClient(projectId)
-  const keys = await db.$queryRaw<Array<{ table_name: string; conname: string }>>`
-    SELECT t.relname AS table_name, c.conname
+  const keys = await db.$queryRaw<Array<{ table_name: string; conname: string; columns: string[] }>>`
+    SELECT t.relname AS table_name, c.conname,
+           ARRAY(SELECT a.attname::text FROM pg_attribute a WHERE a.attrelid = t.oid AND a.attnum = ANY(c.conkey)) AS columns
       FROM pg_constraint c
       JOIN pg_class t     ON t.oid = c.conrelid
       JOIN pg_namespace n ON n.oid = t.relnamespace
@@ -172,6 +174,22 @@ export async function refusedDrop(projectId: string, mainSchema: string, planned
         error:
           `"${step.source}" would drop ${table}'s primary key. Backenly does not: the table's API, its row policies ` +
           `and the foreign keys pointing at it depend on it. Nothing was applied.`,
+        statement: step.source,
+        applied: [],
+      }
+    }
+  }
+  for (const step of columnSteps) {
+    const table = String(step.args.tableName ?? '')
+    const column = String(step.args.columnName ?? '')
+    if (keys.some((k) => k.table_name === table && k.columns.includes(column))) {
+      return {
+        ok: false,
+        code: 'PRIMARY_KEY',
+        error:
+          `"${step.source}" would ${step.tool === 'drop_column' ? 'drop' : 'change the type of'} ${table}.${column}, ` +
+          `${table}'s primary key. Backenly does not: the table's API, its row policies and the foreign keys pointing ` +
+          `at it depend on it. Nothing was applied.`,
         statement: step.source,
         applied: [],
       }
@@ -316,19 +334,25 @@ export function migrationTitle(planned: PlannedAction[]): string {
 }
 
 /**
- * Steps an agent's migration may not run on production by itself. Dropping a
- * constraint, or an index that enforces uniqueness, loses no row but changes
- * which rows production accepts, so a person reviews it first. The migration
- * is held, whole and exactly as sent, in the project's approval queue, and
- * approving it runs it; on a protected production the agent makes it on a
- * branch instead, and the merge a person approves carries it over. A merge,
- * and a migration a person approved, run it.
+ * Steps an agent's migration may not run on production by itself, because a
+ * person reviews them first:
+ *   - dropping a constraint, or an index that enforces uniqueness, loses no row
+ *     but changes which rows production accepts;
+ *   - dropping a column removes what apps read and write, and its values leave
+ *     the table (kept with the change, so restoring brings them back);
+ *   - changing a column's type changes what production accepts and returns,
+ *     and PostgreSQL rewrites the table for most types while reads and writes
+ *     on it wait (the values before are kept with the change too).
+ * The migration is held, whole and exactly as sent, in the project's approval
+ * queue, and approving it runs it; on a protected production the agent makes
+ * it on a branch instead, and the merge a person approves carries it over. A
+ * merge, and a migration a person approved, run it.
  *
  * Dropping an ordinary index changes how fast queries run and never what data
  * is allowed, so it runs: online (DROP INDEX CONCURRENTLY, so no query waits on
  * it), as a governed change that restoring puts back.
  */
-const REVIEWED_BEFORE_PRODUCTION = new Set(['drop_index', 'drop_constraint'])
+const REVIEWED_BEFORE_PRODUCTION = new Set(['drop_index', 'drop_constraint', 'drop_column', 'alter_column_type'])
 
 /**
  * Whether the index a step drops is an ordinary one: not unique, not the
@@ -356,18 +380,29 @@ async function dropsOrdinaryIndex(projectId: string, schema: string, step: Plann
 
 /** Why a person reviews a step before production runs it, in the words the approval card shows. */
 function whyReviewed(step: PlannedAction): string {
-  return step.tool === 'drop_index'
-    ? 'It removes a unique index, which changes which rows production accepts.'
-    : 'It removes a constraint, which changes which rows production accepts.'
+  switch (step.tool) {
+    case 'drop_index':
+      return 'It removes a unique index, which changes which rows production accepts.'
+    case 'drop_column':
+      return 'It drops a column that apps may read or write. Its values are kept with the change, and restoring the state before it brings them back.'
+    case 'alter_column_type':
+      return 'It changes a column\'s type, which changes what production accepts and returns; PostgreSQL rewrites the table for ' +
+        'most type changes, and reads and writes on it wait until that finishes. The values before are kept with the change, ' +
+        'and restoring puts them back.'
+    default:
+      return 'It removes a constraint, which changes which rows production accepts.'
+  }
 }
 
 function needsReview(planned: PlannedAction[], held: PlannedAction[]): MigrationNeedsReview {
+  const first = held[0].source.split(' → ')[0]
+  const more = new Set(held.map((p) => p.source.split(' → ')[0])).size - 1
   return {
     ok: false,
     code: 'NEEDS_REVIEW',
     error:
-      `"${held[0].source}"${held.length > 1 ? ` and ${held.length - 1} more statement${held.length === 2 ? '' : 's'}` : ''} ` +
-      `change${held.length === 1 ? 's' : ''} which rows production accepts, so a person reviews the migration before it runs. Nothing was applied.`,
+      `A person reviews "${first}"${more > 0 ? ` and ${more} more statement${more === 1 ? '' : 's'}` : ''} ` +
+      `before ${more > 0 ? 'they run' : 'it runs'} on production. Nothing was applied.`,
     reasons: [...new Set(held.map(whyReviewed))],
     statements: [...new Set(planned.map((p) => p.source.split(' → ')[0]))],
     applied: [],
