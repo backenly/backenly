@@ -19,7 +19,11 @@ import {
 import {
   PRESENCE_WRITES_PER_ADDRESS_PER_MINUTE,
   PRESENCE_WRITES_PER_MINUTE,
+  SHARED_KEY_BURST_LIMIT,
+  SHARED_KEY_BURST_WINDOW_SECONDS,
   UNCAPPED,
+  clientWindowOf,
+  describeClientWindow,
   countClientRequest,
   countKeyedRequest,
   countPresenceAddress,
@@ -70,38 +74,42 @@ describe('a shared key', () => {
     expect(isSharedKey({ keyType: null, serviceRole: null })).toBe(false)
   })
 
-  it("gives each client the key's limit, so one client at its limit refuses no one else", async () => {
+  it(`gives each client ${SHARED_KEY_BURST_LIMIT} requests per ${SHARED_KEY_BURST_WINDOW_SECONDS} seconds, whatever the key's own limit, and one at its limit refuses no one else`, async () => {
     const own = ownWindow()
     const a = []
-    for (let i = 0; i < 4; i++) a.push(await countKeyedRequest(key(), '203.0.113.1', own.countKey))
-    expect(a.map((d) => d.allowed)).toEqual([true, true, true, false])
-    expect(a.map((d) => d.remaining)).toEqual([2, 1, 0, 0])
-    expect(a[3].retryAfter).toBeGreaterThan(3500)
+    for (let i = 0; i < SHARED_KEY_BURST_LIMIT + 1; i++) a.push(await countKeyedRequest(key(), '203.0.113.1', own.countKey))
+    // The key's own limit is 3; an address gets the burst brake, not 3 an hour.
+    expect(a.filter((d) => d.allowed)).toHaveLength(SHARED_KEY_BURST_LIMIT)
+    expect(a[SHARED_KEY_BURST_LIMIT]).toMatchObject({ allowed: false, remaining: 0 })
+    expect(a[SHARED_KEY_BURST_LIMIT].retryAfter).toBeLessThanOrEqual(SHARED_KEY_BURST_WINDOW_SECONDS)
 
-    expect(await countKeyedRequest(key(), '203.0.113.2', own.countKey)).toMatchObject({ allowed: true, remaining: 2 })
+    expect(await countKeyedRequest(key(), '203.0.113.2', own.countKey)).toMatchObject({ allowed: true, remaining: SHARED_KEY_BURST_LIMIT - 1 })
   })
 
   it("keeps the key's own count with no cap, for requests a client's window let through only", async () => {
     const own = ownWindow()
-    for (const client of ['203.0.113.1', '203.0.113.1', '203.0.113.1', '203.0.113.1', '203.0.113.2']) {
-      await countKeyedRequest(key(), client, own.countKey)
-    }
-    // Four let through (three and one), counted past the key's own limit of 3; the refused one not at all.
-    expect(own.calls).toEqual([UNCAPPED, UNCAPPED, UNCAPPED, UNCAPPED])
-    expect(own.count()).toBe(4)
+    for (let i = 0; i < SHARED_KEY_BURST_LIMIT + 1; i++) await countKeyedRequest(key(), '203.0.113.1', own.countKey)
+    await countKeyedRequest(key(), '203.0.113.2', own.countKey)
+    // Every request let through is counted past the key's own limit of 3; the refused one not at all.
+    expect(own.calls.every((limit) => limit === UNCAPPED)).toBe(true)
+    expect(own.count()).toBe(SHARED_KEY_BURST_LIMIT + 1)
   })
 
   it('counts a request with no known address in one window of its own', async () => {
-    for (let i = 0; i < 3; i++) await countClientRequest(key(), null)
+    for (let i = 0; i < SHARED_KEY_BURST_LIMIT; i++) await countClientRequest(key(), null)
     expect((await countClientRequest(key(), null)).allowed).toBe(false)
     expect((await countClientRequest(key(), '203.0.113.1')).allowed).toBe(true)
   })
 
-  it('starts new windows when the key is rotated or its window length changes, as its own count does', async () => {
-    for (let i = 0; i < 3; i++) await countClientRequest(key(), '203.0.113.1')
+  it('starts new windows when the key is rotated, as its own count does', async () => {
+    for (let i = 0; i < SHARED_KEY_BURST_LIMIT; i++) await countClientRequest(key(), '203.0.113.1')
     expect((await countClientRequest(key(), '203.0.113.1')).allowed).toBe(false)
     expect((await countClientRequest(key({ keyHash: 'b'.repeat(64) }), '203.0.113.1')).allowed).toBe(true)
-    expect((await countClientRequest(key({ rateLimitWindow: 60 }), '203.0.113.1')).allowed).toBe(true)
+  })
+
+  it('tells a client the window that decides', () => {
+    expect(describeClientWindow(clientWindowOf(key()))).toBe('300 requests per 10 second(s) from each address with this key')
+    expect(describeClientWindow(clientWindowOf(key({ shared: false })))).toBe('3 requests per 60 minute(s)')
   })
 })
 
@@ -141,7 +149,7 @@ describe('presence writes', () => {
   it("spend nothing of the key's request limit", async () => {
     for (let i = 0; i < 10; i++) await countPresenceWrite('key-1', 'alice')
     for (let i = 0; i < 10; i++) await countPresenceAddress('project-1', '203.0.113.1')
-    expect(await countClientRequest(key(), '203.0.113.1')).toMatchObject({ allowed: true, remaining: 2 })
+    expect(await countClientRequest(key(), '203.0.113.1')).toMatchObject({ allowed: true, remaining: SHARED_KEY_BURST_LIMIT - 1 })
   })
 
   it(`are counted per address and project before the key is looked up, ${PRESENCE_WRITES_PER_ADDRESS_PER_MINUTE} a minute`, async () => {

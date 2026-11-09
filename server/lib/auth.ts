@@ -19,7 +19,7 @@ import { countInRegion, regionalRateCounting, type RateKey } from '@/lib/auth-pr
 import { authorizingKeyByHash, authorizingProject } from '@/lib/auth-projection/read'
 import type { CloudRegionId } from '@/lib/regions'
 import { clientIpFromNodeRequest } from '@/lib/security/client-ip'
-import { countKeyedRequest, isSharedKey } from '@/lib/security/shared-key-rate'
+import { clientWindowOf, countKeyedRequest, describeClientWindow, isSharedKey } from '@/lib/security/shared-key-rate'
 import crypto from 'crypto'
 import { prisma } from '@/lib/db'
 import { verifyPassword } from '@/lib/auth/password'
@@ -431,9 +431,11 @@ export async function v1AuthMiddleware(req: Request, res: Response, next: NextFu
       )
     : null
 
-  // Always send rate limit headers so clients can self-throttle
+  // Always send rate limit headers so clients can self-throttle: the window
+  // that decides (a shared key's burst brake, any other key's own limit).
+  const window = clientWindowOf(rateKey)
   if (rl) {
-    res.setHeader('X-RateLimit-Limit', String(limit))
+    res.setHeader('X-RateLimit-Limit', String(window.limit))
     res.setHeader('X-RateLimit-Remaining', String(rl.remaining))
     res.setHeader('X-RateLimit-Reset', String(Math.floor(rl.resetAt.getTime() / 1000)))
   }
@@ -443,10 +445,9 @@ export async function v1AuthMiddleware(req: Request, res: Response, next: NextFu
     sendError(
       res,
       ErrorCodes.RATE_LIMIT_EXCEEDED,
-      `Rate limit exceeded. You may make ${limit} requests per ${Math.round((apiKeyRecord.rateLimitWindow ?? 3600) / 60)} minute(s)` +
-      `${rateKey.shared ? ' from each address with this key' : ''}. Try again in ${rl.retryAfter ?? 'a moment'} second(s).`,
+      `Rate limit exceeded. You may make ${describeClientWindow(window)}. Try again in ${rl.retryAfter ?? 'a moment'} second(s).`,
       429,
-      { retryAfter: rl.retryAfter, limit, resetAt: rl.resetAt.toISOString() }
+      { retryAfter: rl.retryAfter, limit: window.limit, resetAt: rl.resetAt.toISOString() }
     )
     return
   }

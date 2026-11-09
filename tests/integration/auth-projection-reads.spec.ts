@@ -38,6 +38,7 @@ import { deliverRegion } from '@/lib/auth-projection/deliver'
 import { AuthorizationUnavailableError, authorizingKeyByHash, authorizingProject } from '@/lib/auth-projection/read'
 import { getProjectServingState, invalidateProjectServingState } from '@/lib/projects/serving-state'
 import { hashApiKey, resolveEndUserFromToken } from '@/server/lib/end-user-identity'
+import { SHARED_KEY_BURST_LIMIT, countClientRequest } from '@/lib/security/shared-key-rate'
 import { NextRequest } from 'next/server'
 import { authenticateApiKey } from '@/lib/middleware/apiKeyAuth'
 import { v1ApiMiddleware } from '@/lib/api/v1/middleware'
@@ -327,9 +328,13 @@ describe("the runtime's own v1 routes (database, logs, presence, broadcast, real
       },
       select: { id: true },
     })
-    // A browser key is limited per address (lib/security/shared-key-rate.ts):
-    // one client, its address behind the proxies, through both runtimes.
+    // A browser key is limited per address, against bursts
+    // (lib/security/shared-key-rate.ts): one client, its address behind the
+    // proxies, through both runtimes. All but two of its window are spent
+    // first, as its earlier requests would have.
     const from = { 'x-forwarded-for': '203.0.113.9' }
+    const burstKey = { id: created.id, keyHash: hashApiKey(raw), rateLimit: 2, rateLimitWindow: 3600, shared: true }
+    for (let i = 0; i < SHARED_KEY_BURST_LIMIT - 2; i++) await countClientRequest(burstKey, '203.0.113.9')
     const broadcastFrom = () =>
       fetch(`${baseUrl}/api/v1/${projectId}/broadcast`, {
         method: 'POST',
@@ -345,7 +350,7 @@ describe("the runtime's own v1 routes (database, logs, presence, broadcast, real
       const viaNext = await nextFrom()
       expect(viaNext).toMatchObject({ authenticated: true })
       expect(viaNext.rateLimited).toBeUndefined()
-      // Two counted, of two: the runtime route is refused now, as the Next route is.
+      // The address's window is spent: the runtime route is refused now, as the Next route is.
       const refused = await broadcastFrom()
       expect(refused.status).toBe(429)
       expect(refused.headers.get('retry-after')).not.toBeNull()

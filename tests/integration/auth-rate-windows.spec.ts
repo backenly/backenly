@@ -34,6 +34,7 @@ import { countInRegion, mirrorRateWindows, pruneRateWindows } from '@/lib/auth-p
 import { enforceKeyRateLimit } from '@/server/lib/auth'
 import { authenticateApiKey } from '@/lib/middleware/apiKeyAuth'
 import { hashApiKey } from '@/server/lib/end-user-identity'
+import { SHARED_KEY_BURST_LIMIT, countClientRequest } from '@/lib/security/shared-key-rate'
 
 jest.setTimeout(120_000)
 
@@ -190,6 +191,9 @@ describe('one counter for the key', () => {
     const { raw, key } = await makeKey(3)
     await deliverRegion(REGION)
     const from = '203.0.113.9'
+    // The address's burst window, all but three of it spent as its earlier
+    // requests would have; the key's own limit of 3 decides nothing.
+    for (let i = 0; i < SHARED_KEY_BURST_LIMIT - 3; i++) await countClientRequest({ ...key, shared: true }, from)
     const nextRequest = () =>
       new NextRequest(`http://localhost/api/v1/${projectId}/storage/files`, { headers: { 'x-api-key': raw, 'x-forwarded-for': from } })
 

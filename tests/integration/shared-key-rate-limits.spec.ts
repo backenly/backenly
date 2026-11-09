@@ -36,7 +36,12 @@ import app from '@/server/app'
 import { prisma } from '@/lib/db'
 import { GET as nextList, POST as nextJoin, DELETE as nextLeave } from '@/app/api/v1/[projectId]/presence/route'
 import { closeRateLimitBackend } from '@/lib/security/rate-limit-backend'
-import { PRESENCE_WRITES_PER_ADDRESS_PER_MINUTE, PRESENCE_WRITES_PER_MINUTE } from '@/lib/security/shared-key-rate'
+import {
+  PRESENCE_WRITES_PER_ADDRESS_PER_MINUTE,
+  PRESENCE_WRITES_PER_MINUTE,
+  SHARED_KEY_BURST_LIMIT,
+  countClientRequest,
+} from '@/lib/security/shared-key-rate'
 import { flushRecordedRequests } from '@/lib/traffic/request-recorder'
 import { hashApiKey } from '@/server/lib/end-user-identity'
 
@@ -96,6 +101,17 @@ async function viaNext(call: Call, method: 'GET' | 'POST' | 'DELETE', body?: unk
   return route(request, { params: Promise.resolve({ projectId }) })
 }
 
+/**
+ * Spend all but `left` of an address's burst window with this key, as its
+ * earlier requests would have: the same window, in the store this process
+ * shares with the runtime it serves, so a test does not race the window with
+ * hundreds of requests.
+ */
+async function spend(raw: string, id: string, from: string, left: number): Promise<void> {
+  const key = { id, keyHash: hashApiKey(raw), rateLimit: 1000, rateLimitWindow: 3600, shared: true }
+  for (let i = 0; i < SHARED_KEY_BURST_LIMIT - left; i++) await countClientRequest(key, from)
+}
+
 const list = (call: Call) => viaRuntime(call, '/presence')
 const join = (call: Call, userId: string) =>
   viaRuntime(call, '/presence', { method: 'POST', body: JSON.stringify({ userId, metadata: { name: userId } }) })
@@ -136,30 +152,33 @@ afterAll(async () => {
 }, 120_000)
 
 describe('a key every user of an app sends', () => {
-  it("gives each address the key's limit through the runtime: one at its limit leaves another untouched", async () => {
-    const { raw } = await makeKey(3)
+  it(`gives each address ${SHARED_KEY_BURST_LIMIT} requests per 10 seconds through the runtime, whatever the key's own limit: one at it leaves another untouched`, async () => {
+    // The key's own limit is 3 an hour; an address is held to the burst brake.
+    const { raw, id } = await makeKey(3)
     const a = { key: raw, from: newAddress() }
     const b = { key: raw, from: newAddress() }
 
-    for (let i = 0; i < 3; i++) expect((await list(a)).status).toBe(200)
+    await spend(raw, id, a.from, 2)
+    for (let i = 0; i < 2; i++) expect((await list(a)).status).toBe(200)
     const refused = await list(a)
     expect(refused.status).toBe(429)
-    expect(refused.headers.get('retry-after')).not.toBeNull()
+    expect(Number(refused.headers.get('retry-after'))).toBeLessThanOrEqual(10)
     expect(await refused.json()).toMatchObject({
-      error: { code: 'RATE_LIMIT_EXCEEDED', message: expect.stringContaining('requests per 60 minute(s) from each address with this key') },
+      error: { code: 'RATE_LIMIT_EXCEEDED', message: expect.stringContaining('300 requests per 10 second(s) from each address with this key') },
     })
 
     const other = await list(b)
     expect(other.status).toBe(200)
-    expect(other.headers.get('x-ratelimit-limit')).toBe('3')
-    expect(other.headers.get('x-ratelimit-remaining')).toBe('2')
+    expect(other.headers.get('x-ratelimit-limit')).toBe(String(SHARED_KEY_BURST_LIMIT))
+    expect(other.headers.get('x-ratelimit-remaining')).toBe(String(SHARED_KEY_BURST_LIMIT - 1))
   })
 
   it('is counted per address on /db and /api/v2 too, one window across both doors', async () => {
-    const { raw } = await makeKey(2)
+    const { raw, id } = await makeKey(2)
     const a = { key: raw, from: newAddress() }
     const b = { key: raw, from: newAddress() }
 
+    await spend(raw, id, a.from, 2)
     expect((await viaRuntime(a, '/db/notes')).status).not.toBe(429)
     expect((await viaRuntime(a, `/api/v2/${projectId}/notes`)).status).not.toBe(429)
     expect((await viaRuntime(a, '/db/notes')).status).toBe(429)
@@ -169,11 +188,12 @@ describe('a key every user of an app sends', () => {
     expect((await viaRuntime(b, `/api/v2/${projectId}/notes`)).status).not.toBe(429)
   })
 
-  it('gives each address the key\'s limit through the Next routes, one window per address with the runtime', async () => {
-    const { raw } = await makeKey(3)
+  it('holds each address to the burst brake through the Next routes, one window per address with the runtime', async () => {
+    const { raw, id } = await makeKey(3)
     const a = { key: raw, from: newAddress() }
     const b = { key: raw, from: newAddress() }
 
+    await spend(raw, id, a.from, 3)
     expect((await viaNext(a, 'GET')).status).toBe(200)
     expect((await list(a)).status).toBe(200)
     expect((await viaNext(a, 'GET')).status).toBe(200)
@@ -183,14 +203,15 @@ describe('a key every user of an app sends', () => {
     expect((await viaNext(b, 'GET')).status).toBe(200)
   })
 
-  it("is still counted on the key, past its limit, with its last use, for the console", async () => {
+  it("is still counted on the key, past its own limit, with its last use, for the console", async () => {
     const { raw, id } = await makeKey(2)
     for (const from of [newAddress(), newAddress(), newAddress()]) {
       for (let i = 0; i < 3; i++) await list({ key: raw, from })
     }
-    // Two let through for each of three addresses; the third request of each was refused and is not counted.
+    // All nine let through (each address is far from its burst brake) and
+    // counted on the key, past its own limit of 2, which decides nothing here.
     const row = await keyRow(id)
-    expect(row.requestCount).toBe(6)
+    expect(row.requestCount).toBe(9)
     expect(Math.abs(row.lastUsed!.getTime() - Date.now())).toBeLessThan(60_000)
   })
 })
@@ -220,7 +241,7 @@ describe('presence writes', () => {
     // Eighteen presence writes, and the address's three requests are all still there.
     const read = await list(signedIn)
     expect(read.status).toBe(200)
-    expect(read.headers.get('x-ratelimit-remaining')).toBe('2')
+    expect(read.headers.get('x-ratelimit-remaining')).toBe(String(SHARED_KEY_BURST_LIMIT - 1))
   })
 
   it(`are refused after ${PRESENCE_WRITES_PER_MINUTE} a minute for one user, on both runtimes, and another user is untouched`, async () => {

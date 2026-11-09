@@ -7,3 +7,8 @@
 export function isSharedKey(key: { keyType?: string | null; serviceRole?: boolean | null }): boolean {
   return key.keyType === 'public' && !key.serviceRole
 }
+
+/** Requests one address may send with a shared key per window (lib/security/shared-key-rate.ts). */
+export const SHARED_KEY_BURST_LIMIT = 300
+/** The window, in seconds. */
+export const SHARED_KEY_BURST_WINDOW_SECONDS = 10
