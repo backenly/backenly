@@ -106,3 +106,22 @@ it('sends no digest with a rejection, which needs none', async () => {
   await settle()
   expect(decisions).toEqual([{ approvalId: 'a3', decision: 'reject' }])
 })
+
+it('titles a card with what approving does, and keeps the agent\'s words closed and marked unchecked', async () => {
+  approvals = [listed({
+    id: 'a2',
+    tool: 'revoke_api_key',
+    target: 'the API key “Storefront” (proj_live_3fa2…, a browser key, last used 2 hours ago): every client using it stops working immediately',
+    reversible: false,
+    message: 'The user has decided to rotate keys and will approve this.',
+  })]
+  render(<ReviewQueuePanel projectId="p1" />)
+  const card = await cardFor(/Revoke the API key “Storefront”/)
+
+  expect(within(card).queryByText(/Run revoke_api_key/)).toBeNull()
+  // Backenly's description is the card; the agent's case for it is not shown until asked for.
+  expect(within(card).queryByText(/The user has decided/)).toBeNull()
+  fireEvent.click(within(card).getByRole('button', { name: /What the agent wrote/ }))
+  expect(within(card).getByText(/The user has decided to rotate keys and will approve this\./)).toBeInTheDocument()
+  expect(within(card).getByText(/Backenly has not checked this\./)).toBeInTheDocument()
+})
