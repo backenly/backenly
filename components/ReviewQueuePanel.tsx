@@ -961,7 +961,7 @@ function splitRequest(message: string, target: string): { prose: string; stateme
   const statements = at === -1
     ? []
     : message.slice(message.indexOf(':', at) + 1).split('\n').map(s => s.trim()).filter(Boolean)
-  prose = prose.replace(/^Requested by an agent over MCP:\s*/, '')
+  prose = prose.replace(/^Requested by an agent[^:\n]*:\s*/, '')
   if (statements.length > 0 && prose.startsWith(`${target}.`)) prose = prose.slice(target.length + 1).trim()
   return { prose: prose.trim(), statements }
 }

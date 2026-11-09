@@ -1094,36 +1094,26 @@ async function parkBranchMerge(auth: McpGuardAuth, branchId: string, startedAt: 
     recordMcpCall({ ...auth, endpoint: ENDPOINT, startedAt }, { statusCode: status, tool: callLabel, error: String(body.code) })
     return NextResponse.json({ ok: false, ...body }, { status })
   }
-  if (!branchId) {
-    return refuse(400, { code: 'BAD_BODY', error: 'branch { action: "merge" } needs a branchId.', hint: 'branch { "action": "list" } shows the ids.' })
+  // The card's statements, what they do to production's rows and what Backenly
+  // adds, and the pinned list approval replays (lib/branches/merge-request.ts).
+  const { mergeRequest } = await import('@/lib/branches/merge-request')
+  const m = await mergeRequest(auth.projectId, branchId, 'Requested by an agent over MCP')
+  if (m.kind === 'refused') {
+    return refuse(m.status, { code: m.code, error: m.error, ...(m.hint ? { hint: m.hint } : {}) })
   }
-  const { diffBranch } = await import('@/lib/branches/engine')
-  const diff = await diffBranch(auth.projectId, branchId).catch((e: unknown) => ({ ok: false as const, error: e instanceof Error ? e.message : String(e) }))
-  if (!diff.ok) return refuse(404, { code: 'BRANCH_NOT_FOUND', error: (diff as { error: string }).error })
-  const d = diff as Extract<typeof diff, { ok: true }>
-  if (d.conflicts.length > 0) {
-    return refuse(409, {
-      code: 'MERGE_CONFLICT',
-      error:
-        `Main has changed ${d.conflicts.join(', ')} since branch "${d.branch}" was cut, and its migrations touch ` +
-        `${d.conflicts.length === 1 ? 'it' : 'them'}. Nothing was requested.`,
-      hint: 'Create a new branch from main as it is now and apply the change there.',
-    })
-  }
-
-  const statements = d.migrations.length ? d.migrations.map((s) => `  ${s}`).join('\n') : '  (no schema changes: the merge only closes the branch)'
-  const target = `Merge preview branch "${d.branch}" into production`
+  const target = m.target
   try {
     const { createApprovalRequest } = await import('@/lib/mcp/approvals')
     const row = await createApprovalRequest({
       projectId: auth.projectId,
       userId: auth.userId,
       apiKeyId: auth.keyId,
-      message: `Requested by an agent over MCP: ${target}. These statements will be applied to production, in order:\n${statements}`,
-      danger: { tool: 'merge_branch', target, rowCount: null, reversible: false },
+      message: m.message,
+      // One governed change: restoring it puts production back as it was before the merge.
+      danger: { tool: 'merge_branch', target, rowCount: null, reversible: true },
       // The replay is held to exactly these statements (MERGE_STALE otherwise):
       // the card's text and the executed DDL are the same list by construction.
-      toolArgs: { branchId, approvedMigrations: d.migrations },
+      toolArgs: m.toolArgs,
     })
     recordMcpCall({ ...auth, endpoint: ENDPOINT, startedAt }, { statusCode: 200, tool: callLabel, mutation: false, summary: `awaiting approval ${row.id}` })
     return NextResponse.json({
@@ -1131,8 +1121,8 @@ async function parkBranchMerge(auth: McpGuardAuth, branchId: string, startedAt: 
       status: 'awaiting_approval',
       summary:
         `${target} needs a human's approval and is waiting on the project's Autonomy page. ` +
-        `${d.migrations.length} statement(s) will reach production when it is approved. Nothing has changed yet.`,
-      data: { branch: d.branch, migrations: d.migrations },
+        `${m.migrations.length} statement(s) will reach production when it is approved. Nothing has changed yet.`,
+      data: { branch: m.branch, migrations: m.migrations },
       approval: {
         id: row.id,
         status: 'pending',

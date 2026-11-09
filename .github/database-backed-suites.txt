@@ -1483,6 +1483,13 @@ tests/integration/schema-freshness.spec.ts
 # open. Real branch schemas, replay and approvals.
 tests/integration/branch-merge-governed.spec.ts
 
+# A merge card says what the merge does to production's rows (counted) and
+# what Backenly adds to each new table, read from the branch, and offers a
+# restore point; backend_chat's merge is parked the same way with its
+# statements pinned, and a branch that cannot merge is refused, not queued.
+# Real provisioned project, branch, migrations and approval rows.
+tests/integration/merge-cards-say-what-lands.spec.ts
+
 # A restore point that cannot bring everything back says so: kept data lost
 # outside Backenly makes a restore need a person who approves exactly what comes
 # back empty, never a lossless one; retention purges a vault only past the
