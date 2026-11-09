@@ -306,16 +306,44 @@ export function migrationTitle(planned: PlannedAction[]): string {
  * human approved does not set it.
  */
 /**
- * Steps an agent's migration may not run on production directly. Dropping an
- * index or a constraint loses no row, but it is a change a person reviews
- * before production has it, as Backenly's own index drops are: the agent makes
+ * Steps an agent's migration may not run on production directly. Dropping a
+ * constraint, or an index that enforces uniqueness, loses no row but changes
+ * which rows production accepts, so a person reviews it first: the agent makes
  * it on a branch, and the merge, which a person approves, carries it over. A
  * person's own migration, and a merge replaying the branch, run it.
+ *
+ * Dropping an ordinary index changes how fast queries run and never what data
+ * is allowed, so it runs: online (DROP INDEX CONCURRENTLY, so no query waits on
+ * it), as a governed change that restoring puts back.
  */
 const REVIEWED_BEFORE_PRODUCTION = new Set(['drop_index', 'drop_constraint'])
 
+/**
+ * Whether the index a step drops is an ordinary one: not unique, not the
+ * primary key, behind no constraint. An index that is not there is left to the
+ * executor, which says so (or, with IF EXISTS, treats it as done).
+ */
+async function dropsOrdinaryIndex(projectId: string, schema: string, step: PlannedAction): Promise<boolean> {
+  if (step.tool !== 'drop_index') return false
+  const name = String(step.args.indexName ?? '')
+  if (!name) return false
+  const { workspaceRawClient } = await import('@/lib/data-plane/regional')
+  const db = await workspaceRawClient(projectId)
+  const rows = await db.$queryRawUnsafe<Array<{ ordinary: boolean }>>(
+    `SELECT NOT ix.indisunique AND NOT ix.indisprimary
+            AND NOT EXISTS (SELECT 1 FROM pg_constraint c WHERE c.conindid = i.oid) AS ordinary
+       FROM pg_class i
+       JOIN pg_index ix ON ix.indexrelid = i.oid
+       JOIN pg_namespace n ON n.oid = i.relnamespace
+      WHERE n.nspname = $1 AND i.relname = $2`,
+    schema,
+    name,
+  )
+  return rows.length === 0 || rows[0].ordinary === true
+}
+
 function reviewedBeforeProduction(step: PlannedAction): MigrationRefusal {
-  const what = step.tool === 'drop_index' ? 'an index' : 'a constraint'
+  const what = step.tool === 'drop_index' ? 'a unique index' : 'a constraint'
   return {
     ok: false,
     code: 'DROP_NEEDS_REVIEW',
@@ -338,9 +366,14 @@ export async function applyMigrationToMain(
   if (!plan.ok) return plan as MigrationRefusal
   const planned = (plan as { ok: true; planned: PlannedAction[] }).planned
   if (opts.agentSurface === true) {
-    const drop = planned.find((p) => REVIEWED_BEFORE_PRODUCTION.has(p.tool))
-    if (drop) return reviewedBeforeProduction(drop)
+    for (const step of planned) {
+      if (!REVIEWED_BEFORE_PRODUCTION.has(step.tool)) continue
+      if (await dropsOrdinaryIndex(projectId, opts.workspaceSchema, step)) continue
+      return reviewedBeforeProduction(step)
+    }
   }
+  // Production is live: every index it loses goes CONCURRENTLY, whoever asked.
+  for (const step of planned) if (step.tool === 'drop_index') step.args = { ...step.args, online: true }
   const existing = await existingTables(projectId, opts.workspaceSchema, tablesNamed(planned))
   const checked = checkPlan(planned, existing)
   if (!checked.ok) return checked as MigrationRefusal

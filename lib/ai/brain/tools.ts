@@ -1852,7 +1852,7 @@ export const TOOL_TO_ACTION: Record<string, (args: any) => AIAction> = {
   drop_column: (a) => ({ action: 'DROP_COLUMN', params: { tableName: a.tableName, columnName: a.columnName } }),
   drop_index: (a) => ({
     action: 'DROP_INDEX',
-    params: { indexName: a.indexName, ifExists: a.ifExists === true, dropUniqueness: a.dropUniqueness === true },
+    params: { indexName: a.indexName, ifExists: a.ifExists === true, dropUniqueness: a.dropUniqueness === true, online: a.online === true },
   }),
   drop_constraint: (a) => ({
     action: 'DROP_CONSTRAINT',

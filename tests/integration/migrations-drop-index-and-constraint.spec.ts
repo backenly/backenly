@@ -14,9 +14,10 @@
  *  1. On a branch, DROP INDEX (unique ones included) and ALTER TABLE … DROP
  *     CONSTRAINT run, and production is untouched.
  *  2. The merge a person approves carries them to production.
- *  3. With protection off, an agent's drop on production is refused with the
- *     branch route; a person's own migration runs it as a governed change that
- *     restoring puts back.
+ *  3. With protection off, an agent's drop of an ordinary index runs on
+ *     production, online, as a governed change that restoring puts back; its
+ *     drop of a unique index or a constraint is refused with the branch
+ *     route; a person's own migration runs it.
  *  4. The primary key is never dropped; a unique index named as a constraint
  *     says to use DROP INDEX; a missing index fails unless IF EXISTS.
  */
@@ -190,12 +191,38 @@ describe('on an unprotected production', () => {
     await migrated('CREATE INDEX orders_total_idx ON orders (total)')
   }, 120_000)
 
-  it('refuses an agent\'s drop with the branch route, changing nothing', async () => {
+  it('runs an agent\'s drop of an ordinary index, online, as a change restoring puts back', async () => {
+    const before = await prisma.backendChange.count({ where: { projectId } })
     const r = await call('apply_migration', { sql: 'DROP INDEX orders_total_idx' })
+    expect(r.body).toMatchObject({ ok: true })
+    expect(await indexes(mainSchema)).not.toEqual(expect.arrayContaining(['orders_total_idx']))
+
+    const change = await prisma.backendChange.findFirst({ where: { projectId }, orderBy: { seq: 'desc' }, select: { id: true, statements: true } })
+    expect(await prisma.backendChange.count({ where: { projectId } })).toBe(before + 1)
+    expect(JSON.stringify(change!.statements)).toContain('DROP INDEX CONCURRENTLY')
+
+    const preview = (await previewRecovery(projectId, change!.id))!
+    const restored = await recoverChange(projectId, change!.id, { mode: 'manual', actorUserId: ownerId, acknowledged: preview.acknowledgement ?? null })
+    expect(restored).toMatchObject({ ok: true, status: 'restored' })
+    expect(await indexes(mainSchema)).toEqual(expect.arrayContaining(['orders_total_idx']))
+  }, 120_000)
+
+  it('refuses an agent\'s drop of a unique index with the branch route, changing nothing', async () => {
+    await migrated('CREATE UNIQUE INDEX orders_contact_once ON orders (contact)')
+    const r = await call('apply_migration', { sql: 'DROP INDEX orders_contact_once' })
     expect(r.status).toBe(400)
     expect(r.body).toMatchObject({ ok: false, code: 'DROP_NEEDS_REVIEW', applied: [] })
+    expect(r.body.error).toMatch(/removes a unique index from production/)
     expect(r.body.hint).toMatch(/branch \{ action: "merge", branchId \}/)
-    expect(await indexes(mainSchema)).toEqual(expect.arrayContaining(['orders_total_idx']))
+    expect(await indexes(mainSchema)).toEqual(expect.arrayContaining(['orders_contact_once']))
+    await migrated('DROP INDEX orders_contact_once')
+  }, 60_000)
+
+  it('refuses an agent\'s constraint drop with the branch route, changing nothing', async () => {
+    const r = await call('apply_migration', { sql: 'ALTER TABLE orders DROP CONSTRAINT total_positive' })
+    expect(r.status).toBe(400)
+    expect(r.body).toMatchObject({ ok: false, code: 'DROP_NEEDS_REVIEW', applied: [] })
+    expect(await constraints(mainSchema)).toContain('total_positive')
   }, 60_000)
 
   it('runs a person\'s drop as a governed change that restoring puts back', async () => {
