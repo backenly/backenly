@@ -929,6 +929,13 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
         description: 'What fires the function. Use an event type for automatic behaviour; http for a directly-callable endpoint.',
       },
       table: { type: 'string', description: 'Required for on_insert / on_update / on_delete — the table whose row events fire the function.' },
+      columns: {
+        type: 'array',
+        items: { type: 'string' },
+        description:
+          'For on_update only: run only when an update changes one of these columns, e.g. ["status"]. Updates that leave them ' +
+          'alone do not run it or count against the plan. Left out, every update runs it.',
+      },
       method: {
         type: 'string',
         enum: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],

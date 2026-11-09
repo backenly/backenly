@@ -53,6 +53,12 @@ tests/integration/function-create-truthful.spec.ts
 tests/integration/function-selfheal-consent.spec.ts
 tests/integration/function-egress-guard.spec.ts
 tests/integration/function-row-events-data-plane.spec.ts
+
+# An on_update function deployed with columns runs only when an update changed
+# one of them (an unknown old row runs it), columns is refused off on_update
+# and for a column the table lacks, and a redeploy without columns is restored
+# with them through the change history.
+tests/integration/row-functions-watch-columns.spec.ts
 tests/integration/project-route-response-shape.spec.ts
 tests/integration/realtime-sse-slot-release.spec.ts
 
