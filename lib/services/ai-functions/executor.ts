@@ -1025,11 +1025,10 @@ export async function fireAiFunctions(
     const triggerType = `on_db_${event.type}`
     const functions = await prisma.aiFunction.findMany({
       where: { projectId, status: RUNNABLE_FUNCTION_STATUS_FILTER, triggerType, triggerTable: event.table },
-      select: { id: true, status: true },
+      select: { id: true },
     })
-    const runnable = functions.filter(fn => !isFunctionSwitchedOff(fn.status))
-    if (runnable.length === 0) return
-    await Promise.allSettled(runnable.map(fn => executeAiFunction(fn.id, projectId, event)))
+    if (functions.length === 0) return
+    await Promise.allSettled(functions.map(fn => executeAiFunction(fn.id, projectId, event)))
   } catch (err: any) {
     console.warn('[AiFunctions] fireAiFunctions failed (non-fatal):', err?.message)
   }
@@ -1069,12 +1068,11 @@ export async function fireAiFunctionsOnSignup(
 
     const functions = await prisma.aiFunction.findMany({
       where: { projectId, status: RUNNABLE_FUNCTION_STATUS_FILTER, triggerType: 'on_signup' },
-      select: { id: true, status: true },
+      select: { id: true },
     })
-    const runnable = functions.filter(fn => !isFunctionSwitchedOff(fn.status))
-    if (runnable.length === 0) return
+    if (functions.length === 0) return
     const event: FunctionEvent = { type: 'signup', data: user }
-    await Promise.allSettled(runnable.map(fn => executeAiFunction(fn.id, projectId, event)))
+    await Promise.allSettled(functions.map(fn => executeAiFunction(fn.id, projectId, event)))
   } catch (err: any) {
     console.warn('[AiFunctions] fireAiFunctionsOnSignup failed (non-fatal):', err?.message)
   }

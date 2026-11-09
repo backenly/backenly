@@ -24,6 +24,6 @@ export function isFunctionSwitchedOff(status: string | null | undefined): boolea
  * Excludes deliberate OFF states ('inactive', 'disabled', 'deleted') while keeping
  * 'active' and 'error' (whose last run failed but remains deployed).
  */
-export const RUNNABLE_FUNCTION_STATUS_FILTER = {
-  notIn: [...FUNCTION_OFF_STATUSES] as string[],
+export const RUNNABLE_FUNCTION_STATUS_FILTER: { notIn: string[] } = {
+  notIn: [...FUNCTION_OFF_STATUSES],
 }

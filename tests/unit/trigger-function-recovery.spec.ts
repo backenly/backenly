@@ -45,10 +45,16 @@ describe('Trigger dispatchers pick up errored functions for self-recovery', () =
   })
 
   it('fireAiFunctions dispatches to a function whose previous run errored', async () => {
-    const findMany = jest.fn().mockResolvedValue([
-      { id: 'fn-errored', status: 'error' },
-      { id: 'fn-disabled', status: 'inactive' },
-    ])
+    const findMany = jest.fn().mockImplementation(async ({ where }) => {
+      const candidates = [
+        { id: 'fn-errored', status: 'error' },
+        { id: 'fn-disabled', status: 'inactive' },
+      ]
+      const excluded = where.status?.notIn || []
+      return candidates
+        .filter((c) => !excluded.includes(c.status))
+        .map((c) => ({ id: c.id }))
+    })
     const findFirst = jest.fn().mockResolvedValue(null)
     jest.doMock('@/lib/db', () => ({
       prisma: {
@@ -68,11 +74,11 @@ describe('Trigger dispatchers pick up errored functions for self-recovery', () =
         triggerType: 'on_db_insert',
         triggerTable: 'orders',
       },
-      select: { id: true, status: true },
+      select: { id: true },
     })
 
     // The errored function proceeds to execution (attempting findFirst by its id);
-    // the disabled function is filtered out before execution.
+    // the disabled function was excluded by the status filter in findMany.
     expect(findFirst).toHaveBeenCalledWith({
       where: { id: 'fn-errored', projectId: 'proj-1' },
     })
@@ -82,10 +88,16 @@ describe('Trigger dispatchers pick up errored functions for self-recovery', () =
   })
 
   it('fireAiFunctionsOnSignup dispatches to a function whose previous run errored', async () => {
-    const findMany = jest.fn().mockResolvedValue([
-      { id: 'fn-welcome-email', status: 'error' },
-      { id: 'fn-deleted', status: 'deleted' },
-    ])
+    const findMany = jest.fn().mockImplementation(async ({ where }) => {
+      const candidates = [
+        { id: 'fn-welcome-email', status: 'error' },
+        { id: 'fn-deleted', status: 'deleted' },
+      ]
+      const excluded = where.status?.notIn || []
+      return candidates
+        .filter((c) => !excluded.includes(c.status))
+        .map((c) => ({ id: c.id }))
+    })
     const findFirst = jest.fn().mockResolvedValue(null)
     jest.doMock('@/lib/db', () => ({
       prisma: {
@@ -108,7 +120,7 @@ describe('Trigger dispatchers pick up errored functions for self-recovery', () =
         status: RUNNABLE_FUNCTION_STATUS_FILTER,
         triggerType: 'on_signup',
       },
-      select: { id: true, status: true },
+      select: { id: true },
     })
 
     expect(findFirst).toHaveBeenCalledWith({
@@ -120,29 +132,40 @@ describe('Trigger dispatchers pick up errored functions for self-recovery', () =
   })
 
   it('dueCronJobs includes errored cron functions and excludes switched-off ones', async () => {
-    const findMany = jest.fn().mockResolvedValue([
-      {
-        id: 'cron-healthy',
-        name: 'daily-report',
-        projectId: 'proj-1',
-        triggerTable: '0 9 * * *',
-        status: 'active',
-      },
-      {
-        id: 'cron-recovering',
-        name: 'sync-inventory',
-        projectId: 'proj-1',
-        triggerTable: '0 9 * * *',
-        status: 'error',
-      },
-      {
-        id: 'cron-off',
-        name: 'disabled-cleanup',
-        projectId: 'proj-1',
-        triggerTable: '0 9 * * *',
-        status: 'inactive',
-      },
-    ])
+    const findMany = jest.fn().mockImplementation(async ({ where }) => {
+      const candidates = [
+        {
+          id: 'cron-healthy',
+          name: 'daily-report',
+          projectId: 'proj-1',
+          triggerTable: '0 9 * * *',
+          status: 'active',
+        },
+        {
+          id: 'cron-recovering',
+          name: 'sync-inventory',
+          projectId: 'proj-1',
+          triggerTable: '0 9 * * *',
+          status: 'error',
+        },
+        {
+          id: 'cron-off',
+          name: 'disabled-cleanup',
+          projectId: 'proj-1',
+          triggerTable: '0 9 * * *',
+          status: 'inactive',
+        },
+      ]
+      const excluded = where.status?.notIn || []
+      return candidates
+        .filter((c) => !excluded.includes(c.status))
+        .map((c) => ({
+          id: c.id,
+          name: c.name,
+          projectId: c.projectId,
+          triggerTable: c.triggerTable,
+        }))
+    })
     jest.doMock('@/lib/db/prisma', () => ({ prisma: { aiFunction: { findMany } } }))
     jest.doMock('@/lib/data-plane/serving', () => ({
       partitionServed: async (items: Array<{ id: string; job: any }>) => ({
@@ -162,7 +185,7 @@ describe('Trigger dispatchers pick up errored functions for self-recovery', () =
         triggerType: 'cron',
         project: { pausedAt: null, deletedAt: null },
       },
-      select: { id: true, name: true, projectId: true, triggerTable: true, status: true },
+      select: { id: true, name: true, projectId: true, triggerTable: true },
     })
 
     const dueIds = result.due.map((j) => j.id)
@@ -175,13 +198,12 @@ describe('Trigger dispatchers pick up errored functions for self-recovery', () =
     // Represents a function whose state evolves across two trigger events
     let currentStatus = 'active'
     let currentLastError: string | null = null
-    let executions = 0
 
     const findMany = jest.fn().mockImplementation(async ({ where }) => {
       // Simulate database filter: status NOT IN ('inactive', 'disabled', 'deleted')
       const isOff = (where.status?.notIn || []).includes(currentStatus)
       if (isOff) return []
-      return [{ id: 'fn-onboarding', status: currentStatus }]
+      return [{ id: 'fn-onboarding' }]
     })
 
     const findFirst = jest.fn().mockImplementation(async () => ({
@@ -233,7 +255,7 @@ describe('Trigger dispatchers pick up errored functions for self-recovery', () =
         status: RUNNABLE_FUNCTION_STATUS_FILTER,
         triggerType: 'on_signup',
       },
-      select: { id: true, status: true },
+      select: { id: true },
     })
 
     // The function was found and findFirst was queried to execute it
