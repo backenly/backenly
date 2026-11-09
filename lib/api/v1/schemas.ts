@@ -40,6 +40,34 @@ export const querySchema = z.object({
   cursorColumn: z.string().optional(),
 })
 
+/**
+ * Every field a database query request may carry, on either server (this
+ * route and the runtime's server/routes/database.ts). The two implement
+ * different subsets, so a field one of them ignores is still part of the API.
+ */
+export const QUERY_FIELDS = ['table', 'select', 'where', 'orderBy', 'limit', 'offset', 'page', 'cursor', 'cursorColumn', 'include'] as const
+
+/**
+ * The fields of a query request that are not part of the query API at all.
+ *
+ * Unknown fields used to be dropped without a word, and a dropped filter is a
+ * query with no filter: `{ "wehre": { … } }` returned every row the caller can
+ * see (production, 2026-11-09). A typo in app code became a data leak instead
+ * of an error, so an unknown field is refused, by name.
+ */
+export function unknownQueryFields(body: unknown): string[] {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return []
+  const known = new Set<string>(QUERY_FIELDS)
+  return Object.keys(body).filter((k) => !known.has(k))
+}
+
+/** The refusal for unknown query fields, the same words on both servers. */
+export function unknownQueryFieldsMessage(fields: string[]): string {
+  const named = fields.slice(0, 5).map((f) => `"${f.slice(0, 40)}"`).join(', ')
+  return `Unknown field${fields.length === 1 ? '' : 's'} ${named} in the query, so nothing was read. ` +
+    `A query takes ${QUERY_FIELDS.slice(0, -1).join(', ')} and ${QUERY_FIELDS[QUERY_FIELDS.length - 1]}.`
+}
+
 export const insertSchema = z.object({
   table: z.string().min(1).max(100),
   data: z.record(z.any()),
