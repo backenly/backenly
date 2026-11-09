@@ -10,6 +10,7 @@
  */
 
 import {
+  exactSqlType,
   parseMigration,
   splitStatements,
   MigrationParseError,
@@ -63,30 +64,68 @@ describe('splitStatements', () => {
   })
 })
 
+describe('declared types are carried exactly, for the executor to create as written', () => {
+  // The vocabulary (`type`) folds timestamptz, date and time into "timestamp"
+  // and drops numeric scale; `sqlType` keeps what the statement said. On
+  // production a merge turned `refunded_at timestamptz` into timestamp without
+  // time zone, and `session_id text` was created as uuid by its name.
+  it.each([
+    ['timestamptz', 'timestamptz'],
+    ['timestamp with time zone', 'timestamptz'],
+    ['timestamp(3) with time zone', 'timestamptz(3)'],
+    ['timestamp', 'timestamp'],
+    ['date', 'date'],
+    ['time', 'time'],
+    ['numeric(10, 2)', 'numeric(10,2)'],
+    ['decimal', 'numeric'],
+    ['double precision', 'double precision'],
+    ['float8', 'double precision'],
+    ['VARCHAR(40)', 'varchar(40)'],
+    ['int', 'integer'],
+    ['int8', 'bigint'],
+    ['json', 'json'],
+    ['text[]', 'text[]'],
+    ['uuid ARRAY', 'uuid[]'],
+  ])('%s → %s', (raw, exact) => {
+    expect(exactSqlType(raw)).toBe(exact)
+  })
+
+  it.each(['serial', 'bigserial', 'citext', 'name'])('%s stays on the vocabulary: it is a sequence or an extension, not a type', (raw) => {
+    expect(exactSqlType(raw)).toBeUndefined()
+  })
+
+  it('reaches both statements an agent sends', () => {
+    const create = parseOne('CREATE TABLE views (session_id text NOT NULL, at timestamptz)')
+    expect((create.args.columns as any[]).map((c) => c.sqlType)).toEqual(['text', 'timestamptz'])
+    const add = parseOne('ALTER TABLE orders ADD COLUMN refunded_at timestamptz')
+    expect((add.args.column as any).sqlType).toBe('timestamptz')
+  })
+})
+
 describe('CREATE TABLE', () => {
   it('maps columns and types', () => {
     const a = parseOne('CREATE TABLE posts (title text NOT NULL, views integer)')
     expect(a.tool).toBe('create_table')
     expect(a.args.tableName).toBe('posts')
     expect(a.args.columns).toEqual([
-      { name: 'title', type: 'text', nullable: false },
-      { name: 'views', type: 'int', nullable: true },
+      { name: 'title', type: 'text', sqlType: 'text', nullable: false },
+      { name: 'views', type: 'int', sqlType: 'integer', nullable: true },
     ])
   })
 
   it('keeps precision types intact rather than splitting on their comma', () => {
     const a = parseOne('CREATE TABLE items (price numeric(10,2), label varchar(255))')
     expect(a.args.columns).toEqual([
-      { name: 'price', type: 'numeric', nullable: true },
-      { name: 'label', type: 'text', nullable: true },
+      { name: 'price', type: 'numeric', sqlType: 'numeric(10,2)', nullable: true },
+      { name: 'label', type: 'text', sqlType: 'varchar(255)', nullable: true },
     ])
   })
 
   it('handles multi-word types', () => {
     const a = parseOne('CREATE TABLE m (at timestamp with time zone, ratio double precision)')
     expect(a.args.columns).toEqual([
-      { name: 'at', type: 'timestamp', nullable: true },
-      { name: 'ratio', type: 'numeric', nullable: true },
+      { name: 'at', type: 'timestamp', sqlType: 'timestamptz', nullable: true },
+      { name: 'ratio', type: 'numeric', sqlType: 'double precision', nullable: true },
     ])
   })
 
@@ -94,7 +133,7 @@ describe('CREATE TABLE', () => {
     const a = parseOne(
       'CREATE TABLE posts (id uuid PRIMARY KEY, title text, created_at timestamptz, updated_at timestamptz)',
     )
-    expect(a.args.columns).toEqual([{ name: 'title', type: 'text', nullable: true }])
+    expect(a.args.columns).toEqual([{ name: 'title', type: 'text', sqlType: 'text', nullable: true }])
     expect(a.notes?.join(' ')).toMatch(/id, created_at, updated_at/)
     // The note must NOT leak into args — dispatchTool forwards args straight to
     // the executor, and an unknown key there is a silent contract violation.
@@ -112,7 +151,7 @@ describe('CREATE TABLE', () => {
   it('reads an inline REFERENCES as a foreign key', () => {
     const a = parseOne('CREATE TABLE posts (author_id uuid REFERENCES users(id), title text)')
     expect((a.args.columns as any[])[0]).toEqual({
-      name: 'author_id', type: 'uuid', fkTo: 'users', references: fk('users'), nullable: true,
+      name: 'author_id', type: 'uuid', sqlType: 'uuid', fkTo: 'users', references: fk('users'), nullable: true,
     })
   })
 
@@ -121,7 +160,7 @@ describe('CREATE TABLE', () => {
       'CREATE TABLE posts (author_id uuid, title text, FOREIGN KEY (author_id) REFERENCES users(id))',
     )
     expect((a.args.columns as any[])[0]).toEqual({
-      name: 'author_id', type: 'uuid', fkTo: 'users', references: fk('users'), nullable: true,
+      name: 'author_id', type: 'uuid', sqlType: 'uuid', fkTo: 'users', references: fk('users'), nullable: true,
     })
   })
 
@@ -141,9 +180,9 @@ describe('CREATE TABLE', () => {
       )`)
     expect(a.args.tableName).toBe('posts')
     expect(a.args.columns).toEqual([
-      { name: 'title', type: 'text', nullable: false },
-      { name: 'body', type: 'text', nullable: true },
-      { name: 'author_id', type: 'uuid', fkTo: 'users', references: fk('users'), nullable: true },
+      { name: 'title', type: 'text', sqlType: 'text', nullable: false },
+      { name: 'body', type: 'text', sqlType: 'text', nullable: true },
+      { name: 'author_id', type: 'uuid', sqlType: 'uuid', fkTo: 'users', references: fk('users'), nullable: true },
     ])
   })
 
@@ -566,8 +605,8 @@ describe('declared DDL survives translation', () => {
   it('treats absence of NOT NULL as an explicit nullable declaration', () => {
     const a = parseOne('CREATE TABLE products (description text, image_url text)')
     expect(a.args.columns).toEqual([
-      { name: 'description', type: 'text', nullable: true },
-      { name: 'image_url', type: 'text', nullable: true },
+      { name: 'description', type: 'text', sqlType: 'text', nullable: true },
+      { name: 'image_url', type: 'text', sqlType: 'text', nullable: true },
     ])
   })
 
@@ -586,9 +625,9 @@ describe('declared DDL survives translation', () => {
        )`,
     )
     expect(a.args.columns).toEqual([
-      { name: 'active', type: 'boolean', nullable: false, default: 'true' },
-      { name: 'stock', type: 'int', nullable: false, default: '0' },
-      { name: 'status', type: 'text', nullable: false, default: "'pending'" },
+      { name: 'active', type: 'boolean', sqlType: 'boolean', nullable: false, default: 'true' },
+      { name: 'stock', type: 'int', sqlType: 'integer', nullable: false, default: '0' },
+      { name: 'status', type: 'text', sqlType: 'text', nullable: false, default: "'pending'" },
     ])
   })
 
@@ -632,7 +671,7 @@ describe('silent loss — nothing declared may vanish without a refusal', () => 
     // The column itself keeps its declared shape — the CHECK is lifted out, not
     // traded against the DEFAULT or the nullability.
     const status = (actions[0].args.columns as any[]).find((c) => c.name === 'status')
-    expect(status).toEqual({ name: 'status', type: 'text', nullable: false, default: "'pending'" })
+    expect(status).toEqual({ name: 'status', type: 'text', sqlType: 'text', nullable: false, default: "'pending'" })
 
     expect(actions[1].args).toMatchObject({
       tableName: 'connections',
