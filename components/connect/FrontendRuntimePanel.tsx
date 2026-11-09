@@ -34,6 +34,7 @@ import {
   SectionTitle,
   StatusDot,
 } from '@/components/inspector/kit'
+import { sharedRead } from '@/lib/client/shared-read'
 
 // ── Connection health types ───────────────────────────────────────────────────
 type FailureKind = 'missing' | 'placeholder' | 'malformed' | 'unknown_key' | 'expired' | 'unknown'
@@ -367,8 +368,9 @@ export function FrontendRuntimeCards({ projectId }: { projectId: string }) {
   async function loadHealth() {
     setHealthRefreshing(true)
     try {
-      const res = await fetch(`/api/projects/${projectId}/connection-health`, { credentials: 'include' })
-      if (res.ok) setHealth(await res.json())
+      // The sidebar pill reads and polls the same thing (lib/client/shared-read.ts).
+      const res = await sharedRead(`/api/projects/${projectId}/connection-health`)
+      if (res.ok && res.data) setHealth(res.data)
     } catch {}
     finally { setHealthRefreshing(false) }
   }

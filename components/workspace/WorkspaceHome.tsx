@@ -88,6 +88,7 @@ import {
 import { type GroupableFinding } from '@/lib/core/finding-groups'
 import { freshlyVerifiedRepairs, quietState as quietStateFor, type SensorSummary } from '@/components/workspace/health-state'
 import { ObservabilityStrip } from '@/components/workspace/ObservabilityStrip'
+import { sharedRead } from '@/lib/client/shared-read'
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -235,7 +236,7 @@ export function WorkspaceHome({
   // /health would hide the very self-heal the loop is meant to show.
   const noStore: RequestInit = { credentials: 'include', cache: 'no-store' }
 
-  const loadAll = useCallback(async () => {
+  const loadAll = useCallback(async (fresh = false) => {
     if (!projectId || !hasBackend) return
     // Progressive: paint each surface as its fetch resolves rather than
     // blocking on the slowest. /build-status runs a deep scan (~8-13s);
@@ -245,14 +246,18 @@ export function WorkspaceHome({
     // /realtime-status left this set with the Realtime panel (2026-07-21): its
     // online-user and channel counts had exactly one reader, and polling an
     // endpoint whose numbers nothing renders is just load.
+    //
+    // MainWorkspace reads /build-status and the top bar /health at the same
+    // moment: one request serves each (lib/client/shared-read.ts). A load after
+    // a repair reads afresh.
     const get = (route: string) =>
-      fetch(`/api/projects/${projectId}/${route}`, noStore).then(r => r.ok ? r.json() : null).catch(() => null)
+      sharedRead(`/api/projects/${projectId}/${route}`, { fresh }).then(r => (r.ok ? r.data : null)).catch(() => null)
     get('build-status').then(v => { if (v) setBuild(v) })
     get('health').then(v => {
       if (v?.data) { setHealth({ ...v.data, fetchedAt: Date.now() }); setHealthError(false) } else setHealthError(true)
     })
     get('dashboard-stats').then(v => { if (v?.data) setStats(v.data) })
-  }, [projectId, hasBackend]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [projectId, hasBackend])
 
   // Cheap health-only refresh for the live-watch poll — /build-status runs a
   // deep scan (~8-13s) and would delay the moment we notice a self-heal. The
@@ -308,7 +313,7 @@ export function WorkspaceHome({
     if (freshlyVerified.length > 0 && autonomy?.level !== 'OFF') {
       setHealSignal(n => n + 1)
       refreshAutonomy()
-      loadAll() // verdict/headline/stats catch up to the repaired state
+      loadAll(true) // verdict/headline/stats catch up to the repaired state
     }
   }, [health, autonomy?.level, refreshAutonomy, loadAll])
 
@@ -322,7 +327,7 @@ export function WorkspaceHome({
     prevOpenIdsRef.current = openIds
     if (prev == null) return
     for (const id of prev) {
-      if (!openIds.has(id)) { refreshAutonomy(); loadAll(); break }
+      if (!openIds.has(id)) { refreshAutonomy(); loadAll(true); break }
     }
   }, [health, refreshAutonomy, loadAll])
 

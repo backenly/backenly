@@ -48,6 +48,7 @@ import {
 } from '@/lib/core/finding-groups'
 import { Disclosure, Fact, Facts, Panel, Row, RowList, RowNote, ROW_TITLE, Section } from '@/components/autonomy/rows'
 import { hasExecutableFix } from '@/lib/core/fix-actions'
+import { sharedRead } from '@/lib/client/shared-read'
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -153,9 +154,11 @@ export function DetectedFindingsPanel({
     if (silent) setRefreshing(true)
     setError(false)
     try {
-      const res = await fetch(`/api/projects/${projectId}/health`, { credentials: 'include' })
+      // The first load shares the top bar's read; a refresh after an action,
+      // or asked for, reads afresh (lib/client/shared-read.ts).
+      const res = await sharedRead(`/api/projects/${projectId}/health`, { fresh: silent })
       if (!res.ok) throw new Error('fetch failed')
-      const j = await res.json()
+      const j = res.data
       setData(j?.data ?? null)
     } catch {
       setError(true)
