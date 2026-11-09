@@ -32,6 +32,7 @@ import {
   serviceRoleRefusalMessage,
 } from '@/lib/security/service-role-exposure'
 import { MCP_KEY_HINT, MCP_KEY_IN_APP, isMcpCredential, mcpKeyRefusalMessage } from '@/lib/security/key-placement'
+import { ADMIN_KEY_IN_BROWSER, adminKeyInBrowser, isRlsBoundAdminKey } from '@/lib/security/admin-key-placement'
 import { touchProjectActivity } from '@/lib/projects/activity'
 
 export interface V1ApiContext {
@@ -390,6 +391,26 @@ export async function v1AuthMiddleware(req: Request, res: Response, next: NextFu
           fixUrl: `https://backenly.com/app/projects/${projectId}/connect`,
         },
       )
+      return
+    }
+  }
+
+  // An admin-role key bound by row-level security: server-only, refused from
+  // the cutoff date on and recorded until then (lib/security/admin-key-placement.ts).
+  if (isRlsBoundAdminKey(apiKeyRecord)) {
+    const verdict = detectBrowserOrigin(req.headers as Record<string, string | string[] | undefined>)
+    const refused = adminKeyInBrowser(
+      { id: apiKeyRecord.id, name: apiKeyRecord.name ?? null, keyPrefix: apiKeyRecord.keyPrefix ?? null, projectId },
+      verdict,
+      { method: req.method, path: req.originalUrl ?? req.url ?? '' },
+    )
+    if (refused) {
+      sendError(res, ADMIN_KEY_IN_BROWSER, refused.message, 403, {
+        kind: 'admin_key_in_browser',
+        detectedVia: verdict.signal,
+        origin: verdict.origin,
+        fixUrl: `https://backenly.com/app/projects/${projectId}/settings`,
+      })
       return
     }
   }

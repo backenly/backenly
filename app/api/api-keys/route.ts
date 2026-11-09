@@ -7,7 +7,7 @@ import { z } from 'zod'
 import crypto from 'crypto'
 import { maskFromPrefix, plaintextForStorage } from '@/lib/auth/api-key-plaintext'
 import { canAccessProject, canAdministerProject } from '@/lib/edition/guard'
-import { mintKey } from '@/lib/auth/key-prefix'
+import { keyKind, mintKey } from '@/lib/auth/key-prefix'
 import { apiKeyRateCeilingViolation } from '@/lib/quota/kernel'
 import { governedChange } from '@/lib/changes/ledger'
 
@@ -114,6 +114,8 @@ export async function GET(request: NextRequest) {
         key: maskApiKey(key.keyPrefix),
         keyPrefix: key.keyPrefix,
         keyType: key.keyType,
+        /** What the key is: publishable, service, server (admin, server-only), mcp or dashboard. */
+        kind: keyKind(key),
         role: key.role,
         permissions: key.permissions,
         capabilities: key.capabilities,
@@ -146,6 +148,22 @@ export async function POST(request: NextRequest) {
     const auth = await requireAuth(request)
     const body = await request.json()
     const data = createApiKeySchema.parse(body)
+
+    // An admin key is a service key. The admin role skips every permission
+    // check and makes storage treat the key as an operator; on a key bound by
+    // row-level security that is server power with a browser-safe prefix
+    // (GHSA-348x). The console's Admin option already sends serviceRole.
+    if (data.keyType === 'public' && data.role === 'admin' && !data.serviceRole) {
+      return NextResponse.json(
+        {
+          error:
+            'An Admin key is a service key: server-side only, and it bypasses row-level security. Pass ' +
+            'serviceRole: true for that, or choose the Write or Client role for a key bound by row-level security.',
+          code: 'ADMIN_KEY_NEEDS_SERVICE_ROLE',
+        },
+        { status: 400 },
+      )
+    }
     
     // For public keys, projectId is required. For dashboard keys, it's optional
     const projectId = request.headers.get('x-project-id') || 
@@ -266,6 +284,7 @@ export async function POST(request: NextRequest) {
         keyShownOnce: true,
         keyPrefix: apiKey.keyPrefix,
         keyType: apiKey.keyType,
+        kind: keyKind(apiKey),
         role: apiKey.role,
         permissions: apiKey.permissions,
         capabilities: apiKey.capabilities,

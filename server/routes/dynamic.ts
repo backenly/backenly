@@ -22,6 +22,7 @@ import { enforceKeyRateLimit, enforceRateLimitByKeyId } from '../lib/auth'
 import { regionalRateCounting, type RateKey } from '@/lib/auth-projection/rate'
 import { hashApiKey, resolveEndUserFromToken, crossEnvironmentUserToken } from '../lib/end-user-identity'
 import { handleViaPostgrest } from './postgrest-handler'
+import { ADMIN_KEY_IN_BROWSER, adminKeyInBrowser, isRlsBoundAdminKey } from '@/lib/security/admin-key-placement'
 import { isFunctionSwitchedOff } from '@/lib/services/ai-functions/status'
 import { v1NotFoundBody } from '@/lib/api/v1/route-not-found'
 import {
@@ -190,6 +191,16 @@ export async function getProjectIdFromAuth(req: Request): Promise<AuthResolution
           code: SERVICE_ROLE_IN_BROWSER,
         }
       }
+    }
+    // An admin-role key bound by row-level security: server-only, refused from
+    // the cutoff date on and recorded until then (lib/security/admin-key-placement.ts).
+    if (isRlsBoundAdminKey(key)) {
+      const refused = adminKeyInBrowser(
+        { id: key.id, name: key.name ?? null, keyPrefix: key.keyPrefix ?? null, projectId: key.projectId },
+        detectBrowserOrigin(req.headers as Record<string, string | string[] | undefined>),
+        { method: req.method, path: req.originalUrl ?? req.url ?? '' },
+      )
+      if (refused) return { success: false, error: refused.message, code: ADMIN_KEY_IN_BROWSER }
     }
     // Counted in the region, the key's last use goes home with its count
     // (lib/auth-projection/rate.ts), rather than as a write per request.

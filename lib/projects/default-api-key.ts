@@ -15,6 +15,14 @@ import { mintKey } from '@/lib/auth/key-prefix'
 /**
  * Mint the project's first key and return the plaintext exactly once.
  *
+ * A publishable key: the `client` role, reads and writes bound by row-level
+ * security, no AI generation, safe in a browser bundle, as its `proj_live_`
+ * prefix says. It was minted with the admin role, which skips every permission
+ * check and makes storage treat it as an operator (every file listed,
+ * downloaded and deletable), while its prefix and the docs called it
+ * browser-safe (GHSA-348x). A server that needs more creates a service key
+ * (Settings → API keys → New key → Admin).
+ *
  * Null on failure, never a throw. A project with no default key is repairable
  * from the dashboard in one click; failing the creation request instead would
  * leave a fully provisioned project that the caller was never told about, and
@@ -33,16 +41,16 @@ export async function createDefaultApiKey(
     await prisma.apiKey.create({
       data: {
         name: `${projectName} Default Key`,
-        // Never persisted. The credential a frontend should embed is
-        // Project.anonKey; this one is issued with role 'admin'. See
-        // lib/auth/api-key-plaintext.ts.
+        // Never persisted: shown once, at creation. See lib/auth/api-key-plaintext.ts.
         key: plaintextForStorage(),
         keyHash, // SHA-256, for O(1) auth lookup
         keyPrefix: apiKeyPrefix,
         keyType: 'public',
-        role: 'admin',
-        permissions: [],
-        capabilities: ['database', 'auth', 'storage', 'functions', 'ai'],
+        role: 'client',
+        permissions: ['read', 'write'],
+        // No 'ai': generation from a browser would spend the project's credits
+        // for anyone who opened the page.
+        capabilities: ['database', 'auth', 'storage', 'functions'],
         serviceRole: false,
         projectId,
         userId,

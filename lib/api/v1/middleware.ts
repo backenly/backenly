@@ -24,6 +24,7 @@ import {
   serviceRoleRefusalMessage,
 } from '@/lib/security/service-role-exposure'
 import { MCP_KEY_HINT, MCP_KEY_IN_APP, isMcpCredential, mcpKeyRefusalMessage } from '@/lib/security/key-placement'
+import { ADMIN_KEY_IN_BROWSER, adminKeyInBrowser, isRlsBoundAdminKey } from '@/lib/security/admin-key-placement'
 import { endUserBearerToken } from '@/lib/security/end-user-bearer'
 
 import { INTERNAL_DOMAINS, isInternalOrigin } from '@/lib/security/internal-origin'
@@ -438,6 +439,19 @@ export async function v1ApiMiddleware(
         context: {} as V1ApiContext,
         response: createErrorResponse(SERVICE_ROLE_IN_BROWSER, serviceRoleRefusalMessage(apiKeyRecord.name ?? null), 403),
       }
+    }
+  }
+
+  // 7b. An admin-role key bound by row-level security: server-only, refused
+  // from the cutoff date on and recorded until then (lib/security/admin-key-placement.ts).
+  if (isRlsBoundAdminKey(apiKeyRecord)) {
+    const refused = adminKeyInBrowser(
+      { id: apiKeyRecord.id, name: apiKeyRecord.name ?? null, keyPrefix: apiKeyRecord.keyPrefix ?? null, projectId },
+      detectBrowserOrigin(Object.fromEntries(request.headers)),
+      { method: request.method, path: request.nextUrl.pathname },
+    )
+    if (refused) {
+      return { context: {} as V1ApiContext, response: createErrorResponse(ADMIN_KEY_IN_BROWSER, refused.message, 403) }
     }
   }
 
