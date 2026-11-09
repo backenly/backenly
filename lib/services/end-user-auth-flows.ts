@@ -262,6 +262,20 @@ export async function logoutEndUser(
  * Generates a single-use, 1-hour reset token and emails it. The token is never
  * returned. Always 200 for unknown emails (no user enumeration).
  */
+/**
+ * Run the part of an unauthenticated request that depends on whether an
+ * account exists after the answer has gone, so the answer is the same in time
+ * as well as in words. Awaited, it was not: a reset for an existing account
+ * stored a token and sent an email before answering (2.9-3.2 s on production,
+ * 2026-11-09) while an unknown address answered in 0.24 s, so the response
+ * time said which addresses have accounts. Failures are logged, never shown.
+ */
+function afterAnswering(label: string, work: () => Promise<unknown>): void {
+  void Promise.resolve()
+    .then(work)
+    .catch((error: any) => console.warn(`[${label}] failed after answering:`, error?.message ?? error))
+}
+
 export async function forgotEndUserPassword(projectId: string, emailRaw: unknown): Promise<AuthFlowResult> {
   try {
     const project = await authorizingProject(projectId)
@@ -270,9 +284,10 @@ export async function forgotEndUserPassword(projectId: string, emailRaw: unknown
     const email = typeof emailRaw === 'string' ? emailRaw.toLowerCase().trim() : undefined
     if (!email) return err('BAD_REQUEST', 'email is required', 400)
 
-    // The outcome is deliberately discarded: this route is unauthenticated, so
-    // it must answer identically whether or not the account exists.
-    await issueEndUserPasswordReset(projectId, email)
+    // The outcome is deliberately discarded, and the work happens after the
+    // answer: this route is unauthenticated, so it must answer identically,
+    // in words and in time, whether or not the account exists.
+    afterAnswering('ForgotPassword', () => issueEndUserPasswordReset(projectId, email))
 
     // Generic success — never reveal whether the email was found
     return ok({ message: 'If an account with that email exists, a password reset link has been sent.' })
@@ -605,42 +620,48 @@ export async function requestEmailVerification(projectId: string, emailRaw: unkn
     const email = typeof emailRaw === 'string' ? emailRaw.toLowerCase().trim() : undefined
     if (!email) return err('BAD_REQUEST', 'email is required', 400)
 
-    const schemaName = `workspace_${projectId}`
-    const db = await workspaceRawClient(projectId)
-    await ensureEmailVerifiedColumn(projectId, schemaName)
-    await ensureTokenTable(db, schemaName, '_email_verifications')
-
-    const users = await executeWithUserContext<{ id: string; email_verified: boolean }>(
-      projectId,
-      '', true,
-      `SELECT id, "email_verified" FROM "${schemaName}"."users" WHERE email = $1 LIMIT 1`,
-      [email],
-    ).catch(() => [] as any[])
-
-    if (users.length > 0 && !users[0].email_verified) {
-      const token = crypto.randomBytes(32).toString('hex')
-      await db.$executeRawUnsafe(
-        `DELETE FROM "${schemaName}"."_email_verifications" WHERE email = $1 AND used_at IS NULL`,
-        email,
-      )
-      await db.$executeRawUnsafe(
-        `INSERT INTO "${schemaName}"."_email_verifications" (email, token, expires_at) VALUES ($1, $2, $3)`,
-        email, token, new Date(Date.now() + 24 * 60 * 60 * 1000),
-      )
-      try {
-        const { getAuthEmailContext, sendEndUserVerificationEmail } =
-          await import('@/lib/services/end-user-auth-email')
-        const emailCtx = await getAuthEmailContext(projectId)
-        await sendEndUserVerificationEmail(projectId, email, token, emailCtx)
-      } catch (mailErr: any) {
-        console.warn('[EmailVerification] send failed (non-fatal):', mailErr?.message)
-      }
-    }
-
+    // After the answer, as for a reset: whether a link goes out depends on the
+    // account existing and being unverified, and the time must not say which.
+    afterAnswering('EmailVerification', () => issueEmailVerification(projectId, email))
     return ok({ message: 'If an account with that email exists, a verification link has been sent.' })
   } catch (error: any) {
     console.error('Request email verification error:', error?.message ?? error)
     return err('INTERNAL_ERROR', 'Failed to send verification email', 500)
+  }
+}
+
+/** Store a verification token for an unverified account and email it. Nothing for any other address. */
+async function issueEmailVerification(projectId: string, email: string): Promise<void> {
+  const schemaName = `workspace_${projectId}`
+  const db = await workspaceRawClient(projectId)
+  await ensureEmailVerifiedColumn(projectId, schemaName)
+  await ensureTokenTable(db, schemaName, '_email_verifications')
+
+  const users = await executeWithUserContext<{ id: string; email_verified: boolean }>(
+    projectId,
+    '', true,
+    `SELECT id, "email_verified" FROM "${schemaName}"."users" WHERE email = $1 LIMIT 1`,
+    [email],
+  ).catch(() => [] as any[])
+
+  if (users.length > 0 && !users[0].email_verified) {
+    const token = crypto.randomBytes(32).toString('hex')
+    await db.$executeRawUnsafe(
+      `DELETE FROM "${schemaName}"."_email_verifications" WHERE email = $1 AND used_at IS NULL`,
+      email,
+    )
+    await db.$executeRawUnsafe(
+      `INSERT INTO "${schemaName}"."_email_verifications" (email, token, expires_at) VALUES ($1, $2, $3)`,
+      email, token, new Date(Date.now() + 24 * 60 * 60 * 1000),
+    )
+    try {
+      const { getAuthEmailContext, sendEndUserVerificationEmail } =
+        await import('@/lib/services/end-user-auth-email')
+      const emailCtx = await getAuthEmailContext(projectId)
+      await sendEndUserVerificationEmail(projectId, email, token, emailCtx)
+    } catch (mailErr: any) {
+      console.warn('[EmailVerification] send failed (non-fatal):', mailErr?.message)
+    }
   }
 }
 
