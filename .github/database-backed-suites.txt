@@ -67,6 +67,11 @@ tests/integration/integrations-autowiring.spec.ts
 # broadcast route enforces its payload cap over a real pg_notify. Frame
 # delivery through the LISTEN hub stays a staging case.
 tests/integration/realtime-ticket-broadcast.spec.ts
+
+# The console's Realtime page gets a single-use ticket that redeems as a
+# stream that sees every change, only for a member of the project; a project
+# with no signing secret says so. A real provisioned project and session.
+tests/integration/console-realtime-sees-every-change.spec.ts
 tests/integration/export-database-rls.spec.ts
 tests/integration/postgres-admin.spec.ts
 
