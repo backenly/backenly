@@ -18,7 +18,8 @@
  *   a service-role key  one window for the key, whoever calls, as before
  *   presence writes     joins, heartbeats and leaves spend nothing of the
  *                       key's limit; a user writing in a loop is refused after
- *                       60 a minute
+ *                       60 a minute, and one address after 600, before its key
+ *                       is even looked up
  *
  * The module on its own is pinned in tests/unit/shared-key-rate.spec.ts.
  */
@@ -35,7 +36,7 @@ import app from '@/server/app'
 import { prisma } from '@/lib/db'
 import { GET as nextList, POST as nextJoin, DELETE as nextLeave } from '@/app/api/v1/[projectId]/presence/route'
 import { closeRateLimitBackend } from '@/lib/security/rate-limit-backend'
-import { PRESENCE_WRITES_PER_MINUTE } from '@/lib/security/shared-key-rate'
+import { PRESENCE_WRITES_PER_ADDRESS_PER_MINUTE, PRESENCE_WRITES_PER_MINUTE } from '@/lib/security/shared-key-rate'
 import { flushRecordedRequests } from '@/lib/traffic/request-recorder'
 import { hashApiKey } from '@/server/lib/end-user-identity'
 
@@ -236,5 +237,19 @@ describe('presence writes', () => {
 
     const other = randomUUID()
     expect((await join({ key: raw, from: writer.from, token: userToken(other) }, other)).status).toBe(200)
+  })
+
+  it(`are refused after ${PRESENCE_WRITES_PER_ADDRESS_PER_MINUTE} a minute from one address, before the key is looked up, on both runtimes`, async () => {
+    // A key nobody issued: every write is refused for it, until the address's window refuses first.
+    const flood = { key: `proj_live_${crypto.randomBytes(24).toString('hex')}`, from: newAddress() }
+    for (let i = 0; i < PRESENCE_WRITES_PER_ADDRESS_PER_MINUTE; i++) expect((await join(flood, 'anyone')).status).toBe(401)
+
+    const refused = await join(flood, 'anyone')
+    expect(refused.status).toBe(429)
+    expect(Number(refused.headers.get('retry-after'))).toBeGreaterThan(0)
+    expect(await refused.json()).toMatchObject({ code: 'RATE_LIMIT_EXCEEDED', error: expect.stringContaining('from this address') })
+    expect((await viaNext(flood, 'POST', { userId: 'anyone' })).status).toBe(429)
+
+    expect((await join({ ...flood, from: newAddress() }, 'anyone')).status).toBe(401)
   })
 })

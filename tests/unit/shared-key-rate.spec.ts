@@ -17,12 +17,16 @@ import {
   type RateLimitBackend,
 } from '@/lib/security/rate-limit-backend'
 import {
+  PRESENCE_WRITES_PER_ADDRESS_PER_MINUTE,
   PRESENCE_WRITES_PER_MINUTE,
   UNCAPPED,
   countClientRequest,
   countKeyedRequest,
+  countPresenceAddress,
   countPresenceWrite,
   isSharedKey,
+  platformLimiterStore,
+  presenceAddressBucket,
   presenceRefusal,
 } from '@/lib/security/shared-key-rate'
 
@@ -123,7 +127,7 @@ describe('presence writes', () => {
     expect((await countPresenceWrite('key-1', 'bob')).allowed).toBe(true)
     expect((await countPresenceWrite('key-2', 'alice')).allowed).toBe(true)
 
-    expect(presenceRefusal(refused)).toEqual({
+    expect(presenceRefusal(refused, 'user')).toEqual({
       status: 429,
       headers: { 'Retry-After': String(refused.retryAfter) },
       body: {
@@ -136,7 +140,33 @@ describe('presence writes', () => {
 
   it("spend nothing of the key's request limit", async () => {
     for (let i = 0; i < 10; i++) await countPresenceWrite('key-1', 'alice')
+    for (let i = 0; i < 10; i++) await countPresenceAddress('project-1', '203.0.113.1')
     expect(await countClientRequest(key(), '203.0.113.1')).toMatchObject({ allowed: true, remaining: 2 })
+  })
+
+  it(`are counted per address and project before the key is looked up, ${PRESENCE_WRITES_PER_ADDRESS_PER_MINUTE} a minute`, async () => {
+    for (let i = 0; i < PRESENCE_WRITES_PER_ADDRESS_PER_MINUTE; i++) {
+      expect((await countPresenceAddress('project-1', '203.0.113.1')).allowed).toBe(true)
+    }
+    const refused = await countPresenceAddress('project-1', '203.0.113.1')
+    expect(refused.allowed).toBe(false)
+    expect((await countPresenceAddress('project-1', '203.0.113.2')).allowed).toBe(true)
+    expect((await countPresenceAddress('project-2', '203.0.113.1')).allowed).toBe(true)
+    expect(presenceRefusal(refused, 'address').body.error).toBe(
+      `Presence was written more than ${PRESENCE_WRITES_PER_ADDRESS_PER_MINUTE} times in a minute from this address. Try again in ${refused.retryAfter} second(s).`,
+    )
+  })
+
+  it('share one window with express-rate-limit, through the store the runtime gives it', async () => {
+    const store = platformLimiterStore(3, 60_000)
+    const bucket = presenceAddressBucket('project-1', '203.0.113.9')
+    const hits = []
+    for (let i = 0; i < 4; i++) hits.push((await store.increment(bucket)).totalHits)
+    // express-rate-limit refuses once the hits pass its limit of 3.
+    expect(hits).toEqual([1, 2, 3, 4])
+    expect((await store.increment(bucket)).resetTime).toBeInstanceOf(Date)
+    // The window is the platform store's: counted there directly, it is full.
+    expect(await memory.consume(bucket, 3, 60_000)).toMatchObject({ allowed: false })
   })
 })
 
@@ -157,6 +187,8 @@ describe('a store that cannot be read', () => {
       for (let i = 0; i < 5; i++) decisions.push(await countKeyedRequest(key(), '203.0.113.1', own.countKey))
       expect(decisions.every((d) => d.allowed)).toBe(true)
       expect((await countPresenceWrite('key-1', 'alice')).allowed).toBe(true)
+      expect((await countPresenceAddress('project-1', '203.0.113.1')).allowed).toBe(true)
+      expect(await platformLimiterStore(3, 60_000).increment('presence-address:project-1:203.0.113.1')).toMatchObject({ totalHits: 1 })
       expect(own.calls).toHaveLength(5)
       expect(warn.mock.calls.map((call) => format(...call))).toEqual([
         '[SharedKeyRate] The rate-limit store could not be reached: shared keys and presence writes go uncounted until it can be.',
@@ -179,6 +211,9 @@ describe('a store that cannot be read', () => {
     const warn = jest.spyOn(console, 'warn').mockImplementation(() => {})
     try {
       expect((await countClientRequest(key(), '203.0.113.1')).allowed).toBe(true)
+      const store = platformLimiterStore(3, 60_000)
+      await expect(store.decrement('k')).resolves.toBeUndefined()
+      await expect(store.resetKey('k')).resolves.toBeUndefined()
     } finally {
       warn.mockRestore()
     }
