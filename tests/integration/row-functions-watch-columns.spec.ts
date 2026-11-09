@@ -8,11 +8,12 @@
  * and there was no way to say which change it was for.
  *
  * deploy_code now takes `columns` for an on_update function. Pinned here with
- * the real deploy, the real dispatch (fireAiFunctions, which the capture drain
- * calls for every captured row) and the change history:
+ * the real deploy, the real capture drain and run queue (a captured update is
+ * written to the outbox as the capture trigger writes it, so a row without its
+ * old values can be one) and the change history:
  *
- *  1. An update that leaves the watched columns alone runs nothing and leaves
- *     no run; one that changes a watched column runs it.
+ *  1. An update that leaves the watched columns alone is not queued, runs
+ *     nothing and leaves no run; one that changes a watched column runs it.
  *  2. With no old row to compare (a payload too large to capture), it runs.
  *  3. columns is refused for any other trigger and for a column the table does
  *     not have.
@@ -41,7 +42,9 @@ import { withChangeAttribution } from '@/lib/changes/attribution'
 import { closeChangeLockPool } from '@/lib/changes/lock'
 import { previewRecovery, recoverChange } from '@/lib/changes/recovery'
 import { deployFunctionCode, getFunction } from '@/lib/services/ai-functions/agent-actions'
-import { fireAiFunctions } from '@/lib/services/ai-functions/executor'
+import { executeInWorkspaceSchema } from '@/lib/services/workspaceDatabase'
+import { OUTBOX_TABLE, drainWebhookOutbox } from '@/lib/webhooks/capture'
+import { FUNCTION_JOBS_TABLE, kickFunctionRuns } from '@/lib/services/ai-functions/run-queue'
 
 let ownerId: string
 let projectId: string
@@ -59,8 +62,26 @@ const deploy = (args: Record<string, unknown>) =>
 
 const runs = () => prisma.aiFunctionLog.count({ where: { functionId } })
 
+/** A captured update, as the capture trigger writes it, drained and run to the end. */
 async function update(after: Record<string, unknown>, before: Record<string, unknown> | undefined) {
-  await fireAiFunctions(projectId, { type: 'update', table: 'orders', data: { id: ORDER, ...after }, old: before && { id: ORDER, ...before } })
+  await executeInWorkspaceSchema(
+    projectId,
+    `INSERT INTO "${schema}"."${OUTBOX_TABLE}" (event_type, table_name, row_data, old_data, truncated)
+     VALUES ('UPDATE', 'orders', $1::jsonb, $2::jsonb, $3)`,
+    JSON.stringify({ id: ORDER, ...after }),
+    before ? JSON.stringify({ id: ORDER, ...before }) : null,
+    !before,
+  )
+  await drainWebhookOutbox()
+  await kickFunctionRuns(projectId, async () => 0)
+}
+
+/** Runs queued and not finished. */
+const queued = async () => {
+  const rows = await prisma.$queryRawUnsafe<Array<{ n: number }>>(
+    `SELECT count(*)::int AS n FROM "${schema}"."${FUNCTION_JOBS_TABLE}"`,
+  ).catch(() => [{ n: 0 }])
+  return rows[0].n
 }
 
 beforeAll(async () => {
@@ -97,6 +118,7 @@ describe('an on_update function watching status', () => {
   it('does not run for an update that leaves status alone', async () => {
     await update({ status: 'pending', notes: 'gift wrap' }, { status: 'pending', notes: null })
     expect(await runs()).toBe(0)
+    expect(await queued()).toBe(0)
   }, 60_000)
 
   it('says what it watches when an agent reads it', async () => {
