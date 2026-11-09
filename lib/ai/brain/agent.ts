@@ -1548,6 +1548,7 @@ async function runAgentLoop(
   resume: LoopResume | null = null,
 ): Promise<BrainResult> {
   const turnTools = toolsForIntent(classification.intent)
+  const offeredTools = new Set(turnTools.map((t) => t.name))
 
   // ── What the model is sent ────────────────────────────────────────────────
   //
@@ -1948,6 +1949,21 @@ async function runAgentLoop(
           ok: false,
           blocked: 'read_only_turn',
           summary: `\`${toolName}\` was NOT run: this turn answers a question and only reads. Finish with the answer, and say in it what would need to change.`,
+        }, true))
+        continue
+      }
+
+      // Any turn, likewise: the mapper table behind dispatchTool also serves
+      // callers that are not the model (apply_migration's parser plans
+      // drop_index and drop_constraint, and holds an agent's drop on production
+      // for a person; deploy_function_code is an MCP agent's door). A model
+      // that names one of those anyway would reach the executor without the
+      // check its own door makes, so it runs only what it was offered.
+      if (!offeredTools.has(toolName)) {
+        results.push(toolResultBlock(toolCall.id, {
+          ok: false,
+          blocked: 'not_offered',
+          summary: `\`${toolName}\` was NOT run: it is not one of the tools offered for this turn. Use one that is.`,
         }, true))
         continue
       }
