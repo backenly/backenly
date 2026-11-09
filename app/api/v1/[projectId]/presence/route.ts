@@ -16,6 +16,7 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { workspaceRawClient, type WorkspaceRawClient } from '@/lib/data-plane/regional'
+import { countPresenceWrite, presenceRefusal } from '@/lib/security/shared-key-rate'
 import { regionErrorResponse } from '@/lib/api/v1/errors'
 import { v1ApiMiddleware } from '@/lib/api/v1/middleware'
 import { recordedV1 } from '@/lib/traffic/recorded-v1'
@@ -161,6 +162,18 @@ function presenceIdentityError(
   )
 }
 
+/**
+ * A presence write spends nothing of the key's limit, or a heartbeat every 25
+ * seconds from every open tab would: it is counted per user instead, once the
+ * caller may write as that user (lib/security/shared-key-rate.ts).
+ */
+async function presenceWindowFull(keyId: string, userId: string): Promise<NextResponse | null> {
+  const decision = await countPresenceWrite(keyId, userId)
+  if (decision.allowed) return null
+  const refusal = presenceRefusal(decision)
+  return NextResponse.json(refusal.body, { status: refusal.status, headers: refusal.headers })
+}
+
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
 /** GET — list users online right now */
@@ -196,7 +209,7 @@ async function handleGET(request: NextRequest, props: { params: Promise<{ projec
 /** POST — join or heartbeat (upsert lastSeen) */
 async function handlePOST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
   const params = await props.params;
-  const auth = await v1ApiMiddleware(request, params)
+  const auth = await v1ApiMiddleware(request, params, { countRequest: false })
   if (auth.response) return auth.response
 
   const { projectId } = params
@@ -215,6 +228,8 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
 
     const identityError = presenceIdentityError(auth.context, userId)
     if (identityError) return identityError
+    const windowFull = await presenceWindowFull(auth.context.apiKey.id, userId)
+    if (windowFull) return windowFull
 
     // The project's database, in its region, whose trigger NOTIFYs the channel
     // its listeners hear (lib/realtime/listener-hub.ts).
@@ -247,7 +262,7 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
 /** DELETE — explicit leave */
 async function handleDELETE(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
   const params = await props.params;
-  const auth = await v1ApiMiddleware(request, params)
+  const auth = await v1ApiMiddleware(request, params, { countRequest: false })
   if (auth.response) return auth.response
 
   const { projectId } = params
@@ -267,6 +282,8 @@ async function handleDELETE(request: NextRequest, props: { params: Promise<{ pro
 
     const identityError = presenceIdentityError(auth.context, userId)
     if (identityError) return identityError
+    const windowFull = await presenceWindowFull(auth.context.apiKey.id, userId)
+    if (windowFull) return windowFull
 
     // The project's database, in its region, whose trigger NOTIFYs the channel
     // its listeners hear (lib/realtime/listener-hub.ts).

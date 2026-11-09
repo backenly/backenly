@@ -77,7 +77,9 @@ export interface V1ApiContext {
  */
 export async function v1ApiMiddleware(
   request: NextRequest,
-  params: { projectId: string }
+  params: { projectId: string },
+  /** `countRequest: false` for a presence write, which the presence route counts per user (lib/security/shared-key-rate.ts). */
+  { countRequest = true }: { countRequest?: boolean } = {},
 ): Promise<{ context: V1ApiContext; response?: NextResponse }> {
   // 0. Generate correlation ID for request tracing
   const correlationId = request.headers.get('x-correlation-id') || crypto.randomUUID()
@@ -105,7 +107,7 @@ export async function v1ApiMiddleware(
   }
 
   // 1. Authenticate API key
-  const auth = await authenticateApiKey(request)
+  const auth = await authenticateApiKey(request, { count: countRequest })
 
   if (!auth.authenticated || !auth.apiKey) {
     // Self-diagnosing 401: return the SHAPE of what we received plus a

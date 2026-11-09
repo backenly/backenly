@@ -19,6 +19,8 @@ import { isRegionError } from '@/lib/data-plane/regional'
 import { authorizingKeyByHash, isAuthorizationUnavailable } from '@/lib/auth-projection/read'
 import { verify } from 'jsonwebtoken'
 import { enforceKeyRateLimit, enforceRateLimitByKeyId } from '../lib/auth'
+import { clientIpFromNodeRequest } from '@/lib/security/client-ip'
+import { isSharedKey } from '@/lib/security/shared-key-rate'
 import { regionalRateCounting, type RateKey } from '@/lib/auth-projection/rate'
 import { hashApiKey, resolveEndUserFromToken, crossEnvironmentUserToken } from '../lib/end-user-identity'
 import { handleViaPostgrest } from './postgrest-handler'
@@ -289,7 +291,7 @@ export async function getProjectIdFromAuth(req: Request): Promise<AuthResolution
       branchSchema: key.branch?.schemaName,
       branchName: key.branch?.name,
       permissions: key.permissions ?? [],
-      rateKey: { id: key.id, keyHash, rateLimit: key.rateLimit, rateLimitWindow: key.rateLimitWindow },
+      rateKey: { id: key.id, keyHash, rateLimit: key.rateLimit, rateLimitWindow: key.rateLimitWindow, shared: isSharedKey(key) },
     }
   }
 
@@ -587,7 +589,8 @@ async function handleDynamicRequest(req: Request, res: Response) {
 
   // Enforce hard rate limit on API key routes (JWT-authed dynamic routes skip this)
   if (keyId) {
-    const rl = authResult.rateKey ? await enforceKeyRateLimit(authResult.rateKey) : await enforceRateLimitByKeyId(keyId)
+    const client = clientIpFromNodeRequest(req)
+    const rl = authResult.rateKey ? await enforceKeyRateLimit(authResult.rateKey, client) : await enforceRateLimitByKeyId(keyId, client)
     res.setHeader('X-RateLimit-Remaining', String(rl.remaining))
     res.setHeader('X-RateLimit-Reset', String(Math.floor(rl.resetAt.getTime() / 1000)))
 

@@ -15,7 +15,8 @@
 
 import { Router, Request, Response } from 'express'
 import { workspaceRawClient, type WorkspaceRawClient } from '@/lib/data-plane/regional'
-import { v1AuthMiddleware } from '../lib/auth'
+import { v1AuthMiddleware, v1PresenceAuthMiddleware } from '../lib/auth'
+import { countPresenceWrite, presenceRefusal } from '@/lib/security/shared-key-rate'
 import { resolveEndUserFromToken } from '../lib/end-user-identity'
 import { workspaceSchemaName, workspaceChannelName, quoteIdent } from '@/lib/security/workspace-schema'
 import { asyncRoute } from '../lib/async-route'
@@ -74,6 +75,20 @@ async function presenceIdentityError(
       code: 'PRESENCE_TOKEN_REQUIRED',
     },
   }
+}
+
+/**
+ * A presence write spends nothing of the key's limit, or a heartbeat every 25
+ * seconds from every open tab would: it is counted per user instead, once the
+ * caller may write as that user (lib/security/shared-key-rate.ts). Answers 429
+ * and returns true when the user's window is full.
+ */
+async function refuseWhenPresenceWindowFull(req: Request, res: Response, userId: string): Promise<boolean> {
+  const decision = await countPresenceWrite(req.v1Context!.apiKey.id, userId)
+  if (decision.allowed) return false
+  const refusal = presenceRefusal(decision)
+  res.set(refusal.headers).status(refusal.status).json(refusal.body)
+  return true
 }
 
 async function ensurePresenceTable(db: WorkspaceRawClient, projectId: string): Promise<void> {
@@ -153,7 +168,7 @@ router.get('/:projectId/presence', asyncRoute(v1AuthMiddleware), asyncRoute(asyn
   }
 }))
 
-router.post('/:projectId/presence', asyncRoute(v1AuthMiddleware), asyncRoute(async (req: Request, res: Response) => {
+router.post('/:projectId/presence', asyncRoute(v1PresenceAuthMiddleware), asyncRoute(async (req: Request, res: Response) => {
   const { projectId } = req.params
   try {
     const qSchema = quoteIdent(workspaceSchemaName(projectId))
@@ -176,6 +191,7 @@ router.post('/:projectId/presence', asyncRoute(v1AuthMiddleware), asyncRoute(asy
       res.status(identityError.status).json(identityError.body)
       return
     }
+    if (await refuseWhenPresenceWindowFull(req, res, userId)) return
 
     await ensurePresenceTable(db, projectId)
 
@@ -197,7 +213,7 @@ router.post('/:projectId/presence', asyncRoute(v1AuthMiddleware), asyncRoute(asy
   }
 }))
 
-router.delete('/:projectId/presence', asyncRoute(v1AuthMiddleware), asyncRoute(async (req: Request, res: Response) => {
+router.delete('/:projectId/presence', asyncRoute(v1PresenceAuthMiddleware), asyncRoute(async (req: Request, res: Response) => {
   const { projectId } = req.params
   try {
     const qSchema = quoteIdent(workspaceSchemaName(projectId))
@@ -216,6 +232,7 @@ router.delete('/:projectId/presence', asyncRoute(v1AuthMiddleware), asyncRoute(a
       res.status(identityError.status).json(identityError.body)
       return
     }
+    if (await refuseWhenPresenceWindowFull(req, res, userId)) return
 
     await ensurePresenceTable(db, projectId)
 
