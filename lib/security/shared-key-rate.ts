@@ -12,10 +12,14 @@
  * got 429 until the window reset. Anyone who opened the app could spend it on
  * purpose.
  *
- * So a shared key is limited per client, and only against bursts: each
- * address may send SHARED_KEY_BURST_LIMIT requests per
- * SHARED_KEY_BURST_WINDOW_SECONDS with the key, and one client at that limit
- * refuses no one else. No platform shares a per-key budget across an app's
+ * So a shared key is limited per client: each address may send its owner's
+ * rate with the key, and one client at that limit refuses no one else. A key
+ * whose owner set no rate (the schema's 1,000 an hour, which nobody chose)
+ * holds each address to a burst brake instead, SHARED_KEY_BURST_LIMIT requests
+ * per SHARED_KEY_BURST_WINDOW_SECONDS (sharedKeyWindow in ./shared-key.ts).
+ * An owner raises it for traffic that comes from one address by design: their
+ * own server rendering with the browser key, an office behind one address, a
+ * load test. No platform shares a per-key budget across an app's
  * visitors: Supabase's data API counts no requests at all, and PocketBase's
  * limiter, when on, allows 300 requests per 10 seconds per address to its API.
  * An hourly budget per address, the key's own 1,000 an hour, refused a
@@ -26,8 +30,8 @@
  *
  * A request its client's window lets through is still counted against the
  * key, with no cap, for the console's count and the key's last use; that count
- * decides nothing. The key's own `rateLimit` decides for a key one caller holds
- * (a service key on the app's server), as it always has. The address is the
+ * decides nothing. For a key one caller holds (a service key on the app's
+ * server) the key's own window decides, as it always has. The address is the
  * one lib/security/client-ip.ts resolves, so a made-up X-Forwarded-For is not
  * a new client.
  *
@@ -47,9 +51,9 @@ import type { ClientRateLimitInfo, Store } from 'express-rate-limit'
 import type { RateDecision, RateKey } from '@/lib/auth-projection/rate'
 import { getRateLimitBackend, type RateLimitResult } from '@/lib/security/rate-limit-backend'
 
-import { SHARED_KEY_BURST_LIMIT, SHARED_KEY_BURST_WINDOW_SECONDS } from '@/lib/security/shared-key'
+import { sharedKeyWindow } from '@/lib/security/shared-key'
 
-export { SHARED_KEY_BURST_LIMIT, SHARED_KEY_BURST_WINDOW_SECONDS, isSharedKey } from '@/lib/security/shared-key'
+export { SHARED_KEY_BURST_LIMIT, SHARED_KEY_BURST_WINDOW_SECONDS, isSharedKey, sharedKeyWindow } from '@/lib/security/shared-key'
 
 /** The key's own count for a shared key, which refuses nothing: PostgreSQL's largest integer. */
 export const UNCAPPED = 2_147_483_647
@@ -59,15 +63,15 @@ const KEY_MARK_LENGTH = 12
 
 
 /**
- * The window that decides a key's requests, as a client should be told it: the
- * burst brake for a shared key, the key's own limit for any other.
+ * The window that decides a key's requests, as a client should be told it:
+ * each address's for a shared key, the key's own for any other.
  */
 export function clientWindowOf(key: { shared?: boolean; rateLimit?: number | null; rateLimitWindow?: number | null }): {
   limit: number
   windowSeconds: number
   perAddress: boolean
 } {
-  if (key.shared) return { limit: SHARED_KEY_BURST_LIMIT, windowSeconds: SHARED_KEY_BURST_WINDOW_SECONDS, perAddress: true }
+  if (key.shared) return { ...sharedKeyWindow(key), perAddress: true }
   return { limit: key.rateLimit ?? 1000, windowSeconds: key.rateLimitWindow ?? 3600, perAddress: false }
 }
 
@@ -97,17 +101,14 @@ export async function countKeyedRequest(
 }
 
 /**
- * Count one request of a shared key against its client's window: the burst
- * brake, for this address alone. A rotated key starts new windows, as its own
- * count does.
+ * Count one request of a shared key against its client's window, for this
+ * address alone. A rotated key starts new windows, as its own count does, and
+ * so does a new rate.
  */
 export async function countClientRequest(key: RateKey, client: string | null): Promise<RateDecision> {
   const mark = key.keyHash.slice(0, KEY_MARK_LENGTH)
-  return consume(
-    `key-burst:${key.id}:${mark}:${client ?? 'unknown'}`,
-    SHARED_KEY_BURST_LIMIT,
-    SHARED_KEY_BURST_WINDOW_SECONDS * 1000,
-  )
+  const { limit, windowSeconds } = sharedKeyWindow(key)
+  return consume(`key-burst:${key.id}:${mark}:${limit}/${windowSeconds}:${client ?? 'unknown'}`, limit, windowSeconds * 1000)
 }
 
 /**

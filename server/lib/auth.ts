@@ -432,7 +432,7 @@ export async function v1AuthMiddleware(req: Request, res: Response, next: NextFu
     : null
 
   // Always send rate limit headers so clients can self-throttle: the window
-  // that decides (a shared key's burst brake, any other key's own limit).
+  // that decides (each address's for a shared key, any other key's own limit).
   const window = clientWindowOf(rateKey)
   if (rl) {
     res.setHeader('X-RateLimit-Limit', String(window.limit))

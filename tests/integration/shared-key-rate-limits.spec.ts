@@ -64,7 +64,8 @@ const userToken = (userId: string) =>
   })
 
 /** A key of this project: a browser key unless `serviceRole`. */
-async function makeKey(rateLimit: number, { serviceRole = false } = {}) {
+/** A browser key; with no rate given, the schema's default, which nobody chose: the burst brake decides. */
+async function makeKey(rateLimit = 1000, { serviceRole = false } = {}) {
   const raw = `${serviceRole ? 'svc' : 'proj'}_live_${crypto.randomBytes(24).toString('hex')}`
   const { id } = await prisma.apiKey.create({
     data: {
@@ -107,9 +108,10 @@ async function viaNext(call: Call, method: 'GET' | 'POST' | 'DELETE', body?: unk
  * shares with the runtime it serves, so a test does not race the window with
  * hundreds of requests.
  */
-async function spend(raw: string, id: string, from: string, left: number): Promise<void> {
-  const key = { id, keyHash: hashApiKey(raw), rateLimit: 1000, rateLimitWindow: 3600, shared: true }
-  for (let i = 0; i < SHARED_KEY_BURST_LIMIT - left; i++) await countClientRequest(key, from)
+async function spend(raw: string, id: string, from: string, left: number, rateLimit = 1000): Promise<void> {
+  const key = { id, keyHash: hashApiKey(raw), rateLimit, rateLimitWindow: 3600, shared: true }
+  const limit = rateLimit === 1000 ? SHARED_KEY_BURST_LIMIT : rateLimit
+  for (let i = 0; i < limit - left; i++) await countClientRequest(key, from)
 }
 
 const list = (call: Call) => viaRuntime(call, '/presence')
@@ -152,9 +154,8 @@ afterAll(async () => {
 }, 120_000)
 
 describe('a key every user of an app sends', () => {
-  it(`gives each address ${SHARED_KEY_BURST_LIMIT} requests per 10 seconds through the runtime, whatever the key's own limit: one at it leaves another untouched`, async () => {
-    // The key's own limit is 3 an hour; an address is held to the burst brake.
-    const { raw, id } = await makeKey(3)
+  it(`gives each address ${SHARED_KEY_BURST_LIMIT} requests per 10 seconds through the runtime when the owner set no rate: one at it leaves another untouched`, async () => {
+    const { raw, id } = await makeKey()
     const a = { key: raw, from: newAddress() }
     const b = { key: raw, from: newAddress() }
 
@@ -174,7 +175,7 @@ describe('a key every user of an app sends', () => {
   })
 
   it('is counted per address on /db and /api/v2 too, one window across both doors', async () => {
-    const { raw, id } = await makeKey(2)
+    const { raw, id } = await makeKey()
     const a = { key: raw, from: newAddress() }
     const b = { key: raw, from: newAddress() }
 
@@ -189,7 +190,7 @@ describe('a key every user of an app sends', () => {
   })
 
   it('holds each address to the burst brake through the Next routes, one window per address with the runtime', async () => {
-    const { raw, id } = await makeKey(3)
+    const { raw, id } = await makeKey()
     const a = { key: raw, from: newAddress() }
     const b = { key: raw, from: newAddress() }
 
@@ -203,13 +204,41 @@ describe('a key every user of an app sends', () => {
     expect((await viaNext(b, 'GET')).status).toBe(200)
   })
 
-  it("is still counted on the key, past its own limit, with its last use, for the console", async () => {
-    const { raw, id } = await makeKey(2)
+  it('holds each address to the rate its owner set, on both runtimes, and another address is untouched', async () => {
+    // Lowered, to hold each visitor to less.
+    const { raw, id } = await makeKey(5)
+    const a = { key: raw, from: newAddress() }
+    await spend(raw, id, a.from, 2, 5)
+    expect((await list(a)).status).toBe(200)
+    expect((await viaNext(a, 'GET')).status).toBe(200)
+    const refused = await list(a)
+    expect(refused.status).toBe(429)
+    expect(await refused.json()).toMatchObject({
+      error: { message: expect.stringContaining('5 requests per 60 minute(s) from each address with this key') },
+    })
+    expect((await viaNext(a, 'GET')).status).toBe(429)
+    expect((await list({ key: raw, from: newAddress() })).status).toBe(200)
+  })
+
+  it('lets one address past the burst brake when the owner raised the rate for it, as a server or a load test needs', async () => {
+    const { raw, id } = await makeKey(100_000)
+    const a = { key: raw, from: newAddress() }
+    // Further than a key with no rate set would go from one address in ten seconds.
+    await spend(raw, id, a.from, 100_000 - SHARED_KEY_BURST_LIMIT - 10, 100_000)
+    const statuses: number[] = []
+    for (let i = 0; i < 20; i++) statuses.push((await list(a)).status)
+    expect(statuses.every((s) => s === 200)).toBe(true)
+    const last = await list(a)
+    expect(last.headers.get('x-ratelimit-limit')).toBe('100000')
+  })
+
+  it("is still counted on the key, with its last use, for the console", async () => {
+    const { raw, id } = await makeKey()
     for (const from of [newAddress(), newAddress(), newAddress()]) {
       for (let i = 0; i < 3; i++) await list({ key: raw, from })
     }
     // All nine let through (each address is far from its burst brake) and
-    // counted on the key, past its own limit of 2, which decides nothing here.
+    // counted on the key, whose own count decides nothing here.
     const row = await keyRow(id)
     expect(row.requestCount).toBe(9)
     expect(Math.abs(row.lastUsed!.getTime() - Date.now())).toBeLessThan(60_000)
@@ -238,10 +267,10 @@ describe('presence writes', () => {
     expect((await viaRuntime(signedIn, `/presence?userId=${userId}`, { method: 'DELETE' })).status).toBe(200)
     expect((await viaNext(signedIn, 'DELETE', { userId })).status).toBe(200)
 
-    // Eighteen presence writes, and the address's three requests are all still there.
+    // Eighteen presence writes, and the address's three requests (its owner's rate) are all still there.
     const read = await list(signedIn)
     expect(read.status).toBe(200)
-    expect(read.headers.get('x-ratelimit-remaining')).toBe(String(SHARED_KEY_BURST_LIMIT - 1))
+    expect(read.headers.get('x-ratelimit-remaining')).toBe('2')
   })
 
   it(`are refused after ${PRESENCE_WRITES_PER_MINUTE} a minute for one user, on both runtimes, and another user is untouched`, async () => {

@@ -94,9 +94,8 @@ export async function PUT(request: NextRequest, props: { params: Promise<{ id: s
     }
 
     // The plan's fair-use ceiling applies to the rate the key ends up with. A
-    // shared (browser) key's own rate decides nothing: each address is held to
-    // the burst brake instead (lib/security/shared-key-rate.ts), so the
-    // ceiling is not checked for it.
+    // shared (browser) key's rate is each address's (lib/security/shared-key.ts),
+    // which a ceiling on one key's rate does not measure, so it is not checked.
     if (data.rateLimit !== undefined || data.rateLimitWindow !== undefined) {
       const current = await prisma.apiKey.findFirst({
         where: { id: params.id, userId: auth.userId },

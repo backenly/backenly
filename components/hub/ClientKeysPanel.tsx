@@ -29,7 +29,7 @@ import {
   Tag,
 } from '@/components/inspector/kit'
 import { PAGE_GUTTER, PAGE_WIDTH } from '@/components/console/tokens'
-import { SHARED_KEY_BURST_LIMIT, SHARED_KEY_BURST_WINDOW_SECONDS, isSharedKey } from '@/lib/security/shared-key'
+import { isSharedKey, sharedKeyWindow, shortWindow } from '@/lib/security/shared-key'
 
 interface ApiKey {
   id: string
@@ -307,10 +307,10 @@ export function ClientKeysPanel() {
                       </div>
                     </td>
                     <td className="whitespace-nowrap px-4 py-3 align-middle text-[13px] tabular-nums text-zinc-400">
-                      {/* Every user of the app sends a shared key, so it is limited per address, against bursts only (lib/security/shared-key-rate.ts). */}
+                      {/* Every user of the app sends a shared key, so its limit is each address's (lib/security/shared-key.ts). */}
                       {isSharedKey(key) ? (
                         <>
-                          {SHARED_KEY_BURST_LIMIT} / {SHARED_KEY_BURST_WINDOW_SECONDS} s<span className="text-faint"> per address</span>
+                          {shortWindow(sharedKeyWindow(key))}<span className="text-faint"> per address</span>
                         </>
                       ) : (
                         <>

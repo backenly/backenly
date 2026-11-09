@@ -22,6 +22,7 @@ import {
   SHARED_KEY_BURST_LIMIT,
   SHARED_KEY_BURST_WINDOW_SECONDS,
   UNCAPPED,
+  sharedKeyWindow,
   clientWindowOf,
   describeClientWindow,
   countClientRequest,
@@ -34,10 +35,11 @@ import {
   presenceRefusal,
 } from '@/lib/security/shared-key-rate'
 
+/** A shared key at the schema's default rate, which nobody chose: the burst brake decides. */
 const key = (over: Partial<RateKey> = {}): RateKey => ({
   id: 'key-1',
   keyHash: 'a'.repeat(64),
-  rateLimit: 3,
+  rateLimit: 1000,
   rateLimitWindow: 3600,
   shared: true,
   ...over,
@@ -74,16 +76,45 @@ describe('a shared key', () => {
     expect(isSharedKey({ keyType: null, serviceRole: null })).toBe(false)
   })
 
-  it(`gives each client ${SHARED_KEY_BURST_LIMIT} requests per ${SHARED_KEY_BURST_WINDOW_SECONDS} seconds, whatever the key's own limit, and one at its limit refuses no one else`, async () => {
+  it(`gives each client ${SHARED_KEY_BURST_LIMIT} requests per ${SHARED_KEY_BURST_WINDOW_SECONDS} seconds when its owner set no rate, and one at its limit refuses no one else`, async () => {
     const own = ownWindow()
     const a = []
     for (let i = 0; i < SHARED_KEY_BURST_LIMIT + 1; i++) a.push(await countKeyedRequest(key(), '203.0.113.1', own.countKey))
-    // The key's own limit is 3; an address gets the burst brake, not 3 an hour.
+    // The schema's 1,000 an hour, which nobody chose, means the burst brake for each address.
     expect(a.filter((d) => d.allowed)).toHaveLength(SHARED_KEY_BURST_LIMIT)
     expect(a[SHARED_KEY_BURST_LIMIT]).toMatchObject({ allowed: false, remaining: 0 })
     expect(a[SHARED_KEY_BURST_LIMIT].retryAfter).toBeLessThanOrEqual(SHARED_KEY_BURST_WINDOW_SECONDS)
 
     expect(await countKeyedRequest(key(), '203.0.113.2', own.countKey)).toMatchObject({ allowed: true, remaining: SHARED_KEY_BURST_LIMIT - 1 })
+  })
+
+  it('holds each client to the rate its owner set, lowered or raised', async () => {
+    const own = ownWindow()
+    const lowered = key({ id: 'key-low', rateLimit: 5, rateLimitWindow: 3600 })
+    const a = []
+    for (let i = 0; i < 6; i++) a.push(await countKeyedRequest(lowered, '203.0.113.1', own.countKey))
+    expect(a.map((d) => d.allowed)).toEqual([true, true, true, true, true, false])
+    expect((await countKeyedRequest(lowered, '203.0.113.2', own.countKey)).allowed).toBe(true)
+
+    // Raised for traffic that comes from one address by design: past the brake, and still per address.
+    const raised = key({ id: 'key-high', rateLimit: 100_000, rateLimitWindow: 3600 })
+    const b = []
+    for (let i = 0; i < SHARED_KEY_BURST_LIMIT + 40; i++) b.push(await countKeyedRequest(raised, '203.0.113.3', own.countKey))
+    expect(b.every((d) => d.allowed)).toBe(true)
+    expect(b.at(-1)!.remaining).toBe(100_000 - SHARED_KEY_BURST_LIMIT - 40)
+  })
+
+  it('starts new windows when its owner sets a new rate', async () => {
+    for (let i = 0; i < SHARED_KEY_BURST_LIMIT; i++) await countClientRequest(key(), '203.0.113.1')
+    expect((await countClientRequest(key(), '203.0.113.1')).allowed).toBe(false)
+    expect((await countClientRequest(key({ rateLimit: 600, rateLimitWindow: 10 }), '203.0.113.1')).allowed).toBe(true)
+  })
+
+  it('reads the schema default as "no rate set", and any other rate as the owner\'s', () => {
+    expect(sharedKeyWindow({ rateLimit: 1000, rateLimitWindow: 3600 })).toEqual({ limit: SHARED_KEY_BURST_LIMIT, windowSeconds: SHARED_KEY_BURST_WINDOW_SECONDS })
+    expect(sharedKeyWindow({})).toEqual({ limit: SHARED_KEY_BURST_LIMIT, windowSeconds: SHARED_KEY_BURST_WINDOW_SECONDS })
+    expect(sharedKeyWindow({ rateLimit: 1000, rateLimitWindow: 60 })).toEqual({ limit: 1000, windowSeconds: 60 })
+    expect(sharedKeyWindow({ rateLimit: 0, rateLimitWindow: 0 })).toEqual({ limit: 1, windowSeconds: 1 })
   })
 
   it("keeps the key's own count with no cap, for requests a client's window let through only", async () => {
@@ -109,7 +140,8 @@ describe('a shared key', () => {
 
   it('tells a client the window that decides', () => {
     expect(describeClientWindow(clientWindowOf(key()))).toBe('300 requests per 10 second(s) from each address with this key')
-    expect(describeClientWindow(clientWindowOf(key({ shared: false })))).toBe('3 requests per 60 minute(s)')
+    expect(describeClientWindow(clientWindowOf(key({ rateLimit: 5000 })))).toBe('5000 requests per 60 minute(s) from each address with this key')
+    expect(describeClientWindow(clientWindowOf(key({ shared: false, rateLimit: 3 })))).toBe('3 requests per 60 minute(s)')
   })
 })
 
@@ -118,7 +150,7 @@ describe('a key one caller holds', () => {
     const own = ownWindow()
     const decisions = []
     for (const client of ['203.0.113.1', '203.0.113.2', '203.0.113.3', '203.0.113.4']) {
-      decisions.push(await countKeyedRequest(key({ shared: false }), client, own.countKey))
+      decisions.push(await countKeyedRequest(key({ shared: false, rateLimit: 3 }), client, own.countKey))
     }
     expect(decisions.map((d) => d.allowed)).toEqual([true, true, true, false])
     expect(own.calls).toEqual([3, 3, 3, 3])

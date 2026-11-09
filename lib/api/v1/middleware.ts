@@ -196,8 +196,8 @@ export async function v1ApiMiddleware(
       summary: `Rate limit hit on project ${params.projectId} (key ${apiKeyRecord.keyPrefix})`,
       detail: { apiKeyId: apiKeyRecord.id, path: request.nextUrl.pathname, limit: apiKeyRecord.rateLimit },
     }).catch(() => {})
-    // The window that decided: a shared key's burst brake, any other key's
-    // own limit (lib/security/shared-key-rate.ts).
+    // The window that decided: each address's for a shared key, any other
+    // key's own limit (lib/security/shared-key-rate.ts).
     const window = clientWindowOf({ ...apiKeyRecord, shared: isSharedKey(apiKeyRecord) })
     const retryAfter = Math.min(window.windowSeconds, 60)
     return {
