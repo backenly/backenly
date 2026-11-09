@@ -751,6 +751,10 @@ tests/integration/overview-truthful-counts.spec.ts
 # parent used a list only per-line messages (never sent) would fill. Runs the
 # real executor and worker, and checks the persisted run record.
 tests/integration/sandbox-function-logs.spec.ts
+
+# A sandboxed function has the whole of JSON and Math (they were empty frozen
+# copies), and what one run does to them stays in that run.
+tests/integration/sandbox-json-and-math.spec.ts
 tests/integration/apply-migration-existing-table.spec.ts
 
 # Failed migration DDL preserves PostgreSQL data and stops without asking the
