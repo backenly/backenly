@@ -138,9 +138,9 @@ describe('provider disclosure', () => {
       'Amplitude',
       'Sentry',
       'Stripe',
-      // Cloud's affiliate tracking: the overlay loads Endorsely's script on
-      // every page, and next.config.js allows its two origins.
-      'Endorsely',
+      // Cloud's affiliate tracking: the overlay loads Rewardful's script on
+      // marketing pages, and next.config.js allows its two origins.
+      'Rewardful',
       'Cloudflare',
       'Google',
       'GitHub',
@@ -228,6 +228,22 @@ describe('disclosures that must be present while the behaviour is live', () => {
       /does not record clicks in the dashboard, on sign-in pages or in the startup application/,
     )
     expect(analytics).toMatch(/does not record what you type/)
+  })
+
+  it('says where Rewardful runs, what it sends while its cookie lasts, and names the cookie', () => {
+    // Cloud loads rw.js on lib/marketing-surfaces.ts pages only. Once a visitor
+    // holds the cookie, rw.js reports every page it runs on, so the policy has
+    // to say that and say where it does not run.
+    const referrals = JSON.stringify(PRIVACY_SECTIONS.find((s) => s.id === 'affiliate-referrals'))
+    expect(referrals).toMatch(/Rewardful tracks those referrals/)
+    expect(referrals).toMatch(/The dashboard, the sign-in pages and pages opened from a one-time link/)
+    expect(referrals).toMatch(/each public page you open sends Rewardful the referral identifier/)
+    expect(referrals).toMatch(/rewardful\.referral/)
+  })
+
+  it('names no affiliate provider Backenly Cloud has retired', () => {
+    const all = JSON.stringify(PRIVACY_SECTIONS) + JSON.stringify(PRIVACY_SUMMARY) + JSON.stringify(PROVIDERS)
+    expect(all).not.toMatch(/Endorsely/i)
   })
 
   it('separates subscription cancellation from account deletion', () => {
