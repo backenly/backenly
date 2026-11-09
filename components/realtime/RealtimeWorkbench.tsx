@@ -12,6 +12,12 @@
  * The SSE lifecycle below (jittered backoff, fatal-vs-transient classification,
  * observable countdown) is carried over unchanged — it is the reason this page
  * survives a server restart without a reload, and none of it is presentational.
+ *
+ * The stream is opened as the signed-in member, with a ticket issued to them
+ * (app/api/projects/[id]/realtime-ticket), so it shows every change whatever
+ * the table's row access, as the console shows every row. It used to be
+ * opened with the anon key, which may read no row of a table only its owners
+ * may read, so such a table showed its deletes alone (#617).
  */
 
 import { useEffect, useRef, useState, useCallback } from 'react'
@@ -108,7 +114,6 @@ export function RealtimeWorkbench({ projectId }: { projectId: string }) {
 
   const esRef = useRef<EventSource | null>(null)
   const counterRef = useRef(0)
-  const anonKeyRef = useRef<string | null>(null)
   // The project's API base in its own region ({origin}/api/v1/{id}). A project
   // outside the home region streams from its region's service, which is the
   // only one that serves it (lib/data-plane/serving.ts).
@@ -206,32 +211,35 @@ export function RealtimeWorkbench({ projectId }: { projectId: string }) {
       setFatalReason(null)
       setConnState('connecting')
 
-      // Anon key is server-side auto-generated on first fetch. Cache it for the
-      // lifetime of this page so reconnects don't re-hit Prisma.
-      if (!anonKeyRef.current) {
-        try {
-          const res = await fetch(`/api/projects/${projectId}/anon-key`, {
-            headers: authHeaders(),
-            credentials: 'include',
-          })
-          if (res.status === 401) {
-            setFatal('Your dashboard session expired. Reload the page to continue.')
-            return
-          }
-          if (!res.ok) {
-            scheduleReconnect()
-            return
-          }
-          const data = await res.json()
-          anonKeyRef.current = data.anonKey ?? null
-        } catch {
+      // A ticket is good for one connection within 30 seconds, so every
+      // connection, a reconnect included, asks for a fresh one.
+      let ticket: string | null = null
+      try {
+        const res = await fetch(`/api/projects/${projectId}/realtime-ticket`, {
+          method: 'POST',
+          headers: authHeaders(),
+          credentials: 'include',
+        })
+        if (res.status === 401) {
+          setFatal('Your dashboard session expired. Reload the page to continue.')
+          return
+        }
+        if (res.status === 404) {
+          setFatal('This project was not found, or you no longer have access to it.')
+          return
+        }
+        if (!res.ok) {
           scheduleReconnect()
           return
         }
+        ticket = (await res.json()).ticket ?? null
+      } catch {
+        scheduleReconnect()
+        return
       }
       if (destroyedRef.current) return
-      if (!anonKeyRef.current) {
-        setFatal("We couldn't generate this project's anon key. Try reloading.")
+      if (!ticket) {
+        setFatal("We couldn't open this project's realtime stream. Try reloading.")
         return
       }
       if (!apiBaseRef.current) {
@@ -248,7 +256,7 @@ export function RealtimeWorkbench({ projectId }: { projectId: string }) {
         return
       }
 
-      const url = `${apiBaseRef.current}/realtime?apiKey=${encodeURIComponent(anonKeyRef.current)}`
+      const url = `${apiBaseRef.current}/realtime?ticket=${encodeURIComponent(ticket)}`
       const es = new EventSource(url)
       esRef.current = es
 
@@ -361,7 +369,8 @@ export function RealtimeWorkbench({ projectId }: { projectId: string }) {
           : {
               icon: Radio,
               title: 'Listening for changes',
-              description: 'The stream is open. Inserts, updates, deletes and broadcasts appear here as they happen.',
+              description:
+                "The stream is open. Inserts, updates, deletes and broadcasts appear here as they happen, whatever the table's row access. Your app's users receive only the rows they may read.",
             }
       case 'reconnecting':
         return {

@@ -1666,3 +1666,12 @@ tests/integration/auth-before-first-signup.spec.ts
 # Express app (server/app.ts), whose modules open the platform database, so it
 # runs with one.
 tests/integration/runtime-rejects-bad-bodies.spec.ts
+
+# The console's Realtime page streams as the signed-in member: the console route
+# issues whoever may open the project a ticket that names them and no end user,
+# reads as the service role, is spent once and is refused when it cannot be;
+# with it the stream receives an owner-only table's inserts, updates and deletes
+# whole on the runtime and the Next route, where a stream on the anon key still
+# receives the delete alone. Real project, row-level security, realtime trigger,
+# notifications and ticket ledger, so a real Postgres.
+tests/integration/console-realtime-operator-feed.spec.ts

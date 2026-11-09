@@ -33,6 +33,13 @@
  * ticket degrades to "short-lived but replayable within 30s" and SAYS SO in the
  * response — a security property that silently stops holding is worse than one
  * that was never claimed.
+ *
+ * The console's Realtime page streams with a ticket too, issued to the signed-in
+ * project member (app/api/projects/[id]/realtime-ticket/route.ts). It reads every
+ * change, as the console reads every row, and names that member in `op`, never
+ * in `userId`: every end-user door takes `userId` as the end user. A console
+ * ticket is never replayable: it is not issued, and not accepted, unless it
+ * can be spent.
  */
 
 import jwt from 'jsonwebtoken'
@@ -51,8 +58,14 @@ export interface SseTicketClaims {
   endUserId?: string | null
   /** End-user role claim, mirrored so the stream can scope without a re-verify. */
   endUserRole?: string | null
-  /** True when the minting key was a service-role key (bypasses RLS scoping). */
+  /**
+   * True when the stream reads every change, as the service role does: the
+   * minting key was a service-role key, or the ticket was issued to a project
+   * member for the console (`operatorId`).
+   */
   serviceRole?: boolean
+  /** The project member a console ticket was issued to (the platform user id). */
+  operatorId?: string | null
 }
 
 export interface MintedTicket {
@@ -83,6 +96,7 @@ export async function mintSseTicket(
       userId: claims.endUserId ?? null,
       role: claims.endUserRole ?? null,
       svc: !!claims.serviceRole,
+      op: claims.operatorId ?? null,
     },
     projectJwtSecret,
     { algorithm: 'HS256', expiresIn: SSE_TICKET_TTL_SECONDS },
@@ -98,7 +112,7 @@ export async function mintSseTicket(
 
 export type TicketRedemption =
   | { ok: true; claims: Required<Pick<SseTicketClaims, 'projectId'>> & SseTicketClaims; singleUseEnforced: boolean }
-  | { ok: false; code: 'INVALID' | 'EXPIRED' | 'WRONG_PROJECT' | 'ALREADY_USED'; message: string }
+  | { ok: false; code: 'INVALID' | 'EXPIRED' | 'WRONG_PROJECT' | 'ALREADY_USED' | 'NOT_SPENT'; message: string }
 
 /**
  * Verify a ticket and burn it.
@@ -148,6 +162,15 @@ export async function redeemSseTicket(
         'connection (that is what makes a ticket in a URL safe).',
     }
   }
+  // A console ticket reads every change, so one that could not be spent is not
+  // honoured: in a URL, it would be replayable for the rest of its 30 seconds.
+  if (burn === 'unenforced' && payload.op) {
+    return {
+      ok: false,
+      code: 'NOT_SPENT',
+      message: 'This console realtime ticket could not be recorded as used, so it was not accepted. Open the stream again.',
+    }
+  }
 
   return {
     ok: true,
@@ -157,6 +180,7 @@ export async function redeemSseTicket(
       endUserId: payload.userId ?? null,
       endUserRole: payload.role ?? null,
       serviceRole: !!payload.svc,
+      operatorId: payload.op ?? null,
     },
     singleUseEnforced: burn === 'burned',
   }
