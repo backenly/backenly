@@ -442,6 +442,12 @@ __tests__/auth/oauth-claim-gate.test.ts
 # positive reads present so the refusals cannot pass because nothing works.
 __tests__/database/sql-workspace-isolation.test.ts
 
+# When the read-only connection itself fails (a class-28 login refusal, as
+# pg_hba's "no encryption" was on production), run_query and the SQL tab say
+# nothing ran and name no host, address, role or database; the statement's own
+# errors still reach the caller. Real bkn_ro_ role, refused with NOLOGIN.
+__tests__/database/read-query-connection.test.ts
+
 # Function SQL ran on the app's own connection, whose role owns every platform
 # table and workspace schema, so generated function code could read public.users
 # or another tenant's tables; claims filter rows, not schemas. It now logs in as
