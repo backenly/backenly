@@ -913,6 +913,8 @@ async function writeFinding(
     // gap's details were written over another gap's row.
     missing_fk_index: ['tableName', 'columnName'],
     missing_rls: 'tableName',
+    // One row per rule: two rules refusing writes are two decisions.
+    unrequested_unique_refusing_writes: ['tableName', 'columnName'],
     rls_denies_everything: 'tableName',
   }
 

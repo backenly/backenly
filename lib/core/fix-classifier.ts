@@ -324,6 +324,20 @@ export function classifyFix(
     }
   }
 
+  // ── A unique rule nobody asked for, refusing writes ───────────
+  //
+  // Whether a value may repeat is a question about the owner's data that only
+  // the owner can answer: the rule may be wanted after all, and the refusals
+  // are then the rule working. Dropping it is theirs to do.
+  if (type === 'unrequested_unique_refusing_writes') {
+    return {
+      decision: 'notify_only',
+      reason:
+        'Writes to this table are being refused, and the likely cause is a rule that keeps a value ' +
+        'unique which nothing recorded asking for. Whether that value may repeat is yours to decide.',
+    }
+  }
+
   // ── Behavioural regression ─────────────────────────────────────
   //
   // A deviation is a symptom, and the repair depends on a cause the measurement

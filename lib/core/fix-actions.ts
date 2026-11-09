@@ -560,6 +560,27 @@ export function getManualRemediationHint(
     // follows from a deviation alone. What it can do is hand over the specific
     // numbers and the specific changes, which is what the developer was about
     // to go and look up.
+    // The refusals are evidence; the rule is the likely cause, not a proven one
+    // (a conflict can also be a reference to a row that does not exist).
+    case 'unrequested_unique_refusing_writes': {
+      const t = typeof details?.tableName === 'string' ? details.tableName : 'This table'
+      const col = typeof details?.columnName === 'string' ? details.columnName : 'a column'
+      const refused = Number(details?.refused ?? 0)
+      const writes = Number(details?.writes ?? 0)
+      const hours = Number(details?.windowHours ?? 24)
+      const others = Array.isArray(details?.otherRules) && details.otherRules.length > 0
+        ? ` ${t} has other rules against repeated values too (${(details.otherRules as string[]).join('; ')}), so some refusals may be theirs.`
+        : ''
+      const drop = typeof details?.drop === 'string' ? `\n\n  ${details.drop}` : ''
+      return (
+        `${t} refused ${refused} of its ${writes} writes in the last ${hours} hours with a conflict. ` +
+        `${t}.${col} is kept unique by a rule that nothing recorded for ${t} asked for.${others}` +
+        `\n\nIf the same ${col} can appear on more than one row, ask your coding agent to remove the ` +
+        `rule with apply_migration:${drop}\n\nIf it should stay unique, dismiss this: the refusals are ` +
+        `the rule working.`
+      )
+    }
+
     case 'behavioural_regression': {
       const measure = String(details?.measure ?? 'this measure').replace(/_/g, ' ')
       const ratio = details?.ratio ? `${details.ratio}x` : 'well above'

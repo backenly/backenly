@@ -114,6 +114,13 @@ export type FindingType =
   // records the request rather than reconciling to reality, so a disagreement
   // is evidence rather than a verdict.
   | 'intent_drift'
+  // ── Writes refused by a unique rule nobody asked for: a table whose writes
+  // were answered with a conflict, and a single-column unique rule on it that
+  // the intent ledger does not record as requested (lib/autonomy/refused-writes.ts).
+  //
+  // notify_only: whether a value may repeat is the owner's decision, and the
+  // remedy (dropping the rule) is theirs to take.
+  | 'unrequested_unique_refusing_writes'
   // ── This backend is behaving unlike itself: a query far slower than its own
   // measured normal, a table taking far more sequential scans than usual, or
   // one growing far outside its own pattern.
@@ -348,6 +355,8 @@ export const ALL_FINDING_TYPES = [
   'idle_in_transaction',
   'index_bloat',
   'intent_drift',
+  // Added 2026-11-10 in the same commit that introduced it.
+  'unrequested_unique_refusing_writes',
   'behavioural_regression',
   'migration_residue',
   // Added 2026-09-14 in the same commit that introduced it, per the discipline
