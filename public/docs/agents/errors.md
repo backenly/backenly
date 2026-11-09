@@ -31,6 +31,8 @@ Every tool and route answers failures as JSON: `{ ok: false, error, code }`, oft
 | `BRANCH_TOKEN_ON_MAIN` / `BRANCH_TOKEN_MISMATCH` | An end-user token issued on a branch was sent to production, or to another branch | Send it with the key of the branch that issued it |
 | `API_KEY_PROJECT_MISMATCH` | A preview key of one project was sent to another project's auth endpoint | Use a key of the project in the URL |
 | `MCP_KEY_IN_APP` | An app sent an MCP key to the runtime API, which serves only project keys | Give the app a project key from `connect` `create_api_key`; if the MCP key was committed or shipped, ask your human to revoke it in Connect → Agents |
+| `PRESENCE_TOKEN_REQUIRED` | Presence was announced or cleared with the public key and no signed-in user (401) | Sign the user in, then `presence.join` with the `user.id` sign-in returned |
+| `PRESENCE_IDENTITY_MISMATCH` | A signed-in user announced or cleared presence as someone else (403) | Pass the signed-in user's own `user.id`, not a username, an email or a made-up id |
 | `SERVICE_ROLE_IN_BROWSER` | A service-role key was sent from a browser, where it would expose every row | Use a publishable key in browser code and keep the service-role key on a server |
 | `BRANCH_REQUIRED` | Production is protected, so a schema change was refused on main, whether sent as `apply_migration` or asked of `backend_chat` | `branch` `create`, then `apply_migration { sql, branchId }`, then `branch` `merge` |
 | `RUN_INTERRUPTED` | A `backend_chat` request stopped because Backenly restarted while it ran | What is in `applied` landed. Send `backend_chat { "message": "continue" }` to finish it |
