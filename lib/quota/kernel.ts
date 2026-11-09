@@ -319,6 +319,21 @@ export async function enforceDbStorage(projectId: string): Promise<QuotaDecision
   }
 }
 
+/**
+ * The account's measured PostgreSQL storage and the storage its plan includes,
+ * in bytes. Null when the plan sets no limit (or there is no plan, as on a
+ * self-hosted install). Throws when it could not be read: unknown is not
+ * "plenty". Read by Backenly's own repairs before they add storage
+ * (lib/authority/gate.ts), which never count on a spend limit: what the plan
+ * includes is the ceiling, so an autonomous change never causes an overage.
+ */
+export async function accountDbStorage(projectId: string): Promise<{ usedBytes: number; includedBytes: number } | null> {
+  const info = await accountEntitlements(projectId)
+  const maxMb = info?.ent.maxPostgresStorageMb ?? null
+  if (!info || maxMb === null) return null
+  return { usedBytes: await accountDbBytes(info.accountId), includedBytes: maxMb * MB }
+}
+
 /** Each of the account's projects' latest measured database size, summed, in bytes. */
 async function accountDbBytes(accountId: string): Promise<number> {
   const rows = await prisma.$queryRaw<Array<{ mb: number | null }>>`
