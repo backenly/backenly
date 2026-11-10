@@ -165,6 +165,18 @@ function summariseFindingText(type: string, details: Record<string, unknown>): s
         ? `\`${table}\` refused ${refused} of ${writes} writes; \`${col}\` is kept unique by a rule nobody asked for`
         : 'Writes are refused by a unique rule nobody asked for'
     }
+    // ── Size ──────────────────────────────────────────────────────────────
+    // One raised under the retired row-count rule carries no sizes, and is not
+    // said to be larger than anything (lib/ai/infra-intelligence.ts withdraws it).
+    case 'infra_partition':
+      if (typeof d.cacheBytes !== 'number') {
+        return table
+          ? `\`${table}\` was flagged by a retired check that counted rows, not size`
+          : 'A table was flagged by a retired check that counted rows, not size'
+      }
+      return table
+        ? `\`${table}\` is larger than PostgreSQL's cache: keep it smaller, or partition it`
+        : 'A table is larger than PostgreSQL\'s cache: keep it smaller, or partition it'
 
     // ── Integrations ──────────────────────────────────────────────────────
     case 'broken_webhook':

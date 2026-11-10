@@ -61,6 +61,14 @@ export type FindingType =
   // The repair is VACUUM ANALYZE on the named table: no data change, no
   // exclusive lock (never VACUUM FULL), and safe to repeat.
   | 'infra_table_bloat'
+  // ── A table larger than the memory PostgreSQL expects to cache data in
+  // (effective_cache_size; lib/ai/infra-intelligence.ts,
+  // detectPartitioningCandidates). One type per table
+  // (`infra_partition_<table>`), recognised by prefix.
+  //
+  // notify_only: partitioning a table that holds data moves every row, which
+  // Backenly does not do on its own. The finding is advice with a next step.
+  | 'infra_partition'
   // ── An index PostgreSQL has not used once across a measured observation
   // window (lib/autonomy/unused-index.ts). Every index is paid for on every
   // insert and update of its table, so one nothing reads is pure write cost.
@@ -351,6 +359,9 @@ export const ALL_FINDING_TYPES = [
   // omissions above were each found in production, and each one routed a real
   // finding into "no automatic repair for it yet".
   'infra_table_bloat',
+  // Added 2026-11-10 in the same commit that registered it. Emitted since
+  // long before, as `infra_partition_<table>`, and recognised by nothing.
+  'infra_partition',
   // Added 2026-08-07 in the same commit that introduced it — the discipline the
   // four omissions above were each found in production for.
   'service_role_key_exposed',
@@ -405,6 +416,8 @@ const PREFIX_MAP: ReadonlyArray<readonly [string, FindingType]> = [
   // Same per-table emission shape (`infra_table_bloat_<table>`), so it can only
   // be recognised by prefix too.
   ['infra_table_bloat', 'infra_table_bloat'],
+  // Same per-table emission shape (`infra_partition_<table>`).
+  ['infra_partition', 'infra_partition'],
   ['missing_fk_index', 'missing_fk_index'],
   ['missing_api_definition', 'missing_api_definition'],
   ['missing_api_crud', 'missing_api_crud'],

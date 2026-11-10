@@ -20,6 +20,7 @@
 import { Pool } from 'pg'
 import { projectDatabaseUrl } from '@/lib/data-plane/regional'
 import { literalPrefix } from '@/lib/projects/backend-presence'
+import { sizeWords } from '@/lib/core/size-words'
 
 // Warn once per server restart if pg_stat_statements is unavailable.
 // Avoids spamming logs on every cron invocation.
@@ -99,9 +100,11 @@ export interface HotTableFinding {
 export interface PartitioningFinding {
   table: string
   liveRows: number
-  growthClass: 'high' | 'very_high' | 'critical'
+  /** The table with its indexes and TOAST, on disk. */
+  bytes: number
+  /** effective_cache_size: the server's own estimate of the memory that caches its data. */
+  cacheBytes: number
   recommendation: string
-  migrationSql: string
 }
 
 export interface QueryFinding {
@@ -136,6 +139,12 @@ export interface InfraReport {
   overallPressure: InfraPressure
   hotTables: HotTableFinding[]
   partitioningCandidates: PartitioningFinding[]
+  /**
+   * Whether the partitioning read finished. An empty list from a read that
+   * failed is not "no table outgrows the cache", and must not withdraw the
+   * findings already raised.
+   */
+  partitioningScanned: boolean
   slowQueries: QueryFinding[]
   websocketPressure: WebSocketFinding | null
   /** Prioritised actionable recommendations, highest severity first */
@@ -324,58 +333,131 @@ async function detectHotTables(pool: Pool, schemaName: string): Promise<HotTable
 }
 
 // ── Detection: Partitioning candidates ───────────────────────────────────────
-
-const PARTITION_PATTERN_TABLES = [
-  'events', 'logs', 'activities', 'notifications', 'audit', 'audit_logs',
-  'metrics', 'analytics', 'requests', 'access_log', 'errors',
-]
-
-async function detectPartitioningCandidates(
+//
+// A table larger than PostgreSQL's cache. The manual's rule of thumb (Table
+// Partitioning, 5.12.1) is that partitioning pays once "the size of the table
+// should exceed the physical memory of the database server". SQL cannot read
+// physical memory, so this compares against effective_cache_size, the server's
+// own estimate of the memory that caches its data (RDS sets it to half the
+// instance's memory), and the advice names both numbers.
+//
+// This advised partitioning for any table past a million rows, or past 100,000
+// with a log-like name, with a "migration" that began by renaming the live
+// table aside, and filed it as a change waiting for approval that had nothing
+// to approve (production QA, 2026-11-09: a "Partitioning candidate" with no
+// next step, for a table PostgreSQL served from memory).
+//
+// No catch: a read that failed rejects, and the report records it
+// (partitioningScanned), so findings are never withdrawn on a failed read.
+export async function detectPartitioningCandidates(
   pool: Pool,
   schemaName: string,
 ): Promise<PartitioningFinding[]> {
-  try {
-    const rows = await pool.query<{ tablename: string; n_live_tup: string }>(
-      // relname, not tablename — see detectHotTables. Same 42703, same swallow.
-      `SELECT relname AS tablename, n_live_tup::int
-         FROM pg_stat_user_tables
-        WHERE schemaname = $1
-          AND n_live_tup > 100000
-        ORDER BY n_live_tup DESC
-        LIMIT 15`,
-      [schemaName],
-    )
+  const rows = await pool.query<{ tablename: string; live_rows: string; bytes: string; cache_bytes: string }>(
+    // relname, not tablename — see detectHotTables. Backenly's own underscore
+    // tables are not the owner's to partition, and a partition is already
+    // partitioned (its parent has no storage of its own, so it never qualifies).
+    // The size is read once per table: the CTE holds a volatile function, so
+    // PostgreSQL keeps it rather than folding it into the filter and the sort.
+    `WITH sized AS (
+       SELECT s.relname, s.n_live_tup, pg_total_relation_size(s.relid) AS bytes
+         FROM pg_stat_user_tables s
+         JOIN pg_class c ON c.oid = s.relid
+        WHERE s.schemaname = $1
+          AND s.relname NOT LIKE '\\_%'
+          AND NOT c.relispartition
+     )
+     SELECT relname AS tablename,
+            n_live_tup::bigint AS live_rows,
+            bytes,
+            pg_size_bytes(current_setting('effective_cache_size')) AS cache_bytes
+       FROM sized
+      WHERE bytes > pg_size_bytes(current_setting('effective_cache_size'))
+      ORDER BY bytes DESC
+      LIMIT 15`,
+    [schemaName],
+  )
 
-    return rows.rows
-      .filter(r => {
-        const name = r.tablename
-        const isTimeSeriesPattern = PARTITION_PATTERN_TABLES.some(
-          p => name === p || name.startsWith(p + '_') || name.endsWith('_' + p),
-        )
-        return isTimeSeriesPattern || Number(r.n_live_tup) > 1_000_000
-      })
-      .map(r => {
-        const rows = Number(r.n_live_tup)
-        const growthClass: PartitioningFinding['growthClass'] =
-          rows > 10_000_000 ? 'critical' : rows > 1_000_000 ? 'very_high' : 'high'
+  return rows.rows.map(r => {
+    const bytes = Number(r.bytes)
+    const cacheBytes = Number(r.cache_bytes)
+    return {
+      table: r.tablename,
+      liveRows: Number(r.live_rows),
+      bytes,
+      cacheBytes,
+      recommendation:
+        `"${r.tablename}" takes ${sizeWords(bytes)}, more than the ${sizeWords(cacheBytes)} PostgreSQL ` +
+        `expects to have cached on this server, so reads of it cannot all come from memory.`,
+    }
+  })
+}
 
-        return {
-          table: r.tablename,
-          liveRows: rows,
-          growthClass,
-          recommendation: `Table "${r.tablename}" has ${rows.toLocaleString()} rows and is unbounded — partition by time to keep per-partition size manageable and enable fast archival.`,
-          migrationSql: `-- Partition "${r.tablename}" by month (requires downtime or pg_partman)
--- Step 1: rename existing table
-ALTER TABLE "${schemaName}"."${r.tablename}" RENAME TO "${r.tablename}_legacy";
--- Step 2: create partitioned table (schema must match)
--- CREATE TABLE "${schemaName}"."${r.tablename}" (...) PARTITION BY RANGE (created_at);
--- Step 3: attach existing data as first partition
--- See: https://www.postgresql.org/docs/current/ddl-partitioning.html`,
-        }
+// ── Partitioning findings: what one scan changes ─────────────────────────────
+
+export interface FiledPartitionFinding {
+  id: string
+  type: string
+  status: string
+  details: unknown
+}
+
+export interface PartitionFindingPlan {
+  /** Raised under the retired row-count rule: withdrawn as `detector_retired`. */
+  retire: FiledPartitionFinding[]
+  /** Its table fits in the cache again: withdrawn, a condition that cleared, never a fix. */
+  cleared: FiledPartitionFinding[]
+  /** Still true, with sizes that moved: the same finding, its numbers brought up to date. */
+  refresh: Array<{ id: string; details: Record<string, unknown> }>
+  /** New, assuming every row in `retire` was withdrawn. */
+  raise: PartitioningFinding[]
+}
+
+const partitionType = (table: string) => `infra_partition_${table}`
+
+/**
+ * Pure: what a scan does to the partitioning findings already filed, of every
+ * status. Nothing at all after a read that failed. A finding a person
+ * dismissed is never raised again; one Backenly withdrew may come back when
+ * its table outgrows the cache again (lib/core/finding-reaper.ts).
+ */
+export function planPartitionFindings(
+  filed: FiledPartitionFinding[],
+  scan: { scanned: boolean; candidates: PartitioningFinding[] },
+): PartitionFindingPlan {
+  const plan: PartitionFindingPlan = { retire: [], cleared: [], refresh: [], raise: [] }
+  if (!scan.scanned) return plan
+
+  const candidates = new Map(scan.candidates.map(f => [partitionType(f.table), f]))
+  const kept = new Set<string>()
+  for (const row of filed) {
+    if (!row.type.startsWith('infra_partition_')) continue
+    const d = (row.details ?? {}) as Record<string, unknown>
+    if (row.status === 'dismissed') {
+      // A person's dismissal stands; a withdrawal (withdrawnBy) does not.
+      if (!d.withdrawnBy) kept.add(row.type)
+      continue
+    }
+    if (row.status !== 'open' && row.status !== 'pending_approval') continue
+    if (typeof d.cacheBytes !== 'number') {
+      plan.retire.push(row)
+      continue
+    }
+    const now = candidates.get(row.type)
+    if (!now) {
+      plan.cleared.push(row)
+      continue
+    }
+    kept.add(row.type)
+    if (d.description !== now.recommendation) {
+      plan.refresh.push({
+        id: row.id,
+        details: { ...d, description: now.recommendation, liveRows: now.liveRows, bytes: now.bytes, cacheBytes: now.cacheBytes },
       })
-  } catch {
-    return []
+    }
   }
+  plan.raise = scan.candidates.filter(f => !kept.has(partitionType(f.table)))
+  return plan
 }
 
 // ── Detection: Slow queries (pg_stat_statements) ──────────────────────────────
@@ -755,6 +837,7 @@ export async function runInfraIntelligence(
       overallPressure: 'none',
       hotTables: hotTables.status === 'fulfilled' ? hotTables.value : [],
       partitioningCandidates: partitionCandidates.status === 'fulfilled' ? partitionCandidates.value : [],
+      partitioningScanned: partitionCandidates.status === 'fulfilled',
       slowQueries: slowQueries.status === 'fulfilled' ? slowQueries.value : [],
       websocketPressure: wsPressure.status === 'fulfilled' ? wsPressure.value : null,
       topRecommendations: [],
@@ -766,9 +849,9 @@ export async function runInfraIntelligence(
     const pressureRank: Record<InfraPressure, number> = { none: 0, low: 1, medium: 2, high: 3, critical: 4 }
     const allPressures: InfraPressure[] = [
       ...report.hotTables.map(f => f.pressure),
-      ...report.partitioningCandidates.map(f =>
-        f.growthClass === 'critical' ? 'critical' : f.growthClass === 'very_high' ? 'high' : 'medium',
-      ),
+      // Advice, never pressure on its own: a table larger than the cache is
+      // served from disk, which is slower, not broken.
+      ...report.partitioningCandidates.map((): InfraPressure => 'low'),
       ...report.slowQueries.map(f => f.pressure),
     ]
     const maxPressure = allPressures.reduce<InfraPressure>(
@@ -783,7 +866,7 @@ export async function runInfraIntelligence(
       recs.push({ priority: pressureRank[f.pressure], text: f.recommendation })
     }
     for (const f of report.partitioningCandidates) {
-      recs.push({ priority: 2, text: f.recommendation })
+      recs.push({ priority: pressureRank.low, text: f.recommendation })
     }
     for (const f of report.slowQueries.filter(f => f.pressure === 'critical' || f.pressure === 'high')) {
       recs.push({ priority: pressureRank[f.pressure], text: f.recommendation })
@@ -802,10 +885,6 @@ export async function runInfraIntelligence(
     // Unused-index removal moved to lib/autonomy/unused-index.ts, which raises a
     // real `unused_index` finding through the approval queue instead of pushing
     // SQL into an array nothing reads.
-    // Partitioning always requires approval (structural change)
-    for (const f of report.partitioningCandidates) {
-      report.approvalRequired.push(f.migrationSql)
-    }
 
     return report
   } finally {
@@ -919,6 +998,37 @@ export async function runAndStoreInfraIntelligence(
       console.log(`[InfraIntelligence] resolved ${staleHotTypes.length} hot-table finding(s) no longer detected`)
     }
 
+    // ── Partitioning findings ────────────────────────────────────────────────
+    //
+    // Closed through the reaper kernel, so no surface reads a closure as a
+    // repair (lib/autonomy/resolution.ts): one raised under the retired
+    // row-count rule is withdrawn as `detector_retired`, and one whose table
+    // fits in the cache again as a condition that cleared. Nothing changes
+    // after a read that failed (planPartitionFindings).
+    const filedPartitions = await prisma.healthFinding.findMany({
+      where: { projectId, type: { startsWith: 'infra_partition_' } },
+      select: { id: true, type: true, status: true, details: true },
+    }).catch(() => null)
+    let partitionsToRaise: PartitioningFinding[] = []
+    if (filedPartitions) {
+      const plan = planPartitionFindings(filedPartitions, {
+        scanned: report.partitioningScanned,
+        candidates: report.partitioningCandidates,
+      })
+      const { withdrawFindings } = await import('@/lib/core/finding-reaper')
+      // A row raised under the old rule for a table that still outgrows the
+      // cache is replaced by a new one, and only once it is withdrawn: never two.
+      const stillFiled = new Set<string>()
+      for (const row of plan.retire) {
+        if ((await withdrawFindings([row], 'detector_retired')) === 0) stillFiled.add(row.type)
+      }
+      if (plan.cleared.length) await withdrawFindings(plan.cleared, 'infra_reaper')
+      for (const r of plan.refresh) {
+        await prisma.healthFinding.update({ where: { id: r.id }, data: { details: r.details as any } }).catch(() => {})
+      }
+      partitionsToRaise = plan.raise.filter(f => !stillFiled.has(`infra_partition_${f.table}`))
+    }
+
     // Nothing under pressure — the resolve pass above has already withdrawn
     // anything stale, so there is nothing left to raise.
     if (report.overallPressure === 'none') return
@@ -954,28 +1064,29 @@ export async function runAndStoreInfraIntelligence(
       }
     }
 
-    // Partitioning candidates → HealthFinding (approval required)
-    for (const f of report.partitioningCandidates) {
-      const type = `infra_partition_${f.table}`
-      if (!existingTypes.has(type)) {
-        toCreate.push({
-          projectId,
-          type,
-          severity: f.growthClass === 'critical' ? 'critical' : 'warning',
-          details: {
-            title: `Partitioning candidate: ${f.table}`,
-            description: f.recommendation,
-            source: 'infra_intelligence',
-            table: f.table,
-            liveRows: f.liveRows,
-            migrationSql: f.migrationSql,
-            requiresApproval: true,
-            detectedAt: report.scannedAt,
-          },
-          status: 'open',
-          autoFixed: false,
-        })
-      }
+    // Partitioning candidates → HealthFinding. Advice with a next step, not a
+    // change waiting for approval: there is no statement to approve, since
+    // partitioning a table that holds data moves every row.
+    for (const f of partitionsToRaise) {
+      toCreate.push({
+        projectId,
+        type: `infra_partition_${f.table}`,
+        severity: 'info',
+        details: {
+          title: `Larger than the cache: ${f.table}`,
+          description: f.recommendation,
+          source: 'infra_intelligence',
+          table: f.table,
+          tableName: f.table,
+          liveRows: f.liveRows,
+          bytes: f.bytes,
+          cacheBytes: f.cacheBytes,
+          requiresApproval: false,
+          detectedAt: report.scannedAt,
+        },
+        status: 'open',
+        autoFixed: false,
+      })
     }
 
     // `infra_connection_pressure` was raised here until 2026-08-09. It was a

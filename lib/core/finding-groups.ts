@@ -87,7 +87,7 @@ export interface FindingGroup<T extends GroupableFinding = GroupableFinding> {
 
 const CATEGORY_MATCHERS: Array<[FindingCategory, RegExp]> = [
   ['security', /(rls|auth|oauth|jwt|unprotected|permission|secret|credential|spike)/i],
-  ['performance', /(index|seq_scan|slow|perf|n_plus_one|latency|scan)/i],
+  ['performance', /(index|seq_scan|slow|perf|n_plus_one|latency|scan|hot_table|table_bloat|partition)/i],
   ['reliability', /(webhook|deploy|drift|api|endpoint|orphan|shadow|fk|migration|broken)/i],
 ]
 
@@ -108,7 +108,10 @@ export function categoryOf(f: GroupableFinding): FindingCategory {
     return explicit
   }
   if (explicit === 'auth' || explicit === 'rls') return 'security'
-  for (const [cat, re] of CATEGORY_MATCHERS) if (re.test(f.type)) return cat
+  // Per-table types carry the table's name (`infra_partition_auth_logs`), and a
+  // table's name must not decide the section: match the base type.
+  const base = normalizeFindingType(f.type, f.details as Record<string, unknown> | null)?.base ?? f.type
+  for (const [cat, re] of CATEGORY_MATCHERS) if (re.test(base)) return cat
   return 'reliability'
 }
 

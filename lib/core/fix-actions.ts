@@ -23,6 +23,7 @@
 
 import { normalizeFindingType } from './types'
 import { triggerPhrase } from './function-trigger-words'
+import { sizeWords } from './size-words'
 import type { AIAction } from '@/lib/ai/minimal-executor'
 import { WITHHELD } from '@/lib/mcp/withhold-secrets'
 import { unsealParams } from '@/lib/operational-memory/sealed-params'
@@ -472,6 +473,30 @@ export function getManualRemediationHint(
       // Registration is handled by buildFixAction (REGISTER_TABLE), so this hint
       // is only a fallback. It describes the safe path, not dropping.
       return 'This table exists in your database but is not yet managed by the platform. Click Register to generate its REST API and adopt it — your data is untouched. (To remove it instead, drop it from the Database section.)'
+    // A table larger than PostgreSQL's cache: advice with two ways forward,
+    // neither Backenly's to take on its own. One raised under the retired
+    // row-count rule carries no sizes, and is not said to be larger than anything.
+    case 'infra_partition': {
+      const t = norm.tableName
+      const bytes = details?.bytes
+      const cache = details?.cacheBytes
+      if (typeof bytes !== 'number' || typeof cache !== 'number') {
+        return (
+          'Raised by a check Backenly has retired, which counted rows rather than size. The next scan ' +
+          `withdraws it unless ${t ?? 'the table'} is larger than PostgreSQL's cache. Nothing is broken.`
+        )
+      }
+      return (
+        `${t ?? 'This table'} takes ${sizeWords(bytes)}, more than the ${sizeWords(cache)} PostgreSQL expects ` +
+        'to have cached on this server, so reads of it cannot all come from memory. Nothing is broken.\n\n' +
+        `If old rows in ${t ?? 'the table'} can go after a while, keep the table smaller: ask your coding agent ` +
+        'to deploy a scheduled function that deletes rows older than the retention you choose. If every row ' +
+        `must stay, ask your coding agent to plan partitioning ${t ?? 'it'} by the column your queries filter ` +
+        'on, usually a date. That means creating a partitioned table and moving the rows across, which ' +
+        'Backenly does not do on its own.'
+      )
+    }
+
     // Only reached when the detector found no indexable column, since
     // buildFixAction handles the repairable case. Names the real numbers so the
     // owner can judge it, and asks for the column instead of guessing one — an
