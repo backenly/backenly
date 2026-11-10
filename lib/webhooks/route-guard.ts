@@ -29,7 +29,7 @@
 
 import { NextResponse } from 'next/server'
 import { canAccessProject, canWriteProject, canAdministerProject } from '@/lib/edition/guard'
-import { webhookPlan, type WebhookPlanRefused } from '@/lib/webhooks/plan'
+import { webhookPlan, type WebhookPlanRefused, type WebhookUse } from '@/lib/webhooks/plan'
 
 /**
  * VIEWER reads. DEVELOPER creates and edits. ADMIN deletes.
@@ -57,6 +57,8 @@ export async function guardWebhookRoute(
   userId: string,
   projectId: string,
   access: WebhookAccess,
+  /** 'stop' for a request that only disables or deletes an endpoint (lib/webhooks/plan.ts). */
+  use: WebhookUse = 'change',
 ): Promise<NextResponse | null> {
   if (!(await GUARD[access](userId, projectId))) {
     return NextResponse.json({ error: 'Project not found' }, { status: 404 })
@@ -68,6 +70,12 @@ export async function guardWebhookRoute(
   // see the endpoints it has and what they delivered. Authorization above is
   // the same for every plan.
   if (access === 'read') return null
+
+  // Stopping never needs the plan either. Delivery doesn't check it, so a
+  // project that moved to a plan without webhooks can still disable or delete
+  // the endpoints it has, rather than keep sending its rows to them until it
+  // pays. Authorization above still applies: deleting stays ADMIN.
+  if (use === 'stop') return null
 
   const plan = await webhookPlan(userId, projectId)
   if (!plan.allowed) {

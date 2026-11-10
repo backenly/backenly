@@ -1850,3 +1850,10 @@ tests/integration/closed-branch-keys-end.spec.ts
 # routes, project check and database; sign-in is delegated and the plan is
 # mocked to Free.
 tests/integration/webhooks-say-the-plan-first.spec.ts
+
+# A project on a plan without webhooks can still disable or delete the
+# endpoints it has (delivery doesn't check the plan); turning one back on or
+# editing it is still refused, and a non-member still gets 404. Real routes,
+# project check and database; sign-in is delegated and the plan is mocked to
+# Free.
+tests/integration/downgraded-webhooks-can-be-stopped.spec.ts

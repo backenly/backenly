@@ -380,7 +380,7 @@ export function WebhooksPanel({ projectId }: { projectId: string }) {
 
         {locked && webhooks.length > 0 && (
           <KitNote icon={Lock} tone="info" actions={plansLink}>
-            Webhooks are part of the Pro plan, and this project is on {planName}. The endpoints below still receive events, but none can be added, changed or removed.
+            Webhooks are part of the Pro plan, and this project is on {planName}. The endpoints below still receive events. You can disable or delete them, but not add or change one.
           </KitNote>
         )}
 
@@ -463,9 +463,8 @@ export function WebhooksPanel({ projectId }: { projectId: string }) {
                       </span>
                     </button>
 
-                    {/* On a plan without webhooks every action here is refused, so none is offered. */}
-                    {!locked && (
-                      <div className="flex flex-shrink-0 items-center gap-1">
+                    <div className="flex flex-shrink-0 items-center gap-1">
+                      {!locked && (
                         <KitButton
                           variant="secondary"
                           size="sm"
@@ -477,19 +476,29 @@ export function WebhooksPanel({ projectId }: { projectId: string }) {
                           <span className="hidden sm:inline">Send test</span>
                           <span className="sm:hidden">Test</span>
                         </KitButton>
-                        <OverflowMenu
-                          label={`More actions for ${webhook.targetUrl}`}
-                          disabled={busyId !== null}
-                          items={[
-                            { label: 'Edit endpoint…', icon: Pencil, onClick: () => setEditing(webhook) },
-                            { label: webhook.active ? 'Disable' : 'Enable', icon: Power, onClick: () => setActive(webhook, !webhook.active) },
-                            { label: 'Rotate secret…', icon: KeyRound, onClick: () => setConfirmRotate(webhook) },
-                            { separator: true },
-                            { label: 'Delete endpoint…', icon: Trash2, danger: true, onClick: () => setConfirmDelete(webhook) },
-                          ]}
-                        />
-                      </div>
-                    )}
+                      )}
+                      <OverflowMenu
+                        label={`More actions for ${webhook.targetUrl}`}
+                        disabled={busyId !== null}
+                        items={
+                          // On a plan without webhooks an endpoint can only be stopped.
+                          locked
+                            ? [
+                                ...(webhook.active
+                                  ? [{ label: 'Disable', icon: Power, onClick: () => setActive(webhook, false) }]
+                                  : []),
+                                { label: 'Delete endpoint…', icon: Trash2, danger: true, onClick: () => setConfirmDelete(webhook) },
+                              ]
+                            : [
+                                { label: 'Edit endpoint…', icon: Pencil, onClick: () => setEditing(webhook) },
+                                { label: webhook.active ? 'Disable' : 'Enable', icon: Power, onClick: () => setActive(webhook, !webhook.active) },
+                                { label: 'Rotate secret…', icon: KeyRound, onClick: () => setConfirmRotate(webhook) },
+                                { separator: true },
+                                { label: 'Delete endpoint…', icon: Trash2, danger: true, onClick: () => setConfirmDelete(webhook) },
+                              ]
+                        }
+                      />
+                    </div>
                   </div>
 
                   {expanded && (
