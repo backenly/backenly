@@ -212,6 +212,25 @@ describe('what a NON-SUPERUSER role may actually install', () => {
     }
   }, 120_000)
 
+  it('offers fuzzystrmatch for search that forgives typos, and a non-superuser can install and use it', async () => {
+    expect(isAllowedExtension('fuzzystrmatch')).toBe(true)
+    const entry = (await listExtensions(projectId)).find(e => e.name === 'fuzzystrmatch')
+    expect(entry).toMatchObject({ available: true, trusted: true })
+    if (entry!.installed) return
+
+    expect(entry!.installable).toBe(true)
+    // Installed and used under the throwaway role, then rolled back.
+    await client.query('BEGIN')
+    try {
+      await client.query(`SET LOCAL ROLE ${role}`)
+      await client.query('CREATE EXTENSION fuzzystrmatch')
+      const { rows } = await client.query(`SELECT levenshtein('sneakers', 'snaekers') AS distance`)
+      expect(rows[0].distance).toBe(2)
+    } finally {
+      await client.query('ROLLBACK')
+    }
+  }, 60_000)
+
   it('agrees with what listExtensions() reports as installable', async () => {
     // The surface's claim and the database's behaviour have to be the same
     // claim. A dashboard offering a button that PostgreSQL refuses is the

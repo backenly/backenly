@@ -85,7 +85,7 @@ The project key is not the MCP key this page set up. Create the app's own with `
 
 Data, two grammars over one engine:
 
-- `/db/{table}`: `GET` (list, with filtering, sorting, pagination and search), `POST` (create), `GET /db/{table}/{id}`, `PATCH /db/{table}/{id}` (`PUT` is accepted as the same update), `DELETE /db/{table}/{id}`.
+- `/db/{table}`: `GET` (list, with filtering, sorting, pagination and search; `pagination.hasMore` always says whether more rows follow, and `pagination.total` is counted only when asked, with `?count=exact`), `POST` (create), `GET /db/{table}/{id}`, `PATCH /db/{table}/{id}` (`PUT` is accepted as the same update), `DELETE /db/{table}/{id}`.
 - `https://backenly.com/api/v2/{projectId}/{table}`: PostgREST's grammar: `?price=gte.100`, `?or=(a.eq.1,b.eq.2)`, `?order=createdAt.desc`, embedded resources such as `?select=*,author(*)`.
 
 REST endpoints are automatic: `/db/<table>` is live the moment a table exists. The end-user auth endpoints are in `auth`; the realtime transport is in `realtime`.

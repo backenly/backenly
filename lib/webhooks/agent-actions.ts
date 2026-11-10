@@ -26,6 +26,7 @@ import {
   rotateWebhookSecret,
   sendTestDelivery,
   updateWebhook,
+  WebhookTablesError,
 } from '@/lib/webhooks'
 import { isRowEventType, isWebhookEventType, WEBHOOK_EVENT_TYPES, type WebhookEventType } from '@/lib/webhooks/events'
 import { listCapturedTables, syncWebhookCapture } from '@/lib/webhooks/capture'
@@ -79,7 +80,7 @@ const notFound = (what: string): WebhookActionResult => ({
 })
 
 function present(w: {
-  id: string; eventType: string; targetUrl: string; active: boolean
+  id: string; eventType: string; targetUrl: string; active: boolean; tables?: string[]
   createdAt: Date; updatedAt: Date; _count?: { logs: number }
 }) {
   return {
@@ -87,6 +88,8 @@ function present(w: {
     eventType: w.eventType,
     targetUrl: w.targetUrl,
     active: w.active,
+    // Row events only: the tables it receives; empty means every table.
+    tables: w.tables ?? [],
     createdAt: w.createdAt,
     updatedAt: w.updatedAt,
     ...(w._count ? { deliveries: w._count.logs } : {}),
@@ -126,6 +129,15 @@ function blocked(err: unknown): WebhookActionResult | null {
     : null
 }
 
+function badTables(err: unknown): WebhookActionResult | null {
+  return err instanceof WebhookTablesError ? { ok: false, code: err.code, summary: `${err.message} Nothing was saved.` } : null
+}
+
+/** " (orders, refunds)" for an endpoint that names tables, nothing for every table. */
+function tablesNote(w: { eventType: string; tables?: string[] }): string {
+  return w.tables && w.tables.length > 0 ? ` (${w.tables.join(', ')})` : ''
+}
+
 function badEventType(value: unknown): WebhookActionResult | null {
   return isWebhookEventType(value)
     ? null
@@ -147,7 +159,7 @@ export async function listWebhooks(actor: WebhookActor): Promise<WebhookActionRe
   }
 
   const lines = webhooks.map((w) =>
-    `• ${w.id}: ${w.eventType} → ${w.targetUrl}${w.active ? '' : ' (disabled)'}, ${w._count.logs} deliveries`)
+    `• ${w.id}: ${w.eventType}${tablesNote(w)} → ${w.targetUrl}${w.active ? '' : ' (disabled)'}, ${w._count.logs} deliveries`)
   // On a plan without webhooks the list still answers, and says so: endpoints
   // can be disabled or deleted, and nothing else changed, until a human
   // changes the plan.
@@ -170,7 +182,7 @@ export async function listWebhooks(actor: WebhookActor): Promise<WebhookActionRe
 
 export async function createProjectWebhook(
   actor: WebhookActor,
-  args: { eventType?: unknown; targetUrl?: unknown },
+  args: { eventType?: unknown; targetUrl?: unknown; tables?: unknown },
 ): Promise<WebhookActionResult> {
   if (typeof args.targetUrl !== 'string' || !args.targetUrl) {
     return { ok: false, code: 'INVALID_ARGUMENT', summary: 'targetUrl is required: the https URL that receives the events.' }
@@ -182,9 +194,9 @@ export async function createProjectWebhook(
 
   let webhook
   try {
-    webhook = await createWebhook(actor.projectId, args.eventType as WebhookEventType, args.targetUrl)
+    webhook = await createWebhook(actor.projectId, args.eventType as WebhookEventType, args.targetUrl, args.tables)
   } catch (err) {
-    const b = blocked(err)
+    const b = blocked(err) ?? badTables(err)
     if (b) return b
     throw err
   }
@@ -193,7 +205,7 @@ export async function createProjectWebhook(
   return {
     ok: true,
     summary:
-      `Created webhook ${webhook.id}: ${webhook.eventType} → ${webhook.targetUrl}. ${SIGNATURE_NOTE} ` +
+      `Created webhook ${webhook.id}: ${webhook.eventType}${tablesNote(webhook)} → ${webhook.targetUrl}. ${SIGNATURE_NOTE} ` +
       'The signing secret is in data.secret and is shown once: put it in the receiver\'s environment, never in code.' +
       captureWarning(captureError),
     data: { webhook: present(webhook), secret: webhook.secret, captureError },
@@ -202,12 +214,12 @@ export async function createProjectWebhook(
 
 export async function updateProjectWebhook(
   actor: WebhookActor,
-  args: { webhookId?: unknown; targetUrl?: unknown; eventType?: unknown; active?: unknown },
+  args: { webhookId?: unknown; targetUrl?: unknown; eventType?: unknown; active?: unknown; tables?: unknown },
 ): Promise<WebhookActionResult> {
   if (typeof args.webhookId !== 'string' || !args.webhookId) {
     return { ok: false, code: 'INVALID_ARGUMENT', summary: 'webhookId is required.' }
   }
-  const changes: { eventType?: WebhookEventType; targetUrl?: string; active?: boolean } = {}
+  const changes: { eventType?: WebhookEventType; targetUrl?: string; active?: boolean; tables?: unknown } = {}
   if (args.targetUrl !== undefined) {
     if (typeof args.targetUrl !== 'string' || !args.targetUrl) {
       return { ok: false, code: 'INVALID_ARGUMENT', summary: 'targetUrl must be a non-empty string.' }
@@ -225,8 +237,10 @@ export async function updateProjectWebhook(
     }
     changes.active = args.active
   }
+  // [] means every table; checked against the project's tables by updateWebhook.
+  if (args.tables !== undefined) changes.tables = args.tables
   if (Object.keys(changes).length === 0) {
-    return { ok: false, code: 'INVALID_ARGUMENT', summary: 'Nothing to change: pass targetUrl, eventType or active.' }
+    return { ok: false, code: 'INVALID_ARGUMENT', summary: 'Nothing to change: pass targetUrl, eventType, tables or active.' }
   }
   const denied = await refuse(actor, 'write', onlyTurnsOff(changes) ? 'stop' : 'change')
   if (denied) return denied
@@ -235,7 +249,7 @@ export async function updateProjectWebhook(
   try {
     updated = await updateWebhook(actor.projectId, args.webhookId, changes)
   } catch (err) {
-    const b = blocked(err)
+    const b = blocked(err) ?? badTables(err)
     if (b) return b
     throw err
   }
@@ -244,7 +258,7 @@ export async function updateProjectWebhook(
 
   return {
     ok: true,
-    summary: `Updated webhook ${updated.id}: ${updated.eventType} → ${updated.targetUrl}${updated.active ? '' : ' (disabled)'}.` +
+    summary: `Updated webhook ${updated.id}: ${updated.eventType}${tablesNote(updated)} → ${updated.targetUrl}${updated.active ? '' : ' (disabled)'}.` +
       captureWarning(captureError),
     data: { webhook: present(updated), captureError },
   }

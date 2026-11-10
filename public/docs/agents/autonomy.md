@@ -30,7 +30,7 @@ Self-healing keeps a backend working; architecture changes keep it well shaped. 
 
 ## Approvals
 
-Some actions never run from the call that asks for them: every one marked "waits for a human" in a topic's action table, and dropping or truncating a table or discarding a branch through `backend_chat`. For those:
+Some actions never run from the call that asks for them: every one marked "waits for a human" in a topic's action table, and dropping or truncating a table through `backend_chat`. For those:
 
 1. The exact call, with its arguments, is parked. The response carries an `approval` object with its `id`, and nothing has changed.
 2. A human approves or rejects it on the project's **Autonomy** page.
