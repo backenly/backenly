@@ -1857,3 +1857,9 @@ tests/integration/webhooks-say-the-plan-first.spec.ts
 # project check and database; sign-in is delegated and the plan is mocked to
 # Free.
 tests/integration/downgraded-webhooks-can-be-stopped.spec.ts
+
+# GET /api/projects/can-create answers what POST /api/projects would (a full
+# plan in the same words, room on the plan, no entitlements yet, single-tenant),
+# so the console says a plan limit before the New project form. Real account,
+# count and plan check; sign-in is delegated and the plan is mocked.
+tests/integration/project-limit-before-the-form.spec.ts

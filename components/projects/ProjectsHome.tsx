@@ -113,6 +113,10 @@ export function ProjectsHome({ org = null }: { org?: ProjectsHomeOrg | null }) {
   const [deleteTarget, setDeleteTarget] = useState<{ id: string; name: string } | null>(null)
   const [deleteBusy, setDeleteBusy] = useState(false)
   const [deleteError, setDeleteError] = useState<string | null>(null)
+  // Whether a project can be created here, asked before the form opens: the
+  // answer creating one gives (GET /api/projects/can-create). Null until it is
+  // known, and then the form opens and creating decides, as it always did.
+  const [creation, setCreation] = useState<{ allowed: boolean; error?: string; code?: string } | null>(null)
   const editInputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
@@ -148,6 +152,30 @@ export function ProjectsHome({ org = null }: { org?: ProjectsHomeOrg | null }) {
       cancelled = true
     }
   }, [router, org?.id, cacheKey, loginRedirect])
+
+  // Asked again after a delete, which can free a place on the plan.
+  const [creationAsked, setCreationAsked] = useState(0)
+  const orgId = org?.id ?? null
+  useEffect(() => {
+    if (!canCreate) return
+    let cancelled = false
+    const ask = async () => {
+      try {
+        const res = await fetch(
+          orgId ? `/api/projects/can-create?orgId=${encodeURIComponent(orgId)}` : '/api/projects/can-create',
+          { credentials: 'include' },
+        )
+        const answer = res.ok ? await res.json() : null
+        if (!cancelled) setCreation(answer)
+      } catch {
+        if (!cancelled) setCreation(null)
+      }
+    }
+    ask()
+    return () => {
+      cancelled = true
+    }
+  }, [canCreate, orgId, creationAsked])
 
   // Creates the project, then opens its workspace. Building happens through
   // the user's coding agent over MCP (Connect) once the workspace is open.
@@ -209,6 +237,7 @@ export function ProjectsHome({ org = null }: { org?: ProjectsHomeOrg | null }) {
         return next
       })
       setDeleteTarget(null)
+      setCreationAsked((n) => n + 1)
     } catch {
       setDeleteError('The project could not be deleted. Try again.')
     } finally {
@@ -255,6 +284,13 @@ export function ProjectsHome({ org = null }: { org?: ProjectsHomeOrg | null }) {
   const showSearch = projects.length >= SEARCH_THRESHOLD
 
   const openNew = () => {
+    // A plan limit is said before the form, not after it is filled in. Only
+    // what creating presents as a limit is caught here (createProject above);
+    // any other refusal is still said by creating, in the form.
+    if (creation?.allowed === false && (!creation.code || creation.code === 'PLAN_LIMIT_EXCEEDED')) {
+      setLimitError(creation.error || 'You have reached your project limit on the free plan.')
+      return
+    }
     setCreateError(null)
     setShowNewModal(true)
   }
