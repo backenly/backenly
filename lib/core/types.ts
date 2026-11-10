@@ -452,7 +452,11 @@ const PREFIX_MAP: ReadonlyArray<readonly [string, FindingType]> = [
   ['broken_auth', 'broken_auth'],
   ['schema_drift', 'shadow_mutation'],
   ['shadow_mutation', 'shadow_mutation'],
-  ['arch_migration', 'shadow_mutation'],
+  // `arch_migration_*` is deliberately absent. It was aliased to shadow_mutation,
+  // whose repair is FIX_API, so Fix now on "Add composite indexes on
+  // high-traffic query patterns" regenerated API definitions for a "table"
+  // named after the proposal's title (production QA, 2026-11-09). A proposal is
+  // advice with its statement (getManualRemediationHint), not a repair.
   ['api_drift', 'api_drift'],
   ['dead_api_endpoint', 'dead_api_endpoint'],
   ['workflow_broken', 'workflow_broken'],

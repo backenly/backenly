@@ -467,6 +467,18 @@ export function getManualRemediationHint(
   type: string,
   details?: Record<string, unknown> | null,
 ): string | null {
+  // A migration Backenly's architecture review proposed
+  // (lib/ai/architecture-evolution.ts): advice that hands over its statement.
+  // Applying it is the owner's call, through the coding agent's governed
+  // apply_migration, never a repair Backenly runs on its own.
+  if (type.startsWith('arch_migration')) {
+    const sql = typeof details?.sqlFix === 'string' && details.sqlFix.trim() ? details.sqlFix.trim() : null
+    const proposal = 'This is a proposal from Backenly’s architecture review, not a fault, and Backenly does not apply it on its own.'
+    return sql
+      ? `${proposal} To apply it, ask your coding agent to run it with apply_migration:\n\n${sql}`
+      : `${proposal} If you want it, ask your coding agent to plan and apply it.`
+  }
+
   const norm = normalizeFindingType(type, details ?? null)
   switch (norm?.base) {
     case 'orphan_table':
