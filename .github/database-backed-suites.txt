@@ -1868,3 +1868,9 @@ tests/integration/project-limit-before-the-form.spec.ts
 # session, else { user: null, canRefresh }), so a signed-out page logs no
 # failed request. Real session rows, checked by the function requireUser uses.
 tests/integration/signed-out-session-answers.spec.ts
+
+# POST /api/projects/[id]/credentials/verify runs the checks storing a key
+# runs and stores nothing: a key the provider refuses (and a malformed webhook
+# secret) is said on the key's own step; a VIEWER may not ask. Real sessions,
+# roles and database; Stripe's API answer is stubbed at fetch.
+tests/integration/integration-key-checked-on-continue.spec.ts
