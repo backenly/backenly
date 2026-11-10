@@ -1123,6 +1123,12 @@ tests/integration/db-doors-agree.spec.ts
 # on load and fixes only on an explicit action. Real project, users table and
 # function rows are the property.
 tests/integration/readiness-reads-never-write.spec.ts
+# The pages that show readiness (the Overview's /build-status, the Deploy
+# page's GET /readiness) reuse a recent behavioral verification of the backend
+# as it is now: three reads at once verify once, a governed change, five
+# minutes or a fix verify again, and a run that failed is not kept. Real
+# project, tables, end-user auth and HTTP stack are the property.
+tests/integration/readiness-reads-reuse-verification.spec.ts
 # The deploy tool tells the truth: status names the current published version
 # (after a rollback too), deploy has no staging target, the first publish,
 # an update and a no-op each say what happened, and an approved deploy is
