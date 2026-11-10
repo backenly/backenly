@@ -29,7 +29,7 @@ import {
   Tag,
 } from '@/components/inspector/kit'
 import { PAGE_GUTTER, PAGE_WIDTH } from '@/components/console/tokens'
-import { isSharedKey } from '@/lib/security/shared-key'
+import { isSharedKey, sharedKeyWindow, shortWindow } from '@/lib/security/shared-key'
 
 interface ApiKey {
   id: string
@@ -307,9 +307,16 @@ export function ClientKeysPanel() {
                       </div>
                     </td>
                     <td className="whitespace-nowrap px-4 py-3 align-middle text-[13px] tabular-nums text-zinc-400">
-                      {(key.rateLimit ?? 1000).toLocaleString()} / {Math.max(1, Math.round((key.rateLimitWindow ?? 3600) / 3600))} h
-                      {/* Every user of the app sends this key, so its limit is each address's (lib/security/shared-key-rate.ts). */}
-                      {isSharedKey(key) ? <span className="text-faint"> per address</span> : null}
+                      {/* Every user of the app sends a shared key, so its limit is each address's (lib/security/shared-key.ts). */}
+                      {isSharedKey(key) ? (
+                        <>
+                          {shortWindow(sharedKeyWindow(key))}<span className="text-faint"> per address</span>
+                        </>
+                      ) : (
+                        <>
+                          {(key.rateLimit ?? 1000).toLocaleString()} / {Math.max(1, Math.round((key.rateLimitWindow ?? 3600) / 3600))} h
+                        </>
+                      )}
                     </td>
                     <td className="whitespace-nowrap px-4 py-3 align-middle text-[13px] tabular-nums text-zinc-400">
                       {formatDate(key.createdAt)}

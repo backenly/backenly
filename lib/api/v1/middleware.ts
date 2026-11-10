@@ -24,6 +24,7 @@ import {
   serviceRoleRefusalMessage,
 } from '@/lib/security/service-role-exposure'
 import { MCP_KEY_HINT, MCP_KEY_IN_APP, isMcpCredential, mcpKeyRefusalMessage } from '@/lib/security/key-placement'
+import { clientWindowOf, describeClientWindow, isSharedKey } from '@/lib/security/shared-key-rate'
 import { endUserBearerToken } from '@/lib/security/end-user-bearer'
 
 import { INTERNAL_DOMAINS, isInternalOrigin } from '@/lib/security/internal-origin'
@@ -195,18 +196,21 @@ export async function v1ApiMiddleware(
       summary: `Rate limit hit on project ${params.projectId} (key ${apiKeyRecord.keyPrefix})`,
       detail: { apiKeyId: apiKeyRecord.id, path: request.nextUrl.pathname, limit: apiKeyRecord.rateLimit },
     }).catch(() => {})
-    const rateLimit = apiKeyRecord.rateLimit || 100
+    // The window that decided: each address's for a shared key, any other
+    // key's own limit (lib/security/shared-key-rate.ts).
+    const window = clientWindowOf({ ...apiKeyRecord, shared: isSharedKey(apiKeyRecord) })
+    const retryAfter = Math.min(window.windowSeconds, 60)
     return {
       context: {} as V1ApiContext,
       response: NextResponse.json(
-        { error: 'Rate limit exceeded. Please slow down and retry after the window resets.' },
+        { error: `Rate limit exceeded. You may make ${describeClientWindow(window)}. Try again in ${retryAfter} second(s).` },
         {
           status: 429,
           headers: {
-            'Retry-After': '60',
-            'X-RateLimit-Limit': String(rateLimit),
+            'Retry-After': String(retryAfter),
+            'X-RateLimit-Limit': String(window.limit),
             'X-RateLimit-Remaining': '0',
-            'X-RateLimit-Reset': String(Math.floor(Date.now() / 1000) + 60),
+            'X-RateLimit-Reset': String(Math.floor(Date.now() / 1000) + retryAfter),
           },
         }
       ),

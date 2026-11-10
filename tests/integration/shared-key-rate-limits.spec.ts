@@ -36,7 +36,12 @@ import app from '@/server/app'
 import { prisma } from '@/lib/db'
 import { GET as nextList, POST as nextJoin, DELETE as nextLeave } from '@/app/api/v1/[projectId]/presence/route'
 import { closeRateLimitBackend } from '@/lib/security/rate-limit-backend'
-import { PRESENCE_WRITES_PER_ADDRESS_PER_MINUTE, PRESENCE_WRITES_PER_MINUTE } from '@/lib/security/shared-key-rate'
+import {
+  PRESENCE_WRITES_PER_ADDRESS_PER_MINUTE,
+  PRESENCE_WRITES_PER_MINUTE,
+  SHARED_KEY_BURST_LIMIT,
+  countClientRequest,
+} from '@/lib/security/shared-key-rate'
 import { flushRecordedRequests } from '@/lib/traffic/request-recorder'
 import { hashApiKey } from '@/server/lib/end-user-identity'
 
@@ -59,7 +64,8 @@ const userToken = (userId: string) =>
   })
 
 /** A key of this project: a browser key unless `serviceRole`. */
-async function makeKey(rateLimit: number, { serviceRole = false } = {}) {
+/** A browser key; with no rate given, the schema's default, which nobody chose: the burst brake decides. */
+async function makeKey(rateLimit = 1000, { serviceRole = false } = {}) {
   const raw = `${serviceRole ? 'svc' : 'proj'}_live_${crypto.randomBytes(24).toString('hex')}`
   const { id } = await prisma.apiKey.create({
     data: {
@@ -94,6 +100,18 @@ async function viaNext(call: Call, method: 'GET' | 'POST' | 'DELETE', body?: unk
   const request = new NextRequest(url, { method, headers: headers(call), ...(method === 'POST' ? { body: JSON.stringify(body) } : {}) })
   const route = { GET: nextList, POST: nextJoin, DELETE: nextLeave }[method]
   return route(request, { params: Promise.resolve({ projectId }) })
+}
+
+/**
+ * Spend all but `left` of an address's burst window with this key, as its
+ * earlier requests would have: the same window, in the store this process
+ * shares with the runtime it serves, so a test does not race the window with
+ * hundreds of requests.
+ */
+async function spend(raw: string, id: string, from: string, left: number, rateLimit = 1000): Promise<void> {
+  const key = { id, keyHash: hashApiKey(raw), rateLimit, rateLimitWindow: 3600, shared: true }
+  const limit = rateLimit === 1000 ? SHARED_KEY_BURST_LIMIT : rateLimit
+  for (let i = 0; i < limit - left; i++) await countClientRequest(key, from)
 }
 
 const list = (call: Call) => viaRuntime(call, '/presence')
@@ -136,30 +154,32 @@ afterAll(async () => {
 }, 120_000)
 
 describe('a key every user of an app sends', () => {
-  it("gives each address the key's limit through the runtime: one at its limit leaves another untouched", async () => {
-    const { raw } = await makeKey(3)
+  it(`gives each address ${SHARED_KEY_BURST_LIMIT} requests per 10 seconds through the runtime when the owner set no rate: one at it leaves another untouched`, async () => {
+    const { raw, id } = await makeKey()
     const a = { key: raw, from: newAddress() }
     const b = { key: raw, from: newAddress() }
 
-    for (let i = 0; i < 3; i++) expect((await list(a)).status).toBe(200)
+    await spend(raw, id, a.from, 2)
+    for (let i = 0; i < 2; i++) expect((await list(a)).status).toBe(200)
     const refused = await list(a)
     expect(refused.status).toBe(429)
-    expect(refused.headers.get('retry-after')).not.toBeNull()
+    expect(Number(refused.headers.get('retry-after'))).toBeLessThanOrEqual(10)
     expect(await refused.json()).toMatchObject({
-      error: { code: 'RATE_LIMIT_EXCEEDED', message: expect.stringContaining('requests per 60 minute(s) from each address with this key') },
+      error: { code: 'RATE_LIMIT_EXCEEDED', message: expect.stringContaining('300 requests per 10 second(s) from each address with this key') },
     })
 
     const other = await list(b)
     expect(other.status).toBe(200)
-    expect(other.headers.get('x-ratelimit-limit')).toBe('3')
-    expect(other.headers.get('x-ratelimit-remaining')).toBe('2')
+    expect(other.headers.get('x-ratelimit-limit')).toBe(String(SHARED_KEY_BURST_LIMIT))
+    expect(other.headers.get('x-ratelimit-remaining')).toBe(String(SHARED_KEY_BURST_LIMIT - 1))
   })
 
   it('is counted per address on /db and /api/v2 too, one window across both doors', async () => {
-    const { raw } = await makeKey(2)
+    const { raw, id } = await makeKey()
     const a = { key: raw, from: newAddress() }
     const b = { key: raw, from: newAddress() }
 
+    await spend(raw, id, a.from, 2)
     expect((await viaRuntime(a, '/db/notes')).status).not.toBe(429)
     expect((await viaRuntime(a, `/api/v2/${projectId}/notes`)).status).not.toBe(429)
     expect((await viaRuntime(a, '/db/notes')).status).toBe(429)
@@ -169,11 +189,12 @@ describe('a key every user of an app sends', () => {
     expect((await viaRuntime(b, `/api/v2/${projectId}/notes`)).status).not.toBe(429)
   })
 
-  it('gives each address the key\'s limit through the Next routes, one window per address with the runtime', async () => {
-    const { raw } = await makeKey(3)
+  it('holds each address to the burst brake through the Next routes, one window per address with the runtime', async () => {
+    const { raw, id } = await makeKey()
     const a = { key: raw, from: newAddress() }
     const b = { key: raw, from: newAddress() }
 
+    await spend(raw, id, a.from, 3)
     expect((await viaNext(a, 'GET')).status).toBe(200)
     expect((await list(a)).status).toBe(200)
     expect((await viaNext(a, 'GET')).status).toBe(200)
@@ -183,14 +204,43 @@ describe('a key every user of an app sends', () => {
     expect((await viaNext(b, 'GET')).status).toBe(200)
   })
 
-  it("is still counted on the key, past its limit, with its last use, for the console", async () => {
-    const { raw, id } = await makeKey(2)
+  it('holds each address to the rate its owner set, on both runtimes, and another address is untouched', async () => {
+    // Lowered, to hold each visitor to less.
+    const { raw, id } = await makeKey(5)
+    const a = { key: raw, from: newAddress() }
+    await spend(raw, id, a.from, 2, 5)
+    expect((await list(a)).status).toBe(200)
+    expect((await viaNext(a, 'GET')).status).toBe(200)
+    const refused = await list(a)
+    expect(refused.status).toBe(429)
+    expect(await refused.json()).toMatchObject({
+      error: { message: expect.stringContaining('5 requests per 60 minute(s) from each address with this key') },
+    })
+    expect((await viaNext(a, 'GET')).status).toBe(429)
+    expect((await list({ key: raw, from: newAddress() })).status).toBe(200)
+  })
+
+  it('lets one address past the burst brake when the owner raised the rate for it, as a server or a load test needs', async () => {
+    const { raw, id } = await makeKey(100_000)
+    const a = { key: raw, from: newAddress() }
+    // Further than a key with no rate set would go from one address in ten seconds.
+    await spend(raw, id, a.from, 100_000 - SHARED_KEY_BURST_LIMIT - 10, 100_000)
+    const statuses: number[] = []
+    for (let i = 0; i < 20; i++) statuses.push((await list(a)).status)
+    expect(statuses.every((s) => s === 200)).toBe(true)
+    const last = await list(a)
+    expect(last.headers.get('x-ratelimit-limit')).toBe('100000')
+  })
+
+  it("is still counted on the key, with its last use, for the console", async () => {
+    const { raw, id } = await makeKey()
     for (const from of [newAddress(), newAddress(), newAddress()]) {
       for (let i = 0; i < 3; i++) await list({ key: raw, from })
     }
-    // Two let through for each of three addresses; the third request of each was refused and is not counted.
+    // All nine let through (each address is far from its burst brake) and
+    // counted on the key, whose own count decides nothing here.
     const row = await keyRow(id)
-    expect(row.requestCount).toBe(6)
+    expect(row.requestCount).toBe(9)
     expect(Math.abs(row.lastUsed!.getTime() - Date.now())).toBeLessThan(60_000)
   })
 })
@@ -217,7 +267,7 @@ describe('presence writes', () => {
     expect((await viaRuntime(signedIn, `/presence?userId=${userId}`, { method: 'DELETE' })).status).toBe(200)
     expect((await viaNext(signedIn, 'DELETE', { userId })).status).toBe(200)
 
-    // Eighteen presence writes, and the address's three requests are all still there.
+    // Eighteen presence writes, and the address's three requests (its owner's rate) are all still there.
     const read = await list(signedIn)
     expect(read.status).toBe(200)
     expect(read.headers.get('x-ratelimit-remaining')).toBe('2')
