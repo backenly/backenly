@@ -10,6 +10,7 @@ import { isReservedWorkspaceTable } from '@/lib/security/workspace-schema'
 import { canAccessProject } from '@/lib/edition/guard'
 import { workspaceRawClient } from '@/lib/data-plane/regional'
 import { generatedEndpointRoutes, isGeneratedEndpoint } from '@/lib/services/domain-endpoints'
+import { liveTableNames } from '@/lib/deployment/published-tables'
 
 /**
  * GET /api/projects/[projectId]/state
@@ -41,6 +42,12 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
     // Load backend state graph
     const { getActiveGraph } = await import('@/lib/orchestration/graph-pointer')
     const graph = await getActiveGraph(projectId)
+
+    // The tables a publish puts live, as the publish counts them, so the Deploy
+    // page and the version it records say the same number. Null when the
+    // project's database cannot be read; the page then falls back to
+    // `entities`.
+    const liveTableCount = await liveTableNames(projectId).then((names) => names.length).catch(() => null)
 
     // Always use prisma.table as ground truth for entities.
     // The dynamic build loop writes to prisma.table but does NOT update BackendStateGraph,
@@ -140,6 +147,7 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
     if (!graph && entities.length === 0) {
       return NextResponse.json({
         entities: [],
+        liveTableCount,
         apis: [],
         capabilities: [],
         hasContent: false,
@@ -320,6 +328,7 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
 
     return NextResponse.json({
       entities,
+      liveTableCount,
       apis,
       endpointCount,     // Total individual HTTP method+path combos (matches API Builder count)
       capabilities,

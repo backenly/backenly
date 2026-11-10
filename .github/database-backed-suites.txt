@@ -1911,3 +1911,9 @@ tests/integration/schema-structure-in-one-read.spec.ts
 # migration declares is installed on the branch. Real schemas, the real branch
 # engine and the real migration path.
 tests/integration/branch-enforces-foreign-keys.spec.ts
+
+# The Deploy page and the version a publish records count the same tables, the
+# ones in the project's schema with Backenly's plumbing left out, and an update
+# names the tables it added, removed or changed. Real schema, the real state
+# route and the real publish.
+tests/integration/publish-counts-the-live-tables.spec.ts
