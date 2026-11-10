@@ -489,7 +489,7 @@ export function EmailSettingsPanel({ projectId }: { projectId: string }) {
               </KitField>
               <KitField
                 label="App URL"
-                hint={policy.effectiveAppUrl ? 'Password reset links land here.' : 'Not set: password reset has no page to land on.'}
+                hint={policy.effectiveAppUrl ? 'Password reset and magic links land here.' : 'Not set: reset links open a page Backenly hosts, and magic links cannot sign anyone in.'}
               >
                 <KitInput type="url" value={policyForm.appUrl} onChange={e => setPolicyForm({ ...policyForm, appUrl: e.target.value })} placeholder={policy.effectiveAppUrl ?? 'https://app.example.com'} spellCheck={false} />
               </KitField>

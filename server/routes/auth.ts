@@ -38,7 +38,14 @@ import { admitSigninAttempt, admitSigninRequest } from '@/lib/security/end-user-
 import { admitExistenceCheck, admitSignupRequest } from '@/lib/security/end-user-signup-limit'
 import { isPlatformProbe } from '@/lib/security/platform-probe'
 import { throttleDecision } from '@/lib/security/rate-limit-decision'
-import type { RateLimitResult } from '@/lib/security/auth-rate-limit'
+import { AUTH_LIMITS, consume, type RateLimitResult } from '@/lib/security/auth-rate-limit'
+import {
+  RESET_PAGE_HEADERS,
+  resetPasswordPage,
+  submitResetPasswordForm,
+  throttledResetPage,
+  type ResetPage,
+} from '@/lib/services/end-user-reset-page'
 
 const router = Router()
 
@@ -536,6 +543,40 @@ async function handleResetPassword(req: Request, res: Response) {
   res.status(result.status).json(result.body)
 }
 
+function sendResetPage(res: Response, page: ResetPage) {
+  res.status(page.status).set(RESET_PAGE_HEADERS).type('html').send(page.html)
+}
+
+/**
+ * GET /auth/reset?token=… — where a reset email links when the project has no
+ * App URL: Backenly's own reset form (lib/services/end-user-reset-page.ts).
+ * Opening it never spends the link.
+ */
+async function handleResetPage(req: Request, res: Response) {
+  sendResetPage(res, await resetPasswordPage(req.params.projectId, req.query.token))
+}
+
+/**
+ * POST /auth/reset — the hosted form's submission. Limited per address from
+ * the same budget as Next's POST /auth/reset-password, so the form is not a
+ * way around it.
+ */
+async function handleResetForm(req: Request, res: Response) {
+  const { projectId } = req.params
+  const limit = await consume(
+    `v1:endUserRecover:${projectId}:${ipFrom(req)}`,
+    AUTH_LIMITS.endUserRecover.ip.limit,
+    AUTH_LIMITS.endUserRecover.ip.windowMs,
+  )
+  if (!limit.allowed) {
+    const d = throttleDecision(limit)
+    res.set(d.headers)
+    sendResetPage(res, await throttledResetPage(projectId, d.status, limit.retryAfter))
+    return
+  }
+  sendResetPage(res, await submitResetPasswordForm(projectId, req.body ?? {}))
+}
+
 // ── Email verification + magic links ─────────────────────────────────────────
 
 async function handleVerifyEmail(req: Request, res: Response) {
@@ -656,6 +697,8 @@ router.post('/:projectId/auth/magic-link/verify', asyncRoute(handleMagicLinkVeri
 router.get('/:projectId/auth/magic', asyncRoute(handleMagicPage))
 router.post('/:projectId/auth/forgot-password', asyncRoute(handleForgotPassword))
 router.post('/:projectId/auth/reset-password', asyncRoute(handleResetPassword))
+router.get('/:projectId/auth/reset', asyncRoute(handleResetPage))
+router.post('/:projectId/auth/reset', asyncRoute(handleResetForm))
 
 // Aliases — AI platforms (Lovable, Replit, Base44) generate /auth/login and
 // /auth/register instead of Backenly's /auth/signin and /auth/signup.
