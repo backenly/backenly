@@ -1899,3 +1899,9 @@ tests/integration/architecture-look-now.spec.ts
 # use: a sign-up on either server and a request made with their token stamp it;
 # a verifier account never. Real database, both servers' sign-up.
 tests/integration/end-user-last-active.spec.ts
+
+# The schema diagram reads every table's columns in one request: /structure
+# without a table answers each table exactly as its own request does, and
+# /relationships without a table answers each foreign key once. Real catalog
+# and the real handlers.
+tests/integration/schema-structure-in-one-read.spec.ts
