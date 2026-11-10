@@ -985,7 +985,7 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
     {},
     []),
   fn('list_schema_changes',
-    'The change history: every governed change to the production backend, newest first, with its changeId and number, who made it (a coding agent, a person, Backenly autonomy), what it did, and how its lifecycle ended: applied and verified; recovered automatically after it failed verification; restored by a person; waiting for a person to approve its recovery; or needing attention. Also whether restoring the state before it is available. Every apply_migration, typed schema tool, approved drop and branch merge is recorded here, with the checkpoint taken before it. Side-effect free.',
+    'The change history: every governed change to the production backend, newest first, with its changeId and number, who made it (a coding agent, a person, Backenly autonomy), what it did, and how its lifecycle ended: applied and verified; recovered automatically after it stopped part-way or failed verification, with the reason; restored by a person; waiting for a person to approve its recovery; or needing attention. Also whether restoring the state before it is available. Every apply_migration, typed schema tool, approved drop and branch merge is recorded here, with the checkpoint taken before it. Side-effect free.',
     { limit: { type: 'integer', minimum: 1, maximum: 50, description: 'How many changes, newest first (default 15).' } },
     []),
   fn('revert_schema_change',
@@ -3637,10 +3637,11 @@ export async function dispatchTool(
       const OUTCOME: Record<string, string> = {
         healthy: 'applied and verified',
         unverified: 'applied, not verified',
-        recovered: 'failed verification, recovered automatically',
+        // Failed while running or in verification: the note says which, and why.
+        recovered: 'failed, recovered automatically',
         restored: 'restored to the state before it',
-        awaiting_approval: 'failed verification, recovery waiting for a person',
-        kept: 'failed verification, kept as it is by a person',
+        awaiting_approval: 'failed, recovery waiting for a person',
+        kept: 'failed, kept as it is by a person',
         needs_attention: 'failed, needs a person',
         in_progress: 'in progress',
       }

@@ -120,6 +120,14 @@ async function schemaExists(sch: string): Promise<boolean> {
   return r[0].n > 0
 }
 
+/** What the Autonomy page's activity feed says about a change Backenly recovered. */
+async function recoveredSentence(changeId: string): Promise<string> {
+  const rows = await prisma.auditLog.findMany({ where: { projectId, action: 'ROLLBACK_CHANGE_RECOVERED' } })
+  const mine = rows.map((r) => JSON.parse(r.details!)).find((d) => d.changeId === changeId)
+  if (!mine) throw new Error(`no recovery recorded for ${changeId}`)
+  return mine.summary as string
+}
+
 /** Create a branch and build on it the way a coding agent does: apply_migration { branchId }. */
 async function branchWith(name: string, sql: string) {
   const made = await createBranch(projectId, ownerId, name)
@@ -393,6 +401,13 @@ describe('a merge whose result fails protected verification', () => {
     expect(JSON.parse(audit!.details!)).toMatchObject({ branch: 'rename-login', verificationFailed: true, recovered: true })
   }, 60_000)
 
+  it('the activity feed says which check it failed', async () => {
+    const recovered = await recoveredSentence(merged.change.id)
+    expect(recovered).toMatch(
+      /^Recovered automatically: change #\d+ \(.+\) failed verification: users lost a column sign-in needs \(id, email or the password\); the previous state is back and verified$/,
+    )
+  })
+
   it('cannot be built from a statement that turns row-level security off: the branch refuses it and logs nothing', async () => {
     const log = async () => (await prisma.workspaceBranchMigration.findMany({ where: { branchId: branch.id }, orderBy: { seq: 'asc' } }))
       .flatMap((m) => m.statements as string[])
@@ -428,7 +443,8 @@ describe('a merge that fails part-way on production data the branch never had', 
 
   it('reports where it stopped, and that nothing it ran is still in effect', () => {
     expect(merged).toMatchObject({ ok: false, code: 'MERGE_FAILED', applied: [], remaining: [] })
-    expect(merged.error).toMatch(/stopped at: ALTER TABLE orders ADD CONSTRAINT orders_total_big CHECK \(total > 15\)/)
+    expect(merged.error).toMatch(/stopped at: ALTER TABLE orders ADD CONSTRAINT orders_total_big CHECK \(total > 15\) \(Cannot add this constraint/)
+    expect(merged.error.match(/orders_total_big CHECK/g)).toHaveLength(1)
     expect(merged.error).toMatch(/Nothing reached production: the 1 statement\(s\) applied before it were restored to the checkpoint automatically/)
     expect(merged.change).toEqual({ id: expect.any(String), seq: expect.any(Number), status: 'recovered' })
   })
@@ -447,6 +463,16 @@ describe('a merge that fails part-way on production data the branch never had', 
     expect(b.status).toBe('active')
     expect(await tableExists(branch.schemaName, 'gift_cards')).toBe(true)
     expect(await constraintCount(branch.schemaName, 'orders_total_big')).toBe(1)
+  })
+
+  it('the activity feed says where it stopped and why, not that it failed verification', async () => {
+    const recovered = await recoveredSentence(merged.change.id)
+    expect(recovered).toMatch(
+      /^Recovered automatically: change #\d+ \(.+\) stopped at ALTER TABLE orders ADD CONSTRAINT orders_total_big CHECK \(total > 15\): Cannot add this constraint to orders — existing rows already violate it, so PostgreSQL rejected it and nothing was applied; the previous state is back and verified$/,
+    )
+    expect(recovered).not.toMatch(/failed verification|Migration stopped at/)
+    const { changes } = await listChanges(projectId)
+    expect(changes.find((c) => c.id === merged.change.id)!.outcome).toMatchObject({ state: 'recovered', note: expect.stringMatching(/orders_total_big/) })
   })
 })
 

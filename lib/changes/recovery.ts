@@ -83,7 +83,7 @@ import {
 import { createVaultStatements, qualified, vaultSchemaName } from './names'
 import { planRestore, verifyAgainstCheckpoint, type PlanConflict, type PlannedStep, type RestorePlan } from './plan'
 import { rollbackWindowDays, windowEndsAt } from './policy'
-import { IN_EFFECT, RECOVERY_OWED, restoreRequestChangeId, type ChangePreservation, type ChangeStatus, type PreservedEntry, type TableChange } from './types'
+import { IN_EFFECT, RECOVERY_OWED, restoreRequestChangeId, type ChangePreservation, type ChangeStatus, type ChangeStep, type PreservedEntry, type TableChange } from './types'
 import { catalogStructure, definitionsFromRegion, keptText, quotesKeptHere } from './residency'
 import type { ChangeVerification, VerificationCheck } from './verify'
 import { rlsSessionParams, rlsSessionSql, type RlsIdentity } from '@/lib/services/rls-session'
@@ -128,6 +128,12 @@ interface LoadedChange {
   sealed: boolean
   /** What it did to the rest of the backend, item by item (lib/changes/resources). */
   resourceOps: ResourceOp[]
+  /** Why it stopped, for one that stopped part-way. */
+  error: string | null
+  /** What was asked for and what took effect, in order: a failed step names its statement and why. */
+  steps: ChangeStep[] | null
+  /** Its protected verification, for one that was verified. */
+  verification: ChangeVerification | null
 }
 
 async function load(projectId: string, changeId: string): Promise<LoadedChange | null> {
@@ -173,6 +179,9 @@ async function load(projectId: string, changeId: string): Promise<LoadedChange |
       (row.checkpoint as { resources?: ResourceSnapshot } | null)?.resources,
       (row.resultState as { resources?: ResourceSnapshot } | null)?.resources,
     ),
+    error: row.error ?? null,
+    steps: Array.isArray(row.steps) ? (row.steps as unknown as ChangeStep[]) : null,
+    verification: (row.verification as unknown as ChangeVerification | null) ?? null,
   }
 }
 
@@ -340,7 +349,7 @@ export function availabilityOf(
   }
   if (change.kind === 'recovery' && opts.targetStatus !== 'restored') {
     return opts.targetStatus === 'recovered'
-      ? { available: false, code: 'FAILED_CHANGE_REAPPLY', reason: 'That change failed verification. Ask for it again instead of reapplying it.' }
+      ? { available: false, code: 'FAILED_CHANGE_REAPPLY', reason: 'That change failed and was recovered. Ask for it again instead of reapplying it.' }
       : { available: false, code: 'NOT_RESTORABLE', reason: 'Only the latest restore of a change can be reapplied, from that change.' }
   }
   if (change.kind === 'recovery' && opts.targetVerified !== true) {
@@ -1242,7 +1251,7 @@ async function escalate(projectId: string, change: LoadedChange, explanation: st
     const row = await createApprovalRequest({
       projectId,
       userId: project.userId,
-      message: `Change #${change.seq} (${change.summary}) failed verification. ${keptText(explanation, quote)}`,
+      message: `Change #${change.seq} (${change.summary}) ${whyItFailed(change)}. ${keptText(explanation, quote)}`,
       danger: { tool: 'revert_schema_change', target: restore.target, rowCount: rows, reversible: true },
       toolArgs: { ...restore.toolArgs },
       restore,
@@ -1250,7 +1259,7 @@ async function escalate(projectId: string, change: LoadedChange, explanation: st
     approvalId = row.id
   }
   await recordEvent(change.id, projectId, 'recovery_escalated', { approvalId, explanation: keptText(explanation, quote) })
-  await audit(projectId, null, 'CHANGE_RECOVERY_AWAITING_APPROVAL', { changeId: change.id, seq: change.seq, summary: `Change #${change.seq} failed verification and needs your approval to recover: ${change.summary}` })
+  await audit(projectId, null, 'CHANGE_RECOVERY_AWAITING_APPROVAL', { changeId: change.id, seq: change.seq, summary: `Waiting for your approval to recover: change #${change.seq} (${change.summary}) ${whyItFailed(change)}` })
   return approvalId
 }
 
@@ -1512,6 +1521,32 @@ async function supersedeRestoredIntents(projectId: string, change: LoadedChange)
   }
 }
 
+/**
+ * How a change failed, as a person reads it: the check it failed, or the
+ * statement it stopped at and why. Every automatic recovery used to say
+ * "failed verification", so a merge that stopped at a statement read as one
+ * that had applied and then failed a check, and the reason was nowhere
+ * (production QA, 2026-11-09). For a project kept in another region the steps
+ * carry no statement and the error is kept as the residency rules keep it.
+ */
+function whyItFailed(change: Pick<LoadedChange, 'status' | 'error' | 'steps' | 'verification'>): string {
+  const flat = (s: string, max: number) => {
+    const t = s.replace(/\s+/g, ' ').trim()
+    return t.length > max ? `${t.slice(0, max - 1)}…` : t
+  }
+  // A reason's first sentence, without its full stop: what follows is advice
+  // for the agent that made the change ("Find the offending rows with
+  // run_query, …"), and the sentence goes on after it.
+  const reason = (s: string) => flat(s.split('\n')[0].split(/(?<=[.!?])\s+(?=[A-Z])/)[0], 300).replace(/\.$/, '')
+  // The finding, not the check's name, as the change history says it.
+  const failing = change.verification?.checks?.find((c) => c.outcome === 'contradicted')
+  if (failing) return `failed verification: ${reason(failing.detail)}`
+  const stopped = change.steps?.find((s) => !s.ok)
+  if (stopped?.summary) return `stopped at ${flat(stopped.statement, 200)}: ${reason(stopped.summary)}`
+  if (change.error) return `stopped part-way: ${reason(change.error)}`
+  return change.status === 'partially_applied' ? 'stopped part-way' : 'failed verification'
+}
+
 async function audit(projectId: string, userId: string | null, action: string, details: Record<string, unknown>) {
   await prisma.auditLog.create({
     data: { projectId, userId, action, type: 'schema', details: JSON.stringify({ ...details, at: new Date().toISOString() }), timestamp: new Date() },
@@ -1533,7 +1568,7 @@ async function afterRecovery(projectId: string, change: LoadedChange, recoverySe
   const sentence = reapply
     ? `Reapplied a change that had been restored (#${recoverySeq})`
     : opts.mode === 'automatic'
-      ? `Recovered automatically: change #${change.seq} (${change.summary}) failed verification; the previous state is back and verified`
+      ? `Recovered automatically: change #${change.seq} (${change.summary}) ${whyItFailed(change)}; the previous state is back and verified`
       : opts.mode === 'repair'
         ? `Undid its own repair: change #${change.seq} (${change.summary}) did not fix what it was meant to; the previous state is back and verified`
         : `Restored the state before change #${change.seq} (${change.summary}), verified`
