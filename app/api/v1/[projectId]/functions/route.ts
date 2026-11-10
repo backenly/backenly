@@ -80,11 +80,12 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
       )
     }
 
+    const { logsFor } = await import('@/lib/services/ai-functions/reply')
     return createSuccessResponse({
       name,
       success: true,
       result: result.returnValue ?? null,
-      logs: result.logs,
+      ...logsFor(result.logs, !!middleware.context.apiKey.serviceRole),
       durationMs: result.durationMs,
     })
   } catch (error: any) {

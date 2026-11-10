@@ -521,6 +521,7 @@ async function handleDynamicRequest(req: Request, res: Response) {
       const fwdHeaders = pickFnHeaders(h => req.headers[h])
 
       const { executeAiFunction } = await import('@/lib/services/ai-functions/executor')
+      const { answerHeaders, logsFor } = await import('@/lib/services/ai-functions/reply')
       const result = await executeAiFunction(fn.id, projectId!, {
         type: 'manual',
         data: eventData,
@@ -538,9 +539,17 @@ async function handleDynamicRequest(req: Request, res: Response) {
         res.status(500).json({
           error: result.error || 'Function execution failed',
           code: 'FUNCTION_EXECUTION_ERROR',
-          logs: result.logs,
+          ...logsFor(result.logs, !!isServiceRole),
           durationMs: result.durationMs,
         })
+        return
+      }
+
+      // A route module answers for itself: its status, its body and its
+      // content type, as it wrote them (lib/services/ai-functions/reply.ts).
+      if (result.answer) {
+        const { status, body, headers } = result.answer
+        res.status(status >= 100 && status <= 599 ? status : 200).set(answerHeaders(headers)).json(body ?? null)
         return
       }
 
@@ -573,7 +582,7 @@ async function handleDynamicRequest(req: Request, res: Response) {
         success: httpStatus < 400,
         name: fnName,
         result: result.returnValue ?? null,
-        logs: result.logs,
+        ...logsFor(result.logs, !!isServiceRole),
         durationMs: result.durationMs,
       })
       return

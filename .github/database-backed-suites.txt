@@ -50,6 +50,11 @@ tests/integration/project-smtp-and-templates.spec.ts
 tests/integration/storage-bucket-policy.spec.ts
 tests/integration/storage-runtime-policy.spec.ts
 tests/integration/function-off-switch.spec.ts
+
+# At /fn/{name} a route module's status, body and content type go out as it
+# wrote them; a plain function keeps its envelope, with its log lines only for
+# a service-role key. The real runtime and function rows.
+tests/integration/function-replies-as-written.spec.ts
 tests/integration/function-create-truthful.spec.ts
 tests/integration/function-selfheal-consent.spec.ts
 tests/integration/function-egress-guard.spec.ts
