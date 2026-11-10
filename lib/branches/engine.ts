@@ -33,8 +33,10 @@ import { computeSchemaDiff, validateBranchName, branchSchemaName, type SchemaDif
 import { replicateRls, verifyRlsParity, type RlsCloneResult } from './rls-clone'
 import { isolateBranchSequences, verifySequenceIsolation } from './sequence-isolation'
 import { registerSchemaByName } from '@/lib/postgrest/registration'
+import { BranchCreateBusyError, withBranchCreateLock } from './create-lock'
 
-const MAX_ACTIVE_BRANCHES = 5
+/** How many branches a project may have active at once. */
+export const MAX_ACTIVE_BRANCHES = 5
 
 /**
  * A branch schema lives beside its project's own, in the project's database in
@@ -110,6 +112,18 @@ export async function createBranch(
   const nameError = validateBranchName(name)
   if (nameError) return { ok: false as const, error: nameError }
 
+  // One create at a time per project, so the limit is counted with no other
+  // create between the count and its row (lib/branches/create-lock.ts).
+  try {
+    return await withBranchCreateLock(projectId, () => cutBranch(projectId, userId, name, options))
+  } catch (err) {
+    if (err instanceof BranchCreateBusyError) return { ok: false as const, error: err.message }
+    throw err
+  }
+}
+
+/** createBranch, under the project's branch-creation lock. */
+async function cutBranch(projectId: string, userId: string, name: string, options: CreateBranchOptions) {
   const active = await prisma.workspaceBranch.count({ where: { projectId, status: 'active' } })
   if (active >= MAX_ACTIVE_BRANCHES) {
     return { ok: false as const, error: `Branch limit reached (${MAX_ACTIVE_BRANCHES} active) — merge or discard one first.` }

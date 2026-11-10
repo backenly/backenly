@@ -2526,8 +2526,15 @@ export async function dispatchTool(
             data: { branches: [] },
           })
         }
-        const lines = branches.map((b: any) => `  • ${b.name} (${b.status}) — id ${b.id}`).join('\n')
-        return finalize({ ok: true, summary: `**Preview branches (${branches.length}):**\n${lines}`, data: { branches } })
+        // The limit counts active branches only. A total that included merged
+        // ones read "Preview branches (6)" on a project holding five of five,
+        // and an agent took it for a project past its limit.
+        const active = branches.filter((b: any) => b.status === 'active')
+        const rest = branches.filter((b: any) => b.status !== 'active')
+        const merged = rest.filter((b: any) => b.status === 'merged').length
+        const lines = [...active, ...rest].map((b: any) => `  • ${b.name} (${b.status}) — id ${b.id}`).join('\n')
+        const head = `**Preview branches:** ${active.length} of ${engine.MAX_ACTIVE_BRANCHES} active${merged ? `, ${merged} merged` : ''}.`
+        return finalize({ ok: true, summary: `${head}\n${lines}`, data: { branches, active: active.length, limit: engine.MAX_ACTIVE_BRANCHES } })
       }
 
       if (name === 'create_branch') {
