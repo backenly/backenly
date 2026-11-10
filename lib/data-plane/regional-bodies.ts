@@ -25,7 +25,8 @@
  *                       expressions, comments and enum labels, which its
  *                       record keeps only as digests (lib/changes/residency.ts)
  *   brain_run           a backend_chat run: the request, the changes that
- *                       landed and the answer (lib/ai/brain/runs.ts)
+ *                       landed and the answer (lib/ai/brain/runs.ts); and the
+ *                       request a stopped turn resumes (lib/ai/brain/loop-resume.ts)
  *
  * For a project in the home region all of it stays on the platform rows, as
  * it always has. For a project in another region it never leaves that region

@@ -29,8 +29,11 @@
 
 import type { Blueprint } from '@/lib/ai/blueprints/types'
 import { getBlueprintForPrompt } from '@/lib/ai/blueprints'
-import { loadPendingPlan, loadResumeQueue, savePendingPlan, saveResumeQueue } from '@/lib/ai/blueprints/store'
+import { loadPendingPlan, loadResumeQueue, markDesigning, savePendingPlan, saveResumeQueue } from '@/lib/ai/blueprints/store'
 import { saveTurn } from '@/lib/ai/brain/memory'
+import { loadLoopResume, saveLoopResume } from '@/lib/ai/brain/loop-resume'
+import { forgetProtection } from '@/lib/branches/protection'
+import { prisma } from '@/lib/db/prisma'
 import { setProviderForTests } from '@/lib/ai/llm'
 import {
   classified,
@@ -339,36 +342,24 @@ describe('CONFIRM with only a resume queue', () => {
   }, 60_000)
 })
 
-
-
 describe('CONFIRM when the plan was lost', () => {
-  it('does not call the architect on confirmation without a saved resume marker', async () => {
-    await saveTurn(
-      fresh.projectId,
-      ORIGINAL_REQUEST,
-      'Here is the plan.\n\nReply "go ahead" to run this, or tell me what to add or remove.',
-    )
+  it('designs the original request again, on a project still empty, and runs it', async () => {
+    await saveTurn(fresh.projectId, ORIGINAL_REQUEST, 'Here is the plan.\n\nReply "go ahead" to run this, or tell me what to add or remove.')
+    architect.mockResolvedValueOnce({ blueprint: planOf('rearchitected_notes'), match: matchOf, architectTokens: 500 })
 
-    await fresh.turn([classified('CONFIRM')], 'go ahead')
+    const { result, provider } = await fresh.turn([classified('CONFIRM')], 'go ahead')
 
-
-        expect(architect).not.toHaveBeenCalled()
+    expect(architect).toHaveBeenCalledWith(ORIGINAL_REQUEST, fresh.projectId, expect.any(Function))
+    expect(provider.calls).toHaveLength(1)
+    expect(await fresh.tableExists('rearchitected_notes')).toBe(true)
+    expect(result).toMatchObject({ success: true, toolsRun: ['create_table'] })
   }, 60_000)
-})
 
-describe('CONFIRM on a built project', () => {
   it('does not offer propose_plan to the agent loop a CONFIRM falls into', async () => {
     // A built project is never re-architected, so a lost plan reaches the loop.
-    await saveTurn(
-      built.projectId,
-      'add a comments table',
-      'Here is the plan.\n\nReply "go ahead" to run this, or tell me what to add or remove.',
-    )
+    await saveTurn(built.projectId, 'add a comments table', 'Here is the plan.\n\nReply "go ahead" to run this, or tell me what to add or remove.')
 
-    const { provider } = await built.turn(
-      [classified('CONFIRM'), finished('No plan is stored.')],
-      'go ahead',
-    )
+    const { provider } = await built.turn([classified('CONFIRM'), finished('No plan is stored.')], 'go ahead')
 
     expect(toolNamesOf(provider, 1)).not.toContain('propose_plan')
     expect(toolNamesOf(provider, 1)).toContain('create_table')
@@ -376,6 +367,79 @@ describe('CONFIRM on a built project', () => {
   }, 60_000)
 })
 
+describe('"continue" after the architect failed on a build', () => {
+  /** One create_table per model step, so twelve of them spend the loop's step budget. */
+  const creates = (n: number) =>
+    Array.from({ length: n }, (_, i) =>
+      toolCall('create_table', { tableName: `loop_step_${i}`, columns: [{ name: 'title', type: 'text' }] }, `toolu_create_${i}`))
+
+  it('saves that the architect failed, and "continue" designs the saved request again and runs the plan', async () => {
+    architect.mockResolvedValueOnce(null)
+    const first = await fresh.turn([classified('BUILD'), ...creates(12)], ORIGINAL_REQUEST)
+
+    expect(first.result.failureCode).toBe('STEP_BUDGET_EXHAUSTED')
+    expect(await loadLoopResume(fresh.projectId)).toMatchObject({ request: ORIGINAL_REQUEST, architectFailed: true })
+
+    architect.mockResolvedValueOnce({ blueprint: planOf('designed_again'), match: matchOf, architectTokens: 500 })
+    const { result, provider } = await fresh.turn([classified('CONFIRM')], 'continue')
+
+    expect(architect).toHaveBeenCalledTimes(2)
+    expect(architect).toHaveBeenLastCalledWith(ORIGINAL_REQUEST, fresh.projectId, expect.any(Function))
+    expect(provider.calls).toHaveLength(1)
+    expect(await fresh.tableExists('designed_again')).toBe(true)
+    expect(result.success).toBe(true)
+    // The plan took over from the marker, so a later "yes" does not design and run it again.
+    expect(await loadLoopResume(fresh.projectId)).toBeNull()
+  }, 120_000)
+
+  it('resumes the loop with what landed when the architect fails again', async () => {
+    await saveLoopResume(fresh.projectId, ORIGINAL_REQUEST, ['Created recipes'], 'step_budget', true)
+    architect.mockResolvedValueOnce(null)
+
+    const { result, provider } = await fresh.turn([classified('CONFIRM'), finished('The rest is in place.')], 'continue')
+
+    expect(architect).toHaveBeenCalledWith(ORIGINAL_REQUEST, fresh.projectId, expect.any(Function))
+    expect(result.summary).toBe('The rest is in place.')
+    const sent = JSON.stringify(provider.calls[1].params.messages.at(-1)!.content)
+    expect(sent).toContain(ORIGINAL_REQUEST)
+    expect(sent).toContain('Created recipes')
+  }, 60_000)
+
+  it('says it is still designing while a design runs, and starts no second one', async () => {
+    await saveLoopResume(fresh.projectId, ORIGINAL_REQUEST, [], 'step_budget', true)
+    await markDesigning(fresh.projectId)
+
+    const { result } = await fresh.turn([classified('CONFIRM')], 'continue')
+
+    expect(architect).not.toHaveBeenCalled()
+    expect(result).toMatchObject({ success: true, inProgress: 'designing' })
+    expect(await loadLoopResume(fresh.projectId)).not.toBeNull()
+  }, 60_000)
+
+  describe('on a protected production', () => {
+    const edition = process.env.BACKENLY_EDITION
+    beforeAll(async () => {
+      process.env.BACKENLY_EDITION = 'cloud'
+      await prisma.project.update({ where: { id: fresh.projectId }, data: { protectedProduction: true } })
+      forgetProtection()
+    })
+    afterAll(async () => {
+      if (edition === undefined) delete process.env.BACKENLY_EDITION
+      else process.env.BACKENLY_EDITION = edition
+      await prisma.project.update({ where: { id: fresh.projectId }, data: { protectedProduction: false } })
+      forgetProtection()
+    })
+
+    it('says how the schema reaches production, and designs and runs nothing', async () => {
+      await saveLoopResume(fresh.projectId, ORIGINAL_REQUEST, [], 'step_budget', true)
+
+      const { result } = await fresh.turn([classified('CONFIRM')], 'continue', { door: 'mcp' })
+
+      expect(architect).not.toHaveBeenCalled()
+      expect(result).toMatchObject({ success: false, failureCode: 'BRANCH_REQUIRED', applied: [] })
+    }, 60_000)
+  })
+})
 
 describe('APPLY_PROPOSAL on a built project', () => {
   it('enters the agent loop with the whole catalog and a hint to build what the conversation listed', async () => {

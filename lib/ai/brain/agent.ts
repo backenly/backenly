@@ -59,6 +59,7 @@ import {
 } from './tools'
 import { getBlueprintForPrompt, getCuratedBlueprintForPrompt, isExplicitSpec, shouldUseCuratedBlueprint } from '../blueprints'
 import { looksLikeBuildDescription } from './build-signals'
+import { findOriginalBuildPrompt } from './resume-routing'
 import { saveLoopResume, loadLoopResume, clearLoopResume, resumePrompt, type LoopResume, type LoopStop } from './loop-resume'
 import {
   savePendingPlan, loadPendingPlan, clearPendingPlan,
@@ -84,7 +85,6 @@ import type { DataMigrationEstimate } from '@/lib/execution/data-migration'
 import { redactArgs } from './redact'
 import { currentPageContext, isAgentDoor, type BrainDoor } from './input-context'
 import { callSignal, startTurnClock, type TurnClock } from './turn-clock'
-import { findOriginalBuildPrompt } from './resume-routing'
 
 /**
  * One tool call the approval gate stopped, carried verbatim so the caller can
@@ -707,9 +707,9 @@ async function runTurn(
       // A design already running for this project answers this build too.
       if (designing) return stillDesigningTurn(classification, emit)
       const resolved = await resolveBlueprintWithHeartbeat(input.message, input.projectId, emit)
-      if (!resolved) {
-        architectFailedThisTurn = true
-      }
+      // No design: the loop takes the build, and if it stops unfinished the
+      // marker it saves says so, so "continue" designs it again.
+      if (!resolved) architectFailedThisTurn = true
       if (resolved && 'vague' in resolved && resolved.vague) {
         console.log(`[Brain] route=ARCHITECT_VAGUE — surfacing clarifying question`)
         return await singleToolTurn('ask_user', { question: resolved.askUser, options: [] }, dispatchCtx, classification, emit, input)
@@ -753,60 +753,40 @@ async function runTurn(
       return await blueprintExecuteTurn(resume.steps, 0, dispatchCtx, classification, emit, input, clock, resume.domain, undefined, true)
     }
 
-    // A loop turn that stopped unfinished saved where it was. Resume the agent
-    // loop on that request with what already landed, rather than searching the
-    // history for a prompt that looks like one.
-
-
-    
-if (loopResume) {
-  if (loopResume.architectFailed && loopResume.request) {
-    const resolved = await resolveBlueprintWithHeartbeat(
-      loopResume.request,
-      input.projectId,
-      emit,
-    )
-
-    if (resolved && 'blueprint' in resolved) {
-      console.log('[Brain] route=LOOP_RESUME_REARCHITECT')
-
-      return await blueprintExecuteTurn(
-        resolved.blueprint.steps,
-        resolved.architectTokens,
-        dispatchCtx,
-        classification,
-        emit,
-        input,
-        clock,
-        resolved.blueprint.domain,
-        extractRequirements(loopResume.request),
-      )
+    // A loop turn that stopped unfinished saved where it was, so "continue"
+    // works from the saved request rather than the history search below.
+    // When the architect had failed on that request, design it again first:
+    // the loop cannot finish a whole backend, the plan can. If the architect
+    // fails again, resume the loop with what already landed.
+    if (loopResume) {
+      if (loopResume.architectFailed && loopResume.request) {
+        if (schemaOnBranch) return await branchBuildTurn(curatedTables(loopResume.request), classification, emit, input)
+        const resolved = await resolveBlueprintWithHeartbeat(loopResume.request, input.projectId, emit)
+        if (resolved && 'blueprint' in resolved) {
+          console.log(
+            `[Brain] route=LOOP_RESUME_REARCHITECT domain=${resolved.blueprint.domain} ` +
+            `steps=${resolved.blueprint.steps.length} architectTokens=${resolved.architectTokens}`,
+          )
+          // The plan takes over from the marker: a later "yes" must not design
+          // and run it again. Steps that fail are saved as a resume queue.
+          await clearLoopResume(input.projectId)
+          return await blueprintExecuteTurn(
+            resolved.blueprint.steps,
+            resolved.architectTokens,
+            dispatchCtx,
+            classification,
+            emit,
+            input,
+            clock,
+            resolved.blueprint.domain,
+            extractRequirements(loopResume.request),
+          )
+        }
+        console.log('[Brain] architect failed again on the saved request; resuming the loop')
+      }
+      console.log(`[Brain] route=LOOP_RESUME applied=${loopResume.applied.length} reason="${loopResume.reason}"`)
+      return await runAgentLoop(input, classification, memory.summary, understandingBlock, recent, dispatchCtx, emit, toolsRun, clock, loopResume)
     }
-
-    console.log('[Brain] Architect retry failed; falling back to loop resume')
-  }
-
-  console.log(
-    `[Brain] route=LOOP_RESUME applied=${loopResume.applied.length} reason="${loopResume.reason}"`,
-  )
-
-  return await runAgentLoop(
-    input,
-    classification,
-    memory.summary,
-    understandingBlock,
-    recent,
-    dispatchCtx,
-    emit,
-    toolsRun,
-    clock,
-    loopResume,
-    architectFailedThisTurn,
-  )
-}
-
-    
-
 
     // No stored plan at all — but the user is confirming/continuing a build.
     // This is the state that produced the endless "continue" loop: the
@@ -860,20 +840,7 @@ if (loopResume) {
   console.log(`[Brain] route=AGENT_LOOP intent=${classification.intent}`)
 
   // BUILD / MODIFY / FIX / QUESTION / DESTRUCTIVE / CONFIRM / APPLY_PROPOSAL → agent loop
-
-  return await runAgentLoop(
-    input,
-    classification,
-    memory.summary,
-    understandingBlock,
-    recent,
-    dispatchCtx,
-    emit,
-    toolsRun,
-    clock,
-    null,
-    architectFailedThisTurn,
-  )
+  return await runAgentLoop(input, classification, memory.summary, understandingBlock, recent, dispatchCtx, emit, toolsRun, clock, null, architectFailedThisTurn)
 }
 
 /**
@@ -2083,6 +2050,9 @@ async function runAgentLoop(
       resumeRequest,
       [...(resume?.applied ?? []), ...appliedMutationTitles],
       stoppedUnfinished,
+      // The architect failed on this request earlier in the turn, so
+      // "continue" designs it again before resuming the loop.
+      architectFailedThisTurn,
     ).then(
       () => true,
       (err) => {
@@ -2093,7 +2063,6 @@ async function runAgentLoop(
   } else if (resume || mutated) {
     await clearLoopResume(input.projectId)
   }
-  
 
   emit({ type: 'final', summary: finalSummary, needsUser, data: terminalData })
   await saveTurn(input.projectId, input.message, finalSummary, input.requestId ?? null)

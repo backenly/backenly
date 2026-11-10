@@ -20,10 +20,11 @@ import {
 } from '@/lib/ai/llm/providers/scripted'
 import { memorySpendLedger, setSpendLedgerForTests } from '@/lib/ai/llm/spend'
 import { runBrain, type BrainInput } from '@/lib/ai/brain/agent'
-import { loadLoopResume, saveLoopResume, resumePrompt } from '@/lib/ai/brain/loop-resume'
+import { clearLoopResume, loadLoopResume, saveLoopResume, resumePrompt } from '@/lib/ai/brain/loop-resume'
 import fs from 'node:fs'
 import { Client } from 'pg'
 import { disconnectRegionalClients } from '@/lib/data-plane/regional'
+import { regionalBodiesFor } from '@/lib/data-plane/regional-bodies'
 
 
 
@@ -46,9 +47,9 @@ function testDatabaseUrl(): string {
   const url = process.env.TEST_DATABASE_URL
   if (!url) throw new Error('TEST_DATABASE_URL is not configured')
 
-  const parsed = new URL(url)
-  if (parsed.pathname !== '/backenly_test') {
-    throw new Error('Expected TEST_DATABASE_URL to point to backenly_test')
+  // A test database by name, so the regional one is never made beside real data.
+  if (!new URL(url).pathname.slice(1).includes('test')) {
+    throw new Error('Expected TEST_DATABASE_URL to name a test database')
   }
 
   return url
@@ -139,6 +140,8 @@ afterEach(() => {
 })
 
 afterAll(async () => {
+  if (previousAutonomyFlag === undefined) delete process.env.ENABLE_AUTONOMY_RECONCILER
+  else process.env.ENABLE_AUTONOMY_RECONCILER = previousAutonomyFlag
   await prisma.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`).catch(() => {})
   await prisma.auditLog.deleteMany({ where: { projectId } }).catch(() => {})
   await prisma.project.deleteMany({ where: { userId: ownerId } }).catch(() => {})
@@ -389,6 +392,28 @@ afterAll(async () => {
     const prompt = resumePrompt(marker!, 'continue')
     expect(prompt).toMatch(/in the conversation above/)
     expect(prompt).not.toMatch(/ORIGINAL REQUEST/)
+  })
+
+  it('keeps one request body in the region: a new stop replaces it, and clearing removes it', async () => {
+    const resumeIdOf = async () => {
+      const row = await prisma.projectPreference.findFirstOrThrow({ where: { projectId: regionalId, key: 'loop_resume' } })
+      return (JSON.parse(row.value) as { resumeId: string }).resumeId
+    }
+    const bodies = await regionalBodiesFor(regionalId)
+
+    await saveLoopResume(regionalId, 'the first request', [], 'step_budget')
+    const first = await resumeIdOf()
+    await saveLoopResume(regionalId, 'the second request', [], 'step_budget')
+    const second = await resumeIdOf()
+
+    // Kept under the run-log kind, which the region prunes if it is never cleared.
+    expect(await bodies.get('brain_run', `brain-loop-resume:${first}`)).toBeNull()
+    expect((await bodies.get('brain_run', `brain-loop-resume:${second}`))?.payload).toMatchObject({ request: 'the second request' })
+    expect((await loadLoopResume(regionalId))?.request).toBe('the second request')
+
+    await clearLoopResume(regionalId)
+    expect(await bodies.get('brain_run', `brain-loop-resume:${second}`)).toBeNull()
+    expect(await loadLoopResume(regionalId)).toBeNull()
   })
 })
 

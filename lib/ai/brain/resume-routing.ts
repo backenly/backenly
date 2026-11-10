@@ -31,23 +31,13 @@ export const CONFIRM_OR_RESUME_RE =
 export function findOriginalBuildPrompt(
   history: ConversationTurnLite[],
 ): string | null {
-  let sawConfirmation = false
-
   for (let i = history.length - 1; i >= 0; i--) {
     const t = history[i]
     if (t.role !== 'user') continue
-
     const c = (t.content ?? '').trim()
-
-    if (CONFIRM_OR_RESUME_RE.test(c)) {
-      sawConfirmation = true
-      continue
-    }
-
     if (c.length < 40) continue
-
-    return sawConfirmation ? c : null
+    if (CONFIRM_OR_RESUME_RE.test(c)) continue
+    return c
   }
-
   return null
 }
