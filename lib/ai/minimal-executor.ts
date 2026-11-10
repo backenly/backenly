@@ -8663,7 +8663,8 @@ async function executeGetUsage(projectId: string): Promise<ExecutionResult> {
     const lines = usage.axes.map((a) => {
       const of = a.included === null ? 'unlimited' : `${fmt(a.included, a.unit)} included`
       const grace = a.grace ? (a.grace.restricted ? ' — RESTRICTED (grace ended)' : ` — over since ${a.grace.overSince.slice(0, 10)}, grace ends ${a.grace.graceEndsAt.slice(0, 10)}`) : ''
-      return `- ${a.label}: ${fmt(a.used, a.unit)} (${of}); projected ${fmt(a.projected, a.unit)}${grace}`
+      const measured = a.measuredAt ? `, measured ${a.measuredAt}` : ''
+      return `- ${a.label}: ${fmt(a.used, a.unit)} (${of}${measured}); projected ${fmt(a.projected, a.unit)}${grace}`
     })
     const overage =
       usage.overage.mode === null

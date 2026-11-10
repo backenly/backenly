@@ -1953,3 +1953,7 @@ tests/integration/webhooks-pick-tables.spec.ts
 # and it warns while magic links are on with no App URL. Real findings and
 # auth settings.
 tests/integration/readiness-counts-open-problems.spec.ts
+# Reading an account's usage measures database storage that is more than five
+# minutes old and says when it was measured: a real schema with rows measured
+# by the production catalog query.
+tests/integration/usage-storage-measured-on-read.spec.ts
