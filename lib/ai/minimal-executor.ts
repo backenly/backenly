@@ -50,6 +50,10 @@ export interface AIAction {
     // Finish a constraint that was added NOT VALID. Approval-gated: it scans the
     // whole table and fails if the existing rows do not satisfy it.
     | 'VALIDATE_CONSTRAINT'
+    // A migration's ALTER TABLE … DROP CONSTRAINT. Reached from apply_migration
+    // on a branch, from a merge a person approved, or from a person's own
+    // migration on main; an agent's on production is refused (lib/mcp/apply-migration.ts).
+    | 'DROP_CONSTRAINT'
     | 'DROP_COLUMN'
     | 'DROP_TABLE' | 'TRUNCATE_TABLE'
     // API
@@ -3154,7 +3158,7 @@ async function _writeDecisionMemory(action: AIAction, projectId: string): Promis
  */
 const GOVERNED_ACTIONS = new Set<AIAction['action']>([
   'CREATE_TABLE', 'CREATE_JUNCTION_TABLE', 'ADD_COLUMN', 'DROP_COLUMN', 'DROP_TABLE',
-  'RENAME_COLUMN', 'ADD_CONSTRAINT', 'VALIDATE_CONSTRAINT', 'CREATE_INDEX', 'DROP_INDEX',
+  'RENAME_COLUMN', 'ADD_CONSTRAINT', 'VALIDATE_CONSTRAINT', 'DROP_CONSTRAINT', 'CREATE_INDEX', 'DROP_INDEX',
   'ALTER_COLUMN_TYPE', 'ENABLE_AUTH', 'ENABLE_TEAMS', 'ENABLE_VECTOR_SEARCH', 'ADD_FULLTEXT_SEARCH',
   'SET_PERMISSION', 'REMOVE_PERMISSION', 'ENABLE_REALTIME', 'DISABLE_REALTIME',
   'CREATE_TRIGGER', 'DELETE_TRIGGER', 'SYNC_COLUMN', 'REMOVE_SYNC_COLUMN',
@@ -3575,6 +3579,9 @@ async function executeSingleAction(
 
       case 'DROP_INDEX':
         return await executeDropIndex(action.params, projectId)
+
+      case 'DROP_CONSTRAINT':
+        return await executeDropConstraint(action.params, projectId)
 
       case 'REINDEX_INDEX':
         return await executeReindexIndex(action.params, projectId)
@@ -8672,10 +8679,71 @@ async function executeVacuumTable(params: any, projectId: string): Promise<Execu
  * A plain DROP INDEX takes a brief ACCESS EXCLUSIVE lock on the table, which is
  * the cost of the approved change and is stated in the result.
  */
-async function executeDropIndex(params: any, projectId: string): Promise<ExecutionResult> {
+/**
+ * A branch is cloned with LIKE … INCLUDING ALL, and Postgres names the indexes
+ * and unique constraints it copies by its own rules, so a name production uses
+ * may not exist on the branch. The copy is the one on the same table with the
+ * same definition. A migration names production's objects, because that is
+ * what the merge replays, so on a branch the name is resolved to its copy.
+ */
+async function branchCopyOfIndex(
+  db: { $queryRawUnsafe: <T = unknown>(sql: string, ...args: unknown[]) => Promise<T> },
+  mainSchema: string,
+  branchSchema: string,
+  indexName: string,
+): Promise<string | null> {
+  const defs = (schema: string, name: string | null) =>
+    db.$queryRawUnsafe<Array<{ index_name: string; table_name: string; definition: string }>>(
+      `SELECT i.relname AS index_name, t.relname AS table_name, pg_get_indexdef(i.oid) AS definition
+         FROM pg_index ix
+         JOIN pg_class i     ON i.oid = ix.indexrelid
+         JOIN pg_class t     ON t.oid = ix.indrelid
+         JOIN pg_namespace n ON n.oid = i.relnamespace
+        WHERE n.nspname = $1 AND ($2::text IS NULL OR i.relname = $2)`,
+      schema, name,
+    )
+  // Everything from USING on, plus UNIQUE: the definition without its name and schema.
+  const shape = (def: string) => `${/^CREATE UNIQUE/i.test(def)}|${def.slice(def.indexOf(' USING '))}`
+  const [main] = await defs(mainSchema, indexName)
+  if (!main) return null
+  const copy = (await defs(branchSchema, null)).find(
+    (b) => b.table_name === main.table_name && shape(b.definition) === shape(main.definition),
+  )
+  return copy?.index_name ?? null
+}
+
+async function branchCopyOfConstraint(
+  db: { $queryRawUnsafe: <T = unknown>(sql: string, ...args: unknown[]) => Promise<T> },
+  mainSchema: string,
+  branchSchema: string,
+  tableName: string,
+  constraintName: string,
+): Promise<string | null> {
+  const defs = (schema: string, name: string | null) =>
+    db.$queryRawUnsafe<Array<{ conname: string; contype: string; definition: string }>>(
+      `SELECT c.conname, c.contype::text AS contype, pg_get_constraintdef(c.oid) AS definition
+         FROM pg_constraint c
+         JOIN pg_class t     ON t.oid = c.conrelid
+         JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE n.nspname = $1 AND t.relname = $2 AND ($3::text IS NULL OR c.conname = $3)`,
+      schema, tableName, name,
+    )
+  const [main] = await defs(mainSchema, constraintName)
+  if (!main) return null
+  const copy = (await defs(branchSchema, null)).find((b) => b.contype === main.contype && b.definition === main.definition)
+  return copy?.conname ?? null
+}
+
+async function executeDropIndex(params: any, projectId: string, target: SchemaTarget = {}): Promise<ExecutionResult> {
   const db = await projectDb(projectId)
   const indexName = params?.indexName ?? params?.index
   const tableName = params?.tableName ?? params?.table
+  // A migration's plain DROP INDEX expects the index to be there, as Postgres
+  // does; IF EXISTS, and every internal caller, take "already gone" as done.
+  const mustExist = params?.ifExists === false
+  // Removing a uniqueness guarantee is what a migration's DROP INDEX on a
+  // unique index asks for in so many words. Backenly's own repairs never do it.
+  const mayDropUnique = params?.dropUniqueness === true
 
   if (!indexName) {
     return {
@@ -8688,7 +8756,7 @@ async function executeDropIndex(params: any, projectId: string): Promise<Executi
 
   try {
     const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
-    const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
+    const postgresSchema = target.targetSchema ?? getWorkspaceDatabaseNames(projectId).postgresSchema
 
     const { SAFE_IDENT } = await import('@/lib/db/sql-expression')
     if (!SAFE_IDENT.test(String(indexName))) {
@@ -8707,12 +8775,14 @@ async function executeDropIndex(params: any, projectId: string): Promise<Executi
       is_primary: boolean
       is_unique: boolean
       constraint_backed: boolean
+      constraint_name: string | null
       definition: string
     }>>(
       `SELECT t.relname                AS table_name,
               ix.indisprimary          AS is_primary,
               ix.indisunique           AS is_unique,
               EXISTS (SELECT 1 FROM pg_constraint c WHERE c.conindid = i.oid) AS constraint_backed,
+              (SELECT c.conname FROM pg_constraint c WHERE c.conindid = i.oid LIMIT 1) AS constraint_name,
               pg_get_indexdef(i.oid)   AS definition
          FROM pg_index ix
          JOIN pg_class i     ON i.oid = ix.indexrelid
@@ -8722,7 +8792,20 @@ async function executeDropIndex(params: any, projectId: string): Promise<Executi
       postgresSchema, indexName,
     ).catch(() => [] as any[])
 
+    if (rows.length === 0 && target.targetSchema) {
+      const copy = await branchCopyOfIndex(db, getWorkspaceDatabaseNames(projectId).postgresSchema, postgresSchema, String(indexName))
+      if (copy) return executeDropIndex({ ...params, indexName: copy, productionName: indexName }, projectId, target)
+    }
+
     if (rows.length === 0) {
+      if (mustExist) {
+        return {
+          success: false,
+          message: `There is no index named "${indexName}" here, so nothing was dropped. DROP INDEX IF EXISTS treats a missing index as done.`,
+          error: 'Index not found',
+          code: 'INDEX_NOT_FOUND',
+        }
+      }
       // Already gone is the goal state, not a failure — a finding can outlive
       // the index it names, and reporting an error here would escalate a change
       // that has in fact been made.
@@ -8746,7 +8829,19 @@ async function executeDropIndex(params: any, projectId: string): Promise<Executi
       }
     }
 
-    if (idx.is_primary || idx.is_unique || idx.constraint_backed) {
+    if (mayDropUnique && idx.constraint_backed && !idx.is_primary) {
+      return {
+        success: false,
+        message:
+          `"${indexName}" is the index behind the constraint "${idx.constraint_name}" on "${idx.table_name}", ` +
+          `so DROP INDEX cannot remove it. Drop the constraint instead: ` +
+          `ALTER TABLE ${idx.table_name} DROP CONSTRAINT ${idx.constraint_name}. Nothing was dropped.`,
+        error: 'Constraint-backed index',
+        code: 'CONSTRAINT_BACKED_INDEX',
+      }
+    }
+
+    if (idx.is_primary || (idx.is_unique && !mayDropUnique) || idx.constraint_backed) {
       return {
         success: false,
         message:
@@ -8777,17 +8872,193 @@ async function executeDropIndex(params: any, projectId: string): Promise<Executi
       await db.$executeRawUnsafe(`DROP INDEX "${postgresSchema}"."${indexName}"`)
     }
 
+    const what = idx.is_unique
+      ? `Its columns no longer have to be unique.`
+      : `Writes to that table no longer maintain it.`
     return {
       success: true,
-      message:
-        `Dropped index "${indexName}" on "${idx.table_name}". Writes to that table no longer ` +
-        `maintain it. The pre-fix snapshot holds its definition, so undo recreates it exactly.`,
-      data: { indexName, tableName: idx.table_name, definition: idx.definition },
+      message: target.targetSchema
+        ? `Dropped ${idx.is_unique ? 'unique ' : ''}index "${params?.productionName ?? indexName}" on "${idx.table_name}" on the branch` +
+          `${params?.productionName ? ` (its copy there is named "${indexName}")` : ''}. ${what} ` +
+          `Merging the branch drops it from production.`
+        : `Dropped ${idx.is_unique ? 'unique ' : ''}index "${indexName}" on "${idx.table_name}". ${what} ` +
+          `The pre-fix snapshot holds its definition, so undo recreates it exactly.`,
+      data: { indexName, tableName: idx.table_name, definition: idx.definition, unique: idx.is_unique },
     }
   } catch (err: any) {
     return {
       success: false,
       message: `Could not drop index "${indexName}": ${err.message}`,
+      error: err.message,
+    }
+  }
+}
+
+/**
+ * DATABASE: Drop a constraint, as a migration's ALTER TABLE … DROP CONSTRAINT.
+ *
+ * Unique, check, foreign-key and exclusion constraints. The primary key is
+ * refused: a Backenly table's managed `id` is what its API, its policies and
+ * the foreign keys pointing at it stand on. Dropping a constraint removes a
+ * rule, not a row, so it is a governed change like adding one: the checkpoint
+ * keeps its definition, and restoring the change puts it back, or waits for a
+ * person when rows written since would break it.
+ *
+ * A UNIQUE that Backenly made as an index (on a soft-delete table every one is
+ * a partial unique index, which has no constraint) is named as an index, so the
+ * caller is told the DROP INDEX that removes it. A branch is cloned without
+ * foreign keys, so dropping one there is recorded and done when the merge
+ * replays it on production, as adding one is.
+ */
+async function executeDropConstraint(params: any, projectId: string, target: SchemaTarget = {}): Promise<ExecutionResult> {
+  const db = await projectDb(projectId)
+  const tableName = params?.tableName
+  const constraintName = params?.constraintName
+  const ifExists = params?.ifExists === true
+  if (!tableName || !constraintName) {
+    return { success: false, message: 'tableName and constraintName are required', error: 'Missing parameters', code: 'VALIDATION' }
+  }
+  const { SAFE_IDENT } = await import('@/lib/db/sql-expression')
+  for (const ident of [tableName, constraintName]) {
+    if (!SAFE_IDENT.test(String(ident))) {
+      return { success: false, message: `"${ident}" is not a valid PostgreSQL identifier.`, error: 'Invalid identifier', code: 'VALIDATION' }
+    }
+  }
+
+  try {
+    const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
+    const mainSchema = getWorkspaceDatabaseNames(projectId).postgresSchema
+    const postgresSchema = target.targetSchema ?? mainSchema
+    const onBranch = !!target.targetSchema
+
+    const constraintIn = (schema: string) =>
+      db.$queryRawUnsafe<Array<{ contype: string; definition: string }>>(
+        `SELECT c.contype::text AS contype, pg_get_constraintdef(c.oid) AS definition
+           FROM pg_constraint c
+           JOIN pg_class t     ON t.oid = c.conrelid
+           JOIN pg_namespace n ON n.oid = t.relnamespace
+          WHERE n.nspname = $1 AND t.relname = $2 AND c.conname = $3`,
+        schema, tableName, constraintName,
+      )
+    let rows = await constraintIn(postgresSchema)
+    let dropName = String(constraintName)
+    if (rows.length === 0 && onBranch) {
+      const copy = await branchCopyOfConstraint(db, mainSchema, postgresSchema, tableName, String(constraintName))
+      if (copy) {
+        dropName = copy
+        rows = await db.$queryRawUnsafe<Array<{ contype: string; definition: string }>>(
+          `SELECT c.contype::text AS contype, pg_get_constraintdef(c.oid) AS definition
+             FROM pg_constraint c
+             JOIN pg_class t     ON t.oid = c.conrelid
+             JOIN pg_namespace n ON n.oid = t.relnamespace
+            WHERE n.nspname = $1 AND t.relname = $2 AND c.conname = $3`,
+          postgresSchema, tableName, copy,
+        )
+      }
+    }
+
+    if (rows.length === 0) {
+      if (onBranch) {
+        const onMain = await constraintIn(mainSchema)
+        if (onMain[0]?.contype === 'f') {
+          return {
+            success: true,
+            message:
+              `Recorded dropping foreign key "${constraintName}" from ${tableName}. A branch has no foreign keys, ` +
+              `so it is dropped from production when the branch is merged.`,
+            data: { tableName, constraintName, kind: 'foreign key', enforcedOnBranch: false },
+          }
+        }
+      }
+      const index = await db.$queryRawUnsafe<Array<{ is_unique: boolean }>>(
+        `SELECT ix.indisunique AS is_unique
+           FROM pg_index ix
+           JOIN pg_class i     ON i.oid = ix.indexrelid
+           JOIN pg_class t     ON t.oid = ix.indrelid
+           JOIN pg_namespace n ON n.oid = i.relnamespace
+          WHERE n.nspname = $1 AND t.relname = $2 AND i.relname = $3`,
+        postgresSchema, tableName, constraintName,
+      )
+      if (index.length > 0) {
+        return {
+          success: false,
+          message:
+            `"${constraintName}" on ${tableName} is ${index[0].is_unique ? 'a unique index' : 'an index'}, not a constraint. ` +
+            `Drop it with DROP INDEX ${constraintName}. Nothing was dropped.`,
+          error: 'Not a constraint',
+          code: 'NOT_A_CONSTRAINT',
+        }
+      }
+      if (ifExists) {
+        return {
+          success: true,
+          message: `${tableName} has no constraint named "${constraintName}", so there was nothing to drop.`,
+          data: { tableName, constraintName, alreadyAbsent: true },
+        }
+      }
+      return {
+        success: false,
+        message:
+          `${tableName} has no constraint named "${constraintName}", so nothing was dropped. ` +
+          `get_table_schema lists its constraints.`,
+        error: 'Constraint not found',
+        code: 'CONSTRAINT_NOT_FOUND',
+      }
+    }
+
+    const { contype, definition } = rows[0]
+    if (contype === 'p') {
+      return {
+        success: false,
+        message:
+          `"${constraintName}" is ${tableName}'s primary key. Backenly does not drop it: the table's API, its row ` +
+          `policies and the foreign keys pointing at it depend on it. Nothing was dropped.`,
+        error: 'Primary key',
+        code: 'PRIMARY_KEY',
+      }
+    }
+    if (contype === 'n') {
+      return {
+        success: false,
+        message: `"${constraintName}" is a NOT NULL rule. Remove it with ALTER TABLE ${tableName} ALTER COLUMN … DROP NOT NULL. Nothing was dropped.`,
+        error: 'Not null constraint',
+        code: 'VALIDATION',
+      }
+    }
+
+    await db.$executeRawUnsafe(`ALTER TABLE "${postgresSchema}"."${tableName}" DROP CONSTRAINT "${dropName}"`)
+    const still = await db.$queryRawUnsafe<Array<{ n: number }>>(
+      `SELECT count(*)::int AS n FROM pg_constraint c JOIN pg_class t ON t.oid = c.conrelid JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE n.nspname = $1 AND t.relname = $2 AND c.conname = $3`,
+      postgresSchema, tableName, dropName,
+    )
+    if (still[0]?.n > 0) {
+      return {
+        success: false,
+        message: `ALTER TABLE … DROP CONSTRAINT reported no error but "${constraintName}" is still on ${tableName}.`,
+        error: 'Verification failed',
+        code: 'VERIFY_FAILED',
+      }
+    }
+    if (!onBranch) {
+      import('@/lib/services/workspace-validator')
+        .then(({ invalidateSchemaCache }) => invalidateSchemaCache(projectId, tableName)).catch(() => {})
+    }
+
+    const kind = ({ u: 'unique', c: 'check', f: 'foreign key', x: 'exclusion' } as Record<string, string>)[contype] ?? 'constraint'
+    return {
+      success: true,
+      message: onBranch
+        ? `Dropped ${kind} constraint "${constraintName}" (${definition}) from ${tableName} on the branch` +
+          `${dropName !== constraintName ? ` (its copy there is named "${dropName}")` : ''}. Merging the branch drops it from production.`
+        : `Dropped ${kind} constraint "${constraintName}" (${definition}) from ${tableName}. ` +
+          `Its definition is kept with this change, so restoring the change puts it back.`,
+      data: { tableName, constraintName, kind, definition },
+    }
+  } catch (err: any) {
+    return {
+      success: false,
+      message: `Could not drop constraint "${constraintName}" from ${tableName}: ${err.message}`,
       error: err.message,
     }
   }
@@ -9496,8 +9767,8 @@ async function executeRenameColumn(params: any, projectId: string, target: Schem
  * merge replays the statement, but with the handler in branch mode (see
  * SchemaTarget): DDL into the branch schema, nothing keyed by the project.
  *
- * Only the five actions the parser emits are accepted. Anything else is
- * refused rather than run against main by the default path.
+ * Only the actions the parser emits are accepted. Anything else is refused
+ * rather than run against main by the default path.
  */
 export async function executeBranchSchemaAction(
   action: { action: string; params: any },
@@ -9518,6 +9789,8 @@ export async function executeBranchSchemaAction(
     case 'CREATE_INDEX':   return executeCreateIndex(action.params, projectId, target)
     case 'RENAME_COLUMN':  return executeRenameColumn(action.params, projectId, target)
     case 'ADD_CONSTRAINT': return executeAddConstraint(action.params, projectId, target)
+    case 'DROP_INDEX':     return executeDropIndex(action.params, projectId, target)
+    case 'DROP_CONSTRAINT': return executeDropConstraint(action.params, projectId, target)
     default:
       return {
         success: false,

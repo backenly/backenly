@@ -331,6 +331,20 @@ describe('ALTER TABLE', () => {
     expect(err.hint).toMatch(/managed `id`|UNIQUE/)
   })
 
+  it('translates DROP CONSTRAINT, carrying IF EXISTS', () => {
+    expect(parseOne('ALTER TABLE orders DROP CONSTRAINT total_positive').args).toEqual({
+      tableName: 'orders', constraintName: 'total_positive',
+    })
+    expect(parseOne('ALTER TABLE orders DROP CONSTRAINT IF EXISTS "Fk_Owner" RESTRICT').args).toEqual({
+      tableName: 'orders', constraintName: 'Fk_Owner', ifExists: true,
+    })
+  })
+
+  it('refuses DROP CONSTRAINT … CASCADE, and more than one constraint per statement', () => {
+    expect(expectRefusal('ALTER TABLE orders DROP CONSTRAINT total_positive CASCADE').code).toBe('UNSUPPORTED_STATEMENT')
+    expect(expectRefusal('ALTER TABLE orders DROP CONSTRAINT a, DROP CONSTRAINT b').code).toBe('BAD_STATEMENT')
+  })
+
   it('refuses DROP COLUMN as destructive, naming the approval path', () => {
     const err = expectRefusal('ALTER TABLE posts DROP COLUMN body')
     expect(err.code).toBe('DESTRUCTIVE_REFUSED')
@@ -428,6 +442,25 @@ describe('refusals route somewhere', () => {
   it('sends UPDATE and DELETE to the typed data tools', () => {
     expect(expectRefusal("UPDATE posts SET title = 'x'").hint).toMatch(/db_update/)
     expect(expectRefusal('DELETE FROM posts').hint).toMatch(/db_delete/)
+  })
+
+  it('translates DROP INDEX, one step per index, allowing a unique one', () => {
+    const steps = parseMigration('DROP INDEX IF EXISTS orders_total_idx, orders_coupon_key')
+    expect(steps.map((p) => [p.tool, p.args])).toEqual([
+      ['drop_index', { indexName: 'orders_total_idx', ifExists: true, dropUniqueness: true }],
+      ['drop_index', { indexName: 'orders_coupon_key', ifExists: true, dropUniqueness: true }],
+    ])
+  })
+
+  it('accepts DROP INDEX CONCURRENTLY and says it does not apply', () => {
+    const [step] = parseMigration('DROP INDEX CONCURRENTLY orders_total_idx')
+    expect(step.args).toEqual({ indexName: 'orders_total_idx', dropUniqueness: true })
+    expect(step.notes?.[0]).toMatch(/without CONCURRENTLY/)
+  })
+
+  it('refuses DROP INDEX … CASCADE and a schema-qualified index', () => {
+    expect(expectRefusal('DROP INDEX orders_total_idx CASCADE').code).toBe('UNSUPPORTED_STATEMENT')
+    expect(expectRefusal('DROP INDEX public.orders_total_idx').code).toBe('QUALIFIED_NAME')
   })
 
   it('refuses DROP TABLE via the approval path', () => {

@@ -726,7 +726,7 @@ function AgentRequestRow({
       busy={state.phase === 'applying'}
       title={
         <p className={ROW_TITLE}>
-          {restore || a.tool === 'merge_branch' ? (
+          {restore || a.tool === 'merge_branch' || a.tool === 'apply_migration' ? (
             <TextWithCode text={a.target} codeClassName="text-zinc-100" />
           ) : destructive && a.tool === 'drop_table' ? (
             <>Drop <TextWithCode text={a.target} codeClassName="text-zinc-100" /></>

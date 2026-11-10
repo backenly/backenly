@@ -77,7 +77,24 @@ export interface MigrationSuccess {
   change?: MigrationChange
 }
 
-export type MigrationOutcome = MigrationRefusal | MigrationFailure | MigrationSuccess
+/**
+ * An agent's migration that a person reviews before it reaches production
+ * (REVIEWED_BEFORE_PRODUCTION). Nothing ran. The MCP route holds it in the
+ * project's approval queue with its exact SQL, and approving it runs that SQL
+ * as one governed change, under the approver's name.
+ */
+export interface MigrationNeedsReview {
+  ok: false
+  code: 'NEEDS_REVIEW'
+  error: string
+  /** Why a person looks first: one sentence for each kind of step that needs it. */
+  reasons: string[]
+  /** The migration's statements, in the order they will run. */
+  statements: string[]
+  applied: []
+}
+
+export type MigrationOutcome = MigrationRefusal | MigrationNeedsReview | MigrationFailure | MigrationSuccess
 
 export interface AppliedStep {
   statement: string
@@ -125,6 +142,42 @@ export async function existingTables(projectId: string, schema: string, names: s
     SELECT table_name FROM information_schema.tables
     WHERE table_schema = ${schema} AND table_name = ANY(${names})`
   return new Set(found.map((r) => r.table_name))
+}
+
+/**
+ * A drop Backenly refuses by rule, refused before anything runs so it is
+ * answered like any other refused statement: nothing applied, nothing
+ * recorded. The primary key is that rule: a Backenly table's managed `id` is
+ * what its API, its policies and the foreign keys pointing at it stand on.
+ * Production's catalog decides, on a branch too, since a migration names
+ * production's objects and the merge replays it there. The executor refuses
+ * it as well, for any other caller.
+ */
+export async function refusedDrop(projectId: string, mainSchema: string, planned: PlannedAction[]): Promise<MigrationRefusal | null> {
+  const drops = planned.filter((p) => p.tool === 'drop_constraint')
+  if (drops.length === 0) return null
+  const db = await workspaceRawClient(projectId)
+  const keys = await db.$queryRaw<Array<{ table_name: string; conname: string }>>`
+    SELECT t.relname AS table_name, c.conname
+      FROM pg_constraint c
+      JOIN pg_class t     ON t.oid = c.conrelid
+      JOIN pg_namespace n ON n.oid = t.relnamespace
+     WHERE n.nspname = ${mainSchema} AND c.contype = 'p'`
+  for (const step of drops) {
+    const table = String(step.args.tableName ?? '')
+    if (keys.some((k) => k.table_name === table && k.conname === step.args.constraintName)) {
+      return {
+        ok: false,
+        code: 'PRIMARY_KEY',
+        error:
+          `"${step.source}" would drop ${table}'s primary key. Backenly does not: the table's API, its row policies ` +
+          `and the foreign keys pointing at it depend on it. Nothing was applied.`,
+        statement: step.source,
+        applied: [],
+      }
+    }
+  }
+  return null
 }
 
 const tableOf = (p: { args: Record<string, unknown> }) => String(p.args.tableName ?? '')
@@ -263,11 +316,71 @@ export function migrationTitle(planned: PlannedAction[]): string {
 }
 
 /**
+ * Steps an agent's migration may not run on production by itself. Dropping a
+ * constraint, or an index that enforces uniqueness, loses no row but changes
+ * which rows production accepts, so a person reviews it first. The migration
+ * is held, whole and exactly as sent, in the project's approval queue, and
+ * approving it runs it; on a protected production the agent makes it on a
+ * branch instead, and the merge a person approves carries it over. A merge,
+ * and a migration a person approved, run it.
+ *
+ * Dropping an ordinary index changes how fast queries run and never what data
+ * is allowed, so it runs: online (DROP INDEX CONCURRENTLY, so no query waits on
+ * it), as a governed change that restoring puts back.
+ */
+const REVIEWED_BEFORE_PRODUCTION = new Set(['drop_index', 'drop_constraint'])
+
+/**
+ * Whether the index a step drops is an ordinary one: not unique, not the
+ * primary key, behind no constraint. An index that is not there is left to the
+ * executor, which says so (or, with IF EXISTS, treats it as done).
+ */
+async function dropsOrdinaryIndex(projectId: string, schema: string, step: PlannedAction): Promise<boolean> {
+  if (step.tool !== 'drop_index') return false
+  const name = String(step.args.indexName ?? '')
+  if (!name) return false
+  const { workspaceRawClient } = await import('@/lib/data-plane/regional')
+  const db = await workspaceRawClient(projectId)
+  const rows = await db.$queryRawUnsafe<Array<{ ordinary: boolean }>>(
+    `SELECT NOT ix.indisunique AND NOT ix.indisprimary
+            AND NOT EXISTS (SELECT 1 FROM pg_constraint c WHERE c.conindid = i.oid) AS ordinary
+       FROM pg_class i
+       JOIN pg_index ix ON ix.indexrelid = i.oid
+       JOIN pg_namespace n ON n.oid = i.relnamespace
+      WHERE n.nspname = $1 AND i.relname = $2`,
+    schema,
+    name,
+  )
+  return rows.length === 0 || rows[0].ordinary === true
+}
+
+/** Why a person reviews a step before production runs it, in the words the approval card shows. */
+function whyReviewed(step: PlannedAction): string {
+  return step.tool === 'drop_index'
+    ? 'It removes a unique index, which changes which rows production accepts.'
+    : 'It removes a constraint, which changes which rows production accepts.'
+}
+
+function needsReview(planned: PlannedAction[], held: PlannedAction[]): MigrationNeedsReview {
+  return {
+    ok: false,
+    code: 'NEEDS_REVIEW',
+    error:
+      `"${held[0].source}"${held.length > 1 ? ` and ${held.length - 1} more statement${held.length === 2 ? '' : 's'}` : ''} ` +
+      `change${held.length === 1 ? 's' : ''} which rows production accepts, so a person reviews the migration before it runs. Nothing was applied.`,
+    reasons: [...new Set(held.map(whyReviewed))],
+    statements: [...new Set(planned.map((p) => p.source.split(' → ')[0]))],
+    applied: [],
+  }
+}
+
+/**
  * Apply a migration to a project's MAIN schema through the brain's dispatch,
  * so approval gates, the intent ledger and rollback behave exactly as a typed
  * call would. `agentSurface` marks a coding agent as the caller, which is what
- * the protected-production gate in dispatchTool keys on; a merge replay that a
- * human approved does not set it.
+ * the protected-production gate in dispatchTool keys on, and what holds a step
+ * in REVIEWED_BEFORE_PRODUCTION for a person; a merge replay, and a migration
+ * a person approved, do not set it.
  */
 export async function applyMigrationToMain(
   projectId: string,
@@ -278,10 +391,25 @@ export async function applyMigrationToMain(
   const plan = planMigration(sql)
   if (!plan.ok) return plan as MigrationRefusal
   const planned = (plan as { ok: true; planned: PlannedAction[] }).planned
+  // Production is live: every index it loses goes CONCURRENTLY, whoever asked.
+  for (const step of planned) if (step.tool === 'drop_index') step.args = { ...step.args, online: true }
   const existing = await existingTables(projectId, opts.workspaceSchema, tablesNamed(planned))
   const checked = checkPlan(planned, existing)
   if (!checked.ok) return checked as MigrationRefusal
+  const refused = await refusedDrop(projectId, opts.workspaceSchema, planned)
+  if (refused) return refused
   const ok = checked as Extract<typeof checked, { ok: true }>
+  // Checked first, so what a person is asked to approve is a migration that
+  // would run as it stands.
+  if (opts.agentSurface === true) {
+    const held: PlannedAction[] = []
+    for (const step of ok.planned) {
+      if (!REVIEWED_BEFORE_PRODUCTION.has(step.tool)) continue
+      if (await dropsOrdinaryIndex(projectId, opts.workspaceSchema, step)) continue
+      held.push(step)
+    }
+    if (held.length > 0) return needsReview(ok.planned, held)
+  }
   const { dispatchTool } = await import('@/lib/ai/brain/tools')
   const run = () => runPlan(ok.planned, ok.notes, (step) =>
     dispatchTool(step.tool, step.args, {

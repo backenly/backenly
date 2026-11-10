@@ -31,6 +31,7 @@ import { DB_TOOL_FAILURE_CODE, DB_TOOL_REQUESTS, isDbTool, type DbToolName } fro
 import {
   applyMigrationToMain,
   type MigrationFailure,
+  type MigrationNeedsReview,
   type MigrationRefusal,
   type MigrationSuccess,
 } from '@/lib/mcp/apply-migration'
@@ -503,6 +504,10 @@ async function handleCall(request: NextRequest, auth: McpGuardAuth, startedAt: n
         agentSurface: true,
         workspaceSchema: workspaceSchemaName(auth.projectId),
       })
+      // A step a person reviews first: the migration waits for them, exactly as sent.
+      if (!outcome.ok && (outcome as { code?: string }).code === 'NEEDS_REVIEW') {
+        return withCors(await parkMigration(auth, sql, outcome as MigrationNeedsReview, startedAt))
+      }
     }
 
     if (!outcome.ok) {
@@ -1081,6 +1086,54 @@ async function parkForApproval(
  * merge would be refused anyway, and a human should not be asked to approve
  * something that cannot run.
  */
+/**
+ * An agent's migration on production with a step a person reviews first
+ * (lib/mcp/apply-migration.ts, REVIEWED_BEFORE_PRODUCTION), held in the
+ * project's approval queue. The request keeps the SQL exactly as sent, and
+ * the card lists its statements; approving runs that SQL as one governed
+ * change under the approver's name, so it is restorable like any other.
+ */
+async function parkMigration(auth: McpGuardAuth, sql: string, review: MigrationNeedsReview, startedAt: number): Promise<NextResponse> {
+  const callLabel = 'apply_migration'
+  const target = 'Apply a migration to production'
+  try {
+    const { createApprovalRequest } = await import('@/lib/mcp/approvals')
+    const row = await createApprovalRequest({
+      projectId: auth.projectId,
+      userId: auth.userId,
+      apiKeyId: auth.keyId,
+      message:
+        `Requested by an agent over MCP: ${target}. ${review.reasons.join(' ')} ` +
+        `These statements will be applied to production, in order:\n${review.statements.map((s) => `  ${s}`).join('\n')}`,
+      danger: { tool: 'apply_migration', target, rowCount: null, reversible: true },
+      toolArgs: { sql },
+    })
+    recordMcpCall({ ...auth, endpoint: ENDPOINT, startedAt }, { statusCode: 200, tool: callLabel, mutation: false, summary: `awaiting approval ${row.id}` })
+    return NextResponse.json({
+      ok: true,
+      status: 'awaiting_approval',
+      summary:
+        `${review.error.replace(/ Nothing was applied\.$/, '')} It is waiting for a person on the project's Autonomy page, ` +
+        `and runs exactly as sent once they approve it. Nothing has changed yet.`,
+      data: { statements: review.statements },
+      approval: {
+        id: row.id,
+        status: 'pending',
+        poll: `check_approval with { "id": "${row.id}" }`,
+        note:
+          'Tell your human it is waiting, then poll check_approval every 15-30s until it is executed, rejected, ' +
+          'failed or expired (24h). Do not send the migration again meanwhile.',
+      },
+      needsUser: true,
+      timing: { ms: Date.now() - startedAt, heavy: false },
+    })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Could not create the approval request.'
+    recordMcpCall({ ...auth, endpoint: ENDPOINT, startedAt }, { statusCode: 500, tool: callLabel, error: 'APPROVAL_FAILED' })
+    return NextResponse.json({ ok: false, code: 'APPROVAL_FAILED', error: message, retryable: true, hint: 'Nothing was changed. Retry the call.' }, { status: 500 })
+  }
+}
+
 async function parkBranchMerge(auth: McpGuardAuth, branchId: string, startedAt: number): Promise<NextResponse> {
   const callLabel = 'branch.merge'
   const refuse = (status: number, body: Record<string, unknown>) => {

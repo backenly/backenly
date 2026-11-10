@@ -177,6 +177,10 @@ export type ToolName =
   | 'apply_proposal'
   | 'list_findings'
   | 'resolve_finding'
+  // apply_migration's DROP INDEX and ALTER TABLE … DROP CONSTRAINT. Not offered
+  // to a model: only the migration parser plans them (lib/mcp/migration-parser.ts).
+  | 'drop_index'
+  | 'drop_constraint'
   // Destructive
   | 'drop_table'
   | 'truncate_table'
@@ -1857,6 +1861,14 @@ export const TOOL_TO_ACTION: Record<string, (args: any) => AIAction> = {
   drop_table: (a) => ({ action: 'DROP_TABLE', params: { tableName: a.tableName } }),
   truncate_table: (a) => ({ action: 'TRUNCATE_TABLE', params: { tableName: a.tableName } }),
   drop_column: (a) => ({ action: 'DROP_COLUMN', params: { tableName: a.tableName, columnName: a.columnName } }),
+  drop_index: (a) => ({
+    action: 'DROP_INDEX',
+    params: { indexName: a.indexName, ifExists: a.ifExists === true, dropUniqueness: a.dropUniqueness === true, online: a.online === true },
+  }),
+  drop_constraint: (a) => ({
+    action: 'DROP_CONSTRAINT',
+    params: { tableName: a.tableName, constraintName: a.constraintName, ifExists: a.ifExists === true },
+  }),
   disable_realtime: (a) => ({ action: 'DISABLE_REALTIME', params: { tableName: a.tableName } }),
 
   // Reads — pure executor passthrough (no special handling)
@@ -2462,6 +2474,45 @@ export async function dispatchTool(
       } catch (e: any) {
         return finalize({ ok: false, summary: e?.message ?? `Could not read schema for "${table}".` })
       }
+    }
+
+    // ── An agent's migration a person approved ─────────────────────────────
+    // apply_migration holds an agent's migration whose steps a person reviews
+    // first (app/api/mcp/tool/route.ts, parkMigration). This runs it once they
+    // approve, exactly as sent, as their change. No model is offered this
+    // name and the MCP door serves apply_migration itself, so the only way
+    // here is runApprovedCall, which sets destructiveConfirmed.
+    if (name === 'apply_migration') {
+      if (ctx.destructiveConfirmed !== true) {
+        return finalize({
+          ok: false,
+          summary: 'apply_migration runs here only once a person has approved the migration.',
+          code: 'NOT_APPROVED',
+        })
+      }
+      const sql = typeof args.sql === 'string' ? args.sql : ''
+      const { applyMigrationToMain } = await import('@/lib/mcp/apply-migration')
+      const { workspaceSchemaName } = await import('@/lib/security/workspace-schema')
+      const outcome = await applyMigrationToMain(ctx.projectId, ctx.userId ?? '', sql, {
+        agentSurface: false,
+        workspaceSchema: workspaceSchemaName(ctx.projectId),
+      })
+      if (outcome.ok) {
+        const done = outcome as import('@/lib/mcp/apply-migration').MigrationSuccess
+        return finalize({
+          ok: true,
+          summary: done.change
+            ? `${done.summary} Recorded as change #${done.change.seq}${done.change.verified ? ', verified' : ''}.`
+            : done.summary,
+          data: { applied: done.applied, ...(done.change ? { change: done.change } : {}) },
+        })
+      }
+      const failed = outcome as { error: string; detail?: string; hint?: string; code: string }
+      return finalize({
+        ok: false,
+        summary: [failed.error, failed.detail, failed.hint].filter(Boolean).join(' '),
+        code: failed.code,
+      })
     }
 
     // ── Preview branches ───────────────────────────────────────────────────
@@ -3868,6 +3919,8 @@ export function humanTitle(name: string, args: Record<string, unknown>): string 
     case 'drop_table': return `Dropping table ${args.tableName ?? ''}`.trim()
     case 'truncate_table': return `Truncating ${args.tableName ?? ''}`.trim()
     case 'drop_column': return `Dropping column ${args.columnName ?? ''} from ${args.tableName ?? ''}`.trim()
+    case 'drop_index': return `Dropping index ${args.indexName ?? ''}`.trim()
+    case 'drop_constraint': return `Dropping constraint ${args.constraintName ?? ''} from ${args.tableName ?? ''}`.trim()
     case 'disable_realtime': return args.tableName ? `Disabling realtime on ${args.tableName}` : 'Disabling realtime project-wide'
     case 'rename_column': return `Renaming ${args.oldName ?? ''} → ${args.newName ?? ''} on ${args.tableName ?? ''}`.trim()
     case 'add_constraint': {
@@ -3896,6 +3949,7 @@ export function humanTitle(name: string, args: Record<string, unknown>): string 
     case 'list_branches': return 'Listing preview branches'
     case 'diff_branch': return `Diffing branch ${args.branchId ?? ''}`.trim()
     case 'merge_branch': return `Merging branch ${args.branchId ?? ''} into production`.replace(/\s+/g, ' ')
+    case 'apply_migration': return 'Applying an approved migration to production'
     case 'discard_branch': return `Discarding branch ${args.branchId ?? ''}`.trim()
     case 'list_integration_keys': return 'Listing integrations'
     case 'list_connected_apps': return 'Listing connected frontends'

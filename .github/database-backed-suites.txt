@@ -1509,6 +1509,13 @@ tests/integration/change-classes-executor.spec.ts
 # it; a scoped one asked for twice is not a conflict, and is never mistaken
 # for one over every row. A real provisioned project and real DDL.
 tests/integration/unique-index-over-every-row.spec.ts
+# A migration's DROP INDEX and ALTER TABLE … DROP CONSTRAINT run on a branch
+# (production names resolved to the clone's copies), reach production through
+# the merge a person approves, and an agent's on production waits for a person
+# in the approval queue; a person's own runs as a restorable governed change,
+# and the primary key is never dropped. A real provisioned project through the
+# MCP route.
+tests/integration/migrations-drop-index-and-constraint.spec.ts
 
 # Every view of a project's schema is current once a change or restore settles:
 # the REST API is asked to reload, the reconciler's baseline follows, validators

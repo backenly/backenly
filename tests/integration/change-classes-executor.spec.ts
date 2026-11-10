@@ -1134,13 +1134,12 @@ describe('statements apply_migration refuses: nothing applied, nothing recorded'
     ['CREATE TYPE … AS ENUM', "CREATE TYPE mood AS ENUM ('calm', 'busy')", 'UNSUPPORTED_STATEMENT'],
     ['an enum column', "ALTER TABLE shelves ADD COLUMN mood mood", 'UNSUPPORTED_TYPE'],
     ['CREATE VIEW', 'CREATE VIEW pantry_items AS SELECT item FROM pantry', 'UNSUPPORTED_STATEMENT'],
-    // No agent path drops a constraint or an index, or changes a primary key,
-    // which Backenly manages. The engine's handling of each is proved in
-    // change-recovery.spec.ts, and a plain index's drop below.
-    ['DROP CONSTRAINT', 'ALTER TABLE contacts DROP CONSTRAINT contacts_email_key', 'DESTRUCTIVE_REFUSED'],
-    ['DROP INDEX', 'DROP INDEX pantry_item_idx', 'DESTRUCTIVE_REFUSED'],
+    // A constraint or an index is dropped as a governed change
+    // (migrations-drop-index-and-constraint.spec.ts); the primary key, which
+    // Backenly manages, is never moved and never dropped. The engine's handling
+    // of each drop is proved in change-recovery.spec.ts, and a plain index's below.
     ['a primary key moved to another column', 'ALTER TABLE shelves ADD PRIMARY KEY (title)', 'UNSUPPORTED_CONSTRAINT'],
-    ['the primary key dropped', 'ALTER TABLE shelves DROP CONSTRAINT shelves_pkey', 'DESTRUCTIVE_REFUSED'],
+    ['the primary key dropped', 'ALTER TABLE shelves DROP CONSTRAINT shelves_pkey', 'PRIMARY_KEY'],
     ['a refused statement after a valid one', 'CREATE TABLE never_made (x text);\nDROP TABLE shelves', 'DESTRUCTIVE_REFUSED'],
     ['rows moved between tables (INSERT … SELECT)', 'INSERT INTO larder (item) SELECT item FROM pantry', 'DML_NOT_MIGRATION'],
     ['rows deleted (DELETE)', 'DELETE FROM pantry WHERE qty IS NULL', 'DML_NOT_MIGRATION'],
