@@ -47,7 +47,8 @@ BEGIN
         ('anon',                   false, NULL,  false),
         ('authenticated',          false, NULL,  false),
         ('service_role',           false, NULL,  false),
-        ('backenly_external',      false, NULL,  false)
+        ('backenly_external',      false, NULL,  false),
+        ('backenly_no_schema_changes', false, NULL, false)
       ) AS v(role_name, login, inherit, bypassrls)
       LEFT JOIN pg_roles p ON p.rolname = v.role_name
   LOOP

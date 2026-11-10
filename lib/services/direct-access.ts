@@ -173,16 +173,19 @@ export async function provisionDirectAccess(projectId: string, mode: DirectAcces
 }
 
 /**
- * Whether a read-write login may change the schema, read from the role itself
- * (pg_roles.rolconfig), where the sync reads it: refused when it says off. A
- * login made before the setting existed has none, and is allowed, as it was.
+ * Whether a read-write login may change the schema, read where the sync reads
+ * it: refused while the login is a member of backenly_no_schema_changes. A
+ * login made before the setting existed is not, and is allowed, as it was.
  */
 async function schemaChangesOf(projectId: string, roleName: string): Promise<SchemaChanges> {
   const db = await workspaceRawClient(projectId)
-  const [row] = await db.$queryRaw<Array<{ off: boolean }>>`
-    SELECT 'backenly.schema_changes=off' = ANY (coalesce(rolconfig, '{}'::text[])) AS off
-      FROM pg_roles WHERE rolname = ${roleName}`
-  return row?.off ? 'refused' : 'allowed'
+  const [row] = await db.$queryRaw<Array<{ refused: boolean }>>`
+    SELECT EXISTS (
+      SELECT 1 FROM pg_auth_members m
+       WHERE m.roleid = (SELECT oid FROM pg_roles WHERE rolname = 'backenly_no_schema_changes')
+         AND m.member = (SELECT oid FROM pg_roles WHERE rolname = ${roleName})
+    ) AS refused`
+  return row?.refused ? 'refused' : 'allowed'
 }
 
 async function withSchemaChanges(projectId: string, credential: DirectAccessCredential): Promise<DirectAccessCredential> {
