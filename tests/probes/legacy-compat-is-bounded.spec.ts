@@ -116,12 +116,14 @@ describe('anything else freezes', () => {
     // A wildcard would mean the exception covers whatever arrives next, which
     // is how a temporary bridge becomes the architecture.
     //
-    // 8, down from 16, and deliberately. The 8 that left are repaired by
+    // 7, down from 16, and deliberately. The 8 that left first are repaired by
     // FIX_API, FIX_WORKFLOW, ADOPT_EXTERNAL_SCHEMA and REGISTER_SCHEMA, which
     // run outside the change ledger, so no loop applies them without a person.
+    // infra_hot_table left next: its index waits for a person, because how
+    // often a table is scanned is not a measured cost and nothing bounded it.
     // This used to pin api_drift as the bridged example; it is now one of the
     // types with no autonomous path at all, and freezes if one ever asks.
-    expect(LEGACY_AUTONOMY_COMPAT_TYPES.size).toBe(8)
+    expect(LEGACY_AUTONOMY_COMPAT_TYPES.size).toBe(7)
     expect(authorityPathFor('infra_table_bloat')).toBe('legacy_compatibility')
     expect(authorityPathFor('infra_table_bloat_v2')).toBe('freeze')
     expect(authorityPathFor('api_drift')).toBe('freeze')

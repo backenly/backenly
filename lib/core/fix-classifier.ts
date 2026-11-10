@@ -71,7 +71,13 @@ const AUTO_SAFE = new Set<FindingType>([
   // be unindexed before the finding is ever raised, so by the time it reaches
   // here it is the same additive CREATE INDEX.
   'slow_query_missing_index',
-  'infra_hot_table',        // Same shape: CREATE INDEX on a verified column, additive
+  // 'infra_hot_table' was here as "the same shape". The statement is the same;
+  // the evidence is not. A hot table is one scanned often, which does not show
+  // that its queries are slow, and no sensor stands behind the claim, so it
+  // reached the loop over the legacy bridge with no size bound: an index of any
+  // size, built on Backenly's own authority. It is approved now (NEEDS_APPROVAL);
+  // a query measured as slow is still indexed on its own, bounded and judged
+  // (slow_query_missing_index, lib/authority/action-classes.ts).
   // Plain VACUUM (ANALYZE) on one table. Changes no row and no schema, holds no
   // exclusive lock, and is idempotent — the safest mutation in the catalogue.
   // Never VACUUM FULL; see executeVacuumTable for why that distinction is the
@@ -117,6 +123,8 @@ const NEEDS_APPROVAL = new Set<FindingType>([
   // Rewrites what writes and deletes the database will accept, with a cascade
   // rule inferred from a column name. See the note in AUTO_SAFE above.
   'missing_fk',
+  // An index on the column a hot table's reads filter on. See AUTO_SAFE above.
+  'infra_hot_table',
   'broken_webhook',               // Needs action in an external dashboard (e.g. Stripe)
   'broken_auth',                  // Auth changes risk locking all end-users out
   'integration_key_invalid',      // Replacing credentials needs explicit confirmation
@@ -520,7 +528,6 @@ const AUTO_ACTION_MAP: Partial<Record<FindingType, string>> = {
   api_drift:                'FIX_API',
   missing_fk_index:         'CREATE_INDEX',
   slow_query_missing_index: 'CREATE_INDEX',
-  infra_hot_table:          'CREATE_INDEX',
   infra_table_bloat:        'VACUUM_TABLE',
   index_bloat:              'REINDEX_INDEX',
   missing_api_definition:   'GENERATE_API',
@@ -551,6 +558,7 @@ const APPROVAL_REASON_MAP: Partial<Record<FindingType, string>> = {
   external_schema_change:       `Backenly can adopt these changes into your APIs, schema baseline and access grants, but ${OUTSIDE_LEDGER_REASON}`,
   schema_not_registered:        `Backenly can register this project's schema with the data plane again, but ${OUTSIDE_LEDGER_REASON}`,
   missing_fk:                   'Adding a foreign key changes which writes the database accepts from that moment on, and the delete rule is inferred from the column name — so it is stated for you to approve rather than applied.',
+  infra_hot_table:              'This table is scanned often and its reads filter on one column, so an index on it should absorb them. How often a table is scanned does not show that its queries are slow, so the index waits for you; Backenly indexes a query it has measured as slow on its own.',
   broken_webhook:               'Webhook repair requires action in an external dashboard (e.g. Stripe, GitHub).',
   broken_auth:                  'Auth configuration changes carry high risk of locking out all end-users.',
   integration_key_invalid:      'Replacing integration credentials requires explicit confirmation from the project owner.',
@@ -573,4 +581,5 @@ const RISK_NOTE_MAP: Partial<Record<FindingType, string>> = {
   auth_jwt_missing:             'An incorrect or premature JWT secret rotation locks all end-users out immediately.',
   auth_users_table_missing:     'Auto-creating the users table without owner confirmation may interfere with existing auth flows.',
   unused_index:                 'If a rarely-run query does need it, that query gets slow until the index is rebuilt.',
+  infra_hot_table:              'Every index costs a little on each insert and update to this table. It is built without blocking writes.',
 }
