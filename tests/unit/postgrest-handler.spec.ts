@@ -217,10 +217,40 @@ describe('request forwarding', () => {
     expect(h['authorization']).not.toContain('caller-secret')
   })
 
-  it('asks for an exact count so pagination totals are real', async () => {
+  it('counts a list only when the caller asks, with ?count=exact or Prefer: count=exact', async () => {
+    // An exact count runs the filtered query a second time, and /db asked for
+    // one on every list (production QA 2026-11-09, report 18).
     stubUpstream(200, [])
     await handleViaPostgrest(mockReq('GET'), mockRes(), ['orders'], { projectId: PROJECT })
-    expect(captured!.init.headers['prefer']).toContain('count=exact')
+    expect(captured!.init.headers['prefer']).toBeUndefined()
+
+    stubUpstream(200, [])
+    await handleViaPostgrest(mockReq('GET', { count: 'exact' }), mockRes(), ['orders'], { projectId: PROJECT })
+    expect(captured!.init.headers['prefer']).toBe('count=exact')
+    // The switch is not forwarded as a filter on a column named count.
+    expect(captured!.url).not.toContain('count=')
+
+    stubUpstream(200, [])
+    const asked = mockReq('GET')
+    asked.headers.prefer = 'count=exact'
+    await handleViaPostgrest(asked, mockRes(), ['orders'], { projectId: PROJECT })
+    expect(captured!.init.headers['prefer']).toBe('count=exact')
+  })
+
+  it('reads one row past the page, so hasMore is exact without a count', async () => {
+    stubUpstream(200, [{ id: 1 }, { id: 2 }, { id: 3 }], { 'content-range': '0-2/*' })
+    const res = mockRes()
+    await handleViaPostgrest(mockReq('GET', { limit: '2' }), res, ['orders'], { projectId: PROJECT })
+    expect(captured!.url).toContain('limit=3')
+    expect(res.body.data).toEqual([{ id: 1 }, { id: 2 }])
+    expect(res.body.pagination).toEqual({ total: null, limit: 2, offset: 0, hasMore: true, nextCursor: 2 })
+  })
+
+  it('still knows the total, uncounted, on the page where the rows end', async () => {
+    stubUpstream(200, [{ id: 5 }], { 'content-range': '4-4/*' })
+    const res = mockRes()
+    await handleViaPostgrest(mockReq('GET', { limit: '2', offset: '4' }), res, ['orders'], { projectId: PROJECT })
+    expect(res.body.pagination).toEqual({ total: 5, limit: 2, offset: 4, hasMore: false, nextCursor: null })
   })
 
   it('sets Content-Profile on writes, not only Accept-Profile', async () => {
