@@ -1258,11 +1258,11 @@ async function restorePlatformRecords(
  * still listed them.
  *
  * A table the restore removed takes its generated endpoints with it, and the
- * restore's own record keeps each row as it was. Only undoing that restore (a
- * reapply: the change being undone is itself a restore) puts rows back, and
- * only those, exactly: one switched off stays off, rewritten code is kept,
- * and one the owner had deleted before is not invented. A restore of anything
- * else brings no generated endpoint back.
+ * restore's own record keeps each row as it was; a drop does the same
+ * (removeEndpointsOfDroppedTable). Undoing what removed them, a restore of the
+ * drop or a reapply that undoes the restore, puts those rows back and only
+ * those, exactly: one switched off stays off, rewritten code is kept, and one
+ * the owner had deleted before is not invented.
  *
  * `change.resultState` is what the restore started from, since a later change
  * to the same tables refuses the restore. Best-effort, as the rest of the
@@ -1277,7 +1277,9 @@ export async function generatedEndpointsFollow(
 ): Promise<void> {
   const touched = tablesTouched(change.footprint)
   const gone = touched.filter((t) => !live.tables[t])
-  const back = change.kind === 'recovery' ? touched.filter((t) => live.tables[t] && !change.resultState.tables[t]) : []
+  // Back: here now, not after the change being undone. That change's record
+  // keeps the endpoints it removed with them, if it removed any.
+  const back = touched.filter((t) => live.tables[t] && !change.resultState.tables[t])
   if (gone.length === 0 && back.length === 0) return
   try {
     const endpoints = await import('@/lib/services/domain-endpoints')

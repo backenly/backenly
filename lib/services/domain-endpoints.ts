@@ -153,6 +153,30 @@ export async function removeDomainEndpoints(
 }
 
 /**
+ * The generated endpoints of a table that was dropped, removed with it, as a
+ * restore removes those of a table it takes away. Left behind, each was a
+ * callable route over a table that was gone. Inside a change, the change's
+ * record keeps each row as it was, so restoring the drop puts back exactly those
+ * (lib/changes/recovery.ts generatedEndpointsFollow). Outside one the drop is
+ * permanent, and so is this.
+ */
+export async function removeEndpointsOfDroppedTable(
+  projectId: string,
+  table: string,
+  changeId: string | null,
+): Promise<RemovedEndpoint[]> {
+  const remaining = (await prisma.table.findMany({ where: { projectId }, select: { name: true } })).map((t) => t.name)
+  const record: RecordRemoved | undefined = changeId
+    ? async (functions, tx) => {
+        await tx.backendChangeEvent.create({
+          data: { changeId, projectId, type: 'generated_endpoints_removed', data: { functions } as unknown as Prisma.InputJsonValue },
+        })
+      }
+    : undefined
+  return removeDomainEndpoints(projectId, [table], remaining, record)
+}
+
+/**
  * Put back endpoints a restore removed, exactly as it kept them. A name that
  * is in use again (someone made a function of that name since) is left alone.
  * Returns the names put back.
