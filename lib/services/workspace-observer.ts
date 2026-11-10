@@ -23,6 +23,7 @@ import { prisma } from '@/lib/db/prisma'
 import { detectSubsystemRecurrence } from '@/lib/autonomy/subsystem-recurrence'
 import { detectIntentDrift } from '@/lib/autonomy/intent-conformance'
 import { detectFailingFunctions } from '@/lib/autonomy/function-failures'
+import { detectFunctionsMissingIntegrations } from '@/lib/autonomy/function-integrations'
 import { probeQueryFailed } from '@/lib/core/drift-detector'
 import { queryWorkspaceSchema } from './workspaceDatabase'
 import {
@@ -477,6 +478,10 @@ async function observeProject(projectId: string, result: ObserverResult): Promis
     // reason: without this line the loop saw it every minute, no row was
     // written, and Overview's "broken guarantees" stayed at 0.
     detectFailingFunctions(projectId),
+    // A function whose code uses an integration the project has not connected.
+    // It runs and gets nothing, often without failing, so the run log alone
+    // never shows it.
+    detectFunctionsMissingIntegrations(projectId),
   ]
 
   const settled = await Promise.allSettled(detectors)
@@ -925,6 +930,7 @@ async function writeFinding(
     intent_drift: 'location',
     // One row per function: two failing functions are two fixes.
     function_failing: 'functionId',
+    function_integration_missing: 'functionId',
     // The gaps the repair loop repairs: one row per gap, keyed as the loop keys
     // its own (gapIdentity, lib/autonomy/desired-state.ts), so the row the
     // observer records is the one the loop acts on. Keyed by type alone, one
