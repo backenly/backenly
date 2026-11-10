@@ -316,10 +316,11 @@ export async function diffBranch(projectId: string, branchId: string): Promise<
 
   const mainChanged = touchedTables(computeSchemaDiff(base as any, main as any))
   const touched = new Set(tablesTouched(migrations))
+  const { withRenames } = await import('./renames')
   return {
     ok: true,
     branch: branch.name,
-    diff: computeSchemaDiff(base as any, br as any),
+    diff: withRenames(computeSchemaDiff(base as any, br as any), migrations, base as any, br as any),
     migrations,
     mainChanged,
     conflicts: mainChanged.filter((t) => touched.has(t)),

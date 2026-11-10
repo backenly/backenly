@@ -2689,13 +2689,20 @@ export async function dispatchTool(
         // mergeBranch re-shapes its early return).
         const res = await engine.diffBranch(ctx.projectId, branchId)
         if (!res.ok) return finalize({ ok: false, summary: (res as { ok: false; error: string }).error })
+        const { renameText } = await import('@/lib/branches/renames')
         const full = res as Extract<typeof res, { ok: true }>
         const d: any = full.diff
         const parts: string[] = []
         if (d.addedTables?.length) parts.push(`Tables added: ${d.addedTables.map((t: any) => t.tableName).join(', ')}`)
         if (d.droppedTables?.length) parts.push(`Tables dropped: ${d.droppedTables.join(', ')}`)
         for (const a of d.altered ?? []) {
-          if (a.addedColumns?.length) parts.push(`${a.table}: +${a.addedColumns.map((c: any) => c.name).join(', +')}`)
+          // Renames come from the branch's statements (lib/branches/renames.ts),
+          // so the columns moved aside read as renamed, not as new.
+          const renamed: Array<{ from: string; to: string; readded: boolean }> = a.renamedColumns ?? []
+          for (const r of renamed) parts.push(`${a.table}: ${renameText(r)}`)
+          const readded = new Set(renamed.filter((r) => r.readded).map((r) => r.from))
+          const added = (a.addedColumns ?? []).map((c: any) => c.name).filter((n: string) => !readded.has(n))
+          if (added.length) parts.push(`${a.table}: +${added.join(', +')}`)
           if (a.droppedColumns?.length) parts.push(`${a.table}: -${a.droppedColumns.join(', -')}`)
           for (const tc of a.typeChanged ?? []) parts.push(`${a.table}.${tc.column}: ${tc.from} → ${tc.to}`)
         }

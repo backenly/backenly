@@ -505,3 +505,34 @@ describe('an agent\'s merge, approved by a person', () => {
     expect(changes.find((c) => c.id === r.id)!.actor.label).toBe("Ada Owner, approving Claude Code's request")
   }, 180_000)
 })
+
+// ── A diff that reads renames ────────────────────────────────────────────────
+
+describe('a branch diff reads renames from the branch\'s statements', () => {
+  it('a rename reads as a rename, and a column moved aside with a new one under its name as a rename and a new column', async () => {
+    const branch = await branchWith(
+      'renames',
+      'ALTER TABLE orders RENAME COLUMN total TO amount; ' +
+        'ALTER TABLE orders RENAME COLUMN customer TO legacy_customer; ' +
+        'ALTER TABLE orders ADD COLUMN customer text',
+    )
+    const d = (await diffBranch(projectId, branch.id)) as any
+    expect(d.diff.altered).toEqual([{
+      table: 'orders',
+      renamedColumns: [
+        { from: 'total', to: 'amount', readded: false },
+        { from: 'customer', to: 'legacy_customer', readded: true },
+      ],
+      addedColumns: [{ name: 'customer', dataType: 'text', isNullable: true }],
+      droppedColumns: [],
+      typeChanged: [],
+    }])
+
+    // What an agent reads: MCP branch { action: "diff" } is backend_chat's diff_branch.
+    const shown = await call('branch', { action: 'diff', branchId: branch.id })
+    expect(shown.body.ok).toBe(true)
+    expect(shown.body.summary).toContain('orders: total renamed amount')
+    expect(shown.body.summary).toContain('orders: customer renamed legacy_customer; a new customer takes its place')
+    expect(shown.body.summary).not.toMatch(/\+amount|\+legacy_customer|\+customer|-total/)
+  }, 120_000)
+})
