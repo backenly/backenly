@@ -25,6 +25,7 @@
 
 import { BRAIN_TOOLS, READ_ONLY_TOOLS, TOOL_TO_ACTION, isDestructiveTool } from '@/lib/ai/brain/tools'
 import { riskLevelForExecutorAction } from '@/lib/operational-memory/ledger'
+import { connectableProviderIds } from '@/lib/services/ai-functions/integration-registry'
 
 export interface DomainAction {
   /** The brain tool that performs this action. */
@@ -120,8 +121,9 @@ export const DOMAIN_TOOLS: DomainTool[] = [
     name: 'integrations',
     title: 'Integrations',
     summary:
-      'Third-party providers used from functions as ctx.integrations.<id>: stripe, resend, sendgrid, ' +
-      'openai, anthropic, twilio, posthog, onesignal, replicate, runway, stability. A key is verified with ' +
+      // The registry's list, the same one the Integrations page offers.
+      `Third-party providers used from functions as ctx.integrations.<id>: ${connectableProviderIds()}. ` +
+      'A key is verified with ' +
       'the provider before it is stored; the human can also paste it on the Integrations page, which keeps it ' +
       'out of this conversation.',
     openWorld: true,
