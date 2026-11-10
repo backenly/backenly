@@ -30,6 +30,7 @@ import { parseMcpBody } from '@/lib/mcp/request-body'
 import { DB_TOOL_FAILURE_CODE, DB_TOOL_REQUESTS, isDbTool, type DbToolName } from '@/lib/mcp/db-tool-requests'
 import {
   applyMigrationToMain,
+  countStatements,
   type MigrationFailure,
   type MigrationNeedsReview,
   type MigrationRefusal,
@@ -536,7 +537,7 @@ async function handleCall(request: NextRequest, auth: McpGuardAuth, startedAt: n
         statusCode: 200,
         tool,
         mutation: true,
-        summary: `migration${success.branch ? ` on branch ${success.branch}` : ''}: ${success.applied.length} statement(s)`,
+        summary: `migration${success.branch ? ` on branch ${success.branch}` : ''}: ${countStatements(success.applied.map((a) => a.statement))} statement(s)`,
       },
     )
     return withCors(NextResponse.json(jsonSafe({

@@ -293,15 +293,27 @@ export async function runPlan(
     }
     applied.push({ statement: step.source, tool: step.tool, summary: result.summary })
   }
+  const statements = countStatements(applied.map((a) => a.statement))
   return {
     ok: true,
     summary:
-      `Applied ${applied.length} statement(s): ` +
+      `Applied ${statements} statement${statements === 1 ? '' : 's'}` +
+      (applied.length !== statements ? ` (${applied.length} steps)` : '') + ': ' +
       applied.map((a) => a.summary).join(' · ') +
       (notes.length ? ` (${notes.join(' ')})` : ''),
     applied,
     notes,
   }
+}
+
+/**
+ * How many statements, as written, these steps came from. One statement can
+ * make several steps (`<stmt> → UNIQUE (…)`); counting steps said "Applied 22
+ * statement(s)" for a branch whose merge then said 16 (production QA,
+ * 2026-11-09).
+ */
+export function countStatements(sources: string[]): number {
+  return new Set(sources.map((s) => s.split(' → ')[0])).size
 }
 
 /**
@@ -463,6 +475,7 @@ export async function applyMigrationToMain(
 
   const { withGovernedChange } = await import('@/lib/changes/ledger')
   const { ChangeInProgressError } = await import('@/lib/changes/lock')
+  const plannedStatements = countStatements(ok.planned.map((p) => p.source))
   try {
     const { result, change } = await withGovernedChange(
       {
@@ -470,7 +483,7 @@ export async function applyMigrationToMain(
         title: migrationTitle(ok.planned),
         // The title quotes the first statement, which can carry values: for a
         // project kept in another region the record says only how many.
-        regionalTitle: `apply_migration: ${ok.planned.length} statement${ok.planned.length === 1 ? '' : 's'}`,
+        regionalTitle: `apply_migration: ${plannedStatements} statement${plannedStatements === 1 ? '' : 's'}`,
       },
       run,
       (outcome) => ({
