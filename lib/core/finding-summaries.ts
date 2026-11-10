@@ -170,6 +170,16 @@ function summariseFindingText(type: string, details: Record<string, unknown>): s
     case 'integration_connected_unused':
       return `${str(d.provider) ?? str(d.integration) ?? 'An integration'} is connected but nothing uses it yet`
 
+    // ── Functions ─────────────────────────────────────────────────────────
+    case 'function_failing': {
+      const name = str(d.functionName) ?? 'A function'
+      const failures = Number(d.failures ?? 0)
+      const runs = Number(d.runs ?? 0)
+      return failures > 0 && runs > 0
+        ? `\`${name}\` failed ${failures} of its last ${runs} runs`
+        : `\`${name}\` keeps failing`
+    }
+
     // ── Workflow / verification ───────────────────────────────────────────
     case 'workflow_broken': {
       const wf = str(d.displayName) ?? str(d.workflow)

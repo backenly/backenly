@@ -64,6 +64,7 @@ import { detectIntentDrift } from './intent-conformance'
 import { detectBehaviouralRegression } from './baseline/detect'
 import { detectMigrationResidue } from './migration-residue'
 import { detectSubsystemRecurrence } from './subsystem-recurrence'
+import { detectFailingFunctions } from './function-failures'
 import { hasCapability, type PlatformCapability } from './platform-capabilities'
 import { projectRegion, requireRegionDatabaseUrl } from '@/lib/data-plane/regional'
 
@@ -243,6 +244,13 @@ export const INVARIANTS: readonly Invariant[] = [
     rationale:
       'Every other check here compares against a fixed number — 100ms for a slow query, 40% dead tuples, 500 rows worth indexing. Fixed numbers answer whether something is bad in general. They cannot answer the question a developer actually asks, which is whether it is bad for THIS backend: a query that went from 4ms to 60ms is still fast by any threshold, fifteen times worse than it was, and almost always the thing they noticed. So an hourly collector records query latency, sequential scans and table size per project, and this compares the last complete hour against the trailing two weeks — median rather than mean, with a minimum history, an absolute floor and a stability check, because a ratio computed on three noisy data points is arithmetic rather than evidence. Never repaired automatically: a deviation is a symptom whose cause is not in the measurement, so the finding carries the numbers and the list of what changed on this backend just before, and leaves the inference to the person who knows the application.',
     probe: detectBehaviouralRegression,
+  },
+  {
+    id: 'functions_keep_working',
+    title: 'Every function that runs on its own is succeeding',
+    rationale:
+      'A function that runs when a row changes, when someone signs up or on a schedule fails out of sight: the request that started it has already been answered, and nothing else on the backend looks wrong. Production QA watched one fail on every real order update for two hours while every other check stayed green. The run log already records each failure, so this reads it: a function that failed at least three times in a day, the latest run included, is reported with its last error. Never repaired automatically: the fix is a change to the function, and the code belongs to whoever wrote it.',
+    probe: detectFailingFunctions,
   },
   {
     id: 'the_schema_is_what_was_asked_for',
@@ -596,6 +604,10 @@ export function gapIdentity(
     // finding. The contract sweep's own auto-resolve is per-surface and was
     // unaffected, which is why this stayed hidden.
     (d.surface as string | undefined) ??
+    // Function findings are located by FUNCTION. They carry the trigger's
+    // table too, so by table two functions on `orders` were one gap: while
+    // one kept failing, the other's finding outlived its recovery.
+    (d.functionId as string | undefined) ??
     (table && column ? `${table}.${column}` : table)
   const base = normalizeFindingType(type, d)?.base ?? type
   return `${base}::${loc}`
@@ -646,6 +658,9 @@ const INVARIANT_EMITS: Readonly<Record<string, readonly FindingType[]>> = {
   // Re-detectable: the comparison runs against the live catalog every tick, so
   // a migrated column stops drifting and the finding withdraws itself.
   the_schema_is_what_was_asked_for: ['intent_drift'],
+  // Re-detectable: the probe reads the run log every pass, so a function whose
+  // next run succeeds stops appearing.
+  functions_keep_working: ['function_failing'],
   // Re-detectable by construction: the probe judges the latest complete hour, so
   // a subject that recovers simply stops appearing.
   the_backend_behaves_like_itself: ['behavioural_regression'],
