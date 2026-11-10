@@ -248,6 +248,15 @@ export function classifyFix(
     }
   }
 
+  if (type === 'infra_partition') {
+    return {
+      decision: 'notify_only',
+      reason:
+        'This table is larger than the memory PostgreSQL expects to cache data in. Nothing is broken: the ' +
+        'next step is deciding how long its rows are kept, or whether to partition it.',
+    }
+  }
+
   if (type === 'infra_hot_table' && !details?.columnName) {
     return {
       decision: 'notify_only',

@@ -40,6 +40,9 @@ export type WithdrawnBy =
   | 'verification_reaper'
   // A live probe of the surface answers correctly again (contract-verifier.ts).
   | 'contract_reaper'
+  // The infrastructure scan no longer sees it: a table that fits in
+  // PostgreSQL's cache again (lib/ai/infra-intelligence.ts).
+  | 'infra_reaper'
 
 /**
  * Close findings whose condition is gone without Backenly repairing it:

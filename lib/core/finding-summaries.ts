@@ -156,6 +156,19 @@ function summariseFindingText(type: string, details: Record<string, unknown>): s
         ? `\`${table}\` changes are not broadcast to realtime subscribers`
         : 'A live-data table is missing its realtime notify trigger'
 
+    // ── Size ──────────────────────────────────────────────────────────────
+    // One raised under the retired row-count rule carries no sizes, and is not
+    // said to be larger than anything (lib/ai/infra-intelligence.ts withdraws it).
+    case 'infra_partition':
+      if (typeof d.cacheBytes !== 'number') {
+        return table
+          ? `\`${table}\` was flagged by a retired check that counted rows, not size`
+          : 'A table was flagged by a retired check that counted rows, not size'
+      }
+      return table
+        ? `\`${table}\` is larger than PostgreSQL's cache: keep it smaller, or partition it`
+        : 'A table is larger than PostgreSQL\'s cache: keep it smaller, or partition it'
+
     // ── Integrations ──────────────────────────────────────────────────────
     case 'broken_webhook':
       return 'A webhook is failing to deliver'
