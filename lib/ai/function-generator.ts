@@ -44,7 +44,15 @@ const ROUTE_MODULE_CONTRACT = `RUNTIME CONTRACT (the code runs in Backenly's rou
 - The second argument is ALWAYS provided; params.projectId is the project id. Query-string values are also merged into params.
 - request supports: request.url, request.method, request.nextUrl.searchParams.get(...), await request.json(), request.headers.get(name), request.cookies.get(name)?.value
 - Respond ONLY with NextResponse.json(body, { status }) from 'next/server'.
-- Imports allowed ONLY from: 'next/server', '@/lib/db' (prisma), '@/lib/auth/jwt' (verifyToken), 'crypto', 'bcryptjs', 'jsonwebtoken'. Any other import crashes.
+- Imports allowed ONLY from: 'next/server', '@/lib/db' (prisma, asService), '@/lib/auth/jwt' (verifyToken, isAdminRequest), 'crypto', 'bcryptjs', 'jsonwebtoken'. Any other import crashes.
+- process.env holds the project's own variables and NODE_ENV only. Never read process.env.JWT_SECRET, ADMIN_API_KEY or AI_EXECUTION_TOKEN: Backenly does not give them to functions, and code that reads them is refused.
+- An ADMIN-ONLY endpoint checks the project's admin key without holding it:
+    if (!isAdminRequest(request)) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+- Work the caller may not do themselves (a checkout that creates the order and takes stock the shopper cannot update) runs inside asService, in one transaction, as the service role. Row-level security does not apply to its SQL, so check who is calling first:
+    const order = await asService(async (db) => {
+      const [product] = await db.$queryRawUnsafe(\`SELECT id, stock FROM "workspace_\${params.projectId}"."products" WHERE id = $1 FOR UPDATE\`, productId)
+      ...
+    })
 - NEVER use: eval, new Function, dynamic import(), child_process, worker_threads, fs writes, process.exit.
 - End-user data tables live in the per-project PostgreSQL schema "workspace_{projectId}" — access them with parameterised raw SQL, e.g.:
     const rows = await prisma.$queryRawUnsafe(\`SELECT * FROM "workspace_\${params.projectId}"."posts" WHERE id = $1\`, id)

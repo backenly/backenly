@@ -1317,9 +1317,6 @@ export async function POST(req: NextRequest) {
 
 function buildAdminEndpoints(schema: string, allTables: string[]): GeneratedEndpoint[] {
   const endpoints: GeneratedEndpoint[] = []
-  // Project id, recovered from the workspace schema name. Signed end-user
-  // tokens MUST carry projectId — v1ApiMiddleware rejects tokens without it.
-  const projectIdFromSchema = schema.replace(/^workspace_/, '')
   const hasJobs = allTables.some(t => isJobTable(t.toLowerCase()))
   const hasCredits = allTables.some(t => isWalletTable(t.toLowerCase()))
   const creditTable = allTables.find(t => isWalletTable(t.toLowerCase())) ?? 'credits'
@@ -1347,14 +1344,13 @@ function buildAdminEndpoints(schema: string, allTables: string[]): GeneratedEndp
     description: 'Admin: paginated user list with search (requires x-admin-key header)',
     code: `import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
+import { isAdminRequest } from '@/lib/auth/jwt'
 
 const SCHEMA = '${schema}'
-const ADMIN_KEY = process.env.ADMIN_API_KEY ?? process.env.AI_EXECUTION_TOKEN ?? ''
 
 export async function GET(req: NextRequest) {
   try {
-    const key = req.headers.get('x-admin-key') ?? req.headers.get('authorization')?.replace('Bearer ', '')
-    if (!key || key !== ADMIN_KEY) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+    if (!isAdminRequest(req)) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
 
     const url = new URL(req.url)
     const limit  = Math.min(Number(url.searchParams.get('limit')  || 50), 500)
@@ -1392,14 +1388,13 @@ export async function GET(req: NextRequest) {
     description: 'Admin: suspend or unsuspend a user account by ID',
     code: `import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
+import { isAdminRequest } from '@/lib/auth/jwt'
 
 const SCHEMA = '${schema}'
-const ADMIN_KEY = process.env.ADMIN_API_KEY ?? process.env.AI_EXECUTION_TOKEN ?? ''
 
 export async function POST(req: NextRequest) {
   try {
-    const key = req.headers.get('x-admin-key') ?? req.headers.get('authorization')?.replace('Bearer ', '')
-    if (!key || key !== ADMIN_KEY) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+    if (!isAdminRequest(req)) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
 
     const { userId, suspended = true, reason } = await req.json().catch(() => ({}))
     if (!userId) return NextResponse.json({ error: '"userId" is required' }, { status: 400 })
@@ -1433,14 +1428,13 @@ export async function POST(req: NextRequest) {
       description: 'Admin: revenue summary — total purchased credits, by date range',
       code: `import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
+import { isAdminRequest } from '@/lib/auth/jwt'
 
 const SCHEMA = '${schema}'
-const ADMIN_KEY = process.env.ADMIN_API_KEY ?? process.env.AI_EXECUTION_TOKEN ?? ''
 
 export async function GET(req: NextRequest) {
   try {
-    const key = req.headers.get('x-admin-key') ?? req.headers.get('authorization')?.replace('Bearer ', '')
-    if (!key || key !== ADMIN_KEY) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+    if (!isAdminRequest(req)) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
 
     const url = new URL(req.url)
     const from = url.searchParams.get('from') ?? new Date(Date.now() - 30 * 86400000).toISOString()
@@ -1485,14 +1479,13 @@ export async function GET(req: NextRequest) {
       description: 'Admin: manually refund/add credits to a user account',
       code: `import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
+import { isAdminRequest } from '@/lib/auth/jwt'
 
 const SCHEMA = '${schema}'
-const ADMIN_KEY = process.env.ADMIN_API_KEY ?? process.env.AI_EXECUTION_TOKEN ?? ''
 
 export async function POST(req: NextRequest) {
   try {
-    const key = req.headers.get('x-admin-key') ?? req.headers.get('authorization')?.replace('Bearer ', '')
-    if (!key || key !== ADMIN_KEY) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+    if (!isAdminRequest(req)) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
 
     const { userId, amount, reason } = await req.json().catch(() => ({}))
     if (!userId) return NextResponse.json({ error: '"userId" is required' }, { status: 400 })
@@ -1529,15 +1522,14 @@ export async function POST(req: NextRequest) {
       description: 'Admin: list all jobs across all users with filter by status',
       code: `import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
+import { isAdminRequest } from '@/lib/auth/jwt'
 
 const SCHEMA = '${schema}'
-const ADMIN_KEY = process.env.ADMIN_API_KEY ?? process.env.AI_EXECUTION_TOKEN ?? ''
 const VALID_STATUSES = ['pending', 'running', 'completed', 'failed', 'cancelled']
 
 export async function GET(req: NextRequest) {
   try {
-    const key = req.headers.get('x-admin-key') ?? req.headers.get('authorization')?.replace('Bearer ', '')
-    if (!key || key !== ADMIN_KEY) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+    if (!isAdminRequest(req)) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
 
     const url    = new URL(req.url)
     const limit  = Math.min(Number(url.searchParams.get('limit')  || 50), 200)
@@ -1578,14 +1570,13 @@ export async function GET(req: NextRequest) {
       description: 'Admin: query the audit log for any actor / resource / action',
       code: `import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
+import { isAdminRequest } from '@/lib/auth/jwt'
 
 const SCHEMA = '${schema}'
-const ADMIN_KEY = process.env.ADMIN_API_KEY ?? process.env.AI_EXECUTION_TOKEN ?? ''
 
 export async function GET(req: NextRequest) {
   try {
-    const key = req.headers.get('x-admin-key') ?? req.headers.get('authorization')?.replace('Bearer ', '')
-    if (!key || key !== ADMIN_KEY) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+    if (!isAdminRequest(req)) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
 
     const url       = new URL(req.url)
     const limit     = Math.min(Number(url.searchParams.get('limit')  || 100), 500)
@@ -1622,14 +1613,13 @@ export async function GET(req: NextRequest) {
     description: 'Admin: aggregate usage metrics — total users, DAU/MAU, credits sold, jobs completed, revenue, storage',
     code: `import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
+import { isAdminRequest } from '@/lib/auth/jwt'
 
 const SCHEMA = '${schema}'
-const ADMIN_KEY = process.env.ADMIN_API_KEY ?? process.env.AI_EXECUTION_TOKEN ?? ''
 
 export async function GET(req: NextRequest) {
   try {
-    const key = req.headers.get('x-admin-key') ?? req.headers.get('authorization')?.replace('Bearer ', '')
-    if (!key || key !== ADMIN_KEY) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+    if (!isAdminRequest(req)) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
 
     const url = new URL(req.url)
     const from = url.searchParams.get('from') ?? new Date(Date.now() - 30 * 86400000).toISOString()
@@ -1698,100 +1688,6 @@ export async function GET(req: NextRequest) {
 }`,
   })
 
-  // ── #99 — User impersonation ─────────────────────────────────────────────────
-  endpoints.push({
-    name: 'admin-impersonate',
-    method: 'POST',
-    description: 'Admin: issue a scoped JWT acting as a specific user — full audit trail recorded',
-    code: `import { NextRequest, NextResponse } from 'next/server'
-import { prisma } from '@/lib/db'
-import { sign } from 'jsonwebtoken'
-
-const SCHEMA = '${schema}'
-const ADMIN_KEY = process.env.ADMIN_API_KEY ?? process.env.AI_EXECUTION_TOKEN ?? ''
-const JWT_SECRET = process.env.JWT_SECRET ?? ''
-const IMPERSONATION_DURATION = 3600 // 1 hour max
-
-export async function POST(req: NextRequest) {
-  try {
-    // This endpoint mints a token that ACTS AS another user, so both secrets must
-    // be genuinely configured. Unset ADMIN_KEY would otherwise be compared
-    // against a caller-supplied value, and an unset JWT_SECRET would surface as
-    // a jsonwebtoken stack trace instead of a refusal.
-    if (!ADMIN_KEY || ADMIN_KEY.length < 16) {
-      return NextResponse.json({ error: 'Impersonation is not configured (ADMIN_API_KEY missing)' }, { status: 503 })
-    }
-    if (!JWT_SECRET || JWT_SECRET.length < 32) {
-      return NextResponse.json({ error: 'Impersonation is not configured (JWT_SECRET missing or too short)' }, { status: 503 })
-    }
-    const key = req.headers.get('x-admin-key') ?? req.headers.get('authorization')?.replace('Bearer ', '')
-    if (!key || key !== ADMIN_KEY) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
-
-    if (!JWT_SECRET) return NextResponse.json({ error: 'JWT_SECRET not configured' }, { status: 500 })
-
-    const { userId, reason, durationSeconds = IMPERSONATION_DURATION } = await req.json().catch(() => ({}))
-    if (!userId) return NextResponse.json({ error: '"userId" is required' }, { status: 400 })
-    if (!reason) return NextResponse.json({ error: '"reason" is required for audit trail' }, { status: 400 })
-
-    // Verify the user exists
-    const userRows = await prisma.$queryRawUnsafe<any[]>(
-      \`SELECT id, email, name, role FROM "\${SCHEMA}"."users" WHERE id = $1 AND "deleted_at" IS NULL LIMIT 1\`,
-      userId,
-    )
-    if (!userRows.length) return NextResponse.json({ error: 'User not found' }, { status: 404 })
-    const user = userRows[0]
-
-    // Cap duration at 1 hour regardless of what the caller requests
-    const safeDuration = Math.min(Number(durationSeconds) || IMPERSONATION_DURATION, IMPERSONATION_DURATION)
-
-    // Issue scoped impersonation JWT. projectId claim is REQUIRED — the v1
-    // runtime rejects end-user tokens that are not scoped to this project.
-    const token = sign(
-      {
-        userId: user.id,
-        email: user.email,
-        role: user.role,
-        projectId: '${projectIdFromSchema}',
-        impersonated: true,
-        impersonatedBy: 'admin',
-        reason,
-        iat: Math.floor(Date.now() / 1000),
-      },
-      JWT_SECRET,
-      { expiresIn: safeDuration },
-    )
-
-    // Write immutable audit log — cannot be disabled or deleted
-    await prisma.$executeRawUnsafe(
-      \`INSERT INTO "\${SCHEMA}"."audit_logs"
-          (id, actor_id, action, resource_type, resource_id, metadata, "createdAt")
-         VALUES (gen_random_uuid(), $1, 'admin.impersonate', 'user', $2, $3::jsonb, NOW())\`,
-      'admin',
-      userId,
-      JSON.stringify({ reason, duration: safeDuration, email: user.email }),
-    ).catch(async () => {
-      // audit_logs table may not exist — create a fallback record in a generic log if present
-      await prisma.$executeRawUnsafe(
-        \`INSERT INTO "\${SCHEMA}"."event_logs"
-            (id, type, payload, "createdAt")
-           VALUES (gen_random_uuid(), 'admin.impersonate', $1::jsonb, NOW())\`,
-        JSON.stringify({ userId, reason, duration: safeDuration, email: user.email }),
-      ).catch(() => {})
-    })
-
-    return NextResponse.json({
-      success: true,
-      token,
-      expiresIn: safeDuration,
-      user: { id: user.id, email: user.email, name: user.name, role: user.role },
-      warning: 'This token grants full access as the user. Use only for debugging. All actions are logged.',
-    })
-  } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 })
-  }
-}`,
-  })
-
   // ── Marketplace analytics — schema-aware, DB-backed, no external key ─────────
   if (hasMarketplace) {
     // Revenue / GMV dashboard
@@ -1801,14 +1697,13 @@ export async function POST(req: NextRequest) {
       description: 'Admin: marketplace GMV, AOV, and order count by date range — queries existing orders/sales tables',
       code: `import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
+import { isAdminRequest } from '@/lib/auth/jwt'
 
 const SCHEMA = '${schema}'
-const ADMIN_KEY = process.env.ADMIN_API_KEY ?? process.env.AI_EXECUTION_TOKEN ?? ''
 
 export async function GET(req: NextRequest) {
   try {
-    const key = req.headers.get('x-admin-key') ?? req.headers.get('authorization')?.replace('Bearer ', '')
-    if (!key || key !== ADMIN_KEY) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+    if (!isAdminRequest(req)) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
 
     const url  = new URL(req.url)
     const from = url.searchParams.get('from') ?? new Date(Date.now() - 30 * 86400000).toISOString()
@@ -1881,14 +1776,13 @@ export async function GET(req: NextRequest) {
         description: 'Admin: per-seller revenue, order count, and top performers — queries sellers + orders tables',
         code: `import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
+import { isAdminRequest } from '@/lib/auth/jwt'
 
 const SCHEMA = '${schema}'
-const ADMIN_KEY = process.env.ADMIN_API_KEY ?? process.env.AI_EXECUTION_TOKEN ?? ''
 
 export async function GET(req: NextRequest) {
   try {
-    const key = req.headers.get('x-admin-key') ?? req.headers.get('authorization')?.replace('Bearer ', '')
-    if (!key || key !== ADMIN_KEY) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+    if (!isAdminRequest(req)) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
 
     const url    = new URL(req.url)
     const from   = url.searchParams.get('from') ?? new Date(Date.now() - 30 * 86400000).toISOString()
@@ -1936,14 +1830,13 @@ export async function GET(req: NextRequest) {
         description: 'Admin: product performance — order count, revenue per product, inventory status',
         code: `import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
+import { isAdminRequest } from '@/lib/auth/jwt'
 
 const SCHEMA = '${schema}'
-const ADMIN_KEY = process.env.ADMIN_API_KEY ?? process.env.AI_EXECUTION_TOKEN ?? ''
 
 export async function GET(req: NextRequest) {
   try {
-    const key = req.headers.get('x-admin-key') ?? req.headers.get('authorization')?.replace('Bearer ', '')
-    if (!key || key !== ADMIN_KEY) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+    if (!isAdminRequest(req)) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
 
     const url    = new URL(req.url)
     const from   = url.searchParams.get('from') ?? new Date(Date.now() - 30 * 86400000).toISOString()

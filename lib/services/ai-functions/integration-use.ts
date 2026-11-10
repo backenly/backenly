@@ -38,7 +38,7 @@ export interface MissingIntegration {
  * The code with its comments blanked, so a commented-out call is not a use.
  * Strings are kept: ctx.integrations['email'] names its provider in one.
  */
-function withoutComments(code: string): string {
+export function withoutComments(code: string): string {
   let out = ''
   let i = 0
   while (i < code.length) {
