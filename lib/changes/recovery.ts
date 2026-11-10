@@ -878,16 +878,28 @@ export async function previewRecovery(projectId: string, changeId: string): Prom
       : needsApproval
         ? (impact?.items.find((i) => i.needsApproval)?.detail ?? plan.unrecoverable[0] ?? null)
         : null
+    // What is known about data written since, and only that. A restore that
+    // failed its proof before its effect on data was measured says nothing
+    // about data: the plan check already says why it is blocked. The data check
+    // used to fail whenever the restore was blocked, beside the sentence that
+    // no data would be removed (production QA, 2026-11-09: a red cross on "No
+    // expected data loss" for a restore refused by a foreign key).
+    const NO_LOSS = 'No data written since this change would be removed or overwritten.'
+    const dataCheck: RecoveryCheckRow | null = impact
+      ? {
+          id: 'data' as const,
+          ok: impact.blockers.length === 0 && !needsApproval,
+          label: 'No expected data loss',
+          detail: impact.blockers[0] ?? (needsApproval ? (out.reason ?? '') : NO_LOSS),
+        }
+      : blocked
+        ? null
+        : { id: 'data' as const, ok: !needsApproval, label: 'No expected data loss', detail: needsApproval ? (out.reason ?? '') : NO_LOSS }
     out.checks = [
       restorePoint,
       protectedNow,
       { id: 'plan', ok: proofOk && !blocked, label: 'Recovery plan verified', detail: proofOk ? `Checked end to end without changing anything (${out.details.proof!.ms} ms).` : (out.reason ?? 'The plan could not be verified.') },
-      {
-        id: 'data',
-        ok: !blocked && !needsApproval,
-        label: 'No expected data loss',
-        detail: !needsApproval ? 'No data written since this change would be removed or overwritten.' : (out.reason ?? ''),
-      },
+      ...(dataCheck ? [dataCheck] : []),
     ]
     return out
   }, { waitMs: 10_000 })
