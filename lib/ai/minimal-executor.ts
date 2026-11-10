@@ -6476,7 +6476,7 @@ async function executeInfo(params: any, projectId?: string): Promise<ExecutionRe
       import('@/lib/api/exposed-resources').then(m => m.listExposedResources(projectId)),
       prisma.appTrigger.findMany({ where: { projectId }, select: { name: true, sourceTable: true, event: true, actionType: true, enabled: true } }),
       prisma.permissionPolicy.findMany({ where: { projectId }, select: { tableName: true, policyName: true, operation: true } }),
-      prisma.aiFunction.findMany({ where: { projectId, status: 'active' }, select: { name: true, description: true, triggerType: true, triggerTable: true, runCount: true } }),
+      prisma.aiFunction.findMany({ where: { projectId, status: 'active' }, select: { name: true, description: true, triggerType: true, triggerTable: true, runCount: true, codeOrigin: true } }),
       prisma.storageBucket.findMany({ where: { projectId }, select: { name: true, isPublic: true } }),
       prisma.project.findFirst({ where: { id: projectId }, select: { jwtSecret: true } }),
     ])
@@ -6525,15 +6525,25 @@ async function executeInfo(params: any, projectId?: string): Promise<ExecutionRe
       lines.push('')
     }
 
-    // AI Functions
-    if (aiFunctions.length > 0) {
-      lines.push(`### AI Functions (${aiFunctions.length} active)`)
-      for (const fn of aiFunctions) {
+    // AI Functions: the project's own, then the endpoints Backenly generated
+    // for its tables, apart, so the count means what a person or agent made.
+    const { generatedEndpointRoutes, isGeneratedEndpoint } = await import('@/lib/services/domain-endpoints')
+    const generatedRoutes = generatedEndpointRoutes(projectId, tables.map((t) => t.name))
+    const ownFunctions = aiFunctions.filter((fn) => !isGeneratedEndpoint(fn, generatedRoutes))
+    const generatedFunctions = aiFunctions.filter((fn) => isGeneratedEndpoint(fn, generatedRoutes))
+    if (ownFunctions.length > 0) {
+      lines.push(`### AI Functions (${ownFunctions.length} active)`)
+      for (const fn of ownFunctions) {
         const trigger = fn.triggerType === 'cron'
           ? `cron: \`${fn.triggerTable}\``
           : fn.triggerType.replace('on_db_', 'on ').replace('_', ' ')
         lines.push(`- **${fn.name}** — ${fn.description} (${trigger}, ${fn.runCount} runs)`)
       }
+      lines.push('')
+    }
+    if (generatedFunctions.length > 0) {
+      lines.push(`### Generated for your tables (${generatedFunctions.length})`)
+      lines.push(generatedFunctions.map((fn) => `\`${fn.name}\``).join(', '))
       lines.push('')
     }
 
