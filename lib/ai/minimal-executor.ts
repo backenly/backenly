@@ -8759,7 +8759,23 @@ async function executeDropIndex(params: any, projectId: string): Promise<Executi
       }
     }
 
-    await db.$executeRawUnsafe(`DROP INDEX "${postgresSchema}"."${indexName}"`)
+    if (params?.online === true) {
+      // DROP INDEX CONCURRENTLY (lib/execution/online-index.ts): the plain
+      // statement takes ACCESS EXCLUSIVE, and while it waits for one long query
+      // every new query on the table queues behind it.
+      const { dropIndexOnline } = await import('@/lib/execution/online-index')
+      const dropped = await dropIndexOnline(projectId, postgresSchema, indexName)
+      if (dropped.kind === 'failed') {
+        return {
+          success: false,
+          message: `Could not drop index "${indexName}" without blocking the table. ${dropped.message}`,
+          error: dropped.message,
+          code: dropped.code,
+        }
+      }
+    } else {
+      await db.$executeRawUnsafe(`DROP INDEX "${postgresSchema}"."${indexName}"`)
+    }
 
     return {
       success: true,
@@ -9001,6 +9017,10 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
   const unique = !!params.unique
   const method = typeof params.method === 'string' ? params.method.toLowerCase().trim() : ''
   const where = typeof params.where === 'string' ? params.where.trim() : ''
+  // CREATE INDEX CONCURRENTLY, on a connection of its own (lib/execution/
+  // online-index.ts): writes to the table go on during the build. Asked for by
+  // Backenly's own repairs (buildFixAction), which build on live tables.
+  const online = params.online === true
 
   const INDEX_METHODS = new Set(['btree', 'gin', 'gist', 'hash', 'brin'])
   if (method && !INDEX_METHODS.has(method)) {
@@ -9083,8 +9103,11 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
 
     const whereClause = effectiveWhere ? ` WHERE (${effectiveWhere})` : ''
     const ddl =
-      `CREATE${unique ? ' UNIQUE' : ''} INDEX IF NOT EXISTS "${idxName}" ` +
+      `CREATE${unique ? ' UNIQUE' : ''} INDEX${online ? ' CONCURRENTLY' : ''} IF NOT EXISTS "${idxName}" ` +
       `ON "${postgresSchema}"."${tableName}"${usingClause} (${colList})${whereClause}`
+    const { buildIndexOnline, dropIndexOnline, indexValidity } = await import('@/lib/execution/online-index')
+    const validity = () =>
+      indexValidity((sql, args) => db.$queryRawUnsafe<Array<{ valid: boolean }>>(sql, ...args).then((rows) => ({ rows })), postgresSchema, idxName)
 
     // ── Name-collision check BEFORE creating ────────────────────────────────
     // `IF NOT EXISTS` matches on NAME only. If an index of this name already
@@ -9103,14 +9126,43 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
       // A partial index is a different index: one scoped to live rows cannot
       // serve a request for one over every row, which an upsert needs.
       const samePredicate = samePredicateText(existingShape.where, effectiveWhere)
-      if (sameUnique && sameCols && samePredicate) {
+      const sameShape = sameUnique && sameCols && samePredicate
+      // Same shape but not valid: what a failed CREATE INDEX CONCURRENTLY leaves
+      // (or one still running). Queries ignore it and writes still maintain it,
+      // so it is not "already there".
+      const valid = sameShape ? (await validity())?.valid !== false : true
+      if (sameShape && valid) {
         return {
           success: true,
           message: `Index "${idxName}" already exists on ${tableName} (${columns.join(', ')})${unique ? ', unique' : ''} — nothing to do.`,
           data: { tableName, columns, unique, indexName: idxName, alreadyExisted: true, definition: def },
         }
       }
-      return {
+      if (sameShape && !online) {
+        return {
+          success: false,
+          message:
+            `An index named "${idxName}" exists on ${tableName} but PostgreSQL marks it invalid: queries ignore it, ` +
+            `and every write still maintains it. A CREATE INDEX CONCURRENTLY that failed, or one still running, leaves one. ` +
+            `Drop it with drop_index, then create the index again.`,
+          error: 'Invalid index',
+          code: 'INDEX_INVALID',
+          data: { indexName: idxName, existingDefinition: def },
+        }
+      }
+      if (sameShape && online) {
+        // Built online, so removed online. A build still running holds a lock
+        // this waits for, and gives up on, without touching it.
+        const dropped = await dropIndexOnline(projectId, postgresSchema, idxName)
+        if (dropped.kind === 'failed') {
+          return {
+            success: false,
+            message: `An unusable copy of index "${idxName}" is on ${tableName} and could not be removed before rebuilding it. ${dropped.message}`,
+            error: dropped.message,
+            code: dropped.code,
+          }
+        }
+      } else return {
         success: false,
         message:
           `An index named "${idxName}" already exists on ${tableName} with a DIFFERENT definition, ` +
@@ -9125,7 +9177,20 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
       }
     }
 
-    await db.$executeRawUnsafe(ddl)
+    if (online) {
+      const built = await buildIndexOnline(projectId, postgresSchema, idxName, ddl)
+      if (built.kind === 'failed') {
+        return {
+          success: false,
+          message: `Could not build the index on ${tableName} (${columns.join(', ')}) without blocking writes. ${built.message}`,
+          error: built.message,
+          code: built.code,
+          data: { indexName: idxName, online: true, transient: built.transient, started: built.started, leftover: built.leftover },
+        }
+      }
+    } else {
+      await db.$executeRawUnsafe(ddl)
+    }
 
     // ── Verify, do not assume ───────────────────────────────────────────────
     const after = await db.$queryRawUnsafe<Array<{ indexdef: string }>>(
@@ -9141,6 +9206,14 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
       }
     }
     const def = after[0].indexdef
+    if (online && (await validity())?.valid !== true) {
+      return {
+        success: false,
+        message: `CREATE INDEX CONCURRENTLY reported no error but "${idxName}" is not valid, so queries cannot use it.`,
+        error: 'Index not valid',
+        code: 'VERIFY_FAILED',
+      }
+    }
     if (unique && !/CREATE UNIQUE/i.test(def)) {
       return {
         success: false,
@@ -9161,6 +9234,7 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
       // to know it did not get that.
       message:
         `✅ Created ${shape} as "${idxName}"` +
+        (online ? ', built alongside live traffic: writes to the table were never blocked' : '') +
         (everyRow && unique
           ? `\n\nIt covers every row, soft-deleted ones included, so an upsert (ON CONFLICT, or on_conflict ` +
             `on the REST API) can target it.`
@@ -9183,6 +9257,7 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
         softDeleteScoped,
         indexName: idxName,
         definition: def,
+        online,
       },
     }
   } catch (error: any) {

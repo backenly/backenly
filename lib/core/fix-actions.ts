@@ -189,6 +189,9 @@ export function buildFixAction(
         },
       }
 
+    // Every index Backenly builds as a repair is built online (CREATE INDEX
+    // CONCURRENTLY): these tables are live, and a plain build blocks their
+    // writes for as long as it runs.
     case 'missing_fk_index':
       return {
         action: 'CREATE_INDEX',
@@ -197,6 +200,7 @@ export function buildFixAction(
           // executeCreateIndex reads `columnName` — emitting `columns: [...]`
           // here silently failed every FK-index fix with "Missing parameters".
           columnName: details.columnName,
+          online: true,
         },
       }
 
@@ -213,6 +217,7 @@ export function buildFixAction(
         params: {
           tableName: details.tableName,
           columnName: details.columnName,
+          online: true,
         },
       }
 
@@ -275,7 +280,7 @@ export function buildFixAction(
       if (!table || !details.columnName) return null
       return {
         action: 'CREATE_INDEX',
-        params: { tableName: table, columnName: details.columnName },
+        params: { tableName: table, columnName: details.columnName, online: true },
       }
     }
 
