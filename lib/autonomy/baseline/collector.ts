@@ -144,10 +144,14 @@ async function collectQueryLatency(
     calls: string
     total_ms: string
   }>(
-    `SELECT LEFT(query, 400) AS query, calls, total_exec_time AS total_ms
+    // No `NOT LIKE '%pg_catalog%'`: every statement PostgREST runs for /api/v2
+    // and v1 /db selects `pg_catalog.count(…)`, so that filter left the app's
+    // own REST traffic out of the baseline (lib/autonomy/slow-query-index.ts).
+    // Read long enough that two REST reads of one table with different WHERE
+    // clauses, which share their first few hundred characters, stay two shapes.
+    `SELECT LEFT(query, 4000) AS query, calls, total_exec_time AS total_ms
        FROM pg_stat_statements
       WHERE position($1 in query) > 0
-        AND query NOT LIKE '%pg_catalog%'
         AND query NOT LIKE '%information_schema%'
       ORDER BY total_exec_time DESC
       LIMIT ${MAX_QUERY_SUBJECTS}`,

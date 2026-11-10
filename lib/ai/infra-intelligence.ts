@@ -484,13 +484,18 @@ async function detectSlowQueries(pool: Pool, schemaName: string): Promise<QueryF
       // `position()` rather than LIKE on purpose: in LIKE, the `_` in
       // `workspace_<id>` is a single-character wildcard, so the pattern would
       // also match schemas that merely resemble this one.
-      `SELECT LEFT(query, 400) AS query,
+      //
+      // No `NOT LIKE '%pg_catalog%'`: PostgREST, which serves /api/v2 and v1
+      // /db, selects `pg_catalog.count(…)` in every statement, so that filter
+      // hid all REST traffic (lib/autonomy/slow-query-index.ts has the
+      // measurement). The text is read long enough to reach PostgREST's WHERE,
+      // which follows fully qualified column lists.
+      `SELECT LEFT(query, 4000) AS query,
               calls,
               ROUND((total_exec_time / NULLIF(calls, 0))::numeric, 2) AS avg_ms,
               ROUND((rows / NULLIF(calls, 0))::numeric, 0) AS avg_rows
          FROM pg_stat_statements
         WHERE position($1 in query) > 0
-          AND query NOT LIKE '%pg_catalog%'
           AND query NOT LIKE '%information_schema%'
           AND (total_exec_time / NULLIF(calls, 0)) > 100
         ORDER BY avg_ms DESC
@@ -504,7 +509,7 @@ async function detectSlowQueries(pool: Pool, schemaName: string): Promise<QueryF
       const avgRows = Number(r.avg_rows)
       const candidate = extractIndexCandidate(r.query, schemaName)
       return {
-        queryPattern: r.query.replace(/\$\d+/g, '?').replace(/\s+/g, ' ').trim(),
+        queryPattern: r.query.replace(/\$\d+/g, '?').replace(/\s+/g, ' ').trim().slice(0, 400),
         avgMs,
         calls,
         avgRows,
@@ -621,11 +626,13 @@ async function measuredFilterColumns(
     // answer WHICH column, so a fast statement run ten thousand times is exactly
     // as informative as a slow one. Ordered by total time so the column the
     // table spends the most time filtering wins when several qualify.
+    // No `NOT LIKE '%pg_catalog%'` (see detectSlowQueries): it hid every
+    // PostgREST statement, so a table read only through the REST APIs could
+    // never name its measured column, and its Hot table finding named none.
     const stmts = await pool.query<{ query: string }>(
-      `SELECT LEFT(query, 400) AS query
+      `SELECT LEFT(query, 4000) AS query
          FROM pg_stat_statements
         WHERE position($1 in query) > 0
-          AND query NOT LIKE '%pg_catalog%'
           AND query NOT LIKE '%information_schema%'
         ORDER BY total_exec_time DESC
         LIMIT 100`,
