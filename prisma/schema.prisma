@@ -2522,6 +2522,8 @@ model Webhook {
   targetUrl String
   secret    String // For HMAC signature
   active    Boolean  @default(true)
+  /// Row events only: the tables this endpoint receives events for. Empty means every table.
+  tables    String[] @default([])
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
