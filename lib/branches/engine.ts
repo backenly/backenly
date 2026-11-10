@@ -8,10 +8,10 @@
  *
  * Contract:
  *   • create   — structural clone (LIKE … INCLUDING ALL: types, defaults,
- *                NOT NULL, indexes), with row security and sequences
- *                replicated; rows are copied only with includeData. FK
- *                constraints intentionally not cloned. Main's schema at this
- *                moment is kept as the branch's base.
+ *                NOT NULL, indexes), with row security, sequences and foreign
+ *                keys replicated; rows are copied only with includeData, all
+ *                from one snapshot of main. Main's schema at this moment is
+ *                kept as the branch's base.
  *   • diff     — the migrations applied on the branch, what they changed
  *                against the base, and any table main changed since.
  *   • merge    — replays the branch's migrations onto main through the
@@ -32,6 +32,7 @@ import { mapPgType } from '@/lib/import/supabase-map'
 import { computeSchemaDiff, validateBranchName, branchSchemaName, type SchemaDiff } from './diff'
 import { replicateRls, verifyRlsParity, type RlsCloneResult } from './rls-clone'
 import { isolateBranchSequences, verifySequenceIsolation } from './sequence-isolation'
+import { replicateForeignKeys, verifyForeignKeyParity, type ForeignKeyCloneResult } from './fk-clone'
 import { registerSchemaByName } from '@/lib/postgrest/registration'
 
 const MAX_ACTIVE_BRANCHES = 5
@@ -127,11 +128,15 @@ export async function createBranch(
   const includeData = options.includeData === true
   let rls: RlsCloneResult = { policiesCreated: 0, tablesEnabled: 0, tablesForced: 0, failures: [] }
   let sequencesIsolated = 0
+  let foreignKeys: ForeignKeyCloneResult = { created: 0, skipped: [] }
 
   const pool = await branchPool(projectId)
   const client = await pool.connect()
   try {
-    await client.query('BEGIN')
+    // One snapshot of main for every table. With foreign keys on the branch, a
+    // child copied after a write main committed mid-clone could name a parent
+    // copied before it, and the key would refuse the branch.
+    await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ')
     await client.query(`CREATE SCHEMA "${schemaName}"`)
     for (const t of main.tables) {
       await client.query(
@@ -177,6 +182,17 @@ export async function createBranch(
         )
       }
     }
+
+    // ── Foreign keys, after the rows ──────────────────────────────────────
+    //
+    // LIKE copies no foreign key, and without them a branch accepted rows
+    // production refuses: production QA watched an agent insert orders for a
+    // user that did not exist. Each key main has is created here, pointing at
+    // the branch's own tables, and checked against the rows just copied.
+    const copied = main.tables.map((t) => t.tableName)
+    foreignKeys = await replicateForeignKeys(client, mainSchema, schemaName, copied)
+    const keys = await verifyForeignKeyParity(client, mainSchema, schemaName, copied)
+    if (!keys.ok) throw new Error(keys.reason ?? 'foreign key parity check failed')
 
     // Belt and braces: assert against the live catalog that the branch is at
     // least as protected as main, rather than trusting the return values above.
@@ -231,6 +247,8 @@ export async function createBranch(
     policiesReplicated: rls.policiesCreated,
     tablesForced: rls.tablesForced,
     sequencesIsolated,
+    foreignKeysReplicated: foreignKeys.created,
+    foreignKeysSkipped: foreignKeys.skipped,
   })
   return {
     ok: true as const,
@@ -239,6 +257,9 @@ export async function createBranch(
     dataCopied: includeData,
     policiesReplicated: rls.policiesCreated,
     sequencesIsolated,
+    foreignKeysReplicated: foreignKeys.created,
+    // Keys into a table a branch does not copy, said rather than dropped quietly.
+    foreignKeysSkipped: foreignKeys.skipped,
   }
 }
 

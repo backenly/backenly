@@ -786,7 +786,9 @@ export function buildDispatchable(): McpToolDescriptor[] {
       'none are applied. For row changes use db_insert/db_update/db_delete; for reads use run_query; for drops ' +
       'and anything else use backend_chat.\n' +
       'With `branchId` the migration applies to that preview branch ONLY, production is untouched, and the ' +
-      'statements are logged for the branch\'s merge. Foreign keys are recorded but not enforced on a branch.',
+      'statements are logged for the branch\'s merge. A branch has every foreign key production has and checks a ' +
+      'key a migration declares with REFERENCES as production will; a key Backenly infers from a column name is ' +
+      'added at the merge.',
     inputSchema: {
       type: 'object',
       properties: {
