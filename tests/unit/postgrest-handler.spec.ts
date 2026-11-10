@@ -102,6 +102,31 @@ beforeEach(() => {
   }) as unknown as typeof fetch
 })
 
+describe('a refusal by row-level security reaches the caller as one', () => {
+  // Production QA (2026-11-09): a policy's refusal was diagnosed as Backenly's
+  // exposure rules, because the error path passes the database's code and not
+  // whether the table has row-level security (lib/observability/request-trace.ts).
+  it('a signed-in insert the policy declines names row-level security, not the exposure rules', async () => {
+    stubUpstream(403, { code: '42501', message: 'new row violates row-level security policy for table "reviews"' })
+    const res = mockRes()
+    await handleViaPostgrest(mockReq('POST', {}, { rating: 9 }), res, ['reviews'], { projectId: PROJECT, endUserId: 'u-1' })
+    expect(res.statusCode).toBe(403)
+    expect(res.body.layer).toBe('database')
+    expect(res.body.diagnosis).toMatch(/row-level security/i)
+    expect(res.body.diagnosis).not.toMatch(/exposure rules/i)
+    expect(res.headers['x-backenly-layer']).toBe('database')
+  })
+
+  it('an anonymous insert the policy declines names it too, not the API key', async () => {
+    stubUpstream(401, { code: '42501', message: 'permission denied for table reviews' })
+    const res = mockRes()
+    await handleViaPostgrest(mockReq('POST', {}, { rating: 9 }), res, ['reviews'], { projectId: PROJECT })
+    expect(res.body.layer).toBe('database')
+    expect(res.body.diagnosis).toMatch(/no end-user token/)
+    expect(res.body.diagnosis).not.toMatch(/API key/)
+  })
+})
+
 describe('exposure gate — runs before anything is forwarded', () => {
   it('404s the users table without contacting PostgREST', async () => {
     // PostgREST would serve this, password column and all. The gate is what the
