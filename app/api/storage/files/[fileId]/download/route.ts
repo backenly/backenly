@@ -19,7 +19,7 @@ import {
 import { INTERNAL_TRAFFIC_HEADER, isInternalTraffic } from '@/lib/traffic/request-recorder'
 import { recordEgress } from '@/lib/usage/egress'
 import { projectRestriction, restrictionDetails, restrictionMessage, RESTRICTED_CODE } from '@/lib/usage/restrictions'
-import { DOWNLOAD_URL_TTL_SECONDS, signCdnUrl, signedCdnConfig } from '@/lib/storage/cdn'
+import { DOWNLOAD_URL_TTL_SECONDS, signCdnUrl, signedCdnConfig, windowedPublicCdnUrl } from '@/lib/storage/cdn'
 import { servedHere } from '@/lib/data-plane/serving'
 import { refusalForState } from '@/lib/projects/serving-response'
 
@@ -174,6 +174,16 @@ export async function GET(request: NextRequest, props: { params: Promise<{ fileI
         ? signedCdnConfig()
         : null
     if (cdn) {
+      // A file anyone may read is handed the same URL for a whole window, with
+      // a redirect the browser keeps until it ends, so a page that shows the
+      // same image again reuses it instead of coming back here (cdn.ts). One
+      // that is not public gets a fresh URL and a redirect nobody keeps.
+      if (cacheControlFor(record.bucket?.accessPolicy, record.isPublic).startsWith('public')) {
+        const { url, maxAge } = windowedPublicCdnUrl(record.path, cdn)
+        const res = NextResponse.redirect(url, 302)
+        res.headers.set('Cache-Control', `private, max-age=${maxAge}`)
+        return res
+      }
       const res = NextResponse.redirect(signCdnUrl(record.path, DOWNLOAD_URL_TTL_SECONDS, cdn), 302)
       res.headers.set('Cache-Control', 'private, no-store')
       return res
