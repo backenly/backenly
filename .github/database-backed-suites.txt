@@ -92,6 +92,7 @@ tests/integration/realtime-ticket-broadcast.spec.ts
 # stream that sees every change, only for a member of the project; a project
 # with no signing secret says so. A real provisioned project and session.
 tests/integration/console-realtime-sees-every-change.spec.ts
+tests/integration/auth-stats-change-from-nothing.spec.ts
 tests/integration/export-database-rls.spec.ts
 tests/integration/export-portable-policies.spec.ts
 tests/integration/postgres-admin.spec.ts
