@@ -37,6 +37,7 @@ import {
 import { EDGE, FOCUS, PAGE_GUTTER, PAGE_WIDTH, PLATE, RULE, R_CONTROL, R_PANEL, WELL } from '@/components/console/tokens'
 import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
 import { CLOUD_REGIONS, HOME_REGION, regionLabel, type CloudRegion, type CloudRegionId } from '@/lib/regions'
+import { sharedRead } from '@/lib/client/shared-read'
 
 type UserProfile = { id: string; name?: string; email?: string }
 
@@ -58,10 +59,9 @@ const SEARCH_THRESHOLD = 6
 
 async function getCurrentUser(): Promise<UserProfile | null> {
   try {
-    const response = await fetch('/api/auth/me')
-    if (!response.ok) return null
-    const data = await response.json()
-    return data.user || null
+    const response = await sharedRead('/api/auth/me')
+    if (!response.ok || !response.data) return null
+    return response.data.user || null
   } catch {
     return null
   }

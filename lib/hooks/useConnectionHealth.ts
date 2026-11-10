@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useState, useCallback } from 'react'
+import { sharedRead } from '@/lib/client/shared-read'
 
 /**
  * useConnectionHealth — single source of truth for the "is a real frontend
@@ -74,13 +75,14 @@ export function useConnectionHealth(projectId: string | null | undefined): UseCo
   const [health, setHealth] = useState<ConnectionHealth | null>(null)
   const [loading, setLoading] = useState(true)
 
-  const refresh = useCallback(async () => {
+  // Every copy of this hook on a page (the sidebar pill, the Deploy page, the
+  // autonomy status) reads and polls the same thing: one request serves them
+  // all (lib/client/shared-read.ts). An explicit refresh reads afresh.
+  const load = useCallback(async (fresh: boolean) => {
     if (!projectId) return
     try {
-      const res = await fetch(`/api/projects/${projectId}/connection-health`, {
-        credentials: 'include',
-      })
-      if (res.ok) setHealth(await res.json())
+      const res = await sharedRead<ConnectionHealth>(`/api/projects/${projectId}/connection-health`, { fresh })
+      if (res.ok && res.data) setHealth(res.data)
     } catch {
       // Soft-fail — the pill collapses to 'idle' rather than blocking the UI.
     } finally {
@@ -88,15 +90,17 @@ export function useConnectionHealth(projectId: string | null | undefined): UseCo
     }
   }, [projectId])
 
+  const refresh = useCallback(() => load(true), [load])
+
   useEffect(() => {
     if (!projectId) {
       setLoading(false)
       return
     }
-    refresh()
-    const t = setInterval(refresh, 15_000)
+    load(false)
+    const t = setInterval(() => load(false), 15_000)
     return () => clearInterval(t)
-  }, [projectId, refresh])
+  }, [projectId, load])
 
   const status: ConnectionStatus = (() => {
     if (loading && !health) return 'loading'

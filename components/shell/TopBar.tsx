@@ -41,6 +41,7 @@ import {
   SearchTrigger,
   useDismiss,
 } from './ConsoleChrome'
+import { sharedRead } from '@/lib/client/shared-read'
 
 const STATUS_DOT: Record<string, string> = {
   LIVE: 'bg-emerald-400',
@@ -98,9 +99,11 @@ export function TopBar() {
     let cancelled = false
     async function poll() {
       try {
-        const res = await fetch(`/api/projects/${projectId}/health`, { credentials: 'include' })
-        if (!res.ok) return
-        const j = await res.json()
+        // The page below may read the same health at the same moment: one
+        // request serves both (lib/client/shared-read.ts).
+        const res = await sharedRead(`/api/projects/${projectId}/health`)
+        if (!res.ok || !res.data) return
+        const j = res.data
         // Everything that waits on the user: findings the loop is holding,
         // calls their coding agent parked for approval, and architecture
         // changes Backenly prepared. This counted only the held findings, and
