@@ -17,7 +17,7 @@ const health = {
   failures: [],
   successes: [{ origin: 'shop.example.com', count: 12, lastSeen: '2026-11-10T10:00:00.000Z' }],
   probes: { count: 0, lastSeen: null },
-  totals: { failures24h: 0, failures1h: 0, bootstraps24h: 12, distinctOriginsFailing: 0, distinctOriginsConnected: 1 },
+  totals: { failures24h: 0, failures1h: 0, bootstraps24h: 12, requests24h: 12, distinctOriginsFailing: 0, distinctOriginsConnected: 1 },
   summaryText: '',
 }
 

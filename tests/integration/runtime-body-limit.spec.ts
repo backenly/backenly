@@ -38,15 +38,18 @@ describe('a body the runtime will not read', () => {
   it('over the limit is 413 PAYLOAD_TOO_LARGE, and names the limit', async () => {
     const res = await post(JSON.stringify([{ note: 'x'.repeat(11 * 1024 * 1024) }]))
     expect(res.status).toBe(413)
+    // In PostgREST's error shape, as every /api/v2 error is (server/lib/v2-error-shape.ts).
     expect(await res.json()).toEqual({
-      error: 'Request body is larger than the 10 MB this endpoint accepts.',
       code: 'PAYLOAD_TOO_LARGE',
+      message: 'Request body is larger than the 10 MB this endpoint accepts.',
+      details: null,
+      hint: null,
     })
   }, 60_000)
 
   it('that is not JSON is still 400 BAD_REQUEST, saying so', async () => {
     const res = await post('{"note": ')
     expect(res.status).toBe(400)
-    expect(await res.json()).toEqual({ error: 'The request body is not valid JSON.', code: 'BAD_REQUEST' })
+    expect(await res.json()).toEqual({ code: 'BAD_REQUEST', message: 'The request body is not valid JSON.', details: null, hint: null })
   }, 60_000)
 })

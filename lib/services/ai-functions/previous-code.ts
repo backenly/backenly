@@ -16,7 +16,9 @@
  */
 export function previousCodeNote(sameCode: boolean, change: { id: string; seq: number } | null): string {
   if (sameCode) return '. Its code was already this, so the code did not change'
-  if (!change) return ''
+  // No change was recorded (the change history is off for this project), so
+  // nothing kept the code it replaced: then the old sentence is the true one.
+  if (!change) return '. The previous code is not kept, so there is nothing to roll back to'
   return (
     `. The previous code is kept in the change history as change #${change.seq}: ` +
     `restore that change in History to bring it back, or ask with deploy { action: "revert_change", changeId: "${change.id}" } (a person approves it)`

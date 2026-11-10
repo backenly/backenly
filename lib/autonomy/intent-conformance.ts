@@ -174,7 +174,14 @@ export async function supersedeSchemaIntent(projectId: string, change: Supersedi
       const column = String(change.columnName || '').trim()
       const type = String(change.type || '').trim()
       if (column && type) {
-        await prisma.schemaIntent.updateMany({ where: { projectId, tableName: table, columnName: column }, data: { requestedType: type } })
+        // Both: the declared type is checked before the kind
+        // (requestedSqlType ?? requestedType), so leaving the one a CREATE
+        // TABLE declared read the retype as drift against it.
+        const requestedSqlType = canonicalSqlType(type) === type ? type : null
+        await prisma.schemaIntent.updateMany({
+          where: { projectId, tableName: table, columnName: column },
+          data: { requestedType: type, requestedSqlType },
+        })
       }
     } else {
       const from = String(change.from || '').trim()
