@@ -67,10 +67,8 @@ export async function POST(request: NextRequest) {
             buffer: buffer,
             mimeType: file.type || undefined,
           },
-          {
-            projectId,
-            isPublic: false, // Default to private
-          }
+          // No isPublic: the bucket's access policy decides (clampIsPublic).
+          { projectId }
         )
 
         return NextResponse.json({
