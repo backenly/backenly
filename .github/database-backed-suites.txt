@@ -1844,6 +1844,12 @@ tests/integration/branch-limit-holds.spec.ts
 # stubbed.
 tests/integration/closed-branch-keys-end.spec.ts
 
+# An agent discards its own preview branch over MCP at once: the branch's
+# schema and keys go, production and the Review Queue are untouched, and a
+# read-only key or another project's branch is refused. Real route, engine and
+# schemas.
+tests/integration/agents-discard-branches.spec.ts
+
 # On a plan without webhooks, reads are answered (the list with the plan in
 # it, not a 403), so the page says so before anyone fills in a form and an
 # endpoint made on Pro can still be read; every change is still refused. Real

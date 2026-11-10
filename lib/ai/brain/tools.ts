@@ -238,8 +238,9 @@ export const DESTRUCTIVE_TOOLS: ReadonlySet<ToolName> = new Set<ToolName>([
   'remove_integration_key',
   // Drops the endpoint and its delivery history; not undoable from the dashboard
   'delete_webhook',
-  // DROP SCHEMA CASCADE on the branch — every experiment in it is gone.
-  'discard_branch',
+  // discard_branch is NOT here: it drops a preview branch's own schema and
+  // keys, never anything of production's, so an agent cleans up its own
+  // experiments without a person (production QA, 2026-11-09).
   // Replays the branch's migrations onto PRODUCTION. Reviewing a change before
   // it reaches production is what a branch is for, so a human approves it.
   'merge_branch',
@@ -1191,7 +1192,7 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
     { branchId: { type: 'string', description: 'The branch id from list_branches.' } },
     ['branchId']),
   fn('discard_branch',
-    'DESTRUCTIVE. Drop a preview branch and everything in it. Requires explicit human approval. Main is untouched.',
+    'Drop a preview branch, its rows and its keys. Runs at once, with no approval and no undo; production is untouched.',
     { branchId: { type: 'string', description: 'The branch id from list_branches.' } },
     ['branchId']),
   fn('list_integration_keys',
@@ -2746,8 +2747,8 @@ export async function dispatchTool(
         })
       }
 
-      // discard_branch — DESTRUCTIVE; the brain's gate parks it for approval
-      // before it ever reaches here.
+      // discard_branch — drops the branch's schema and ends its keys. No
+      // approval: nothing of production's is touched.
       const res = await engine.discardBranch(ctx.projectId, ctx.userId ?? '', branchId)
       if (!res.ok) return finalize({ ok: false, summary: (res as any).error })
       return finalize({ ok: true, summary: 'Branch discarded. Main is untouched.', data: res })
