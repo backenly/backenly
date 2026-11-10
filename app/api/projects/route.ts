@@ -1,12 +1,9 @@
 export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
-import { prisma } from '@/lib/db'
 import { z } from 'zod'
 import { withAuth } from '@/lib/auth/route-protection'
-import { enforceProjectCreation } from '@/lib/entitlements/policy'
-import { initializeAccountEntitlements } from '@/lib/entitlements'
-import { accountProjectsWhere } from '@/lib/usage/account'
+import { projectCreationVerdict, type CreationVerdict } from '@/lib/projects/creation-verdict'
 import { recordProductEvent } from '@/lib/platform-signals'
 import { sanitizeDiagnostic } from '@/lib/errors/diagnostic-sanitize'
 import { assertWritable } from '@/lib/platform-controls'
@@ -140,40 +137,18 @@ export const POST = withAuth(async (request: NextRequest, { user }) => {
       )
     }
 
-    // Who the project will belong to, and the billing account whose plan it
-    // counts against: inside an organization, the organization; elsewhere, the
-    // caller.
+    // Who the project will belong to, and whether its plan has room: the same
+    // answer GET /api/projects/can-create gives before the form opens
+    // (lib/projects/creation-verdict.ts). Creating also gives a first-time
+    // account its entitlements before the limit is read.
     const lifecycle = getProjectLifecycle()
-    const account = await lifecycle.creationAccount(user.userId, validatedData.organizationId ?? null)
-    if (account.ok === false) {
-      return NextResponse.json(
-        { success: false, error: account.error, code: account.code },
-        { status: account.status },
-      )
+    const verdict = await projectCreationVerdict(user.userId, validatedData.organizationId ?? null, { initialize: true })
+    if (verdict.allowed === false) {
+      // This tsconfig does not narrow on a boolean discriminant.
+      const { allowed: _allowed, status, ...refusal } = verdict as Extract<CreationVerdict, { allowed: false }>
+      return NextResponse.json({ success: false, ...refusal }, { status })
     }
-
-    // ─── Plan enforcement: project limit ─────────────────────────────────────
-    const billingAccount = account.organizationId ?? account.ownerId
-    const existingCount = await prisma.project.count({ where: accountProjectsWhere(billingAccount) })
-
-    // Give a first-time account whatever entitlements it needs. A no-op in
-    // single-tenant, where entitlements come from the edition rather than a row.
-    await initializeAccountEntitlements(user.userId)
-
-    const limitCheck = await enforceProjectCreation(billingAccount, existingCount)
-    if (limitCheck !== true) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: limitCheck.message,
-          code: limitCheck.code,
-          upgradeRequired: limitCheck.upgradeRequired,
-          currentPlan: limitCheck.currentPlan,
-          requiredPlan: limitCheck.requiredPlan,
-        },
-        { status: 403 }
-      )
-    }
+    const account = verdict as Extract<CreationVerdict, { allowed: true }>
 
     const { project, apiKey } = await lifecycle.create({
       name: validatedData.name,

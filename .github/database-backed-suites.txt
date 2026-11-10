@@ -1666,3 +1666,9 @@ tests/integration/auth-before-first-signup.spec.ts
 # Express app (server/app.ts), whose modules open the platform database, so it
 # runs with one.
 tests/integration/runtime-rejects-bad-bodies.spec.ts
+
+# GET /api/projects/can-create answers what POST /api/projects would (a full
+# plan in the same words, room on the plan, no entitlements yet, single-tenant),
+# so the console says a plan limit before the New project form. Real account,
+# count and plan check; sign-in is delegated and the plan is mocked.
+tests/integration/project-limit-before-the-form.spec.ts
