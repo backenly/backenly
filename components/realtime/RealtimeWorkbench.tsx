@@ -19,7 +19,7 @@ import { Radio, WifiOff, Circle, RefreshCw, AlertTriangle, Trash2, ChevronLeft }
 import { getAuthToken } from '@/lib/api/auth'
 import { getProject } from '@/lib/api/projects'
 import {
-  CommandBar, CopyField, EmptyState, IconButton, KIT, KitButton, NoticeStrip, StatusDot,
+  CommandBar, EmptyState, IconButton, KIT, KitButton, NoticeStrip, StatusDot,
   type StatusTone,
 } from '@/components/inspector/kit'
 import { AgentEmptyState } from '@/components/inspector/AgentEmptyState'
@@ -28,7 +28,6 @@ import { FOCUS_INSET } from '@/components/console/tokens'
 interface RealtimeStatusData {
   triggeredTables: string[]
   onlineUsers: number
-  channel: string
 }
 
 interface LiveEvent {
@@ -671,15 +670,6 @@ export function RealtimeWorkbench({ projectId }: { projectId: string }) {
                 </section>
               )}
 
-              {status?.channel && (
-                <section className="border-t border-white/[0.06] px-4 py-4">
-                  <h3 className="text-[13px] font-medium text-zinc-200">Postgres channel</h3>
-                  <p className="mb-2 mt-0.5 text-[12.5px] leading-[19px] text-faint">
-                    Changes are published with NOTIFY on this channel.
-                  </p>
-                  <CopyField value={status.channel} />
-                </section>
-              )}
             </div>
           </div>
         </div>
