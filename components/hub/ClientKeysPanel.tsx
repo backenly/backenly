@@ -312,7 +312,11 @@ export function ClientKeysPanel() {
                       {formatDate(key.createdAt)}
                     </td>
                     <td className="whitespace-nowrap px-4 py-3 align-middle text-[13px] tabular-nums">
-                      {key.expiresAt ? (
+                      {key.branch && key.branch.status !== 'active' ? (
+                        // Its branch was merged or discarded, and the key with
+                        // it: no date to wait for, it never answers again.
+                        <span className="text-faint">Ended with branch</span>
+                      ) : key.expiresAt ? (
                         // The runtime refuses the key past this date; a key
                         // that will die deserves a visible date, not a silent
                         // birthday. Amber once it is under 30 days out.
