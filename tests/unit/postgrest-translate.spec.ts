@@ -432,3 +432,40 @@ describe('toApiError — which errors are about the values sent', () => {
     expect(toApiError(400, { code: '42703', message: 'm' }).status).toBe(400)
   })
 })
+
+/**
+ * Production QA (2026-11-09): a 20,000-row batch to /api/v2 came back
+ * `400 REQUEST_FAILED, "Request could not be completed"`, and the reason was
+ * only in the runtime's log. stripUpstreamError forwarded a short list of
+ * codes and replaced every other 4xx with that sentence, PostgREST's own
+ * request errors included: rows whose keys differ (PGRST102), a column the
+ * table does not have (PGRST204), the project's own RAISE EXCEPTION (P0001).
+ * Each describes the request the caller made.
+ */
+describe('stripUpstreamError — errors about the request the caller made', () => {
+  const forwarded = (status: number, body: Record<string, unknown>) => stripUpstreamError(status, body)
+
+  it('keeps PostgREST’s reason for a request it refused', () => {
+    const out = forwarded(400, { code: 'PGRST102', message: 'All object keys must match', details: null, hint: null })
+    expect(out).toEqual({ status: 400, body: { code: 'PGRST102', message: 'All object keys must match', details: null, hint: null } })
+    expect(forwarded(400, { code: 'PGRST122', message: 'Invalid preferences given with handling=strict' }).body.code).toBe('PGRST122')
+  })
+
+  it('keeps an unknown column on a write, the v2 form of 42703', () => {
+    const out = forwarded(400, { code: 'PGRST204', message: "Could not find the 'colour' column of 'products' in the schema cache" })
+    expect(out.body).toMatchObject({ code: 'PGRST204', message: expect.stringContaining("'colour' column") })
+  })
+
+  it('keeps the project’s own RAISE EXCEPTION text', () => {
+    const out = forwarded(400, { code: 'P0001', message: 'Orders over 500 need approval' })
+    expect(out.body).toMatchObject({ code: 'P0001', message: 'Orders over 500 need approval' })
+  })
+
+  it('still hides the schema list and anything it does not recognise', () => {
+    expect(JSON.stringify(forwarded(406, { code: 'PGRST106', message: 'Only the following schemas are exposed: workspace_b' }).body)).not.toMatch(/workspace_/)
+    expect(forwarded(400, { code: 'XX000', message: 'internal error at 10.0.0.4' }).body).toEqual({
+      code: 'REQUEST_FAILED',
+      message: 'Request could not be completed',
+    })
+  })
+})
