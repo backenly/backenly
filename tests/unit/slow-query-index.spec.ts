@@ -131,3 +131,45 @@ describe('extractIndexCandidate — refuses to guess', () => {
     expect(extractIndexCandidate(q, 'workspace.abc')).toBeNull()
   })
 })
+
+/**
+ * Statements that do not quote their names, or name no schema at all.
+ *
+ * A function's code and a direct connection read through a search path set to
+ * the project's schema, so their statements say `FROM orders WHERE status = $1`.
+ * The sensor read only `"<schema>"."<table>"` and `"column"`, and never saw them
+ * (production QA, 2026-11-09). An unqualified table counts only for a statement
+ * the project's own role ran, and only when the schema has that table.
+ */
+describe('extractIndexCandidate — names written without quotes', () => {
+  const tables = new Set(['orders', 'users'])
+
+  it('reads an unquoted table after the quoted schema, and an unquoted column', () => {
+    expect(extractIndexCandidate(`SELECT * FROM "${SCHEMA}".orders WHERE status = $1`, SCHEMA)).toEqual({ table: 'orders', column: 'status' })
+    expect(extractIndexCandidate(`SELECT * FROM "${SCHEMA}"."orders" WHERE status IN ($1, $2)`, SCHEMA)).toEqual({ table: 'orders', column: 'status' })
+  })
+
+  it('folds unquoted names to lower case, as PostgreSQL does, and keeps quoted ones', () => {
+    expect(extractIndexCandidate(`SELECT * FROM Orders WHERE Customer_Email = $1`, SCHEMA, { tables })).toEqual({ table: 'orders', column: 'customer_email' })
+    expect(extractIndexCandidate(`SELECT * FROM "${SCHEMA}"."orders" WHERE "Status" = $1`, SCHEMA)).toEqual({ table: 'orders', column: 'Status' })
+  })
+
+  it('reads an unqualified table only for a statement the project ran, and only a table the schema has', () => {
+    const q = `SELECT * FROM orders WHERE customer_email = $1`
+    expect(extractIndexCandidate(q, SCHEMA)).toBeNull()
+    expect(extractIndexCandidate(q, SCHEMA, { tables })).toEqual({ table: 'orders', column: 'customer_email' })
+    expect(extractIndexCandidate(`SELECT * FROM invoices WHERE total = $1`, SCHEMA, { tables })).toBeNull()
+  })
+
+  it('never reads another schema\'s table as this one, or part of a name as a name', () => {
+    expect(extractIndexCandidate(`SELECT * FROM other.orders WHERE status = $1`, SCHEMA, { tables })).toBeNull()
+    expect(extractIndexCandidate(`SELECT * FROM "other"."orders" WHERE status = $1`, SCHEMA, { tables })).toBeNull()
+    expect(extractIndexCandidate(`SELECT * FROM ordersx WHERE status = $1`, SCHEMA, { tables })).toBeNull()
+  })
+
+  it('still refuses a filter on a joined table, and a keyword', () => {
+    expect(extractIndexCandidate(`SELECT * FROM orders JOIN users ON true WHERE users.email = $1`, SCHEMA, { tables })).toBeNull()
+    expect(extractIndexCandidate(`SELECT * FROM orders WHERE status NOT IN ($1)`, SCHEMA, { tables })).toBeNull()
+    expect(extractIndexCandidate(`SELECT * FROM orders WHERE total >= $1`, SCHEMA, { tables })).toBeNull()
+  })
+})
