@@ -45,6 +45,7 @@ import { runAgenticFixLoop } from '@/lib/ai/agentic-fix-loop'
 import { getBlueprintForPrompt } from '@/lib/ai/blueprints'
 import type { Blueprint, BlueprintStep } from '@/lib/ai/blueprints/types'
 import { loadPendingPlan, loadResumeQueue, savePendingPlan, saveResumeQueue } from '@/lib/ai/blueprints/store'
+import { loadLoopResume, saveLoopResume } from '@/lib/ai/brain/loop-resume'
 import { thisMonth } from '@/lib/entitlements/policy'
 import { executeRun } from '@/lib/mcp/chat-turn'
 import { classified, setUpBrainProject } from '../helpers/brain-harness'
@@ -160,6 +161,20 @@ describe('a confirmed build', () => {
     expect(body).toMatchObject({ ok: false, code: 'AI_CREDITS_EXHAUSTED' })
     expect(body.summary).toContain('Nothing was built: the remaining steps need up to 2 AI credits, and this account has 1 left this month.')
     expect(await loadResumeQueue(brain.projectId)).not.toBeNull()
+  }, 60_000)
+
+  it('keeps the resume point when a "continue" designs the request again and its price cannot be held', async () => {
+    await alreadySpent(2_000) // 8 of 10 credits left; the plan costs 51
+    await saveLoopResume(brain.projectId, 'a notes app', [], 'step_budget', true)
+    architect.mockResolvedValueOnce({ blueprint: plan([notes]), match, architectTokens: ARCHITECT })
+
+    const { body } = await say('continue')
+
+    expect(await brain.tableExists('notes')).toBe(false)
+    expect(await charged()).toBe(2_000)
+    expect(body).toMatchObject({ ok: false, code: 'AI_CREDITS_EXHAUSTED' })
+    // Nothing ran, so "continue" designs it again once there are credits for it.
+    expect(await loadLoopResume(brain.projectId)).toMatchObject({ request: 'a notes app', architectFailed: true })
   }, 60_000)
 })
 

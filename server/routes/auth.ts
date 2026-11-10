@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express'
+import rateLimit from 'express-rate-limit'
 import { clientIpFromNodeRequest } from '@/lib/security/client-ip'
 import { prisma } from '@/lib/db'
 import { workspaceRawClient } from '@/lib/data-plane/regional'
@@ -10,6 +11,7 @@ import { sendError, sendSuccess, ErrorCodes } from '../lib/response'
 import {
   refreshEndUserToken,
   logoutEndUser,
+  currentEndUser,
   forgotEndUserPassword,
   resetEndUserPassword,
   requestEmailVerification,
@@ -41,6 +43,7 @@ import { admitExistenceCheck, admitSignupRequest } from '@/lib/security/end-user
 import { isPlatformProbe } from '@/lib/security/platform-probe'
 import { throttleDecision } from '@/lib/security/rate-limit-decision'
 import { AUTH_LIMITS, consume, type RateLimitResult } from '@/lib/security/auth-rate-limit'
+import { platformLimiterStore } from '@/lib/security/shared-key-rate'
 import {
   RESET_PAGE_HEADERS,
   resetPasswordPage,
@@ -510,6 +513,47 @@ async function handleLogout(req: Request, res: Response) {
   res.status(result.status).json(result.body)
 }
 
+/**
+ * Reads of /auth/me from one address, per project (AUTH_LIMITS.endUserMe), in
+ * the platform's shared store so every runtime process counts the same
+ * window. The address is lib/security/client-ip.ts's, never req.ip.
+ */
+const meReadsFromAnAddress = rateLimit({
+  windowMs: AUTH_LIMITS.endUserMe.ip.windowMs,
+  limit: AUTH_LIMITS.endUserMe.ip.limit,
+  keyGenerator: (req) => `end-user-me:${req.params.projectId}:${ipFrom(req)}`,
+  store: platformLimiterStore(AUTH_LIMITS.endUserMe.ip.limit, AUTH_LIMITS.endUserMe.ip.windowMs),
+  standardHeaders: false,
+  legacyHeaders: false,
+  validate: { ip: false, trustProxy: false, xForwardedForHeader: false },
+  handler: (req, res) => {
+    const resetAt = (req as Request & { rateLimit?: { resetTime?: Date } }).rateLimit?.resetTime?.getTime()
+      ?? Date.now() + AUTH_LIMITS.endUserMe.ip.windowMs
+    sendThrottled(res, {
+      allowed: false,
+      outcome: 'limit_exceeded',
+      remaining: 0,
+      resetAt,
+      retryAfter: Math.max(1, Math.ceil((resetAt - Date.now()) / 1000)),
+    })
+  },
+})
+
+/**
+ * GET /api/v1/:projectId/auth/me
+ * The signed-in end user. The token is read from Authorization (Bearer) or
+ * X-User-Token, the header the SDK sends it in. Mounted before the OAuth
+ * router, whose /auth/:provider used to answer this path with a 404.
+ */
+async function handleMe(req: Request, res: Response) {
+  const env = await authEnvironment(req, res)
+  if (!env) return
+  const header = req.headers['x-user-token']
+  const token = tokenFrom(req) ?? (typeof header === 'string' && header ? header : null)
+  const result = await currentEndUser(req.params.projectId, token, env)
+  res.status(result.status).json(result.body)
+}
+
 async function handleForgotPassword(req: Request, res: Response) {
   const { projectId } = req.params
   // IP rate limit — this endpoint can trigger emails, so it needs its own
@@ -680,6 +724,7 @@ router.post('/:projectId/auth/signup', asyncRoute(handleSignUp))
 router.post('/:projectId/auth/signin', asyncRoute(handleSignIn))
 router.post('/:projectId/auth/refresh-token', asyncRoute(handleRefreshToken))
 router.post('/:projectId/auth/logout', asyncRoute(handleLogout))
+router.get('/:projectId/auth/me', asyncRoute(meReadsFromAnAddress), asyncRoute(handleMe))
 router.post('/:projectId/auth/verify-email', asyncRoute(handleVerifyEmail))
 router.get('/:projectId/auth/verify-email', asyncRoute(handleVerifyEmailPage))
 router.post('/:projectId/auth/resend-verification', asyncRoute(handleResendVerification))

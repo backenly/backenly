@@ -3,9 +3,10 @@
  * ============================================
  *
  * Creating a table registers, as AiFunction rows, the endpoints that
- * lib/ai/build-runtime/domain-business-logic.ts writes for it: a validation
- * schema for every table, and more for a recognised kind of table (jobs,
- * wallets, subscriptions, users). They are served at /fn/<name> and read the
+ * lib/ai/build-runtime/domain-business-logic.ts writes for a recognised kind
+ * of table (jobs, wallets, subscriptions, users). Tables built before
+ * 2026-11-11 also got a validation schema endpoint, `<table>-schema`, which is
+ * still recognised as generated but no longer registered. They are served at /fn/<name> and read the
  * table, so they follow it. GENERATE_API registers them. A restore that removes
  * the table removes them and keeps them exactly as they were, and only undoing
  * that restore puts them back (lib/changes/recovery.ts).
@@ -27,7 +28,7 @@ export type GeneratedRoutes = Map<string, Set<string>>
 export function generatedEndpointRoutes(projectId: string, tables: string[]): GeneratedRoutes {
   const routes: GeneratedRoutes = new Map()
   for (const table of tables) {
-    for (const ep of generateDomainEndpoints(table, projectId, tables)) {
+    for (const ep of generateDomainEndpoints(table, projectId, tables, { includeSchemaEndpoint: true })) {
       const known = routes.get(ep.name) ?? new Set<string>()
       routes.set(ep.name, known.add(routeOf(projectId, ep)))
     }
@@ -138,11 +139,11 @@ export async function generatedEndpointsOf(projectId: string, removed: string[],
   if (removed.length === 0) return []
   const allTables = [...new Set([...removed, ...remaining])]
   const stillGenerated = new Set(
-    remaining.flatMap((t) => generateDomainEndpoints(t, projectId, allTables).map((ep) => ep.name)),
+    remaining.flatMap((t) => generateDomainEndpoints(t, projectId, allTables, { includeSchemaEndpoint: true }).map((ep) => ep.name)),
   )
   const routes = new Map<string, string>()
   for (const t of removed) {
-    for (const ep of generateDomainEndpoints(t, projectId, allTables)) {
+    for (const ep of generateDomainEndpoints(t, projectId, allTables, { includeSchemaEndpoint: true })) {
       if (!stillGenerated.has(ep.name)) routes.set(ep.name, routeOf(projectId, ep))
     }
   }

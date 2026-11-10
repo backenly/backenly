@@ -1,10 +1,11 @@
 /**
  * END-USER AUTH FLOWS — shared kernel
  * ====================================
- * Framework-free implementations of the four "session lifecycle" auth flows:
+ * Framework-free implementations of the "session lifecycle" auth flows:
  *
  *   refreshEndUserToken   POST /auth/refresh-token
  *   logoutEndUser         POST /auth/logout
+ *   currentEndUser        GET  /auth/me
  *   forgotEndUserPassword POST /auth/forgot-password
  *   resetEndUserPassword  POST /auth/reset-password
  *
@@ -40,6 +41,7 @@ import {
   crossEnvironmentToken,
   type AuthEnvironment,
 } from '@/lib/branches/auth-environment'
+import { resolveEndUserFromToken } from '@/server/lib/end-user-identity'
 import jwt from 'jsonwebtoken'
 import crypto from 'crypto'
 
@@ -255,6 +257,70 @@ export async function logoutEndUser(
     }
     // Logout should never fail from the client's perspective
     return ok({ message: 'Logged out successfully.' })
+  }
+}
+
+/**
+ * GET /auth/me
+ * The signed-in end user: { data: { user: { id, email, name, role } } }.
+ *
+ * There was no such endpoint: the path fell through to the OAuth route and
+ * answered 404 'Provider "me" is not supported'. The token is checked the way
+ * every data request checks it (server/lib/end-user-identity.ts): signed for
+ * this project and environment, not revoked by /auth/logout, its user not
+ * blocked. The user is then read from the users table, so the answer is the
+ * account as it is now, not as the token remembers it.
+ */
+export async function currentEndUser(
+  projectId: string,
+  rawToken: string | null,
+  env: AuthEnvironment = mainAuthEnvironment(projectId),
+): Promise<AuthFlowResult> {
+  try {
+    const project = await authorizingProject(projectId)
+    if (!project) return err('NOT_FOUND', 'Project not found', 404)
+    if (!rawToken) {
+      return err(
+        'UNAUTHORIZED',
+        'Not signed in. Pass the token sign-in returned in the Authorization header (Bearer <token>).',
+        401,
+      )
+    }
+
+    const identity = await resolveEndUserFromToken(
+      projectId,
+      rawToken,
+      env.branch ? { ...env.branch, schemaName: env.schemaName } : null,
+    )
+    if (identity === 'blocked') return err('FORBIDDEN', 'This account has been suspended.', 403)
+    if (!identity) {
+      const other = project.jwtSecret ? crossEnvironmentToken(rawToken, resolveJwtSecret(project.jwtSecret), env.branch) : null
+      return other ? err(other.code, other.error, 401) : err('UNAUTHORIZED', 'Invalid token. Please sign in again.', 401)
+    }
+
+    // Only the columns this users table has, read as the service role: the
+    // table is FORCE RLS, as refreshEndUserToken explains.
+    const schema = await introspectAuthUsersTable(projectId, env.schemaName)
+    const selectCols = ['id', 'email']
+    if (schema.hasName) selectCols.push('name')
+    if (schema.hasRole) selectCols.push('role')
+    const users = await executeWithUserContext<any>(
+      projectId,
+      '',
+      true,
+      `SELECT ${selectCols.map(c => `"${c}"`).join(', ')} FROM "${env.schemaName}"."users" WHERE id = $1${userIdCast(schema)} LIMIT 1`,
+      [identity.userId],
+    )
+    const user = users[0]
+    if (!user) return err('UNAUTHORIZED', 'User not found. Please sign in again.', 401)
+
+    return ok({ user: { id: user.id, email: user.email, name: user.name ?? null, role: user.role ?? 'user' } })
+  } catch (error: any) {
+    console.error('Current user error:', error?.message ?? error)
+    if (isRegionError(error)) {
+      return err(error.code, 'The signed-in user could not be read: this project\'s data region is not reachable from this server.', 503)
+    }
+    return err('INTERNAL_ERROR', 'Failed to read the signed-in user', 500)
   }
 }
 

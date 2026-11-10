@@ -27,6 +27,8 @@ Call as `functions { action: "<action>", … }`.
 | `delete_schedule` | remove a scheduled job | nothing | no | waits for a human |
 <!-- end generated -->
 
+`delete` waits for a human only when the function ran in the last 7 days. A function that is switched off, or has not run in that time, is deleted at once: History keeps it, and restoring the change brings it back.
+
 ## The two runtime contracts
 
 Which one a function uses is set by its trigger.
@@ -44,7 +46,7 @@ export async function POST(request: Request) {
 }
 ```
 
-It may import only `next/server`, `@/lib/db` (a `prisma` whose raw SQL runs in this project's schema, and `asService`), `@/lib/auth/jwt` (`verifyToken`, for this project's end-user tokens, and `isAdminRequest`), `crypto`, `bcryptjs` and `jsonwebtoken`. Its SQL logs in as the project's own database role: it reads and writes this project's tables, row-level security applies to the caller the request carries, and PostgreSQL refuses anything outside the project (Backenly's own tables, other projects). `process.env` holds this project's variables (set with `connect { action: "set_env" }`) and `NODE_ENV`: none of Backenly's own configuration, and never the project's signing secret or admin key. Code that reads `JWT_SECRET`, `ADMIN_API_KEY` or `AI_EXECUTION_TOKEN` is refused. Export one handler per HTTP method; when a module exports several, pass `method`.
+It may import only `next/server`, `@/lib/db` (a `prisma` whose raw SQL runs in this project's schema, and `asService`), `@/lib/auth/jwt` (`verifyToken`, for this project's end-user tokens, and `isAdminRequest`), `crypto`, `bcryptjs` and `jsonwebtoken`. Its SQL logs in as the project's own database role: it reads and writes this project's tables, row-level security applies to the caller the request carries, and PostgreSQL refuses anything outside the project (Backenly's own tables, other projects). `process.env` holds this project's variables (set with `connect { action: "set_env" }`, read as `process.env.KEY`) and `NODE_ENV`: none of Backenly's own configuration, and never the project's signing secret or admin key. Code that reads `JWT_SECRET`, `ADMIN_API_KEY` or `AI_EXECUTION_TOKEN` is refused. Export one handler per HTTP method; when a module exports several, pass `method`.
 
 - An admin-only endpoint checks the project's admin key (Functions page, Copy admin key) without holding it: `if (!isAdminRequest(request)) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })`. The key is sent as `x-admin-key`.
 - Work the caller may not do themselves, such as a checkout that creates the order and takes stock the shopper cannot update, runs in `await asService(async (db) => { … })`: one transaction, as the service role, so row-level security does not apply to its SQL. It still reaches only this project's tables. Check who is calling before you use it; the run's logs record each use.
@@ -57,6 +59,12 @@ ctx.log('paid orders', rows.length)
 await ctx.integrations.email.send({ to: event.data.email, subject: 'Thanks', html: '<p>Paid.</p>' })
 return { count: rows.length }
 ```
+
+What `event` holds depends on the trigger:
+
+- a row trigger: `{ type, table, data, old }`. `type` is `"insert"`, `"update"` or `"delete"`; `data` is the row as written, or the deleted row for a delete; `old` is the row before an update, and is absent for inserts and deletes.
+- `on_signup`: `{ type: "signup", data: { id, email, name } }`, the new end user.
+- a schedule: `{ type: "cron", data: { scheduledAt, timestamp } }`, the ISO time it was due and the same time in milliseconds.
 
 - `ctx.db.query(table, where?, { limit, offset, orderBy }?)`, `ctx.db.insert(table, row)`, `ctx.db.update(table, where, patch)`, `ctx.db.delete(table, where)`: this project's tables only; update and delete need a non-empty `where`. `where` matches by equality: every key equals its value, ANDed, with no ranges or patterns. `query` returns at most `limit` rows (default 100, at most 1000), in no particular order unless you pass `orderBy`, such as `{ id: 'asc' }`. To act on every matching row, page with `offset` under one fixed `orderBy` and collect the ids first.
 - `ctx.http.get(url, headers?)`, `ctx.http.post(url, body, headers?)`: outbound requests through the egress guard, which refuses private and metadata addresses.

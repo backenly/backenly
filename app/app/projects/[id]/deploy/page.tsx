@@ -35,6 +35,7 @@ import {
 } from '@/components/inspector/kit'
 import { EDGE, FOCUS, PAGE_GUTTER, PAGE_WIDTH, RULE } from '@/components/console/tokens'
 import { useAgentConnection } from '@/lib/hooks/useAgentConnection'
+import { readinessHeadline } from '@/components/deploy/readiness-headline'
 
 type ProjectStatus = 'PRIVATE' | 'DEPLOYING' | 'LIVE' | 'FAILED'
 
@@ -309,7 +310,8 @@ export default function PublishPage() {
   // that wider set meant the button led straight to a refusal.
   const publishable = registeredTableCount > 0 || apiResourceCount > 0 || hasAuth
 
-  const passingChecks = readinessChecks.filter(c => c.status === 'pass').length
+  // Blockers, failing warnings and the checks that ran, counted honestly.
+  const headline = readinessHeadline(readinessChecks)
   const blockingChecks = readinessChecks.filter(c => c.status === 'fail' && c.severity === 'blocking')
   const warningChecks = readinessChecks.filter(c => c.status === 'fail' && c.severity !== 'blocking')
   // What "Apply safe fixes" would change: failing checks the engine can fix.
@@ -368,13 +370,7 @@ export default function PublishPage() {
               {title}
             </span>
           }
-          actions={
-            blockingChecks.length === 0 ? (
-              <StatusDot tone="operational" label={`${passingChecks} of ${readinessChecks.length} passing`} />
-            ) : (
-              <StatusDot tone="attention" label={`${blockingChecks.length} to clear`} />
-            )
-          }
+          actions={<StatusDot tone={headline.tone} label={headline.label} />}
         />
         <ul className="space-y-2.5 px-4 py-3.5">
           {visibleChecks.map(check => (

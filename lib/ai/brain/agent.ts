@@ -67,6 +67,15 @@ import {
   designInProgress,
 } from '../blueprints/store'
 import { GATED_SCHEMA_TOOLS, isProductionProtected } from '@/lib/branches/protection'
+import {
+  AFTER_MERGE_TOOLS,
+  BuildBranch,
+  clearAfterMerge,
+  loadAfterMerge,
+  mergeStateOf,
+  saveAfterMerge,
+  type AfterMergeQueue,
+} from '@/lib/branches/build-branch'
 import { CONTINUE, GO_AHEAD_LATER, type NextCall } from './next-call'
 import type { Blueprint, BlueprintMatch, BlueprintStep } from '../blueprints/types'
 import {
@@ -80,7 +89,7 @@ import {
 import { createSeedContext, runSeedStep, type SeedTableResult } from '../blueprints/seed-runner'
 import type { FixLoopResult } from '../agentic-fix-loop'
 import { recordToolExecutionMemory, type BackendEventStatus } from '@/lib/operational-memory/ledger'
-import { needsApproval } from '@/lib/mcp/domains'
+import { approvalNeededFor, needsApproval } from '@/lib/mcp/domains'
 import type { DataMigrationEstimate } from '@/lib/execution/data-migration'
 import { redactArgs } from './redact'
 import { currentPageContext, isAgentDoor, type BrainDoor } from './input-context'
@@ -318,6 +327,14 @@ export interface BrainResult {
   next?: NextCall
   /** Set while the architect is still designing: nothing ran, and `next` collects the design. */
   inProgress?: 'designing'
+  /**
+   * On a protected production: what this turn built on its preview branch
+   * (`statements`, the SQL a merge replays) and what it saved to run on
+   * production after the merge (`afterMerge`). Nothing here is on production
+   * yet; `applied` lists only what is. A turn that built anything also returns
+   * the one merge_branch call a person approves, in `blockedCalls`.
+   */
+  branchBuild?: { branchId: string; branch: string; statements: string[]; afterMerge: string[] }
 }
 
 export type BrainFailureCode =
@@ -594,7 +611,10 @@ async function runTurn(
   emit({ type: 'phase', phase: 'classify' })
   const [hasPendingProposal, hasResumeQueue, hasPendingBlueprint, loopResume, designing] = await Promise.all([
     hasActiveProposal(input.projectId),
-    loadResumeQueue(input.projectId).then(q => q !== null).catch(() => false),
+    // Steps saved for after a merge are a queue "continue" picks up, like a resume queue.
+    Promise.all([loadResumeQueue(input.projectId), loadAfterMerge(input.projectId)])
+      .then(([q, a]) => q !== null || a !== null)
+      .catch(() => false),
     loadPendingPlan(input.projectId).then(p => p !== null).catch(() => false),
     loadLoopResume(input.projectId).catch(() => null),
     designInProgress(input.projectId).catch(() => false),
@@ -701,14 +721,15 @@ async function runTurn(
     return await singleToolTurn('answer_question', { question: input.message }, dispatchCtx, classification, emit, input)
   }
 
-  // ── Protected production: tables are built on a branch ────────────────────
-  // The gate refuses every table an agent's turn would create on main
-  // (lib/branches/protection.ts). A plan run here is a refusal per table, a
-  // failure for every step on those tables, and a resume queue "continue" can
-  // only refuse again, so no plan is designed or run for a protected project:
-  // the turn says how the schema reaches it instead (branchBuildTurn).
+  // ── Protected production: the schema is built on a preview branch ─────────
+  // The gate refuses every schema change an agent makes on main
+  // (lib/branches/protection.ts). backend_chat used to stop there and hand the
+  // coding agent a plan to carry out itself, so on Cloud, where protection is
+  // the default, the builder only planned (production QA 2026-11-09, report
+  // 97). Now this turn builds the schema on a preview branch and asks a person
+  // once, with one merge of it (lib/branches/build-branch.ts).
   const schemaOnBranch = dispatchCtx.agentSurface === true && (await isProductionProtected(input.projectId).catch(() => false))
-  const plansSchema = (steps: BlueprintStep[]) => steps.some((s) => GATED_SCHEMA_TOOLS.has(s.tool))
+  if (schemaOnBranch) dispatchCtx.buildBranch = new BuildBranch(input.projectId, input.userId ?? '', input.message)
 
   // UNCLEAR → ask one clarifying question, never build anything.
   if (classification.intent === 'UNCLEAR') {
@@ -727,7 +748,6 @@ async function runTurn(
         confidence: classification.confidence,
         reasoning: 'fresh project + product description — routed to architect (classifier hedged UNCLEAR)',
       }
-      if (schemaOnBranch) return await branchBuildTurn(curatedTables(input.message), buildClass, emit, input)
       if (designing) return stillDesigningTurn(buildClass, emit)
       const resolved = await resolveBlueprintWithHeartbeat(input.message, input.projectId, emit)
       if (resolved && 'vague' in resolved && resolved.vague) {
@@ -756,15 +776,15 @@ async function runTurn(
   //
   // Either way "go ahead" runs every step deterministically — no LLM
   // re-derivation, no partial coverage, no run_test → fix_backend loop.
+  let architectFailedThisTurn = false
   if (classification.intent === 'BUILD' || classification.intent === 'APPLY_PROPOSAL') {
     if (isFreshProject) {
-      if (schemaOnBranch) {
-        console.log(`[Brain] route=BRANCH_REQUIRED (protected production, fresh build)`)
-        return await branchBuildTurn(curatedTables(input.message), classification, emit, input)
-      }
       // A design already running for this project answers this build too.
       if (designing) return stillDesigningTurn(classification, emit)
       const resolved = await resolveBlueprintWithHeartbeat(input.message, input.projectId, emit)
+      // No design: the loop takes the build, and if it stops unfinished the
+      // marker it saves says so, so "continue" designs it again.
+      if (!resolved) architectFailedThisTurn = true
       if (resolved && 'vague' in resolved && resolved.vague) {
         console.log(`[Brain] route=ARCHITECT_VAGUE — surfacing clarifying question`)
         return await singleToolTurn('ask_user', { question: resolved.askUser, options: [] }, dispatchCtx, classification, emit, input)
@@ -787,7 +807,7 @@ async function runTurn(
   if (classification.intent === 'CONFIRM') {
     const pending = await loadPendingPlan(input.projectId).catch(() => null)
     if (pending) {
-      if (schemaOnBranch && plansSchema(pending.steps)) return await branchBuildTurn(tablesOf(pending.steps), classification, emit, input)
+      dispatchCtx.buildBranch?.nameAfter(pending.title || pending.blueprintDomain)
       console.log(`[Brain] route=BLUEPRINT_EXECUTE domain=${pending.blueprintDomain} steps=${pending.steps.length} architectTokens=${pending.architectTokens}`)
       return await blueprintExecuteTurn(pending.steps, pending.architectTokens, dispatchCtx, classification, emit, input, clock, pending.blueprintDomain, pending.ledger)
     }
@@ -801,17 +821,62 @@ async function runTurn(
     // / "resume" all route here so the user never gets dropped into a
     // confused LLM loop after a partial build. No architect tokens to bill
     // — those were charged on the original proposal/execute pair.
+    // Steps saved for after a merge of this project's build branch run once
+    // that merge has reached production.
+    const afterMerge = await loadAfterMerge(input.projectId).catch(() => null)
+    if (afterMerge) {
+      const where = await mergeStateOf(input.projectId, afterMerge.branchId).catch(() => null)
+      if (where?.state === 'merged') {
+        await clearAfterMerge(input.projectId)
+        console.log(`[Brain] route=AFTER_MERGE branch=${afterMerge.branch} steps=${afterMerge.steps.length}`)
+        return await blueprintExecuteTurn(afterMerge.steps, 0, dispatchCtx, classification, emit, input, clock, 'after-merge', undefined, true)
+      }
+      if (where && where.state !== 'gone') return await mergeNotLandedTurn(afterMerge, where, classification, emit, input)
+      await clearAfterMerge(input.projectId)
+    }
+
     const resume = await loadResumeQueue(input.projectId).catch(() => null)
     if (resume) {
-      if (schemaOnBranch && plansSchema(resume.steps)) return await branchBuildTurn(tablesOf(resume.steps), classification, emit, input)
+      dispatchCtx.buildBranch?.nameAfter(resume.domain)
       console.log(`[Brain] route=BLUEPRINT_RESUME domain=${resume.domain} steps=${resume.steps.length}`)
       return await blueprintExecuteTurn(resume.steps, 0, dispatchCtx, classification, emit, input, clock, resume.domain, undefined, true)
     }
 
-    // A loop turn that stopped unfinished saved where it was. Resume the agent
-    // loop on that request with what already landed, rather than searching the
-    // history for a prompt that looks like one.
+    // A loop turn that stopped unfinished saved where it was, so "continue"
+    // works from the saved request rather than the history search below.
+    // When the architect had failed on that request, design it again first:
+    // the loop cannot finish a whole backend, the plan can. If the architect
+    // fails again, resume the loop with what already landed. On a protected
+    // production either one builds on a preview branch named after the request.
     if (loopResume) {
+      if (loopResume.architectFailed && loopResume.request) {
+        dispatchCtx.buildBranch?.nameAfter(loopResume.request)
+        const resolved = await resolveBlueprintWithHeartbeat(loopResume.request, input.projectId, emit)
+        if (resolved && 'blueprint' in resolved) {
+          console.log(
+            `[Brain] route=LOOP_RESUME_REARCHITECT domain=${resolved.blueprint.domain} ` +
+            `steps=${resolved.blueprint.steps.length} architectTokens=${resolved.architectTokens}`,
+          )
+          const ran = await blueprintExecuteTurn(
+            resolved.blueprint.steps,
+            resolved.architectTokens,
+            dispatchCtx,
+            classification,
+            emit,
+            input,
+            clock,
+            resolved.blueprint.domain,
+            extractRequirements(loopResume.request),
+          )
+          // Once a step ran, the plan has taken over from the marker (steps that
+          // failed are its resume queue), so a later "yes" must not design and
+          // run it again. A plan whose price could not be held ran nothing, and
+          // keeps the marker so "continue" designs it again.
+          if (ran.toolsRun.length > 0) await clearLoopResume(input.projectId)
+          return ran
+        }
+        console.log('[Brain] architect failed again on the saved request; resuming the loop')
+      }
       console.log(`[Brain] route=LOOP_RESUME applied=${loopResume.applied.length} reason="${loopResume.reason}"`)
       return await runAgentLoop(input, classification, memory.summary, understandingBlock, recent, dispatchCtx, emit, toolsRun, clock, loopResume)
     }
@@ -837,7 +902,7 @@ async function runTurn(
     // the project is still empty and the original ask was a substantial build.
     const originalBuild = findOriginalBuildPrompt(memory.history)
     if (originalBuild && (isExplicitSpec(originalBuild) || (isFreshProject && originalBuild.length > 200))) {
-      if (schemaOnBranch) return await branchBuildTurn(curatedTables(originalBuild), classification, emit, input)
+      dispatchCtx.buildBranch?.nameAfter(originalBuild)
       const resolved = await resolveBlueprintWithHeartbeat(originalBuild, input.projectId, emit)
       if (resolved && 'blueprint' in resolved) {
         console.log(
@@ -868,7 +933,7 @@ async function runTurn(
   console.log(`[Brain] route=AGENT_LOOP intent=${classification.intent}`)
 
   // BUILD / MODIFY / FIX / QUESTION / DESTRUCTIVE / CONFIRM / APPLY_PROPOSAL → agent loop
-  return await runAgentLoop(input, classification, memory.summary, understandingBlock, recent, dispatchCtx, emit, toolsRun, clock)
+  return await runAgentLoop(input, classification, memory.summary, understandingBlock, recent, dispatchCtx, emit, toolsRun, clock, null, architectFailedThisTurn)
 }
 
 /**
@@ -1042,6 +1107,14 @@ async function blueprintExecuteTurn(
   const seedCtx = createSeedContext(input.projectId)
   /** Steps the turn's clock stopped before they started, in plan order. */
   let notStarted: BlueprintStep[] = []
+  /**
+   * On a protected production: steps saved to run after the merge, because
+   * their table is only on the preview branch this run builds the schema on.
+   */
+  const onBranch = ctx.buildBranch ?? null
+  const afterMerge: BlueprintStep[] = []
+  /** Labels of the steps that landed on the branch, not on production. */
+  const branchApplied: string[] = []
 
   for (const [i, step] of steps.entries()) {
     // Every step used to run whatever the time: the executor never read the
@@ -1050,6 +1123,19 @@ async function blueprintExecuteTurn(
     if (clock.stopped()) {
       notStarted = steps.slice(i)
       break
+    }
+
+    // A step on a table only the branch has (its API, row security, realtime,
+    // triggers, demo rows) runs on production once the merge brings the table
+    // there. Saved under the plan's own label; nothing ran, so nothing is billed.
+    if (
+      onBranch &&
+      AFTER_MERGE_TOOLS.has(step.tool) &&
+      (await onBranch.onlyOnBranch(String((step.args as { tableName?: string }).tableName ?? '')))
+    ) {
+      onBranch.defer({ label: step.label, tool: step.tool, args: step.args })
+      afterMerge.push(step)
+      continue
     }
     attemptedTools.push(step.tool)
 
@@ -1112,6 +1198,7 @@ async function blueprintExecuteTurn(
       if (result.ok || alreadyThere) {
         succeeded.push(alreadyThere ? `${step.label} (already there)` : step.label)
         succeededSteps.push(step)
+        if ((result.data as { onBranch?: boolean } | undefined)?.onBranch) branchApplied.push(step.label)
       } else {
         failed.push({ label: step.label, detail: result.summary.slice(0, 200), step })
       }
@@ -1153,6 +1240,21 @@ async function blueprintExecuteTurn(
     await clearResumeQueue(input.projectId).catch(() => {})
   }
 
+  // ── Built on a branch: one merge, and what waits for it ─────────────────
+  // A plan the clock stopped part-way keeps building on the same branch when
+  // "continue" runs the rest, and asks for the merge when it finishes, so the
+  // person is asked once for the whole plan; the resumed run that finishes it
+  // asks for everything on the branch, whatever it added itself.
+  const builtHere = (onBranch?.statements.length ?? 0) > 0
+  const inProgress = onBranch && (builtHere || resumed) ? await onBranch.buildInProgress().catch(() => null) : null
+  const branch = onBranch?.current ?? inProgress?.branch ?? null
+  const builtOnBranch = !!inProgress
+  const mergeNow = builtOnBranch && notStarted.length === 0
+  if (branch && onBranch && onBranch.afterMerge.length > 0) {
+    await saveAfterMerge(input.projectId, branch, onBranch.afterMerge)
+      .catch((err) => console.error('[Brain] could not save the steps for after the merge:', err))
+  }
+
   emit({ type: 'phase', phase: 'verify' })
 
   // ── Post-apply verification — run what we built, don't hope ─────────────
@@ -1167,7 +1269,13 @@ async function blueprintExecuteTurn(
   // between phases and before each fix when the signal fires.
   let verificationBlock = ''
   let ranFixLoop = false
-  if (succeededSteps.length > 0 && clock.stopped()) {
+  if (builtOnBranch) {
+    // The tables are on the branch, not production: a check of the live
+    // backend now would test what the merge has yet to bring.
+    verificationBlock = afterMerge.length > 0
+      ? '**Verification** · after the merge: "continue" runs the saved steps on production, then checks the live backend.'
+      : '**Verification** · after the merge, on production.'
+  } else if (succeededSteps.length > 0 && clock.stopped()) {
     verificationBlock = '**Verification** · not run: the time ran out first. Reply "continue" to finish the build, and it is verified then.'
   } else if (succeededSteps.length > 0) {
     ranFixLoop = true
@@ -1205,7 +1313,8 @@ async function blueprintExecuteTurn(
   }
 
   const finalProof = await collectProof(input.projectId).catch(() => null)
-  const stateBlock = finalProof && !finalProof.nothingBuilt ? formatProof(finalProof) : ''
+  // Production's state: on a branch build it has not changed yet, so it is not shown as the result.
+  const stateBlock = !builtOnBranch && finalProof && !finalProof.nothingBuilt ? formatProof(finalProof) : ''
 
   // ── Request coverage — reconcile what was ASKED against what EXISTS ─────
   // Ground truth: live proof for tables/auth/realtime/buckets, succeeded plan
@@ -1226,13 +1335,26 @@ async function blueprintExecuteTurn(
     coverageBlock = renderLedgerReport(reconcileLedger(ledger, applied), 'result')
   }
 
+  const branchHead = builtOnBranch
+    ? `**Built on preview branch "${branch!.name}".** ${branchApplied.length} step${branchApplied.length === 1 ? '' : 's'} applied there` +
+      (succeeded.length > branchApplied.length ? `, ${succeeded.length - branchApplied.length} on production` : '') +
+      (failed.length ? `, and ${failed.length} item${failed.length === 1 ? '' : 's'} need a follow-up` : '') +
+      (notStarted.length ? `; the time ran out before ${notStarted.length} more could start` : '') +
+      '. Production has none of the branch\'s changes until a person approves its merge.'
+    : null
+  const savedForMerge = afterMerge.length
+    ? ['', `**After the merge** · ${afterMerge.length}`, ...afterMerge.slice(0, 8).map((s, i) => `${i + 1}. ${s.label}`),
+       ...(afterMerge.length > 8 ? [`… and ${afterMerge.length - 8} more`] : [])]
+    : []
   const summary = [
-    notStarted.length > 0
+    branchHead ??
+    (notStarted.length > 0
       ? `**${succeeded.length} steps applied.** The time ran out before ${notStarted.length} more could start` +
         (failed.length ? `, and ${failed.length} item${failed.length === 1 ? '' : 's'} need a follow-up.` : '.')
       : failed.length === 0
         ? `**Backend built.** ${succeeded.length} steps applied.`
-        : `**${succeeded.length} steps applied.** ${failed.length} item${failed.length === 1 ? '' : 's'} need a follow-up.`,
+        : `**${succeeded.length} steps applied.** ${failed.length} item${failed.length === 1 ? '' : 's'} need a follow-up.`),
+    ...savedForMerge,
     ...(coverageBlock ? ['', coverageBlock] : []),
     ...(verificationBlock ? ['', verificationBlock] : []),
     '',
@@ -1241,7 +1363,14 @@ async function blueprintExecuteTurn(
       ? ['', `**Follow-ups pending** · ${failed.length}`, ...failed.slice(0, 8).map((f, i) => `${i + 1}. ${f.label}: ${f.detail}`)]
       : []),
     '',
-    notStarted.length > 0
+    mergeNow
+      ? `Its merge into production is requested for a person to approve. ` +
+        (afterMerge.length
+          ? `Once it is executed, say "continue" and the ${afterMerge.length} saved step${afterMerge.length === 1 ? '' : 's'} run on production.`
+          : 'Once it is executed, the change is on production.')
+      : builtOnBranch
+      ? `Reply "continue" to run the ${notStarted.length + failed.length} remaining step${notStarted.length + failed.length === 1 ? '' : 's'} on the same branch; its merge is requested when the plan finishes.`
+      : notStarted.length > 0
       ? `Reply "continue" to run the ${notStarted.length + failed.length} remaining step${notStarted.length + failed.length === 1 ? '' : 's'}.`
       : failed.length === 0
         ? 'Open the dashboard tabs to explore: Database, APIs, Storage, Realtime, Auth & Users. Reply with what you want to change next.'
@@ -1273,9 +1402,66 @@ async function blueprintExecuteTurn(
     verifiedInline: ranFixLoop,
     // Stopped by the clock: what landed and whether the state was read back,
     // as the agent loop reports its own budget stop, so backend_chat answers
-    // it as a partial result rather than a failure to retry.
-    ...(notStarted.length > 0 ? { budgetStopped: true, verified: !!finalProof, applied: succeeded } : {}),
-    ...(resumeSaved ? { next: CONTINUE } : {}),
+    // it as a partial result rather than a failure to retry. Only what is on
+    // production counts as applied.
+    ...(notStarted.length > 0
+      ? { budgetStopped: true, verified: !!finalProof, applied: succeeded.filter((l) => !branchApplied.includes(l)) }
+      : {}),
+    // On a branch build the next call is the person's: check_approval, then "continue".
+    ...(resumeSaved && !mergeNow ? { next: CONTINUE } : {}),
+    ...(mergeNow ? { blockedCalls: [mergeCall(branch!)] } : {}),
+    ...(branch && onBranch && (builtOnBranch || onBranch.afterMerge.length > 0)
+      ? { branchBuild: { branchId: branch.id, branch: branch.name, statements: [...onBranch.statements], afterMerge: onBranch.afterMerge.map((s) => s.label) } }
+      : {}),
+  }
+}
+
+/** The one merge a branch build asks a person for (lib/branches/merge-request.ts pins its statements). */
+function mergeCall(branch: { id: string; name: string }): BlockedCall {
+  return {
+    tool: 'merge_branch',
+    args: { branchId: branch.id },
+    target: `Merge preview branch "${branch.name}" into production`,
+    rowCount: null,
+    reversible: true,
+  }
+}
+
+/**
+ * "continue" while the merge the saved steps wait for has not reached
+ * production. Still waiting for a person: say so, and run nothing. Not
+ * waiting for anyone (rejected, expired, or refused when it was asked for):
+ * ask for it again, since its branch still holds the build.
+ */
+async function mergeNotLandedTurn(
+  queue: AfterMergeQueue,
+  where: { state: 'waiting'; approvalId: string } | { state: 'not_requested' },
+  classification: Classification,
+  emit: (e: BrainEvent) => void,
+  input: BrainInput,
+): Promise<BrainResult> {
+  const n = queue.steps.length
+  const saved = `${n} step${n === 1 ? '' : 's'} saved for after it`
+  const summary =
+    where.state === 'waiting'
+      ? `The merge of preview branch "${queue.branch}" into production is still waiting for a person's approval ` +
+        `(approval "${where.approvalId}"), so the ${saved} have not run. Poll check_approval with that id, and say ` +
+        `"continue" once it is executed.`
+      : `Preview branch "${queue.branch}" has not been merged, and no merge of it was waiting, so its merge is ` +
+        `requested again below. The ${saved} run once it is executed and you say "continue".`
+  emit({ type: 'phase', phase: 'finish' })
+  emit({ type: 'final', summary, needsUser: true })
+  await saveTurn(input.projectId, input.message, summary, input.requestId ?? null)
+  return {
+    success: where.state === 'not_requested',
+    summary,
+    needsUser: true,
+    iterations: 0,
+    toolsRun: [],
+    classification,
+    tokensUsed: 0,
+    applied: [],
+    ...(where.state === 'not_requested' ? { blockedCalls: [mergeCall({ id: queue.branchId, name: queue.branch })] } : {}),
   }
 }
 
@@ -1396,6 +1582,7 @@ async function runAgentLoop(
   toolsRun: string[],
   clock: TurnClock,
   resume: LoopResume | null = null,
+  architectFailedThisTurn = false,
 ): Promise<BrainResult> {
   const turnTools = toolsForIntent(classification.intent)
   const offeredTools = new Set(turnTools.map((t) => t.name))
@@ -1419,7 +1606,16 @@ async function runAgentLoop(
     (rolledSummary ? `EARLIER CONTEXT:\n${rolledSummary}\n\n` : '') +
     `INTENT CLASSIFICATION (advisory): ${classification.intent} (${classification.confidence.toFixed(2)}) — ${classification.reasoning}\n` +
     `${intentHint}\n` +
-    (schemaOnBranch
+    (ctx.buildBranch
+      ? `PRODUCTION IS PROTECTED on this project, so this turn builds its schema on a preview branch, and ` +
+        `production gets it through one merge a person approves, requested for you when the turn ends. ` +
+        `create_table, add_column, create_index, rename_column and add_constraint apply to that branch exactly as ` +
+        `declared: nothing is inferred from a column's name, so give each foreign key with fkTo and each unique ` +
+        `column unique: true. generate_api, add_rls, set_rls, enable_realtime and create_trigger on a table only the ` +
+        `branch has are saved and run on production after the merge. Do not call merge_branch. enable_teams, ` +
+        `enable_vector_search and run_data_migration cannot be built on the branch here: say so if the request ` +
+        `needs them.\n`
+      : schemaOnBranch
       ? `PRODUCTION IS PROTECTED on this project: ${[...GATED_SCHEMA_TOOLS].join(', ')} are refused here. ` +
         `Its schema changes are made on a preview branch, with branch and apply_migration, and reach production ` +
         `through a merge a person approves; the coding agent that asked does that. Do every other part of the ` +
@@ -1464,6 +1660,9 @@ async function runAgentLoop(
   let modelFailure: ModelFailure | null = null
   /** Mutations that landed this turn — reported even if the turn later fails. */
   const appliedMutationTitles: string[] = []
+  /** On a protected production: schema changes built on the turn's preview branch, and steps saved for after its merge. */
+  const branchBuilt: string[] = []
+  const savedForMerge: string[] = []
   /**
    * Mutations that were ATTEMPTED and refused, with the reason.
    *
@@ -1823,19 +2022,24 @@ async function runAgentLoop(
         continue
       }
 
-      // Approval gate — one rule for every door. `needsApproval` is the same
-      // judgement the MCP tool route uses: the brain's destructive set OR an
-      // executor rated high-risk, so the two doors can never disagree about
-      // what needs a person. A gated call never runs here; it is returned
-      // exactly as issued so the caller can queue it for a human.
-      if (needsApproval(toolName)) {
+      // Approval gate — one rule for every door. `approvalNeededFor` is the
+      // same judgement the MCP tool route uses: the brain's destructive set OR
+      // an executor rated high-risk, less the calls the rule clears by what
+      // they touch (deleting a function nothing calls), so the two doors can
+      // never disagree about what needs a person. A gated call never runs
+      // here; it is returned exactly as issued so the caller can queue it for
+      // a human.
+      const gated = needsApproval(toolName)
+      if (gated && (await approvalNeededFor(toolName, args, input.projectId))) {
         results.push(holdForApproval(toolCall.id, toolName, args, await describeDanger(input.projectId, toolName, args)))
         continue
       }
 
       // Redacted for the log only; the call itself receives the real arguments.
       console.log(`[Brain] tool=${toolName} args=${JSON.stringify(redactArgs(args)).slice(0, 200)}`)
-      const result = await dispatchTool(toolName, args, ctx)
+      // A call the rule cleared is confirmed for the executor's own gate, as
+      // the MCP route confirms it, so it is not parked a second time there.
+      const result = await dispatchTool(toolName, args, gated ? { ...ctx, mcpOwnerConfirmed: true } : ctx)
       // A real data migration is stopped by the executor's own gate, which
       // counts the rows it would change. That answer used to reach the model as
       // a failure asking for a "confirm" no message could deliver, so from here
@@ -1873,7 +2077,16 @@ async function runAgentLoop(
       // control tool to CONTROL_TOOLS above) keeps this honest without editing
       // this branch every time; a tool whose arguments decide, like a dry-run
       // migration, has its rule in tools.READ_ONLY_WHEN.
-      const isMutation = isMutationCall(toolName, args)
+      // Built on the turn's preview branch, or saved for after its merge: not a
+      // change to production, so there is nothing on production to verify yet,
+      // and neither is reported as applied there.
+      const branchData = result.ok ? (result.data as { onBranch?: boolean; afterMerge?: boolean } | undefined) : undefined
+      if (branchData?.onBranch) {
+        branchBuilt.push(humanTitle(toolName, args))
+        changed = true
+      }
+      if (branchData?.afterMerge) savedForMerge.push(humanTitle(toolName, args))
+      const isMutation = isMutationCall(toolName, args) && !branchData?.onBranch && !branchData?.afterMerge
       if (isMutation) {
         mutated = true
         verificationSteered = false
@@ -2091,6 +2304,9 @@ async function runAgentLoop(
       resumeRequest,
       [...(resume?.applied ?? []), ...appliedMutationTitles],
       stoppedUnfinished,
+      // The architect failed on this request earlier in the turn, so
+      // "continue" designs it again before resuming the loop.
+      architectFailedThisTurn,
     ).then(
       () => true,
       (err) => {
@@ -2098,8 +2314,39 @@ async function runAgentLoop(
         return false
       },
     )
-  } else if (resume || mutated) {
+  } else if (resume || mutated || branchBuilt.length > 0) {
     await clearLoopResume(input.projectId)
+  }
+
+  // ── Built on a branch: one merge for a person, and what waits for it ──────
+  // A build stopped part-way keeps building on the same branch when "continue"
+  // picks it up, and asks for the merge when it finishes, so the person is
+  // asked once for the whole request.
+  const builtHere = (ctx.buildBranch?.statements.length ?? 0) > 0
+  const inProgress = ctx.buildBranch && (builtHere || resume) ? await ctx.buildBranch.buildInProgress().catch(() => null) : null
+  const branch = ctx.buildBranch?.current ?? inProgress?.branch ?? null
+  const builtOnBranch = !!inProgress
+  const mergeNow = builtOnBranch && !stoppedUnfinished
+  if (branch && ctx.buildBranch && ctx.buildBranch.afterMerge.length > 0) {
+    await saveAfterMerge(input.projectId, branch, ctx.buildBranch.afterMerge)
+      .catch((err) => console.error('[Brain] could not save the steps for after the merge:', err))
+  }
+  if (mergeNow && !blockedCalls.some((b) => b.tool === 'merge_branch' && b.args.branchId === branch!.id)) {
+    blockedCalls.push(mergeCall(branch!))
+  }
+  if (branch && (branchBuilt.length > 0 || savedForMerge.length > 0)) {
+    finalSummary = [
+      finalSummary,
+      '',
+      branchBuilt.length
+        ? `**Built on preview branch "${branch.name}"** · ${branchBuilt.length}: ${branchBuilt.join('; ')}. ` +
+          `Production has none of it until a person approves the branch's merge` +
+          (mergeNow ? ', which is requested below.' : ', which is requested once the build finishes.')
+        : `Preview branch "${branch.name}" holds this build until its merge.`,
+      ...(savedForMerge.length
+        ? [`**After the merge** · ${savedForMerge.length}: ${savedForMerge.join('; ')}. Say "continue" once the merge is executed, and they run on production.`]
+        : []),
+    ].join('\n')
   }
 
   emit({ type: 'final', summary: finalSummary, needsUser, data: terminalData })
@@ -2152,7 +2399,17 @@ async function runAgentLoop(
     // A resumed turn that changed nothing earns no further `next`: an agent
     // follows it, so each "continue" it is offered has to have moved the
     // request on. The resume point stays for a person who asks again.
-    ...(resumeSaved && (!resume || appliedMutationTitles.length > 0) ? { next: CONTINUE } : {}),
+    ...(resumeSaved && (!resume || appliedMutationTitles.length > 0 || branchBuilt.length > 0) ? { next: CONTINUE } : {}),
+    ...(branch && ctx.buildBranch && (builtOnBranch || ctx.buildBranch.afterMerge.length > 0)
+      ? {
+          branchBuild: {
+            branchId: branch.id,
+            branch: branch.name,
+            statements: [...ctx.buildBranch.statements],
+            afterMerge: ctx.buildBranch.afterMerge.map((s) => s.label),
+          },
+        }
+      : {}),
   }
 }
 
@@ -2252,55 +2509,6 @@ function stoppedBeforeStarting(
 }
 
 /**
- * A build asked of a project whose production is protected.
- *
- * Every table this turn would create on main is refused there
- * (lib/branches/protection.ts). Run anyway, a plan was a refusal per table, a
- * failure for every step on those tables, and a resume queue that "continue"
- * could only refuse again. The schema reaches a protected production one way,
- * a preview branch and a merge a person approves, and the agent holds the
- * tools for it, so this says so before anything runs, with the calls in order.
- * `tables` is a design to start from when one is at hand without a model call.
- */
-async function branchBuildTurn(
-  tables: string[],
-  classification: Classification,
-  emit: (e: BrainEvent) => void,
-  input: BrainInput,
-): Promise<BrainResult> {
-  const summary =
-    `This project's production is protected, so I can't create its tables: a schema change reaches it through ` +
-    `a preview branch and a merge a person approves. Nothing was changed.\n\n` +
-    `To build it:\n` +
-    `1. branch { "action": "create", "name": "<short-name>" }\n` +
-    `2. apply_migration { "sql": "<every CREATE TABLE the app needs, parents first>", "branchId": "<id>" }: the whole data model in one migration\n` +
-    `3. Try it against the branch's preview endpoint, seeded with db_insert and the branchId\n` +
-    `4. branch { "action": "merge", "branchId": "<id>" }, which your human approves in the Review Queue while you poll check_approval\n\n` +
-    `Storage buckets and auth are not schema changes, so the storage and auth tools set them up now. ` +
-    `Realtime and functions on the new tables follow the merge.` +
-    (tables.length ? `\n\nA data model to start from: ${tables.join(', ')}.` : '')
-  emit({ type: 'final', summary, needsUser: false })
-  await saveTurn(input.projectId, input.message, summary, input.requestId ?? null)
-  return {
-    success: false,
-    summary,
-    needsUser: false,
-    iterations: 0,
-    toolsRun: [],
-    classification,
-    tokensUsed: 0,
-    failureCode: 'BRANCH_REQUIRED',
-    retryable: false,
-    applied: [],
-    next: {
-      tool: 'branch',
-      arguments: { action: 'create', name: 'build' },
-      why: "This project's production is protected: its tables are built on a preview branch and merged once a person approves.",
-    },
-  }
-}
-
-/**
  * A build, or a "go ahead", that arrives while the architect is still
  * designing this project's backend (lib/ai/blueprints/store.ts). A second
  * design would spend minutes and credits on the same backend, and there is
@@ -2323,19 +2531,6 @@ function stillDesigningTurn(classification: Classification, emit: (e: BrainEvent
     inProgress: 'designing',
     next: GO_AHEAD_LATER,
   }
-}
-
-/** The tables a curated design would give this request, found without a model call. */
-function curatedTables(message: string): string[] {
-  if (!shouldUseCuratedBlueprint(message)) return []
-  return tablesOf(getCuratedBlueprintForPrompt(message)?.blueprint.steps ?? [])
-}
-
-function tablesOf(steps: BlueprintStep[]): string[] {
-  return steps
-    .filter((s) => s.tool === 'create_table')
-    .map((s) => String((s.args as { tableName?: unknown }).tableName ?? ''))
-    .filter(Boolean)
 }
 
 function buildIntentHint(intent: BrainIntent): string {

@@ -2107,6 +2107,7 @@ describe('each region’s projects are served only in that region', () => {
       success: false,
       error: "This project's data is in us-east-1, and it is served only there.",
       code: 'WRONG_REGION',
+      message: "This project's data is in us-east-1, and it is served only there.",
       region: 'us-east-1',
       apiUrl: `${VIRGINIA}/api/v1/${regionalProject}`,
     })

@@ -40,7 +40,7 @@ import {
 } from '@/components/inspector/kit'
 import { FOCUS, PAGE_GUTTER, PAGE_WIDTH } from '@/components/console/tokens'
 import { when } from '@/components/changes/present'
-import { WEBHOOK_EVENT_TYPES, EVENT_DESCRIPTIONS, type WebhookEventType } from '@/lib/webhooks/events'
+import { WEBHOOK_EVENT_TYPES, EVENT_DESCRIPTIONS, isRowEventType, type WebhookEventType } from '@/lib/webhooks/events'
 import { planDisplayName } from '@/lib/entitlements/plan-names'
 import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
 import Link from 'next/link'
@@ -50,6 +50,8 @@ interface WebhookRow {
   eventType: string
   targetUrl: string
   active: boolean
+  /** Row events only: the tables it receives; empty means every table. */
+  tables?: string[]
   createdAt: string
   updatedAt: string
   logCount: number
@@ -135,6 +137,8 @@ const STATUS_LABEL: Record<string, string> = {
 export function WebhooksPanel({ projectId }: { projectId: string }) {
   const [webhooks, setWebhooks] = useState<WebhookRow[]>([])
   const [capture, setCapture] = useState<CaptureState | null>(null)
+  // The tables an endpoint can name for its row events.
+  const [availableTables, setAvailableTables] = useState<string[]>([])
   // Whether the project's plan includes webhooks, from the list route. On a
   // plan without them the page says so and offers no form: it used to show
   // "Add endpoint" and refuse what was filled in (production QA, 2026-11-09).
@@ -171,6 +175,7 @@ export function WebhooksPanel({ projectId }: { projectId: string }) {
       const data = await res.json()
       if (!res.ok) throw new Error(data.error ?? 'Webhooks could not be loaded.')
       setWebhooks(data.webhooks ?? [])
+      setAvailableTables(data.availableTables ?? [])
       setCapture(data.capture ?? null)
       setPlan(data.plan ?? null)
       if (trigRes.ok) {
@@ -228,11 +233,11 @@ export function WebhooksPanel({ projectId }: { projectId: string }) {
     loadLogs(webhookId)
   }
 
-  async function create(eventType: WebhookEventType, targetUrl: string) {
+  async function create(eventType: WebhookEventType, targetUrl: string, tables: string[]) {
     const res = await fetch(`/api/projects/${projectId}/webhooks`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ eventType, targetUrl }),
+      body: JSON.stringify({ eventType, targetUrl, tables }),
     })
     const data = await res.json()
     if (!res.ok) throw new Error(data.error ?? 'The webhook could not be created.')
@@ -248,11 +253,11 @@ export function WebhooksPanel({ projectId }: { projectId: string }) {
     await load()
   }
 
-  async function saveEdit(webhook: WebhookRow, eventType: WebhookEventType, targetUrl: string) {
+  async function saveEdit(webhook: WebhookRow, eventType: WebhookEventType, targetUrl: string, tables: string[]) {
     const res = await fetch(`/api/projects/${projectId}/webhooks/${webhook.id}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ eventType, targetUrl }),
+      body: JSON.stringify({ eventType, targetUrl, tables }),
     })
     const data = await res.json()
     if (!res.ok) throw new Error(data.error ?? 'The webhook could not be updated.')
@@ -453,6 +458,11 @@ export function WebhooksPanel({ projectId }: { projectId: string }) {
                         <span className="block truncate font-mono text-[12.5px] text-zinc-100">{webhook.targetUrl}</span>
                         <span className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-faint">
                           <Tag mono>{webhook.eventType}</Tag>
+                          {isRowEventType(webhook.eventType) && (
+                            <span className="truncate">
+                              {webhook.tables && webhook.tables.length > 0 ? webhook.tables.join(', ') : 'Every table'}
+                            </span>
+                          )}
                           <span>{webhook.active ? 'Enabled' : 'Disabled'}</span>
                           <span className="tabular-nums">
                             {webhook.logCount === 0
@@ -680,6 +690,7 @@ export function WebhooksPanel({ projectId }: { projectId: string }) {
       <WebhookForm
         open={creating}
         title="Add endpoint"
+        availableTables={availableTables}
         onClose={() => setCreating(false)}
         onSubmit={create}
       />
@@ -690,8 +701,10 @@ export function WebhooksPanel({ projectId }: { projectId: string }) {
           title="Edit endpoint"
           initialUrl={editing.targetUrl}
           initialEvent={editing.eventType as WebhookEventType}
+          initialTables={editing.tables}
+          availableTables={availableTables}
           onClose={() => setEditing(null)}
-          onSubmit={(eventType, targetUrl) => saveEdit(editing, eventType, targetUrl)}
+          onSubmit={(eventType, targetUrl, tables) => saveEdit(editing, eventType, targetUrl, tables)}
         />
       )}
 
@@ -774,11 +787,15 @@ export function isFromBackenly(rawBody, signatureHeader, secret) {
  * `row.updated` while the type union included it, so a picker built from the
  * type would have offered an option the API rejects. One list, one answer.
  */
+const NO_TABLES: string[] = []
+
 function WebhookForm({
   open,
   title,
   initialUrl = '',
   initialEvent = 'row.inserted',
+  initialTables = NO_TABLES,
+  availableTables,
   onClose,
   onSubmit,
 }: {
@@ -786,23 +803,41 @@ function WebhookForm({
   title: string
   initialUrl?: string
   initialEvent?: WebhookEventType
+  /** Row events only: the tables it receives; empty means every table. */
+  initialTables?: string[]
+  availableTables: string[]
   onClose: () => void
-  onSubmit: (eventType: WebhookEventType, targetUrl: string) => Promise<void>
+  onSubmit: (eventType: WebhookEventType, targetUrl: string, tables: string[]) => Promise<void>
 }) {
   const [url, setUrl] = useState(initialUrl)
   const [event, setEvent] = useState<WebhookEventType>(initialEvent)
+  const [someTables, setSomeTables] = useState(initialTables.length > 0)
+  const [picked, setPicked] = useState<string[]>(initialTables)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
-    if (open) { setUrl(initialUrl); setEvent(initialEvent); setError(null) }
-  }, [open, initialUrl, initialEvent])
+    if (open) {
+      setUrl(initialUrl)
+      setEvent(initialEvent)
+      setSomeTables(initialTables.length > 0)
+      setPicked(initialTables)
+      setError(null)
+    }
+  }, [open, initialUrl, initialEvent, initialTables])
+
+  const rowEvent = isRowEventType(event)
+  // A sign-up comes from no table; "every table" sends none.
+  const tables = rowEvent && someTables ? picked : []
+  const missingTables = rowEvent && someTables && picked.length === 0
+  const togglePicked = (table: string) =>
+    setPicked((prev) => (prev.includes(table) ? prev.filter((t) => t !== table) : [...prev, table]))
 
   async function submit() {
     setBusy(true)
     setError(null)
     try {
-      await onSubmit(event, url.trim())
+      await onSubmit(event, url.trim(), tables)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'The endpoint could not be saved.')
     } finally {
@@ -818,7 +853,7 @@ function WebhookForm({
       footer={
         <>
           <KitButton variant="ghost" onClick={onClose}>Cancel</KitButton>
-          <KitButton variant="primary" loading={busy} disabled={url.trim() === ''} onClick={submit}>
+          <KitButton variant="primary" loading={busy} disabled={url.trim() === '' || missingTables} onClick={submit}>
             {busy ? 'Saving…' : 'Save endpoint'}
           </KitButton>
         </>
@@ -871,6 +906,48 @@ function WebhookForm({
             ))}
           </div>
         </KitField>
+
+        {rowEvent && (
+          <KitField label="Tables" hint="Row events from other tables are not sent to this endpoint.">
+            <div className="space-y-1.5">
+              {[
+                { value: false, label: 'Every table' },
+                { value: true, label: 'Only the tables I pick' },
+              ].map((option) => (
+                <label key={option.label} className="flex cursor-pointer items-center gap-2.5 text-[13px] text-zinc-200">
+                  <input
+                    type="radio"
+                    name="webhook-tables"
+                    checked={someTables === option.value}
+                    onChange={() => setSomeTables(option.value)}
+                    className="accent-violet-400"
+                  />
+                  {option.label}
+                </label>
+              ))}
+              {someTables &&
+                (availableTables.length === 0 ? (
+                  <p className="pl-6 text-[12px] text-faint">This project has no tables yet.</p>
+                ) : (
+                  <div className="flex flex-wrap gap-x-4 gap-y-1.5 pl-6 pt-1">
+                    {availableTables.map((table) => (
+                      <label key={table} className="flex cursor-pointer items-center gap-2 font-mono text-[12px] text-zinc-200">
+                        <input
+                          type="checkbox"
+                          name="webhook-table"
+                          value={table}
+                          checked={picked.includes(table)}
+                          onChange={() => togglePicked(table)}
+                          className="accent-violet-400"
+                        />
+                        {table}
+                      </label>
+                    ))}
+                  </div>
+                ))}
+            </div>
+          </KitField>
+        )}
 
         {error && <KitNote icon={AlertTriangle} tone="danger">{error}</KitNote>}
       </div>
