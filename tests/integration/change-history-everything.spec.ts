@@ -53,6 +53,7 @@ import { closeChangeLockPool } from '@/lib/changes/lock'
 import { storageAdapter } from '@/lib/changes/resources/storage'
 import { syncWebhookCapture } from '@/lib/webhooks/capture'
 import { connectFrontend, disconnectFrontend } from '@/lib/services/connectFrontend'
+import { executeAction } from '@/lib/ai/minimal-executor'
 import { installChangeLedgerGuard } from '../helpers/change-ledger-guard'
 
 let ownerId: string
@@ -159,7 +160,7 @@ describe('a function', () => {
     })
     expect(created.summary).toBe('Created function sendWelcome')
     const rewritten = await change('rewrite sendWelcome', () => prisma.aiFunction.update({ where: { id: fnId }, data: { generatedCode: 'v2', status: 'inactive' } }))
-    expect(rewritten.summary).toBe('Changed function sendWelcome: generated code, power')
+    expect(rewritten.summary).toBe('Changed function sendWelcome: generated code, turned off')
     expect(await restore(rewritten.id)).toMatchObject({ ok: true })
     expect(await prisma.aiFunction.findUnique({ where: { id: fnId } })).toMatchObject({ generatedCode: 'v1', status: 'active' })
 
@@ -416,6 +417,62 @@ describe('an allowed origin', () => {
     const r = await connectFrontend({ projectId, frontendUrl: 'https://shop.example', userId: ownerId, confirmedBy: 'UI' })
     expect(r.requiresConfirmation).toBe(true)
     expect(await prisma.backendChange.count({ where: { projectId } })).toBe(before)
+  })
+})
+
+// ── In the words of the person who asked ─────────────────────────────────────
+
+describe('History says what was done, in plain words', () => {
+  // Production QA (2026-11-09): enabling auth read "Created table users",
+  // turning on realtime "Changed the triggers on orders", switching a function
+  // off "Changed function qa-event-dump: power", and the agent's key "MCP Key".
+  const latest = () => prisma.backendChange.findFirstOrThrow({ where: { projectId }, orderBy: { createdAt: 'desc' } })
+  const run = (action: string, params: Record<string, unknown>) =>
+    withChangeAttribution({ source: 'dashboard', actorUserId: ownerId }, () => executeAction({ action, params } as any, projectId))
+
+  it('turning on sign-in is said as that, not as the table it creates', async () => {
+    expect((await run('ENABLE_AUTH', {})).success).toBe(true)
+    expect(await latest()).toMatchObject({
+      title: 'Turn on email and password sign-in',
+      summary: 'Turned on email and password sign-in',
+    })
+  }, 120_000)
+
+  it('turning realtime on and off for a table is said as that, not as its trigger', async () => {
+    expect((await run('CREATE_TABLE', { tableName: 'parcels', columns: [{ name: 'label', type: 'text' }] })).success).toBe(true)
+    expect((await run('ENABLE_REALTIME', { tableName: 'parcels' })).success).toBe(true)
+    expect(await latest()).toMatchObject({ title: 'Turn on realtime for parcels', summary: 'Turned on realtime for parcels' })
+    // Turning realtime off waits for approval; an approved call carries `confirmed`.
+    expect((await run('DISABLE_REALTIME', { tableName: 'parcels', confirmed: true })).success).toBe(true)
+    expect(await latest()).toMatchObject({ summary: 'Turned off realtime for parcels' })
+  }, 120_000)
+
+  it('a function switched off is said as that', async () => {
+    const fn = await prisma.aiFunction.create({
+      data: { projectId, name: 'nightlyDigest', description: 'digest', generatedCode: 'v1', triggerType: 'manual' },
+    })
+    const c = await change('switch off nightlyDigest', () => prisma.aiFunction.update({ where: { id: fn.id }, data: { status: 'inactive' } }))
+    expect(c.summary).toBe('Turned off function nightlyDigest')
+  })
+
+  it("names an agent by its key's label, as Connect lists it", async () => {
+    const key = await prisma.apiKey.create({
+      data: {
+        name: 'MCP Key', mcpClientLabel: 'Agent setup', keyPrefix: `mcp_${hex(3)}`, keyHash: hex(16), userId: ownerId, projectId,
+        keyType: 'mcp', scope: 'mcp', permissions: ['read', 'write'], capabilities: [],
+      },
+    })
+    const c = await withChangeAttribution({ source: 'mcp', apiKeyId: key.id, actorUserId: ownerId }, () =>
+      withGovernedChange({ projectId, title: 'agent sets FEATURE_Y' }, async () => { await setEnv('FEATURE_Y', 'on') }))
+    const listed = (await listChanges(projectId, { limit: 5 })).changes.find((x) => x.id === c.change!.id)
+    expect(listed?.actor).toMatchObject({ type: 'agent', label: 'Agent setup' })
+  })
+
+  it("credits an architecture change's step to Backenly, approved by the person", async () => {
+    const c = await withChangeAttribution({ source: 'approval', actorUserId: ownerId, groupId: 'evolution:plan-under-test' }, () =>
+      withGovernedChange({ projectId, title: 'Architecture change step' }, async () => { await setEnv('FEATURE_Z', 'on') }))
+    const listed = (await listChanges(projectId, { limit: 5 })).changes.find((x) => x.id === c.change!.id)
+    expect(listed?.actor).toMatchObject({ type: 'system', label: 'Backenly, approved by owner' })
   })
 })
 

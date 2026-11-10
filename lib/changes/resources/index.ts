@@ -106,7 +106,14 @@ export function describeOp(op: ResourceOp): string {
   const fields = [...new Set([...Object.keys(op.before.fields), ...Object.keys(op.after.fields)])]
     .filter((f) => canonicalJson(op.before!.fields[f] ?? null) !== canonicalJson(op.after!.fields[f] ?? null))
   const secrets = changedSecrets(op.before, op.after)
-  const what = [...fields.map(humanField), ...secrets.map((s) => `${humanField(s)} (replaced)`)]
+  // A function's Power switch, said as what happened to it: History read
+  // "Changed function qa-event-dump: power" (production QA, 2026-11-09).
+  const switched = (f: string) => op.resource === 'functions' && f === 'power'
+  const power = `turned ${op.after.fields.power === 'off' ? 'off' : 'on'}`
+  if (fields.length === 1 && switched(fields[0]) && secrets.length === 0) {
+    return `${power.charAt(0).toUpperCase()}${power.slice(1)} ${label}`
+  }
+  const what = [...fields.map((f) => (switched(f) ? power : humanField(f))), ...secrets.map((s) => `${humanField(s)} (replaced)`)]
   return `Changed ${label}${what.length ? `: ${what.slice(0, 3).join(', ')}${what.length > 3 ? ` and ${what.length - 3} more` : ''}` : ''}`
 }
 
