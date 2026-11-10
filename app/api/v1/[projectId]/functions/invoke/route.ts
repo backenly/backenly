@@ -52,6 +52,8 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
       endUserRole: context.endUserRole,
       serviceRole: context.apiKey.serviceRole,
       headers: pickFnHeaders(h => request.headers.get(h)),
+      // Recorded as an HTTP call, which it is; the event keeps type 'manual'.
+      trigger: 'http',
     })
 
     if (!result.success) {

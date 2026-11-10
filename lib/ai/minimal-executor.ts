@@ -10472,7 +10472,7 @@ async function executeSetEnvVar(params: any, projectId: string): Promise<Executi
         success: true,
         message:
           `Stored encrypted env var **${summary.key}** (\`${summary.preview}\`).\n\n` +
-          `It will be available inside AI functions as \`ctx.env.${summary.key}\` on the next invocation.`,
+          `Functions read it from their next run: \`ctx.env.${summary.key}\`, or \`process.env.${summary.key}\` in a route module.`,
         data: { key: summary.key, preview: summary.preview },
       }
     } catch (err: any) {

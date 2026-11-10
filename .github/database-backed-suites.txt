@@ -1750,3 +1750,8 @@ tests/integration/runtime-rejects-bad-bodies.spec.ts
 # UNIQUE the SQL declares is a real constraint ON CONFLICT can target. A table
 # the brain designs from a description keeps its inference.
 tests/integration/sql-as-written.spec.ts
+# A function run is recorded as it happened: a call through /fn as http, the
+# status the function answered at the end of its log, a 5xx answer as a failed
+# run. A route function reads the project's variables as process.env.KEY, and
+# none replaces a variable Backenly sets.
+tests/integration/function-run-record.spec.ts
