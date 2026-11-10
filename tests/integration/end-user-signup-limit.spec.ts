@@ -184,6 +184,8 @@ it('both runtimes refuse a short password the same way, in plain words', async (
       message: 'Password must be at least 8 characters.',
       details: { fields: { password: ['Password must be at least 8 characters.'] } },
     },
+    code: 'VALIDATION_ERROR',
+    message: 'Password must be at least 8 characters.',
   })
   expect(refusals[1].body).toEqual(refusals[0].body)
 }, 60_000)
