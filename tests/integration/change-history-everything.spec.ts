@@ -52,6 +52,7 @@ import { listChanges } from '@/lib/changes/history'
 import { closeChangeLockPool } from '@/lib/changes/lock'
 import { storageAdapter } from '@/lib/changes/resources/storage'
 import { syncWebhookCapture } from '@/lib/webhooks/capture'
+import { connectFrontend, disconnectFrontend } from '@/lib/services/connectFrontend'
 import { installChangeLedgerGuard } from '../helpers/change-ledger-guard'
 
 let ownerId: string
@@ -375,6 +376,48 @@ describe('the anon key and a preview branch\'s keys', () => {
 })
 
 // ── Across the backend at once ───────────────────────────────────────────────
+
+// ── Allowed origins ──────────────────────────────────────────────────────────
+
+describe('an allowed origin', () => {
+  // Production QA (2026-11-09): adding http://localhost:5173 to the allowed
+  // origins, the CORS allowlist, left no entry in the History.
+  const ORIGIN = 'http://localhost:5173'
+  const latest = () => prisma.backendChange.findFirstOrThrow({ where: { projectId }, orderBy: { createdAt: 'desc' } })
+  const active = async () =>
+    (await prisma.connectedApp.findUnique({ where: { projectId_origin: { projectId, origin: ORIGIN } } }))?.isActive ?? false
+
+  it('added from the console is one entry, by that person; its restore takes it off the list', async () => {
+    const r = await connectFrontend({ projectId, frontendUrl: ORIGIN, userId: ownerId, confirmedBy: 'UI', force: true })
+    expect(r.connected).toBe(true)
+    const c = await latest()
+    expect(c).toMatchObject({
+      title: `Allow ${ORIGIN}`,
+      summary: `Added allowed origin ${ORIGIN}`,
+      resources: ['frontends'],
+      actorUserId: ownerId,
+    })
+    expect(await restore(c.id)).toMatchObject({ ok: true })
+    expect(await active()).toBe(false)
+  })
+
+  it('removed is put back by its restore', async () => {
+    await connectFrontend({ projectId, frontendUrl: ORIGIN, userId: ownerId, confirmedBy: 'UI', force: true })
+    const r = await disconnectFrontend({ projectId, origin: ORIGIN, userId: ownerId, confirmedBy: 'UI', force: true })
+    expect(r.disconnected).toBe(true)
+    const c = await latest()
+    expect(c).toMatchObject({ summary: `Removed allowed origin ${ORIGIN}`, resources: ['frontends'] })
+    expect(await restore(c.id)).toMatchObject({ ok: true })
+    expect(await active()).toBe(true)
+  })
+
+  it('asking first changes nothing, and records nothing', async () => {
+    const before = await prisma.backendChange.count({ where: { projectId } })
+    const r = await connectFrontend({ projectId, frontendUrl: 'https://shop.example', userId: ownerId, confirmedBy: 'UI' })
+    expect(r.requiresConfirmation).toBe(true)
+    expect(await prisma.backendChange.count({ where: { projectId } })).toBe(before)
+  })
+})
 
 describe('one change across the schema and the rest of the backend', () => {
   it('is one entry, restored as one, verified', async () => {
