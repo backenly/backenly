@@ -2287,6 +2287,10 @@ model ApiRequestLog {
   // branch row outlives its traffic anyway (branches are marked merged or
   // discarded, never deleted).
   branchId   String?
+  // The browser origin the request came from (scheme, host and port; never a
+  // path), or null for a server or a tool. Connection Health counts a
+  // frontend's requests from it (app/api/projects/[id]/connection-health).
+  origin     String?
   project    Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
   user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 

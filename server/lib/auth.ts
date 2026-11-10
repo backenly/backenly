@@ -281,7 +281,7 @@ export async function v1AuthMiddleware(req: Request, res: Response, next: NextFu
     const ip = clientIpFromNodeRequest(req)
 
     // Feed the Connection Health dashboard surface — non-blocking.
-    // SKIP internal origins (backenly.com, localhost): the dashboard
+    // SKIP internal origins (Backenly's own domains and the console's origin): the dashboard
     // dogfooding the v1 runtime is not a customer frontend. Mirrors the
     // Next-side writer in lib/api/v1/middleware.ts — this Express path is
     // the one that actually serves /api/v1/* in production.

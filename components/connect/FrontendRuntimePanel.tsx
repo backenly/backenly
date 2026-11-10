@@ -57,6 +57,7 @@ interface ConnectionHealth {
     failures24h: number
     failures1h: number
     bootstraps24h: number
+    requests24h: number
     distinctOriginsFailing: number
     distinctOriginsConnected: number
   }
@@ -97,7 +98,7 @@ interface ActivityCardProps {
 function ActivityCard({ health, refreshing, onRefresh, onCopyFix, copiedIdx, formatTimeAgo }: ActivityCardProps) {
   const totals = health?.totals
   const hasErrors = !!totals && totals.failures24h > 0
-  const hasTraffic = !!totals && totals.bootstraps24h > 0
+  const hasTraffic = !!totals && totals.requests24h > 0
   const accent = hasErrors
     ? (totals!.failures1h > 0 ? 'red' : 'amber')
     : (hasTraffic ? 'ok' : 'neutral')
@@ -126,7 +127,7 @@ function ActivityCard({ health, refreshing, onRefresh, onCopyFix, copiedIdx, for
       <div className="space-y-3 px-4 py-3.5">
         {!hasErrors && !hasTraffic && (
           <p className="text-[13px] leading-[20px] text-faint">
-            No SDK requests yet. Traffic and failures appear here once your app calls Backenly.
+            No requests from an app yet. Traffic and failures appear here once your app calls Backenly.
           </p>
         )}
 
@@ -135,7 +136,7 @@ function ActivityCard({ health, refreshing, onRefresh, onCopyFix, copiedIdx, for
             <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
               <StatusDot tone="operational" label="All clear" />
               <span className="text-[12px] tabular-nums text-faint">
-                {totals!.bootstraps24h.toLocaleString()} requests
+                {totals!.requests24h.toLocaleString()} requests
                 {totals!.distinctOriginsConnected > 0 &&
                   ` from ${totals!.distinctOriginsConnected} ${totals!.distinctOriginsConnected === 1 ? 'origin' : 'origins'}`}
               </span>
@@ -161,7 +162,7 @@ function ActivityCard({ health, refreshing, onRefresh, onCopyFix, copiedIdx, for
                 <span className="text-[12px] tabular-nums text-rose-300">{totals!.failures1h} in the last hour</span>
               )}
               {hasTraffic && (
-                <span className="text-[12px] tabular-nums text-faint">{totals!.bootstraps24h.toLocaleString()} succeeded</span>
+                <span className="text-[12px] tabular-nums text-faint">{totals!.requests24h.toLocaleString()} succeeded</span>
               )}
             </div>
             {health!.failures.slice(0, 1).map((f, idx) => (

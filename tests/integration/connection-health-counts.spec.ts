@@ -91,6 +91,8 @@ it('counts the whole day by origin, kind and key shape, as the activity card rea
     failures24h: 35,
     failures1h: 10,
     bootstraps24h: 6040,
+    // No request-log rows here: every success is a bootstrap ping.
+    requests24h: 6040,
     distinctOriginsFailing: 1,
     distinctOriginsConnected: 2,
   })
@@ -106,7 +108,7 @@ it('answers a project with nothing to show', async () => {
     failures: [],
     successes: [],
     probes: { count: 0, lastSeen: null },
-    totals: { failures24h: 0, failures1h: 0, bootstraps24h: 0, distinctOriginsFailing: 0, distinctOriginsConnected: 0 },
+    totals: { failures24h: 0, failures1h: 0, bootstraps24h: 0, requests24h: 0, distinctOriginsFailing: 0, distinctOriginsConnected: 0 },
     summaryText: '',
   })
 }, 60_000)

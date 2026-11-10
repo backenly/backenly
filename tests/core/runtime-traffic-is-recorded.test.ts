@@ -245,6 +245,25 @@ describe("what is not the project's traffic", () => {
     }
   })
 
+  it('keeps the browser origin a request came from, never its path, and none for a server', async () => {
+    const p = await project()
+    try {
+      const at = (h: Record<string, string>) => recordRuntimeRequest({
+        projectId: p.projectId, method: 'GET', pathname: `/api/v1/${p.projectId}/db/todos`,
+        statusCode: 200, durationMs: 3, headers: headers({ 'x-api-key': 'proj_live_k', ...h }),
+      })
+      at({ origin: 'http://localhost:5173' })
+      at({ referer: 'https://shop.example/checkout?cart=1' })
+      at({ origin: 'null' })
+      at({})
+      await flushRecordedRequests()
+      const origins = await prisma.apiRequestLog.findMany({ where: { projectId: p.projectId }, select: { origin: true } })
+      expect(origins.map(r => r.origin).sort()).toEqual(['http://localhost:5173', 'https://shop.example', null, null])
+    } finally {
+      await drop(p)
+    }
+  })
+
   it("the Next wrapper leaves out the console's own request", async () => {
     const p = await project()
     try {

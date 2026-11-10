@@ -6,14 +6,15 @@ export const dynamic = 'force-dynamic'
  * Powers the frontend Activity card on Connect → Direct and the
  * FrontendConnectionPill (sidebar + Deploy page).
  *
- * Aggregates the last 24h of `auth_failure` and `bootstrap` SecurityEvents
- * for this project and returns:
+ * Aggregates the last 24h of `auth_failure` and `bootstrap` SecurityEvents,
+ * and of the requests frontends made (api_request_logs by origin), for this
+ * project and returns:
  *
  *   {
  *     failures:    [{ origin, kind, sentKeyShape, count, lastSeen, hint, fixHint }],
  *     successes:   [{ origin, count, lastSeen }],
  *     probes:      { count, lastSeen },   // origin-less rejections — bots/curl, never a red signal
- *     totals:      { failures24h, bootstraps24h, distinctOriginsFailing },
+ *     totals:      { failures24h, bootstraps24h, requests24h, distinctOriginsFailing, distinctOriginsConnected },
  *     summaryText: "12 requests from my-app.vercel.app failed in the last hour — wrong API key"
  *   }
  *
@@ -140,7 +141,7 @@ export async function GET(req: NextRequest) {
     // buckets below key on, a day is a handful of rows, and nothing is capped.
     // "createdAt" holds UTC without a zone, so the bounds are given in UTC
     // whatever the session's time zone.
-    const [groups, project] = await Promise.all([
+    const [groups, project, requestGroups] = await Promise.all([
       prisma.$queryRaw<EventGroup[]>`
         SELECT kind,
                detail->>'origin'       AS origin,
@@ -158,11 +159,25 @@ export async function GET(req: NextRequest) {
         where: { id: projectId },
         select: { anonKey: true },
       }),
+      // The requests a frontend made, by the origin it called from: every
+      // request the API answered without an error in the last day, production
+      // only. A frontend is its requests, not only the SDK's bootstrap ping:
+      // production QA (2026-11-09) watched an app call the API from its own
+      // origin with its key while this said "Not connected".
+      prisma.$queryRaw<Array<{ origin: string; n: number; lastSeen: Date }>>`
+        SELECT origin, count(*)::int AS n, max("timestamp") AS "lastSeen"
+          FROM api_request_logs
+         WHERE "projectId" = ${projectId}
+           AND "branchId" IS NULL
+           AND origin IS NOT NULL
+           AND "statusCode" < 400
+           AND "timestamp" >= (${since24h}::timestamptz AT TIME ZONE 'UTC')
+         GROUP BY origin`,
     ])
 
     // ── Bucket the groups by kind ────────────────────────────────────────────
-    // Drop events whose origin is the platform itself (backenly.com,
-    // localhost). The v1 middleware already suppresses these at write-time,
+    // Drop events whose origin is the platform itself (Backenly's own domains
+    // and the console's origin). The v1 middleware already suppresses these at write-time,
     // but historical rows predating that fix still live in the SecurityEvent
     // table for 24h — filtering here makes the pill go green immediately
     // instead of trickling out as old rows age off.
@@ -223,8 +238,28 @@ export async function GET(req: NextRequest) {
       }
     }
 
+    // The frontends' requests, by origin as the page shows it.
+    const fromLog = new Map<string, SuccessGroup>()
+    for (const r of requestGroups) {
+      if (isInternalOrigin(r.origin)) continue
+      const origin = shortenOrigin(r.origin)
+      const seen = fromLog.get(origin)
+      if (seen) {
+        seen.count += r.n
+        seen.lastSeen = later(seen.lastSeen, r.lastSeen)
+      } else fromLog.set(origin, { origin, count: r.n, lastSeen: r.lastSeen.toISOString() })
+    }
+    // A bootstrap ping is itself a request, so an origin the log has is
+    // counted from the log alone; the ping events only add origins the log has
+    // no rows for (rows written before origins were kept).
+    for (const [origin, group] of fromLog) {
+      const pinged = successMap.get(origin)
+      successMap.set(origin, pinged ? { ...group, lastSeen: later(group.lastSeen, new Date(pinged.lastSeen)) } : group)
+    }
+
     const failures = Array.from(failureMap.values()).sort((a, b) => b.count - a.count)
     const successes = Array.from(successMap.values()).sort((a, b) => b.count - a.count)
+    const requests24h = successes.reduce((sum, s) => sum + s.count, 0)
 
     return NextResponse.json({
       failures,
@@ -237,6 +272,8 @@ export async function GET(req: NextRequest) {
         failures24h: attributableFailures24h,
         failures1h,
         bootstraps24h,
+        /** Requests from frontends that succeeded in the last day (bootstrap pings included). */
+        requests24h,
         distinctOriginsFailing: new Set(failures.map(f => f.origin)).size,
         distinctOriginsConnected: successes.length,
       },
