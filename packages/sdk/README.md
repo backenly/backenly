@@ -76,6 +76,17 @@ const supabase = createClient('https://backenly.com/api/v1/<PROJECT_ID>', '<BACK
 channel subscriptions all work. The `{ data, error }` contract is preserved and
 nothing throws.
 
+`channel().on('postgres_changes', …)` hands a handler the changed row in `new`,
+and a deleted row in `old`. A client without a service-role key receives a
+deleted row, and an update's previous row, as their primary key only. An error
+on the stream reaches `subscribe()`'s callback as `CHANNEL_ERROR`.
+
+`storage.from(bucket).upload(path, file)` stores the file in that bucket under
+that path. The bucket must exist, except `default`, which is private. Backenly
+addresses a stored file by its id, so the `data.path` that `upload()` resolves
+is that id: pass it, not your own path, to `getPublicUrl()` and `remove()`. As
+in Supabase, that URL serves the file to anyone only when its bucket is public.
+
 ## Typed clients
 
 ```bash
