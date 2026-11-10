@@ -8,10 +8,14 @@
  *   READ_ONLY  (bkn_ro_<hex12>) — SELECT on every workspace table/sequence.
  *               psql, TablePlus, EXPLAIN, BI tools, self-serve pg_dump.
  *               Cannot mutate anything: no INSERT/UPDATE/DELETE/DDL grants.
- *   READ_WRITE (bkn_rw_<hex12>) — DML + in-schema DDL. Every DDL statement it
- *               runs is captured by the backenly_ddl_watch event trigger into
+ *   READ_WRITE (bkn_rw_<hex12>) — DML. Schema changes over it skip the
+ *               approvals and History every other door goes through, so a new
+ *               login is refused them by Postgres (no CREATE on the schema, no
+ *               owner-role membership) until the project's admin allows them
+ *               (setSchemaChanges). Allowed, every DDL statement it runs is
+ *               captured by the backenly_ddl_watch event trigger into
  *               SchemaDriftEvent, and the autonomy loop adopts or flags it
- *               (see lib/autonomy/drift-watch.ts). Reconciliation, not lockout.
+ *               (see lib/autonomy/drift-watch.ts).
  *
  * Every privileged operation is delegated to a SECURITY DEFINER function
  * installed by scripts/setup-direct-access.sql (owned by postgres, hard input
@@ -41,6 +45,9 @@ import { encryptValue, decryptValue } from '@/lib/security/projectEnvCrypto'
 
 export type DirectAccessMode = 'READ_ONLY' | 'READ_WRITE'
 
+/** Whether a read-write login may change the schema (scripts/setup-direct-access.sql, section 5b). */
+export type SchemaChanges = 'allowed' | 'refused'
+
 export interface DirectAccessCredential {
   mode: DirectAccessMode
   roleName: string
@@ -53,6 +60,8 @@ export interface DirectAccessCredential {
   pgDumpCommand: string
   createdAt: string
   rotatedAt: string | null
+  /** READ_WRITE only: whether schema changes over the login are allowed. */
+  schemaChanges?: SchemaChanges
 }
 
 export interface DirectAccessStatus {
@@ -160,7 +169,51 @@ export async function provisionDirectAccess(projectId: string, mode: DirectAcces
   const target = await connectionTarget(projectId)
   const schema = await resolveWorkspaceSchema(projectId)
   const row = await provisionRole(projectId, mode, schema)
-  return buildCredential(row, schema, target)
+  return withSchemaChanges(projectId, buildCredential(row, schema, target))
+}
+
+/**
+ * Whether a read-write login may change the schema, read from the role itself
+ * (pg_roles.rolconfig), where the sync reads it: refused when it says off. A
+ * login made before the setting existed has none, and is allowed, as it was.
+ */
+async function schemaChangesOf(projectId: string, roleName: string): Promise<SchemaChanges> {
+  const db = await workspaceRawClient(projectId)
+  const [row] = await db.$queryRaw<Array<{ off: boolean }>>`
+    SELECT 'backenly.schema_changes=off' = ANY (coalesce(rolconfig, '{}'::text[])) AS off
+      FROM pg_roles WHERE rolname = ${roleName}`
+  return row?.off ? 'refused' : 'allowed'
+}
+
+async function withSchemaChanges(projectId: string, credential: DirectAccessCredential): Promise<DirectAccessCredential> {
+  if (credential.mode !== 'READ_WRITE') return credential
+  return { ...credential, schemaChanges: await schemaChangesOf(projectId, credential.roleName) }
+}
+
+/**
+ * Allow or refuse schema changes over the project's read-write login. Refused
+ * is the default for a new one: they skip the approvals and History that
+ * apply_migration and the dashboard go through, and are only observed as drift
+ * afterwards. Applied by the grants sync, which runs straight after.
+ */
+export async function setSchemaChanges(projectId: string, allowed: boolean): Promise<DirectAccessCredential> {
+  assertValidProjectId(projectId)
+  const existing = await prisma.databaseCredential.findUnique({ where: { projectId_mode: { projectId, mode: 'READ_WRITE' } } })
+  if (!existing) throw new Error('This project has no read-write login to change.')
+  const db = await workspaceRawClient(projectId)
+  await db.$queryRaw`SELECT public.backenly_direct_set_schema_changes(${existing.roleName}, ${allowed})`
+  await syncDirectAccessGrants(projectId)
+  await prisma.auditLog.create({
+    data: {
+      projectId,
+      action: allowed ? 'DIRECT_ACCESS_SCHEMA_CHANGES_ALLOWED' : 'DIRECT_ACCESS_SCHEMA_CHANGES_REFUSED',
+      type: 'security',
+      details: JSON.stringify({ roleName: existing.roleName }),
+      timestamp: new Date(),
+    },
+  }).catch(() => {})
+  const [schema, target] = await Promise.all([resolveWorkspaceSchema(projectId), connectionTarget(projectId)])
+  return withSchemaChanges(projectId, buildCredential(existing, schema, target))
 }
 
 /**
@@ -263,7 +316,7 @@ export async function rotateDirectAccess(projectId: string, mode: DirectAccessMo
     },
   }).catch(() => {})
 
-  return buildCredential(row, schema, target)
+  return withSchemaChanges(projectId, buildCredential(row, schema, target))
 }
 
 export async function revokeDirectAccess(projectId: string, mode: DirectAccessMode): Promise<void> {
@@ -357,7 +410,7 @@ export async function getDirectAccessStatus(projectId: string): Promise<DirectAc
   const target = rows.length > 0 ? await connectionTarget(projectId) : null
   return {
     schema,
-    credentials: target ? rows.map(r => buildCredential(r, schema, target)) : [],
+    credentials: target ? await Promise.all(rows.map(r => withSchemaChanges(projectId, buildCredential(r, schema, target)))) : [],
     pendingDriftEvents,
   }
 }

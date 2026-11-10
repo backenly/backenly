@@ -427,6 +427,8 @@ describe('the application, against the database the procedure built', () => {
   it('hands out direct access, and DDL over it is captured as drift in the region', async () => {
     await rows(app(), `SELECT public.backenly_direct_create_role($1, $2, $3, 'READ_WRITE')`, [rw, rwPassword, schema])
     await rows(app(), `SELECT public.backenly_direct_create_role($1, $2, $3, 'READ_ONLY')`, [ro, roPassword, schema])
+    // A new read-write login changes rows only; its owner allows schema changes.
+    await rows(app(), `SELECT public.backenly_direct_set_schema_changes($1, true)`, [rw])
     await rows(app(), `SELECT public.backenly_direct_sync_schema($1, $2, $3, $4)`, [schema, ro, rw, owner])
     expect(await rows(superUrl(), `SELECT pg_get_userbyid(nspowner) AS owner FROM pg_namespace WHERE nspname = $1`, [schema])).toEqual([{ owner }])
 
