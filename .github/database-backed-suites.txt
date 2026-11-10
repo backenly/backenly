@@ -1552,6 +1552,11 @@ tests/integration/migrations-drop-index-and-constraint.spec.ts
 # expression calls built-ins only, and a drop runs without CASCADE. Real
 # provisioned project, branch schemas, governed changes and catalog reads.
 tests/integration/migrations-drop-column-and-retype.spec.ts
+# Names Backenly makes from a column follow it on a rename (its idx_/uniq_
+# indexes and fk_ keys), a name it would choose that another index holds gives
+# the next free one, and an index identical to one that exists is not built
+# twice. Real provisioned project, governed migrations, catalog.
+tests/integration/index-names-follow-renames.spec.ts
 
 # Every view of a project's schema is current once a change or restore settles:
 # the REST API is asked to reload, the reconciler's baseline follows, validators

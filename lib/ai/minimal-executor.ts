@@ -9439,7 +9439,7 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
     const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
     const postgresSchema = target.targetSchema ?? getWorkspaceDatabaseNames(projectId).postgresSchema
 
-    const idxName = params.indexName || defaultIndexName(tableName, columns, unique)
+    let idxName = params.indexName || defaultIndexName(tableName, columns, unique)
     const colList = columns.map((c) => `"${c}"`).join(', ')
     const usingClause = method ? ` USING ${method}` : ''
 
@@ -9471,12 +9471,57 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
     }
 
     const whereClause = effectiveWhere ? ` WHERE (${effectiveWhere})` : ''
-    const ddl =
-      `CREATE${unique ? ' UNIQUE' : ''} INDEX${online ? ' CONCURRENTLY' : ''} IF NOT EXISTS "${idxName}" ` +
-      `ON "${postgresSchema}"."${tableName}"${usingClause} (${colList})${whereClause}`
     const { buildIndexOnline, dropIndexOnline, indexValidity } = await import('@/lib/execution/online-index')
-    const validity = () =>
-      indexValidity((sql, args) => db.$queryRawUnsafe<Array<{ valid: boolean }>>(sql, ...args).then((rows) => ({ rows })), postgresSchema, idxName)
+    const validity = (name: string = idxName) =>
+      indexValidity((sql, args) => db.$queryRawUnsafe<Array<{ valid: boolean }>>(sql, ...args).then((rows) => ({ rows })), postgresSchema, name)
+
+    // ── The same index under another name is not built twice ────────────────
+    // An agent's `CREATE INDEX product_views_product_idx ON product_views
+    // (product_id)` was built beside Backenly's own idx_product_views_product_id
+    // (production QA, 2026-11-09): two indexes, every write paying for both. An
+    // index over the same columns, as unique or not, with no predicate and the
+    // same method, already does the job; say which.
+    if (!effectiveWhere) {
+      const all = await db.$queryRawUnsafe<Array<{ indexname: string; indexdef: string }>>(
+        `SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = $1 AND tablename = $2`,
+        postgresSchema, tableName,
+      )
+      const wanted = columns.map((c) => c.toLowerCase()).join(',')
+      let same = all.find((r) =>
+        r.indexname !== idxName &&
+        !/\sWHERE\s/i.test(r.indexdef) &&
+        /CREATE UNIQUE/i.test(r.indexdef) === unique &&
+        new RegExp(`USING ${method ?? 'btree'}\\b`, 'i').test(r.indexdef) &&
+        indexDefColumns(r.indexdef).join(',') === wanted)
+      // One a failed CREATE INDEX CONCURRENTLY left behind does no job.
+      if (same && (await validity(same.indexname))?.valid === false) same = undefined
+      if (same && !params.indexName) {
+        return {
+          success: true,
+          message: `${tableName} already has this index, "${same.indexname}" (${columns.join(', ')})${unique ? ', unique' : ''}, so a second one was not built.`,
+          data: { tableName, columns, unique, indexName: same.indexname, alreadyExisted: true, definition: same.indexdef },
+        }
+      }
+      // Asked for by name: when the index doing the job is one Backenly made,
+      // it takes the name asked for, so the name exists and the index is not
+      // built twice. One a person named is left, and this one built as asked.
+      if (same && isBackenlyIndexName(tableName, columns, unique, same.indexname)) {
+        const taken = await db.$queryRawUnsafe<Array<{ n: number }>>(
+          `SELECT count(*)::int AS n FROM pg_class c JOIN pg_namespace ns ON ns.oid = c.relnamespace WHERE ns.nspname = $1 AND c.relname = $2`,
+          postgresSchema, idxName,
+        )
+        if (!taken[0]?.n) {
+          await db.$executeRawUnsafe(`ALTER INDEX "${postgresSchema}"."${same.indexname}" RENAME TO "${idxName}"`)
+          return {
+            success: true,
+            message:
+              `${tableName} already had this index, as Backenly's "${same.indexname}" (${columns.join(', ')})${unique ? ', unique' : ''}. ` +
+              `It is now named "${idxName}", as asked, and a second one was not built.`,
+            data: { tableName, columns, unique, indexName: idxName, alreadyExisted: true, renamedFrom: same.indexname },
+          }
+        }
+      }
+    }
 
     // ── Name-collision check BEFORE creating ────────────────────────────────
     // `IF NOT EXISTS` matches on NAME only. If an index of this name already
@@ -9531,6 +9576,11 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
             code: dropped.code,
           }
         }
+      } else if (!params.indexName) {
+        // A name Backenly chose is taken by another index (one left on a column
+        // renamed from under it, or made by hand): the next free one. A merge
+        // failed on exactly this, production QA 2026-11-09.
+        idxName = await freeIndexName(db, postgresSchema, idxName)
       } else return {
         success: false,
         message:
@@ -9546,6 +9596,10 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
       }
     }
 
+    // The name is settled now: it may be the next free one.
+    const ddl =
+      `CREATE${unique ? ' UNIQUE' : ''} INDEX${online ? ' CONCURRENTLY' : ''} IF NOT EXISTS "${idxName}" ` +
+      `ON "${postgresSchema}"."${tableName}"${usingClause} (${colList})${whereClause}`
     if (online) {
       const built = await buildIndexOnline(projectId, postgresSchema, idxName, ddl)
       if (built.kind === 'failed') {
@@ -9771,6 +9825,113 @@ export function indexDefShape(indexdef: string): { columns: string[]; where: str
   }
 }
 
+/**
+ * Whether an index name is one Backenly made for these columns: its default
+ * (defaultIndexName, in either case style, or with the _2, _3 a free name
+ * takes) or the one create_table and add_column give a column they index.
+ */
+function isBackenlyIndexName(table: string, columns: string[], unique: boolean, name: string): boolean {
+  const lower = name.toLowerCase()
+  const made = defaultIndexName(table, columns, unique).toLowerCase()
+  if (lower === made || new RegExp(`^${made.replace(/[^a-z0-9_]/g, '\\$&')}_\\d+$`).test(lower)) return true
+  return columns.length === 1 && name === `idx_${table}_${columns[0].toLowerCase().replace(/[^a-z0-9]/g, '_')}`.slice(0, 63)
+}
+
+/** `name`, or the first of name_2, name_3, … that no relation in the schema has. */
+async function freeIndexName(db: Awaited<ReturnType<typeof projectDb>>, schema: string, name: string): Promise<string> {
+  for (let n = 2; n < 100; n++) {
+    const suffix = `_${n}`
+    const candidate = `${name.slice(0, 63 - suffix.length)}${suffix}`
+    const taken = await db.$queryRawUnsafe<Array<{ n: number }>>(
+      `SELECT count(*)::int AS n FROM pg_class c JOIN pg_namespace ns ON ns.oid = c.relnamespace WHERE ns.nspname = $1 AND c.relname = $2`,
+      schema, candidate,
+    )
+    if (!taken[0]?.n) return candidate
+  }
+  return `${name.slice(0, 54)}_${Date.now().toString(36)}`.slice(0, 63)
+}
+
+/**
+ * After a column is renamed, the names Backenly made from it follow it: an
+ * index named by defaultIndexName (idx_ or uniq_, in either case style) and a
+ * foreign key named fk_<table>_<column> or fk_<table>_<column without _id>.
+ * Left behind, idx_orders_status kept naming the index on legacy_status, and
+ * the next CREATE INDEX ON orders (status) collided with it: on production a
+ * merge failed there (QA, 2026-11-09). Names a person chose are left alone,
+ * and so is a name whose new form is taken. Returns "old → new" for each.
+ */
+async function renameNamesWithColumn(
+  db: Awaited<ReturnType<typeof projectDb>>,
+  schema: string,
+  table: string,
+  oldColumn: string,
+  newColumn: string,
+): Promise<string[]> {
+  const moved: string[] = []
+  const free = async (name: string) => {
+    const rows = await db.$queryRawUnsafe<Array<{ n: number }>>(
+      `SELECT (SELECT count(*) FROM pg_class c JOIN pg_namespace ns ON ns.oid = c.relnamespace WHERE ns.nspname = $1 AND c.relname = $2)
+            + (SELECT count(*) FROM pg_constraint k JOIN pg_namespace ns ON ns.oid = k.connamespace WHERE ns.nspname = $1 AND k.conname = $2) AS n`,
+      schema, name,
+    )
+    return Number(rows[0]?.n ?? 0) === 0
+  }
+  // The name in the style it was made in: Backenly writes some lower-cased.
+  const styled = (made: string, like: string) => (like === like.toLowerCase() ? made.toLowerCase() : made)
+
+  try {
+    const indexes = await db.$queryRawUnsafe<Array<{ name: string; def: string; isunique: boolean }>>(
+      `SELECT i.relname AS name, pg_get_indexdef(ix.indexrelid) AS def, ix.indisunique AS isunique
+         FROM pg_index ix
+         JOIN pg_class i ON i.oid = ix.indexrelid
+         JOIN pg_class t ON t.oid = ix.indrelid
+         JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE n.nspname = $1 AND t.relname = $2
+          AND NOT EXISTS (SELECT 1 FROM pg_constraint c WHERE c.conindid = ix.indexrelid)`,
+      schema, table,
+    )
+    for (const ix of indexes) {
+      const cols = indexDefColumns(ix.def)
+      if (!cols.includes(newColumn.toLowerCase())) continue
+      const before = cols.map((c) => (c === newColumn.toLowerCase() ? oldColumn : c))
+      const after = cols.map((c) => (c === newColumn.toLowerCase() ? newColumn : c))
+      if (ix.name.toLowerCase() !== defaultIndexName(table, before, ix.isunique).toLowerCase()) continue
+      const next = styled(defaultIndexName(table, after, ix.isunique), ix.name)
+      if (next === ix.name || !(await free(next))) continue
+      await db.$executeRawUnsafe(`ALTER INDEX "${schema}"."${ix.name}" RENAME TO "${next}"`)
+      moved.push(`${ix.name} → ${next}`)
+    }
+
+    const keys = await db.$queryRawUnsafe<Array<{ name: string }>>(
+      `SELECT k.conname AS name
+         FROM pg_constraint k
+         JOIN pg_class t ON t.oid = k.conrelid
+         JOIN pg_namespace n ON n.oid = t.relnamespace
+         JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.conkey[1]
+        WHERE n.nspname = $1 AND t.relname = $2 AND k.contype = 'f'
+          AND array_length(k.conkey, 1) = 1 AND a.attname = $3`,
+      schema, table, newColumn,
+    )
+    const base = (c: string) => c.replace(/_id$/i, '')
+    for (const key of keys) {
+      const forms: Array<[string, string]> = [
+        [`fk_${table}_${oldColumn}`, `fk_${table}_${newColumn}`],
+        [`fk_${table}_${base(oldColumn)}`, `fk_${table}_${base(newColumn)}`],
+      ]
+      const form = forms.find(([was]) => was.slice(0, 63).toLowerCase() === key.name.toLowerCase())
+      if (!form) continue
+      const next = styled(form[1].slice(0, 63), key.name)
+      if (next === key.name || !(await free(next))) continue
+      await db.$executeRawUnsafe(`ALTER TABLE "${schema}"."${table}" RENAME CONSTRAINT "${key.name}" TO "${next}"`)
+      moved.push(`${key.name} → ${next}`)
+    }
+  } catch (err: any) {
+    // The rename itself stands; a name left behind only risks a later collision.
+    console.warn(`[RenameColumn] names for ${table}.${newColumn} not followed:`, err?.message ?? err)
+  }
+  return moved
+}
+
 /** Column list of a pg_indexes definition, lower-cased for comparison. */
 export function indexDefColumns(indexdef: string): string[] {
   return indexDefShape(indexdef).columns
@@ -9803,6 +9964,8 @@ async function executeRenameColumn(params: any, projectId: string, target: Schem
     await db.$executeRawUnsafe(
       `ALTER TABLE "${postgresSchema}"."${safe(tableName)}" RENAME COLUMN "${safe(oldName)}" TO "${safe(newName)}"`
     )
+    // Names Backenly made from the old column follow it (renameNamesWithColumn).
+    const followed = await renameNamesWithColumn(db, postgresSchema, safe(tableName), safe(oldName), safe(newName))
     // The ledger describes MAIN; a branch's rename is applied when it is merged.
     if (!target.targetSchema) {
       const { supersedeSchemaIntent } = await import('@/lib/autonomy/intent-conformance')
@@ -9812,8 +9975,10 @@ async function executeRenameColumn(params: any, projectId: string, target: Schem
     import('@/lib/services/workspace-validator').then(({ invalidateSchemaCache }) => invalidateSchemaCache(projectId, tableName)).catch(() => {})
     return {
       success: true,
-      message: `✅ Column renamed from "${oldName}" to "${newName}" in ${tableName}`,
-      data: { tableName, oldName, newName }
+      message:
+        `✅ Column renamed from "${oldName}" to "${newName}" in ${tableName}` +
+        (followed.length ? `. Backenly's names for it followed: ${followed.join(', ')}.` : ''),
+      data: { tableName, oldName, newName, ...(followed.length ? { renamedWithIt: followed } : {}) }
     }
   } catch (error: any) {
     return { success: false, message: `Failed to rename column: ${error.message}`, error: error.message }

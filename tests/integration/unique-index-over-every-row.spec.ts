@@ -157,8 +157,11 @@ describe('a unique index scoped to live rows', () => {
 
   it('is never mistaken for one over every row of the same name', async () => {
     const out = await createIndex({ columns: ['user_id', 'quantity'], unique: true, where: 'true' })
-    expect(out).toMatchObject({ success: false, code: 'INDEX_CONFLICT', data: { requested: { where: 'true' } } })
-    expect(out.message).toMatch(/over every row/)
+    // Not taken for the scoped index: one over every row is built beside it,
+    // under the next free name, since the name Backenly chose is in use (#662).
+    expect(out).toMatchObject({ success: true, data: { everyRow: true, indexName: 'uniq_cart_items_user_id_quantity_2' } })
+    expect(out.message).toMatch(/covers every row/)
+    expect(await indexdef('uniq_cart_items_user_id_quantity_2')).not.toMatch(/WHERE/i)
     // The scoped index is left as it was.
     expect(await indexdef('uniq_cart_items_user_id_quantity')).toMatch(/WHERE \(deleted_at IS NULL\)$/)
   }, 120_000)
