@@ -1576,9 +1576,9 @@ AI FUNCTIONS (serverless logic — "when X happens, run this logic automatically
 - CREATE_AI_FUNCTION - Create an AI-generated serverless function from a description
   triggerType: on_signup | on_db_insert | on_db_update | on_db_delete | on_webhook | manual
   for on_webhook: triggerTable = integration name (e.g. "stripe") to match that webhook source
-- LIST_AI_FUNCTIONS - List all AI functions
-- DELETE_AI_FUNCTION - Delete an AI function
-- TOGGLE_AI_FUNCTION - Enable or disable an AI function
+- LIST_AI_FUNCTIONS - List all functions
+- DELETE_AI_FUNCTION - Delete a function
+- TOGGLE_AI_FUNCTION - Enable or disable a function
 - FIX_AI_FUNCTION - Regenerate code for a broken function. Use when user pastes a function error,
   shows "Syntax error: ..." from a function, says a function is broken/not working, or asks you
   to fix/repair an existing function. NEVER create new functions when the user is showing an error
@@ -2197,7 +2197,7 @@ export async function validateAction(
     case 'DELETE_ENV_VAR':
       if (!action.params.key) errors.push('Env var key is required')
       preview = `Delete env var "${action.params.key}"`
-      warnings.push('AI functions using this env var will start failing on next invocation')
+      warnings.push('Functions using this env var will start failing on their next run')
       break
 
     case 'GET_DEPLOY_STATUS':
@@ -2388,22 +2388,22 @@ export async function validateAction(
     case 'CREATE_AI_FUNCTION':
       if (!action.params.description) errors.push('description is required')
       if (!action.params.triggerType) errors.push('triggerType is required (on_signup | on_db_insert | on_db_update | on_db_delete | manual)')
-      preview = `Create AI function: "${action.params.description?.slice(0, 60)}"`
+      preview = `Create function: "${action.params.description?.slice(0, 60)}"`
       break
 
     case 'LIST_AI_FUNCTIONS':
-      preview = 'List all AI functions'
+      preview = 'List all functions'
       break
 
     case 'DELETE_AI_FUNCTION':
       if (!action.params.functionId && !action.params.name) errors.push('functionId or name is required')
-      preview = `Delete AI function "${action.params.name || action.params.functionId}"`
+      preview = `Delete function "${action.params.name || action.params.functionId}"`
       break
 
     case 'TOGGLE_AI_FUNCTION':
       if (!action.params.functionId && !action.params.name) errors.push('functionId or name is required')
       if (action.params.active === undefined) errors.push('active (true/false) is required')
-      preview = `${action.params.active ? 'Enable' : 'Disable'} AI function "${action.params.name || action.params.functionId}"`
+      preview = `${action.params.active ? 'Enable' : 'Disable'} function "${action.params.name || action.params.functionId}"`
       break
 
     // ========== INTEGRATION KEY MANAGEMENT ==========
@@ -6532,7 +6532,7 @@ async function executeInfo(params: any, projectId?: string): Promise<ExecutionRe
     const ownFunctions = aiFunctions.filter((fn) => !isGeneratedEndpoint(fn, generatedRoutes))
     const generatedFunctions = aiFunctions.filter((fn) => isGeneratedEndpoint(fn, generatedRoutes))
     if (ownFunctions.length > 0) {
-      lines.push(`### AI Functions (${ownFunctions.length} active)`)
+      lines.push(`### Functions (${ownFunctions.length} active)`)
       for (const fn of ownFunctions) {
         const trigger = fn.triggerType === 'cron'
           ? `cron: \`${fn.triggerTable}\``
@@ -6600,7 +6600,7 @@ const INFO_HELP_TEXT = `💡 **I can help you build your backend!**
 - "Restore my database to yesterday" — point-in-time restore
 - "List my backups" — show backup history
 
-⚡ **AI Functions:**
+⚡ **Functions:**
 - "When a user signs up, send them a welcome email"
 - "Every day at 9am, send digest emails"
 
@@ -10023,14 +10023,14 @@ async function executeListEnvVars(projectId: string): Promise<ExecutionResult> {
       return {
         success: true,
         message:
-          '**Project env vars:**\n\nNone yet. Set one with: _"Save STRIPE_WEBHOOK_SECRET as whsec_…"_\n\nAccess from AI functions via `ctx.env.YOUR_KEY`.',
+          '**Project env vars:**\n\nNone yet. Set one with: _"Save STRIPE_WEBHOOK_SECRET as whsec_…"_\n\nAccess from functions via `ctx.env.YOUR_KEY`.',
         data: { vars: [] },
       }
     }
     const list = rows.map((r) => `• \`${r.key}\` — ${r.preview}${r.description ? `  _(${r.description})_` : ''}`).join('\n')
     return {
       success: true,
-      message: `**Project env vars (${rows.length}):**\n\n${list}\n\nAccess from AI functions via \`ctx.env.<KEY>\`.`,
+      message: `**Project env vars (${rows.length}):**\n\n${list}\n\nAccess from functions via \`ctx.env.<KEY>\`.`,
       data: { vars: rows },
     }
   } catch (error: any) {
@@ -11102,7 +11102,7 @@ async function executeCreateAiFunction(params: any, projectId: string): Promise<
     const fnValidation = validateAiFunctionData(name, description)
     if (!fnValidation.valid) {
       console.warn(`[AI Executor] GENERATE_FUNCTION blocked: ${fnValidation.reason}`)
-      return { success: false, message: `Could not create AI function — ${fnValidation.reason}. Please provide a concrete description of what this function should do.` }
+      return { success: false, message: `Could not create the function — ${fnValidation.reason}. Please provide a concrete description of what this function should do.` }
     }
 
     // The generated name (when none was supplied) can collide as well.
@@ -11178,7 +11178,7 @@ async function executeCreateAiFunction(params: any, projectId: string): Promise<
       : `⚠️ Syntax error: ${syntaxCheck.error} — function saved but will NOT execute until corrected`
 
     const baseMessage = [
-      `**AI Function \`${fn.name}\` registered.**`,
+      `**Function \`${fn.name}\` registered.**`,
       ``,
       `Trigger: ${triggerLabel[triggerType] ?? triggerType}`,
       syntaxLine,
@@ -11224,7 +11224,7 @@ async function executeCreateAiFunction(params: any, projectId: string): Promise<
       },
     }
   } catch (error: any) {
-    return { success: false, message: `Failed to create AI function: ${error.message}`, error: error.message }
+    return { success: false, message: `Failed to create the function: ${error.message}`, error: error.message }
   }
 }
 
@@ -11259,7 +11259,7 @@ async function existingFunctionResult(
   }
   return {
     success: true,
-    message: `AI function \`${names[0]}\` already exists; it was left unchanged.`,
+    message: `Function \`${names[0]}\` already exists; it was left unchanged.`,
     data: fn ? { id: fn.id, name: fn.name, status: fn.status, existed: true } : { names, existed: true },
     artifacts: { functions: [names[0]] },
     verifiedAt: new Date().toISOString(),
@@ -11400,7 +11400,7 @@ async function executeListAiFunctions(projectId: string): Promise<ExecutionResul
     if (functions.length === 0) {
       return {
         success: true,
-        message: 'No AI functions yet. Describe what you want to happen and I\'ll create one automatically.',
+        message: 'No functions yet. Describe what you want to happen and I\'ll create one automatically.',
         data: { functions: [] },
       }
     }
@@ -11454,12 +11454,12 @@ async function executeListAiFunctions(projectId: string): Promise<ExecutionResul
     return {
       success: true,
       message:
-        `**${functions.length} AI Function${functions.length !== 1 ? 's' : ''}:**\n\n${list}\n\n` +
+        `**${functions.length} Function${functions.length !== 1 ? 's' : ''}:**\n\n${list}\n\n` +
         `Full source, recent runs and last errors are in \`data.functions[]\` — you never need to regenerate a function to read it (regenerating OVERWRITES it).`,
       data: { functions: enriched },
     }
   } catch (error: any) {
-    return { success: false, message: `Failed to list AI functions: ${error.message}`, error: error.message }
+    return { success: false, message: `Failed to list functions: ${error.message}`, error: error.message }
   }
 }
 
@@ -11550,11 +11550,11 @@ async function executeDeleteAiFunction(params: any, projectId: string): Promise<
 
     return {
       success: true,
-      message: `✅ AI function \`${fn.name}\` deleted.`,
+      message: `✅ Function \`${fn.name}\` deleted.`,
       data: { deleted: true, name: fn.name },
     }
   } catch (error: any) {
-    return { success: false, message: `Failed to delete AI function: ${error.message}`, error: error.message }
+    return { success: false, message: `Failed to delete the function: ${error.message}`, error: error.message }
   }
 }
 
@@ -11575,14 +11575,14 @@ async function findAiFunctionForAction(
   const { prisma } = await import('@/lib/db')
   if (typeof functionId === 'string' && functionId) {
     const byId = await prisma.aiFunction.findFirst({ where: { ...where, id: functionId, projectId } })
-    return byId ?? { result: { success: false, message: `AI function "${functionId}" not found`, error: 'NOT_FOUND' } }
+    return byId ?? { result: { success: false, message: `Function "${functionId}" not found`, error: 'NOT_FOUND' } }
   }
   if (typeof name !== 'string' || !name.trim()) {
     return { result: { success: false, message: 'functionId or name is required', error: 'INVALID_ARGUMENT' } }
   }
   const { resolveFunctionByName } = await import('@/lib/services/ai-functions/names')
   const found = await resolveFunctionByName(projectId, name, where as any)
-  if (!found) return { result: { success: false, message: `AI function "${name}" not found`, error: 'NOT_FOUND' } }
+  if (!found) return { result: { success: false, message: `Function "${name}" not found`, error: 'NOT_FOUND' } }
   if ('ambiguous' in found) {
     return {
       result: {
@@ -11625,11 +11625,11 @@ async function executeToggleAiFunction(params: any, projectId: string): Promise<
 
     return {
       success: true,
-      message: `✅ AI function \`${fn.name}\` is now **${newStatus}**.`,
+      message: `✅ Function \`${fn.name}\` is now **${newStatus}**.`,
       data: { functionId: fn.id, name: fn.name, status: newStatus },
     }
   } catch (error: any) {
-    return { success: false, message: `Failed to toggle AI function: ${error.message}`, error: error.message }
+    return { success: false, message: `Failed to switch the function: ${error.message}`, error: error.message }
   }
 }
 
@@ -12045,7 +12045,7 @@ async function executeStoreIntegrationKey(params: any, projectId: string): Promi
 
     return {
       success: true,
-      message: `${integrationId} connected. Key stored securely (${status.maskedKey}).${keyValidationNote}${webhookUrl}${webhookGap}${appIdGap}${autoWiredMsg}${notWiredMsg}\n\nAI functions can now use \`ctx.integrations.${integrationId}.*\` to call ${integrationId} APIs.`,
+      message: `${integrationId} connected. Key stored securely (${status.maskedKey}).${keyValidationNote}${webhookUrl}${webhookGap}${appIdGap}${autoWiredMsg}${notWiredMsg}\n\nFunctions can now use \`ctx.integrations.${integrationId}.*\` to call ${integrationId} APIs.`,
       data: {
         integrationId,
         maskedKey: status.maskedKey,
