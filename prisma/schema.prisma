@@ -2803,13 +2803,30 @@ model AiFunction {
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 
-  project       Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  executionLogs AiFunctionLog[]
+  project        Project                   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  executionLogs  AiFunctionLog[]
+  triggerColumns AiFunctionTriggerColumns?
 
   @@index([projectId])
   @@index([projectId, triggerType])
   @@index([projectId, status])
   @@map("ai_functions")
+}
+
+// ============================================================================
+// ROW-UPDATE FUNCTIONS: THE COLUMNS THEY WATCH
+// A function fired by row updates runs only when one of these columns changed;
+// without a row it runs on every update. A table of its own rather than a
+// column on ai_functions, whose rows every read of a function loads whole, so
+// a release that runs ahead of this migration still reads every function.
+// ============================================================================
+model AiFunctionTriggerColumns {
+  functionId String     @id
+  columns    String[]
+  updatedAt  DateTime   @updatedAt
+  function   AiFunction @relation(fields: [functionId], references: [id], onDelete: Cascade)
+
+  @@map("ai_function_trigger_columns")
 }
 
 // ============================================================================

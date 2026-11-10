@@ -100,6 +100,10 @@ export async function getFunction(
   if ('ambiguous' in found) return ambiguousName(found.ambiguous)
   // A regional project's last error is read from its region (./run-records.ts).
   const [fn] = await withLastErrors(actor.projectId, [found])
+  // The columns a row-update function watches, when it watches any.
+  const watchedColumns = fn.triggerType === 'on_db_update'
+    ? ((await prisma.aiFunctionTriggerColumns.findUnique({ where: { functionId: fn.id } }).catch(() => null))?.columns ?? null)
+    : null
 
   const endpoint = httpEndpoint(fn.triggerTable)
   return {
@@ -107,6 +111,7 @@ export async function getFunction(
     summary:
       `Function ${fn.name} (${fn.id}): ${fn.status}, trigger ${fn.triggerType}` +
       (endpoint ? ` ${endpoint.method} ${endpoint.path}` : fn.triggerTable ? ` (${fn.triggerTable})` : '') +
+      (watchedColumns?.length ? `, only when ${watchedColumns.join(' or ')} changes` : '') +
       `, ${fn.runCount} runs${fn.lastRun ? `, last ${fn.lastRun.toISOString()}` : ''}.` +
       (fn.lastError ? `\nLast error: ${fn.lastError.slice(0, 300)}` : '') +
       '\nThe code is in data.code.',
@@ -117,6 +122,7 @@ export async function getFunction(
       status: fn.status,
       triggerType: fn.triggerType,
       triggerTable: fn.triggerTable,
+      ...(watchedColumns?.length ? { watchedColumns } : {}),
       endpoint,
       runCount: fn.runCount,
       lastRun: fn.lastRun,
@@ -313,6 +319,7 @@ export async function deployFunctionCode(
     description?: unknown
     functionId?: unknown
     projectId?: unknown
+    columns?: unknown
   },
 ): Promise<FunctionActionResult> {
   // The project is the one the key is bound to. A different one named in the
@@ -333,6 +340,20 @@ export async function deployFunctionCode(
   const trigger = typeof args.trigger === 'string' ? args.trigger.trim().toLowerCase() : ''
   if (!(trigger in DEPLOY_TRIGGERS)) {
     return invalid(`trigger is required, one of: ${Object.keys(DEPLOY_TRIGGERS).join(', ')}. "http" takes a route module; the others take a sandbox function body.`)
+  }
+
+  // A row-update function may name the columns it watches: it then runs only
+  // when an update changed one of them (executor.ts functionsDueForUpdate).
+  let columns: string[] | null = null
+  if (args.columns !== undefined && args.columns !== null) {
+    if (trigger !== 'on_update') {
+      return invalid('columns applies to trigger "on_update" only: the columns whose change runs the function.')
+    }
+    const named = Array.isArray(args.columns) ? args.columns.map((c) => (typeof c === 'string' ? c.trim() : '')) : []
+    if (named.length === 0 || named.some((c) => !/^[A-Za-z_][A-Za-z0-9_$]{0,62}$/.test(c))) {
+      return invalid('columns is a list of column names, e.g. ["status"]. Leave it out to run on every update.')
+    }
+    columns = [...new Set(named)]
   }
 
   if (typeof args.code !== 'string' || !args.code.trim()) return invalid('code is required: the complete source to deploy.')
@@ -422,6 +443,20 @@ export async function deployFunctionCode(
     if (!found[0]?.n) {
       return { ok: false, code: 'TABLE_NOT_FOUND', summary: `There is no table ${table} in this project, so a ${trigger} function on it would never run.` }
     }
+    if (columns) {
+      const present = await db.$queryRaw<Array<{ column_name: string }>>`
+        SELECT column_name FROM information_schema.columns
+        WHERE table_schema = ${workspaceSchemaName(actor.projectId)} AND table_name = ${table}`
+      const have = new Set(present.map((r) => r.column_name))
+      const missing = columns.filter((c) => !have.has(c))
+      if (missing.length > 0) {
+        return {
+          ok: false,
+          code: 'COLUMN_NOT_FOUND',
+          summary: `${table} has no column ${missing.join(', ')}, so a change to it could never run the function. Nothing was deployed.`,
+        }
+      }
+    }
   }
 
   // Look the function up under every form of the name the agent gave, so a
@@ -458,9 +493,22 @@ export async function deployFunctionCode(
   // decision to start running it.
   const keptOff = existing?.status === 'inactive' || existing?.status === 'disabled'
   const { governedChange } = await import('@/lib/changes/ledger')
-  const fn = await governedChange(actor.projectId, `${existing ? 'Deploy new code to' : 'Deploy'} function ${deployedName}`, () => existing
-    ? prisma.aiFunction.update({ where: { id: existing.id }, data: { ...fields, ...(keptOff ? {} : { status: 'active' }) } })
-    : prisma.aiFunction.create({ data: { projectId: actor.projectId, name, status: 'active', ...fields } }))
+  const fn = await governedChange(actor.projectId, `${existing ? 'Deploy new code to' : 'Deploy'} function ${deployedName}`, async () => {
+    const saved = existing
+      ? await prisma.aiFunction.update({ where: { id: existing.id }, data: { ...fields, ...(keptOff ? {} : { status: 'active' }) } })
+      : await prisma.aiFunction.create({ data: { projectId: actor.projectId, name, status: 'active', ...fields } })
+    // A deploy says the whole trigger: left out, every update runs it.
+    if (columns) {
+      await prisma.aiFunctionTriggerColumns.upsert({
+        where: { functionId: saved.id },
+        create: { functionId: saved.id, columns },
+        update: { columns },
+      })
+    } else {
+      await prisma.aiFunctionTriggerColumns.deleteMany({ where: { functionId: saved.id } }).catch(() => {})
+    }
+    return saved
+  })
   // New code clears the last error, in the project's region too.
   if (existing?.lastError) await rowLastError(actor.projectId, existing.id, null)
 
@@ -477,6 +525,7 @@ export async function deployFunctionCode(
     summary:
       `${existing ? 'Replaced the code of' : 'Deployed'} ${deployedName} (${fn.id}), trigger ${trigger}` +
       (endpoint ? `, ${method} ${endpoint}` : table ? ` on ${table}` : '') +
+      (columns ? `, run only when ${columns.join(' or ')} changes` : '') +
       (renamed
         ? existing
           ? `. "${rawName}" is stored as "${deployedName}", which this replaced`
@@ -493,6 +542,7 @@ export async function deployFunctionCode(
       trigger,
       triggerType: fn.triggerType,
       triggerTable: fn.triggerTable,
+      watchedColumns: columns,
       endpoint: endpoint ? { method, path: endpoint } : null,
       status: fn.status,
       codeSha256: sha(code),
