@@ -1023,6 +1023,12 @@ tests/integration/scheduler-leader-lock.spec.ts
 # without the provisioning grant one.
 tests/integration/direct-access-backup-grants.spec.ts
 
+# A new read-write Postgres login reads and writes rows, and Postgres refuses
+# it any schema change (no CREATE on the schema, no owner-role membership)
+# until its project's admin allows schema changes; a login from before the
+# setting keeps what it had. Real roles, grants and definer functions.
+tests/integration/read-write-logins-refuse-schema-changes.spec.ts
+
 # Both storage drivers apply one per-file rule: the bucket's own limit under the
 # shared ceiling for uploads through the server. The local driver also applied
 # Project.maxFileSize, which nothing can set (10 MB everywhere), so a raised

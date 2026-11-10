@@ -3571,11 +3571,14 @@ export async function dispatchTool(
           `${provisioned ? 'Provisioned' : 'Existing'} ${mode === 'READ_ONLY' ? 'read-only' : 'read-write'} Postgres access: role ${c.roleName} @ ${c.host}:${c.port}/${c.database} (TLS required, search_path pinned to ${status.schema}).`,
           mode === 'READ_ONLY'
             ? 'SELECT-only — safe for inspection, EXPLAIN, BI, and pg_dump (run pg_dump with --enable-row-security; the returned pgDumpCommand includes it). It cannot mutate anything.'
-            : 'DML + in-schema DDL. Every DDL statement you run is observed as drift — call adopt_external_schema when you finish migrating.',
+            : c.schemaChanges === 'allowed'
+              ? 'Rows and schema: the project owner allowed schema changes over it. They skip approvals and History and are observed as drift — call adopt_external_schema when you finish migrating.'
+              : 'Rows only: schema changes over it are refused (permission denied). Change the schema with apply_migration, which is governed, verified and reversible.',
           'The connection string is in data.connectionString — treat it as a secret (do not write it into code, files, or logs; reference it from env).',
         ].join('\n')),
         data: {
           mode: c.mode,
+          ...(c.schemaChanges ? { schemaChanges: c.schemaChanges } : {}),
           roleName: c.roleName,
           host: c.host,
           port: c.port,
@@ -3614,9 +3617,9 @@ export async function dispatchTool(
           'Read-write database access is not armed for this project, so there is no read-write connection ' +
           'string to hand you. Only the project OWNER can arm it, and it is one click:\n\n' +
           `  ${armUrl}\n\n` +
-          'Give the human that link and ask them to create read-write credentials (Connect → Direct). Every ' +
-          'schema change made over that connection is observed as drift and adopted by the autonomy loop, ' +
-          'which is why it is opt-in. Then call this tool again with mode=READ_WRITE.\n' +
+          'Give the human that link and ask them to create read-write credentials (Connect → Direct). The login ' +
+          'reads and writes rows; schema changes over it stay refused unless the owner allows them there. Then ' +
+          'call this tool again with mode=READ_WRITE.\n' +
           'Read-only access needs no approval and is available right now via mode=READ_ONLY — it covers ' +
           'inspection, EXPLAIN, BI and pg_dump (with --enable-row-security — the returned pgDumpCommand includes it). For SCHEMA CHANGES you do not need direct access at all: ' +
           'apply_migration takes ordinary DDL and is governed, verified and reversible.',

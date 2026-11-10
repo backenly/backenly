@@ -6,9 +6,10 @@
  * Real PostgreSQL connection strings for the project's workspace schema:
  *   • Read-only  — SELECT-only role. psql, TablePlus, EXPLAIN, BI tools,
  *                  self-serve pg_dump. Structurally cannot mutate.
- *   • Read-write — DML + in-schema DDL. External DDL is captured by the
- *                  drift watch and adopted/flagged by autonomy —
- *                  reconciliation, not lockout.
+ *   • Read-write — rows only, until the admin allows schema changes over it:
+ *                  those skip approvals and History, so Postgres refuses them
+ *                  by default. Allowed, they are captured by the drift watch
+ *                  and adopted/flagged by autonomy.
  *
  * Plus the portability guarantee made concrete: one-click pg_dump exports
  * (full / schema / data) that restore on any PostgreSQL.
@@ -41,6 +42,8 @@ interface Credential {
   pgDumpCommand: string
   createdAt: string
   rotatedAt: string | null
+  /** READ_WRITE only. */
+  schemaChanges?: 'allowed' | 'refused'
 }
 
 interface Status {
@@ -61,6 +64,7 @@ export function DirectDatabasePanel({ projectId }: { projectId: string }) {
   const [copied, setCopied] = useState<string | null>(null)
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'info' | 'warning' } | null>(null)
   const [revokeTarget, setRevokeTarget] = useState<Credential['mode'] | null>(null)
+  const [confirmAllow, setConfirmAllow] = useState(false)
 
   const load = useCallback(async () => {
     try {
@@ -145,7 +149,28 @@ export function DirectDatabasePanel({ projectId }: { projectId: string }) {
     }
   }
 
+  const setSchemaChanges = async (value: 'allowed' | 'refused') => {
+    setBusy('schema_changes')
+    try {
+      const res = await fetch(`/api/projects/${projectId}/database-access`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ schemaChanges: value }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || 'Could not change the setting')
+      setToast({ message: value === 'allowed' ? 'Schema changes allowed over this login' : 'Schema changes refused over this login', type: 'success' })
+      await load()
+    } catch (err: any) {
+      setToast({ message: err.message, type: 'error' })
+    } finally {
+      setBusy(null)
+    }
+  }
+
   const has = (mode: Credential['mode']) => status?.credentials.some(c => c.mode === mode) ?? false
+  const readWrite = status?.credentials.find(c => c.mode === 'READ_WRITE')
 
   if (loading) {
     return (
@@ -212,12 +237,32 @@ export function DirectDatabasePanel({ projectId }: { projectId: string }) {
           />
           <KitCardBody className="space-y-3">
             <p className="text-[12px] leading-relaxed text-faint">
-              Full DML + in-schema DDL from your own tools. Schema changes are{' '}
-              <span className="text-zinc-300">observed, not blocked</span>. Autonomy asks you before it adopts them
-              into your APIs.
+              Reads and writes rows from your own tools. Schema changes belong in apply_migration or the
+              dashboard, where they are checked, kept in History and can be undone.
             </p>
-            {has('READ_WRITE') ? (
+            {readWrite ? (
               <>
+                {readWrite.schemaChanges === 'allowed' ? (
+                  <KitNote
+                    icon={GitBranch}
+                    tone="warn"
+                    title="Schema changes are allowed over this login"
+                    actions={
+                      <KitButton variant="secondary" size="sm" disabled={busy !== null} onClick={() => setSchemaChanges('refused')}>
+                        {busy === 'schema_changes' ? 'Saving…' : 'Refuse schema changes'}
+                      </KitButton>
+                    }
+                  >
+                    They skip approvals and History. Autonomy asks you before it adopts them into your APIs.
+                  </KitNote>
+                ) : (
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-[12.5px] text-faint">
+                    <span>Schema changes over this login are refused.</span>
+                    <KitButton variant="ghost" size="sm" disabled={busy !== null} onClick={() => setConfirmAllow(true)}>
+                      Allow schema changes
+                    </KitButton>
+                  </div>
+                )}
                 {status!.pendingDriftEvents > 0 && (
                   <div className="flex items-center gap-2 text-[12.5px] text-amber-400/90">
                     <GitBranch className="w-3.5 h-3.5" />
@@ -225,7 +270,7 @@ export function DirectDatabasePanel({ projectId }: { projectId: string }) {
                   </div>
                 )}
                 <CredentialDetails
-                  credential={status!.credentials.find(c => c.mode === 'READ_WRITE')!}
+                  credential={readWrite}
                   revealed={revealed} setRevealed={setRevealed}
                   copied={copied} onCopy={copy}
                   busy={busy} onRotate={() => rotate('READ_WRITE')} onRevoke={() => setRevokeTarget('READ_WRITE')}
@@ -307,6 +352,18 @@ export function DirectDatabasePanel({ projectId }: { projectId: string }) {
         title={`Revoke ${revokeTarget === 'READ_ONLY' ? 'read-only' : 'read-write'} credentials?`}
         description="Anything connected with them is disconnected immediately."
         confirmLabel="Revoke"
+        danger
+      />
+      <KitConfirmDialog
+        open={confirmAllow}
+        onCancel={() => setConfirmAllow(false)}
+        onConfirm={() => {
+          setConfirmAllow(false)
+          setSchemaChanges('allowed')
+        }}
+        title="Allow schema changes over this login?"
+        description="A table changed or dropped over it skips approvals and History, so Backenly cannot undo it. Autonomy asks you before it adopts the change into your APIs."
+        confirmLabel="Allow schema changes"
         danger
       />
     </section>

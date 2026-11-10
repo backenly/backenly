@@ -135,6 +135,7 @@ BEGIN
       ('public.backenly_direct_set_password(text,text)',                true),
       ('public.backenly_direct_drop_role(text)',                        true),
       ('public.backenly_direct_sync_schema(text,text,text,text)',       true),
+      ('public.backenly_direct_set_schema_changes(text,boolean)',       true),
       ('public.backenly_pgrst_prune_schemas()',                         false),
       ('public.backenly_pgrst_apply_owner_defaults(text)',              false),
       ('public.backenly_capture_ddl()',                                 false),

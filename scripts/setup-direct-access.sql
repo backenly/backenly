@@ -11,8 +11,8 @@
 --   read-write) scoped to their own workspace_<projectId> schema. The app
 --   itself must NOT hold CREATEROLE or superuser — so every privileged
 --   operation lives in a narrow SECURITY DEFINER function owned by postgres,
---   with hard input validation. The app (backenly_user) can only call these
---   four functions; it cannot create arbitrary roles or touch other schemas.
+--   with hard input validation. The app (backenly_user) can only call the
+--   functions below; it cannot create arbitrary roles or touch other schemas.
 --
 --   1. backenly_external            — NOLOGIN group; pg_hba only admits remote
 --                                     connections for members of this group.
@@ -31,6 +31,8 @@
 --                                     gets whether or not it has direct access.
 --                                     Called when a workspace is created, after
 --                                     governed DDL, after a restore and on adopt.
+--   5b. backenly_direct_set_schema_changes — whether a read-write login may
+--                                     change the schema; a new one may not.
 --   6. backenly_capture_ddl/_drop   — event triggers that record every DDL
 --                                     statement executed BY a bkn_% role into
 --                                     public.schema_drift_events (the evidence
@@ -98,6 +100,7 @@ DROP FUNCTION IF EXISTS public.backenly_direct_create_role(text, text, text, tex
 DROP FUNCTION IF EXISTS public.backenly_direct_set_password(text, text);
 DROP FUNCTION IF EXISTS public.backenly_direct_drop_role(text);
 DROP FUNCTION IF EXISTS public.backenly_direct_sync_schema(text, text, text, text);
+DROP FUNCTION IF EXISTS public.backenly_direct_set_schema_changes(text, boolean);
 
 CREATE OR REPLACE FUNCTION public.backenly_direct_create_role(
   p_role     text,
@@ -136,6 +139,11 @@ BEGIN
       'CREATE ROLE %I WITH LOGIN PASSWORD %L NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS CONNECTION LIMIT %s IN ROLE backenly_external',
       p_role, p_password, CASE WHEN p_mode = 'READ_ONLY' THEN 3 ELSE 2 END
     );
+    -- A new read-write login changes rows, not the schema, until the project's
+    -- admin allows it (section 5b). Re-keying an existing login keeps its setting.
+    IF p_mode = 'READ_WRITE' THEN
+      EXECUTE format('ALTER ROLE %I SET backenly.schema_changes = %L', p_role, 'off');
+    END IF;
   END IF;
 
   -- Hardening: bounded statements, no camping in open transactions, and the
@@ -276,10 +284,12 @@ REVOKE ALL ON FUNCTION public.backenly_direct_drop_role(text) FROM PUBLIC;
 -- drift adopt, and for each existing workspace when this file is installed
 -- (section 7). With no ro/rw role it grants the backup role and stops.
 -- Owner-role model (READ_WRITE only): a NOLOGIN role bkn_own_<hex> owns the
--- schema and every table in it; backenly_user AND the rw login role are members,
--- so BOTH the platform and the external developer can ALTER/DROP any table —
--- that is what makes external DDL a first-class citizen instead of a permission
--- error. Membership is inherited, so backenly_user loses nothing.
+-- schema and every table in it; backenly_user is a member, and so is the rw
+-- login role when it may change the schema (section 5b), so that the external
+-- developer can ALTER/DROP any table. Membership is inherited, so backenly_user
+-- loses nothing. A login that may not change the schema is no member and has
+-- no CREATE on it: it reads and writes rows, and a schema change over it is a
+-- permission error.
 CREATE OR REPLACE FUNCTION public.backenly_direct_sync_schema(
   p_schema text,
   p_ro     text DEFAULT NULL,
@@ -292,6 +302,7 @@ DECLARE
   t record;
   v_backup text;
   v_creator text;
+  v_rw_ddl boolean;
 BEGIN
   IF p_schema !~ '^workspace_[0-9a-fA-F][0-9a-fA-F-]{10,60}$' THEN
     RAISE EXCEPTION 'backenly_direct_sync_schema: invalid schema %', p_schema;
@@ -313,13 +324,28 @@ BEGIN
   IF p_ro IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = p_ro) THEN p_ro := NULL; END IF;
   IF p_rw IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = p_rw) THEN p_rw := NULL; END IF;
 
+  -- Whether the rw login may change the schema (section 5b): not when its role
+  -- says so. A login made before the setting existed has none, and keeps the
+  -- schema changes it had.
+  v_rw_ddl := p_rw IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM pg_roles
+     WHERE rolname = p_rw AND 'backenly.schema_changes=off' = ANY (coalesce(rolconfig, '{}'::text[])));
+
   -- ── Ownership model (READ_WRITE only) ──────────────────────────────────────
   IF p_rw IS NOT NULL AND p_owner IS NOT NULL THEN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = p_owner) THEN
       EXECUTE format('CREATE ROLE %I NOLOGIN', p_owner);
     END IF;
     EXECUTE format('GRANT %I TO %I', p_owner, public.backenly_app_role());
-    EXECUTE format('GRANT %I TO %I', p_owner, p_rw);
+    IF v_rw_ddl THEN
+      EXECUTE format('GRANT %I TO %I', p_owner, p_rw);
+    ELSIF EXISTS (
+      SELECT 1 FROM pg_auth_members m
+       WHERE m.roleid = (SELECT oid FROM pg_roles WHERE rolname = p_owner)
+         AND m.member = (SELECT oid FROM pg_roles WHERE rolname = p_rw)
+    ) THEN
+      EXECUTE format('REVOKE %I FROM %I', p_owner, p_rw);
+    END IF;
     EXECUTE format('ALTER SCHEMA %I OWNER TO %I', p_schema, p_owner);
     FOR t IN
       SELECT c.relname, c.relkind
@@ -349,7 +375,12 @@ BEGIN
     EXECUTE format('GRANT SELECT ON ALL SEQUENCES IN SCHEMA %I TO %I', p_schema, p_ro);
   END IF;
   IF p_rw IS NOT NULL THEN
-    EXECUTE format('GRANT USAGE, CREATE ON SCHEMA %I TO %I', p_schema, p_rw);
+    IF v_rw_ddl THEN
+      EXECUTE format('GRANT USAGE, CREATE ON SCHEMA %I TO %I', p_schema, p_rw);
+    ELSE
+      EXECUTE format('GRANT USAGE ON SCHEMA %I TO %I', p_schema, p_rw);
+      EXECUTE format('REVOKE CREATE ON SCHEMA %I FROM %I', p_schema, p_rw);
+    END IF;
     EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE, REFERENCES ON ALL TABLES IN SCHEMA %I TO %I', p_schema, p_rw);
     EXECUTE format('GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA %I TO %I', p_schema, p_rw);
   END IF;
@@ -437,6 +468,38 @@ END
 $fn$;
 
 REVOKE ALL ON FUNCTION public.backenly_direct_sync_schema(text, text, text, text) FROM PUBLIC;
+
+-- ── 5b. Whether a read-write login may change the schema ─────────────────────
+--
+-- A schema change over a read-write login skips the approvals and the History
+-- every other door goes through: it is only observed as drift afterwards. So a
+-- new login may not make one (backenly_direct_create_role), and the project's
+-- admin can allow it. The setting is kept on the role, so the sync applies it
+-- whenever it runs: ownership-role membership and CREATE on the schema with
+-- schema changes allowed, row grants alone without. Takes effect at the next
+-- sync, which the application runs right after calling this.
+CREATE OR REPLACE FUNCTION public.backenly_direct_set_schema_changes(
+  p_role  text,
+  p_allow boolean
+) RETURNS boolean
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public
+AS $fn$
+BEGIN
+  IF p_role !~ '^bkn_rw_[0-9a-f]{12}$' THEN
+    RAISE EXCEPTION 'backenly_direct_set_schema_changes: invalid role name %', p_role;
+  END IF;
+  IF p_allow IS NULL THEN
+    RAISE EXCEPTION 'backenly_direct_set_schema_changes: say whether schema changes are allowed';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = p_role) THEN
+    RAISE EXCEPTION 'backenly_direct_set_schema_changes: role % does not exist', p_role;
+  END IF;
+  EXECUTE format('ALTER ROLE %I SET backenly.schema_changes = %L', p_role, CASE WHEN p_allow THEN 'on' ELSE 'off' END);
+  RETURN true;
+END
+$fn$;
+
+REVOKE ALL ON FUNCTION public.backenly_direct_set_schema_changes(text, boolean) FROM PUBLIC;
 -- ── 6. DDL drift capture — the observed-drift half of the open loop ──────────
 --
 -- Fires on EVERY DDL statement in the cluster, but returns immediately unless
@@ -588,6 +651,7 @@ BEGIN
     EXECUTE format('GRANT EXECUTE ON FUNCTION public.backenly_direct_set_password(text, text) TO %I', r);
     EXECUTE format('GRANT EXECUTE ON FUNCTION public.backenly_direct_drop_role(text) TO %I', r);
     EXECUTE format('GRANT EXECUTE ON FUNCTION public.backenly_direct_sync_schema(text, text, text, text) TO %I', r);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION public.backenly_direct_set_schema_changes(text, boolean) TO %I', r);
   END IF;
 END $grant$;
 
