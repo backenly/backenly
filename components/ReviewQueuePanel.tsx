@@ -396,7 +396,13 @@ export function ReviewQueuePanel({ projectId }: { projectId: string }) {
     }
   }
 
-  const decideAgentRequest = async (approvalId: string, decision: 'approve' | 'reject', shownDigest?: string | null) => {
+  const decideAgentRequest = async (
+    approvalId: string,
+    decision: 'approve' | 'reject',
+    shownDigest?: string | null,
+    // Bulk approval says one result for all of them and refreshes once.
+    opts: { quiet?: boolean } = {},
+  ): Promise<{ ok: boolean }> => {
     setRow(approvalId, { phase: decision === 'approve' ? 'applying' : 'dismissing' })
     try {
       const res = await fetch(`/api/projects/${projectId}/agent-approvals`, {
@@ -415,6 +421,7 @@ export function ReviewQueuePanel({ projectId }: { projectId: string }) {
 
       if (res.ok && j?.success) {
         setRow(approvalId, { phase: 'verified' })
+        if (opts.quiet) return { ok: true }
         const request = agentApprovals.find(a => a.id === approvalId)
         const restore = request?.tool === 'revert_schema_change'
         const versionRestore = request?.tool === 'rollback_deploy'
@@ -435,7 +442,7 @@ export function ReviewQueuePanel({ projectId }: { projectId: string }) {
           })
         }, 2400)
         timers.current.push(t)
-        return
+        return { ok: true }
       }
 
       // A call that ran and failed answers with what happened (resultSummary):
@@ -448,10 +455,49 @@ export function ReviewQueuePanel({ projectId }: { projectId: string }) {
           : 'Could not reject. Try again.'),
       })
       // The request changed under this card, or was decided elsewhere: show it as it is now.
-      if (res.status === 409) fetchReport(true)
+      if (res.status === 409 && !opts.quiet) fetchReport(true)
+      return { ok: false }
     } catch {
       setRow(approvalId, { phase: 'error', message: 'Network error. Check your connection and try again.' })
+      return { ok: false }
     }
+  }
+
+  // ── Approving several agent requests at once ──────────────────────────────
+  // An agent cleaning up after itself (the debug functions it made, its
+  // scratch branches, the temporary key) left a card each: seven approvals one
+  // by one. Each is still its own approval, run exactly as its card shows,
+  // with that card's digest, one after another; the person approves the list
+  // they were shown, taken when they asked. Restores, and requests Backenly
+  // raised itself, are decided one at a time.
+  const [bulk, setBulk] = useState<
+    | { phase: 'idle' }
+    | { phase: 'confirming' | 'running'; requests: Array<{ id: string; shownDigest?: string | null; title: string }>; done: number }
+  >({ phase: 'idle' })
+
+  const approveAll = async (requests: Array<{ id: string; shownDigest?: string | null; title: string }>) => {
+    setBulk({ phase: 'running', requests, done: 0 })
+    let ran = 0
+    for (const [i, r] of requests.entries()) {
+      const outcome = await decideAgentRequest(r.id, 'approve', r.shownDigest, { quiet: true })
+      if (outcome.ok) ran += 1
+      setBulk({ phase: 'running', requests, done: i + 1 })
+    }
+    setBulk({ phase: 'idle' })
+    const missed = requests.length - ran
+    flashBanner(
+      `Ran ${ran} of ${requests.length}`,
+      missed > 0 ? `${missed} did not run; ${missed === 1 ? 'its card says' : 'their cards say'} why` : 'your agent sees each result on its next poll',
+    )
+    const t = setTimeout(async () => {
+      await fetchReport(true)
+      setRowState(prev => {
+        const rest = { ...prev }
+        for (const r of requests) if (rest[r.id]?.phase === 'verified') delete rest[r.id]
+        return rest
+      })
+    }, 2400)
+    timers.current.push(t)
   }
 
   /** Dismiss every member of a group — the inverse of approveGroup. */
@@ -510,6 +556,12 @@ export function ReviewQueuePanel({ projectId }: { projectId: string }) {
   }
 
   const pendingAgents = agentApprovals.filter(a => a.status === 'pending')
+  const bulkable = pendingAgents.filter(a =>
+    a.readable !== false &&
+    a.requestedBy !== 'backenly' &&
+    a.tool !== 'revert_schema_change' &&
+    a.tool !== 'rollback_deploy' &&
+    (rowState[a.id]?.phase ?? 'idle') === 'idle')
   // An approval the human already granted must not vanish from the queue
   // while it runs — and if its execution died (server reports failed with no
   // executedAt: the terminal update never ran), the unknown outcome is the
@@ -558,6 +610,19 @@ export function ReviewQueuePanel({ projectId }: { projectId: string }) {
               onResetError={() => setRow(g.key, { phase: 'idle' })}
             />
           ))}
+          {(bulkable.length >= 2 || bulk.phase !== 'idle') && (
+            <BulkApproveRow
+              count={bulkable.length}
+              state={bulk}
+              onAsk={() => setBulk({
+                phase: 'confirming',
+                requests: bulkable.map(a => ({ id: a.id, shownDigest: a.shownDigest, title: approvalTitle(a.tool, a.target) })),
+                done: 0,
+              })}
+              onCancel={() => setBulk({ phase: 'idle' })}
+              onConfirm={() => bulk.phase === 'confirming' && approveAll(bulk.requests)}
+            />
+          )}
           {pendingAgents.map(a => (
             <AgentRequestRow
               key={a.id}
@@ -637,6 +702,63 @@ function QueueSection({
     >
       {children}
     </Section>
+  )
+}
+
+/**
+ * The row offering to approve the agent's waiting requests together: first
+ * the count, then the list it would approve, then progress through it.
+ */
+function BulkApproveRow({
+  count,
+  state,
+  onAsk,
+  onCancel,
+  onConfirm,
+}: {
+  count: number
+  state:
+    | { phase: 'idle' }
+    | { phase: 'confirming' | 'running'; requests: Array<{ id: string; title: string }>; done: number }
+  onAsk: () => void
+  onCancel: () => void
+  onConfirm: () => void
+}) {
+  if (state.phase === 'idle') {
+    return (
+      <li className="flex flex-wrap items-center justify-between gap-3 px-5 py-3">
+        <p className="text-[13px] text-zinc-300">{count} requests from your agent are waiting.</p>
+        <GhostAction onClick={onAsk}>
+          <CheckCircle2 className="size-3.5" /> Approve all {count}
+        </GhostAction>
+      </li>
+    )
+  }
+  const n = state.requests.length
+  return (
+    <li className="space-y-3 px-5 py-4">
+      <p className="text-[13px] font-medium text-zinc-100">
+        {state.phase === 'running'
+          ? `Running ${Math.min(state.done + 1, n)} of ${n}…`
+          : `Approve these ${n}? Each runs exactly as its card shows, one after another.`}
+      </p>
+      <ul className="space-y-1">
+        {state.requests.map((r, i) => (
+          <li key={r.id} className="flex gap-2 text-[12.5px] text-zinc-400">
+            <span className="tabular-nums text-zinc-500">{i + 1}.</span>
+            <TextWithCode text={r.title} codeClassName="text-zinc-300" />
+          </li>
+        ))}
+      </ul>
+      {state.phase === 'confirming' && (
+        <div className="flex flex-wrap gap-2">
+          <PrimaryAction onClick={onConfirm} busy={false} busyLabel="Running…">
+            <CheckCircle2 className="size-3.5" /> Approve and run {n}
+          </PrimaryAction>
+          <GhostAction onClick={onCancel}>Cancel</GhostAction>
+        </div>
+      )}
+    </li>
   )
 }
 
