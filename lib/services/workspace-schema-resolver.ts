@@ -268,8 +268,57 @@ export async function resolveTableStructure(
   }
 
   const graph = await getActiveGraph(projectId).catch(() => null)
-  const entity = findEntityCI(graph?.entities, tableName)
+  return resolveColumns(dbColumns, findEntityCI(graph?.entities, tableName))
+}
 
+/**
+ * Every table's columns, as resolveTableStructure answers each one, from one
+ * catalog read and one graph read. Keyed by the names the table list shows:
+ * live tables (system tables left out), then graph entities not built yet. A
+ * table resolveTableStructure would 404 is left out.
+ */
+export async function resolveSchemaStructure(projectId: string): Promise<Record<string, ResolvedColumn[]>> {
+  const workspaceSchema = `workspace_${projectId}`
+  const [dbTables, live, graph] = await Promise.all([
+    PostgresService.listTables(projectId, workspaceSchema).catch((err) => {
+      console.error('[SchemaResolver] listTables failed:', err?.message)
+      return [] as Awaited<ReturnType<typeof PostgresService.listTables>>
+    }),
+    PostgresService.getSchemaStructure(projectId, workspaceSchema).catch((err) => {
+      console.error('[SchemaResolver] schema introspection failed:', err?.message)
+      return new Map<string, ColumnInfo[]>()
+    }),
+    getActiveGraph(projectId).catch(() => null),
+  ])
+  const entities: Record<string, EntityState> = graph?.entities || {}
+
+  // The same names, in the same order, as resolveWorkspaceTables lists.
+  const liveNames = dbTables.map((t) => t.name).filter((name) => !isSystemTable(name))
+  const liveLower = new Set(liveNames.map((name) => name.toLowerCase()))
+  const plannedNames = Object.keys(entities).filter(
+    (name) => !liveLower.has(name.toLowerCase()) && !isReservedWorkspaceTable(name),
+  )
+
+  const structure: Record<string, ResolvedColumn[]> = {}
+  for (const name of [...liveNames, ...plannedNames]) {
+    let dbColumns = live.get(name) ?? []
+    // A live table the one read saw no columns for: ask for it alone, which
+    // falls back to pg_catalog as the per-table answer does.
+    if (dbColumns.length === 0 && liveLower.has(name.toLowerCase())) {
+      dbColumns = await PostgresService.getTableStructure(projectId, workspaceSchema, name).catch(() => [])
+    }
+    const columns = resolveColumns(dbColumns, findEntityCI(entities, name))
+    if (columns) structure[name] = columns
+  }
+  return structure
+}
+
+/**
+ * A table's columns: the live ones enriched with the graph's descriptions, or,
+ * when it is not built yet, the graph's declared fields. Null when it exists
+ * in neither.
+ */
+function resolveColumns(dbColumns: ColumnInfo[], entity: EntityState | undefined): ResolvedColumn[] | null {
   // 1. Live table — ground truth, enriched with graph descriptions.
   if (dbColumns.length > 0) {
     return dbColumns.map((c) => {

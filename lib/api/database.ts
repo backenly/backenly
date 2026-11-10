@@ -358,6 +358,24 @@ export async function getStructure(
   }
 }
 
+/**
+ * Every table's columns in one request, keyed by table name: what getStructure
+ * answers for each table. A table the server could not resolve is absent.
+ */
+export async function getSchemaStructure(
+  type: DatabaseType,
+  options?: { projectId?: string }
+): Promise<Record<string, ColumnInfo[]>> {
+  const params = new URLSearchParams({ type })
+  if (options?.projectId) params.append('projectId', options.projectId)
+  const response = await fetch(`/api/database/structure?${params.toString()}`, {
+    credentials: 'include', // Include cookies for auth
+  })
+  const data = await response.json().catch(() => ({}))
+  if (!response.ok || !data.success) throw new Error(data.error || 'Failed to fetch structure')
+  return data.data ?? {}
+}
+
 // Rows/Documents
 export async function getRows(
   type: DatabaseType,
@@ -557,16 +575,17 @@ export async function addConstraint(
   if (!response.ok || !data.success) throw new Error(data.error || 'Failed to add constraint')
 }
 
-// Relationships (PostgreSQL only)
+// Relationships (PostgreSQL only). Without a table, every relationship in the schema, once each.
 export async function getRelationships(
   schema: string,
-  table: string,
+  table?: string,
   options?: {
     projectId?: string
     view?: 'platform' | 'workspace' | 'all'
   }
 ): Promise<RelationshipInfo[]> {
-  const params = new URLSearchParams({ schema, table })
+  const params = new URLSearchParams({ schema })
+  if (table) params.append('table', table)
   if (options?.projectId) params.append('projectId', options.projectId)
   const response = await fetch(`/api/database/relationships?${params.toString()}`, {
     credentials: 'include', // Include cookies for auth
