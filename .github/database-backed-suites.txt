@@ -1879,3 +1879,8 @@ tests/integration/integration-key-checked-on-continue.spec.ts
 # origin the request log keeps (localhost included); a bootstrap ping is
 # counted once. Real session, recorder and route.
 tests/integration/frontend-seen-from-its-requests.spec.ts
+
+# Every /api/v2 error leaves in PostgREST's shape ({ code, message, details,
+# hint }), whichever door refused it: the exposure check and a body over the
+# limit here, v1 unchanged. The real Express app, project and key.
+tests/integration/v2-errors-in-postgrest-shape.spec.ts
