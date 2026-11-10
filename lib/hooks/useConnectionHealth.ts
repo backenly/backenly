@@ -18,7 +18,7 @@ import { sharedRead } from '@/lib/client/shared-read'
  *
  * `status` is the at-a-glance summary the UI renders against:
  *   - 'idle'       : no requests yet, nothing to say
- *   - 'connected'  : ≥1 bootstrap in 24h, 0 failures → all good
+ *   - 'connected'  : ≥1 request from a frontend in 24h, 0 failures → all good
  *   - 'degraded'   : both successes AND failures → partial
  *   - 'failing'    : failures only → something is wrong
  *   - 'loading'    : initial fetch in flight (avoid flicker)
@@ -55,6 +55,8 @@ export interface ConnectionHealth {
     failures24h: number
     failures1h: number
     bootstraps24h: number
+    /** Requests from frontends that succeeded in the last day, bootstrap pings included. */
+    requests24h: number
     distinctOriginsFailing: number
     distinctOriginsConnected: number
   }
@@ -105,7 +107,7 @@ export function useConnectionHealth(projectId: string | null | undefined): UseCo
   const status: ConnectionStatus = (() => {
     if (loading && !health) return 'loading'
     if (!health) return 'idle'
-    const hasSuccess = health.totals.bootstraps24h > 0
+    const hasSuccess = health.totals.requests24h > 0
     const hasFailure = health.totals.failures24h > 0
     if (!hasSuccess && !hasFailure) return 'idle'
     if (hasSuccess && !hasFailure) return 'connected'

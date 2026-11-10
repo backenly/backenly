@@ -122,8 +122,9 @@ export async function v1ApiMiddleware(
     // "X requests from origin Y failed in the last 5 minutes" without
     // any extra logging plumbing on this hot path.
     //
-    // SKIP internal origins (backenly.com, localhost): those are dashboard
-    // pages dogfooding the v1 runtime — surfacing them on Connection Health
+    // SKIP internal origins (Backenly's own domains and the console's origin,
+    // lib/security/internal-origin.ts): those are dashboard pages dogfooding
+    // the v1 runtime — surfacing them on Connection Health
     // would falsely tell the project owner "your frontend backenly.com is
     // failing" when in reality it's our own UI hitting the runtime without
     // an anon key. Real customer frontends (lovable.app, vercel.app, the

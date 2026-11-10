@@ -1874,3 +1874,8 @@ tests/integration/signed-out-session-answers.spec.ts
 # secret) is said on the key's own step; a VIEWER may not ask. Real sessions,
 # roles and database; Stripe's API answer is stubbed at fetch.
 tests/integration/integration-key-checked-on-continue.spec.ts
+
+# Connection Health counts a frontend's successful production requests by the
+# origin the request log keeps (localhost included); a bootstrap ping is
+# counted once. Real session, recorder and route.
+tests/integration/frontend-seen-from-its-requests.spec.ts

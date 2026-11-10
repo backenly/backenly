@@ -105,6 +105,7 @@ interface Pending {
   duration: number
   timestamp: Date
   branchId: string | null
+  origin: string | null
 }
 
 const buffer: Pending[] = []
@@ -135,6 +136,26 @@ export interface ServedRequest {
 
 interface HeaderReader {
   get(name: string): string | null | undefined
+}
+
+/**
+ * The browser origin a request came from: scheme, host and port, never a path
+ * or a query. The Origin header (a browser sends it cross-origin), else the
+ * Referer's origin; null for a server, a tool, or a sandboxed page ("null").
+ */
+export function requestOrigin(headers?: HeaderReader): string | null {
+  if (!headers) return null
+  for (const name of ['origin', 'referer']) {
+    const raw = headers.get(name)?.trim()
+    if (!raw || raw === 'null') continue
+    try {
+      const url = new URL(raw)
+      if (url.protocol === 'http:' || url.protocol === 'https:') return url.origin.slice(0, 255)
+    } catch {
+      // Not a URL: try the next header.
+    }
+  }
+  return null
 }
 
 /** Headers and query parameters a caller sends a credential in (API key, realtime ticket, link token). */
@@ -211,6 +232,7 @@ export function recordRuntimeRequest(req: ServedRequest): void {
       duration: Math.max(0, Math.round(req.durationMs)),
       timestamp: new Date(),
       branchId: req.branchId ?? null,
+      origin: requestOrigin(req.headers),
     })
 
     if (buffer.length >= FLUSH_AT) void flushRecordedRequests()
