@@ -649,7 +649,7 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
     '(insert/update). Omitting `check` on insert/update means "anything the caller may target", so state ' +
     'it whenever the write rule is narrower than the read rule.',
     {
-      tableName: { type: 'string' },
+      tableName: { type: 'string', description: 'The table whose row-level security rules to set.' },
       select: {
         type: 'object',
         description: 'SELECT rule. { using: "<predicate>" } — which rows are readable.',

@@ -658,7 +658,7 @@ export function buildDispatchable(): McpToolDescriptor[] {
       inputSchema: {
         type: 'object',
         properties: {
-          table: { type: 'string' },
+          table: { type: 'string', description: 'The table to insert the row into.' },
           row: { type: 'object', description: 'Column → value pairs for the new row. Omit id/timestamps — they are auto-generated.' },
           branchId: { type: 'string', description: 'A preview branch id (branch action:"list") to read or seed that branch instead of production.' },
         },
@@ -675,7 +675,7 @@ export function buildDispatchable(): McpToolDescriptor[] {
       inputSchema: {
         type: 'object',
         properties: {
-          table: { type: 'string' },
+          table: { type: 'string', description: 'The table whose matching rows to update.' },
           filter: { type: 'object', description: 'WHERE clause as column=value pairs (must not be empty — global updates are refused).' },
           patch: { type: 'object', description: 'Columns to set on the matched rows.' },
           branchId: { type: 'string', description: 'A preview branch id (branch action:"list") to read or seed that branch instead of production.' },
@@ -693,7 +693,7 @@ export function buildDispatchable(): McpToolDescriptor[] {
       inputSchema: {
         type: 'object',
         properties: {
-          table: { type: 'string' },
+          table: { type: 'string', description: 'The table to delete the matching rows from.' },
           filter: { type: 'object', description: 'WHERE clause as column=value pairs. Must not be empty.' },
           branchId: { type: 'string', description: 'A preview branch id (branch action:"list") to read or seed that branch instead of production.' },
         },
