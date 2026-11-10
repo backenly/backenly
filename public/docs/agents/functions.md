@@ -27,6 +27,8 @@ Call as `functions { action: "<action>", … }`.
 | `delete_schedule` | remove a scheduled job | nothing | no | waits for a human |
 <!-- end generated -->
 
+`delete` waits for a human only when the function ran in the last 7 days. A function that is switched off, or has not run in that time, is deleted at once: History keeps it, and restoring the change brings it back.
+
 ## The two runtime contracts
 
 Which one a function uses is set by its trigger.
