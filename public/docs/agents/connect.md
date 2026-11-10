@@ -33,7 +33,7 @@ Call as `connect { action: "<action>", … }`.
 
 ## Environment variables
 
-`set_env { key, value }` stores an encrypted variable that sandbox functions read as `ctx.env.KEY`. Keys are `UPPER_SNAKE_CASE`. Use it for values the app needs; provider keys go in `integrations`, and Backenly's own secrets are never settable here.
+`set_env { key, value }` stores an encrypted variable that sandbox functions read as `ctx.env.KEY` and http functions read as `process.env.KEY`. Keys are `UPPER_SNAKE_CASE`. Use it for values the app needs; provider keys go in `integrations`, and Backenly's own secrets are never settable here.
 
 ## Database credentials
 
