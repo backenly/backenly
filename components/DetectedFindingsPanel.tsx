@@ -77,7 +77,8 @@ type RowState =
   | { phase: 'idle' }
   | { phase: 'applying' }
   | { phase: 'dismissing' }
-  | { phase: 'verified' }
+  /** How many of the fixes applied kept a snapshot to restore from. */
+  | { phase: 'verified'; applied: number; snapshots: number }
   | { phase: 'error'; message: string }
 
 function timeAgo(iso: string | null): string {
@@ -196,7 +197,7 @@ export function DetectedFindingsPanel({
   const fixOne = async (
     findingId: string,
     retriesLeft = 3,
-  ): Promise<{ ok: boolean; error?: string }> => {
+  ): Promise<{ ok: boolean; error?: string; snapshotId?: string | null }> => {
     try {
       const res = await fetch(`/api/projects/${projectId}/health/approve`, {
         method: 'POST',
@@ -205,7 +206,7 @@ export function DetectedFindingsPanel({
         body: JSON.stringify({ findingId }),
       })
       const j = await res.json().catch(() => ({} as any))
-      if (res.ok && j?.success) return { ok: true }
+      if (res.ok && j?.success) return { ok: true, snapshotId: typeof j.snapshotId === 'string' ? j.snapshotId : null }
       if (res.status === 409 && retriesLeft > 0) {
         await new Promise(r => { timers.current.push(setTimeout(r, 2500)) })
         return fixOne(findingId, retriesLeft - 1)
@@ -225,10 +226,13 @@ export function DetectedFindingsPanel({
     setRow(g.key, { phase: 'applying' })
     let applied = 0
     let firstError: string | undefined
+    let snapshots = 0
     for (const m of g.members) {
       const r = await fixOne(m.id)
-      if (r.ok) applied += 1
-      else if (!firstError) firstError = r.error
+      if (r.ok) {
+        applied += 1
+        if (r.snapshotId) snapshots += 1
+      } else if (!firstError) firstError = r.error
     }
 
     if (applied === 0) {
@@ -239,7 +243,7 @@ export function DetectedFindingsPanel({
       return
     }
 
-    setRow(g.key, { phase: 'verified' })
+    setRow(g.key, { phase: 'verified', applied, snapshots })
     const t = setTimeout(async () => {
       await fetchHealth(true)
       setRowState(prev => {
@@ -358,7 +362,15 @@ function DetectedRow({
       <Row icon={CheckCircle2} tone="done" title={title} className="animate-fade-in">
         <Facts>
           <Fact>Fixed{many ? ` on ${g.members.length} tables` : ''}</Fact>
-          <Fact>Rollback snapshot captured</Fact>
+          {/* Said only for what the approve route kept a snapshot of: a fix
+              that takes none (an index, say) returns snapshotId null. */}
+          {state.snapshots > 0 && (
+            <Fact>
+              {state.snapshots === state.applied
+                ? 'Rollback snapshot captured'
+                : `Rollback snapshot captured for ${state.snapshots} of ${state.applied}`}
+            </Fact>
+          )}
         </Facts>
       </Row>
     )
