@@ -7476,7 +7476,8 @@ async function executeListKeys(projectId: string): Promise<ExecutionResult> {
         permissions: true,
         createdAt: true,
         lastUsed: true,
-        expiresAt: true
+        expiresAt: true,
+        branch: { select: { name: true, status: true } },
       },
       orderBy: { createdAt: 'desc' }
     })
@@ -7492,7 +7493,9 @@ async function executeListKeys(projectId: string): Promise<ExecutionResult> {
     const keyList = keys.map(key => {
       const age = Math.floor((Date.now() - new Date(key.createdAt).getTime()) / (1000 * 60 * 60 * 24))
       const lastUsed = key.lastUsed ? `(used ${Math.floor((Date.now() - new Date(key.lastUsed).getTime()) / (1000 * 60 * 60))}h ago)` : '(never used)'
-      return `🔑 **${key.name}** (${key.keyPrefix}...) - Created ${age}d ago ${lastUsed}`
+      // A preview key ends with its branch: say so, rather than list it as live.
+      const ended = key.branch && key.branch.status !== 'active' ? ` · ended with branch ${key.branch.name} (${key.branch.status})` : ''
+      return `🔑 **${key.name}** (${key.keyPrefix}...) - Created ${age}d ago ${lastUsed}${ended}`
     }).join('\n')
     
     return {

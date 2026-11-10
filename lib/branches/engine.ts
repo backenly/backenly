@@ -502,6 +502,7 @@ async function replayMerge(projectId: string, userId: string, branchId: string, 
     where: { id: branchId },
     data: { status: 'merged', mergedAt: new Date() },
   })
+  await endBranchKeys(branchId)
   // The branch's work now lives on main; its schema is dropped and its keys,
   // already refused as inactive, can never fall back to anything.
   if (branch) await dropBranchSchema(projectId, branch.schemaName).catch((e: any) =>
@@ -569,6 +570,7 @@ async function legacyAdditiveMerge(projectId: string, userId: string, branchId: 
       where: { id: branchId },
       data: review.length === 0 ? { status: 'merged', mergedAt: new Date() } : {},
     })
+    if (review.length === 0) await endBranchKeys(branchId)
   }
   await audit(projectId, userId, 'BRANCH_MERGED', {
     branch: d.branch, applied: applied.length, review: review.length,
@@ -591,8 +593,23 @@ export async function discardBranch(projectId: string, userId: string, branchId:
     where: { id: branch.id },
     data: { status: 'discarded', discardedAt: new Date() },
   })
+  await endBranchKeys(branch.id)
   await audit(projectId, userId, 'BRANCH_DISCARDED', { branch: branch.name })
   return { ok: true as const }
+}
+
+/**
+ * A closed branch's keys end with it. The runtime already refused them
+ * (BRANCH_INACTIVE), but each kept the 90-day expiry it was minted with, so a
+ * key that will never answer again was listed as live until next year.
+ */
+async function endBranchKeys(branchId: string): Promise<void> {
+  const now = new Date()
+  // history: a preview branch's key ends with its branch (lib/changes/resources/keys.ts)
+  await prisma.apiKey.updateMany({
+    where: { branchId, OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] },
+    data: { expiresAt: now },
+  })
 }
 
 export async function listBranches(projectId: string) {

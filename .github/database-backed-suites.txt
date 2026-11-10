@@ -1837,3 +1837,9 @@ tests/integration/storage-shows-who-uploaded.spec.ts
 # are active against the limit with merged ones counted apart. Real schemas,
 # real branch engine; PostgREST registration stubbed.
 tests/integration/branch-limit-holds.spec.ts
+
+# A preview key ends with its branch: merging or discarding a branch expires
+# its keys (and no other key), and the agent's key list says which keys ended
+# with their branch. Real schemas, real branch engine; PostgREST registration
+# stubbed.
+tests/integration/closed-branch-keys-end.spec.ts
