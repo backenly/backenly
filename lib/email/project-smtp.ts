@@ -171,6 +171,54 @@ export async function buildProjectSmtpTransport(
   return { transport, from: resolved.from, source: resolved.source }
 }
 
+// ── Mail to a project's own users ────────────────────────────────────────────
+
+const EMAIL_ADDRESS = /^[^\s@]+@[^\s@.]+\.[^\s@]+$/
+
+/** The bare address in "Name <address>" or "address". */
+function addressOf(value: string): string {
+  const angle = value.match(/<([^<>]+)>\s*$/)
+  return (angle ? angle[1] : value).trim()
+}
+
+/**
+ * The From of mail a project's own users receive: email verification, magic
+ * links and password resets.
+ *
+ * Project SMTP sends exactly as the project configured it. The deployment's
+ * SMTP carries the deployment's identity, which on Backenly Cloud is its
+ * support desk: a store's shoppers got "Backenly <support@backenly.com>", the
+ * store was named only in the body, and a reply reached Backenly. Through the
+ * deployment, the display name is the app's own, and the address is
+ * SMTP_END_USER_FROM when the operator set one (a no-reply address on a domain
+ * the provider has verified), otherwise SMTP_FROM's. The address is never the
+ * app's: the deployment can only send from domains it has verified.
+ *
+ * The name is the developer's input. Control characters become spaces, so a
+ * line break cannot start a header of its own; nodemailer quotes or encodes
+ * the rest.
+ */
+export function endUserFrom(
+  resolved: { source: SmtpSource; from: string },
+  appName: string | null | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): string | { name: string; address: string } {
+  if (resolved.source !== 'deployment') return resolved.from
+
+  let address = addressOf(resolved.from)
+  const endUserAddress = env.SMTP_END_USER_FROM?.trim()
+  if (endUserAddress) {
+    if (EMAIL_ADDRESS.test(addressOf(endUserAddress))) {
+      address = addressOf(endUserAddress)
+    } else {
+      console.warn(`[SMTP] SMTP_END_USER_FROM is not an email address; sending from ${address} instead.`)
+    }
+  }
+
+  const name = (appName ?? '').replace(/[\x00-\x1f\x7f-\x9f\u2028\u2029]+/g, ' ').replace(/\s+/g, ' ').trim()
+  return name ? { name, address } : address
+}
+
 // ── Reading, for the dashboard ────────────────────────────────────────────────
 
 export async function getSmtpConfigView(projectId: string): Promise<SmtpConfigView> {

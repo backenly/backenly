@@ -7,9 +7,10 @@
  * from ProjectAuthConfig (appName/appUrl), falling back to the project name.
  *
  * Delivery resolves SMTP per project, falling back to the deployment
- * environment (lib/email/project-smtp.ts). When neither is configured the email
- * is logged to console instead — tokens are NEVER returned to API callers (see
- * forgotEndUserPassword).
+ * environment (lib/email/project-smtp.ts). Through the deployment, the From
+ * names the app, not the deployment (endUserFrom). When neither is configured
+ * the email is logged to console instead — tokens are NEVER returned to API
+ * callers (see forgotEndUserPassword).
  *
  * Subjects and bodies below are the BUILT-INS. An operator override replaces
  * one per kind; absence means the built-in is used, so an install that
@@ -20,7 +21,7 @@
 
 import nodemailer from 'nodemailer'
 import { prisma } from '@/lib/db'
-import { buildProjectSmtpTransport } from '@/lib/email/project-smtp'
+import { buildProjectSmtpTransport, endUserFrom } from '@/lib/email/project-smtp'
 import { resolveAuthEmail } from '@/lib/email/auth-template-resolver'
 import type { TemplateKind, TemplateVariable } from '@/lib/email/template-kinds'
 
@@ -86,10 +87,12 @@ async function deliver(
   subject: string,
   html: string,
   label: string,
+  appName: string | undefined,
 ): Promise<boolean> {
   const resolved = await buildProjectSmtpTransport(nodemailer, projectId)
   if (resolved) {
-    await resolved.transport.sendMail({ from: resolved.from, to, subject, html })
+    // Through the deployment's SMTP the sender is the app, not the deployment.
+    await resolved.transport.sendMail({ from: endUserFrom(resolved, appName), to, subject, html })
     return true
   }
   // Neither project settings nor deployment env. The email is logged WITHOUT
@@ -129,7 +132,7 @@ async function sendAuthEmail(
     )
   }
 
-  return deliver(projectId, to, email.subject, email.bodyHtml, label)
+  return deliver(projectId, to, email.subject, email.bodyHtml, label, values.appName)
 }
 
 export async function sendEndUserVerificationEmail(
