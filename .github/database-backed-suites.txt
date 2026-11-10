@@ -1948,3 +1948,8 @@ tests/integration/publish-counts-the-live-tables.spec.ts
 # capture trigger, outbox, drain and loopback receiver, the table list's
 # checks, History, and the agent's actions.
 tests/integration/webhooks-pick-tables.spec.ts
+# Readiness counts the problems Backenly found: an open critical finding blocks
+# publishing and a warning warns, each named as the Autonomy page names it,
+# and it warns while magic links are on with no App URL. Real findings and
+# auth settings.
+tests/integration/readiness-counts-open-problems.spec.ts
