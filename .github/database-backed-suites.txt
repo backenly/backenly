@@ -1666,3 +1666,8 @@ tests/integration/auth-before-first-signup.spec.ts
 # Express app (server/app.ts), whose modules open the platform database, so it
 # runs with one.
 tests/integration/runtime-rejects-bad-bodies.spec.ts
+
+# An end user's last_login ("Last active", "Active in 30 days") follows their
+# use: a sign-up on either server and a request made with their token stamp it;
+# a verifier account never. Real database, both servers' sign-up.
+tests/integration/end-user-last-active.spec.ts
