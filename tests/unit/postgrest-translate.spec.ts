@@ -14,6 +14,7 @@ import {
   toRecordEnvelope,
   translateReadQuery,
   stripUpstreamError,
+  v2GrammarIn,
 } from '@/lib/postgrest/translate'
 import { isOperationEnabled, operationFor } from '@/lib/postgrest/exposure'
 
@@ -467,5 +468,48 @@ describe('stripUpstreamError — errors about the request the caller made', () =
       code: 'REQUEST_FAILED',
       message: 'Request could not be completed',
     })
+  })
+})
+
+/**
+ * Production QA (2026-11-09): /db reads filters by equality only, and read
+ * /api/v2's grammar as data. `?status=eq.paid` matched the literal "eq.paid"
+ * and answered 200 with no rows; `?order=created_at.desc` and
+ * `?select=*,author(*)` were dropped without a word. Each is refused with the
+ * /api/v2 request that does what was asked.
+ */
+describe('v2GrammarIn — /api/v2 syntax sent to /db', () => {
+  const target = { projectId: 'p1', table: 'orders' }
+  const refuse = (query: Record<string, string>) => v2GrammarIn(query, target)
+
+  it('refuses an operator filter, naming the /api/v2 request', () => {
+    expect(refuse({ status: 'eq.paid' })).toBe(
+      '"status=eq.paid" is /api/v2\'s filter syntax. On /db a filter is an equality (?status=paid); ' +
+        'for operators, use /api/v2/p1/orders?status=eq.paid.',
+    )
+    expect(refuse({ total: 'gt.100' })).toMatch(/\/api\/v2\/p1\/orders\?total=gt\.100/)
+    expect(refuse({ id: 'in.(1,2)' })).not.toBeNull()
+    expect(refuse({ deleted_at: 'is.null' })).not.toBeNull()
+    expect(refuse({ name: 'not.ilike.*bot*' })).not.toBeNull()
+  })
+
+  it('refuses or/and, a v2 order and an embedding select', () => {
+    expect(refuse({ or: '(status.eq.paid,status.eq.sent)' })).toMatch(/^"or" combines filters on \/api\/v2 only/)
+    expect(refuse({ order: 'created_at.desc' })).toBe(
+      'On /db, sort names the column and order is asc or desc (?sort=created_at&order=desc). ' +
+        '"order=created_at.desc" is /api/v2\'s syntax: /api/v2/p1/orders?order=created_at.desc.',
+    )
+    expect(refuse({ select: '*,author(*)' })).toBe(
+      'On /db, select lists columns (?select=id,title). To embed related rows or rename columns, use ' +
+        '/api/v2/p1/orders?select=*,author(*).',
+    )
+  })
+
+  it('leaves /db’s own grammar, and literal values that only look alike, alone', () => {
+    expect(refuse({ status: 'paid' })).toBeNull()
+    expect(refuse({ domain: 'is.gd' })).toBeNull()
+    expect(refuse({ team: 'in.house' })).toBeNull()
+    expect(refuse({ sort: 'created_at', order: 'desc', select: 'id,title', limit: '10' })).toBeNull()
+    expect(refuse({ select: '*' })).toBeNull()
   })
 })

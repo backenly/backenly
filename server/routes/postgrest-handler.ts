@@ -38,6 +38,7 @@ import {
   toListEnvelope,
   toRecordEnvelope,
   translateReadQuery,
+  v2GrammarIn,
 } from '@/lib/postgrest/translate'
 import { checkExposure, operationFor, tableHasSoftDelete } from '@/lib/postgrest/exposure'
 import { ensureSchemaRegistered } from '@/lib/postgrest/registration'
@@ -225,6 +226,13 @@ export async function handleViaPostgrest(
   const exposure = await checkExposure(ctx.projectId, table, operation)
   if (!exposure.allowed) {
     return answer(exposure.status ?? 404, { error: exposure.error, code: exposure.code })
+  }
+
+  // /db reads filter by equality; /api/v2's grammar would be read as data and
+  // answer a wrong 200, so it is refused with the request that would work.
+  if (operation === 'list' || operation === 'get') {
+    const refusal = v2GrammarIn(req.query as Record<string, string | string[] | undefined>, { projectId: ctx.projectId, table })
+    if (refusal) return answer(400, { error: refusal, code: 'UNSUPPORTED_QUERY' })
   }
 
   // Throws rather than falling back to main if the branch does not belong to

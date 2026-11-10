@@ -127,6 +127,17 @@ describe('a refusal by row-level security reaches the caller as one', () => {
   })
 })
 
+describe('/api/v2 syntax sent to /db', () => {
+  it('is refused with the /api/v2 request, before anything is forwarded', async () => {
+    const res = mockRes()
+    await handleViaPostgrest(mockReq('GET', { status: 'eq.paid' }), res, ['orders'], { projectId: PROJECT })
+    expect(res.statusCode).toBe(400)
+    expect(res.body.code).toBe('UNSUPPORTED_QUERY')
+    expect(res.body.error).toContain(`/api/v2/${PROJECT}/orders?status=eq.paid`)
+    expect(global.fetch).not.toHaveBeenCalled()
+  })
+})
+
 describe('exposure gate — runs before anything is forwarded', () => {
   it('404s the users table without contacting PostgREST', async () => {
     // PostgREST would serve this, password column and all. The gate is what the
