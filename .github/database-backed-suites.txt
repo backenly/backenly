@@ -1800,6 +1800,10 @@ tests/integration/auth-before-first-signup.spec.ts
 # Express app (server/app.ts), whose modules open the platform database, so it
 # runs with one.
 tests/integration/runtime-rejects-bad-bodies.spec.ts
+
+# Every v1 error carries a top-level code and message on both servers, added
+# beside what each body already said (real runtime, a real Next route).
+tests/integration/v1-errors-carry-code-and-message.spec.ts
 # A table declared in SQL is created as written: no constraint, nullability or
 # default its column names suggest, kept out of the name-based key repair, and a
 # UNIQUE the SQL declares is a real constraint ON CONFLICT can target. A table

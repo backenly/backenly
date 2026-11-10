@@ -2,7 +2,7 @@
 
 Index: https://backenly.com/llms.txt
 
-Every tool and route answers failures as JSON: `{ ok: false, error, code }`, often with `hint`, and over MCP also as `structuredContent` with a second text block saying what the fields mean for your next step. Branch on `code`, not on the message.
+Every tool and route answers failures as JSON: `{ ok: false, error, code }`, often with `hint`, and over MCP also as `structuredContent` with a second text block saying what the fields mean for your next step. Every error from the app-facing `/api/v1` API also carries a top-level `code` and `message`, beside whatever else its body says, and `/api/v2` answers in PostgREST's shape, `{ code, message, details, hint }`. Branch on `code`, not on the message.
 
 | Code | Meaning | What to do |
 | --- | --- | --- |

@@ -80,6 +80,10 @@ it('answers a body over the limit in the same shape', async () => {
 it('CONTROL: v1 keeps its own envelope for the same refusal', async () => {
   const r = await call('GET', `/api/v1/${projectId}/db/_backenly_presence`, { headers: { 'x-api-key': key } })
   expect(r.status).toBe(404)
-  expect(r.json).toMatchObject({ error: 'Resource "_backenly_presence" not found', code: 'NOT_FOUND' })
-  expect(r.json).not.toHaveProperty('message')
+  // v1's `error` stays, with the top-level `message` every v1 error now
+  // carries beside it (lib/api/v1/error-shape.ts); PostgREST's details and hint
+  // are v2's alone.
+  expect(r.json).toMatchObject({ error: 'Resource "_backenly_presence" not found', code: 'NOT_FOUND', message: 'Resource "_backenly_presence" not found' })
+  expect(r.json).not.toHaveProperty('details')
+  expect(r.json).not.toHaveProperty('hint')
 })

@@ -17,6 +17,7 @@ import { nextProxy } from './routes/next-proxy'
 import { asyncRoute } from './lib/async-route'
 import { projectServingGate } from './lib/serving-gate'
 import { postgrestErrorShape } from './lib/v2-error-shape'
+import { v1ErrorShape } from './lib/v1-error-shape'
 import { recordRuntimeRequest, INTERNAL_TRAFFIC_HEADER, isInternalTraffic } from '@/lib/traffic/request-recorder'
 import { meterNodeResponse } from '@/lib/usage/egress'
 import { branchIdForRequest, refuseBranchKeyOffDataPlane } from '@/lib/branches/key-scope'
@@ -112,6 +113,12 @@ app.use(cors({
 // as { code, message, details, hint }, like PostgREST's own errors.
 // server/lib/v2-error-shape.ts.
 app.use('/api/v2', postgrestErrorShape)
+
+// ── v1 errors all carry a top-level code and message ─────────────────────────────
+// Added beside whatever an error body already says, never moved or removed: v1
+// is a contract apps read. Before the gates, so their refusals are covered too.
+// lib/api/v1/error-shape.ts.
+app.use('/api/v1', v1ErrorShape)
 
 // ── Traffic ─────────────────────────────────────────────────────────────────────
 // Every request to a project's runtime API is recorded once it finishes, first
