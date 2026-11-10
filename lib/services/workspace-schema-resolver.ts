@@ -18,12 +18,13 @@
  * ONE reconciliation kernel. Every database-inspector endpoint reads from here.
  *   • The DATABASE is ground truth for *existence* — does the table/column
  *     physically exist in the workspace schema.
- *   • The GRAPH is the enrichment + intent layer — reason, createdBy, and
- *     "planned but not yet materialised" tables.
- *   • The resolved view is the deterministic UNION of both.
- *   • Drift SELF-HEALS: tables/columns present in the live schema but missing
- *     from the graph are backfilled into the graph (idempotent, cooldown-guarded)
- *     so the "source of truth" converges back to honesty instead of rotting.
+ *   • The GRAPH is the enrichment layer — reason, createdBy, relationships.
+ *   • The resolved view is the live tables, enriched from the graph. The graph
+ *     stands in for the schema only when the schema cannot be read.
+ *   • Drift SELF-HEALS both ways: tables/columns present in the live schema but
+ *     missing from the graph are backfilled into it, and entities whose table
+ *     is gone are taken out (idempotent, cooldown-guarded), so the "source of
+ *     truth" converges back to honesty instead of rotting.
  */
 
 import { workspaceRawClient } from '@/lib/data-plane/regional'
@@ -41,6 +42,7 @@ import {
   type EntityState,
   type FieldState,
 } from '@/lib/orchestration/backend-state-graph'
+import { withoutTables } from '@/lib/orchestration/graph-tables'
 
 /** A column as the inspector consumes it (mirrors `ColumnInfo` in lib/api/database.ts). */
 export interface ResolvedColumn {
@@ -63,7 +65,7 @@ export interface ResolvedTable {
   exists: boolean
   /** Present as an entity in the active BackendGraph. */
   inGraph: boolean
-  /** `live` = materialised in the DB. `planned` = graph intent, not built yet. */
+  /** `live` = in the database. `planned` = only in the graph, listed when the schema could not be read. */
   status: 'live' | 'planned'
   rows: number | null
   size: string | null
@@ -141,13 +143,13 @@ function findEntityCI(
 /**
  * Resolve the full table list for a project's workspace.
  *
- * Union of:
- *   1. Every physical table in `workspace_{projectId}` (status: `live`).
- *   2. Every graph entity not yet materialised in the DB (status: `planned`).
+ * Every physical table in `workspace_{projectId}` (status: `live`). When the
+ * schema cannot be read, the graph's entities stand in (status: `planned`).
  *
- * `driftDetected` is true when a live table is missing from the graph or its
- * graph entity has fewer fields than the live table has columns — the signal
- * the caller uses to trigger `reconcileGraphDrift`.
+ * `driftDetected` is true when a live table is missing from the graph, its
+ * graph entity has fewer fields than the live table has columns, or the graph
+ * holds a table the schema no longer has — the signal the caller uses to
+ * trigger `reconcileGraphDrift`.
  */
 export async function resolveWorkspaceTables(projectId: string): Promise<ResolvedTableList> {
   const workspaceSchema = `workspace_${projectId}`
@@ -160,9 +162,10 @@ export async function resolveWorkspaceTables(projectId: string): Promise<Resolve
   // kernel below — same source the dashboard reads from, so the two surfaces
   // can never disagree on "X rows".
   const [dbTablesRaw, graph, liveStats] = await Promise.all([
+    // null: the schema could not be read, and the graph is all there is.
     PostgresService.listTables(projectId, workspaceSchema).catch((err) => {
       console.error('[SchemaResolver] listTables failed:', err?.message)
-      return [] as Awaited<ReturnType<typeof PostgresService.listTables>>
+      return null
     }),
     getActiveGraph(projectId).catch((err) => {
       console.error('[SchemaResolver] getActiveGraph failed:', err?.message)
@@ -174,7 +177,7 @@ export async function resolveWorkspaceTables(projectId: string): Promise<Resolve
     }),
   ])
 
-  const dbTables = dbTablesRaw.filter((t) => !isSystemTable(t.name))
+  const dbTables = (dbTablesRaw ?? []).filter((t) => !isSystemTable(t.name))
   const columnCounts = await getColumnCounts(projectId, workspaceSchema, dbTables.map((t) => t.name))
   const statByName = new Map(liveStats.map((s) => [s.name, s]))
 
@@ -214,13 +217,23 @@ export async function resolveWorkspaceTables(projectId: string): Promise<Resolve
     })
   }
 
-  // 2. Graph entities not yet materialised — intent ahead of the database.
+  // 2. Graph entities with no table. Nothing writes an entity ahead of its
+  //    table: the build runtime and reconcileGraphDrift write them for tables
+  //    that exist. So when the schema was read, an entity without a table has
+  //    outlived it (a drop, a restore, a change over a direct connection): it is
+  //    not listed, and the drift flag has reconcileGraphDrift take it out of the
+  //    graph. Production QA (2026-11-09) found a dropped table listed here.
+  //    Only when the schema could not be read does the graph stand in for it.
   for (const [name, entity] of Object.entries(graphEntities)) {
     if (seenLower.has(name.toLowerCase())) continue
     // A prior reconcileGraphDrift (before isSystemTable used the canonical
     // predicate) may have written reserved tables into the graph. Never surface
     // them as "planned" tables — they are plumbing, not product.
     if (isReservedWorkspaceTable(name)) continue
+    if (dbTablesRaw) {
+      driftDetected = true
+      continue
+    }
     tables.push({
       name,
       schema: workspaceSchema,
@@ -319,12 +332,15 @@ const lastReconcileAt = new Map<string, number>()
 const RECONCILE_COOLDOWN_MS = 60_000
 
 /**
- * Backfill the active graph from the live workspace schema.
+ * Bring the active graph in line with the live workspace schema.
  *
  * For every physical table missing from the graph — or whose graph entity has
  * fewer fields than the live table has columns — write a reconciled entity (or
- * refreshed field set) into a NEW immutable graph row via the standard pointer
- * machinery. Idempotent: once the graph matches reality this does nothing.
+ * refreshed field set), and take out every entity whose table is gone, with
+ * the API entries and relationships that name it (lib/orchestration/
+ * graph-tables.ts). All of it goes into a NEW immutable graph row via the
+ * standard pointer machinery. Idempotent: once the graph matches reality this
+ * does nothing.
  *
  * Safe to call fire-and-forget from a GET handler — the inspector response is
  * already correct without it; this is graph hygiene only. Guarded by an
@@ -337,9 +353,10 @@ export async function reconcileGraphDrift(projectId: string): Promise<void> {
   reconciling.add(projectId)
   try {
     const workspaceSchema = `workspace_${projectId}`
-    const dbTables = (await PostgresService.listTables(projectId, workspaceSchema)).filter(
-      (t) => !isSystemTable(t.name)
-    )
+    const listed = await PostgresService.listTables(projectId, workspaceSchema)
+    const dbTables = listed.filter((t) => !isSystemTable(t.name))
+    // A read that found no table at all is not taken as proof that every table
+    // is gone: nothing is taken out of the graph on the strength of it.
     if (dbTables.length === 0) return
 
     const existingGraph = await getActiveGraph(projectId)
@@ -405,11 +422,17 @@ export async function reconcileGraphDrift(projectId: string): Promise<void> {
       }
     }
 
-    if (added.length === 0 && repopulated.length === 0) return
+    // Entities whose table is gone: dropped, restored away, or removed over a
+    // direct connection. Any table the schema holds counts, reserved ones
+    // included, so nothing that exists is taken out.
+    const live = new Set(listed.map((t) => t.name.toLowerCase()))
+    const gone = Object.keys(entities).filter((name) => !live.has(name.toLowerCase()))
 
+    if (added.length === 0 && repopulated.length === 0 && gone.length === 0) return
+
+    const healed: BackendStateGraph = { ...graph, entities }
     const mutated: BackendStateGraph = {
-      ...graph,
-      entities,
+      ...(withoutTables(healed, gone) ?? healed),
       version: (graph.version || 1) + 1,
       lastUpdated: nowIso,
     }
@@ -423,6 +446,7 @@ export async function reconcileGraphDrift(projectId: string): Promise<void> {
     console.log(`[SchemaResolver] ✅ Healed graph drift for ${projectId}`, {
       addedEntities: added,
       repopulatedEntities: repopulated,
+      removedEntities: gone,
     })
   } catch (err: any) {
     if (err?.message === 'CONCURRENCY_CONFLICT') {

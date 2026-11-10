@@ -11,6 +11,7 @@ import { isReservedWorkspaceTable } from '@/lib/security/workspace-schema'
 import type { RelatedRowsVia } from '@/lib/services/rls-ownership'
 import { addForeignKeySql, columnForeignKeySql, describeTarget, isDeclaredForeignKey } from '@/lib/db/declared-foreign-key'
 import { getActiveGraph, saveNewGraph } from '@/lib/orchestration/graph-pointer'
+import { withoutTables } from '@/lib/orchestration/graph-tables'
 import { withTimeout } from './with-timeout'
 import { trackAction } from './execution-timeline'
 import { classifyErrorCode } from '@/lib/errors/taxonomy'
@@ -6036,26 +6037,20 @@ async function executeDropTable(params: any, projectId: string): Promise<Executi
     const { supersedeSchemaIntent } = await import('@/lib/autonomy/intent-conformance')
     await supersedeSchemaIntent(projectId, { kind: 'drop_table', tableName })
 
-    // Best-effort: strip the entity from the BackendStateGraph so graph-based
-    // API counts stay in sync. Failure here must never block the deletion itself.
+    // The table leaves the ACTIVE graph, as a new version of it like every
+    // graph change. This used to edit whichever graph row the database returned
+    // first: for a project provisioned today, its empty first version, so
+    // nothing changed and the Database page kept listing the table (production
+    // QA, 2026-11-09); for an older project, a past version, edited in place. The
+    // drop is done whatever happens here; a graph left behind is set right by
+    // the next reconciliation (lib/services/workspace-schema-resolver.ts).
     try {
-      const graphRecord = await prisma.backendGraph.findFirst({ where: { projectId } })
-      if (graphRecord) {
-        const graph = graphRecord.graphData as any
-        if (graph?.entities?.[tableName]) {
-          delete graph.entities[tableName]
-          // Also remove any graph API entries associated with the table
-          if (graph?.apis) {
-            for (const path of Object.keys(graph.apis)) {
-              if (path.startsWith(`/${tableName}`) || (graph.apis[path] as any)?.entity === tableName) {
-                delete graph.apis[path]
-              }
-            }
-          }
-          await prisma.backendGraph.update({ where: { id: graphRecord.id }, data: { graphData: graph } })
-        }
-      }
-    } catch { /* non-fatal — graph cleanup is best-effort */ }
+      const graph = await getActiveGraph(projectId)
+      const next = graph && withoutTables(graph, [tableName])
+      if (next) await saveNewGraph(projectId, next, undefined, { skipBillingCheck: true })
+    } catch (err: any) {
+      console.warn(`[AI Executor] Dropped ${tableName}; the graph still holds it until the next reconciliation:`, err?.message)
+    }
 
     import('@/lib/ai/execution-cache').then(({ invalidateSchemaCache }) => invalidateSchemaCache(projectId)).catch(() => {})
     import('@/lib/services/workspace-validator').then(({ invalidateSchemaCache: invalidateValidatorCache }) => invalidateValidatorCache(projectId, tableName)).catch(() => {})
