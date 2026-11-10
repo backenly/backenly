@@ -1129,6 +1129,11 @@ tests/integration/readiness-reads-never-write.spec.ts
 # minutes or a fix verify again, and a run that failed is not kept. Real
 # project, tables, end-user auth and HTTP stack are the property.
 tests/integration/readiness-reads-reuse-verification.spec.ts
+# Connection health counts the last day in the database: bootstraps per
+# origin, key failures per origin, kind and key shape, probes without an
+# origin, the platform's own origins left out, nothing capped at 5,000. Real
+# security_events rows are the property.
+tests/integration/connection-health-counts.spec.ts
 # The deploy tool tells the truth: status names the current published version
 # (after a rollback too), deploy has no staging target, the first publish,
 # an update and a no-op each say what happened, and an approved deploy is
