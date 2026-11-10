@@ -1831,3 +1831,9 @@ tests/integration/public-files-are-cacheable.spec.ts
 # console, and the console listing names them (an end user by email from the
 # project's users table). Real routes, real database, local storage driver.
 tests/integration/storage-shows-who-uploaded.spec.ts
+
+# The active-branch limit holds under concurrent creates (one create at a time
+# per project, lib/branches/create-lock.ts), and list_branches says how many
+# are active against the limit with merged ones counted apart. Real schemas,
+# real branch engine; PostgREST registration stubbed.
+tests/integration/branch-limit-holds.spec.ts
