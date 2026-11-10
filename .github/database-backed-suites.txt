@@ -1540,6 +1540,13 @@ tests/integration/change-history-everything.spec.ts
 # catalog.
 tests/integration/change-restore-to.spec.ts
 
+# A restore as production runs it: the workspace owned by a NOSUPERUSER
+# NOBYPASSRLS login, FORCE ROW LEVEL SECURITY and Backenly's own-rows policy.
+# Re-adding a foreign key to existing rows is checked against every row (it
+# failed as "violates fk_reviews_user" while every user existed), and data
+# written since a change is measured in rows only the service role can see.
+tests/integration/change-restore-forced-rls.spec.ts
+
 # An agent's rollback is a request to restore the backend to a published
 # version: parked with Backenly's list of the changes it would undo, whichever
 # door asked; a project admin's approval undoes exactly that list, by the

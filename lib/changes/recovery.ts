@@ -86,6 +86,10 @@ import { rollbackWindowDays, windowEndsAt } from './policy'
 import { IN_EFFECT, RECOVERY_OWED, restoreRequestChangeId, type ChangePreservation, type ChangeStatus, type PreservedEntry, type TableChange } from './types'
 import { catalogStructure, definitionsFromRegion, keptText, quotesKeptHere } from './residency'
 import type { ChangeVerification, VerificationCheck } from './verify'
+import { rlsSessionParams, rlsSessionSql, type RlsIdentity } from '@/lib/services/rls-session'
+
+/** Who a restore runs as inside the workspace: Backenly, which every policy's service-role clause admits. */
+const PLATFORM_CONTEXT: RlsIdentity = { userId: '', isServiceRole: true, userRole: 'service' }
 
 // ── Loading ──────────────────────────────────────────────────────────────────
 
@@ -429,6 +433,20 @@ async function runPlan(
   await client.query('BEGIN')
   let index = -1
   try {
+    // As Backenly, seeing every row: what it measures, the keys it puts back
+    // and the checks it runs are about the whole table, not about the rows an
+    // end user may see. Every workspace table has FORCE ROW LEVEL SECURITY,
+    // which binds this connection too (it is the tables' owner and does not
+    // bypass RLS), and with no claims set every owner-scoped policy hides every
+    // row. PostgreSQL's bulk check of a foreign key added to existing rows
+    // (RI_Initial_Check, on ADD CONSTRAINT and on VALIDATE) runs under those
+    // policies, unlike the per-row check, so restoring a dropped `reviews`
+    // failed with `violates foreign key constraint "fk_reviews_user"` while
+    // every user it referenced existed (production, 2026-11-09). The service
+    // role is the context the platform's own policies give owner tooling
+    // (lib/postgrest/rls-translation.ts), as queryWorkspaceAsOwner uses it.
+    // Transaction-local: it ends with this transaction.
+    await client.query(rlsSessionSql(), rlsSessionParams(PLATFORM_CONTEXT))
     // Bounded waits: a restore that queues behind a long transaction holds
     // every request behind it, so it gives up instead and says why.
     await client.query(`SET LOCAL lock_timeout = '5s'`)
