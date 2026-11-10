@@ -1048,50 +1048,40 @@ async function persistExecutionLog(
 }
 
 // ─── Batch Fire Helpers ───────────────────────────────────────────────────────
-
-export async function fireAiFunctions(
-  projectId: string,
-  event: FunctionEvent
-): Promise<void> {
-  try {
-    const triggerType = `on_db_${event.type}`
-    const functions = await prisma.aiFunction.findMany({
-      where: { projectId, status: 'active', triggerType, triggerTable: event.table },
-      select: { id: true },
-    })
-    if (functions.length === 0) return
-    const ids = functions.map((fn) => fn.id)
-    const due = event.type === 'update' ? await functionsDueForUpdate(ids, event) : ids
-    await Promise.allSettled(due.map((id) => executeAiFunction(id, projectId, event)))
-  } catch (err: any) {
-    console.warn('[AiFunctions] fireAiFunctions failed (non-fatal):', err?.message)
-  }
-}
+//
+// Row-event functions are not fired from here: the capture drain queues one
+// job per matching function and the queue runs them at a bounded pace
+// (./run-queue.ts). Firing every match at once, unawaited, is what made a bulk
+// update run hundreds of functions together.
 
 /**
- * The row-update functions an update should run: those that watch no columns,
- * and those that watch one this update changed (deploy_code's `columns`). A
- * function watching `status` is not run, nor counted against the plan, for an
- * update that left `status` alone: a bulk UPDATE of 5,271 orders used to run an
- * "order shipped" email for every one of them. Without the old row (a payload
- * too large to capture) a change cannot be ruled out, so the function runs.
- * Without the table that holds the columns (a release ahead of its migration),
- * every function runs, as before.
+ * The columns each row-update function watches (deploy_code's `columns`), read
+ * once for a batch of captured rows. Without the table that holds them (a
+ * release ahead of its migration) none are known, and every function runs, as
+ * before.
  */
-async function functionsDueForUpdate(ids: string[], event: FunctionEvent): Promise<string[]> {
+export async function watchedColumnsOf(ids: string[]): Promise<Map<string, string[]>> {
+  if (ids.length === 0) return new Map()
   const watched = await prisma.aiFunctionTriggerColumns
     .findMany({ where: { functionId: { in: ids } }, select: { functionId: true, columns: true } })
     .catch(() => [] as Array<{ functionId: string; columns: string[] }>)
-  if (watched.length === 0) return ids
-  const columnsOf = new Map(watched.map((w) => [w.functionId, w.columns]))
+  return new Map(watched.map((w) => [w.functionId, w.columns]))
+}
+
+/**
+ * Whether an update should run a row-update function: it watches no columns,
+ * or one this update changed. A function watching `status` is not run, nor
+ * counted against the plan, for an update that left `status` alone: a bulk
+ * UPDATE of 5,271 orders used to run an "order shipped" email for every one of
+ * them. Without the old row (a payload too large to capture) a change cannot be
+ * ruled out, so the function runs.
+ */
+export function dueForUpdate(columns: string[] | undefined, event: FunctionEvent): boolean {
   const before = event.old
+  if (!columns || columns.length === 0 || !before) return true
   const after = event.data ?? {}
   const same = (a: unknown, b: unknown) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null)
-  return ids.filter((id) => {
-    const columns = columnsOf.get(id)
-    if (!columns || columns.length === 0 || !before) return true
-    return columns.some((column) => !same(after[column], before[column]))
-  })
+  return columns.some((column) => !same(after[column], before[column]))
 }
 
 /**

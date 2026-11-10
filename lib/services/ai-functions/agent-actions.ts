@@ -225,12 +225,20 @@ export async function listFunctionLogs(
   const lines = logs.slice(0, 10).map((l) =>
     `• ${l.createdAt.toISOString()} ${l.function.name}: ${l.success ? 'ok' : 'FAILED'}, ${l.durationMs}ms, ${l.triggerType}` +
     (l.error ? `, ${l.error.slice(0, 100)}` : ''))
+  // Runs of row-event functions wait in a queue and start a few at a time
+  // (./run-queue.ts): say how many have not run yet, so a missing run reads as
+  // waiting, not lost.
+  const { queuedFunctionRuns } = await import('./run-queue')
+  const byFunction = await queuedFunctionRuns(actor.projectId)
+  const queued = functionId ? byFunction.get(functionId) ?? 0 : [...byFunction.values()].reduce((a, b) => a + b, 0)
+  const waiting = queued > 0 ? `\n${queued} more run${queued === 1 ? '' : 's'} from row changes ${queued === 1 ? 'is' : 'are'} queued and will start in order.` : ''
   return {
     ok: true,
-    summary: logs.length
+    summary: (logs.length
       ? `Function runs, newest first (kept 30 days):\n${lines.join('\n')}` + (logs.length > 10 ? `\n…${logs.length - 10} more in data.runs.` : '')
-      : 'No function runs recorded yet. Run one with functions { action: "invoke" }.',
+      : 'No function runs recorded yet. Run one with functions { action: "invoke" }.') + waiting,
     data: {
+      queued,
       runs: logs.map((l) => ({
         id: l.id,
         functionId: l.functionId,

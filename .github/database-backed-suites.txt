@@ -65,6 +65,14 @@ tests/integration/function-row-events-data-plane.spec.ts
 # and for a column the table lacks, and a redeploy without columns is restored
 # with them through the change history.
 tests/integration/row-functions-watch-columns.spec.ts
+
+# Row-event function runs are queued in the transaction that releases their
+# captured rows and run at a bounded pace: a burst never runs more than the
+# project's limit at once, a job a stopped process left is run again, one left
+# too often is recorded and dropped, a throwing function is not retried, the
+# run log says what is queued, and pausing discards the queue. Real capture
+# trigger, outbox, queue, sandbox executor and run log.
+tests/integration/function-runs-queued.spec.ts
 tests/integration/project-route-response-shape.spec.ts
 tests/integration/realtime-sse-slot-release.spec.ts
 
