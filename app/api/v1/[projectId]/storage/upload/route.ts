@@ -11,6 +11,7 @@ import { assertQuotaAvailable, QuotaExceededError } from '@/lib/services/storage
 import { isUploadRejected, MAX_BUFFERED_UPLOAD_BYTES } from '@/lib/storage/upload-policy'
 import path from 'path'
 import { recordedV1 } from '@/lib/traffic/recorded-v1'
+import { apiUploader } from '@/lib/storage/uploader'
 
 // ── Global hard limit (defence-in-depth before any bucket config) ──────────
 // The file travels through this server in memory, so it is bounded by the
@@ -203,7 +204,9 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
       // is not an end user, and recording it made owner_only buckets
       // unreadable by their own uploaders. Key-only server calls record null,
       // which owner_only treats as operator-only: closed, not broken.
-      { isPublic, projectId: context.projectId, uploadedBy: context.endUserId ?? undefined }
+      // The kind of uploader is recorded beside it, so the console can say an
+      // upload came from the public key alone (lib/storage/uploader.ts).
+      { isPublic, projectId: context.projectId, uploadedBy: context.endUserId ?? undefined, uploader: apiUploader(context) }
     )
 
 

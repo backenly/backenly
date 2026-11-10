@@ -26,6 +26,7 @@
 import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand, HeadObjectCommand } from '@aws-sdk/client-s3'
 import { UploadRejectedError, assertFileAllowed, assertFileSize, uploadExtension } from '@/lib/storage/upload-policy'
 import { cacheControlFor, clampIsPublic, policyAllowsPublic } from '@/lib/storage/access-policy'
+import { uploaderOf, type UploaderRecord } from '@/lib/storage/uploader'
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner'
 import { prisma } from '@/lib/db'
 import crypto from 'crypto'
@@ -283,7 +284,7 @@ export class S3StorageService implements StorageService {
   async uploadFile(
     bucketId: string,
     file: { name: string; buffer: Buffer; mimeType?: string },
-    options: { isPublic?: boolean; projectId: string; uploadedBy?: string }
+    options: { isPublic?: boolean; projectId: string; uploadedBy?: string; uploader?: UploaderRecord }
   ) {
     if (!options.projectId) {
       throw new Error('Project ID is required for tenant isolation')
@@ -503,6 +504,7 @@ export class S3StorageService implements StorageService {
           isPublic: fileIsPublic,
           projectId: options.projectId,
           uploadedBy: options?.uploadedBy || null,
+          ...(options?.uploader ? { metadata: { uploader: { ...options.uploader } } } : {}),
         },
       })
 
@@ -572,6 +574,7 @@ export class S3StorageService implements StorageService {
         mimeType: file.mimeType,
         isPublic: file.isPublic,
         uploadedBy: file.uploadedBy ?? null,
+        uploader: uploaderOf(file),
         bucket: file.bucket.name,
         createdAt: file.createdAt,
         url: await this.getFileUrl(file.id, projectId, 3600),
