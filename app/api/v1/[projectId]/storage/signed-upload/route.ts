@@ -9,6 +9,7 @@ import { getS3Client, getS3Config, isS3Configured } from '@/lib/services/s3-conf
 import crypto from 'crypto'
 import { recordedV1 } from '@/lib/traffic/recorded-v1'
 import { clampIsPublic } from '@/lib/storage/access-policy'
+import { apiUploader } from '@/lib/storage/uploader'
 import { keepFileNames, storedFileName } from '@/lib/storage/file-names'
 
 const ALLOWED_VIDEO_TYPES = new Set([
@@ -207,7 +208,11 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
             size: BigInt(contentLength),
             mimeType: contentType,
             isPublic,
-            metadata: { uploadId, status: 'pending', s3Key },
+            // Who is sending it (lib/storage/uploader.ts): the signed-in end
+            // user, else the key. The end user is the uploader owner_only
+            // buckets compare against, as with the form upload.
+            uploadedBy: context.endUserId ?? null,
+            metadata: { uploadId, status: 'pending', s3Key, uploader: { ...apiUploader(context) } },
           },
         })
 

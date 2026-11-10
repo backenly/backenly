@@ -15,6 +15,14 @@ import { withTenantIsolation, TenantIsolationError } from '@/lib/tenant/isolatio
 import { storageService } from '@/lib/services/storage'
 import { assertQuotaAvailable, QuotaExceededError } from '@/lib/services/storageQuota'
 import { isUploadRejected } from '@/lib/storage/upload-policy'
+import { authenticateRequest } from '@/lib/auth/middleware'
+import { consoleUploader, type UploaderRecord } from '@/lib/storage/uploader'
+
+/** The platform account behind this console request, already authenticated by tenant isolation. */
+async function consoleUploaderOf(request: NextRequest): Promise<UploaderRecord | undefined> {
+  const auth = await authenticateRequest(request)
+  return auth.authenticated && auth.userId ? consoleUploader(auth.userId) : undefined
+}
 
 export async function POST(request: NextRequest) {
   try {
@@ -68,7 +76,9 @@ export async function POST(request: NextRequest) {
             mimeType: file.type || undefined,
           },
           // No isPublic: the bucket's access policy decides (clampIsPublic).
-          { projectId }
+          // The uploader is the signed-in account, so the console can say a
+          // file came from it rather than from an app (lib/storage/uploader.ts).
+          { projectId, uploader: await consoleUploaderOf(request) }
         )
 
         return NextResponse.json({

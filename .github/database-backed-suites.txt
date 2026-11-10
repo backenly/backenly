@@ -1825,3 +1825,9 @@ tests/integration/auth-mail-says-who-sends-it.spec.ts
 # behind the signed CDN a public file's redirect repeats one URL for a window
 # and may be kept for the rest of it. Real metadata database; S3 calls stubbed.
 tests/integration/public-files-are-cacheable.spec.ts
+
+# The console says who sent each file: every upload path records whether it
+# came from a signed-in end user, the public key alone, a server key or the
+# console, and the console listing names them (an end user by email from the
+# project's users table). Real routes, real database, local storage driver.
+tests/integration/storage-shows-who-uploaded.spec.ts

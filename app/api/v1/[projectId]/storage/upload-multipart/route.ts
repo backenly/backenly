@@ -12,6 +12,7 @@ import fs from 'fs/promises'
 import os from 'os'
 import { recordedV1 } from '@/lib/traffic/recorded-v1'
 import { cacheControlFor, clampIsPublic } from '@/lib/storage/access-policy'
+import { apiUploader, uploaderOf } from '@/lib/storage/uploader'
 import { forgetFileNames, keepFileNames, storedFileName, withFileName } from '@/lib/storage/file-names'
 
 const CHUNK_UPLOAD_DIR = process.env.CHUNK_TEMP_DIR || path.join(os.tmpdir(), 'backenly-chunks')
@@ -65,7 +66,7 @@ function safeChunkPath(uploadId: string, partFile?: string): string | null {
  */
 
 // ── INITIATE ──────────────────────────────────────────────────────────────────
-async function handleInitiate(request: NextRequest, context: { projectId: string; apiKey: any }) {
+async function handleInitiate(request: NextRequest, context: { projectId: string; apiKey: any; endUserId: string | null }) {
   let body: any
   try { body = await request.json() } catch {
     return createErrorResponse(ErrorCodes.BAD_REQUEST, 'Request body must be JSON', 400)
@@ -106,6 +107,9 @@ async function handleInitiate(request: NextRequest, context: { projectId: string
   // The file follows its bucket unless the upload says otherwise, and never past
   // it (lib/storage/access-policy.ts).
   const isPublic = clampIsPublic(requestedPublic, bucketRecord.accessPolicy)
+  // Who is sending it, recorded on the tracking row and carried to the file
+  // (lib/storage/uploader.ts): the signed-in end user, else the key.
+  const uploader = apiUploader(context)
 
   // S3 multipart initiation
   if (process.env.STORAGE_DRIVER === 's3' && isS3Configured()) {
@@ -147,7 +151,8 @@ async function handleInitiate(request: NextRequest, context: { projectId: string
           size: BigInt(contentLength),
           mimeType: contentType,
           isPublic,
-          metadata: { uploadId, s3UploadId, s3Key, status: 'uploading' },
+          uploadedBy: context.endUserId ?? null,
+          metadata: { uploadId, s3UploadId, s3Key, status: 'uploading', uploader: { ...uploader } },
         },
       })
 
@@ -182,7 +187,8 @@ async function handleInitiate(request: NextRequest, context: { projectId: string
       size: BigInt(contentLength),
       mimeType: contentType,
       isPublic,
-      metadata: { uploadId, chunkDir, status: 'uploading', contentType, bucketId: bucketRecord.id },
+      uploadedBy: context.endUserId ?? null,
+      metadata: { uploadId, chunkDir, status: 'uploading', contentType, bucketId: bucketRecord.id, uploader: { ...uploader } },
     },
   })
 
@@ -356,10 +362,10 @@ async function handleComplete(request: NextRequest, uploadId: string, totalParts
     bucket.id,
     // The real name: a regional project's tracking row holds only its stand-in.
     { name: (await withFileName(projectId, fileRecord)).name, buffer: assembled, mimeType: fileRecord.mimeType || 'application/octet-stream' },
-    // Multipart's initiate step carries no end-user identity yet, so the
-    // uploader is unknown, not ''. Null reads as operator-only under
-    // owner_only — closed rather than broken.
-    { isPublic: fileRecord.isPublic, projectId, uploadedBy: undefined }
+    // The uploader the initiate step recorded on the tracking row. A row
+    // without one (an upload begun before it was recorded) stays unknown,
+    // which owner_only reads as operator-only: closed rather than broken.
+    { isPublic: fileRecord.isPublic, projectId, uploadedBy: fileRecord.uploadedBy ?? undefined, uploader: uploaderOf(fileRecord) ?? undefined }
   )
   // Clean up temp chunks
   fs.rm(chunkDir, { recursive: true, force: true }).catch(() => null)
