@@ -197,6 +197,22 @@ export interface StructuredApiError {
   hint?: string
 }
 
+/**
+ * 42P10 on an upsert: no unique index covers exactly the conflict columns.
+ *
+ * On a table with soft delete the usual cause is Backenly's own: a UNIQUE index
+ * there is scoped to live rows (WHERE deleted_at IS NULL), and Postgres cannot
+ * match `ON CONFLICT (cols)`, which is all on_conflict can say, to a partial
+ * index. The caller was told only "Request could not be completed". Postgres's
+ * text for this error describes the request, never a row or another tenant.
+ */
+const UPSERT_TARGET_MESSAGE =
+  'No unique index covers exactly the on_conflict columns, so the upsert has nothing to match against.'
+const UPSERT_TARGET_HINT =
+  'On a table with soft delete, a UNIQUE index counts live rows only (WHERE deleted_at IS NULL), and an upsert ' +
+  'cannot target that. Create one over every row: create_index { tableName, columns, unique: true, where: "true" }, ' +
+  'or CREATE UNIQUE INDEX … WHERE true.'
+
 /** PostgREST error SQLSTATE → HTTP status, matching the old executor's mapping. */
 const PG_STATUS: Record<string, number> = {
   '23502': 400, // not null violation
@@ -289,6 +305,13 @@ export function toApiError(
     }
   }
 
+  if (pgCode === '42P10') {
+    return {
+      status: 400,
+      body: { error: UPSERT_TARGET_MESSAGE, code: 'UPSERT_TARGET_NOT_UNIQUE', hint: UPSERT_TARGET_HINT },
+    }
+  }
+
   if (pgCode && PG_STATUS[pgCode]) {
     return {
       status: PG_STATUS[pgCode],
@@ -363,6 +386,19 @@ export function stripUpstreamError(
           pgCode === 'PGRST106'
             ? 'This project\'s data plane is still being provisioned. Retry shortly.'
             : 'The data plane is temporarily unavailable.',
+      },
+    }
+  }
+
+  // PostgREST's shape and Postgres's own words, with a hint that says how to
+  // get an index an upsert can use.
+  if (pgCode === '42P10') {
+    return {
+      status: 400,
+      body: {
+        code: pgCode,
+        message: typeof b.message === 'string' && b.message ? b.message : UPSERT_TARGET_MESSAGE,
+        hint: UPSERT_TARGET_HINT,
       },
     }
   }

@@ -512,14 +512,25 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
         items: { type: 'string' },
         description: 'Ordered column list. Several columns create ONE composite index over that exact tuple.',
       },
-      unique: { type: 'boolean', description: 'Enforce uniqueness over the whole column tuple.' },
+      unique: {
+        type: 'boolean',
+        description:
+          'Enforce uniqueness over the whole column tuple. On a table with soft delete (`deleted_at`) it counts ' +
+          'live rows only (the index is scoped WHERE deleted_at IS NULL) unless `where` says otherwise.',
+      },
       indexName: { type: 'string', description: 'Optional explicit index name. Omit and one is derived from the table and columns.' },
       method: {
         type: 'string',
         enum: ['btree', 'gin', 'gist', 'hash', 'brin'],
         description: 'Index method. Defaults to btree; use gin for array or jsonb containment queries.',
       },
-      where: { type: 'string', description: 'Optional predicate for a PARTIAL index — only rows matching it are indexed.' },
+      where: {
+        type: 'string',
+        description:
+          'Optional predicate for a PARTIAL index: only rows matching it are indexed. "true" indexes every row, ' +
+          'soft-deleted ones included; an upsert (ON CONFLICT, or on_conflict on the REST API) can only target a ' +
+          'unique index like that.',
+      },
     },
     ['tableName', 'columns']),
   fn('generate_api',

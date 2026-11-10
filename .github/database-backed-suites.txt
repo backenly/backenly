@@ -1504,6 +1504,12 @@ tests/integration/agent-rollback-approval.spec.ts
 # was written after the restore. Real catalog, helper functions and triggers.
 tests/integration/change-classes-executor.spec.ts
 
+# A UNIQUE index over every row (where: "true", or CREATE UNIQUE INDEX … WHERE
+# true) is created on a soft-delete table and an ON CONFLICT upsert can target
+# it; a scoped one asked for twice is not a conflict, and is never mistaken
+# for one over every row. A real provisioned project and real DDL.
+tests/integration/unique-index-over-every-row.spec.ts
+
 # Every view of a project's schema is current once a change or restore settles:
 # the REST API is asked to reload, the reconciler's baseline follows, validators
 # see a table another process changed, a restore supersedes the request behind

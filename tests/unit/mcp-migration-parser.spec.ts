@@ -382,6 +382,21 @@ describe('CREATE INDEX', () => {
     })
   })
 
+  it('passes WHERE true on as an index over every row, which an upsert can target', () => {
+    for (const sql of [
+      'CREATE UNIQUE INDEX cart_all ON cart_items (user_id, product_id) WHERE true',
+      'CREATE UNIQUE INDEX cart_all ON cart_items (user_id, product_id) WHERE (TRUE)',
+    ]) {
+      expect(parseOne(sql).args).toEqual({
+        tableName: 'cart_items', columns: ['user_id', 'product_id'], unique: true, indexName: 'cart_all', where: 'true',
+      })
+    }
+  })
+
+  it('still refuses a predicate that names no column and is not simply true', () => {
+    expect(expectRefusal('CREATE UNIQUE INDEX ON cart_items (user_id) WHERE 1 = 1').code).toBe('UNSAFE_CONSTRAINT')
+  })
+
   it('refuses an index clause it cannot translate rather than ignoring it', () => {
     const err = expectRefusal('CREATE INDEX ON posts (author_id) INCLUDE (title)')
     expect(err.code).toBe('UNSUPPORTED_STATEMENT')
