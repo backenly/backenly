@@ -1536,6 +1536,12 @@ tests/integration/auth-projection-confirm.spec.ts
 # guard trigger. Real catalog, DDL, transactions and triggers are the property.
 tests/integration/change-recovery.spec.ts
 tests/integration/restore-generated-endpoints.spec.ts
+
+# Deleting a function nothing calls (switched off, or not run in 7 days) runs
+# at once on both doors, and restoring the change brings it back; one that ran
+# in that time waits for a person; a new table gets no <table>-schema
+# function. Real ledger, MCP route and brain loop.
+tests/integration/agents-delete-unused-functions.spec.ts
 tests/integration/dropped-table-leaves-the-graph.spec.ts
 tests/integration/functions-count-your-functions.spec.ts
 

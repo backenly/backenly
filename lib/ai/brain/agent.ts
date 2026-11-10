@@ -89,7 +89,7 @@ import {
 import { createSeedContext, runSeedStep, type SeedTableResult } from '../blueprints/seed-runner'
 import type { FixLoopResult } from '../agentic-fix-loop'
 import { recordToolExecutionMemory, type BackendEventStatus } from '@/lib/operational-memory/ledger'
-import { needsApproval } from '@/lib/mcp/domains'
+import { approvalNeededFor, needsApproval } from '@/lib/mcp/domains'
 import type { DataMigrationEstimate } from '@/lib/execution/data-migration'
 import { redactArgs } from './redact'
 import { currentPageContext, isAgentDoor, type BrainDoor } from './input-context'
@@ -1986,19 +1986,24 @@ async function runAgentLoop(
         continue
       }
 
-      // Approval gate — one rule for every door. `needsApproval` is the same
-      // judgement the MCP tool route uses: the brain's destructive set OR an
-      // executor rated high-risk, so the two doors can never disagree about
-      // what needs a person. A gated call never runs here; it is returned
-      // exactly as issued so the caller can queue it for a human.
-      if (needsApproval(toolName)) {
+      // Approval gate — one rule for every door. `approvalNeededFor` is the
+      // same judgement the MCP tool route uses: the brain's destructive set OR
+      // an executor rated high-risk, less the calls the rule clears by what
+      // they touch (deleting a function nothing calls), so the two doors can
+      // never disagree about what needs a person. A gated call never runs
+      // here; it is returned exactly as issued so the caller can queue it for
+      // a human.
+      const gated = needsApproval(toolName)
+      if (gated && (await approvalNeededFor(toolName, args, input.projectId))) {
         results.push(holdForApproval(toolCall.id, toolName, args, await describeDanger(input.projectId, toolName, args)))
         continue
       }
 
       // Redacted for the log only; the call itself receives the real arguments.
       console.log(`[Brain] tool=${toolName} args=${JSON.stringify(redactArgs(args)).slice(0, 200)}`)
-      const result = await dispatchTool(toolName, args, ctx)
+      // A call the rule cleared is confirmed for the executor's own gate, as
+      // the MCP route confirms it, so it is not parked a second time there.
+      const result = await dispatchTool(toolName, args, gated ? { ...ctx, mcpOwnerConfirmed: true } : ctx)
       // A real data migration is stopped by the executor's own gate, which
       // counts the rows it would change. That answer used to reach the model as
       // a failure asking for a "confirm" no message could deliver, so from here

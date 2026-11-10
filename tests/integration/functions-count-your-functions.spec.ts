@@ -76,6 +76,9 @@ beforeAll(async () => {
   const route = (name: string) => `POST /api/v1/${projectId}/fn/${name}`
   await prisma.aiFunction.createMany({
     data: [
+      // The validation schema endpoint a table built before 2026-11-11 was
+      // given, as GENERATE_API registered it. New tables no longer get one.
+      { projectId, name: 'orders-schema', description: 'Return the runtime validation schema for orders', generatedCode: 'export async function GET() {}', triggerType: 'manual', triggerTable: `GET /api/v1/${projectId}/fn/orders-schema` },
       // deploy_code: the agent's code, verbatim.
       { projectId, name: 'send-receipt', description: 'Email a receipt', generatedCode: 'export async function POST() {}', codeOrigin: 'agent', triggerType: 'manual', triggerTable: route('send-receipt') },
       // GENERATE_FUNCTION: an endpoint the agent asked Backenly to write.
@@ -94,9 +97,12 @@ afterAll(async () => {
   process.env.ENGINE_MODE = originalEngineMode
 })
 
-it('the table generated endpoints of its own', async () => {
+it('a new table gets no validation schema function: nothing calls one', async () => {
+  const made: any = await withChangeAttribution({ source: 'dashboard', actorUserId: ownerId }, () =>
+    executeAction({ action: 'CREATE_TABLE', params: { tableName: 'notes', columns: [{ name: 'body', type: 'text' }] } } as any, projectId, undefined, 0, undefined, false))
+  expect(made.success).toBe(true)
   const names = (await prisma.aiFunction.findMany({ where: { projectId }, select: { name: true } })).map((f) => f.name)
-  expect(names).toContain('orders-schema')
+  expect(names).not.toContain('notes-schema')
 })
 
 it("the Overview counts the project's own functions", async () => {

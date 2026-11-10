@@ -43,7 +43,7 @@ import { createHash } from 'crypto'
 import { DOCS_MAX_CHARS } from '@/lib/mcp/docs-limit'
 import { AGENT_DOCS_URL, AGENT_DOC_TOPICS, agentDocPublicPath, resolveDocTopic } from '@/lib/mcp/agent-docs'
 import { readPublicDoc as readPublicFile } from '@/lib/mcp/public-docs'
-import { readOnlyView, resolveDomainAction, type DomainResolution } from '@/lib/mcp/domains'
+import { approvalNeededFor, readOnlyView, resolveDomainAction, type DomainResolution } from '@/lib/mcp/domains'
 import { withChangeAttribution } from '@/lib/changes/ledger'
 
 /**
@@ -175,7 +175,7 @@ async function handleCall(request: NextRequest, auth: McpGuardAuth, startedAt: n
   // Parked with the exact call. Approval runs that call verbatim (see
   // runApprovedCall in lib/mcp/approvals.ts), so what executes is what the
   // human read, not a model's re-reading of it.
-  if (resolved?.approval) {
+  if (resolved?.approval && (await approvalNeededFor(resolved.target, domainArgs!, auth.projectId))) {
     return withCors(await parkForApproval(auth, resolved, domainArgs!, startedAt))
   }
 

@@ -256,6 +256,22 @@ export function needsApproval(target: string): boolean {
 }
 
 /**
+ * needsApproval for one call, asked by both doors (the MCP tool route and the
+ * brain's gate). Deleting a function nothing calls, one switched off or not
+ * run in 7 days, runs at once: History keeps its code, and restoring the
+ * change brings it back (lib/services/ai-functions/delete-rule.ts). Every
+ * other call answers as needsApproval does.
+ */
+export async function approvalNeededFor(target: string, args: Record<string, unknown>, projectId: string): Promise<boolean> {
+  if (!needsApproval(target)) return false
+  if (target === 'delete_ai_function') {
+    const { deleteWaitsForPerson } = await import('@/lib/services/ai-functions/delete-rule')
+    return deleteWaitsForPerson(projectId, args)
+  }
+  return true
+}
+
+/**
  * A domain as a read-only key sees it: only the actions whose target is a read,
  * or null when there are none.
  *
