@@ -85,6 +85,8 @@ import type { DataMigrationEstimate } from '@/lib/execution/data-migration'
 import { redactArgs } from './redact'
 import { currentPageContext, isAgentDoor, type BrainDoor } from './input-context'
 import { callSignal, startTurnClock, type TurnClock } from './turn-clock'
+import { creditsAreCapped, holdTurnPrice, type PriceRefusal } from '@/lib/entitlements/credit-holds'
+import { creditsFromTokens } from '@/lib/entitlements/policy'
 
 /**
  * One tool call the approval gate stopped, carried verbatim so the caller can
@@ -331,6 +333,11 @@ export type BrainFailureCode =
    * reached. Not retryable until that changes; the typed tools need no AI.
    */
   | 'AI_UNAVAILABLE'
+  /**
+   * A confirmed build costs more AI credits than the account has left, so
+   * nothing ran and the plan is kept. The typed tools use no credits.
+   */
+  | 'AI_CREDITS_EXHAUSTED'
   /** Hit MAX_ITERATIONS. Not retryable as-is — continue instead. */
   | 'STEP_BUDGET_EXHAUSTED'
   /** The turn ended asking the user something. Not a failure to retry. */
@@ -412,6 +419,58 @@ function proxyTokensForSteps(tools: readonly string[]): number {
     sum += STEP_TOKEN_COST[t as ToolName] ?? STEP_TOKEN_DEFAULT
   }
   return sum
+}
+
+/**
+ * The most a plan's run is charged: the architect's tokens its proposal
+ * deferred, and every step's price. A run is charged only the steps it
+ * attempts (blueprintExecuteTurn), so never more than this.
+ */
+function planPrice(architectTokens: number, steps: readonly BlueprintStep[]): number {
+  return architectTokens + proxyTokensForSteps(steps.map((s) => s.tool))
+}
+
+const aiCredits = (n: number) => `${n.toLocaleString('en-US')} AI credit${n === 1 ? '' : 's'}`
+
+/**
+ * A confirmed build whose price the account's credits could not hold: no step
+ * ran, nothing is charged, and the plan, or the steps a "continue" would run,
+ * stays where it was.
+ */
+async function priceNotHeldTurn(
+  refusal: PriceRefusal,
+  resumed: boolean,
+  classification: Classification,
+  emit: (e: BrainEvent) => void,
+  input: BrainInput,
+): Promise<BrainResult> {
+  const again = resumed ? 'continue' : 'go ahead'
+  let summary: string
+  if (refusal.reason === 'unavailable') {
+    console.error('[Brain] a build\'s price could not be held against the account\'s credits:', refusal.detail)
+    summary = `Nothing was built: this account's AI credits could not be checked, so the build did not start. ${resumed ? 'The remaining steps are' : 'The plan is'} kept.`
+  } else {
+    const needs = `${resumed ? 'the remaining steps need' : 'this plan needs'} up to ${aiCredits(refusal.neededCredits)}`
+    summary = refusal.heldByOtherWork
+      ? `Nothing was built: ${needs}, and work still in progress is holding this account's credits. Say "${again}" again when it finishes.`
+      : `Nothing was built: ${needs}, and this account has ${refusal.leftCredits.toLocaleString('en-US')} left this month. ` +
+        `Upgrade for more and say "${again}" again, or build ${resumed ? 'them' : 'it'} with the typed tools ` +
+        '(create_table, add_column, set_rls and the rest), which use no credits. Credits reset on the 1st.'
+  }
+  emit({ type: 'phase', phase: 'finish' })
+  emit({ type: 'final', summary, needsUser: true })
+  await saveTurn(input.projectId, input.message, summary, input.requestId ?? null)
+  return {
+    success: false,
+    summary,
+    needsUser: true,
+    iterations: 0,
+    toolsRun: [],
+    classification,
+    tokensUsed: 0,
+    failureCode: refusal.reason === 'unavailable' ? 'AI_UNAVAILABLE' : 'AI_CREDITS_EXHAUSTED',
+    retryable: false,
+  }
 }
 
 /** Rotating progress lines shown while the LLM architect designs the backend. */
@@ -893,6 +952,11 @@ async function blueprintProposeTurn(
       ? ['', '**Notes**', ...blueprint.warnings]
       : []),
     '',
+    // What "go ahead" will cost, where credits are counted: the run is charged
+    // the architect's tokens and a fixed price per step, at most this.
+    ...((await creditsAreCapped(input.projectId))
+      ? [`Running it uses up to ${aiCredits(creditsFromTokens(planPrice(architectTokens, blueprint.steps)))}.`]
+      : []),
     'Reply "go ahead" to run this, or tell me what to add or remove.',
   ]
 
@@ -983,6 +1047,15 @@ async function blueprintExecuteTurn(
   /** The steps are a resume queue an earlier run of the plan left. */
   resumed = false,
 ): Promise<BrainResult> {
+  // The run is charged a price when it ends (tokensUsed below). Held whole
+  // before any step starts, or no step starts: it used to be charged without
+  // ever being held, so a build ran with fewer credits left than it cost and
+  // charged the account past its cap.
+  const notHeld = await holdTurnPrice(input.projectId, planPrice(architectTokens, steps), {
+    runsForMs: input.deadlineAt === undefined ? 0 : input.deadlineAt - Date.now(),
+  })
+  if (notHeld) return await priceNotHeldTurn(notHeld, resumed, classification, emit, input)
+
   emit({ type: 'phase', phase: 'execute' })
 
   const succeeded: string[] = []
