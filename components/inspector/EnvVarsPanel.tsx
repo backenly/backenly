@@ -240,7 +240,7 @@ export function EnvVarsPanel({ projectId }: EnvVarsPanelProps) {
           setVarToDelete(null)
         }}
         title={`Delete ${varToDelete ?? 'env var'}?`}
-        description={varToDelete ? `AI functions reading ctx.env.${varToDelete} will get undefined.` : undefined}
+        description={varToDelete ? `Functions reading ctx.env.${varToDelete} will get undefined.` : undefined}
         confirmLabel="Delete"
         danger
       />

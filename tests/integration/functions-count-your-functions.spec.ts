@@ -119,6 +119,13 @@ it('the Functions list marks what Backenly generated for a table, and only that'
 
 it("the agent's picture of the backend lists the generated endpoints apart", async () => {
   const info: any = await executeAction({ action: 'INFO', params: {} } as any, projectId)
-  expect(info.message).toContain('### AI Functions (2 active)')
+  expect(info.message).toContain('### Functions (2 active)')
   expect(info.message).toMatch(/### Generated for your tables \(\d+\)\n[^\n]*`orders-schema`/)
+})
+
+it('calls them functions: no AI wrote code an agent deployed', async () => {
+  // Production QA (2026-11-09): "10 AI Functions" for code agents deployed.
+  const list: any = await executeAction({ action: 'LIST_AI_FUNCTIONS', params: {} } as any, projectId)
+  expect(list.message).toMatch(/^\*\*\d+ Functions:\*\*/)
+  expect(list.message).not.toMatch(/AI Function/i)
 })
