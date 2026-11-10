@@ -1666,3 +1666,8 @@ tests/integration/auth-before-first-signup.spec.ts
 # Express app (server/app.ts), whose modules open the platform database, so it
 # runs with one.
 tests/integration/runtime-rejects-bad-bodies.spec.ts
+
+# A function redeploy names the change that keeps the previous code, and
+# restoring that change brings it back; an identical redeploy names none. Real
+# ledger and project.
+tests/integration/function-redeploy-in-history.spec.ts
