@@ -297,10 +297,14 @@ export const AUTONOMOUSLY_REPAIRABLE_FINDING_TYPES = Object.keys(FINDING_TYPE_TO
  * missing_api_definition, schema_not_registered, shadow_mutation,
  * verification_failed and workflow_broken are no longer autonomous at all, so
  * they have no place on a bridge for autonomous types.
+ *
+ * And to 7 when infra_hot_table moved to approval: its evidence is how often a
+ * table is scanned, no sensor stands behind it, and over this bridge it built
+ * an index with none of create_index's bounds. A query measured as slow is the
+ * claim create_index takes on its own (slow_query_missing_index).
  */
 export const LEGACY_AUTONOMY_COMPAT_TYPES: ReadonlySet<string> = new Set([
   'index_bloat',
-  'infra_hot_table',
   'infra_table_bloat',
   'missing_rate_limit',
   'orphan_table',
