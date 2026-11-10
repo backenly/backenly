@@ -12,6 +12,7 @@ import type { RelatedRowsVia } from '@/lib/services/rls-ownership'
 import { addForeignKeySql, columnForeignKeySql, describeTarget, isDeclaredForeignKey } from '@/lib/db/declared-foreign-key'
 import { getActiveGraph, saveNewGraph } from '@/lib/orchestration/graph-pointer'
 import { withoutTables } from '@/lib/orchestration/graph-tables'
+import { planDisplayName } from '@/lib/entitlements/plan-names'
 import { withTimeout } from './with-timeout'
 import { trackAction } from './execution-timeline'
 import { classifyErrorCode } from '@/lib/errors/taxonomy'
@@ -8643,7 +8644,7 @@ async function executeGetUsage(projectId: string): Promise<ExecutionResult> {
     return {
       success: true,
       message: [
-        `Usage for ${usage.period} on the ${usage.planName} plan, across every project of this account:`,
+        `Usage for ${usage.period} on the ${planDisplayName(usage.planName)} plan, across every project of this account:`,
         ...lines,
         overage,
         'Projections assume the last seven days continue. Only the account owner can raise the spend limit.',

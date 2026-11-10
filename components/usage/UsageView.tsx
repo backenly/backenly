@@ -29,6 +29,7 @@ import { Database, HardDrive, Bot, Activity, Users, ArrowUpRight, AlertTriangle,
 import { OrgShell } from '@/components/shell/OrgShell'
 import { EmptyState, INPUT_BASE, KitButton, KitNote, KitCard, KitCardHeader, KitCardBody, PageHeader, Skeleton } from '@/components/inspector/kit'
 import { EDGE, PAGE_GUTTER, PAGE_WIDTH, PLATE, R_PANEL } from '@/components/console/tokens'
+import { planDisplayName } from '@/lib/entitlements/plan-names'
 
 interface UsageData {
   planName: string
@@ -535,7 +536,7 @@ export function UsageView({ orgId }: { orgId?: string | null }) {
         <PageHeader
           className="!px-0"
           title="Usage"
-          meta={usage ? <span className="text-[13px] text-faint">{usage.planName} plan</span> : undefined}
+          meta={usage ? <span className="text-[13px] text-faint">{planDisplayName(usage.planName)} plan</span> : undefined}
           description={
             orgId
               ? 'Everything this organization has used in the current billing cycle, pooled across all of its projects.'
