@@ -19,6 +19,7 @@
 
 import { Pool } from 'pg'
 import { projectDatabaseUrl } from '@/lib/data-plane/regional'
+import { literalPrefix } from '@/lib/projects/backend-presence'
 
 // Warn once per server restart if pg_stat_statements is unavailable.
 // Avoids spamming logs on every cron invocation.
@@ -794,7 +795,7 @@ export async function runAndStoreInfraIntelligence(
 
     // Deduplicate against open findings
     const existing = await prisma.healthFinding.findMany({
-      where: { projectId, status: 'open', type: { startsWith: 'infra_' } },
+      where: { projectId, status: 'open', type: { startsWith: literalPrefix('infra_') } },
       select: { type: true },
     }).catch(() => [])
     const existingTypes = new Set(existing.map(e => e.type))

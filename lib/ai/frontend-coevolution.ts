@@ -26,6 +26,7 @@ import { getWorkspaceDatabaseNames } from '@/lib/services/databaseProvisioning'
 import { prisma } from '@/lib/db/prisma'
 import { Pool } from 'pg'
 import { projectDatabaseUrl } from '@/lib/data-plane/regional'
+import { literalPrefix } from '@/lib/projects/backend-presence'
 
 // ── Public types ─────────────────────────────────────────────────────────────
 
@@ -601,7 +602,7 @@ export async function runAndStoreFrontendCoevolution(
 
     // Store approval-required signals as HealthFindings
     const existing = await prisma.healthFinding.findMany({
-      where: { projectId, status: 'open', type: { startsWith: 'coevo_' } },
+      where: { projectId, status: 'open', type: { startsWith: literalPrefix('coevo_') } },
       select: { type: true },
     }).catch(() => [] as Array<{ type: string }>)
     const existingTypes = new Set(existing.map(e => e.type))
