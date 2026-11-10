@@ -197,6 +197,20 @@ export interface StructuredApiError {
   hint?: string
 }
 
+/**
+ * The API's code for a database error in PG_STATUS. A value of the wrong type,
+ * format or length, or for a column the table does not have, is about the
+ * request's values, as /database/insert says (lib/api/v1/data-errors.ts); only
+ * a constraint the row broke is DB_CONSTRAINT_ERROR. Every one used to be,
+ * so "abc" for an integer read as a broken constraint (production QA,
+ * 2026-11-09).
+ */
+function apiCodeFor(pgCode: string): string {
+  if (pgCode === '42P01') return 'TABLE_NOT_FOUND'
+  if (pgCode.startsWith('22') || pgCode === '42703') return 'VALIDATION_ERROR'
+  return 'DB_CONSTRAINT_ERROR'
+}
+
 /** PostgREST error SQLSTATE → HTTP status, matching the old executor's mapping. */
 const PG_STATUS: Record<string, number> = {
   '23502': 400, // not null violation
@@ -294,7 +308,7 @@ export function toApiError(
       status: PG_STATUS[pgCode],
       body: {
         error: message || 'Request could not be completed',
-        code: pgCode === '42P01' ? 'TABLE_NOT_FOUND' : 'DB_CONSTRAINT_ERROR',
+        code: apiCodeFor(pgCode),
         details: typeof b.details === 'string' ? b.details : undefined,
         hint: typeof b.hint === 'string' ? b.hint : undefined,
       },

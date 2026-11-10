@@ -376,3 +376,31 @@ describe('stripUpstreamError — v2 passthrough', () => {
     expect(JSON.stringify(out.body)).not.toMatch(/backenly_authenticator|10\.0\.0\.4/)
   })
 })
+
+/**
+ * Production QA (2026-11-09): "abc" sent for an integer column through /db came
+ * back DB_CONSTRAINT_ERROR, while /database/insert answered the same row
+ * VALIDATION_ERROR. A value of the wrong type or format, a value too long and
+ * a column the table does not have are about the request's values, not a
+ * constraint the row broke.
+ */
+describe('toApiError — which errors are about the values sent', () => {
+  const code = (pg: string) => toApiError(400, { code: pg, message: 'm' }).body.code
+
+  it('labels a value of the wrong type, format or length, and an unknown column, VALIDATION_ERROR', () => {
+    expect(code('22P02')).toBe('VALIDATION_ERROR') // invalid input syntax for type integer: "abc"
+    expect(code('22007')).toBe('VALIDATION_ERROR') // invalid datetime format
+    expect(code('22001')).toBe('VALIDATION_ERROR') // value too long
+    expect(code('42703')).toBe('VALIDATION_ERROR') // column does not exist
+  })
+
+  it('keeps DB_CONSTRAINT_ERROR for a constraint the row broke, and TABLE_NOT_FOUND', () => {
+    for (const pg of ['23502', '23503', '23505', '23514']) expect(code(pg)).toBe('DB_CONSTRAINT_ERROR')
+    expect(code('42P01')).toBe('TABLE_NOT_FOUND')
+  })
+
+  it('keeps the status it had', () => {
+    expect(toApiError(400, { code: '22P02', message: 'm' }).status).toBe(400)
+    expect(toApiError(400, { code: '42703', message: 'm' }).status).toBe(400)
+  })
+})
