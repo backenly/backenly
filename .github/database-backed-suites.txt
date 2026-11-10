@@ -954,6 +954,13 @@ tests/integration/ai-lab-arm.spec.ts
 # charge. The row and the race are real, so it needs a real Postgres.
 tests/integration/ai-credit-holds.spec.ts
 
+# A confirmed build's price (the architect's tokens its proposal deferred and a
+# fixed price per step) is held whole before any step runs, or nothing runs and
+# the plan is kept; the build's own model calls hold nothing more, and the run
+# is never charged past the cap. backend_chat's real run against real holds,
+# usage rows and workspace tables.
+tests/integration/confirmed-build-holds-its-price.spec.ts
+
 # The calls that only route a brain turn are recorded like every other model
 # call: the classifier and the answer of a CHAT turn, the classifier and the
 # clarifying question of an UNCLEAR one, each reserved, settled and written to
