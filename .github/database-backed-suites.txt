@@ -1813,3 +1813,9 @@ tests/integration/function-run-record.spec.ts
 # The runtime answers a body over its JSON limit 413 PAYLOAD_TOO_LARGE and names
 # the limit (server/app.ts), as the web tier does.
 tests/integration/runtime-body-limit.spec.ts
+
+# Who sends a project's auth emails, as said to the person who asks: the
+# settings view names the address the deployment sends from, and the agent's
+# auth tool says Backenly sends it on Cloud, the deployment's SMTP when
+# self-hosted. Creates a user and project in the platform database.
+tests/integration/auth-mail-says-who-sends-it.spec.ts
