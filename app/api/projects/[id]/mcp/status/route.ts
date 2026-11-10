@@ -5,7 +5,7 @@ export const dynamic = 'force-dynamic'
  *
  * Is the signed-in user's coding agent connected to this project over MCP?
  *
- *   { connected: boolean, lastSeenAt: string | null, client: string | null }
+ *   { connected: boolean, active: boolean, lastSeenAt: string | null, client: string | null }
  *
  * Every console surface that offers "Connect your agent" reads this, through
  * lib/hooks/useAgentConnection.ts, so a user whose agent is already wired in is
@@ -27,6 +27,7 @@ export async function GET(req: NextRequest) {
       const status = await agentConnectionFor(projectId, userId)
       return NextResponse.json({
         connected: status.connected,
+        active: status.active,
         lastSeenAt: status.lastSeenAt ? status.lastSeenAt.toISOString() : null,
         client: status.client,
       })
