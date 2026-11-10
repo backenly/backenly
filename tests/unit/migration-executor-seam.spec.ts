@@ -100,7 +100,7 @@ describe('a real migration survives the whole path', () => {
   it('the declared column shape is not traded against the extracted CHECK', () => {
     const create = toExecutorParams(SQL).find((s) => s.tool === 'create_table')!
     const status = (create.params.columns as any[]).find((c) => c.name === 'status')
-    expect(status).toEqual({ name: 'status', type: 'text', nullable: false, default: "'pending'" })
+    expect(status).toEqual({ name: 'status', type: 'text', sqlType: 'text', nullable: false, default: "'pending'" })
   })
 
   it('array columns reach the executor as array types', () => {

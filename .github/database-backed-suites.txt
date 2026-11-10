@@ -766,6 +766,11 @@ tests/integration/apply-migration-dispatch.spec.ts
 # A foreign key is installed exactly as the migration declares it: its actions,
 # referenced column and name, read back from the catalog and checked by deletes.
 tests/integration/apply-migration-foreign-keys.spec.ts
+
+# A migration's column types are created as declared: a text column named like
+# an id stays text, timestamptz/date/time and numeric scale survive CREATE TABLE
+# and the ADD COLUMN a merge replays. Read back from the catalog.
+tests/integration/apply-migration-declared-types.spec.ts
 # MCP acceptance (scripts/mcp-acceptance/cases.ts): two agent workflows, twice
 # each, and the acceptance cases no other suite covered. Real MCP route, real
 # keys, provisioned projects, runtime engine mode.

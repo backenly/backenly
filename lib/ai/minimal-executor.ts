@@ -886,6 +886,23 @@ function normalizeUserInput(input: string): string {
 }
 
 /**
+ * A type a statement declared, exactly (lib/mcp/migration-parser.ts: exactSqlType).
+ *
+ * When a column carries one, it is created with that type and nothing about
+ * its name is consulted: on production (2026-11-09) `session_id text` became
+ * uuid by name, and `refunded_at timestamptz`, carried only as the vocabulary's
+ * "timestamp", became timestamp without time zone on merge. Checked against the
+ * spellings the parser emits, since it is interpolated into DDL.
+ */
+const DECLARED_SQL_TYPE =
+  /^(?:text|varchar(?:\(\d{1,5}\))?|char(?:\(\d{1,4}\))?|smallint|integer|bigint|boolean|timestamp(?:\([0-6]\))?|timestamptz(?:\([0-6]\))?|date|time(?:\([0-6]\))?|uuid|json|jsonb|numeric(?:\(\d{1,4}(?:,\d{1,4})?\))?|real|double precision|money)(?:\[\])?$/
+
+function declaredSqlType(col: unknown): string | null {
+  const t = (col as { sqlType?: unknown } | null)?.sqlType
+  return typeof t === 'string' && DECLARED_SQL_TYPE.test(t) ? t.toUpperCase() : null
+}
+
+/**
  * Validate and normalize column type with guards
  */
 function normalizeColumnType(type: string | undefined, columnName: string): string {
@@ -4308,7 +4325,7 @@ async function executeCreateTable(
         if (existingCols.has(colLower)) continue
         existingCols.add(colLower)
 
-        const normalizedType = normalizeColumnType(col.type, col.name)
+        const normalizedType = declaredSqlType(col) ?? normalizeColumnType(col.type, col.name)
         const constraints = deriveConstraints(col.name, normalizedType, tableName)
         // Hand the column the value set its CHECK will enforce, so its DEFAULT
         // is derived from that list rather than guessed from its name. A default
@@ -5877,7 +5894,7 @@ async function executeAddColumn(
         if (!ident.test(spec!.fkTo)) return { success: false, message: `"${spec!.fkTo}" is not a table this path can reference.` }
         referencesSql = ` REFERENCES "${postgresSchema}"."${spec!.fkTo}"("id")`
       }
-      const type = normalizeColumnType(String(spec!.type ?? colsToAdd[0].type), name)
+      const type = declaredSqlType(spec) ?? normalizeColumnType(String(spec!.type ?? colsToAdd[0].type), name)
       const definition = `${type}${defaultSql}${spec!.nullable === false ? ' NOT NULL' : ''}${spec!.unique === true ? ' UNIQUE' : ''}${referencesSql}`
       if (referencesSql) {
         // A key into `users` needs the end-user auth table (lib/services/auth-users-reference.ts),
@@ -5909,8 +5926,10 @@ async function executeAddColumn(
     }
 
     const addedCols: string[] = []
+    // A migration's column carries its declared type (sqlType); keep it on this path too.
+    const sqlType = spec && colsToAdd.length === 1 && typeof spec.sqlType === 'string' ? spec.sqlType : undefined
     for (const col of colsToAdd) {
-      await addColumnToTable(tableName, { name: col.name, type: col.type }, projectId, apiKey, target)
+      await addColumnToTable(tableName, { name: col.name, type: col.type, ...(sqlType ? { sqlType } : {}) }, projectId, apiKey, target)
       addedCols.push(col.name)
     }
 
@@ -6163,7 +6182,7 @@ async function executeInsertData(
  */
 async function addColumnToTable(
   tableName: string,
-  column: { name: string; type: string },
+  column: { name: string; type: string; sqlType?: string },
   projectId: string,
   apiKey?: string,
   target: SchemaTarget = {},
@@ -6188,7 +6207,7 @@ async function addColumnToTable(
     }
     
     // Apply constraint-first system: detect FK columns, unique columns, etc.
-    const normalizedType = normalizeColumnType(column.type, column.name)
+    const normalizedType = declaredSqlType(column) ?? normalizeColumnType(column.type, column.name)
     const constraints = deriveConstraints(column.name, normalizedType, tableName)
     const columnDef = { name: column.name, type: normalizedType }
     const columnSQL = applyConstraintsToColumn(columnDef, constraints, postgresSchema)
