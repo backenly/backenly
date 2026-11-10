@@ -68,6 +68,7 @@ tests/integration/integrations-autowiring.spec.ts
 # delivery through the LISTEN hub stays a staging case.
 tests/integration/realtime-ticket-broadcast.spec.ts
 tests/integration/export-database-rls.spec.ts
+tests/integration/export-portable-policies.spec.ts
 tests/integration/postgres-admin.spec.ts
 
 # Needs a real Postgres AND a git worktree of an older release.
