@@ -109,13 +109,15 @@ const OPEN_WORLD = new Set(['backend_chat', 'store_integration_key', 'send_push'
 export function annotationsFor(name: string): McpToolAnnotations {
   // A domain tool never performs a destructive update itself: its destructive
   // and high-risk actions park the exact call for a human (lib/mcp/domains.ts).
+  // One whose every action only reads is a read (isReadOnlyTool).
   const domain = getDomainTool(name)
   if (domain) {
+    const readOnly = isReadOnlyTool(name)
     return {
       title: domain.title,
-      readOnlyHint: false,
+      readOnlyHint: readOnly,
       destructiveHint: false,
-      idempotentHint: false,
+      idempotentHint: readOnly,
       openWorldHint: !!domain.openWorld,
     }
   }
@@ -427,9 +429,16 @@ export function buildCatalog(opts?: { readOnly?: boolean }): McpToolDescriptor[]
  */
 const READ_ONLY_SYNTHETIC = new Set(['fetch_docs', 'generate_types', 'check_approval', 'db_query'])
 
-/** True when `name` may be served to a read-only key. */
+/**
+ * True when `name` may be served to a read-only key. A domain tool is when
+ * every action behind it only reads: a read-only key may call each of them
+ * (the route judges the action's own tool), so the whole tool is a read.
+ * `monitoring` was advertised to hosts as writing (production QA, 2026-11-09).
+ */
 export function isReadOnlyTool(name: string): boolean {
-  return READ_ONLY_TOOLS.has(name as any) || READ_ONLY_SYNTHETIC.has(name)
+  if (READ_ONLY_TOOLS.has(name as any) || READ_ONLY_SYNTHETIC.has(name)) return true
+  const domain = getDomainTool(name)
+  return !!domain && Object.values(domain.actions).every((a) => READ_ONLY_TOOLS.has(a.tool as any))
 }
 
 /**
