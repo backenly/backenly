@@ -143,17 +143,12 @@ export async function deliverSingleAttempt(
 
     if (response.ok) {
       const answer = responseBody?.slice(0, 1000) ?? null
-      await prisma.webhookLog.update({
-        where: { id: logId },
-        data: {
-          status: 'SUCCESS',
-          statusCode: response.status,
-          responseBody: bodies.region ? null : answer,
-          attemptCount: attemptNumber,
-          deliveredAt: new Date(),
-        },
-      })
-      if (bodies.region) await bodies.set('webhook', logId, { responseBody: answer })
+      await recordAttempt(
+        logId,
+        { status: 'SUCCESS', statusCode: response.status, attemptCount: attemptNumber, deliveredAt: new Date() },
+        answer,
+        bodies,
+      )
       return {
         success: true,
         statusCode: response.status,
@@ -222,7 +217,6 @@ async function _scheduleRetry(
   // What the receiver answered stays with the body: on the row at home, in the
   // project's region otherwise.
   const answer = lastResult.responseBody?.slice(0, 1000) ?? null
-  const rowAnswer = bodies.region ? null : answer
 
   // A refused destination is terminal on the first attempt. FAILED rather than
   // DEAD_LETTER: dead-letter means "we tried and they never answered", and
@@ -244,18 +238,18 @@ async function _scheduleRetry(
 
   if (nextAttempt > MAX_ATTEMPTS) {
     // All retries exhausted → dead letter
-    await prisma.webhookLog.update({
-      where: { id: logId },
-      data: {
+    await recordAttempt(
+      logId,
+      {
         status: 'DEAD_LETTER',
         attemptCount: attemptNumber,
         error: lastResult.error ?? null,
         statusCode: lastResult.statusCode ?? null,
-        responseBody: rowAnswer,
         nextRetryAt: null,
       },
-    })
-    if (bodies.region) await bodies.set('webhook', logId, { responseBody: answer })
+      answer,
+      bodies,
+    )
 
     // Notify via event bus → creates a PlatformNotification for the project owner
     const log = await prisma.webhookLog.findUnique({
@@ -276,18 +270,18 @@ async function _scheduleRetry(
     const delayMs = RETRY_DELAYS_MS[nextAttempt - 1] ?? RETRY_DELAYS_MS[RETRY_DELAYS_MS.length - 1]
     const nextRetryAt = new Date(Date.now() + delayMs)
 
-    await prisma.webhookLog.update({
-      where: { id: logId },
-      data: {
+    await recordAttempt(
+      logId,
+      {
         status: 'RETRYING',
         attemptCount: attemptNumber,
         error: lastResult.error ?? null,
         statusCode: lastResult.statusCode ?? null,
-        responseBody: rowAnswer,
         nextRetryAt,
       },
-    })
-    if (bodies.region) await bodies.set('webhook', logId, { responseBody: answer })
+      answer,
+      bodies,
+    )
   }
 }
 
@@ -466,6 +460,33 @@ async function createLog(
       signature: generateWebhookSignature(JSON.stringify(payload), webhook.secret),
     },
   })
+}
+
+/**
+ * How a delivery attempt ended, with the receiver's answer where the project's
+ * data is kept. In the region, the answer is written first, as the payload is
+ * in createLog, so a row that says how the attempt ended has its answer: written
+ * after the row, it was missing from a listing read in between. When the region
+ * refuses the answer, the row is still written and the refusal is thrown after
+ * it, as it was when the row went first.
+ */
+async function recordAttempt(
+  logId: string,
+  outcome: Omit<Prisma.WebhookLogUpdateInput, 'responseBody'>,
+  answer: string | null,
+  bodies: RegionalBodies,
+): Promise<void> {
+  const refusal = bodies.region
+    ? await bodies.set('webhook', logId, { responseBody: answer }).then(
+        () => null,
+        (error: unknown) => ({ error }),
+      )
+    : null
+  await prisma.webhookLog.update({
+    where: { id: logId },
+    data: { ...outcome, responseBody: bodies.region ? null : answer },
+  })
+  if (refusal) throw refusal.error
 }
 
 // ─── Webhook Management ───────────────────────────────────────────────────────
@@ -750,18 +771,18 @@ async function deliverOnceAndRecord(
   // would otherwise sit at PENDING for ever and read as "still trying".
   if (!result.success) {
     const answer = result.responseBody?.slice(0, 1000) ?? null
-    await prisma.webhookLog.update({
-      where: { id: log.id },
-      data: {
+    await recordAttempt(
+      log.id,
+      {
         status: 'FAILED',
         attemptCount: 1,
         error: result.error ?? null,
         statusCode: result.statusCode ?? null,
-        responseBody: bodies.region ? null : answer,
         nextRetryAt: null,
       },
-    })
-    if (bodies.region) await bodies.set('webhook', log.id, { responseBody: answer })
+      answer,
+      bodies,
+    )
   }
 
   return { logId: log.id, ...result }

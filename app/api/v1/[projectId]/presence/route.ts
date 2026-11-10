@@ -21,6 +21,7 @@ import { countPresenceAddress, countPresenceWrite, presenceRefusal } from '@/lib
 import { regionErrorResponse } from '@/lib/api/v1/errors'
 import { v1ApiMiddleware } from '@/lib/api/v1/middleware'
 import { recordedV1 } from '@/lib/traffic/recorded-v1'
+import { presenceMetadataTooLarge } from '@/lib/realtime/presence-metadata'
 
 export const dynamic = 'force-dynamic'
 
@@ -240,6 +241,9 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
     if (userId.length > 255) {
       return NextResponse.json({ error: 'userId too long (max 255)' }, { status: 400 })
     }
+    // Refused here, not by pg_notify in the trigger, where it failed the upsert with a 500.
+    const tooLarge = presenceMetadataTooLarge(metadata)
+    if (tooLarge) return NextResponse.json(tooLarge.body, { status: tooLarge.status })
 
     const identityError = presenceIdentityError(auth.context, userId)
     if (identityError) return identityError
