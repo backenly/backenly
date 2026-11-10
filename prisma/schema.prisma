@@ -448,6 +448,10 @@ model SchemaIntent {
 
   /// Type as the caller declared it, e.g. "timestamp" — not the type created.
   requestedType     String
+  /// The type exactly as a statement declared it ("timestamptz",
+  /// "numeric(10,2)"), held to the type PostgreSQL reports. Null when it came
+  /// from the typed tools' vocabulary, which is held to its kind.
+  requestedSqlType  String?
   requestedNullable Boolean?
   requestedUnique   Boolean?
   /// Table the caller asked this column to reference.
