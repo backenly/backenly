@@ -347,6 +347,19 @@ export function toApiError(
  * 22xxx, 42703) keep their real text: those describe the caller's own data and
  * are the ones worth reading.
  */
+/**
+ * Errors that describe the request the caller made, which the caller has to
+ * read to fix it: PostgREST's own request errors (PGRST1xx; the schema list,
+ * PGRST106, is answered before this), a column the table does not have on a
+ * write (PGRST204, the v2 form of 42703), and the project's own RAISE
+ * EXCEPTION (P0001). Replaced by "Request could not be completed", a
+ * 20,000-row batch whose refusal was only in the runtime's log reached its
+ * caller as nothing (production QA, 2026-11-09).
+ */
+function describesTheRequest(pgCode: string): boolean {
+  return /^PGRST1\d\d$/.test(pgCode) || pgCode === 'PGRST204' || pgCode === 'P0001'
+}
+
 export function stripUpstreamError(
   status: number,
   body: unknown,
@@ -369,7 +382,7 @@ export function stripUpstreamError(
 
   // Caller-facing constraint errors: real text, because it is about their row.
   const SAFE_PREFIXES = ['23', '22', '42703', '42P01', 'PGRST100', 'PGRST116', 'PGRST118', 'PGRST200']
-  if (pgCode && SAFE_PREFIXES.some(p => pgCode.startsWith(p))) {
+  if (pgCode && (SAFE_PREFIXES.some(p => pgCode.startsWith(p)) || describesTheRequest(pgCode))) {
     return {
       status,
       body: {
