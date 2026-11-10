@@ -55,7 +55,9 @@ const STDIO_CLI = read('packages/mcp-server/src/cli.ts')
 const STDIO_PACKAGE = JSON.parse(read('packages/mcp-server/package.json')) as { engines: { node: string } }
 const CHANGELOG = read('packages/mcp-server/CHANGELOG.md')
 const DOCS_LIMIT = read('lib/mcp/docs-limit.ts')
-const CONSENT = read('app/mcp/authorize/page.tsx')
+// The consent screen: the page, and the form it renders (a client component so
+// it can navigate to the MCP client's callback, which the CSP blocks a form from).
+const CONSENT = read('app/mcp/authorize/page.tsx') + read('app/mcp/authorize/ConsentForm.tsx')
 const MCP_AUTH = read('lib/mcp/auth.ts')
 
 const CLI = path.join(process.cwd(), 'packages', 'cli', 'bin', 'backenly.mjs')
@@ -426,7 +428,7 @@ describe('the agent pages are public', () => {
   })
 
   it.each(['claude-code', 'cursor'] as const)('%s: the undo answer names every part the one History records', (slug) => {
-    const words: Record<string, string> = { env: 'environment variables' }
+    const words: Record<string, string> = { env: 'environment variables', frontends: 'allowed origins' }
     const answer = AGENTS[slug].faq.find((f) => /undo/i.test(f.q))!.a
     expect(answer).toMatch(/the schema/)
     for (const part of RESOURCE_ORDER) expect([part, answer.includes(words[part] ?? part)]).toEqual([part, true])

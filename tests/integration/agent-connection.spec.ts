@@ -23,7 +23,7 @@ import { prisma } from '@/lib/db/prisma'
 import { hashApiKey } from '@/lib/auth/apiKeyAuth'
 import { createSession } from '@/lib/auth/session'
 import { authenticateMcp } from '@/lib/mcp/auth'
-import { agentConnectionFor } from '@/lib/mcp/agent-connection'
+import { ACTIVE_WITHIN_MS, agentConnectionFor } from '@/lib/mcp/agent-connection'
 import { resetSingleTenantCache } from '@/lib/edition/single-tenant/project-resolver'
 
 const DB_URL = process.env.TEST_DATABASE_URL
@@ -144,7 +144,7 @@ describe('agentConnectionFor', () => {
     const owner = await makeUser()
     const projectId = await makeProject(owner.id)
 
-    expect(await agentConnectionFor(projectId, owner.id)).toEqual({ connected: false, lastSeenAt: null, client: null })
+    expect(await agentConnectionFor(projectId, owner.id)).toEqual({ connected: false, active: false, lastSeenAt: null, client: null })
 
     // Minting is the first half of connecting. Nothing is connected yet.
     const key = await mintMcpKey(projectId, owner.id, { label: 'VS Code laptop' })
@@ -152,7 +152,28 @@ describe('agentConnectionFor', () => {
 
     const stamped = await connectAgent(key.raw, key.id)
     const answer = await agentConnectionFor(projectId, owner.id)
-    expect(answer).toEqual({ connected: true, lastSeenAt: stamped, client: 'VS Code laptop' })
+    expect(answer).toEqual({ connected: true, active: true, lastSeenAt: stamped, client: 'VS Code laptop' })
+  })
+
+  it('is at work only while its last call is recent; idle after that, and still connected', async () => {
+    // Production QA (2026-11-09): "Agent connected", green, six days after the
+    // last call. A call is the only sign of an agent at work.
+    const owner = await makeUser()
+    const projectId = await makeProject(owner.id)
+    const key = await mintMcpKey(projectId, owner.id, { label: 'VS Code laptop' })
+    const stamped = await connectAgent(key.raw, key.id)
+
+    const anHourLater = new Date(stamped.getTime() + ACTIVE_WITHIN_MS)
+    expect(await agentConnectionFor(projectId, owner.id, new Date(anHourLater.getTime() - 1))).toMatchObject({ connected: true, active: true })
+    expect(await agentConnectionFor(projectId, owner.id, anHourLater)).toMatchObject({ connected: true, active: false })
+
+    const sixDaysLater = new Date(stamped.getTime() + 6 * 24 * 3_600_000)
+    expect(await agentConnectionFor(projectId, owner.id, sixDaysLater)).toEqual({
+      connected: true,
+      active: false,
+      lastSeenAt: stamped,
+      client: 'VS Code laptop',
+    })
   })
 
   it('belongs to the user: a teammate connecting their agent does not connect this one', async () => {
@@ -229,14 +250,14 @@ describe('GET /api/projects/[id]/mcp/status', () => {
 
     const before: any = await GET(consoleRequest({ cookie: owner.token, path }))
     expect(before.status).toBe(200)
-    expect(body(before)).toEqual({ connected: false, lastSeenAt: null, client: null })
+    expect(body(before)).toEqual({ connected: false, active: false, lastSeenAt: null, client: null })
 
     const key = await mintMcpKey(projectId, owner.id, { label: 'Claude Code' })
     const stamped = await connectAgent(key.raw, key.id)
 
     const after: any = await GET(consoleRequest({ cookie: owner.token, path }))
     expect(after.status).toBe(200)
-    expect(body(after)).toEqual({ connected: true, lastSeenAt: stamped.toISOString(), client: 'Claude Code' })
+    expect(body(after)).toEqual({ connected: true, active: true, lastSeenAt: stamped.toISOString(), client: 'Claude Code' })
   })
 
   it('refuses anyone who cannot open the project', async () => {

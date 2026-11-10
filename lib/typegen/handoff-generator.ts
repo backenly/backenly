@@ -55,7 +55,7 @@ function exampleInsert(schema: WorkspaceSchema, tableIndex = 0): string {
 
 /** Build per-table example snippets showing real table names and column names */
 function buildTableExamples(schema: WorkspaceSchema): string {
-  if (schema.tables.length === 0) return '// No tables yet — create some via the AI chat'
+  if (schema.tables.length === 0) return '// No tables yet — ask your coding agent to create some'
   return schema.tables.slice(0, 6).map(t => {
     const insert = exampleInsert(schema, schema.tables.indexOf(t))
     const pascal = toPascalCase(t.tableName)

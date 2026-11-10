@@ -34,7 +34,8 @@ import { workspaceRawClient } from '@/lib/data-plane/regional'
 import { loopPrincipals, principalsToMetadata, type PrincipalSet } from '@/lib/principal'
 
 import { actionClassForFindingType } from './action-classes'
-import { decideAuthority, type AuthorityDecision, type ObservationContext } from './decision'
+import { decideAuthority, type AuthorityDecision, type BuildFacts, type ObservationContext, type PriorAttempts } from './decision'
+import { readIndexBuildFacts } from './build-facts'
 import { loadGrants, revalidateGrant } from './grants'
 import { loadOwnershipIntents, type OwnershipIntentRecord } from './ownership-intent'
 
@@ -129,6 +130,8 @@ export async function authorizeAutonomousFix(args: {
   projectId: string
   findingType: string
   tableName: string | null
+  /** The column it changes, when it changes one: what a build is sized by. */
+  columnName?: string | null
   loop?: 'reconciler' | 'maintenance'
 }): Promise<GateResult> {
   const loop = args.loop ?? 'reconciler'
@@ -170,6 +173,24 @@ export async function authorizeAutonomousFix(args: {
     recentChanges = []
   }
 
+  // An action that builds is judged on what it would occupy, and on what
+  // became of the last time it was built (lib/autonomy/index-trials.ts). Not
+  // read is not small: the decision sends a missing fact to a person.
+  let build: BuildFacts | undefined
+  let priorAttempts: PriorAttempts | 'unknown' | undefined
+  if (cls?.buildBounds && table) {
+    build = await readIndexBuildFacts(args.projectId, table, args.columnName ?? null)
+    if (args.columnName) {
+      try {
+        const { indexAttempts, BUILD_ATTEMPTS } = await import('@/lib/autonomy/index-trials')
+        priorAttempts = { ...(await indexAttempts(args.projectId, table, args.columnName)), failureLimit: BUILD_ATTEMPTS }
+      } catch {
+        // No record read is not a record of nothing.
+        priorAttempts = 'unknown'
+      }
+    }
+  }
+
   const decision = decideAuthority({
     projectId: args.projectId,
     actionClassId,
@@ -184,6 +205,9 @@ export async function authorizeAutonomousFix(args: {
     ownershipIntents: intents,
     delegations,
     recentChanges,
+    findingType: args.findingType,
+    build,
+    priorAttempts,
   })
 
   const usedGrant = delegations.find(

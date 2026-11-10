@@ -14,13 +14,16 @@
  */
 
 import { decideAuthority, type AuthorityInputs } from '@/lib/authority/decision'
-import { ACTION_CLASSES, actionClass } from '@/lib/authority/action-classes'
+import { ACTION_CLASSES, actionClass, actionClassForFindingType } from '@/lib/authority/action-classes'
 import { P } from '@/lib/principal'
 import type { OwnershipIntentRecord } from '@/lib/authority/ownership-intent'
 import type { TierDelegation } from '@/lib/authority/delegation'
 import { applyIntentToFixDetails } from '@/lib/authority/gate'
 import { buildFixAction } from '@/lib/core/fix-actions'
 import type { ProbeOutcome } from '@/lib/autonomy/sensor-health'
+
+const MB = 1024 ** 2
+const GB = 1024 ** 3
 
 function probe(id: string, status: ProbeOutcome['status']): ProbeOutcome {
   return { id, title: id, status, findingCount: status === 'fired' ? 1 : 0 }
@@ -78,6 +81,9 @@ function inputs(over: Partial<AuthorityInputs> = {}): AuthorityInputs {
       reason: null,
     },
     ownershipIntents: [],
+    // A small table, a small index, a plan with room: building permits action.
+    build: { tableBytes: 50 * MB, partitioned: false, estimatedBytes: 5 * MB, storage: { usedBytes: 200 * MB, includedBytes: 8 * GB } },
+    priorAttempts: { removed: null, failures: 0, failureLimit: 3, lastFailure: null },
     ...over,
   }
 }
@@ -146,6 +152,124 @@ describe('sensor confidence constrains authority', () => {
   it('accepts a fired sensor as support', () => {
     const d = decideAuthority(inputs({ probes: [probe('relationships_are_indexed', 'fired')] }))
     expect(d.decision).toBe('AUTO_EXECUTE')
+  })
+})
+
+describe('a measured index is judged on the probe that measured it', () => {
+  // Backenly indexes every relationship column itself, so on a project it built
+  // the foreign-key probe never fires and stays unverified. A slow-query index
+  // was narrowed to a person on that probe (reproduced against a live
+  // reconciler: narrowedBy=sensor_unverified), although the probe that raised
+  // it had fired.
+  const measured = () =>
+    inputs({
+      actionClassId: actionClassForFindingType('slow_query_missing_index')!.id,
+      findingType: 'slow_query_missing_index',
+      probes: [probe('measured_slow_queries_are_indexed', 'fired'), probe('relationships_are_indexed', 'unverified')],
+    })
+
+  it('auto-executes when the slow-query probe fired, whatever the foreign-key probe says', () => {
+    const d = decideAuthority(measured())
+    expect(d.narrowedBy).not.toContain('sensor_unverified')
+    expect(d.decision).toBe('AUTO_EXECUTE')
+  })
+
+  it('still needs its own probe: unverified measurement cannot support autonomy', () => {
+    const d = decideAuthority({
+      ...measured(),
+      probes: [probe('measured_slow_queries_are_indexed', 'unverified'), probe('relationships_are_indexed', 'clean')],
+    })
+    expect(d.decision).toBe('PROPOSE_ONLY')
+  })
+
+  it('leaves a foreign-key index on the foreign-key probe', () => {
+    const d = decideAuthority({ ...measured(), findingType: 'missing_fk_index' })
+    expect(d.decision).toBe('PROPOSE_ONLY')
+    expect(d.narrowedBy).toContain('sensor_unverified')
+  })
+})
+
+describe('an index Backenly builds on its own is bounded by what it would occupy', () => {
+  // Azure SQL's automatic tuning draws the same lines for the indexes it
+  // creates: none on a table over 10 GB, none that would take space use past
+  // 90% of the maximum. Past either, a person decides when.
+  const build = (b: Partial<NonNullable<AuthorityInputs['build']>>) => inputs({ build: { ...inputs().build!, ...b } })
+
+  it('builds on a table up to 10 GB', () => {
+    expect(decideAuthority(build({ tableBytes: 10 * GB })).decision).toBe('AUTO_EXECUTE')
+  })
+
+  it('leaves a table over 10 GB to a person, and says how big it is', () => {
+    const d = decideAuthority(build({ tableBytes: 14.2 * GB }))
+    expect(d.decision).toBe('PROPOSE_ONLY')
+    expect(d.narrowedBy).toContain('table_too_large')
+    expect(d.reasons.join(' ')).toContain('orders holds 14.2 GB of data')
+  })
+
+  it('leaves a partitioned table to a person: it cannot be indexed without blocking writes', () => {
+    const d = decideAuthority(build({ partitioned: true, tableBytes: 0 }))
+    expect(d.decision).toBe('PROPOSE_ONLY')
+    expect(d.narrowedBy).toContain('build_not_online')
+  })
+
+  it('treats a size it could not read as a reason to ask, not as small', () => {
+    expect(decideAuthority(build({ tableBytes: null })).narrowedBy).toContain('build_size_unknown')
+    expect(decideAuthority(inputs({ build: undefined })).decision).toBe('PROPOSE_ONLY')
+  })
+
+  it('never takes the account past 90% of the storage its plan includes', () => {
+    const fits = decideAuthority(build({ estimatedBytes: 500 * MB, storage: { usedBytes: 6.5 * GB, includedBytes: 8 * GB } }))
+    expect(fits.decision).toBe('AUTO_EXECUTE')
+    const over = decideAuthority(build({ estimatedBytes: 900 * MB, storage: { usedBytes: 6.5 * GB, includedBytes: 8 * GB } }))
+    expect(over.decision).toBe('PROPOSE_ONLY')
+    expect(over.narrowedBy).toContain('storage_headroom')
+    expect(over.reasons.join(' ')).toContain('92% of the 8.0 GB of database storage its plan includes')
+  })
+
+  it('has no storage line to hold when the plan sets no limit', () => {
+    expect(decideAuthority(build({ storage: null, estimatedBytes: 50 * GB })).decision).toBe('AUTO_EXECUTE')
+  })
+
+  it('asks when the account storage could not be read', () => {
+    expect(decideAuthority(build({ storage: 'unknown' })).narrowedBy).toContain('storage_unknown')
+  })
+})
+
+describe('an index Backenly took away, or could not build, is not rebuilt on its own', () => {
+  const removed = (by: 'backenly' | 'someone_else') =>
+    inputs({
+      priorAttempts: {
+        removed: { by, builtAt: '2026-11-01T10:00:00.000Z', removedAt: '2026-11-03T10:00:00.000Z', until: '2026-12-03T10:00:00.000Z', finding: 'PostgreSQL did not use it for any of the 412 queries that filtered orders.customer_ref since it was built' },
+        failures: 0,
+        failureLimit: 3,
+        lastFailure: null,
+      },
+    })
+
+  it('leaves the index it removed after a trial to a person for 30 days, and says why', () => {
+    const d = decideAuthority(removed('backenly'))
+    expect(d.decision).toBe('PROPOSE_ONLY')
+    expect(d.narrowedBy).toContain('recently_removed')
+    expect(d.reasons.join(' ')).toContain('removed it on 2026-11-03, because PostgreSQL did not use it')
+    expect(d.reasons.join(' ')).toContain('before 2026-12-03')
+  })
+
+  it('does not put back an index someone else removed', () => {
+    const d = decideAuthority(removed('someone_else'))
+    expect(d.decision).toBe('PROPOSE_ONLY')
+    expect(d.reasons.join(' ')).toContain('someone removed it on 2026-11-03')
+  })
+
+  it('hands a build that failed three times in a row to a person', () => {
+    const twice = decideAuthority(inputs({ priorAttempts: { removed: null, failures: 2, failureLimit: 3, lastFailure: 'x' } }))
+    expect(twice.decision).toBe('AUTO_EXECUTE')
+    const thrice = decideAuthority(inputs({ priorAttempts: { removed: null, failures: 3, failureLimit: 3, lastFailure: 'The build ran past 30 minutes and was stopped.' } }))
+    expect(thrice.decision).toBe('PROPOSE_ONLY')
+    expect(thrice.narrowedBy).toContain('build_failed_repeatedly')
+  })
+
+  it('asks when the record of earlier attempts could not be read', () => {
+    expect(decideAuthority(inputs({ priorAttempts: 'unknown' })).narrowedBy).toContain('prior_attempts_unknown')
   })
 })
 

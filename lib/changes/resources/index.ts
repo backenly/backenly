@@ -8,6 +8,7 @@ import { canonicalJson } from '../integrity'
 import { authAdapter } from './auth'
 import { changedSecrets, RESOURCE_ORDER, sameFields, sameItem, type ResourceAdapter, type ResourceId, type ResourceOp, type ResourceSnapshot, type Tx } from './core'
 import { envAdapter } from './env'
+import { frontendsAdapter } from './frontends'
 import { functionsAdapter } from './functions'
 import { integrationsAdapter } from './integrations'
 import { keysAdapter } from './keys'
@@ -20,7 +21,7 @@ export * from './core'
 
 /** Read at call time, so the adapters' modules have finished loading. */
 function adapters(): ResourceAdapter[] {
-  return [authAdapter, storageAdapter, functionsAdapter, webhooksAdapter, envAdapter, keysAdapter, integrationsAdapter]
+  return [authAdapter, storageAdapter, functionsAdapter, webhooksAdapter, envAdapter, keysAdapter, integrationsAdapter, frontendsAdapter]
 }
 
 export function adapterFor(id: ResourceId): ResourceAdapter {
@@ -95,14 +96,24 @@ export function opsOf(checkpoint: ResourceSnapshot | undefined, result: Resource
 
 // ── Saying what a change did ─────────────────────────────────────────────────
 
+/** An item that is added to a list rather than created: "Added allowed origin …". */
+const ADDED: ReadonlySet<ResourceId> = new Set<ResourceId>(['frontends'])
+
 export function describeOp(op: ResourceOp): string {
   const label = (op.after ?? op.before)!.label
-  if (!op.before) return `Created ${label}`
+  if (!op.before) return `${ADDED.has(op.resource) ? 'Added' : 'Created'} ${label}`
   if (!op.after) return `Removed ${label}`
   const fields = [...new Set([...Object.keys(op.before.fields), ...Object.keys(op.after.fields)])]
     .filter((f) => canonicalJson(op.before!.fields[f] ?? null) !== canonicalJson(op.after!.fields[f] ?? null))
   const secrets = changedSecrets(op.before, op.after)
-  const what = [...fields.map(humanField), ...secrets.map((s) => `${humanField(s)} (replaced)`)]
+  // A function's Power switch, said as what happened to it: History read
+  // "Changed function qa-event-dump: power" (production QA, 2026-11-09).
+  const switched = (f: string) => op.resource === 'functions' && f === 'power'
+  const power = `turned ${op.after.fields.power === 'off' ? 'off' : 'on'}`
+  if (fields.length === 1 && switched(fields[0]) && secrets.length === 0) {
+    return `${power.charAt(0).toUpperCase()}${power.slice(1)} ${label}`
+  }
+  const what = [...fields.map((f) => (switched(f) ? power : humanField(f))), ...secrets.map((s) => `${humanField(s)} (replaced)`)]
   return `Changed ${label}${what.length ? `: ${what.slice(0, 3).join(', ')}${what.length > 3 ? ` and ${what.length - 3} more` : ''}` : ''}`
 }
 
@@ -110,11 +121,13 @@ export function describeOp(op: ResourceOp): string {
 export function describeOps(ops: ResourceOp[]): string {
   if (ops.length === 0) return ''
   if (ops.length === 1) return describeOp(ops[0])
-  const created = ops.filter((o) => !o.before).map((o) => o.after!.label)
+  const created = ops.filter((o) => !o.before && !ADDED.has(o.resource)).map((o) => o.after!.label)
+  const added = ops.filter((o) => !o.before && ADDED.has(o.resource)).map((o) => o.after!.label)
   const removed = ops.filter((o) => !o.after).map((o) => o.before!.label)
   const changed = ops.filter((o) => o.before && o.after).map((o) => o.after!.label)
   const parts = [
     created.length ? `created ${list(created)}` : '',
+    added.length ? `added ${list(added)}` : '',
     changed.length ? `changed ${list(changed)}` : '',
     removed.length ? `removed ${list(removed)}` : '',
   ].filter(Boolean)

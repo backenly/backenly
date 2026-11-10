@@ -16,6 +16,7 @@ import { mcpGuard, recordMcpCall } from '@/lib/mcp/guard'
 import { readWorkspaceSchema } from '@/lib/typegen/schema-reader'
 import { countExposedResources } from '@/lib/api/exposed-resources'
 import { resolvePublicBaseUrl } from '@/lib/services/public-url'
+import { isGeneratedEndpoint, projectGeneratedRoutes } from '@/lib/services/domain-endpoints'
 
 const ENDPOINT = '/api/cli/overview'
 
@@ -40,7 +41,14 @@ export async function GET(request: NextRequest) {
       }),
       readWorkspaceSchema(auth.projectId),
       countExposedResources(auth.projectId),
-      prisma.aiFunction.count({ where: { projectId: auth.projectId } }),
+      // The project's own functions, not the endpoints generated for its tables.
+      Promise.all([
+        prisma.aiFunction.findMany({
+          where: { projectId: auth.projectId },
+          select: { name: true, triggerType: true, triggerTable: true, codeOrigin: true },
+        }),
+        projectGeneratedRoutes(auth.projectId),
+      ]).then(([rows, generated]) => rows.filter((fn) => !isGeneratedEndpoint(fn, generated)).length),
     ])
 
     if (!project) {

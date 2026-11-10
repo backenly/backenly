@@ -40,6 +40,39 @@ describe('extractIndexCandidate — recognises the shape it is sure about', () =
   })
 })
 
+describe('extractIndexCandidate — PostgREST statements (/api/v2 and v1 /db)', () => {
+  // Real schema names keep the project id's hyphens, which an identifier
+  // pattern cannot match. PostgREST qualifies every column with schema and
+  // table, so the parser has to find the table-and-column pair inside a
+  // three-part name.
+  const S = 'workspace_5f0c2a9e-7d41-4b8e-9a63-0e2d7c1b8f44'
+  const qi = `"${S}"."product_views"`
+  const wrap = (read: string) =>
+    `WITH pgrst_source AS ( ${read} )  SELECT null::bigint AS total_result_set, pg_catalog.count(_postgrest_t) AS page_total, ` +
+    `coalesce(json_agg(_postgrest_t), $4) AS body FROM ( SELECT * FROM pgrst_source ) _postgrest_t`
+
+  it('reads an eq filter', () => {
+    const q = wrap(`SELECT ${qi}.* FROM ${qi} WHERE  ${qi}."referrer" = $1   LIMIT $2 OFFSET $3`)
+    expect(extractIndexCandidate(q, S)).toEqual({ table: 'product_views', column: 'referrer' })
+  })
+
+  it('reads an in filter, which PostgREST writes as = ANY', () => {
+    const q = wrap(`SELECT ${qi}.* FROM ${qi} WHERE  ${qi}."country" = ANY ($1)    LIMIT $2 OFFSET $3`)
+    expect(extractIndexCandidate(q, S)).toEqual({ table: 'product_views', column: 'country' })
+  })
+
+  it('skips the soft-delete predicate v1 /db adds and reads the filter', () => {
+    const q = wrap(`SELECT ${qi}.* FROM ${qi} WHERE  ${qi}."deleted_at" IS NULL AND  ${qi}."session_key" = $1   LIMIT $2 OFFSET $3`)
+    expect(extractIndexCandidate(q, S)).toEqual({ table: 'product_views', column: 'session_key' })
+  })
+
+  it('does not take a branch schema for the project schema', () => {
+    const b = `"${S}_br_scratch"."product_views"`
+    const q = wrap(`SELECT ${b}.* FROM ${b} WHERE  ${b}."referrer" = $1   LIMIT $2 OFFSET $3`)
+    expect(extractIndexCandidate(q, S)).toBeNull()
+  })
+})
+
 describe('extractIndexCandidate — refuses to guess', () => {
   it('returns null for another tenant schema', () => {
     // The whole cross-tenant safety property. pg_stat_statements is per-database
@@ -96,5 +129,47 @@ describe('extractIndexCandidate — refuses to guess', () => {
     // match any character and let a neighbouring tenant's schema through.
     const q = `SELECT * FROM "workspaceXabc"."orders" WHERE "status" = $1`
     expect(extractIndexCandidate(q, 'workspace.abc')).toBeNull()
+  })
+})
+
+/**
+ * Statements that do not quote their names, or name no schema at all.
+ *
+ * A function's code and a direct connection read through a search path set to
+ * the project's schema, so their statements say `FROM orders WHERE status = $1`.
+ * The sensor read only `"<schema>"."<table>"` and `"column"`, and never saw them
+ * (production QA, 2026-11-09). An unqualified table counts only for a statement
+ * the project's own role ran, and only when the schema has that table.
+ */
+describe('extractIndexCandidate — names written without quotes', () => {
+  const tables = new Set(['orders', 'users'])
+
+  it('reads an unquoted table after the quoted schema, and an unquoted column', () => {
+    expect(extractIndexCandidate(`SELECT * FROM "${SCHEMA}".orders WHERE status = $1`, SCHEMA)).toEqual({ table: 'orders', column: 'status' })
+    expect(extractIndexCandidate(`SELECT * FROM "${SCHEMA}"."orders" WHERE status IN ($1, $2)`, SCHEMA)).toEqual({ table: 'orders', column: 'status' })
+  })
+
+  it('folds unquoted names to lower case, as PostgreSQL does, and keeps quoted ones', () => {
+    expect(extractIndexCandidate(`SELECT * FROM Orders WHERE Customer_Email = $1`, SCHEMA, { tables })).toEqual({ table: 'orders', column: 'customer_email' })
+    expect(extractIndexCandidate(`SELECT * FROM "${SCHEMA}"."orders" WHERE "Status" = $1`, SCHEMA)).toEqual({ table: 'orders', column: 'Status' })
+  })
+
+  it('reads an unqualified table only for a statement the project ran, and only a table the schema has', () => {
+    const q = `SELECT * FROM orders WHERE customer_email = $1`
+    expect(extractIndexCandidate(q, SCHEMA)).toBeNull()
+    expect(extractIndexCandidate(q, SCHEMA, { tables })).toEqual({ table: 'orders', column: 'customer_email' })
+    expect(extractIndexCandidate(`SELECT * FROM invoices WHERE total = $1`, SCHEMA, { tables })).toBeNull()
+  })
+
+  it('never reads another schema\'s table as this one, or part of a name as a name', () => {
+    expect(extractIndexCandidate(`SELECT * FROM other.orders WHERE status = $1`, SCHEMA, { tables })).toBeNull()
+    expect(extractIndexCandidate(`SELECT * FROM "other"."orders" WHERE status = $1`, SCHEMA, { tables })).toBeNull()
+    expect(extractIndexCandidate(`SELECT * FROM ordersx WHERE status = $1`, SCHEMA, { tables })).toBeNull()
+  })
+
+  it('still refuses a filter on a joined table, and a keyword', () => {
+    expect(extractIndexCandidate(`SELECT * FROM orders JOIN users ON true WHERE users.email = $1`, SCHEMA, { tables })).toBeNull()
+    expect(extractIndexCandidate(`SELECT * FROM orders WHERE status NOT IN ($1)`, SCHEMA, { tables })).toBeNull()
+    expect(extractIndexCandidate(`SELECT * FROM orders WHERE total >= $1`, SCHEMA, { tables })).toBeNull()
   })
 })

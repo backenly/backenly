@@ -1,6 +1,7 @@
 export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
+import { isSharedKey } from '@/lib/security/shared-key'
 import { confirmPropagation } from '@/lib/auth-projection/confirm'
 import { prisma } from '@/lib/db/postgres'
 import { requireAuth } from '@/lib/auth/middleware'
@@ -92,13 +93,15 @@ export async function PUT(request: NextRequest, props: { params: Promise<{ id: s
       updateData.requestCount = 0
     }
 
-    // The plan's fair-use ceiling applies to the rate the key ends up with.
+    // The plan's fair-use ceiling applies to the rate the key ends up with. A
+    // shared (browser) key's rate is each address's (lib/security/shared-key.ts),
+    // which a ceiling on one key's rate does not measure, so it is not checked.
     if (data.rateLimit !== undefined || data.rateLimitWindow !== undefined) {
       const current = await prisma.apiKey.findFirst({
         where: { id: params.id, userId: auth.userId },
-        select: { rateLimit: true, rateLimitWindow: true, projectId: true },
+        select: { rateLimit: true, rateLimitWindow: true, projectId: true, keyType: true, serviceRole: true },
       })
-      if (current) {
+      if (current && !isSharedKey(current)) {
         const ceiling = await apiKeyRateCeilingViolation(
           current.projectId,
           auth.userId,

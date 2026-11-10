@@ -61,6 +61,14 @@ export type FindingType =
   // The repair is VACUUM ANALYZE on the named table: no data change, no
   // exclusive lock (never VACUUM FULL), and safe to repeat.
   | 'infra_table_bloat'
+  // ── A table larger than the memory PostgreSQL expects to cache data in
+  // (effective_cache_size; lib/ai/infra-intelligence.ts,
+  // detectPartitioningCandidates). One type per table
+  // (`infra_partition_<table>`), recognised by prefix.
+  //
+  // notify_only: partitioning a table that holds data moves every row, which
+  // Backenly does not do on its own. The finding is advice with a next step.
+  | 'infra_partition'
   // ── An index PostgreSQL has not used once across a measured observation
   // window (lib/autonomy/unused-index.ts). Every index is paid for on every
   // insert and update of its table, so one nothing reads is pure write cost.
@@ -114,6 +122,13 @@ export type FindingType =
   // records the request rather than reconciling to reality, so a disagreement
   // is evidence rather than a verdict.
   | 'intent_drift'
+  // ── Writes refused by a unique rule nobody asked for: a table whose writes
+  // were answered with a conflict, and a single-column unique rule on it that
+  // the intent ledger does not record as requested (lib/autonomy/refused-writes.ts).
+  //
+  // notify_only: whether a value may repeat is the owner's decision, and the
+  // remedy (dropping the rule) is theirs to take.
+  | 'unrequested_unique_refusing_writes'
   // ── This backend is behaving unlike itself: a query far slower than its own
   // measured normal, a table taking far more sequential scans than usual, or
   // one growing far outside its own pattern.
@@ -128,6 +143,19 @@ export type FindingType =
   // depends entirely on a cause that is not in the data. The finding carries the
   // measurement and what changed on the backend just before it.
   | 'behavioural_regression'
+  // ── A function that keeps failing: at least three failed runs in a day, the
+  // latest among them (lib/autonomy/function-failures.ts).
+  //
+  // notify_only: the remedy is a change to the function's code, which belongs
+  // to whoever wrote it. The finding carries the run log's evidence.
+  | 'function_failing'
+  // ── A function whose code uses an integration the project has not
+  // connected (lib/autonomy/function-integrations.ts). It runs and gets
+  // nothing, often without failing.
+  //
+  // notify_only: the key is the owner's to give, and the code is whoever
+  // wrote it.
+  | 'function_integration_missing'
   // ── What a migration that did not finish left behind.
   //
   // A FAILED migration is not directly observable: the DDL event triggers
@@ -338,6 +366,9 @@ export const ALL_FINDING_TYPES = [
   // omissions above were each found in production, and each one routed a real
   // finding into "no automatic repair for it yet".
   'infra_table_bloat',
+  // Added 2026-11-10 in the same commit that registered it. Emitted since
+  // long before, as `infra_partition_<table>`, and recognised by nothing.
+  'infra_partition',
   // Added 2026-08-07 in the same commit that introduced it — the discipline the
   // four omissions above were each found in production for.
   'service_role_key_exposed',
@@ -348,6 +379,8 @@ export const ALL_FINDING_TYPES = [
   'idle_in_transaction',
   'index_bloat',
   'intent_drift',
+  // Added 2026-11-10 in the same commit that introduced it.
+  'unrequested_unique_refusing_writes',
   'behavioural_regression',
   'migration_residue',
   // Added 2026-09-14 in the same commit that introduced it, per the discipline
@@ -357,6 +390,10 @@ export const ALL_FINDING_TYPES = [
   'usage_anomaly',
   // Added 2026-10-05 in the same commit that introduced it.
   'architecture_evolution',
+  // Added 2026-11-10 in the same commit that introduced it.
+  'function_failing',
+  // Added 2026-11-10 in the same commit that introduced it.
+  'function_integration_missing',
 ] as const satisfies ReadonlyArray<FindingType>
 
 /** The finding type that carries an architecture-change approval request. */
@@ -388,6 +425,8 @@ const PREFIX_MAP: ReadonlyArray<readonly [string, FindingType]> = [
   // Same per-table emission shape (`infra_table_bloat_<table>`), so it can only
   // be recognised by prefix too.
   ['infra_table_bloat', 'infra_table_bloat'],
+  // Same per-table emission shape (`infra_partition_<table>`).
+  ['infra_partition', 'infra_partition'],
   ['missing_fk_index', 'missing_fk_index'],
   ['missing_api_definition', 'missing_api_definition'],
   ['missing_api_crud', 'missing_api_crud'],
@@ -422,7 +461,11 @@ const PREFIX_MAP: ReadonlyArray<readonly [string, FindingType]> = [
   ['broken_auth', 'broken_auth'],
   ['schema_drift', 'shadow_mutation'],
   ['shadow_mutation', 'shadow_mutation'],
-  ['arch_migration', 'shadow_mutation'],
+  // `arch_migration_*` is deliberately absent. It was aliased to shadow_mutation,
+  // whose repair is FIX_API, so Fix now on "Add composite indexes on
+  // high-traffic query patterns" regenerated API definitions for a "table"
+  // named after the proposal's title (production QA, 2026-11-09). A proposal is
+  // advice with its statement (getManualRemediationHint), not a repair.
   ['api_drift', 'api_drift'],
   ['dead_api_endpoint', 'dead_api_endpoint'],
   ['workflow_broken', 'workflow_broken'],

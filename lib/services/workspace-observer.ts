@@ -22,6 +22,8 @@
 import { prisma } from '@/lib/db/prisma'
 import { detectSubsystemRecurrence } from '@/lib/autonomy/subsystem-recurrence'
 import { detectIntentDrift } from '@/lib/autonomy/intent-conformance'
+import { detectFailingFunctions } from '@/lib/autonomy/function-failures'
+import { detectFunctionsMissingIntegrations } from '@/lib/autonomy/function-integrations'
 import { probeQueryFailed } from '@/lib/core/drift-detector'
 import { queryWorkspaceSchema } from './workspaceDatabase'
 import {
@@ -54,7 +56,7 @@ import {
 import { isDataPlaneOutage } from '@/lib/core/fix-actions'
 import { reportPlatformFault, type PlatformFaultReport } from '@/lib/autonomy/platform-faults'
 import { reapUnattributableFindings, withdrawFindings } from '@/lib/core/finding-reaper'
-import { recordContractSweepResult } from '@/lib/autonomy/data-plane-liveness'
+import { readContractLiveness, recordContractSweepResult } from '@/lib/autonomy/data-plane-liveness'
 import { writeFixHistory, checkEscalation, buildResolutionText } from '@/lib/memory/fix-history'
 import { generateFixPlansFromRawFindings, type FixPlan } from '@/lib/core/fix-plan-generator'
 import { runBuiltInVerification, type VerificationExecutionResult } from '@/lib/verification/verification-executor'
@@ -300,6 +302,9 @@ export async function runContractSweep(options: {
           attribution.tenantBroken.get(projectId) ?? [],
           attribution.answeredBySurface,
         )
+        // What the previous pass found broken, read before this pass's
+        // heartbeat replaces it.
+        const previous = await readContractLiveness(projectId).catch(() => null)
 
         // The heartbeat, written on every pass whose outcome is KNOWN.
         //
@@ -337,7 +342,15 @@ export async function runContractSweep(options: {
               finding.details.fixError = err?.message ?? String(err)
               await writeFinding(projectId, finding, 'pending_approval', false)
             }
-          } else {
+          } else if (previous?.brokenSurfaces?.includes(String(finding.details?.surface ?? ''))) {
+            // A person is asked only about a surface that failed this pass and
+            // the one before. One failing pass is often a moment, not a fault:
+            // right after a restore, a surface failed once and answered a
+            // minute later, and its finding came and went in the queue
+            // (production QA, 2026-11-09). The heartbeat above already records
+            // this pass's failure, so a fault that lasts is filed on the next
+            // pass. The data-plane repair above does not wait: it re-checks
+            // against its own probe before acting, and a failed repair is filed.
             await writeFinding(projectId, finding, 'pending_approval', false)
           }
         }
@@ -461,6 +474,14 @@ async function observeProject(projectId: string, result: ObserverResult): Promis
     // this line it was detected every minute and recorded nowhere: nobody was
     // told, and the investigator, which reads findings, never saw one.
     detectIntentDrift(projectId),
+    // A function that keeps failing on its own runs. notify_only for the same
+    // reason: without this line the loop saw it every minute, no row was
+    // written, and Overview's "broken guarantees" stayed at 0.
+    detectFailingFunctions(projectId),
+    // A function whose code uses an integration the project has not connected.
+    // It runs and gets nothing, often without failing, so the run log alone
+    // never shows it.
+    detectFunctionsMissingIntegrations(projectId),
   ]
 
   const settled = await Promise.allSettled(detectors)
@@ -907,12 +928,17 @@ async function writeFinding(
     // One row per drifted column (`table.column`): two missing columns are two
     // repairs, and each one's proposal is bound to its own finding.
     intent_drift: 'location',
+    // One row per function: two failing functions are two fixes.
+    function_failing: 'functionId',
+    function_integration_missing: 'functionId',
     // The gaps the repair loop repairs: one row per gap, keyed as the loop keys
     // its own (gapIdentity, lib/autonomy/desired-state.ts), so the row the
     // observer records is the one the loop acts on. Keyed by type alone, one
     // gap's details were written over another gap's row.
     missing_fk_index: ['tableName', 'columnName'],
     missing_rls: 'tableName',
+    // One row per rule: two rules refusing writes are two decisions.
+    unrequested_unique_refusing_writes: ['tableName', 'columnName'],
     rls_denies_everything: 'tableName',
   }
 

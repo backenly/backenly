@@ -55,6 +55,13 @@ export interface ReadinessOptions {
    * explicitly (the deploy itself, POST /readiness, autoFix: true).
    */
   autoFix?: boolean
+  /**
+   * When true, a behavioral verification of the backend as it is now (no
+   * governed change since, at most five minutes old) is reused instead of run
+   * again (lib/deployment/verification-reuse.ts). For the pages that show
+   * readiness; a deploy, a fix and an agent's check verify afresh.
+   */
+  reuseRecentVerification?: boolean
 }
 
 // ─── Weights ──────────────────────────────────────────────────────────────────
@@ -71,7 +78,7 @@ export async function scoreReadiness(
   projectId: string,
   options: ReadinessOptions = {},
 ): Promise<ReadinessReport> {
-  const { autoFix = false } = options
+  const { autoFix = false, reuseRecentVerification = false } = options
 
   // Load everything we need in one round-trip
   // `apiDefs` was destructured here and never referenced again in this file —
@@ -121,7 +128,7 @@ export async function scoreReadiness(
     checkApiExposure(projectId),
     checkEndUserAuthTable(projectId, project),           // auth enabled → users table ready (or created on first sign-up)
     checkMonitoringBasics(projectId),
-    checkBehavioralVerification(projectId),
+    checkBehavioralVerification(projectId, reuseRecentVerification && !autoFix),
     checkSecurityAudit(projectId),          // #31/#7 security — blocks deploy on critical/high findings
     checkFunctionTriggers(projectId, autoFix), // signup functions must have auto-triggers; placeholders must be cleaned up
   ])
@@ -666,7 +673,7 @@ async function checkMonitoringBasics(projectId: string): Promise<ReadinessCheck>
  * Skipped checks (not applicable to this project) never count as failures.
  * Only checks that ran and failed will block the deploy.
  */
-async function checkBehavioralVerification(projectId: string): Promise<ReadinessCheck> {
+async function checkBehavioralVerification(projectId: string, reuseRecent: boolean): Promise<ReadinessCheck> {
   const base: Omit<ReadinessCheck, 'status' | 'message' | 'details' | 'fixApplied'> = {
     id: 'behavioral_verification',
     name: 'Behavioral verification',
@@ -676,8 +683,9 @@ async function checkBehavioralVerification(projectId: string): Promise<Readiness
   }
 
   try {
-    const { runBehavioralVerification } = await import('@/lib/ai/behavioral-verifier')
-    const result = await runBehavioralVerification(projectId)
+    const result = reuseRecent
+      ? await (await import('./verification-reuse')).recentBehavioralVerification(projectId)
+      : await (await import('@/lib/ai/behavioral-verifier')).runBehavioralVerification(projectId)
 
     const ran     = result.checks.filter(c => !c.skipped)
     const failed  = ran.filter(c => !c.passed)

@@ -230,6 +230,12 @@ function labelForAudit(
     return { kind: 'auto_fix', label: `A repair failed its check, and the access rules${table} could not be put back: needs a look` }
   }
 
+  // An index Backenly built on its own, kept or taken away after its trial
+  // (lib/autonomy/index-trials.ts). The row carries its own sentence.
+  if (a === 'index_trial_result') {
+    return { kind: 'auto_fix', label: typeof d.sentence === 'string' && d.sentence ? d.sentence : 'Backenly checked an index it built' }
+  }
+
   // Self-healing engine — health-check rows that aren't direct fix events.
   if (t.includes('health') || a.includes('health_fix')) {
     if (a.includes('rolled_back')) return { kind: 'auto_fix', label: 'Undid a previous fix' }

@@ -35,24 +35,24 @@ let ipCounter = 0
 const freshIp = () => `198.19.${Math.floor(++ipCounter / 250)}.${ipCounter % 250}`
 const tag = crypto.randomBytes(3).toString('hex')
 
-type Runtime = (projectId: string, email: string, ip: string, internal?: string) => Promise<{ status: number; body: any }>
+type Runtime = (projectId: string, email: string, ip: string, internal?: string, password?: string) => Promise<{ status: number; body: any }>
 
 const runtimes: Record<'next' | 'express', Runtime> = {
   // The Next handler, called directly (jest.setup.js stubs the global Request;
   // signin-enumeration.spec.ts has the details).
-  next: async (projectId, email, ip, internal) => {
+  next: async (projectId, email, ip, internal, password = PASSWORD) => {
     const headers = new Map([['content-type', 'application/json'], ['x-forwarded-for', ip]])
     if (internal) headers.set(INTERNAL_TRAFFIC_HEADER, internal)
     const res = await nextSignup(
       {
         headers: { get: (name: string) => headers.get(name.toLowerCase()) ?? null },
-        json: async () => ({ email, password: PASSWORD, name: 'x' }),
+        json: async () => ({ email, password, name: 'x' }),
       } as unknown as NextRequest,
       { params: Promise.resolve({ projectId }) },
     )
     return { status: res.status, body: await res.json() }
   },
-  express: async (projectId, email, ip, internal) => {
+  express: async (projectId, email, ip, internal, password = PASSWORD) => {
     const res = await fetch(`${base}/api/v1/${projectId}/auth/signup`, {
       method: 'POST',
       headers: {
@@ -60,7 +60,7 @@ const runtimes: Record<'next' | 'express', Runtime> = {
         'x-forwarded-for': ip,
         ...(internal ? { [INTERNAL_TRAFFIC_HEADER]: internal } : {}),
       },
-      body: JSON.stringify({ email, password: PASSWORD, name: 'x' }),
+      body: JSON.stringify({ email, password, name: 'x' }),
     })
     return { status: res.status, body: await res.json() }
   },
@@ -167,3 +167,23 @@ it('both runtimes give the same refusal', async () => {
   expect(refusals.map((r) => r.status)).toEqual([429, 429])
   expect(refusals[0].body).toEqual(refusals[1].body)
 }, 180_000)
+
+// Production QA (2026-11-09): a short password came back from the web tier as
+// "password: String must contain at least 8 character(s)", Zod's own words,
+// while the Express runtime said "Request validation failed". End users read
+// these: the refusal is in plain words, the same from both.
+it('both runtimes refuse a short password the same way, in plain words', async () => {
+  const refusals: any[] = []
+  for (const name of Object.keys(runtimes) as Array<keyof typeof runtimes>) {
+    refusals.push(await runtimes[name](projects[name], `short-${tag}-${name}@example.test`, freshIp(), undefined, 'short'))
+  }
+  expect(refusals.map((r) => r.status)).toEqual([400, 400])
+  expect(refusals[0].body).toEqual({
+    error: {
+      code: 'VALIDATION_ERROR',
+      message: 'Password must be at least 8 characters.',
+      details: { fields: { password: ['Password must be at least 8 characters.'] } },
+    },
+  })
+  expect(refusals[1].body).toEqual(refusals[0].body)
+}, 60_000)

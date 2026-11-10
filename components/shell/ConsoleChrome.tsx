@@ -36,6 +36,7 @@ import { Kbd, MenuItem, MenuPanel, MenuSeparator, Skeleton, useDismiss } from '@
 import { CANVAS, CHROME, FOCUS, R_CONTROL } from '@/components/console/tokens'
 import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
 import { OrgSwitcher } from '@cloud/org-switcher'
+import { sharedRead } from '@/lib/client/shared-read'
 
 /* ── Frame ─────────────────────────────────────────────────────────────── */
 
@@ -255,8 +256,10 @@ export function useMe(): MeUser | null {
   useEffect(() => {
     if (cachedUser) return
     let cancelled = false
-    fetch('/api/auth/me')
-      .then((r) => (r.ok ? r.json() : null))
+    // The page's other readers of the signed-in user share this request
+    // (lib/client/shared-read.ts).
+    sharedRead('/api/auth/me')
+      .then((r) => (r.ok ? r.data : null))
       .then((d) => {
         if (d?.user && !cancelled) {
           cachedUser = d.user

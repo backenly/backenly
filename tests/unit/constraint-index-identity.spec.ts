@@ -35,6 +35,7 @@ import {
   derivedConstraintName,
   defaultIndexName,
   indexDefColumns,
+  indexDefShape,
 } from '@/lib/ai/minimal-executor'
 
 describe('constraint identity — idempotency must be earned, not assumed', () => {
@@ -138,6 +139,22 @@ describe('index names and definitions', () => {
     expect(indexDefColumns(
       'CREATE INDEX i ON s.t USING btree ("createdAt" DESC, author_id)',
     )).toEqual(['createdat', 'author_id'])
+  })
+
+  it('reads the columns of a partial index, not its predicate', () => {
+    expect(indexDefShape(
+      'CREATE UNIQUE INDEX uniq_cart_items_user_id ON workspace_x.cart_items USING btree (user_id, product_id) WHERE (deleted_at IS NULL)',
+    )).toEqual({ columns: ['user_id', 'product_id'], where: '(deleted_at IS NULL)' })
+  })
+
+  it('reads an index over every row as having no predicate', () => {
+    expect(indexDefShape('CREATE UNIQUE INDEX a ON s.t USING btree (user_id, product_id)'))
+      .toEqual({ columns: ['user_id', 'product_id'], where: null })
+  })
+
+  it('keeps an expression column whole, commas and all', () => {
+    expect(indexDefShape('CREATE INDEX e ON s.t USING btree (lower(email), COALESCE(a, b)) WHERE (deleted_at IS NULL)'))
+      .toEqual({ columns: ['lower(email)', 'coalesce(a, b)'], where: '(deleted_at IS NULL)' })
   })
 
   it('returns an empty list rather than throwing on an unparseable definition', () => {

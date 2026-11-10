@@ -138,6 +138,11 @@ describe('approvals', () => {
     expect(parked.body.approval?.id).toBeTruthy()
     const row = await prisma.agentApprovalRequest.findUnique({ where: { id: parked.body.approval.id } })
     expect(row).toMatchObject({ tool: 'revoke_api_key', toolArgs: { keyId: victim.id }, status: 'pending' })
+    // The card names the key as a person knows it, not by its id.
+    const key = await prisma.apiKey.findUniqueOrThrow({ where: { id: victim.id }, select: { name: true } })
+    expect(row!.target).toContain(`the API key “${key.name}” (`)
+    expect(row!.target).toMatch(/: every client using it stops working immediately$/)
+    expect(row!.target).not.toContain(victim.id)
     // Nothing happened yet.
     expect((await call(victim.raw, 'read_backend_state')).body.ok).toBe(true)
     const decided = await decideApproval({ projectId, approvalId: parked.body.approval.id, approverUserId: ownerId, decision: 'approve' })
