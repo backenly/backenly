@@ -43,6 +43,15 @@ export async function requireUser() {
     }
   }
 
+  return userFromToken(token)
+}
+
+/**
+ * The platform user a session token belongs to, or UnauthorizedError: the
+ * checks requireUser makes once it has the token. A route that holds the
+ * request reads the token from it and asks this (app/api/auth/session).
+ */
+export async function userFromToken(token: string | undefined) {
   if (!token) {
     throw new UnauthorizedError('No authentication token')
   }

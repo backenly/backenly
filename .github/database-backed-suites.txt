@@ -1863,3 +1863,8 @@ tests/integration/downgraded-webhooks-can-be-stopped.spec.ts
 # so the console says a plan limit before the New project form. Real account,
 # count and plan check; sign-in is delegated and the plan is mocked.
 tests/integration/project-limit-before-the-form.spec.ts
+
+# GET /api/auth/session answers every browser with 200 (the user for a live
+# session, else { user: null, canRefresh }), so a signed-out page logs no
+# failed request. Real session rows, checked by the function requireUser uses.
+tests/integration/signed-out-session-answers.spec.ts
