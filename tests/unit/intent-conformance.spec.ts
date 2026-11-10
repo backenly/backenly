@@ -198,3 +198,76 @@ describe('honest reporting', () => {
     expect(kinds).toEqual(['missing_fk', 'nullability_drift', 'type_drift'])
   })
 })
+
+/**
+ * A type a statement declared is held to exactly that type (production QA,
+ * 2026-11-09: `refunded_at timestamptz` became timestamp without time zone and
+ * nothing said so). The typed tools' words stay kinds.
+ */
+describe('compareIntentToActual — a declared type', () => {
+  // data_type as information_schema reports it beside format_type's spelling.
+  const kindOf = (sqlType: string) => (sqlType.endsWith('[]') ? 'ARRAY' : sqlType.replace(/\(.*?\)/g, '').trim())
+  const declared = (requestedSqlType: string, sqlType: string, dataType = kindOf(sqlType)) =>
+    compareIntentToActual(
+      [intent({ columnName: 'c', requestedType: 'timestamp', requestedSqlType })],
+      [column({ columnName: 'c', sqlType, dataType })],
+    ).findings
+
+  it('is met by the same type in PostgreSQL’s spelling', () => {
+    expect(declared('timestamptz', 'timestamp with time zone')).toEqual([])
+    expect(declared('timestamptz(3)', 'timestamp(3) with time zone')).toEqual([])
+    expect(declared('varchar(12)', 'character varying(12)')).toEqual([])
+    expect(declared('numeric(10,2)', 'numeric(10,2)')).toEqual([])
+    expect(declared('integer', 'integer')).toEqual([])
+    expect(declared('text[]', 'text[]')).toEqual([])
+    // Spellings of one type: char is char(1), and varchar with no length holds what text does.
+    expect(declared('char', 'character(1)')).toEqual([])
+    expect(declared('varchar', 'text')).toEqual([])
+  })
+
+  it('reports a time zone dropped or added as critical, saying what it does to values', () => {
+    const [dropped] = declared('timestamptz', 'timestamp without time zone')
+    expect(dropped).toMatchObject({ kind: 'type_drift', requested: 'timestamptz', actual: 'timestamp without time zone', severity: 'critical' })
+    expect(dropped.detail).toBe(
+      'Column "c" on "budgets" was declared as timestamptz but is timestamp without time zone. ' +
+        'A time written with an offset loses it: PostgreSQL keeps the clock reading and drops the offset.',
+    )
+    const [added] = declared('timestamp', 'timestamp with time zone')
+    expect(added).toMatchObject({ severity: 'critical' })
+    expect(added.detail).toContain("A time written without an offset is read in the server's time zone and comes back converted, not as written.")
+  })
+
+  it('reports a looser or tighter length or scale as a warning, saying which', () => {
+    const say = (d: string, a: string) => declared(d, a).map((f) => [f.severity, f.detail.split('. ').slice(1).join('. ')])
+    expect(say('numeric(10,2)', 'numeric')).toEqual([['warning', 'Values are kept as written instead of being rounded to 2 decimal places.']])
+    expect(say('numeric', 'numeric(10,2)')).toEqual([['warning', 'Values are rounded to 2 decimal places.']])
+    expect(say('numeric(10,2)', 'numeric(12,4)')).toEqual([['warning', 'Values are rounded to 4 decimal places instead of 2.']])
+    expect(say('varchar(12)', 'text')).toEqual([['warning', 'Values longer than 12 characters are accepted.']])
+    expect(say('varchar(12)', 'character varying(8)')).toEqual([['warning', 'Values longer than 8 characters are refused.']])
+    expect(say('text', 'character varying(8)')).toEqual([['warning', 'Values longer than 8 characters are refused.']])
+  })
+
+  it('reports a different kind of type as critical', () => {
+    expect(declared('uuid', 'text')).toEqual([
+      expect.objectContaining({ requested: 'uuid', actual: 'text', severity: 'critical' }),
+    ])
+  })
+
+  it('falls back to the kind when either side has no exact spelling', () => {
+    // time with time zone is not among the declared spellings: held to its kind.
+    expect(declared('time', 'time with time zone', 'time with time zone')).toEqual([])
+    expect(declared('time', 'time with time zone', 'integer')).toEqual([
+      expect.objectContaining({ kind: 'type_drift', requested: 'time', actual: 'integer' }),
+    ])
+  })
+})
+
+describe('compareIntentToActual — a word from the typed tools', () => {
+  it('is a kind: timestamp is met by either timestamp type', () => {
+    const findings = compareIntentToActual(
+      [intent({ requestedType: 'timestamp' })],
+      [column({ dataType: 'timestamp with time zone', sqlType: 'timestamp with time zone' })],
+    ).findings
+    expect(findings).toEqual([])
+  })
+})

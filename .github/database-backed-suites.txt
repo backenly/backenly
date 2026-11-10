@@ -799,6 +799,9 @@ tests/integration/apply-migration-foreign-keys.spec.ts
 # an id stays text, timestamptz/date/time and numeric scale survive CREATE TABLE
 # and the ADD COLUMN a merge replays. Read back from the catalog.
 tests/integration/apply-migration-declared-types.spec.ts
+# The loop holds a column to the type a statement declared, added columns too:
+# timestamptz that became timestamp, numeric that lost its scale.
+tests/integration/intent-declared-types.spec.ts
 # MCP acceptance (scripts/mcp-acceptance/cases.ts): two agent workflows, twice
 # each, and the acceptance cases no other suite covered. Real MCP route, real
 # keys, provisioned projects, runtime engine mode.

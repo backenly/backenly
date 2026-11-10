@@ -5886,6 +5886,25 @@ async function executeAddColumn(
     }
     // ── END REAL DB CHECK ────────────────────────────────────────────────────
 
+    // ── Intent ledger ────────────────────────────────────────────────────────
+    // What was asked for, recorded once the column exists: a refused ADD COLUMN
+    // leaves its table without it, which the ledger would then report as a
+    // missing column. Like create_table's, it describes main; a branch's request
+    // is recorded when it is merged. Without it a column added later was held to
+    // nothing, so `refunded_at timestamptz` turning into timestamp without time
+    // zone on a merge was never reported (production QA, 2026-11-09).
+    const recordAdded = async (
+      cols: Array<{ name: string; type: string; sqlType?: string; nullable?: boolean; unique?: boolean; fkTo?: string }>,
+    ) => {
+      if (branchMode) return
+      try {
+        const { recordSchemaIntent } = await import('@/lib/autonomy/intent-conformance')
+        await recordSchemaIntent(projectId, tableName, cols, 'add_column')
+      } catch (intentErr: any) {
+        console.error('[IntentLedger] record failed (non-fatal):', intentErr?.message)
+      }
+    }
+
     // ── A column declared with constraints is added as declared ──────────────
     //
     // addColumnToTable takes a name and a type and derives the rest, and it
@@ -5955,6 +5974,14 @@ async function executeAddColumn(
         await db.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS "${indexName}" ON "${postgresSchema}"."${tableName}" ("${name}")`)
       }
       import('@/lib/services/workspace-validator').then(({ invalidateSchemaCache }) => invalidateSchemaCache(projectId, tableName)).catch(() => {})
+      await recordAdded([{
+        name,
+        type: String(spec!.type ?? colsToAdd[0].type),
+        ...(typeof spec!.sqlType === 'string' ? { sqlType: spec!.sqlType } : {}),
+        ...(typeof spec!.nullable === 'boolean' ? { nullable: spec!.nullable } : {}),
+        ...(typeof spec!.unique === 'boolean' ? { unique: spec!.unique } : {}),
+        ...(isDeclaredForeignKey(declaredFk) ? { fkTo: declaredFk.table } : typeof spec!.fkTo === 'string' ? { fkTo: spec!.fkTo } : {}),
+      }])
       return { success: true, message: `✅ Added "${name}" ${definition.replace(` REFERENCES "${postgresSchema}".`, ' REFERENCES ')} to table "${tableName}"` }
     }
 
@@ -5968,6 +5995,12 @@ async function executeAddColumn(
 
     // Column schema changed — evict cached Zod validation schema
     import('@/lib/services/workspace-validator').then(({ invalidateSchemaCache }) => invalidateSchemaCache(projectId, tableName)).catch(() => {})
+    await recordAdded(colsToAdd.map((c) => ({
+      name: c.name,
+      type: c.type,
+      ...(sqlType ? { sqlType } : {}),
+      ...(spec && colsToAdd.length === 1 && typeof spec.nullable === 'boolean' ? { nullable: spec.nullable } : {}),
+    })))
 
     return {
       success: true,

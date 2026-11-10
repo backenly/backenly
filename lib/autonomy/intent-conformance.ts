@@ -29,15 +29,27 @@
 
 import { prisma } from '@/lib/db/prisma'
 import { workspaceRawClient } from '@/lib/data-plane/regional'
+import { exactSqlType } from '@/lib/mcp/migration-parser'
 import type { RawFinding, FindingSeverity } from '@/lib/core/types'
 
 export interface RequestedColumn {
   name?: string
   type?: string
+  /**
+   * The type exactly as a statement declared it, in the parser's canonical
+   * spelling (lib/mcp/migration-parser.ts, exactSqlType): held to exactly that.
+   */
+  sqlType?: string
   nullable?: boolean
   notNull?: boolean
   unique?: boolean
   fkTo?: string
+}
+
+/** A declared type in its canonical spelling, or null when it is not one. */
+function canonicalSqlType(t: unknown): string | null {
+  if (typeof t !== 'string' || !t.trim()) return null
+  return exactSqlType(t) ?? null
 }
 
 /**
@@ -45,6 +57,8 @@ export interface RequestedColumn {
  * `timestamp` matches `timestamp without time zone` and `int` matches
  * `integer`. Deliberately coarse: this detects a column becoming a DIFFERENT
  * KIND of thing, not precision differences like numeric(10,2) vs numeric.
+ * That is what a type from the typed tools' vocabulary is held to; a type a
+ * statement declared is held to exactly that type (compareIntentToActual).
  */
 export function typeFamily(declared: string | undefined | null): string {
   const t = String(declared ?? '').toLowerCase().trim().replace(/\(.*$/, '')
@@ -87,6 +101,9 @@ export async function recordSchemaIntent(
       typeof col.nullable === 'boolean' ? col.nullable
       : typeof col.notNull === 'boolean' ? !col.notNull
       : null
+    // Only a spelling the parser emits is a declaration; anything else is held
+    // to its kind, as before.
+    const requestedSqlType = canonicalSqlType(col.sqlType) === col.sqlType ? col.sqlType! : null
 
     try {
       await prisma.schemaIntent.upsert({
@@ -98,6 +115,7 @@ export async function recordSchemaIntent(
           tableName: table,
           columnName: name,
           requestedType: type,
+          requestedSqlType,
           requestedNullable,
           requestedUnique: typeof col.unique === 'boolean' ? col.unique : null,
           requestedFkTo: typeof col.fkTo === 'string' && col.fkTo.trim() ? col.fkTo.trim().toLowerCase() : null,
@@ -107,6 +125,7 @@ export async function recordSchemaIntent(
         // changed their mind, which is not drift.
         update: {
           requestedType: type,
+          requestedSqlType,
           requestedNullable,
           requestedUnique: typeof col.unique === 'boolean' ? col.unique : null,
           requestedFkTo: typeof col.fkTo === 'string' && col.fkTo.trim() ? col.fkTo.trim().toLowerCase() : null,
@@ -185,6 +204,12 @@ export interface ConformanceFinding {
   requested: string
   actual: string
   detail: string
+  /**
+   * Set where the kind alone does not say it: a declared type that drifted
+   * within its kind is critical only when it changes values as they are
+   * stored (a time zone dropped or added), and a warning otherwise.
+   */
+  severity?: FindingSeverity
 }
 
 export interface ConformanceReport {
@@ -199,6 +224,8 @@ export interface RecordedIntent {
   tableName: string
   columnName: string
   requestedType: string
+  /** The type a statement declared, exactly; null for the typed tools' vocabulary. */
+  requestedSqlType?: string | null
   requestedNullable: boolean | null
   requestedUnique?: boolean | null
   requestedFkTo: string | null
@@ -209,7 +236,61 @@ export interface ActualColumn {
   tableName: string
   columnName: string
   dataType: string
+  /** The type exactly as PostgreSQL reports it (format_type). */
+  sqlType?: string
   nullable: boolean
+}
+
+/**
+ * Two spellings of one type, where the difference changes no value: a `char`
+ * with no length is char(1), and a `varchar` with no length holds what `text`
+ * does. Anything else that differs is a different type.
+ */
+function sameDeclaredType(declared: string, actual: string): boolean {
+  const norm = (t: string) => (t === 'char' ? 'char(1)' : t === 'varchar' ? 'text' : t)
+  return norm(declared) === norm(actual)
+}
+
+const baseOf = (t: string) => t.replace(/\(.*?\)/, '')
+const modifierOf = (t: string) => /\(([^)]*)\)/.exec(t)?.[1]
+
+/** Whether the drift moves a time between "an instant" and "a clock reading". */
+function timeZoneChanged(declared: string, actual: string): boolean {
+  const pair = `${baseOf(declared)}>${baseOf(actual)}`
+  return pair === 'timestamptz>timestamp' || pair === 'timestamp>timestamptz'
+}
+
+/** What a declared type that drifted within its kind does to values, in one sentence. */
+function typeDriftConsequence(declared: string, actual: string): string {
+  const d = baseOf(declared)
+  const a = baseOf(actual)
+  if (d === 'timestamptz' && a === 'timestamp') {
+    return 'A time written with an offset loses it: PostgreSQL keeps the clock reading and drops the offset.'
+  }
+  if (d === 'timestamp' && a === 'timestamptz') {
+    return "A time written without an offset is read in the server's time zone and comes back converted, not as written."
+  }
+  if (d === 'numeric' && a === 'numeric') {
+    const scale = (t: string) => (modifierOf(t) ? (modifierOf(t)!.split(',')[1] ?? '0') : null)
+    const ds = scale(declared)
+    const as = scale(actual)
+    if (ds !== null && as === null) return `Values are kept as written instead of being rounded to ${ds} decimal places.`
+    if (ds === null && as !== null) return `Values are rounded to ${as} decimal places.`
+    return `Values are rounded to ${as} decimal places instead of ${ds}.`
+  }
+  const length = (t: string) => {
+    const b = baseOf(t)
+    return b === 'varchar' || b === 'char' ? Number(modifierOf(t) ?? (b === 'char' ? 1 : NaN)) : NaN
+  }
+  const dl = length(declared)
+  const al = length(actual)
+  if (Number.isFinite(dl) && (!Number.isFinite(al) || al > dl)) {
+    return `Values longer than ${dl} characters are accepted.`
+  }
+  if (Number.isFinite(al) && (!Number.isFinite(dl) || al < dl)) {
+    return `Values longer than ${al} characters are refused.`
+  }
+  return `Values are held as ${actual}, not as the ${declared} declared.`
 }
 
 /**
@@ -259,20 +340,44 @@ export function compareIntentToActual(
       continue
     }
 
-    const wanted = typeFamily(intent.requestedType)
-    const got = typeFamily(live.dataType)
-    if (wanted !== 'unknown' && wanted !== got) {
-      findings.push({
-        table: intent.tableName,
-        column: intent.columnName,
-        kind: 'type_drift',
-        requested: intent.requestedType,
-        actual: live.dataType,
-        detail:
-          `Column "${intent.columnName}" on "${intent.tableName}" was requested as ` +
-          `${intent.requestedType} but is ${live.dataType}. Values written in the requested ` +
-          `format will be rejected.`,
-      })
+    // A type a statement declared is held to exactly that type, against the
+    // type PostgreSQL reports. A word from the typed tools ("timestamp") is a
+    // kind, and so is a type either side cannot spell exactly.
+    const declared = canonicalSqlType(intent.requestedSqlType)
+    const liveExact = canonicalSqlType(live.sqlType)
+    if (declared && liveExact) {
+      if (!sameDeclaredType(declared, liveExact)) {
+        const kindChanged = typeFamily(declared) !== typeFamily(liveExact)
+        findings.push({
+          table: intent.tableName,
+          column: intent.columnName,
+          kind: 'type_drift',
+          requested: declared,
+          actual: live.sqlType!,
+          severity: kindChanged || timeZoneChanged(declared, liveExact) ? 'critical' : 'warning',
+          detail:
+            `Column "${intent.columnName}" on "${intent.tableName}" was declared as ${declared} ` +
+            `but is ${live.sqlType}. ` +
+            (kindChanged ? 'Values written in the declared format will be rejected.' : typeDriftConsequence(declared, liveExact)),
+        })
+      }
+    } else {
+      const requestedType = intent.requestedSqlType ?? intent.requestedType
+      const wanted = typeFamily(requestedType)
+      const got = typeFamily(live.dataType)
+      if (wanted !== 'unknown' && wanted !== got) {
+        findings.push({
+          table: intent.tableName,
+          column: intent.columnName,
+          kind: 'type_drift',
+          requested: requestedType,
+          actual: live.dataType,
+          detail:
+            `Column "${intent.columnName}" on "${intent.tableName}" was requested as ` +
+            `${requestedType} but is ${live.dataType}. Values written in the requested ` +
+            `format will be rejected.`,
+        })
+      }
     }
 
     if (intent.requestedNullable === true && !live.nullable) {
@@ -325,12 +430,19 @@ export async function checkIntentConformance(projectId: string): Promise<Conform
   // project's region, resolved before the fail-soft foreign-key read below.
   const db = await workspaceRawClient(projectId)
   const schema = `workspace_${projectId}`
+  // format_type is the type exactly as PostgreSQL reports it (`timestamp with
+  // time zone`, `numeric(10,2)`, `character varying(12)`), which a declared type
+  // is held to; data_type is the kind, which a vocabulary word is held to.
   const rows = await db.$queryRawUnsafe<Array<{
-    table_name: string; column_name: string; data_type: string; is_nullable: string
+    table_name: string; column_name: string; data_type: string; is_nullable: string; sql_type: string
   }>>(
-    `SELECT table_name, column_name, data_type, is_nullable
-       FROM information_schema.columns
-      WHERE table_schema = $1`,
+    `SELECT col.table_name, col.column_name, col.data_type, col.is_nullable,
+            format_type(a.atttypid, a.atttypmod) AS sql_type
+       FROM information_schema.columns col
+       JOIN pg_catalog.pg_attribute a
+         ON a.attrelid = format('%I.%I', col.table_schema, col.table_name)::regclass
+        AND a.attname = col.column_name
+      WHERE col.table_schema = $1`,
     schema,
   )
 
@@ -338,6 +450,7 @@ export async function checkIntentConformance(projectId: string): Promise<Conform
     tableName: r.table_name,
     columnName: r.column_name,
     dataType: r.data_type,
+    sqlType: r.sql_type,
     nullable: r.is_nullable === 'YES',
   }))
 
@@ -392,8 +505,9 @@ export async function detectIntentDrift(projectId: string): Promise<RawFinding[]
     type: 'intent_drift' as const,
     // A column that is a different KIND of thing than requested silently
     // corrupts every read of it; a missing FK or a widened nullability is a
-    // weaker guarantee than asked for but not a wrong value.
-    severity: (f.kind === 'type_drift' ? 'critical' : 'warning') as FindingSeverity,
+    // weaker guarantee than asked for but not a wrong value. A declared type
+    // that drifted within its kind says which it is (severity).
+    severity: f.severity ?? ((f.kind === 'type_drift' ? 'critical' : 'warning') as FindingSeverity),
     autoFixable: false,
     details: {
       tableName: f.table,
