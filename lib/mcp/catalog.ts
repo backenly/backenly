@@ -456,26 +456,21 @@ export function buildDispatchable(): McpToolDescriptor[] {
     name: 'backend_chat',
     tier: 'chat',
     description:
-      'Run a natural-language request through the Backenly brain, Backenly\'s own model, which decides the steps, ' +
-      'applies them through the same governed tools and returns a summary. Use it for what you would rather describe ' +
-      'than specify ("add likes and comments to my posts table", "make the orders API faster"). A call answers within ' +
-      'about 45 s. A request that takes longer keeps running on its own: the answer has `status: "running"`, a run ' +
-      'id and what has landed so far, and backend_chat with "status" waits for it again and returns its result. ' +
-      'While one request runs, a message sent here joins it instead of starting another. Whenever an answer ' +
-      'carries `next`, the request is not finished: make that call. To lay down a whole app\'s schema, ' +
-      'apply_migration with the complete DDL is faster and exact. Where production is protected the brain builds ' +
-      'the schema on a preview branch and asks a person for one merge: the answer carries the `approval` id to poll ' +
-      'with check_approval and `branch`, what waits for the merge; say "continue" once it is executed. If the ' +
-      'request involves a destructive operation ' +
-      '(dropping tables/columns, deleting buckets), it is NOT executed — the response includes an `approval` object ' +
-      'with a pending request id: the human approves it in the Backenly Review Queue, and you poll `check_approval` ' +
-      'until it is executed or rejected.',
+      'Ask Backenly\'s own model to plan and apply what you would rather describe than specify ("add likes and ' +
+      'comments to my posts table"), through the same governed tools; it returns a summary. It answers within about ' +
+      '45 s; a longer request keeps running and answers `status: "running"` with a run id and what has landed, and ' +
+      'backend_chat with "status" waits for it again. A message sent while one runs joins it. Whenever an answer ' +
+      'carries `next`, the request is not finished: make that call. For a whole schema, apply_migration with the ' +
+      'complete DDL is faster and exact. Where production is protected, the brain builds the schema on a preview ' +
+      'branch and asks a person for one merge: the answer carries the `approval` id to poll with check_approval and ' +
+      '`branch`, what waits for the merge; say "continue" once it is executed. A destructive step is NOT executed: ' +
+      'the answer carries an `approval` id to poll with check_approval while a person decides in the Review Queue.',
     inputSchema: {
       type: 'object',
       properties: {
         message: {
           type: 'string',
-          description: 'The natural-language request. Be specific — e.g. "create a table called posts with id, title, body, author_id (FK users), and timestamps" works better than "make a posts table".',
+          description: 'The request, specific: "a posts table with title, body and author_id (FK users)" works better than "make a posts table".',
         },
       },
       required: ['message'],
@@ -517,14 +512,10 @@ export function buildDispatchable(): McpToolDescriptor[] {
     name: 'generate_types',
     tier: 'read',
     description:
-      'Generate TypeScript types for every table in this project, read from the live PostgreSQL catalog. ' +
-      'Returns ready-to-save source — write it to a file (conventionally `src/backenly.types.ts`) and import ' +
-      '`Database`, `Row<T>`, `Insert<T>`, `Update<T>` and `TableName` from it. ' +
-      'format="dts" (default) is the type declarations; format="client" additionally emits a typed client ' +
-      'bound to this project; format="openapi" emits an OpenAPI 3.1 spec of the REST surface. ' +
-      'ALWAYS call this instead of hand-writing row types — hand-written types drift silently the next time ' +
-      'the schema changes, and the response carries `schemaHash` so you can tell whether a regeneration ' +
-      'actually changed anything. Side-effect free.',
+      'TypeScript types for every table, read from the live catalog: save the source (conventionally ' +
+      '`src/backenly.types.ts`) and import `Database`, `Row<T>`, `Insert<T>`, `Update<T>` and `TableName`. ' +
+      'ALWAYS use it instead of hand-writing row types, which drift when the schema changes; `schemaHash` says ' +
+      'whether a regeneration changed anything. Side-effect free.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -532,8 +523,8 @@ export function buildDispatchable(): McpToolDescriptor[] {
           type: 'string',
           enum: ['dts', 'client', 'openapi'],
           description:
-            'dts = type declarations only (default). client = declarations plus a typed client for this ' +
-            'project. openapi = OpenAPI 3.1 description of the REST endpoints.',
+            'dts = type declarations (default); client = declarations plus a typed client for this project; ' +
+            'openapi = an OpenAPI 3.1 spec of the REST endpoints.',
         },
       },
       additionalProperties: false,
@@ -585,15 +576,11 @@ export function buildDispatchable(): McpToolDescriptor[] {
     name: 'check_approval',
     tier: 'read',
     description:
-      'Check the status of an approval request: a call that was parked for a human instead of running. ' +
-      'It also takes the run id of a backend_chat request still running, and returns where it has got to or its result. ' +
-      'Returns pending | approved | executed | failed | rejected | expired (older requests may also read partial) ' +
-      'plus a result summary once decided. ' +
-      'Poll every 15-30s while pending; stop on any terminal status. Only the human can approve — ' +
-      'from the Backenly dashboard Review Queue. ' +
-      'Neither `failed` nor `partial` promises the backend is unchanged: read resultSummary and check the ' +
-      'current state before raising the request again, because a call that stops part-way can leave some ' +
-      'of its work applied.',
+      'The status of a call parked for a person, or of a backend_chat run by its run id: pending | approved | ' +
+      'executed | failed | rejected | expired (older requests may also read partial), with a result summary once ' +
+      'decided. Poll every 15-30s while pending; stop on any other status. Only a person approves, in the Review ' +
+      'Queue. Neither `failed` nor `partial` promises the backend is unchanged: read resultSummary and the current ' +
+      'state before raising the request again.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -640,9 +627,9 @@ export function buildDispatchable(): McpToolDescriptor[] {
       name: 'db_query',
       tier: 'data',
       description:
-        'Read rows from a single workspace table by simple column = value filter. Returns whole rows. ' +
-        'For joins, aggregates, GROUP BY, or any multi-table question use `run_query` instead — this tool cannot express them. ' +
-        'Owner/admin maintenance tool: validates table and column shapes, but intentionally bypasses end-user RLS and app triggers. Row-event functions and row webhooks still fire: they are captured inside PostgreSQL, so they see every writer.',
+        'Read whole rows from one table by a column = value filter; for joins, aggregates or GROUP BY use `run_query`. ' +
+        'The db_* tools act as the owner: they check table and column shapes but bypass end-user RLS and app ' +
+        'triggers. Row-event functions and row webhooks still fire, since they are captured inside PostgreSQL.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -654,7 +641,7 @@ export function buildDispatchable(): McpToolDescriptor[] {
           limit: { type: 'integer', minimum: 1, maximum: 200, description: 'Row cap. Default 50.' },
           offset: { type: 'integer', minimum: 0, description: 'Offset for pagination.' },
           orderBy: { type: 'object', description: 'e.g. {"created_at":"desc"}.' },
-          branchId: { type: 'string', description: 'A preview branch id (branch action:"list") to read or seed that branch instead of production.' },
+          branchId: { type: 'string', description: 'A preview branch id (branch action:"list"): use that branch instead of production.' },
         },
         required: ['table'],
         additionalProperties: false,
@@ -664,14 +651,13 @@ export function buildDispatchable(): McpToolDescriptor[] {
       name: 'db_insert',
       tier: 'data',
       description:
-        'Insert one row into a workspace table. Owner/admin maintenance tool: bypasses end-user RLS and app triggers; row-event functions and row webhooks still fire (captured inside PostgreSQL). ' +
-        'Returns the created row including auto-generated id and timestamps.',
+        'Insert one row, as the owner (see db_query); returns it with its generated id and timestamps.',
       inputSchema: {
         type: 'object',
         properties: {
           table: { type: 'string', description: 'The table to insert the row into.' },
           row: { type: 'object', description: 'Column → value pairs for the new row. Omit id/timestamps — they are auto-generated.' },
-          branchId: { type: 'string', description: 'A preview branch id (branch action:"list") to read or seed that branch instead of production.' },
+          branchId: { type: 'string', description: 'A preview branch id (branch action:"list"): use that branch instead of production.' },
         },
         required: ['table', 'row'],
         additionalProperties: false,
@@ -681,15 +667,14 @@ export function buildDispatchable(): McpToolDescriptor[] {
       name: 'db_update',
       tier: 'data',
       description:
-        'Patch one or more rows in a workspace table. `filter` selects which rows to update; `patch` is the column → value diff. ' +
-        'Owner/admin maintenance tool: bypasses end-user RLS and app triggers; row-event functions and row webhooks still fire (captured inside PostgreSQL). Returns the count of rows updated.',
+        'Set `patch` on the rows `filter` matches, as the owner (see db_query); returns how many changed.',
       inputSchema: {
         type: 'object',
         properties: {
           table: { type: 'string', description: 'The table whose matching rows to update.' },
           filter: { type: 'object', description: 'WHERE clause as column=value pairs (must not be empty — global updates are refused).' },
           patch: { type: 'object', description: 'Columns to set on the matched rows.' },
-          branchId: { type: 'string', description: 'A preview branch id (branch action:"list") to read or seed that branch instead of production.' },
+          branchId: { type: 'string', description: 'A preview branch id (branch action:"list"): use that branch instead of production.' },
         },
         required: ['table', 'filter', 'patch'],
         additionalProperties: false,
@@ -699,14 +684,14 @@ export function buildDispatchable(): McpToolDescriptor[] {
       name: 'db_delete',
       tier: 'data',
       description:
-        'Delete rows from a workspace table matching `filter`. `filter` is REQUIRED and non-empty — there is no "delete all rows" path here. ' +
-        'Owner/admin maintenance tool: bypasses end-user RLS and app triggers; row-event functions and row webhooks still fire (captured inside PostgreSQL). For destructive table-wide operations use the dashboard.',
+        'Delete the rows `filter` matches, as the owner (see db_query). A non-empty `filter` is required: there is no ' +
+        '"delete all rows" here; table-wide deletes belong to the dashboard.',
       inputSchema: {
         type: 'object',
         properties: {
           table: { type: 'string', description: 'The table to delete the matching rows from.' },
           filter: { type: 'object', description: 'WHERE clause as column=value pairs. Must not be empty.' },
-          branchId: { type: 'string', description: 'A preview branch id (branch action:"list") to read or seed that branch instead of production.' },
+          branchId: { type: 'string', description: 'A preview branch id (branch action:"list"): use that branch instead of production.' },
         },
         required: ['table', 'filter'],
         additionalProperties: false,
@@ -724,23 +709,13 @@ export function buildDispatchable(): McpToolDescriptor[] {
     name: 'branch',
     tier: 'build',
     description:
-      'Work with preview branches: a clone of this project\'s SCHEMA in an isolated PostgreSQL schema, with its own ' +
-      'row-security policies and its own sequences, where you build and test a change while production keeps ' +
-      'serving. Change the branch\'s schema with apply_migration { sql, branchId }; it is logged, and "merge" replays ' +
-      'that log onto production. Without a branchId, apply_migration changes MAIN (and on a project whose production ' +
-      'is protected, it is refused with BRANCH_REQUIRED).\n' +
-      'A branch starts EMPTY. It does not copy production rows unless you pass includeData:true, which protects your ' +
-      'real data from whatever the experiment does to it. Seed what you need instead.\n' +
-      'Its PREVIEW ENDPOINT is the project\'s usual base URL with a key bound to the branch: the environment is a ' +
-      'property of the KEY, and no header or URL switches it. "create" returns that endpoint with a client key ' +
-      '(shown once) and instructions for a test; "connect" issues more keys. A branch key reads and writes the branch ' +
-      'through the data API (/api/v1/{projectId}/db and /api/v2), and every response says which environment answered ' +
-      'in the X-Backenly-Environment header (branch:<name>): assert it in tests. End-user sign-up, sign-in, refresh and ' +
-      'logout with the key run on the branch\'s own users table, and their tokens work only with that branch\'s key. ' +
-      'Any other endpoint (functions, storage, realtime, the emailed auth flows) refuses the key with ' +
-      'BRANCH_SURFACE_UNAVAILABLE, and a key on a merged or discarded branch is refused, rather than either falling ' +
-      'back to production. Read a branch\'s traffic with monitoring ' +
-      'action:"request_logs" and its branchId.\n' +
+      'Preview branches: a copy of this project\'s SCHEMA (its row-security policies and sequences) where you build ' +
+      'and test a change while production keeps serving. Change a branch with apply_migration { sql, branchId }; ' +
+      'it is logged, and "merge" replays the log onto production. A branch starts EMPTY: rows are copied only with ' +
+      'includeData:true. Its preview endpoint is the usual base URL with a key bound to the branch, from "create" ' +
+      'or "connect": the data API and end-user auth run on the branch, every response carries ' +
+      'X-Backenly-Environment (branch:<name>), and other endpoints refuse the key with BRANCH_SURFACE_UNAVAILABLE. ' +
+      'fetch_docs topic "branches" has the details.\n' +
       'Actions: "list" (existing branches + their ids) · "create" (needs `name`, lowercase kebab-case, max 5 active) · ' +
       '"connect" (needs `branchId`; serviceRole:true for a server-side key) · ' +
       '"diff" (needs `branchId` — the migrations a merge would replay, and any conflict with main) · "merge" (needs ' +
@@ -760,8 +735,7 @@ export function buildDispatchable(): McpToolDescriptor[] {
         includeData: {
           type: 'boolean',
           description:
-            'For action:"create". Default false — the branch is schema-only. True copies every production row into ' +
-            'it, which is occasionally useful for reproducing a data-shaped bug and is otherwise a liability.',
+            'For action:"create". Default false: schema only. True also copies every production row, rarely worth it.',
         },
         serviceRole: {
           type: 'boolean',
@@ -786,25 +760,20 @@ export function buildDispatchable(): McpToolDescriptor[] {
     name: 'apply_migration',
     tier: 'build',
     description:
-      'Apply a schema migration written as ordinary PostgreSQL DDL. Supports CREATE TABLE, ' +
-      'ALTER TABLE (ADD COLUMN / DROP COLUMN / RENAME COLUMN / ALTER COLUMN … TYPE [USING] / ADD CONSTRAINT / DROP CONSTRAINT / ' +
-      'ALTER COLUMN SET|DROP NOT NULL / SET|DROP DEFAULT, several comma-separated), CREATE [UNIQUE] INDEX and DROP INDEX; ' +
-      'multiple statements in one call are applied in order. Write bare table names — your project schema is ' +
-      'already in scope. Every table gets `id`, `"createdAt"` and `"updatedAt"` (camelCase) and `"deleted_at"` ' +
-      'automatically; a declared `id`, `created_at` or `updated_at` is skipped in their favour, so order by ' +
-      '`"createdAt"`. Each statement is translated into a governed action, so the change stays ' +
-      'planned, verified and reversible — this is NOT raw SQL execution. Anything it cannot govern is refused ' +
-      'with the exact tool to use instead, and a migration is all-or-nothing: if one statement is unsupported, ' +
-      'none are applied. A column\'s new type is exactly the one written; USING may convert the column\'s own value ' +
-      'with casts and built-in functions. A dropped or retyped column\'s values are kept with the change, so ' +
-      'restoring it brings them back. On production, a migration that drops a column, a constraint or a unique index, ' +
-      'or changes a column\'s type, waits for a person: the response has status "awaiting_approval" and an approval ' +
-      'id to poll with check_approval, and approving it runs the migration exactly as sent. For row changes use ' +
-      'db_insert/db_update/db_delete; for reads use run_query; for dropping a table and anything else use backend_chat.\n' +
-      'With `branchId` the migration applies to that preview branch ONLY, production is untouched, and the ' +
-      'statements are logged for the branch\'s merge. A branch has every foreign key production has and checks a ' +
-      'key a migration declares with REFERENCES as production will; a key Backenly infers from a column name is ' +
-      'added at the merge.',
+      'Apply a schema migration written as ordinary PostgreSQL DDL: CREATE TABLE; ALTER TABLE (ADD / DROP / RENAME ' +
+      'COLUMN, ALTER COLUMN … TYPE [USING], SET|DROP NOT NULL, SET|DROP DEFAULT, ADD / DROP CONSTRAINT, several ' +
+      'comma-separated); CREATE [UNIQUE] INDEX; DROP INDEX. Statements apply in order, all or nothing; write bare ' +
+      'table names. Every table gets `id`, `"createdAt"`, `"updatedAt"` (camelCase) and `"deleted_at"`; a declared ' +
+      '`id`, `created_at` or `updated_at` gives way to them, so order by `"createdAt"`. Each statement becomes a ' +
+      'governed action, planned, verified and reversible: this is NOT raw SQL execution, and anything else is refused ' +
+      'with the tool to use. A new type is exactly the one written; USING may cast the column\'s own value. Dropped ' +
+      'or retyped values are kept with the change, so restoring it brings them back. On production, dropping a ' +
+      'column, a constraint or a unique index, or changing a type, waits for a person: status "awaiting_approval" ' +
+      'with an approval id to poll with check_approval; approval runs the migration exactly as sent. Rows: ' +
+      'db_insert/db_update/db_delete; reads: run_query; dropping a table and anything else: backend_chat.\n' +
+      'With `branchId` it applies to that preview branch ONLY and is logged for the merge. A branch has production\'s ' +
+      'foreign keys and checks one a migration declares with REFERENCES; a key Backenly infers from a column name ' +
+      'is added at the merge.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -855,12 +824,10 @@ export function buildDispatchable(): McpToolDescriptor[] {
     name: 'read_backend_state',
     tier: 'read',
     description:
-      'Read what is currently true about this backend. Call with no arguments for the grounding overview ' +
-      '(tables, APIs, auth, storage, RLS) — do this FIRST on any non-trivial task. Pass `section` to drill into ' +
-      'one area. This is the single read-state tool: there is no list_tables/list_apis/etc. to choose between. ' +
-      'For anything expressible as a query over your own data, use run_query instead. Side-effect free.\n' +
-      'With `branchId` and section "schema", reads that preview branch\'s tables, columns and policies instead of ' +
-      'production\'s. run_query reads production only; read a branch\'s rows with db_query { branchId }.',
+      'What is currently true about this backend. No arguments: the overview (tables, APIs, auth, storage, RLS); ' +
+      'read it FIRST on any non-trivial task. `section` drills into one area. For questions about your own data, ' +
+      'use run_query. With `branchId` and section "schema", reads that preview branch\'s schema; read a branch\'s ' +
+      'rows with db_query { branchId }. Side-effect free.',
     inputSchema: {
       type: 'object',
       properties: {

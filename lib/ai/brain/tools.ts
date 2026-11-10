@@ -475,7 +475,7 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
     'Alias of get_backend_metadata — a complete structured overview of the project backend (tables + counts + relationships + auth/storage/realtime/functions). Use to confirm the connection and ground your plan. Side-effect free.',
     {}),
   fn('get_table_schema',
-    'Complete, RLS-aware schema for ONE table: every column (type, nullable, default, primary key, max length), the primary key, foreign keys (with ON DELETE), indexes (with UNIQUE and the full column tuple), CHECK constraints (with the ACTUAL allowed values so you never violate them), triggers, whether RLS/FORCE-RLS is on, the live row-level-security policies (command, ROLES the policy applies to, PERMISSIVE/RESTRICTIVE, USING + WITH CHECK), and the exact record count. The policy roles matter: a `USING (true)` policy is not open access if it is granted only to an internal role, so read `roles` before concluding a table is exposed. Each policy also carries `editableUsing` / `editableCheck`: the SAME rule rewritten into the form set_rls accepts, so you can read a live policy and send it straight back unchanged. Use those when editing — the raw `using` / `withCheck` are PostgreSQL\'s rendering and include a service-role wrapper plus a schema-qualified claim reader, so sending them back is rejected. Call this before writing any query, insert, or migration against a table, and ALWAYS before changing one command of an existing policy. Reads the live PostgreSQL catalog — never stale. Side-effect free.',
+    'ONE table from the live catalog: columns (type, nullable, default, key, max length), primary and foreign keys (with ON DELETE), indexes, CHECK constraints with their ACTUAL allowed values, triggers, RLS / FORCE RLS, the policies (command, ROLES, permissive or restrictive, USING and WITH CHECK) and the exact row count. A `USING (true)` policy granted only to an internal role is not open access: read `roles` before calling a table exposed. To edit a policy with set_rls, send back its `editableUsing` / `editableCheck`, never the raw `using` / `withCheck`, which are refused. Call it before writing a query, insert or migration against a table, and ALWAYS before changing one command of a policy. Side-effect free.',
     { tableName: { type: 'string', description: 'The table to describe (snake_case).' } },
     ['tableName']),
   fn('create_table',
@@ -663,23 +663,19 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
     },
     ['tableName']),
   fn('set_rls',
-    'Write row-level security as EXACT SQL, one rule per command. Deterministic: your predicates are ' +
-    'installed verbatim — never re-derived, re-worded, simplified or inferred — and the result is read ' +
-    'back from pg_policies before this reports success. No language model is involved, so it cannot be ' +
-    'rate-limited and the same call twice produces the same state.\n' +
-    'USE THIS, not backend_chat, whenever you can write the predicate yourself. Prefer `add_rls` only ' +
-    'for the named templates (owner_read_write, participants, …).\n' +
-    'THE FOUR COMMANDS ARE INDEPENDENT. Name only the ones you want to change — the rest are left ' +
-    'byte-identical, so "fix UPDATE and DELETE, leave SELECT alone" is a supported operation rather ' +
-    'than a re-statement of the whole set. Naming a subset while a FOR ALL policy is present is refused ' +
-    'rather than silently widened.\n' +
-    'PREDICATE GRAMMAR: this table\'s columns, `backenly_jwt_claim(\'sub\')` for the calling end-user\'s ' +
-    'id, comparisons, AND/OR/NOT, IN, BETWEEN, IS NULL, casts, and pure functions. To depend on a PARENT ' +
-    'row, write `EXISTS (SELECT 1 FROM parent p WHERE p.id = this_table.parent_id AND …)` — the parent ' +
-    'and every column it names are checked against the live schema. Nothing else may read another table.\n' +
-    'USING = which rows the command may TARGET (select/update/delete). CHECK = which rows it may PRODUCE ' +
-    '(insert/update). Omitting `check` on insert/update means "anything the caller may target", so state ' +
-    'it whenever the write rule is narrower than the read rule.',
+    'Write row-level security as EXACT SQL, one rule per command: your predicates are installed verbatim ' +
+    'and read back from pg_policies before this reports success. No model is involved. USE THIS, not ' +
+    'backend_chat, whenever you can write the predicate; `add_rls` only for the named templates ' +
+    '(owner_read_write, participants, …).\n' +
+    'THE FOUR COMMANDS ARE INDEPENDENT: name only those to change, and the rest stay byte-identical. ' +
+    'Naming a subset while a FOR ALL policy exists is refused rather than silently widened.\n' +
+    'PREDICATE GRAMMAR: this table\'s columns, `backenly_jwt_claim(\'sub\')` for the end-user\'s id, ' +
+    'comparisons, AND/OR/NOT, IN, BETWEEN, IS NULL, casts and pure functions; a PARENT row through ' +
+    '`EXISTS (SELECT 1 FROM parent p WHERE p.id = this_table.parent_id AND …)`, checked against the live ' +
+    'schema. Nothing else may read another table.\n' +
+    'USING = rows the command may TARGET (select/update/delete); CHECK = rows it may PRODUCE (insert/update). ' +
+    'Without `check`, an insert or update may produce anything the caller may target: state it whenever ' +
+    'writing is narrower than reading.',
     {
       tableName: { type: 'string', description: 'The table whose row-level security rules to set.' },
       select: {
@@ -965,8 +961,7 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
         type: 'array',
         items: { type: 'string' },
         description:
-          'For on_update only: run only when an update changes one of these columns, e.g. ["status"]. Updates that leave them ' +
-          'alone do not run it or count against the plan. Left out, every update runs it.',
+          'on_update only: run only when an update changes one of these columns, e.g. ["status"]; other updates do not run it. Left out, every update does.',
       },
       method: {
         type: 'string',
@@ -1103,7 +1098,7 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
     {}),
   // ── Read tools (live state of every section) ──────────────────────────────
   fn('run_query',
-    "Run read-only SQL against this project's workspace schema. This is THE way to read data: full PostgreSQL SELECT including joins, GROUP BY, aggregates, window functions, CTEs, subqueries, and EXPLAIN (without ANALYZE). Tables are already in scope: write `SELECT * FROM posts`, not `workspace_x.posts`. Executes as a SELECT-only role inside a READ ONLY transaction — it cannot write, and it cannot read another project's DATA (Postgres grants refuse it, not a SQL check). The PostgreSQL system catalogs (`pg_*`, `information_schema`) are instance-wide rather than per-project, so they are refused outright; use read_backend_state or get_table_schema to inspect this project's schema. One statement per call. Results are capped (default 200 rows, max 1000) and `truncated` tells you whether more exist. Password, token and API-key columns come back as '[redacted]'. To change SCHEMA use apply_migration (ordinary DDL); to change ROWS use db_insert / db_update / db_delete.",
+    "Read-only SQL on this project's tables, THE way to read data: full SELECT with joins, GROUP BY, aggregates, window functions, CTEs, subqueries, and EXPLAIN (without ANALYZE). Write `SELECT * FROM posts`, not `workspace_x.posts`. It runs as a SELECT-only role in a READ ONLY transaction, so it cannot write or read another project's DATA (Postgres grants refuse it). The system catalogs (`pg_*`, `information_schema`) are shared by every project, so they are refused: use read_backend_state or get_table_schema. One statement per call; at most 1000 rows (default 200), and `truncated` says whether there are more. Password, token and API-key columns read '[redacted]'. SCHEMA changes: apply_migration; ROW changes: db_insert / db_update / db_delete.",
     {
       sql: { type: 'string', description: 'A single read-only SQL statement, e.g. "SELECT status, count(*) FROM orders GROUP BY status".' },
       limit: { type: 'number', description: 'Row cap. Default 200, max 1000.' },
@@ -1430,8 +1425,7 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
         minimum: 1,
         maximum: 3650,
         description:
-          'Optional. Omitted means the key NEVER expires (same as dashboard keys). When set, the runtime ' +
-          'refuses the key after this many days and the response says the exact date.',
+          'Optional. Omitted, the key never expires; set, it is refused after this many days (the answer gives the date).',
       },
       serviceRole: {
         type: 'boolean',
@@ -1442,9 +1436,8 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
       branchId: {
         type: 'string',
         description:
-          'Optional. Bind this key to a preview branch (id from branch(action:"list")) so it reads that ' +
-          'branch instead of production. Omit for main. A key whose branch is later merged or discarded ' +
-          'is refused rather than silently falling back to production.',
+          'Optional. Bind the key to a preview branch (branch action:"list") instead of production. A key whose ' +
+          'branch is merged or discarded is refused, never pointed back at production.',
       },
     }),
   fn('revoke_api_key',

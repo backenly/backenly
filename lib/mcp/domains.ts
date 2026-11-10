@@ -285,6 +285,13 @@ export function readOnlyView(domain: DomainTool): DomainTool | null {
 /** Arguments that ask a read to write, never offered to a read-only key. */
 const WRITE_ONLY_ARGS = new Set(['autoFix'])
 
+/**
+ * Arguments only the brain's own model uses. `force` answers a confirmation
+ * prompt in backend_chat; the typed door binds without one, so offering it
+ * there only cost every session its description.
+ */
+const BRAIN_ONLY_ARGS = new Set(['force'])
+
 export type DomainResolution =
   | { kind: 'ok'; domain: DomainTool; action: string; target: string; approval: boolean }
   | { kind: 'unknown_action'; domain: DomainTool; action: string; supported: string[] }
@@ -343,6 +350,7 @@ export function domainInputSchema(domain: DomainTool, opts?: { readOnly?: boolea
     for (const [prop, schema] of Object.entries(brainParams(tool).properties)) {
       if (prop === 'action') continue
       if (opts?.readOnly && WRITE_ONLY_ARGS.has(prop)) continue
+      if (BRAIN_ONLY_ARGS.has(prop)) continue
       if (!properties[prop]) {
         properties[prop] = { ...schema }
         usedBy[prop] = [action]
@@ -369,7 +377,7 @@ export function domainInputSchema(domain: DomainTool, opts?: { readOnly?: boolea
       action: {
         type: 'string',
         enum: Object.keys(domain.actions),
-        description: 'What to do. The tool description lists each action and the arguments it needs.',
+        description: 'One of the actions the description lists.',
       },
       ...properties,
     },
