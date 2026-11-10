@@ -227,3 +227,91 @@ describe('STO-12: metadata never fetches the bytes', () => {
     expect(typeof data.url).toBe('string')
   }, 60_000)
 })
+
+/**
+ * STO-13: a file follows its bucket unless the upload says otherwise.
+ *
+ * Production QA (2026-11-09): files uploaded into a Public bucket were listed
+ * as Private, with one-hour signed links. The bucket's access policy is the
+ * default a file takes (lib/storage/access-policy.ts clampIsPublic: `requested
+ * ?? true` within a public bucket), but every upload route decided for it: the
+ * form route read a missing `isPublic` as false, and the signed and multipart
+ * routes defaulted it to false and stored it without the bucket's clamp, and
+ * created a missing bucket labelled public by one file's flag.
+ */
+describe('STO-13: a file follows its bucket unless the upload says otherwise', () => {
+  const formUpload = async (bucket: string, name: string, isPublic?: 'true' | 'false') => {
+    const { POST } = await import('@/app/api/v1/[projectId]/storage/upload/route')
+    const form = new FormData()
+    form.set('file', new File([`hello ${name}`], name, { type: 'text/plain' }))
+    form.set('bucket', bucket)
+    form.set('path', name)
+    if (isPublic) form.set('isPublic', isPublic)
+    const req = new NextRequest(`http://test.local/api/v1/${projectId}/storage/upload`, {
+      method: 'POST', headers: { 'x-api-key': serviceKey }, body: form,
+    })
+    const res = await POST(req, { params: Promise.resolve({ projectId }) })
+    const body = await res.json()
+    expect(res.status).toBe(200)
+    return body.data
+  }
+  const jsonPost = async (route: 'signed-upload' | 'upload-multipart', body: Record<string, unknown>, query = '') => {
+    const mod = await import(`@/app/api/v1/[projectId]/storage/${route}/route`)
+    const req = new NextRequest(`http://test.local/api/v1/${projectId}/storage/${route}${query}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-api-key': serviceKey },
+      body: JSON.stringify(body),
+    })
+    const res = await mod.POST(req, { params: Promise.resolve({ projectId }) })
+    return { status: res.status, body: await res.json() }
+  }
+  const isPublicOf = async (id: string) =>
+    (await prisma.storageFile.findUnique({ where: { id }, select: { isPublic: true } }))?.isPublic
+
+  it('a form upload that says nothing takes the bucket’s policy, and says so', async () => {
+    const data = await formUpload('uploads', 'follows.txt')
+    expect(data.isPublic).toBe(true)
+    expect(await isPublicOf(data.id)).toBe(true)
+    expect(String(data.url)).not.toMatch(/token=/)
+  }, 60_000)
+
+  it('a form upload may still keep one file private inside a public bucket', async () => {
+    const data = await formUpload('uploads', 'kept.txt', 'false')
+    expect(await isPublicOf(data.id)).toBe(false)
+  }, 60_000)
+
+  it('a multipart upload takes the bucket’s policy, and a private bucket clamps it', async () => {
+    const open = await jsonPost('upload-multipart', { filename: 'clip.mp4', contentType: 'video/mp4', contentLength: 1024, bucket: 'uploads' }, '?action=initiate')
+    expect(open.status).toBe(200)
+    const closed = await jsonPost('upload-multipart', { filename: 'clip2.mp4', contentType: 'video/mp4', contentLength: 1024, bucket: 'secrets', isPublic: true }, '?action=initiate')
+    expect(closed.status).toBe(200)
+    const rows = await prisma.storageFile.findMany({
+      where: { projectId, bucketId: { in: [uploadsBucketId, privateBucketId] }, name: { in: ['clip.mp4', 'clip2.mp4'] } },
+      select: { name: true, isPublic: true },
+    })
+    expect(Object.fromEntries(rows.map((r) => [r.name, r.isPublic]))).toEqual({ 'clip.mp4': true, 'clip2.mp4': false })
+  }, 60_000)
+
+  it('a signed upload takes the bucket’s policy, and a private bucket clamps it', async () => {
+    const before = process.env.STORAGE_DRIVER
+    process.env.STORAGE_DRIVER = 's3'
+    try {
+      const open = await jsonPost('signed-upload', { filename: 'movie.mp4', contentType: 'video/mp4', contentLength: 2048, bucket: 'uploads' })
+      const closed = await jsonPost('signed-upload', { filename: 'movie2.mp4', contentType: 'video/mp4', contentLength: 2048, bucket: 'secrets', isPublic: true })
+      expect([open.status, closed.status]).toEqual([200, 200])
+      expect(await isPublicOf(open.body.data.fileId)).toBe(true)
+      expect(await isPublicOf(closed.body.data.fileId)).toBe(false)
+    } finally {
+      process.env.STORAGE_DRIVER = before
+    }
+  }, 60_000)
+
+  it('an upload never creates an open bucket: a missing one is created private, whatever the file asks', async () => {
+    const r = await jsonPost('upload-multipart', { filename: 'first.mp4', contentType: 'video/mp4', contentLength: 1024, bucket: 'fresh', isPublic: true }, '?action=initiate')
+    expect(r.status).toBe(200)
+    const bucket = await prisma.storageBucket.findFirst({ where: { projectId, name: 'fresh' }, select: { isPublic: true, accessPolicy: true } })
+    expect(bucket).toEqual({ isPublic: false, accessPolicy: 'private' })
+    const row = await prisma.storageFile.findFirst({ where: { projectId, name: 'first.mp4' }, select: { isPublic: true } })
+    expect(row?.isPublic).toBe(false)
+  }, 60_000)
+})

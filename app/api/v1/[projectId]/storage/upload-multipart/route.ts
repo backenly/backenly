@@ -11,6 +11,7 @@ import path from 'path'
 import fs from 'fs/promises'
 import os from 'os'
 import { recordedV1 } from '@/lib/traffic/recorded-v1'
+import { clampIsPublic } from '@/lib/storage/access-policy'
 import { forgetFileNames, keepFileNames, storedFileName, withFileName } from '@/lib/storage/file-names'
 
 const CHUNK_UPLOAD_DIR = process.env.CHUNK_TEMP_DIR || path.join(os.tmpdir(), 'backenly-chunks')
@@ -70,7 +71,8 @@ async function handleInitiate(request: NextRequest, context: { projectId: string
     return createErrorResponse(ErrorCodes.BAD_REQUEST, 'Request body must be JSON', 400)
   }
 
-  const { filename, contentType, contentLength, bucket: bucketName = 'videos', isPublic = false } = body
+  const { filename, contentType, contentLength, bucket: bucketName = 'videos' } = body
+  const requestedPublic = body.isPublic === undefined || body.isPublic === null ? undefined : body.isPublic === true || body.isPublic === 'true'
 
   if (!filename || !contentType || !contentLength) {
     return createErrorResponse(ErrorCodes.BAD_REQUEST, 'filename, contentType, and contentLength are required', 400)
@@ -95,10 +97,15 @@ async function handleInitiate(request: NextRequest, context: { projectId: string
   })
   if (!bucketRecord) {
     // history: provisioned by the first upload, on the data plane, which never waits for the change lock
+    // An upload never opens a bucket: one it creates is private until its owner
+    // sets the access policy.
     bucketRecord = await prisma.storageBucket.create({
-      data: { name: bucketName, projectId: context.projectId, isPublic: Boolean(isPublic), maxFileSizeBytes: BigInt(MAX_ASSEMBLED_BYTES) },
+      data: { name: bucketName, projectId: context.projectId, isPublic: false, maxFileSizeBytes: BigInt(MAX_ASSEMBLED_BYTES) },
     })
   }
+  // The file follows its bucket unless the upload says otherwise, and never past
+  // it (lib/storage/access-policy.ts).
+  const isPublic = clampIsPublic(requestedPublic, bucketRecord.accessPolicy)
 
   // S3 multipart initiation
   if (process.env.STORAGE_DRIVER === 's3' && isS3Configured()) {
@@ -134,7 +141,7 @@ async function handleInitiate(request: NextRequest, context: { projectId: string
           path: s3Key,
           size: BigInt(contentLength),
           mimeType: contentType,
-          isPublic: Boolean(isPublic),
+          isPublic,
           metadata: { uploadId, s3UploadId, s3Key, status: 'uploading' },
         },
       })
@@ -169,7 +176,7 @@ async function handleInitiate(request: NextRequest, context: { projectId: string
       path: `${uploadId}/${stored.name}`,
       size: BigInt(contentLength),
       mimeType: contentType,
-      isPublic: Boolean(isPublic),
+      isPublic,
       metadata: { uploadId, chunkDir, status: 'uploading', contentType, bucketId: bucketRecord.id },
     },
   })

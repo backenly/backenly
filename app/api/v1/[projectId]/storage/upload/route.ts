@@ -53,7 +53,7 @@ const BLOCKED_EXTENSIONS = new Set([
  *   file      — the File blob
  *   bucket    — bucket name (default: 'default')
  *   path      — desired file path/name inside the bucket
- *   isPublic  — 'true' | 'false'
+ *   isPublic  — 'true' | 'false'; absent, the bucket's access policy decides
  */
 async function handlePOST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
   const params = await props.params;
@@ -87,7 +87,11 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
     const file = formData.get('file') as File | null
     const bucketName = (formData.get('bucket') as string | null) || 'default'
     const filePath = (formData.get('path') as string | null) || ''
-    const isPublic = formData.get('isPublic') === 'true'
+    // A file follows its bucket unless the upload says otherwise: absent, the
+    // bucket's access policy decides (clampIsPublic). Reading absent as false
+    // made every file uploaded into a Public bucket private, with expiring links.
+    const requestedPublic = formData.get('isPublic')
+    const isPublic = requestedPublic === null || requestedPublic === '' ? undefined : requestedPublic === 'true'
 
     if (!file) {
       return createErrorResponse(ErrorCodes.BAD_REQUEST, 'Missing required field: file', 400)
