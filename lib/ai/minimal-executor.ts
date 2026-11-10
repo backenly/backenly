@@ -6037,6 +6037,18 @@ async function executeDropTable(params: any, projectId: string): Promise<Executi
     const { supersedeSchemaIntent } = await import('@/lib/autonomy/intent-conformance')
     await supersedeSchemaIntent(projectId, { kind: 'drop_table', tableName })
 
+    // Its generated endpoints go with it, kept on the change's record so that
+    // restoring the drop puts them back (lib/services/domain-endpoints.ts).
+    // Left behind, each was a callable route over a table that was gone. The
+    // drop is done whatever happens here, and a failed removal removes nothing.
+    try {
+      const { removeEndpointsOfDroppedTable } = await import('@/lib/services/domain-endpoints')
+      const { currentChange } = await import('@/lib/changes/ledger')
+      await removeEndpointsOfDroppedTable(projectId, tableName, currentChange(projectId)?.id ?? null)
+    } catch (err: any) {
+      console.warn(`[AI Executor] Dropped ${tableName}; its generated endpoints were left in place:`, err?.message)
+    }
+
     // The table leaves the ACTIVE graph, as a new version of it like every
     // graph change. This used to edit whichever graph row the database returned
     // first: for a project provisioned today, its empty first version, so
