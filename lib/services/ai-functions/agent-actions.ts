@@ -13,6 +13,7 @@
  *     the error; its code does not change underneath it.
  */
 
+import { previousCodeNote } from '@/lib/services/ai-functions/previous-code'
 import { createHash } from 'crypto'
 import { prisma } from '@/lib/db/prisma'
 import { canAccessProject, canWriteProject } from '@/lib/edition/guard'
@@ -500,8 +501,13 @@ export async function deployFunctionCode(
   // A function someone switched off stays off: deploying new code is not a
   // decision to start running it.
   const keptOff = existing?.status === 'inactive' || existing?.status === 'disabled'
-  const { governedChange } = await import('@/lib/changes/ledger')
+  const { governedChange, currentChange } = await import('@/lib/changes/ledger')
+  // The change this deploy is recorded as. The history keeps the code it
+  // replaced (lib/changes/resources/functions.ts), so the answer says where.
+  let recordedAs = null as { id: string; seq: number } | null
   const fn = await governedChange(actor.projectId, `${existing ? 'Deploy new code to' : 'Deploy'} function ${deployedName}`, async () => {
+    const open = currentChange(actor.projectId)
+    if (open) recordedAs = { id: open.id, seq: open.seq }
     const saved = existing
       ? await prisma.aiFunction.update({ where: { id: existing.id }, data: { ...fields, ...(keptOff ? {} : { status: 'active' }) } })
       : await prisma.aiFunction.create({ data: { projectId: actor.projectId, name, status: 'active', ...fields } })
@@ -540,7 +546,7 @@ export async function deployFunctionCode(
           : `. Deployed as "${deployedName}", not "${rawName}": names are lowercase kebab-case because they are URL path segments`
         : '') +
       (keptOff ? '. It stays switched off; turn it on with functions { action: "set_active", active: true }' : '') +
-      (existing ? '. The previous code is not kept, so there is nothing to roll back to' : '') +
+      (existing ? previousCodeNote(existing.generatedCode === code, recordedAs) : '') +
       `. Run it with functions { action: "invoke", functionId: "${fn.id}" } and read its runs with { action: "logs" }.`,
     data: {
       functionId: fn.id,
@@ -556,6 +562,8 @@ export async function deployFunctionCode(
       codeSha256: sha(code),
       codeBytes: bytes,
       previousCodeSha256: existing ? sha(existing.generatedCode) : null,
+      // Where the previous code is: this change, in the project's history.
+      change: existing && existing.generatedCode !== code ? recordedAs : null,
       deployedAt: fn.updatedAt,
     },
   }
