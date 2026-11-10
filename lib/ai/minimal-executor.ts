@@ -11702,12 +11702,20 @@ async function executeStoreIntegrationKey(params: any, projectId: string): Promi
       luma: 'luma_...',
     }
     const example = rawIntegrationId ? (KEY_EXAMPLES[rawIntegrationId.toLowerCase()] ?? `your ${providerName} API key`) : 'your API key'
+    const isEmail = rawIntegrationId && ['resend', 'sendgrid'].includes(rawIntegrationId.toLowerCase())
+    const emailPrompt = isEmail
+      ? [
+          ``,
+          `Also provide your verified sender email address (\`fromEmail: "you@yourdomain.com"\`). Resend and SendGrid require emails to come from a verified domain on your account.`,
+        ]
+      : []
     return {
       success: false,
       message: [
         `**To connect ${providerName}**, paste your API key here:`,
         ``,
         `Example format: \`${example}\``,
+        ...emailPrompt,
         ``,
         `Or say **"skip for now"** to continue without it — you can connect it later.`,
       ].join('\n'),
@@ -11777,6 +11785,21 @@ async function executeStoreIntegrationKey(params: any, projectId: string): Promi
       } else {
         const { hasIntegrationKey } = await import('@/lib/services/integrationKeyStore')
         oneSignalAppIdPending = !(await hasIntegrationKey(projectId, 'onesignal_app_id'))
+      }
+    }
+
+    // Resend / SendGrid: store verified sender email (fromEmail) when provided
+    let senderEmailPending = false
+    const rawFromEmail = params.fromEmail ?? params.from ?? params.senderEmail
+    let trimmedFromEmail: string | null = null
+    if (integrationId === 'resend' || integrationId === 'sendgrid') {
+      if (rawFromEmail) {
+        trimmedFromEmail = String(rawFromEmail).trim()
+        await storeIntegrationKey(projectId, 'email_from', trimmedFromEmail)
+      } else {
+        const { getIntegrationKey } = await import('@/lib/services/integrationKeyStore')
+        trimmedFromEmail = await getIntegrationKey(projectId, 'email_from').catch(() => null)
+        senderEmailPending = !trimmedFromEmail
       }
     }
 
@@ -11882,13 +11905,13 @@ async function executeStoreIntegrationKey(params: any, projectId: string): Promi
         const welcomeResult = await executeCreateAiFunction(
           {
             name: `${integrationId}-welcome-email`,
-            description: `When a user signs up, send them a welcome email using ctx.integrations.${integrationId}.send(). Address the email to the user's email, use a friendly subject line, and include their name if available.`,
+            description: `When a user signs up, send them a welcome email using ctx.integrations.email.send(). Address the email to the user's email, use a friendly subject line, and include their name if available.`,
             triggerType: 'on_signup',
           },
           projectId,
         )
         if (welcomeResult.success) {
-          autoWiredSteps.push(`✅ Created welcome email trigger (on_signup → ${integrationId})`)
+          autoWiredSteps.push(`✅ Created welcome email trigger (on_signup → ctx.integrations.email.send)`)
         } else {
           wiringFailed(`welcome email on sign-up (${integrationId})`, welcomeResult)
         }
@@ -11903,14 +11926,14 @@ async function executeStoreIntegrationKey(params: any, projectId: string): Promi
           const resetResult = await executeCreateAiFunction(
             {
               name: `${integrationId}-password-reset-email`,
-              description: `When a password reset record is inserted into \`${resetTable.name}\`, send a password reset email to the user using ctx.integrations.${integrationId}.send(). Include the reset token as a link. Log the delivery result.`,
+              description: `When a password reset record is inserted into \`${resetTable.name}\`, send a password reset email to the user using ctx.integrations.email.send(). Include the reset token as a link. Log the delivery result.`,
               triggerType: 'on_db_insert',
               triggerTable: resetTable.name,
             },
             projectId,
           )
           if (resetResult.success) {
-            autoWiredSteps.push(`✅ Created password reset trigger (${resetTable.name}.insert → ${integrationId})`)
+            autoWiredSteps.push(`✅ Created password reset trigger (${resetTable.name}.insert → ctx.integrations.email.send)`)
           } else {
             wiringFailed(`password reset email on ${resetTable.name} insert (${integrationId})`, resetResult)
           }
@@ -11992,6 +12015,8 @@ async function executeStoreIntegrationKey(params: any, projectId: string): Promi
               verification: status.verification,
               verificationDetail: status.verificationDetail,
               webhookSecretPending,
+              senderEmailPending,
+              fromEmail: trimmedFromEmail ?? _existing[integrationId]?.fromEmail,
             },
           },
         },
@@ -12033,9 +12058,25 @@ async function executeStoreIntegrationKey(params: any, projectId: string): Promi
         `call integrations { "action": "connect", "integrationId": "onesignal", "apiKey": "<same REST key>", "appId": "<your App ID>" }.`
       : ''
 
+    const senderEmailGap = senderEmailPending
+      ? [
+          '',
+          '⚠ **Default sender email is NOT set.**',
+          `Resend and SendGrid require emails to come from a verified domain on your account (they refuse to send as backenly.com).`,
+          `To set your default sender, call:`,
+          `integrations { "action": "connect", "integrationId": "${integrationId}", "apiKey": "<same API key>", "fromEmail": "you@yourdomain.com" }`,
+          `or pass an explicit \`from\` in each \`ctx.integrations.email.send({ from: "you@yourdomain.com", ... })\` call.`,
+        ].join('\n')
+      : ''
+
+    const fromNote = trimmedFromEmail ? `\n\nDefault sender email: \`${trimmedFromEmail}\`` : ''
+    const functionCapabilityNote = (integrationId === 'resend' || integrationId === 'sendgrid')
+      ? 'AI functions can now use `ctx.integrations.email.send()` to send emails.'
+      : `AI functions can now use \`ctx.integrations.${integrationId}.*\` to call ${integrationId} APIs.`
+
     return {
       success: true,
-      message: `${integrationId} connected. Key stored securely (${status.maskedKey}).${keyValidationNote}${webhookUrl}${webhookGap}${appIdGap}${autoWiredMsg}${notWiredMsg}\n\nAI functions can now use \`ctx.integrations.${integrationId}.*\` to call ${integrationId} APIs.`,
+      message: `${integrationId} connected. Key stored securely (${status.maskedKey}).${keyValidationNote}${fromNote}${webhookUrl}${webhookGap}${appIdGap}${senderEmailGap}${autoWiredMsg}${notWiredMsg}\n\n${functionCapabilityNote}`,
       data: {
         integrationId,
         maskedKey: status.maskedKey,
@@ -12043,6 +12084,8 @@ async function executeStoreIntegrationKey(params: any, projectId: string): Promi
         verificationDetail: status.verificationDetail,
         webhookSecretPending,
         oneSignalAppIdPending,
+        senderEmailPending,
+        fromEmail: trimmedFromEmail ?? undefined,
         autoWired: autoWiredSteps,
         notWired,
       },

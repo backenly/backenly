@@ -151,6 +151,22 @@ export async function verifyIntegrationKey(
 ): Promise<VerificationResult> {
   const id = String(integrationId ?? '').toLowerCase()
 
+  // Sender email is an email address (e.g. notifications@yourdomain.com), not an API key.
+  // Validate email format and bypass high-entropy API key placeholder checks.
+  if (id === 'email_from' || id.endsWith('_from') || id.endsWith('_from_email')) {
+    const trimmed = String(rawKey ?? '').trim()
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed)) {
+      return {
+        status: 'rejected',
+        detail: `"${rawKey}" is not a valid email address format. Provide a valid sender email address like noreply@yourdomain.com.`,
+      }
+    }
+    return {
+      status: 'unverifiable',
+      detail: 'Sender email stored.',
+    }
+  }
+
   const fabricated = looksFabricated(rawKey)
   if (fabricated) {
     return {
