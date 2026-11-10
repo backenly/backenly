@@ -274,6 +274,9 @@ const INVARIANT_REAPABLE_TYPES = [
   // Its probe compares the intent ledger to the live catalog on every tick, so
   // a column the owner migrates back into shape clears on the next pass.
   'intent_drift',
+  // Its probe reads the last day's refusals and the live catalog each pass, so
+  // a dropped rule, or a day without refusals, withdraws the finding.
+  'unrequested_unique_refusing_writes',
   // Its probe judges the most recent complete hour against the trailing window,
   // so a subject that returns to normal stops being reported on the next hour
   // and the finding withdraws itself. Without this a one-hour spike would sit in

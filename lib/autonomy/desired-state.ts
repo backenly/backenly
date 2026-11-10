@@ -65,6 +65,7 @@ import { detectBehaviouralRegression } from './baseline/detect'
 import { detectMigrationResidue } from './migration-residue'
 import { detectSubsystemRecurrence } from './subsystem-recurrence'
 import { detectFailingFunctions } from './function-failures'
+import { detectRefusedWrites } from './refused-writes'
 import { hasCapability, type PlatformCapability } from './platform-capabilities'
 import { projectRegion, requireRegionDatabaseUrl } from '@/lib/data-plane/regional'
 
@@ -258,6 +259,13 @@ export const INVARIANTS: readonly Invariant[] = [
     rationale:
       'Every other invariant here can be evaluated from the live catalog, because correct is defined by the catalog itself. Type correctness is not like that: a column that is integer looks perfectly healthy, and nothing distinguishes it from one that was supposed to be a timestamp. The information needed to notice was never missing from the database — it was never written down. So the request is recorded at build time and compared against reality, which is how a start_date created as INTEGER in May was found after two months of a continuously-running loop reporting green. The ledger records the REQUEST and is never reconciled to the catalog: one that self-heals to match reality agrees with it by construction and can never detect anything.',
     probe: detectIntentDrift,
+  },
+  {
+    id: 'no_unrequested_rule_refuses_writes',
+    title: 'No rule nobody asked for keeps refusing writes',
+    rationale:
+      'A rule that keeps a column unique looks healthy on its own: it is a constraint doing its job. It is only wrong when nobody wanted it, and then it shows up as real writes refused. Production QA met exactly that: orders kept every email unique, which nobody had asked for, so each customer\'s second order was refused while every check stayed green. So this starts from the evidence, writes refused with a conflict in the last day, and names the single-column unique rules on that table that the intent ledger does not record as requested. Never repaired automatically: whether a value may repeat is the owner\'s decision.',
+    probe: detectRefusedWrites,
   },
   {
     id: 'indexes_are_not_mostly_empty_space',
@@ -664,6 +672,9 @@ const INVARIANT_EMITS: Readonly<Record<string, readonly FindingType[]>> = {
   // Re-detectable by construction: the probe judges the latest complete hour, so
   // a subject that recovers simply stops appearing.
   the_backend_behaves_like_itself: ['behavioural_regression'],
+  // Re-detectable: the probe reads the last day's refusals and the live
+  // catalog, so a dropped rule or a quiet day closes the gap.
+  no_unrequested_rule_refuses_writes: ['unrequested_unique_refusing_writes'],
   // Re-detectable: all three shapes are live catalog reads, so a completed
   // rebuild, validation or transaction resolution closes the gap.
   no_migration_was_left_half_finished: ['migration_residue'],

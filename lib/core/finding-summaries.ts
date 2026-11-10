@@ -156,6 +156,16 @@ function summariseFindingText(type: string, details: Record<string, unknown>): s
         ? `\`${table}\` changes are not broadcast to realtime subscribers`
         : 'A live-data table is missing its realtime notify trigger'
 
+    // ── Refused writes ────────────────────────────────────────────────────
+    case 'unrequested_unique_refusing_writes': {
+      const col = str(d.columnName)
+      const refused = Number(d.refused ?? 0)
+      const writes = Number(d.writes ?? 0)
+      return table && col && writes > 0
+        ? `\`${table}\` refused ${refused} of ${writes} writes; \`${col}\` is kept unique by a rule nobody asked for`
+        : 'Writes are refused by a unique rule nobody asked for'
+    }
+
     // ── Integrations ──────────────────────────────────────────────────────
     case 'broken_webhook':
       return 'A webhook is failing to deliver'
