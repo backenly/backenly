@@ -1889,3 +1889,8 @@ tests/integration/v2-errors-in-postgrest-shape.spec.ts
 # restoring that change brings it back; an identical redeploy names none. Real
 # ledger and project.
 tests/integration/function-redeploy-in-history.spec.ts
+
+# A person can ask Backenly to look for architecture changes from the console;
+# the route answers one look per project every 10 minutes and says when the
+# next may start. Real session, project and engine.
+tests/integration/architecture-look-now.spec.ts
