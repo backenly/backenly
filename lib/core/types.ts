@@ -134,6 +134,13 @@ export type FindingType =
   // notify_only: the remedy is a change to the function's code, which belongs
   // to whoever wrote it. The finding carries the run log's evidence.
   | 'function_failing'
+  // ── A function whose code uses an integration the project has not
+  // connected (lib/autonomy/function-integrations.ts). It runs and gets
+  // nothing, often without failing.
+  //
+  // notify_only: the key is the owner's to give, and the code is whoever
+  // wrote it.
+  | 'function_integration_missing'
   // ── What a migration that did not finish left behind.
   //
   // A FAILED migration is not directly observable: the DDL event triggers
@@ -365,6 +372,8 @@ export const ALL_FINDING_TYPES = [
   'architecture_evolution',
   // Added 2026-11-10 in the same commit that introduced it.
   'function_failing',
+  // Added 2026-11-10 in the same commit that introduced it.
+  'function_integration_missing',
 ] as const satisfies ReadonlyArray<FindingType>
 
 /** The finding type that carries an architecture-change approval request. */

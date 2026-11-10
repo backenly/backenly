@@ -23,6 +23,8 @@ import { rowLastError, withLastErrors, withRunBodies } from './run-records'
 import { isFunctionSwitchedOff } from './status'
 import { workspaceRawClient } from '@/lib/data-plane/regional'
 import { functionNameForms, resolveFunctionByName } from './names'
+import { integrationsUsedBy, missingIntegrations } from './integration-use'
+import { missingIntegrationDeployNote } from '@/lib/core/function-integration-words'
 
 export interface FunctionActor {
   userId?: string
@@ -470,6 +472,19 @@ export async function deployFunctionCode(
   const { syncCaptureForFunctionChange } = await import('@/lib/webhooks/capture')
   await syncCaptureForFunctionChange(actor.projectId, fn.triggerType)
 
+  // What the code reaches through ctx.integrations that this project has no key
+  // for. It deploys, and the agent is told now rather than finding the calls
+  // empty in production. A route module has no ctx.integrations. The deploy has
+  // happened, so a failed read leaves the note out rather than answering with
+  // an error; the observer reports the same thing on its next pass.
+  const stored = isHttp
+    ? null
+    : await prisma.projectIntegrationKey
+        .findMany({ where: { projectId: actor.projectId }, select: { integrationId: true } })
+        .then((keys) => new Set(keys.map((k) => k.integrationId)))
+        .catch(() => null)
+  const missing = stored ? missingIntegrations(integrationsUsedBy(code), stored) : []
+
   const sha = (s: string) => createHash('sha256').update(s, 'utf8').digest('hex')
   const renamed = rawName !== deployedName
   return {
@@ -477,6 +492,7 @@ export async function deployFunctionCode(
     summary:
       `${existing ? 'Replaced the code of' : 'Deployed'} ${deployedName} (${fn.id}), trigger ${trigger}` +
       (endpoint ? `, ${method} ${endpoint}` : table ? ` on ${table}` : '') +
+      missingIntegrationDeployNote(missing) +
       (renamed
         ? existing
           ? `. "${rawName}" is stored as "${deployedName}", which this replaced`
@@ -495,6 +511,9 @@ export async function deployFunctionCode(
       triggerTable: fn.triggerTable,
       endpoint: endpoint ? { method, path: endpoint } : null,
       status: fn.status,
+      // Per kind of provider the code uses and cannot reach: the names it
+      // wrote, and the vault ids any one of which would serve it.
+      missingIntegrations: missing,
       codeSha256: sha(code),
       codeBytes: bytes,
       previousCodeSha256: existing ? sha(existing.generatedCode) : null,

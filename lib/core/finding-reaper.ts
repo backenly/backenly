@@ -346,7 +346,8 @@ export async function reapInvariantFindings(
 /**
  * Static finding types written exclusively by workspace-observer.ts's own
  * detectors (detectOrphanTables, detectApiDrift, detectBrokenWebhooks,
- * detectAuthSpike, detectDeployFailure, checkIntegrationHealth) and by no
+ * detectAuthSpike, detectDeployFailure, checkIntegrationHealth,
+ * detectFunctionsMissingIntegrations) and by no
  * other pipeline — verified by grepping
  * every `type: '<value>'` write site in the codebase before adding an entry
  * here. Getting this wrong in either direction is a real bug: omit a type
@@ -384,6 +385,9 @@ const OBSERVER_LOCATABLE_REAPABLE_TYPES: ReadonlySet<string> = new Set([
   'integration_smtp_unreachable',
   'oauth_config_invalid',
   'integration_connected_unused',
+  // Located by function (gapIdentity), so a function whose integration is
+  // connected, or whose code stops using it, is withdrawn on its own.
+  'function_integration_missing',
 ])
 
 /**

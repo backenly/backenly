@@ -23,6 +23,7 @@
 
 import { normalizeFindingType } from './types'
 import { triggerPhrase } from './function-trigger-words'
+import { missingFrom, missingIntegrationHint } from './function-integration-words'
 import type { AIAction } from '@/lib/ai/minimal-executor'
 import { WITHHELD } from '@/lib/mcp/withhold-secrets'
 import { unsealParams } from '@/lib/operational-memory/sealed-params'
@@ -613,6 +614,13 @@ If the column is deliberately different now, tell your coding agent to rebuild i
         `\n\nAsk your coding agent to fix ${name} and deploy it again. Its runs are on the Functions ` +
         `page, and this clears once a run succeeds.`
       )
+    }
+
+    // The key is the owner's and the code is whoever wrote it: the hint says
+    // which calls have nothing behind them and both ways out.
+    case 'function_integration_missing': {
+      const name = typeof details?.functionName === 'string' ? details.functionName : 'This function'
+      return missingIntegrationHint(name, triggerPhrase(details?.trigger, details?.tableName), missingFrom(details?.missing))
     }
 
     // No repair exists and none should. Terminating a backend rolls back

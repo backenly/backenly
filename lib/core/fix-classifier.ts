@@ -361,6 +361,20 @@ export function classifyFix(
     }
   }
 
+  // ── A function that uses an integration nobody connected ──────
+  //
+  // Either the owner connects the provider, with a key only they have, or the
+  // function's code changes, which is whoever wrote it. Backenly can do
+  // neither.
+  if (type === 'function_integration_missing') {
+    return {
+      decision: 'notify_only',
+      reason:
+        'This function uses an integration that is not connected. Connecting it needs the ' +
+        "provider's key, which only the owner has, so Backenly says what is missing.",
+    }
+  }
+
   // ── Migration residue ─────────────────────────────────────────
   //
   // One type, three different residues, three different answers — decided on

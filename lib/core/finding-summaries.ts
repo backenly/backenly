@@ -19,6 +19,7 @@
  */
 
 import { normalizeFindingType } from './types'
+import { missingFrom, missingIntegrationSummary } from './function-integration-words'
 
 type Details = Record<string, unknown> | null | undefined
 
@@ -179,6 +180,8 @@ function summariseFindingText(type: string, details: Record<string, unknown>): s
         ? `\`${name}\` failed ${failures} of its last ${runs} runs`
         : `\`${name}\` keeps failing`
     }
+    case 'function_integration_missing':
+      return missingIntegrationSummary(str(d.functionName) ?? 'A function', missingFrom(d.missing))
 
     // ── Workflow / verification ───────────────────────────────────────────
     case 'workflow_broken': {
