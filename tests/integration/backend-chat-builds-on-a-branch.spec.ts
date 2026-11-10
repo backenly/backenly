@@ -61,6 +61,7 @@ import { getBlueprintForPrompt } from '@/lib/ai/blueprints'
 import { runAgenticFixLoop } from '@/lib/ai/agentic-fix-loop'
 import type { Blueprint, BlueprintStep } from '@/lib/ai/blueprints/types'
 import { savePendingPlan } from '@/lib/ai/blueprints/store'
+import { loadLoopResume, saveLoopResume } from '@/lib/ai/brain/loop-resume'
 import { loadAfterMerge } from '@/lib/branches/build-branch'
 import { forgetProtection } from '@/lib/branches/protection'
 import { runApprovedCall } from '@/lib/mcp/approvals'
@@ -288,5 +289,24 @@ describe('a plan for a new protected project', () => {
     expect(result.summary).toContain('Its merge into production is requested for a person to approve.')
     // Nothing on production to check yet.
     expect(fixLoop).not.toHaveBeenCalled()
+  }, 120_000)
+
+  it('is designed again on "continue" after the architect failed on the request, and runs the same way', async () => {
+    // The turn the architect failed on fell to the loop, which stopped unfinished and saved the request.
+    await saveLoopResume(fresh.projectId, 'a notes app', [], 'step_budget', true)
+    architect.mockResolvedValueOnce({ blueprint: plan, match: { domain: 'notes', confidence: 0.9, matchedOn: 'llm-architect' }, architectTokens: 0 })
+
+    const { result } = await fresh.turn([classified('CONFIRM')], 'continue', MCP)
+
+    expect(architect).toHaveBeenCalledWith('a notes app', fresh.projectId, expect.any(Function))
+    const [branch] = await activeBranches(fresh.projectId)
+    // Named after the saved request, not after "continue".
+    expect(branch.name).toBe('notes')
+    expect(await tablesIn(branch.schemaName)).toEqual(['notes'])
+    expect(await tablesIn(fresh.schema)).toEqual([])
+    expect(result.blockedCalls).toEqual([expect.objectContaining({ tool: 'merge_branch', args: { branchId: branch.id } })])
+    expect(result.branchBuild).toMatchObject({ branch: 'notes', afterMerge: ['Generate REST API for notes', 'Seed notes'] })
+    // The plan took over from the saved request, so a later "yes" does not design it again.
+    expect(await loadLoopResume(fresh.projectId)).toBeNull()
   }, 120_000)
 })
