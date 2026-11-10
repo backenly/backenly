@@ -107,6 +107,9 @@ export function recordedV1<R extends Request, C, T extends Response>(
             durationMs,
             internalHeader,
             branchId,
+            // Read to keep the console's own requests and keyless refusals out (isProjectTraffic).
+            headers: request.headers,
+            search: url.search,
           })
         })
         .catch(() => {})

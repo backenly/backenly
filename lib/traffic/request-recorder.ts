@@ -33,6 +33,13 @@
  * with a value derived from the platform secret, so a client cannot use the
  * header to keep its own requests out of the log.
  *
+ * Nor two kinds of request that are not the project's traffic
+ * (`isProjectTraffic`): Backenly's console calling the project's API from its
+ * own pages, and a request refused because it presented no credential at all.
+ * Production QA (2026-11-09): a brand-new project's Monitoring showed the
+ * console's own Realtime connection as its first request, and keyless requests
+ * from strangers lowered its success rate.
+ *
  * ── What it also counts ─────────────────────────────────────────────────────
  *
  * Each written batch is added to its billing accounts' monthly API request
@@ -121,6 +128,69 @@ export interface ServedRequest {
    * failure tests included) never reads as a production incident.
    */
   branchId?: string | null
+  /** The request's headers and query string, read by `isProjectTraffic`. */
+  headers?: HeaderReader
+  search?: string
+}
+
+interface HeaderReader {
+  get(name: string): string | null | undefined
+}
+
+/** Headers and query parameters a caller sends a credential in (API key, realtime ticket, link token). */
+const CREDENTIAL_HEADERS = ['x-api-key', 'apikey', 'authorization']
+const CREDENTIAL_PARAMS = ['apiKey', 'api_key', 'ticket', 'token']
+
+/** The origin the console is served from. Null when unset: then the request's own host stands in. */
+function platformOrigin(): string | null {
+  try {
+    return process.env.NEXT_PUBLIC_APP_URL ? new URL(process.env.NEXT_PUBLIC_APP_URL).origin : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Whether a finished request is the project's own traffic, as Monitoring and
+ * every traffic signal should count it. Two kinds are not:
+ *
+ *   - Backenly's console calling the project's API from one of its own pages
+ *     (the Realtime page's stream): the Referer is a console page, /app/...,
+ *     on the platform's own origin. Browsers send the full URL on a
+ *     same-origin request under the console's referrer policy, and a page
+ *     cannot forge it. A project's own app on another origin never matches,
+ *     nor one served on the platform's host outside /app.
+ *   - a request refused (401) that presented no credential at all: a stranger
+ *     or a crawler. The Connect page counts failed key checks on their own.
+ *
+ * A request with a wrong key is still the project's traffic (it is often the
+ * project's own app holding a revoked key), and so is a 403.
+ */
+export function isProjectTraffic(req: { statusCode: number; headers?: HeaderReader; search?: string }): boolean {
+  const headers = req.headers
+  if (!headers) return true
+
+  const referer = headers.get('referer')
+  if (referer) {
+    try {
+      const page = new URL(referer)
+      const onConsolePage = page.pathname === '/app' || page.pathname.startsWith('/app/')
+      const platform = platformOrigin()
+      const host = headers.get('x-forwarded-host') ?? headers.get('host')
+      if (onConsolePage && (platform ? page.origin === platform : !!host && page.host === host)) return false
+    } catch {
+      // Not a URL: nothing to tell from it.
+    }
+  }
+
+  if (req.statusCode === 401) {
+    const params = new URLSearchParams(req.search ?? '')
+    const presented =
+      CREDENTIAL_HEADERS.some((name) => !!headers.get(name)?.trim()) ||
+      CREDENTIAL_PARAMS.some((name) => !!params.get(name)?.trim())
+    if (!presented) return false
+  }
+  return true
 }
 
 /** Queue one served request. Never throws, never awaits the database. */
@@ -130,6 +200,7 @@ export function recordRuntimeRequest(req: ServedRequest): void {
     const method = req.method.toUpperCase()
     if (method === 'OPTIONS' || method === 'HEAD') return
     if (isInternalTraffic(req.internalHeader)) return
+    if (!isProjectTraffic(req)) return
     if (buffer.length >= BUFFER_CEILING) return
 
     buffer.push({

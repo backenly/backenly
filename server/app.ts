@@ -129,6 +129,9 @@ app.use(['/api/v1/:projectId', '/api/v2/:projectId'], (req, res, next) => {
       statusCode: res.statusCode,
       durationMs: Date.now() - startedAt,
       internalHeader: req.get(INTERNAL_TRAFFIC_HEADER),
+      // Read to keep the console's own requests and keyless refusals out (isProjectTraffic).
+      headers: { get: (name: string) => req.get(name) ?? null },
+      search: new URL(req.originalUrl, 'http://runtime.internal').search,
     }
     // A forwarded request is not recorded here at all (Next already did), so
     // it needs no branch lookup either.
