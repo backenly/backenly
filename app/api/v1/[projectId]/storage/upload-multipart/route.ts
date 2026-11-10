@@ -11,7 +11,7 @@ import path from 'path'
 import fs from 'fs/promises'
 import os from 'os'
 import { recordedV1 } from '@/lib/traffic/recorded-v1'
-import { clampIsPublic } from '@/lib/storage/access-policy'
+import { cacheControlFor, clampIsPublic } from '@/lib/storage/access-policy'
 import { forgetFileNames, keepFileNames, storedFileName, withFileName } from '@/lib/storage/file-names'
 
 const CHUNK_UPLOAD_DIR = process.env.CHUNK_TEMP_DIR || path.join(os.tmpdir(), 'backenly-chunks')
@@ -118,10 +118,15 @@ async function handleInitiate(request: NextRequest, context: { projectId: string
       // The key is recorded on the platform row (its path), so a regional
       // project's names only by their stand-in (lib/storage/file-names.ts).
       const s3Key = `projects/${context.projectId}/buckets/${bucketName}/${uploadId}/${await storedFileName(context.projectId, safeFilename)}`
+      // A public object says how long it may be kept, as the S3 driver's
+      // uploads do (lib/services/s3Storage.ts): set here, on the object the
+      // parts assemble into.
+      const cacheControl = cacheControlFor(bucketRecord.accessPolicy, isPublic)
       const cmd = new CreateMultipartUploadCommand({
         Bucket: s3Bucket,
         Key: s3Key,
         ContentType: contentType,
+        ...(cacheControl.startsWith('public') ? { CacheControl: cacheControl } : {}),
         Metadata: { projectId: context.projectId, bucketId: bucketRecord.id },
       })
       const { UploadId: s3UploadId } = await s3.send(cmd)

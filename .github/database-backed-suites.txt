@@ -1819,3 +1819,9 @@ tests/integration/runtime-body-limit.spec.ts
 # auth tool says Backenly sends it on Cloud, the deployment's SMTP when
 # self-hosted. Creates a user and project in the platform database.
 tests/integration/auth-mail-says-who-sends-it.spec.ts
+
+# A public file is one a browser may keep: objects in a public bucket are
+# written with the bucket's public Cache-Control (S3 driver and multipart), and
+# behind the signed CDN a public file's redirect repeats one URL for a window
+# and may be kept for the rest of it. Real metadata database; S3 calls stubbed.
+tests/integration/public-files-are-cacheable.spec.ts
