@@ -186,14 +186,17 @@ function ActivityCard({ health, refreshing, onRefresh, onCopyFix, copiedIdx, for
           </>
         )}
 
-        {/* Origin-less rejections: bots, curl, or server scripts probing the
-            public endpoint. Informational: real browser frontends always send
-            an Origin header, so these never turn the card red. */}
+        {/* Requests without an Origin that failed the API key check: bots,
+            curl, or server scripts. Informational: real browser frontends
+            always send an Origin header, so these never turn the card red.
+            They were refused for the key, not for the missing Origin: a
+            request without one and with a valid key is served (production
+            QA, 2026-11-09). */}
         {(health?.probes?.count ?? 0) > 0 && (
           <p className={`border-t ${KIT.hairline} pt-2.5 text-[12px] leading-[18px] text-faint`}>
             {health!.probes!.count.toLocaleString()} {health!.probes!.count === 1 ? 'request' : 'requests'} without an Origin header
-            {health!.probes!.lastSeen ? ` (last ${formatTimeAgo(health!.probes!.lastSeen)})` : ''} were rejected. These are
-            usually bots, curl, or a server script missing its API key.
+            failed the API key check{health!.probes!.lastSeen ? ` (last ${formatTimeAgo(health!.probes!.lastSeen)})` : ''}. Usually
+            bots, curl, or a server script missing its key.
           </p>
         )}
       </div>
@@ -234,8 +237,8 @@ function RegisteredCard({
         title="Allowed origins"
         description={
           active.length > 0
-            ? `${active.length} active. Only these origins can call the SDK.`
-            : 'Optional. Until you add one, any origin can call the SDK.'
+            ? `${active.length} active. Browsers block calls from other sites; servers and mobile apps are not affected.`
+            : 'Optional. Until you add one, a web app on any site can call the SDK.'
         }
       />
 
