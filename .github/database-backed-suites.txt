@@ -1666,3 +1666,9 @@ tests/integration/auth-before-first-signup.spec.ts
 # Express app (server/app.ts), whose modules open the platform database, so it
 # runs with one.
 tests/integration/runtime-rejects-bad-bodies.spec.ts
+
+# The Deploy page and the version a publish records count the same tables, the
+# ones in the project's schema with Backenly's plumbing left out, and an update
+# names the tables it added, removed or changed. Real schema, the real state
+# route and the real publish.
+tests/integration/publish-counts-the-live-tables.spec.ts
