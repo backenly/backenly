@@ -4,6 +4,7 @@ import { v1AuthMiddleware, checkPermission, checkCapability } from '../lib/auth'
 import { sendError, sendSuccess, ErrorCodes } from '../lib/response'
 import { z } from 'zod'
 import { refusedDataRequest } from '@/lib/api/v1/data-errors'
+import { unknownQueryFields, unknownQueryFieldsMessage } from '@/lib/api/v1/schemas'
 import { typedParams, type TypedParams } from '@/lib/api/v1/typed-params'
 import { whereConditions } from '@/lib/api/v1/where'
 import type { QueryContext } from '@/lib/db/query-errors'
@@ -113,6 +114,13 @@ router.post('/:projectId/database/query', asyncRoute(v1AuthMiddleware), asyncRou
 
   if (!checkPermission(res, ctx, ['read', 'admin'])) return
   if (!checkCapability(res, ctx, '/database')) return
+
+  // A misspelt filter must not become a query with no filter (lib/api/v1/schemas.ts).
+  const unknown = unknownQueryFields(req.body)
+  if (unknown.length > 0) {
+    sendError(res, 'UNKNOWN_FIELD', unknownQueryFieldsMessage(unknown), 400, { fields: unknown })
+    return
+  }
 
   const parsed = querySchema.safeParse(req.body)
   if (!parsed.success) {

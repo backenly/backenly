@@ -254,6 +254,19 @@ describe.each([
     expect(await snapshot()).toHaveLength(3)
   })
 
+  it('a misspelt filter is refused by name, never read as no filter', async () => {
+    // Production (2026-11-09): `{ "wehre": { … } }` was dropped as an unknown
+    // field and the query returned every row the caller could see.
+    const res = await post(base(), '/database/query', { table: TABLE, wehre: { title: 'unowned' } })
+    const body = await res.json()
+    expect({ status: res.status, code: body.error?.code }).toEqual({ status: 400, code: 'UNKNOWN_FIELD' })
+    expect(JSON.stringify(body)).toContain('"wehre"')
+    expect(body.data).toBeUndefined()
+    // The fields the API does take still work, on whichever server answers.
+    const ok = await post(base(), '/database/query', { table: TABLE, where: { title: 'unowned' }, limit: 5, offset: 0 })
+    expect(ok.status).toBe(200)
+  })
+
   it('a duplicate of a unique value answers 409', async () => {
     const res = await post(base(), '/database/insert', { table: TABLE, data: { title: 'unowned' } })
     expect({ status: res.status, code: (await res.json()).error?.code }).toEqual({ status: 409, code: 'CONFLICT' })
