@@ -71,6 +71,81 @@ function firstValue(v: string | string[] | undefined): string | undefined {
   return Array.isArray(v) ? v[0] : v
 }
 
+/**
+ * Whether a filter value is written in PostgREST's grammar: an operator, a dot,
+ * and an operand of the shape that operator takes. The shape matters: `is.gd`
+ * (a domain) and `in.house` are values, `is.null` and `in.(1,2)` are not.
+ */
+function looksLikeV2Filter(value: string): boolean {
+  const v = value.startsWith('not.') ? value.slice(4) : value
+  const dot = v.indexOf('.')
+  if (dot < 1) return false
+  const op = v.slice(0, dot)
+  const rest = v.slice(dot + 1)
+  switch (op) {
+    case 'eq': case 'neq': case 'gt': case 'gte': case 'lt': case 'lte':
+    case 'like': case 'ilike': case 'match': case 'imatch':
+    case 'fts': case 'plfts': case 'phfts': case 'wfts':
+      return rest.length > 0
+    case 'is':
+      return /^(null|not_null|true|false|unknown)$/.test(rest)
+    case 'in':
+      return /^\(.*\)$/.test(rest)
+    case 'cs': case 'cd': case 'ov':
+      return /^[{[(].*[}\])]$/.test(rest)
+    case 'sl': case 'sr': case 'nxr': case 'nxl': case 'adj':
+      return /^[[(].*[\])]$/.test(rest)
+    default:
+      return false
+  }
+}
+
+/**
+ * Why a /db read written in /api/v2's grammar is refused, with the /api/v2
+ * request that does what was asked, or null when the read is /db's own.
+ *
+ * /db filters by equality and nothing else (translateReadQuery). Read as data,
+ * `?status=eq.paid` matched the literal "eq.paid" and answered 200 with no
+ * rows; a v2 order or an embedding select was dropped without a word
+ * (production QA, 2026-11-09). A wrong answer that looks right is worse than a
+ * refusal, so these are refused.
+ */
+export function v2GrammarIn(
+  query: Record<string, string | string[] | undefined>,
+  target: { projectId: string; table: string },
+): string | null {
+  const v2 = (q: string) => `/api/v2/${target.projectId}/${target.table}?${q}`
+  for (const [key, raw] of Object.entries(query)) {
+    const value = firstValue(raw)
+    if (value === undefined) continue
+    if (key === 'or' || key === 'and' || key === 'not.or' || key === 'not.and') {
+      return `"${key}" combines filters on /api/v2 only; /db filters by equality. Use ${v2(`${key}=${value}`)}.`
+    }
+    if (!RESERVED_QUERY_PARAMS.has(key) && IDENT.test(key) && looksLikeV2Filter(value)) {
+      const bare = value.slice(value.indexOf('.', value.startsWith('not.') ? 4 : 0) + 1)
+      return (
+        `"${key}=${value}" is /api/v2's filter syntax. On /db a filter is an equality (?${key}=${bare}); ` +
+        `for operators, use ${v2(`${key}=${value}`)}.`
+      )
+    }
+  }
+  const order = firstValue(query.order)
+  if (order !== undefined && !/^(asc|desc)$/i.test(order)) {
+    return (
+      'On /db, sort names the column and order is asc or desc (?sort=created_at&order=desc). ' +
+      `"order=${order}" is /api/v2's syntax: ${v2(`order=${order}`)}.`
+    )
+  }
+  const select = firstValue(query.select)
+  if (select !== undefined) {
+    const cols = select.split(',').map(c => c.trim()).filter(Boolean)
+    if (cols.some(c => c !== '*' && !IDENT.test(c))) {
+      return `On /db, select lists columns (?select=id,title). To embed related rows or rename columns, use ${v2(`select=${select}`)}.`
+    }
+  }
+  return null
+}
+
 /** Backenly REST query params → PostgREST query string. */
 export function translateReadQuery(opts: TranslateReadOptions): TranslatedQuery {
   const { query, hasSoftDelete, recordId } = opts
