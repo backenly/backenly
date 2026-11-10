@@ -826,10 +826,7 @@ async function runTurn(
             `[Brain] route=LOOP_RESUME_REARCHITECT domain=${resolved.blueprint.domain} ` +
             `steps=${resolved.blueprint.steps.length} architectTokens=${resolved.architectTokens}`,
           )
-          // The plan takes over from the marker: a later "yes" must not design
-          // and run it again. Steps that fail are saved as a resume queue.
-          await clearLoopResume(input.projectId)
-          return await blueprintExecuteTurn(
+          const ran = await blueprintExecuteTurn(
             resolved.blueprint.steps,
             resolved.architectTokens,
             dispatchCtx,
@@ -840,6 +837,12 @@ async function runTurn(
             resolved.blueprint.domain,
             extractRequirements(loopResume.request),
           )
+          // Once a step ran, the plan has taken over from the marker (steps that
+          // failed are its resume queue), so a later "yes" must not design and
+          // run it again. A plan whose price could not be held ran nothing, and
+          // keeps the marker so "continue" designs it again.
+          if (ran.toolsRun.length > 0) await clearLoopResume(input.projectId)
+          return ran
         }
         console.log('[Brain] architect failed again on the saved request; resuming the loop')
       }
