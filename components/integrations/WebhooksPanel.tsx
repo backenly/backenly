@@ -32,7 +32,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import {
   Webhook, Plus, Trash2, Send, KeyRound, Power,
-  CheckCircle2, AlertTriangle, ChevronRight, Pencil,
+  CheckCircle2, AlertTriangle, ChevronRight, Pencil, Lock,
 } from 'lucide-react'
 import {
   CopyButton, EmptyState, GhostPreview, KitBadge, KitButton, KitConfirmDialog, KitField, KitInput, KitModal, KitNote,
@@ -41,6 +41,9 @@ import {
 import { FOCUS, PAGE_GUTTER, PAGE_WIDTH } from '@/components/console/tokens'
 import { when } from '@/components/changes/present'
 import { WEBHOOK_EVENT_TYPES, EVENT_DESCRIPTIONS, type WebhookEventType } from '@/lib/webhooks/events'
+import { planDisplayName } from '@/lib/entitlements/plan-names'
+import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
+import Link from 'next/link'
 
 interface WebhookRow {
   id: string
@@ -132,6 +135,10 @@ const STATUS_LABEL: Record<string, string> = {
 export function WebhooksPanel({ projectId }: { projectId: string }) {
   const [webhooks, setWebhooks] = useState<WebhookRow[]>([])
   const [capture, setCapture] = useState<CaptureState | null>(null)
+  // Whether the project's plan includes webhooks, from the list route. On a
+  // plan without them the page says so and offers no form: it used to show
+  // "Add endpoint" and refuse what was filled in (production QA, 2026-11-09).
+  const [plan, setPlan] = useState<{ allowed: boolean; currentPlan?: string } | null>(null)
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [message, setMessage] = useState<{ tone: 'danger' | 'success' | 'warn'; text: string } | null>(null)
@@ -165,6 +172,7 @@ export function WebhooksPanel({ projectId }: { projectId: string }) {
       if (!res.ok) throw new Error(data.error ?? 'Webhooks could not be loaded.')
       setWebhooks(data.webhooks ?? [])
       setCapture(data.capture ?? null)
+      setPlan(data.plan ?? null)
       if (trigRes.ok) {
         const trig = await trigRes.json()
         setTriggerWebhooks(trig.triggers ?? [])
@@ -331,6 +339,18 @@ export function WebhooksPanel({ projectId }: { projectId: string }) {
     }
   }
 
+  const locked = plan?.allowed === false
+  const planName = plan?.currentPlan ? planDisplayName(plan.currentPlan) : 'a plan without webhooks'
+  // Plans and billing live in the Cloud console; a self-hosted build has none.
+  const plansLink = CLOUD_CONTROL_PLANE ? (
+    <Link
+      href="/app/billing"
+      className="text-[13px] font-medium text-zinc-100 underline decoration-white/25 underline-offset-4 hover:decoration-white/60"
+    >
+      See plans
+    </Link>
+  ) : undefined
+
   return (
     <div className={`${PAGE_WIDTH} ${PAGE_GUTTER} pb-16`}>
       <PageHeader
@@ -346,7 +366,8 @@ export function WebhooksPanel({ projectId }: { projectId: string }) {
         }
         actions={
           // The empty state carries this action itself; one button per intent.
-          loading || webhooks.length > 0 ? (
+          // A plan without webhooks offers no form at all.
+          !locked && (loading || webhooks.length > 0) ? (
             <KitButton variant="primary" icon={Plus} onClick={() => setCreating(true)}>
               Add endpoint
             </KitButton>
@@ -356,6 +377,12 @@ export function WebhooksPanel({ projectId }: { projectId: string }) {
 
       <div className="space-y-3">
         {loadError && <KitNote icon={AlertTriangle} tone="danger">{loadError}</KitNote>}
+
+        {locked && webhooks.length > 0 && (
+          <KitNote icon={Lock} tone="info" actions={plansLink}>
+            Webhooks are part of the Pro plan, and this project is on {planName}. The endpoints below still receive events, but none can be added, changed or removed.
+          </KitNote>
+        )}
 
         {message && (
           <KitNote icon={message.tone === 'success' ? CheckCircle2 : AlertTriangle} tone={message.tone}>
@@ -378,6 +405,15 @@ export function WebhooksPanel({ projectId }: { projectId: string }) {
           <div className="space-y-2">
             <Skeleton className="h-[64px] w-full rounded-[10px]" />
             <Skeleton className="h-[64px] w-full rounded-[10px]" />
+          </div>
+        ) : webhooks.length === 0 && locked ? (
+          <div className="rounded-[10px] border border-white/[0.08] bg-[#0f1012]">
+            <EmptyState
+              icon={Lock}
+              title="Webhooks are part of the Pro plan"
+              description={`This project is on ${planName}. On Pro, Backenly POSTs a signed JSON body to your URL when a row changes or an end user signs up, with retries and a delivery log.`}
+              action={plansLink}
+            />
           </div>
         ) : webhooks.length === 0 ? (
           <div className="rounded-[10px] border border-white/[0.08] bg-[#0f1012]">
@@ -427,30 +463,33 @@ export function WebhooksPanel({ projectId }: { projectId: string }) {
                       </span>
                     </button>
 
-                    <div className="flex flex-shrink-0 items-center gap-1">
-                      <KitButton
-                        variant="secondary"
-                        size="sm"
-                        icon={Send}
-                        loading={busyId === webhook.id}
-                        disabled={busyId !== null}
-                        onClick={() => sendTest(webhook)}
-                      >
-                        <span className="hidden sm:inline">Send test</span>
-                        <span className="sm:hidden">Test</span>
-                      </KitButton>
-                      <OverflowMenu
-                        label={`More actions for ${webhook.targetUrl}`}
-                        disabled={busyId !== null}
-                        items={[
-                          { label: 'Edit endpoint…', icon: Pencil, onClick: () => setEditing(webhook) },
-                          { label: webhook.active ? 'Disable' : 'Enable', icon: Power, onClick: () => setActive(webhook, !webhook.active) },
-                          { label: 'Rotate secret…', icon: KeyRound, onClick: () => setConfirmRotate(webhook) },
-                          { separator: true },
-                          { label: 'Delete endpoint…', icon: Trash2, danger: true, onClick: () => setConfirmDelete(webhook) },
-                        ]}
-                      />
-                    </div>
+                    {/* On a plan without webhooks every action here is refused, so none is offered. */}
+                    {!locked && (
+                      <div className="flex flex-shrink-0 items-center gap-1">
+                        <KitButton
+                          variant="secondary"
+                          size="sm"
+                          icon={Send}
+                          loading={busyId === webhook.id}
+                          disabled={busyId !== null}
+                          onClick={() => sendTest(webhook)}
+                        >
+                          <span className="hidden sm:inline">Send test</span>
+                          <span className="sm:hidden">Test</span>
+                        </KitButton>
+                        <OverflowMenu
+                          label={`More actions for ${webhook.targetUrl}`}
+                          disabled={busyId !== null}
+                          items={[
+                            { label: 'Edit endpoint…', icon: Pencil, onClick: () => setEditing(webhook) },
+                            { label: webhook.active ? 'Disable' : 'Enable', icon: Power, onClick: () => setActive(webhook, !webhook.active) },
+                            { label: 'Rotate secret…', icon: KeyRound, onClick: () => setConfirmRotate(webhook) },
+                            { separator: true },
+                            { label: 'Delete endpoint…', icon: Trash2, danger: true, onClick: () => setConfirmDelete(webhook) },
+                          ]}
+                        />
+                      </div>
+                    )}
                   </div>
 
                   {expanded && (

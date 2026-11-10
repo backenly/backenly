@@ -203,6 +203,21 @@ describe('webhooks', () => {
     expect(r.body.data.deliveries.map((d: any) => d.status)).toEqual(['FAILED', 'SUCCESS'])
   }, 60_000)
 
+  it('on a plan without webhooks, still lists them and their deliveries, and says the plan', async () => {
+    mockPlan = 'free'
+    const list = await call(RO_KEY, 'webhooks', { action: 'list' })
+    expect(list.body.ok).toBe(true)
+    expect(list.body.data.webhooks.map((w: any) => w.id)).toEqual([webhookId])
+    expect(list.body.data.plan).toEqual({ allowed: false, currentPlan: 'SANDBOX', requiredPlan: 'PRO' })
+    expect(list.body.summary).toContain('this project is on Free. These endpoints still receive events')
+    const logs = await call(RO_KEY, 'webhooks', { action: 'logs', webhookId })
+    expect(logs.body.ok).toBe(true)
+    expect(logs.body.data.deliveries).toHaveLength(2)
+    const test = await call(RW_KEY, 'webhooks', { action: 'test', webhookId })
+    expect(test.body).toMatchObject({ ok: false, code: 'PLAN_LIMIT_EXCEEDED' })
+    expect(receiver.received).toHaveLength(0)
+  }, 60_000)
+
   it('sends a failed delivery again as a new attempt, leaving the original as it was', async () => {
     const r = await call(RW_KEY, 'webhooks', { action: 'replay', deliveryId: failedLogId })
     expect(r.body).toMatchObject({ ok: true, data: { replayOf: failedLogId, success: true } })

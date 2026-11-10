@@ -1843,3 +1843,10 @@ tests/integration/branch-limit-holds.spec.ts
 # with their branch. Real schemas, real branch engine; PostgREST registration
 # stubbed.
 tests/integration/closed-branch-keys-end.spec.ts
+
+# On a plan without webhooks, reads are answered (the list with the plan in
+# it, not a 403), so the page says so before anyone fills in a form and an
+# endpoint made on Pro can still be read; every change is still refused. Real
+# routes, project check and database; sign-in is delegated and the plan is
+# mocked to Free.
+tests/integration/webhooks-say-the-plan-first.spec.ts
