@@ -50,6 +50,7 @@ describe('isBranchScopedRuntimePath', () => {
     // which branch it belongs to. OAuth returns through a provider the same way.
     `/api/v1/${ID}/auth/forgot-password`,
     `/api/v1/${ID}/auth/reset-password`,
+    `/api/v1/${ID}/auth/reset`,
     `/api/v1/${ID}/auth/verify-email`,
     `/api/v1/${ID}/auth/resend-verification`,
     `/api/v1/${ID}/auth/magic-link`,

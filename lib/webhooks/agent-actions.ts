@@ -14,8 +14,8 @@
  */
 
 import { canAccessProject, canWriteProject, canAdministerProject } from '@/lib/edition/guard'
-import { enforceWebhook } from '@/lib/entitlements/policy'
-import { billingAccountOf } from '@/lib/usage/account'
+import { planDisplayName } from '@/lib/entitlements/plan-names'
+import { onlyTurnsOff, webhookPlan, type WebhookPlanRefused, type WebhookUse } from '@/lib/webhooks/plan'
 import {
   createWebhook,
   deleteWebhook,
@@ -51,17 +51,22 @@ export const SIGNATURE_NOTE =
 type Access = 'read' | 'write' | 'admin'
 const GUARD = { read: canAccessProject, write: canWriteProject, admin: canAdministerProject } as const
 
-async function refuse(actor: WebhookActor, access: Access): Promise<WebhookActionResult | null> {
+async function refuse(actor: WebhookActor, access: Access, use: WebhookUse = 'change'): Promise<WebhookActionResult | null> {
   if (!(await GUARD[access](actor.userId, actor.projectId))) {
     return { ok: false, code: 'PROJECT_NOT_FOUND', summary: 'Project not found, or this key may not do that here.' }
   }
-  // The plan of the account the project bills to, not the caller's own.
-  const entitlement = await enforceWebhook((await billingAccountOf(actor.projectId)) ?? actor.userId)
-  if (entitlement !== true) {
+  // Reading never needs the plan, as on the routes (route-guard.ts): the list
+  // says what the plan is, and endpoints made before a downgrade can still be
+  // seen.
+  if (access === 'read') return null
+  // Nor does stopping: disabling or deleting an endpoint (lib/webhooks/plan.ts).
+  if (use === 'stop') return null
+  const plan = await webhookPlan(actor.userId, actor.projectId)
+  if (!plan.allowed) {
     return {
       ok: false,
       code: 'PLAN_LIMIT_EXCEEDED',
-      summary: `Webhooks require the Pro plan (current plan: ${entitlement.currentPlan}). Nothing was changed; a human upgrades the plan.`,
+      summary: `Webhooks require the Pro plan, and this project is on ${planDisplayName((plan as WebhookPlanRefused).currentPlan)}. Nothing was changed; a human changes the plan.`,
     }
   }
   return null
@@ -131,7 +136,7 @@ export async function listWebhooks(actor: WebhookActor): Promise<WebhookActionRe
   const denied = await refuse(actor, 'read')
   if (denied) return denied
 
-  const webhooks = await getProjectWebhooks(actor.projectId)
+  const [webhooks, plan] = await Promise.all([getProjectWebhooks(actor.projectId), webhookPlan(actor.userId, actor.projectId)])
   const required = webhooks.some((w) => w.active && isRowEventType(w.eventType))
   const tables = await listCapturedTables(actor.projectId).catch(() => null)
   const capture = {
@@ -143,13 +148,23 @@ export async function listWebhooks(actor: WebhookActor): Promise<WebhookActionRe
 
   const lines = webhooks.map((w) =>
     `• ${w.id}: ${w.eventType} → ${w.targetUrl}${w.active ? '' : ' (disabled)'}, ${w._count.logs} deliveries`)
+  // On a plan without webhooks the list still answers, and says so: endpoints
+  // can be disabled or deleted, and nothing else changed, until a human
+  // changes the plan.
+  const onPlan = plan.allowed ? null : planDisplayName((plan as WebhookPlanRefused).currentPlan)
   return {
     ok: true,
     summary: webhooks.length
       ? `Webhooks (${webhooks.length}):\n${lines.join('\n')}` +
-        (capture.healthy ? '' : '\n\nWARNING: an active row webhook exists but no table is being captured, so row events are not being delivered.')
-      : `No webhooks yet. Create one with webhooks { action: "create", eventType, targetUrl }; eventType is one of ${WEBHOOK_EVENT_TYPES.join(', ')}.`,
-    data: { webhooks: webhooks.map(present), capture },
+        (capture.healthy ? '' : '\n\nWARNING: an active row webhook exists but no table is being captured, so row events are not being delivered.') +
+        (onPlan
+          ? `\n\nWebhooks are part of the Pro plan, and this project is on ${onPlan}. These endpoints still receive events. ` +
+            'They can be disabled or deleted; adding or changing one needs the Pro plan, which a human changes.'
+          : '')
+      : onPlan
+        ? `No webhooks. Webhooks are part of the Pro plan, and this project is on ${onPlan}, so none can be created; a human changes the plan.`
+        : `No webhooks yet. Create one with webhooks { action: "create", eventType, targetUrl }; eventType is one of ${WEBHOOK_EVENT_TYPES.join(', ')}.`,
+    data: { webhooks: webhooks.map(present), capture, plan },
   }
 }
 
@@ -213,7 +228,7 @@ export async function updateProjectWebhook(
   if (Object.keys(changes).length === 0) {
     return { ok: false, code: 'INVALID_ARGUMENT', summary: 'Nothing to change: pass targetUrl, eventType or active.' }
   }
-  const denied = await refuse(actor, 'write')
+  const denied = await refuse(actor, 'write', onlyTurnsOff(changes) ? 'stop' : 'change')
   if (denied) return denied
 
   let updated
@@ -242,7 +257,7 @@ export async function deleteProjectWebhook(
   if (typeof args.webhookId !== 'string' || !args.webhookId) {
     return { ok: false, code: 'INVALID_ARGUMENT', summary: 'webhookId is required.' }
   }
-  const denied = await refuse(actor, 'admin')
+  const denied = await refuse(actor, 'admin', 'stop')
   if (denied) return denied
 
   const result = await deleteWebhook(args.webhookId, actor.projectId)

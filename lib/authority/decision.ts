@@ -121,6 +121,19 @@ export interface AuthorityInputs {
   /** Recent changes by anyone, for conflict detection. */
   recentChanges?: CorrelatedChange[]
   /**
+   * The finding the action answers. A class may judge a finding on the probe
+   * that raised it (ActionClass.evidenceByFindingType); without one, its
+   * declared sensors.
+   */
+  findingType?: string
+  /** What building it would occupy, for a class with build bounds. Absent is unknown. */
+  build?: BuildFacts
+  /**
+   * Earlier attempts at this exact change, for a class whose attempts are
+   * recorded; 'unknown' when the record could not be read.
+   */
+  priorAttempts?: PriorAttempts | 'unknown'
+  /**
    * Every ownership intent recorded for the resource's table, newest first.
    *
    * The LIST, not a boolean. A boolean would collapse "declared by the owner
@@ -140,6 +153,40 @@ export interface AuthorityInputs {
    */
   delegations?: TierDelegation[]
 }
+
+/** What an action that builds on a table would occupy (ActionClass.buildBounds). */
+export interface BuildFacts {
+  /** The table's data in bytes (the heap a build reads), or null when it could not be read. */
+  tableBytes: number | null
+  /** A partitioned table cannot be indexed online. */
+  partitioned: boolean
+  /** Estimated size of what is built, or null when there are no planner statistics to estimate from. */
+  estimatedBytes: number | null
+  /**
+   * The account's measured database storage and what its plan includes. Null
+   * when the plan sets no limit; 'unknown' when it could not be read.
+   */
+  storage: { usedBytes: number; includedBytes: number } | null | 'unknown'
+}
+
+/** Earlier attempts at the same change (lib/autonomy/index-trials.ts). */
+export interface PriorAttempts {
+  /** Backenly built it and it was taken away since: by whom, why, and until when a person decides the next one. */
+  removed: { by: 'backenly' | 'someone_else'; builtAt: string | null; removedAt: string; until: string; finding: string } | null
+  /** Failed attempts in a row, and how many it takes before a person decides. */
+  failures: number
+  failureLimit: number
+  lastFailure: string | null
+}
+
+const GIB = 1024 ** 3
+const MIB = 1024 ** 2
+function bytes(n: number): string {
+  if (n >= GIB) return `${(n / GIB).toFixed(1)} GB`
+  if (n >= MIB) return `${Math.round(n / MIB)} MB`
+  return `${Math.max(1, Math.round(n / 1024))} KB`
+}
+const day = (iso: string | null) => (iso ? iso.slice(0, 10) : 'an earlier day')
 
 export interface AuthorityDecision {
   decision: Decision
@@ -339,8 +386,9 @@ export function decideAuthority(input: AuthorityInputs): AuthorityDecision {
     }
   }
 
-  const evidence = cls.requiredSensors.map(r => judgeSensor(r, input.probes))
-  const verifierEvidence = judgeSensor(cls.verifier, input.probes)
+  const claim = (input.findingType && cls.evidenceByFindingType?.[input.findingType]) || null
+  const evidence = (claim?.requiredSensors ?? cls.requiredSensors).map(r => judgeSensor(r, input.probes))
+  const verifierEvidence = judgeSensor(claim?.verifier ?? cls.verifier, input.probes)
   const recoveryStatus: 'implemented' | 'not_implemented' =
     cls.recovery === 'none' || canRollback(cls.recovery as any)
       ? 'implemented'
@@ -511,6 +559,72 @@ export function decideAuthority(input: AuthorityInputs): AuthorityDecision {
       `intent_${intentEval?.refusal ?? 'unavailable'}`,
       `${cls.id} changes who can read data. ${intentEval?.note ?? 'No intent was supplied.'} ` +
         'Backenly would be guessing the predicate.',
+    )
+  }
+
+  // ── Size: how much an action may build on its own ─────────────────────────
+  //
+  // Unknown is not small: a size that could not be read sends the action to a
+  // person, as a limit that is exceeded does.
+  if (cls.buildBounds) {
+    const b = input.build
+    const max = cls.buildBounds
+    const table = tableOf(input.resource)
+    if (!b || b.tableBytes === null) {
+      narrow('PROPOSE_ONLY', 'build_size_unknown', `The size of ${table} could not be read, so Backenly cannot tell how long building on it would take.`)
+    } else if (b.partitioned) {
+      narrow('PROPOSE_ONLY', 'build_not_online', `${table} is partitioned, and PostgreSQL cannot build an index on a partitioned table without blocking its writes.`)
+    } else if (b.tableBytes > max.maxTableBytes) {
+      narrow(
+        'PROPOSE_ONLY',
+        'table_too_large',
+        `${table} holds ${bytes(b.tableBytes)} of data. Backenly builds on its own only on tables up to ${bytes(max.maxTableBytes)}; ` +
+          'on a larger one the build runs long enough that a person should choose when.',
+      )
+    }
+    if (b?.storage === 'unknown') {
+      narrow('PROPOSE_ONLY', 'storage_unknown', "The account's database storage could not be read, so Backenly cannot tell whether this fits in what the plan includes.")
+    } else if (b?.storage) {
+      if (b.estimatedBytes === null) {
+        narrow('PROPOSE_ONLY', 'build_size_unknown', `PostgreSQL has no statistics for ${table} yet, so the size of the index cannot be estimated.`)
+      } else {
+        const share = (b.storage.usedBytes + b.estimatedBytes) / b.storage.includedBytes
+        if (share > max.maxStorageShare) {
+          narrow(
+            'PROPOSE_ONLY',
+            'storage_headroom',
+            `This would take about ${bytes(b.estimatedBytes)}, bringing the account to ${Math.round(share * 100)}% of the ` +
+              `${bytes(b.storage.includedBytes)} of database storage its plan includes. Backenly leaves the last ` +
+              `${Math.round((1 - max.maxStorageShare) * 100)}% to you.`,
+          )
+        }
+      }
+    }
+  }
+
+  // ── Earlier attempts at this exact change ─────────────────────────────────
+  if (input.priorAttempts === 'unknown') {
+    narrow('PROPOSE_ONLY', 'prior_attempts_unknown', 'The record of earlier attempts at this change could not be read, so Backenly cannot tell whether it was recently removed.')
+  }
+  const prior = input.priorAttempts === 'unknown' ? undefined : input.priorAttempts
+  if (prior?.removed) {
+    const r = prior.removed
+    narrow(
+      'PROPOSE_ONLY',
+      'recently_removed',
+      r.by === 'backenly'
+        ? `Backenly built this on ${day(r.builtAt)} and removed it on ${day(r.removedAt)}, because ${r.finding}. ` +
+            `It does not build it again on its own before ${day(r.until)}.`
+        : `Backenly built this on ${day(r.builtAt)} and someone removed it on ${day(r.removedAt)}. ` +
+            `Backenly does not build it again on its own before ${day(r.until)}.`,
+    )
+  }
+  if (prior && prior.failures >= prior.failureLimit) {
+    narrow(
+      'PROPOSE_ONLY',
+      'build_failed_repeatedly',
+      `Backenly tried ${prior.failures} times in a row to build this without blocking the table, and could not.` +
+        (prior.lastFailure ? ` The last attempt: ${prior.lastFailure}` : ''),
     )
   }
 

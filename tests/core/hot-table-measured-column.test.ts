@@ -142,7 +142,9 @@ describe('with no measurement available, it names no column', () => {
     // This routing already existed and was correct; it simply never fired,
     // because the name list nearly always found something to name.
     expect(classifyFix('infra_hot_table', { tableName: 'orders' }).decision).toBe('notify_only')
+    // With a column, the index waits for a person
+    // (tests/core/hot-table-index-waits-for-a-person.test.ts).
     expect(classifyFix('infra_hot_table', { tableName: 'orders', columnName: 'customer_ref' }).decision)
-      .toBe('auto')
+      .toBe('approval')
   })
 })

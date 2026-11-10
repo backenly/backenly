@@ -1,4 +1,5 @@
 import { prisma } from '@/lib/db'
+import { uploaderOf, type UploaderRecord } from '@/lib/storage/uploader'
 import { promises as fs } from 'fs'
 import path from 'path'
 import crypto from 'crypto'
@@ -24,7 +25,7 @@ export interface StorageService {
   uploadFile(
     bucketId: string,
     file: { name: string; buffer: Buffer; mimeType?: string },
-    options: { isPublic?: boolean; projectId: string; uploadedBy?: string }
+    options: { isPublic?: boolean; projectId: string; uploadedBy?: string; uploader?: UploaderRecord }
   ): Promise<{ id: string; name: string; path: string; url: string; size: bigint }>
   listFiles(bucketId: string | undefined, projectId: string, options?: { limit?: number; offset?: number; search?: string }): Promise<Array<{
     id: string
@@ -33,6 +34,8 @@ export interface StorageService {
     mimeType: string | null
     isPublic: boolean
     uploadedBy: string | null
+    /** Who sent it (lib/storage/uploader.ts). Null when nothing was recorded. */
+    uploader: UploaderRecord | null
     bucket: string
     createdAt: Date
     url: string
@@ -238,7 +241,7 @@ class LocalStorageService implements StorageService {
   async uploadFile(
     bucketId: string,
     file: { name: string; buffer: Buffer; mimeType?: string },
-    options: { isPublic?: boolean; projectId: string; uploadedBy?: string }
+    options: { isPublic?: boolean; projectId: string; uploadedBy?: string; uploader?: UploaderRecord }
   ) {
     if (!options.projectId) {
       throw new Error('Project ID is required for tenant isolation')
@@ -444,6 +447,7 @@ class LocalStorageService implements StorageService {
           isPublic: isPublicFile,
           projectId: options.projectId, // Required - use validated projectId
           uploadedBy: options?.uploadedBy || null,
+          ...(options?.uploader ? { metadata: { uploader: { ...options.uploader } } } : {}),
           processingStatus: 'pending', // Will be updated by storageProcessing hook (#77)
         },
       })
@@ -528,6 +532,7 @@ class LocalStorageService implements StorageService {
       mimeType: file.mimeType,
       isPublic: file.isPublic,
       uploadedBy: file.uploadedBy ?? null,
+      uploader: uploaderOf(file),
       bucket: file.bucket.name,
       createdAt: file.createdAt,
       url: file.isPublic

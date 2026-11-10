@@ -54,12 +54,13 @@ describe('infra_hot_table is a registered, dispatchable finding type', () => {
     const action = buildFixAction('infra_hot_table_notes', REPAIRABLE)
     expect(action).toEqual({
       action: 'CREATE_INDEX',
-      params: { tableName: 'notes', columnName: 'user_id' },
+      // Built online: the table is live (lib/execution/online-index.ts).
+      params: { tableName: 'notes', columnName: 'user_id', online: true },
     })
   })
 
-  it('is classified auto only when there is a column to index', () => {
-    expect(classifyFix('infra_hot_table_notes', REPAIRABLE).decision).toBe('auto')
+  it('waits for a person when there is a column to index, and has nothing to run when there is none', () => {
+    expect(classifyFix('infra_hot_table_notes', REPAIRABLE).decision).toBe('approval')
     expect(classifyFix('infra_hot_table_users', NOT_REPAIRABLE).decision).toBe('notify_only')
   })
 

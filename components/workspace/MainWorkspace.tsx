@@ -6,6 +6,7 @@ import { EmptyState, KitButton, Skeleton } from '@/components/inspector/kit'
 
 import { WorkspaceHome } from './WorkspaceHome'
 import { WorkspaceSetup } from './WorkspaceSetup'
+import { sharedRead } from '@/lib/client/shared-read'
 
 interface MainWorkspaceProps {
   projectId: string
@@ -57,22 +58,21 @@ export function MainWorkspace({ projectId, projectName }: MainWorkspaceProps) {
   const [stateStatus, setStateStatus] = useState<'loading' | 'ready' | 'error'>('loading')
   const [blockedCount, setBlockedCount] = useState(0)
 
-  const fetchBuildStatus = useCallback(async () => {
+  // WorkspaceHome reads /build-status too, and a return to the tab fires both
+  // `focus` and `visibilitychange`: each read joins one already on its way
+  // (lib/client/shared-read.ts). After a change, `fresh` reads afresh.
+  const fetchBuildStatus = useCallback(async (fresh = false) => {
     try {
-      const res = await fetch(`/api/projects/${projectId}/build-status`, { credentials: 'include' })
-      if (res.ok) {
-        const data = await res.json()
-        setBlockedCount(data.blocked?.length ?? 0)
-      }
+      const res = await sharedRead(`/api/projects/${projectId}/build-status`, { fresh })
+      if (res.ok && res.data) setBlockedCount(res.data.blocked?.length ?? 0)
     } catch { /* non-fatal */ }
   }, [projectId])
 
-  const fetchBackendState = useCallback(async () => {
+  const fetchBackendState = useCallback(async (fresh = false) => {
     try {
-      const response = await fetch(`/api/projects/${projectId}/state`, { credentials: 'include' })
-      if (response.ok) {
-        const data = await response.json()
-        setBackendState(data)
+      const response = await sharedRead(`/api/projects/${projectId}/state`, { fresh })
+      if (response.ok && response.data) {
+        setBackendState(response.data)
         setStateStatus('ready')
       } else {
         console.error('Failed to fetch backend state: HTTP', response.status)
@@ -96,8 +96,8 @@ export function MainWorkspace({ projectId, projectName }: MainWorkspaceProps) {
   // capability summary would disagree with the auth inspector until reload.
   useEffect(() => {
     const refresh = () => {
-      fetchBackendState()
-      fetchBuildStatus()
+      fetchBackendState(true)
+      fetchBuildStatus(true)
     }
     window.addEventListener('backenly:oauth-connected', refresh)
     return () => {

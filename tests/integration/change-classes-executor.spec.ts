@@ -22,13 +22,15 @@
  * written into it, the moved columns dropped with their values kept), and is
  * restored newest first.
  *
- * Statements apply_migration refuses (RENAME TABLE, ALTER COLUMN TYPE, DROP
- * COLUMN, DROP TABLE, CREATE TYPE, CREATE VIEW, INSERT, UPDATE, DELETE) are
- * asserted refused with nothing applied and nothing recorded. Where the executor still has a real path
- * for one of those classes, that path is exercised instead: the dashboard's
- * column delete (lib/services/tableLifecycle.ts), a drop_table a person approves
- * from the review queue (lib/mcp/approvals.ts), and the executor's own
- * ALTER_COLUMN_TYPE action. Enums and views have no executor path at all.
+ * Statements apply_migration refuses (RENAME TABLE, DROP TABLE, CREATE TYPE,
+ * CREATE VIEW, INSERT, UPDATE, DELETE) are asserted refused with nothing
+ * applied and nothing recorded. Where the executor has a path of its own for
+ * one of those classes, or for a column drop or retype (which apply_migration
+ * runs too: migrations-drop-column-and-retype.spec.ts), that path is exercised:
+ * the dashboard's column delete (lib/services/tableLifecycle.ts), a drop_table
+ * a person approves from the review queue (lib/mcp/approvals.ts), and the
+ * executor's own ALTER_COLUMN_TYPE action. Enums and views have no executor
+ * path at all.
  */
 
 jest.mock('@cloud/entitlements', () => {
@@ -441,7 +443,7 @@ changeClass('RENAME COLUMN', {
   },
 })
 
-// ── ALTER COLUMN TYPE: apply_migration refuses it; the executor's own action ──
+// ── ALTER COLUMN TYPE: the executor's own action, as a planned retype runs it ──
 
 /** The executor's ALTER_COLUMN_TYPE action, as a person's planned retype runs it. Returns the change's id. */
 async function retype(tableName: string, columnName: string, newType: string): Promise<string> {
@@ -454,7 +456,7 @@ async function retype(tableName: string, columnName: string, newType: string): P
   return change.id
 }
 
-changeClass('ALTER COLUMN TYPE integer → bigint (the executor\'s ALTER_COLUMN_TYPE; apply_migration refuses it)', {
+changeClass('ALTER COLUMN TYPE integer → bigint (the executor\'s ALTER_COLUMN_TYPE)', {
   tables: ['meters'],
   arrange: async () => {
     await migrated('CREATE TABLE meters (label text NOT NULL, reading integer)')
@@ -490,9 +492,9 @@ changeClass('ALTER COLUMN TYPE numeric → integer, a lossy cast (the executor\'
   },
 })
 
-// ── DROP COLUMN: apply_migration refuses it; the dashboard's column delete ───
+// ── DROP COLUMN: the dashboard's column delete ────────────────────────────────
 
-changeClass('DROP COLUMN, from the dashboard (apply_migration refuses it): its values are kept and come back', {
+changeClass('DROP COLUMN, from the dashboard: its values are kept and come back', {
   tables: ['contacts'],
   arrange: async () => {
     await migrated('CREATE TABLE contacts (name text NOT NULL, phone text)')
@@ -598,10 +600,8 @@ changeClass('ADD CONSTRAINT … UNIQUE', {
   act: () => migrated('ALTER TABLE badges ADD CONSTRAINT badges_code_key UNIQUE (code)'),
   risk: 'additive',
   recorded: (row, after) => {
-    // A soft-delete table gets the uniqueness as a partial unique index (lib/ai/minimal-executor.ts).
-    const idx = after.cat.tables.badges.indexes.find((i) => i.name === 'badges_code_key')!
-    expect(idx).toMatchObject({ unique: true })
-    expect(idx.definition).toMatch(/\(code\) WHERE \(deleted_at IS NULL\)/)
+    // Declared in SQL: the constraint as written, over every row, by its name (lib/ai/minimal-executor.ts).
+    expect(after.cat.tables.badges.constraints.find((c) => c.name === 'badges_code_key')).toMatchObject({ type: 'u', definition: 'UNIQUE (code)' })
   },
 })
 
@@ -1128,19 +1128,21 @@ describe('a large table: 200,000 rows through a dropped column and a rewrite, ea
 describe('statements apply_migration refuses: nothing applied, nothing recorded', () => {
   it.each([
     ['RENAME TABLE', 'ALTER TABLE pantry RENAME TO larder', 'UNSUPPORTED_STATEMENT'],
-    ['ALTER COLUMN TYPE', 'ALTER TABLE meters ALTER COLUMN reading TYPE bigint', 'UNSUPPORTED_STATEMENT'],
-    ['DROP COLUMN', 'ALTER TABLE contacts DROP COLUMN name', 'DESTRUCTIVE_REFUSED'],
+    // A column is dropped or retyped as a governed change whose vault keeps its
+    // values (migrations-drop-column-and-retype.spec.ts); Backenly's own columns
+    // never are, and a conversion that could reach past the column is refused.
+    ['a column Backenly keeps dropped', 'ALTER TABLE contacts DROP COLUMN id', 'RESERVED_COLUMN'],
+    ['a USING that reads another column', 'ALTER TABLE meters ALTER COLUMN reading TYPE bigint USING length(other)', 'UNSAFE_EXPRESSION'],
     ['DROP TABLE', 'DROP TABLE shelves', 'DESTRUCTIVE_REFUSED'],
     ['CREATE TYPE … AS ENUM', "CREATE TYPE mood AS ENUM ('calm', 'busy')", 'UNSUPPORTED_STATEMENT'],
     ['an enum column', "ALTER TABLE shelves ADD COLUMN mood mood", 'UNSUPPORTED_TYPE'],
     ['CREATE VIEW', 'CREATE VIEW pantry_items AS SELECT item FROM pantry', 'UNSUPPORTED_STATEMENT'],
-    // No agent path drops a constraint or an index, or changes a primary key,
-    // which Backenly manages. The engine's handling of each is proved in
-    // change-recovery.spec.ts, and a plain index's drop below.
-    ['DROP CONSTRAINT', 'ALTER TABLE contacts DROP CONSTRAINT contacts_email_key', 'DESTRUCTIVE_REFUSED'],
-    ['DROP INDEX', 'DROP INDEX pantry_item_idx', 'DESTRUCTIVE_REFUSED'],
+    // A constraint or an index is dropped as a governed change
+    // (migrations-drop-index-and-constraint.spec.ts); the primary key, which
+    // Backenly manages, is never moved and never dropped. The engine's handling
+    // of each drop is proved in change-recovery.spec.ts, and a plain index's below.
     ['a primary key moved to another column', 'ALTER TABLE shelves ADD PRIMARY KEY (title)', 'UNSUPPORTED_CONSTRAINT'],
-    ['the primary key dropped', 'ALTER TABLE shelves DROP CONSTRAINT shelves_pkey', 'DESTRUCTIVE_REFUSED'],
+    ['the primary key dropped', 'ALTER TABLE shelves DROP CONSTRAINT shelves_pkey', 'PRIMARY_KEY'],
     ['a refused statement after a valid one', 'CREATE TABLE never_made (x text);\nDROP TABLE shelves', 'DESTRUCTIVE_REFUSED'],
     ['rows moved between tables (INSERT … SELECT)', 'INSERT INTO larder (item) SELECT item FROM pantry', 'DML_NOT_MIGRATION'],
     ['rows deleted (DELETE)', 'DELETE FROM pantry WHERE qty IS NULL', 'DML_NOT_MIGRATION'],

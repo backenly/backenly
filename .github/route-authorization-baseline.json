@@ -90,6 +90,11 @@
     "reason": "ACCEPTED: unauthenticated by design; authority comes from the six-digit code mailed to the address, not a session. The code is stored as an HMAC, dies after five wrong guesses and is single-use. Rate-limited via AUTH_LIMITS."
   },
   {
+    "route": "/api/auth/session",
+    "status": "ACCEPTED",
+    "reason": "ACCEPTED: unauthenticated by design - it answers whether the caller is signed in, so a signed-out caller gets an answer instead of a 401. Authority is the caller's own session cookie: with a valid one it returns that user's own profile, without one only { user: null, canRefresh }. It takes no identifier, names no resource and is read-only."
+  },
+  {
     "route": "/api/auth/verify-email",
     "status": "ACCEPTED",
     "reason": "ACCEPTED: unauthenticated by design; authority comes from the signed token in the link."

@@ -164,8 +164,11 @@ function SignupForm() {
     }
     // Turnstile issues single-use tokens, so a failed submit must not be
     // retried with the same one — the server would reject it as a duplicate.
+    // Said under the check, where the form's own errors appear, not on the
+    // email field: it outlined a valid address in red and pointed "below" to
+    // a check further down (production QA, 2026-11-09).
     if (isTurnstileEnabled && !turnstileToken) {
-      setErrors({ email: 'Please complete the verification check below.' })
+      setErrors({ form: 'Complete the verification check above to create your account.' })
       return
     }
     setErrors({})
