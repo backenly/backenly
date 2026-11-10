@@ -3,9 +3,11 @@ import { prisma } from '@/lib/db/postgres'
 import { trackApiKeyUsage } from '@/lib/services/apiKeyUsage'
 import crypto from 'crypto'
 import { classifyKeyFailure } from './apiKeyFailureDiagnostic'
-import { countInRegion, regionalRateCounting } from '@/lib/auth-projection/rate'
+import { countInRegion, regionalRateCounting, type RateDecision } from '@/lib/auth-projection/rate'
 import { authorizingKeyByHash, type AuthorizingKey } from '@/lib/auth-projection/read'
 import { endUserBearerToken } from '@/lib/security/end-user-bearer'
+import { clientIpFromHeaders } from '@/lib/security/client-ip'
+import { countKeyedRequest, isSharedKey } from '@/lib/security/shared-key-rate'
 
 export interface ApiKeyAuthResult {
   authenticated: boolean
@@ -45,8 +47,16 @@ export interface ApiKeyAuthResult {
  *   - Authorization: Bearer <key>
  *   - x-api-key: <key>
  * Verification uses SHA-256 hash lookup (O(1), no bcrypt needed for API keys).
+ *
+ * The request is counted against the key's limit: per client for a key every
+ * user of an app sends (lib/security/shared-key-rate.ts). `count: false`
+ * authenticates without counting, for a presence write, which the presence
+ * route counts per user instead.
  */
-export async function authenticateApiKey(request: NextRequest): Promise<ApiKeyAuthResult> {
+export async function authenticateApiKey(
+  request: NextRequest,
+  { count = true }: { count?: boolean } = {},
+): Promise<ApiKeyAuthResult> {
   // Accept key from Authorization: Bearer OR x-api-key header
   let providedKey: string | null = null
 
@@ -102,17 +112,18 @@ export async function authenticateApiKey(request: NextRequest): Promise<ApiKeyAu
         failureReason: classifyKeyFailure(providedKey, key ? 'expired' : 'unknown_key'),
       }
     }
-    const decision = await countInRegion(region, {
-      id: key.id,
-      keyHash,
-      rateLimit: key.rateLimit,
-      rateLimitWindow: key.rateLimitWindow,
-    })
+    const decision = count
+      ? await countKeyedRequest(
+          { id: key.id, keyHash, rateLimit: key.rateLimit, rateLimitWindow: key.rateLimitWindow, shared: isSharedKey(key) },
+          clientIpFromHeaders(request),
+          (limit) => countInRegion(region, { id: key.id, keyHash, rateLimit: limit, rateLimitWindow: key.rateLimitWindow }),
+        )
+      : null
     return {
       authenticated: true,
       apiKey: { id: key.id, userId: key.userId, permissions: key.permissions, role: key.role },
       record: key,
-      ...(decision.allowed ? {} : { rateLimited: true, error: 'Rate limit exceeded' }),
+      ...(decision && !decision.allowed ? { rateLimited: true, error: 'Rate limit exceeded' } : {}),
     }
   }
 
@@ -143,8 +154,31 @@ export async function authenticateApiKey(request: NextRequest): Promise<ApiKeyAu
       failureReason: classifyKeyFailure(providedKey, expiredMatch ? 'expired' : 'unknown_key'),
     }
   }
-  
-  // Check rate limits
+
+  const authenticated: ApiKeyAuthResult = {
+    authenticated: true,
+    apiKey: {
+      id: apiKey.id,
+      userId: apiKey.userId,
+      permissions: apiKey.permissions,
+      role: apiKey.role,
+    },
+  }
+  if (!count) return authenticated
+
+  const decision = await countKeyedRequest(
+    { id: apiKey.id, keyHash, rateLimit: apiKey.rateLimit, rateLimitWindow: apiKey.rateLimitWindow, shared: isSharedKey(apiKey) },
+    clientIpFromHeaders(request),
+    (limit) => countAtHome(apiKey, limit),
+  )
+  return decision.allowed ? authenticated : { ...authenticated, rateLimited: true, error: 'Rate limit exceeded' }
+}
+
+/** Count one request against the key's own window at home, api_keys.requestCount, while it is under `limit`. */
+async function countAtHome(
+  apiKey: { id: string; rateLimitWindow: number; requestCount: number; resetAt: Date | null },
+  limit: number,
+): Promise<RateDecision> {
   const now = new Date()
   const resetAt = apiKey.resetAt || new Date(now.getTime() + apiKey.rateLimitWindow * 1000)
 
@@ -165,33 +199,10 @@ export async function authenticateApiKey(request: NextRequest): Promise<ApiKeyAu
   // If another concurrent request already pushed it over the limit, updated.count === 0.
   // history: usage bookkeeping (last used, rate-limit window), not configuration
   const updated = await prisma.apiKey.updateMany({
-    where: { id: apiKey.id, requestCount: { lt: apiKey.rateLimit } },
+    where: { id: apiKey.id, requestCount: { lt: limit } },
     data: { requestCount: { increment: 1 }, lastUsed: now },
   })
-
-  if (updated.count === 0) {
-    return {
-      authenticated: true,
-      apiKey: {
-        id: apiKey.id,
-        userId: apiKey.userId,
-        permissions: apiKey.permissions,
-        role: apiKey.role,
-      },
-      rateLimited: true,
-      error: 'Rate limit exceeded',
-    }
-  }
-  
-  return {
-    authenticated: true,
-    apiKey: {
-      id: apiKey.id,
-      userId: apiKey.userId,
-      permissions: apiKey.permissions,
-      role: apiKey.role,
-    },
-  }
+  return { allowed: updated.count > 0, remaining: Math.max(0, limit - apiKey.requestCount - 1), resetAt }
 }
 
 /**

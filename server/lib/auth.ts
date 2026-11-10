@@ -19,6 +19,7 @@ import { countInRegion, regionalRateCounting, type RateKey } from '@/lib/auth-pr
 import { authorizingKeyByHash, authorizingProject } from '@/lib/auth-projection/read'
 import type { CloudRegionId } from '@/lib/regions'
 import { clientIpFromNodeRequest } from '@/lib/security/client-ip'
+import { countKeyedRequest, isSharedKey } from '@/lib/security/shared-key-rate'
 import crypto from 'crypto'
 import { prisma } from '@/lib/db'
 import { verifyPassword } from '@/lib/auth/password'
@@ -223,19 +224,21 @@ async function enforceHardRateLimit(apiKeyRecord: any): Promise<RateLimitDecisio
 
 /**
  * Count a request against a key's window: in the region when it counts there
- * (lib/auth-projection/rate.ts), at home otherwise.
+ * (lib/auth-projection/rate.ts), at home otherwise. A key every user of an app
+ * sends is counted per `client`, the caller's address (lib/security/shared-key-rate.ts).
  */
-export async function enforceKeyRateLimit(key: RateKey): Promise<RateLimitDecision> {
+export async function enforceKeyRateLimit(key: RateKey, client: string | null = null): Promise<RateLimitDecision> {
   const region = regionalRateCounting()
-  if (region) return countInRegion(region, key)
-  return enforceRateLimitByKeyId(key.id)
+  if (region) return countKeyedRequest(key, client, (limit) => countInRegion(region, { ...key, rateLimit: limit }))
+  return enforceRateLimitByKeyId(key.id, client)
 }
 
 /**
- * Enforce rate limiting by API key ID.
+ * Enforce rate limiting by API key ID, at home: per `client` for a key every
+ * user of an app sends, as enforceKeyRateLimit.
  * Exported so dynamic.ts (which has its own auth flow) can reuse it.
  */
-export async function enforceRateLimitByKeyId(keyId: string): Promise<RateLimitDecision> {
+export async function enforceRateLimitByKeyId(keyId: string, client: string | null = null): Promise<RateLimitDecision> {
   const record = await prisma.apiKey.findUnique({
     where: { id: keyId },
     select: {
@@ -244,13 +247,20 @@ export async function enforceRateLimitByKeyId(keyId: string): Promise<RateLimitD
       rateLimitWindow: true,
       requestCount: true,
       resetAt: true,
+      keyHash: true,
+      keyType: true,
+      serviceRole: true,
     },
   })
   if (!record) {
     // Key not found — let the auth middleware handle it; just allow here
     return { allowed: true, remaining: 0, resetAt: new Date() }
   }
-  return enforceHardRateLimit(record)
+  return countKeyedRequest(
+    { id: record.id, keyHash: record.keyHash ?? '', rateLimit: record.rateLimit, rateLimitWindow: record.rateLimitWindow, shared: isSharedKey(record) },
+    client,
+    (limit) => enforceHardRateLimit({ ...record, rateLimit: limit }),
+  )
 }
 
 // ── v1 Auth Middleware ────────────────────────────────────────────────────────
@@ -259,8 +269,9 @@ export async function enforceRateLimitByKeyId(keyId: string): Promise<RateLimitD
  * Express middleware: validates API key + project ownership + rate limit.
  * Attaches V1ApiContext to req.v1Context on success.
  * Sets standard X-RateLimit-* headers on every response.
+ * `countRequest` is false only for a presence write (v1PresenceAuthMiddleware).
  */
-export async function v1AuthMiddleware(req: Request, res: Response, next: NextFunction) {
+export async function v1AuthMiddleware(req: Request, res: Response, next: NextFunction, countRequest = true) {
   const projectId = req.params.projectId
 
   if (!projectId) {
@@ -403,28 +414,37 @@ export async function v1AuthMiddleware(req: Request, res: Response, next: NextFu
   }
 
   // ── Hard rate limiting ──────────────────────────────────────────────────────
+  // Per client for a key every user of an app sends (lib/security/shared-key-rate.ts).
   const limit: number = apiKeyRecord.rateLimit ?? 1000
-  const rl = regional
-    ? await countInRegion(regional.region, {
-        id: apiKeyRecord.id,
-        keyHash: regional.keyHash,
-        rateLimit: limit,
-        rateLimitWindow: apiKeyRecord.rateLimitWindow ?? 3600,
-      })
-    : await enforceHardRateLimit(apiKeyRecord)
+  const rateKey: RateKey = {
+    id: apiKeyRecord.id,
+    keyHash: regional?.keyHash ?? ('keyHash' in apiKeyRecord ? apiKeyRecord.keyHash : null) ?? '',
+    rateLimit: limit,
+    rateLimitWindow: apiKeyRecord.rateLimitWindow ?? 3600,
+    shared: isSharedKey(apiKeyRecord),
+  }
+  const rl = countRequest
+    ? await countKeyedRequest(rateKey, clientIpFromNodeRequest(req), (perKey) =>
+        regional
+          ? countInRegion(regional.region, { ...rateKey, rateLimit: perKey })
+          : enforceHardRateLimit({ ...apiKeyRecord, rateLimit: perKey }),
+      )
+    : null
 
   // Always send rate limit headers so clients can self-throttle
-  res.setHeader('X-RateLimit-Limit', String(limit))
-  res.setHeader('X-RateLimit-Remaining', String(rl.remaining))
-  res.setHeader('X-RateLimit-Reset', String(Math.floor(rl.resetAt.getTime() / 1000)))
+  if (rl) {
+    res.setHeader('X-RateLimit-Limit', String(limit))
+    res.setHeader('X-RateLimit-Remaining', String(rl.remaining))
+    res.setHeader('X-RateLimit-Reset', String(Math.floor(rl.resetAt.getTime() / 1000)))
+  }
 
-  if (!rl.allowed) {
+  if (rl && !rl.allowed) {
     if (rl.retryAfter) res.setHeader('Retry-After', String(rl.retryAfter))
     sendError(
       res,
       ErrorCodes.RATE_LIMIT_EXCEEDED,
-      `Rate limit exceeded. You may make ${limit} requests per ${Math.round((apiKeyRecord.rateLimitWindow ?? 3600) / 60)} minute(s). ` +
-      `Try again in ${rl.retryAfter ?? 'a moment'} second(s).`,
+      `Rate limit exceeded. You may make ${limit} requests per ${Math.round((apiKeyRecord.rateLimitWindow ?? 3600) / 60)} minute(s)` +
+      `${rateKey.shared ? ' from each address with this key' : ''}. Try again in ${rl.retryAfter ?? 'a moment'} second(s).`,
       429,
       { retryAfter: rl.retryAfter, limit, resetAt: rl.resetAt.toISOString() }
     )
@@ -448,6 +468,15 @@ export async function v1AuthMiddleware(req: Request, res: Response, next: NextFu
   void touchProjectActivity(projectId)
 
   next()
+}
+
+/**
+ * v1AuthMiddleware for a presence write, which spends nothing of the key's
+ * limit: the presence route counts it per address and per user instead
+ * (lib/security/shared-key-rate.ts).
+ */
+export async function v1PresenceAuthMiddleware(req: Request, res: Response, next: NextFunction) {
+  return v1AuthMiddleware(req, res, next, false)
 }
 
 // ── Permission helpers ─────────────────────────────────────────────────────────

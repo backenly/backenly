@@ -1427,6 +1427,14 @@ tests/integration/auth-projection-reads.spec.ts
 # Both databases and the real SQL are the property, so it needs a real Postgres.
 tests/integration/auth-rate-windows.spec.ts
 
+# A key every user of an app sends is limited per address, not per key: one
+# address at its limit leaves another untouched on the v1 middleware, /db,
+# /api/v2 and the Next routes, the key keeps its count past its limit for the
+# console, a service-role key keeps one window, and presence writes spend
+# nothing of the limit but are capped per user and, before the key is looked
+# up, per address. Real keys, routes and tokens.
+tests/integration/shared-key-rate-limits.spec.ts
+
 # A revocation reported done only once the project's region has it: a home
 # project's change is not applicable, a regional key's revocation is confirmed
 # with the copy no longer holding the key, a region that cannot apply it leaves
