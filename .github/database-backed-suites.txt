@@ -1894,3 +1894,8 @@ tests/integration/function-redeploy-in-history.spec.ts
 # the route answers one look per project every 10 minutes and says when the
 # next may start. Real session, project and engine.
 tests/integration/architecture-look-now.spec.ts
+
+# An end user's last_login ("Last active", "Active in 30 days") follows their
+# use: a sign-up on either server and a request made with their token stamp it;
+# a verifier account never. Real database, both servers' sign-up.
+tests/integration/end-user-last-active.spec.ts

@@ -143,6 +143,11 @@ export async function trackEndUserActive(
 ): Promise<void> {
   if (!projectId || !endUserId) return
   if (isReservedTestEmail(email)) return
+  // The same use is the user's "Last active" on the Auth page, in the
+  // project's own users table (lib/services/end-user-auth-table.ts).
+  const stamped = import('@/lib/services/end-user-auth-table')
+    .then(({ stampLastActive }) => stampLastActive(projectId, endUserId))
+    .catch(() => {})
   const month = thisMonth()
   try {
     // A project kept in another region is counted under a per-project stand-in
@@ -164,6 +169,7 @@ export async function trackEndUserActive(
   } catch {
     /* tracking must never break auth */
   }
+  await stamped
 }
 
 // One tracking write per end user per UTC day per process, however many
