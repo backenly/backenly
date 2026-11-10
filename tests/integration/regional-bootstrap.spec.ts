@@ -337,7 +337,7 @@ describe('a region’s first database', () => {
       superUrl(),
       `SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolbypassrls
          FROM pg_roles WHERE rolname = ANY($1) ORDER BY rolname`,
-      [[...LOGINS, 'anon', 'authenticated', 'service_role', 'backenly_external']],
+      [[...LOGINS, 'anon', 'authenticated', 'service_role', 'backenly_external', 'backenly_no_schema_changes']],
     )
     const no = { rolsuper: false, rolcreaterole: false, rolcreatedb: false }
     expect(attributes).toEqual([
@@ -347,6 +347,7 @@ describe('a region’s first database', () => {
       { rolname: 'backenly_authenticator', ...no, rolinherit: false, rolcanlogin: true, rolbypassrls: false },
       { rolname: 'backenly_backup', ...no, rolinherit: false, rolcanlogin: true, rolbypassrls: true },
       { rolname: 'backenly_external', ...no, rolinherit: true, rolcanlogin: false, rolbypassrls: false },
+      { rolname: 'backenly_no_schema_changes', ...no, rolinherit: true, rolcanlogin: false, rolbypassrls: false },
       { rolname: 'service_role', ...no, rolinherit: true, rolcanlogin: false, rolbypassrls: false },
     ])
 

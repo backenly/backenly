@@ -142,6 +142,43 @@ describe('a read-write login made before the setting existed', () => {
   }, 60_000)
 })
 
+describe('held by a definer that is not a superuser, as on Amazon RDS', () => {
+  // RDS gives no superuser. Its master owns the definer functions and holds
+  // ADMIN on the roles it created, nothing more, and a role-level setting of
+  // Backenly's own (ALTER ROLE ... SET backenly.x) needs a superuser to write.
+  // All of this runs in one transaction and is rolled back, so other suites
+  // only ever see the functions as installed.
+  it('makes a read-write login that refuses schema changes, and lets its owner allow them', async () => {
+    const definer = `bkn_test_definer_${hex}`
+    const login = `bkn_rw_${randomBytes(6).toString('hex')}`
+    const refused = async () =>
+      (await q(
+        `SELECT EXISTS (SELECT 1 FROM pg_auth_members m JOIN pg_roles g ON g.oid = m.roleid JOIN pg_roles u ON u.oid = m.member
+                         WHERE g.rolname = 'backenly_no_schema_changes' AND u.rolname = $1) AS yes`,
+        [login],
+      ))[0].yes as boolean
+    await q('BEGIN')
+    try {
+      await q(`CREATE ROLE ${definer} NOLOGIN NOSUPERUSER CREATEROLE`)
+      // ADMIN on the groups the install made, as the master that made them holds it.
+      for (const { rolname } of await q(`SELECT rolname FROM pg_roles WHERE rolname IN ('backenly_external', 'backenly_no_schema_changes')`)) {
+        await q(`GRANT ${rolname} TO ${definer} WITH ADMIN TRUE, INHERIT FALSE, SET FALSE`)
+      }
+      await q(`ALTER FUNCTION public.backenly_direct_create_role(text, text, text, text) OWNER TO ${definer}`)
+      await q(`ALTER FUNCTION public.backenly_direct_set_schema_changes(text, boolean) OWNER TO ${definer}`)
+
+      await q(`SELECT public.backenly_direct_create_role($1, $2, $3, 'READ_WRITE')`, [login, PASSWORD, schema])
+      expect(await refused()).toBe(true)
+      await q(`SELECT public.backenly_direct_set_schema_changes($1, true)`, [login])
+      expect(await refused()).toBe(false)
+      await q(`SELECT public.backenly_direct_set_schema_changes($1, false)`, [login])
+      expect(await refused()).toBe(true)
+    } finally {
+      await q('ROLLBACK')
+    }
+  }, 60_000)
+})
+
 describe('through the application', () => {
   it('provisions read-write access that refuses schema changes, says so, and lets the admin allow them', async () => {
     process.env.BACKENLY_EDITION = 'cloud'

@@ -16,6 +16,9 @@
 --
 --   1. backenly_external            — NOLOGIN group; pg_hba only admits remote
 --                                     connections for members of this group.
+--      backenly_no_schema_changes   — NOLOGIN role with no privileges; a
+--                                     read-write login that is a member may not
+--                                     change the schema (section 5b).
 --   2. backenly_direct_create_role  — create/reset a bkn_ro_/bkn_rw_ login role
 --                                     (hardened: connection limit, timeouts,
 --                                     search_path pinned to the one schema).
@@ -86,10 +89,16 @@ LANGUAGE sql STABLE AS $fn$
 $fn$;
 
 -- ── 1. Remote-access group (pg_hba matches +backenly_external) ───────────────
+-- And the role that marks a read-write login that may not change the schema
+-- (section 5b). The definer grants both, so it holds ADMIN on each: it created
+-- them, here or in the regional procedure (tools/managed-db/regional/sql/roles.sql).
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'backenly_external') THEN
     CREATE ROLE backenly_external NOLOGIN;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'backenly_no_schema_changes') THEN
+    CREATE ROLE backenly_no_schema_changes NOLOGIN;
   END IF;
 END $$;
 
@@ -142,7 +151,9 @@ BEGIN
     -- A new read-write login changes rows, not the schema, until the project's
     -- admin allows it (section 5b). Re-keying an existing login keeps its setting.
     IF p_mode = 'READ_WRITE' THEN
-      EXECUTE format('ALTER ROLE %I SET backenly.schema_changes = %L', p_role, 'off');
+      EXECUTE format(CASE WHEN current_setting('server_version_num')::int >= 160000
+                          THEN 'GRANT backenly_no_schema_changes TO %I WITH INHERIT FALSE, SET FALSE'
+                          ELSE 'GRANT backenly_no_schema_changes TO %I' END, p_role);
     END IF;
   END IF;
 
@@ -324,12 +335,13 @@ BEGIN
   IF p_ro IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = p_ro) THEN p_ro := NULL; END IF;
   IF p_rw IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = p_rw) THEN p_rw := NULL; END IF;
 
-  -- Whether the rw login may change the schema (section 5b): not when its role
-  -- says so. A login made before the setting existed has none, and keeps the
-  -- schema changes it had.
+  -- Whether the rw login may change the schema (section 5b): not while it is a
+  -- member of backenly_no_schema_changes. A login made before the setting
+  -- existed is not, and keeps the schema changes it had.
   v_rw_ddl := p_rw IS NOT NULL AND NOT EXISTS (
-    SELECT 1 FROM pg_roles
-     WHERE rolname = p_rw AND 'backenly.schema_changes=off' = ANY (coalesce(rolconfig, '{}'::text[])));
+    SELECT 1 FROM pg_auth_members m
+     WHERE m.roleid = (SELECT oid FROM pg_roles WHERE rolname = 'backenly_no_schema_changes')
+       AND m.member = (SELECT oid FROM pg_roles WHERE rolname = p_rw));
 
   -- ── Ownership model (READ_WRITE only) ──────────────────────────────────────
   IF p_rw IS NOT NULL AND p_owner IS NOT NULL THEN
@@ -478,12 +490,20 @@ REVOKE ALL ON FUNCTION public.backenly_direct_sync_schema(text, text, text, text
 -- whenever it runs: ownership-role membership and CREATE on the schema with
 -- schema changes allowed, row grants alone without. Takes effect at the next
 -- sync, which the application runs right after calling this.
+--
+-- The setting is membership of backenly_no_schema_changes, a role with no
+-- privileges, granted without INHERIT or SET from PostgreSQL 16. A setting of
+-- Backenly's own on the role (ALTER ROLE ... SET backenly.x) would need a
+-- superuser to write, and a managed database such as Amazon RDS has none: its
+-- master, which owns these functions, holds ADMIN on the roles it created.
 CREATE OR REPLACE FUNCTION public.backenly_direct_set_schema_changes(
   p_role  text,
   p_allow boolean
 ) RETURNS boolean
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public
 AS $fn$
+DECLARE
+  v_refused boolean;
 BEGIN
   IF p_role !~ '^bkn_rw_[0-9a-f]{12}$' THEN
     RAISE EXCEPTION 'backenly_direct_set_schema_changes: invalid role name %', p_role;
@@ -494,7 +514,27 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = p_role) THEN
     RAISE EXCEPTION 'backenly_direct_set_schema_changes: role % does not exist', p_role;
   END IF;
-  EXECUTE format('ALTER ROLE %I SET backenly.schema_changes = %L', p_role, CASE WHEN p_allow THEN 'on' ELSE 'off' END);
+  v_refused := EXISTS (
+    SELECT 1 FROM pg_auth_members m
+     WHERE m.roleid = (SELECT oid FROM pg_roles WHERE rolname = 'backenly_no_schema_changes')
+       AND m.member = (SELECT oid FROM pg_roles WHERE rolname = p_role));
+  IF p_allow AND v_refused THEN
+    EXECUTE format('REVOKE backenly_no_schema_changes FROM %I', p_role);
+  ELSIF NOT p_allow AND NOT v_refused THEN
+    EXECUTE format(CASE WHEN current_setting('server_version_num')::int >= 160000
+                        THEN 'GRANT backenly_no_schema_changes TO %I WITH INHERIT FALSE, SET FALSE'
+                        ELSE 'GRANT backenly_no_schema_changes TO %I' END, p_role);
+  END IF;
+  -- A REVOKE of a grant another role made only warns, so the result is read
+  -- back rather than assumed.
+  IF EXISTS (
+    SELECT 1 FROM pg_auth_members m
+     WHERE m.roleid = (SELECT oid FROM pg_roles WHERE rolname = 'backenly_no_schema_changes')
+       AND m.member = (SELECT oid FROM pg_roles WHERE rolname = p_role)
+  ) = p_allow THEN
+    RAISE EXCEPTION 'backenly_direct_set_schema_changes: schema changes over % are still %', p_role,
+      CASE WHEN p_allow THEN 'refused' ELSE 'allowed' END;
+  END IF;
   RETURN true;
 END
 $fn$;
