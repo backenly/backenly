@@ -81,7 +81,10 @@ export async function authenticateApiKey(request: NextRequest): Promise<ApiKeyAu
   if (!providedKey) {
     return {
       authenticated: false,
-      error: 'API key required. Send via Authorization: Bearer <key>, x-api-key header, or ?apiKey= query param.',
+      // The headers only. A key in a URL ends up in logs and history; the query
+      // parameter is still read for EventSource, which cannot set headers, but it
+      // is not offered to everyone who forgot a key (production QA, 2026-11-09).
+      error: 'API key required. Send it in the x-api-key header or as Authorization: Bearer <key>.',
       failureReason: classifyKeyFailure(null, 'missing'),
     }
   }
