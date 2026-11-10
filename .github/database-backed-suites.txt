@@ -1900,6 +1900,11 @@ tests/integration/architecture-look-now.spec.ts
 # a verifier account never. Real database, both servers' sign-up.
 tests/integration/end-user-last-active.spec.ts
 
+# GET /auth/me answers the signed-in end user on both servers, from one flow:
+# the token checked as every data request checks it (revoked, suspended,
+# other project), the user read from the real users table.
+tests/integration/end-user-auth-me.spec.ts
+
 # The schema diagram reads every table's columns in one request: /structure
 # without a table answers each table exactly as its own request does, and
 # /relationships without a table answers each foreign key once. Real catalog

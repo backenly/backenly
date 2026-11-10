@@ -10,6 +10,7 @@ import { sendError, sendSuccess, ErrorCodes } from '../lib/response'
 import {
   refreshEndUserToken,
   logoutEndUser,
+  currentEndUser,
   forgotEndUserPassword,
   resetEndUserPassword,
   requestEmailVerification,
@@ -510,6 +511,21 @@ async function handleLogout(req: Request, res: Response) {
   res.status(result.status).json(result.body)
 }
 
+/**
+ * GET /api/v1/:projectId/auth/me
+ * The signed-in end user. The token is read from Authorization (Bearer) or
+ * X-User-Token, the header the SDK sends it in. Mounted before the OAuth
+ * router, whose /auth/:provider used to answer this path with a 404.
+ */
+async function handleMe(req: Request, res: Response) {
+  const env = await authEnvironment(req, res)
+  if (!env) return
+  const header = req.headers['x-user-token']
+  const token = tokenFrom(req) ?? (typeof header === 'string' && header ? header : null)
+  const result = await currentEndUser(req.params.projectId, token, env)
+  res.status(result.status).json(result.body)
+}
+
 async function handleForgotPassword(req: Request, res: Response) {
   const { projectId } = req.params
   // IP rate limit — this endpoint can trigger emails, so it needs its own
@@ -680,6 +696,7 @@ router.post('/:projectId/auth/signup', asyncRoute(handleSignUp))
 router.post('/:projectId/auth/signin', asyncRoute(handleSignIn))
 router.post('/:projectId/auth/refresh-token', asyncRoute(handleRefreshToken))
 router.post('/:projectId/auth/logout', asyncRoute(handleLogout))
+router.get('/:projectId/auth/me', asyncRoute(handleMe))
 router.post('/:projectId/auth/verify-email', asyncRoute(handleVerifyEmail))
 router.get('/:projectId/auth/verify-email', asyncRoute(handleVerifyEmailPage))
 router.post('/:projectId/auth/resend-verification', asyncRoute(handleResendVerification))
