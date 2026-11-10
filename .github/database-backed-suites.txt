@@ -1804,3 +1804,6 @@ tests/integration/sql-as-written.spec.ts
 # run. A route function reads the project's variables as process.env.KEY, and
 # none replaces a variable Backenly sets.
 tests/integration/function-run-record.spec.ts
+# The runtime answers a body over its JSON limit 413 PAYLOAD_TOO_LARGE and names
+# the limit (server/app.ts), as the web tier does.
+tests/integration/runtime-body-limit.spec.ts

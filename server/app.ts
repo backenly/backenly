@@ -283,6 +283,19 @@ app.use((err: any, _req: express.Request, res: express.Response, next: express.N
   // as a 500, a client's malformed JSON read as the platform failing, in the
   // response and in every error count (found by fuzzing the data API).
   if (err?.expose === true && Number.isInteger(err.status) && err.status >= 400 && err.status < 500) {
+    // Over the limit says so and names it, as the web tier's own limit does
+    // (middleware.ts): "could not be read" is what a malformed body gets, and a
+    // caller could not tell a batch that was too big from one that was broken.
+    if (err.type === 'entity.too.large') {
+      const mb = Number(err.limit) / (1024 * 1024)
+      res.status(413).json({
+        error: Number.isFinite(mb) && mb > 0
+          ? `Request body is larger than the ${mb} MB this endpoint accepts.`
+          : 'Request body is larger than this endpoint accepts.',
+        code: 'PAYLOAD_TOO_LARGE',
+      })
+      return
+    }
     res.status(err.status).json({
       error: err.type === 'entity.parse.failed' ? 'The request body is not valid JSON.' : 'The request body could not be read.',
       code: 'BAD_REQUEST',
