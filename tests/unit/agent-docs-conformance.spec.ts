@@ -345,20 +345,18 @@ describe('the auth doc describes the API the runtime serves', () => {
   // The authorities: server/routes/auth.ts (the production Express door) and
   // lib/api/v1/route-not-found.ts (the runtime's own 404 hint). The doc once
   // promised accessToken/refreshToken fields nothing returns, an X-User-Token
-  // logout nothing reads, and a GET /auth/me nothing serves — and the 404's
+  // logout nothing reads, and a GET /auth/me nothing served — and the 404's
   // hint itself advertised /auth/me, so an agent trusting its own error
-  // retried the same shape forever.
+  // retried the same shape forever. Both servers now serve GET /auth/me
+  // (production QA 2026-11-09, report 28), and the doc lists it.
   const authDoc = fs.readFileSync(path.join(ROOT, 'public', 'docs', 'agents', 'auth.md'), 'utf8')
-  const skillMd = fs.readFileSync(path.join(ROOT, 'public', 'skill.md'), 'utf8')
   const notFound = fs.readFileSync(path.join(ROOT, 'lib', 'api', 'v1', 'route-not-found.ts'), 'utf8')
   const authRouter = fs.readFileSync(path.join(ROOT, 'server', 'routes', 'auth.ts'), 'utf8')
 
-  it('the runtime serves no /auth/me, and nothing LISTS it as served', () => {
-    expect(authRouter).not.toContain('auth/me')
-    // Saying "there is no /auth/me" is fine; OFFERING it as an endpoint is not.
-    expect(authDoc).not.toMatch(/\|\s*GET\s*\|\s*`\/auth\/me`/)
-    expect(skillMd).not.toMatch(/`\/auth\/me`,/)
-    expect(notFound).not.toMatch(/'[A-Z]+ +\/auth\/me/)
+  it('the runtime serves GET /auth/me, and the auth doc lists it as served', () => {
+    expect(authRouter).toMatch(/router\.get\('\/:projectId\/auth\/me'/)
+    expect(authDoc).toMatch(/\|\s*GET\s*\|\s*`\/auth\/me`/)
+    expect(authDoc).not.toContain('There is no `/auth/me`')
   })
 
   it('responses are { data: { user, token } } — no accessToken/refreshToken pair', () => {

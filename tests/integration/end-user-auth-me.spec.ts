@@ -120,6 +120,23 @@ describe('the runtime', () => {
   }, 60_000)
 })
 
+describe('reads from one address', () => {
+  it('are limited, since no API key is needed here, and the refusal says when to try again', async () => {
+    const ip = `198.18.12.${crypto.randomInt(1, 250)}`
+    for (let i = 0; i < 300; i++) {
+      const res = await express('/auth/me', { headers: { 'x-forwarded-for': ip } })
+      await res.text()
+      expect(res.status).toBe(401)
+    }
+    const refused = await express('/auth/me', { headers: { 'x-forwarded-for': ip } })
+    expect(refused.status).toBe(429)
+    expect(Number(refused.headers.get('retry-after'))).toBeGreaterThan(0)
+    expect((await refused.json()).error).toMatchObject({ code: 'RATE_LIMIT_EXCEEDED' })
+    // Another address is not held back by it.
+    expect((await express('/auth/me', { headers: { 'x-forwarded-for': '198.18.13.1' } })).status).toBe(401)
+  }, 120_000)
+})
+
 describe('the Next route', () => {
   it('answers the same as the runtime', async () => {
     const asha = await shopper('Asha')

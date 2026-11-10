@@ -40,12 +40,13 @@ Relative to `https://backenly.com/api/v1/{projectId}`, with `x-api-key: <project
 | POST | `/auth/signin` | `{ email, password }` returns `{ data: { user, token } }` |
 | POST | `/auth/refresh-token` | current token as `Authorization: Bearer <token>` (or `{ token }`) returns `{ data: { token, user } }` — there is no separate refresh token |
 | POST | `/auth/logout` | current token as `Authorization: Bearer <token>` (or `{ token }`); revokes it. Always answers 200 |
+| GET | `/auth/me` | current token as `Authorization: Bearer <token>` (or `X-User-Token`) returns the signed-in user, `{ data: { user: { id, email, name, role } } }`, as the account is now. A revoked token answers 401, a suspended account 403 |
 | POST | `/auth/forgot-password` | `{ email }`, always 200 (no account enumeration) |
 | POST | `/auth/reset-password` | `{ token, password }` |
 | GET | `/auth/{provider}?redirect_to=…` | OAuth start; redirects back to `redirect_to` with `?token=…&user_id=…` |
 | POST | `/auth/magic-link` | `{ email, redirectTo? }` emails a one-time sign-in link |
 | POST | `/auth/verify-email` | `{ token }` |
 
-Send the access token as `X-User-Token` on data requests; that is what row-level security reads. There is no `/auth/me`: the signup/signin/refresh responses carry the `user` object, and the token's claims carry `userId`. `users` is never served through `/db/users`.
+Send the access token as `X-User-Token` on data requests; that is what row-level security reads. `/auth/me` says who is signed in; the signup/signin/refresh responses carry the `user` object too, and the token's claims carry `userId`. `users` is never served through `/db/users`.
 
 OAuth `redirect_to` only redirects to a **connected frontend origin** — connect it first with `connect { "action": "connect_frontend", "url": "…" }`. An unconnected origin never receives a token: the OAuth start refuses with `REDIRECT_NOT_ALLOWED` so the failure is visible on your screen, not after the provider round-trip.
