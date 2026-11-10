@@ -62,10 +62,65 @@ export class ReadQueryError extends Error {
     message: string,
     readonly code: string,
     readonly hint?: string,
+    /** The HTTP status a route answers with: the caller's statement (400), or Backenly's side (503). */
+    readonly status: number = 400,
   ) {
     super(message)
     this.name = 'ReadQueryError'
   }
+}
+
+/**
+ * The read-only connection could not be opened or was lost. Nothing ran.
+ *
+ * Its message is the only part a caller sees, so it names no host, address,
+ * role or database: PostgreSQL's own text does ("no pg_hba.conf entry for host
+ * "10.0.x.x", user "bkn_ro_…", database "backenly", no encryption"), and
+ * that text reached customers and their agents verbatim (production,
+ * 2026-11-02 to 2026-11-09). The original is logged for operators.
+ */
+export const READ_CONNECTION_FAILED =
+  "Backenly couldn't open the read-only connection to this project's database, so the query didn't run. " +
+  'Try again in a minute. If it keeps failing, contact support.'
+
+/**
+ * Failures of the connection rather than of the statement: SQLSTATE class 08
+ * (connection exception), 28 (authorization, where pg_hba refusals land), 53
+ * (insufficient resources: too many connections), 57P01–57P05 (the server
+ * shutting down, recovering or refusing new sessions), and Node's own socket
+ * errors. A statement timeout (57014) is the caller's query and stays theirs.
+ */
+export function isConnectionFailure(err: unknown): boolean {
+  const code = (err as { code?: unknown })?.code
+  if (typeof code === 'string') {
+    if (/^(08|28|53)[0-9A-Z]{3}$/.test(code) || /^57P0[1-5]$/.test(code)) return true
+    if (/^E[A-Z]+$/.test(code)) return true // ECONNREFUSED, ETIMEDOUT, ENOTFOUND, …
+    if (/CERT|^ERR_(TLS|SSL)/.test(code)) return true // certificate and handshake failures
+  }
+  const message = err instanceof Error ? err.message : ''
+  return /Connection terminated|timeout expired|Connection ended unexpectedly|does not support SSL/i.test(message)
+}
+
+/**
+ * How the read-only client connects: the project's own database URL with the
+ * read-only role's credentials in it.
+ *
+ * Built from the URL, never from its parts, so TLS is exactly what the
+ * platform's own connections to that database use: `sslmode` and the other
+ * TLS parameters in the URL, or PGSSLMODE when the URL names none. This used
+ * to pass host, port and database separately with `ssl: false`, a choice made
+ * when the database ran on the same machine. On RDS, where every connection
+ * must be encrypted, PostgreSQL then refused every read-only query, so
+ * run_query and the console's SQL tab both failed for every project.
+ */
+export function readOnlyConnection(
+  projectUrl: string,
+  cred: { roleName: string; password: string },
+): { connectionString: string } {
+  const url = new URL(projectUrl)
+  url.username = cred.roleName
+  url.password = cred.password
+  return { connectionString: url.toString() }
 }
 
 // ── Guards ───────────────────────────────────────────────────────────────────
@@ -278,22 +333,6 @@ export function redactRows(
 
 // ── Execution ────────────────────────────────────────────────────────────────
 
-/**
- * Internal connection info: the host, port and database of the project's own
- * database, in its region, where its read-only role exists. The developer-facing
- * credential carries a PUBLIC host built for psql; the server dials the database
- * the way it reaches it itself. A region this process has no connection for is
- * refused (REGION_NOT_CONFIGURED), never tried against another region.
- */
-async function internalTarget(projectId: string): Promise<{ host: string; port: number; database: string }> {
-  const url = new URL(await projectDatabaseUrl(projectId))
-  return {
-    host: url.hostname || 'localhost',
-    port: parseInt(url.port || '5432', 10),
-    database: url.pathname.replace(/^\//, '').split('?')[0] || 'backenly',
-  }
-}
-
 export async function runReadQuery(
   projectId: string,
   sql: string,
@@ -322,27 +361,31 @@ async function execute(
 ): Promise<ReadQueryResult> {
   const cap = Math.min(Math.max(1, Math.floor(limit)), MAX_ROWS)
   const schema = workspaceSchemaName(projectId)
-  const { host, port, database } = await internalTarget(projectId)
+  // The project's own database, in its region, where its read-only role
+  // exists. The developer-facing credential carries a PUBLIC host built for
+  // psql; the server dials the database the way it reaches it itself. A region
+  // this process has no connection for is refused (REGION_NOT_CONFIGURED),
+  // never tried against another region.
+  const projectUrl = await projectDatabaseUrl(projectId)
   // Provisioning is idempotent and instant; a read tool should never make the
   // agent go and arrange its own access first.
   const cred = await readOnlyLogin(projectId)
 
   const client = new Client({
-    host,
-    port,
-    database,
-    user: cred.roleName,
-    password: cred.password,
-    // Localhost on the app box; TLS is not adding anything over the loopback
-    // and the snakeoil cert would fail verification anyway.
-    ssl: false,
+    ...readOnlyConnection(projectUrl, cred),
     connectionTimeoutMillis: 10_000,
-statement_timeout: STATEMENT_TIMEOUT_MS,
+    statement_timeout: STATEMENT_TIMEOUT_MS,
   } as any)
+  // A connection lost while idle is reported here; unhandled, it ends the process.
+  client.on('error', () => {})
 
   const started = Date.now()
   try {
-    await client.connect()
+    try {
+      await client.connect()
+    } catch (err) {
+      throw connectionFailed(projectId, err)
+    }
     // Read-only transaction: a second, independent guarantee alongside the
     // role's grants and its default_transaction_read_only setting.
     await client.query('BEGIN READ ONLY')
@@ -364,9 +407,22 @@ statement_timeout: STATEMENT_TIMEOUT_MS,
       redactedColumns,
       ms: Date.now() - started,
     }
+  } catch (err) {
+    // The statement's own errors (a typo, a missing column, a timeout) are the
+    // caller's to read. A connection lost part-way is Backenly's, said plainly.
+    if (!(err instanceof ReadQueryError) && isConnectionFailure(err)) throw connectionFailed(projectId, err)
+    throw err
   } finally {
     await client.end().catch(() => {})
   }
+}
+
+function connectionFailed(projectId: string, err: unknown): ReadQueryError {
+  const e = err as { code?: unknown; message?: unknown }
+  console.error(
+    `[read-query] read-only connection failed for project ${projectId}: ${String(e?.code ?? '')} ${String(e?.message ?? err)}`,
+  )
+  return new ReadQueryError(READ_CONNECTION_FAILED, 'DATABASE_UNAVAILABLE', undefined, 503)
 }
 
 /**
