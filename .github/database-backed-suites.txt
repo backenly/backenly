@@ -1905,3 +1905,9 @@ tests/integration/end-user-last-active.spec.ts
 # /relationships without a table answers each foreign key once. Real catalog
 # and the real handlers.
 tests/integration/schema-structure-in-one-read.spec.ts
+
+# A branch refuses what production refuses: it is created with every foreign
+# key main has (as written, pointing at its own tables), and a key a branch
+# migration declares is installed on the branch. Real schemas, the real branch
+# engine and the real migration path.
+tests/integration/branch-enforces-foreign-keys.spec.ts

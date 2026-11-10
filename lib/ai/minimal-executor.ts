@@ -4396,10 +4396,10 @@ async function executeCreateTable(
         colSql = colSql.replace(/\s+REFERENCES\s+"[^"]*"\."[^"]*"\("[^"]*"\)[^,;]*/gi, '').trim()
         // A foreign key declared in a migration is installed exactly as written,
         // in this same statement, so a key that cannot be created leaves no table
-        // behind (lib/db/declared-foreign-key.ts). A branch is built without
-        // foreign keys, and gets this one when its merge replays the statement.
+        // behind (lib/db/declared-foreign-key.ts). On a branch it references the
+        // branch's own tables (postgresSchema is the branch's), as main's would.
         const declaredFk = (col as { references?: unknown }).references
-        if (declaredFk !== undefined && !branchMode) {
+        if (declaredFk !== undefined) {
           if (!isDeclaredForeignKey(declaredFk)) {
             return {
               success: false,
@@ -4438,8 +4438,9 @@ async function executeCreateTable(
     const createTableSQL = `CREATE TABLE IF NOT EXISTS "${postgresSchema}"."${tableName}" (\n  ${columnDefs.join(',\n  ')}\n);`
 
     // A key into `users` needs the end-user auth table, which otherwise only
-    // the first sign-up creates (lib/services/auth-users-reference.ts).
-    if (!branchMode && tableName !== 'users') {
+    // the first sign-up creates (lib/services/auth-users-reference.ts). On a
+    // branch it is created in the branch's schema, where the key points.
+    if (tableName !== 'users') {
       const { ensureReferencedAuthUsersTable } = await import('@/lib/services/auth-users-reference')
       for (const { col } of columnPlans) {
         const declared = (col as { references?: { table?: unknown } }).references
@@ -4567,8 +4568,9 @@ async function executeCreateTable(
     // indexes above are the DDL main will get, issued into the branch schema.
     // Everything below is keyed by the project (metadata, realtime, buckets,
     // foreign keys across main, auto-RLS, generated endpoints) and happens on
-    // main when the merge replays this statement. Foreign keys are not enforced
-    // on a branch, matching how a branch is cloned (lib/branches/engine.ts).
+    // main when the merge replays this statement. A key the statement declared
+    // was installed with the table above; the keys Backenly infers below (fkTo,
+    // and *_id columns by name) are added on main when the merge replays it.
     if (branchMode) {
       return {
         success: true,
@@ -10168,15 +10170,18 @@ async function executeAddConstraint(params: any, projectId: string, schemaTarget
     // explicit referencedTable, then the expression, then inference.
     const fromExpr = /^([A-Za-z_][A-Za-z0-9_$]*)\s*\(/.exec(expression)?.[1]
     const target = referencedTable || fromExpr
-    // fk-repair works on main's catalog. A branch does not enforce foreign keys
-    // (it is cloned without them), so the statement is recorded and the key is
-    // added when the merge replays it on main. Said, not silently skipped.
-    if (branchMode) {
+    // A key the migration declares is installed below, on the branch as on
+    // main. One Backenly would infer from the column name goes through
+    // fk-repair, which works on main's catalog, so on a branch the statement
+    // is recorded and the key is added when the merge replays it on main.
+    // Said, not silently skipped.
+    if (branchMode && params.references === undefined) {
       return {
         success: true,
         message:
-          `Recorded foreign key ${tableName}.${columnName}${target ? ` → ${target}` : ''}; it is not enforced on a ` +
-          `branch and is added to production when the branch is merged.`,
+          `Recorded foreign key ${tableName}.${columnName}${target ? ` → ${target}` : ''}. Backenly infers it from ` +
+          `the column name on production, so it is added there when the branch is merged and is not checked on ` +
+          `the branch. Declare it with REFERENCES to have the branch check it too.`,
         data: { tableName, columnName, referencedTable: target ?? null, enforcedOnBranch: false },
       }
     }
@@ -10194,11 +10199,13 @@ async function executeAddConstraint(params: any, projectId: string, schemaTarget
         }
       }
       const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
-      const sql = addForeignKeySql(getWorkspaceDatabaseNames(projectId).postgresSchema, tableName, columnName, fk)
+      // On a branch, the branch's own tables: the key checks what production's will.
+      const schema = schemaTarget.targetSchema ?? getWorkspaceDatabaseNames(projectId).postgresSchema
+      const sql = addForeignKeySql(schema, tableName, columnName, fk)
       try {
         // A key into `users` needs the end-user auth table (lib/services/auth-users-reference.ts).
         const { ensureReferencedAuthUsersTable } = await import('@/lib/services/auth-users-reference')
-        await ensureReferencedAuthUsersTable(projectId, fk.table)
+        await ensureReferencedAuthUsersTable(projectId, fk.table, schema)
         await db.$executeRawUnsafe(sql)
       } catch (err: any) {
         const reason = err?.meta?.message ?? err?.message ?? String(err)
@@ -10211,8 +10218,11 @@ async function executeAddConstraint(params: any, projectId: string, schemaTarget
       }
       return {
         success: true,
-        message: `✅ Added foreign key ${tableName}.${columnName} → ${describeTarget(fk)} ON DELETE ${fk.onDelete} ON UPDATE ${fk.onUpdate}`,
-        data: { tableName, columnName, referencedTable: fk.table, referencedColumn: fk.column ?? null, onDelete: fk.onDelete, onUpdate: fk.onUpdate },
+        message: `✅ Added foreign key ${tableName}.${columnName} → ${describeTarget(fk)} ON DELETE ${fk.onDelete} ON UPDATE ${fk.onUpdate}${branchMode ? ' on the branch' : ''}`,
+        data: {
+          tableName, columnName, referencedTable: fk.table, referencedColumn: fk.column ?? null, onDelete: fk.onDelete, onUpdate: fk.onUpdate,
+          ...(branchMode ? { enforcedOnBranch: true } : {}),
+        },
       }
     }
     const { repairForeignKeyColumn } = await import('./fk-repair')
