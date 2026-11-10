@@ -20,6 +20,47 @@ function routeOf(projectId: string, ep: GeneratedEndpoint): string {
   return `${ep.method} /api/v1/${projectId}/fn/${ep.name}`
 }
 
+/** What the generator gives the project's tables: each name, with the routes it is registered under. */
+export type GeneratedRoutes = Map<string, Set<string>>
+
+/** The endpoints Backenly generates for these tables, as GENERATE_API registers them. */
+export function generatedEndpointRoutes(projectId: string, tables: string[]): GeneratedRoutes {
+  const routes: GeneratedRoutes = new Map()
+  for (const table of tables) {
+    for (const ep of generateDomainEndpoints(table, projectId, tables)) {
+      const known = routes.get(ep.name) ?? new Set<string>()
+      routes.set(ep.name, known.add(routeOf(projectId, ep)))
+    }
+  }
+  return routes
+}
+
+/** The same, for the project's tables as registration reads them (the platform's table registry). */
+export async function projectGeneratedRoutes(projectId: string): Promise<GeneratedRoutes> {
+  const tables = await prisma.table.findMany({ where: { projectId }, select: { name: true } })
+  return generatedEndpointRoutes(projectId, tables.map((t) => t.name))
+}
+
+/**
+ * Whether a function is one Backenly generated for a table: a name and route
+ * the generator gives one of the project's tables, the manual trigger
+ * GENERATE_API registers, and no code an agent deployed over it (codeOrigin
+ * 'agent'). They are part of the table's API, not functions a person or an
+ * agent made, so the project's function count leaves them out. Production QA
+ * (2026-11-09): the Overview said "Functions 9" for a project with two.
+ *
+ * The route alone does not tell: a function an agent asks Backenly to write
+ * (GENERATE_FUNCTION, lib/ai/function-generator.ts) is stored with the same
+ * trigger and the same shape of route.
+ */
+export function isGeneratedEndpoint(
+  fn: { name: string; triggerType: string | null; triggerTable: string | null; codeOrigin?: string | null },
+  routes: GeneratedRoutes,
+): boolean {
+  if (fn.codeOrigin === 'agent' || fn.triggerType !== 'manual' || !fn.triggerTable) return false
+  return routes.get(fn.name)?.has(fn.triggerTable) ?? false
+}
+
 /** Register the table's generated endpoints, rewriting the ones that exist, as GENERATE_API always has. */
 export async function registerDomainEndpoints(
   projectId: string,

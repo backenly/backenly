@@ -1520,6 +1520,7 @@ tests/integration/auth-projection-confirm.spec.ts
 tests/integration/change-recovery.spec.ts
 tests/integration/restore-generated-endpoints.spec.ts
 tests/integration/dropped-table-leaves-the-graph.spec.ts
+tests/integration/functions-count-your-functions.spec.ts
 
 # Protected verification and automatic recovery: a change that breaks
 # production without being asked to (RLS off, a CASCADE, a step that did not
