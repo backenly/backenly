@@ -48,6 +48,7 @@ import { recordUsage } from '@/lib/usage/ledger'
 import { recordQuotaWarning } from '@/lib/usage/alerts'
 import { effectiveCap } from '@/lib/usage/overage'
 import type { UserEntitlements } from '@/lib/entitlements'
+import { planDisplayName } from '@/lib/entitlements/plan-names'
 
 const MB = 1024 * 1024
 
@@ -208,7 +209,7 @@ export async function canAcceptNewEndUser(projectId: string): Promise<QuotaDecis
     if (count >= cap) {
       return blocked(
         info.ent.planName,
-        `The account this app bills to has reached the ${cap.toLocaleString()} monthly active users its ${info.ent.planName} plan allows across all of its projects. New sign-ups resume on the 1st, or when its limit is raised.`,
+        `The account this app bills to has reached the ${cap.toLocaleString()} monthly active users its ${planDisplayName(info.ent.planName)} plan allows across all of its projects. New sign-ups resume on the 1st, or when its limit is raised.`,
         count,
         cap,
       )
@@ -255,7 +256,7 @@ export async function enforceRealtimeConnection(
     if (existing >= max) {
       return blocked(
         ent.planName,
-        `The account this app bills to has reached the ${max.toLocaleString()} concurrent realtime connections its ${ent.planName} plan allows across all of its projects.`,
+        `The account this app bills to has reached the ${max.toLocaleString()} concurrent realtime connections its ${planDisplayName(ent.planName)} plan allows across all of its projects.`,
         existing,
         max,
       )
@@ -308,7 +309,7 @@ export async function enforceDbStorage(projectId: string): Promise<QuotaDecision
       const capMb = Math.floor(cap / MB)
       return blocked(
         info.ent.planName,
-        `Your account has reached ${capMb.toLocaleString()} MB of PostgreSQL storage, shared by all of your projects, on the ${info.ent.planName} plan. Remove data, raise your spend limit or upgrade to continue.`,
+        `Your account has reached ${capMb.toLocaleString()} MB of PostgreSQL storage, shared by all of your projects, on the ${planDisplayName(info.ent.planName)} plan. Remove data, raise your spend limit or upgrade to continue.`,
         usedMb,
         capMb,
       )
@@ -387,7 +388,7 @@ export async function apiKeyRateCeilingViolation(
     if (requested <= perMin) return null
     const allowed = Math.floor((perMin * rateLimitWindowSec) / 60)
     return (
-      `The ${ent!.planName} plan allows up to ${perMin.toLocaleString()} requests per minute per API key. ` +
+      `The ${planDisplayName(ent!.planName)} plan allows up to ${perMin.toLocaleString()} requests per minute per API key. ` +
       `For a ${rateLimitWindowSec}-second window that is at most ${allowed.toLocaleString()} requests.`
     )
   } catch {

@@ -67,6 +67,7 @@ tests/integration/integrations-autowiring.spec.ts
 # broadcast route enforces its payload cap over a real pg_notify. Frame
 # delivery through the LISTEN hub stays a staging case.
 tests/integration/realtime-ticket-broadcast.spec.ts
+tests/integration/plans-said-by-their-names.spec.ts
 tests/integration/export-database-rls.spec.ts
 tests/integration/postgres-admin.spec.ts
 
