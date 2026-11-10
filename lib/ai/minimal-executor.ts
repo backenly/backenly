@@ -12347,10 +12347,19 @@ async function executeDeleteAiFunction(params: any, projectId: string): Promise<
     const { syncCaptureForFunctionChange } = await import('@/lib/webhooks/capture')
     await syncCaptureForFunctionChange(projectId, fn.triggerType)
 
+    // The delete is a governed change, which keeps the function as it was:
+    // restoring the change brings it back, code and trigger.
+    const { currentChange } = await import('@/lib/changes/ledger')
+    const open = currentChange(projectId)
+    const change = open ? { id: open.id, seq: open.seq } : null
+
     return {
       success: true,
-      message: `✅ Function \`${fn.name}\` deleted.`,
-      data: { deleted: true, name: fn.name },
+      message: `✅ Function \`${fn.name}\` deleted.` + (change
+        ? ` It is kept in the change history as change #${change.seq}: restore that change in History to bring it back, ` +
+          `or ask with deploy { action: "revert_change", changeId: "${change.id}" } (a person approves it).`
+        : ''),
+      data: { deleted: true, name: fn.name, change },
     }
   } catch (error: any) {
     return { success: false, message: `Failed to delete the function: ${error.message}`, error: error.message }

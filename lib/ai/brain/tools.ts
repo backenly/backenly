@@ -1486,7 +1486,7 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
     },
     ['active']),
   fn('delete_ai_function',
-    'DESTRUCTIVE. Permanently delete an AI / serverless function and its history. Requires confirmation.',
+    'Delete a function. Runs at once when it is switched off or has not run in 7 days; one that ran in that time waits for a person\'s approval. The change history keeps the function, so restoring the change brings it back.',
     { functionId: { type: 'string' }, name: { type: 'string' } }),
   fn('delete_cron_job',
     'DESTRUCTIVE. Permanently delete a scheduled job — it stops running immediately. Requires confirmation.',

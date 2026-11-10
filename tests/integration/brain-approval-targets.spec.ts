@@ -46,6 +46,15 @@ beforeAll(async () => {
       secret: 'not-a-real-secret',
     },
   })).id
+  // A function that served a call just now: deleting it waits for a person.
+  // One switched off or unused for 7 days is deleted at once
+  // (agents-delete-unused-functions.spec.ts).
+  await prisma.aiFunction.create({
+    data: {
+      projectId: brain.projectId, name: 'summarise', description: 'Summarise a post', generatedCode: 'return {}',
+      triggerType: 'manual', status: 'active', lastRun: new Date(),
+    },
+  })
 }, 60_000)
 
 // The harness rebuilds the workspace before each test; the rows are put back.
@@ -156,8 +165,12 @@ describe('every tool the brain\'s model is offered that needs approval', () => {
     expect(gated.length).toBeGreaterThanOrEqual(23)
   })
 
+  // Whether a delete waits depends on the function it names: one that ran in
+  // the last 7 days does, so the call names one.
+  const ARGS: Record<string, Record<string, unknown>> = { delete_ai_function: { name: 'summarise' } }
+
   it.each(gated)('%s is held with a target, never run', async (tool) => {
-    const { held, result } = await hold(tool, {})
+    const { held, result } = await hold(tool, ARGS[tool] ?? {})
 
     expect(held).toHaveLength(1)
     expect(held[0].tool).toBe(tool)
