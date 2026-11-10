@@ -44,7 +44,7 @@ import {
   SettingsCard,
   StatusDot,
 } from '@/components/inspector/kit'
-import { useAgentConnection } from '@/lib/hooks/useAgentConnection'
+import { lastCallAgo, useAgentConnection } from '@/lib/hooks/useAgentConnection'
 import { PAGE_GUTTER, PAGE_WIDTH } from '@/components/console/tokens'
 import { AgentInstallGuide, AgentCapabilitiesCard } from '@/components/connect/AgentInstallGuide'
 import { AgentKeysPanel } from '@/components/connect/AgentKeysPanel'
@@ -98,8 +98,12 @@ export default function ProjectConnectPage() {
         meta={
           agent.status === 'loading' ? undefined : agent.connected ? (
             <StatusDot
-              tone="operational"
-              label={agent.client ? `Connected through ${agent.client}` : 'Agent connected'}
+              tone={agent.active ? 'operational' : 'neutral'}
+              label={
+                agent.active || !agent.lastSeenAt
+                  ? agent.client ? `Connected through ${agent.client}` : 'Agent connected'
+                  : `Last call ${lastCallAgo(agent.lastSeenAt)}${agent.client ? `, through ${agent.client}` : ''}`
+              }
               className="text-[13px]"
             />
           ) : (
