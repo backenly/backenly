@@ -29,8 +29,7 @@
 
 import { NextResponse } from 'next/server'
 import { canAccessProject, canWriteProject, canAdministerProject } from '@/lib/edition/guard'
-import { enforceWebhook } from '@/lib/entitlements/policy'
-import { billingAccountOf } from '@/lib/usage/account'
+import { webhookPlan, type WebhookPlanRefused } from '@/lib/webhooks/plan'
 
 /**
  * VIEWER reads. DEVELOPER creates and edits. ADMIN deletes.
@@ -63,16 +62,24 @@ export async function guardWebhookRoute(
     return NextResponse.json({ error: 'Project not found' }, { status: 404 })
   }
 
-  // The plan of the account the project bills to, not the caller's own.
-  const entitlement = await enforceWebhook((await billingAccountOf(projectId)) ?? userId)
-  if (entitlement !== true) {
+  // Reading never needs the plan. The list says what the plan is
+  // (webhookPlan), so the page can say webhooks are on Pro before anyone fills
+  // in a form, and a project that moved to a plan without webhooks can still
+  // see the endpoints it has and what they delivered. Authorization above is
+  // the same for every plan.
+  if (access === 'read') return null
+
+  const plan = await webhookPlan(userId, projectId)
+  if (!plan.allowed) {
+    // This tsconfig does not narrow on a boolean discriminant.
+    const refused = plan as WebhookPlanRefused
     return NextResponse.json(
       {
         error: 'Webhooks require the Pro plan',
         code: 'PLAN_LIMIT_EXCEEDED',
         upgradeRequired: true,
-        currentPlan: entitlement.currentPlan,
-        requiredPlan: 'PRO',
+        currentPlan: refused.currentPlan,
+        requiredPlan: refused.requiredPlan,
       },
       { status: 403 },
     )

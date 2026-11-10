@@ -17,6 +17,7 @@ import { createWebhook, getProjectWebhooks } from '@/lib/webhooks'
 import { isWebhookEventType, isRowEventType, WEBHOOK_EVENT_TYPES } from '@/lib/webhooks/events'
 import { syncWebhookCapture, listCapturedTables } from '@/lib/webhooks/capture'
 import { guardWebhookRoute } from '@/lib/webhooks/route-guard'
+import { webhookPlan } from '@/lib/webhooks/plan'
 import { BlockedOutboundError } from '@/lib/security/outbound-guard'
 
 /**
@@ -43,10 +44,12 @@ function present(w: Awaited<ReturnType<typeof getProjectWebhooks>>[number]) {
 export const GET = withAuth(async (_request: NextRequest, { user, params }) => {
   const { id: projectId } = await params
 
+  // Answered on every plan, with the plan's answer in it, so the page can say
+  // webhooks are on Pro before anyone fills in the form.
   const denied = await guardWebhookRoute(user.userId, projectId, 'read')
   if (denied) return denied
 
-  const webhooks = await getProjectWebhooks(projectId)
+  const [webhooks, plan] = await Promise.all([getProjectWebhooks(projectId), webhookPlan(user.userId, projectId)])
 
   // Capture state is read from information_schema, not from a flag this app
   // set and believed. The PG catalog is the source of truth for what the
@@ -57,6 +60,8 @@ export const GET = withAuth(async (_request: NextRequest, { user, params }) => {
 
   return NextResponse.json({
     webhooks: webhooks.map(present),
+    /** Whether this project's plan includes webhooks; a change is refused while it does not. */
+    plan,
     capture: {
       /** Tables carrying a live capture trigger right now. */
       tables: capturedTables ?? [],
