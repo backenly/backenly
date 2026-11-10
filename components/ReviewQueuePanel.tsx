@@ -54,6 +54,7 @@ import { groupFindings, CATEGORY_LABEL, severityWord, type FindingCategory, type
 import { hasExecutableFix } from '@/lib/core/fix-actions'
 import { isEvolutionApprovalFinding } from '@/lib/core/types'
 import { EvolutionRequestRow } from '@/components/autonomy/EvolutionRequestRow'
+import { approvalTitle } from '@/lib/mcp/approval-title'
 import { onArchitectureChange } from '@/components/autonomy/architecture-decisions'
 import {
   CodeBlock, Disclosure, EmptyLine, Fact, Facts, Panel, Row, RowList, RowNote, ROW_TEXT, ROW_TITLE, Section, rows,
@@ -712,9 +713,16 @@ function AgentRequestRow({
   // statements are machine text, so they are set as code, in full up to
   // MAX_STATEMENTS and behind "Show the full request" past that.
   const [showFull, setShowFull] = useState(false)
+  const [showAgentWords, setShowAgentWords] = useState(false)
   const { prose, statements } = splitRequest(a.message, a.target)
-  const long = statements.length > 0 ? statements.length > MAX_STATEMENTS : prose.length > 180
-  const shownProse = statements.length === 0 && long && !showFull ? clip(prose, 180) : prose
+  // What an agent wrote is its case for the call, not a description of it: the
+  // title is Backenly's description, and the agent's words stay closed until
+  // asked for, marked as unchecked. A drop card used to lead with the agent's
+  // "the user has decided to remove the reviews feature and will approve".
+  const agentWords = !restore && !fromBackenly && statements.length === 0 && prose && prose !== a.target ? prose : ''
+  const backenlyProse = agentWords ? '' : prose
+  const long = statements.length > 0 ? statements.length > MAX_STATEMENTS : backenlyProse.length > 180
+  const shownProse = statements.length === 0 && long && !showFull ? clip(backenlyProse, 180) : backenlyProse
   const shownStatements = showFull ? statements : statements.slice(0, MAX_STATEMENTS)
   // A card that could only show stand-ins is not something a human read, so it
   // cannot be approved. Rejecting it needs nothing from the region.
@@ -726,12 +734,10 @@ function AgentRequestRow({
       busy={state.phase === 'applying'}
       title={
         <p className={ROW_TITLE}>
-          {restore || a.tool === 'merge_branch' || a.tool === 'apply_migration' ? (
+          {restore ? (
             <TextWithCode text={a.target} codeClassName="text-zinc-100" />
-          ) : destructive && a.tool === 'drop_table' ? (
-            <>Drop <TextWithCode text={a.target} codeClassName="text-zinc-100" /></>
           ) : (
-            <>Run <span className="font-mono text-[12.5px] text-zinc-200">{a.tool}</span> on <TextWithCode text={a.target} codeClassName="text-zinc-100" /></>
+            <TextWithCode text={approvalTitle(a.tool, a.target)} codeClassName="text-zinc-100" />
           )}
         </p>
       }
@@ -753,13 +759,19 @@ function AgentRequestRow({
         )
       }
     >
-      {shownProse && (
-        // The agent's own words are quoted, so they never read as Backenly's.
-        restore || fromBackenly || statements.length > 0 ? (
-          <p className={`${ROW_TEXT} whitespace-pre-wrap`}>{shownProse}</p>
-        ) : (
-          <p className={`${ROW_TEXT} whitespace-pre-wrap border-l-2 border-white/[0.10] pl-3`}>“{shownProse}”</p>
-        )
+      {shownProse && <p className={`${ROW_TEXT} whitespace-pre-wrap`}>{shownProse}</p>}
+      {agentWords && (
+        <>
+          <Disclosure open={showAgentWords} onToggle={() => setShowAgentWords(v => !v)}>
+            {showAgentWords ? 'Hide what the agent wrote' : 'What the agent wrote'}
+          </Disclosure>
+          {showAgentWords && (
+            // Quoted, and said to be unchecked, so it never reads as Backenly's.
+            <p className={`${ROW_TEXT} whitespace-pre-wrap border-l-2 border-white/[0.10] pl-3`}>
+              “{agentWords}” <span className="text-zinc-500">Backenly has not checked this.</span>
+            </p>
+          )}
+        </>
       )}
       {shownStatements.length > 0 && <CodeBlock>{shownStatements.join('\n')}</CodeBlock>}
       {long && (
@@ -847,7 +859,7 @@ function AgentOutcomeRow({ request: a, running }: { request: AgentApproval; runn
       title={
         <p className={ROW_TITLE}>
           {running ? 'Approved, running now: ' : 'Approved, but the outcome is unknown: '}
-          <span className="font-mono text-[12.5px] text-zinc-200">{a.tool}</span> on <TextWithCode text={a.target} codeClassName="text-zinc-100" />
+          <TextWithCode text={approvalTitle(a.tool, a.target)} codeClassName="text-zinc-100" />
         </p>
       }
       actions={running ? <Loader2 className="h-4 w-4 animate-spin text-zinc-500" strokeWidth={1.75} /> : undefined}

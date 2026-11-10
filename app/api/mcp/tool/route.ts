@@ -973,11 +973,18 @@ async function parkForApproval(
   startedAt: number,
 ): Promise<NextResponse> {
   const callLabel = `${resolution.domain.name}.${resolution.action}`
+  // Backenly's description of the call, the one the brain's gate gives
+  // (lib/mcp/approval-describe.ts): a card read "Connect: revoke_api_key
+  // (keyId=ec1b…)", and a person could not tell which key. The tool and its
+  // arguments are left only for a call it has no words for.
+  const { describeApproval } = await import('@/lib/mcp/approval-describe')
+  const danger = await describeApproval(auth.projectId, resolution.target, args).catch(() => null)
+  const known = !!danger && danger.target !== `\`${resolution.target}\``
   const scopeNote =
-    resolution.target === 'disable_realtime' ? await describeRealtimeDisableScope(auth.projectId, args) : ''
-  let described = describeCall(resolution, args) + scopeNote
-  let reversible = false
-  let rowCount: number | null = null
+    !known && resolution.target === 'disable_realtime' ? await describeRealtimeDisableScope(auth.projectId, args) : ''
+  let described = known ? danger!.target : describeCall(resolution, args) + scopeNote
+  let reversible = known ? danger!.reversible : false
+  let rowCount: number | null = known ? danger!.rowCount : null
   let toolArgs: Record<string, unknown> = args
   let restore: import('@/lib/changes/recovery').RestoreRequest | undefined
   let versionRestore: import('@/lib/changes/range').VersionRestoreRequest | undefined
