@@ -56,6 +56,12 @@ export interface StepRunResult {
 export interface RungChange {
   /** Names only, so the record may keep it for a project in any region. */
   title: string
+  /**
+   * The step in words, for the History row once it is applied: the rung's
+   * statements create Backenly's own sync functions (bkn_evo_…), which the
+   * row used to name instead. Names only, like the title.
+   */
+  summary?: string
   /** What the statements were asked to do, for protected verification (lib/changes/verify.ts). */
   expectations?: Expectation[]
 }
@@ -104,7 +110,13 @@ export async function runStatements(at: WorkspaceAt, statements: string[], chang
   }
   const { withGovernedChange, expectEffect } = await import('@/lib/changes/ledger')
   const { change: closed } = await withGovernedChange(
-    { projectId: at.projectId, title: change.title.slice(0, 300), kind: 'change', autoRecover: false },
+    {
+      projectId: at.projectId,
+      title: change.title.slice(0, 300),
+      ...(change.summary ? { summaryIfApplied: change.summary.slice(0, 300) } : {}),
+      kind: 'change',
+      autoRecover: false,
+    },
     async () => {
       for (const e of change.expectations ?? []) expectEffect(at.projectId, e)
       await run()
@@ -120,6 +132,7 @@ export async function runStatements(at: WorkspaceAt, statements: string[], chang
 export function rungChange(plan: ExtractionPlan, step: ExtractionStep): RungChange {
   return {
     title: `Architecture change (${plan.spec.label} of ${plan.spec.host}), step ${step.ordinal}: ${step.title}`,
+    summary: step.title,
     expectations: step.kind === 'create_satellite' ? [{ action: 'CREATE_TABLE', table: plan.spec.satellite }] : [],
   }
 }

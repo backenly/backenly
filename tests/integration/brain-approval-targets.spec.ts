@@ -83,10 +83,9 @@ const ROWS: Row[] = [
   { tool: 'delete_file', args: () => ({ fileName: 'avatar.png' }), target: 'the file `avatar.png`', reversible: false },
   { tool: 'disable_realtime', args: () => ({ tableName: 'keep_me' }), target: 'realtime on `keep_me`', reversible: true },
   { tool: 'disable_realtime', args: () => ({}), target: /realtime project-wide|realtime on EVERY streaming table/, reversible: true },
-  { tool: 'trigger_deploy', args: () => ({}), target: 'a production deploy', reversible: true },
+  { tool: 'trigger_deploy', args: () => ({}), target: 'the backend as it is now, as a new published version', reversible: true },
   { tool: 'rollback_deploy', args: () => ({}), target: 'the backend as it was at an earlier published version', reversible: true },
-  { tool: 'revoke_api_key', args: () => ({ keyId: 'k1' }), target: 'an API key (every client using it stops working immediately)', reversible: false },
-  { tool: 'rotate_api_key', args: () => ({ keyId: 'k1' }), target: 'an API key rotation (the old key stops working immediately)', reversible: false },
+  { tool: 'revoke_api_key', args: () => ({ keyId: 'k1' }), target: 'the API key `k1` (no such key in this project): every client using it stops working immediately', reversible: false },
   { tool: 'delete_env_var', args: () => ({ name: 'STRIPE_KEY' }), target: 'the env var `STRIPE_KEY` (functions reading it will fail)', reversible: false },
   { tool: 'delete_trigger', args: () => ({ triggerId }), target: 'the trigger `notify-on-like`', reversible: false },
   { tool: 'delete_trigger', args: () => ({ triggerId: 'ghost-trigger' }), target: '`ghost-trigger` (no such trigger in this project)', reversible: false },
@@ -129,6 +128,23 @@ describe('a call the approval gate stops is held as issued and described to the 
     expect(events).toContainEqual(expect.objectContaining({ type: 'danger', tool: row.tool }))
     const answer = JSON.stringify(provider.calls[2].params.messages.at(-1))
     expect(answer).toContain('needs_human_approval')
+    expect(answer).toContain('NOT run')
+  }, 60_000)
+})
+
+describe('a gated tool the model is not offered', () => {
+  // rotate_api_key is withheld from the model (AGENT_ONLY_TOOLS): an approved
+  // rotation would either store the new key where every member reads it or hand
+  // it to nobody. A model that names it anyway is told it was not offered, and
+  // nothing is run or queued for a person.
+  it('is neither run nor held', async () => {
+    const { held, result, provider } = await hold('rotate_api_key', { keyId: 'k1' })
+
+    expect(held).toEqual([])
+    expect(result.toolsRun).toEqual(['finish'])
+    expect(result.applied).toEqual([])
+    const answer = JSON.stringify(provider.calls[2].params.messages.at(-1))
+    expect(answer).toContain('not_offered')
     expect(answer).toContain('NOT run')
   }, 60_000)
 })

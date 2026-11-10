@@ -19,6 +19,12 @@ export interface StorageFile {
   bucket: string
   createdAt: string | Date
   url: string
+  /**
+   * Who sent it: a signed-in end user (by email), Anonymous (the public key
+   * with no signed-in user), a server key, or a console account. Null when the
+   * upload predates this being recorded.
+   */
+  uploader?: { kind: 'end_user' | 'anonymous' | 'server_key' | 'console'; label: string } | null
 }
 
 export interface StorageStats {

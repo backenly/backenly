@@ -24,7 +24,7 @@
 import { runBrain, type BrainEvent, type BrainResult } from '@/lib/ai/brain/agent'
 import { closeCreditTurn } from '@/lib/entitlements/credit-holds'
 import { createTokenScope, runInTokenScope } from '@/lib/ai/token-meter'
-import { createApprovalRequest, RestoreRequestRefusedError } from '@/lib/mcp/approvals'
+import { createApprovalRequest, RequestRefusedError } from '@/lib/mcp/approvals'
 import { recordMcpCall } from '@/lib/mcp/guard'
 import { STATUS_NEXT } from '@/lib/ai/brain/next-call'
 import {
@@ -188,7 +188,7 @@ export async function turnBody(
       })
       queued.push({ id: row.id, tool: blocked.tool, target: blocked.target })
     } catch (e) {
-      if (e instanceof RestoreRequestRefusedError) {
+      if (e instanceof RequestRefusedError) {
         notQueued.push({ tool: blocked.tool, target: blocked.target, reason: e.message })
         continue
       }

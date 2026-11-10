@@ -87,6 +87,13 @@ interface Door {
  * every body-less GET here first "hung" for 60s while the server had already
  * answered it in milliseconds.
  */
+/**
+ * The refusal as each door answers it: v1's envelope ({ error: { code,
+ * message, details } }), and PostgREST's own shape on /api/v2 ({ code,
+ * message, details, hint }, server/lib/v2-error-shape.ts).
+ */
+const refusal = (path: string, json: any) => (path.includes('/api/v2/') ? json : json?.error)
+
 function doors(id: string): Door[] {
   return [
     { name: 'dynamic table CRUD', method: 'GET', path: `/api/v1/${id}/db/things` },
@@ -127,7 +134,7 @@ describe('a locked project', () => {
   it.each(doors('__ID__'))('is refused on the $name door', async ({ method, path, body }) => {
     const res = await call(method, path.replace('__ID__', id), body)
     expect(res.status).toBe(503)
-    expect(res.json?.error?.message).toBe(LOCKED_MESSAGE)
+    expect(refusal(path, res.json)?.message).toBe(LOCKED_MESSAGE)
   }, 60_000)
 })
 
@@ -138,7 +145,7 @@ describe('a paused project', () => {
   it.each(doors('__ID__'))('is refused on the $name door, with where to resume it', async ({ method, path, body }) => {
     const res = await call(method, path.replace('__ID__', id), body)
     expect(res.status).toBe(503)
-    expect(res.json?.error).toMatchObject({
+    expect(refusal(path, res.json)).toMatchObject({
       code: PAUSED_CODE,
       message: PAUSED_MESSAGE,
       details: {
@@ -166,8 +173,8 @@ describe('an open project (the control)', () => {
     'still reaches its router on the $name door',
     async ({ method, path, body }) => {
       const res = await call(method, path.replace('__ID__', id), body)
-      expect(res.json?.error?.message).not.toBe(LOCKED_MESSAGE)
-      expect(res.json?.error?.code).not.toBe('PROJECT_STATE_UNAVAILABLE')
+      expect(refusal(path, res.json)?.message).not.toBe(LOCKED_MESSAGE)
+      expect(refusal(path, res.json)?.code).not.toBe('PROJECT_STATE_UNAVAILABLE')
     },
     60_000,
   )

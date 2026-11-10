@@ -151,7 +151,10 @@ describe('a change that breaks production, recovered automatically', () => {
     expect((rec.verification as any).outcome).toBe('confirmed')
 
     const audit = await prisma.auditLog.findFirst({ where: { projectId, action: 'ROLLBACK_CHANGE_RECOVERED' }, orderBy: { timestamp: 'desc' } })
-    expect(JSON.parse(audit!.details!).summary).toMatch(/Recovered automatically/)
+    // Which check failed, said as the change history says it.
+    expect(JSON.parse(audit!.details!).summary).toMatch(
+      /^Recovered automatically: change #\d+ \(.+\) failed verification: row-level security turned off on secrets; the previous state is back and verified$/,
+    )
 
     const { changes } = await listChanges(projectId)
     const entry = changes.find((c) => c.id === change!.id)!
@@ -263,6 +266,11 @@ describe('a recovery that would cost data', () => {
     expect(a.target).toMatch(/Restore the state before change #\d+/)
     expect(a.toolArgs).toMatchObject({ changeId, origin: 'backenly', acknowledged: { 'restore_incomplete:ledger_a:extra': 1 } })
     expect(await events(changeId)).toContain('recovery_escalated')
+    // The request and the activity feed both say which check it failed.
+    expect(a.message).toMatch(/^Change #\d+ \(.+\) failed verification: row-level security turned off on ledger_a\. /)
+    const waiting = (await prisma.auditLog.findMany({ where: { projectId, action: 'CHANGE_RECOVERY_AWAITING_APPROVAL' } }))
+      .map((r) => JSON.parse(r.details!)).find((d) => d.changeId === changeId)
+    expect(waiting.summary).toMatch(/^Waiting for your approval to recover: change #\d+ \(.+\) failed verification: row-level security turned off on ledger_a$/)
     const { changes } = await listChanges(projectId)
     expect(changes.find((c) => c.id === changeId)).toMatchObject({ outcome: { state: 'awaiting_approval' }, approvalId })
     // Production is as the change left it until a person decides.

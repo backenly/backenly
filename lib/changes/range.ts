@@ -5,10 +5,17 @@
  * Each step is an ordinary restore (lib/changes/recovery.ts): it is proved
  * before it runs, verified after, recorded as its own entry and reapplied on
  * its own. So this is a sequence, not one transaction, and it holds every step
- * to the restore's own rules. It runs a step only when its restore is lossless,
- * and stops at the first step that needs a person or cannot run, naming it and
- * saying why. What it restored before stopping stays restored; running it again
- * continues from there, once that step is resolved.
+ * to the restore's own rules. It runs a step only when its restore is lossless.
+ *
+ * Before the first step runs, the whole sequence is proved (proveSequence):
+ * every step, each against the schema the steps before it leave, in one
+ * transaction that is rolled back. If any step would need a person or could not
+ * run, nothing runs, and that step is named with why. This used to be found
+ * only on reaching the step, after the steps before it had run: on production
+ * (2026-11-09) "Restore to v1" undid #46, stopped at #45, and left the backend
+ * between v1 and where it was. A step can still stop while running if the
+ * backend changed between the proof and that step; what ran before it then
+ * stays restored, and running it again continues from there.
  *
  * What "made after the point" means, entry by entry, newest first:
  *
@@ -44,6 +51,7 @@ import {
   ARCHITECTURE_CHANGE_GROUP,
   ARCHITECTURE_UNDO_SUFFIX,
   previewRecovery,
+  proveSequence,
   recoverChange,
   type RecoveryOutcome,
   type RecoveryPreview,
@@ -67,6 +75,8 @@ export interface RangeStop extends RangeEntry {
   reason: string
   /** The step's record, to open its own restore dialog. */
   recordId: string
+  /** Found by proving the whole sequence first: nothing has run, and nothing will until it is resolved. */
+  beforeAnything?: boolean
 }
 
 export interface RangePlan {
@@ -202,6 +212,28 @@ export async function planRestoreTo(projectId: string, afterSeq: number): Promis
   return plan
 }
 
+/**
+ * Prove the whole sequence before any of it runs (proveSequence). Returns the
+ * step that would stop it, as a stop found before anything ran, or null when
+ * every step would run.
+ */
+export async function proveRestoreTo(projectId: string, plan: RangePlan): Promise<RangeStop | null> {
+  if (plan.steps.length === 0) return null
+  const proof = await proveSequence(projectId, plan.steps.map((s) => s.recordId))
+  if (proof.ok) return null
+  const failed = proof as Extract<typeof proof, { ok: false }>
+  const step = plan.steps.find((s) => s.recordId === failed.recordId) ?? plan.steps[0]
+  return {
+    id: step.id,
+    seq: step.seq,
+    summary: step.summary,
+    recordId: step.recordId,
+    code: failed.code,
+    reason: failed.reason,
+    beforeAnything: true,
+  }
+}
+
 /** Why a step's proof stops the sequence, or null when it may run. */
 function stopFor(step: RangeStep, preview: RecoveryPreview | null): RangeStop | null {
   const at = { id: step.id, seq: step.seq, summary: step.summary, recordId: step.recordId }
@@ -231,6 +263,11 @@ export async function restoreTo(
 ): Promise<RangeOutcome> {
   const plan = await planRestoreTo(projectId, afterSeq)
   const out: RangeOutcome = { afterSeq, restored: [], kept: [...plan.kept], stoppedAt: null }
+  const blocked = await proveRestoreTo(projectId, plan)
+  if (blocked) {
+    out.stoppedAt = blocked
+    return out
+  }
   for (const step of plan.steps) {
     const preview = await previewRecovery(projectId, step.recordId)
     if (preview?.safety === 'unavailable' && preview.unavailableCode === 'NOT_REVERSIBLE') {
@@ -323,12 +360,23 @@ export async function describeVersionRestore(
       ? { ok: false, status: 409, code: 'RESTORE_BLOCKED', error: `Restoring to v${v} would stop before undoing anything. ${plan.stop.reason}` }
       : { ok: false, status: 409, code: 'NOTHING_TO_RESTORE', error: `Nothing has changed since v${v} was published: the backend is already as it was then.` }
   }
+  // A request a person could approve and that would then stop part-way is not
+  // put in front of them: the step that would stop it is named instead.
+  const blocked = await proveRestoreTo(projectId, plan)
+  if (blocked) {
+    return {
+      ok: false,
+      status: 409,
+      code: 'RESTORE_BLOCKED',
+      error: `Restoring to v${v} would stop at #${blocked.seq} (${blocked.summary}) before undoing anything, so it was not asked for. ${blocked.reason}`,
+    }
+  }
   const published = point.publishedAt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' })
   const detail = [
     `Undoes, newest first:`,
     ...plan.steps.map((s) => `#${s.seq} ${s.summary}${s.action === 'reapply' ? ` (reapplied: it was in effect at v${v})` : ''}`),
     ...(plan.stop ? [`Stops at #${plan.stop.seq}. ${plan.stop.reason}`] : []),
-    'Each one is checked before it runs. One that would set aside data written since, or that cannot run, stops it there, for you to review in History.',
+    'All of them were checked together before asking. Each is checked again as it runs; one that would set aside data written since, or that cannot run, stops it there, for you to review in History.',
   ].join('\n')
   return {
     ok: true,

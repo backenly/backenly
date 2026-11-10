@@ -203,6 +203,21 @@ describe('webhooks', () => {
     expect(r.body.data.deliveries.map((d: any) => d.status)).toEqual(['FAILED', 'SUCCESS'])
   }, 60_000)
 
+  it('on a plan without webhooks, still lists them and their deliveries, and says the plan', async () => {
+    mockPlan = 'free'
+    const list = await call(RO_KEY, 'webhooks', { action: 'list' })
+    expect(list.body.ok).toBe(true)
+    expect(list.body.data.webhooks.map((w: any) => w.id)).toEqual([webhookId])
+    expect(list.body.data.plan).toEqual({ allowed: false, currentPlan: 'SANDBOX', requiredPlan: 'PRO' })
+    expect(list.body.summary).toContain('this project is on Free. These endpoints still receive events')
+    const logs = await call(RO_KEY, 'webhooks', { action: 'logs', webhookId })
+    expect(logs.body.ok).toBe(true)
+    expect(logs.body.data.deliveries).toHaveLength(2)
+    const test = await call(RW_KEY, 'webhooks', { action: 'test', webhookId })
+    expect(test.body).toMatchObject({ ok: false, code: 'PLAN_LIMIT_EXCEEDED' })
+    expect(receiver.received).toHaveLength(0)
+  }, 60_000)
+
   it('sends a failed delivery again as a new attempt, leaving the original as it was', async () => {
     const r = await call(RW_KEY, 'webhooks', { action: 'replay', deliveryId: failedLogId })
     expect(r.body).toMatchObject({ ok: true, data: { replayOf: failedLogId, success: true } })
@@ -235,6 +250,25 @@ describe('webhooks', () => {
     await call(RW_KEY, 'webhooks', { action: 'test', webhookId })
     const got = receiver.received[0]
     expect(got.headers['x-webhook-signature']).toBe(`sha256=${crypto.createHmac('sha256', next).update(got.raw).digest('hex')}`)
+  }, 60_000)
+
+  it('on a plan without webhooks, can still disable or delete one, and nothing else', async () => {
+    const made = await call(RW_KEY, 'webhooks', { action: 'create', eventType: 'row.deleted', targetUrl: receiver.url })
+    const id = made.body.data.webhook.id
+    mockPlan = 'free'
+    const off = await call(RW_KEY, 'webhooks', { action: 'update', webhookId: id, active: false })
+    expect(off.body).toMatchObject({ ok: true, data: { webhook: { active: false } } })
+    const on = await call(RW_KEY, 'webhooks', { action: 'update', webhookId: id, active: true })
+    expect(on.body).toMatchObject({ ok: false, code: 'PLAN_LIMIT_EXCEEDED' })
+    expect((await prisma.webhook.findUnique({ where: { id } }))?.active).toBe(false)
+    const list = await call(RO_KEY, 'webhooks', { action: 'list' })
+    expect(list.body.summary).toContain('They can be disabled or deleted; adding or changing one needs the Pro plan')
+
+    const del = await call(RW_KEY, 'webhooks', { action: 'delete', webhookId: id })
+    expect(del.body).toMatchObject({ ok: true, status: 'awaiting_approval' })
+    const decided = await decideApproval({ projectId, approvalId: del.body.approval.id, approverUserId: ownerId, decision: 'approve' })
+    expect(decided).toMatchObject({ ok: true, status: 'executed' })
+    expect(await prisma.webhook.count({ where: { id } })).toBe(0)
   }, 60_000)
 
   it('parks a delete for a human, deletes nothing, and runs exactly that call once approved', async () => {

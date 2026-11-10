@@ -18,6 +18,7 @@ import { scoreReadiness, formatReadinessReport } from '@/lib/deployment/readines
 import type { ReadinessReport } from '@/lib/deployment/readiness-scorer'
 import { sanitizeDiagnostic } from '@/lib/errors/diagnostic-sanitize'
 import { isCrudExposable, listExposedTables } from '@/lib/mcp/schema-introspection'
+import { initialPublishSummary, liveTableNames, tableFingerprints, updateSummary } from '@/lib/deployment/published-tables'
 
 export interface GoLiveResult {
   kind: 'deployed'
@@ -191,7 +192,8 @@ export async function goLive(
     // v1 records the catalog it published, like every later version, so an
     // identical publish right after going live is a truthful no-op instead of
     // a second version that changes nothing.
-    const catalogSchemaHash = await liveCatalogHash(projectId)
+    const catalog = await liveCatalog(projectId)
+    const catalogSchemaHash = catalog.hash
     const result = await prisma.$transaction(async (tx) => {
       // Validate project has a backend graph
       const projectWithGraph = await tx.project.findUnique({
@@ -203,16 +205,9 @@ export async function goLive(
         throw new Error('Cannot deploy: project has no backend state configured')
       }
 
-      // Build change summary from the graph
-      const graphData = projectWithGraph.activeGraph.graphData as any
-      const entityCount = Object.keys(graphData?.entities || {}).length
-      const apiCount = Object.keys(graphData?.apis || {}).length
-      const summaryParts: string[] = []
-      if (entityCount > 0) summaryParts.push(`${entityCount} table${entityCount > 1 ? 's' : ''}`)
-      if (apiCount > 0) summaryParts.push(`${apiCount} endpoint${apiCount > 1 ? 's' : ''}`)
-      const changeSummary = summaryParts.length > 0
-        ? `Initial publish with ${summaryParts.join(', ')}`
-        : 'Initial publish'
+      // The tables this publish puts live, counted as the Deploy page counts
+      // them (lib/deployment/published-tables.ts), never the graph's entities.
+      const changeSummary = initialPublishSummary(Object.keys(catalog.tables).length)
 
       // Set project LIVE
       await tx.project.update({
@@ -241,8 +236,9 @@ export async function goLive(
           version: 1,
           graphSnapshotId: project.activeGraphId,
           changeSummary,
-          // What the next publish compares against to decide "no changes".
-          config: { catalogSchemaHash },
+          // What the next publish compares against: the hash decides "no
+          // changes", the tables say which changed.
+          config: { catalogSchemaHash, tables: catalog.tables },
         },
       })
 
@@ -291,14 +287,19 @@ export async function goLive(
  * (table_name, ordinal_position), so the hash is stable; generatedAt is
  * excluded because it changes on every read.
  */
-async function liveCatalogHash(projectId: string): Promise<string> {
+async function liveCatalog(projectId: string): Promise<{ hash: string; tables: Record<string, string> }> {
   const { readWorkspaceSchema } = await import('@/lib/typegen/schema-reader')
-  const liveSchema = await readWorkspaceSchema(projectId)
-  return crypto
-    .createHash('sha256')
-    .update(JSON.stringify(liveSchema.tables))
-    .digest('hex')
-    .slice(0, 16)
+  const [liveSchema, names] = await Promise.all([readWorkspaceSchema(projectId), liveTableNames(projectId)])
+  return {
+    hash: crypto
+      .createHash('sha256')
+      .update(JSON.stringify(liveSchema.tables))
+      .digest('hex')
+      .slice(0, 16),
+    // The tables a publish puts live, each with a fingerprint of its shape, so
+    // the next publish can say which were added, removed or changed.
+    tables: tableFingerprints(names, liveSchema.tables),
+  }
 }
 
 /**
@@ -316,7 +317,8 @@ export async function publishUpdate(
   triggerSource?: GoLiveOptions['confirmedBy'],
 ): Promise<GoLiveResult | GoLiveError> {
   try {
-    const catalogSchemaHash = await liveCatalogHash(projectId)
+    const catalog = await liveCatalog(projectId)
+    const catalogSchemaHash = catalog.hash
 
     const result = await prisma.$transaction(async (tx) => {
       // Get next version number
@@ -344,36 +346,10 @@ export async function publishUpdate(
         return { publicUrl, version: latestDeployment?.version || 1, noChanges: true }
       }
 
-      // Get graph data for change summary
-      const activeGraph = await tx.backendGraph.findUnique({
-        where: { id: activeGraphId },
-        select: { graphData: true },
-      })
-
-      const graphData = activeGraph?.graphData as any
-      const entityCount = Object.keys(graphData?.entities || {}).length
-      const apiCount = Object.keys(graphData?.apis || {}).length
-
-      // Compare with previous deployment's graph for diff summary
-      let changeSummary = 'Backend updated'
-      if (latestDeployment?.graphSnapshotId) {
-        const prevGraph = await tx.backendGraph.findUnique({
-          where: { id: latestDeployment.graphSnapshotId },
-          select: { graphData: true },
-        })
-        const prevData = prevGraph?.graphData as any
-        const prevEntities = Object.keys(prevData?.entities || {})
-        const currEntities = Object.keys(graphData?.entities || {})
-        const added = currEntities.filter((e: string) => !prevEntities.includes(e))
-        const removed = prevEntities.filter((e: string) => !currEntities.includes(e))
-
-        const parts: string[] = []
-        if (added.length > 0) parts.push(`${added.length} table${added.length > 1 ? 's' : ''} added`)
-        if (removed.length > 0) parts.push(`${removed.length} table${removed.length > 1 ? 's' : ''} removed`)
-        if (parts.length === 0 && entityCount > 0) parts.push(`${entityCount} table${entityCount > 1 ? 's' : ''} updated`)
-        if (apiCount > 0) parts.push(`${apiCount} endpoint${apiCount > 1 ? 's' : ''}`)
-        changeSummary = parts.length > 0 ? parts.join(', ') : 'Configuration updated'
-      }
+      // What changed, table by table, against the tables the last publish
+      // recorded. The graph's entities said "Configuration updated" after an
+      // agent's migration added a table, since migrations do not move it.
+      const changeSummary = updateSummary((latestDeployment?.config as any)?.tables, catalog.tables)
 
       // Create new deployment version
       await tx.deployment.create({
@@ -388,8 +364,9 @@ export async function publishUpdate(
           version: nextVersion,
           graphSnapshotId: activeGraphId,
           changeSummary,
-          // What the next publish compares against to decide "no changes".
-          config: { catalogSchemaHash },
+          // What the next publish compares against: the hash decides "no
+          // changes", the tables say which changed.
+          config: { catalogSchemaHash, tables: catalog.tables },
         },
       })
 

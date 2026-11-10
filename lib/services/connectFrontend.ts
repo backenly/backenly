@@ -27,6 +27,18 @@
 import { prisma } from '@/lib/db/prisma'
 import { allowsAnyOrigin, isDevelopmentOrigin } from '@/lib/security/development-origin'
 
+/**
+ * An allowed origin is part of the change history (lib/changes/resources/
+ * frontends.ts): adding or removing one is a governed change of its own, with
+ * the person who made it, and restoring it puts the list back.
+ */
+const governed = async <T>(projectId: string, title: string, userId: string | undefined, fn: () => Promise<T>) =>
+  (await import('@/lib/changes/ledger')).governedChange(projectId, title, fn, userId ? { actorUserId: userId } : {})
+
+/** Another change holds the project's change lock past the wait: said, not thrown. */
+const changeInProgress = (err: unknown): string | null =>
+  (err as { code?: unknown })?.code === 'CHANGE_IN_PROGRESS' ? (err as Error).message : null
+
 export interface ConnectFrontendOptions {
   projectId: string
   frontendUrl: string
@@ -194,23 +206,32 @@ export async function connectFrontend(options: ConnectFrontendOptions): Promise<
   })
   const firstConnectedOrigin = !isDevelopmentOrigin(origin) && allowsAnyOrigin(otherActive.map(o => o.origin))
 
-  const row = await prisma.connectedApp.upsert({
-    where: { projectId_origin: { projectId, origin } },
-    update: {
-      isActive: true,
-      connectedBy: confirmedBy,
-      backendVersion,
-      connectedAt: new Date(),
-      disconnectedAt: null,
-    },
-    create: {
-      projectId,
-      origin,
-      isActive: true,
-      connectedBy: confirmedBy,
-      backendVersion,
-    },
-  })
+  let row: { id: string }
+  try {
+    row = await governed(projectId, `Allow ${origin}`, userId, () =>
+      prisma.connectedApp.upsert({
+        where: { projectId_origin: { projectId, origin } },
+        update: {
+          isActive: true,
+          connectedBy: confirmedBy,
+          backendVersion,
+          connectedAt: new Date(),
+          disconnectedAt: null,
+        },
+        create: {
+          projectId,
+          origin,
+          isActive: true,
+          connectedBy: confirmedBy,
+          backendVersion,
+        },
+      }),
+    )
+  } catch (err) {
+    const busy = changeInProgress(err)
+    if (!busy) throw err
+    return { success: false, message: busy, connected: false, origin, backendVersion, errors: ['change in progress'] }
+  }
 
   await prisma.auditLog.create({
     data: {
@@ -299,10 +320,18 @@ export async function disconnectFrontend(options: DisconnectFrontendOptions): Pr
     }
   }
 
-  await prisma.connectedApp.update({
-    where: { projectId_origin: { projectId, origin } },
-    data: { isActive: false, disconnectedAt: new Date() },
-  })
+  try {
+    await governed(projectId, `Remove ${origin} from the allowed origins`, userId, () =>
+      prisma.connectedApp.update({
+        where: { projectId_origin: { projectId, origin } },
+        data: { isActive: false, disconnectedAt: new Date() },
+      }),
+    )
+  } catch (err) {
+    const busy = changeInProgress(err)
+    if (!busy) throw err
+    return { success: false, message: busy, disconnected: false, errors: ['change in progress'] }
+  }
 
   await prisma.auditLog.create({
     data: {

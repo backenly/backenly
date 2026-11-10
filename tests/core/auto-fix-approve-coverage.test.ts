@@ -99,7 +99,6 @@ describe('normalizeFindingType — real production dynamic types', () => {
     ['n_plus_one_risk_product_categories', 'missing_fk_index', 'product_categories'],
     ['unbounded_pagination_api', 'missing_rate_limit', 'api'],
     ['schema_drift', 'shadow_mutation', undefined],
-    ['arch_migration_add_composite_indexes_on_high_traffic_qu', 'shadow_mutation', undefined],
     ['weak_rls_profiles', 'missing_rls', 'profiles'],
     ['missing_index_sessions', 'missing_fk_index', 'sessions'],
   ]

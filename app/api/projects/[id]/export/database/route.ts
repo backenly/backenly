@@ -9,15 +9,17 @@
  *
  * Query params:
  *   mode = full (default) | schema | data
- *   raw  = 1 → skip the portability filter (keep RLS policy statements that
- *          reference Backenly-internal roles; they error harmlessly on a
- *          foreign cluster, but migration tools prefer clean input)
+ *   raw  = 1 → pg_dump's output as it is: a policy written for particular
+ *          roles stays as written and fails to restore where those roles do
+ *          not exist (migration tools prefer the portable file)
  *
  * Runs pg_dump on the app box (same host as Postgres in prod) with
  * --no-owner --no-privileges and streams stdout. In portable mode (default),
- * CREATE POLICY statements are filtered out because they reference roles
- * (backenly_user, bkn_…) that don't exist at the destination; row-level
- * security ENABLE statements are kept — they're valid everywhere.
+ * every policy comes with its table, and one written for particular roles is
+ * created for those of its roles the destination has
+ * (lib/services/export-policies.ts). This mode used to leave out every policy,
+ * which restored FORCE ROW LEVEL SECURITY with nothing to allow a row, so every
+ * table denied every row (production QA, 2026-11-09).
  *
  * Note: developers can also run pg_dump themselves with their read-only
  * connection string — this endpoint is the zero-install path.
@@ -25,7 +27,7 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { spawn } from 'child_process'
-import { Transform } from 'stream'
+import { portablePolicies } from '@/lib/services/export-policies'
 import { withProjectValidation } from '@/lib/middleware/projectValidation'
 import { resolveWorkspaceSchema } from '@/lib/services/workspace-pool'
 import { buildConnection, sanitizeError } from '@/lib/services/workspace-backup'
@@ -35,29 +37,6 @@ import { regionErrorResponse } from '@/lib/api/v1/errors'
 
 export const dynamic = 'force-dynamic'
 export const maxDuration = 300
-
-/** Line-oriented filter that drops CREATE POLICY … ; statements (multi-line safe). */
-function portableFilter(): Transform {
-  let carry = ''
-  let inPolicy = false
-  return new Transform({
-    transform(chunk, _enc, cb) {
-      const text = carry + chunk.toString('utf8')
-      const lines = text.split('\n')
-      carry = lines.pop() ?? '' // last piece may be a partial line
-      const out: string[] = []
-      for (const line of lines) {
-        if (!inPolicy && /^\s*CREATE POLICY /.test(line)) inPolicy = true
-        if (!inPolicy) out.push(line)
-        else if (/;\s*$/.test(line)) inPolicy = false // statement ended — drop it and resume
-      }
-      cb(null, out.length > 0 ? out.join('\n') + '\n' : '')
-    },
-    flush(cb) {
-      cb(null, !inPolicy && carry.length > 0 ? carry : '')
-    },
-  })
-}
 
 // ADMIN: `mode=full` streams every row of every table in the workspace — the
 // whole tenant, end-user data included. An export is classified by what it
@@ -148,12 +127,19 @@ export async function GET(request: NextRequest) {
       `-- Exported at: ${new Date().toISOString()}`,
       `--`,
       `-- Restore anywhere:  psql -d yourdb -f this-file.sql`,
-      raw
-        ? `-- Raw mode: CREATE POLICY statements reference Backenly-managed roles and`
-        : `-- Portable mode: CREATE POLICY statements were omitted (they reference`,
-      raw
-        ? `-- will error harmlessly if those roles don't exist at the destination.`
-        : `-- Backenly-managed roles). Row-level security ENABLE statements are kept.`,
+      // A data-only dump has no policies to speak of.
+      ...(mode === 'data'
+        ? []
+        : raw
+          ? [
+              `-- Raw mode: pg_dump's output as it is. A policy for a role this server`,
+              `-- does not have fails to restore; psql reports it and carries on.`,
+            ]
+          : [
+              `-- Portable mode: row-level security comes with its policies. A policy`,
+              `-- written for particular roles is created for those of its roles this`,
+              `-- server has, and skipped with a warning when it has none of them.`,
+            ]),
       ``,
       ``,
     ].join('\n')
@@ -162,7 +148,7 @@ export async function GET(request: NextRequest) {
       ? dump
       : await new Promise<Buffer>((resolve, reject) => {
           const out: Buffer[] = []
-          const f = portableFilter()
+          const f = portablePolicies()
           f.on('data', (d: Buffer) => out.push(Buffer.from(d)))
           f.on('end', () => resolve(Buffer.concat(out)))
           f.on('error', reject)

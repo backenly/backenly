@@ -169,6 +169,8 @@ describe('refreshAgentConnection and readAgentConnection', () => {
     await refreshAgentConnection('p1')
     expect(readAgentConnection('p1')).toEqual({
       status: 'connected',
+      // Connected, but its last call was long ago: not calling now.
+      active: false,
       lastSeenAt: CONNECTED.lastSeenAt,
       client: 'Visual Studio Code',
     })

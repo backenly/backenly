@@ -412,6 +412,11 @@ function ActivationModal({
   const [keyError, setKeyError] = useState('')
   const [webhookKey, setWebhookKey] = useState('')
   const [showWebhookKey, setShowWebhookKey] = useState(false)
+  const [webhookKeyError, setWebhookKeyError] = useState('')
+  // The provider's answer about the key, asked on Continue (checking), so a
+  // refused key is said on this step rather than after the next one.
+  const [checking, setChecking] = useState(false)
+  const [keyCheck, setKeyCheck] = useState<{ status: string; detail: string } | null>(null)
   const [selectedOptions, setSelectedOptions] = useState<string[]>([])
   const [customIntent, setCustomIntent] = useState('')
   const [submitting, setSubmitting] = useState(false)
@@ -433,8 +438,39 @@ function ActivationModal({
     return true
   }
 
-  function handleStep1Continue() {
-    if (validateKey()) setStep(2)
+  async function handleStep1Continue() {
+    if (!validateKey() || checking) return
+    setChecking(true)
+    setWebhookKeyError('')
+    setKeyCheck(null)
+    try {
+      const values: Record<string, string> = { [provider.envVar]: apiKey.trim() }
+      if (provider.webhookKey && webhookKey.trim()) values[provider.webhookKey.envVar] = webhookKey.trim()
+      const res = await fetch(`/api/projects/${projectId}/credentials/verify`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ integrationId: provider.id, values }),
+      })
+      const data = await res.json().catch(() => ({}))
+      // A key storing would refuse is said here, under its own field.
+      if (res.status === 422) {
+        const message = data.error || 'This key was refused.'
+        if (provider.webhookKey && data.envVar === provider.webhookKey.envVar) setWebhookKeyError(message)
+        else setKeyError(message)
+        return
+      }
+      const main = res.ok && Array.isArray(data.checks)
+        ? data.checks.find((c: { envVar: string }) => c.envVar === provider.envVar)
+        : null
+      if (main) setKeyCheck({ status: main.status, detail: main.detail })
+      // Any other answer (offline, a limit, a server error) doesn't stop here:
+      // connecting checks the key again before it is stored.
+      setStep(2)
+    } catch {
+      setStep(2)
+    } finally {
+      setChecking(false)
+    }
   }
 
   function toggleOption(intent: string) {
@@ -528,8 +564,8 @@ function ActivationModal({
             <KitButton variant="primary" onClick={onClose}>Done</KitButton>
           </>
         ) : step === 1 ? (
-          <KitButton variant="primary" iconRight={ChevronRight} onClick={handleStep1Continue} disabled={!apiKey.trim()}>
-            Continue
+          <KitButton variant="primary" iconRight={ChevronRight} onClick={handleStep1Continue} loading={checking} disabled={!apiKey.trim()}>
+            {checking ? `Checking with ${provider.name}…` : 'Continue'}
           </KitButton>
         ) : (
           <>
@@ -599,9 +635,10 @@ function ActivationModal({
                     spellCheck={false}
                     type={showWebhookKey ? 'text' : 'password'}
                     value={webhookKey}
-                    onChange={e => setWebhookKey(e.target.value)}
+                    onChange={e => { setWebhookKey(e.target.value); setWebhookKeyError('') }}
                     placeholder={provider.webhookKey.placeholder}
-                    className="pr-10 font-mono"
+                    aria-invalid={!!webhookKeyError}
+                    className={`pr-10 font-mono ${webhookKeyError ? '!border-rose-400/50' : ''}`}
                   />
                   <button
                     type="button"
@@ -612,6 +649,7 @@ function ActivationModal({
                     {showWebhookKey ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
                   </button>
                 </div>
+                {webhookKeyError && <p role="alert" className="mt-1.5 text-[12px] text-rose-300">{webhookKeyError}</p>}
               </label>
               <a
                 href={provider.webhookKey.docsUrl}
@@ -634,6 +672,11 @@ function ActivationModal({
 
       {step === 2 && !done && (
         <div className="space-y-4">
+          {keyCheck && (
+            <KitNote icon={keyCheck.status === 'verified' ? Check : Info} tone={keyCheck.status === 'verified' ? 'success' : 'info'}>
+              {keyCheck.detail}
+            </KitNote>
+          )}
           <fieldset>
             <legend className="text-[13px] font-medium text-zinc-100">What should {provider.name} do in this backend?</legend>
             <p className="mb-3 mt-0.5 text-[12.5px] text-faint">

@@ -88,7 +88,8 @@ async function signUp(request: NextRequest, projectId: string, env: AuthEnvironm
     // Validate request body
     const validation = await validateRequestBody(signUpSchema, request)
     if (!validation.success) {
-      return createErrorResponse(ErrorCodes.VALIDATION_ERROR, (validation as { success: false; error: string }).error, 400)
+      const refused = validation as { success: false; error: string; fields?: Record<string, string[]> }
+      return createErrorResponse(ErrorCodes.VALIDATION_ERROR, refused.error, 400, refused.fields ? { fields: refused.fields } : undefined)
     }
 
     const { email, password, name } = validation.data

@@ -13,6 +13,7 @@ export const dynamic = 'force-dynamic'
 import { NextRequest, NextResponse } from 'next/server'
 import { withTenantIsolation, TenantIsolationError } from '@/lib/tenant/isolation'
 import { storageService } from '@/lib/services/storage'
+import { describeUploaders } from '@/lib/storage/uploader-labels'
 
 export async function GET(request: NextRequest) {
   try {
@@ -38,10 +39,13 @@ export async function GET(request: NextRequest) {
           storageService.countFiles(bucketId || undefined, projectId, search),
         ])
 
+        // Who sent each file, in words (lib/storage/uploader-labels.ts).
+        const uploaders = await describeUploaders(projectId, files)
+
         return NextResponse.json({
           success: true,
           total,
-          files: files.map(file => ({
+          files: files.map((file, i) => ({
             id: file.id,
             name: file.name,
             size: file.size.toString(), // BigInt to string
@@ -50,6 +54,7 @@ export async function GET(request: NextRequest) {
             bucket: file.bucket,
             createdAt: file.createdAt.toISOString(),
             url: file.url,
+            uploader: uploaders[i],
           })),
         })
       } catch (error: any) {

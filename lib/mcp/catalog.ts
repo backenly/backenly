@@ -109,13 +109,15 @@ const OPEN_WORLD = new Set(['backend_chat', 'store_integration_key', 'send_push'
 export function annotationsFor(name: string): McpToolAnnotations {
   // A domain tool never performs a destructive update itself: its destructive
   // and high-risk actions park the exact call for a human (lib/mcp/domains.ts).
+  // One whose every action only reads is a read (isReadOnlyTool).
   const domain = getDomainTool(name)
   if (domain) {
+    const readOnly = isReadOnlyTool(name)
     return {
       title: domain.title,
-      readOnlyHint: false,
+      readOnlyHint: readOnly,
       destructiveHint: false,
-      idempotentHint: false,
+      idempotentHint: readOnly,
       openWorldHint: !!domain.openWorld,
     }
   }
@@ -427,9 +429,16 @@ export function buildCatalog(opts?: { readOnly?: boolean }): McpToolDescriptor[]
  */
 const READ_ONLY_SYNTHETIC = new Set(['fetch_docs', 'generate_types', 'check_approval', 'db_query'])
 
-/** True when `name` may be served to a read-only key. */
+/**
+ * True when `name` may be served to a read-only key. A domain tool is when
+ * every action behind it only reads: a read-only key may call each of them
+ * (the route judges the action's own tool), so the whole tool is a read.
+ * `monitoring` was advertised to hosts as writing (production QA, 2026-11-09).
+ */
 export function isReadOnlyTool(name: string): boolean {
-  return READ_ONLY_TOOLS.has(name as any) || READ_ONLY_SYNTHETIC.has(name)
+  if (READ_ONLY_TOOLS.has(name as any) || READ_ONLY_SYNTHETIC.has(name)) return true
+  const domain = getDomainTool(name)
+  return !!domain && Object.values(domain.actions).every((a) => READ_ONLY_TOOLS.has(a.tool as any))
 }
 
 /**
@@ -631,7 +640,7 @@ export function buildDispatchable(): McpToolDescriptor[] {
       description:
         'Read rows from a single workspace table by simple column = value filter. Returns whole rows. ' +
         'For joins, aggregates, GROUP BY, or any multi-table question use `run_query` instead — this tool cannot express them. ' +
-        'Owner/admin maintenance tool: validates table and column shapes, but intentionally bypasses end-user RLS and app triggers. Row-event AI functions and row webhooks still fire: they are captured inside PostgreSQL, so they see every writer.',
+        'Owner/admin maintenance tool: validates table and column shapes, but intentionally bypasses end-user RLS and app triggers. Row-event functions and row webhooks still fire: they are captured inside PostgreSQL, so they see every writer.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -653,12 +662,12 @@ export function buildDispatchable(): McpToolDescriptor[] {
       name: 'db_insert',
       tier: 'data',
       description:
-        'Insert one row into a workspace table. Owner/admin maintenance tool: bypasses end-user RLS and app triggers; row-event AI functions and row webhooks still fire (captured inside PostgreSQL). ' +
+        'Insert one row into a workspace table. Owner/admin maintenance tool: bypasses end-user RLS and app triggers; row-event functions and row webhooks still fire (captured inside PostgreSQL). ' +
         'Returns the created row including auto-generated id and timestamps.',
       inputSchema: {
         type: 'object',
         properties: {
-          table: { type: 'string' },
+          table: { type: 'string', description: 'The table to insert the row into.' },
           row: { type: 'object', description: 'Column → value pairs for the new row. Omit id/timestamps — they are auto-generated.' },
           branchId: { type: 'string', description: 'A preview branch id (branch action:"list") to read or seed that branch instead of production.' },
         },
@@ -671,11 +680,11 @@ export function buildDispatchable(): McpToolDescriptor[] {
       tier: 'data',
       description:
         'Patch one or more rows in a workspace table. `filter` selects which rows to update; `patch` is the column → value diff. ' +
-        'Owner/admin maintenance tool: bypasses end-user RLS and app triggers; row-event AI functions and row webhooks still fire (captured inside PostgreSQL). Returns the count of rows updated.',
+        'Owner/admin maintenance tool: bypasses end-user RLS and app triggers; row-event functions and row webhooks still fire (captured inside PostgreSQL). Returns the count of rows updated.',
       inputSchema: {
         type: 'object',
         properties: {
-          table: { type: 'string' },
+          table: { type: 'string', description: 'The table whose matching rows to update.' },
           filter: { type: 'object', description: 'WHERE clause as column=value pairs (must not be empty — global updates are refused).' },
           patch: { type: 'object', description: 'Columns to set on the matched rows.' },
           branchId: { type: 'string', description: 'A preview branch id (branch action:"list") to read or seed that branch instead of production.' },
@@ -689,11 +698,11 @@ export function buildDispatchable(): McpToolDescriptor[] {
       tier: 'data',
       description:
         'Delete rows from a workspace table matching `filter`. `filter` is REQUIRED and non-empty — there is no "delete all rows" path here. ' +
-        'Owner/admin maintenance tool: bypasses end-user RLS and app triggers; row-event AI functions and row webhooks still fire (captured inside PostgreSQL). For destructive table-wide operations use the dashboard.',
+        'Owner/admin maintenance tool: bypasses end-user RLS and app triggers; row-event functions and row webhooks still fire (captured inside PostgreSQL). For destructive table-wide operations use the dashboard.',
       inputSchema: {
         type: 'object',
         properties: {
-          table: { type: 'string' },
+          table: { type: 'string', description: 'The table to delete the matching rows from.' },
           filter: { type: 'object', description: 'WHERE clause as column=value pairs. Must not be empty.' },
           branchId: { type: 'string', description: 'A preview branch id (branch action:"list") to read or seed that branch instead of production.' },
         },
@@ -776,17 +785,24 @@ export function buildDispatchable(): McpToolDescriptor[] {
     tier: 'build',
     description:
       'Apply a schema migration written as ordinary PostgreSQL DDL. Supports CREATE TABLE, ' +
-      'ALTER TABLE (ADD COLUMN / RENAME COLUMN / ADD CONSTRAINT / ALTER COLUMN SET|DROP NOT NULL / SET|DROP DEFAULT) and CREATE [UNIQUE] INDEX; ' +
+      'ALTER TABLE (ADD COLUMN / DROP COLUMN / RENAME COLUMN / ALTER COLUMN … TYPE [USING] / ADD CONSTRAINT / DROP CONSTRAINT / ' +
+      'ALTER COLUMN SET|DROP NOT NULL / SET|DROP DEFAULT, several comma-separated), CREATE [UNIQUE] INDEX and DROP INDEX; ' +
       'multiple statements in one call are applied in order. Write bare table names — your project schema is ' +
       'already in scope. Every table gets `id`, `"createdAt"` and `"updatedAt"` (camelCase) and `"deleted_at"` ' +
       'automatically; a declared `id`, `created_at` or `updated_at` is skipped in their favour, so order by ' +
       '`"createdAt"`. Each statement is translated into a governed action, so the change stays ' +
       'planned, verified and reversible — this is NOT raw SQL execution. Anything it cannot govern is refused ' +
       'with the exact tool to use instead, and a migration is all-or-nothing: if one statement is unsupported, ' +
-      'none are applied. For row changes use db_insert/db_update/db_delete; for reads use run_query; for drops ' +
-      'and anything else use backend_chat.\n' +
+      'none are applied. A column\'s new type is exactly the one written; USING may convert the column\'s own value ' +
+      'with casts and built-in functions. A dropped or retyped column\'s values are kept with the change, so ' +
+      'restoring it brings them back. On production, a migration that drops a column, a constraint or a unique index, ' +
+      'or changes a column\'s type, waits for a person: the response has status "awaiting_approval" and an approval ' +
+      'id to poll with check_approval, and approving it runs the migration exactly as sent. For row changes use ' +
+      'db_insert/db_update/db_delete; for reads use run_query; for dropping a table and anything else use backend_chat.\n' +
       'With `branchId` the migration applies to that preview branch ONLY, production is untouched, and the ' +
-      'statements are logged for the branch\'s merge. Foreign keys are recorded but not enforced on a branch.',
+      'statements are logged for the branch\'s merge. A branch has every foreign key production has and checks a ' +
+      'key a migration declares with REFERENCES as production will; a key Backenly infers from a column name is ' +
+      'added at the merge.',
     inputSchema: {
       type: 'object',
       properties: {
