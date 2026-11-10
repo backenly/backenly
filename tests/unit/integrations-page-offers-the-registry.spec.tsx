@@ -69,7 +69,8 @@ it('groups the providers by the registry’s categories', async () => {
   render(<IntegrationsPanel />)
   await flush()
   for (const title of ['Payments', 'Email', 'SMS', 'Push notifications', 'AI / LLM', 'Image & video generation']) {
-    expect(screen.getByRole('radio', { name: new RegExp(`^${title.replace(/[/&]/g, '\\$&')}`) })).toBeInTheDocument()
+    // A filter's accessible name is its title followed by its count ("SMS1").
+    expect(screen.getByRole('radio', { name: (name) => name.startsWith(title) })).toBeInTheDocument()
   }
   fireEvent.click(screen.getByRole('radio', { name: /^SMS/ }))
   await flush()
