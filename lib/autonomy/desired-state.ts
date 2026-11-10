@@ -604,6 +604,10 @@ export function gapIdentity(
     // finding. The contract sweep's own auto-resolve is per-surface and was
     // unaffected, which is why this stayed hidden.
     (d.surface as string | undefined) ??
+    // Function findings are located by FUNCTION. They carry the trigger's
+    // table too, so by table two functions on `orders` were one gap: while
+    // one kept failing, the other's finding outlived its recovery.
+    (d.functionId as string | undefined) ??
     (table && column ? `${table}.${column}` : table)
   const base = normalizeFindingType(type, d)?.base ?? type
   return `${base}::${loc}`

@@ -22,6 +22,7 @@
 import { prisma } from '@/lib/db/prisma'
 import { detectSubsystemRecurrence } from '@/lib/autonomy/subsystem-recurrence'
 import { detectIntentDrift } from '@/lib/autonomy/intent-conformance'
+import { detectFailingFunctions } from '@/lib/autonomy/function-failures'
 import { probeQueryFailed } from '@/lib/core/drift-detector'
 import { queryWorkspaceSchema } from './workspaceDatabase'
 import {
@@ -461,6 +462,10 @@ async function observeProject(projectId: string, result: ObserverResult): Promis
     // this line it was detected every minute and recorded nowhere: nobody was
     // told, and the investigator, which reads findings, never saw one.
     detectIntentDrift(projectId),
+    // A function that keeps failing on its own runs. notify_only for the same
+    // reason: without this line the loop saw it every minute, no row was
+    // written, and Overview's "broken guarantees" stayed at 0.
+    detectFailingFunctions(projectId),
   ]
 
   const settled = await Promise.allSettled(detectors)
