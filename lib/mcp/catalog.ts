@@ -463,8 +463,10 @@ export function buildDispatchable(): McpToolDescriptor[] {
       'id and what has landed so far, and backend_chat with "status" waits for it again and returns its result. ' +
       'While one request runs, a message sent here joins it instead of starting another. Whenever an answer ' +
       'carries `next`, the request is not finished: make that call. To lay down a whole app\'s schema, ' +
-      'apply_migration with the complete DDL is faster and exact. Where production is protected the brain cannot ' +
-      'change the schema: build it on a branch with apply_migration. If the request involves a destructive operation ' +
+      'apply_migration with the complete DDL is faster and exact. Where production is protected the brain builds ' +
+      'the schema on a preview branch and asks a person for one merge: the answer carries the `approval` id to poll ' +
+      'with check_approval and `branch`, what waits for the merge; say "continue" once it is executed. If the ' +
+      'request involves a destructive operation ' +
       '(dropping tables/columns, deleting buckets), it is NOT executed — the response includes an `approval` object ' +
       'with a pending request id: the human approves it in the Backenly Review Queue, and you poll `check_approval` ' +
       'until it is executed or rejected.',
