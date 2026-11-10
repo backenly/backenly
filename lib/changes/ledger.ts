@@ -171,6 +171,14 @@ export interface GovernedChangeInput {
   recoversId?: string
   /** For a recovery: its own one-line summary ("Restored the state before #12"). */
   summary?: string
+  /**
+   * What the change did in the words of the person who asked, when it was
+   * applied: for an action whose database effect would misname it (turning on
+   * sign-in creates a users table; turning on realtime adds a trigger). Only
+   * Backenly's own words, never a caller's. A change that fails is described
+   * by what it actually did instead.
+   */
+  summaryIfApplied?: string
   /** Recover automatically (when provably safe) if the change fails. Default: yes for a change. */
   autoRecover?: boolean
 }
@@ -480,7 +488,10 @@ export async function withGovernedChange<T>(
     }
     const preserved: ChangePreservation | null = change.preserved.length > 0 ? { vault: change.vault, entries: change.preserved } : null
     const touchedDatabase = keptFootprint.length > 0 || change.preserved.length > 0
-    const summary = input.summary ?? [touchedDatabase ? describeChange(keptFootprint) : '', describeOps(resourceOps)].filter(Boolean).join('. ')
+    const summary =
+      input.summary ??
+      (verdict.ok && input.summaryIfApplied ? input.summaryIfApplied : undefined) ??
+      [touchedDatabase ? describeChange(keptFootprint) : '', describeOps(resourceOps)].filter(Boolean).join('. ')
     const evidence = {
       steps: keptSteps(verdict.steps, quote) as unknown as Prisma.InputJsonValue,
       // For a project kept in another region the SQL stays there: it can carry values.

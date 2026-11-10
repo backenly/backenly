@@ -3205,8 +3205,9 @@ export async function executeAction(
     return r
   }
   try {
+    const plain = plainWordsForLedger(action)
     const { result, change } = await withGovernedChange(
-      { projectId, title: describeActionForLedger(action) },
+      { projectId, title: plain?.title ?? describeActionForLedger(action), ...(plain ? { summaryIfApplied: plain.summary } : {}) },
       recorded,
       (r) => ({
         ok: r.success,
@@ -3264,6 +3265,30 @@ function expectationsFor(action: AIAction): Array<{ action: string; table?: stri
       return table ? [{ action: action.action, table }] : []
     default:
       return []
+  }
+}
+
+/**
+ * The change history's words for an action whose database effect would misname
+ * it: turning on sign-in creates a users table, and turning on realtime adds a
+ * trigger, so History read "Created table users" and "Changed the triggers on
+ * orders" (production QA, 2026-11-09). The title is what was asked; the
+ * summary is what was done, used when it was applied.
+ */
+function plainWordsForLedger(action: AIAction): { title: string; summary: string } | null {
+  const p = (action.params ?? {}) as Record<string, any>
+  const table: string | undefined = p.table ?? p.tableName
+  switch (action.action) {
+    case 'ENABLE_AUTH':
+      return { title: 'Turn on email and password sign-in', summary: 'Turned on email and password sign-in' }
+    case 'ENABLE_TEAMS':
+      return { title: 'Turn on teams', summary: 'Turned on teams' }
+    case 'ENABLE_REALTIME':
+      return table ? { title: `Turn on realtime for ${table}`, summary: `Turned on realtime for ${table}` } : null
+    case 'DISABLE_REALTIME':
+      return table ? { title: `Turn off realtime for ${table}`, summary: `Turned off realtime for ${table}` } : null
+    default:
+      return null
   }
 }
 

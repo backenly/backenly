@@ -23,11 +23,12 @@ const NOUN: Record<string, string> = {
 
 /**
  * The functions Backenly installs beside a project's tables: the updatedAt
- * stamp and the end-user claim reader every policy calls. They arrive with a
- * project's first table and are plumbing, not what anyone asked for, so the
- * summary leaves them out; View details lists them with the rest.
+ * stamp and the end-user claim reader every policy calls, and the sync
+ * functions an architecture change keeps two tables equal with (bkn_evo_…).
+ * They are plumbing, not what anyone asked for, so the summary leaves them
+ * out; View details lists them with the rest.
  */
-const isPlatformHelper = (c: TableChange) => c.object === 'function' && /^(?:backenly_|set_updated_at\()/.test(nameOf(c))
+const isPlatformHelper = (c: TableChange) => c.object === 'function' && /^(?:backenly_|set_updated_at\(|bkn_evo_)/.test(nameOf(c))
 
 export function describeChange(footprint: TableChange[]): string {
   if (footprint.length === 0) return 'Changed nothing'
