@@ -1666,3 +1666,8 @@ tests/integration/auth-before-first-signup.spec.ts
 # Express app (server/app.ts), whose modules open the platform database, so it
 # runs with one.
 tests/integration/runtime-rejects-bad-bodies.spec.ts
+
+# GET /api/auth/session answers every browser with 200 (the user for a live
+# session, else { user: null, canRefresh }), so a signed-out page logs no
+# failed request. Real session rows, checked by the function requireUser uses.
+tests/integration/signed-out-session-answers.spec.ts
