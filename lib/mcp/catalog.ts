@@ -77,7 +77,8 @@ export interface McpToolAnnotations {
  * irreversible only through the human Review Queue (destructive brain tools are
  * never dispatchable here at all).
  */
-const OVERWRITES_DATA = new Set(['db_update', 'db_delete'])
+// `branch` too, for its discard action: it drops the branch's rows.
+const OVERWRITES_DATA = new Set(['db_update', 'db_delete', 'branch', 'discard_branch'])
 
 /** Writes that leave the same end state however many times they run. */
 const IDEMPOTENT_WRITES = new Set(['set_rls', 'set_env_var'])
@@ -161,9 +162,9 @@ const MCP_EXCLUDE = new Set<string>([
 
 /** Build tools (non-destructive mutations) — assigned to tier 'build'. */
 const BUILD_TOOLS = new Set<string>([
-  'create_branch', 'connect_branch', 'merge_branch',
+  'create_branch', 'connect_branch', 'merge_branch', 'discard_branch',
   'create_table', 'add_column', 'create_index', 'rename_column', 'add_constraint',
-  // (list_branches / diff_branch are read tools; all four are reachable through
+  // (list_branches / diff_branch are read tools; all six are reachable through
   // the single advertised `branch` tool — see BRANCH_ACTIONS.)
   'generate_api', 'enable_auth', 'create_bucket', 'set_bucket_public', 'set_bucket_policy', 'add_rls', 'set_rls',
   'create_trigger', 'enable_realtime', 'generate_function', 'enable_vector_search',
@@ -272,9 +273,10 @@ const MCP_SURFACE = new Set<string>([
   // picking between four similarly-named tools, and it costs a quarter of the
   // context. All four still dispatch individually for pinned clients.
   //
-  // `discard` is deliberately not one of the actions: it is destructive, so it
-  // routes through backend_chat → the human Review Queue like every other
-  // irreversible operation.
+  // `discard` drops the branch's schema and ends its keys, and runs at once:
+  // it removes a scratch copy, never anything of production's, as Supabase's
+  // and Neon's delete_branch do. Production QA (2026-11-09) watched an agent
+  // pay AI credits and wait on a person to tidy up its own experiments.
   'branch',
   // ── set_rls — the deterministic door onto the one security-critical write ──
   //
@@ -720,8 +722,9 @@ export function buildDispatchable(): McpToolDescriptor[] {
       '"connect" (needs `branchId`; serviceRole:true for a server-side key) · ' +
       '"diff" (needs `branchId` — the migrations a merge would replay, and any conflict with main) · "merge" (needs ' +
       '`branchId` — replays the branch\'s migrations onto production; it WAITS FOR A HUMAN: you get an approval id to ' +
-      'poll with check_approval, and it is refused while main has changed a table the migrations touch). Discarding a ' +
-      'branch is destructive — ask via backend_chat and it goes to the Review Queue.',
+      'poll with check_approval, and it is refused while main has changed a table the migrations touch) · "discard" ' +
+      '(needs `branchId` — drops the branch, its rows and its keys at once, with no approval and no undo; production ' +
+      'is untouched).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -731,7 +734,7 @@ export function buildDispatchable(): McpToolDescriptor[] {
           description: 'What to do. Start with "list" if you do not have a branchId.',
         },
         name: { type: 'string', description: 'For action:"create" — the branch name, e.g. "add-payments".' },
-        branchId: { type: 'string', description: 'For action:"connect" / "diff" / "merge" — the id from action:"list".' },
+        branchId: { type: 'string', description: 'For action:"connect" / "diff" / "merge" / "discard" — the id from action:"list".' },
         includeData: {
           type: 'boolean',
           description:
@@ -863,8 +866,9 @@ export function buildDispatchable(): McpToolDescriptor[] {
  * `branch { action }` → the brain tool that performs it.
  *
  * Exported for the same reason as STATE_SECTIONS: the dispatcher routes from
- * the table the manifest advertises, so the two cannot drift. `discard` is
- * absent on purpose — it is destructive and belongs on the approval path.
+ * the table the manifest advertises, so the two cannot drift. `merge` waits
+ * for a person (it changes production); `discard` does not (it drops only the
+ * branch).
  */
 export const BRANCH_ACTIONS: Record<string, string> = {
   list: 'list_branches',
@@ -872,6 +876,7 @@ export const BRANCH_ACTIONS: Record<string, string> = {
   connect: 'connect_branch',
   diff: 'diff_branch',
   merge: 'merge_branch',
+  discard: 'discard_branch',
 }
 
 export const STATE_SECTIONS: Record<string, string> = {

@@ -81,7 +81,7 @@ One tool per dashboard section, each with an `action`:
 
 ## Approvals
 
-An action marked "wait for approval" never runs from the call. The exact call is parked, the response carries an `approval` object with its id, and nothing changes until a human approves it on the project's **Autonomy** page; the approved call then runs verbatim, with no model re-reading it. Dropping or truncating a table and discarding a branch go through `backend_chat`, which parks them the same way. Poll `check_approval` every 15–30 seconds until the status is `executed`, `rejected` (do not retry), `expired`, `failed` (approved but the call did not complete — it can stop part-way, so read state to see what landed before retrying) or `partial` (some changes landed; verify state instead of replaying). Details: `autonomy`.
+An action marked "wait for approval" never runs from the call. The exact call is parked, the response carries an `approval` object with its id, and nothing changes until a human approves it on the project's **Autonomy** page; the approved call then runs verbatim, with no model re-reading it. Dropping or truncating a table goes through `backend_chat`, which parks it the same way. Poll `check_approval` every 15–30 seconds until the status is `executed`, `rejected` (do not retry), `expired`, `failed` (approved but the call did not complete — it can stop part-way, so read state to see what landed before retrying) or `partial` (some changes landed; verify state instead of replaying). Details: `autonomy`.
 
 ## Read-only keys
 

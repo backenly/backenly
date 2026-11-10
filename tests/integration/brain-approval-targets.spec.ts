@@ -99,7 +99,6 @@ const ROWS: Row[] = [
   { tool: 'delete_webhook', args: () => ({}), target: 'no webhook (the call names none)', reversible: false },
   { tool: 'merge_branch', args: () => ({ branchId: 'ghost-branch' }), target: 'merge of preview branch `ghost-branch` into production', reversible: false },
   { tool: 'merge_branch', args: () => ({}), target: 'merge of preview branch `unknown` into production', reversible: false },
-  { tool: 'discard_branch', args: () => ({ branchId: 'ghost-branch' }), target: 'the preview branch `ghost-branch` and every unmerged change on it', reversible: false },
   { tool: 'block_end_user', args: () => ({ email: 'a@example.test' }), target: 'the end-user a@example.test (they lose access immediately)', reversible: true },
   { tool: 'remove_permission', args: () => ({}), target: 'a row-level security policy (data exposure may widen)', reversible: true },
   { tool: 'disable_oauth_provider', args: () => ({ provider: 'google' }), target: 'google sign-in (end-users on this provider cannot log in)', reversible: true },
@@ -153,7 +152,8 @@ describe('every tool the brain\'s model is offered that needs approval', () => {
   const gated = BRAIN_MODEL_TOOLS.map((t) => t.function.name).filter((name) => needsApproval(name))
 
   it('is a real set, so the table above cannot silently cover nothing', () => {
-    expect(gated.length).toBeGreaterThanOrEqual(23)
+    // 22 since discard_branch runs directly: it drops only the branch.
+    expect(gated.length).toBeGreaterThanOrEqual(22)
   })
 
   it.each(gated)('%s is held with a target, never run', async (tool) => {

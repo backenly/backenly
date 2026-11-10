@@ -11,8 +11,7 @@ Preview branches, on Backenly Cloud: a copy of the project's schema in an isolat
 - `connect`: another key for an active branch, with its preview endpoint. `serviceRole: true` issues a server-side key that bypasses row-level security on the branch only.
 - `diff`: the migrations applied on the branch, in order (exactly what a merge replays), what they changed, and any conflict with production.
 - `merge`: replay the branch's migrations onto production. **Waits for a human**: you get an approval id to poll with `check_approval`. Refused with `MERGE_CONFLICT` while production has changed a table the migrations touch. When it runs, the branch is closed and its schema dropped.
-
-Discarding a branch goes through `backend_chat` and waits for a human's approval.
+- `discard`: drop the branch, its rows and its keys at once. No approval and no undo; production is untouched.
 
 ## Building on a branch
 

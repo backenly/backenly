@@ -573,7 +573,7 @@ async function handleCall(request: NextRequest, auth: McpGuardAuth, startedAt: n
           error: action ? `Unknown branch action "${action}".` : 'branch requires { action }.',
           code: 'UNKNOWN_BRANCH_ACTION',
           supported: Object.keys(BRANCH_ACTIONS),
-          hint: 'Start with { "action": "list" } to get branch ids. Discarding a branch is destructive — ask via backend_chat.',
+          hint: 'Start with { "action": "list" } to get branch ids.',
         },
         { status: 400 },
       ))
