@@ -341,19 +341,102 @@ describe('ALTER TABLE', () => {
     })
   })
 
-  it('refuses DROP CONSTRAINT … CASCADE, and more than one constraint per statement', () => {
+  it('refuses DROP CONSTRAINT … CASCADE', () => {
     expect(expectRefusal('ALTER TABLE orders DROP CONSTRAINT total_positive CASCADE').code).toBe('UNSUPPORTED_STATEMENT')
-    expect(expectRefusal('ALTER TABLE orders DROP CONSTRAINT a, DROP CONSTRAINT b').code).toBe('BAD_STATEMENT')
   })
 
-  it('refuses DROP COLUMN as destructive, naming the approval path', () => {
-    const err = expectRefusal('ALTER TABLE posts DROP COLUMN body')
-    expect(err.code).toBe('DESTRUCTIVE_REFUSED')
-    expect(err.hint).toMatch(/backend_chat/)
+  it('translates comma-separated actions one by one, each with a source of its own', () => {
+    const drops = parseMigration('ALTER TABLE orders DROP CONSTRAINT a, DROP CONSTRAINT b')
+    expect(drops.map((a) => [a.tool, a.args])).toEqual([
+      ['drop_constraint', { tableName: 'orders', constraintName: 'a' }],
+      ['drop_constraint', { tableName: 'orders', constraintName: 'b' }],
+    ])
+    expect(drops.map((a) => a.source)).toEqual([
+      'ALTER TABLE orders DROP CONSTRAINT a, DROP CONSTRAINT b → DROP CONSTRAINT a',
+      'ALTER TABLE orders DROP CONSTRAINT a, DROP CONSTRAINT b → DROP CONSTRAINT b',
+    ])
+    // The comma used to run into the first action: this was ONE column whose
+    // default was "0, ADD COLUMN qty int".
+    const added = parseMigration('ALTER TABLE orders ADD COLUMN price numeric(10,2) DEFAULT 0, ADD COLUMN qty int')
+    expect(added.map((a) => (a.args.column as { name: string }).name)).toEqual(['price', 'qty'])
+    expect((added[0].args.column as { default: string }).default).toBe('0')
+    // An inline CHECK is a step of its own, with a source of its own.
+    const checked = parseMigration('ALTER TABLE orders ADD COLUMN qty int CHECK (qty > 0)')
+    expect(checked.map((a) => a.source)).toEqual([
+      'ALTER TABLE orders ADD COLUMN qty int CHECK (qty > 0)',
+      'ALTER TABLE orders ADD COLUMN qty int CHECK (qty > 0) → CHECK (qty > 0)',
+    ])
+  })
+
+  it('reads a comma inside ARRAY[…] as part of the default', () => {
+    const [create] = parseMigration("CREATE TABLE posts (tags text[] DEFAULT ARRAY['a','b'], title text)")
+    expect((create.args.columns as Array<{ name: string }>).map((c) => c.name)).toEqual(['tags', 'title'])
+  })
+
+  it('translates DROP COLUMN as written, carrying IF EXISTS', () => {
+    expect(parseOne('ALTER TABLE posts DROP COLUMN body').args).toEqual({ tableName: 'posts', columnName: 'body', asWritten: true })
+    expect(parseOne('ALTER TABLE posts DROP IF EXISTS "Body" RESTRICT').args).toEqual({
+      tableName: 'posts', columnName: 'Body', ifExists: true, asWritten: true,
+    })
+  })
+
+  it('refuses DROP COLUMN … CASCADE, and dropping a column Backenly keeps', () => {
+    expect(expectRefusal('ALTER TABLE posts DROP COLUMN body CASCADE').code).toBe('UNSUPPORTED_STATEMENT')
+    expect(expectRefusal('ALTER TABLE posts DROP COLUMN id').code).toBe('RESERVED_COLUMN')
+    expect(expectRefusal('ALTER TABLE posts DROP COLUMN "updatedAt"').code).toBe('RESERVED_COLUMN')
+  })
+
+  it('translates ALTER COLUMN … TYPE to the declared type, exactly', () => {
+    expect(parseOne("ALTER TABLE orders ALTER COLUMN refunded_at TYPE timestamptz USING refunded_at AT TIME ZONE 'UTC'").args).toEqual({
+      tableName: 'orders',
+      columnName: 'refunded_at',
+      newType: 'timestamp',
+      sqlType: 'timestamptz',
+      asWritten: true,
+      using: "refunded_at AT TIME ZONE 'UTC'",
+    })
+    expect(parseOne('ALTER TABLE orders ALTER total SET DATA TYPE numeric(10,2)').args).toMatchObject({ sqlType: 'numeric(10,2)' })
+    expect(parseOne('ALTER TABLE orders ALTER COLUMN sku TYPE varchar(40)').args).toMatchObject({ sqlType: 'varchar(40)' })
+    expect(parseOne('ALTER TABLE orders ALTER COLUMN qty TYPE bigint USING CAST(qty AS bigint)').args).toMatchObject({
+      sqlType: 'bigint', using: 'CAST(qty AS bigint)',
+    })
+    expect(parseOne("ALTER TABLE orders ALTER COLUMN qty TYPE int USING NULLIF(qty, '')::integer").args).toMatchObject({
+      sqlType: 'integer', using: "NULLIF(qty, '')::integer",
+    })
+    expect(parseOne("ALTER TABLE orders ALTER COLUMN tags TYPE text[] USING string_to_array(tags, ',')").args).toMatchObject({
+      sqlType: 'text[]',
+    })
+    expect(parseOne("ALTER TABLE orders ALTER COLUMN paid TYPE timestamptz USING 'epoch'::timestamptz + paid * interval '1 second'").args)
+      .toMatchObject({ sqlType: 'timestamptz' })
+  })
+
+  it('refuses a USING that reads anything but the column through built-ins', () => {
+    for (const using of [
+      "query_to_xml('select 1', true, true, '')",
+      '(SELECT email FROM users LIMIT 1)',
+      'c::regclass::text',
+      'other_schema.lower(c)',
+      'lower(d)',
+      "E'\\'' || c",
+      'c || $$x$$',
+      "c AT TIME ZONE 'UTC; DROP TABLE t'",
+      '5',
+    ]) {
+      const err = expectRefusal(`ALTER TABLE t ALTER COLUMN c TYPE text USING ${using}`)
+      expect({ using, code: err.code }).toEqual({ using, code: 'UNSAFE_EXPRESSION' })
+      expect(err.hint).toMatch(/run_data_migration|built-in|literals|zone|Cast to one of/)
+    }
+  })
+
+  it('refuses a new type without an exact spelling, COLLATE, and retyping a column Backenly keeps', () => {
+    expect(expectRefusal('ALTER TABLE t ALTER COLUMN c TYPE serial').code).toBe('UNSUPPORTED_TYPE')
+    expect(expectRefusal('ALTER TABLE t ALTER COLUMN c TYPE geometry').code).toBe('UNSUPPORTED_TYPE')
+    expect(expectRefusal('ALTER TABLE t ALTER COLUMN c TYPE text COLLATE "C"').code).toBe('UNSUPPORTED_STATEMENT')
+    expect(expectRefusal('ALTER TABLE t ALTER COLUMN "createdAt" TYPE timestamptz').code).toBe('RESERVED_COLUMN')
   })
 
   it('refuses an unmodelled ALTER action with a route forward', () => {
-    const err = expectRefusal('ALTER TABLE posts ALTER COLUMN title TYPE integer')
+    const err = expectRefusal('ALTER TABLE posts ALTER COLUMN title SET STATISTICS 100')
     expect(err.code).toBe('UNSUPPORTED_STATEMENT')
     expect(err.hint).toMatch(/backend_chat/)
   })
@@ -493,7 +576,8 @@ describe('refusals route somewhere', () => {
       'DROP TABLE posts',
       'SELECT 1',
       "INSERT INTO t (a) VALUES (1)",
-      'ALTER TABLE t ALTER COLUMN c TYPE int',
+      'ALTER TABLE t ALTER COLUMN c TYPE int USING lower(d)',
+      'ALTER TABLE t DROP COLUMN c CASCADE',
       'CREATE TABLE t (x geometry)',
       'VACUUM',
     ]) {
@@ -520,6 +604,7 @@ describe('conformance with the real dispatch contract', () => {
     'ALTER TABLE u ADD CONSTRAINT ue UNIQUE (email)',
     'ALTER TABLE p ADD FOREIGN KEY (author_id) REFERENCES users(id)',
     'ALTER TABLE posts ALTER COLUMN title SET NOT NULL',
+    'ALTER TABLE posts DROP COLUMN IF EXISTS body',
     'CREATE UNIQUE INDEX idx_email ON users (email)',
     'CREATE INDEX ON posts (author_id, created_at DESC)',
   ]
@@ -561,6 +646,22 @@ describe('conformance with the real dispatch contract', () => {
       const missing = schema.required.filter((k) => action.args[k] === undefined)
       expect({ tool: action.tool, missing }).toEqual({ tool: action.tool, missing: [] })
     }
+  })
+
+  it('emits for alter_column_type, which no model is offered, exactly what its mapper forwards', () => {
+    const { TOOL_TO_ACTION } = require('@/lib/ai/brain/tools')
+    const [step] = parseMigration("ALTER TABLE t ALTER COLUMN c TYPE timestamptz USING c AT TIME ZONE 'UTC'")
+    const read = new Set<string>()
+    const { params } = TOOL_TO_ACTION[step.tool](new Proxy(step.args, {
+      get(target, key, receiver) {
+        if (typeof key === 'string') read.add(key)
+        return Reflect.get(target, key, receiver)
+      },
+    }))
+    expect(Object.keys(step.args).filter((k) => !read.has(k))).toEqual([])
+    expect(params).toEqual({
+      tableName: 't', columnName: 'c', newType: 'timestamp', sqlType: 'timestamptz', using: "c AT TIME ZONE 'UTC'", asWritten: true,
+    })
   })
 
   it('only ever emits constraintType values the enum accepts', () => {

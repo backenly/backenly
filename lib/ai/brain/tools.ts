@@ -177,10 +177,12 @@ export type ToolName =
   | 'apply_proposal'
   | 'list_findings'
   | 'resolve_finding'
-  // apply_migration's DROP INDEX and ALTER TABLE … DROP CONSTRAINT. Not offered
-  // to a model: only the migration parser plans them (lib/mcp/migration-parser.ts).
+  // apply_migration's DROP INDEX, ALTER TABLE … DROP CONSTRAINT and ALTER COLUMN
+  // … TYPE. Not offered to a model: only the migration parser plans them
+  // (lib/mcp/migration-parser.ts), and the brain runs only what it offered.
   | 'drop_index'
   | 'drop_constraint'
+  | 'alter_column_type'
   // Destructive
   | 'drop_table'
   | 'truncate_table'
@@ -1514,7 +1516,16 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
     ['tableName']),
   fn('drop_column',
     'DESTRUCTIVE. Permanently drop a column and ALL of its data from a table. Reserved columns (id, createdAt, updatedAt) cannot be dropped — to remove the whole table use drop_table. Regenerates the table\'s REST API so the column disappears from CRUD payloads. Requires explicit user confirmation in the same turn.',
-    { tableName: { type: 'string' }, columnName: { type: 'string' } },
+    {
+      tableName: { type: 'string' },
+      columnName: { type: 'string' },
+      ifExists: { type: 'boolean', description: 'Succeed without a change when the table has no such column.' },
+      asWritten: {
+        type: 'boolean',
+        description:
+          'Drop only this column, as SQL without CASCADE does: refused while a view, a row policy or another table\'s foreign key depends on it, naming what does. apply_migration sets it.',
+      },
+    },
     ['tableName', 'columnName']),
   fn('disable_realtime',
     'DESTRUCTIVE (for live subscribers). Stop streaming realtime change events. Pass a tableName to disable a single table, or omit to disable realtime project-wide. Any client currently subscribed via SSE stops receiving events the moment the trigger is dropped. The shared NOTIFY function is preserved so re-enabling later is instant. Requires explicit user confirmation in the same turn.',
@@ -1886,7 +1897,21 @@ export const TOOL_TO_ACTION: Record<string, (args: any) => AIAction> = {
   rotate_webhook_secret: (a) => ({ action: 'ROTATE_WEBHOOK_SECRET', params: { triggerName: a.triggerName, triggerId: a.triggerId } }),
   drop_table: (a) => ({ action: 'DROP_TABLE', params: { tableName: a.tableName } }),
   truncate_table: (a) => ({ action: 'TRUNCATE_TABLE', params: { tableName: a.tableName } }),
-  drop_column: (a) => ({ action: 'DROP_COLUMN', params: { tableName: a.tableName, columnName: a.columnName } }),
+  drop_column: (a) => ({
+    action: 'DROP_COLUMN',
+    params: { tableName: a.tableName, columnName: a.columnName, ifExists: a.ifExists === true, asWritten: a.asWritten === true },
+  }),
+  alter_column_type: (a) => ({
+    action: 'ALTER_COLUMN_TYPE',
+    params: {
+      tableName: a.tableName,
+      columnName: a.columnName,
+      newType: a.newType,
+      sqlType: a.sqlType,
+      using: a.using,
+      asWritten: a.asWritten === true,
+    },
+  }),
   drop_index: (a) => ({
     action: 'DROP_INDEX',
     params: { indexName: a.indexName, ifExists: a.ifExists === true, dropUniqueness: a.dropUniqueness === true, online: a.online === true },
@@ -3947,6 +3972,7 @@ export function humanTitle(name: string, args: Record<string, unknown>): string 
     case 'drop_column': return `Dropping column ${args.columnName ?? ''} from ${args.tableName ?? ''}`.trim()
     case 'drop_index': return `Dropping index ${args.indexName ?? ''}`.trim()
     case 'drop_constraint': return `Dropping constraint ${args.constraintName ?? ''} from ${args.tableName ?? ''}`.trim()
+    case 'alter_column_type': return `Changing the type of ${args.tableName ?? ''}.${args.columnName ?? ''} to ${args.sqlType ?? args.newType ?? '…'}`
     case 'disable_realtime': return args.tableName ? `Disabling realtime on ${args.tableName}` : 'Disabling realtime project-wide'
     case 'rename_column': return `Renaming ${args.oldName ?? ''} → ${args.newName ?? ''} on ${args.tableName ?? ''}`.trim()
     case 'add_constraint': {

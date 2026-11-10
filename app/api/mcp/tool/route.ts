@@ -1113,8 +1113,8 @@ async function parkMigration(auth: McpGuardAuth, sql: string, review: MigrationN
       ok: true,
       status: 'awaiting_approval',
       summary:
-        `${review.error.replace(/ Nothing was applied\.$/, '')} It is waiting for a person on the project's Autonomy page, ` +
-        `and runs exactly as sent once they approve it. Nothing has changed yet.`,
+        `${review.error.replace(/ Nothing was applied\.$/, '')} ${review.reasons.join(' ')} It is waiting for a person on the ` +
+        `project's Autonomy page, and runs exactly as sent once they approve it. Nothing has changed yet.`,
       data: { statements: review.statements },
       approval: {
         id: row.id,

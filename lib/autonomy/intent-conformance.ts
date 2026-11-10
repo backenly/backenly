@@ -126,9 +126,10 @@ export type SupersedingChange =
   | { kind: 'drop_column'; tableName: string; columnName: string }
   | { kind: 'drop_table'; tableName: string }
   | { kind: 'rename_column'; tableName: string; from: string; to: string }
+  | { kind: 'retype_column'; tableName: string; columnName: string; type: string }
 
 /**
- * A governed drop or rename is a later explicit request, so it supersedes what
+ * A governed drop, rename or retype is a later explicit request, so it supersedes what
  * the ledger recorded for those columns, the same way a second create_table
  * does. Without this, a column the developer removed on purpose stayed
  * "requested" forever: the drift detector reported it missing, and an AI
@@ -148,6 +149,14 @@ export async function supersedeSchemaIntent(projectId: string, change: Supersedi
     } else if (change.kind === 'drop_column') {
       const column = String(change.columnName || '').trim()
       if (column) await prisma.schemaIntent.deleteMany({ where: { projectId, tableName: table, columnName: column } })
+    } else if (change.kind === 'retype_column') {
+      // The new type is what is requested now: without this, a column retyped
+      // on purpose read as type drift against the type it was created with.
+      const column = String(change.columnName || '').trim()
+      const type = String(change.type || '').trim()
+      if (column && type) {
+        await prisma.schemaIntent.updateMany({ where: { projectId, tableName: table, columnName: column }, data: { requestedType: type } })
+      }
     } else {
       const from = String(change.from || '').trim()
       const to = String(change.to || '').trim()
