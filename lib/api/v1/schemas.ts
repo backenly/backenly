@@ -4,16 +4,23 @@ import { z } from 'zod'
  * V1 Public API validation schemas
  */
 
-// Auth schemas
+// End-user auth, in the words an app shows its users. Both runtimes parse with
+// these (app/api/v1/[projectId]/auth/*, server/routes/auth.ts), so the same body
+// is refused the same way by either.
+const email = z.string({ required_error: 'Email is required.' }).email('Email must be a valid email address.')
+
 export const signUpSchema = z.object({
-  email: z.string().email(),
-  password: z.string().min(8).max(100),
-  name: z.string().min(1).max(100).optional(),
+  email,
+  password: z
+    .string({ required_error: 'Password is required.' })
+    .min(8, 'Password must be at least 8 characters.')
+    .max(100, 'Password must be at most 100 characters.'),
+  name: z.string().min(1, 'Name cannot be empty.').max(100, 'Name must be at most 100 characters.').optional(),
 })
 
 export const signInSchema = z.object({
-  email: z.string().email(),
-  password: z.string().min(1),
+  email,
+  password: z.string({ required_error: 'Password is required.' }).min(1, 'Password is required.'),
 })
 
 export const refreshTokenSchema = z.object({

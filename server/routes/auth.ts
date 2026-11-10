@@ -20,6 +20,8 @@ import {
 } from '@/lib/services/end-user-auth-flows'
 import { getAuthEmailContext } from '@/lib/services/end-user-auth-email'
 import { z } from 'zod'
+import { signInSchema, signUpSchema } from '@/lib/api/v1/schemas'
+import { describeIssues, plainErrorMap } from '@/lib/validation/plain-issues'
 import jwt from 'jsonwebtoken'
 import { JWTSecretManager, resolveJwtSecret } from '@/lib/services/jwtSecretManager'
 import { asyncRoute } from '../lib/async-route'
@@ -73,17 +75,8 @@ async function authEnvironment(req: Request, res: Response): Promise<AuthEnviron
 
 // End-user passwords must be at least 8 chars. Project owners can opt into
 // stricter rules via their auth config; this is the floor that the runtime
-// enforces regardless of project config.
-const signUpSchema = z.object({
-  email: z.string().email(),
-  password: z.string().min(8, 'Password must be at least 8 characters'),
-  name: z.string().optional(),
-})
-
-const signInSchema = z.object({
-  email: z.string().email(),
-  password: z.string(),
-})
+// enforces regardless of project config. The schemas and their words are the
+// web tier's own (lib/api/v1/schemas.ts), so a body is refused the same way here.
 
 // In-memory IP throttle for the emailed end-user flows below (recovery,
 // verification, magic links). The address is the one lib/security/client-ip.ts
@@ -155,11 +148,10 @@ async function handleSignUp(req: Request, res: Response) {
     const env = await authEnvironment(req, res)
     if (!env) return
 
-    const parsed = signUpSchema.safeParse(req.body)
+    const parsed = signUpSchema.safeParse(req.body, { errorMap: plainErrorMap })
     if (!parsed.success) {
-      sendError(res, ErrorCodes.VALIDATION_ERROR, 'Request validation failed', 400, {
-        fields: parsed.error.flatten().fieldErrors,
-      })
+      const refused = describeIssues(parsed.error)
+      sendError(res, ErrorCodes.VALIDATION_ERROR, refused.message, 400, { fields: refused.fields })
       return
     }
 
@@ -349,11 +341,10 @@ async function handleSignIn(req: Request, res: Response) {
     const env = await authEnvironment(req, res)
     if (!env) return
 
-    const parsed = signInSchema.safeParse(req.body)
+    const parsed = signInSchema.safeParse(req.body, { errorMap: plainErrorMap })
     if (!parsed.success) {
-      sendError(res, ErrorCodes.VALIDATION_ERROR, 'Request validation failed', 400, {
-        fields: parsed.error.flatten().fieldErrors,
-      })
+      const refused = describeIssues(parsed.error)
+      sendError(res, ErrorCodes.VALIDATION_ERROR, refused.message, 400, { fields: refused.fields })
       return
     }
 
