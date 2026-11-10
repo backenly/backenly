@@ -18,7 +18,10 @@
  *      (`result.tokensUsed`), then stops the holds counting. A run is charged
  *      when it ends, whether or not anyone waited for it: a turn used to keep
  *      running past the call's 90 s cap and was billed only what it had spent
- *      by then.
+ *      by then. On a protected production a build turn is charged only when it
+ *      ends with a request waiting for a person (the merge of the branch it
+ *      built on) or with changes on production: one that only planned, or
+ *      failed before either, is not.
  */
 
 import { runBrain, type BrainEvent, type BrainResult } from '@/lib/ai/brain/agent'
@@ -117,8 +120,16 @@ export async function executeRun(
     // returned total (authoritative) but never charge less than we observed.
     // A billing write must never turn a completed backend change into an error.
     spentTokens = Math.max(spentTokens, result.tokensUsed)
-    await closeCreditTurn(ctx.creditAccount, creditScope, spentTokens).catch(() => {})
     const turn = await turnBody(result, events, ctx)
+    // ── A build on a protected production is charged for what it delivers ────
+    // There the schema is built on a preview branch and reaches production
+    // through a merge a person approves. A build turn that ends with a request
+    // waiting for a person, or with changes on production, is charged; one that
+    // only planned, or failed, before either is not (Decision 4, production QA
+    // 2026-11-09, report 98: plans and diagnoses took an org past its credits).
+    const chargeable =
+      turn.reviewable || (result.applied?.length ?? 0) > 0 || !(await protectedBuild(ctx.caller.projectId, result))
+    await closeCreditTurn(ctx.creditAccount, creditScope, chargeable ? spentTokens : 0).catch(() => {})
     outcome = turn.outcome
     mutation = turn.mutation
     note = { summary: turn.summary }
@@ -148,6 +159,16 @@ export async function executeRun(
   return outcome
 }
 
+/** Intents that ask backend_chat to change the backend, rather than to answer about it. */
+const BUILD_INTENTS: ReadonlySet<string> = new Set(['BUILD', 'MODIFY', 'APPLY_PROPOSAL', 'CONFIRM'])
+
+/** Whether this turn was a build on a project whose production is protected. */
+async function protectedBuild(projectId: string, result: BrainResult): Promise<boolean> {
+  if (!BUILD_INTENTS.has(result.classification.intent)) return false
+  const { isProductionProtected } = await import('@/lib/branches/protection')
+  return isProductionProtected(projectId).catch(() => false)
+}
+
 /**
  * The body for a turn that returned: approvals queued for what its gate
  * stopped, then everything an agent needs to act on what happened.
@@ -156,7 +177,7 @@ export async function turnBody(
   result: BrainResult,
   events: BrainEvent[],
   ctx: { caller: ChatCaller; message: string; startedAt: number },
-): Promise<{ outcome: RunOutcome; mutation: boolean; summary: string }> {
+): Promise<{ outcome: RunOutcome; mutation: boolean; summary: string; reviewable: boolean }> {
   // Escalation instead of a dead end. Every call the brain's approval gate
   // stopped is queued for a human with its EXACT tool and arguments, one
   // request per call, and approval runs that call verbatim, so the operation
@@ -254,8 +275,16 @@ export async function turnBody(
       : '',
   ].filter(Boolean).join(' ')
   const onlyNotQueued = notQueued.length > 0 && !escalated && !result.applied?.length && !result.failureCode
+  // A build on a protected production asks for one merge of its branch: the
+  // branch has changed, production has not.
+  const branchMerge = !!result.branchBuild && queued[0]?.tool === 'merge_branch'
   const summary =
-    (escalated
+    (escalated && branchMerge
+      ? `${result.summary}\n\n⏸ The merge of preview branch "${result.branchBuild!.branch}" into production needs a ` +
+        `person's approval and is waiting in the project's Review Queue (Autonomy page), listing exactly the ` +
+        `statements it will apply. Poll \`check_approval\` with id "${approval!.id}" until the status is executed, ` +
+        `rejected or expired. Production has not changed yet.`
+      : escalated
       ? `${result.summary}\n\n⏸ This operation needs a human's approval, so Backenly did not run it. ` +
         `It is waiting, exactly as requested, in the project's Review Queue (Autonomy page). ` +
         `Poll \`check_approval\` with id "${approval!.id}" until the status is executed, rejected or expired. ` +
@@ -328,6 +357,9 @@ export async function turnBody(
     // build. `next` is the exact call that picks up the rest; it is set only
     // when that call will find something (lib/ai/brain/next-call.ts).
     ...(result.next ? { next: result.next } : {}),
+    // A build on a protected production: what is on its preview branch, and
+    // what waits for the merge. None of it is on production yet.
+    ...(result.branchBuild ? { branch: result.branchBuild } : {}),
     classification: {
       intent: result.classification.intent,
       confidence: result.classification.confidence,
@@ -340,6 +372,8 @@ export async function turnBody(
     outcome: { statusCode: 200, body },
     mutation: result.toolsRun.some((t) => !['read_backend_state', 'finish', 'answer_question'].includes(t)),
     summary,
+    // A request now waits for a person: what a build on a protected production is charged for.
+    reviewable: queued.length > 0,
   }
 }
 

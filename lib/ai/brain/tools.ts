@@ -21,6 +21,7 @@ import { AiError, generate } from '../llm'
 import { kickReconciler, shouldKickFor } from '@/lib/autonomy/event-trigger'
 import { WEBHOOK_EVENT_TYPES } from '@/lib/webhooks/events'
 import { publicOrigin } from '@/lib/branches/preview'
+import type { BuildBranch } from '@/lib/branches/build-branch'
 import { SERVED_OAUTH_PROVIDERS, isServedOAuthProvider } from '@/lib/services/oauth-providers'
 
 /** Executor actions whose audit rows record who acted (see runExecutor). */
@@ -395,6 +396,14 @@ export interface ToolDispatchContext {
    * tried to "repair" tables it had just built.
    */
   createdThisTurn?: Set<string>
+  /**
+   * backend_chat's turn on a project whose production is protected: its schema
+   * calls are built on this preview branch instead of being refused, and a step
+   * on a table only the branch has is saved for after the merge
+   * (lib/branches/build-branch.ts). The MCP tool route sets none, so an agent's
+   * own typed call there is still refused with the branch to use.
+   */
+  buildBranch?: BuildBranch
   onToolEvent?: (e: {
     phase: 'start' | 'done' | 'fail'
     tool: ToolName
@@ -2222,6 +2231,21 @@ function preflightValidate(
   }
 }
 
+/**
+ * A typed schema call on the turn's preview branch: written as SQL and applied
+ * as a branch migration, which logs it for the merge. Its events name the
+ * branch, so nothing reads it as a change to production.
+ */
+async function buildOnBranch(name: string, args: Record<string, unknown>, ctx: ToolDispatchContext, title: string): Promise<ToolResult> {
+  const branch = ctx.buildBranch!
+  ctx.onToolEvent?.({ phase: 'start', tool: name as ToolName, title: `${title} on a preview branch` })
+  const r = await branch.apply(name, args)
+  const where = branch.current ? ` on preview branch "${branch.current.name}"` : ''
+  ctx.onToolEvent?.({ phase: r.ok ? 'done' : 'fail', tool: name as ToolName, title: `${title}${where}`, detail: r.summary })
+  if (r.ok && name === 'create_table' && typeof args.tableName === 'string') ctx.createdThisTurn?.add(args.tableName)
+  return { ok: r.ok, summary: r.summary, ...(r.code ? { code: r.code } : {}), ...(r.data ? { data: r.data } : {}) }
+}
+
 export async function dispatchTool(
   name: string,
   args: Record<string, unknown>,
@@ -2241,8 +2265,19 @@ export async function dispatchTool(
   if (ctx.agentSurface) {
     const { GATED_SCHEMA_TOOLS, isProductionProtected, branchRequired } = await import('@/lib/branches/protection')
     if (GATED_SCHEMA_TOOLS.has(name) && (await isProductionProtected(ctx.projectId))) {
+      // backend_chat builds it on its turn's preview branch, for one merge a
+      // person approves (lib/branches/build-branch.ts).
+      if (ctx.buildBranch) return await buildOnBranch(name, args, ctx, title)
       const refusal = branchRequired(`${name}${args.tableName ? ` on "${String(args.tableName)}"` : ''}`)
       return { ok: false, summary: `${refusal.error} ${refusal.hint}`, code: refusal.code }
+    }
+    // A step on a table only the turn's branch has cannot run on production
+    // before the merge brings the table there: it is saved to run after it.
+    if (ctx.buildBranch && typeof args.tableName === 'string' && args.tableName) {
+      const { AFTER_MERGE_TOOLS } = await import('@/lib/branches/build-branch')
+      if (AFTER_MERGE_TOOLS.has(name) && (await isProductionProtected(ctx.projectId)) && (await ctx.buildBranch.onlyOnBranch(args.tableName))) {
+        return ctx.buildBranch.defer({ label: title, tool: name, args })
+      }
     }
   }
 

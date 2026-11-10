@@ -954,6 +954,13 @@ tests/integration/ai-lab-arm.spec.ts
 # charge. The row and the race are real, so it needs a real Postgres.
 tests/integration/ai-credit-holds.spec.ts
 
+# backend_chat on a protected production builds the schema on a preview branch,
+# saves what needs the tables on production for after the merge, and asks a
+# person for one merge with its statements pinned; a build turn there is charged
+# for that request, not for a plan. Real branch engine, migration log, approval
+# request, merge replay and charge.
+tests/integration/backend-chat-builds-on-a-branch.spec.ts
+
 # A confirmed build's price (the architect's tokens its proposal deferred and a
 # fixed price per step) is held whole before any step runs, or nothing runs and
 # the plan is kept; the build's own model calls hold nothing more, and the run
