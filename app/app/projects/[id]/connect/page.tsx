@@ -28,7 +28,7 @@
 
 import { useEffect, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
-import { Bot, KeyRound, TerminalSquare, FileCode2, FileJson } from 'lucide-react'
+import { Bot, KeyRound, TerminalSquare, FileCode2, FileJson, RotateCw } from 'lucide-react'
 import { setCurrentProjectId } from '@/lib/api/client'
 import { getProject, type Project } from '@/lib/api/projects'
 import {
@@ -42,6 +42,7 @@ import {
   KitTabs,
   PageHeader,
   SettingsCard,
+  Skeleton,
   StatusDot,
 } from '@/components/inspector/kit'
 import { lastCallAgo, useAgentConnection } from '@/lib/hooks/useAgentConnection'
@@ -151,15 +152,25 @@ export default function ProjectConnectPage() {
 
 function DirectTab({ projectId }: { projectId: string }) {
   const router = useRouter()
-  const [project, setProject] = useState<Project | null>(null)
+  // A project still loading, or one that could not be loaded, is not a project
+  // without an address. The row used to show "—" for all three, so a slow or
+  // failed request read as the server saying there is no API address.
+  const [load, setLoad] = useState<{ state: 'loading' } | { state: 'failed' } | { state: 'ready'; project: Project }>({ state: 'loading' })
+  const [attempt, setAttempt] = useState(0)
 
   useEffect(() => {
     let cancelled = false
     getProject(projectId)
-      .then((p) => { if (!cancelled) setProject(p) })
-      .catch(() => { /* rows fall back to their unset state */ })
+      .then((p) => { if (!cancelled) setLoad({ state: 'ready', project: p }) })
+      .catch(() => { if (!cancelled) setLoad({ state: 'failed' }) })
     return () => { cancelled = true }
-  }, [projectId])
+  }, [projectId, attempt])
+
+  const retry = () => {
+    setLoad({ state: 'loading' })
+    setAttempt((n) => n + 1)
+  }
+  const project = load.state === 'ready' ? load.project : null
 
   // The live base is {origin}/api/v1/{projectId}, where origin is the API
   // address of the project's region: this console's own origin for the home
@@ -205,7 +216,23 @@ function DirectTab({ projectId }: { projectId: string }) {
       >
         <DetailList>
           <DetailRow label="API base URL">
-            {apiBaseUrl ? <CopyField value={apiBaseUrl} /> : <span className="text-faint">—</span>}
+            {load.state === 'loading' ? (
+              <span aria-busy="true" className="block">
+                <Skeleton className="h-[34px] w-full" />
+                <span className="sr-only">Loading</span>
+              </span>
+            ) : load.state === 'failed' ? (
+              <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                <span role="alert" className="text-zinc-400">Couldn’t load the URL.</span>
+                <KitButton size="sm" variant="ghost" icon={RotateCw} onClick={retry}>
+                  Try again
+                </KitButton>
+              </span>
+            ) : apiBaseUrl ? (
+              <CopyField value={apiBaseUrl} />
+            ) : (
+              <span className="text-faint">—</span>
+            )}
           </DetailRow>
           <DetailRow label="Project ID">
             <CopyField value={projectId} />
