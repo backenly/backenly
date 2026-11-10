@@ -45,7 +45,7 @@ describe('a real migration survives the whole path', () => {
     const steps = toExecutorParams(SQL)
     expect(steps.map((s) => s.tool)).toEqual([
       'create_table',
-      'create_index',    // UNIQUE (requester_id, addressee_id)
+      'add_constraint',  // UNIQUE (requester_id, addressee_id), a real constraint as written
       'add_constraint',  // inline CHECK on status
       'add_constraint',  // table-level connections_no_self
       'create_index',    // the explicit CREATE UNIQUE INDEX
@@ -53,7 +53,8 @@ describe('a real migration survives the whole path', () => {
   })
 
   it('the CHECK predicate reaches the executor under the field it reads', () => {
-    const checks = toExecutorParams(SQL).filter((s) => s.tool === 'add_constraint')
+    const checks = toExecutorParams(SQL).filter((s) => s.tool === 'add_constraint' && s.params.constraintType === 'check')
+    expect(checks).toHaveLength(2)
     for (const c of checks) {
       // `expression` is what executeAddConstraint reads. Undefined here is
       // defect #2 exactly.
@@ -70,21 +71,24 @@ describe('a real migration survives the whole path', () => {
     // the divergence would show up as a migration that parses and then fails at
     // the executor for no reason the caller can see. They share one grammar.
     for (const step of toExecutorParams(SQL)) {
-      if (step.tool !== 'add_constraint') continue
+      if (step.tool !== 'add_constraint' || step.params.constraintType !== 'check') continue
       const r = validateBooleanExpression(step.params.expression, { requireColumn: true })
       expect(r.kind).toBe('ok')
     }
   })
 
-  it('the composite unique index keeps BOTH columns and its uniqueness', () => {
+  it('a composite UNIQUE keeps BOTH columns and its uniqueness', () => {
     const indexes = toExecutorParams(SQL).filter((s) => s.tool === 'create_index')
     const pair = indexes.find((i) => i.params.tableName === 'conversations')!
     expect(pair.params.columns).toEqual(['user_a', 'user_b'])
     expect(pair.params.unique).toBe(true)
 
-    const fromConstraint = indexes.find((i) => i.params.tableName === 'connections')!
+    // UNIQUE inside CREATE TABLE is a constraint as written, which the executor makes a real one.
+    const fromConstraint = toExecutorParams(SQL).find(
+      (s) => s.tool === 'add_constraint' && s.params.constraintType === 'unique' && s.params.tableName === 'connections',
+    )!
     expect(fromConstraint.params.columns).toEqual(['requester_id', 'addressee_id'])
-    expect(fromConstraint.params.unique).toBe(true)
+    expect(fromConstraint.params.asWritten).toBe(true)
   })
 
   it('the multi-column CHECK arrives WITHOUT a bogus single columnName', () => {

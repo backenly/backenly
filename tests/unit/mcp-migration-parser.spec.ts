@@ -137,7 +137,7 @@ describe('CREATE TABLE', () => {
     expect(a.notes?.join(' ')).toMatch(/id, created_at, updated_at/)
     // The note must NOT leak into args — dispatchTool forwards args straight to
     // the executor, and an unknown key there is a silent contract violation.
-    expect(Object.keys(a.args).sort()).toEqual(['columns', 'tableName'])
+    expect(Object.keys(a.args).sort()).toEqual(['asWritten', 'columns', 'tableName'])
   })
 
   it('names the camelCase columns that replace a skipped created_at', () => {
@@ -280,7 +280,7 @@ describe('ALTER TABLE', () => {
 
   it('translates UNIQUE and FOREIGN KEY constraints', () => {
     expect(parseOne('ALTER TABLE u ADD CONSTRAINT ue UNIQUE (email)').args).toEqual({
-      tableName: 'u', columnName: 'email', constraintType: 'unique', constraintName: 'ue',
+      tableName: 'u', columnName: 'email', columns: ['email'], constraintType: 'unique', constraintName: 'ue', asWritten: true,
     })
     expect(parseOne('ALTER TABLE p ADD FOREIGN KEY (author_id) REFERENCES users(id)').args).toEqual({
       tableName: 'p',
@@ -294,17 +294,18 @@ describe('ALTER TABLE', () => {
 
   // Defect #10: this was refused, and its own hint pointed at CREATE UNIQUE
   // INDEX — which then silently dropped both the composite-ness and the
-  // uniqueness (defects #5 and #4). Three bugs in one dead end.
-  it('applies a multi-column UNIQUE as a composite unique index', () => {
+  // uniqueness (defects #5 and #4). Three bugs in one dead end. Now it is the
+  // constraint as written, by its name, which ON CONFLICT (user_a, user_b) can use.
+  it('applies a multi-column UNIQUE as the composite constraint written', () => {
     const a = parseOne('ALTER TABLE conversations ADD CONSTRAINT pair UNIQUE (user_a, user_b)')
-    expect(a.tool).toBe('create_index')
+    expect(a.tool).toBe('add_constraint')
     expect(a.args).toEqual({
       tableName: 'conversations',
       columns: ['user_a', 'user_b'],
-      unique: true,
-      indexName: 'pair',
+      constraintType: 'unique',
+      asWritten: true,
+      constraintName: 'pair',
     })
-    expect(a.notes?.join(' ')).toMatch(/unique index/i)
   })
 
   it('translates ALTER COLUMN DROP NOT NULL and DEFAULT changes', () => {

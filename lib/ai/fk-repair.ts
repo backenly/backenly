@@ -364,8 +364,17 @@ export async function repairForeignKeysWithDetails(projectId: string): Promise<F
       postgresSchema
     )
     const fkSet = new Set(existingFKs.map(r => `${r.table_name}.${r.column_name}`))
+    // Tables declared in SQL keep exactly the keys their statement declared
+    // (lib/db/declared-tables.ts). If that cannot be read, nothing is repaired
+    // this time: the repair runs again after the next table is created.
+    const { tablesDeclaredInSql } = await import('@/lib/db/declared-tables')
+    const declared = await tablesDeclaredInSql(projectId).catch(() => null)
+    if (!declared) {
+      return { repaired: 0, failed: 0, details: [], summaryMessage: 'Foreign-key repair skipped: the tables declared in SQL could not be read.' }
+    }
 
     for (const { table_name, column_name, is_nullable } of allCols) {
+      if (declared.has(table_name)) continue
       const base = deriveFkBase(column_name)
       if (!base) continue
 

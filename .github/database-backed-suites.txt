@@ -1745,3 +1745,8 @@ tests/integration/auth-before-first-signup.spec.ts
 # Express app (server/app.ts), whose modules open the platform database, so it
 # runs with one.
 tests/integration/runtime-rejects-bad-bodies.spec.ts
+# A table declared in SQL is created as written: no constraint, nullability or
+# default its column names suggest, kept out of the name-based key repair, and a
+# UNIQUE the SQL declares is a real constraint ON CONFLICT can target. A table
+# the brain designs from a description keeps its inference.
+tests/integration/sql-as-written.spec.ts
