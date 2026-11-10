@@ -1666,3 +1666,9 @@ tests/integration/auth-before-first-signup.spec.ts
 # Express app (server/app.ts), whose modules open the platform database, so it
 # runs with one.
 tests/integration/runtime-rejects-bad-bodies.spec.ts
+
+# Who sends a project's auth emails, as said to the person who asks: the
+# settings view names the address the deployment sends from, and the agent's
+# auth tool says Backenly sends it on Cloud, the deployment's SMTP when
+# self-hosted. Creates a user and project in the platform database.
+tests/integration/auth-mail-says-who-sends-it.spec.ts

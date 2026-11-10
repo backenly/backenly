@@ -14,6 +14,7 @@
  */
 
 import nodemailer from 'nodemailer'
+import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
 import { canAccessProject, canAdministerProject, canWriteProject } from '@/lib/edition/guard'
 import {
   deleteSmtpConfig,
@@ -52,13 +53,25 @@ const badKind = (kind: unknown): EmailActionResult | null =>
     ? null
     : { ok: false, code: 'INVALID_ARGUMENT', summary: `kind must be one of: ${TEMPLATE_KINDS.join(', ')}.` }
 
-function senderLine(smtp: Awaited<ReturnType<typeof getSmtpConfigView>>): string {
+function senderLine(smtp: Awaited<ReturnType<typeof getSmtpConfigView>>, policy: AuthEmailPolicyView | null): string {
   if (smtp.activeSource === 'none') return 'No sender is configured, so auth emails are not being sent.'
-  const via = smtp.activeSource === 'project' ? `this project's SMTP (${smtp.host}:${smtp.effectivePort})` : 'the deployment’s SMTP'
+  if (smtp.activeSource === 'deployment') {
+    // The From the project's users see (endUserFrom). On Cloud the deployment
+    // is Backenly, so there are no environment variables for anyone to change;
+    // the project's own SMTP is how to send from its domain.
+    const as = smtp.deploymentSenderAddress
+      ? ` as ${policy ? `"${policy.effectiveAppName}" ` : ''}<${smtp.deploymentSenderAddress}>`
+      : ''
+    return CLOUD_CONTROL_PLANE
+      ? `Backenly sends this project's auth emails${as}. To send from the app's own domain, set its SMTP: auth { action: "set_smtp" }.`
+      : `Auth emails are sent through the deployment’s SMTP${as}.`
+  }
+  // The test result belongs to the project's settings, so it is said only when
+  // they are the ones sending.
   const proof = smtp.lastTestAt
     ? smtp.lastTestError ? `; the last test failed: ${smtp.lastTestError}` : `; the last test succeeded at ${smtp.lastTestAt}`
     : '; not tested since the settings were saved'
-  return `Auth emails are sent through ${via}${proof}.`
+  return `Auth emails are sent through this project's SMTP (${smtp.host}:${smtp.effectivePort})${proof}.`
 }
 
 function policyLine(policy: AuthEmailPolicyView): string {
@@ -81,7 +94,7 @@ export async function emailSettings(actor: EmailActor): Promise<EmailActionResul
   return {
     ok: true,
     summary:
-      `${senderLine(smtp)} ${policy ? `${policyLine(policy)} ` : ''}` +
+      `${senderLine(smtp, policy)} ${policy ? `${policyLine(policy)} ` : ''}` +
       `Templates: ${customised.length ? `customised ${customised.join(', ')}` : 'all defaults'}. ` +
       `A template may use {{${templates.variables.join('}}, {{')}}}, and must include {{${templates.requiredVariables.join('}}, {{')}}}.`,
     data: { smtp, policy, ...templates },
@@ -181,7 +194,7 @@ export async function removeSmtp(actor: EmailActor): Promise<EmailActionResult> 
   return {
     ok: true,
     summary:
-      (removed ? 'Removed this project’s SMTP settings. ' : 'This project had no SMTP settings. ') + senderLine(smtp) +
+      (removed ? 'Removed this project’s SMTP settings. ' : 'This project had no SMTP settings. ') + senderLine(smtp, policy) +
       (stranded
         ? ' Sign-in still requires a verified email, so new users can no longer sign in: configure a sender, or turn ' +
           'verification off with auth { action: "set_email_policy", requireEmailVerification: false }.'

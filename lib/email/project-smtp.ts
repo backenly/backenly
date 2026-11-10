@@ -81,6 +81,11 @@ export interface SmtpConfigView {
   lastTestError: string | null
   /** Whether the deployment environment could serve as a fallback. */
   deploymentFallbackAvailable: boolean
+  /**
+   * The address auth emails to this project's users are sent from through the
+   * deployment, under the app's name (endUserFrom). Null without deployment SMTP.
+   */
+  deploymentSenderAddress: string | null
   /** Which source a message sent right now would use. */
   activeSource: SmtpSource
 }
@@ -97,6 +102,11 @@ export interface SmtpConfigInput {
 }
 
 // ── Resolution ───────────────────────────────────────────────────────────────
+
+/** The deployment's own From line, for mail sent through its environment. */
+function deploymentFrom(env: NodeJS.ProcessEnv = process.env): string {
+  return env.SMTP_FROM || 'Backenly <noreply@backenly.com>'
+}
 
 /**
  * The credentials a send from this project should use, right now.
@@ -143,7 +153,7 @@ export async function resolveProjectSmtp(projectId: string): Promise<ResolvedSmt
     return {
       source: 'deployment',
       credentials: env,
-      from: process.env.SMTP_FROM || 'Backenly <noreply@backenly.com>',
+      from: deploymentFrom(),
     }
   }
 
@@ -205,18 +215,22 @@ export function endUserFrom(
 ): string | { name: string; address: string } {
   if (resolved.source !== 'deployment') return resolved.from
 
-  let address = addressOf(resolved.from)
-  const endUserAddress = env.SMTP_END_USER_FROM?.trim()
-  if (endUserAddress) {
-    if (EMAIL_ADDRESS.test(addressOf(endUserAddress))) {
-      address = addressOf(endUserAddress)
-    } else {
-      console.warn(`[SMTP] SMTP_END_USER_FROM is not an email address; sending from ${address} instead.`)
-    }
-  }
-
+  const address = deploymentEndUserAddress(env)
   const name = (appName ?? '').replace(/[\x00-\x1f\x7f-\x9f\u2028\u2029]+/g, ' ').replace(/\s+/g, ' ').trim()
   return name ? { name, address } : address
+}
+
+/**
+ * The address endUserFrom sends from through the deployment: SMTP_END_USER_FROM
+ * when it is a usable address, otherwise SMTP_FROM's.
+ */
+export function deploymentEndUserAddress(env: NodeJS.ProcessEnv = process.env): string {
+  const fallback = addressOf(deploymentFrom(env))
+  const configured = env.SMTP_END_USER_FROM?.trim()
+  if (!configured) return fallback
+  if (EMAIL_ADDRESS.test(addressOf(configured))) return addressOf(configured)
+  console.warn(`[SMTP] SMTP_END_USER_FROM is not an email address; sending from ${fallback} instead.`)
+  return fallback
 }
 
 // ── Reading, for the dashboard ────────────────────────────────────────────────
@@ -244,6 +258,7 @@ export async function getSmtpConfigView(projectId: string): Promise<SmtpConfigVi
     lastTestAt: row?.lastTestAt ? row.lastTestAt.toISOString() : null,
     lastTestError: row?.lastTestError ?? null,
     deploymentFallbackAvailable: env !== null,
+    deploymentSenderAddress: env !== null ? deploymentEndUserAddress() : null,
     activeSource: active.source,
   }
 }
