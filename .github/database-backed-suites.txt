@@ -1666,3 +1666,6 @@ tests/integration/auth-before-first-signup.spec.ts
 # Express app (server/app.ts), whose modules open the platform database, so it
 # runs with one.
 tests/integration/runtime-rejects-bad-bodies.spec.ts
+# The runtime answers a body over its JSON limit 413 PAYLOAD_TOO_LARGE and names
+# the limit (server/app.ts), as the web tier does.
+tests/integration/runtime-body-limit.spec.ts
