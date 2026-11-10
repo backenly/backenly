@@ -54,7 +54,7 @@ import {
 import { isDataPlaneOutage } from '@/lib/core/fix-actions'
 import { reportPlatformFault, type PlatformFaultReport } from '@/lib/autonomy/platform-faults'
 import { reapUnattributableFindings, withdrawFindings } from '@/lib/core/finding-reaper'
-import { recordContractSweepResult } from '@/lib/autonomy/data-plane-liveness'
+import { readContractLiveness, recordContractSweepResult } from '@/lib/autonomy/data-plane-liveness'
 import { writeFixHistory, checkEscalation, buildResolutionText } from '@/lib/memory/fix-history'
 import { generateFixPlansFromRawFindings, type FixPlan } from '@/lib/core/fix-plan-generator'
 import { runBuiltInVerification, type VerificationExecutionResult } from '@/lib/verification/verification-executor'
@@ -300,6 +300,9 @@ export async function runContractSweep(options: {
           attribution.tenantBroken.get(projectId) ?? [],
           attribution.answeredBySurface,
         )
+        // What the previous pass found broken, read before this pass's
+        // heartbeat replaces it.
+        const previous = await readContractLiveness(projectId).catch(() => null)
 
         // The heartbeat, written on every pass whose outcome is KNOWN.
         //
@@ -337,7 +340,15 @@ export async function runContractSweep(options: {
               finding.details.fixError = err?.message ?? String(err)
               await writeFinding(projectId, finding, 'pending_approval', false)
             }
-          } else {
+          } else if (previous?.brokenSurfaces?.includes(String(finding.details?.surface ?? ''))) {
+            // A person is asked only about a surface that failed this pass and
+            // the one before. One failing pass is often a moment, not a fault:
+            // right after a restore, a surface failed once and answered a
+            // minute later, and its finding came and went in the queue
+            // (production QA, 2026-11-09). The heartbeat above already records
+            // this pass's failure, so a fault that lasts is filed on the next
+            // pass. The data-plane repair above does not wait: it re-checks
+            // against its own probe before acting, and a failed repair is filed.
             await writeFinding(projectId, finding, 'pending_approval', false)
           }
         }
