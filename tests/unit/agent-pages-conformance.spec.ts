@@ -426,7 +426,7 @@ describe('the agent pages are public', () => {
   })
 
   it.each(['claude-code', 'cursor'] as const)('%s: the undo answer names every part the one History records', (slug) => {
-    const words: Record<string, string> = { env: 'environment variables' }
+    const words: Record<string, string> = { env: 'environment variables', frontends: 'allowed origins' }
     const answer = AGENTS[slug].faq.find((f) => /undo/i.test(f.q))!.a
     expect(answer).toMatch(/the schema/)
     for (const part of RESOURCE_ORDER) expect([part, answer.includes(words[part] ?? part)]).toEqual([part, true])
