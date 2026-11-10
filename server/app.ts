@@ -16,6 +16,7 @@ import v2Routes from './routes/v2'
 import { nextProxy } from './routes/next-proxy'
 import { asyncRoute } from './lib/async-route'
 import { projectServingGate } from './lib/serving-gate'
+import { postgrestErrorShape } from './lib/v2-error-shape'
 import { recordRuntimeRequest, INTERNAL_TRAFFIC_HEADER, isInternalTraffic } from '@/lib/traffic/request-recorder'
 import { meterNodeResponse } from '@/lib/usage/egress'
 import { branchIdForRequest, refuseBranchKeyOffDataPlane } from '@/lib/branches/key-scope'
@@ -104,6 +105,13 @@ app.use(cors({
   exposedHeaders: ['Content-Range', 'Content-Location', 'Location', 'Range-Unit', 'Preference-Applied', 'X-Backenly-Environment'],
   maxAge: 86400,
 }))
+
+// ── v2 answers every error in PostgREST's shape ────────────────────────────────
+// Before every gate and the body parser, so a refusal from any of them (region,
+// serving, key placement, a body too large, a server error) reaches a v2 client
+// as { code, message, details, hint }, like PostgREST's own errors.
+// server/lib/v2-error-shape.ts.
+app.use('/api/v2', postgrestErrorShape)
 
 // ── Traffic ─────────────────────────────────────────────────────────────────────
 // Every request to a project's runtime API is recorded once it finishes, first

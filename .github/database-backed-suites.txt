@@ -1666,3 +1666,8 @@ tests/integration/auth-before-first-signup.spec.ts
 # Express app (server/app.ts), whose modules open the platform database, so it
 # runs with one.
 tests/integration/runtime-rejects-bad-bodies.spec.ts
+
+# Every /api/v2 error leaves in PostgREST's shape ({ code, message, details,
+# hint }), whichever door refused it: the exposure check and a body over the
+# limit here, v1 unchanged. The real Express app, project and key.
+tests/integration/v2-errors-in-postgrest-shape.spec.ts
