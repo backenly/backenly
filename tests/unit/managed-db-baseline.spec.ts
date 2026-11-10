@@ -125,6 +125,7 @@ const FORWARD_MIGRATIONS = [
   '20261109120000_ai_function_trigger_columns',
   '20261110120000_schema_intent_declared_type',
   '20261110170000_request_log_origin',
+  '20261111120000_webhook_tables',
 ]
 
 describe('the assembled migration workspace', () => {

@@ -1943,3 +1943,8 @@ tests/integration/branch-enforces-foreign-keys.spec.ts
 # names the tables it added, removed or changed. Real schema, the real state
 # route and the real publish.
 tests/integration/publish-counts-the-live-tables.spec.ts
+
+# A webhook endpoint can name the tables it receives row events for: a real
+# capture trigger, outbox, drain and loopback receiver, the table list's
+# checks, History, and the agent's actions.
+tests/integration/webhooks-pick-tables.spec.ts

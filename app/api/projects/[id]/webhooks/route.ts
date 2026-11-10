@@ -13,9 +13,9 @@ export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
 import { withAuth } from '@/lib/auth/route-protection'
-import { createWebhook, getProjectWebhooks } from '@/lib/webhooks'
+import { createWebhook, getProjectWebhooks, WebhookTablesError } from '@/lib/webhooks'
 import { isWebhookEventType, isRowEventType, WEBHOOK_EVENT_TYPES } from '@/lib/webhooks/events'
-import { syncWebhookCapture, listCapturedTables } from '@/lib/webhooks/capture'
+import { syncWebhookCapture, listCapturedTables, capturableTables } from '@/lib/webhooks/capture'
 import { guardWebhookRoute } from '@/lib/webhooks/route-guard'
 import { webhookPlan } from '@/lib/webhooks/plan'
 import { BlockedOutboundError } from '@/lib/security/outbound-guard'
@@ -35,6 +35,8 @@ function present(w: Awaited<ReturnType<typeof getProjectWebhooks>>[number]) {
     eventType: w.eventType,
     targetUrl: w.targetUrl,
     active: w.active,
+    /** Row events only: the tables this endpoint receives; empty means every table. */
+    tables: w.tables,
     createdAt: w.createdAt,
     updatedAt: w.updatedAt,
     logCount: w._count.logs,
@@ -57,9 +59,12 @@ export const GET = withAuth(async (_request: NextRequest, { user, params }) => {
   // ends up reporting that it works while nothing fires.
   const wantsRowEvents = webhooks.some(w => w.active && isRowEventType(w.eventType))
   const capturedTables = await listCapturedTables(projectId).catch(() => null)
+  const availableTables = await capturableTables(projectId).catch(() => [] as string[])
 
   return NextResponse.json({
     webhooks: webhooks.map(present),
+    /** The tables an endpoint can name for its row events. */
+    availableTables,
     /** Whether this project's plan includes webhooks; a change is refused while it does not. */
     plan,
     capture: {
@@ -101,8 +106,11 @@ export const POST = withAuth(async (request: NextRequest, { user, params }) => {
 
   let webhook
   try {
-    webhook = await createWebhook(projectId, eventType, targetUrl)
+    webhook = await createWebhook(projectId, eventType, targetUrl, body?.tables)
   } catch (err) {
+    if (err instanceof WebhookTablesError) {
+      return NextResponse.json({ error: err.message, code: err.code }, { status: 400 })
+    }
     // The egress guard's reason is shown to the operator verbatim. They typed
     // the URL; telling them "invalid" when the real answer is "that resolves to
     // a loopback address" turns a five-second fix into a support thread.

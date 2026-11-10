@@ -24,7 +24,7 @@ import crypto from 'crypto'
 import { emit } from '@/lib/events/bus'
 import { safeFetch, assertAllowedUrl, BlockedOutboundError } from '@/lib/security/outbound-guard'
 import { BODIES_ON_THE_ROW, REGIONAL_BODY_RETENTION_DAYS, regionalBodiesFor, type RegionalBodies } from '@/lib/data-plane/regional-bodies'
-import { WEBHOOK_EVENT_TYPES, isWebhookEventType, type WebhookEventType } from './events'
+import { WEBHOOK_EVENT_TYPES, isRowEventType, isWebhookEventType, type WebhookEventType } from './events'
 
 // ─── Retry schedule ───────────────────────────────────────────────────────────
 
@@ -410,8 +410,16 @@ export async function triggerWebhooks(
   eventType: WebhookEventType,
   data: Record<string, any>
 ): Promise<void> {
+  // A row event goes to the endpoints that listen to its table: those that
+  // name it, and those that name none (every table). A sign-up is no table's.
+  const table = isRowEventType(eventType) && typeof data?.table === 'string' ? data.table : null
   const webhooks = await prisma.webhook.findMany({
-    where: { projectId, eventType, active: true },
+    where: {
+      projectId,
+      eventType,
+      active: true,
+      ...(table ? { OR: [{ tables: { isEmpty: true } }, { tables: { has: table } }] } : {}),
+    },
   })
 
   if (webhooks.length === 0) return
@@ -480,15 +488,60 @@ export function assertDeliverableUrl(targetUrl: string): void {
 /** Each write below is one governed change, in the project's history (lib/changes/resources/webhooks.ts). */
 const governed = async <T>(projectId: string, title: string, fn: () => Promise<T>) => (await import('@/lib/changes/ledger')).governedChange(projectId, title, fn)
 
+/** A table list an endpoint cannot have: not a list, a table this project lacks, or tables on a sign-up event. */
+export class WebhookTablesError extends Error {
+  constructor(
+    message: string,
+    readonly code: 'INVALID_ARGUMENT' | 'UNKNOWN_TABLE' | 'TABLES_NOT_APPLICABLE',
+  ) {
+    super(message)
+    this.name = 'WebhookTablesError'
+  }
+}
+
+/**
+ * The tables an endpoint receives row events for, checked: a list of this
+ * project's tables that can carry row events (empty means every table), and
+ * only for a row event. A name the project does not have is refused rather
+ * than stored, so a typo cannot quietly mean "never".
+ */
+export async function webhookTables(projectId: string, eventType: string, tables: unknown): Promise<string[]> {
+  if (tables === undefined || tables === null) return []
+  if (!Array.isArray(tables) || !tables.every((t) => typeof t === 'string' && t.trim().length > 0)) {
+    throw new WebhookTablesError('tables must be a list of table names.', 'INVALID_ARGUMENT')
+  }
+  const named = [...new Set(tables.map((t: string) => t.trim()))]
+  if (named.length === 0) return []
+  if (!isRowEventType(eventType)) {
+    throw new WebhookTablesError(
+      `${eventType} comes from sign-ups, not from a table, so it can't be limited to tables. Leave tables out.`,
+      'TABLES_NOT_APPLICABLE',
+    )
+  }
+  const { capturableTables } = await import('./capture')
+  const known = new Set(await capturableTables(projectId))
+  const unknown = named.filter((t) => !known.has(t))
+  if (unknown.length > 0) {
+    throw new WebhookTablesError(
+      `This project has no table ${unknown.map((t) => `"${t}"`).join(', ')} that sends row events` +
+        (known.size > 0 ? `. Tables it can name: ${[...known].join(', ')}.` : '. It has no tables yet.'),
+      'UNKNOWN_TABLE',
+    )
+  }
+  return named
+}
+
 export async function createWebhook(
   projectId: string,
   eventType: WebhookEventType,
-  targetUrl: string
+  targetUrl: string,
+  tables?: unknown,
 ) {
   assertDeliverableUrl(targetUrl)
+  const only = await webhookTables(projectId, eventType, tables)
   return governed(projectId, `Create a webhook for ${eventType}`, () =>
     prisma.webhook.create({
-      data: { projectId, eventType, targetUrl, secret: crypto.randomBytes(32).toString('hex') },
+      data: { projectId, eventType, targetUrl, tables: only, secret: crypto.randomBytes(32).toString('hex') },
     }))
 }
 
@@ -555,17 +608,24 @@ export async function getWebhookLogs(projectId: string, webhookId: string, limit
 export async function updateWebhook(
   projectId: string,
   webhookId: string,
-  changes: { eventType?: WebhookEventType; targetUrl?: string; active?: boolean }
+  changes: { eventType?: WebhookEventType; targetUrl?: string; active?: boolean; tables?: unknown }
 ) {
   if (changes.targetUrl !== undefined) assertDeliverableUrl(changes.targetUrl)
 
   const existing = await prisma.webhook.findFirst({
     where: { id: webhookId, projectId },
-    select: { id: true },
+    select: { id: true, eventType: true, tables: true },
   })
   if (!existing) return null
 
-  return governed(projectId, 'Change a webhook', () => prisma.webhook.update({ where: { id: webhookId }, data: changes }))
+  const { tables, ...rest } = changes
+  const eventType = rest.eventType ?? existing.eventType
+  const data: { eventType?: WebhookEventType; targetUrl?: string; active?: boolean; tables?: string[] } = { ...rest }
+  if (tables !== undefined) data.tables = await webhookTables(projectId, eventType, tables)
+  // Moving to a sign-up event drops a table list it cannot use.
+  else if (!isRowEventType(eventType) && existing.tables.length > 0) data.tables = []
+
+  return governed(projectId, 'Change a webhook', () => prisma.webhook.update({ where: { id: webhookId }, data }))
 }
 
 /**

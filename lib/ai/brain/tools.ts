@@ -884,14 +884,16 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
     {
       eventType: { type: 'string', enum: [...WEBHOOK_EVENT_TYPES], description: 'The event that fires it.' },
       targetUrl: { type: 'string', description: 'The https URL that receives the events.' },
+      tables: { type: 'array', items: { type: 'string' }, description: 'Row events only: the tables it receives events for. Leave out for every table.' },
     },
     ['eventType', 'targetUrl']),
   fn('update_webhook',
-    'Change an outbound webhook endpoint: its target URL, its event, or switch it on or off.',
+    'Change an outbound webhook endpoint: its target URL, its event, the tables it receives row events for, or switch it on or off.',
     {
       webhookId: { type: 'string', description: 'From list_webhooks.' },
       targetUrl: { type: 'string', description: 'A new https URL.' },
       eventType: { type: 'string', enum: [...WEBHOOK_EVENT_TYPES], description: 'A new event.' },
+      tables: { type: 'array', items: { type: 'string' }, description: 'Row events only: the tables it receives events for; [] for every table.' },
       active: { type: 'boolean', description: 'false stops deliveries without deleting the endpoint.' },
     },
     ['webhookId']),

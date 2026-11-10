@@ -176,8 +176,8 @@ export const DOMAIN_TOOLS: DomainTool[] = [
     openWorld: true,
     actions: {
       list: { tool: 'list_webhooks', gloss: 'every endpoint with its event, URL, on/off state and capture health' },
-      create: { tool: 'create_webhook', gloss: 'an endpoint for row.inserted, row.updated, row.deleted or auth.user.created' },
-      update: { tool: 'update_webhook', gloss: 'change the URL or event of an endpoint, or switch it on or off' },
+      create: { tool: 'create_webhook', gloss: 'an endpoint for row.inserted, row.updated, row.deleted or auth.user.created; tables limits a row event to some tables' },
+      update: { tool: 'update_webhook', gloss: 'change the URL, event or tables of an endpoint, or switch it on or off' },
       delete: { tool: 'delete_webhook', gloss: 'remove an endpoint and its delivery history' },
       test: { tool: 'test_webhook', gloss: 'send one real signed test delivery now and see what the receiver answered' },
       logs: { tool: 'list_webhook_logs', gloss: 'the deliveries of one endpoint, with status, HTTP code, error and payload' },
