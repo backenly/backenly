@@ -608,9 +608,10 @@ class CompatStorage {
           return { data: null, error: fromException(e) }
         }
       },
+      // `path` is the file id upload() resolved as `data.path`. This called a
+      // storage.getFileUrl() the SDK never had, so publicUrl was always null.
       getPublicUrl(path: string) {
-        const url = (backend.storage as any).getFileUrl?.(path) ?? null
-        return { data: { publicUrl: url } }
+        return { data: { publicUrl: backend.storage.getUrl(path) } }
       },
       async remove(paths: string[]) {
         try {
