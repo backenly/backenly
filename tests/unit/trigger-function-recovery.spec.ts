@@ -44,47 +44,34 @@ describe('Trigger dispatchers pick up errored functions for self-recovery', () =
     jest.restoreAllMocks()
   })
 
-  it('fireAiFunctions dispatches to a function whose previous run errored', async () => {
+  it('rowEventFunctions queues a row-event function whose previous run errored', async () => {
+    // Row events reach functions through the capture drain, which asks the run
+    // queue for the project's row-event functions (lib/services/ai-functions/run-queue.ts).
     const findMany = jest.fn().mockImplementation(async ({ where }) => {
       const candidates = [
-        { id: 'fn-errored', status: 'error' },
-        { id: 'fn-disabled', status: 'inactive' },
+        { id: 'fn-errored', status: 'error', triggerType: 'on_db_insert', triggerTable: 'orders' },
+        { id: 'fn-disabled', status: 'inactive', triggerType: 'on_db_insert', triggerTable: 'orders' },
       ]
       const excluded = where.status?.notIn || []
       return candidates
         .filter((c) => !excluded.includes(c.status))
-        .map((c) => ({ id: c.id }))
+        .map(({ id, triggerType, triggerTable }) => ({ id, triggerType, triggerTable }))
     })
-    const findFirst = jest.fn().mockResolvedValue(null)
-    jest.doMock('@/lib/db', () => ({
-      prisma: {
-        aiFunction: { findMany, findFirst },
-        project: { findUnique: jest.fn().mockResolvedValue(null) },
-      },
-    }))
+    jest.doMock('@/lib/db/prisma', () => ({ prisma: { aiFunction: { findMany } } }))
 
-    const { fireAiFunctions } = await import('@/lib/services/ai-functions/executor')
+    const { rowEventFunctions } = await import('@/lib/services/ai-functions/run-queue')
 
-    await fireAiFunctions('proj-1', { type: 'insert', table: 'orders' })
+    const fns = await rowEventFunctions('proj-1', ['on_db_insert', 'on_db_update'])
 
     expect(findMany).toHaveBeenCalledWith({
       where: {
         projectId: 'proj-1',
         status: RUNNABLE_FUNCTION_STATUS_FILTER,
-        triggerType: 'on_db_insert',
-        triggerTable: 'orders',
+        triggerType: { in: ['on_db_insert', 'on_db_update'] },
       },
-      select: { id: true },
+      select: { id: true, triggerType: true, triggerTable: true },
     })
-
-    // The errored function proceeds to execution (attempting findFirst by its id);
-    // the disabled function was excluded by the status filter in findMany.
-    expect(findFirst).toHaveBeenCalledWith({
-      where: { id: 'fn-errored', projectId: 'proj-1' },
-    })
-    expect(findFirst).not.toHaveBeenCalledWith({
-      where: { id: 'fn-disabled', projectId: 'proj-1' },
-    })
+    expect(fns.map((f) => f.id)).toEqual(['fn-errored'])
   })
 
   it('fireAiFunctionsOnSignup dispatches to a function whose previous run errored', async () => {
