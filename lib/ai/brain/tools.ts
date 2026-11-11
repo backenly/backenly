@@ -1471,6 +1471,7 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
       label: { type: 'string', description: 'Optional human label, e.g. "Stripe live key".' },
       webhookSecret: { type: 'string', description: 'Stripe only: the endpoint signing secret (whsec_…). Until it is stored, the Stripe receiver rejects every event.' },
       appId: { type: 'string', description: 'OneSignal only: the App ID, sent with the REST API key. Push stays off until both are stored.' },
+      fromEmail: { type: 'string', description: 'Resend / SendGrid only: verified sender email address (e.g. "noreply@yourdomain.com"). Defaults "from" for ctx.integrations.email.send().' },
     },
     ['integrationId']),
   fn('remove_integration_key',
@@ -1980,7 +1981,17 @@ export const TOOL_TO_ACTION: Record<string, (args: any) => AIAction> = {
   set_key_permissions: (a) => ({ action: 'SET_KEY_PERMISSIONS', params: { keyId: a.keyId, permissions: a.permissions } }),
 
   // Integrations
-  store_integration_key: (a) => ({ action: 'STORE_INTEGRATION_KEY', params: { integrationId: a.integrationId, apiKey: a.apiKey, label: a.label, webhookSecret: a.webhookSecret, appId: a.appId } }),
+  store_integration_key: (a) => ({
+    action: 'STORE_INTEGRATION_KEY',
+    params: {
+      integrationId: a.integrationId,
+      apiKey: a.apiKey,
+      label: a.label,
+      webhookSecret: a.webhookSecret,
+      appId: a.appId,
+      fromEmail: a.fromEmail,
+    },
+  }),
   remove_integration_key: (a) => ({ action: 'REMOVE_INTEGRATION_KEY', params: { integrationId: a.integrationId } }),
   delete_trigger: (a) => ({ action: 'DELETE_TRIGGER', params: { triggerId: a.triggerId, name: a.name } }),
 
