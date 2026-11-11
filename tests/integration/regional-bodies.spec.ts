@@ -14,6 +14,8 @@
  *   retry and replay   send the event read from the region; a body past its
  *                      retention fails the retry honestly instead
  *   listings           show the region's data to whoever asks
+ *   outcomes           a row says how a delivery attempt ended only once the
+ *                      region keeps the receiver's reply
  *   trigger failures   the platform row says only the HTTP status; the
  *                      receiver's words stay in the region
  *   function errors    the row keeps the platform's own prefix, which the
@@ -373,6 +375,82 @@ describe('an endpoint webhook', () => {
     expect(replay).toEqual(expect.objectContaining({ replayOf: first!.logId, success: true }))
     expect(receiver.received).toHaveLength(1)
     expect(receiver.received[0].body.data.test).toBe(true)
+  })
+
+  // The region keeps each reply a second late, so a row that said how an
+  // attempt ended before its reply was kept is read in between, every time.
+  describe('while the region is slow to keep a reply', () => {
+    beforeEach(() =>
+      run(
+        regionalUrl,
+        `CREATE FUNCTION public.slow_reply() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(1); RETURN NEW; END $$;
+         CREATE TRIGGER slow_reply BEFORE UPDATE ON public.regional_bodies
+           FOR EACH ROW WHEN (NEW."responseBody" IS NOT NULL) EXECUTE FUNCTION public.slow_reply();`,
+      ),
+    )
+    afterEach(() => run(regionalUrl, 'DROP FUNCTION IF EXISTS public.slow_reply() CASCADE'))
+
+    it('lists a delivery with its reply as soon as its row says it succeeded', async () => {
+      const webhook = await createWebhook(regionalProject, 'row.inserted', receiver.url)
+      await triggerWebhooks(regionalProject, 'row.inserted', { note: `marker-${randomUUID()}` })
+      await until(
+        () => prisma.webhookLog.findFirst({ where: { webhookId: webhook.id } }),
+        (row) => row?.status === 'SUCCESS',
+      )
+
+      const [listed] = await getWebhookLogs(regionalProject, webhook.id)
+      expect(listed).toEqual(expect.objectContaining({ status: 'SUCCESS', responseBody: 'ok' }))
+    })
+
+    it('keeps the refusal as soon as its row says the delivery will be retried', async () => {
+      const marker = `marker-${randomUUID()}`
+      const webhook = await createWebhook(regionalProject, 'row.inserted', receiver.url)
+      receiver.status = 500
+      await triggerWebhooks(regionalProject, 'row.inserted', { note: marker })
+      const failed = await until(
+        () => prisma.webhookLog.findFirst({ where: { webhookId: webhook.id } }),
+        (row) => row?.status === 'RETRYING',
+      )
+
+      expect(failed!.status).toBe('RETRYING')
+      expect((await regionalBody(failed!.id)).responseBody).toContain(marker)
+    })
+
+    it('keeps the refusal as soon as its row says a test delivery failed', async () => {
+      const webhook = await createWebhook(regionalProject, 'row.inserted', receiver.url)
+      receiver.status = 500
+      const sending = sendTestDelivery(regionalProject, webhook.id)
+      const failed = await until(
+        () => prisma.webhookLog.findFirst({ where: { webhookId: webhook.id } }),
+        (row) => row?.status === 'FAILED',
+      )
+
+      expect(failed!.status).toBe('FAILED')
+      expect((await regionalBody(failed!.id)).responseBody).toMatch(/^refused: .*Test delivery from Backenly/)
+      await sending
+    })
+  })
+
+  describe('while the region refuses a reply', () => {
+    beforeEach(() =>
+      run(
+        regionalUrl,
+        `CREATE FUNCTION public.refuse_reply() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'reply refused'; END $$;
+         CREATE TRIGGER refuse_reply BEFORE UPDATE ON public.regional_bodies
+           FOR EACH ROW WHEN (NEW."responseBody" IS NOT NULL) EXECUTE FUNCTION public.refuse_reply();`,
+      ),
+    )
+    afterEach(() => run(regionalUrl, 'DROP FUNCTION IF EXISTS public.refuse_reply() CASCADE'))
+
+    it('still records how the attempt ended on the row, and says the region refused', async () => {
+      const webhook = await createWebhook(regionalProject, 'row.inserted', receiver.url)
+      receiver.status = 500
+
+      await expect(sendTestDelivery(regionalProject, webhook.id)).rejects.toThrow('reply refused')
+      expect(await prisma.webhookLog.findFirst({ where: { webhookId: webhook.id } })).toEqual(
+        expect.objectContaining({ status: 'FAILED', statusCode: 500, payload: null, responseBody: null }),
+      )
+    })
   })
 })
 

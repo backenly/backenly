@@ -50,6 +50,13 @@ export function generateDomainEndpoints(
   tableName: string,
   projectId: string,
   allProjectTables: string[] = [],
+  /**
+   * Include `<table>-schema`, which tables built before 2026-11-11 were given.
+   * It is no longer registered for a new table, but one that exists is still
+   * Backenly's: recognising it keeps it out of the project's function count
+   * and lets it follow its table through a restore.
+   */
+  opts: { includeSchemaEndpoint?: boolean } = {},
 ): GeneratedEndpoint[] {
   const t = tableName.toLowerCase()
   const schema = `workspace_${projectId}`
@@ -120,8 +127,14 @@ export function generateDomainEndpoints(
   // project wants marketplace analytics it asks for them, and `backend_chat`
   // builds them — with the request on the record.
 
-  // ── #55 — VALIDATION schema endpoint (every table) ────────────────────────
-  endpoints.push(buildValidationSchemaEndpoint(tableName, schema))
+  // ── #55 — VALIDATION schema endpoint: no longer registered ───────────────
+  //
+  // Every table used to get `<table>-schema`, a function that reads its
+  // columns from information_schema. Nothing calls it: not the SDK, not the
+  // console, not an agent, which reads the same through the OpenAPI document,
+  // get_table_schema or generate_types. It only filled the Functions list with
+  // entries nobody asked for (production QA, 2026-11-09: 7 of a project's 9).
+  if (opts.includeSchemaEndpoint) endpoints.push(buildValidationSchemaEndpoint(tableName, schema))
 
   return endpoints
 }
@@ -159,7 +172,7 @@ let fixedEndpointNames: Set<string> | null = null
  */
 export function isDomainEndpointName(name: string): boolean {
   fixedEndpointNames ??= new Set(
-    EVERY_KIND.flatMap((t) => generateDomainEndpoints(t, 'p', EVERY_KIND))
+    EVERY_KIND.flatMap((t) => generateDomainEndpoints(t, 'p', EVERY_KIND, { includeSchemaEndpoint: true }))
       .map((ep) => ep.name)
       .filter((n) => !EVERY_KIND.some((t) => n.startsWith(`${t}-`))),
   )

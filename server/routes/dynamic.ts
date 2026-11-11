@@ -41,6 +41,7 @@ import {
 } from '@/lib/security/key-placement'
 import { endUserBearerToken } from '@/lib/security/end-user-bearer'
 import { asyncRoute } from '../lib/async-route'
+import { markAsWritten } from '../lib/v1-error-shape'
 import { refuseUnlessServing } from '../lib/serving-gate'
 import { touchProjectActivity } from '@/lib/projects/activity'
 import { ENVIRONMENT_HEADER, environmentHeaderValue } from '@/lib/branches/key-scope'
@@ -551,7 +552,7 @@ async function handleDynamicRequest(req: Request, res: Response) {
       // content type, as it wrote them (lib/services/ai-functions/reply.ts).
       if (result.answer) {
         const { status, body, headers } = result.answer
-        res.status(status >= 100 && status <= 599 ? status : 200).set(answerHeaders(headers)).json(body ?? null)
+        markAsWritten(res).status(status >= 100 && status <= 599 ? status : 200).set(answerHeaders(headers)).json(body ?? null)
         return
       }
 
@@ -580,7 +581,8 @@ async function handleDynamicRequest(req: Request, res: Response) {
           ? result.httpStatus
           : 200
 
-      res.status(httpStatus).json({
+      // The status is the function's choice, not one of Backenly's errors.
+      markAsWritten(res).status(httpStatus).json({
         success: httpStatus < 400,
         name: fnName,
         result: result.returnValue ?? null,

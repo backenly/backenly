@@ -28,6 +28,6 @@ export async function webhookPlan(userId: string, projectId: string): Promise<We
 export type WebhookUse = 'change' | 'stop'
 
 /** Whether an update only turns an endpoint off, the one edit every plan may make. */
-export function onlyTurnsOff(update: { targetUrl?: unknown; eventType?: unknown; active?: unknown }): boolean {
-  return update.active === false && update.targetUrl === undefined && update.eventType === undefined
+export function onlyTurnsOff(update: { targetUrl?: unknown; eventType?: unknown; active?: unknown; tables?: unknown }): boolean {
+  return update.active === false && update.targetUrl === undefined && update.eventType === undefined && update.tables === undefined
 }

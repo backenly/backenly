@@ -20,7 +20,7 @@ Call as `deploy { action: "<action>", … }`.
 | `revert_change` | ask to restore the state before one change (changeId); a person approves it, and data written since is never dropped silently | `changeId` | no | waits for a human |
 <!-- end generated -->
 
-- `readiness` reports what stands between the project and a working deploy. It is a read and fixes nothing, unless a read-write key passes `autoFix: true`; a read-only key's readiness read never changes anything.
+- `readiness` reports what stands between the project and a working deploy. It is a read and fixes nothing, unless a read-write key passes `autoFix: true`; a read-only key's readiness read never changes anything. It counts the problems the self-healing loop found and nothing has fixed or dismissed: a critical one blocks a deploy, and a warning is reported without blocking.
 - `history` lists every published version and which one is serving.
 - `deploy` waits for a human's approval (see `autonomy`); the approved call runs exactly as you made it.
 - `rollback { version }` asks for the backend to be restored to that published version: every change made since it was published is undone, newest first, each checked before it runs, and the version is recorded as current. Backenly measures it first and queues its own list of those changes; a version that does not exist, or that nothing has changed since, is answered at once. A project admin approves exactly that list, and nothing runs if the history changed since. A change that would set aside data written since stops it there for the person to review. You can request it, never approve it.

@@ -12,8 +12,8 @@ Call as `webhooks { action: "<action>", … }`.
 | Action | What it does | Needs | Read-only key | Approval |
 | --- | --- | --- | --- | --- |
 | `list` | every endpoint with its event, URL, on/off state and capture health | nothing | yes | no |
-| `create` | an endpoint for row.inserted, row.updated, row.deleted or auth.user.created | `eventType`, `targetUrl` | no | no |
-| `update` | change the URL or event of an endpoint, or switch it on or off | `webhookId` | no | no |
+| `create` | an endpoint for row.inserted, row.updated, row.deleted or auth.user.created; tables limits a row event to some tables | `eventType`, `targetUrl` | no | no |
+| `update` | change the URL, event or tables of an endpoint, or switch it on or off | `webhookId` | no | no |
 | `delete` | remove an endpoint and its delivery history | `webhookId` | no | waits for a human |
 | `test` | send one real signed test delivery now and see what the receiver answered | `webhookId` | no | no |
 | `logs` | the deliveries of one endpoint, with status, HTTP code, error and payload | `webhookId` | yes | no |
@@ -32,6 +32,6 @@ Call as `webhooks { action: "<action>", … }`.
 - `rotate_secret` issues a new signing secret; the next delivery is signed with the new one only.
 - `triggers`, `trigger_deliveries`, `replay_trigger_delivery` and `rotate_trigger_secret` are for table triggers whose action calls a URL.
 
-Endpoint events (`row.inserted`, `row.updated`, `row.deleted`, `auth.user.created`) are **project-wide**: an endpoint cannot subscribe to one table. Each delivery's payload carries `data.table`, so the receiver filters. For a genuinely per-table webhook, create a table trigger with a URL action (`create_trigger`); note that triggers fire from the JSON data routes (`/database/insert`, `/database/update`, `/database/delete`), not from every writer the endpoint capture sees.
+A row event endpoint receives every table's rows unless it names `tables`: `webhooks { action: "create", eventType: "row.inserted", targetUrl, tables: ["orders"] }` sends it only `orders` rows, and `update` with `tables: []` goes back to every table. A table the project does not have is refused. `auth.user.created` comes from sign-ups, not from a table, and takes no `tables`. Each delivery's payload carries `data.table`. Table triggers whose action calls a URL (`create_trigger`) are a different thing: they fire from the JSON data routes (`/database/insert`, `/database/update`, `/database/delete`), not from every writer the endpoint capture sees.
 
 Destinations are checked by the egress guard, which refuses private and cloud-metadata addresses.

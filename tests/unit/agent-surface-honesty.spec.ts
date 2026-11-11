@@ -223,10 +223,15 @@ describe('preview branches are reachable from an agent (#30)', () => {
     expect(route).toMatch(/if \(target === 'merge_branch'\) \{\s*return withCors\(await parkBranchMerge\(/)
   })
 
-  it('offers no discard action, and does not dispatch discard_branch', () => {
-    // Dropping a branch schema is irreversible, so it routes through
-    // backend_chat → the human Review Queue like every other destructive op.
-    expect(dispatchable.has('discard_branch')).toBe(false)
+  it('offers discard, which runs at once because it drops only the branch', async () => {
+    // Production QA (2026-11-09): an agent paid AI credits and waited on a
+    // person to tidy up its own experiments. A discard drops the branch's own
+    // schema and keys, never anything of production's.
+    const { BRANCH_ACTIONS } = await import('@/lib/mcp/catalog')
+    const { isDestructiveTool } = await import('@/lib/ai/brain/tools')
+    expect(BRANCH_ACTIONS.discard).toBe('discard_branch')
+    expect(dispatchable.has('discard_branch')).toBe(true)
+    expect(isDestructiveTool('discard_branch')).toBe(false)
   })
 
   it('keeps the catalog inside the tool-selection budget', () => {
