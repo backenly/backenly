@@ -382,7 +382,8 @@ function makeGuardedLookup(scope: EgressScope) {
 export interface SafeFetchOptions {
   method?: string
   headers?: Record<string, string>
-  body?: string
+  /** Text, or bytes for a body that is not text (a multipart upload). */
+  body?: string | Uint8Array
   /** Total budget across every redirect hop. */
   timeoutMs?: number
   /** Bytes after which the response is abandoned. */
@@ -405,7 +406,7 @@ const CREDENTIAL_HEADERS = ['authorization', 'cookie', 'proxy-authorization']
 function oneRequest(
   url: URL,
   opts: Required<Pick<SafeFetchOptions, 'method' | 'headers' | 'maxBytes'>> & {
-    body?: string
+    body?: string | Uint8Array
     deadline: number
     scope: EgressScope
   },

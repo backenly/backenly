@@ -32,6 +32,7 @@
  *   ctx.integrations.isConnected(name)  → boolean
  */
 
+import { randomBytes } from 'crypto'
 import { getIntegrationKey } from '@/lib/services/integrationKeyStore'
 import { safeFetch } from '@/lib/security/outbound-guard'
 import {
@@ -46,6 +47,11 @@ import {
  * Universal escape hatch present on EVERY connected provider. Guarantees that a
  * provider which stores a key is never "phantom": even without a hand-written
  * typed helper, `ctx.integrations.<id>.request(...)` makes a signed call.
+ *
+ * `path` is relative to the provider's base URL, and may repeat the base's
+ * version as the provider's docs write it (resolveProviderUrl). An object
+ * `body` is encoded as the provider takes it (encodeBody): JSON, a form for
+ * Stripe, multipart for Stability, or what the call's Content-Type names.
  */
 export interface GenericIntegration {
   request(
@@ -130,12 +136,13 @@ export interface IntegrationContext {
   [provider: string]: any
 }
 
-// ── Stripe form encoder ────────────────────────────────────────────────────────
+// ── Form encoder ───────────────────────────────────────────────────────────────
 // Stripe's API uses application/x-www-form-urlencoded with PHP-style nesting:
 //   line_items[0][price]=price_x&line_items[0][quantity]=1&metadata[k]=v
 // This walks arrays + objects recursively so nested params encode correctly.
+// The Stripe helpers and request() for any form-encoded body both use it.
 
-function encodeStripeForm(obj: Record<string, any>): string {
+function encodeForm(obj: Record<string, any>): string {
   const pairs: string[] = []
   const walk = (key: string, val: any): void => {
     if (val === undefined || val === null) return
@@ -164,7 +171,7 @@ function buildStripeIntegration(secretKey: string): StripeIntegration {
     const res = await fetch(`${STRIPE_BASE}${path}`, {
       method: 'POST',
       headers,
-      body: encodeStripeForm(params),
+      body: encodeForm(params),
       signal: AbortSignal.timeout(8000),
     })
     const data = await res.json()
@@ -516,12 +523,16 @@ function buildPostHogIntegration(apiKey: string, host: string): PostHogIntegrati
  * The fix keeps the legitimate case — some APIs return absolute next-page URLs
  * on their own host — by requiring an absolute path to share the provider's
  * origin. Anything else is refused before a credential is attached.
+ *
+ * A relative path is appended to the base, never resolved against it, so it
+ * cannot leave the provider's host, and a path that repeats the base's own
+ * path is appended once (withoutBasePath).
  */
 export function resolveProviderUrl(base: string, path: string, providerId: string): string {
   const p = String(path ?? '')
 
   if (!/^[a-z][a-z0-9+.-]*:/i.test(p)) {
-    return `${base}${p.startsWith('/') ? '' : '/'}${p}`
+    return `${base}${withoutBasePath(base, p.startsWith('/') ? p : `/${p}`)}`
   }
 
   let target: URL
@@ -548,6 +559,155 @@ export function resolveProviderUrl(base: string, path: string, providerId: strin
   return target.toString()
 }
 
+/**
+ * A relative path without the base URL's own path, when it starts with it.
+ *
+ * Most bases end in their API version (https://api.openai.com/v1,
+ * https://api.sendgrid.com/v3, https://onesignal.com/api/v1), and providers
+ * document their paths with it, so OpenAI's '/v1/chat/completions' was sent to
+ * /v1/v1/chat/completions and answered 404. Only whole segments are dropped:
+ * '/v10/x' on a '/v1' base is left as it is.
+ */
+function withoutBasePath(base: string, relative: string): string {
+  let basePath: string
+  try {
+    basePath = new URL(base).pathname.replace(/\/+$/, '')
+  } catch {
+    return relative
+  }
+  if (!basePath || !relative.startsWith(basePath)) return relative
+  const next = relative.charAt(basePath.length)
+  return next === '' || next === '/' || next === '?' || next === '#' ? relative.slice(basePath.length) : relative
+}
+
+// ── Request bodies ─────────────────────────────────────────────────────────────
+
+const JSON_TYPE = 'application/json'
+const FORM_TYPE = 'application/x-www-form-urlencoded'
+const MULTIPART_TYPE = 'multipart/form-data'
+const BYTES_TYPE = 'application/octet-stream'
+
+type BodyEncoding = NonNullable<ProviderSpec['bodyEncoding']>
+
+/** The Content-Type a call's own headers name, whatever its case. */
+function contentTypeOf(headers: Record<string, string>): string | undefined {
+  const name = Object.keys(headers).find((h) => h.toLowerCase() === 'content-type')
+  return name ? headers[name] : undefined
+}
+
+function withoutContentType(headers: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(Object.entries(headers).filter(([h]) => h.toLowerCase() !== 'content-type'))
+}
+
+function encodingOfType(type: string): BodyEncoding {
+  const t = type.trim().toLowerCase()
+  if (t.startsWith(MULTIPART_TYPE)) return 'multipart'
+  if (t.startsWith(FORM_TYPE)) return 'form'
+  return 'json'
+}
+
+/**
+ * A request() body as the provider takes it.
+ *
+ * Every body used to be JSON.stringify'd and sent as application/json. Stripe
+ * takes only form-encoded bodies, so every Stripe write outside the typed
+ * helpers failed, and Stability's image endpoints take only multipart, so the
+ * registry's own Stability example could not work. A Content-Type the call
+ * names chooses the encoding; otherwise the provider's (spec.bodyEncoding),
+ * JSON unless it says otherwise. A string is sent as it is.
+ */
+function encodeBody(
+  spec: ProviderSpec,
+  body: unknown,
+  callerType: string | undefined,
+): { body: string | Uint8Array; contentType: string } {
+  const encoding = callerType ? encodingOfType(callerType) : spec.bodyEncoding ?? 'json'
+  if (typeof body === 'string') {
+    return { body, contentType: callerType ?? (encoding === 'form' ? FORM_TYPE : JSON_TYPE) }
+  }
+  if (encoding === 'json') return { body: JSON.stringify(body), contentType: callerType ?? JSON_TYPE }
+
+  if (!body || typeof body !== 'object' || Array.isArray(body) || body instanceof Uint8Array) {
+    throw new Error(`${spec.id}.request(): a ${encoding === 'form' ? 'form' : 'multipart'} body must be an object of fields.`)
+  }
+  if (encoding === 'form') return { body: encodeForm(body as Record<string, unknown>), contentType: FORM_TYPE }
+  const boundary = `BackenlyFormBoundary${randomBytes(16).toString('hex')}`
+  return {
+    body: encodeMultipart(body as Record<string, unknown>, boundary, spec.id),
+    contentType: `${MULTIPART_TYPE}; boundary=${boundary}`,
+  }
+}
+
+/**
+ * multipart/form-data. A field is a string, number or boolean, a list of those
+ * (sent as repeated fields), or a file. A function cannot build FormData or a
+ * Blob in the sandbox, and its arguments reach this process as plain values,
+ * so a file is described: { base64, filename?, contentType? }, or { data,
+ * filename?, contentType? } with text or bytes as data. Bytes alone are a file
+ * too.
+ */
+function encodeMultipart(fields: Record<string, unknown>, boundary: string, providerId: string): Buffer {
+  const parts: Buffer[] = []
+  const add = (name: string, value: unknown): void => {
+    if (value === undefined || value === null) return
+    const disposition = `--${boundary}\r\nContent-Disposition: form-data; name="${dispositionValue(name)}"`
+    const file = multipartFile(value)
+    if (file) {
+      if (/[\r\n]/.test(file.contentType)) {
+        throw new Error(`${providerId}.request(): the content type of file field "${name}" must be one line.`)
+      }
+      parts.push(
+        Buffer.from(`${disposition}; filename="${dispositionValue(file.filename)}"\r\nContent-Type: ${file.contentType}\r\n\r\n`),
+        file.bytes,
+        Buffer.from('\r\n'),
+      )
+      return
+    }
+    if (typeof value === 'object') {
+      throw new Error(
+        `${providerId}.request(): multipart field "${name}" must be a string, number, boolean, ` +
+          'or a file ({ base64, filename?, contentType? } or { data, filename?, contentType? }).',
+      )
+    }
+    parts.push(Buffer.from(`${disposition}\r\n\r\n${String(value)}\r\n`))
+  }
+  for (const [name, value] of Object.entries(fields)) {
+    if (Array.isArray(value)) value.forEach((v) => add(name, v))
+    else add(name, value)
+  }
+  parts.push(Buffer.from(`--${boundary}--\r\n`))
+  return Buffer.concat(parts)
+}
+
+/** A field name or filename inside Content-Disposition, escaped as browsers escape it. */
+function dispositionValue(s: string): string {
+  return s.replace(/"/g, '%22').replace(/\r/g, '%0D').replace(/\n/g, '%0A')
+}
+
+function bytesOf(v: unknown): Buffer | null {
+  if (v instanceof Uint8Array) return Buffer.from(v.buffer, v.byteOffset, v.byteLength)
+  if (v instanceof ArrayBuffer) return Buffer.from(v)
+  return null
+}
+
+/** The file a multipart field describes, or null for a field that is not one. */
+function multipartFile(value: unknown): { bytes: Buffer; filename: string; contentType: string } | null {
+  const raw = bytesOf(value)
+  if (raw) return { bytes: raw, filename: 'file', contentType: BYTES_TYPE }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const f = value as { base64?: unknown; data?: unknown; filename?: unknown; contentType?: unknown }
+  const bytes =
+    typeof f.base64 === 'string' ? Buffer.from(f.base64, 'base64')
+    : typeof f.data === 'string' ? Buffer.from(f.data, 'utf8')
+    : bytesOf(f.data)
+  if (!bytes) return null
+  return {
+    bytes,
+    filename: typeof f.filename === 'string' && f.filename ? f.filename : 'file',
+    contentType: typeof f.contentType === 'string' && f.contentType ? f.contentType : BYTES_TYPE,
+  }
+}
+
 // ── Universal request() builder ────────────────────────────────────────────────
 // Works for ANY registry provider that declares a baseUrl + buildHeaders. This is
 // the anti-phantom primitive: a stored key always yields a callable surface.
@@ -562,28 +722,29 @@ function buildGenericRequest(
     async request(method, path, body, headers) {
       const m = String(method || 'GET').toUpperCase()
       const url = resolveProviderUrl(base, path, spec.id)
+      const callerHeaders = headers ?? {}
+      const callerType = contentTypeOf(callerHeaders)
 
-      // Merge provider auth headers with any per-call overrides.
-      const finalHeaders: Record<string, string> = {
-        'Content-Type': 'application/json',
-        ...(spec.buildHeaders ? spec.buildHeaders(key) : {}),
-        ...(headers ?? {}),
-      }
-
-      // Inject aux fields (e.g. OneSignal app_id) into JSON bodies only.
+      // Inject aux fields (e.g. OneSignal app_id) into object bodies only.
       let finalBody = body
       if (spec.injectBody && finalBody && typeof finalBody === 'object' && !Array.isArray(finalBody)) {
         finalBody = { ...spec.injectBody(auxValue), ...(finalBody as Record<string, unknown>) }
       }
 
       const hasBody = finalBody !== undefined && finalBody !== null && m !== 'GET' && m !== 'HEAD'
+      const encoded = hasBody ? encodeBody(spec, finalBody, callerType) : null
+
+      // Provider auth headers, any per-call overrides, then the body's own type.
+      const finalHeaders: Record<string, string> = {
+        ...(spec.buildHeaders ? spec.buildHeaders(key) : {}),
+        ...withoutContentType(callerHeaders),
+        'Content-Type': encoded?.contentType ?? callerType ?? JSON_TYPE,
+      }
 
       const res = await safeFetch(url, {
         method: m,
         headers: finalHeaders,
-        body: hasBody
-          ? (typeof finalBody === 'string' ? finalBody : JSON.stringify(finalBody))
-          : undefined,
+        body: encoded?.body,
         timeoutMs: 20000,
       })
 

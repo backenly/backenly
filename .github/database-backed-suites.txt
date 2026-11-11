@@ -790,6 +790,12 @@ tests/integration/sandbox-function-logs.spec.ts
 # A sandboxed function has the whole of JSON and Math (they were empty frozen
 # copies), and what one run does to them stays in that run.
 tests/integration/sandbox-json-and-math.spec.ts
+# A function's ctx.integrations.<provider>.request() calls, written as each
+# provider's docs write them, reach the provider as it takes them: the
+# version in a path once, a Stripe body form-encoded, and a Stability body
+# multipart, carrying an image from base64 byte for byte. Real executor,
+# worker, function row and vault keys; only the outbound call is captured.
+tests/integration/integration-request-from-a-function.spec.ts
 tests/integration/apply-migration-existing-table.spec.ts
 
 # Failed migration DDL preserves PostgreSQL data and stops without asking the
