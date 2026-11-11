@@ -167,6 +167,11 @@ export async function keepColumnValues(
   column: string,
   reason: 'dropped' | 'retyped',
   destructiveSql: string,
+  /**
+   * Run the statement with search_path set to pg_catalog: a retype's USING
+   * expression then names only built-ins, whatever the project's schema holds.
+   */
+  opts: { catalogSearchPath?: boolean } = {},
 ): Promise<{ handled: false } | { handled: true; rows: number; vault: string; seq: number }> {
   const change = currentChange(projectId)
   if (!change) return { handled: false }
@@ -188,6 +193,8 @@ export async function keepColumnValues(
       change,
       `CREATE TABLE ${qualified(vault, vaultTable)} AS SELECT ${select} FROM ${target} WHERE ${q(column)} IS NOT NULL`,
     )
+    // Everything after this names its schema, so it holds for the rest of the transaction.
+    if (opts.catalogSearchPath) await client.query('SET LOCAL search_path TO pg_catalog, pg_temp')
     await run(change, destructiveSql)
 
     let afterColumn: string | undefined

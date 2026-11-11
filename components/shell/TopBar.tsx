@@ -27,7 +27,7 @@ import { getProjects, type Project } from '@/lib/api/projects'
 import { BUTTON_BASE, BUTTON_VARIANTS, Kbd, StatusDot } from '@/components/inspector/kit'
 import { FOCUS, R_CONTROL } from '@/components/console/tokens'
 import { HOME_REGION, regionLabel } from '@/lib/regions'
-import { useAgentConnection } from '@/lib/hooks/useAgentConnection'
+import { lastCallAgo, useAgentConnection } from '@/lib/hooks/useAgentConnection'
 import {
   AccountMenu,
   AccountScope,
@@ -41,6 +41,7 @@ import {
   SearchTrigger,
   useDismiss,
 } from './ConsoleChrome'
+import { sharedRead } from '@/lib/client/shared-read'
 
 const STATUS_DOT: Record<string, string> = {
   LIVE: 'bg-emerald-400',
@@ -98,9 +99,11 @@ export function TopBar() {
     let cancelled = false
     async function poll() {
       try {
-        const res = await fetch(`/api/projects/${projectId}/health`, { credentials: 'include' })
-        if (!res.ok) return
-        const j = await res.json()
+        // The page below may read the same health at the same moment: one
+        // request serves both (lib/client/shared-read.ts).
+        const res = await sharedRead(`/api/projects/${projectId}/health`)
+        if (!res.ok || !res.data) return
+        const j = res.data
         // Everything that waits on the user: findings the loop is holding,
         // calls their coding agent parked for approval, and architecture
         // changes Backenly prepared. This counted only the held findings, and
@@ -266,11 +269,14 @@ export function TopBar() {
           <Link
             data-tour="connect-agent"
             href={`${basePath}/connect`}
-            title={connectedTitle(agent.lastSeenAt, agent.client)}
+            title={connectedTitle(agent.lastSeenAt, agent.client, agent.active)}
             className={`${BUTTON_BASE} ${BUTTON_VARIANTS.secondary} h-[32px] min-w-[32px] px-2.5 text-[13px]`}
           >
-            <StatusDot tone="operational" />
-            <span className="sr-only sm:not-sr-only">Agent connected</span>
+            {/* Green only while the agent is at work; set up and quiet says when it last called. */}
+            <StatusDot tone={agent.active ? 'operational' : 'neutral'} />
+            <span className="sr-only sm:not-sr-only">
+              {agent.active || !agent.lastSeenAt ? 'Agent connected' : `Last call ${lastCallAgo(agent.lastSeenAt)}`}
+            </span>
           </Link>
         ) : (
           <Link
@@ -290,16 +296,11 @@ export function TopBar() {
 }
 
 /** The connected slot's tooltip: which client, and how recently it called. */
-function connectedTitle(lastSeenAt: string | null, client: string | null): string {
+function connectedTitle(lastSeenAt: string | null, client: string | null, active: boolean): string {
   const via = client ? ` through ${client}` : ''
-  const when = lastSeenAt ? `, last call ${ago(lastSeenAt)}` : ''
-  return `Your coding agent is connected over MCP${via}${when}. Open Connect to manage keys or add another agent.`
-}
-
-function ago(iso: string): string {
-  const minutes = Math.floor((Date.now() - new Date(iso).getTime()) / 60_000)
-  if (minutes < 1) return 'just now'
-  const [n, unit]: [number, string] =
-    minutes < 60 ? [minutes, 'minute'] : minutes < 1440 ? [Math.floor(minutes / 60), 'hour'] : [Math.floor(minutes / 1440), 'day']
-  return `${n} ${unit}${n === 1 ? '' : 's'} ago`
+  const when = lastSeenAt ? lastCallAgo(lastSeenAt) : null
+  const said = active
+    ? `Your coding agent is connected over MCP${via}${when ? `, last call ${when}` : ''}.`
+    : `Your coding agent is set up over MCP${via}${when ? ` and last called ${when}` : ''}.`
+  return `${said} Open Connect to manage keys or add another agent.`
 }

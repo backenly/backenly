@@ -20,6 +20,8 @@ import {
 } from '@/lib/services/end-user-auth-flows'
 import { getAuthEmailContext } from '@/lib/services/end-user-auth-email'
 import { z } from 'zod'
+import { signInSchema, signUpSchema } from '@/lib/api/v1/schemas'
+import { describeIssues, plainErrorMap } from '@/lib/validation/plain-issues'
 import jwt from 'jsonwebtoken'
 import { JWTSecretManager, resolveJwtSecret } from '@/lib/services/jwtSecretManager'
 import { asyncRoute } from '../lib/async-route'
@@ -38,7 +40,14 @@ import { admitSigninAttempt, admitSigninRequest } from '@/lib/security/end-user-
 import { admitExistenceCheck, admitSignupRequest } from '@/lib/security/end-user-signup-limit'
 import { isPlatformProbe } from '@/lib/security/platform-probe'
 import { throttleDecision } from '@/lib/security/rate-limit-decision'
-import type { RateLimitResult } from '@/lib/security/auth-rate-limit'
+import { AUTH_LIMITS, consume, type RateLimitResult } from '@/lib/security/auth-rate-limit'
+import {
+  RESET_PAGE_HEADERS,
+  resetPasswordPage,
+  submitResetPasswordForm,
+  throttledResetPage,
+  type ResetPage,
+} from '@/lib/services/end-user-reset-page'
 
 const router = Router()
 
@@ -73,17 +82,8 @@ async function authEnvironment(req: Request, res: Response): Promise<AuthEnviron
 
 // End-user passwords must be at least 8 chars. Project owners can opt into
 // stricter rules via their auth config; this is the floor that the runtime
-// enforces regardless of project config.
-const signUpSchema = z.object({
-  email: z.string().email(),
-  password: z.string().min(8, 'Password must be at least 8 characters'),
-  name: z.string().optional(),
-})
-
-const signInSchema = z.object({
-  email: z.string().email(),
-  password: z.string(),
-})
+// enforces regardless of project config. The schemas and their words are the
+// web tier's own (lib/api/v1/schemas.ts), so a body is refused the same way here.
 
 // In-memory IP throttle for the emailed end-user flows below (recovery,
 // verification, magic links). The address is the one lib/security/client-ip.ts
@@ -155,11 +155,10 @@ async function handleSignUp(req: Request, res: Response) {
     const env = await authEnvironment(req, res)
     if (!env) return
 
-    const parsed = signUpSchema.safeParse(req.body)
+    const parsed = signUpSchema.safeParse(req.body, { errorMap: plainErrorMap })
     if (!parsed.success) {
-      sendError(res, ErrorCodes.VALIDATION_ERROR, 'Request validation failed', 400, {
-        fields: parsed.error.flatten().fieldErrors,
-      })
+      const refused = describeIssues(parsed.error)
+      sendError(res, ErrorCodes.VALIDATION_ERROR, refused.message, 400, { fields: refused.fields })
       return
     }
 
@@ -349,11 +348,10 @@ async function handleSignIn(req: Request, res: Response) {
     const env = await authEnvironment(req, res)
     if (!env) return
 
-    const parsed = signInSchema.safeParse(req.body)
+    const parsed = signInSchema.safeParse(req.body, { errorMap: plainErrorMap })
     if (!parsed.success) {
-      sendError(res, ErrorCodes.VALIDATION_ERROR, 'Request validation failed', 400, {
-        fields: parsed.error.flatten().fieldErrors,
-      })
+      const refused = describeIssues(parsed.error)
+      sendError(res, ErrorCodes.VALIDATION_ERROR, refused.message, 400, { fields: refused.fields })
       return
     }
 
@@ -536,6 +534,40 @@ async function handleResetPassword(req: Request, res: Response) {
   res.status(result.status).json(result.body)
 }
 
+function sendResetPage(res: Response, page: ResetPage) {
+  res.status(page.status).set(RESET_PAGE_HEADERS).type('html').send(page.html)
+}
+
+/**
+ * GET /auth/reset?token=… — where a reset email links when the project has no
+ * App URL: Backenly's own reset form (lib/services/end-user-reset-page.ts).
+ * Opening it never spends the link.
+ */
+async function handleResetPage(req: Request, res: Response) {
+  sendResetPage(res, await resetPasswordPage(req.params.projectId, req.query.token))
+}
+
+/**
+ * POST /auth/reset — the hosted form's submission. Limited per address from
+ * the same budget as Next's POST /auth/reset-password, so the form is not a
+ * way around it.
+ */
+async function handleResetForm(req: Request, res: Response) {
+  const { projectId } = req.params
+  const limit = await consume(
+    `v1:endUserRecover:${projectId}:${ipFrom(req)}`,
+    AUTH_LIMITS.endUserRecover.ip.limit,
+    AUTH_LIMITS.endUserRecover.ip.windowMs,
+  )
+  if (!limit.allowed) {
+    const d = throttleDecision(limit)
+    res.set(d.headers)
+    sendResetPage(res, await throttledResetPage(projectId, d.status, limit.retryAfter))
+    return
+  }
+  sendResetPage(res, await submitResetPasswordForm(projectId, req.body ?? {}))
+}
+
 // ── Email verification + magic links ─────────────────────────────────────────
 
 async function handleVerifyEmail(req: Request, res: Response) {
@@ -656,6 +688,8 @@ router.post('/:projectId/auth/magic-link/verify', asyncRoute(handleMagicLinkVeri
 router.get('/:projectId/auth/magic', asyncRoute(handleMagicPage))
 router.post('/:projectId/auth/forgot-password', asyncRoute(handleForgotPassword))
 router.post('/:projectId/auth/reset-password', asyncRoute(handleResetPassword))
+router.get('/:projectId/auth/reset', asyncRoute(handleResetPage))
+router.post('/:projectId/auth/reset', asyncRoute(handleResetForm))
 
 // Aliases — AI platforms (Lovable, Replit, Base44) generate /auth/login and
 // /auth/register instead of Backenly's /auth/signin and /auth/signup.

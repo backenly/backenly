@@ -167,4 +167,32 @@ describe('the tools a turn is offered', () => {
     expect(result.blockedCalls).toBeUndefined()
     expect(provider.calls).toHaveLength(4)
   }, 120_000)
+
+  it('runs no tool a turn was not offered, so a drop only a migration may plan cannot skip its review', async () => {
+    // drop_constraint maps to the executor for apply_migration's parser, which
+    // holds an agent's drop on production for a person. It is not offered to a
+    // model, and a model that names it anyway must not reach the executor.
+    await prisma.$executeRawUnsafe(`ALTER TABLE "${schema}"."notes" ADD CONSTRAINT notes_body_present CHECK (body <> '')`)
+    const provider = scriptedProvider([
+      classified('MODIFY'),
+      scriptedMessage({
+        toolUse: [{ id: 'toolu_drop', name: 'drop_constraint', input: { tableName: 'notes', constraintName: 'notes_body_present' } }],
+      }),
+      scriptedMessage({ toolUse: [{ id: 'toolu_finish', name: 'finish', input: { summary: 'Left the rule in place.' } }] }),
+    ])
+
+    const result = await turn(provider, 'let a note have an empty body')
+
+    expect(offered(provider, 1)).not.toContain('drop_constraint')
+    const refused = answers(provider, 2).toolu_drop
+    expect(refused).toMatchObject({ ok: false, blocked: 'not_offered', isError: true })
+    expect(refused.summary).toMatch(/NOT run/)
+    const left = await prisma.$queryRawUnsafe<Array<{ n: number }>>(
+      `SELECT count(*)::int AS n FROM pg_constraint WHERE conname = 'notes_body_present' AND connamespace = $1::regnamespace`,
+      schema,
+    )
+    expect(left[0].n).toBe(1)
+    expect(result.toolsRun).toEqual(['finish'])
+    expect(result.refused).toEqual([{ title: 'Dropping constraint notes_body_present from notes', reason: 'not one of the tools offered for this turn' }])
+  }, 120_000)
 })

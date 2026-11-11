@@ -99,9 +99,10 @@ describe('RT-05: enabling is per table, every-table only by name', () => {
 
 describe('RT-07 / RT-08: the words match the blast radius', () => {
   it('both park paths resolve a project-wide disable to the streaming tables', () => {
-    const agent = fs.readFileSync(path.join(ROOT, 'lib', 'ai', 'brain', 'agent.ts'), 'utf8')
-    expect(agent).toContain('EVERY streaming table')
-    expect(agent).toContain('listTablesWithRealtimeTriggers')
+    // The brain's gate describes a stopped call with describeApproval (#659).
+    const gate = fs.readFileSync(path.join(ROOT, 'lib', 'mcp', 'approval-describe.ts'), 'utf8')
+    expect(gate).toContain('EVERY streaming table')
+    expect(gate).toContain('listTablesWithRealtimeTriggers')
     const door = fs.readFileSync(path.join(ROOT, 'app', 'api', 'mcp', 'tool', 'route.ts'), 'utf8')
     expect(door).toContain('describeRealtimeDisableScope')
     expect(door).toContain('EVERY streaming table stops')

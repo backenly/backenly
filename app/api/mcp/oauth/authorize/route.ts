@@ -46,8 +46,34 @@ import {
 } from '@/lib/mcp/oauth'
 import { canAdministerProject } from '@/lib/edition/guard'
 
+/**
+ * ── How the consent page receives the outcome ───────────────────────────────
+ *
+ * The consent page posts with `Accept: application/json` and navigates to the
+ * `redirectTo` it gets back. A plain form post answered with a 303 to the
+ * client's redirect_uri cannot work in Chromium: the console's CSP has
+ * `form-action 'self'`, which also covers where a form submission is
+ * redirected, so the browser blocked the 303 and Approve did nothing
+ * (production, 2026-11-09). Navigating with `location.assign` is not a form
+ * submission, so `form-action 'self'` stays as strict as it is everywhere else.
+ * Every other caller (a browser without JavaScript, a test) still gets the 303.
+ */
+function wantsJson(request: NextRequest): boolean {
+  return (request.headers.get('accept') ?? '').toLowerCase().includes('application/json')
+}
+
+/** Send the browser to a verified redirect_uri: a 303, or `{ redirectTo }` for the consent page. */
+function sendTo(url: string, json: boolean) {
+  return json
+    ? NextResponse.json({ redirectTo: url }, { headers: { 'cache-control': 'no-store' } })
+    : NextResponse.redirect(url, { status: 303 })
+}
+
 /** An error we must NOT send to the client's redirect_uri. */
-function localError(message: string, detail: string) {
+function localError(message: string, detail: string, json = false) {
+  if (json) {
+    return NextResponse.json({ error: message, detail }, { status: 400, headers: { 'cache-control': 'no-store' } })
+  }
   return new NextResponse(
     `<!doctype html><meta charset="utf-8"><title>Authorization error</title>` +
       `<div style="font:15px/1.6 system-ui;max-width:34rem;margin:14vh auto;padding:0 1.5rem;color:#e6e6e6;background:#101116">` +
@@ -58,12 +84,12 @@ function localError(message: string, detail: string) {
 }
 
 /** An RFC-shaped error that is safe to send back to a verified redirect_uri. */
-function redirectError(redirectUri: string, error: string, description: string, state?: string) {
+function redirectError(redirectUri: string, error: string, description: string, state?: string, json = false) {
   const url = new URL(redirectUri)
   url.searchParams.set('error', error)
   url.searchParams.set('error_description', description)
   if (state) url.searchParams.set('state', state)
-  return NextResponse.redirect(url.toString(), { status: 303 })
+  return sendTo(url.toString(), json)
 }
 
 function sessionUserId(request: NextRequest): string | null {
@@ -150,8 +176,9 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
+  const json = wantsJson(request)
   const form = await request.formData().catch(() => null)
-  if (!form) return localError('Bad request', 'Expected a form submission.')
+  if (!form) return localError('Bad request', 'Expected a form submission.', json)
 
   const confirmToken = String(form.get('confirm') ?? '')
   const projectId = String(form.get('project_id') ?? '')
@@ -160,21 +187,21 @@ export async function POST(request: NextRequest) {
 
   const confirm = verifyAuthzToken(confirmToken, CONFIRM_TYP)
   if (!confirm) {
-    return localError('This approval expired', 'Start the connection again from your MCP host.')
+    return localError('This approval expired', 'Start the connection again from your MCP host.', json)
   }
 
   // The CSRF check: the confirmation must belong to whoever is signed in now.
   const uid = sessionUserId(request)
   if (!uid || uid !== confirm.uid) {
-    return localError('Session mismatch', 'Sign in again and retry the connection.')
+    return localError('Session mismatch', 'Sign in again and retry the connection.', json)
   }
 
   if (decision !== 'approve') {
-    return redirectError(confirm.redirect_uri, 'access_denied', 'The user declined.', confirm.state)
+    return redirectError(confirm.redirect_uri, 'access_denied', 'The user declined.', confirm.state, json)
   }
 
   if (!(await canAdministerProject(uid, projectId))) {
-    return redirectError(confirm.redirect_uri, 'access_denied', 'Project not found.', confirm.state)
+    return redirectError(confirm.redirect_uri, 'access_denied', 'Project not found.', confirm.state, json)
   }
 
   const project = await prisma.project.findUnique({
@@ -182,12 +209,12 @@ export async function POST(request: NextRequest) {
     select: { id: true, name: true },
   })
   if (!project) {
-    return redirectError(confirm.redirect_uri, 'access_denied', 'Project not found.', confirm.state)
+    return redirectError(confirm.redirect_uri, 'access_denied', 'Project not found.', confirm.state, json)
   }
 
   const client = await prisma.mcpOAuthClient.findUnique({ where: { clientId: confirm.client_id } })
   if (!client) {
-    return localError('Unknown client', 'This client registration no longer exists.')
+    return localError('Unknown client', 'This client registration no longer exists.', json)
   }
 
   // Read-only is the human's choice here, and it narrows the granted scope. A
@@ -255,5 +282,5 @@ export async function POST(request: NextRequest) {
   const url = new URL(confirm.redirect_uri)
   url.searchParams.set('code', code)
   if (confirm.state) url.searchParams.set('state', confirm.state)
-  return NextResponse.redirect(url.toString(), { status: 303 })
+  return sendTo(url.toString(), json)
 }

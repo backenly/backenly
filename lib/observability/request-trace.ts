@@ -149,6 +149,28 @@ export function classifyRequestOutcome(f: RequestFacts): RequestOutcome {
     }
   }
 
+  // ── The database refused the identity ─────────────────────────────────────
+  //
+  // PostgreSQL's 42501 (insufficient_privilege): a row-level security policy,
+  // or the table's grants, declined the identity the request carried, with a
+  // valid key. PostgREST answers it 401 for a caller with no end-user token and
+  // 403 for one with, so neither status says which layer decided, and the
+  // error path does not know whether the table has row-level security. Read as
+  // a status, it was explained as a rejected API key or as Backenly's exposure
+  // rules (production QA, 2026-11-09).
+  if (f.upstreamCode === '42501') {
+    return {
+      layer: 'database',
+      silentFailure: false,
+      explanation: f.endUserIdentityPresent
+        ? `Row-level security or the grants on ${table} refused this for the signed-in user. ` +
+          `The key is valid; the table's policy declined this user.`
+        : `Row-level security or the grants on ${table} refused this for a caller with no ` +
+          `end-user token. The key is valid; send the signed-in user's token as X-User-Token, ` +
+          `or, if this should work without signing in, the table's policy has to allow it.`,
+    }
+  }
+
   // ── Auth ──────────────────────────────────────────────────────────────────
   if (f.status === 401) {
     return {

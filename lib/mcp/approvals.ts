@@ -89,14 +89,22 @@ export interface DangerInfo {
   reversible: boolean
 }
 
-/** A restore that cannot happen is refused when asked for, and nothing is queued. */
-export class RestoreRequestRefusedError extends Error {
+/** A request that cannot happen is refused when asked for, and nothing is queued. */
+export class RequestRefusedError extends Error {
   constructor(
     readonly status: number,
     readonly code: string,
     message: string,
   ) {
     super(message)
+    this.name = 'RequestRefusedError'
+  }
+}
+
+/** A restore that cannot happen. */
+export class RestoreRequestRefusedError extends RequestRefusedError {
+  constructor(status: number, code: string, message: string) {
+    super(status, code, message)
     this.name = 'RestoreRequestRefusedError'
   }
 }
@@ -180,6 +188,20 @@ export async function createApprovalRequest(input: {
     message = input.versionRestore
       ? message
       : `Requested by an agent.\n${restore.detail}\nThe agent wrote: “${input.message}”`
+  }
+
+  // A merge is parked with the statements its card lists, pinned, and what they
+  // do to production's rows (lib/branches/merge-request.ts), whichever door
+  // asked: backend_chat's used to carry the branch id alone, so approval
+  // replayed whatever the branch held by then. One that cannot happen (no such
+  // branch, main moved under it) is refused here, and nothing is queued.
+  if (danger.tool === 'merge_branch' && !Array.isArray(toolArgs.approvedMigrations)) {
+    const { mergeRequest } = await import('@/lib/branches/merge-request')
+    const m = await mergeRequest(input.projectId, String(toolArgs.branchId ?? toolArgs.branch ?? ''), 'Requested by an agent through backend_chat')
+    if (m.kind === 'refused') throw new RequestRefusedError(m.status, m.code, m.error)
+    danger = { ...danger, target: m.target, reversible: true }
+    toolArgs = { ...m.toolArgs }
+    message = m.message
   }
 
   // The request's words, its target and its exact call are what the approver

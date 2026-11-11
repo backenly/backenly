@@ -13,6 +13,7 @@
  *     the error; its code does not change underneath it.
  */
 
+import { previousCodeNote } from '@/lib/services/ai-functions/previous-code'
 import { createHash } from 'crypto'
 import { prisma } from '@/lib/db/prisma'
 import { canAccessProject, canWriteProject } from '@/lib/edition/guard'
@@ -23,6 +24,8 @@ import { rowLastError, withLastErrors, withRunBodies } from './run-records'
 import { isFunctionSwitchedOff } from './status'
 import { workspaceRawClient } from '@/lib/data-plane/regional'
 import { functionNameForms, resolveFunctionByName } from './names'
+import { integrationsUsedBy, missingIntegrations } from './integration-use'
+import { missingIntegrationDeployNote } from '@/lib/core/function-integration-words'
 
 export interface FunctionActor {
   userId?: string
@@ -100,6 +103,10 @@ export async function getFunction(
   if ('ambiguous' in found) return ambiguousName(found.ambiguous)
   // A regional project's last error is read from its region (./run-records.ts).
   const [fn] = await withLastErrors(actor.projectId, [found])
+  // The columns a row-update function watches, when it watches any.
+  const watchedColumns = fn.triggerType === 'on_db_update'
+    ? ((await prisma.aiFunctionTriggerColumns.findUnique({ where: { functionId: fn.id } }).catch(() => null))?.columns ?? null)
+    : null
 
   const endpoint = httpEndpoint(fn.triggerTable)
   return {
@@ -107,6 +114,7 @@ export async function getFunction(
     summary:
       `Function ${fn.name} (${fn.id}): ${fn.status}, trigger ${fn.triggerType}` +
       (endpoint ? ` ${endpoint.method} ${endpoint.path}` : fn.triggerTable ? ` (${fn.triggerTable})` : '') +
+      (watchedColumns?.length ? `, only when ${watchedColumns.join(' or ')} changes` : '') +
       `, ${fn.runCount} runs${fn.lastRun ? `, last ${fn.lastRun.toISOString()}` : ''}.` +
       (fn.lastError ? `\nLast error: ${fn.lastError.slice(0, 300)}` : '') +
       '\nThe code is in data.code.',
@@ -117,6 +125,7 @@ export async function getFunction(
       status: fn.status,
       triggerType: fn.triggerType,
       triggerTable: fn.triggerTable,
+      ...(watchedColumns?.length ? { watchedColumns } : {}),
       endpoint,
       runCount: fn.runCount,
       lastRun: fn.lastRun,
@@ -219,12 +228,20 @@ export async function listFunctionLogs(
   const lines = logs.slice(0, 10).map((l) =>
     `• ${l.createdAt.toISOString()} ${l.function.name}: ${l.success ? 'ok' : 'FAILED'}, ${l.durationMs}ms, ${l.triggerType}` +
     (l.error ? `, ${l.error.slice(0, 100)}` : ''))
+  // Runs of row-event functions wait in a queue and start a few at a time
+  // (./run-queue.ts): say how many have not run yet, so a missing run reads as
+  // waiting, not lost.
+  const { queuedFunctionRuns } = await import('./run-queue')
+  const byFunction = await queuedFunctionRuns(actor.projectId)
+  const queued = functionId ? byFunction.get(functionId) ?? 0 : [...byFunction.values()].reduce((a, b) => a + b, 0)
+  const waiting = queued > 0 ? `\n${queued} more run${queued === 1 ? '' : 's'} from row changes ${queued === 1 ? 'is' : 'are'} queued and will start in order.` : ''
   return {
     ok: true,
-    summary: logs.length
+    summary: (logs.length
       ? `Function runs, newest first (kept 30 days):\n${lines.join('\n')}` + (logs.length > 10 ? `\n…${logs.length - 10} more in data.runs.` : '')
-      : 'No function runs recorded yet. Run one with functions { action: "invoke" }.',
+      : 'No function runs recorded yet. Run one with functions { action: "invoke" }.') + waiting,
     data: {
+      queued,
       runs: logs.map((l) => ({
         id: l.id,
         functionId: l.functionId,
@@ -313,6 +330,7 @@ export async function deployFunctionCode(
     description?: unknown
     functionId?: unknown
     projectId?: unknown
+    columns?: unknown
   },
 ): Promise<FunctionActionResult> {
   // The project is the one the key is bound to. A different one named in the
@@ -333,6 +351,20 @@ export async function deployFunctionCode(
   const trigger = typeof args.trigger === 'string' ? args.trigger.trim().toLowerCase() : ''
   if (!(trigger in DEPLOY_TRIGGERS)) {
     return invalid(`trigger is required, one of: ${Object.keys(DEPLOY_TRIGGERS).join(', ')}. "http" takes a route module; the others take a sandbox function body.`)
+  }
+
+  // A row-update function may name the columns it watches: it then runs only
+  // when an update changed one of them (executor.ts functionsDueForUpdate).
+  let columns: string[] | null = null
+  if (args.columns !== undefined && args.columns !== null) {
+    if (trigger !== 'on_update') {
+      return invalid('columns applies to trigger "on_update" only: the columns whose change runs the function.')
+    }
+    const named = Array.isArray(args.columns) ? args.columns.map((c) => (typeof c === 'string' ? c.trim() : '')) : []
+    if (named.length === 0 || named.some((c) => !/^[A-Za-z_][A-Za-z0-9_$]{0,62}$/.test(c))) {
+      return invalid('columns is a list of column names, e.g. ["status"]. Leave it out to run on every update.')
+    }
+    columns = [...new Set(named)]
   }
 
   if (typeof args.code !== 'string' || !args.code.trim()) return invalid('code is required: the complete source to deploy.')
@@ -422,6 +454,20 @@ export async function deployFunctionCode(
     if (!found[0]?.n) {
       return { ok: false, code: 'TABLE_NOT_FOUND', summary: `There is no table ${table} in this project, so a ${trigger} function on it would never run.` }
     }
+    if (columns) {
+      const present = await db.$queryRaw<Array<{ column_name: string }>>`
+        SELECT column_name FROM information_schema.columns
+        WHERE table_schema = ${workspaceSchemaName(actor.projectId)} AND table_name = ${table}`
+      const have = new Set(present.map((r) => r.column_name))
+      const missing = columns.filter((c) => !have.has(c))
+      if (missing.length > 0) {
+        return {
+          ok: false,
+          code: 'COLUMN_NOT_FOUND',
+          summary: `${table} has no column ${missing.join(', ')}, so a change to it could never run the function. Nothing was deployed.`,
+        }
+      }
+    }
   }
 
   // Look the function up under every form of the name the agent gave, so a
@@ -457,10 +503,28 @@ export async function deployFunctionCode(
   // A function someone switched off stays off: deploying new code is not a
   // decision to start running it.
   const keptOff = existing?.status === 'inactive' || existing?.status === 'disabled'
-  const { governedChange } = await import('@/lib/changes/ledger')
-  const fn = await governedChange(actor.projectId, `${existing ? 'Deploy new code to' : 'Deploy'} function ${deployedName}`, () => existing
-    ? prisma.aiFunction.update({ where: { id: existing.id }, data: { ...fields, ...(keptOff ? {} : { status: 'active' }) } })
-    : prisma.aiFunction.create({ data: { projectId: actor.projectId, name, status: 'active', ...fields } }))
+  const { governedChange, currentChange } = await import('@/lib/changes/ledger')
+  // The change this deploy is recorded as. The history keeps the code it
+  // replaced (lib/changes/resources/functions.ts), so the answer says where.
+  let recordedAs = null as { id: string; seq: number } | null
+  const fn = await governedChange(actor.projectId, `${existing ? 'Deploy new code to' : 'Deploy'} function ${deployedName}`, async () => {
+    const open = currentChange(actor.projectId)
+    if (open) recordedAs = { id: open.id, seq: open.seq }
+    const saved = existing
+      ? await prisma.aiFunction.update({ where: { id: existing.id }, data: { ...fields, ...(keptOff ? {} : { status: 'active' }) } })
+      : await prisma.aiFunction.create({ data: { projectId: actor.projectId, name, status: 'active', ...fields } })
+    // A deploy says the whole trigger: left out, every update runs it.
+    if (columns) {
+      await prisma.aiFunctionTriggerColumns.upsert({
+        where: { functionId: saved.id },
+        create: { functionId: saved.id, columns },
+        update: { columns },
+      })
+    } else {
+      await prisma.aiFunctionTriggerColumns.deleteMany({ where: { functionId: saved.id } }).catch(() => {})
+    }
+    return saved
+  })
   // New code clears the last error, in the project's region too.
   if (existing?.lastError) await rowLastError(actor.projectId, existing.id, null)
 
@@ -470,6 +534,19 @@ export async function deployFunctionCode(
   const { syncCaptureForFunctionChange } = await import('@/lib/webhooks/capture')
   await syncCaptureForFunctionChange(actor.projectId, fn.triggerType)
 
+  // What the code reaches through ctx.integrations that this project has no key
+  // for. It deploys, and the agent is told now rather than finding the calls
+  // empty in production. A route module has no ctx.integrations. The deploy has
+  // happened, so a failed read leaves the note out rather than answering with
+  // an error; the observer reports the same thing on its next pass.
+  const stored = isHttp
+    ? null
+    : await prisma.projectIntegrationKey
+        .findMany({ where: { projectId: actor.projectId }, select: { integrationId: true } })
+        .then((keys) => new Set(keys.map((k) => k.integrationId)))
+        .catch(() => null)
+  const missing = stored ? missingIntegrations(integrationsUsedBy(code), stored) : []
+
   const sha = (s: string) => createHash('sha256').update(s, 'utf8').digest('hex')
   const renamed = rawName !== deployedName
   return {
@@ -477,13 +554,15 @@ export async function deployFunctionCode(
     summary:
       `${existing ? 'Replaced the code of' : 'Deployed'} ${deployedName} (${fn.id}), trigger ${trigger}` +
       (endpoint ? `, ${method} ${endpoint}` : table ? ` on ${table}` : '') +
+      (columns ? `, run only when ${columns.join(' or ')} changes` : '') +
+      missingIntegrationDeployNote(missing) +
       (renamed
         ? existing
           ? `. "${rawName}" is stored as "${deployedName}", which this replaced`
           : `. Deployed as "${deployedName}", not "${rawName}": names are lowercase kebab-case because they are URL path segments`
         : '') +
       (keptOff ? '. It stays switched off; turn it on with functions { action: "set_active", active: true }' : '') +
-      (existing ? '. The previous code is not kept, so there is nothing to roll back to' : '') +
+      (existing ? previousCodeNote(existing.generatedCode === code, recordedAs) : '') +
       `. Run it with functions { action: "invoke", functionId: "${fn.id}" } and read its runs with { action: "logs" }.`,
     data: {
       functionId: fn.id,
@@ -493,11 +572,17 @@ export async function deployFunctionCode(
       trigger,
       triggerType: fn.triggerType,
       triggerTable: fn.triggerTable,
+      watchedColumns: columns,
       endpoint: endpoint ? { method, path: endpoint } : null,
       status: fn.status,
+      // Per kind of provider the code uses and cannot reach: the names it
+      // wrote, and the vault ids any one of which would serve it.
+      missingIntegrations: missing,
       codeSha256: sha(code),
       codeBytes: bytes,
       previousCodeSha256: existing ? sha(existing.generatedCode) : null,
+      // Where the previous code is: this change, in the project's history.
+      change: existing && existing.generatedCode !== code ? recordedAs : null,
       deployedAt: fn.updatedAt,
     },
   }

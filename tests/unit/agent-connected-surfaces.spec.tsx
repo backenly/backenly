@@ -16,6 +16,7 @@ import { FunctionsWorkbench } from '@/components/functions/FunctionsWorkbench'
 import { MainWorkspace } from '@/components/workspace/MainWorkspace'
 import { AuthWorkbench } from '@/components/auth/AuthWorkbench'
 import { TopBar } from '@/components/shell/TopBar'
+import ProjectConnectPage from '@/app/app/projects/[id]/connect/page'
 
 const push = jest.fn()
 jest.mock('next/navigation', () => ({
@@ -25,8 +26,10 @@ jest.mock('next/navigation', () => ({
   useSearchParams: () => new URLSearchParams('tab=users'),
 }))
 
-const CONNECTED = { connected: true, lastSeenAt: new Date().toISOString(), client: 'Visual Studio Code' }
-const NOT_CONNECTED = { connected: false, lastSeenAt: null, client: null }
+const CONNECTED = { connected: true, active: true, lastSeenAt: new Date().toISOString(), client: 'Visual Studio Code' }
+const NOT_CONNECTED = { connected: false, active: false, lastSeenAt: null, client: null }
+/** Set up, last called six days ago: the server answers not active. */
+const IDLE = { ...CONNECTED, active: false, lastSeenAt: new Date(Date.now() - 6 * 24 * 3_600_000).toISOString() }
 
 let agentAnswer: unknown = NOT_CONNECTED
 
@@ -152,6 +155,39 @@ describe('Top bar', () => {
     expect(status).toHaveAttribute('href', '/app/projects/p1/connect')
     expect(status).toHaveAttribute('data-tour', 'connect-agent')
     expect(status.getAttribute('title')).toMatch(/through Visual Studio Code, last call just now/)
+    expect(status.querySelector('.bg-emerald-400')).not.toBeNull()
     expect(screen.queryByRole('link', { name: 'Connect agent' })).toBeNull()
+  })
+
+  it('says when a quiet agent last called, without the green dot', async () => {
+    // Production QA (2026-11-09): "Agent connected", green, six days after the
+    // last call. MCP over HTTP holds no connection to see; a call is the sign.
+    agentAnswer = IDLE
+    render(<TopBar />)
+    await settle()
+    expect(screen.queryByRole('link', { name: 'Agent connected' })).toBeNull()
+    const status = screen.getByRole('link', { name: 'Last call 6 days ago' })
+    expect(status).toHaveAttribute('href', '/app/projects/p1/connect')
+    expect(status.getAttribute('title')).toMatch(/set up over MCP through Visual Studio Code and last called 6 days ago/)
+    expect(status.querySelector('.bg-emerald-400')).toBeNull()
+    // Still set up: it does not ask to connect again.
+    expect(screen.queryByRole('link', { name: 'Connect agent' })).toBeNull()
+  })
+})
+
+describe('Connect', () => {
+  it('says the agent is connected only while it is at work, and otherwise when it last called', async () => {
+    agentAnswer = CONNECTED
+    const { unmount } = render(<ProjectConnectPage />)
+    await settle()
+    expect(screen.getByText('Connected through Visual Studio Code')).toBeInTheDocument()
+    unmount()
+
+    clearAgentConnectionCache()
+    agentAnswer = IDLE
+    render(<ProjectConnectPage />)
+    await settle()
+    expect(screen.queryByText('Connected through Visual Studio Code')).toBeNull()
+    expect(screen.getByText('Last call 6 days ago, through Visual Studio Code')).toBeInTheDocument()
   })
 })

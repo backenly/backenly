@@ -84,7 +84,7 @@ export function FrontendConnectionPill({
 
   const tooltip = (() => {
     if (status === 'idle') return 'No frontend has connected to this backend yet. Your agent wires the SDK; coordinates live on the Connect page.'
-    if (status === 'connected') return `${health?.totals.bootstraps24h ?? 0} requests in the last 24h from ${health?.totals.distinctOriginsConnected ?? 0} origin(s).`
+    if (status === 'connected') return `${health?.totals.requests24h ?? 0} requests in the last 24h from ${health?.totals.distinctOriginsConnected ?? 0} origin(s).`
     if (status === 'degraded') return `${health?.totals.failures24h ?? 0} requests failing. Open for fix prompts.`
     if (status === 'failing') return `${health?.totals.failures24h ?? 0} requests failing with a wrong API key. Open for a one-click fix.`
     return ''

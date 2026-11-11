@@ -121,6 +121,19 @@ export async function register() {
         ])
       })
 
+      // Row events every five seconds as well: a captured row waited for the
+      // minute's tick before its webhook and its functions saw it. Cheap when
+      // idle (one indexed look per project with a row subscriber), and shared
+      // with the minute's drain (lib/webhooks/capture.ts, drainRowEvents);
+      // queued function runs then go at their own pace
+      // (lib/services/ai-functions/run-queue.ts).
+      cron.schedule('*/5 * * * * *', async () => {
+        const { drainRowEvents } = await import('./lib/webhooks/capture')
+        await drainRowEvents().catch((err: any) =>
+          console.error('[CronScheduler] Row event drain error:', err?.message)
+        )
+      })
+
       // The platform's share at half past each minute: after the outbox drain
       // above has made each delivery's first attempt, so the retry pass sees
       // this minute's failures this minute (lib/services/cron-runner.ts).

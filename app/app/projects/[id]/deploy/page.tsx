@@ -64,6 +64,8 @@ interface PublishedVersion {
 
 interface BackendState {
   entities: Array<{ name: string; fieldCount: number }>
+  /** The tables a publish puts live, as the publish counts them. */
+  liveTableCount?: number | null
   apis: Array<{ method: string; path: string }>
   endpointCount?: number
   capabilities: Array<{ name: string; enabled: boolean; icon: string }>
@@ -295,13 +297,17 @@ export default function PublishPage() {
   const hasRealBackend = (backendState?.hasContent ?? false) || hasAuth
   const latestPublishedVersion = publishedVersions[0]
   const endpointCount = backendState?.endpointCount ?? (backendState?.apis.length ?? 0) * 5
-  const tableCount = backendState?.entities.length ?? 0
+  // Registered tables decide whether the engine accepts a publish, so
+  // `publishable` reads them; the number shown is what a publish puts live, as
+  // the version it records counts it.
+  const registeredTableCount = backendState?.entities.length ?? 0
+  const tableCount = backendState?.liveTableCount ?? registeredTableCount
   const apiResourceCount = backendState?.apis.length ?? 0
   // What the publish ENGINE will accept (lib/deployment/go-live.ts refuses
   // when tables, exposed APIs and auth are all absent). hasContent is wider —
   // functions, buckets or realtime alone flip it — and offering Publish on
   // that wider set meant the button led straight to a refusal.
-  const publishable = tableCount > 0 || apiResourceCount > 0 || hasAuth
+  const publishable = registeredTableCount > 0 || apiResourceCount > 0 || hasAuth
 
   const passingChecks = readinessChecks.filter(c => c.status === 'pass').length
   const blockingChecks = readinessChecks.filter(c => c.status === 'fail' && c.severity === 'blocking')

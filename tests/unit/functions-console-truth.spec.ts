@@ -61,11 +61,12 @@ describe('FN-17: a test run is a real run and says so', () => {
 })
 
 describe("FN-18: 'Remove all' cannot classify agent code as cleanup fodder", () => {
-  it('the schema-helper classifier requires a non-agent codeOrigin, not just a name shape', () => {
+  it('the schema-helper classifier requires the server to say Backenly generated it, not just a name shape', () => {
     // An agent-deployed function named `invoices-schema` with no run yet
     // matched the bare name heuristic, and the bulk cleanup deleted it as an
-    // "auto-generated validation-schema endpoint".
-    expect(workbench).toContain("fn.codeOrigin !== 'agent'")
-    expect(workbench).toMatch(/codeOrigin !== 'agent'[\s\S]{0,160}SCHEMA_FN_RE\.test\(fn\.name\)/)
+    // "auto-generated validation-schema endpoint". The server's `generated`
+    // flag never marks agent code, nor an endpoint an agent asked Backenly to
+    // write (tests/unit/generated-endpoint.spec.ts).
+    expect(workbench).toMatch(/fn\.generated === true && SCHEMA_FN_RE\.test\(fn\.name\)/)
   })
 })

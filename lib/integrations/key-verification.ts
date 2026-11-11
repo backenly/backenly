@@ -137,6 +137,28 @@ const PROBES: Record<string, Probe> = {
   ),
 }
 
+/** How each provider is written where a person reads it ("your Stripe dashboard"). */
+const PROVIDER_NAMES: Record<string, string> = {
+  stripe: 'Stripe',
+  stripe_webhook_secret: 'Stripe',
+  openai: 'OpenAI',
+  anthropic: 'Anthropic',
+  resend: 'Resend',
+  sendgrid: 'SendGrid',
+  posthog: 'PostHog',
+  twilio: 'Twilio',
+  onesignal: 'OneSignal',
+  replicate: 'Replicate',
+  runway: 'Runway',
+  stability: 'Stability AI',
+}
+
+export function providerName(integrationId: string): string {
+  const id = String(integrationId ?? '').toLowerCase()
+  if (PROVIDER_NAMES[id]) return PROVIDER_NAMES[id]
+  return id ? id.charAt(0).toUpperCase() + id.slice(1) : 'provider'
+}
+
 /**
  * Verify a credential with its provider.
  *
@@ -171,7 +193,7 @@ export async function verifyIntegrationKey(
   if (fabricated) {
     return {
       status: 'rejected',
-      detail: `This does not look like a real credential — ${fabricated}. Backenly will not store a placeholder: it would read as "connected" and fail at the first live request. Paste the actual key from your ${id || 'provider'} dashboard.`,
+      detail: `This does not look like a real credential — ${fabricated}. Backenly will not store a placeholder: it would read as "connected" and fail at the first live request. Paste the actual key from your ${providerName(id)} dashboard.`,
     }
   }
 

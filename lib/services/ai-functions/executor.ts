@@ -67,6 +67,12 @@ export interface FunctionExecutionResult {
    * looks.
    */
   httpStatus?: number
+  /**
+   * For a route module (a function written as a Next.js route handler), its
+   * answer as it wrote it: status, body and headers. /fn/{name} sends exactly
+   * this (lib/services/ai-functions/reply.ts). Absent for any other function.
+   */
+  answer?: { status: number; body: unknown; headers: Record<string, string> }
   error?: string
   errorCode?: 'PLAN_LIMIT_EXCEEDED' | 'NOT_FOUND'
   upgradeRequired?: boolean
@@ -91,6 +97,12 @@ export interface FunctionCallerContext {
    * endpoint's real logic can be exercised. Never set on public paths.
    */
   testRun?: boolean
+  /**
+   * How the run was asked for, as its record says it (`http` for a call
+   * through /fn or /functions). The event the function sees keeps its own
+   * `type`, which code may branch on; only the record changes.
+   */
+  trigger?: string
   /**
    * Whether a failure hands the function to the model-backed auto-fixer, which
    * rewrites its code. On by default. An agent invoking a function to test it
@@ -875,7 +887,7 @@ export async function executeAiFunction(
   // correct behaviour, not a failure). Only thrown errors / timeouts fail.
   if (isRouteModuleFunction(fn.generatedCode)) {
     try {
-      const { logs, returnValue } = await executeRouteModuleFunction(
+      const { logs, returnValue, headers } = await executeRouteModuleFunction(
         fn.generatedCode,
         projectId,
         event,
@@ -883,7 +895,20 @@ export async function executeAiFunction(
         { headers: caller.headers, testRun: caller.testRun }
       )
       const durationMs = Date.now() - startMs
-      await persistExecutionLog(functionId, projectId, true, logs, undefined, durationMs, event.type)
+      // The run's record says what the handler answered. A 4xx is the caller's
+      // error and the run still succeeded; a 5xx is the function's own, and the
+      // run is recorded as failed with that status. Neither is a thrown error,
+      // so neither touches the function's state or starts the self-heal below.
+      const answered = typeof returnValue?.status === 'number' ? returnValue.status : 200
+      await persistExecutionLog(
+        functionId,
+        projectId,
+        answered < 500,
+        [...logs, `answered HTTP ${answered}`],
+        answered >= 500 ? `The function answered HTTP ${answered}.` : undefined,
+        durationMs,
+        caller.trigger ?? event.type,
+      )
       // history: how the last run went, not configuration (lib/changes/resources/functions.ts)
       prisma.aiFunction.update({
         where: { id: functionId },
@@ -895,11 +920,18 @@ export async function executeAiFunction(
       // means the function ran without throwing, `httpStatus` means what it
       // decided to answer. The invocation route needs the second one — see the
       // note in server/routes/dynamic.ts about every function replying 200.
-      return { success: true, logs, returnValue, httpStatus: returnValue?.status, durationMs }
+      return {
+        success: true,
+        logs,
+        returnValue,
+        httpStatus: returnValue?.status,
+        answer: { status: returnValue.status, body: returnValue.body, headers: headers ?? {} },
+        durationMs,
+      }
     } catch (err: any) {
       const durationMs = Date.now() - startMs
       const errorMsg = err?.message || 'Route function error'
-      await persistExecutionLog(functionId, projectId, false, [], errorMsg, durationMs, event.type)
+      await persistExecutionLog(functionId, projectId, false, [], errorMsg, durationMs, caller.trigger ?? event.type)
       rowLastError(projectId, functionId, errorMsg)
         // history: how the last run went, not configuration (lib/changes/resources/functions.ts)
         .then((lastError) => prisma.aiFunction.update({
@@ -955,7 +987,7 @@ export async function executeAiFunction(
       const durationMs = Date.now() - startMs
 
       // Persist execution log
-      await persistExecutionLog(functionId, projectId, true, logs, undefined, durationMs, event.type)
+      await persistExecutionLog(functionId, projectId, true, logs, undefined, durationMs, caller.trigger ?? event.type)
 
       // history: how the last run went, not configuration (lib/changes/resources/functions.ts)
       prisma.aiFunction.update({
@@ -979,7 +1011,7 @@ export async function executeAiFunction(
   const logs: string[] = lastError instanceof SandboxRunError ? lastError.logs : []
 
   // Persist error log
-  await persistExecutionLog(functionId, projectId, false, logs, errorMsg, durationMs, event.type)
+  await persistExecutionLog(functionId, projectId, false, logs, errorMsg, durationMs, caller.trigger ?? event.type)
 
   rowLastError(projectId, functionId, errorMsg)
     // history: how the last run went, not configuration (lib/changes/resources/functions.ts)
@@ -1016,22 +1048,40 @@ async function persistExecutionLog(
 }
 
 // ─── Batch Fire Helpers ───────────────────────────────────────────────────────
+//
+// Row-event functions are not fired from here: the capture drain queues one
+// job per matching function and the queue runs them at a bounded pace
+// (./run-queue.ts). Firing every match at once, unawaited, is what made a bulk
+// update run hundreds of functions together.
 
-export async function fireAiFunctions(
-  projectId: string,
-  event: FunctionEvent
-): Promise<void> {
-  try {
-    const triggerType = `on_db_${event.type}`
-    const functions = await prisma.aiFunction.findMany({
-      where: { projectId, status: 'active', triggerType, triggerTable: event.table },
-      select: { id: true },
-    })
-    if (functions.length === 0) return
-    await Promise.allSettled(functions.map(fn => executeAiFunction(fn.id, projectId, event)))
-  } catch (err: any) {
-    console.warn('[AiFunctions] fireAiFunctions failed (non-fatal):', err?.message)
-  }
+/**
+ * The columns each row-update function watches (deploy_code's `columns`), read
+ * once for a batch of captured rows. Without the table that holds them (a
+ * release ahead of its migration) none are known, and every function runs, as
+ * before.
+ */
+export async function watchedColumnsOf(ids: string[]): Promise<Map<string, string[]>> {
+  if (ids.length === 0) return new Map()
+  const watched = await prisma.aiFunctionTriggerColumns
+    .findMany({ where: { functionId: { in: ids } }, select: { functionId: true, columns: true } })
+    .catch(() => [] as Array<{ functionId: string; columns: string[] }>)
+  return new Map(watched.map((w) => [w.functionId, w.columns]))
+}
+
+/**
+ * Whether an update should run a row-update function: it watches no columns,
+ * or one this update changed. A function watching `status` is not run, nor
+ * counted against the plan, for an update that left `status` alone: a bulk
+ * UPDATE of 5,271 orders used to run an "order shipped" email for every one of
+ * them. Without the old row (a payload too large to capture) a change cannot be
+ * ruled out, so the function runs.
+ */
+export function dueForUpdate(columns: string[] | undefined, event: FunctionEvent): boolean {
+  const before = event.old
+  if (!columns || columns.length === 0 || !before) return true
+  const after = event.data ?? {}
+  const same = (a: unknown, b: unknown) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null)
+  return columns.some((column) => !same(after[column], before[column]))
 }
 
 /**
