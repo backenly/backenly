@@ -938,7 +938,7 @@ function clamp(s: string, url: string): string {
 // ── Parking a domain action for a human ─────────────────────────────────────
 
 /** Argument names whose values never belong in a human-facing description. */
-const SECRET_ARG = /^(apiKey|clientSecret|webhookSecret|value|password|secret)$/i
+const SECRET_ARG = /^(apiKey|authToken|clientSecret|webhookSecret|value|password|secret)$/i
 
 /** "Deploy: rollback (version=3)" — what the human reads on the approval card. */
 function describeCall(resolution: Extract<DomainResolution, { kind: 'ok' }>, args: Record<string, unknown>): string {

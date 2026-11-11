@@ -131,7 +131,7 @@ export const DOMAIN_TOOLS: DomainTool[] = [
       list: { tool: 'list_integration_keys', gloss: 'connected providers, masked keys and verification state' },
       capabilities: { tool: 'list_integration_capabilities', gloss: 'the exact ctx.integrations methods each provider gives a function, and for Stripe its receiver URL and signing-secret state' },
       verify: { tool: 'verify_integration_key', gloss: 'ask the provider again whether the stored key works' },
-      connect: { tool: 'store_integration_key', gloss: 'store a provider key (Stripe also takes webhookSecret, OneSignal also takes appId, Resend/SendGrid also takes fromEmail) and wire the first functions, which Backenly\'s model writes' },
+      connect: { tool: 'store_integration_key', gloss: 'store a provider key (Stripe also takes webhookSecret, OneSignal also takes appId, Resend/SendGrid also takes fromEmail, Twilio takes accountSid, authToken and fromNumber) and wire the first functions, which Backenly\'s model writes' },
       disconnect: { tool: 'remove_integration_key', gloss: 'remove a provider key' },
       send_push: { tool: 'send_push', gloss: 'a push notification through the connected OneSignal app' },
     },

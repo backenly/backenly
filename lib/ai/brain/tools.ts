@@ -1466,8 +1466,11 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
     'If you do NOT have the key yet, call this with ONLY `integrationId` (omit apiKey) — it returns an inline "paste your key here" prompt to relay in chat. Collect the key IN THE CHAT; never redirect the user to the dashboard / Controls hamburger / Integrations panel. When they paste it, call again with `apiKey`. ' +
     'After it is stored, do not stop at "connected" — wire it into their app (generate_function + create_trigger) so it actually runs on a real event.',
     {
-      integrationId: { type: 'string', description: 'Provider id, e.g. "stripe", "resend", "openai", "replicate".' },
-      apiKey: { type: 'string', description: 'The secret to store (encrypted). Omit to trigger the inline "paste your key" prompt.' },
+      integrationId: { type: 'string', description: 'Provider id, e.g. "stripe", "resend", "openai", "replicate". For email, the provider: "resend" or "sendgrid".' },
+      apiKey: { type: 'string', description: 'The secret to store (encrypted). Omit to trigger the inline "paste your key" prompt. Twilio: accountSid:authToken:fromNumber, or give the three below instead.' },
+      accountSid: { type: 'string', description: 'Twilio only: the Account SID (AC…), from the Twilio Console.' },
+      authToken: { type: 'string', description: 'Twilio only: the auth token, from the Twilio Console.' },
+      fromNumber: { type: 'string', description: 'Twilio only: the number SMS is sent from, in E.164 form (e.g. +15550001111), a short code, or an alphanumeric sender ID.' },
       label: { type: 'string', description: 'Optional human label, e.g. "Stripe live key".' },
       webhookSecret: { type: 'string', description: 'Stripe only: the endpoint signing secret (whsec_…). Until it is stored, the Stripe receiver rejects every event.' },
       appId: { type: 'string', description: 'OneSignal only: the App ID, sent with the REST API key. Push stays off until both are stored.' },
@@ -1990,6 +1993,9 @@ export const TOOL_TO_ACTION: Record<string, (args: any) => AIAction> = {
       webhookSecret: a.webhookSecret,
       appId: a.appId,
       fromEmail: a.fromEmail,
+      accountSid: a.accountSid,
+      authToken: a.authToken,
+      fromNumber: a.fromNumber,
     },
   }),
   remove_integration_key: (a) => ({ action: 'REMOVE_INTEGRATION_KEY', params: { integrationId: a.integrationId } }),

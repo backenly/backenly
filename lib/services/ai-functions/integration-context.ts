@@ -34,6 +34,7 @@
 
 import { getIntegrationKey } from '@/lib/services/integrationKeyStore'
 import { safeFetch } from '@/lib/security/outbound-guard'
+import { twilioCredentialParts, twilioCredentialProblem } from '@/lib/integrations/twilio-credential'
 import {
   INTEGRATION_PROVIDERS,
   genericRequestProviders,
@@ -361,6 +362,18 @@ function buildTwilioIntegration(accountSid: string, authToken: string, fromNumbe
   }
 }
 
+/** ctx.integrations.twilio for a stored value it cannot send with: each call says what to store instead. */
+function unusableTwilioIntegration(problem: string): TwilioIntegration {
+  return {
+    async sendSms() {
+      throw new Error(
+        `Twilio cannot send: its stored credential is not accountSid:authToken:fromNumber. ${problem} ` +
+          'Connect Twilio again with its accountSid, authToken and fromNumber.',
+      )
+    },
+  }
+}
+
 // ── OpenAI wrapper ─────────────────────────────────────────────────────────────
 
 function buildOpenAIIntegration(apiKey: string): OpenAIIntegration {
@@ -669,13 +682,16 @@ export async function buildIntegrationContext(projectId: string): Promise<Integr
   }
 
   if (twilioRaw) {
-    // Twilio key stored as "accountSid:authToken:fromNumber"
-    const parts = twilioRaw.split(':')
-    if (parts.length >= 3) {
-      ctx.twilio = buildTwilioIntegration(parts[0], parts[1], parts[2])
-      connected.add('twilio')
-      connected.add('sms')
-    }
+    // Stored as accountSid:authToken:fromNumber (lib/integrations/twilio-credential.ts),
+    // which every way of storing it now checks. A value stored before that may
+    // lack a part: the helper used to be left out for it, so every SMS function
+    // threw a TypeError, and its sendSms now says what to store instead.
+    const credential = twilioCredentialParts(twilioRaw)
+    ctx.twilio = credential
+      ? buildTwilioIntegration(credential.accountSid, credential.authToken, credential.fromNumber)
+      : unusableTwilioIntegration(twilioCredentialProblem(twilioRaw) ?? '')
+    connected.add('twilio')
+    connected.add('sms')
   }
 
   if (posthogKey) {

@@ -1133,6 +1133,14 @@ tests/integration/integrations-connect-contract.spec.ts
 # rows and the real credentials, keys and build-status routes are the
 # property; PostHog and seeded rows keep CI off provider APIs.
 tests/integration/integration-key-one-row.spec.ts
+# Connect stores only a credential functions can use: Twilio from its Account
+# SID, auth token and sending number, checked and confirmed by Twilio, and sent
+# with; the SID and token alone are refused; a key connected as "email" is
+# stored as resend or sendgrid, or refused, and the unknown-id list leaves
+# "email" out. A Twilio value stored before gives functions a reason, not a
+# TypeError, and a re-check rejects it. Real vault rows, connect action and
+# runtime context; the providers' answers are stood in for.
+tests/integration/connect-checks-what-functions-read.spec.ts
 # Function management names the function it acted on: delete_schedule deletes
 # the exact job, an agent's create of a taken name is refused before any model
 # call, a second function on an event is created with the overlap named, every
