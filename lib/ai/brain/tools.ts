@@ -1984,7 +1984,7 @@ export const TOOL_TO_ACTION: Record<string, (args: any) => AIAction> = {
       label: a.label,
       webhookSecret: a.webhookSecret,
       appId: a.appId,
-      fromEmail: a.fromEmail ?? (a as any).from ?? (a as any).senderEmail,
+      fromEmail: a.fromEmail,
     },
   }),
   remove_integration_key: (a) => ({ action: 'REMOVE_INTEGRATION_KEY', params: { integrationId: a.integrationId } }),
