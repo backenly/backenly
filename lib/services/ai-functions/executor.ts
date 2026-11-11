@@ -31,7 +31,7 @@ import { getProviderSpec } from './integration-registry'
 import { generateFixedFunctionCode } from './generator'
 import { isRouteModuleFunction, executeRouteModuleFunction, validateRouteModule } from './route-module-runner'
 import { recordFunctionRun, rowLastError, runTextKeptInRegion, withLastErrors } from './run-records'
-import { isFunctionSwitchedOff } from './status'
+import { isFunctionSwitchedOff, RUNNABLE_FUNCTION_STATUS_FILTER } from './status'
 import { enforceAiFunctionInvocation, trackAiFunctionInvocation } from '@/lib/entitlements/policy'
 import { recordUsage } from '@/lib/usage/ledger'
 import { accountOf } from '@/lib/usage/account'
@@ -43,7 +43,7 @@ import { isReservedTestEmail } from '@/lib/services/end-user-auth-table'
 import { castTarget, coerceValue, columnTypes } from '@/lib/mcp/runtime-db'
 
 // Re-exported so the many existing executor importers keep one import site.
-export { FUNCTION_OFF_STATUSES, isFunctionSwitchedOff } from './status'
+export { FUNCTION_OFF_STATUSES, RUNNABLE_FUNCTION_STATUS_FILTER, isFunctionSwitchedOff } from './status'
 
 export interface FunctionEvent {
   type: string
@@ -1117,7 +1117,7 @@ export async function fireAiFunctionsOnSignup(
     if (typeof user?.email === 'string' && isReservedTestEmail(user.email)) return
 
     const functions = await prisma.aiFunction.findMany({
-      where: { projectId, status: 'active', triggerType: 'on_signup' },
+      where: { projectId, status: RUNNABLE_FUNCTION_STATUS_FILTER, triggerType: 'on_signup' },
       select: { id: true },
     })
     if (functions.length === 0) return
