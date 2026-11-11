@@ -8854,10 +8854,11 @@ async function executeVacuumTable(params: any, projectId: string): Promise<Execu
  *     project's workspace schema, so a name collision across tenants cannot
  *     reach anyone else's catalog.
  *
- * CONCURRENTLY is deliberately NOT used, and the reason is not caution: it
- * cannot run inside a transaction block, and every governed mutation here does.
- * A plain DROP INDEX takes a brief ACCESS EXCLUSIVE lock on the table, which is
- * the cost of the approved change and is stated in the result.
+ * By default, plain DROP INDEX is used because migrations run inside a transaction
+ * block, taking a brief ACCESS EXCLUSIVE lock on the table.
+ * When `params.online === true` is passed (e.g. Backenly's autonomous repairs),
+ * `dropIndexOnline` (lib/execution/online-index.ts) drops the index CONCURRENTLY
+ * on its own dedicated connection, avoiding table locks while traffic continues.
  */
 /**
  * A branch is cloned with LIKE … INCLUDING ALL, and Postgres names the indexes
@@ -9039,7 +9040,10 @@ async function executeDropIndex(params: any, projectId: string, target: SchemaTa
       // statement takes ACCESS EXCLUSIVE, and while it waits for one long query
       // every new query on the table queues behind it.
       const { dropIndexOnline } = await import('@/lib/execution/online-index')
-      const dropped = await dropIndexOnline(projectId, postgresSchema, indexName)
+      const timeouts = params?.timeouts ?? (params?.lockTimeoutMs || params?.buildTimeoutMs
+        ? { lockTimeoutMs: params.lockTimeoutMs, buildTimeoutMs: params.buildTimeoutMs }
+        : undefined)
+      const dropped = await dropIndexOnline(projectId, postgresSchema, indexName, timeouts)
       if (dropped.kind === 'failed') {
         return {
           success: false,
@@ -9646,10 +9650,13 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
           data: { indexName: idxName, existingDefinition: def },
         }
       }
+      const timeouts = params?.timeouts ?? (params?.lockTimeoutMs || params?.buildTimeoutMs
+        ? { lockTimeoutMs: params.lockTimeoutMs, buildTimeoutMs: params.buildTimeoutMs }
+        : undefined)
       if (sameShape && online) {
         // Built online, so removed online. A build still running holds a lock
         // this waits for, and gives up on, without touching it.
-        const dropped = await dropIndexOnline(projectId, postgresSchema, idxName)
+        const dropped = await dropIndexOnline(projectId, postgresSchema, idxName, timeouts)
         if (dropped.kind === 'failed') {
           return {
             success: false,
@@ -9683,7 +9690,10 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
       `CREATE${unique ? ' UNIQUE' : ''} INDEX${online ? ' CONCURRENTLY' : ''} IF NOT EXISTS "${idxName}" ` +
       `ON "${postgresSchema}"."${tableName}"${usingClause} (${colList})${whereClause}`
     if (online) {
-      const built = await buildIndexOnline(projectId, postgresSchema, idxName, ddl)
+      const timeouts = params?.timeouts ?? (params?.lockTimeoutMs || params?.buildTimeoutMs
+        ? { lockTimeoutMs: params.lockTimeoutMs, buildTimeoutMs: params.buildTimeoutMs }
+        : undefined)
+      const built = await buildIndexOnline(projectId, postgresSchema, idxName, ddl, timeouts)
       if (built.kind === 'failed') {
         return {
           success: false,
