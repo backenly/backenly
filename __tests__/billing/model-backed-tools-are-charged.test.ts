@@ -232,11 +232,14 @@ describe('the billing contract is wired at every boundary', () => {
   it('closing a turn charges it before it stops the turn’s holds counting', () => {
     // Both routes charge through closeCreditTurn. If it stopped charging, every
     // model-backed path would be free again; if it released before charging,
-    // a finished call would be counted nowhere for a moment.
+    // a finished call would be counted nowhere for a moment. It charges through
+    // chargeWithinCap, which stops the charge at the account's cap.
     const holds = read('lib/entitlements/credit-holds.ts')
     const body = holds.slice(holds.indexOf('export async function closeCreditTurn('))
-    expect(body.indexOf('await chargeAiCredits(')).toBeGreaterThan(-1)
-    expect(body.indexOf('await chargeAiCredits(')).toBeLessThan(body.indexOf('aiCreditHold'))
+    expect(body.indexOf('await chargeWithinCap(')).toBeGreaterThan(-1)
+    expect(body.indexOf('await chargeWithinCap(')).toBeLessThan(body.indexOf('aiCreditHold'))
+    const charge = holds.slice(holds.indexOf('async function chargeWithinCap('), holds.indexOf('export async function closeCreditTurn('))
+    expect(charge).toContain('await chargeAiCredits(')
   })
 
   it('names a non-empty model-backed set (guards against a vacuous pass)', () => {

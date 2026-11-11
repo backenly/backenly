@@ -64,6 +64,8 @@ import { detectIntentDrift } from './intent-conformance'
 import { detectBehaviouralRegression } from './baseline/detect'
 import { detectMigrationResidue } from './migration-residue'
 import { detectSubsystemRecurrence } from './subsystem-recurrence'
+import { detectFailingFunctions } from './function-failures'
+import { detectRefusedWrites } from './refused-writes'
 import { hasCapability, type PlatformCapability } from './platform-capabilities'
 import { projectRegion, requireRegionDatabaseUrl } from '@/lib/data-plane/regional'
 
@@ -245,11 +247,25 @@ export const INVARIANTS: readonly Invariant[] = [
     probe: detectBehaviouralRegression,
   },
   {
+    id: 'functions_keep_working',
+    title: 'Every function that runs on its own is succeeding',
+    rationale:
+      'A function that runs when a row changes, when someone signs up or on a schedule fails out of sight: the request that started it has already been answered, and nothing else on the backend looks wrong. Production QA watched one fail on every real order update for two hours while every other check stayed green. The run log already records each failure, so this reads it: a function that failed at least three times in a day, the latest run included, is reported with its last error. Never repaired automatically: the fix is a change to the function, and the code belongs to whoever wrote it.',
+    probe: detectFailingFunctions,
+  },
+  {
     id: 'the_schema_is_what_was_asked_for',
     title: 'Every column is the type and shape it was requested as',
     rationale:
       'Every other invariant here can be evaluated from the live catalog, because correct is defined by the catalog itself. Type correctness is not like that: a column that is integer looks perfectly healthy, and nothing distinguishes it from one that was supposed to be a timestamp. The information needed to notice was never missing from the database — it was never written down. So the request is recorded at build time and compared against reality, which is how a start_date created as INTEGER in May was found after two months of a continuously-running loop reporting green. The ledger records the REQUEST and is never reconciled to the catalog: one that self-heals to match reality agrees with it by construction and can never detect anything.',
     probe: detectIntentDrift,
+  },
+  {
+    id: 'no_unrequested_rule_refuses_writes',
+    title: 'No rule nobody asked for keeps refusing writes',
+    rationale:
+      'A rule that keeps a column unique looks healthy on its own: it is a constraint doing its job. It is only wrong when nobody wanted it, and then it shows up as real writes refused. Production QA met exactly that: orders kept every email unique, which nobody had asked for, so each customer\'s second order was refused while every check stayed green. So this starts from the evidence, writes refused with a conflict in the last day, and names the single-column unique rules on that table that the intent ledger does not record as requested. Never repaired automatically: whether a value may repeat is the owner\'s decision.',
+    probe: detectRefusedWrites,
   },
   {
     id: 'indexes_are_not_mostly_empty_space',
@@ -596,6 +612,10 @@ export function gapIdentity(
     // finding. The contract sweep's own auto-resolve is per-surface and was
     // unaffected, which is why this stayed hidden.
     (d.surface as string | undefined) ??
+    // Function findings are located by FUNCTION. They carry the trigger's
+    // table too, so by table two functions on `orders` were one gap: while
+    // one kept failing, the other's finding outlived its recovery.
+    (d.functionId as string | undefined) ??
     (table && column ? `${table}.${column}` : table)
   const base = normalizeFindingType(type, d)?.base ?? type
   return `${base}::${loc}`
@@ -646,9 +666,15 @@ const INVARIANT_EMITS: Readonly<Record<string, readonly FindingType[]>> = {
   // Re-detectable: the comparison runs against the live catalog every tick, so
   // a migrated column stops drifting and the finding withdraws itself.
   the_schema_is_what_was_asked_for: ['intent_drift'],
+  // Re-detectable: the probe reads the run log every pass, so a function whose
+  // next run succeeds stops appearing.
+  functions_keep_working: ['function_failing'],
   // Re-detectable by construction: the probe judges the latest complete hour, so
   // a subject that recovers simply stops appearing.
   the_backend_behaves_like_itself: ['behavioural_regression'],
+  // Re-detectable: the probe reads the last day's refusals and the live
+  // catalog, so a dropped rule or a quiet day closes the gap.
+  no_unrequested_rule_refuses_writes: ['unrequested_unique_refusing_writes'],
   // Re-detectable: all three shapes are live catalog reads, so a completed
   // rebuild, validation or transaction resolution closes the gap.
   no_migration_was_left_half_finished: ['migration_residue'],

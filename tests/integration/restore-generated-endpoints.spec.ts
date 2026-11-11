@@ -15,7 +15,9 @@
  *   - undoing that restore (a reapply) puts back exactly those rows: one
  *     switched off stays off, rewritten code is kept, and one the owner had
  *     deleted is not invented;
- *   - a restore of anything else (a drop) brings no generated endpoint back;
+ *   - a drop takes the table's generated endpoints with it, and restoring the
+ *     drop puts back exactly those: one switched off stays off, and one the
+ *     owner deleted before the drop is not invented;
  *   - an automatic recovery removes them as a restore does;
  *   - code an agent deployed over a generated name, the project's own
  *     functions, and a name another remaining table still generates are never
@@ -176,8 +178,24 @@ describe('a restore and its reapply', () => {
   }, 120_000)
 })
 
-describe('a restore of anything else', () => {
-  it('brings no generated endpoint back: restoring a drop leaves a deleted one deleted', async () => {
+describe('a drop, and its restore', () => {
+  it('a drop takes the generated endpoints with it, and its restore puts back exactly those', async () => {
+    // Left behind, each was a callable route over a table that was gone, and
+    // counted as one of the project's own functions.
+    await asPerson({ action: 'CREATE_TABLE', params: { tableName: 'reviews', columns: [{ name: 'rating', type: 'integer' }] } })
+    await prisma.aiFunction.updateMany({ where: { projectId, name: 'reviews-schema' }, data: { status: 'inactive' } })
+
+    const dropped = await asPerson({ action: 'DROP_TABLE', params: { tableName: 'reviews', confirmed: true } })
+    expect(await tableExists('reviews')).toBe(false)
+    expect(await named('reviews-schema')).toBeUndefined()
+
+    const out = await restore(dropped.id)
+    expect(out.ok).toBe(true)
+    expect(await tableExists('reviews')).toBe(true)
+    expect((await named('reviews-schema'))?.status).toBe('inactive')
+  }, 120_000)
+
+  it('restoring a drop leaves a generated endpoint the owner deleted before it deleted', async () => {
     await asPerson({ action: 'CREATE_TABLE', params: { tableName: 'notes', columns: [{ name: 'body', type: 'text' }] } })
     expect(await named('notes-schema')).toBeDefined()
     await prisma.aiFunction.deleteMany({ where: { projectId, name: 'notes-schema' } })

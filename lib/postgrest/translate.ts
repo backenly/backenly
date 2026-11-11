@@ -71,6 +71,81 @@ function firstValue(v: string | string[] | undefined): string | undefined {
   return Array.isArray(v) ? v[0] : v
 }
 
+/**
+ * Whether a filter value is written in PostgREST's grammar: an operator, a dot,
+ * and an operand of the shape that operator takes. The shape matters: `is.gd`
+ * (a domain) and `in.house` are values, `is.null` and `in.(1,2)` are not.
+ */
+function looksLikeV2Filter(value: string): boolean {
+  const v = value.startsWith('not.') ? value.slice(4) : value
+  const dot = v.indexOf('.')
+  if (dot < 1) return false
+  const op = v.slice(0, dot)
+  const rest = v.slice(dot + 1)
+  switch (op) {
+    case 'eq': case 'neq': case 'gt': case 'gte': case 'lt': case 'lte':
+    case 'like': case 'ilike': case 'match': case 'imatch':
+    case 'fts': case 'plfts': case 'phfts': case 'wfts':
+      return rest.length > 0
+    case 'is':
+      return /^(null|not_null|true|false|unknown)$/.test(rest)
+    case 'in':
+      return /^\(.*\)$/.test(rest)
+    case 'cs': case 'cd': case 'ov':
+      return /^[{[(].*[}\])]$/.test(rest)
+    case 'sl': case 'sr': case 'nxr': case 'nxl': case 'adj':
+      return /^[[(].*[\])]$/.test(rest)
+    default:
+      return false
+  }
+}
+
+/**
+ * Why a /db read written in /api/v2's grammar is refused, with the /api/v2
+ * request that does what was asked, or null when the read is /db's own.
+ *
+ * /db filters by equality and nothing else (translateReadQuery). Read as data,
+ * `?status=eq.paid` matched the literal "eq.paid" and answered 200 with no
+ * rows; a v2 order or an embedding select was dropped without a word
+ * (production QA, 2026-11-09). A wrong answer that looks right is worse than a
+ * refusal, so these are refused.
+ */
+export function v2GrammarIn(
+  query: Record<string, string | string[] | undefined>,
+  target: { projectId: string; table: string },
+): string | null {
+  const v2 = (q: string) => `/api/v2/${target.projectId}/${target.table}?${q}`
+  for (const [key, raw] of Object.entries(query)) {
+    const value = firstValue(raw)
+    if (value === undefined) continue
+    if (key === 'or' || key === 'and' || key === 'not.or' || key === 'not.and') {
+      return `"${key}" combines filters on /api/v2 only; /db filters by equality. Use ${v2(`${key}=${value}`)}.`
+    }
+    if (!RESERVED_QUERY_PARAMS.has(key) && IDENT.test(key) && looksLikeV2Filter(value)) {
+      const bare = value.slice(value.indexOf('.', value.startsWith('not.') ? 4 : 0) + 1)
+      return (
+        `"${key}=${value}" is /api/v2's filter syntax. On /db a filter is an equality (?${key}=${bare}); ` +
+        `for operators, use ${v2(`${key}=${value}`)}.`
+      )
+    }
+  }
+  const order = firstValue(query.order)
+  if (order !== undefined && !/^(asc|desc)$/i.test(order)) {
+    return (
+      'On /db, sort names the column and order is asc or desc (?sort=created_at&order=desc). ' +
+      `"order=${order}" is /api/v2's syntax: ${v2(`order=${order}`)}.`
+    )
+  }
+  const select = firstValue(query.select)
+  if (select !== undefined) {
+    const cols = select.split(',').map(c => c.trim()).filter(Boolean)
+    if (cols.some(c => c !== '*' && !IDENT.test(c))) {
+      return `On /db, select lists columns (?select=id,title). To embed related rows or rename columns, use ${v2(`select=${select}`)}.`
+    }
+  }
+  return null
+}
+
 /** Backenly REST query params → PostgREST query string. */
 export function translateReadQuery(opts: TranslateReadOptions): TranslatedQuery {
   const { query, hasSoftDelete, recordId } = opts
@@ -197,6 +272,36 @@ export interface StructuredApiError {
   hint?: string
 }
 
+/**
+ * 42P10 on an upsert: no unique index covers exactly the conflict columns.
+ *
+ * On a table with soft delete the usual cause is Backenly's own: a UNIQUE index
+ * there is scoped to live rows (WHERE deleted_at IS NULL), and Postgres cannot
+ * match `ON CONFLICT (cols)`, which is all on_conflict can say, to a partial
+ * index. The caller was told only "Request could not be completed". Postgres's
+ * text for this error describes the request, never a row or another tenant.
+ */
+const UPSERT_TARGET_MESSAGE =
+  'No unique index covers exactly the on_conflict columns, so the upsert has nothing to match against.'
+const UPSERT_TARGET_HINT =
+  'On a table with soft delete, a UNIQUE index counts live rows only (WHERE deleted_at IS NULL), and an upsert ' +
+  'cannot target that. Create one over every row: create_index { tableName, columns, unique: true, where: "true" }, ' +
+  'or CREATE UNIQUE INDEX … WHERE true.'
+
+/**
+ * The API's code for a database error in PG_STATUS. A value of the wrong type,
+ * format or length, or for a column the table does not have, is about the
+ * request's values, as /database/insert says (lib/api/v1/data-errors.ts); only
+ * a constraint the row broke is DB_CONSTRAINT_ERROR. Every one used to be,
+ * so "abc" for an integer read as a broken constraint (production QA,
+ * 2026-11-09).
+ */
+function apiCodeFor(pgCode: string): string {
+  if (pgCode === '42P01') return 'TABLE_NOT_FOUND'
+  if (pgCode.startsWith('22') || pgCode === '42703') return 'VALIDATION_ERROR'
+  return 'DB_CONSTRAINT_ERROR'
+}
+
 /** PostgREST error SQLSTATE → HTTP status, matching the old executor's mapping. */
 const PG_STATUS: Record<string, number> = {
   '23502': 400, // not null violation
@@ -289,12 +394,19 @@ export function toApiError(
     }
   }
 
+  if (pgCode === '42P10') {
+    return {
+      status: 400,
+      body: { error: UPSERT_TARGET_MESSAGE, code: 'UPSERT_TARGET_NOT_UNIQUE', hint: UPSERT_TARGET_HINT },
+    }
+  }
+
   if (pgCode && PG_STATUS[pgCode]) {
     return {
       status: PG_STATUS[pgCode],
       body: {
         error: message || 'Request could not be completed',
-        code: pgCode === '42P01' ? 'TABLE_NOT_FOUND' : 'DB_CONSTRAINT_ERROR',
+        code: apiCodeFor(pgCode),
         details: typeof b.details === 'string' ? b.details : undefined,
         hint: typeof b.hint === 'string' ? b.hint : undefined,
       },
@@ -347,6 +459,19 @@ export function toApiError(
  * 22xxx, 42703) keep their real text: those describe the caller's own data and
  * are the ones worth reading.
  */
+/**
+ * Errors that describe the request the caller made, which the caller has to
+ * read to fix it: PostgREST's own request errors (PGRST1xx; the schema list,
+ * PGRST106, is answered before this), a column the table does not have on a
+ * write (PGRST204, the v2 form of 42703), and the project's own RAISE
+ * EXCEPTION (P0001). Replaced by "Request could not be completed", a
+ * 20,000-row batch whose refusal was only in the runtime's log reached its
+ * caller as nothing (production QA, 2026-11-09).
+ */
+function describesTheRequest(pgCode: string): boolean {
+  return /^PGRST1\d\d$/.test(pgCode) || pgCode === 'PGRST204' || pgCode === 'P0001'
+}
+
 export function stripUpstreamError(
   status: number,
   body: unknown,
@@ -367,9 +492,22 @@ export function stripUpstreamError(
     }
   }
 
+  // PostgREST's shape and Postgres's own words, with a hint that says how to
+  // get an index an upsert can use.
+  if (pgCode === '42P10') {
+    return {
+      status: 400,
+      body: {
+        code: pgCode,
+        message: typeof b.message === 'string' && b.message ? b.message : UPSERT_TARGET_MESSAGE,
+        hint: UPSERT_TARGET_HINT,
+      },
+    }
+  }
+
   // Caller-facing constraint errors: real text, because it is about their row.
   const SAFE_PREFIXES = ['23', '22', '42703', '42P01', 'PGRST100', 'PGRST116', 'PGRST118', 'PGRST200']
-  if (pgCode && SAFE_PREFIXES.some(p => pgCode.startsWith(p))) {
+  if (pgCode && (SAFE_PREFIXES.some(p => pgCode.startsWith(p)) || describesTheRequest(pgCode))) {
     return {
       status,
       body: {

@@ -19,6 +19,7 @@
  */
 
 import { normalizeFindingType } from './types'
+import { missingFrom, missingIntegrationSummary } from './function-integration-words'
 
 type Details = Record<string, unknown> | null | undefined
 
@@ -156,6 +157,28 @@ function summariseFindingText(type: string, details: Record<string, unknown>): s
         ? `\`${table}\` changes are not broadcast to realtime subscribers`
         : 'A live-data table is missing its realtime notify trigger'
 
+    // ── Refused writes ────────────────────────────────────────────────────
+    case 'unrequested_unique_refusing_writes': {
+      const col = str(d.columnName)
+      const refused = Number(d.refused ?? 0)
+      const writes = Number(d.writes ?? 0)
+      return table && col && writes > 0
+        ? `\`${table}\` refused ${refused} of ${writes} writes; \`${col}\` is kept unique by a rule nobody asked for`
+        : 'Writes are refused by a unique rule nobody asked for'
+    }
+    // ── Size ──────────────────────────────────────────────────────────────
+    // One raised under the retired row-count rule carries no sizes, and is not
+    // said to be larger than anything (lib/ai/infra-intelligence.ts withdraws it).
+    case 'infra_partition':
+      if (typeof d.cacheBytes !== 'number') {
+        return table
+          ? `\`${table}\` was flagged by a retired check that counted rows, not size`
+          : 'A table was flagged by a retired check that counted rows, not size'
+      }
+      return table
+        ? `\`${table}\` is larger than PostgreSQL's cache: keep it smaller, or partition it`
+        : 'A table is larger than PostgreSQL\'s cache: keep it smaller, or partition it'
+
     // ── Integrations ──────────────────────────────────────────────────────
     case 'broken_webhook':
       return 'A webhook is failing to deliver'
@@ -169,6 +192,18 @@ function summariseFindingText(type: string, details: Record<string, unknown>): s
         : 'The SMTP host is unreachable — outbound email will fail'
     case 'integration_connected_unused':
       return `${str(d.provider) ?? str(d.integration) ?? 'An integration'} is connected but nothing uses it yet`
+
+    // ── Functions ─────────────────────────────────────────────────────────
+    case 'function_failing': {
+      const name = str(d.functionName) ?? 'A function'
+      const failures = Number(d.failures ?? 0)
+      const runs = Number(d.runs ?? 0)
+      return failures > 0 && runs > 0
+        ? `\`${name}\` failed ${failures} of its last ${runs} runs`
+        : `\`${name}\` keeps failing`
+    }
+    case 'function_integration_missing':
+      return missingIntegrationSummary(str(d.functionName) ?? 'A function', missingFrom(d.missing))
 
     // ── Workflow / verification ───────────────────────────────────────────
     case 'workflow_broken': {

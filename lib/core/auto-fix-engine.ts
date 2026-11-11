@@ -386,6 +386,7 @@ export async function runAutoFix(
       projectId,
       findingType: finding.type,
       tableName,
+      columnName: typeof details.columnName === 'string' ? details.columnName : null,
       loop: actor.loop,
     })
 
@@ -439,16 +440,59 @@ export async function runAutoFix(
     // It also carries the class's declared recovery, so the executor performs
     // the recovery the decision was granted on rather than a different one.
     const { applyIntentToFixDetails } = await import('@/lib/authority/gate')
-    return _executeAutoFix(
+
+    // An index Backenly builds on its own (lib/autonomy/index-trials.ts): paced
+    // after a failed build, which has already read the table twice, and, for
+    // one built because queries measured slow, judged on those queries after.
+    const column = typeof details.columnName === 'string' ? details.columnName : null
+    const indexBuild = hold.action === 'CREATE_INDEX' && tableName && column ? { table: tableName, column } : null
+    if (indexBuild) {
+      const trials = await import('@/lib/autonomy/index-trials')
+      const wait = trials.buildWaitOf(await trials.loadIndexTrial(projectId, indexBuild.table, indexBuild.column).catch(() => null))
+      // Recorded when the build failed; not again on every pass it waits.
+      if (wait) return { findingId, outcome: 'deferred', message: wait }
+    }
+    const res = await _executeAutoFix(
       finding.id,
       projectId,
       type,
       applyIntentToFixDetails(gate.decision, details),
-      { ...opts, recovery: gate.decision.capability.recovery, hold },
+      { ...opts, recovery: gate.decision.capability.recovery, hold, indexBuild },
     )
+    if (indexBuild && res.outcome === 'auto_fixed') {
+      await _afterIndexBuilt(projectId, finding.id, finding.type, indexBuild, res).catch((err: any) =>
+        console.warn(`[AutoFix] index trial for ${indexBuild.table}.${indexBuild.column} not opened:`, err?.message ?? err))
+    }
+    return res
   }
 
   return _executeAutoFix(finding.id, projectId, type, details, opts)
+}
+
+/**
+ * After an index Backenly built on its own: its failures in a row are over,
+ * and one built because queries measured slow is now a trial, judged on those
+ * queries (lib/autonomy/index-trials.ts). The reading is taken now, seconds
+ * after the build; queries in those seconds count as "before", which can only
+ * make the index look less useful than it is.
+ */
+async function _afterIndexBuilt(
+  projectId: string,
+  findingId: string,
+  findingType: string,
+  build: { table: string; column: string },
+  res: AutoFixResult,
+): Promise<void> {
+  const trials = await import('@/lib/autonomy/index-trials')
+  const { defaultIndexName } = await import('@/lib/ai/minimal-executor')
+  const indexName = defaultIndexName(build.table, [build.column], false)
+  if (findingType !== 'slow_query_missing_index') {
+    await trials.noteIndexBuilt(projectId, build.table, build.column)
+    return
+  }
+  const changeIds = Array.isArray((res.rollbackData as any)?.changeIds) ? ((res.rollbackData as any).changeIds as string[]) : []
+  const reading = await trials.readIndexTrial(projectId, build.table, build.column, indexName).catch(() => null)
+  await trials.startIndexTrial({ projectId, table: build.table, column: build.column, indexName, findingId, changeIds, reading })
 }
 
 /**
@@ -1555,7 +1599,13 @@ async function _executeAutoFix(
    * architecture hold (lib/evolution-engine/holds.ts) is asked again inside
    * the build lock, so an approval that landed since the first ask holds it.
    */
-  opts: { skipCooldown?: boolean; recovery?: string; hold?: { table: string | null; action: string | null } } = {},
+  opts: {
+    skipCooldown?: boolean
+    recovery?: string
+    hold?: { table: string | null; action: string | null }
+    /** Set for an index Backenly builds on its own: a build that fails is counted (lib/autonomy/index-trials.ts). */
+    indexBuild?: { table: string; column: string } | null
+  } = {},
 ): Promise<AutoFixResult> {
   const baseType = (normalizeFindingType(type, details)?.base ?? type) as FindingType
   const fixAction = buildFixAction(type, details)
@@ -1665,6 +1715,13 @@ async function _executeAutoFix(
 
   if (!result!.success) {
     const reason = result!.error ?? result!.message
+    // A build that ran and failed paces the next one; one that never started
+    // (another build held the database's lock) does not.
+    const built = result!.data as { online?: boolean; started?: boolean } | undefined
+    if (opts.indexBuild && built?.online && built.started) {
+      const { noteIndexBuildFailure } = await import('@/lib/autonomy/index-trials')
+      await noteIndexBuildFailure(projectId, opts.indexBuild.table, opts.indexBuild.column, String(reason)).catch(() => {})
+    }
     const recovered = policyPre
       ? await _recoverPolicies(findingId, projectId, type, policyPre, policyPost, reason, changeIds)
       : null

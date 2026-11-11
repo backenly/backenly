@@ -89,6 +89,7 @@ import {
 import {
   claimRequest,
   isClaimAbandoned,
+  liveRequestFor,
   raiseRequest,
   releaseAbandonedClaims,
   requestById,
@@ -631,13 +632,21 @@ async function refreshIfStale(
   const abandoned =
     !!open.state && PREPARING.includes(open.state) && now.getTime() - open.updatedAt.getTime() > ABANDONED_AFTER_MS
   let drifted = false
+  let unaskable = false
   if (open.state === 'awaiting_approval') {
     const resolved = await primitive.resolvePlan(projectId, opp.spec)
     // A plan that can no longer be built, or whose version moved, is
     // re-proposed — or withdrawn — by requestApproval.
     drifted = 'refusal' in resolved || resolved.plan.planVersion !== open.planVersion
+    // Waiting on a person who has nothing to act on: the queue's row was taken
+    // out by something other than the person or this engine (both of which
+    // also move the decision on). It happened to every waiting request on
+    // 2026-11-09, when another module's cleanup matched `architecture_evolution`
+    // with the pattern 'arch_%'. Ask again, rather than skipping it forever as
+    // "already awaiting approval".
+    unaskable = !(await liveRequestFor(projectId, open.concernKey))
   }
-  if (!retryRehearsal && !drifted && !abandoned) return 'current'
+  if (!retryRehearsal && !drifted && !abandoned && !unaskable) return 'current'
   const r = await requestApproval(projectId, primitive, opp, now, refOf(open))
   return r === 'requested' ? 'refreshed' : 'current'
 }

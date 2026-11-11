@@ -16,6 +16,7 @@ import { getWebhook, updateWebhook, deleteWebhook } from '@/lib/webhooks'
 import { isWebhookEventType, WEBHOOK_EVENT_TYPES } from '@/lib/webhooks/events'
 import { syncWebhookCapture } from '@/lib/webhooks/capture'
 import { guardWebhookRoute } from '@/lib/webhooks/route-guard'
+import { onlyTurnsOff } from '@/lib/webhooks/plan'
 import { BlockedOutboundError } from '@/lib/security/outbound-guard'
 
 export const GET = withAuth(async (_request: NextRequest, { user, params }) => {
@@ -51,10 +52,14 @@ export const GET = withAuth(async (_request: NextRequest, { user, params }) => {
 export const PATCH = withAuth(async (request: NextRequest, { user, params }) => {
   const { id: projectId, webhookId } = await params
 
-  const denied = await guardWebhookRoute(user.userId, projectId, 'write')
+  const body = await request.json().catch(() => null)
+
+  // Turning an endpoint off is allowed on every plan; any other edit needs a
+  // plan that includes webhooks.
+  const stops = body !== null && typeof body === 'object' && onlyTurnsOff(body)
+  const denied = await guardWebhookRoute(user.userId, projectId, 'write', stops ? 'stop' : 'change')
   if (denied) return denied
 
-  const body = await request.json().catch(() => null)
   if (!body || typeof body !== 'object') {
     return NextResponse.json({ error: 'A JSON body is required' }, { status: 400 })
   }
@@ -131,7 +136,8 @@ export const PATCH = withAuth(async (request: NextRequest, { user, params }) => 
 export const DELETE = withAuth(async (_request: NextRequest, { user, params }) => {
   const { id: projectId, webhookId } = await params
 
-  const denied = await guardWebhookRoute(user.userId, projectId, 'admin')
+  // Deleting is allowed on every plan (stopping an endpoint never needs one).
+  const denied = await guardWebhookRoute(user.userId, projectId, 'admin', 'stop')
   if (denied) return denied
 
   // deleteMany with both ids: a webhook belonging to another project matches

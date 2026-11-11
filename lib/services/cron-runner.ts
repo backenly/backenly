@@ -40,7 +40,7 @@ import { matchesCronExpression } from '@/lib/services/cron-expression'
 import { executeAiFunction, FunctionEvent } from '@/lib/services/ai-functions/executor'
 import { RUNNABLE_FUNCTION_STATUS_FILTER } from '@/lib/services/ai-functions/status'
 import { retryFailedWebhooks } from '@/lib/webhooks/index'
-import { drainWebhookOutbox } from '@/lib/webhooks/capture'
+import { drainRowEvents } from '@/lib/webhooks/capture'
 import { pruneRegionalBodies } from '@/lib/data-plane/regional-bodies'
 import { detectAndTimeoutStuckJobs, enqueue } from '@/lib/queue/index'
 import { processBackgroundJobs, processPurgeJobs, processRegionalJobs } from '@/lib/queue/worker'
@@ -180,7 +180,7 @@ export async function runSystemTasks(): Promise<void> {
  * it keeps off the platform rows.
  */
 export async function runRegionalSystemTasks(now: Date = new Date()): Promise<void> {
-  await drainWebhookOutbox().catch(err =>
+  await drainRowEvents().catch(err =>
     console.error('[SystemTasks] webhook outbox drain failed:', err?.message)
   )
 

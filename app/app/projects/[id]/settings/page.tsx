@@ -19,7 +19,7 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
-import { SlidersHorizontal, KeyRound, Users, Check, Trash2, Crown, UserPlus, FolderLock, Lock, Plus, X } from 'lucide-react'
+import { SlidersHorizontal, KeyRound, Users, Check, Trash2, Crown, UserPlus, FolderLock, Lock, Plus, X, AlertTriangle, RotateCw } from 'lucide-react'
 import { setCurrentProjectId } from '@/lib/api/client'
 import { getProject, updateProject, deleteProject, type Project } from '@/lib/api/projects'
 import {
@@ -141,13 +141,18 @@ function GeneralTab({ projectId, onDeleted }: { projectId: string; onDeleted: ()
       setName(p.name ?? '')
       setDescription(p.description ?? '')
     } catch {
-      /* handled by empty state */
+      /* project stays null: the tab says it could not load */
     } finally {
       setLoading(false)
     }
   }, [projectId])
 
   useEffect(() => { if (projectId) load() }, [projectId, load])
+
+  const retry = () => {
+    setLoading(true)
+    void load()
+  }
 
   const dirty = project ? name.trim() !== (project.name ?? '') || (description ?? '') !== (project.description ?? '') : false
 
@@ -181,7 +186,7 @@ function GeneralTab({ projectId, onDeleted }: { projectId: string; onDeleted: ()
     project?.apiUrlProd || project?.apiUrlStaging || project?.apiUrlDev || project?.apiBaseUrl || null
 
   const confirmDelete = async () => {
-    if (deleteText !== (project?.name ?? '')) return
+    if (!project || deleteText !== project.name) return
     setDeleting(true)
     setDeleteError(null)
     try {
@@ -205,6 +210,23 @@ function GeneralTab({ projectId, onDeleted }: { projectId: string; onDeleted: ()
             <Skeleton className={`${h} w-full rounded-[10px]`} />
           </div>
         ))}
+      </SettingsColumn>
+    )
+  }
+
+  // A project that could not be loaded is not drawn as an empty one: its name
+  // field would be blank, its region the home region, and the delete check
+  // would match an empty box against the missing name.
+  if (!project) {
+    return (
+      <SettingsColumn>
+        <KitNote
+          tone="danger"
+          icon={AlertTriangle}
+          actions={<KitButton size="sm" variant="ghost" icon={RotateCw} onClick={retry}>Try again</KitButton>}
+        >
+          Couldn’t load this project’s settings.
+        </KitNote>
       </SettingsColumn>
     )
   }
@@ -299,7 +321,7 @@ function GeneralTab({ projectId, onDeleted }: { projectId: string; onDeleted: ()
             variant="danger"
             icon={Trash2}
             loading={deleting}
-            disabled={deleteText !== (project?.name ?? '')}
+            disabled={deleteText !== project.name}
           >
             Delete project
           </KitButton>

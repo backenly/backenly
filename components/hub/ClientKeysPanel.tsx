@@ -29,6 +29,7 @@ import {
   Tag,
 } from '@/components/inspector/kit'
 import { PAGE_GUTTER, PAGE_WIDTH } from '@/components/console/tokens'
+import { isSharedKey, sharedKeyWindow, shortWindow } from '@/lib/security/shared-key'
 
 interface ApiKey {
   id: string
@@ -306,13 +307,26 @@ export function ClientKeysPanel() {
                       </div>
                     </td>
                     <td className="whitespace-nowrap px-4 py-3 align-middle text-[13px] tabular-nums text-zinc-400">
-                      {(key.rateLimit ?? 1000).toLocaleString()} / {Math.max(1, Math.round((key.rateLimitWindow ?? 3600) / 3600))} h
+                      {/* Every user of the app sends a shared key, so its limit is each address's (lib/security/shared-key.ts). */}
+                      {isSharedKey(key) ? (
+                        <>
+                          {shortWindow(sharedKeyWindow(key))}<span className="text-faint"> per address</span>
+                        </>
+                      ) : (
+                        <>
+                          {(key.rateLimit ?? 1000).toLocaleString()} / {Math.max(1, Math.round((key.rateLimitWindow ?? 3600) / 3600))} h
+                        </>
+                      )}
                     </td>
                     <td className="whitespace-nowrap px-4 py-3 align-middle text-[13px] tabular-nums text-zinc-400">
                       {formatDate(key.createdAt)}
                     </td>
                     <td className="whitespace-nowrap px-4 py-3 align-middle text-[13px] tabular-nums">
-                      {key.expiresAt ? (
+                      {key.branch && key.branch.status !== 'active' ? (
+                        // Its branch was merged or discarded, and the key with
+                        // it: no date to wait for, it never answers again.
+                        <span className="text-faint">Ended with branch</span>
+                      ) : key.expiresAt ? (
                         // The runtime refuses the key past this date; a key
                         // that will die deserves a visible date, not a silent
                         // birthday. Amber once it is under 30 days out.

@@ -661,7 +661,9 @@ export async function runDeepScan(
   const proofPromise = collectProof(projectId).catch(() => null)
 
   emit('Checking auth, permissions, and deploy gates…')
-  const readinessPromise = scoreReadiness(projectId, { autoFix: false }).catch(() => null)
+  // A read: the verifier's latest run of the backend as it is now is enough
+  // (lib/deployment/verification-reuse.ts).
+  const readinessPromise = scoreReadiness(projectId, { autoFix: false, reuseRecentVerification: true }).catch(() => null)
 
   emit('Analyzing production safety risks…')
   const prodIntelPromise = analyzeProductionReadiness(projectId).catch(() => null)
