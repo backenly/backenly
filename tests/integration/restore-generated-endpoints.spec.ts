@@ -3,8 +3,9 @@
  * =======================================================================
  *
  * Creating a table registers the endpoints Backenly generates for it as
- * AiFunction rows (a validation schema for every table, and more for a jobs
- * table). Staging qualification found them outliving the table: after
+ * AiFunction rows (more for a jobs table; tables built before 2026-11-11 also
+ * got a validation schema, `<table>-schema`, which is no longer registered but
+ * still follows its table). Staging qualification found them outliving the table: after
  * "Restore the state before #N" removed the table, read_backend_state still
  * listed `<table>-schema`, a callable route over a table that was gone. The
  * ledger's restore put the table registry and its row-level-security rules back
@@ -80,6 +81,19 @@ async function asPerson(action: Record<string, unknown>) {
 
 const restore = (id: string) => recoverChange(projectId, id, { mode: 'manual', actorUserId: ownerId, acknowledged: null })
 
+/**
+ * The validation schema endpoint a table built before 2026-11-11 was given,
+ * exactly as GENERATE_API registered it. A new table no longer gets one, but
+ * one that exists is still Backenly's and follows its table.
+ */
+const olderTablesSchemaEndpoint = (table: string) =>
+  prisma.aiFunction.create({
+    data: {
+      projectId, name: `${table}-schema`, description: `Return the runtime validation schema for ${table}`,
+      generatedCode: `// the validation schema of ${table}`, triggerType: 'manual', triggerTable: `GET /api/v1/${projectId}/fn/${table}-schema`,
+    },
+  })
+
 beforeAll(async () => {
   process.env.BACKENLY_EDITION = 'cloud'
   process.env.ENGINE_MODE = 'runtime'
@@ -115,7 +129,10 @@ describe('a restore and its reapply', () => {
   it('creating a jobs table generates its endpoints, in the same change', async () => {
     createdId = (await asPerson({ action: 'CREATE_TABLE', params: { tableName: 'jobs', columns: [{ name: 'title', type: 'text' }, { name: 'status', type: 'text' }] } })).id
     const names = (await functions()).map((f) => f.name)
-    for (const n of ['jobs-schema', 'jobs-create', 'jobs-cancel', 'jobs-retry', 'jobs-progress']) expect(names).toContain(n)
+    for (const n of ['jobs-create', 'jobs-cancel', 'jobs-retry', 'jobs-progress']) expect(names).toContain(n)
+    expect(names).not.toContain('jobs-schema')
+    // As a table built before 2026-11-11 has it.
+    await olderTablesSchemaEndpoint('jobs')
 
     // What happens to them before the restore, each a case the restore must respect.
     await prisma.aiFunction.updateMany({
@@ -183,6 +200,7 @@ describe('a drop, and its restore', () => {
     // Left behind, each was a callable route over a table that was gone, and
     // counted as one of the project's own functions.
     await asPerson({ action: 'CREATE_TABLE', params: { tableName: 'reviews', columns: [{ name: 'rating', type: 'integer' }] } })
+    await olderTablesSchemaEndpoint('reviews')
     await prisma.aiFunction.updateMany({ where: { projectId, name: 'reviews-schema' }, data: { status: 'inactive' } })
 
     const dropped = await asPerson({ action: 'DROP_TABLE', params: { tableName: 'reviews', confirmed: true } })
@@ -197,7 +215,7 @@ describe('a drop, and its restore', () => {
 
   it('restoring a drop leaves a generated endpoint the owner deleted before it deleted', async () => {
     await asPerson({ action: 'CREATE_TABLE', params: { tableName: 'notes', columns: [{ name: 'body', type: 'text' }] } })
-    expect(await named('notes-schema')).toBeDefined()
+    await olderTablesSchemaEndpoint('notes')
     await prisma.aiFunction.deleteMany({ where: { projectId, name: 'notes-schema' } })
 
     const dropped = await asPerson({ action: 'DROP_TABLE', params: { tableName: 'notes', confirmed: true } })
@@ -211,12 +229,12 @@ describe('a drop, and its restore', () => {
 
 describe('an automatic recovery', () => {
   it('removes the endpoints generated for a table it removed, as a restore does', async () => {
-    const T = `"${schema}"."renders_log"`
+    const T = `"${schema}"."render_jobs"`
     await expect(
       withChangeAttribution({ source: 'mcp' }, () =>
         withGovernedChange({ projectId, title: 'a table, then a step that cannot apply' }, async () => {
           const created: any = await executeAction(
-            { action: 'CREATE_TABLE', params: { tableName: 'renders_log', columns: [{ name: 'body', type: 'text' }] } } as any,
+            { action: 'CREATE_TABLE', params: { tableName: 'render_jobs', columns: [{ name: 'body', type: 'text' }] } } as any,
             projectId, undefined, 0, undefined, false,
           )
           expect(created.success).toBe(true)
@@ -226,12 +244,12 @@ describe('an automatic recovery', () => {
 
     const failed = await prisma.backendChange.findFirstOrThrow({ where: { projectId, title: 'a table, then a step that cannot apply' } })
     expect(failed.status).toBe('recovered')
-    expect(await tableExists('renders_log')).toBe(false)
-    expect((await functions()).filter((f) => f.name.startsWith('renders_log-'))).toEqual([])
+    expect(await tableExists('render_jobs')).toBe(false)
+    expect((await functions()).filter((f) => f.name.startsWith('render_jobs-'))).toEqual([])
 
     const recovery = await prisma.backendChange.findFirstOrThrow({ where: { projectId, kind: 'recovery', recoversId: failed.id } })
     const kept = await prisma.backendChangeEvent.findMany({ where: { changeId: recovery.id, type: 'generated_endpoints_removed' } })
-    expect(((kept[0]?.data as any)?.functions ?? []).map((f: { name: string }) => f.name)).toContain('renders_log-schema')
+    expect(((kept[0]?.data as any)?.functions ?? []).map((f: { name: string }) => f.name)).toContain('render_jobs-create')
   }, 120_000)
 })
 
@@ -240,6 +258,8 @@ describe('removing the endpoints of a table that is gone', () => {
     // Every auth table generates the same auth endpoints.
     await registerDomainEndpoints(projectId, 'users', ['users', 'accounts'])
     await registerDomainEndpoints(projectId, 'accounts', ['users', 'accounts'])
+    await olderTablesSchemaEndpoint('users')
+    await olderTablesSchemaEndpoint('accounts')
     const shared = (await functions()).filter((f) => f.name.startsWith('auth-')).map((f) => f.name)
     expect(shared.length).toBeGreaterThan(0)
 
@@ -256,7 +276,7 @@ describe('removing the endpoints of a table that is gone', () => {
 
 describe('removing them only where a copy is kept, and only what is still generated', () => {
   it('removes nothing when the copy cannot be kept', async () => {
-    await registerDomainEndpoints(projectId, 'widgets', ['widgets'])
+    await olderTablesSchemaEndpoint('widgets')
     await expect(
       removeDomainEndpoints(projectId, ['widgets'], [], async () => { throw new Error('the record could not be written') }),
     ).rejects.toThrow(/could not be written/)
@@ -264,7 +284,7 @@ describe('removing them only where a copy is kept, and only what is still genera
   }, 60_000)
 
   it('leaves the code an agent deployed over a generated row after it was selected, and does not record it', async () => {
-    await registerDomainEndpoints(projectId, 'gadgets', ['gadgets'])
+    await olderTablesSchemaEndpoint('gadgets')
     const rows = await generatedEndpointsOf(projectId, ['gadgets'], [])
     // Between the selection and the delete, as an agent's deploy can land.
     await prisma.aiFunction.updateMany({
@@ -278,7 +298,7 @@ describe('removing them only where a copy is kept, and only what is still genera
   }, 60_000)
 
   it('removes a row whose function only ran since it was selected, and records it as it is', async () => {
-    await registerDomainEndpoints(projectId, 'doohickeys', ['doohickeys'])
+    await olderTablesSchemaEndpoint('doohickeys')
     const rows = await generatedEndpointsOf(projectId, ['doohickeys'], [])
     // A live app calling the endpoint meanwhile: only the run's bookkeeping moves.
     await prisma.aiFunction.updateMany({
@@ -292,7 +312,7 @@ describe('removing them only where a copy is kept, and only what is still genera
   }, 60_000)
 
   it('leaves the endpoints of a removed table where no restore record can keep them', async () => {
-    await registerDomainEndpoints(projectId, 'sprockets', ['sprockets'])
+    await olderTablesSchemaEndpoint('sprockets')
     await generatedEndpointsFollow(
       projectId,
       { id: crypto.randomUUID(), kind: 'change', footprint: [{ kind: 'added', before: null, after: 'sprockets', details: [] }], resultState: { tables: { sprockets: {} } } as any },

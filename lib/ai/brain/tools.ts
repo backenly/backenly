@@ -21,6 +21,7 @@ import { AiError, generate } from '../llm'
 import { kickReconciler, shouldKickFor } from '@/lib/autonomy/event-trigger'
 import { WEBHOOK_EVENT_TYPES } from '@/lib/webhooks/events'
 import { publicOrigin } from '@/lib/branches/preview'
+import type { BuildBranch } from '@/lib/branches/build-branch'
 import { SERVED_OAUTH_PROVIDERS, isServedOAuthProvider } from '@/lib/services/oauth-providers'
 
 /** Executor actions whose audit rows record who acted (see runExecutor). */
@@ -238,8 +239,9 @@ export const DESTRUCTIVE_TOOLS: ReadonlySet<ToolName> = new Set<ToolName>([
   'remove_integration_key',
   // Drops the endpoint and its delivery history; not undoable from the dashboard
   'delete_webhook',
-  // DROP SCHEMA CASCADE on the branch — every experiment in it is gone.
-  'discard_branch',
+  // discard_branch is NOT here: it drops a preview branch's own schema and
+  // keys, never anything of production's, so an agent cleans up its own
+  // experiments without a person (production QA, 2026-11-09).
   // Replays the branch's migrations onto PRODUCTION. Reviewing a change before
   // it reaches production is what a branch is for, so a human approves it.
   'merge_branch',
@@ -395,6 +397,14 @@ export interface ToolDispatchContext {
    * tried to "repair" tables it had just built.
    */
   createdThisTurn?: Set<string>
+  /**
+   * backend_chat's turn on a project whose production is protected: its schema
+   * calls are built on this preview branch instead of being refused, and a step
+   * on a table only the branch has is saved for after the merge
+   * (lib/branches/build-branch.ts). The MCP tool route sets none, so an agent's
+   * own typed call there is still refused with the branch to use.
+   */
+  buildBranch?: BuildBranch
   onToolEvent?: (e: {
     phase: 'start' | 'done' | 'fail'
     tool: ToolName
@@ -466,7 +476,7 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
     'Alias of get_backend_metadata — a complete structured overview of the project backend (tables + counts + relationships + auth/storage/realtime/functions). Use to confirm the connection and ground your plan. Side-effect free.',
     {}),
   fn('get_table_schema',
-    'Complete, RLS-aware schema for ONE table: every column (type, nullable, default, primary key, max length), the primary key, foreign keys (with ON DELETE), indexes (with UNIQUE and the full column tuple), CHECK constraints (with the ACTUAL allowed values so you never violate them), triggers, whether RLS/FORCE-RLS is on, the live row-level-security policies (command, ROLES the policy applies to, PERMISSIVE/RESTRICTIVE, USING + WITH CHECK), and the exact record count. The policy roles matter: a `USING (true)` policy is not open access if it is granted only to an internal role, so read `roles` before concluding a table is exposed. Each policy also carries `editableUsing` / `editableCheck`: the SAME rule rewritten into the form set_rls accepts, so you can read a live policy and send it straight back unchanged. Use those when editing — the raw `using` / `withCheck` are PostgreSQL\'s rendering and include a service-role wrapper plus a schema-qualified claim reader, so sending them back is rejected. Call this before writing any query, insert, or migration against a table, and ALWAYS before changing one command of an existing policy. Reads the live PostgreSQL catalog — never stale. Side-effect free.',
+    'ONE table from the live catalog: columns (type, nullable, default, key, max length), primary and foreign keys (with ON DELETE), indexes, CHECK constraints with their ACTUAL allowed values, triggers, RLS / FORCE RLS, the policies (command, ROLES, permissive or restrictive, USING and WITH CHECK) and the exact row count. A `USING (true)` policy granted only to an internal role is not open access: read `roles` before calling a table exposed. To edit a policy with set_rls, send back its `editableUsing` / `editableCheck`, never the raw `using` / `withCheck`, which are refused. Call it before writing a query, insert or migration against a table, and ALWAYS before changing one command of a policy. Side-effect free.',
     { tableName: { type: 'string', description: 'The table to describe (snake_case).' } },
     ['tableName']),
   fn('create_table',
@@ -654,23 +664,19 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
     },
     ['tableName']),
   fn('set_rls',
-    'Write row-level security as EXACT SQL, one rule per command. Deterministic: your predicates are ' +
-    'installed verbatim — never re-derived, re-worded, simplified or inferred — and the result is read ' +
-    'back from pg_policies before this reports success. No language model is involved, so it cannot be ' +
-    'rate-limited and the same call twice produces the same state.\n' +
-    'USE THIS, not backend_chat, whenever you can write the predicate yourself. Prefer `add_rls` only ' +
-    'for the named templates (owner_read_write, participants, …).\n' +
-    'THE FOUR COMMANDS ARE INDEPENDENT. Name only the ones you want to change — the rest are left ' +
-    'byte-identical, so "fix UPDATE and DELETE, leave SELECT alone" is a supported operation rather ' +
-    'than a re-statement of the whole set. Naming a subset while a FOR ALL policy is present is refused ' +
-    'rather than silently widened.\n' +
-    'PREDICATE GRAMMAR: this table\'s columns, `backenly_jwt_claim(\'sub\')` for the calling end-user\'s ' +
-    'id, comparisons, AND/OR/NOT, IN, BETWEEN, IS NULL, casts, and pure functions. To depend on a PARENT ' +
-    'row, write `EXISTS (SELECT 1 FROM parent p WHERE p.id = this_table.parent_id AND …)` — the parent ' +
-    'and every column it names are checked against the live schema. Nothing else may read another table.\n' +
-    'USING = which rows the command may TARGET (select/update/delete). CHECK = which rows it may PRODUCE ' +
-    '(insert/update). Omitting `check` on insert/update means "anything the caller may target", so state ' +
-    'it whenever the write rule is narrower than the read rule.',
+    'Write row-level security as EXACT SQL, one rule per command: your predicates are installed verbatim ' +
+    'and read back from pg_policies before this reports success. No model is involved. USE THIS, not ' +
+    'backend_chat, whenever you can write the predicate; `add_rls` only for the named templates ' +
+    '(owner_read_write, participants, …).\n' +
+    'THE FOUR COMMANDS ARE INDEPENDENT: name only those to change, and the rest stay byte-identical. ' +
+    'Naming a subset while a FOR ALL policy exists is refused rather than silently widened.\n' +
+    'PREDICATE GRAMMAR: this table\'s columns, `backenly_jwt_claim(\'sub\')` for the end-user\'s id, ' +
+    'comparisons, AND/OR/NOT, IN, BETWEEN, IS NULL, casts and pure functions; a PARENT row through ' +
+    '`EXISTS (SELECT 1 FROM parent p WHERE p.id = this_table.parent_id AND …)`, checked against the live ' +
+    'schema. Nothing else may read another table.\n' +
+    'USING = rows the command may TARGET (select/update/delete); CHECK = rows it may PRODUCE (insert/update). ' +
+    'Without `check`, an insert or update may produce anything the caller may target: state it whenever ' +
+    'writing is narrower than reading.',
     {
       tableName: { type: 'string', description: 'The table whose row-level security rules to set.' },
       select: {
@@ -878,14 +884,16 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
     {
       eventType: { type: 'string', enum: [...WEBHOOK_EVENT_TYPES], description: 'The event that fires it.' },
       targetUrl: { type: 'string', description: 'The https URL that receives the events.' },
+      tables: { type: 'array', items: { type: 'string' }, description: 'Row events only: the tables it receives events for. Leave out for every table.' },
     },
     ['eventType', 'targetUrl']),
   fn('update_webhook',
-    'Change an outbound webhook endpoint: its target URL, its event, or switch it on or off.',
+    'Change an outbound webhook endpoint: its target URL, its event, the tables it receives row events for, or switch it on or off.',
     {
       webhookId: { type: 'string', description: 'From list_webhooks.' },
       targetUrl: { type: 'string', description: 'A new https URL.' },
       eventType: { type: 'string', enum: [...WEBHOOK_EVENT_TYPES], description: 'A new event.' },
+      tables: { type: 'array', items: { type: 'string' }, description: 'Row events only: the tables it receives events for; [] for every table.' },
       active: { type: 'boolean', description: 'false stops deliveries without deleting the endpoint.' },
     },
     ['webhookId']),
@@ -956,8 +964,7 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
         type: 'array',
         items: { type: 'string' },
         description:
-          'For on_update only: run only when an update changes one of these columns, e.g. ["status"]. Updates that leave them ' +
-          'alone do not run it or count against the plan. Left out, every update runs it.',
+          'on_update only: run only when an update changes one of these columns, e.g. ["status"]; other updates do not run it. Left out, every update does.',
       },
       method: {
         type: 'string',
@@ -1094,7 +1101,7 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
     {}),
   // ── Read tools (live state of every section) ──────────────────────────────
   fn('run_query',
-    "Run read-only SQL against this project's workspace schema. This is THE way to read data: full PostgreSQL SELECT including joins, GROUP BY, aggregates, window functions, CTEs, subqueries, and EXPLAIN (without ANALYZE). Tables are already in scope: write `SELECT * FROM posts`, not `workspace_x.posts`. Executes as a SELECT-only role inside a READ ONLY transaction — it cannot write, and it cannot read another project's DATA (Postgres grants refuse it, not a SQL check). The PostgreSQL system catalogs (`pg_*`, `information_schema`) are instance-wide rather than per-project, so they are refused outright; use read_backend_state or get_table_schema to inspect this project's schema. One statement per call. Results are capped (default 200 rows, max 1000) and `truncated` tells you whether more exist. Password, token and API-key columns come back as '[redacted]'. To change SCHEMA use apply_migration (ordinary DDL); to change ROWS use db_insert / db_update / db_delete.",
+    "Read-only SQL on this project's tables, THE way to read data: full SELECT with joins, GROUP BY, aggregates, window functions, CTEs, subqueries, and EXPLAIN (without ANALYZE). Write `SELECT * FROM posts`, not `workspace_x.posts`. It runs as a SELECT-only role in a READ ONLY transaction, so it cannot write or read another project's DATA (Postgres grants refuse it). The system catalogs (`pg_*`, `information_schema`) are shared by every project, so they are refused: use read_backend_state or get_table_schema. One statement per call; at most 1000 rows (default 200), and `truncated` says whether there are more. Password, token and API-key columns read '[redacted]'. SCHEMA changes: apply_migration; ROW changes: db_insert / db_update / db_delete.",
     {
       sql: { type: 'string', description: 'A single read-only SQL statement, e.g. "SELECT status, count(*) FROM orders GROUP BY status".' },
       limit: { type: 'number', description: 'Row cap. Default 200, max 1000.' },
@@ -1191,7 +1198,7 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
     { branchId: { type: 'string', description: 'The branch id from list_branches.' } },
     ['branchId']),
   fn('discard_branch',
-    'DESTRUCTIVE. Drop a preview branch and everything in it. Requires explicit human approval. Main is untouched.',
+    'Drop a preview branch, its rows and its keys. Runs at once, with no approval and no undo; production is untouched.',
     { branchId: { type: 'string', description: 'The branch id from list_branches.' } },
     ['branchId']),
   fn('list_integration_keys',
@@ -1421,8 +1428,7 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
         minimum: 1,
         maximum: 3650,
         description:
-          'Optional. Omitted means the key NEVER expires (same as dashboard keys). When set, the runtime ' +
-          'refuses the key after this many days and the response says the exact date.',
+          'Optional. Omitted, the key never expires; set, it is refused after this many days (the answer gives the date).',
       },
       serviceRole: {
         type: 'boolean',
@@ -1433,9 +1439,8 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
       branchId: {
         type: 'string',
         description:
-          'Optional. Bind this key to a preview branch (id from branch(action:"list")) so it reads that ' +
-          'branch instead of production. Omit for main. A key whose branch is later merged or discarded ' +
-          'is refused rather than silently falling back to production.',
+          'Optional. Bind the key to a preview branch (branch action:"list") instead of production. A key whose ' +
+          'branch is merged or discarded is refused, never pointed back at production.',
       },
     }),
   fn('revoke_api_key',
@@ -1487,7 +1492,7 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
     },
     ['active']),
   fn('delete_ai_function',
-    'DESTRUCTIVE. Permanently delete an AI / serverless function and its history. Requires confirmation.',
+    'Delete a function. Runs at once when it is switched off or has not run in 7 days; one that ran in that time waits for a person\'s approval. The change history keeps the function, so restoring the change brings it back.',
     { functionId: { type: 'string' }, name: { type: 'string' } }),
   fn('delete_cron_job',
     'DESTRUCTIVE. Permanently delete a scheduled job — it stops running immediately. Requires confirmation.',
@@ -2233,6 +2238,21 @@ function preflightValidate(
   }
 }
 
+/**
+ * A typed schema call on the turn's preview branch: written as SQL and applied
+ * as a branch migration, which logs it for the merge. Its events name the
+ * branch, so nothing reads it as a change to production.
+ */
+async function buildOnBranch(name: string, args: Record<string, unknown>, ctx: ToolDispatchContext, title: string): Promise<ToolResult> {
+  const branch = ctx.buildBranch!
+  ctx.onToolEvent?.({ phase: 'start', tool: name as ToolName, title: `${title} on a preview branch` })
+  const r = await branch.apply(name, args)
+  const where = branch.current ? ` on preview branch "${branch.current.name}"` : ''
+  ctx.onToolEvent?.({ phase: r.ok ? 'done' : 'fail', tool: name as ToolName, title: `${title}${where}`, detail: r.summary })
+  if (r.ok && name === 'create_table' && typeof args.tableName === 'string') ctx.createdThisTurn?.add(args.tableName)
+  return { ok: r.ok, summary: r.summary, ...(r.code ? { code: r.code } : {}), ...(r.data ? { data: r.data } : {}) }
+}
+
 export async function dispatchTool(
   name: string,
   args: Record<string, unknown>,
@@ -2252,8 +2272,19 @@ export async function dispatchTool(
   if (ctx.agentSurface) {
     const { GATED_SCHEMA_TOOLS, isProductionProtected, branchRequired } = await import('@/lib/branches/protection')
     if (GATED_SCHEMA_TOOLS.has(name) && (await isProductionProtected(ctx.projectId))) {
+      // backend_chat builds it on its turn's preview branch, for one merge a
+      // person approves (lib/branches/build-branch.ts).
+      if (ctx.buildBranch) return await buildOnBranch(name, args, ctx, title)
       const refusal = branchRequired(`${name}${args.tableName ? ` on "${String(args.tableName)}"` : ''}`)
       return { ok: false, summary: `${refusal.error} ${refusal.hint}`, code: refusal.code }
+    }
+    // A step on a table only the turn's branch has cannot run on production
+    // before the merge brings the table there: it is saved to run after it.
+    if (ctx.buildBranch && typeof args.tableName === 'string' && args.tableName) {
+      const { AFTER_MERGE_TOOLS } = await import('@/lib/branches/build-branch')
+      if (AFTER_MERGE_TOOLS.has(name) && (await isProductionProtected(ctx.projectId)) && (await ctx.buildBranch.onlyOnBranch(args.tableName))) {
+        return ctx.buildBranch.defer({ label: title, tool: name, args })
+      }
     }
   }
 
@@ -2757,8 +2788,8 @@ export async function dispatchTool(
         })
       }
 
-      // discard_branch — DESTRUCTIVE; the brain's gate parks it for approval
-      // before it ever reaches here.
+      // discard_branch — drops the branch's schema and ends its keys. No
+      // approval: nothing of production's is touched.
       const res = await engine.discardBranch(ctx.projectId, ctx.userId ?? '', branchId)
       if (!res.ok) return finalize({ ok: false, summary: (res as any).error })
       return finalize({ ok: true, summary: 'Branch discarded. Main is untouched.', data: res })
@@ -3582,11 +3613,14 @@ export async function dispatchTool(
           `${provisioned ? 'Provisioned' : 'Existing'} ${mode === 'READ_ONLY' ? 'read-only' : 'read-write'} Postgres access: role ${c.roleName} @ ${c.host}:${c.port}/${c.database} (TLS required, search_path pinned to ${status.schema}).`,
           mode === 'READ_ONLY'
             ? 'SELECT-only — safe for inspection, EXPLAIN, BI, and pg_dump (run pg_dump with --enable-row-security; the returned pgDumpCommand includes it). It cannot mutate anything.'
-            : 'DML + in-schema DDL. Every DDL statement you run is observed as drift — call adopt_external_schema when you finish migrating.',
+            : c.schemaChanges === 'allowed'
+              ? 'Rows and schema: the project owner allowed schema changes over it. They skip approvals and History and are observed as drift — call adopt_external_schema when you finish migrating.'
+              : 'Rows only: schema changes over it are refused (permission denied). Change the schema with apply_migration, which is governed, verified and reversible.',
           'The connection string is in data.connectionString — treat it as a secret (do not write it into code, files, or logs; reference it from env).',
         ].join('\n')),
         data: {
           mode: c.mode,
+          ...(c.schemaChanges ? { schemaChanges: c.schemaChanges } : {}),
           roleName: c.roleName,
           host: c.host,
           port: c.port,
@@ -3625,9 +3659,9 @@ export async function dispatchTool(
           'Read-write database access is not armed for this project, so there is no read-write connection ' +
           'string to hand you. Only the project OWNER can arm it, and it is one click:\n\n' +
           `  ${armUrl}\n\n` +
-          'Give the human that link and ask them to create read-write credentials (Connect → Direct). Every ' +
-          'schema change made over that connection is observed as drift and adopted by the autonomy loop, ' +
-          'which is why it is opt-in. Then call this tool again with mode=READ_WRITE.\n' +
+          'Give the human that link and ask them to create read-write credentials (Connect → Direct). The login ' +
+          'reads and writes rows; schema changes over it stay refused unless the owner allows them there. Then ' +
+          'call this tool again with mode=READ_WRITE.\n' +
           'Read-only access needs no approval and is available right now via mode=READ_ONLY — it covers ' +
           'inspection, EXPLAIN, BI and pg_dump (with --enable-row-security — the returned pgDumpCommand includes it). For SCHEMA CHANGES you do not need direct access at all: ' +
           'apply_migration takes ordinary DDL and is governed, verified and reversible.',

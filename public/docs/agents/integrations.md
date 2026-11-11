@@ -2,7 +2,7 @@
 
 Index: https://backenly.com/llms.txt
 
-Third-party providers a project's functions call, with the keys kept server side. Five have a dashboard card and a topic of their own: [stripe](https://backenly.com/docs/agents/stripe.md), [resend](https://backenly.com/docs/agents/resend.md), [openai](https://backenly.com/docs/agents/openai.md), [anthropic](https://backenly.com/docs/agents/anthropic.md) and [posthog](https://backenly.com/docs/agents/posthog.md). The runtime also covers SendGrid, Twilio, OneSignal, Replicate, Runway and Stability.
+Third-party providers a project's functions call, with the keys kept server side. Each has a card on the Integrations page, where a person can paste its key. Five have a topic of their own: [stripe](https://backenly.com/docs/agents/stripe.md), [resend](https://backenly.com/docs/agents/resend.md), [openai](https://backenly.com/docs/agents/openai.md), [anthropic](https://backenly.com/docs/agents/anthropic.md) and [posthog](https://backenly.com/docs/agents/posthog.md). The others are SendGrid, Twilio, OneSignal, Replicate, Runway and Stability.
 
 ## Actions
 

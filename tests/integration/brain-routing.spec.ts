@@ -32,8 +32,6 @@ import { getBlueprintForPrompt } from '@/lib/ai/blueprints'
 import { loadPendingPlan, loadResumeQueue, markDesigning, savePendingPlan, saveResumeQueue } from '@/lib/ai/blueprints/store'
 import { saveTurn } from '@/lib/ai/brain/memory'
 import { loadLoopResume, saveLoopResume } from '@/lib/ai/brain/loop-resume'
-import { forgetProtection } from '@/lib/branches/protection'
-import { prisma } from '@/lib/db/prisma'
 import { setProviderForTests } from '@/lib/ai/llm'
 import {
   classified,
@@ -416,29 +414,8 @@ describe('"continue" after the architect failed on a build', () => {
     expect(await loadLoopResume(fresh.projectId)).not.toBeNull()
   }, 60_000)
 
-  describe('on a protected production', () => {
-    const edition = process.env.BACKENLY_EDITION
-    beforeAll(async () => {
-      process.env.BACKENLY_EDITION = 'cloud'
-      await prisma.project.update({ where: { id: fresh.projectId }, data: { protectedProduction: true } })
-      forgetProtection()
-    })
-    afterAll(async () => {
-      if (edition === undefined) delete process.env.BACKENLY_EDITION
-      else process.env.BACKENLY_EDITION = edition
-      await prisma.project.update({ where: { id: fresh.projectId }, data: { protectedProduction: false } })
-      forgetProtection()
-    })
-
-    it('says how the schema reaches production, and designs and runs nothing', async () => {
-      await saveLoopResume(fresh.projectId, ORIGINAL_REQUEST, [], 'step_budget', true)
-
-      const { result } = await fresh.turn([classified('CONFIRM')], 'continue', { door: 'mcp' })
-
-      expect(architect).not.toHaveBeenCalled()
-      expect(result).toMatchObject({ success: false, failureCode: 'BRANCH_REQUIRED', applied: [] })
-    }, 60_000)
-  })
+  // On a protected production the saved request is designed again too, and
+  // built on a preview branch for one merge: backend-chat-builds-on-a-branch.spec.ts.
 })
 
 describe('APPLY_PROPOSAL on a built project', () => {

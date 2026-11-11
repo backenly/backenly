@@ -1,7 +1,7 @@
 /**
  * Webhooks and triggers in the change history (lib/changes/resources).
  *
- * Their targets, events, conditions and switches come back exactly. A signing
+ * Their targets, events, tables, conditions and switches come back exactly. A signing
  * secret never does: a restore leaves the one in place, and a webhook or
  * trigger a change removed with its secret does not come back, since every
  * receiver verifies against that secret and it was not kept.
@@ -22,7 +22,7 @@ export const webhooksAdapter: ResourceAdapter = {
     for (const w of hooks) {
       out[`webhook:${w.id}`] = {
         label: `webhook to ${hostOf(w.targetUrl)} (${w.eventType})`,
-        fields: { eventType: w.eventType, targetUrl: w.targetUrl, active: w.active },
+        fields: { eventType: w.eventType, targetUrl: w.targetUrl, active: w.active, tables: w.tables },
         secrets: { secret: secretDigest(w.secret) },
       }
     }
@@ -60,7 +60,8 @@ export const webhooksAdapter: ResourceAdapter = {
     const f = op.before.fields as Record<string, any>
     if (kind === 'webhook') {
       // Only settings: the secret in place stays (a removed one is irreversible).
-      await tx.webhook.updateMany({ where: { id, projectId }, data: { eventType: f.eventType, targetUrl: f.targetUrl, active: f.active } })
+      // A change recorded before endpoints named tables has none: every table.
+      await tx.webhook.updateMany({ where: { id, projectId }, data: { eventType: f.eventType, targetUrl: f.targetUrl, active: f.active, tables: f.tables ?? [] } })
       return
     }
     const data = {

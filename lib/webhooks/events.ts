@@ -48,7 +48,7 @@ export function isRowEventType(value: unknown): value is RowEventType {
 
 /** What the dashboard shows beside each option. */
 export const EVENT_DESCRIPTIONS: Record<WebhookEventType, string> = {
-  'row.inserted': 'A row was inserted into any table in this project.',
+  'row.inserted': 'A row was inserted into a table the endpoint listens to (every table, unless it names some).',
   'row.updated': 'A row was updated. The payload carries both the new and previous values.',
   'row.deleted': 'A row was deleted. The payload carries the row as it was.',
   'auth.user.created': 'An end user signed up. Never includes credentials.',

@@ -11,6 +11,7 @@ import {
   parseContentRange,
   toApiError,
   toListEnvelope,
+  wantsExactCount,
   toRecordEnvelope,
   translateReadQuery,
   stripUpstreamError,
@@ -173,6 +174,30 @@ describe('pagination envelope', () => {
   it('reports hasMore=false on the final page', () => {
     const env = toListEnvelope([{ id: 3 }], '2-2/3', 2, 2)
     expect(env.pagination.hasMore).toBe(false)
+  })
+
+  it('with one row past the page, trims it and knows hasMore exactly', () => {
+    const more = toListEnvelope([{ id: 1 }, { id: 2 }, { id: 3 }], '0-2/*', 2, 0, { extraRow: true })
+    expect(more.data).toEqual([{ id: 1 }, { id: 2 }])
+    expect(more.pagination).toEqual({ total: null, limit: 2, offset: 0, hasMore: true, nextCursor: 2 })
+
+    // Exactly a page left: a full page is no longer read as "more follow".
+    const end = toListEnvelope([{ id: 1 }, { id: 2 }], '0-1/*', 2, 0, { extraRow: true })
+    expect(end.pagination).toEqual({ total: 2, limit: 2, offset: 0, hasMore: false, nextCursor: null })
+  })
+
+  it('does not place the end of the rows by an offset past it', () => {
+    expect(toListEnvelope([], '*/*', 2, 10, { extraRow: true }).pagination.total).toBeNull()
+    expect(toListEnvelope([], '*/*', 2, 0, { extraRow: true }).pagination.total).toBe(0)
+  })
+
+  it('reads count=exact as a request for a total, not a filter', () => {
+    expect(wantsExactCount({ count: 'exact' }, undefined)).toBe(true)
+    expect(wantsExactCount({}, 'return=minimal, count=exact')).toBe(true)
+    expect(wantsExactCount({ count: '5' }, undefined)).toBe(false)
+    expect(wantsExactCount({}, undefined)).toBe(false)
+    expect(translateReadQuery({ query: { count: 'exact' }, hasSoftDelete: false }).search).not.toContain('count')
+    expect(translateReadQuery({ query: { count: '5' }, hasSoftDelete: false }).search).toContain('count=eq.5')
   })
 
   it('infers hasMore from a full page when the total is unknown', () => {
