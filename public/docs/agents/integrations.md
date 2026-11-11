@@ -14,7 +14,7 @@ Call as `integrations { action: "<action>", … }`.
 | `list` | connected providers, masked keys and verification state | nothing | yes | no |
 | `capabilities` | the exact ctx.integrations methods each provider gives a function, and for Stripe its receiver URL and signing-secret state | nothing | yes | no |
 | `verify` | ask the provider again whether the stored key works | `integrationId` | no | no |
-| `connect` | store a provider key (Stripe also takes webhookSecret, OneSignal also takes appId, Resend/SendGrid also takes fromEmail, Twilio takes accountSid, authToken and fromNumber) and wire the first functions, which Backenly's model writes | `integrationId` | no | no |
+| `connect` | store a provider key (Stripe also takes webhookSecret, OneSignal also takes appId, Resend/SendGrid also takes fromEmail) and wire the first functions, which Backenly's model writes | `integrationId` | no | no |
 | `disconnect` | remove a provider key | `integrationId` | no | waits for a human |
 | `send_push` | a push notification through the connected OneSignal app | `message` | no | no |
 <!-- end generated -->
