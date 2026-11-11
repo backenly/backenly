@@ -25,6 +25,7 @@ import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { useOrgHrefs } from '@cloud/org-routing'
 import { planAllowsOverage } from '@/lib/pricing/catalog'
+import { measuredAgo } from '@/components/usage/measured-ago'
 import { Database, HardDrive, Bot, Activity, Users, ArrowUpRight, AlertTriangle, ShieldCheck, Sparkles, Globe, Wallet, Info, RefreshCw } from 'lucide-react'
 import { OrgShell } from '@/components/shell/OrgShell'
 import { EmptyState, INPUT_BASE, KitButton, KitNote, KitCard, KitCardHeader, KitCardBody, PageHeader, Skeleton } from '@/components/inspector/kit'
@@ -60,6 +61,8 @@ interface AxisDescription {
   estimatedCents: number
   projectedCents: number
   grace: { overSince: string; graceEndsAt: string; restricted: boolean } | null
+  /** Database storage only: when the reading was taken (it is measured, not counted). */
+  measuredAt?: string | null
 }
 
 interface AccountUsage {
@@ -187,6 +190,9 @@ function AxisMeter({ a, resetNote, planBillsOverage }: { a: AxisDescription; res
   // On a plan that bills other axes, say plainly which one it does not: the
   // spend limit never buys more of it, and it is never on an invoice.
   if (planBillsOverage && !a.billable && a.included !== null) notes.push('not billed past the plan')
+  // Storage is measured, not counted: say when, unless it was just now.
+  const measured = measuredAgo(a.measuredAt)
+  if (measured) notes.push(measured)
   return (
     <Meter
       icon={AXIS_ICON[a.axis]}
@@ -620,8 +626,8 @@ export function UsageView({ orgId }: { orgId?: string | null }) {
 
             <div className="mt-5">
               <KitNote tone="info" icon={Info} title="Counters lag a little">
-                Counters can take up to an hour to reflect the latest activity. Autonomy runs never draw from your credits;
-                keeping backends alive is included.
+                Database storage is measured when you open this page, so it is at most a few minutes old. Egress can take
+                up to an hour to show. Autonomy runs never draw from your credits; keeping backends alive is included.
               </KitNote>
             </div>
 

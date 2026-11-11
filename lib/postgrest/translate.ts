@@ -53,6 +53,11 @@ export interface TranslateReadOptions {
   recordId?: string
   /** Primary key column name; defaults to id. */
   primaryKey?: string
+  /**
+   * Ask for one row past the page, so whether more rows follow is known
+   * without counting them (toListEnvelope's `extraRow`).
+   */
+  extraRow?: boolean
 }
 
 export interface TranslatedQuery {
@@ -160,6 +165,9 @@ export function translateReadQuery(opts: TranslateReadOptions): TranslatedQuery 
     if (!IDENT.test(key)) continue
     const value = firstValue(rawValue)
     if (value === undefined) continue
+    // `count=exact` asks for a total (wantsExactCount); any other value of a
+    // column named `count` is still a filter.
+    if (key === 'count' && value === 'exact') continue
     parts.push(`${encodeURIComponent(key)}=eq.${encodeURIComponent(encodeFilterValue(value))}`)
   }
 
@@ -196,11 +204,29 @@ export function translateReadQuery(opts: TranslateReadOptions): TranslatedQuery 
   const offset = Number.isFinite(rawOffset) && rawOffset > 0 ? rawOffset : 0
 
   if (recordId === undefined) {
-    parts.push(`limit=${limit}`)
+    parts.push(`limit=${opts.extraRow ? limit + 1 : limit}`)
     if (offset > 0) parts.push(`offset=${offset}`)
   }
 
   return { search: parts.join('&'), limit, offset }
+}
+
+/**
+ * Did the caller ask for an exact total? `?count=exact`, or `Prefer:
+ * count=exact` as on /api/v2 and in PostgREST itself.
+ *
+ * Counting is opt-in, as on PostgREST and Supabase: an exact count runs the
+ * filtered query a second time, so on a large table every list cost about
+ * twice its own work (production QA 2026-11-09: ~200 ms on /db against ~90 ms
+ * on /api/v2 for one filter over 600k rows).
+ */
+export function wantsExactCount(
+  query: Record<string, string | string[] | undefined>,
+  prefer: string | string[] | undefined,
+): boolean {
+  if (firstValue(query.count) === 'exact') return true
+  const header = Array.isArray(prefer) ? prefer.join(',') : prefer ?? ''
+  return header.split(',').some((p) => p.trim().toLowerCase() === 'count=exact')
 }
 
 /**
@@ -218,7 +244,12 @@ export function parseContentRange(header: string | null | undefined): number | n
 export interface ListEnvelope {
   data: unknown[]
   pagination: {
-    total: number
+    /**
+     * Rows matching the filter. Exact when the caller asked for a count
+     * (wantsExactCount), or when the page shows where the rows end; null
+     * otherwise, rather than a guess.
+     */
+    total: number | null
     limit: number
     offset: number
     hasMore: boolean
@@ -244,13 +275,27 @@ export interface ListEnvelope {
  * paginating clients early and silently truncate their results.
  */
 export function toListEnvelope(
-  rows: unknown[],
+  fetched: unknown[],
   contentRange: string | null | undefined,
   limit: number,
   offset: number,
+  /** `fetched` asked for one row past the page (translateReadQuery's `extraRow`). */
+  { extraRow = false }: { extraRow?: boolean } = {},
 ): ListEnvelope {
-  const total = parseContentRange(contentRange)
-  const hasMore = total === null ? rows.length >= limit : offset + rows.length < total
+  const rows = extraRow ? fetched.slice(0, limit) : fetched
+  const counted = parseContentRange(contentRange)
+  // A count is the authority when there is one. Otherwise the extra row says
+  // whether more follow; without it a full page is assumed to have more, since
+  // claiming the end without knowing would stop a paginating client early.
+  const hasMore =
+    counted !== null
+      ? offset + rows.length < counted
+      : extraRow
+        ? fetched.length > limit
+        : rows.length >= limit
+  // Uncounted, the total is still known on the page where the rows end, unless
+  // the offset is past the end (no rows here, nothing to place the end by).
+  const total = counted ?? (!hasMore && (rows.length > 0 || offset === 0) ? offset + rows.length : null)
 
   // Mirrors the legacy executor: the last row's id when more pages remain,
   // otherwise null. Reading it off the row rather than computing it keeps the
@@ -261,7 +306,7 @@ export function toListEnvelope(
 
   return {
     data: rows,
-    pagination: { total: total ?? offset + rows.length, limit, offset, hasMore, nextCursor },
+    pagination: { total, limit, offset, hasMore, nextCursor },
   }
 }
 

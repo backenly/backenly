@@ -132,8 +132,8 @@ export async function isCapturableTable(tableName: string): Promise<boolean> {
   return true
 }
 
-/** Every user table in the workspace schema that may carry a trigger. */
-async function capturableTables(projectId: string): Promise<string[]> {
+/** Every user table in the workspace schema that may carry a trigger: the tables an endpoint can name. */
+export async function capturableTables(projectId: string): Promise<string[]> {
   const schema = workspaceSchemaName(projectId)
   const rows = (await queryWorkspaceSchema(
     projectId,

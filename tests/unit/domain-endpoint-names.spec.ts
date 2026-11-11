@@ -20,7 +20,7 @@ describe('a generated endpoint name', () => {
   it('is recognised for every endpoint the builders generate, in any project', () => {
     for (const subset of [TABLES, ['users', 'jobs'], ['projects', 'assets'], ['posts']]) {
       for (const t of subset) {
-        for (const ep of generateDomainEndpoints(t, 'proj', subset)) {
+        for (const ep of generateDomainEndpoints(t, 'proj', subset, { includeSchemaEndpoint: true })) {
           expect([t, ep.name, isDomainEndpointName(ep.name)]).toEqual([t, ep.name, true])
         }
       }

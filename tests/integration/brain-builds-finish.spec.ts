@@ -240,42 +240,21 @@ describe('on a protected production', () => {
     forgetProtection()
   })
 
-  it('a build of a new project says how its schema reaches production, and designs and runs nothing', async () => {
-    const { result, provider } = await fresh.turn([classified('BUILD')], 'Build an e-commerce store backend.', MCP)
+  // What a build there does (on a preview branch, with one merge for a person)
+  // is backend-chat-builds-on-a-branch.spec.ts. These are the routes into it.
+  it('a build of a new project is designed and proposed, as on any project', async () => {
+    const { result } = await fresh.turn([classified('BUILD')], 'Build an e-commerce store backend.', MCP)
 
-    expect(provider.calls).toHaveLength(1)
-    expect(blueprints).not.toHaveBeenCalled()
-    expect(result).toMatchObject({ success: false, failureCode: 'BRANCH_REQUIRED', retryable: false, applied: [] })
-    expect(result.next).toMatchObject({ tool: 'branch', arguments: { action: 'create' } })
-    expect(result.summary).toContain('apply_migration { "sql"')
-    expect(result.summary).toContain('branch { "action": "merge"')
-    // A curated design, found without a model call, is offered as a start.
-    expect(result.summary).toMatch(/A data model to start from: .*products.*orders/)
+    expect(result.failureCode).toBeUndefined()
+    expect(result.toolsRun).toEqual(['propose_plan'])
+    expect(result.summary).toContain('Reply "go ahead" to run this')
     expect(await tablesOf(fresh.schema)).toEqual([])
   }, 60_000)
 
-  it('a plan saved before production was protected is not run into the gate', async () => {
-    // Run, every table step of it would be refused, and every step on those tables would fail after it.
-    await savePendingPlan(
-      fresh.projectId,
-      {
-        domain: 'turns-test', title: 'Notes', summary: 'Notes.',
-        steps: [createStep('notes'), { label: 'Generate REST API for notes', tool: 'generate_api', args: { tableName: 'notes' } }],
-      },
-      { domain: 'turns-test', confidence: 0.85, matchedOn: 'llm-architect' },
-      0,
-    )
-
-    const { result } = await fresh.turn([classified('CONFIRM')], 'go ahead', MCP)
-
-    expect(result.failureCode).toBe('BRANCH_REQUIRED')
-    expect(result.summary).toContain('A data model to start from: notes')
-    expect(await tablesOf(fresh.schema)).toEqual([])
-  }, 60_000)
-
-  it('the loop is told up front which calls are refused here', async () => {
+  it('the loop is told up front that it builds the schema on a preview branch, for one merge', async () => {
     const { provider } = await built.turn([classified('MODIFY'), finished('Done.')], 'add a comments table', MCP)
-    expect(systemOf(provider, 1)).toContain('PRODUCTION IS PROTECTED on this project: create_table, add_column')
+    expect(systemOf(provider, 1)).toContain('PRODUCTION IS PROTECTED on this project, so this turn builds its schema on a preview branch')
+    expect(systemOf(provider, 1)).toContain('Do not call merge_branch.')
   }, 60_000)
 })
 

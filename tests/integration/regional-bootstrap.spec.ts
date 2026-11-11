@@ -337,7 +337,7 @@ describe('a region’s first database', () => {
       superUrl(),
       `SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolbypassrls
          FROM pg_roles WHERE rolname = ANY($1) ORDER BY rolname`,
-      [[...LOGINS, 'anon', 'authenticated', 'service_role', 'backenly_external']],
+      [[...LOGINS, 'anon', 'authenticated', 'service_role', 'backenly_external', 'backenly_no_schema_changes']],
     )
     const no = { rolsuper: false, rolcreaterole: false, rolcreatedb: false }
     expect(attributes).toEqual([
@@ -347,6 +347,7 @@ describe('a region’s first database', () => {
       { rolname: 'backenly_authenticator', ...no, rolinherit: false, rolcanlogin: true, rolbypassrls: false },
       { rolname: 'backenly_backup', ...no, rolinherit: false, rolcanlogin: true, rolbypassrls: true },
       { rolname: 'backenly_external', ...no, rolinherit: true, rolcanlogin: false, rolbypassrls: false },
+      { rolname: 'backenly_no_schema_changes', ...no, rolinherit: true, rolcanlogin: false, rolbypassrls: false },
       { rolname: 'service_role', ...no, rolinherit: true, rolcanlogin: false, rolbypassrls: false },
     ])
 
@@ -427,6 +428,8 @@ describe('the application, against the database the procedure built', () => {
   it('hands out direct access, and DDL over it is captured as drift in the region', async () => {
     await rows(app(), `SELECT public.backenly_direct_create_role($1, $2, $3, 'READ_WRITE')`, [rw, rwPassword, schema])
     await rows(app(), `SELECT public.backenly_direct_create_role($1, $2, $3, 'READ_ONLY')`, [ro, roPassword, schema])
+    // A new read-write login changes rows only; its owner allows schema changes.
+    await rows(app(), `SELECT public.backenly_direct_set_schema_changes($1, true)`, [rw])
     await rows(app(), `SELECT public.backenly_direct_sync_schema($1, $2, $3, $4)`, [schema, ro, rw, owner])
     expect(await rows(superUrl(), `SELECT pg_get_userbyid(nspowner) AS owner FROM pg_namespace WHERE nspname = $1`, [schema])).toEqual([{ owner }])
 

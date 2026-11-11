@@ -99,6 +99,11 @@ export const ALLOWED_EXTENSIONS: readonly AllowedExtension[] = [
     expectedTrusted: true,
   },
   {
+    name: 'fuzzystrmatch',
+    purpose: 'Edit distance and sound-alike matching (levenshtein, soundex, metaphone), for search that forgives typos.',
+    expectedTrusted: true,
+  },
+  {
     name: 'hstore',
     purpose: 'Key/value pairs in a single column. Predates jsonb and is still lighter for flat string maps.',
     expectedTrusted: true,
