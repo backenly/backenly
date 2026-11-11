@@ -69,7 +69,7 @@ describe('probe signups do not trigger on_signup handlers', () => {
     expect(findMany.mock.calls[0][0].where).toMatchObject({
       projectId: 'proj-1',
       triggerType: 'on_signup',
-      status: 'active',
+      status: { notIn: expect.arrayContaining(['inactive', 'disabled', 'deleted']) },
     })
   })
 
