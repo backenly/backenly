@@ -22,17 +22,18 @@ interface Sent {
   body?: string | Uint8Array
 }
 const mockSent: Sent[] = []
+/** What each provider answers, by the exact host the call went to. */
+const mockAnswers: Record<string, unknown> = {
+  'api.openai.com': { id: 'chatcmpl-1' },
+  'api.stripe.com': { id: 'prod_1', object: 'product' },
+  'api.stability.ai': { image: 'aW1hZ2U=', finish_reason: 'SUCCESS' },
+}
 
 jest.mock('@/lib/security/outbound-guard', () => ({
   ...jest.requireActual('@/lib/security/outbound-guard'),
   safeFetch: jest.fn(async (url: string, opts: any = {}) => {
     mockSent.push({ url, method: opts.method, headers: opts.headers ?? {}, body: opts.body })
-    const answer = url.includes('openai.com')
-      ? { id: 'chatcmpl-1' }
-      : url.includes('stripe.com')
-        ? { id: 'prod_1', object: 'product' }
-        : { image: 'aW1hZ2U=', finish_reason: 'SUCCESS' }
-    const text = JSON.stringify(answer)
+    const text = JSON.stringify(mockAnswers[new URL(url).host] ?? null)
     return {
       ok: true,
       status: 200,
