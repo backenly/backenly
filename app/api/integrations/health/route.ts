@@ -17,6 +17,7 @@ import { authenticateRequest } from '@/lib/auth/middleware'
 import { prisma } from '@/lib/db'
 import { getIntegrationKey } from '@/lib/services/integrationKeyStore'
 import { canAccessProject } from '@/lib/edition/guard'
+import { errorBody, readResendAnswer, type VerificationResult } from '@/lib/integrations/key-verification'
 
 // ── Integration probe definitions ──────────────────────────────────────────────
 
@@ -33,6 +34,13 @@ interface ProbeConfig {
   docsUrl: string
   /** Env var that job processors look for */
   envKey: string
+  /**
+   * Reads an answer outside successStatuses when its status alone does not
+   * say what happened to the key, from the status and the provider's error
+   * body. Resend answers a Sending-access key with 401 and a deleted key with
+   * 400 (readResendAnswer, lib/integrations/key-verification.ts).
+   */
+  readRefusal?: (status: number, body: unknown) => VerificationResult
 }
 
 const INTEGRATION_PROBES: Record<string, ProbeConfig> = {
@@ -55,6 +63,7 @@ const INTEGRATION_PROBES: Record<string, ProbeConfig> = {
     successStatuses: [200],
     docsUrl: 'resend.com/api-keys',
     envKey: 'RESEND_API_KEY',
+    readRefusal: readResendAnswer,
   },
   sendgrid: {
     displayName: 'SendGrid',
@@ -164,6 +173,12 @@ async function probeIntegration(
 
     if (config.successStatuses.includes(res.status)) {
       return { status: 'ok', responseMs, note: `HTTP ${res.status} — key valid` }
+    }
+    if (config.readRefusal) {
+      const answer = config.readRefusal(res.status, await errorBody(res))
+      const status: HealthStatus =
+        answer.status === 'verified' ? 'ok' : answer.status === 'rejected' ? 'invalid_key' : 'degraded'
+      return { status, responseMs, note: `HTTP ${res.status} — ${answer.detail}` }
     }
     if (res.status === 401 || res.status === 403) {
       return { status: 'invalid_key', responseMs, note: `HTTP ${res.status} — key rejected by provider` }
