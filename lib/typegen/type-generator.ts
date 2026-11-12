@@ -196,7 +196,7 @@ export function generateTypes(schema: WorkspaceSchema): GeneratedTypes {
     return {
       source: [
         `// No tables found in workspace_${schema.projectId}`,
-        `// Create tables via the AI chat to generate types.`,
+        `// Ask your coding agent to create tables, then generate the types again.`,
         `export interface Database {}`,
         `export type TableName = never;`,
       ].join('\n'),

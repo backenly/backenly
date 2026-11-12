@@ -3,18 +3,24 @@ export const dynamic = 'force-dynamic'
 import { NextRequest, NextResponse } from 'next/server'
 import { withProjectAccess } from '@/lib/auth/route-protection'
 import { z } from 'zod'
-import { resolveTableStructure } from '@/lib/services/workspace-schema-resolver'
+import { resolveSchemaStructure, resolveTableStructure } from '@/lib/services/workspace-schema-resolver'
 
 const querySchema = z.object({
   type: z.enum(['postgresql', 'mongodb']),
   schema: z.string().optional(),
-  table: z.string(),
+  table: z.string().optional(),
   projectId: z.string().optional(),
   view: z.enum(['platform', 'workspace', 'all']).optional(),
 })
 
 /**
- * GET /api/database/structure - Get the column structure of one table.
+ * GET /api/database/structure - Get the column structure of one table, or of
+ * every table.
+ *
+ * ?table=<name>  → that table's columns
+ * (no table)     → { [table]: columns } for every table the table list shows,
+ *                  each exactly as its own request answers it, from one
+ *                  catalog read (the schema diagram's load)
  *
  * Reads the reconciliation kernel in lib/services/workspace-schema-resolver.ts.
  * Live introspection of `workspace_{projectId}.{table}` is ground truth; graph
@@ -32,7 +38,7 @@ export const GET = withProjectAccess(async (request: NextRequest, { user, projec
     const validated = querySchema.parse({
       type: searchParams.get('type') || 'postgresql',
       schema: searchParams.get('schema') || undefined,
-      table: searchParams.get('table'),
+      table: searchParams.get('table') || undefined,
       projectId: searchParams.get('projectId') || undefined,
       view: searchParams.get('view') || 'workspace',
     })
@@ -44,6 +50,14 @@ export const GET = withProjectAccess(async (request: NextRequest, { user, projec
         success: false,
         error: 'Project ID required',
       }, { status: 400 })
+    }
+
+    if (validated.table === undefined) {
+      return NextResponse.json({
+        success: true,
+        data: await resolveSchemaStructure(targetProjectId),
+        source: 'reconciled',
+      })
     }
 
     const columns = await resolveTableStructure(targetProjectId, validated.table)

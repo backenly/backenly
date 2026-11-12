@@ -28,6 +28,19 @@ import { prisma } from '@/lib/db/prisma'
 import { Pool } from 'pg'
 import { countExposedResources } from '@/lib/api/exposed-resources'
 import { projectDatabaseUrl } from '@/lib/data-plane/regional'
+import { literalPrefix } from '@/lib/projects/backend-presence'
+import { isEvolutionApprovalFinding } from '@/lib/core/types'
+
+/**
+ * The type prefix this module's findings carry, as a LIKE pattern.
+ *
+ * Prisma hands `startsWith` to LIKE unescaped, and `_` there matches any one
+ * character, so the bare `'arch_'` also matched `architecture_evolution`: the
+ * Architecture Evolution Engine's approval requests. Every observer pass then
+ * withdrew every request waiting for a person, while the engine's own record
+ * still said it was waiting (production, 2026-11-09).
+ */
+const ARCH_TYPE_PREFIX = literalPrefix('arch_')
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
@@ -581,7 +594,7 @@ export async function withdrawUnsupportedArchFindings(
   const stale = await prisma.healthFinding.findMany({
     where: {
       projectId,
-      type: { startsWith: 'arch_' },
+      type: { startsWith: ARCH_TYPE_PREFIX },
       status: { in: ['open', 'pending_approval'] },
     },
     select: { id: true, type: true, details: true },
@@ -590,6 +603,10 @@ export async function withdrawUnsupportedArchFindings(
   let withdrawn = 0
   for (const e of stale) {
     if (validTypes.has(e.type)) continue
+    // Never this module's to withdraw, whatever a pattern matches: an approval
+    // request belongs to lib/evolution-engine, which withdraws its own and
+    // records why.
+    if (isEvolutionApprovalFinding(e.type)) continue
     await prisma.healthFinding.update({
       where: { id: e.id },
       data: {
@@ -635,7 +652,7 @@ export async function runAndStoreArchitectureEvolution(
     // re-created proposals the user had already dismissed or applied.
     // Reaper-withdrawn rows are the exception (see withdrawUnsupportedArchFindings).
     const existing = await prisma.healthFinding.findMany({
-      where: { projectId, type: { startsWith: 'arch_' } },
+      where: { projectId, type: { startsWith: ARCH_TYPE_PREFIX } },
       select: { type: true, status: true, details: true },
     }).catch(() => [])
     const existingTypes = new Set(

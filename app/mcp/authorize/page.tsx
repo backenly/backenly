@@ -10,8 +10,10 @@ export const dynamic = 'force-dynamic'
  * Server component on purpose. The `confirm` token it mints carries the signed
  * authorization request plus the signed-in user's id, and it must never be
  * reachable by client JavaScript on another origin — rendering it server-side
- * into a form is what makes the POST CSRF-resistant. See the header comment in
- * app/api/mcp/oauth/authorize/route.ts.
+ * into this page's form is what makes the POST CSRF-resistant. See the header
+ * comment in app/api/mcp/oauth/authorize/route.ts. The form itself is a client
+ * component (./ConsentForm) only so it can submit with fetch and navigate to the
+ * MCP client's callback, which a form-redirect cannot do under the CSP.
  *
  * Read-only defaults to ON. An agent that only needs to read should not be the
  * one that has to ask for less, and the safer default is the one a user
@@ -26,6 +28,7 @@ import { verifyToken } from '@/lib/auth/jwt'
 import { getProjectResolver } from '@/lib/edition'
 import { CONFIRM_TYP, REQ_TYP, signAuthzToken, verifyAuthzToken } from '@/lib/mcp/oauth-authz'
 import { SCOPE_WRITE } from '@/lib/mcp/oauth'
+import ConsentForm from './ConsentForm'
 
 export const metadata: Metadata = {
   title: 'Authorize an agent',
@@ -125,65 +128,13 @@ export default async function McpAuthorizePage(
   )
 
   const wantsWrite = req.scope.split(/\s+/).includes(SCOPE_WRITE)
-  const label = { display: 'block', fontSize: '.8rem', color: '#9a9aa2', margin: '0 0 .4rem' }
-  const field = {
-    width: '100%',
-    background: '#1c1d23',
-    color: '#e6e6e6',
-    border: '1px solid #2e2f37',
-    borderRadius: 8,
-    padding: '.6rem .7rem',
-    font: 'inherit',
-  }
 
   return (
     <Shell title={`Connect ${client.clientName} to Backenly`}>
       <p style={{ color: '#9a9aa2', margin: '0 0 1.25rem', fontSize: '.9rem' }}>
         This will let {client.clientName} operate one of your backends over MCP.
       </p>
-
-      <form method="POST" action="/api/mcp/oauth/authorize">
-        <input type="hidden" name="confirm" value={confirm} />
-
-        <label style={label} htmlFor="project_id">Project</label>
-        <select id="project_id" name="project_id" style={{ ...field, marginBottom: '1.1rem' }} defaultValue={projects[0].id}>
-          {projects.map((p) => (
-            <option key={p.id} value={p.id}>{p.name}</option>
-          ))}
-        </select>
-
-        <div style={{ background: '#1c1d23', border: '1px solid #2e2f37', borderRadius: 8, padding: '.8rem .85rem', marginBottom: '1.25rem' }}>
-          <label style={{ display: 'flex', gap: '.6rem', alignItems: 'flex-start', cursor: 'pointer' }}>
-            <input type="checkbox" name="read_only" defaultChecked style={{ marginTop: '.25rem', accentColor: '#8B5CF6' }} />
-            <span>
-              <span style={{ display: 'block', fontSize: '.9rem' }}>Read-only access</span>
-              <span style={{ display: 'block', fontSize: '.8rem', color: '#9a9aa2', marginTop: '.15rem' }}>
-                The agent can inspect schema, run read queries and read logs, but cannot
-                change anything. {wantsWrite ? `${client.clientName} asked for write access — unchecking grants it.` : ''}
-              </span>
-            </span>
-          </label>
-        </div>
-
-        <div style={{ display: 'flex', gap: '.6rem' }}>
-          <button
-            type="submit"
-            name="decision"
-            value="approve"
-            style={{ flex: 1, background: '#e6e6e6', color: '#101116', border: 0, borderRadius: 8, padding: '.65rem', font: 'inherit', fontWeight: 600, cursor: 'pointer' }}
-          >
-            Approve
-          </button>
-          <button
-            type="submit"
-            name="decision"
-            value="deny"
-            style={{ flex: 1, background: 'transparent', color: '#9a9aa2', border: '1px solid #2e2f37', borderRadius: 8, padding: '.65rem', font: 'inherit', cursor: 'pointer' }}
-          >
-            Cancel
-          </button>
-        </div>
-      </form>
+      <ConsentForm confirm={confirm} projects={projects} clientName={client.clientName} wantsWrite={wantsWrite} />
     </Shell>
   )
 }

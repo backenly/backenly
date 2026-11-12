@@ -252,7 +252,7 @@ describe('the REST routes answer 404 for a trigger that is not in the project', 
 
     const foreign = await nextDelete(theirs)
     expect(foreign.status).toBe(404)
-    expect(await foreign.json()).toEqual({ error: 'Trigger not found in this project' })
+    expect(await foreign.json()).toEqual({ error: 'Trigger not found in this project', code: 'NOT_FOUND', message: 'Trigger not found in this project' })
     expect(await names(otherProjectId)).toEqual(['their_trigger'])
 
     const own = await nextDelete(mine)
@@ -268,7 +268,7 @@ describe('the REST routes answer 404 for a trigger that is not in the project', 
 
     const foreign = await expressDelete(`?id=${theirs}`)
     expect(foreign.status).toBe(404)
-    expect(await foreign.json()).toEqual({ error: 'Trigger not found in this project' })
+    expect(await foreign.json()).toEqual({ error: 'Trigger not found in this project', code: 'NOT_FOUND', message: 'Trigger not found in this project' })
     expect(await names(otherProjectId)).toEqual(['their_trigger'])
 
     expect((await expressDelete(`?id=${mine}&id=${theirs}`)).status).toBe(400)

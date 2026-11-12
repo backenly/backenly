@@ -38,6 +38,7 @@ import {
   KitButton, KitNote, KitField, KitInput, KitTextarea, KitModal, KitConfirmDialog, SettingsCard, Spinner, StatusDot,
 } from '@/components/inspector/kit'
 import { formatStamp } from '@/components/console/format'
+import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
 import { ago } from '@/components/changes/present'
 
 interface SmtpView {
@@ -54,6 +55,8 @@ interface SmtpView {
   lastTestAt: string | null
   lastTestError: string | null
   deploymentFallbackAvailable: boolean
+  /** The address auth emails go out from through the deployment, under the app's name. */
+  deploymentSenderAddress: string | null
   activeSource: 'project' | 'deployment' | 'none'
 }
 
@@ -90,16 +93,33 @@ function formFromPolicy(p: PolicyView) {
   }
 }
 
-const SOURCE_LABEL: Record<SmtpView['activeSource'], string> = {
-  project: 'This project’s SMTP',
-  deployment: 'Deployment SMTP',
-  none: 'Not configured',
+// On Backenly Cloud the deployment is Backenly. A customer there has no
+// environment variables to set, so the copy says who sends the mail and as
+// whom (CLOUD_CONTROL_PLANE). A self-hosted operator does set them, so theirs
+// names the variables.
+
+/** The From a project's users see when the deployment sends: “shopqa” <noreply@…>. */
+function deploymentSender(smtp: SmtpView, policy: PolicyView | null): string | null {
+  if (!smtp.deploymentSenderAddress) return null
+  return policy ? `“${policy.effectiveAppName}” <${smtp.deploymentSenderAddress}>` : smtp.deploymentSenderAddress
 }
 
-const SOURCE_TEXT: Record<SmtpView['activeSource'], string> = {
-  project: 'Mail sends through this project’s own SMTP settings.',
-  deployment: 'Mail sends through the deployment’s SMTP environment variables.',
-  none: 'Nothing is configured, so auth emails are only logged to the server console. Password reset and verification will not reach anyone.',
+function sourceLabel(source: SmtpView['activeSource']): string {
+  if (source === 'project') return 'This project’s SMTP'
+  if (source === 'deployment') return CLOUD_CONTROL_PLANE ? 'Sent by Backenly' : 'Deployment SMTP'
+  return 'Not configured'
+}
+
+function sourceText(smtp: SmtpView, policy: PolicyView | null): string {
+  if (smtp.activeSource === 'project') return 'Mail sends through this project’s own SMTP settings.'
+  if (smtp.activeSource === 'none') {
+    return 'Nothing is configured, so auth emails are only logged to the server console. Password reset and verification will not reach anyone.'
+  }
+  const sender = deploymentSender(smtp, policy)
+  const as = sender ? ` as ${sender}` : ''
+  return CLOUD_CONTROL_PLANE
+    ? `Backenly sends this project’s auth emails${as}. To send from your own domain, add your SMTP settings below.`
+    : `Mail sends through the deployment’s SMTP environment variables${as}.`
 }
 
 export function EmailSettingsPanel({ projectId }: { projectId: string }) {
@@ -303,6 +323,7 @@ export function EmailSettingsPanel({ projectId }: { projectId: string }) {
   }
 
   const busyIcon = (key: string, icon: typeof Save) => (busy === key ? undefined : icon)
+  const sender = smtp ? deploymentSender(smtp, policy) : null
 
   return (
     <div className="mx-auto w-full max-w-[1200px] px-4 py-6 sm:px-6 lg:px-8">
@@ -324,15 +345,17 @@ export function EmailSettingsPanel({ projectId }: { projectId: string }) {
               {smtp && (
                 <StatusDot
                   tone={smtp.activeSource === 'none' ? 'attention' : 'operational'}
-                  label={<span className="text-[12.5px] font-normal">{SOURCE_LABEL[smtp.activeSource]}</span>}
+                  label={<span className="text-[12.5px] font-normal">{sourceLabel(smtp.activeSource)}</span>}
                 />
               )}
             </span>
           }
-          description={smtp ? SOURCE_TEXT[smtp.activeSource] : undefined}
+          description={smtp ? sourceText(smtp, policy) : undefined}
           footer={
             smtp?.deploymentFallbackAvailable
-              ? 'Turning these off falls back to the deployment’s SMTP.'
+              ? CLOUD_CONTROL_PLANE
+                ? 'With these off, Backenly sends the auth emails.'
+                : 'Turning these off falls back to the deployment’s SMTP.'
               : 'Turning these off means auth emails are only logged.'
           }
           actions={
@@ -417,7 +440,9 @@ export function EmailSettingsPanel({ projectId }: { projectId: string }) {
               <span className="block text-[13px] font-medium text-zinc-100">Send with these settings</span>
               <span className="mt-0.5 block text-[12.5px] leading-[18px] text-faint">
                 {smtp?.deploymentFallbackAvailable
-                  ? 'Unchecked, auth emails fall back to the deployment’s SMTP.'
+                  ? CLOUD_CONTROL_PLANE
+                    ? 'Unchecked, Backenly sends them.'
+                    : 'Unchecked, auth emails fall back to the deployment’s SMTP.'
                   : 'Unchecked, auth emails are only logged to the server console.'}
               </span>
             </span>
@@ -489,7 +514,7 @@ export function EmailSettingsPanel({ projectId }: { projectId: string }) {
               </KitField>
               <KitField
                 label="App URL"
-                hint={policy.effectiveAppUrl ? 'Password reset links land here.' : 'Not set: password reset has no page to land on.'}
+                hint={policy.effectiveAppUrl ? 'Password reset and magic links land here.' : 'Not set: reset links open a page Backenly hosts, and magic links cannot sign anyone in.'}
               >
                 <KitInput type="url" value={policyForm.appUrl} onChange={e => setPolicyForm({ ...policyForm, appUrl: e.target.value })} placeholder={policy.effectiveAppUrl ?? 'https://app.example.com'} spellCheck={false} />
               </KitField>
@@ -591,7 +616,9 @@ export function EmailSettingsPanel({ projectId }: { projectId: string }) {
           title="Remove this project’s SMTP settings?"
           description={
             smtp?.deploymentFallbackAvailable
-              ? 'Auth emails will fall back to the deployment’s SMTP environment variables. The stored password is deleted and cannot be recovered.'
+              ? CLOUD_CONTROL_PLANE
+                ? `Backenly will send this project’s auth emails${sender ? `, as ${sender}` : ''}. The stored password is deleted and cannot be recovered.`
+                : 'Auth emails will fall back to the deployment’s SMTP environment variables. The stored password is deleted and cannot be recovered.'
               : 'There is no deployment fallback configured, so auth emails will only be logged to the server console. Password reset and verification will stop reaching anyone.'
           }
           confirmLabel={busy === 'remove' ? 'Removing…' : 'Remove'}

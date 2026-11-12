@@ -176,7 +176,11 @@ describe('both serving processes record', () => {
     await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
     try {
       const { port } = server.address() as AddressInfo
-      await fetch(`http://127.0.0.1:${port}/api/v1/${p.projectId}/db/todos`)
+      // A request with a key, even a wrong one, is the project's traffic.
+      await fetch(`http://127.0.0.1:${port}/api/v1/${p.projectId}/db/todos`, { headers: { 'x-api-key': 'proj_live_wrong' } })
+      // A refused request that presented no credential at all is not.
+      const keyless = await fetch(`http://127.0.0.1:${port}/api/v1/${p.projectId}/db/todos`)
+      expect(keyless.status).toBe(401)
       await new Promise(r => setTimeout(r, 50))
       await flushRecordedRequests()
       const got = await rows(p.projectId)
@@ -187,6 +191,97 @@ describe('both serving processes record', () => {
       await drop(p)
     }
   }, 60_000)
+})
+
+// Production QA (2026-11-09): a brand-new project's Monitoring showed the
+// console's own Realtime connection as its first request, and requests from
+// strangers with no key lowered its success rate. Neither is the project's
+// traffic (isProjectTraffic); a wrong key, a 403 and the project's own app are.
+describe("what is not the project's traffic", () => {
+  const originalAppUrl = process.env.NEXT_PUBLIC_APP_URL
+  beforeAll(() => { process.env.NEXT_PUBLIC_APP_URL = 'https://backenly.test' })
+  afterAll(() => {
+    if (originalAppUrl === undefined) delete process.env.NEXT_PUBLIC_APP_URL
+    else process.env.NEXT_PUBLIC_APP_URL = originalAppUrl
+  })
+  const headers = (h: Record<string, string>) => new Headers(h)
+
+  it("leaves out the console calling the API from its own pages, and keeps the project's own app", async () => {
+    const p = await project()
+    try {
+      const at = (h: Record<string, string>, status = 200) => recordRuntimeRequest({
+        projectId: p.projectId, method: 'GET', pathname: `/api/v1/${p.projectId}/realtime`,
+        statusCode: status, durationMs: 3, headers: headers(h),
+      })
+      at({ referer: `https://backenly.test/app/projects/${p.projectId}/realtime` })
+      at({ referer: 'https://shop.example/checkout', 'x-api-key': 'proj_live_k' })
+      // The platform's origin outside the console, and a look-alike host: still counted.
+      at({ referer: 'https://backenly.test/pricing', 'x-api-key': 'proj_live_k' })
+      at({ referer: `https://backenly.test.evil.example/app/projects/${p.projectId}`, 'x-api-key': 'proj_live_k' })
+      await flushRecordedRequests()
+      expect((await rows(p.projectId)).length).toBe(3)
+    } finally {
+      await drop(p)
+    }
+  })
+
+  it('leaves out a refused request with no credential, and keeps a wrong key, a ticket, a 403 and a public read', async () => {
+    const p = await project()
+    try {
+      const at = (status: number, h: Record<string, string> = {}, search = '') => recordRuntimeRequest({
+        projectId: p.projectId, method: 'GET', pathname: `/api/v1/${p.projectId}/db/todos`,
+        statusCode: status, durationMs: 3, headers: headers(h), search,
+      })
+      at(401)                                     // no credential at all: not the project's
+      at(401, { 'x-api-key': 'proj_live_wrong' }) // a wrong key: often the project's own app
+      at(401, {}, '?apiKey=proj_live_wrong')
+      at(401, {}, '?ticket=t1')
+      at(403)
+      at(200)
+      await flushRecordedRequests()
+      expect((await rows(p.projectId)).map(r => r.statusCode).sort()).toEqual([200, 401, 401, 401, 403])
+    } finally {
+      await drop(p)
+    }
+  })
+
+  it('keeps the browser origin a request came from, never its path, and none for a server', async () => {
+    const p = await project()
+    try {
+      const at = (h: Record<string, string>) => recordRuntimeRequest({
+        projectId: p.projectId, method: 'GET', pathname: `/api/v1/${p.projectId}/db/todos`,
+        statusCode: 200, durationMs: 3, headers: headers({ 'x-api-key': 'proj_live_k', ...h }),
+      })
+      at({ origin: 'http://localhost:5173' })
+      at({ referer: 'https://shop.example/checkout?cart=1' })
+      at({ origin: 'null' })
+      at({})
+      await flushRecordedRequests()
+      const origins = await prisma.apiRequestLog.findMany({ where: { projectId: p.projectId }, select: { origin: true } })
+      expect(origins.map(r => r.origin).sort()).toEqual(['http://localhost:5173', 'https://shop.example', null, null])
+    } finally {
+      await drop(p)
+    }
+  })
+
+  it("the Next wrapper leaves out the console's own request", async () => {
+    const p = await project()
+    try {
+      const ctx = { params: Promise.resolve({ projectId: p.projectId }) }
+      const stream = recordedV1(async () => new Response('', { status: 200 }))
+      await stream(new Request(`http://x/api/v1/${p.projectId}/realtime?ticket=t1`, {
+        headers: { referer: `https://backenly.test/app/projects/${p.projectId}/realtime` },
+      }), ctx)
+      await stream(new Request(`http://x/api/v1/${p.projectId}/realtime?apiKey=proj_live_k`, {
+        headers: { referer: 'https://shop.example/' },
+      }), ctx)
+      await new Promise(r => setImmediate(r))
+      await flushRecordedRequests()
+      expect(await rows(p.projectId)).toHaveLength(1)
+    } finally {
+      await drop(p)
+    }
+  })
 })
 
 describe('the signals that read traffic can now see it', () => {

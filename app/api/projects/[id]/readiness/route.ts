@@ -30,7 +30,9 @@ export const GET = withAuth(async (request, { user }) => {
     return NextResponse.json({ error: 'Project not found or access denied' }, { status: 404 })
   }
 
-  const report = await scoreReadiness(projectId, { autoFix: false })
+  // The Deploy page's read. Its verifier result may be a recent one of the
+  // backend as it is now; POST below fixes and verifies afresh.
+  const report = await scoreReadiness(projectId, { autoFix: false, reuseRecentVerification: true })
   return NextResponse.json({ success: true, report })
 })
 

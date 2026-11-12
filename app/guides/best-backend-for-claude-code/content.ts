@@ -527,7 +527,7 @@ export const COMPARISON: Record<OptionId, Record<CriterionId, Claim[]>> = {
     restore: [
       claim(
         'backenlyRecovery',
-        'Every change, to the schema, auth, storage, functions, webhooks, environment variables, keys or integrations, is one entry in History. Restore it alone, or everything back to a point; data your app wrote is never rewound, and a secret never comes back.',
+        'Every change, to the schema, auth, storage, functions, webhooks, environment variables, keys, integrations or allowed origins, is one entry in History. Restore it alone, or everything back to a point; data your app wrote is never rewound, and a secret never comes back.',
       ),
       claim(
         'backenlyPricing',

@@ -1243,7 +1243,9 @@ describe('the autonomy probes read the project’s region', () => {
     process.env[REGION_VARIABLE] = regionalUrl
     expect((await detectExpiredTokenBuildup(regionalProject)).map((f) => f.details?.tableName)).toEqual(['sessions'])
     expect((await detectUnregisteredSchema(regionalProject)).map((f) => f.type)).toEqual(['schema_not_registered'])
-    expect(await checkIntentConformance(regionalProject)).toMatchObject({ checked: 1, findings: [] })
+    // Two: the note column recorded above, and the tag column the executor
+    // added earlier in this file, which it records as asked for too.
+    expect(await checkIntentConformance(regionalProject)).toMatchObject({ checked: 2, findings: [] })
     expect(
       await verifyPostcondition('ADD_COLUMN', regionalProject, { tableName: 'marker', columnName: 'note', columnType: 'text' }),
     ).toBe('confirmed')
@@ -2105,6 +2107,7 @@ describe('each region’s projects are served only in that region', () => {
       success: false,
       error: "This project's data is in us-east-1, and it is served only there.",
       code: 'WRONG_REGION',
+      message: "This project's data is in us-east-1, and it is served only there.",
       region: 'us-east-1',
       apiUrl: `${VIRGINIA}/api/v1/${regionalProject}`,
     })

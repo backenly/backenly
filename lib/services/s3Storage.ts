@@ -25,7 +25,8 @@
 
 import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand, HeadObjectCommand } from '@aws-sdk/client-s3'
 import { UploadRejectedError, assertFileAllowed, assertFileSize, uploadExtension } from '@/lib/storage/upload-policy'
-import { clampIsPublic, policyAllowsPublic } from '@/lib/storage/access-policy'
+import { cacheControlFor, clampIsPublic, policyAllowsPublic } from '@/lib/storage/access-policy'
+import { uploaderOf, type UploaderRecord } from '@/lib/storage/uploader'
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner'
 import { prisma } from '@/lib/db'
 import crypto from 'crypto'
@@ -283,7 +284,7 @@ export class S3StorageService implements StorageService {
   async uploadFile(
     bucketId: string,
     file: { name: string; buffer: Buffer; mimeType?: string },
-    options: { isPublic?: boolean; projectId: string; uploadedBy?: string }
+    options: { isPublic?: boolean; projectId: string; uploadedBy?: string; uploader?: UploaderRecord }
   ) {
     if (!options.projectId) {
       throw new Error('Project ID is required for tenant isolation')
@@ -424,6 +425,21 @@ export class S3StorageService implements StorageService {
       finalFileName
     )
 
+    // The bucket's policy is the ceiling at WRITE time, exactly as in the local
+    // driver: a caller-supplied `true` must not plant a world-readable row in a
+    // private bucket and leave the serving path to quietly clean up after it.
+    // This driver is the one Cloud runs, and it was the only writer without the
+    // clamp.
+    const bucketPolicy = bucket.accessPolicy ?? (bucket.isPublic ? 'public_read' : 'private')
+    const fileIsPublic = clampIsPublic(options?.isPublic, bucketPolicy)
+    // A public object says how long it may be kept, as the app's own download
+    // route does when it serves the bytes itself. Behind a CDN the object's
+    // headers are the response, and without one every view of a public image
+    // went back to the edge. The key is new on every upload, so the bytes at
+    // it never change. A private object carries none: who may read it is
+    // decided per request.
+    const cacheControl = cacheControlFor(bucketPolicy, fileIsPublic)
+
     // Upload to S3, in the bucket of the project's own region.
     try {
       const at = await this.at(options.projectId)
@@ -433,6 +449,7 @@ export class S3StorageService implements StorageService {
           Key: s3Key,
           Body: file.buffer,
           ContentType: detectedMimeType,
+          ...(cacheControl.startsWith('public') ? { CacheControl: cacheControl } : {}),
           Metadata: {
             projectId: options.projectId,
             bucketId: bucketId,
@@ -483,17 +500,11 @@ export class S3StorageService implements StorageService {
           path: s3Key, // S3 key is stored as path
           size: BigInt(file.buffer.length),
           mimeType: detectedMimeType || null,
-          // The bucket's policy is the ceiling at WRITE time, exactly as in
-          // the local driver: a caller-supplied `true` must not plant a
-          // world-readable row in a private bucket and leave the serving
-          // path to quietly clean up after it. This driver is the one Cloud
-          // runs, and it was the only writer without the clamp.
-          isPublic: clampIsPublic(
-            options?.isPublic,
-            bucket.accessPolicy ?? (bucket.isPublic ? 'public_read' : 'private'),
-          ),
+          // Clamped to the bucket's policy above, before the object was written.
+          isPublic: fileIsPublic,
           projectId: options.projectId,
           uploadedBy: options?.uploadedBy || null,
+          ...(options?.uploader ? { metadata: { uploader: { ...options.uploader } } } : {}),
         },
       })
 
@@ -563,6 +574,7 @@ export class S3StorageService implements StorageService {
         mimeType: file.mimeType,
         isPublic: file.isPublic,
         uploadedBy: file.uploadedBy ?? null,
+        uploader: uploaderOf(file),
         bucket: file.bucket.name,
         createdAt: file.createdAt,
         url: await this.getFileUrl(file.id, projectId, 3600),

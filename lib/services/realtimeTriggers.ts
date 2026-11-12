@@ -15,8 +15,9 @@
  *   }
  *
  * pg_notify payload limit is 8000 bytes. For large rows the data field
- * is intentionally omitted to stay within limits — clients can re-fetch
- * via backend.<table>.get(id) if they need the full record.
+ * is cut down to stay within limits: an update's old row to its primary key
+ * first, then the row itself, so a client can still fetch the row by that key
+ * or drop a deleted one (notifyFunctionSql).
  *
  * Important: this uses executeInWorkspaceSchema (Prisma raw) which goes
  * through the pooled connection. That is fine for one-shot DDL; only
@@ -26,6 +27,171 @@
 import { executeInWorkspaceSchema, queryWorkspaceSchema } from './workspaceDatabase'
 
 const MAX_PAYLOAD_BYTES = 7_500 // Stay safely below pg_notify's 8 000-byte limit
+
+/**
+ * Recorded on the notify function, so a schema still running an older body is
+ * recognised and replaced (ensureRealtimeFunctionCurrent).
+ */
+export const REALTIME_FUNCTION_VERSION = 'backenly realtime notify v2'
+
+/**
+ * The shared notify function for a schema: one per schema, reused by every
+ * table's trigger.
+ *
+ * A change goes out whole when it fits pg_notify's limit. One that does not
+ * used to go out as `{ data: null, truncated: true }`: the client learned that
+ * some row changed and not which, could neither fetch it nor apply a delete,
+ * and a handler reading `event.data.id` threw (#620). Updates got there at half
+ * the row size, because the payload carries the whole old row too. Now, in
+ * turn, until it fits:
+ *
+ *   1. an update's old row is reduced to its primary key (`oldTruncated`),
+ *      which is all a stream that is not a service-role one ever receives of
+ *      it (lib/realtime/visibility.ts), and the new row stays whole;
+ *   2. the row is reduced to its primary key (`truncated`), so a client knows
+ *      which row to fetch or drop, and the routes deliver the frame only to a
+ *      stream that may read that row, as they do any change with row data;
+ *   3. only a table with no primary key, or one too large to send, gets the
+ *      old frame with no row data.
+ *
+ * The primary key is looked up only on that path. pg_notify is never handed
+ * more than the limit: raising there would fail the write that fired it.
+ */
+function notifyFunctionSql(schemaName: string, channel: string): string {
+  return `
+    CREATE OR REPLACE FUNCTION "${schemaName}".backenly_notify_realtime()
+    RETURNS trigger LANGUAGE plpgsql AS $$
+    DECLARE
+      payload  text;
+      row_data json;
+      old_data json;
+      key_cols text[];
+      row_key  json;
+      old_key  json;
+    BEGIN
+      row_data := CASE WHEN TG_OP = 'DELETE' THEN row_to_json(OLD) ELSE row_to_json(NEW) END;
+      old_data := CASE WHEN TG_OP = 'UPDATE' THEN row_to_json(OLD) ELSE NULL END;
+
+      payload := json_build_object(
+        'type',      lower(TG_OP),
+        'table',     TG_TABLE_NAME,
+        'data',      row_data,
+        'old',       old_data,
+        'timestamp', extract(epoch from clock_timestamp())
+      )::text;
+      IF octet_length(payload) <= ${MAX_PAYLOAD_BYTES} THEN
+        PERFORM pg_notify('${channel}', payload);
+        RETURN COALESCE(NEW, OLD);
+      END IF;
+
+      SELECT array_agg(a.attname::text ORDER BY array_position(i.indkey, a.attnum))
+        INTO key_cols
+        FROM pg_index i
+        JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+       WHERE i.indrelid = TG_RELID AND i.indisprimary;
+
+      IF key_cols IS NOT NULL THEN
+        SELECT json_object_agg(k, row_data -> k) INTO row_key FROM unnest(key_cols) AS k;
+
+        -- 1. The old row reduced to its key, the new row whole.
+        IF TG_OP = 'UPDATE' THEN
+          SELECT json_object_agg(k, old_data -> k) INTO old_key FROM unnest(key_cols) AS k;
+          payload := json_build_object(
+            'type',         lower(TG_OP),
+            'table',        TG_TABLE_NAME,
+            'data',         row_data,
+            'old',          old_key,
+            'oldTruncated', true,
+            'timestamp',    extract(epoch from clock_timestamp())
+          )::text;
+          IF octet_length(payload) <= ${MAX_PAYLOAD_BYTES} THEN
+            PERFORM pg_notify('${channel}', payload);
+            RETURN COALESCE(NEW, OLD);
+          END IF;
+        END IF;
+
+        -- 2. The row reduced to its key: which row changed.
+        payload := json_build_object(
+          'type',      lower(TG_OP),
+          'table',     TG_TABLE_NAME,
+          'data',      row_key,
+          'old',       old_key,
+          'truncated', true,
+          'timestamp', extract(epoch from clock_timestamp())
+        )::text;
+        IF octet_length(payload) <= ${MAX_PAYLOAD_BYTES} THEN
+          PERFORM pg_notify('${channel}', payload);
+          RETURN COALESCE(NEW, OLD);
+        END IF;
+      END IF;
+
+      -- 3. No key to name the row by.
+      PERFORM pg_notify('${channel}', json_build_object(
+        'type',      lower(TG_OP),
+        'table',     TG_TABLE_NAME,
+        'data',      null,
+        'truncated', true,
+        'timestamp', extract(epoch from clock_timestamp())
+      )::text);
+      RETURN COALESCE(NEW, OLD);
+    END;
+    $$;
+    `
+}
+
+/** Create (or replace) a schema's notify function and record its version. */
+async function createNotifyFunction(projectId: string): Promise<void> {
+  const schemaName = `workspace_${projectId}`
+  await executeInWorkspaceSchema(projectId, notifyFunctionSql(schemaName, `workspace_${projectId}_changes`))
+  await executeInWorkspaceSchema(
+    projectId,
+    `COMMENT ON FUNCTION "${schemaName}".backenly_notify_realtime() IS '${REALTIME_FUNCTION_VERSION}'`,
+  )
+}
+
+/** Projects whose notify function this process has already found current, or absent. */
+const currentFunctionChecked = new Set<string>()
+/** A check under way, shared by every stream that opens for the project meanwhile. */
+const functionChecks = new Map<string, Promise<'current' | 'upgraded' | 'absent'>>()
+
+/**
+ * Replace a schema's notify function if it predates REALTIME_FUNCTION_VERSION.
+ *
+ * Every table's trigger calls the one function by name, so replacing it moves
+ * all of the project's realtime tables to the current body at once. Schemas
+ * whose realtime was enabled before kept the old body, which sent large changes
+ * with no row key, until a table's realtime was enabled again. Checked once per
+ * project per process; a schema without the function has no realtime table.
+ */
+export function ensureRealtimeFunctionCurrent(projectId: string): Promise<'current' | 'upgraded' | 'absent'> {
+  if (currentFunctionChecked.has(projectId)) return Promise.resolve('current')
+  let check = functionChecks.get(projectId)
+  if (!check) {
+    check = checkRealtimeFunction(projectId).finally(() => functionChecks.delete(projectId))
+    functionChecks.set(projectId, check)
+  }
+  return check
+}
+
+async function checkRealtimeFunction(projectId: string): Promise<'current' | 'upgraded' | 'absent'> {
+  const schemaName = `workspace_${projectId}`
+  const rows = (await queryWorkspaceSchema(
+    projectId,
+    `SELECT obj_description(p.oid, 'pg_proc') AS version
+       FROM pg_proc p
+       JOIN pg_namespace n ON n.oid = p.pronamespace
+      WHERE n.nspname = $1 AND p.proname = 'backenly_notify_realtime'`,
+    schemaName,
+  )) as Array<{ version: string | null }>
+  let outcome: 'current' | 'upgraded' | 'absent' = 'current'
+  if (!rows?.length) outcome = 'absent'
+  else if (rows[0].version !== REALTIME_FUNCTION_VERSION) {
+    await createNotifyFunction(projectId)
+    outcome = 'upgraded'
+  }
+  currentFunctionChecked.add(projectId)
+  return outcome
+}
 
 /**
  * Install (or replace) the realtime NOTIFY trigger on a single table.
@@ -76,50 +242,11 @@ export async function installRealtimeTrigger(
   }
 
   const schemaName = `workspace_${projectId}`
-  const channel = `workspace_${projectId}_changes`
 
   // 1. Create (or replace) the shared notify function for this schema.
   //    One function per schema, reused across all tables.
-  await executeInWorkspaceSchema(
-    projectId,
-    `
-    CREATE OR REPLACE FUNCTION "${schemaName}".backenly_notify_realtime()
-    RETURNS trigger LANGUAGE plpgsql AS $$
-    DECLARE
-      payload  text;
-      row_data json;
-      old_data json;
-    BEGIN
-      row_data := CASE WHEN TG_OP = 'DELETE' THEN row_to_json(OLD) ELSE row_to_json(NEW) END;
-      old_data := CASE WHEN TG_OP = 'UPDATE' THEN row_to_json(OLD) ELSE NULL END;
-
-      payload := json_build_object(
-        'type',      lower(TG_OP),
-        'table',     TG_TABLE_NAME,
-        'data',      row_data,
-        'old',       old_data,
-        'timestamp', extract(epoch from clock_timestamp())
-      )::text;
-
-      -- Skip oversized payloads to avoid pg_notify limit errors;
-      -- client should re-fetch via REST if data is missing.
-      IF octet_length(payload) <= ${MAX_PAYLOAD_BYTES} THEN
-        PERFORM pg_notify('${channel}', payload);
-      ELSE
-        PERFORM pg_notify('${channel}', json_build_object(
-          'type',      lower(TG_OP),
-          'table',     TG_TABLE_NAME,
-          'data',      null,
-          'truncated', true,
-          'timestamp', extract(epoch from clock_timestamp())
-        )::text);
-      END IF;
-
-      RETURN COALESCE(NEW, OLD);
-    END;
-    $$;
-    `
-  )
+  await createNotifyFunction(projectId)
+  currentFunctionChecked.add(projectId)
 
   // 2. Drop the existing trigger on this table (if any) then re-create it.
   //    Split into two statements — Prisma prepared-statement mode rejects

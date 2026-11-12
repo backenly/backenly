@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useState, useCallback } from 'react'
+import { sharedRead } from '@/lib/client/shared-read'
 
 /**
  * useConnectionHealth — single source of truth for the "is a real frontend
@@ -17,7 +18,7 @@ import { useEffect, useState, useCallback } from 'react'
  *
  * `status` is the at-a-glance summary the UI renders against:
  *   - 'idle'       : no requests yet, nothing to say
- *   - 'connected'  : ≥1 bootstrap in 24h, 0 failures → all good
+ *   - 'connected'  : ≥1 request from a frontend in 24h, 0 failures → all good
  *   - 'degraded'   : both successes AND failures → partial
  *   - 'failing'    : failures only → something is wrong
  *   - 'loading'    : initial fetch in flight (avoid flicker)
@@ -54,6 +55,8 @@ export interface ConnectionHealth {
     failures24h: number
     failures1h: number
     bootstraps24h: number
+    /** Requests from frontends that succeeded in the last day, bootstrap pings included. */
+    requests24h: number
     distinctOriginsFailing: number
     distinctOriginsConnected: number
   }
@@ -74,13 +77,14 @@ export function useConnectionHealth(projectId: string | null | undefined): UseCo
   const [health, setHealth] = useState<ConnectionHealth | null>(null)
   const [loading, setLoading] = useState(true)
 
-  const refresh = useCallback(async () => {
+  // Every copy of this hook on a page (the sidebar pill, the Deploy page, the
+  // autonomy status) reads and polls the same thing: one request serves them
+  // all (lib/client/shared-read.ts). An explicit refresh reads afresh.
+  const load = useCallback(async (fresh: boolean) => {
     if (!projectId) return
     try {
-      const res = await fetch(`/api/projects/${projectId}/connection-health`, {
-        credentials: 'include',
-      })
-      if (res.ok) setHealth(await res.json())
+      const res = await sharedRead<ConnectionHealth>(`/api/projects/${projectId}/connection-health`, { fresh })
+      if (res.ok && res.data) setHealth(res.data)
     } catch {
       // Soft-fail — the pill collapses to 'idle' rather than blocking the UI.
     } finally {
@@ -88,20 +92,22 @@ export function useConnectionHealth(projectId: string | null | undefined): UseCo
     }
   }, [projectId])
 
+  const refresh = useCallback(() => load(true), [load])
+
   useEffect(() => {
     if (!projectId) {
       setLoading(false)
       return
     }
-    refresh()
-    const t = setInterval(refresh, 15_000)
+    load(false)
+    const t = setInterval(() => load(false), 15_000)
     return () => clearInterval(t)
-  }, [projectId, refresh])
+  }, [projectId, load])
 
   const status: ConnectionStatus = (() => {
     if (loading && !health) return 'loading'
     if (!health) return 'idle'
-    const hasSuccess = health.totals.bootstraps24h > 0
+    const hasSuccess = health.totals.requests24h > 0
     const hasFailure = health.totals.failures24h > 0
     if (!hasSuccess && !hasFailure) return 'idle'
     if (hasSuccess && !hasFailure) return 'connected'

@@ -14,6 +14,7 @@ import { maskApiKey, scanForDangerousSecret } from '@/lib/ai/api-key-detector'
 import {
   verifyIntegrationKey,
   blocksStorage,
+  type VerificationResult,
   type VerificationStatus,
 } from '@/lib/integrations/key-verification'
 
@@ -50,6 +51,12 @@ const ENV_VAR_VAULT_IDS: Record<string, string> = {
   openai_api_key: 'openai',
   anthropic_api_key: 'anthropic',
   posthog_api_key: 'posthog',
+  twilio_credentials: 'twilio',
+  onesignal_rest_api_key: 'onesignal',
+  onesignal_app_id: 'onesignal_app_id',
+  replicate_api_token: 'replicate',
+  runwayml_api_secret: 'runway',
+  stability_api_key: 'stability',
   google_client_id: 'google',
   google_client_secret: 'google',
   github_client_id: 'github',
@@ -123,6 +130,10 @@ const INTEGRATION_KEY_FORMATS: Record<string, KeyFormatSpec> = {
     valid: (k) => k.startsWith('re_'),
     hint: 'Resend API keys must start with re_',
   },
+  email_from: {
+    valid: (k) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(k.trim()),
+    hint: 'Sender email must be a valid email address (e.g. noreply@yourdomain.com)',
+  },
   posthog: {
     valid: (k) => k.startsWith('phc_'),
     hint: 'PostHog project API keys start with phc_. Find yours in PostHog → Project Settings → Project API key.',
@@ -166,15 +177,69 @@ export function validateIntegrationKeyFormat(
   return spec.valid(rawKey) ? { ok: true } : { ok: false, error: spec.hint }
 }
 
+/** What the checks a key must pass before it is stored said about it. */
+export type IntegrationKeyCheck =
+  | { ok: true; vaultId: string; verification: VerificationResult; formatWarning?: string }
+  | { ok: false; vaultId: string; error: string; isFormatError?: boolean; isVerificationError?: boolean }
+
 /**
- * Store or update an integration API key for a project.
- * The raw key is encrypted; only the masked version is persisted in plaintext.
- *
- * Three gates, in order, all of which run before anything touches the DB:
+ * The checks a key passes before it is stored, without storing it.
  *
  *   1. dangerous-secret scan — private keys, DB URLs, JWTs never get vaulted;
  *   2. format validation     — wrong provider / wrong mode;
  *   3. LIVE VERIFICATION     — the provider is asked whether the key works.
+ *
+ * storeIntegrationKey runs exactly these, and the console asks them when a key
+ * is entered (POST /api/projects/[id]/credentials/verify), so a key the
+ * provider refuses is said before the rest of the form, not after it.
+ */
+export async function checkIntegrationKey(
+  integrationId: string,
+  rawKey: string,
+  options: { skipVerification?: boolean } = {},
+): Promise<IntegrationKeyCheck> {
+  // One row per credential: a key offered under an env-var name is checked
+  // and stored under the vault id every reader looks up, never beside it.
+  const vaultId = canonicalVaultId(integrationId)
+
+  // ── Secret scan: block dangerous values before they touch the DB ──────────
+  const scan = scanForDangerousSecret(rawKey)
+  if (scan.isDangerous) {
+    return { ok: false, vaultId, error: scan.warning ?? `Refused to store value that looks like a ${scan.label}` }
+  }
+
+  // ── Format validation: reject clearly wrong keys (wrong provider, wrong mode) ──
+  const formatCheck = validateIntegrationKeyFormat(vaultId, rawKey)
+  if ('error' in formatCheck) {
+    return { ok: false, vaultId, error: formatCheck.error, isFormatError: true }
+  }
+
+  // ── Live verification: ask the provider ───────────────────────────────────
+  // `skipVerification` exists for restore/migration paths that are re-filing a
+  // credential already known good. It is NOT a connect-time option.
+  const verification = options.skipVerification
+    ? { status: 'unchecked' as VerificationStatus, detail: 'Verification skipped (internal re-file).' }
+    : await verifyIntegrationKey(vaultId, rawKey)
+
+  if (blocksStorage(verification)) {
+    return { ok: false, vaultId, error: verification.detail, isVerificationError: true }
+  }
+
+  return {
+    ok: true,
+    vaultId,
+    verification,
+    ...('warning' in formatCheck && formatCheck.warning ? { formatWarning: formatCheck.warning } : {}),
+  }
+}
+
+/**
+ * Store or update an integration API key for a project.
+ * The raw key is encrypted; only the masked version is persisted in plaintext.
+ *
+ * Three gates, all of which run before anything touches the DB
+ * (checkIntegrationKey): the dangerous-secret scan, format validation, and
+ * LIVE VERIFICATION, the provider being asked whether the key works.
  *
  * Gate 3 is the one that was missing. Gates 1 and 2 cannot tell a real
  * `sk_test_…` from a fabricated one with the same prefix, so a made-up
@@ -196,32 +261,16 @@ export async function storeIntegrationKey(
   rawKey: string,
   options: { skipVerification?: boolean } = {},
 ): Promise<KeyVaultStatus & { formatWarning?: string }> {
-  // One row per credential: a key offered under an env-var name is stored
-  // under the vault id every reader looks up, never beside it.
-  const vaultId = canonicalVaultId(integrationId)
-
-  // ── Secret scan: block dangerous values before they touch the DB ──────────
-  const scan = scanForDangerousSecret(rawKey)
-  if (scan.isDangerous) {
-    throw new Error(scan.warning ?? `Refused to store value that looks like a ${scan.label}`)
+  const check = await checkIntegrationKey(integrationId, rawKey, options)
+  if (check.ok === false) {
+    // This tsconfig does not narrow on a boolean discriminant.
+    const refused = check as Extract<IntegrationKeyCheck, { ok: false }>
+    throw Object.assign(new Error(refused.error), {
+      ...(refused.isFormatError ? { isFormatError: true } : {}),
+      ...(refused.isVerificationError ? { isVerificationError: true } : {}),
+    })
   }
-
-  // ── Format validation: reject clearly wrong keys (wrong provider, wrong mode) ──
-  const formatCheck = validateIntegrationKeyFormat(vaultId, rawKey)
-  if ('error' in formatCheck) {
-    throw Object.assign(new Error(formatCheck.error), { isFormatError: true })
-  }
-
-  // ── Live verification: ask the provider ───────────────────────────────────
-  // `skipVerification` exists for restore/migration paths that are re-filing a
-  // credential already known good. It is NOT a connect-time option.
-  const verification = options.skipVerification
-    ? { status: 'unchecked' as VerificationStatus, detail: 'Verification skipped (internal re-file).' }
-    : await verifyIntegrationKey(vaultId, rawKey)
-
-  if (blocksStorage(verification)) {
-    throw Object.assign(new Error(verification.detail), { isVerificationError: true })
-  }
+  const { vaultId, verification } = check as Extract<IntegrationKeyCheck, { ok: true }>
 
   const encryptedKey = encrypt(rawKey)
   const maskedKey = maskApiKey(rawKey)
@@ -255,8 +304,9 @@ export async function storeIntegrationKey(
   }
 
   // Surface test-mode warning to callers (e.g. the API route returns it to the UI)
-  if ('warning' in formatCheck && formatCheck.warning) {
-    result.formatWarning = formatCheck.warning
+  const { formatWarning } = check as Extract<IntegrationKeyCheck, { ok: true }>
+  if (formatWarning) {
+    result.formatWarning = formatWarning
   }
 
   return result
