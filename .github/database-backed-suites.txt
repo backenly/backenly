@@ -60,6 +60,13 @@ tests/integration/function-selfheal-consent.spec.ts
 tests/integration/function-egress-guard.spec.ts
 tests/integration/function-row-events-data-plane.spec.ts
 
+# Every route a client calls a function by answers with the real status: a run
+# the plan refused is 402 PLAN_LIMIT_EXCEEDED on /fn, /functions and
+# /functions/invoke, and a run that completed answers with the handler's own
+# status (401, 503, 204) on all three, with no Backenly error code added to the
+# function's answer (#604). The real runtime, Next routes and function rows.
+tests/integration/function-routes-answer-real-status.spec.ts
+
 # An on_update function deployed with columns runs only when an update changed
 # one of them (an unknown old row runs it), columns is refused off on_update
 # and for a column the table lacks, and a redeploy without columns is restored
