@@ -19,6 +19,7 @@
 import crypto from 'crypto'
 import { prisma } from '@/lib/db'
 import { recordFunctionRun, rowLastError } from '@/lib/services/ai-functions/run-records'
+import { previousCodeNote } from '@/lib/services/ai-functions/previous-code'
 
 import { chat } from '@/lib/ai/llm/chat'
 export interface GeneratedFunction {
@@ -569,32 +570,38 @@ export async function executeGenerateFunction(
     const functionId = existing ? existing.id : crypto.randomUUID()
     const rowError = await rowLastError(projectId, functionId, storedError, 'SMOKE_TEST_FAILED: ')
     // Only the save is a governed change: the model and the smoke test ran before it.
-    const { governedChange } = await import('@/lib/changes/ledger')
-    const fn = await governedChange(projectId, `${existing ? 'Regenerate' : 'Create'} function ${existing?.name ?? functionName}`, () => existing
-      ? prisma.aiFunction.update({
-          where: { id: existing.id },
-          data: {
-            description,
-            generatedCode: code,
-            triggerType: 'manual',
-            triggerTable: `${method} ${endpoint}`,
-            status: storedStatus,
-            lastError: rowError,
-          },
-        })
-      : prisma.aiFunction.create({
-          data: {
-            id: functionId,
-            projectId,
-            name: functionName,
-            description,
-            generatedCode: code,
-            triggerType: 'manual',
-            triggerTable: `${method} ${endpoint}`,
-            status: storedStatus,
-            lastError: rowError,
-          },
-        }))
+    const { governedChange, currentChange } = await import('@/lib/changes/ledger')
+    // The change this save is recorded as: the history keeps the code it replaced.
+    let recordedAs = null as { id: string; seq: number } | null
+    const fn = await governedChange(projectId, `${existing ? 'Regenerate' : 'Create'} function ${existing?.name ?? functionName}`, () => {
+      const open = currentChange(projectId)
+      if (open) recordedAs = { id: open.id, seq: open.seq }
+      return existing
+        ? prisma.aiFunction.update({
+            where: { id: existing.id },
+            data: {
+              description,
+              generatedCode: code,
+              triggerType: 'manual',
+              triggerTable: `${method} ${endpoint}`,
+              status: storedStatus,
+              lastError: rowError,
+            },
+          })
+        : prisma.aiFunction.create({
+            data: {
+              id: functionId,
+              projectId,
+              name: functionName,
+              description,
+              generatedCode: code,
+              triggerType: 'manual',
+              triggerTable: `${method} ${endpoint}`,
+              status: storedStatus,
+              lastError: rowError,
+            },
+          })
+    })
 
     // The creation checks are runs of this function: record them where its
     // other runs are, so nothing it did at creation is invisible.
@@ -671,7 +678,7 @@ export async function executeGenerateFunction(
           : ''
 
     const message = (existing
-      ? `Replaced the code of ${method} ${endpoint}; the previous code is not kept. `
+      ? `Replaced the code of ${method} ${endpoint}${previousCodeNote(existing.generatedCode === code, recordedAs)}. `
       : `Generated ${method} ${endpoint} — custom function ready. `) +
       `Code stored in database.${verificationNote}${renameNote}`
 

@@ -178,7 +178,7 @@ export const FAQ = [
   },
   {
     q: 'Can I undo what my agent did?',
-    a: 'Yes. Every change, whether your agent, Backenly or you made it, is one entry in the project’s History, which covers the schema, auth, storage, functions, webhooks, environment variables, keys and integrations. Restore one change, or everything back to a point; each restore is checked before it runs and verified after. Data your app wrote is never rewound, a restore that would affect it waits for your approval, and a secret or a revoked key never comes back. An agent can ask for a restore, but only a person approves it.',
+    a: 'Yes. Every change, whether your agent, Backenly or you made it, is one entry in the project’s History, which covers the schema, auth, storage, functions, webhooks, environment variables, keys, integrations and allowed origins. Restore one change, or everything back to a point; each restore is checked before it runs and verified after. Data your app wrote is never rewound, a restore that would affect it waits for your approval, and a secret or a revoked key never comes back. An agent can ask for a restore, but only a person approves it.',
   },
   {
     q: 'Can I give an agent read-only access?',

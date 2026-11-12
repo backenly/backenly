@@ -4,16 +4,23 @@ import { z } from 'zod'
  * V1 Public API validation schemas
  */
 
-// Auth schemas
+// End-user auth, in the words an app shows its users. Both runtimes parse with
+// these (app/api/v1/[projectId]/auth/*, server/routes/auth.ts), so the same body
+// is refused the same way by either.
+const email = z.string({ required_error: 'Email is required.' }).email('Email must be a valid email address.')
+
 export const signUpSchema = z.object({
-  email: z.string().email(),
-  password: z.string().min(8).max(100),
-  name: z.string().min(1).max(100).optional(),
+  email,
+  password: z
+    .string({ required_error: 'Password is required.' })
+    .min(8, 'Password must be at least 8 characters.')
+    .max(100, 'Password must be at most 100 characters.'),
+  name: z.string().min(1, 'Name cannot be empty.').max(100, 'Name must be at most 100 characters.').optional(),
 })
 
 export const signInSchema = z.object({
-  email: z.string().email(),
-  password: z.string().min(1),
+  email,
+  password: z.string({ required_error: 'Password is required.' }).min(1, 'Password is required.'),
 })
 
 export const refreshTokenSchema = z.object({
@@ -39,6 +46,34 @@ export const querySchema = z.object({
   cursor: z.string().optional(),
   cursorColumn: z.string().optional(),
 })
+
+/**
+ * Every field a database query request may carry, on either server (this
+ * route and the runtime's server/routes/database.ts). The two implement
+ * different subsets, so a field one of them ignores is still part of the API.
+ */
+export const QUERY_FIELDS = ['table', 'select', 'where', 'orderBy', 'limit', 'offset', 'page', 'cursor', 'cursorColumn', 'include'] as const
+
+/**
+ * The fields of a query request that are not part of the query API at all.
+ *
+ * Unknown fields used to be dropped without a word, and a dropped filter is a
+ * query with no filter: `{ "wehre": { … } }` returned every row the caller can
+ * see (production, 2026-11-09). A typo in app code became a data leak instead
+ * of an error, so an unknown field is refused, by name.
+ */
+export function unknownQueryFields(body: unknown): string[] {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return []
+  const known = new Set<string>(QUERY_FIELDS)
+  return Object.keys(body).filter((k) => !known.has(k))
+}
+
+/** The refusal for unknown query fields, the same words on both servers. */
+export function unknownQueryFieldsMessage(fields: string[]): string {
+  const named = fields.slice(0, 5).map((f) => `"${f.slice(0, 40)}"`).join(', ')
+  return `Unknown field${fields.length === 1 ? '' : 's'} ${named} in the query, so nothing was read. ` +
+    `A query takes ${QUERY_FIELDS.slice(0, -1).join(', ')} and ${QUERY_FIELDS[QUERY_FIELDS.length - 1]}.`
+}
 
 export const insertSchema = z.object({
   table: z.string().min(1).max(100),

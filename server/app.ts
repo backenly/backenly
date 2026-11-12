@@ -16,6 +16,8 @@ import v2Routes from './routes/v2'
 import { nextProxy } from './routes/next-proxy'
 import { asyncRoute } from './lib/async-route'
 import { projectServingGate } from './lib/serving-gate'
+import { postgrestErrorShape } from './lib/v2-error-shape'
+import { v1ErrorShape } from './lib/v1-error-shape'
 import { recordRuntimeRequest, INTERNAL_TRAFFIC_HEADER, isInternalTraffic } from '@/lib/traffic/request-recorder'
 import { meterNodeResponse } from '@/lib/usage/egress'
 import { branchIdForRequest, refuseBranchKeyOffDataPlane } from '@/lib/branches/key-scope'
@@ -105,6 +107,19 @@ app.use(cors({
   maxAge: 86400,
 }))
 
+// ── v2 answers every error in PostgREST's shape ────────────────────────────────
+// Before every gate and the body parser, so a refusal from any of them (region,
+// serving, key placement, a body too large, a server error) reaches a v2 client
+// as { code, message, details, hint }, like PostgREST's own errors.
+// server/lib/v2-error-shape.ts.
+app.use('/api/v2', postgrestErrorShape)
+
+// ── v1 errors all carry a top-level code and message ─────────────────────────────
+// Added beside whatever an error body already says, never moved or removed: v1
+// is a contract apps read. Before the gates, so their refusals are covered too.
+// lib/api/v1/error-shape.ts.
+app.use('/api/v1', v1ErrorShape)
+
 // ── Traffic ─────────────────────────────────────────────────────────────────────
 // Every request to a project's runtime API is recorded once it finishes, first
 // in the chain so a request the gate refuses is recorded too: a paused or
@@ -129,6 +144,9 @@ app.use(['/api/v1/:projectId', '/api/v2/:projectId'], (req, res, next) => {
       statusCode: res.statusCode,
       durationMs: Date.now() - startedAt,
       internalHeader: req.get(INTERNAL_TRAFFIC_HEADER),
+      // Read to keep the console's own requests and keyless refusals out (isProjectTraffic).
+      headers: { get: (name: string) => req.get(name) ?? null },
+      search: new URL(req.originalUrl, 'http://runtime.internal').search,
     }
     // A forwarded request is not recorded here at all (Next already did), so
     // it needs no branch lookup either.
@@ -283,6 +301,19 @@ app.use((err: any, _req: express.Request, res: express.Response, next: express.N
   // as a 500, a client's malformed JSON read as the platform failing, in the
   // response and in every error count (found by fuzzing the data API).
   if (err?.expose === true && Number.isInteger(err.status) && err.status >= 400 && err.status < 500) {
+    // Over the limit says so and names it, as the web tier's own limit does
+    // (middleware.ts): "could not be read" is what a malformed body gets, and a
+    // caller could not tell a batch that was too big from one that was broken.
+    if (err.type === 'entity.too.large') {
+      const mb = Number(err.limit) / (1024 * 1024)
+      res.status(413).json({
+        error: Number.isFinite(mb) && mb > 0
+          ? `Request body is larger than the ${mb} MB this endpoint accepts.`
+          : 'Request body is larger than this endpoint accepts.',
+        code: 'PAYLOAD_TOO_LARGE',
+      })
+      return
+    }
     res.status(err.status).json({
       error: err.type === 'entity.parse.failed' ? 'The request body is not valid JSON.' : 'The request body could not be read.',
       code: 'BAD_REQUEST',

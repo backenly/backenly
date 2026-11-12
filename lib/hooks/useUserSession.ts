@@ -47,7 +47,7 @@ export function invalidateSessionCache(): void {
 
 /**
  * The current session, from memory when it is known, otherwise verified
- * against /api/auth/me. Deduplicates in-flight requests across hook consumers.
+ * against /api/auth/session. Deduplicates in-flight requests across hook consumers.
  */
 export async function checkSession(): Promise<CacheRecord> {
   if (sessionCache !== null) {
@@ -77,13 +77,17 @@ function fetchSession(): Promise<CacheRecord> {
         headers['Authorization'] = `Bearer ${token}`
       }
 
-      let res = await fetch('/api/auth/me', {
-        headers,
-        credentials: 'include',
-      })
+      // /api/auth/session answers a signed-out browser with { user: null }
+      // rather than a 401, so a signed-out page logs no failed request.
+      const ask = async (): Promise<{ user?: UserProfile | null; canRefresh?: boolean } | null> => {
+        const res = await fetch('/api/auth/session', { headers, credentials: 'include' })
+        return res.ok ? res.json() : null
+      }
+      let answer = await ask()
 
-      // If unauthorized, attempt to refresh token via cookie/rotation
-      if (res.status === 401) {
+      // No live session, but a refresh cookie: the access session expired, so
+      // rotate it and ask again. Without the cookie there is nothing to refresh.
+      if (answer && !answer.user && answer.canRefresh) {
         try {
           const refreshRes = await fetch('/api/auth/refresh-token', {
             method: 'POST',
@@ -96,23 +100,14 @@ function fetchSession(): Promise<CacheRecord> {
               localStorage.setItem('auth-token', refreshData.token)
               headers['Authorization'] = `Bearer ${refreshData.token}`
             }
-            res = await fetch('/api/auth/me', {
-              headers,
-              credentials: 'include',
-            })
+            answer = await ask()
           }
         } catch {
-          // Refresh failed, proceed with original response
+          // Refresh failed: signed out.
         }
       }
 
-      if (res.ok) {
-        const data = await res.json()
-        const user = data.user || data
-        sessionCache = { isLoggedIn: true, user }
-      } else {
-        sessionCache = { isLoggedIn: false, user: null }
-      }
+      sessionCache = answer?.user ? { isLoggedIn: true, user: answer.user } : { isLoggedIn: false, user: null }
     } catch {
       sessionCache = { isLoggedIn: false, user: null }
     } finally {

@@ -60,6 +60,8 @@ interface TableAlteration {
   addedColumns: ColumnDiff[]
   droppedColumns: string[]
   typeChanged: Array<{ column: string; from: string; to: string }>
+  /** Read from the branch's statements: a renamed column keeps its values. */
+  renamedColumns?: Array<{ from: string; to: string; readded: boolean }>
 }
 interface SchemaDiff {
   addedTables: Array<{ tableName: string; columns: unknown[] }>
@@ -363,6 +365,11 @@ export function BranchesPanel({ projectId }: { projectId: string }) {
                       <span className="font-mono">{a.table}</span>
                     </SectionLabel>
                     <div className="mt-1.5 flex flex-wrap gap-1.5">
+                      {(a.renamedColumns ?? []).map((r) => (
+                        <Tag key={`renamed:${r.from}`} tone="warn" mono>
+                          {r.from} renamed {r.to}
+                        </Tag>
+                      ))}
                       {a.addedColumns.map((c) => (
                         <Tag key={c.name} tone="good" mono>
                           + {c.name} {c.dataType}

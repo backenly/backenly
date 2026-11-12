@@ -11,18 +11,17 @@ Preview branches, on Backenly Cloud: a copy of the project's schema in an isolat
 - `connect`: another key for an active branch, with its preview endpoint. `serviceRole: true` issues a server-side key that bypasses row-level security on the branch only.
 - `diff`: the migrations applied on the branch, in order (exactly what a merge replays), what they changed, and any conflict with production.
 - `merge`: replay the branch's migrations onto production. **Waits for a human**: you get an approval id to poll with `check_approval`. Refused with `MERGE_CONFLICT` while production has changed a table the migrations touch. When it runs, the branch is closed and its schema dropped.
-
-Discarding a branch goes through `backend_chat` and waits for a human's approval.
+- `discard`: drop the branch, its rows and its keys at once. No approval and no undo; production is untouched.
 
 ## Building on a branch
 
 1. `branch` `create` with a name. Keep the `branchId` and the preview key it returns.
-2. `apply_migration { sql, branchId }`. Same grammar and checks as on production, applied to the branch only; production is untouched. Each statement that applies is logged for the merge. Foreign keys are recorded but not enforced on a branch.
+2. `apply_migration { sql, branchId }`. Same grammar and checks as on production, applied to the branch only; production is untouched. Each statement that applies is logged for the merge. A branch enforces foreign keys: it starts with every key production has, and a key a migration declares is created on it.
 3. Seed rows with `db_insert { table, row, branchId }`, or with the preview key over the data API.
 4. Test against the preview endpoint (below). Read the branch's schema with `read_backend_state { section: "schema", branchId }` and its rows with `db_query { table, branchId }`. `run_query` reads production only.
 5. `branch` `diff`, then `branch` `merge`, and tell your human it is waiting for their approval.
 
-On a project whose production is protected (the default for new Backenly Cloud projects), `apply_migration` without a `branchId`, and the schema tools inside `backend_chat`, are refused with `BRANCH_REQUIRED`: use the steps above.
+On a project whose production is protected (the default for new Backenly Cloud projects), `apply_migration` without a `branchId` is refused with `BRANCH_REQUIRED`: use the steps above. `backend_chat` takes them itself: it builds the schema on a preview branch, saves what needs the new tables on production (their APIs, row security, realtime, seed rows) for after the merge, and returns the one merge request in `approval`. Once `check_approval` says it is executed, send `backend_chat { "message": "continue" }` to run what was saved.
 
 ## The preview endpoint
 

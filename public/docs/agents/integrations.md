@@ -2,7 +2,7 @@
 
 Index: https://backenly.com/llms.txt
 
-Third-party providers a project's functions call, with the keys kept server side. Five have a dashboard card and a topic of their own: [stripe](https://backenly.com/docs/agents/stripe.md), [resend](https://backenly.com/docs/agents/resend.md), [openai](https://backenly.com/docs/agents/openai.md), [anthropic](https://backenly.com/docs/agents/anthropic.md) and [posthog](https://backenly.com/docs/agents/posthog.md). The runtime also covers SendGrid, Twilio, OneSignal, Replicate, Runway and Stability.
+Third-party providers a project's functions call, with the keys kept server side. Each has a card on the Integrations page, where a person can paste its key. Five have a topic of their own: [stripe](https://backenly.com/docs/agents/stripe.md), [resend](https://backenly.com/docs/agents/resend.md), [openai](https://backenly.com/docs/agents/openai.md), [anthropic](https://backenly.com/docs/agents/anthropic.md) and [posthog](https://backenly.com/docs/agents/posthog.md). The others are SendGrid, Twilio, OneSignal, Replicate, Runway and Stability.
 
 ## Actions
 
@@ -14,7 +14,7 @@ Call as `integrations { action: "<action>", … }`.
 | `list` | connected providers, masked keys and verification state | nothing | yes | no |
 | `capabilities` | the exact ctx.integrations methods each provider gives a function, and for Stripe its receiver URL and signing-secret state | nothing | yes | no |
 | `verify` | ask the provider again whether the stored key works | `integrationId` | no | no |
-| `connect` | store a provider key (Stripe also takes webhookSecret, OneSignal also takes appId) and wire the first functions, which Backenly's model writes | `integrationId` | no | no |
+| `connect` | store a provider key (Stripe also takes webhookSecret, OneSignal also takes appId, Resend/SendGrid also takes fromEmail) and wire the first functions, which Backenly's model writes | `integrationId` | no | no |
 | `disconnect` | remove a provider key | `integrationId` | no | waits for a human |
 | `send_push` | a push notification through the connected OneSignal app | `message` | no | no |
 <!-- end generated -->

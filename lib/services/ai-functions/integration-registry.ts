@@ -124,6 +124,7 @@ export const INTEGRATION_PROVIDERS: Record<string, ProviderSpec> = {
     category: 'email',
     connectedNames: ['email', 'resend', 'sendgrid'],
     keyStoreIds: ['resend', 'sendgrid'],
+    auxKeyStoreId: 'email_from',
     rich: true,
     genericRequest: false,
     methods: [

@@ -7,7 +7,7 @@ import {
   Rows, Compass, Map as MapIcon, Eye, EyeOff, Target
 } from 'lucide-react'
 import {
-  getTables, getStructure, getRelationships,
+  getTables, getSchemaStructure, getRelationships,
   type TableInfo, type ColumnInfo, type DatabaseType
 } from '@/lib/api/database'
 import { EmptyState, Spinner } from '@/components/inspector/kit'
@@ -673,8 +673,16 @@ export function SchemaDiagram({
       const dbType = databaseType || 'postgresql'
       const targetSchema = activeSchema || 'public'
 
-      // Live fetch
-      const fetchedTables = await getTables(dbType, targetSchema, { projectId: projectId || undefined })
+      // Three reads, side by side, whatever the number of tables: the list,
+      // every table's columns, and every relationship. Asking per table made
+      // two requests per table, and the map took seconds to appear.
+      const scope = { projectId: projectId || undefined }
+      const [fetchedTables, structure, rels] = await Promise.all([
+        getTables(dbType, targetSchema, scope),
+        getSchemaStructure(dbType, scope).catch(() => ({} as Record<string, ColumnInfo[]>)),
+        // Ignore relationship query errors if schema doesn't have FKs
+        getRelationships(targetSchema, undefined, scope).catch(() => []),
+      ])
       if (!fetchedTables || fetchedTables.length === 0) {
         setTables([])
         setColumnsMap(new Map())
@@ -685,41 +693,25 @@ export function SchemaDiagram({
 
       setTables(fetchedTables)
 
-      // Concurrently fetch columns & relationships
       const cMap = new Map<string, ColumnInfo[]>()
+      for (const t of fetchedTables) cMap.set(t.name, structure[t.name] ?? [])
+
       const allRels: GraphRelationship[] = []
-
-      await Promise.all(
-        fetchedTables.map(async (t) => {
-          try {
-            const cols = await getStructure(dbType, t.name, targetSchema, { projectId: projectId || undefined })
-            cMap.set(t.name, cols || [])
-          } catch {
-            cMap.set(t.name, [])
-          }
-
-          try {
-            const rels = await getRelationships(targetSchema, t.name, { projectId: projectId || undefined })
-            if (Array.isArray(rels)) {
-              rels.forEach((r, idx) => {
-                if (r?.from?.table && r?.to?.table) {
-                  // r.from is referenced PK table (parent), r.to is referencing FK table (child)
-                  allRels.push({
-                    id: `${r.from.table}_${r.from.column}_to_${r.to.table}_${r.to.column}_${idx}`,
-                    sourceTable: r.to.table,
-                    sourceColumn: r.to.column,
-                    targetTable: r.from.table,
-                    targetColumn: r.from.column,
-                    constraintName: r.name,
-                  })
-                }
-              })
-            }
-          } catch {
-            // Ignore relationship query errors if schema doesn't have FKs
+      if (Array.isArray(rels)) {
+        rels.forEach((r, idx) => {
+          if (r?.from?.table && r?.to?.table) {
+            // r.from is referenced PK table (parent), r.to is referencing FK table (child)
+            allRels.push({
+              id: `${r.from.table}_${r.from.column}_to_${r.to.table}_${r.to.column}_${idx}`,
+              sourceTable: r.to.table,
+              sourceColumn: r.to.column,
+              targetTable: r.from.table,
+              targetColumn: r.from.column,
+              constraintName: r.name,
+            })
           }
         })
-      )
+      }
 
       setColumnsMap(cMap)
       setRelationships(allRels)

@@ -272,11 +272,18 @@ const ROLLBACK_PREFIX = 'ROLLBACK_'
 // marker, rendered as if it were a guardrail action, saying nothing about what
 // or why. The audit rows still exist for the breaker and precision analysis —
 // they just stop pretending to be news.
+//
+// AUTONOMY_INVESTIGATION too: the row is the investigator's own bookkeeping
+// (lib/autonomy/escalation-diagnosis.ts counts it against the daily cap). What
+// it found is written on the finding it looked into and shown there, in the
+// Review Queue, the dashboard and the agent's briefing. In the feed it printed
+// as the bare "autonomy investigation" (production QA, 2026-11-09).
 const INTERNAL_ONLY_ACTIONS = [
   'AUTONOMY_TICK',
   'AUTONOMY_SCAN_CONSUMED',
   'AUTONOMY_LIVE_RUN',
   'HEALTH_FIX_DEFERRED',
+  'AUTONOMY_INVESTIGATION',
 ]
 
 function classify(action: string): ActivityItem['kind'] {
@@ -340,11 +347,17 @@ function humanize(action: string, details: string | null): string {
       // it. This row asserted "verified & snapshotted" on every applied fix,
       // including the ones whose type no probe can re-check — the ledger was
       // vouching for work nothing had looked at.
+      //
+      // And only claim a snapshot when one was kept: the approve route records
+      // its id on this row, and a fix that takes none (an index, say) records
+      // null. Production QA (2026-11-09) read "snapshot captured" beside an
+      // approve response that said snapshotId: null.
+      const snapshot = typeof d.snapshotId === 'string' && d.snapshotId.length > 0
       const suffix = isVerifiedFix(d.verification)
-        ? ' — re-checked and confirmed, snapshot captured'
+        ? ` — re-checked and confirmed${snapshot ? ', snapshot captured' : ''}`
         : isVerificationError(d.verification)
           ? ' — applied, but the check that would confirm it could not run'
-          : ' — applied and snapshotted (not independently re-checked)'
+          : ` — applied${snapshot ? ' and snapshotted' : ''} (not independently re-checked)`
       return what
         ? `Applied your approved fix: ${what}${suffix}`
         : `Applied your approved fix${suffix}`

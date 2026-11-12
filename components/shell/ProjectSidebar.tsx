@@ -124,7 +124,10 @@ function useLiveCounts(projectId: string): LiveCounts {
         const next: LiveCounts = {}
         if (fnRes.ok) {
           const j = await fnRes.json()
-          next.functions = Array.isArray(j.functions) ? j.functions.length : undefined
+          // The project's own functions, not the endpoints Backenly generated for its tables.
+          next.functions = Array.isArray(j.functions)
+            ? j.functions.filter((fn: { generated?: boolean }) => !fn.generated).length
+            : undefined
         }
         if (!cancelled) setCounts(next)
       } catch {

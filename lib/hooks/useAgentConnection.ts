@@ -30,10 +30,25 @@ export type AgentConnectionStatus = 'loading' | 'connected' | 'disconnected'
 
 export interface AgentConnectionState {
   status: AgentConnectionStatus
+  /**
+   * It called recently, as the server judged when it answered
+   * (lib/mcp/agent-connection.ts ACTIVE_WITHIN_MS). Connected and not active is
+   * idle: set up, so nothing asks to connect it again, but no green dot.
+   */
+  active: boolean
   /** ISO time the agent last reached Backenly. Null unless connected. */
   lastSeenAt: string | null
   /** The key's label or the OAuth client's name, when there is one. */
   client: string | null
+}
+
+/** "just now", "5 minutes ago", "6 days ago": how long since the agent's last call. */
+export function lastCallAgo(iso: string, now: number = Date.now()): string {
+  const minutes = Math.floor((now - new Date(iso).getTime()) / 60_000)
+  if (minutes < 1) return 'just now'
+  const [n, unit]: [number, string] =
+    minutes < 60 ? [minutes, 'minute'] : minutes < 1440 ? [Math.floor(minutes / 60), 'hour'] : [Math.floor(minutes / 1440), 'day']
+  return `${n} ${unit}${n === 1 ? '' : 's'} ago`
 }
 
 export interface UseAgentConnectionResult extends AgentConnectionState {
@@ -42,8 +57,8 @@ export interface UseAgentConnectionResult extends AgentConnectionState {
   needsConnect: boolean
 }
 
-const LOADING: AgentConnectionState = { status: 'loading', lastSeenAt: null, client: null }
-const DISCONNECTED: AgentConnectionState = { status: 'disconnected', lastSeenAt: null, client: null }
+const LOADING: AgentConnectionState = { status: 'loading', active: false, lastSeenAt: null, client: null }
+const DISCONNECTED: AgentConnectionState = { status: 'disconnected', active: false, lastSeenAt: null, client: null }
 
 /** An answer this recent is reused when another surface mounts. */
 const FRESH_MS = 30_000
@@ -65,14 +80,15 @@ function subscribe(listener: () => void): () => void {
 }
 
 function sameAnswer(a: AgentConnectionState, b: AgentConnectionState): boolean {
-  return a.status === b.status && a.lastSeenAt === b.lastSeenAt && a.client === b.client
+  return a.status === b.status && a.active === b.active && a.lastSeenAt === b.lastSeenAt && a.client === b.client
 }
 
 function parse(body: unknown): AgentConnectionState {
-  const b = body as { connected?: unknown; lastSeenAt?: unknown; client?: unknown } | null
+  const b = body as { connected?: unknown; active?: unknown; lastSeenAt?: unknown; client?: unknown } | null
   if (b?.connected !== true) return DISCONNECTED
   return {
     status: 'connected',
+    active: b.active === true,
     lastSeenAt: typeof b.lastSeenAt === 'string' ? b.lastSeenAt : null,
     client: typeof b.client === 'string' && b.client ? b.client : null,
   }

@@ -5,11 +5,11 @@
  * when a version was published.
  *
  * It lists what it would undo, newest first, before anything runs
- * (GET …/changes/restore-to). Running it undoes those changes one by one, each
- * an ordinary restore with its own proof and its own record
- * (lib/changes/range.ts), and stops at the first one that needs a person,
- * which opens in its own Restore dialog. What it restored before stopping
- * stays restored.
+ * (GET …/changes/restore-to), having proved all of it together: if one step
+ * would need a person or could not run, it says which and offers nothing to
+ * run, and that step opens in its own Restore dialog. Running it undoes the
+ * changes one by one, each an ordinary restore with its own proof and its own
+ * record (lib/changes/range.ts).
  */
 
 import { useEffect, useState } from 'react'
@@ -101,9 +101,11 @@ export function RestoreToDialog({
 
   const plan = phase.kind === 'ready' || phase.kind === 'running' ? phase.plan : null
   const nothing = plan && plan.steps.length === 0 && !plan.stop
+  // A step that would stop it was found before anything ran: nothing is offered to run.
+  const stopsFirst = !!plan?.stop?.beforeAnything
 
   const footer =
-    phase.kind === 'done' || phase.kind === 'error' || nothing || (plan && plan.steps.length === 0) ? (
+    phase.kind === 'done' || phase.kind === 'error' || nothing || stopsFirst || (plan && plan.steps.length === 0) ? (
       <KitButton variant={phase.kind === 'done' && !phase.outcome.stoppedAt ? 'primary' : 'secondary'} onClick={onClose}>
         {phase.kind === 'done' && !phase.outcome.stoppedAt ? 'Done' : 'Close'}
       </KitButton>
@@ -130,7 +132,9 @@ export function RestoreToDialog({
     >
       <span className="[overflow-wrap:anywhere]">
         {/* After a run, the title says where it stopped. */}
-        {restoredCount === null ? `Stops at #${stop.seq}: ` : restoredCount > 0 ? `${plural(restoredCount, 'change')} restored before it. ` : ''}
+        {restoredCount === null
+          ? stop.beforeAnything ? `Stops at #${stop.seq} before restoring anything: ` : `Stops at #${stop.seq}: `
+          : restoredCount > 0 ? `${plural(restoredCount, 'change')} restored before it. ` : stop.beforeAnything ? 'Nothing was restored. ' : ''}
         {stop.reason}
       </span>
     </KitNote>
@@ -195,8 +199,9 @@ export function RestoreToDialog({
           {plan.steps.length > 0 && (
             <>
               <p className="text-[13px] leading-[20px] text-zinc-300 [text-wrap:pretty]">
-                Undoes the {plural(plan.steps.length, 'change')} made since, newest first. Each one is checked before it runs, and
-                if one needs your approval, it stops there and asks.
+                {stopsFirst
+                  ? `Restoring to ${pointName} means undoing these ${plural(plan.steps.length, 'change')}, newest first. One of them can't be undone yet, so nothing will run until it is resolved.`
+                  : `Undoes the ${plural(plan.steps.length, 'change')} made since, newest first. All of them were checked together first, and each is checked again as it runs.`}
               </p>
               <StepList items={plan.steps.map((s) => ({ seq: s.seq, summary: s.summary, tail: s.action === 'reapply' ? 'Reapply' : undefined }))} />
             </>

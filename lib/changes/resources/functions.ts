@@ -40,6 +40,15 @@ export const functionsAdapter: ResourceAdapter = {
       where: { projectId },
       select: { id: true, name: true, description: true, generatedCode: true, codeOrigin: true, triggerType: true, triggerTable: true, status: true },
     })
+    // The columns a row-update function watches, kept beside it. Recorded only
+    // for a function that has some, so a function without them reads as it
+    // always has. Without the table (a release ahead of its migration), none.
+    const watched = new Map(
+      (await prisma.aiFunctionTriggerColumns
+        .findMany({ where: { function: { projectId } }, select: { functionId: true, columns: true } })
+        .catch(() => [] as Array<{ functionId: string; columns: string[] }>))
+        .map((w) => [w.functionId, w.columns]),
+    )
     const out: Record<string, ResourceItem> = {}
     for (const f of rows) {
       if (isGeneratedEndpoint(f)) continue
@@ -53,6 +62,7 @@ export const functionsAdapter: ResourceAdapter = {
           triggerType: f.triggerType,
           triggerTable: f.triggerTable,
           power: isFunctionSwitchedOff(f.status) ? 'off' : 'on',
+          ...(watched.get(f.id)?.length ? { columns: watched.get(f.id) } : {}),
         },
       }
     }
@@ -71,6 +81,7 @@ export const functionsAdapter: ResourceAdapter = {
     }
     const f = op.before.fields as {
       name: string; description: string; generatedCode: string; codeOrigin: string; triggerType: string; triggerTable: string | null; power: 'on' | 'off'
+      columns?: string[]
     }
     const data = {
       name: f.name, description: f.description, generatedCode: f.generatedCode, codeOrigin: f.codeOrigin,
@@ -81,5 +92,15 @@ export const functionsAdapter: ResourceAdapter = {
     const status = f.power === 'off' ? 'inactive' : existing && !isFunctionSwitchedOff(existing.status) ? existing.status : 'active'
     if (existing) await tx.aiFunction.update({ where: { id }, data: { ...data, status } })
     else await tx.aiFunction.create({ data: { id, projectId, ...data, status } })
+    // The columns it watched come back with it; none recorded means it ran on every update.
+    if (f.columns?.length) {
+      await tx.aiFunctionTriggerColumns.upsert({
+        where: { functionId: id },
+        create: { functionId: id, columns: f.columns },
+        update: { columns: f.columns },
+      })
+    } else {
+      await tx.aiFunctionTriggerColumns.deleteMany({ where: { functionId: id } })
+    }
   },
 }

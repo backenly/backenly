@@ -373,6 +373,77 @@ export class PostgresService {
   }
 
   /**
+   * Every table's columns in a schema, from one catalog query: what
+   * getTableStructure answers for one table, for all of them at once, keyed by
+   * table name. The schema diagram asked per table, and twice (columns and
+   * relationships), which was most of the 6 s it took to open with a handful
+   * of tables. A table missing here gets no pg_catalog fallback; callers that
+   * need one ask getTableStructure for it.
+   */
+  static async getSchemaStructure(projectId: string, schema: string): Promise<Map<string, ColumnInfo[]>> {
+    const db = await workspaceRawClient(projectId)
+    const rows = await db.$queryRaw<Array<{
+      table_name: string
+      column_name: string
+      data_type: string
+      is_nullable: string
+      column_default: string | null
+      is_primary: boolean
+      is_unique: boolean
+      is_indexed: boolean
+      is_foreign: boolean
+    }>>`
+      WITH keyed AS (
+        SELECT DISTINCT ku.table_name, ku.column_name, tc.constraint_type
+        FROM information_schema.table_constraints tc
+        JOIN information_schema.key_column_usage ku
+          ON tc.constraint_name = ku.constraint_name
+          AND tc.table_schema = ku.table_schema
+          AND tc.table_name = ku.table_name
+        WHERE tc.table_schema = ${schema}
+          AND tc.constraint_type IN ('PRIMARY KEY', 'UNIQUE', 'FOREIGN KEY')
+      ),
+      indexed AS (
+        SELECT DISTINCT t.relname AS table_name, a.attname AS column_name
+        FROM pg_index i
+        JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+        JOIN pg_class t ON t.oid = i.indrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE n.nspname = ${schema}
+      )
+      SELECT
+        c.table_name,
+        c.column_name,
+        c.data_type,
+        c.is_nullable,
+        c.column_default,
+        EXISTS (SELECT 1 FROM keyed k WHERE k.table_name = c.table_name AND k.column_name = c.column_name AND k.constraint_type = 'PRIMARY KEY') AS is_primary,
+        EXISTS (SELECT 1 FROM keyed k WHERE k.table_name = c.table_name AND k.column_name = c.column_name AND k.constraint_type = 'UNIQUE') AS is_unique,
+        EXISTS (SELECT 1 FROM indexed x WHERE x.table_name = c.table_name AND x.column_name = c.column_name) AS is_indexed,
+        EXISTS (SELECT 1 FROM keyed k WHERE k.table_name = c.table_name AND k.column_name = c.column_name AND k.constraint_type = 'FOREIGN KEY') AS is_foreign
+      FROM information_schema.columns c
+      WHERE c.table_schema = ${schema}
+      ORDER BY c.table_name, c.ordinal_position
+    `
+    const tables = new Map<string, ColumnInfo[]>()
+    for (const r of rows) {
+      const columns = tables.get(r.table_name) ?? []
+      columns.push({
+        name: r.column_name,
+        type: r.data_type,
+        nullable: r.is_nullable === 'YES',
+        primary: r.is_primary,
+        foreign: r.is_foreign,
+        unique: r.is_unique,
+        indexed: r.is_indexed,
+        default: r.column_default || undefined,
+      })
+      tables.set(r.table_name, columns)
+    }
+    return tables
+  }
+
+  /**
    * Get table indexes, from the database holding the project's data
    */
   static async getTableIndexes(projectId: string, schema: string, tableName: string): Promise<IndexInfo[]> {

@@ -8,10 +8,10 @@
  *
  * Contract:
  *   • create   — structural clone (LIKE … INCLUDING ALL: types, defaults,
- *                NOT NULL, indexes), with row security and sequences
- *                replicated; rows are copied only with includeData. FK
- *                constraints intentionally not cloned. Main's schema at this
- *                moment is kept as the branch's base.
+ *                NOT NULL, indexes), with row security, sequences and foreign
+ *                keys replicated; rows are copied only with includeData, all
+ *                from one snapshot of main. Main's schema at this moment is
+ *                kept as the branch's base.
  *   • diff     — the migrations applied on the branch, what they changed
  *                against the base, and any table main changed since.
  *   • merge    — replays the branch's migrations onto main through the
@@ -32,9 +32,12 @@ import { mapPgType } from '@/lib/import/supabase-map'
 import { computeSchemaDiff, validateBranchName, branchSchemaName, type SchemaDiff } from './diff'
 import { replicateRls, verifyRlsParity, type RlsCloneResult } from './rls-clone'
 import { isolateBranchSequences, verifySequenceIsolation } from './sequence-isolation'
+import { replicateForeignKeys, verifyForeignKeyParity, type ForeignKeyCloneResult } from './fk-clone'
 import { registerSchemaByName } from '@/lib/postgrest/registration'
+import { BranchCreateBusyError, withBranchCreateLock } from './create-lock'
 
-const MAX_ACTIVE_BRANCHES = 5
+/** How many branches a project may have active at once. */
+export const MAX_ACTIVE_BRANCHES = 5
 
 /**
  * A branch schema lives beside its project's own, in the project's database in
@@ -110,6 +113,18 @@ export async function createBranch(
   const nameError = validateBranchName(name)
   if (nameError) return { ok: false as const, error: nameError }
 
+  // One create at a time per project, so the limit is counted with no other
+  // create between the count and its row (lib/branches/create-lock.ts).
+  try {
+    return await withBranchCreateLock(projectId, () => cutBranch(projectId, userId, name, options))
+  } catch (err) {
+    if (err instanceof BranchCreateBusyError) return { ok: false as const, error: err.message }
+    throw err
+  }
+}
+
+/** createBranch, under the project's branch-creation lock. */
+async function cutBranch(projectId: string, userId: string, name: string, options: CreateBranchOptions) {
   const active = await prisma.workspaceBranch.count({ where: { projectId, status: 'active' } })
   if (active >= MAX_ACTIVE_BRANCHES) {
     return { ok: false as const, error: `Branch limit reached (${MAX_ACTIVE_BRANCHES} active) — merge or discard one first.` }
@@ -127,11 +142,15 @@ export async function createBranch(
   const includeData = options.includeData === true
   let rls: RlsCloneResult = { policiesCreated: 0, tablesEnabled: 0, tablesForced: 0, failures: [] }
   let sequencesIsolated = 0
+  let foreignKeys: ForeignKeyCloneResult = { created: 0, skipped: [] }
 
   const pool = await branchPool(projectId)
   const client = await pool.connect()
   try {
-    await client.query('BEGIN')
+    // One snapshot of main for every table. With foreign keys on the branch, a
+    // child copied after a write main committed mid-clone could name a parent
+    // copied before it, and the key would refuse the branch.
+    await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ')
     await client.query(`CREATE SCHEMA "${schemaName}"`)
     for (const t of main.tables) {
       await client.query(
@@ -177,6 +196,17 @@ export async function createBranch(
         )
       }
     }
+
+    // ── Foreign keys, after the rows ──────────────────────────────────────
+    //
+    // LIKE copies no foreign key, and without them a branch accepted rows
+    // production refuses: production QA watched an agent insert orders for a
+    // user that did not exist. Each key main has is created here, pointing at
+    // the branch's own tables, and checked against the rows just copied.
+    const copied = main.tables.map((t) => t.tableName)
+    foreignKeys = await replicateForeignKeys(client, mainSchema, schemaName, copied)
+    const keys = await verifyForeignKeyParity(client, mainSchema, schemaName, copied)
+    if (!keys.ok) throw new Error(keys.reason ?? 'foreign key parity check failed')
 
     // Belt and braces: assert against the live catalog that the branch is at
     // least as protected as main, rather than trusting the return values above.
@@ -231,6 +261,8 @@ export async function createBranch(
     policiesReplicated: rls.policiesCreated,
     tablesForced: rls.tablesForced,
     sequencesIsolated,
+    foreignKeysReplicated: foreignKeys.created,
+    foreignKeysSkipped: foreignKeys.skipped,
   })
   return {
     ok: true as const,
@@ -239,6 +271,9 @@ export async function createBranch(
     dataCopied: includeData,
     policiesReplicated: rls.policiesCreated,
     sequencesIsolated,
+    foreignKeysReplicated: foreignKeys.created,
+    // Keys into a table a branch does not copy, said rather than dropped quietly.
+    foreignKeysSkipped: foreignKeys.skipped,
   }
 }
 
@@ -316,10 +351,11 @@ export async function diffBranch(projectId: string, branchId: string): Promise<
 
   const mainChanged = touchedTables(computeSchemaDiff(base as any, main as any))
   const touched = new Set(tablesTouched(migrations))
+  const { withRenames } = await import('./renames')
   return {
     ok: true,
     branch: branch.name,
-    diff: computeSchemaDiff(base as any, br as any),
+    diff: withRenames(computeSchemaDiff(base as any, br as any), migrations, base as any, br as any),
     migrations,
     mainChanged,
     conflicts: mainChanged.filter((t) => touched.has(t)),
@@ -487,6 +523,7 @@ async function replayMerge(projectId: string, userId: string, branchId: string, 
     where: { id: branchId },
     data: { status: 'merged', mergedAt: new Date() },
   })
+  await endBranchKeys(branchId)
   // The branch's work now lives on main; its schema is dropped and its keys,
   // already refused as inactive, can never fall back to anything.
   if (branch) await dropBranchSchema(projectId, branch.schemaName).catch((e: any) =>
@@ -554,6 +591,7 @@ async function legacyAdditiveMerge(projectId: string, userId: string, branchId: 
       where: { id: branchId },
       data: review.length === 0 ? { status: 'merged', mergedAt: new Date() } : {},
     })
+    if (review.length === 0) await endBranchKeys(branchId)
   }
   await audit(projectId, userId, 'BRANCH_MERGED', {
     branch: d.branch, applied: applied.length, review: review.length,
@@ -576,8 +614,23 @@ export async function discardBranch(projectId: string, userId: string, branchId:
     where: { id: branch.id },
     data: { status: 'discarded', discardedAt: new Date() },
   })
+  await endBranchKeys(branch.id)
   await audit(projectId, userId, 'BRANCH_DISCARDED', { branch: branch.name })
   return { ok: true as const }
+}
+
+/**
+ * A closed branch's keys end with it. The runtime already refused them
+ * (BRANCH_INACTIVE), but each kept the 90-day expiry it was minted with, so a
+ * key that will never answer again was listed as live until next year.
+ */
+async function endBranchKeys(branchId: string): Promise<void> {
+  const now = new Date()
+  // history: a preview branch's key ends with its branch (lib/changes/resources/keys.ts)
+  await prisma.apiKey.updateMany({
+    where: { branchId, OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] },
+    data: { expiresAt: now },
+  })
 }
 
 export async function listBranches(projectId: string) {

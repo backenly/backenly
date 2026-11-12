@@ -15,12 +15,23 @@
  *
  * A key nobody has presented yet does not count. Minting one is the first half
  * of connecting; until an agent uses it, nothing is connected.
+ *
+ * Connected is not at work. MCP over HTTP holds no connection Backenly could
+ * watch, so a call is the only sign of an agent at work: `active` is a call
+ * within ACTIVE_WITHIN_MS, the one state a green "connected" may claim.
+ * Production QA (2026-11-09): "Agent connected", green, six days after the
+ * last call.
  */
 
 import { prisma } from '@/lib/db/prisma'
 
+/** How recent the last call must be for the agent to count as at work. */
+export const ACTIVE_WITHIN_MS = 60 * 60_000
+
 export interface AgentConnection {
   connected: boolean
+  /** It called within ACTIVE_WITHIN_MS. Connected and not active is idle. */
+  active: boolean
   /** When the agent last reached Backenly. Null when not connected. */
   lastSeenAt: Date | null
   /**
@@ -46,6 +57,11 @@ export async function agentConnectionFor(
     orderBy: { lastUsed: 'desc' },
     select: { lastUsed: true, mcpClientLabel: true },
   })
-  if (!latest) return { connected: false, lastSeenAt: null, client: null }
-  return { connected: true, lastSeenAt: latest.lastUsed, client: latest.mcpClientLabel || null }
+  if (!latest?.lastUsed) return { connected: false, active: false, lastSeenAt: null, client: null }
+  return {
+    connected: true,
+    active: now.getTime() - latest.lastUsed.getTime() < ACTIVE_WITHIN_MS,
+    lastSeenAt: latest.lastUsed,
+    client: latest.mcpClientLabel || null,
+  }
 }

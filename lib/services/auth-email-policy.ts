@@ -27,8 +27,13 @@ export interface AuthEmailPolicyView {
   appUrl: string | null
   requireEmailVerification: boolean
   magicLinksEnabled: boolean
-  /** What emails actually show, after falling back to the project's own name and URL. */
+  /** What emails actually show, after falling back to the project's own name. */
   effectiveAppName: string
+  /**
+   * Where reset and magic links send people: the App URL, or null. Never the
+   * project's API base (project.publicUrl), which is no page a person can use;
+   * with no App URL, reset links open the page Backenly hosts.
+   */
   effectiveAppUrl: string | null
 }
 
@@ -61,7 +66,7 @@ export const NO_SENDER_MESSAGE =
 export async function getAuthEmailPolicy(projectId: string): Promise<AuthEmailPolicyView | null> {
   const project = await prisma.project.findUnique({
     where: { id: projectId },
-    select: { name: true, publicUrl: true, authConfig: true },
+    select: { name: true, authConfig: true },
   })
   if (!project) return null
   const cfg = project.authConfig
@@ -71,7 +76,7 @@ export async function getAuthEmailPolicy(projectId: string): Promise<AuthEmailPo
     requireEmailVerification: cfg?.requireEmailVerification ?? false,
     magicLinksEnabled: cfg?.magicLinksEnabled ?? true,
     effectiveAppName: cfg?.appName || project.name,
-    effectiveAppUrl: linkableAppUrl(cfg?.appUrl) ?? linkableAppUrl(project.publicUrl),
+    effectiveAppUrl: linkableAppUrl(cfg?.appUrl),
   }
 }
 

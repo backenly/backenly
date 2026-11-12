@@ -21,7 +21,8 @@
  *        resume   { decisionId }
  *        undo     { decisionId }               lossless, or refused
  *        assess   {}                            look for changes now (reads
- *                                               and rehearses only)
+ *                                               and rehearses only); once
+ *                                               every 10 minutes per project
  *
  * For a project kept in another region, what runs against its tables (the
  * start of an approved change, a rehearsal again after its table moved, an
@@ -56,6 +57,11 @@ import {
 } from '@/lib/evolution-engine/engine'
 import { allPrimitives } from '@/lib/evolution-engine/primitive'
 import { readMemory, priorsFor, summarizeDecisions } from '@/lib/evolution-engine/memory'
+import { consume } from '@/lib/security/auth-rate-limit'
+import { throttleDecision } from '@/lib/security/rate-limit-decision'
+
+/** How often a person may ask Backenly to look for architecture changes, per project. */
+const ASSESS_EVERY_MS = 10 * 60_000
 
 export async function GET(request: NextRequest, _props: { params: Promise<{ id: string }> }) {
   return withProjectValidation<any>(request, async validated => {
@@ -136,6 +142,21 @@ export async function POST(request: NextRequest, _props: { params: Promise<{ id:
     }
 
     if (action === 'assess') {
+      // A look rehearses every proposal on a copy, some 700 statements each,
+      // so a person may ask for one every ten minutes per project; the
+      // scheduler looks every day besides.
+      const budget = await consume(`architecture-assess:${projectId}`, 1, ASSESS_EVERY_MS)
+      if (!budget.allowed && budget.outcome === 'store_unavailable') {
+        const unavailable = throttleDecision(budget)
+        return NextResponse.json({ error: unavailable.message, code: unavailable.code }, { status: unavailable.status, headers: unavailable.headers })
+      }
+      if (!budget.allowed) {
+        const minutes = Math.max(1, Math.ceil((budget.retryAfter ?? ASSESS_EVERY_MS / 1000) / 60))
+        return NextResponse.json(
+          { error: `Backenly looked for changes in the last 10 minutes. Ask again in ${minutes} ${minutes === 1 ? 'minute' : 'minutes'}.`, code: 'ASSESSED_RECENTLY' },
+          { status: 429, headers: { 'Retry-After': String(budget.retryAfter ?? ASSESS_EVERY_MS / 1000) } },
+        )
+      }
       const r = await proposeWhereTheTablesAre(projectId)
       return NextResponse.json({ ok: true, ...r })
     }
