@@ -175,6 +175,13 @@ export interface ExecutionResult {
    * and a caller that does not care can ignore it.
    */
   advisories?: string[]
+  /**
+   * What automatic row-level security has to tell whoever created a table: it
+   * starts closed, or it could not be protected. Also in `message`; kept apart
+   * so an action that created the table on the way to another (the dependency
+   * resolver's CREATE_TABLE before an ADD_COLUMN) says it in that one's result.
+   */
+  rlsNotice?: string
   /** ISO timestamp set when a live DB read-back confirmed the artifact exists */
   verifiedAt?: string
   /**
@@ -3347,6 +3354,10 @@ async function executeActionUnrecorded(
       'ENABLE_AUTH',       // creates `users`, the anchor every plan resolves against
     ])
 
+    // A table the resolver created on the way to the action asked for may have
+    // started closed; the caller hears that in the asked action's result.
+    const createdOnTheWay: string[] = []
+
     for (const act of finalActions) {
       // Phase 8: wrap each action with timeline tracking
       lastResult = await trackAction(
@@ -3356,6 +3367,9 @@ async function executeActionUnrecorded(
         () => executeSingleAction(act, projectId, apiKey),
         { retryCount },
       )
+      if (lastResult.success && lastResult.rlsNotice && act !== finalActions[finalActions.length - 1]) {
+        createdOnTheWay.push(lastResult.rlsNotice)
+      }
 
       // Phase 7: Regenerate TypeScript types after schema mutations (non-blocking)
       if (TYPEGEN_TRIGGER_ACTIONS.has(act.action) && lastResult.success) {
@@ -3458,6 +3472,9 @@ async function executeActionUnrecorded(
       _writeDecisionMemory(act, projectId).catch(() => {})
     }
 
+    if (createdOnTheWay.length > 0 && lastResult.success) {
+      return { ...lastResult, message: [lastResult.message, ...createdOnTheWay].join('\n\n') }
+    }
     return lastResult
   } catch (error: any) {
     console.error('[AI Executor] Error:', error)
@@ -4448,6 +4465,13 @@ async function executeCreateTable(
       }
     }
 
+    // Whether this call creates the table or finds it there: only a table it
+    // creates starts closed when no owner can be inferred (auto-RLS below).
+    const [{ existed: tableExisted }] = await db.$queryRawUnsafe<Array<{ existed: boolean }>>(
+      `SELECT to_regclass($1) IS NOT NULL AS existed`,
+      `"${postgresSchema}"."${tableName}"`,
+    )
+
     console.log(`📝 [AI Executor] Executing SQL:`, createTableSQL)
     await db.$executeRawUnsafe(createTableSQL)
 
@@ -4828,17 +4852,17 @@ async function executeCreateTable(
     // owner's rows when an owner can be inferred, closed to all but
     // service-role keys when not (lib/services/workspace-rls.ts). This runs
     // unconditionally so security never depends on the AI "remembering" to call
-    // SET_PERMISSION, and the caller is told when the table starts closed.
+    // SET_PERMISSION, and the caller is told when the table starts closed. A
+    // table that was already there (CREATE TABLE IF NOT EXISTS found it) may be
+    // serving an app, so it is never closed here.
     let rlsNotice: string | null = null
+    const { autoApplyRlsIfNeeded, rlsNotSetNotice } = await import('@/lib/services/workspace-rls')
     try {
-      const { autoApplyRlsIfNeeded } = await import('@/lib/services/workspace-rls')
-      rlsNotice = (await autoApplyRlsIfNeeded(projectId, tableName, safeColumns, {}, { closeWhenUndecidable: true })).notice
+      rlsNotice = (await autoApplyRlsIfNeeded(projectId, tableName, safeColumns, {}, { closeWhenUndecidable: !tableExisted })).notice
     } catch (rlsErr: any) {
       // Non-fatal — table is created; RLS can be applied manually via SET_PERMISSION
       console.warn(`[AI Executor] Auto-RLS failed (non-fatal):`, rlsErr?.message)
-      rlsNotice =
-        `Backenly could not set row-level security on "${tableName}" (${rlsErr?.message ?? rlsErr}). ` +
-        `Until it has a rule, its rows can be read with the publishable key and written by any signed-in user: set one with add_rls.`
+      if (!tableExisted) rlsNotice = rlsNotSetNotice(tableName, rlsErr?.message ?? String(rlsErr))
     }
 
     // ── Domain endpoint generation ────────────────────────────────────────────
@@ -4986,6 +5010,7 @@ async function executeCreateTable(
             `table gets: id (uuid primary key), "createdAt", "updatedAt" and "deleted_at" (a client DELETE sets it).`
           : `✅ Created table "${tableName}" with ${safeColumns.length + 3} columns (including id, createdAt, updatedAt)`) +
         (rlsNotice ? `\n\n${rlsNotice}` : ''),
+      ...(rlsNotice ? { rlsNotice } : {}),
       data: {
         tableName,
         schema: postgresSchema,
@@ -5177,13 +5202,11 @@ async function executeCreateJunctionTable(
     // the rows of an owned parent's, or closed until someone says the rule.
     let rlsNotice: string | null = null
     if (!existed) {
+      const { autoApplyRlsIfNeeded, rlsNotSetNotice } = await import('@/lib/services/workspace-rls')
       try {
-        const { autoApplyRlsIfNeeded } = await import('@/lib/services/workspace-rls')
         rlsNotice = (await autoApplyRlsIfNeeded(projectId, finalName, [], {}, { closeWhenUndecidable: true })).notice
       } catch (rlsErr: any) {
-        rlsNotice =
-          `Backenly could not set row-level security on "${finalName}" (${rlsErr?.message ?? rlsErr}). ` +
-          `Until it has a rule, its rows can be read with the publishable key and written by any signed-in user: set one with add_rls.`
+        rlsNotice = rlsNotSetNotice(finalName, rlsErr?.message ?? String(rlsErr))
       }
     }
 
@@ -5206,6 +5229,7 @@ async function executeCreateJunctionTable(
       message:
         `✅ Created junction table **${finalName}** linking **${tableA}** ↔ **${tableB}**.\n\nColumns: id, ${singularA}Id (FK→${first}), ${singularB}Id (FK→${second})${extraColNames}, createdAt` +
         (rlsNotice ? `\n\n${rlsNotice}` : ''),
+      ...(rlsNotice ? { rlsNotice } : {}),
       data: { junctionName: finalName, tableA, tableB },
     }
   } catch (error: any) {
@@ -5876,12 +5900,39 @@ export async function GET(req: NextRequest, { params }: { params: { projectId: s
 
 /**
  * REAL BACKEND CALL: Add Column (via raw SQL)
+ *
+ * Outside a branch, a table missing from the database is created first
+ * (addColumns). That table is protected as create_table protects a new one
+ * (autoApplyRlsIfNeeded), once its columns are there: the owner's rows when
+ * they show an owner, closed to all but service-role keys when not. It was
+ * left without row-level security, readable with the publishable key and
+ * writable by any signed-in end user.
  */
 async function executeAddColumn(
   params: any,
   projectId: string,
   apiKey?: string,
   target: SchemaTarget = {},
+): Promise<ExecutionResult> {
+  const created: { table?: string } = {}
+  const result = await addColumns(params, projectId, apiKey, target, created)
+  if (!created.table) return result
+  const { autoApplyRlsIfNeeded, rlsNotSetNotice } = await import('@/lib/services/workspace-rls')
+  let notice: string | null
+  try {
+    notice = (await autoApplyRlsIfNeeded(projectId, created.table, [], {}, { closeWhenUndecidable: true })).notice
+  } catch (rlsErr: any) {
+    notice = rlsNotSetNotice(created.table, rlsErr?.message ?? String(rlsErr))
+  }
+  return notice ? { ...result, message: `${result.message}\n\n${notice}`, rlsNotice: notice } : result
+}
+
+async function addColumns(
+  params: any,
+  projectId: string,
+  apiKey: string | undefined,
+  target: SchemaTarget,
+  created: { table?: string },
 ): Promise<ExecutionResult> {
   const db = await projectDb(projectId)
   const branchMode = !!target.targetSchema
@@ -5935,6 +5986,7 @@ async function executeAddColumn(
            "updatedAt" TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
          )`
       )
+      created.table = tableName
       // Register in Prisma metadata
       const existsMeta = await prisma.table.findFirst({ where: { projectId, name: tableName } })
       if (!existsMeta) {

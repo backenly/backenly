@@ -1985,3 +1985,16 @@ tests/integration/usage-storage-measured-on-read.spec.ts
 # auto-wired functions against ctx.integrations.email.send(). A real project,
 # the real connect action and the real key store (#609).
 tests/integration/email-integration-wiring-sender.spec.ts
+
+# A table Backenly creates whose owner it cannot infer starts closed to all but
+# service-role keys, opens once a foreign key shows the owner unless a rule was
+# chosen since, and a table adopted from the database is left as it is. Read
+# and written as the REST API's own roles with production's grants.
+__tests__/database/new-tables-closed-by-default.test.ts
+
+# The same, on every door a table comes through: apply_migration on production
+# and on a preview branch, the merge, backend_chat building on a branch,
+# generate_api and add_column creating a missing table, a junction table and a
+# restore from History; a later migration showing the owner opens it as one
+# verified change. Real schemas, executor, MCP route, branch engine and ledger.
+tests/integration/new-tables-closed-on-every-path.spec.ts

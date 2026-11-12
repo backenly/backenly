@@ -1338,10 +1338,10 @@ async function installCustomPolicySet(
   projectId: string,
   tableName: string,
   schemaName: string,
-  plan: Extract<CustomPolicyPlan, { kind: 'ok' }>,
+  requested: Extract<CustomPolicyPlan, { kind: 'ok' }>,
   role: string,
 ): Promise<{ success: boolean; message: string }> {
-  const targeted = plan.rules.map((r) => r.command)
+  let plan = requested
   const preState = await readRlsState(projectId, schemaName, tableName)
   const before = await readLivePolicies(projectId, schemaName, tableName)
 
@@ -1351,20 +1351,35 @@ async function installCustomPolicySet(
   // while adding a narrower per-command one WIDENS access instead of narrowing
   // it. Refusing is the only honest outcome: the caller has to say what the
   // whole set should be.
+  //
+  // Except on a table Backenly closed because it could not tell who owns a row
+  // (autoApplyRlsIfNeeded): its one FOR ALL rule, admin_only, is nobody's
+  // choice, and naming some commands is the first rule anyone states. Those
+  // commands get theirs; the others keep what the closed table gave them,
+  // service-role keys only, now as a rule of their own.
   if (plan.scoped) {
     const blanket = before.filter((p) => p.policyName.startsWith('backenly_') && commandsCoveredBy(p).length === 4)
-    if (blanket.length) {
+    if (blanket.length && (await stillClosedByDefault(projectId, schemaName, tableName)) &&
+        (await closedByDefaultTables(projectId, schemaName)).has(tableName)) {
+      const named = plan.rules.map((r) => r.command)
+      plan = {
+        ...plan,
+        scoped: false,
+        rules: [...plan.rules, ...RLS_COMMANDS.filter((c) => !named.includes(c)).map(serviceRoleOnlyRule)],
+      }
+    } else if (blanket.length) {
       return {
         success: false,
         message:
           `No policy was changed on "${tableName}". It carries a FOR ALL policy ` +
           `(${blanket.map((p) => p.policyName).join(', ')}) that already governs ` +
-          `${targeted.join('/').toUpperCase()}. Adding a narrower policy alongside it would WIDEN access, ` +
+          `${plan.rules.map((r) => r.command).join('/').toUpperCase()}. Adding a narrower policy alongside it would WIDEN access, ` +
           `not narrow it, because PostgreSQL combines permissive policies with OR. ` +
           `Restate all four commands so the whole set is replaced at once.`,
       }
     }
   }
+  const targeted = plan.rules.map((r) => r.command)
 
   const preserved = plan.scoped
     ? before.filter(
@@ -1439,11 +1454,13 @@ async function installCustomPolicySet(
       }
       const changed = targeted.includes(command)
       const rule = plan.rules.find((r) => r.command === command)
-      const shown = rule
-        ? [rule.using ? `may target: ${rule.using}` : null, rule.check ? `may write: ${rule.check}` : null]
-            .filter(Boolean)
-            .join(' · ')
-        : describeLiveRow(row)
+      const shown = rule && isServiceRoleOnly(rule)
+        ? 'service-role keys only'
+        : rule
+          ? [rule.using ? `may target: ${rule.using}` : null, rule.check ? `may write: ${rule.check}` : null]
+              .filter(Boolean)
+              .join(' · ')
+          : describeLiveRow(row)
       lines.push(
         `  • ${command.toUpperCase()} — ${changed ? 'CHANGED' : 'unchanged'} (${row.policyName}): ${shown}`,
       )
@@ -1478,6 +1495,23 @@ async function installCustomPolicySet(
         `names exists (get_table_schema) and that the types compare — ids are compared as ::text.`,
     }
   }
+}
+
+/**
+ * A command's rule that only service-role keys satisfy: every custom policy is
+ * `<service role> OR (<rule>)`, so the rule is `false`.
+ */
+function serviceRoleOnlyRule(command: RlsCommand): ResolvedCommandRule {
+  return {
+    command,
+    ...(command !== 'insert' ? { using: 'false' } : {}),
+    ...(command === 'insert' || command === 'update' ? { check: 'false' } : {}),
+    identityIndependent: false,
+  }
+}
+
+function isServiceRoleOnly(rule: ResolvedCommandRule): boolean {
+  return (rule.using ?? 'false') === 'false' && (rule.check ?? 'false') === 'false'
 }
 
 /** Render a live policy row for a human, when we did not author it this call. */
@@ -2141,31 +2175,6 @@ export async function executeWithUserContext<T = any>(
   })
 }
 
-/**
- * Deterministic auto-RLS: read the live schema immediately after CREATE_TABLE
- * and install the policy the schema implies, without asking the AI.
- *
- * The rule set lives in lib/services/rls-ownership.ts and covers three shapes
- * this function used to miss entirely:
- *
- *   - a FK to `users` under a non-canonical name (`customer_id`) — was skipped
- *     because only a hardcoded name list was consulted;
- *   - indirect ownership (`order_items.order_id → orders.user_id`) — was left
- *     with RLS off, which is how customer line items ended up readable by any
- *     API key;
- *   - reference tables — were left with RLS off, which leaves their WRITES open
- *     too. `public_read` is what "this catalog is public" actually means.
- *
- * When ownership genuinely cannot be inferred, this returns without enabling
- * RLS and reports why. That is deliberate: a table with RLS on and no policy
- * reads EMPTY, so guessing here would replace a data exposure with an outage.
- * The missing-RLS detector picks the table up on the next tick and asks a human
- * what the rule is.
- *
- * Called by the CREATE_TABLE executor. The `columns` argument is now advisory
- * only — the catalog is the source of truth, because a FK declared in the same
- * statement is not visible in the in-memory column list.
- */
 /** What automatic row-level security did to a table, and what to tell whoever created it. */
 export interface AutoRlsOutcome {
   /** The rule now on the table, or null when none was applied. */
@@ -2178,7 +2187,19 @@ export interface AutoRlsOutcome {
 }
 
 /**
- * Protect a table Backenly just created or adopted.
+ * Deterministic auto-RLS: read the live schema right after a table is created
+ * or adopted and install the policy the schema implies, without asking the AI.
+ *
+ * The rule set lives in lib/services/rls-ownership.ts and covers three shapes
+ * this function used to miss entirely:
+ *
+ *   - a FK to `users` under a non-canonical name (`customer_id`) — was skipped
+ *     because only a hardcoded name list was consulted;
+ *   - indirect ownership (`order_items.order_id → orders.user_id`) — was left
+ *     with RLS off, which is how customer line items ended up readable by any
+ *     API key;
+ *   - reference tables — were left with RLS off, which leaves their WRITES open
+ *     too. `public_read` is what "this catalog is public" actually means.
  *
  * A table whose owner cannot be inferred is CLOSED when `closeWhenUndecidable`
  * (tables Backenly creates): row-level security on, service-role keys only
@@ -2190,8 +2211,14 @@ export interface AutoRlsOutcome {
  * outage: the person or agent creating it says the rule, or Backenly opens it
  * itself once a column or foreign key shows who owns a row (reconcileAutoRls).
  *
- * A table adopted from the database (REGISTER_TABLE) may already be serving an
- * app, so it is left as it is and reported.
+ * A table adopted from the database (REGISTER_TABLE), or one that already
+ * existed, may already be serving an app: closing it could make it read empty
+ * for that app. It is left as it is, and the missing-RLS detector asks a
+ * person what the rule is.
+ *
+ * The `columns` argument is advisory only — the catalog is the source of
+ * truth, because a FK declared in the same statement is not visible in the
+ * in-memory column list.
  */
 export async function autoApplyRlsIfNeeded(
   projectId: string,
@@ -2211,28 +2238,21 @@ export async function autoApplyRlsIfNeeded(
     const closed = await applyPermissionPolicy(projectId, { tableName, template: 'admin_only' }, target)
     if (!closed.success) {
       console.warn(`[AutoRLS] ⚠️ Could not close "${tableName}": ${closed.message}`)
-      return {
-        template: null,
-        applied: false,
-        closedByDefault: false,
-        notice:
-          `Backenly could not tell who owns a row in "${tableName}" and could not close it either (${closed.message}). ` +
-          `Its rows can be read with the publishable key and written by any signed-in user until it has a rule: ` +
-          `set one with add_rls.`,
-      }
+      return { template: null, applied: false, closedByDefault: false, notice: rlsNotSetNotice(tableName, closed.message) }
     }
     await rememberClosedByDefault(projectId, schemaName, tableName, plan.reason)
     console.log(`[AutoRLS] "${tableName}" closed by default (service-role keys only): ${plan.reason}`)
+    // Short enough to survive the tool result's clip (800 characters, lib/ai/brain/tools.ts)
+    // after the create message, and naming set_rls: the door an MCP agent has.
     return {
       template: 'admin_only',
       applied: true,
       closedByDefault: true,
       notice:
-        `"${tableName}" is closed: only service-role keys can read or write it, because Backenly could not tell who ` +
-        `owns its rows (${plan.reason}) ` +
-        `To open it, set its rule with add_rls: own_rows on the column naming the owning user, public_read for rows ` +
-        `everyone may read, or custom for a rule of your own. Backenly also opens it when a foreign key to users, or ` +
-        `to a table whose rows users own, shows who owns a row.`,
+        `"${tableName}" is closed: only service-role keys can read or write it, because no column or foreign key ` +
+        `shows which user owns a row. To open it, give it rules: set_rls naming all four commands, or add_rls with ` +
+        `a named rule (owner_read_write on the column naming the owner, public_read for rows everyone may read). ` +
+        `Backenly opens it itself once a foreign key to users, or to a table users own, shows who owns a row.`,
     }
   }
 
@@ -2251,6 +2271,17 @@ export async function autoApplyRlsIfNeeded(
     console.warn(`[AutoRLS] ⚠️ Failed to apply policy on "${tableName}": ${result.message}`)
   }
   return { template: result.success ? plan.template : null, applied: result.success, closedByDefault: false, notice: null }
+}
+
+/**
+ * What to tell whoever created a table that row-level security could not be
+ * set on: it is open to the REST API's roles until it has a rule.
+ */
+export function rlsNotSetNotice(tableName: string, reason: string): string {
+  return (
+    `Backenly could not set row-level security on "${tableName}" (${reason}). Until it has a rule, its rows can be ` +
+    `read with the publishable key and written by any signed-in user: set one with set_rls or add_rls.`
+  )
 }
 
 // ── Closed by default ────────────────────────────────────────────────────────
@@ -2343,6 +2374,16 @@ export async function reconcileAutoRls(
       ...(plan.kind === 'party_rows' ? { partyColumns: plan.partyColumns } : {}),
       ...(plan.kind === 'related_rows' ? { via: plan.via } : {}),
     })
+    if (result.success && closed.has(tableName)) {
+      // Opening a table Backenly closed replaces the admin_only rule it was
+      // closed with. Inside a governed change (the ADD COLUMN or foreign key
+      // that showed the owner) that is the change setting the table's access
+      // rules, and protected verification is told so: otherwise it reads the
+      // replaced rule as row-level security weakened as a side effect and
+      // restores the checkpoint, undoing the change that showed the owner.
+      const { expectEffect } = await import('@/lib/changes/ledger')
+      expectEffect(projectId, { action: 'SET_PERMISSION', table: tableName })
+    }
     out.push({ tableName, template: plan.template, applied: result.success, message: result.message })
   }
 
