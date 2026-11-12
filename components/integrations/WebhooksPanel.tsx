@@ -32,7 +32,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import {
   Webhook, Plus, Trash2, Send, KeyRound, Power,
-  CheckCircle2, AlertTriangle, ChevronRight, Pencil,
+  CheckCircle2, AlertTriangle, ChevronRight, Pencil, Lock,
 } from 'lucide-react'
 import {
   CopyButton, EmptyState, GhostPreview, KitBadge, KitButton, KitConfirmDialog, KitField, KitInput, KitModal, KitNote,
@@ -40,13 +40,18 @@ import {
 } from '@/components/inspector/kit'
 import { FOCUS, PAGE_GUTTER, PAGE_WIDTH } from '@/components/console/tokens'
 import { when } from '@/components/changes/present'
-import { WEBHOOK_EVENT_TYPES, EVENT_DESCRIPTIONS, type WebhookEventType } from '@/lib/webhooks/events'
+import { WEBHOOK_EVENT_TYPES, EVENT_DESCRIPTIONS, isRowEventType, type WebhookEventType } from '@/lib/webhooks/events'
+import { planDisplayName } from '@/lib/entitlements/plan-names'
+import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
+import Link from 'next/link'
 
 interface WebhookRow {
   id: string
   eventType: string
   targetUrl: string
   active: boolean
+  /** Row events only: the tables it receives; empty means every table. */
+  tables?: string[]
   createdAt: string
   updatedAt: string
   logCount: number
@@ -132,6 +137,12 @@ const STATUS_LABEL: Record<string, string> = {
 export function WebhooksPanel({ projectId }: { projectId: string }) {
   const [webhooks, setWebhooks] = useState<WebhookRow[]>([])
   const [capture, setCapture] = useState<CaptureState | null>(null)
+  // The tables an endpoint can name for its row events.
+  const [availableTables, setAvailableTables] = useState<string[]>([])
+  // Whether the project's plan includes webhooks, from the list route. On a
+  // plan without them the page says so and offers no form: it used to show
+  // "Add endpoint" and refuse what was filled in (production QA, 2026-11-09).
+  const [plan, setPlan] = useState<{ allowed: boolean; currentPlan?: string } | null>(null)
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [message, setMessage] = useState<{ tone: 'danger' | 'success' | 'warn'; text: string } | null>(null)
@@ -164,7 +175,9 @@ export function WebhooksPanel({ projectId }: { projectId: string }) {
       const data = await res.json()
       if (!res.ok) throw new Error(data.error ?? 'Webhooks could not be loaded.')
       setWebhooks(data.webhooks ?? [])
+      setAvailableTables(data.availableTables ?? [])
       setCapture(data.capture ?? null)
+      setPlan(data.plan ?? null)
       if (trigRes.ok) {
         const trig = await trigRes.json()
         setTriggerWebhooks(trig.triggers ?? [])
@@ -220,11 +233,11 @@ export function WebhooksPanel({ projectId }: { projectId: string }) {
     loadLogs(webhookId)
   }
 
-  async function create(eventType: WebhookEventType, targetUrl: string) {
+  async function create(eventType: WebhookEventType, targetUrl: string, tables: string[]) {
     const res = await fetch(`/api/projects/${projectId}/webhooks`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ eventType, targetUrl }),
+      body: JSON.stringify({ eventType, targetUrl, tables }),
     })
     const data = await res.json()
     if (!res.ok) throw new Error(data.error ?? 'The webhook could not be created.')
@@ -240,11 +253,11 @@ export function WebhooksPanel({ projectId }: { projectId: string }) {
     await load()
   }
 
-  async function saveEdit(webhook: WebhookRow, eventType: WebhookEventType, targetUrl: string) {
+  async function saveEdit(webhook: WebhookRow, eventType: WebhookEventType, targetUrl: string, tables: string[]) {
     const res = await fetch(`/api/projects/${projectId}/webhooks/${webhook.id}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ eventType, targetUrl }),
+      body: JSON.stringify({ eventType, targetUrl, tables }),
     })
     const data = await res.json()
     if (!res.ok) throw new Error(data.error ?? 'The webhook could not be updated.')
@@ -331,6 +344,18 @@ export function WebhooksPanel({ projectId }: { projectId: string }) {
     }
   }
 
+  const locked = plan?.allowed === false
+  const planName = plan?.currentPlan ? planDisplayName(plan.currentPlan) : 'a plan without webhooks'
+  // Plans and billing live in the Cloud console; a self-hosted build has none.
+  const plansLink = CLOUD_CONTROL_PLANE ? (
+    <Link
+      href="/app/billing"
+      className="text-[13px] font-medium text-zinc-100 underline decoration-white/25 underline-offset-4 hover:decoration-white/60"
+    >
+      See plans
+    </Link>
+  ) : undefined
+
   return (
     <div className={`${PAGE_WIDTH} ${PAGE_GUTTER} pb-16`}>
       <PageHeader
@@ -346,7 +371,8 @@ export function WebhooksPanel({ projectId }: { projectId: string }) {
         }
         actions={
           // The empty state carries this action itself; one button per intent.
-          loading || webhooks.length > 0 ? (
+          // A plan without webhooks offers no form at all.
+          !locked && (loading || webhooks.length > 0) ? (
             <KitButton variant="primary" icon={Plus} onClick={() => setCreating(true)}>
               Add endpoint
             </KitButton>
@@ -356,6 +382,12 @@ export function WebhooksPanel({ projectId }: { projectId: string }) {
 
       <div className="space-y-3">
         {loadError && <KitNote icon={AlertTriangle} tone="danger">{loadError}</KitNote>}
+
+        {locked && webhooks.length > 0 && (
+          <KitNote icon={Lock} tone="info" actions={plansLink}>
+            Webhooks are part of the Pro plan, and this project is on {planName}. The endpoints below still receive events. You can disable or delete them, but not add or change one.
+          </KitNote>
+        )}
 
         {message && (
           <KitNote icon={message.tone === 'success' ? CheckCircle2 : AlertTriangle} tone={message.tone}>
@@ -378,6 +410,15 @@ export function WebhooksPanel({ projectId }: { projectId: string }) {
           <div className="space-y-2">
             <Skeleton className="h-[64px] w-full rounded-[10px]" />
             <Skeleton className="h-[64px] w-full rounded-[10px]" />
+          </div>
+        ) : webhooks.length === 0 && locked ? (
+          <div className="rounded-[10px] border border-white/[0.08] bg-[#0f1012]">
+            <EmptyState
+              icon={Lock}
+              title="Webhooks are part of the Pro plan"
+              description={`This project is on ${planName}. On Pro, Backenly POSTs a signed JSON body to your URL when a row changes or an end user signs up, with retries and a delivery log.`}
+              action={plansLink}
+            />
           </div>
         ) : webhooks.length === 0 ? (
           <div className="rounded-[10px] border border-white/[0.08] bg-[#0f1012]">
@@ -417,6 +458,11 @@ export function WebhooksPanel({ projectId }: { projectId: string }) {
                         <span className="block truncate font-mono text-[12.5px] text-zinc-100">{webhook.targetUrl}</span>
                         <span className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-faint">
                           <Tag mono>{webhook.eventType}</Tag>
+                          {isRowEventType(webhook.eventType) && (
+                            <span className="truncate">
+                              {webhook.tables && webhook.tables.length > 0 ? webhook.tables.join(', ') : 'Every table'}
+                            </span>
+                          )}
                           <span>{webhook.active ? 'Enabled' : 'Disabled'}</span>
                           <span className="tabular-nums">
                             {webhook.logCount === 0
@@ -428,27 +474,39 @@ export function WebhooksPanel({ projectId }: { projectId: string }) {
                     </button>
 
                     <div className="flex flex-shrink-0 items-center gap-1">
-                      <KitButton
-                        variant="secondary"
-                        size="sm"
-                        icon={Send}
-                        loading={busyId === webhook.id}
-                        disabled={busyId !== null}
-                        onClick={() => sendTest(webhook)}
-                      >
-                        <span className="hidden sm:inline">Send test</span>
-                        <span className="sm:hidden">Test</span>
-                      </KitButton>
+                      {!locked && (
+                        <KitButton
+                          variant="secondary"
+                          size="sm"
+                          icon={Send}
+                          loading={busyId === webhook.id}
+                          disabled={busyId !== null}
+                          onClick={() => sendTest(webhook)}
+                        >
+                          <span className="hidden sm:inline">Send test</span>
+                          <span className="sm:hidden">Test</span>
+                        </KitButton>
+                      )}
                       <OverflowMenu
                         label={`More actions for ${webhook.targetUrl}`}
                         disabled={busyId !== null}
-                        items={[
-                          { label: 'Edit endpoint…', icon: Pencil, onClick: () => setEditing(webhook) },
-                          { label: webhook.active ? 'Disable' : 'Enable', icon: Power, onClick: () => setActive(webhook, !webhook.active) },
-                          { label: 'Rotate secret…', icon: KeyRound, onClick: () => setConfirmRotate(webhook) },
-                          { separator: true },
-                          { label: 'Delete endpoint…', icon: Trash2, danger: true, onClick: () => setConfirmDelete(webhook) },
-                        ]}
+                        items={
+                          // On a plan without webhooks an endpoint can only be stopped.
+                          locked
+                            ? [
+                                ...(webhook.active
+                                  ? [{ label: 'Disable', icon: Power, onClick: () => setActive(webhook, false) }]
+                                  : []),
+                                { label: 'Delete endpoint…', icon: Trash2, danger: true, onClick: () => setConfirmDelete(webhook) },
+                              ]
+                            : [
+                                { label: 'Edit endpoint…', icon: Pencil, onClick: () => setEditing(webhook) },
+                                { label: webhook.active ? 'Disable' : 'Enable', icon: Power, onClick: () => setActive(webhook, !webhook.active) },
+                                { label: 'Rotate secret…', icon: KeyRound, onClick: () => setConfirmRotate(webhook) },
+                                { separator: true },
+                                { label: 'Delete endpoint…', icon: Trash2, danger: true, onClick: () => setConfirmDelete(webhook) },
+                              ]
+                        }
                       />
                     </div>
                   </div>
@@ -632,6 +690,7 @@ export function WebhooksPanel({ projectId }: { projectId: string }) {
       <WebhookForm
         open={creating}
         title="Add endpoint"
+        availableTables={availableTables}
         onClose={() => setCreating(false)}
         onSubmit={create}
       />
@@ -642,8 +701,10 @@ export function WebhooksPanel({ projectId }: { projectId: string }) {
           title="Edit endpoint"
           initialUrl={editing.targetUrl}
           initialEvent={editing.eventType as WebhookEventType}
+          initialTables={editing.tables}
+          availableTables={availableTables}
           onClose={() => setEditing(null)}
-          onSubmit={(eventType, targetUrl) => saveEdit(editing, eventType, targetUrl)}
+          onSubmit={(eventType, targetUrl, tables) => saveEdit(editing, eventType, targetUrl, tables)}
         />
       )}
 
@@ -726,11 +787,15 @@ export function isFromBackenly(rawBody, signatureHeader, secret) {
  * `row.updated` while the type union included it, so a picker built from the
  * type would have offered an option the API rejects. One list, one answer.
  */
+const NO_TABLES: string[] = []
+
 function WebhookForm({
   open,
   title,
   initialUrl = '',
   initialEvent = 'row.inserted',
+  initialTables = NO_TABLES,
+  availableTables,
   onClose,
   onSubmit,
 }: {
@@ -738,23 +803,41 @@ function WebhookForm({
   title: string
   initialUrl?: string
   initialEvent?: WebhookEventType
+  /** Row events only: the tables it receives; empty means every table. */
+  initialTables?: string[]
+  availableTables: string[]
   onClose: () => void
-  onSubmit: (eventType: WebhookEventType, targetUrl: string) => Promise<void>
+  onSubmit: (eventType: WebhookEventType, targetUrl: string, tables: string[]) => Promise<void>
 }) {
   const [url, setUrl] = useState(initialUrl)
   const [event, setEvent] = useState<WebhookEventType>(initialEvent)
+  const [someTables, setSomeTables] = useState(initialTables.length > 0)
+  const [picked, setPicked] = useState<string[]>(initialTables)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
-    if (open) { setUrl(initialUrl); setEvent(initialEvent); setError(null) }
-  }, [open, initialUrl, initialEvent])
+    if (open) {
+      setUrl(initialUrl)
+      setEvent(initialEvent)
+      setSomeTables(initialTables.length > 0)
+      setPicked(initialTables)
+      setError(null)
+    }
+  }, [open, initialUrl, initialEvent, initialTables])
+
+  const rowEvent = isRowEventType(event)
+  // A sign-up comes from no table; "every table" sends none.
+  const tables = rowEvent && someTables ? picked : []
+  const missingTables = rowEvent && someTables && picked.length === 0
+  const togglePicked = (table: string) =>
+    setPicked((prev) => (prev.includes(table) ? prev.filter((t) => t !== table) : [...prev, table]))
 
   async function submit() {
     setBusy(true)
     setError(null)
     try {
-      await onSubmit(event, url.trim())
+      await onSubmit(event, url.trim(), tables)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'The endpoint could not be saved.')
     } finally {
@@ -770,7 +853,7 @@ function WebhookForm({
       footer={
         <>
           <KitButton variant="ghost" onClick={onClose}>Cancel</KitButton>
-          <KitButton variant="primary" loading={busy} disabled={url.trim() === ''} onClick={submit}>
+          <KitButton variant="primary" loading={busy} disabled={url.trim() === '' || missingTables} onClick={submit}>
             {busy ? 'Saving…' : 'Save endpoint'}
           </KitButton>
         </>
@@ -823,6 +906,48 @@ function WebhookForm({
             ))}
           </div>
         </KitField>
+
+        {rowEvent && (
+          <KitField label="Tables" hint="Row events from other tables are not sent to this endpoint.">
+            <div className="space-y-1.5">
+              {[
+                { value: false, label: 'Every table' },
+                { value: true, label: 'Only the tables I pick' },
+              ].map((option) => (
+                <label key={option.label} className="flex cursor-pointer items-center gap-2.5 text-[13px] text-zinc-200">
+                  <input
+                    type="radio"
+                    name="webhook-tables"
+                    checked={someTables === option.value}
+                    onChange={() => setSomeTables(option.value)}
+                    className="accent-violet-400"
+                  />
+                  {option.label}
+                </label>
+              ))}
+              {someTables &&
+                (availableTables.length === 0 ? (
+                  <p className="pl-6 text-[12px] text-faint">This project has no tables yet.</p>
+                ) : (
+                  <div className="flex flex-wrap gap-x-4 gap-y-1.5 pl-6 pt-1">
+                    {availableTables.map((table) => (
+                      <label key={table} className="flex cursor-pointer items-center gap-2 font-mono text-[12px] text-zinc-200">
+                        <input
+                          type="checkbox"
+                          name="webhook-table"
+                          value={table}
+                          checked={picked.includes(table)}
+                          onChange={() => togglePicked(table)}
+                          className="accent-violet-400"
+                        />
+                        {table}
+                      </label>
+                    ))}
+                  </div>
+                ))}
+            </div>
+          </KitField>
+        )}
 
         {error && <KitNote icon={AlertTriangle} tone="danger">{error}</KitNote>}
       </div>

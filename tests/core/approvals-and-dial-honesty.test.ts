@@ -167,8 +167,9 @@ describe('AUT-06: Review-only copy matches what CONSERVATIVE does', () => {
 })
 
 describe('BR-03: the approval card shows what a merge applies', () => {
-  it('describeDanger resolves branch name and statement count for merges', () => {
-    const src = fs.readFileSync(path.join(ROOT, 'lib', 'ai', 'brain', 'agent.ts'), 'utf8')
+  it('the approval describer resolves branch name and statement count for merges', () => {
+    // lib/mcp/approval-describe.ts: one description for the brain's gate and the MCP door.
+    const src = fs.readFileSync(path.join(ROOT, 'lib', 'mcp', 'approval-describe.ts'), 'utf8')
     expect(src).toContain("case 'merge_branch':")
     expect(src).toContain("case 'discard_branch':")
     expect(src).toContain('merge of preview branch')

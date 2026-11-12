@@ -36,9 +36,34 @@ import { refuseMisplacedKey } from '@/lib/security/key-placement'
 import { misdirectedResponse } from '@/lib/data-plane/serving'
 import { resolvePublicBaseUrl } from '@/lib/services/public-url'
 import { servingRefusal } from '@/lib/projects/serving-response'
+import { v1ErrorBody } from '@/lib/api/v1/error-shape'
 
 /** A project id, as the runtime gate requires before it looks one up. */
 const PROJECT_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+/**
+ * A JSON error with the top-level `code` and `message` every v1 error carries
+ * (lib/api/v1/error-shape.ts). A success, a body that is not JSON (the realtime
+ * stream) and an error that already has both are returned as they are.
+ */
+async function shapedError<T extends Response>(response: T): Promise<T> {
+  if (response.status < 400) return response
+  if (!(response.headers.get('content-type') ?? '').includes('application/json')) return response
+  let body: unknown
+  try {
+    // A copy is read, so the original can still be returned as it is. A
+    // Response without clone() (jest's stand-in) reads its body without
+    // consuming it.
+    body = typeof response.clone === 'function' ? await response.clone().json() : await response.json()
+  } catch {
+    return response
+  }
+  const shaped = v1ErrorBody(response.status, body)
+  if (shaped === body) return response
+  const headers = new Headers(response.headers)
+  headers.delete('content-length')
+  return new NextResponse(JSON.stringify(shaped), { status: response.status, statusText: response.statusText, headers }) as unknown as T
+}
 
 export function recordedV1<R extends Request, C, T extends Response>(
   handler: (request: R, context: C) => T | Promise<T>,
@@ -59,7 +84,7 @@ export function recordedV1<R extends Request, C, T extends Response>(
         const misdirected = await misdirectedResponse(requestedProject, resolvePublicBaseUrl(request))
         if (misdirected) {
           statusCode = misdirected.status
-          return misdirected as unknown as T
+          return await shapedError(misdirected as unknown as T)
         }
         // Then a project that is locked, paused or unreadable is not served
         // either, by any route here: the same gate, codes and words as the
@@ -70,7 +95,7 @@ export function recordedV1<R extends Request, C, T extends Response>(
           const refused = await servingRefusal(requestedProject)
           if (refused) {
             statusCode = refused.status
-            return refused as unknown as T
+            return await shapedError(refused as unknown as T)
           }
         }
       }
@@ -79,9 +104,9 @@ export function recordedV1<R extends Request, C, T extends Response>(
         (await refuseBranchKeyOffDataPlane(url.pathname, request.headers, url))
       if (refusal) {
         statusCode = refusal.status
-        return NextResponse.json(refusal.body, { status: refusal.status }) as unknown as T
+        return NextResponse.json(v1ErrorBody(refusal.status, refusal.body), { status: refusal.status }) as unknown as T
       }
-      const response = await handler(request, context)
+      const response = await shapedError(await handler(request, context))
       statusCode = response.status
       // Backenly's own synthetic requests are neither recorded nor metered.
       if (isInternalTraffic(internalHeader)) return response
@@ -107,6 +132,9 @@ export function recordedV1<R extends Request, C, T extends Response>(
             durationMs,
             internalHeader,
             branchId,
+            // Read to keep the console's own requests and keyless refusals out (isProjectTraffic).
+            headers: request.headers,
+            search: url.search,
           })
         })
         .catch(() => {})

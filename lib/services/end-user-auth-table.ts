@@ -624,6 +624,56 @@ export async function buildUserInsert(
   }
 }
 
+/** A project's users.id type as a cast, read once in a while: the stamp below binds the id as it. */
+const usersIdCast = new Map<string, { cast: string; at: number }>()
+const ID_CAST_TTL_MS = 10 * 60_000
+
+/**
+ * Record that an end user is active now. trackEndUserActive calls it for every
+ * kind of use: a sign-up, a sign-in on either server, a refresh, OAuth, a
+ * magic link, and a request made with their token (once a day). The Auth
+ * page's "Active in 30 days" and each user's "Last active" read last_login.
+ * Production QA (2026-11-09): users who signed up and kept using their token
+ * read "Last active: Never", and "Active in 30 days" counted 1 of the 10
+ * users using the app, because only a sign-in or a refresh stamped it.
+ *
+ * One UPDATE by primary key, the id bound as its column's type (see
+ * stampLastLogin). A table without last_login gets it from stampLastLogin at
+ * the next sign-in; until then this does nothing. Never throws.
+ */
+export async function stampLastActive(projectId: string, userId: string): Promise<void> {
+  try {
+    const { executeWithUserContext } = await import('./workspace-rls')
+    const schemaName = `workspace_${projectId}`
+    let known = usersIdCast.get(projectId)
+    if (!known || Date.now() - known.at > ID_CAST_TTL_MS) {
+      const idType = await executeWithUserContext<{ data_type: string }>(
+        projectId,
+        '',
+        true,
+        `SELECT data_type FROM information_schema.columns
+          WHERE table_schema = $1 AND table_name = 'users' AND column_name = 'id'`,
+        [schemaName],
+      )
+      const dataType = idType[0]?.data_type ?? ''
+      known = {
+        cast: dataType === 'uuid' ? '::uuid' : ['smallint', 'integer', 'bigint'].includes(dataType) ? '::bigint' : '',
+        at: Date.now(),
+      }
+      usersIdCast.set(projectId, known)
+    }
+    await executeWithUserContext(
+      projectId,
+      '',
+      true,
+      `UPDATE "${schemaName}"."users" SET "last_login" = NOW() WHERE id = $1${known.cast}`,
+      [String(userId)],
+    )
+  } catch {
+    // Recording activity must never affect the request it describes.
+  }
+}
+
 /**
  * Record the moment an end-user authenticated, so the Auth dashboard's
  * "active · 30d" metric reflects real activity.

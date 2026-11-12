@@ -137,6 +137,12 @@ COPY --from=build /src/.next/standalone ./
 COPY --from=build /src/node_modules/esbuild ./node_modules/esbuild
 COPY --from=build /src/node_modules/@esbuild ./node_modules/@esbuild
 
+# bcrypt, the native password hashing (lib/auth/password.ts), is in the
+# standalone tree: output tracing follows its loader to the prebuilt binary for
+# this platform. Asserted, not assumed: the build fails unless this image can
+# hash and verify.
+RUN node -e "const b=require('bcrypt');const h=b.hashSync('x',4);if(!b.compareSync('x',h)||b.compareSync('y',h))process.exit(1);console.log('bcrypt hashes in this image')"
+
 # Asserted, not assumed: the build fails unless this image can compile
 # TypeScript the way the function runner does.
 RUN node -e "const e=require('esbuild');const o=e.transformSync('export const n: number = 1',{loader:'ts',format:'cjs'});if(!o.code.includes('exports'))process.exit(1);console.log('esbuild '+e.version+' compiles TypeScript in this image')"

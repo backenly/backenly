@@ -36,6 +36,10 @@ import {
   Info,
   KeyRound,
   Lock,
+  MessageSquare,
+  Bell,
+  Clapperboard,
+  Plug,
 } from 'lucide-react'
 import {
   BUTTON_BASE,
@@ -55,6 +59,11 @@ import {
   StatusDot,
 } from '@/components/inspector/kit'
 import { FOCUS, PAGE_GUTTER, PAGE_WIDTH } from '@/components/console/tokens'
+import {
+  integrationCatalog,
+  type CatalogProvider,
+  type SecondaryCredential,
+} from './integration-catalog'
 
 // ─── Brand logos ────────────────────────────────────────────────────────────────
 // Official marks (simple-icons, CC0), pasted verbatim from the package so a mark
@@ -135,48 +144,17 @@ function keyVerificationBadge(status?: KeyVaultStatus): { tone: 'operational' | 
   }
 }
 
-interface QuickOption {
-  label: string
-  intent: string
-}
-
-interface WebhookKeyConfig {
-  /** Key vault integration ID — e.g. 'stripe_webhook_secret' */
-  vaultId: string
-  /** Environment variable name — e.g. 'STRIPE_WEBHOOK_SECRET' */
-  envVar: string
-  placeholder: string
-  label: string
-  helperText: string
-  docsUrl: string
+interface WebhookKeyConfig extends SecondaryCredential {
   /** Filled in at runtime from keyVault response */
   keyStatus?: KeyVaultStatus
 }
 
-interface Provider {
-  id: string
-  name: string
-  tagline: string
-  /**
-   * Catalog-card body. A tagline names the provider; this says what connecting
-   * it actually gets you, drawn from `provisions` so the card never promises
-   * something the activation does not build.
-   */
-  description: string
+interface Provider extends Omit<CatalogProvider, 'webhookKey'> {
   /** Official brand mark — falls back to the category icon if omitted */
   logo?: React.ComponentType<{ className?: string; style?: React.CSSProperties }>
-  /** Official brand hex — applied to the logo glyph only. */
-  brandColor?: string
   enabled: boolean
   keyStatus?: KeyVaultStatus
-  provisions: string[]
-  // Modal metadata
-  envVar: string
-  keyPlaceholder: string
-  keyHelperText: string
-  keyDocsUrl: string
-  quickOptions: QuickOption[]
-  /** Optional secondary credential (e.g. Stripe webhook secret) */
+  /** Optional secondary credential (Stripe's webhook secret, OneSignal's App ID) */
   webhookKey?: WebhookKeyConfig
 }
 
@@ -188,181 +166,38 @@ interface IntegrationCategory {
   providers: Provider[]
 }
 
-// ─── Static catalog ───────────────────────────────────────────────────────────
+// ─── Catalog ──────────────────────────────────────────────────────────────────
+// Which providers are offered, and under which category, is the registry's
+// (components/hub/integration-catalog.ts): the same list the MCP integrations
+// tool and the functions runtime serve. Only the marks are added here; a
+// provider without an official mark shows its category's icon.
 
-const INTEGRATION_CATALOG: IntegrationCategory[] = [
-  {
-    id: 'payments',
-    title: 'Payments',
-    description: 'Monetize your app: subscriptions, one-time purchases, billing.',
-    icon: CreditCard,
-    providers: [
-      {
-        id: 'stripe',
-        name: 'Stripe',
-        tagline: 'Payment processing',
-        description:
-          'Subscriptions, one-time checkout, and usage billing, built by your agent in Backenly: checkout, plan schema, and a payment event log behind a signed webhook receiver.',
-        logo: StripeLogo,
-        brandColor: '#635BFF',
-        enabled: false,
-        provisions: [
-          'Stripe webhook endpoint',
-          'Subscription schema (plans, billing_cycles)',
-          'Payment events table',
-          'Checkout session logic',
-        ],
-        envVar: 'STRIPE_SECRET_KEY',
-        keyPlaceholder: 'sk_live_…  or  sk_test_…',
-        keyHelperText: 'Find your key in the Stripe Dashboard → Developers → API keys',
-        keyDocsUrl: 'https://dashboard.stripe.com/apikeys',
-        quickOptions: [
-          { label: 'Subscription billing (monthly / annual plans)', intent: 'Add subscription billing with monthly and annual plans, payment management, and billing history' },
-          { label: 'One-time purchases at checkout', intent: 'Add one-time purchase checkout with payment processing and order confirmation' },
-          { label: 'Usage-based billing', intent: 'Add usage-based billing that charges users based on their consumption' },
-          { label: 'Free trial then paid plan', intent: 'Add a free trial flow that converts to a paid subscription after the trial period' },
-        ],
-        webhookKey: {
-          vaultId: 'stripe_webhook_secret',
-          envVar: 'STRIPE_WEBHOOK_SECRET',
-          placeholder: 'whsec_…',
-          label: 'Webhook Secret',
-          helperText: 'Dashboard → Webhooks → your endpoint → Signing secret',
-          docsUrl: 'https://dashboard.stripe.com/webhooks',
-        },
-      },
-    ],
-  },
-  {
-    id: 'email',
-    title: 'Email & Notifications',
-    description: 'Transactional email delivery: welcome flows, alerts, receipts.',
-    icon: Mail,
-    providers: [
-      {
-        id: 'resend',
-        name: 'Resend',
-        tagline: 'Developer-first email',
-        description:
-          'Transactional email that reaches inboxes. Welcome flows, receipts, and password resets, each with a delivery event log.',
-        logo: ResendLogo,
-        brandColor: '#FFFFFF',
-        enabled: false,
-        provisions: [
-          'Email service endpoint',
-          'Welcome email template',
-          'Delivery event log',
-        ],
-        envVar: 'RESEND_API_KEY',
-        keyPlaceholder: 're_…',
-        keyHelperText: 'Find your key in the Resend Dashboard → API Keys',
-        keyDocsUrl: 'https://resend.com/api-keys',
-        quickOptions: [
-          { label: 'Welcome email on sign-up', intent: 'Send a welcome email when a user signs up' },
-          { label: 'Order confirmation emails', intent: 'Send order confirmation emails when a purchase is made' },
-          { label: 'Password reset emails', intent: 'Send password reset emails with secure links' },
-          { label: 'Abandoned cart reminders', intent: 'Send abandoned cart reminder emails to users who did not complete checkout' },
-          { label: 'General notifications', intent: 'Send transactional notification emails for key user actions' },
-        ],
-      },
-    ],
-  },
-  {
-    id: 'ai',
-    title: 'AI / LLM',
-    description: 'Add AI features: text generation, embeddings, completions.',
-    icon: Brain,
-    providers: [
-      {
-        id: 'openai',
-        name: 'OpenAI',
-        tagline: 'GPT-4 & embeddings',
-        description:
-          'GPT models and embeddings behind a governed endpoint, with request quotas and stored responses so a runaway loop cannot drain your key.',
-        logo: OpenAILogo,
-        brandColor: '#FFFFFF',
-        enabled: false,
-        provisions: [
-          'AI completion endpoint',
-          'Request quota & rate limiting',
-          'Response storage table',
-        ],
-        envVar: 'OPENAI_API_KEY',
-        keyPlaceholder: 'sk-…',
-        keyHelperText: 'Find your key in the OpenAI Platform → API keys',
-        keyDocsUrl: 'https://platform.openai.com/api-keys',
-        quickOptions: [
-          { label: 'Product description generation', intent: 'Add AI-powered product description generation that creates compelling descriptions from product attributes' },
-          { label: 'AI search & recommendations', intent: 'Add AI-powered search and product recommendations based on user preferences and browsing history' },
-          { label: 'Customer support chatbot', intent: 'Add an AI customer support chatbot that answers questions about products, orders, and policies' },
-          { label: 'Review sentiment analysis', intent: 'Add AI sentiment analysis for customer reviews to automatically tag and surface insights' },
-          { label: 'Content & copy generation', intent: 'Add AI content generation for marketing copy, blog posts, and promotional material' },
-        ],
-      },
-      {
-        id: 'anthropic',
-        name: 'Anthropic',
-        tagline: 'Claude models',
-        description:
-          'Claude models behind a governed endpoint, with request quotas and stored responses so a runaway loop cannot drain your key.',
-        logo: AnthropicLogo,
-        brandColor: '#D97757',
-        enabled: false,
-        provisions: [
-          'AI completion endpoint',
-          'Request quota & rate limiting',
-          'Response storage table',
-        ],
-        envVar: 'ANTHROPIC_API_KEY',
-        keyPlaceholder: 'sk-ant-api03-…',
-        keyHelperText: 'Find your key in the Anthropic Console → API keys',
-        keyDocsUrl: 'https://console.anthropic.com/settings/keys',
-        quickOptions: [
-          { label: 'Customer support chatbot', intent: 'Add an AI customer support chatbot powered by Claude that answers questions about products, orders, and policies' },
-          { label: 'Content & copy generation', intent: 'Add AI content generation with Claude for marketing copy, blog posts, and promotional material' },
-          { label: 'Document summarization', intent: 'Add AI document summarization with Claude that condenses long text into concise summaries' },
-          { label: 'Review sentiment analysis', intent: 'Add AI sentiment analysis with Claude for customer reviews to automatically tag and surface insights' },
-          { label: 'Smart data extraction', intent: 'Add AI-powered structured data extraction with Claude that pulls structured fields from unstructured text' },
-        ],
-      },
-    ],
-  },
-  {
-    id: 'analytics',
-    title: 'Analytics & Product Intelligence',
-    description: 'Track user behaviour, product funnels, feature flags, and session replay.',
-    icon: BarChart2,
-    providers: [
-      {
-        id: 'posthog',
-        name: 'PostHog',
-        tagline: 'Product analytics & feature flags',
-        description:
-          'Funnels, feature flags, and session replay captured server-side, so your events survive ad blockers and client failures.',
-        logo: PostHogLogo,
-        brandColor: '#F9BD2B',
-        enabled: false,
-        provisions: [
-          'Server-side event capture endpoint',
-          'User identify & group endpoint',
-          'Feature flag evaluation helper',
-          'Analytics event schema (sign-up, purchase, funnel events)',
-        ],
-        envVar: 'POSTHOG_API_KEY',
-        keyPlaceholder: 'phc_…',
-        keyHelperText: 'PostHog → Project Settings → Project API key (starts with phc_)',
-        keyDocsUrl: 'https://app.posthog.com/project/settings',
-        quickOptions: [
-          { label: 'Track user sign-ups and activation events', intent: 'Connect PostHog and track user_signed_up, account_activated, and first_action events with user properties' },
-          { label: 'Track e-commerce funnel (view → cart → purchase)', intent: 'Connect PostHog and track product_viewed, added_to_cart, checkout_started, and order_completed events' },
-          { label: 'Track feature usage and engagement', intent: 'Connect PostHog and track feature_used events for key product features to measure engagement and retention' },
-          { label: 'Enable feature flags for gradual rollouts', intent: 'Connect PostHog and add feature flag evaluation so I can roll out new features gradually to specific user segments' },
-          { label: 'Session replay + custom events', intent: 'Connect PostHog with session replay enabled and set up custom event tracking for my key user flows' },
-        ],
-      },
-    ],
-  },
-]
+const LOGOS: Record<string, React.ComponentType<LogoProps>> = {
+  stripe: StripeLogo,
+  resend: ResendLogo,
+  openai: OpenAILogo,
+  anthropic: AnthropicLogo,
+  posthog: PostHogLogo,
+}
+
+const CATEGORY_ICONS: Record<string, React.ComponentType<{ className?: string; style?: React.CSSProperties }>> = {
+  payments: CreditCard,
+  email: Mail,
+  sms: MessageSquare,
+  push: Bell,
+  ai: Brain,
+  video: Clapperboard,
+  analytics: BarChart2,
+  other: Plug,
+}
+
+const INTEGRATION_CATALOG: IntegrationCategory[] = integrationCatalog().map((cat) => ({
+  id: cat.id,
+  title: cat.title,
+  description: cat.description,
+  icon: CATEGORY_ICONS[cat.id] ?? Plug,
+  providers: cat.providers.map((provider) => ({ ...provider, logo: LOGOS[provider.id], enabled: false })),
+}))
 
 // ─── Provider logomark ────────────────────────────────────────────────────────
 // A neutral tile; the brand hex lives on the glyph only.
@@ -412,6 +247,11 @@ function ActivationModal({
   const [keyError, setKeyError] = useState('')
   const [webhookKey, setWebhookKey] = useState('')
   const [showWebhookKey, setShowWebhookKey] = useState(false)
+  const [webhookKeyError, setWebhookKeyError] = useState('')
+  // The provider's answer about the key, asked on Continue (checking), so a
+  // refused key is said on this step rather than after the next one.
+  const [checking, setChecking] = useState(false)
+  const [keyCheck, setKeyCheck] = useState<{ status: string; detail: string } | null>(null)
   const [selectedOptions, setSelectedOptions] = useState<string[]>([])
   const [customIntent, setCustomIntent] = useState('')
   const [submitting, setSubmitting] = useState(false)
@@ -433,8 +273,39 @@ function ActivationModal({
     return true
   }
 
-  function handleStep1Continue() {
-    if (validateKey()) setStep(2)
+  async function handleStep1Continue() {
+    if (!validateKey() || checking) return
+    setChecking(true)
+    setWebhookKeyError('')
+    setKeyCheck(null)
+    try {
+      const values: Record<string, string> = { [provider.envVar]: apiKey.trim() }
+      if (provider.webhookKey && webhookKey.trim()) values[provider.webhookKey.envVar] = webhookKey.trim()
+      const res = await fetch(`/api/projects/${projectId}/credentials/verify`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ integrationId: provider.id, values }),
+      })
+      const data = await res.json().catch(() => ({}))
+      // A key storing would refuse is said here, under its own field.
+      if (res.status === 422) {
+        const message = data.error || 'This key was refused.'
+        if (provider.webhookKey && data.envVar === provider.webhookKey.envVar) setWebhookKeyError(message)
+        else setKeyError(message)
+        return
+      }
+      const main = res.ok && Array.isArray(data.checks)
+        ? data.checks.find((c: { envVar: string }) => c.envVar === provider.envVar)
+        : null
+      if (main) setKeyCheck({ status: main.status, detail: main.detail })
+      // Any other answer (offline, a limit, a server error) doesn't stop here:
+      // connecting checks the key again before it is stored.
+      setStep(2)
+    } catch {
+      setStep(2)
+    } finally {
+      setChecking(false)
+    }
   }
 
   function toggleOption(intent: string) {
@@ -528,8 +399,8 @@ function ActivationModal({
             <KitButton variant="primary" onClick={onClose}>Done</KitButton>
           </>
         ) : step === 1 ? (
-          <KitButton variant="primary" iconRight={ChevronRight} onClick={handleStep1Continue} disabled={!apiKey.trim()}>
-            Continue
+          <KitButton variant="primary" iconRight={ChevronRight} onClick={handleStep1Continue} loading={checking} disabled={!apiKey.trim()}>
+            {checking ? `Checking with ${provider.name}…` : 'Continue'}
           </KitButton>
         ) : (
           <>
@@ -599,9 +470,10 @@ function ActivationModal({
                     spellCheck={false}
                     type={showWebhookKey ? 'text' : 'password'}
                     value={webhookKey}
-                    onChange={e => setWebhookKey(e.target.value)}
+                    onChange={e => { setWebhookKey(e.target.value); setWebhookKeyError('') }}
                     placeholder={provider.webhookKey.placeholder}
-                    className="pr-10 font-mono"
+                    aria-invalid={!!webhookKeyError}
+                    className={`pr-10 font-mono ${webhookKeyError ? '!border-rose-400/50' : ''}`}
                   />
                   <button
                     type="button"
@@ -612,6 +484,7 @@ function ActivationModal({
                     {showWebhookKey ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
                   </button>
                 </div>
+                {webhookKeyError && <p role="alert" className="mt-1.5 text-[12px] text-rose-300">{webhookKeyError}</p>}
               </label>
               <a
                 href={provider.webhookKey.docsUrl}
@@ -634,6 +507,11 @@ function ActivationModal({
 
       {step === 2 && !done && (
         <div className="space-y-4">
+          {keyCheck && (
+            <KitNote icon={keyCheck.status === 'verified' ? Check : Info} tone={keyCheck.status === 'verified' ? 'success' : 'info'}>
+              {keyCheck.detail}
+            </KitNote>
+          )}
           <fieldset>
             <legend className="text-[13px] font-medium text-zinc-100">What should {provider.name} do in this backend?</legend>
             <p className="mb-3 mt-0.5 text-[12.5px] text-faint">

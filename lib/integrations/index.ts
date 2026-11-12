@@ -75,12 +75,12 @@ async function dispatchNow(
 
     case 'resend': {
       const { executeEmailIntegration } = await import('./email.executor')
-      return executeEmailIntegration(projectId, 'resend', params.apiKey)
+      return executeEmailIntegration(projectId, 'resend', params.apiKey, params.fromEmail ?? params.from ?? params.senderEmail)
     }
 
     case 'sendgrid': {
       const { executeEmailIntegration } = await import('./email.executor')
-      return executeEmailIntegration(projectId, 'sendgrid', params.apiKey)
+      return executeEmailIntegration(projectId, 'sendgrid', params.apiKey, params.fromEmail ?? params.from ?? params.senderEmail)
     }
 
     case 'openai': {

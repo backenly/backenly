@@ -332,12 +332,14 @@ describe('a platform fault is never filed against a tenant', () => {
 
   it("still files a failure that is genuinely one project's own", async () => {
     // The guard must not blind the detector: one project's broken db surface,
-    // while its neighbours answer, is that project's finding.
+    // while its neighbours answer, is that project's finding, once it has
+    // failed two passes in a row.
     const ps = [await builtProject(), await builtProject(), await builtProject()]
     const broken = ps[0]
     const ingress = await stubIngress({ db: new Set([broken.projectId]) })
     process.env.CONTRACT_PROBE_ORIGIN = ingress.origin
     try {
+      await runContractSweep({ projectIds: ps.map(p => p.projectId) })
       const sweep = await runContractSweep({ projectIds: ps.map(p => p.projectId) })
 
       expect(sweep.platformFaults).toEqual([])
@@ -355,6 +357,37 @@ describe('a platform fault is never filed against a tenant', () => {
       expect(beat.ok).toBe(true)
     } finally {
       await ingress.close()
+      for (const p of ps) await dropProject(p)
+    }
+  }, 60_000)
+
+  it('asks no one about a surface that failed one pass and answered the next', async () => {
+    // Production QA (2026-11-09): right after a restore, a contract finding
+    // appeared and vanished a minute later. One failing pass is recorded in
+    // the heartbeat, not put in front of a person.
+    const ps = [await builtProject(), await builtProject(), await builtProject()]
+    const flaky = ps[0]
+    const failing = await stubIngress({ db: new Set([flaky.projectId]) })
+    process.env.CONTRACT_PROBE_ORIGIN = failing.origin
+    try {
+      const first = await runContractSweep({ projectIds: ps.map(p => p.projectId) })
+      expect(first.broken).toBe(1)
+      // The failure is on record for the next pass to confirm.
+      expect(JSON.parse((await heartbeat(flaky.projectId))!.value)).toMatchObject({ ok: false, brokenSurfaces: ['db'] })
+    } finally {
+      await failing.close()
+    }
+    const healthy = await stubIngress()
+    process.env.CONTRACT_PROBE_ORIGIN = healthy.origin
+    try {
+      await runContractSweep({ projectIds: ps.map(p => p.projectId) })
+      const rows = await prisma.healthFinding.findMany({
+        where: { projectId: { in: ps.map(p => p.projectId) }, type: 'contract_surface_broken' },
+      })
+      expect(rows).toEqual([])
+      expect(JSON.parse((await heartbeat(flaky.projectId))!.value)).toMatchObject({ ok: true })
+    } finally {
+      await healthy.close()
       for (const p of ps) await dropProject(p)
     }
   }, 60_000)
@@ -624,6 +657,8 @@ describe('the critical email tells the truth', () => {
     const ingress = await stubIngress({ db: new Set([ps[0].projectId]) })
     process.env.CONTRACT_PROBE_ORIGIN = ingress.origin
     try {
+      // Two failing passes file it; the third writes it again.
+      await runContractSweep({ projectIds: ps.map(p => p.projectId) })
       await runContractSweep({ projectIds: ps.map(p => p.projectId) })
       const first = await prisma.healthFinding.findFirstOrThrow({
         where: { projectId: ps[0].projectId, type: 'contract_surface_broken' },

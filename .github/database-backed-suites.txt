@@ -37,6 +37,7 @@ tests/bench/prisma-uuid-binding.spec.ts
 tests/build-runs/build-run-service.test.ts
 tests/build-runs/hydration.test.ts
 tests/integration/mcp-oauth-flow.spec.ts
+tests/integration/mcp-oauth-consent.spec.ts
 tests/integration/mcp-direct-access-url.spec.ts
 tests/integration/mcp-transport-hygiene.spec.ts
 tests/integration/webhook-delivery.spec.ts
@@ -49,10 +50,29 @@ tests/integration/project-smtp-and-templates.spec.ts
 tests/integration/storage-bucket-policy.spec.ts
 tests/integration/storage-runtime-policy.spec.ts
 tests/integration/function-off-switch.spec.ts
+
+# At /fn/{name} a route module's status, body and content type go out as it
+# wrote them; a plain function keeps its envelope, with its log lines only for
+# a service-role key. The real runtime and function rows.
+tests/integration/function-replies-as-written.spec.ts
 tests/integration/function-create-truthful.spec.ts
 tests/integration/function-selfheal-consent.spec.ts
 tests/integration/function-egress-guard.spec.ts
 tests/integration/function-row-events-data-plane.spec.ts
+
+# An on_update function deployed with columns runs only when an update changed
+# one of them (an unknown old row runs it), columns is refused off on_update
+# and for a column the table lacks, and a redeploy without columns is restored
+# with them through the change history.
+tests/integration/row-functions-watch-columns.spec.ts
+
+# Row-event function runs are queued in the transaction that releases their
+# captured rows and run at a bounded pace: a burst never runs more than the
+# project's limit at once, a job a stopped process left is run again, one left
+# too often is recorded and dropped, a throwing function is not retried, the
+# run log says what is queued, and pausing discards the queue. Real capture
+# trigger, outbox, queue, sandbox executor and run log.
+tests/integration/function-runs-queued.spec.ts
 tests/integration/project-route-response-shape.spec.ts
 tests/integration/realtime-sse-slot-release.spec.ts
 
@@ -67,7 +87,16 @@ tests/integration/integrations-autowiring.spec.ts
 # broadcast route enforces its payload cap over a real pg_notify. Frame
 # delivery through the LISTEN hub stays a staging case.
 tests/integration/realtime-ticket-broadcast.spec.ts
+
+# The console's Realtime page gets a single-use ticket that redeems as a
+# stream that sees every change, only for a member of the project; a project
+# with no signing secret says so. A real provisioned project and session.
+tests/integration/console-realtime-sees-every-change.spec.ts
+tests/integration/auth-stats-change-from-nothing.spec.ts
+tests/integration/plans-said-by-their-names.spec.ts
+tests/integration/realtime-status-keeps-its-channel-internal.spec.ts
 tests/integration/export-database-rls.spec.ts
+tests/integration/export-portable-policies.spec.ts
 tests/integration/postgres-admin.spec.ts
 
 # Needs a real Postgres AND a git worktree of an older release.
@@ -442,6 +471,12 @@ __tests__/auth/oauth-claim-gate.test.ts
 # positive reads present so the refusals cannot pass because nothing works.
 __tests__/database/sql-workspace-isolation.test.ts
 
+# When the read-only connection itself fails (a class-28 login refusal, as
+# pg_hba's "no encryption" was on production), run_query and the SQL tab say
+# nothing ran and name no host, address, role or database; the statement's own
+# errors still reach the caller. Real bkn_ro_ role, refused with NOLOGIN.
+__tests__/database/read-query-connection.test.ts
+
 # Function SQL ran on the app's own connection, whose role owns every platform
 # table and workspace schema, so generated function code could read public.users
 # or another tenant's tables; claims filter rows, not schemas. It now logs in as
@@ -751,6 +786,10 @@ tests/integration/overview-truthful-counts.spec.ts
 # parent used a list only per-line messages (never sent) would fill. Runs the
 # real executor and worker, and checks the persisted run record.
 tests/integration/sandbox-function-logs.spec.ts
+
+# A sandboxed function has the whole of JSON and Math (they were empty frozen
+# copies), and what one run does to them stays in that run.
+tests/integration/sandbox-json-and-math.spec.ts
 tests/integration/apply-migration-existing-table.spec.ts
 
 # Failed migration DDL preserves PostgreSQL data and stops without asking the
@@ -759,6 +798,14 @@ tests/integration/apply-migration-dispatch.spec.ts
 # A foreign key is installed exactly as the migration declares it: its actions,
 # referenced column and name, read back from the catalog and checked by deletes.
 tests/integration/apply-migration-foreign-keys.spec.ts
+
+# A migration's column types are created as declared: a text column named like
+# an id stays text, timestamptz/date/time and numeric scale survive CREATE TABLE
+# and the ADD COLUMN a merge replays. Read back from the catalog.
+tests/integration/apply-migration-declared-types.spec.ts
+# The loop holds a column to the type a statement declared, added columns too:
+# timestamptz that became timestamp, numeric that lost its scale.
+tests/integration/intent-declared-types.spec.ts
 # MCP acceptance (scripts/mcp-acceptance/cases.ts): two agent workflows, twice
 # each, and the acceptance cases no other suite covered. Real MCP route, real
 # keys, provisioned projects, runtime engine mode.
@@ -907,6 +954,20 @@ tests/integration/ai-lab-arm.spec.ts
 # charge. The row and the race are real, so it needs a real Postgres.
 tests/integration/ai-credit-holds.spec.ts
 
+# backend_chat on a protected production builds the schema on a preview branch,
+# saves what needs the tables on production for after the merge, and asks a
+# person for one merge with its statements pinned; a build turn there is charged
+# for that request, not for a plan. Real branch engine, migration log, approval
+# request, merge replay and charge.
+tests/integration/backend-chat-builds-on-a-branch.spec.ts
+
+# A confirmed build's price (the architect's tokens its proposal deferred and a
+# fixed price per step) is held whole before any step runs, or nothing runs and
+# the plan is kept; the build's own model calls hold nothing more, and the run
+# is never charged past the cap. backend_chat's real run against real holds,
+# usage rows and workspace tables.
+tests/integration/confirmed-build-holds-its-price.spec.ts
+
 # The calls that only route a brain turn are recorded like every other model
 # call: the classifier and the answer of a CHAT turn, the classifier and the
 # clarifying question of an UNCLEAR one, each reserved, settled and written to
@@ -968,6 +1029,12 @@ tests/integration/scheduler-leader-lock.spec.ts
 # tests; without the default privileges two fail, without the converge one,
 # without the provisioning grant one.
 tests/integration/direct-access-backup-grants.spec.ts
+
+# A new read-write Postgres login reads and writes rows, and Postgres refuses
+# it any schema change (no CREATE on the schema, no owner-role membership)
+# until its project's admin allows schema changes; a login from before the
+# setting keeps what it had. Real roles, grants and definer functions.
+tests/integration/read-write-logins-refuse-schema-changes.spec.ts
 
 # Both storage drivers apply one per-file rule: the bucket's own limit under the
 # shared ceiling for uploads through the server. The local driver also applied
@@ -1083,6 +1150,17 @@ tests/integration/db-doors-agree.spec.ts
 # on load and fixes only on an explicit action. Real project, users table and
 # function rows are the property.
 tests/integration/readiness-reads-never-write.spec.ts
+# The pages that show readiness (the Overview's /build-status, the Deploy
+# page's GET /readiness) reuse a recent behavioral verification of the backend
+# as it is now: three reads at once verify once, a governed change, five
+# minutes or a fix verify again, and a run that failed is not kept. Real
+# project, tables, end-user auth and HTTP stack are the property.
+tests/integration/readiness-reads-reuse-verification.spec.ts
+# Connection health counts the last day in the database: bootstraps per
+# origin, key failures per origin, kind and key shape, probes without an
+# origin, the platform's own origins left out, nothing capped at 5,000. Real
+# security_events rows are the property.
+tests/integration/connection-health-counts.spec.ts
 # The deploy tool tells the truth: status names the current published version
 # (after a rollback too), deploy has no staging target, the first publish,
 # an update and a no-op each say what happened, and an approved deploy is
@@ -1136,6 +1214,13 @@ tests/integration/storage-policy-action.spec.ts
 # project-wide disable stops. Real workspace tables and NOTIFY triggers are
 # the property.
 tests/integration/realtime-scope-truth.spec.ts
+# A large realtime change still says which row changed: an update that fits
+# without its old row keeps the new row and reduces the old one to its key, one
+# too large either way carries the primary key and reaches only streams that
+# may read the row, and a schema on the older notify function is brought up to
+# date; presence metadata over 4 KB is refused with 413 on both runtimes, not
+# failed with a 500. Real triggers, notifications and policies are the property.
+tests/integration/realtime-large-changes.spec.ts
 # The storage runtime is correct on both drivers: the S3 driver clamps a
 # requested isPublic to the bucket policy at write time like the local one,
 # multipart complete leaves exactly one real row and counts the bytes once,
@@ -1278,6 +1363,12 @@ tests/integration/structural-evolution-identities.spec.ts
 # declined where it is approved. Real finding rows.
 tests/integration/architecture-requests-not-broken-guarantees.spec.ts
 
+# A request waiting for a person stays in the queue through the observer's
+# stale-finding pass (whose 'arch_%' LIKE once matched architecture_evolution),
+# and one taken out by anything but the person or the engine is asked again on
+# the next pass instead of being skipped as "already awaiting approval".
+tests/integration/evolution-request-survives-cleanups.spec.ts
+
 # Whether a user's coding agent is connected: an MCP key or OAuth connection
 # their agent authenticated with (authenticateMcp's stamp), unexpired, for this
 # user and this project only, and the console status route built on it: owner
@@ -1294,6 +1385,13 @@ tests/integration/approval-binding.spec.ts
 # never returns a credential; an unknown account is reported plainly. Real
 # workspace users tables are the property, so it needs a real Postgres.
 tests/integration/reset-password-sends-link.spec.ts
+
+# A published project with no App URL emails a reset link to the reset page
+# Backenly hosts, never to its API base; the page shows a form, refuses a bad
+# password without spending the link, and changes the password exactly once.
+# Real workspace users and reset tokens are the property, so it needs a real
+# Postgres.
+tests/integration/reset-link-opens-a-page.spec.ts
 
 # A project's data is read in its own region and nowhere else: a second
 # database stands in for another region's, a regional project with no
@@ -1427,6 +1525,14 @@ tests/integration/auth-projection-reads.spec.ts
 # Both databases and the real SQL are the property, so it needs a real Postgres.
 tests/integration/auth-rate-windows.spec.ts
 
+# A key every user of an app sends is limited per address, not per key: one
+# address at its limit leaves another untouched on the v1 middleware, /db,
+# /api/v2 and the Next routes, the key keeps its count past its limit for the
+# console, a service-role key keeps one window, and presence writes spend
+# nothing of the limit but are capped per user and, before the key is looked
+# up, per address. Real keys, routes and tokens.
+tests/integration/shared-key-rate-limits.spec.ts
+
 # A revocation reported done only once the project's region has it: a home
 # project's change is not applicable, a regional key's revocation is confirmed
 # with the copy no longer holding the key, a region that cannot apply it leaves
@@ -1443,6 +1549,14 @@ tests/integration/auth-projection-confirm.spec.ts
 # guard trigger. Real catalog, DDL, transactions and triggers are the property.
 tests/integration/change-recovery.spec.ts
 tests/integration/restore-generated-endpoints.spec.ts
+
+# Deleting a function nothing calls (switched off, or not run in 7 days) runs
+# at once on both doors, and restoring the change brings it back; one that ran
+# in that time waits for a person; a new table gets no <table>-schema
+# function. Real ledger, MCP route and brain loop.
+tests/integration/agents-delete-unused-functions.spec.ts
+tests/integration/dropped-table-leaves-the-graph.spec.ts
+tests/integration/functions-count-your-functions.spec.ts
 
 # Protected verification and automatic recovery: a change that breaks
 # production without being asked to (RLS off, a CASCADE, a step that did not
@@ -1471,6 +1585,32 @@ tests/integration/agent-rollback-approval.spec.ts
 # was written after the restore. Real catalog, helper functions and triggers.
 tests/integration/change-classes-executor.spec.ts
 
+# A UNIQUE index over every row (where: "true", or CREATE UNIQUE INDEX … WHERE
+# true) is created on a soft-delete table and an ON CONFLICT upsert can target
+# it; a scoped one asked for twice is not a conflict, and is never mistaken
+# for one over every row. A real provisioned project and real DDL.
+tests/integration/unique-index-over-every-row.spec.ts
+# A migration's DROP INDEX and ALTER TABLE … DROP CONSTRAINT run on a branch
+# (production names resolved to the clone's copies), reach production through
+# the merge a person approves, and an agent's on production waits for a person
+# in the approval queue; a person's own runs as a restorable governed change,
+# and the primary key is never dropped. A real provisioned project through the
+# MCP route.
+tests/integration/migrations-drop-index-and-constraint.spec.ts
+
+# DROP COLUMN and ALTER COLUMN … TYPE in a migration: on a branch they run, the
+# merge a person approves carries them to production with the values before
+# kept in the change's vault (restoring puts them back), an agent's on
+# production waits for a person, the declared type is created exactly, a USING
+# expression calls built-ins only, and a drop runs without CASCADE. Real
+# provisioned project, branch schemas, governed changes and catalog reads.
+tests/integration/migrations-drop-column-and-retype.spec.ts
+# Names Backenly makes from a column follow it on a rename (its idx_/uniq_
+# indexes and fk_ keys), a name it would choose that another index holds gives
+# the next free one, and an index identical to one that exists is not built
+# twice. Real provisioned project, governed migrations, catalog.
+tests/integration/index-names-follow-renames.spec.ts
+
 # Every view of a project's schema is current once a change or restore settles:
 # the REST API is asked to reload, the reconciler's baseline follows, validators
 # see a table another process changed, a restore supersedes the request behind
@@ -1482,6 +1622,20 @@ tests/integration/schema-freshness.spec.ts
 # result fails verification or the replay fails part-way, and the branch stays
 # open. Real branch schemas, replay and approvals.
 tests/integration/branch-merge-governed.spec.ts
+
+# A merge card says what the merge does to production's rows (counted) and
+# what Backenly adds to each new table, read from the branch, and offers a
+# restore point; backend_chat's merge is parked the same way with its
+# statements pinned, and a branch that cannot merge is refused, not queued.
+# Real provisioned project, branch, migrations and approval rows.
+tests/integration/merge-cards-say-what-lands.spec.ts
+
+# A merge that would fail on production's rows (NOT NULL over empty values, a
+# UNIQUE over duplicates, a CHECK some rows break, a foreign key to nothing, a
+# NOT NULL column with no default) is refused before anyone is asked, through
+# MCP and backend_chat, with columns followed through renames. Real provisioned
+# project, branches and production rows.
+tests/integration/merge-preflight.spec.ts
 
 # A restore point that cannot bring everything back says so: kept data lost
 # outside Backenly makes a restore need a person who approves exactly what comes
@@ -1518,6 +1672,19 @@ tests/integration/change-history-everything.spec.ts
 # requests cannot keep tables locked: a number a minute per project. Real
 # catalog.
 tests/integration/change-restore-to.spec.ts
+
+# A restore as production runs it: the workspace owned by a NOSUPERUSER
+# NOBYPASSRLS login, FORCE ROW LEVEL SECURITY and Backenly's own-rows policy.
+# Re-adding a foreign key to existing rows is checked against every row (it
+# failed as "violates fk_reviews_user" while every user existed), and data
+# written since a change is measured in rows only the service role can see.
+tests/integration/change-restore-forced-rls.spec.ts
+
+# Restore to a point proves every step, each against the schema the newer steps
+# leave, in one rolled-back transaction before running any: a step that would
+# stop it is named and nothing runs (it used to undo the newer ones and stop
+# half-way), and a step whose conflict the newer steps clear still runs whole.
+tests/integration/change-restore-to-proves-first.spec.ts
 
 # An agent's rollback is a request to restore the backend to a published
 # version: parked with Backenly's list of the changes it would undo, whichever
@@ -1666,3 +1833,155 @@ tests/integration/auth-before-first-signup.spec.ts
 # Express app (server/app.ts), whose modules open the platform database, so it
 # runs with one.
 tests/integration/runtime-rejects-bad-bodies.spec.ts
+
+# Every v1 error carries a top-level code and message on both servers, added
+# beside what each body already said (real runtime, a real Next route).
+tests/integration/v1-errors-carry-code-and-message.spec.ts
+# A table declared in SQL is created as written: no constraint, nullability or
+# default its column names suggest, kept out of the name-based key repair, and a
+# UNIQUE the SQL declares is a real constraint ON CONFLICT can target. A table
+# the brain designs from a description keeps its inference.
+tests/integration/sql-as-written.spec.ts
+# A function run is recorded as it happened: a call through /fn as http, the
+# status the function answered at the end of its log, a 5xx answer as a failed
+# run. A route function reads the project's variables as process.env.KEY, and
+# none replaces a variable Backenly sets.
+tests/integration/function-run-record.spec.ts
+# The runtime answers a body over its JSON limit 413 PAYLOAD_TOO_LARGE and names
+# the limit (server/app.ts), as the web tier does.
+tests/integration/runtime-body-limit.spec.ts
+
+# Who sends a project's auth emails, as said to the person who asks: the
+# settings view names the address the deployment sends from, and the agent's
+# auth tool says Backenly sends it on Cloud, the deployment's SMTP when
+# self-hosted. Creates a user and project in the platform database.
+tests/integration/auth-mail-says-who-sends-it.spec.ts
+
+# A public file is one a browser may keep: objects in a public bucket are
+# written with the bucket's public Cache-Control (S3 driver and multipart), and
+# behind the signed CDN a public file's redirect repeats one URL for a window
+# and may be kept for the rest of it. Real metadata database; S3 calls stubbed.
+tests/integration/public-files-are-cacheable.spec.ts
+
+# The console says who sent each file: every upload path records whether it
+# came from a signed-in end user, the public key alone, a server key or the
+# console, and the console listing names them (an end user by email from the
+# project's users table). Real routes, real database, local storage driver.
+tests/integration/storage-shows-who-uploaded.spec.ts
+
+# The active-branch limit holds under concurrent creates (one create at a time
+# per project, lib/branches/create-lock.ts), and list_branches says how many
+# are active against the limit with merged ones counted apart. Real schemas,
+# real branch engine; PostgREST registration stubbed.
+tests/integration/branch-limit-holds.spec.ts
+
+# A preview key ends with its branch: merging or discarding a branch expires
+# its keys (and no other key), and the agent's key list says which keys ended
+# with their branch. Real schemas, real branch engine; PostgREST registration
+# stubbed.
+tests/integration/closed-branch-keys-end.spec.ts
+
+# An agent discards its own preview branch over MCP at once: the branch's
+# schema and keys go, production and the Review Queue are untouched, and a
+# read-only key or another project's branch is refused. Real route, engine and
+# schemas.
+tests/integration/agents-discard-branches.spec.ts
+
+# On a plan without webhooks, reads are answered (the list with the plan in
+# it, not a 403), so the page says so before anyone fills in a form and an
+# endpoint made on Pro can still be read; every change is still refused. Real
+# routes, project check and database; sign-in is delegated and the plan is
+# mocked to Free.
+tests/integration/webhooks-say-the-plan-first.spec.ts
+
+# A project on a plan without webhooks can still disable or delete the
+# endpoints it has (delivery doesn't check the plan); turning one back on or
+# editing it is still refused, and a non-member still gets 404. Real routes,
+# project check and database; sign-in is delegated and the plan is mocked to
+# Free.
+tests/integration/downgraded-webhooks-can-be-stopped.spec.ts
+
+# GET /api/projects/can-create answers what POST /api/projects would (a full
+# plan in the same words, room on the plan, no entitlements yet, single-tenant),
+# so the console says a plan limit before the New project form. Real account,
+# count and plan check; sign-in is delegated and the plan is mocked.
+tests/integration/project-limit-before-the-form.spec.ts
+
+# GET /api/auth/session answers every browser with 200 (the user for a live
+# session, else { user: null, canRefresh }), so a signed-out page logs no
+# failed request. Real session rows, checked by the function requireUser uses.
+tests/integration/signed-out-session-answers.spec.ts
+
+# POST /api/projects/[id]/credentials/verify runs the checks storing a key
+# runs and stores nothing: a key the provider refuses (and a malformed webhook
+# secret) is said on the key's own step; a VIEWER may not ask. Real sessions,
+# roles and database; Stripe's API answer is stubbed at fetch.
+tests/integration/integration-key-checked-on-continue.spec.ts
+
+# Connection Health counts a frontend's successful production requests by the
+# origin the request log keeps (localhost included); a bootstrap ping is
+# counted once. Real session, recorder and route.
+tests/integration/frontend-seen-from-its-requests.spec.ts
+
+# Every /api/v2 error leaves in PostgREST's shape ({ code, message, details,
+# hint }), whichever door refused it: the exposure check and a body over the
+# limit here, v1 unchanged. The real Express app, project and key.
+tests/integration/v2-errors-in-postgrest-shape.spec.ts
+
+# A function redeploy names the change that keeps the previous code, and
+# restoring that change brings it back; an identical redeploy names none. Real
+# ledger and project.
+tests/integration/function-redeploy-in-history.spec.ts
+
+# A person can ask Backenly to look for architecture changes from the console;
+# the route answers one look per project every 10 minutes and says when the
+# next may start. Real session, project and engine.
+tests/integration/architecture-look-now.spec.ts
+
+# An end user's last_login ("Last active", "Active in 30 days") follows their
+# use: a sign-up on either server and a request made with their token stamp it;
+# a verifier account never. Real database, both servers' sign-up.
+tests/integration/end-user-last-active.spec.ts
+
+# GET /auth/me answers the signed-in end user on both servers, from one flow:
+# the token checked as every data request checks it (revoked, suspended,
+# other project), the user read from the real users table.
+tests/integration/end-user-auth-me.spec.ts
+
+# The schema diagram reads every table's columns in one request: /structure
+# without a table answers each table exactly as its own request does, and
+# /relationships without a table answers each foreign key once. Real catalog
+# and the real handlers.
+tests/integration/schema-structure-in-one-read.spec.ts
+
+# A branch refuses what production refuses: it is created with every foreign
+# key main has (as written, pointing at its own tables), and a key a branch
+# migration declares is installed on the branch. Real schemas, the real branch
+# engine and the real migration path.
+tests/integration/branch-enforces-foreign-keys.spec.ts
+
+# The Deploy page and the version a publish records count the same tables, the
+# ones in the project's schema with Backenly's plumbing left out, and an update
+# names the tables it added, removed or changed. Real schema, the real state
+# route and the real publish.
+tests/integration/publish-counts-the-live-tables.spec.ts
+
+# A webhook endpoint can name the tables it receives row events for: a real
+# capture trigger, outbox, drain and loopback receiver, the table list's
+# checks, History, and the agent's actions.
+tests/integration/webhooks-pick-tables.spec.ts
+# Readiness counts the problems Backenly found: an open critical finding blocks
+# publishing and a warning warns, each named as the Autonomy page names it,
+# and it warns while magic links are on with no App URL. Real findings and
+# auth settings.
+tests/integration/readiness-counts-open-problems.spec.ts
+# Reading an account's usage measures database storage that is more than five
+# minutes old and says when it was measured: a real schema with rows measured
+# by the production catalog query.
+tests/integration/usage-storage-measured-on-read.spec.ts
+
+# Connecting Resend or SendGrid stores the sender a function's email.send()
+# uses by default (email_from), says when none is set, and writes the
+# auto-wired functions against ctx.integrations.email.send(). A real project,
+# the real connect action and the real key store (#609).
+tests/integration/email-integration-wiring-sender.spec.ts

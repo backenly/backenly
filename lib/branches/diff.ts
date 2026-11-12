@@ -27,6 +27,12 @@ export interface TableAlteration {
   addedColumns: ColumnDiff[]
   droppedColumns: string[]
   typeChanged: Array<{ column: string; from: string; to: string }>
+  /**
+   * Columns renamed, read from the branch's statements (lib/branches/renames.ts):
+   * a comparison of names alone cannot see one. `readded` when a new column
+   * then took the old name.
+   */
+  renamedColumns?: Array<{ from: string; to: string; readded: boolean }>
 }
 
 export interface SchemaDiff {

@@ -55,10 +55,10 @@ export async function POST(request: NextRequest) {
     // A refused statement is a contract error the agent can act on, not a
     // database failure — keep the two distinguishable.
     if (err instanceof ReadQueryError) {
-      recordMcpCall({ ...auth, endpoint: ENDPOINT, startedAt }, { statusCode: 400, tool: 'run_query', error: err.code })
+      recordMcpCall({ ...auth, endpoint: ENDPOINT, startedAt }, { statusCode: err.status, tool: 'run_query', error: err.code })
       return withCors(NextResponse.json(
         { ok: false, error: err.message, code: err.code, ...(err.hint ? { hint: err.hint } : {}) },
-        { status: 400 },
+        { status: err.status },
       ))
     }
     const msg = err instanceof Error ? err.message : 'Query failed'

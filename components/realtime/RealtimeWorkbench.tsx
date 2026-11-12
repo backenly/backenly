@@ -19,7 +19,7 @@ import { Radio, WifiOff, Circle, RefreshCw, AlertTriangle, Trash2, ChevronLeft }
 import { getAuthToken } from '@/lib/api/auth'
 import { getProject } from '@/lib/api/projects'
 import {
-  CommandBar, CopyField, EmptyState, IconButton, KIT, KitButton, NoticeStrip, StatusDot,
+  CommandBar, EmptyState, IconButton, KIT, KitButton, NoticeStrip, StatusDot,
   type StatusTone,
 } from '@/components/inspector/kit'
 import { AgentEmptyState } from '@/components/inspector/AgentEmptyState'
@@ -28,7 +28,6 @@ import { FOCUS_INSET } from '@/components/console/tokens'
 interface RealtimeStatusData {
   triggeredTables: string[]
   onlineUsers: number
-  channel: string
 }
 
 interface LiveEvent {
@@ -101,6 +100,9 @@ export function RealtimeWorkbench({ projectId }: { projectId: string }) {
   const [connState, setConnState] = useState<ConnectionState>('idle')
   const [retrySecondsLeft, setRetrySecondsLeft] = useState<number | null>(null)
   const [fatalReason, setFatalReason] = useState<string | null>(null)
+  // True while the stream runs on the public anon key because the project could
+  // not issue a ticket: it then shows only what an anonymous visitor could read.
+  const [anonymousView, setAnonymousView] = useState(false)
   const [events, setEvents] = useState<LiveEvent[]>([])
   const [eventCount, setEventCount] = useState(0)
   const [tableFilter, setTableFilter] = useState<string | null>(null)
@@ -206,33 +208,67 @@ export function RealtimeWorkbench({ projectId }: { projectId: string }) {
       setFatalReason(null)
       setConnState('connecting')
 
-      // Anon key is server-side auto-generated on first fetch. Cache it for the
-      // lifetime of this page so reconnects don't re-hit Prisma.
-      if (!anonKeyRef.current) {
-        try {
-          const res = await fetch(`/api/projects/${projectId}/anon-key`, {
-            headers: authHeaders(),
-            credentials: 'include',
-          })
-          if (res.status === 401) {
-            setFatal('Your dashboard session expired. Reload the page to continue.')
-            return
-          }
-          if (!res.ok) {
-            scheduleReconnect()
-            return
-          }
+      // A fresh single-use ticket for every connect. It shows every change, as
+      // the console shows every row, and puts no long-lived key in a URL
+      // (app/api/projects/[id]/realtime-ticket). The public anon key used to be
+      // the credential here, so on any table behind row-level security the
+      // owner saw nothing. It remains only for a project that cannot issue a
+      // ticket yet, and the page says what that view leaves out.
+      let credential: string | null = null
+      try {
+        const res = await fetch(`/api/projects/${projectId}/realtime-ticket`, {
+          method: 'POST',
+          headers: authHeaders(),
+          credentials: 'include',
+        })
+        if (res.status === 401) {
+          setFatal('Your dashboard session expired. Reload the page to continue.')
+          return
+        }
+        if (res.ok) {
           const data = await res.json()
-          anonKeyRef.current = data.anonKey ?? null
-        } catch {
+          if (data.ticket) credential = `ticket=${encodeURIComponent(data.ticket)}`
+          setAnonymousView(false)
+        } else if (res.status !== 409) {
           scheduleReconnect()
           return
         }
-      }
-      if (destroyedRef.current) return
-      if (!anonKeyRef.current) {
-        setFatal("We couldn't generate this project's anon key. Try reloading.")
+      } catch {
+        scheduleReconnect()
         return
+      }
+
+      if (!credential) {
+        // Anon key is server-side auto-generated on first fetch. Cache it for
+        // the lifetime of this page so reconnects don't re-hit Prisma.
+        if (!anonKeyRef.current) {
+          try {
+            const res = await fetch(`/api/projects/${projectId}/anon-key`, {
+              headers: authHeaders(),
+              credentials: 'include',
+            })
+            if (res.status === 401) {
+              setFatal('Your dashboard session expired. Reload the page to continue.')
+              return
+            }
+            if (!res.ok) {
+              scheduleReconnect()
+              return
+            }
+            const data = await res.json()
+            anonKeyRef.current = data.anonKey ?? null
+          } catch {
+            scheduleReconnect()
+            return
+          }
+        }
+        if (destroyedRef.current) return
+        if (!anonKeyRef.current) {
+          setFatal("We couldn't generate this project's anon key. Try reloading.")
+          return
+        }
+        credential = `apiKey=${encodeURIComponent(anonKeyRef.current)}`
+        setAnonymousView(true)
       }
       if (!apiBaseRef.current) {
         try {
@@ -248,7 +284,7 @@ export function RealtimeWorkbench({ projectId }: { projectId: string }) {
         return
       }
 
-      const url = `${apiBaseRef.current}/realtime?apiKey=${encodeURIComponent(anonKeyRef.current)}`
+      const url = `${apiBaseRef.current}/realtime?${credential}`
       const es = new EventSource(url)
       esRef.current = es
 
@@ -439,6 +475,12 @@ export function RealtimeWorkbench({ projectId }: { projectId: string }) {
       {statusError === 'network' && (
         <NoticeStrip icon={Circle}>
           Couldn&apos;t refresh status. Showing the last known values and retrying automatically.
+        </NoticeStrip>
+      )}
+      {anonymousView && connState !== 'fatal' && (
+        <NoticeStrip icon={Circle}>
+          Showing only changes an anonymous visitor could read. This project has no signing secret yet, so this page
+          cannot open a stream that sees every change.
         </NoticeStrip>
       )}
       {connState === 'fatal' && fatalReason && (
@@ -671,15 +713,6 @@ export function RealtimeWorkbench({ projectId }: { projectId: string }) {
                 </section>
               )}
 
-              {status?.channel && (
-                <section className="border-t border-white/[0.06] px-4 py-4">
-                  <h3 className="text-[13px] font-medium text-zinc-200">Postgres channel</h3>
-                  <p className="mb-2 mt-0.5 text-[12.5px] leading-[19px] text-faint">
-                    Changes are published with NOTIFY on this channel.
-                  </p>
-                  <CopyField value={status.channel} />
-                </section>
-              )}
             </div>
           </div>
         </div>

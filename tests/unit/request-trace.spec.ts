@@ -156,3 +156,39 @@ describe('resolveRequestId', () => {
     expect(resolveRequestId(12345)).toMatch(/^[0-9a-f-]{36}$/)
   })
 })
+
+/**
+ * Production QA (2026-11-09): a policy that refused an insert was explained as
+ * "Backenly's exposure rules refused this operation… The table is internal",
+ * and the same refusal for an anonymous caller as "The credential was rejected…
+ * Check the API key". Both were PostgreSQL's 42501 (insufficient_privilege):
+ * row-level security or the table's grants declined the identity, with a valid
+ * key. PostgREST answers it 401 for a caller with no end-user token and 403 for
+ * one with, so the status alone never said which layer decided.
+ */
+describe('a refusal by the database itself (42501)', () => {
+  it('blames row-level security or the grants for a signed-in user, never the API gate', () => {
+    const o = classifyRequestOutcome(facts({ status: 403, upstreamCode: '42501', tableHasRls: undefined, table: 'reviews' }))
+    expect(o.layer).toBe('database')
+    expect(o.explanation).toBe(
+      'Row-level security or the grants on "reviews" refused this for the signed-in user. ' +
+        "The key is valid; the table's policy declined this user.",
+    )
+  })
+
+  it('blames it for a caller with no end-user token too, where PostgREST answers 401, never the key', () => {
+    const o = classifyRequestOutcome(
+      facts({ status: 401, upstreamCode: '42501', endUserIdentityPresent: false, tableHasRls: undefined, table: 'reviews' }),
+    )
+    expect(o.layer).toBe('database')
+    expect(o.explanation).toBe(
+      'Row-level security or the grants on "reviews" refused this for a caller with no end-user token. ' +
+        "The key is valid; send the signed-in user's token as X-User-Token, or, if this should work " +
+        "without signing in, the table's policy has to allow it.",
+    )
+  })
+
+  it('a 401 Backenly raised itself is still about the credential', () => {
+    expect(classifyRequestOutcome(facts({ status: 401, upstreamCode: null })).layer).toBe('auth')
+  })
+})

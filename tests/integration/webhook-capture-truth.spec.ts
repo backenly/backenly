@@ -149,10 +149,10 @@ describe('WH-F8: an interrupted first attempt is swept, not stranded', () => {
   }, 60_000)
 })
 
-describe('WH-F10: the docs state the project-wide contract', () => {
-  it('webhooks.md says endpoints are project-wide with data.table filtering', () => {
+describe('WH-F10: the docs state which tables an endpoint receives', () => {
+  it('webhooks.md says an endpoint gets every table unless it names tables, with data.table on each delivery', () => {
     const doc = fs.readFileSync(path.join(ROOT, 'public', 'docs', 'agents', 'webhooks.md'), 'utf8')
-    expect(doc).toContain('project-wide')
+    expect(doc).toContain("receives every table's rows unless it names `tables`")
     expect(doc).toContain('data.table')
     expect(doc).toContain('/database/insert')
   })

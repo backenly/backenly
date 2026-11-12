@@ -3,11 +3,13 @@
  *
  *   GET    /api/projects/[id]/database-access          — status + connection strings
  *   POST   /api/projects/[id]/database-access          — provision { mode }
+ *   PATCH  /api/projects/[id]/database-access          — { schemaChanges: "allowed" | "refused" }
  *   DELETE /api/projects/[id]/database-access?mode=…   — revoke
  *
  * READ_ONLY: SELECT-only role — psql/TablePlus/BI/pg_dump, cannot mutate.
- * READ_WRITE: DML + in-schema DDL — external DDL is captured as drift and
- * adopted/flagged by the autonomy loop (lib/autonomy/drift-watch.ts).
+ * READ_WRITE: DML. Schema changes over it are refused until the admin allows
+ * them; allowed, they skip approvals and History and are captured as drift,
+ * adopted or flagged by the autonomy loop (lib/autonomy/drift-watch.ts).
  *
  * Secrets: responses include the decrypted password/connection string — this
  * is the owner-authenticated management surface, same trust boundary as the
@@ -20,6 +22,7 @@ import {
   getDirectAccessStatus,
   provisionDirectAccess,
   revokeDirectAccess,
+  setSchemaChanges,
   type DirectAccessMode,
 } from '@/lib/services/direct-access'
 
@@ -61,6 +64,37 @@ export async function POST(request: NextRequest) {
         )
       }
       return NextResponse.json({ error: 'Could not provision database credentials.' }, { status: 500 })
+    }
+  }, { floor: 'administer' })
+}
+
+// Whether the read-write login may change the schema. ADMIN, like creating
+// the login: allowing it lets changes skip the approvals and History.
+export async function PATCH(request: NextRequest) {
+  return withProjectValidation<any>(request, async (validated) => {
+    const body = await request.json().catch(() => ({}))
+    const value = body?.schemaChanges
+    if (value !== 'allowed' && value !== 'refused') {
+      return NextResponse.json({ error: 'schemaChanges must be "allowed" or "refused"' }, { status: 400 })
+    }
+    try {
+      const credential = await setSchemaChanges(validated.projectId, value === 'allowed')
+      return NextResponse.json({ credential })
+    } catch (err: any) {
+      const msg: string = err?.message ?? ''
+      if (msg.includes('no read-write login')) {
+        return NextResponse.json({ error: 'This project has no read-write login.' }, { status: 404 })
+      }
+      console.error('[database-access] schema changes setting failed:', msg)
+      // The definer arrives with scripts/setup-direct-access.sql; a database
+      // that has not had it reinstalled cannot apply the setting.
+      if (msg.includes('backenly_direct_set_schema_changes') && msg.includes('does not exist')) {
+        return NextResponse.json(
+          { error: 'This database needs its direct-access helpers updated before this setting can change.' },
+          { status: 503 },
+        )
+      }
+      return NextResponse.json({ error: 'Could not change the setting.' }, { status: 500 })
     }
   }, { floor: 'administer' })
 }

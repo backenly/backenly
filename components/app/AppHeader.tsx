@@ -9,6 +9,7 @@ import { Logo } from '@/components/Logo'
 import { getProjects, type Project } from '@/lib/api/projects'
 import { setCurrentProjectId as setProjectId, clearProjectCache } from '@/lib/api/client'
 import { signOut } from '@/lib/api/auth'
+import { sharedRead } from '@/lib/client/shared-read'
 
 export function AppHeader() {
   const router = useRouter()
@@ -32,9 +33,9 @@ export function AppHeader() {
   useEffect(() => {
     const fetchUser = async () => {
       try {
-        const response = await fetch('/api/auth/me')
-        if (response.ok) {
-          const data = await response.json()
+        const response = await sharedRead('/api/auth/me')
+        if (response.ok && response.data) {
+          const data = response.data
           setUserData({
             email: data.user?.email || data.email || 'user@example.com',
             name: data.user?.name || data.name || null

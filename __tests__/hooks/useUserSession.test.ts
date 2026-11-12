@@ -97,21 +97,21 @@ describe('useUserSession({ confirmSignedIn }) on pages that act on "signed in"',
 
   test('a cached "signed in" for a revoked session is never reported', async () => {
     setSessionCache(user, true)
-    const api = server({ '/api/auth/me': { status: 401 }, '/api/auth/refresh-token': { status: 401 } })
+    const api = server({ '/api/auth/session': { status: 200, body: { user: null, canRefresh: false } } })
 
     const { result } = renderHook(() => useUserSession({ confirmSignedIn: true }))
     expect(result.current.isLoggedIn).toBe(false)
 
     await waitFor(() => expect(result.current.isLoading).toBe(false))
     expect(result.current.isLoggedIn).toBe(false)
-    expect(api.calls('/api/auth/me')).toBe(1)
+    expect(api.calls('/api/auth/session')).toBe(1)
     // The shared cache learns it too, so display-only consumers stop saying "signed in".
     expect(renderHook(() => useUserSession()).result.current.isLoggedIn).toBe(false)
   })
 
   test('a cached "signed in" the server confirms is reported', async () => {
     setSessionCache(user, true)
-    server({ '/api/auth/me': { status: 200, body: { user } } })
+    server({ '/api/auth/session': { status: 200, body: { user } } })
 
     const { result } = renderHook(() => useUserSession({ confirmSignedIn: true }))
 
@@ -121,14 +121,14 @@ describe('useUserSession({ confirmSignedIn }) on pages that act on "signed in"',
 
   test('an expired access session with a live refresh token is still signed in', async () => {
     setSessionCache(user, true)
-    let meCalls = 0
+    let sessionCalls = 0
     global.fetch = jest.fn(async (url: string) => {
       if (url === '/api/auth/refresh-token') {
         return { ok: true, status: 200, json: async () => ({ token: 'rotated-jwt' }) } as Response
       }
-      meCalls += 1
-      return meCalls === 1
-        ? ({ ok: false, status: 401, json: async () => ({}) } as Response)
+      sessionCalls += 1
+      return sessionCalls === 1
+        ? ({ ok: true, status: 200, json: async () => ({ user: null, canRefresh: true }) } as Response)
         : ({ ok: true, status: 200, json: async () => ({ user }) } as Response)
     }) as unknown as typeof fetch
 
@@ -146,7 +146,7 @@ describe('useUserSession({ confirmSignedIn }) on pages that act on "signed in"',
 
     expect(result.current.isLoggedIn).toBe(false)
     expect(result.current.isLoading).toBe(false)
-    expect(api.calls('/api/auth/me')).toBe(0)
+    expect(api.calls('/api/auth/session')).toBe(0)
   })
 
   test('display-only consumers still read the cache without a request', () => {
@@ -156,18 +156,50 @@ describe('useUserSession({ confirmSignedIn }) on pages that act on "signed in"',
     const { result } = renderHook(() => useUserSession())
 
     expect(result.current.isLoggedIn).toBe(true)
-    expect(api.calls('/api/auth/me')).toBe(0)
+    expect(api.calls('/api/auth/session')).toBe(0)
   })
 
   test('confirming pages mounted together share one check', async () => {
     setSessionCache(user, true)
-    const api = server({ '/api/auth/me': { status: 200, body: { user } } })
+    const api = server({ '/api/auth/session': { status: 200, body: { user } } })
 
     const first = renderHook(() => useUserSession({ confirmSignedIn: true }))
     const second = renderHook(() => useUserSession({ confirmSignedIn: true }))
 
     await waitFor(() => expect(first.result.current.isLoggedIn).toBe(true))
     await waitFor(() => expect(second.result.current.isLoggedIn).toBe(true))
-    expect(api.calls('/api/auth/me')).toBe(1)
+    expect(api.calls('/api/auth/session')).toBe(1)
+  })
+})
+
+// Production QA (2026-11-09): the signed-out login page logged a 401 from
+// /api/auth/me and another from /api/auth/refresh-token on every load. The
+// hook now asks /api/auth/session, which answers a signed-out browser, and
+// refreshes only when the answer says a refresh cookie is there.
+describe('a signed-out browser', () => {
+  beforeEach(() => {
+    invalidateSessionCache()
+    localStorage.clear()
+  })
+
+  test('asks once, gets an answer, and tries no refresh', async () => {
+    const statuses: number[] = []
+    const fetchMock = jest.fn(async (url: string) => {
+      const status = url === '/api/auth/session' ? 200 : 401
+      statuses.push(status)
+      return {
+        ok: status < 300,
+        status,
+        json: async () => (url === '/api/auth/session' ? { user: null, canRefresh: false } : {}),
+      } as Response
+    })
+    global.fetch = fetchMock as unknown as typeof fetch
+
+    const { result } = renderHook(() => useUserSession({ confirmSignedIn: true }))
+
+    await waitFor(() => expect(result.current.isLoading).toBe(false))
+    expect(result.current.isLoggedIn).toBe(false)
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(['/api/auth/session'])
+    expect(statuses.every((status) => status < 400)).toBe(true)
   })
 })

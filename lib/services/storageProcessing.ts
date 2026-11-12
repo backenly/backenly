@@ -15,6 +15,7 @@
  */
 
 import { prisma } from '@/lib/db/postgres'
+import { uploaderOf } from '@/lib/storage/uploader'
 import path from 'path'
 import fs from 'fs/promises'
 
@@ -142,9 +143,11 @@ async function processImage(
       const stats = await fs.stat(thumbPath)
       const originalFile = await prisma.storageFile.findUnique({
         where: { id: fileId },
-        select: { bucketId: true, projectId: true, uploadedBy: true },
+        select: { bucketId: true, projectId: true, uploadedBy: true, metadata: true },
       })
       if (originalFile) {
+        // The thumbnail was sent by whoever sent the original.
+        const uploader = uploaderOf(originalFile)
         await prisma.storageFile.create({
           data: {
             bucketId:    originalFile.bucketId,
@@ -156,6 +159,7 @@ async function processImage(
             mimeType:    'image/webp',
             isPublic:    false,
             uploadedBy:  originalFile.uploadedBy,
+            ...(uploader ? { metadata: { uploader: { ...uploader } } } : {}),
             processingStatus: 'complete',
           },
         })

@@ -35,7 +35,7 @@
  * That difference is most of the reliability gap we are closing.
  */
 
-import { validateBooleanExpression } from '@/lib/db/sql-expression'
+import { isEveryRowPredicate, validateBooleanExpression, validateConversionExpression } from '@/lib/db/sql-expression'
 import { describeTarget, type DeclaredForeignKey, type ReferentialAction } from '@/lib/db/declared-foreign-key'
 
 /**
@@ -162,8 +162,9 @@ function splitTopLevel(s: string): string[] {
       }
       continue
     }
-    if (ch === '(') depth++
-    if (ch === ')') depth--
+    // Brackets too: a comma inside ARRAY['a','b'] separates elements, not items.
+    if (ch === '(' || ch === '[') depth++
+    if (ch === ')' || ch === ']') depth--
     if (ch === ',' && depth === 0) {
       if (cur.trim()) out.push(cur.trim())
       cur = ''
@@ -305,11 +306,77 @@ function mapType(rawType: string, stmt: string): string {
 /** Named once so the error text and the docs can never disagree. */
 const SUPPORTED_TYPE_LIST = 'text, int, bigint, boolean, timestamp, uuid, jsonb, numeric'
 
+/**
+ * Declared types, each with the one spelling the executor creates.
+ *
+ * The vocabulary above (TYPE_MAP) is Backenly's eight column kinds, and it is
+ * lossy: `timestamptz`, `date` and `time` all become `timestamp`, and
+ * `numeric(10,2)` loses its scale. The executor then built the column from the
+ * kind, and from the column's NAME where the kind was text, so on production
+ * (2026-11-09) `session_id text` was created as uuid and a merge turned
+ * `refunded_at timestamptz` into `timestamp without time zone`. A statement's
+ * type is a declaration, so it is now carried exactly.
+ *
+ * Left on the vocabulary, as before: `serial`/`bigserial` (they are a sequence
+ * and a default, not a type), `citext` (an extension) and `name`.
+ */
+const EXACT_TYPES: Record<string, string> = {
+  text: 'text', varchar: 'varchar', 'character varying': 'varchar', char: 'char', character: 'char',
+  int: 'integer', integer: 'integer', int4: 'integer', smallint: 'smallint', int2: 'smallint',
+  bigint: 'bigint', int8: 'bigint',
+  boolean: 'boolean', bool: 'boolean',
+  timestamp: 'timestamp', 'timestamp without time zone': 'timestamp',
+  timestamptz: 'timestamptz', 'timestamp with time zone': 'timestamptz',
+  date: 'date', time: 'time', 'time without time zone': 'time',
+  uuid: 'uuid', json: 'json', jsonb: 'jsonb',
+  numeric: 'numeric', decimal: 'numeric', real: 'real', float4: 'real', float8: 'double precision',
+  'double precision': 'double precision', money: 'money',
+}
+
+/** Length, precision or scale a declared type may carry through. */
+const TYPE_MODIFIER: Record<string, RegExp> = {
+  varchar: /^\d{1,5}$/,
+  char: /^\d{1,4}$/,
+  numeric: /^\d{1,4}(?:,\d{1,4})?$/,
+  timestamp: /^[0-6]$/,
+  timestamptz: /^[0-6]$/,
+  time: /^[0-6]$/,
+}
+
+/**
+ * The declared type in its canonical spelling, or undefined where the
+ * vocabulary is kept. `rawType` has already passed mapType.
+ */
+export function exactSqlType(rawType: string): string | undefined {
+  const trimmed = rawType.trim().toLowerCase().replace(/\s+/g, ' ')
+  // The same array reading mapType applied, so the two cannot disagree.
+  const element = arrayElementOf(trimmed)
+  const array = element !== null
+  const scalar = (element ?? trimmed).trim()
+  const modifier = /\(([^)]*)\)/.exec(scalar)?.[1]?.replace(/\s+/g, '')
+  // `timestamp(3) with time zone` puts the modifier before the words.
+  const base = scalar.replace(/\([^)]*\)/g, '').replace(/\s+/g, ' ').trim()
+  const exact = EXACT_TYPES[base]
+  if (!exact) return undefined
+  let out = exact
+  if (modifier !== undefined) {
+    if (!TYPE_MODIFIER[exact]?.test(modifier)) return undefined
+    out = `${exact}(${modifier})`
+  }
+  return array ? `${out}[]` : out
+}
+
 // ── Column definition parsing ────────────────────────────────────────────────
 
 interface ParsedColumn {
   name: string
   type: string
+  /**
+   * The type exactly as the statement declared it, in one canonical spelling
+   * (`timestamptz`, `date`, `numeric(10,2)`, `text`). The executor creates this
+   * type and never one inferred from the column's name (exactSqlType).
+   */
+  sqlType?: string
   nullable?: boolean
   unique?: boolean
   /** The referenced table, as the executor's `fkTo` contract has always named it. */
@@ -654,6 +721,8 @@ function parseColumnDef(def: string, stmt: string, checksOut?: ParsedCheck[]): P
   }
 
   const col: ParsedColumn = { name, type: mapType(rawType, stmt) }
+  const declared = exactSqlType(rawType)
+  if (declared) col.sqlType = declared
 
   // ── Nullability: absence is a statement, not a gap ──────────────────────────
   //
@@ -950,24 +1019,28 @@ function translateCreateTable(stmt: string): PlannedAction[] {
     notes.push(`${dropped.join(', ')} skipped: ${MANAGED_REPLACEMENT}. Order by "createdAt", not created_at.`)
   }
 
+  // The table is created as written: the columns, keys, uniques and checks the
+  // statement declares, and nothing a column's name suggests
+  // (lib/ai/minimal-executor.ts, executeCreateTable).
   const actions: PlannedAction[] = [{
     tool: 'create_table',
-    args: { tableName, columns },
+    args: { tableName, columns, asWritten: true },
     source: stmt,
     ...(notes.length ? { notes } : {}),
   }]
 
   for (const cols of compositeUniques) {
     actions.push({
-      tool: 'create_index',
-      args: { tableName, columns: cols, unique: true },
+      tool: 'add_constraint',
+      args: { tableName, columns: cols, constraintType: 'unique', asWritten: true },
       source: `${stmt} → UNIQUE (${cols.join(', ')})`,
-      notes: [`UNIQUE (${cols.join(', ')}) on ${tableName} applied as a unique index — that is how Postgres enforces it.`],
     })
   }
 
+  // Each expansion has a source of its own, so a run that stops between the
+  // table and one of its rules is reported as not fully applied.
   for (const check of checks) {
-    actions.push(checkAction(tableName, check, stmt))
+    actions.push(checkAction(tableName, check, `${stmt} → CHECK (${check.expression})`))
   }
 
   return actions
@@ -994,6 +1067,103 @@ function checkAction(tableName: string, check: ParsedCheck, source: string): Pla
     },
     source,
   }
+}
+
+/**
+ * A trailing CASCADE or RESTRICT, read without a regex that could backtrack.
+ * CASCADE is refused: it also drops whatever depends on the object, which the
+ * author did not name and nobody would have read.
+ */
+function withoutDropBehaviour(rest: string, what: string, stmt: string): string {
+  const lower = rest.toLowerCase()
+  for (const word of ['cascade', 'restrict']) {
+    if (lower.endsWith(word) && /\s/.test(rest.charAt(rest.length - word.length - 1))) {
+      if (word === 'cascade') {
+        throw new MigrationParseError(
+          `${what} … CASCADE is not supported.`,
+          'UNSUPPORTED_STATEMENT',
+          `CASCADE also drops whatever depends on it. Drop those first, then this.`,
+          stmt,
+        )
+      }
+      return rest.slice(0, rest.length - word.length).trimEnd()
+    }
+  }
+  return rest
+}
+
+/**
+ * ALTER TABLE t DROP CONSTRAINT [IF EXISTS] name [RESTRICT].
+ *
+ * Removes a rule, never a row, so it is translated rather than refused like the
+ * other DROPs. It runs on a branch, and reaches production through a merge a
+ * person approved or a person's own migration: an agent's on production is
+ * refused (lib/mcp/apply-migration.ts).
+ */
+function translateDropConstraint(tableName: string, action: string, stmt: string): PlannedAction[] {
+  let rest = action.replace(/^drop\s+constraint\s+/i, '').trim()
+  let ifExists = false
+  const ie = /^if\s+exists\s+/i.exec(rest)
+  if (ie) {
+    ifExists = true
+    rest = rest.slice(ie[0].length)
+  }
+  rest = withoutDropBehaviour(rest, 'DROP CONSTRAINT', stmt)
+  const name = /^("(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$]*)$/.exec(rest)
+  if (!name) {
+    throw new MigrationParseError(
+      `Could not read the constraint to drop from "${action.slice(0, 60)}".`,
+      'BAD_STATEMENT',
+      `One constraint per statement: ALTER TABLE ${tableName} DROP CONSTRAINT <name>;`,
+      stmt,
+    )
+  }
+  return [{
+    tool: 'drop_constraint',
+    args: { tableName, constraintName: unquoteIdent(name[1]), ...(ifExists ? { ifExists: true } : {}) },
+    source: stmt,
+  }]
+}
+
+/**
+ * DROP INDEX [CONCURRENTLY] [IF EXISTS] name [, …] [RESTRICT].
+ *
+ * Removes an index, never a row, so it is translated rather than refused like
+ * the other DROPs, and runs where a constraint drop does. A unique index may be
+ * dropped too: in a migration that is exactly what the author asked for, and it
+ * is how a UNIQUE that Backenly made as an index is removed. CONCURRENTLY is
+ * accepted and said not to apply, since a migration runs as one governed change
+ * inside a transaction.
+ */
+function translateDropIndex(stmt: string): PlannedAction[] {
+  let rest = stmt.replace(/^drop\s+index\s+/i, '').trim()
+  const notes: string[] = []
+  const concurrently = /^concurrently\s+/i.exec(rest)
+  if (concurrently) {
+    rest = rest.slice(concurrently[0].length)
+    notes.push(
+      'Dropped without CONCURRENTLY: a migration runs as one governed change, inside a transaction, where ' +
+      'Postgres does not allow it. The drop holds a brief exclusive lock on the table.',
+    )
+  }
+  let ifExists = false
+  const ie = /^if\s+exists\s+/i.exec(rest)
+  if (ie) {
+    ifExists = true
+    rest = rest.slice(ie[0].length)
+  }
+  rest = withoutDropBehaviour(rest, 'DROP INDEX', stmt)
+  const names = splitTopLevel(rest).map((n) => unquoteIdent(n))
+  if (names.length === 0 || names.some((n) => !n)) {
+    throw new MigrationParseError('DROP INDEX names no index.', 'BAD_STATEMENT', 'e.g. DROP INDEX orders_email_key;', stmt)
+  }
+  for (const n of names) assertUnqualified(n, stmt)
+  return names.map((indexName, i) => ({
+    tool: 'drop_index',
+    args: { indexName, ...(ifExists ? { ifExists: true } : {}), dropUniqueness: true },
+    source: stmt,
+    ...(i === 0 && notes.length ? { notes } : {}),
+  }))
 }
 
 /**
@@ -1025,29 +1195,21 @@ function translateAddConstraint(tableName: string, body: string, stmt: string): 
         stmt,
       )
     }
-    if (cols.length === 1) {
-      return [{
-        tool: 'add_constraint',
-        args: { tableName, columnName: cols[0], constraintType: 'unique', ...(constraintName ? { constraintName } : {}) },
-        source: stmt,
-      }]
-    }
-    // Multi-column UNIQUE. Postgres implements a UNIQUE constraint AS a unique
-    // index, so this is the same guarantee under a different name — not a
-    // downgrade, and no longer a refusal (defect #10).
+    // A UNIQUE constraint, one column or several, exactly as written: a real
+    // constraint over every row, which ON CONFLICT (…) can target. It used to
+    // become a unique index scoped to live rows, which no ON CONFLICT naming
+    // only the columns can use (42P10), under a name the SQL never gave.
     return [{
-      tool: 'create_index',
-      args: { tableName, columns: cols, unique: true, ...(constraintName ? { indexName: constraintName } : {}) },
+      tool: 'add_constraint',
+      args: {
+        tableName,
+        ...(cols.length === 1 ? { columnName: cols[0] } : {}),
+        columns: cols,
+        constraintType: 'unique',
+        asWritten: true,
+        ...(constraintName ? { constraintName } : {}),
+      },
       source: stmt,
-      notes: [
-        `Multi-column UNIQUE (${cols.join(', ')}) applied as a unique index on ${tableName} — ` +
-        `that is how PostgreSQL enforces a composite UNIQUE constraint. The guarantee is identical.`,
-        // Named up front rather than discovered in production. The executor
-        // scopes a UNIQUE index on a soft-delete table to live rows, because an
-        // unscoped one collides with rows the app can no longer see.
-        `If ${tableName} carries \`deleted_at\` (every Backenly-created table does), the index is scoped ` +
-        `\`WHERE deleted_at IS NULL\` so it does not collide with soft-deleted rows.`,
-      ],
     }]
   }
 
@@ -1123,7 +1285,27 @@ function translateAlterTable(stmt: string): PlannedAction[] {
 
   const tableName = unquoteIdent(head[1])
   assertUnqualified(tableName, stmt)
-  const action = head[2].trim()
+
+  // `ALTER TABLE t DROP COLUMN a, DROP COLUMN b`: several actions, each its own
+  // step. Each step's source names its action, so a run that stops between two
+  // of them reports exactly which took effect (fullyAppliedStatements).
+  // Without the split the comma ran into the first action, and
+  // `ADD COLUMN a numeric DEFAULT 0, ADD COLUMN b int` read as one column whose
+  // default was "0, ADD COLUMN b int".
+  const actions = splitTopLevel(head[2].trim())
+  if (actions.length > 1) {
+    return actions.flatMap((part) =>
+      translateAlterAction(tableName, part, stmt).map((step) => ({
+        ...step,
+        source: `${stmt} → ${part}${step.source.slice(stmt.length)}`,
+      })),
+    )
+  }
+  return translateAlterAction(tableName, head[2].trim(), stmt)
+}
+
+/** One action of an ALTER TABLE. `stmt` is the whole statement, for sources and errors. */
+function translateAlterAction(tableName: string, action: string, stmt: string): PlannedAction[] {
 
   // RENAME COLUMN a TO b
   const rename = /^rename\s+(?:column\s+)?("(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$]*)\s+to\s+("(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$]*)/i.exec(action)
@@ -1135,9 +1317,15 @@ function translateAlterTable(stmt: string): PlannedAction[] {
     }]
   }
 
-  // ALTER COLUMN c SET NOT NULL — the one ALTER COLUMN form that maps cleanly
-  // onto a governed constraint. Type changes deliberately do not (they are a
-  // data migration, not a constraint) and fall through to the refusal below.
+  // ALTER [COLUMN] c [SET DATA] TYPE t [USING expr]: the column keeps its rows
+  // and takes the declared type exactly. It runs on a branch, and reaches
+  // production through a merge a person approved or through a person's
+  // approval of the migration; either way the values before are kept with the
+  // change (lib/changes/preserve.ts), so restoring puts them back.
+  const retype = /^alter\s+(?:column\s+)?("(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$]*)\s+(?:set\s+data\s+)?type\s+([\s\S]+)$/i.exec(action)
+  if (retype) return translateRetype(tableName, unquoteIdent(retype[1]), retype[2].trim(), stmt)
+
+  // ALTER COLUMN c SET NOT NULL — maps cleanly onto a governed constraint.
   const setNotNull = /^alter\s+(?:column\s+)?("(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$]*)\s+set\s+not\s+null/i.exec(action)
   if (setNotNull) {
     return [{
@@ -1191,34 +1379,143 @@ function translateAlterTable(stmt: string): PlannedAction[] {
     const col = parseColumnDef(add[1], stmt, checks)
     if (!col) throw new MigrationParseError('Could not parse the added column.', 'BAD_COLUMN_DEF', undefined, stmt)
     const column: Record<string, unknown> = { name: col.name, type: col.type }
+    if (col.sqlType !== undefined) column.sqlType = col.sqlType
     if (col.nullable !== undefined) column.nullable = col.nullable
     if (col.default !== undefined) column.default = col.default
     if (col.unique !== undefined) column.unique = col.unique
     if (col.fkTo !== undefined) column.fkTo = col.fkTo
     if (col.references !== undefined) column.references = col.references
     const actions: PlannedAction[] = [{ tool: 'add_column', args: { tableName, column }, source: stmt }]
-    for (const check of checks) actions.push(checkAction(tableName, check, stmt))
+    for (const check of checks) actions.push(checkAction(tableName, check, `${stmt} → CHECK (${check.expression})`))
     return actions
   }
 
   // ADD CONSTRAINT ... / ADD UNIQUE (...) / ADD FOREIGN KEY (...)
   if (add) return translateAddConstraint(tableName, add[1].trim(), stmt)
 
-  // Everything else on ALTER TABLE is destructive or unmodelled.
-  if (/^drop\b/i.test(action)) {
-    throw new MigrationParseError(
-      `Dropping columns is destructive and cannot run over MCP.`,
-      'DESTRUCTIVE_REFUSED',
-      `Describe it via backend_chat — it is parked in the Review Queue for human approval and you get an approval id to poll with check_approval.`,
-      stmt,
-    )
-  }
+  // DROP CONSTRAINT [IF EXISTS] name [RESTRICT]: removes a rule, not a row.
+  if (/^drop\s+constraint\b/i.test(action)) return translateDropConstraint(tableName, action, stmt)
+
+  // DROP [COLUMN] [IF EXISTS] c [RESTRICT]. Its values are kept with the change.
+  if (/^drop\s+/i.test(action)) return translateDropColumn(tableName, action, stmt)
+
   throw new MigrationParseError(
     `ALTER TABLE action not supported: "${action.slice(0, 60)}".`,
     'UNSUPPORTED_STATEMENT',
-    `Supported: ADD COLUMN, RENAME COLUMN, ADD CONSTRAINT. For type changes or anything else, use backend_chat and describe the intent.`,
+    `Supported: ADD COLUMN, DROP COLUMN, RENAME COLUMN, ALTER COLUMN … TYPE / SET|DROP NOT NULL / SET|DROP DEFAULT, ` +
+    `ADD CONSTRAINT and DROP CONSTRAINT. For anything else, use backend_chat and describe the intent.`,
     stmt,
   )
+}
+
+/**
+ * Backenly's own columns, which a migration neither drops nor retypes: a
+ * table's API, its policies and the foreign keys into it stand on `id`, and
+ * the update trigger writes "updatedAt". Production's catalog decides the
+ * primary key itself (lib/mcp/apply-migration.ts, refusedDrop); these names
+ * are refused here already, before anything is asked of it.
+ */
+const KEPT_COLUMNS = new Set(['id', 'createdAt', 'updatedAt'])
+
+function assertNotKeptColumn(columnName: string, what: string, stmt: string): void {
+  if (!KEPT_COLUMNS.has(columnName)) return
+  throw new MigrationParseError(
+    `"${columnName}" is a column Backenly keeps on every table, so a migration does not ${what} it.`,
+    'RESERVED_COLUMN',
+    columnName === 'id'
+      ? `The table's API, its row policies and the foreign keys into it depend on "id". To remove the table, describe it via backend_chat.`
+      : `Backenly writes "${columnName}" on every row. Add a column of your own if you need another time.`,
+    stmt,
+  )
+}
+
+/**
+ * ALTER TABLE t DROP [COLUMN] [IF EXISTS] c [RESTRICT].
+ *
+ * Run as written: without CASCADE, so PostgreSQL refuses it while a view, a
+ * row policy or a foreign key from another table depends on the column, and
+ * says which. CASCADE is refused, since it would remove those too.
+ */
+function translateDropColumn(tableName: string, action: string, stmt: string): PlannedAction[] {
+  let rest = action.replace(/^drop\s+(?:column\s+)?/i, '').trim()
+  let ifExists = false
+  const ie = /^if\s+exists\s+/i.exec(rest)
+  if (ie) {
+    ifExists = true
+    rest = rest.slice(ie[0].length)
+  }
+  rest = withoutDropBehaviour(rest, 'DROP COLUMN', stmt)
+  const name = /^("(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$]*)$/.exec(rest)
+  if (!name) {
+    throw new MigrationParseError(
+      `Could not read the column to drop from "${action.slice(0, 60)}".`,
+      'BAD_STATEMENT',
+      `One column per action: ALTER TABLE ${tableName} DROP COLUMN <name>, DROP COLUMN <other>;`,
+      stmt,
+    )
+  }
+  const columnName = unquoteIdent(name[1])
+  assertNotKeptColumn(columnName, 'drop', stmt)
+  return [{
+    tool: 'drop_column',
+    args: { tableName, columnName, ...(ifExists ? { ifExists: true } : {}), asWritten: true },
+    source: stmt,
+  }]
+}
+
+/**
+ * ALTER [COLUMN] c [SET DATA] TYPE t [USING expr].
+ *
+ * The new type is the declared one, exactly (exactSqlType), never one chosen
+ * from the column's name. Without USING, PostgreSQL's own conversion applies,
+ * and it refuses one it does not have (text to integer), saying to add USING.
+ * A USING expression converts the column's own value with built-in functions
+ * and casts (validateConversionExpression); anything else is refused, since it
+ * runs over every row as the platform.
+ */
+function translateRetype(tableName: string, columnName: string, rest: string, stmt: string): PlannedAction[] {
+  assertNotKeptColumn(columnName, 'change the type of', stmt)
+  const parts = /^([\s\S]+?)(?:\s+using\s+([\s\S]+))?$/i.exec(rest)
+  const typeText = (parts?.[1] ?? '').trim()
+  const using = parts?.[2]?.trim()
+  if (/\bcollate\b/i.test(typeText)) {
+    throw new MigrationParseError(
+      `COLLATE is not supported on a type change.`,
+      'UNSUPPORTED_STATEMENT',
+      `Change the type without COLLATE: ALTER TABLE ${tableName} ALTER COLUMN ${columnName} TYPE ${typeText.replace(/\s+collate\b[\s\S]*$/i, '')};`,
+      stmt,
+    )
+  }
+  const newType = mapType(typeText, stmt)
+  const sqlType = exactSqlType(typeText)
+  if (!sqlType) {
+    throw new MigrationParseError(
+      `"${typeText}" cannot be a column's new type.`,
+      'UNSUPPORTED_TYPE',
+      /serial/i.test(typeText)
+        ? `serial and bigserial are a sequence and a default, not a type. Change the type to integer or bigint.`
+        : `Use one of: text, varchar(n), integer, bigint, smallint, numeric(p,s), real, double precision, boolean, date, ` +
+          `timestamp, timestamptz, time, uuid, json, jsonb, or an array of one of them.`,
+      stmt,
+    )
+  }
+  const args: Record<string, unknown> = { tableName, columnName, newType, sqlType, asWritten: true }
+  if (using !== undefined) {
+    const checked = validateConversionExpression(using, {
+      column: columnName,
+      castType: (t) => exactSqlType(t) !== undefined,
+    })
+    if (checked.kind !== 'ok') {
+      throw new MigrationParseError(
+        `USING ${using.length > 60 ? `${using.slice(0, 59)}…` : using} cannot run here: ${checked.reason}`,
+        'UNSAFE_EXPRESSION',
+        checked.hint,
+        stmt,
+      )
+    }
+    args.using = checked.expression
+  }
+  return [{ tool: 'alter_column_type', args, source: stmt }]
 }
 
 /**
@@ -1292,14 +1589,19 @@ function translateCreateIndex(stmt: string): PlannedAction[] {
         stmt,
       )
     }
-    assertSafeCheckExpression(where[1], stmt)
+    // `WHERE true` is an index over every row: what an upsert needs on a
+    // soft-delete table, where a UNIQUE index is otherwise scoped to live rows.
+    // It names no column, so it is passed on as itself rather than checked as a
+    // predicate, which would refuse it.
+    const everyRow = isEveryRowPredicate(where[1])
+    if (!everyRow) assertSafeCheckExpression(where[1], stmt)
     return [{
       tool: 'create_index',
       args: {
         tableName, columns: indexColumns(paren.body), unique,
         ...(method ? { method } : {}),
         ...(indexName ? { indexName } : {}),
-        where: where[1].trim(),
+        where: everyRow ? 'true' : where[1].trim(),
       },
       source: stmt,
     }]
@@ -1355,6 +1657,8 @@ function translateStatement(stmt: string): PlannedAction[] {
 
   const dml = /^(insert|update|delete)\b/i.exec(s)
   if (dml) return translateDml(s, dml[1])
+
+  if (/^drop\s+index\b/i.test(s)) return translateDropIndex(s)
 
   if (DESTRUCTIVE_VERBS.test(s)) {
     throw new MigrationParseError(

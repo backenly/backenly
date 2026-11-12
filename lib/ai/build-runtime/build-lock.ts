@@ -21,7 +21,13 @@
  * Rules:
  *   - Every mutation path MUST call withBuildLock() or acquireBuildLock/releaseBuildLock
  *   - Lock is advisory: on DB failure, execution is allowed (fail open — never block user)
- *   - Lock TTL is 10 minutes — a hung build auto-expires via session cleanup
+ *   - The lock lasts exactly as long as its holder: the holder releases it, or
+ *     the holder's process stops and its session ends with it. Nothing else
+ *     releases it, not another acquirer and not a timer: a slow holder cannot be
+ *     told from a hung one, and taking the lock from one still working runs two
+ *     changes on one project at once. A holder past LOCK_TTL_MS is logged.
+ *   - A release releases only its own acquisition (a token), so a release that
+ *     comes late never frees the next holder.
  *   - Budget is per project per hour — not per user (projects are the isolation unit)
  */
 
@@ -30,10 +36,16 @@ import { Pool, type PoolClient } from 'pg'
 
 // ── Config ─────────────────────────────────────────────────────────────────────
 
-const LOCK_TTL_MS      = 10 * 60 * 1000  // 10 min stale lock auto-expiry (for mem fallback)
+// The job record's deadline (timeoutAt): past it the queue's stuck-job sweep
+// closes a record whose holder stopped without releasing (lib/queue,
+// detectAndTimeoutStuckJobs). Also the age past which a holder in this process
+// is logged. Never a reason to take the lock from its holder.
+const LOCK_TTL_MS      = 10 * 60 * 1000
 const MAX_OPS_PER_HOUR = 10              // per project
 const COOLDOWN_MS      = 2 * 60 * 1000   // 2 min after any mutation
-const STALE_JOB_MS     = 2 * 60 * 1000   // BackgroundJob marked 'running' >2 min is stale
+
+/** What a caller is told while another holder has the project's lock. */
+const BLOCKED_REASON = 'Another change to this project is still in progress. Try again when it finishes.'
 
 /** Categories that require explicit user approval before execution. */
 export const APPROVAL_REQUIRED_ACTIONS = new Set([
@@ -54,6 +66,8 @@ export interface BuildLockHandle {
   kind: MutationKind
   acquiredAt: number
   usingAdvisory: boolean  // true = pg advisory, false = in-memory fallback
+  /** This acquisition of the advisory lock: only it releases the lock. */
+  token?: symbol
 }
 
 export interface LockResult {
@@ -102,8 +116,8 @@ function projectToLockKey(projectId: string): number {
 // The consequence was not theoretical. It reproduced on demand under repeated
 // repair cycles against a real database:
 // after a repair, later repairs for that project fail with "Another auto-fix is
-// in progress" while ZERO BackgroundJobs are running — so `reapStaleJobs` finds
-// nothing to reap (release had already marked the job `completed`), gives up,
+// in progress" while ZERO BackgroundJobs are running — so the stale-job reaper
+// found nothing to reap (release had already marked the job `completed`), gave up,
 // and the project loses autonomous repair entirely until the connection
 // recycles. That is the same silent-stall shape as the thirteen-day
 // `attempted=0` outage: every ledger row looks like activity.
@@ -125,23 +139,34 @@ const lockPool = new Pool({
   max: 10,
 })
 
-/** lockKey → the connection holding it. The pin that makes unlock correct. */
-const _heldLockClients = new Map<number, PoolClient>()
+/** A lock this process holds: the connection it was taken on, and which acquisition took it. */
+interface HeldLock {
+  client: PoolClient
+  token: symbol
+  since: number
+  kind?: MutationKind
+  /** Whether a holder this long has been logged (once per holder). */
+  said?: boolean
+}
+
+/** lockKey → the lock this process holds. The pin that makes unlock correct. */
+const _heldLocks = new Map<number, HeldLock>()
 
 /**
- * Take the advisory lock on a connection we keep checked out.
- * Returns false without leaking the connection when the lock is already held.
+ * Take the advisory lock on a connection we keep checked out. Returns this
+ * acquisition's token, or null without leaking the connection when the lock is
+ * already held.
  */
-async function pgTryAdvisoryLock(key: number): Promise<boolean> {
+async function pgTryAdvisoryLock(key: number): Promise<symbol | null> {
   // Already held by this process — do not double-acquire. pg advisory locks are
   // re-entrant per session and would then need matching unlocks to release.
-  if (_heldLockClients.has(key)) return false
+  if (_heldLocks.has(key)) return null
 
   let client: PoolClient
   try {
     client = await lockPool.connect()
   } catch {
-    return false
+    return null
   }
 
   try {
@@ -150,33 +175,36 @@ async function pgTryAdvisoryLock(key: number): Promise<boolean> {
       [key],
     )
     if (res.rows[0]?.acquired === true) {
-      _heldLockClients.set(key, client)
-      return true
+      const token = Symbol(`build-lock:${key}`)
+      _heldLocks.set(key, { client, token, since: Date.now() })
+      return token
     }
     client.release()
-    return false
+    return null
   } catch {
     client.release()
-    return false
+    return null
   }
 }
 
 /**
- * Release the advisory lock on the SAME connection that took it.
+ * Release the advisory lock on the SAME connection that took it, and only for
+ * the acquisition that took it.
  *
  * Loud on failure: a silent false here is precisely the bug above, and a lock
  * that fails to release costs the project its autonomous repairs.
  */
-async function pgAdvisoryUnlock(key: number): Promise<void> {
-  const client = _heldLockClients.get(key)
-  if (!client) {
-    // Nothing pinned for this key. Either the lock was never taken by this
-    // process, or it was taken by another instance — in which case stealing it
-    // would be wrong. Both are no-ops, not errors.
+async function pgAdvisoryUnlock(key: number, token: symbol): Promise<void> {
+  const held = _heldLocks.get(key)
+  if (!held || held.token !== token) {
+    // Not this acquisition's lock: released already, never taken by this
+    // process, or taken since by the next holder, whose lock this must not
+    // free. A no-op, not an error.
     return
   }
+  const client = held.client
 
-  _heldLockClients.delete(key)
+  _heldLocks.delete(key)
   try {
     const res = await client.query<{ released: boolean }>(
       'SELECT pg_advisory_unlock($1::bigint) AS released',
@@ -202,62 +230,52 @@ async function pgAdvisoryUnlock(key: number): Promise<void> {
 
 // ── In-memory fallback lock ────────────────────────────────────────────────────
 
-const _memLocks = new Map<string, { acquiredAt: number; kind: MutationKind }>()
+// The same rule as the advisory lock: held until its holder releases it (the
+// process is alive while it holds it), and released only by that acquisition.
+const _memLocks = new Map<string, { acquiredAt: number; kind: MutationKind; token: symbol }>()
 
-function memAcquire(projectId: string, kind: MutationKind): boolean {
-  const existing = _memLocks.get(projectId)
-  if (existing && Date.now() - existing.acquiredAt < LOCK_TTL_MS) return false
-  _memLocks.set(projectId, { acquiredAt: Date.now(), kind })
-  return true
+function memAcquire(projectId: string, kind: MutationKind): symbol | null {
+  if (_memLocks.has(projectId)) return null
+  const token = Symbol(`build-lock:mem:${projectId}`)
+  _memLocks.set(projectId, { acquiredAt: Date.now(), kind, token })
+  return token
 }
 
-function memRelease(projectId: string): void {
-  _memLocks.delete(projectId)
+function memRelease(projectId: string, token: symbol | undefined): void {
+  if (token && _memLocks.get(projectId)?.token === token) _memLocks.delete(projectId)
 }
 
-// ── Stale-job cleanup ─────────────────────────────────────────────────────────
+// ── A holder that has kept the lock a long time ───────────────────────────────
+//
+// There is no stale-lock reaping. It used to run whenever an acquirer found
+// the lock held: any holder whose record was more than two minutes old was
+// marked failed and its lock released on its own connection, so the caller
+// could take it. The lock is pinned to its holder's connection and ends with
+// its session, so the only holder that reaping could release was one still
+// running in this process — a build of several tables, an index built online
+// on a large table — and the reconciler, which tries a repair every minute,
+// then changed the project alongside it. A record left 'running' by a process
+// that stopped is closed by the queue's stuck-job sweep (timeoutAt).
 
-/**
- * Reap BackgroundJob rows stuck in 'running' status for longer than STALE_JOB_MS.
- *
- * Why: pg_advisory_lock is session-scoped. With Prisma's pooled connections,
- * a release call can land on a different pooled connection than the acquire,
- * leaving the original lock held until the source connection is cycled out.
- * This function detects orphaned BackgroundJob rows and marks them as failed
- * so budget checks recover, and attempts a best-effort advisory_unlock on the
- * stuck key.
- *
- * Returns true if any stale job was cleaned up (caller may retry the lock).
- */
-async function reapStaleJobs(projectId: string, lockKey: number): Promise<boolean> {
-  try {
-    const staleCutoff = new Date(Date.now() - STALE_JOB_MS)
-    const reaped = await prisma.backgroundJob.updateMany({
-      where: {
-        projectId,
-        type: 'build_lock',
-        status: 'running',
-        OR: [
-          { startedAt: { lt: staleCutoff } },
-          { startedAt: null, createdAt: { lt: staleCutoff } },
-          { timeoutAt: { lt: new Date() } },
-        ],
-      },
-      data: { status: 'failed', completedAt: new Date(), error: 'Stale lock reaped (job exceeded TTL)' },
-    })
+const HOLDER_WORDS: Record<MutationKind, string> = {
+  build: 'build',
+  modify: 'change',
+  storage: 'storage change',
+  resume: 'resumed build',
+}
 
-    if (reaped.count === 0) return false
-
-    // Release the advisory lock if THIS process is the one pinning it. When the
-    // holder is another instance, `pgAdvisoryUnlock` is a no-op by design —
-    // forcibly stealing a lock held elsewhere is how two workers end up mutating
-    // one project at once, which is the exact race the lock exists to prevent.
-    await pgAdvisoryUnlock(lockKey)
-
-    return true
-  } catch {
-    return false
-  }
+/** Log, once per holder, a holder in this process that has kept the lock past LOCK_TTL_MS. */
+function sayLongHolder(projectId: string, key: number): void {
+  const held = _heldLocks.get(key)
+  if (!held || held.said) return
+  const age = Date.now() - held.since
+  if (age < LOCK_TTL_MS) return
+  held.said = true
+  const holder = held.kind ? `A ${HOLDER_WORDS[held.kind]}` : 'A holder'
+  console.error(
+    `[BuildLock] ${holder} has held the build lock of project ${projectId} for ${Math.floor(age / 60_000)} minutes. ` +
+      'Nothing takes the lock from a live holder: changes to this project wait until it finishes or this process stops.',
+  )
 }
 
 // ── Lock acquisition ───────────────────────────────────────────────────────────
@@ -269,8 +287,8 @@ async function reapStaleJobs(projectId: string, lockKey: number): Promise<boolea
  * Creates a BackgroundJob record for budget tracking.
  * Falls back to in-memory lock if the DB is unreachable.
  *
- * If the advisory lock is held, attempts a stale-lock reap before giving up —
- * orphaned locks from Prisma pool churn are auto-cleared.
+ * If the lock is held, the caller is told so and waits: it never takes the
+ * lock from its holder, however long that holder has had it.
  */
 export async function acquireBuildLock(
   projectId: string,
@@ -280,22 +298,13 @@ export async function acquireBuildLock(
 
   // ── Primary: PostgreSQL advisory lock ─────────────────────────────────────
   try {
-    let acquired = await pgTryAdvisoryLock(lockKey)
-
-    // If the lock is held, check whether it's stale and retry once after reaping.
-    if (!acquired) {
-      const reaped = await reapStaleJobs(projectId, lockKey)
-      if (reaped) {
-        acquired = await pgTryAdvisoryLock(lockKey)
-      }
+    const token = await pgTryAdvisoryLock(lockKey)
+    if (!token) {
+      sayLongHolder(projectId, lockKey)
+      return { acquired: false, blockedReason: BLOCKED_REASON }
     }
-
-    if (!acquired) {
-      return {
-        acquired: false,
-        blockedReason: `Another auto-fix is in progress for this project. Try again in a few seconds.`,
-      }
-    }
+    const held = _heldLocks.get(lockKey)
+    if (held) held.kind = kind
 
     // Create BackgroundJob for audit trail + budget tracking
     let jobId = `advisory:${projectId}:${Date.now()}`
@@ -316,16 +325,16 @@ export async function acquireBuildLock(
 
     return {
       acquired: true,
-      handle: { projectId, lockId: jobId, lockKey, kind, acquiredAt: Date.now(), usingAdvisory: true },
+      handle: { projectId, lockId: jobId, lockKey, kind, acquiredAt: Date.now(), usingAdvisory: true, token },
     }
   } catch {
     // DB completely unreachable — fall back to in-memory
   }
 
   // ── Fallback: in-memory lock ───────────────────────────────────────────────
-  const acquired = memAcquire(projectId, kind)
-  if (!acquired) {
-    return { acquired: false, blockedReason: 'Another operation is in progress.' }
+  const token = memAcquire(projectId, kind)
+  if (!token) {
+    return { acquired: false, blockedReason: BLOCKED_REASON }
   }
   return {
     acquired: true,
@@ -336,38 +345,37 @@ export async function acquireBuildLock(
       kind,
       acquiredAt: Date.now(),
       usingAdvisory: false,
+      token,
     },
   }
 }
 
-/** Release a previously acquired lock. Safe to call multiple times. */
+/**
+ * Release a previously acquired lock. Safe to call more than once: only the
+ * acquisition that holds the lock releases it, so a release that comes late
+ * never frees the next holder, and never closes the next holder's record.
+ */
 export async function releaseBuildLock(handle: BuildLockHandle | undefined): Promise<void> {
   if (!handle) return
 
-  if (handle.usingAdvisory) {
-    await pgAdvisoryUnlock(handle.lockKey)
-  } else if (handle.lockId.startsWith('mem:')) {
-    memRelease(handle.projectId)
+  if (!handle.usingAdvisory) {
+    memRelease(handle.projectId, handle.token)
     return
   }
 
-  // Update BackgroundJob audit record
-  if (!handle.lockId.startsWith('mem:') && !handle.lockId.startsWith('advisory:')) {
+  if (!handle.token || _heldLocks.get(handle.lockKey)?.token !== handle.token) return
+
+  // The record first, while this acquisition still holds the lock: a record
+  // reads 'running' only while its holder has the lock. A lock taken without a
+  // record (the create failed) has none to close; the other 'running' records
+  // are not this holder's.
+  if (!handle.lockId.startsWith('advisory:')) {
     await prisma.backgroundJob.update({
       where: { id: handle.lockId },
       data: { status: 'completed', completedAt: new Date() },
     }).catch(() => {})
-  } else {
-    // Best-effort update for jobs with generated IDs
-    await prisma.backgroundJob.updateMany({
-      where: {
-        projectId: handle.projectId,
-        type: 'build_lock',
-        status: 'running',
-      },
-      data: { status: 'completed', completedAt: new Date() },
-    }).catch(() => {})
   }
+  await pgAdvisoryUnlock(handle.lockKey, handle.token)
 }
 
 // ── Budget enforcement ─────────────────────────────────────────────────────────
@@ -476,17 +484,17 @@ export async function withBuildLock<T>(
 
 /**
  * Run `fn` holding the project's build lock if it is free, and record nothing:
- * no job row, so no budget or cooldown is spent, and no stale-job reaping, so
- * a long repair is never taken over. For a short section that must not land
- * in the middle of a mutation (consent to an architecture change,
+ * no job row, so no budget or cooldown is spent. For a short section that must
+ * not land in the middle of a mutation (consent to an architecture change,
  * lib/evolution-engine/engine.ts approveRequest), never for a mutation itself.
  */
 export async function whileBuildLockFree<T>(projectId: string, fn: () => Promise<T>): Promise<{ ran: true; value: T } | { ran: false }> {
   const key = projectToLockKey(projectId)
-  if (!(await pgTryAdvisoryLock(key))) return { ran: false }
+  const token = await pgTryAdvisoryLock(key)
+  if (!token) return { ran: false }
   try {
     return { ran: true, value: await fn() }
   } finally {
-    await pgAdvisoryUnlock(key)
+    await pgAdvisoryUnlock(key, token)
   }
 }
