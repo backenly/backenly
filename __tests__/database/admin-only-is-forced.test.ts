@@ -11,7 +11,9 @@
  *
  * Pinned with the real installer (applyPermissionPolicy) and the real
  * visibility check, run as a NOSUPERUSER NOBYPASSRLS role that is a member of
- * the owning role: the production premise. Tables installed before the fix are
+ * the owning role: the production premise. The SDK's database routes read the
+ * same way (GET /api/v1/{projectId}/database/query), so the app's publishable
+ * key is held to the rule there too. Tables installed before the fix are
  * brought in line by scripts/force-admin-only-tables.ts (forceAdminOnlyTables).
  */
 
@@ -35,8 +37,13 @@ jest.mock('@/lib/services/workspace-rls', () => {
   }
 })
 
+import '@/tests/helpers/real-web-standard'
+import { NextRequest } from 'next/server'
 import { prisma } from '@/lib/db/prisma'
 import { applyPermissionPolicy, forceAdminOnlyTables } from '@/lib/services/workspace-rls'
+import { GET as queryRoute } from '@/app/api/v1/[projectId]/database/query/route'
+import { mintKey } from '@/lib/auth/key-prefix'
+import { hashApiKey } from '@/server/lib/end-user-identity'
 import { visibleChange, type RealtimeSubscriber } from '@/lib/realtime/visibility'
 import { jwtClaimFunctionSql, serviceRoleClause } from '@/lib/postgrest/rls-translation'
 
@@ -85,6 +92,8 @@ beforeAll(async () => {
 afterAll(async () => {
   if (schema) await prisma.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`).catch(() => {})
   await prisma.permissionPolicy.deleteMany({ where: { projectId } }).catch(() => {})
+  await prisma.apiKey.deleteMany({ where: { projectId } }).catch(() => {})
+  await prisma.table.deleteMany({ where: { projectId } }).catch(() => {})
   await prisma.project.deleteMany({ where: { id: projectId } }).catch(() => {})
   await prisma.user.deleteMany({ where: { id: ownerId } }).catch(() => {})
 })
@@ -126,5 +135,25 @@ describe('admin_only', () => {
 
   it('still sends a service-role subscriber every change', async () => {
     expect(await visibleChange(as(null, true), insert())).not.toBeNull()
+  })
+})
+
+describe('the SDK\'s database route', () => {
+  it('reads none of an admin_only table\'s rows with the app\'s publishable key', async () => {
+    const minted = mintKey({ keyType: 'public', serviceRole: false })
+    await prisma.apiKey.create({
+      data: {
+        name: 'browser', keyPrefix: minted.prefix, keyHash: hashApiKey(minted.key), keyType: 'public',
+        serviceRole: false, permissions: ['read'], capabilities: ['database'], projectId, userId: ownerId,
+      },
+    })
+    await prisma.table.create({ data: { name: 'payouts', projectId } })
+    const res = await queryRoute(
+      new NextRequest(`https://backenly.test/api/v1/${projectId}/database/query?table=payouts`, { headers: { 'x-api-key': minted.key } }),
+      { params: Promise.resolve({ projectId }) },
+    )
+    const body = await res.text()
+    expect(res.status).toBe(200)
+    expect(body).not.toContain(secret)
   })
 })

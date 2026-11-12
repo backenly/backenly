@@ -1985,3 +1985,10 @@ tests/integration/usage-storage-measured-on-read.spec.ts
 # auto-wired functions against ctx.integrations.email.send(). A real project,
 # the real connect action and the real key store (#609).
 tests/integration/email-integration-wiring-sender.spec.ts
+
+# admin_only forces row-level security like every other rule, so the role that
+# owns workspace tables is held to it: realtime's per-change visibility check
+# and the SDK's database routes, run as a NOSUPERUSER NOBYPASSRLS member of the
+# owning role, give an end user and the publishable key none of its rows; an
+# admin_only table installed before is found and forced.
+__tests__/database/admin-only-is-forced.test.ts
