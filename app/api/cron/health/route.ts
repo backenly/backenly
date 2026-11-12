@@ -9,6 +9,7 @@ export const dynamic = 'force-dynamic'
 import { NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
 import { isSchedulerLeader } from '@/lib/scheduler/leader'
+import { RUNNABLE_FUNCTION_STATUS_FILTER } from '@/lib/services/ai-functions/status'
 
 export async function GET() {
   const schedulerStartedAt = (globalThis as any).__cronSchedulerStartedAt ?? null
@@ -22,7 +23,7 @@ export async function GET() {
   }).catch(() => null)
 
   const activeCronJobs = await prisma.aiFunction.count({
-    where: { triggerType: 'cron', status: 'active' },
+    where: { triggerType: 'cron', status: RUNNABLE_FUNCTION_STATUS_FILTER },
   }).catch(() => 0)
 
   return NextResponse.json({

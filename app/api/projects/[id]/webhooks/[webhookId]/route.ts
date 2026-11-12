@@ -12,10 +12,11 @@ export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
 import { withAuth } from '@/lib/auth/route-protection'
-import { getWebhook, updateWebhook, deleteWebhook } from '@/lib/webhooks'
+import { getWebhook, updateWebhook, deleteWebhook, WebhookTablesError } from '@/lib/webhooks'
 import { isWebhookEventType, WEBHOOK_EVENT_TYPES } from '@/lib/webhooks/events'
 import { syncWebhookCapture } from '@/lib/webhooks/capture'
 import { guardWebhookRoute } from '@/lib/webhooks/route-guard'
+import { onlyTurnsOff } from '@/lib/webhooks/plan'
 import { BlockedOutboundError } from '@/lib/security/outbound-guard'
 
 export const GET = withAuth(async (_request: NextRequest, { user, params }) => {
@@ -33,6 +34,7 @@ export const GET = withAuth(async (_request: NextRequest, { user, params }) => {
       eventType: webhook.eventType,
       targetUrl: webhook.targetUrl,
       active: webhook.active,
+      tables: webhook.tables,
       createdAt: webhook.createdAt,
       updatedAt: webhook.updatedAt,
       logCount: webhook._count.logs,
@@ -41,7 +43,7 @@ export const GET = withAuth(async (_request: NextRequest, { user, params }) => {
 })
 
 /**
- * Edit destination, event, or enabled state.
+ * Edit destination, event, tables, or enabled state.
  *
  * Unknown fields are ignored rather than applied — `secret` in particular.
  * Letting a PATCH body set the signing secret would hand an attacker who can
@@ -51,15 +53,19 @@ export const GET = withAuth(async (_request: NextRequest, { user, params }) => {
 export const PATCH = withAuth(async (request: NextRequest, { user, params }) => {
   const { id: projectId, webhookId } = await params
 
-  const denied = await guardWebhookRoute(user.userId, projectId, 'write')
+  const body = await request.json().catch(() => null)
+
+  // Turning an endpoint off is allowed on every plan; any other edit needs a
+  // plan that includes webhooks.
+  const stops = body !== null && typeof body === 'object' && onlyTurnsOff(body)
+  const denied = await guardWebhookRoute(user.userId, projectId, 'write', stops ? 'stop' : 'change')
   if (denied) return denied
 
-  const body = await request.json().catch(() => null)
   if (!body || typeof body !== 'object') {
     return NextResponse.json({ error: 'A JSON body is required' }, { status: 400 })
   }
 
-  const changes: { eventType?: any; targetUrl?: string; active?: boolean } = {}
+  const changes: { eventType?: any; targetUrl?: string; active?: boolean; tables?: unknown } = {}
 
   if (body.targetUrl !== undefined) {
     if (typeof body.targetUrl !== 'string' || !body.targetUrl) {
@@ -85,9 +91,12 @@ export const PATCH = withAuth(async (request: NextRequest, { user, params }) => 
     changes.active = body.active
   }
 
+  // Checked against the project's tables by updateWebhook: [] means every table.
+  if (body.tables !== undefined) changes.tables = body.tables
+
   if (Object.keys(changes).length === 0) {
     return NextResponse.json(
-      { error: 'Nothing to change. Send targetUrl, eventType or active.' },
+      { error: 'Nothing to change. Send targetUrl, eventType, tables or active.' },
       { status: 400 },
     )
   }
@@ -96,6 +105,9 @@ export const PATCH = withAuth(async (request: NextRequest, { user, params }) => 
   try {
     updated = await updateWebhook(projectId, webhookId, changes)
   } catch (err) {
+    if (err instanceof WebhookTablesError) {
+      return NextResponse.json({ error: err.message, code: err.code }, { status: 400 })
+    }
     if (err instanceof BlockedOutboundError) {
       return NextResponse.json({ error: err.message, code: 'BLOCKED_DESTINATION' }, { status: 400 })
     }
@@ -121,6 +133,7 @@ export const PATCH = withAuth(async (request: NextRequest, { user, params }) => 
       eventType: updated.eventType,
       targetUrl: updated.targetUrl,
       active: updated.active,
+      tables: updated.tables,
       createdAt: updated.createdAt,
       updatedAt: updated.updatedAt,
     },
@@ -131,7 +144,8 @@ export const PATCH = withAuth(async (request: NextRequest, { user, params }) => 
 export const DELETE = withAuth(async (_request: NextRequest, { user, params }) => {
   const { id: projectId, webhookId } = await params
 
-  const denied = await guardWebhookRoute(user.userId, projectId, 'admin')
+  // Deleting is allowed on every plan (stopping an endpoint never needs one).
+  const denied = await guardWebhookRoute(user.userId, projectId, 'admin', 'stop')
   if (denied) return denied
 
   // deleteMany with both ids: a webhook belonging to another project matches

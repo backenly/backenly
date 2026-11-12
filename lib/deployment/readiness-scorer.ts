@@ -18,6 +18,8 @@ import { prisma } from '@/lib/db'
 import { workspaceRawClient } from '@/lib/data-plane/regional'
 import { sanitizeDiagnostic } from '@/lib/errors/diagnostic-sanitize'
 import { aiAvailability } from '@/lib/ai/llm'
+import { EVOLUTION_FINDING_TYPE } from '@/lib/core/types'
+import { summariseFinding } from '@/lib/core/finding-summaries'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -55,6 +57,13 @@ export interface ReadinessOptions {
    * explicitly (the deploy itself, POST /readiness, autoFix: true).
    */
   autoFix?: boolean
+  /**
+   * When true, a behavioral verification of the backend as it is now (no
+   * governed change since, at most five minutes old) is reused instead of run
+   * again (lib/deployment/verification-reuse.ts). For the pages that show
+   * readiness; a deploy, a fix and an agent's check verify afresh.
+   */
+  reuseRecentVerification?: boolean
 }
 
 // ─── Weights ──────────────────────────────────────────────────────────────────
@@ -71,7 +80,7 @@ export async function scoreReadiness(
   projectId: string,
   options: ReadinessOptions = {},
 ): Promise<ReadinessReport> {
-  const { autoFix = false } = options
+  const { autoFix = false, reuseRecentVerification = false } = options
 
   // Load everything we need in one round-trip
   // `apiDefs` was destructured here and never referenced again in this file —
@@ -121,9 +130,11 @@ export async function scoreReadiness(
     checkApiExposure(projectId),
     checkEndUserAuthTable(projectId, project),           // auth enabled → users table ready (or created on first sign-up)
     checkMonitoringBasics(projectId),
-    checkBehavioralVerification(projectId),
+    checkBehavioralVerification(projectId, reuseRecentVerification && !autoFix),
     checkSecurityAudit(projectId),          // #31/#7 security — blocks deploy on critical/high findings
     checkFunctionTriggers(projectId, autoFix), // signup functions must have auto-triggers; placeholders must be cleaned up
+    checkOpenFindings(projectId),           // problems Backenly found and nothing has fixed or dismissed
+    checkEmailLinks(projectId, project),    // magic links need an App URL to sign anyone in
   ])
 
   return buildReport(projectId, checks)
@@ -666,7 +677,7 @@ async function checkMonitoringBasics(projectId: string): Promise<ReadinessCheck>
  * Skipped checks (not applicable to this project) never count as failures.
  * Only checks that ran and failed will block the deploy.
  */
-async function checkBehavioralVerification(projectId: string): Promise<ReadinessCheck> {
+async function checkBehavioralVerification(projectId: string, reuseRecent: boolean): Promise<ReadinessCheck> {
   const base: Omit<ReadinessCheck, 'status' | 'message' | 'details' | 'fixApplied'> = {
     id: 'behavioral_verification',
     name: 'Behavioral verification',
@@ -676,8 +687,9 @@ async function checkBehavioralVerification(projectId: string): Promise<Readiness
   }
 
   try {
-    const { runBehavioralVerification } = await import('@/lib/ai/behavioral-verifier')
-    const result = await runBehavioralVerification(projectId)
+    const result = reuseRecent
+      ? await (await import('./verification-reuse')).recentBehavioralVerification(projectId)
+      : await (await import('@/lib/ai/behavioral-verifier')).runBehavioralVerification(projectId)
 
     const ran     = result.checks.filter(c => !c.skipped)
     const failed  = ran.filter(c => !c.passed)
@@ -819,6 +831,139 @@ async function checkEndUserAuthTable(
       severity: 'warning',
       status: 'fail',
       message: 'Could not verify end-user users table — check DB connectivity',
+      details: [`⚠ ${sanitizeDiagnostic(err) || 'Unknown error'}`],
+      fixApplied: false,
+    }
+  }
+}
+
+/**
+ * open_findings — problems Backenly found that nothing has fixed or dismissed.
+ *
+ * Readiness never read them. Production QA (2026-11-09, report 86) saw "11 of
+ * 11 passing" while anonymous uploads were open, an unrequested UNIQUE(email)
+ * blocked orders and a function sent email with no provider connected; the
+ * self-healing loop had findings for some of those, and the Deploy page did not
+ * show one of them.
+ *
+ * A critical finding blocks, the way a critical security audit result does; a
+ * warning warns. Each is named in the words the Autonomy page uses
+ * (lib/core/finding-summaries.ts). An architecture change Backenly prepared is
+ * a request waiting on a person, not a problem, so it is not counted, as on
+ * Overview. Informational findings are not counted either.
+ */
+async function checkOpenFindings(projectId: string): Promise<ReadinessCheck> {
+  const base: Omit<ReadinessCheck, 'status' | 'message' | 'details' | 'fixApplied'> = {
+    id: 'open_findings',
+    name: 'Open problems',
+    description: 'Problems Backenly found that are not fixed or dismissed',
+    severity: 'blocking',
+  }
+  try {
+    const rows = await prisma.healthFinding.findMany({
+      where: {
+        projectId,
+        status: { in: ['open', 'pending_approval'] },
+        type: { not: EVOLUTION_FINDING_TYPE },
+        severity: { in: ['critical', 'warning'] },
+      },
+      orderBy: { detectedAt: 'desc' },
+      select: { type: true, severity: true, details: true },
+      take: 200,
+    })
+    const named = (severity: string) => [
+      ...new Set(
+        rows
+          .filter((r) => r.severity === severity)
+          .map((r) => summariseFinding(r.type, r.details as Record<string, unknown> | null)),
+      ),
+    ]
+    const critical = named('critical')
+    const warnings = named('warning')
+    const where = 'Fix or dismiss them on the Autonomy page.'
+    if (critical.length > 0) {
+      return {
+        ...base,
+        status: 'fail',
+        message:
+          `${critical.length === 1 ? '1 critical problem is' : `${critical.length} critical problems are`} open: ` +
+          `${critical[0]}${critical.length > 1 ? ', and more' : ''}. ${where}`,
+        details: [...critical.map((t) => `✗ ${t}`), ...warnings.map((t) => `⚠ ${t}`)],
+        fixApplied: false,
+      }
+    }
+    if (warnings.length > 0) {
+      return {
+        ...base,
+        severity: 'warning',
+        status: 'fail',
+        message:
+          `${warnings.length === 1 ? '1 problem is' : `${warnings.length} problems are`} open: ` +
+          `${warnings[0]}${warnings.length > 1 ? ', and more' : ''}. ${where}`,
+        details: warnings.map((t) => `⚠ ${t}`),
+        fixApplied: false,
+      }
+    }
+    return { ...base, status: 'pass', message: 'No problems are open', details: [], fixApplied: false }
+  } catch (err) {
+    return {
+      ...base,
+      severity: 'warning',
+      status: 'fail',
+      message: 'Could not read the open problems',
+      details: [`⚠ ${sanitizeDiagnostic(err) || 'Unknown error'}`],
+      fixApplied: false,
+    }
+  }
+}
+
+/**
+ * email_links — where the links in end users' auth emails go.
+ *
+ * Password reset links open a page the runtime hosts when no App URL is set,
+ * but a magic link can only sign someone in to the app, so with magic links on
+ * and no App URL they sign nobody in (lib/services/auth-email-policy.ts). Magic
+ * links are on unless turned off, so this warns until the App URL is set or
+ * magic links are switched off. Skipped while end-user auth is off.
+ */
+async function checkEmailLinks(projectId: string, project: { authManifest: any }): Promise<ReadinessCheck> {
+  const base: Omit<ReadinessCheck, 'status' | 'message' | 'details' | 'fixApplied'> = {
+    id: 'email_links',
+    name: 'Links in auth emails',
+    description: 'Magic links need the App URL to sign anyone in',
+    severity: 'warning',
+  }
+  try {
+    const { isEndUserAuthEnabled } = await import('@/lib/services/auth-status')
+    if (!(await isEndUserAuthEnabled(projectId, project.authManifest))) {
+      return { ...base, status: 'skip', message: 'End-user auth is off', details: [], fixApplied: false }
+    }
+    const { getAuthEmailPolicy } = await import('@/lib/services/auth-email-policy')
+    const policy = await getAuthEmailPolicy(projectId)
+    if (!policy || policy.effectiveAppUrl || !policy.magicLinksEnabled) {
+      return {
+        ...base,
+        status: 'pass',
+        message: policy?.effectiveAppUrl
+          ? `Reset and magic links open ${policy.effectiveAppUrl}`
+          : 'Reset links open the page Backenly hosts; magic links are off',
+        details: [],
+        fixApplied: false,
+      }
+    }
+    return {
+      ...base,
+      status: 'fail',
+      message:
+        'No App URL is set, so magic links can’t sign anyone in. Set the App URL under Auth → Email, or turn magic links off.',
+      details: ['Password reset links still work: they open a page Backenly hosts.'],
+      fixApplied: false,
+    }
+  } catch (err) {
+    return {
+      ...base,
+      status: 'fail',
+      message: 'Could not read the auth email settings',
       details: [`⚠ ${sanitizeDiagnostic(err) || 'Unknown error'}`],
       fixApplied: false,
     }

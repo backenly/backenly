@@ -1,5 +1,6 @@
 /**
- * Every destructive tool says what it destroys (describeDanger, lib/ai/brain/agent.ts).
+ * Every destructive tool says what it destroys (describeApproval,
+ * lib/mcp/approval-describe.ts, which the brain's gate and the MCP door share).
  *
  * When the brain's gate stops a destructive call, describeDanger writes its
  * target, and over MCP that target is the Review Queue entry a person approves
@@ -16,13 +17,13 @@ import fs from 'fs'
 import path from 'path'
 import { BRAIN_TOOLS, isDestructiveTool } from '@/lib/ai/brain/tools'
 
-const agent = fs.readFileSync(path.join(__dirname, '..', '..', 'lib', 'ai', 'brain', 'agent.ts'), 'utf8')
+const describer = fs.readFileSync(path.join(__dirname, '..', '..', 'lib', 'mcp', 'approval-describe.ts'), 'utf8')
 
-/** The tools describeDanger has a `case` for. */
+/** The tools describeApproval has a `case` for. */
 function describedTools(): Set<string> {
-  const start = agent.indexOf('async function describeDanger(')
+  const start = describer.indexOf('export async function describeApproval(')
   expect(start).toBeGreaterThan(-1)
-  const body = agent.slice(start, agent.indexOf('\n}\n', start))
+  const body = describer.slice(start, describer.indexOf('\n}\n', start))
   return new Set([...body.matchAll(/^\s*case '([a-z_]+)':/gm)].map((m) => m[1]))
 }
 

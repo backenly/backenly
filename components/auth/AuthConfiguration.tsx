@@ -16,10 +16,11 @@ type ProviderId = 'google' | 'github' | 'discord' | 'facebook'
 interface AuthStats {
   totalUsers: number
   activeUsers: number
-  activeUsersDelta: number
+  /** Percent change from the previous period; null when it had nothing to compare against. */
+  activeUsersDelta: number | null
   verifications: number
   signups24h: number
-  signupsDelta: number
+  signupsDelta: number | null
   signups7d: number
 }
 
@@ -153,7 +154,7 @@ function timeAgo(iso?: string | null): string {
 // Identity avatars stay neutral — color is reserved for state, not decoration.
 const AVATAR_TONE = 'bg-white/[0.04] border-white/[0.10] text-zinc-300'
 
-function delta(value: number | undefined) {
+function delta(value: number | null | undefined) {
   if (!value) return undefined
   return (
     <span className={value > 0 ? 'text-emerald-300/90' : 'text-rose-300'}>

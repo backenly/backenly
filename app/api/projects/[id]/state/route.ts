@@ -9,6 +9,8 @@ import { getProjectAuthStatus } from '@/lib/services/auth-status'
 import { isReservedWorkspaceTable } from '@/lib/security/workspace-schema'
 import { canAccessProject } from '@/lib/edition/guard'
 import { workspaceRawClient } from '@/lib/data-plane/regional'
+import { generatedEndpointRoutes, isGeneratedEndpoint } from '@/lib/services/domain-endpoints'
+import { liveTableNames } from '@/lib/deployment/published-tables'
 
 /**
  * GET /api/projects/[projectId]/state
@@ -41,21 +43,37 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
     const { getActiveGraph } = await import('@/lib/orchestration/graph-pointer')
     const graph = await getActiveGraph(projectId)
 
+    // The tables a publish puts live, as the publish counts them, so the Deploy
+    // page and the version it records say the same number. Null when the
+    // project's database cannot be read; the page then falls back to
+    // `entities`.
+    const liveTableCount = await liveTableNames(projectId).then((names) => names.length).catch(() => null)
+
     // Always use prisma.table as ground truth for entities.
     // The dynamic build loop writes to prisma.table but does NOT update BackendStateGraph,
     // so reading graph.entities gives stale/partial counts. Graph is used only for field metadata.
-    const [prismaTablesRaw, functionCount, triggerCount, projectRow, prismaBucketCount] = await Promise.all([
+    const [prismaTablesRaw, functionRows, triggerCount, projectRow, prismaBucketCount] = await Promise.all([
       prisma.table.findMany({
         where: { projectId },
         select: { name: true },
         orderBy: { createdAt: 'asc' },
       }),
-      prisma.aiFunction.count({ where: { projectId } }).catch(() => 0),
+      prisma.aiFunction
+        .findMany({ where: { projectId }, select: { name: true, triggerType: true, triggerTable: true, codeOrigin: true } })
+        .catch(() => [] as Array<{ name: string; triggerType: string; triggerTable: string | null; codeOrigin: string }>),
       prisma.appTrigger.count({ where: { projectId } }).catch(() => 0),
       prisma.project.findUnique({ where: { id: projectId }, select: { jwtSecret: true } }),
       // Authoritative bucket count — Prisma is ground truth, same as tables
       prisma.storageBucket.count({ where: { projectId } }).catch(() => 0),
     ])
+
+    // Every function is a callable route. The project's own are the ones a
+    // person or an agent made, not the endpoints Backenly generated for its
+    // tables (lib/services/domain-endpoints.ts): the Functions count and
+    // "built" mean those.
+    const functionCount = functionRows.length
+    const generated = generatedEndpointRoutes(projectId, prismaTablesRaw.map((t) => t.name))
+    const ownFunctionCount = functionRows.filter((fn) => !isGeneratedEndpoint(fn, generated)).length
 
     // Deduplicate tables by name — duplicate rows can accumulate when the build
     // loop runs multiple times (e.g. after credential submission). First occurrence wins.
@@ -129,6 +147,7 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
     if (!graph && entities.length === 0) {
       return NextResponse.json({
         entities: [],
+        liveTableCount,
         apis: [],
         capabilities: [],
         hasContent: false,
@@ -270,12 +289,12 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
     }
 
     // Include functions and triggers in the response for the dashboard summary
-    if (functionCount > 0) {
+    if (ownFunctionCount > 0) {
       capabilities.push({
         name: 'Functions',
         enabled: true,
         icon: 'functions' as const,
-        count: functionCount,
+        count: ownFunctionCount,
       })
     }
     if (triggerCount > 0) {
@@ -300,7 +319,7 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
       realTables.length > 0 ||
       exposedResources.length > 0 ||
       authEnabled ||
-      functionCount > 0 ||
+      ownFunctionCount > 0 ||
       bucketCount > 0 ||
       (graph?.realtime?.enabled ?? false) ||
       jobCount > 0 ||
@@ -309,6 +328,7 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
 
     return NextResponse.json({
       entities,
+      liveTableCount,
       apis,
       endpointCount,     // Total individual HTTP method+path combos (matches API Builder count)
       capabilities,

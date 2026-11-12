@@ -46,6 +46,7 @@ import {
   TEMPLATE_KINDS,
 } from '@/lib/email/template-kinds'
 import { resolveAuthEmail } from '@/lib/email/auth-template-resolver'
+import { getAuthEmailContext, sendEndUserPasswordResetEmail } from '@/lib/services/end-user-auth-email'
 
 const prisma = new PrismaClient()
 
@@ -108,6 +109,7 @@ beforeEach(async () => {
   delete process.env.SMTP_PASS
   delete process.env.SMTP_PORT
   delete process.env.SMTP_FROM
+  delete process.env.SMTP_END_USER_FROM
 })
 
 async function configureProjectSmtp(target = projectId, enabled = true) {
@@ -268,6 +270,79 @@ describe('precedence: project first, deployment as fallback', () => {
     // The neighbour is unaffected and has nothing.
     expect((await resolveProjectSmtp(otherProjectId)).source).toBe('none')
   }, 60_000)
+})
+
+describe('mail to a project’s own users says whose it is', () => {
+  // Production QA (2026-11-09): a store's shoppers got their password reset
+  // "From: Backenly <support@backenly.com>". Only the body named the store, and
+  // a reply went to Backenly's support desk. Through the deployment's SMTP, the
+  // display name is the app's, and the address can be a no-reply one.
+
+  const useDeploymentSmtp = () => {
+    process.env.SMTP_HOST = '127.0.0.1'
+    process.env.SMTP_PORT = String(sink.port)
+    process.env.SMTP_USER = 'deployment-user'
+    process.env.SMTP_PASS = 'deployment-password'
+    process.env.SMTP_FROM = 'Backenly <support@example.test>'
+  }
+  const nameTheApp = (appName: string) =>
+    prisma.projectAuthConfig.upsert({ where: { projectId }, create: { projectId, appName }, update: { appName } })
+  const sendReset = async () =>
+    sendEndUserPasswordResetEmail(projectId, 'shopper@example.test', 'reset-token', await getAuthEmailContext(projectId))
+  const fromHeader = (raw: string) => raw.split(/\r?\n\r?\n/)[0].match(/^From: (.*)$/m)?.[1]
+
+  afterEach(async () => {
+    await prisma.projectAuthConfig.deleteMany({ where: { projectId } })
+  })
+
+  it('names the app, at the deployment’s address, when no end-user address is set', async () => {
+    useDeploymentSmtp()
+    await nameTheApp('Corner Shop')
+
+    expect(await sendReset()).toBe(true)
+    expect(sink.received).toHaveLength(1)
+    expect(fromHeader(sink.received[0].raw)).toBe('Corner Shop <support@example.test>')
+    expect(sink.received[0].mailFrom).toBe('support@example.test')
+  }, 120_000)
+
+  it('sends from SMTP_END_USER_FROM when the operator set one, still as the app', async () => {
+    useDeploymentSmtp()
+    process.env.SMTP_END_USER_FROM = 'noreply@example.test'
+    await nameTheApp('Corner Shop')
+
+    expect(await sendReset()).toBe(true)
+    expect(fromHeader(sink.received[0].raw)).toBe('Corner Shop <noreply@example.test>')
+    expect(sink.received[0].mailFrom).toBe('noreply@example.test')
+  }, 120_000)
+
+  it('falls back to the project’s name when the app has none of its own', async () => {
+    useDeploymentSmtp()
+
+    expect(await sendReset()).toBe(true)
+    expect(fromHeader(sink.received[0].raw)).toBe('"smtp-suite" <support@example.test>')
+  }, 120_000)
+
+  it('keeps a line break in the app’s name out of the headers', async () => {
+    useDeploymentSmtp()
+    await nameTheApp('Corner Shop\r\nBcc: attacker@example.test')
+
+    expect(await sendReset()).toBe(true)
+    const headers = sink.received[0].raw.split(/\r?\n\r?\n/)[0]
+    expect(headers).not.toMatch(/^Bcc:/im)
+    expect(sink.received[0].rcptTo).toEqual(['shopper@example.test'])
+    expect(fromHeader(sink.received[0].raw)).toBe('"Corner Shop Bcc: attacker@example.test" <support@example.test>')
+  }, 120_000)
+
+  it('CONTROL: project SMTP still sends exactly as the project configured it', async () => {
+    useDeploymentSmtp()
+    process.env.SMTP_END_USER_FROM = 'noreply@example.test'
+    await nameTheApp('Corner Shop')
+    await configureProjectSmtp()
+
+    expect(await sendReset()).toBe(true)
+    expect(fromHeader(sink.received[0].raw)).toBe('Example Auth <auth@example.test>')
+    expect(sink.received[0].mailFrom).toBe(FROM)
+  }, 120_000)
 })
 
 describe('the stored password', () => {

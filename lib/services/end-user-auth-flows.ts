@@ -1,10 +1,11 @@
 /**
  * END-USER AUTH FLOWS — shared kernel
  * ====================================
- * Framework-free implementations of the four "session lifecycle" auth flows:
+ * Framework-free implementations of the "session lifecycle" auth flows:
  *
  *   refreshEndUserToken   POST /auth/refresh-token
  *   logoutEndUser         POST /auth/logout
+ *   currentEndUser        GET  /auth/me
  *   forgotEndUserPassword POST /auth/forgot-password
  *   resetEndUserPassword  POST /auth/reset-password
  *
@@ -29,6 +30,7 @@ import { ensureAuthUsersTable, introspectAuthUsersTable, stampLastLogin, isReser
 import { trackEndUserActive } from '@/lib/quota/kernel'
 import { emitEndUserCreated } from '@/lib/services/end-user-auth-events'
 import { resolveJwtSecret } from '@/lib/services/jwtSecretManager'
+import { workspaceSchemaName } from '@/lib/security/workspace-schema'
 // Existence and the signing secret, from the region's copy while it is fresh
 // (lib/auth-projection/read.ts): nothing else of the project is read here.
 import { authorizingProject } from '@/lib/auth-projection/read'
@@ -39,6 +41,7 @@ import {
   crossEnvironmentToken,
   type AuthEnvironment,
 } from '@/lib/branches/auth-environment'
+import { resolveEndUserFromToken } from '@/server/lib/end-user-identity'
 import jwt from 'jsonwebtoken'
 import crypto from 'crypto'
 
@@ -258,6 +261,70 @@ export async function logoutEndUser(
 }
 
 /**
+ * GET /auth/me
+ * The signed-in end user: { data: { user: { id, email, name, role } } }.
+ *
+ * There was no such endpoint: the path fell through to the OAuth route and
+ * answered 404 'Provider "me" is not supported'. The token is checked the way
+ * every data request checks it (server/lib/end-user-identity.ts): signed for
+ * this project and environment, not revoked by /auth/logout, its user not
+ * blocked. The user is then read from the users table, so the answer is the
+ * account as it is now, not as the token remembers it.
+ */
+export async function currentEndUser(
+  projectId: string,
+  rawToken: string | null,
+  env: AuthEnvironment = mainAuthEnvironment(projectId),
+): Promise<AuthFlowResult> {
+  try {
+    const project = await authorizingProject(projectId)
+    if (!project) return err('NOT_FOUND', 'Project not found', 404)
+    if (!rawToken) {
+      return err(
+        'UNAUTHORIZED',
+        'Not signed in. Pass the token sign-in returned in the Authorization header (Bearer <token>).',
+        401,
+      )
+    }
+
+    const identity = await resolveEndUserFromToken(
+      projectId,
+      rawToken,
+      env.branch ? { ...env.branch, schemaName: env.schemaName } : null,
+    )
+    if (identity === 'blocked') return err('FORBIDDEN', 'This account has been suspended.', 403)
+    if (!identity) {
+      const other = project.jwtSecret ? crossEnvironmentToken(rawToken, resolveJwtSecret(project.jwtSecret), env.branch) : null
+      return other ? err(other.code, other.error, 401) : err('UNAUTHORIZED', 'Invalid token. Please sign in again.', 401)
+    }
+
+    // Only the columns this users table has, read as the service role: the
+    // table is FORCE RLS, as refreshEndUserToken explains.
+    const schema = await introspectAuthUsersTable(projectId, env.schemaName)
+    const selectCols = ['id', 'email']
+    if (schema.hasName) selectCols.push('name')
+    if (schema.hasRole) selectCols.push('role')
+    const users = await executeWithUserContext<any>(
+      projectId,
+      '',
+      true,
+      `SELECT ${selectCols.map(c => `"${c}"`).join(', ')} FROM "${env.schemaName}"."users" WHERE id = $1${userIdCast(schema)} LIMIT 1`,
+      [identity.userId],
+    )
+    const user = users[0]
+    if (!user) return err('UNAUTHORIZED', 'User not found. Please sign in again.', 401)
+
+    return ok({ user: { id: user.id, email: user.email, name: user.name ?? null, role: user.role ?? 'user' } })
+  } catch (error: any) {
+    console.error('Current user error:', error?.message ?? error)
+    if (isRegionError(error)) {
+      return err(error.code, 'The signed-in user could not be read: this project\'s data region is not reachable from this server.', 503)
+    }
+    return err('INTERNAL_ERROR', 'Failed to read the signed-in user', 500)
+  }
+}
+
+/**
  * POST /auth/forgot-password
  * Generates a single-use, 1-hour reset token and emails it. The token is never
  * returned. Always 200 for unknown emails (no user enumeration).
@@ -397,6 +464,44 @@ export async function issueEndUserPasswordReset(
   return { found: users.length > 0, emailSent }
 }
 
+/** The shortest password a reset accepts: the API and the hosted reset page check the same number. */
+export const MIN_END_USER_PASSWORD_LENGTH = 8
+
+export type PasswordResetLinkState =
+  | { state: 'usable'; email: string }
+  | { state: 'invalid' | 'used' | 'expired' }
+
+/**
+ * Whether a password reset link can still be used, without using it, and the
+ * address it was sent to. The hosted reset page (lib/services/end-user-hosted-pages.ts)
+ * asks before it shows its form, so a spent or expired link says so before
+ * anyone types a password.
+ */
+export async function passwordResetLinkState(projectId: string, tokenRaw: unknown): Promise<PasswordResetLinkState> {
+  const token = typeof tokenRaw === 'string' ? tokenRaw.trim() : ''
+  let schemaName: string
+  try {
+    schemaName = workspaceSchemaName(projectId)
+  } catch {
+    return { state: 'invalid' }
+  }
+  if (!token || !(await authorizingProject(projectId))) return { state: 'invalid' }
+
+  // Resolved before the lookup's fail-soft catch: an unreachable region is
+  // not an invalid link. No table yet means no reset was ever issued.
+  const db = await workspaceRawClient(projectId)
+  const rows = await db.$queryRawUnsafe<Array<{ email: string; expires_at: Date; used_at: Date | null }>>(
+    `SELECT email, expires_at, used_at FROM "${schemaName}"."_password_resets" WHERE token = $1 LIMIT 1`,
+    token,
+  ).catch(() => [] as Array<{ email: string; expires_at: Date; used_at: Date | null }>)
+
+  const reset = rows[0]
+  if (!reset) return { state: 'invalid' }
+  if (reset.used_at) return { state: 'used' }
+  if (new Date(reset.expires_at) < new Date()) return { state: 'expired' }
+  return { state: 'usable', email: reset.email }
+}
+
 /**
  * POST /auth/reset-password
  * Consumes a reset token, updates the password, and returns a fresh JWT so
@@ -419,8 +524,8 @@ export async function resetEndUserPassword(
     const newPassword = typeof passwordRaw === 'string' ? passwordRaw : undefined
 
     if (!token) return err('BAD_REQUEST', '"token" is required', 400)
-    if (!newPassword || newPassword.length < 8) {
-      return err('BAD_REQUEST', '"password" must be at least 8 characters', 400)
+    if (!newPassword || newPassword.length < MIN_END_USER_PASSWORD_LENGTH) {
+      return err('BAD_REQUEST', `"password" must be at least ${MIN_END_USER_PASSWORD_LENGTH} characters`, 400)
     }
 
     const schemaName = `workspace_${projectId}`

@@ -78,7 +78,7 @@ describe('the install commands are the ones agents are told', () => {
 
   it('names every part the one History records in the undo answer', () => {
     // lib/changes/resources records these beside the schema (docs/CHANGE_RECOVERY.md, "One history").
-    const words: Record<string, string> = { env: 'environment variables' }
+    const words: Record<string, string> = { env: 'environment variables', frontends: 'allowed origins' }
     const answer = FAQ.find((f) => /undo/i.test(f.q))!.a
     expect(answer).toMatch(/the schema/)
     for (const part of RESOURCE_ORDER) expect([part, answer.includes(words[part] ?? part)]).toEqual([part, true])

@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { describeIssues, plainErrorMap } from './plain-issues'
 
 /**
  * Common validation schemas
@@ -143,7 +144,8 @@ export function validateRequest<T>(
   schema: z.ZodSchema<T>,
   data: unknown
 ): { success: true; data: T } | { success: false; error: z.ZodError } {
-  const result = schema.safeParse(data)
+  // Plain sentences naming the field, unless the schema wrote its own (lib/validation/plain-issues.ts).
+  const result = schema.safeParse(data, { errorMap: plainErrorMap })
   
   if (result.success) {
     return { success: true, data: result.data }
@@ -158,7 +160,7 @@ export function validateRequest<T>(
 export async function validateRequestBody<T>(
   schema: z.ZodSchema<T>,
   request: Request
-): Promise<{ success: true; data: T } | { success: false; error: string; status: number }> {
+): Promise<{ success: true; data: T } | { success: false; error: string; status: number; fields?: Record<string, string[]> }> {
   try {
     const body = await request.json()
     const result = validateRequest(schema, body)
@@ -167,11 +169,11 @@ export async function validateRequestBody<T>(
       return { success: true, data: result.data }
     }
       
-    return {
-      success: false,
-      error: 'error' in result ? result.error.errors.map(e => `${e.path.join('.')}: ${e.message}`).join(', ') : 'Unknown error',
-      status: 400,
-    }
+    // `in`, not `success`: strictNullChecks is off here, which disables
+    // narrowing a union on a boolean literal.
+    if (!('error' in result)) return { success: false, error: 'Unknown error', status: 400 }
+    const described = describeIssues(result.error)
+    return { success: false, error: described.message, status: 400, fields: described.fields }
   } catch (error) {
     return {
       success: false,

@@ -19,6 +19,8 @@
 
 import { Pool } from 'pg'
 import { projectDatabaseUrl } from '@/lib/data-plane/regional'
+import { literalPrefix } from '@/lib/projects/backend-presence'
+import { sizeWords } from '@/lib/core/size-words'
 
 // Warn once per server restart if pg_stat_statements is unavailable.
 // Avoids spamming logs on every cron invocation.
@@ -98,9 +100,11 @@ export interface HotTableFinding {
 export interface PartitioningFinding {
   table: string
   liveRows: number
-  growthClass: 'high' | 'very_high' | 'critical'
+  /** The table with its indexes and TOAST, on disk. */
+  bytes: number
+  /** effective_cache_size: the server's own estimate of the memory that caches its data. */
+  cacheBytes: number
   recommendation: string
-  migrationSql: string
 }
 
 export interface QueryFinding {
@@ -134,7 +138,18 @@ export interface InfraReport {
   scannedAt: string
   overallPressure: InfraPressure
   hotTables: HotTableFinding[]
+  /**
+   * Whether the hot-table read finished. Its empty list after a failure used to
+   * withdraw every hot-table finding the project had.
+   */
+  hotTablesScanned: boolean
   partitioningCandidates: PartitioningFinding[]
+  /**
+   * Whether the partitioning read finished. An empty list from a read that
+   * failed is not "no table outgrows the cache", and must not withdraw the
+   * findings already raised.
+   */
+  partitioningScanned: boolean
   slowQueries: QueryFinding[]
   websocketPressure: WebSocketFinding | null
   /** Prioritised actionable recommendations, highest severity first */
@@ -159,222 +174,295 @@ async function getPool(projectId: string): Promise<Pool> {
 
 // ── Detection: Hot tables ─────────────────────────────────────────────────────
 
-async function detectHotTables(pool: Pool, schemaName: string): Promise<HotTableFinding[]> {
-  try {
-    const rows = await pool.query<{
-      tablename: string
-      seq_scan: string
-      idx_scan: string
-      n_live_tup: string
-      n_dead_tup: string
-    }>(
-      // `relname AS tablename`, not `tablename`. pg_stat_user_tables exposes
-      // (schemaname, relname); `tablename` is a pg_tables column. Selecting it
-      // here raised 42703 on EVERY call, the module's "never throws" contract
-      // swallowed it, and this detector returned [] — reported as "no hot
-      // tables" rather than "the query is wrong". It had never once run.
-      `SELECT relname AS tablename, seq_scan, COALESCE(idx_scan, 0) AS idx_scan,
-              n_live_tup, n_dead_tup
-         FROM pg_stat_user_tables
-        WHERE schemaname = $1
-          AND (seq_scan > 100 OR n_live_tup > 5000)
-          -- Underscore-prefixed tables are Backenly's own platform internals
-          -- (_email_verifications, _token_blacklist, …). Surfacing them told the
-          -- owner their backend had a problem they neither created nor can act
-          -- on. Every other detector already excludes them; this one did not.
-          --
-          -- left() rather than a LIKE pattern, deliberately. This was first
-          -- written as NOT LIKE E'\\_%', which a JS template literal collapses to
-          -- SQL E'\_%'; an E-string drops the unrecognised escape, leaving the
-          -- pattern '_%' where _ is a LIKE WILDCARD. That excluded every table
-          -- with at least one character, so the detector returned [] for every
-          -- project and its catch reported "no hot tables". Same silent shape as
-          -- the pg_stat_user_tables.tablename bug it sits next to. left() has no
-          -- escaping semantics to get wrong.
-          AND left(relname, 1) <> '_'
-        ORDER BY seq_scan DESC
-        LIMIT 20`,
-      [schemaName],
-    )
+// No catch around the read: one that fails rejects, and the report records it
+// (hotTablesScanned), so a failed read never reads as "no hot tables" and never
+// withdraws the findings already raised. measuredFilterColumns keeps its own
+// catch: without pg_stat_statements a table is reported with no column.
+export async function detectHotTables(pool: Pool, schemaName: string): Promise<HotTableFinding[]> {
+  const rows = await pool.query<{
+    tablename: string
+    seq_scan: string
+    idx_scan: string
+    n_live_tup: string
+    n_dead_tup: string
+  }>(
+    // `relname AS tablename`, not `tablename`. pg_stat_user_tables exposes
+    // (schemaname, relname); `tablename` is a pg_tables column. Selecting it
+    // here raised 42703 on EVERY call, the module's "never throws" contract
+    // swallowed it, and this detector returned [] — reported as "no hot
+    // tables" rather than "the query is wrong". It had never once run.
+    `SELECT relname AS tablename, seq_scan, COALESCE(idx_scan, 0) AS idx_scan,
+            n_live_tup, n_dead_tup
+       FROM pg_stat_user_tables
+      WHERE schemaname = $1
+        AND (seq_scan > 100 OR n_live_tup > 5000)
+        -- Underscore-prefixed tables are Backenly's own platform internals
+        -- (_email_verifications, _token_blacklist, …). Surfacing them told the
+        -- owner their backend had a problem they neither created nor can act
+        -- on. Every other detector already excludes them; this one did not.
+        --
+        -- left() rather than a LIKE pattern, deliberately. This was first
+        -- written as NOT LIKE E'\\_%', which a JS template literal collapses to
+        -- SQL E'\_%'; an E-string drops the unrecognised escape, leaving the
+        -- pattern '_%' where _ is a LIKE WILDCARD. That excluded every table
+        -- with at least one character, so the detector returned [] for every
+        -- project and its catch reported "no hot tables". Same silent shape as
+        -- the pg_stat_user_tables.tablename bug it sits next to. left() has no
+        -- escaping semantics to get wrong.
+        AND left(relname, 1) <> '_'
+      ORDER BY seq_scan DESC
+      LIMIT 20`,
+    [schemaName],
+  )
 
-    // Which column are these sequential scans actually filtering on?
+  // Which column are these sequential scans actually filtering on?
+  //
+  // This used to answer from a hardcoded name list — created_at, user_id,
+  // owner_id, updated_at — picking the first one that existed on the table.
+  // Two revisions before that it hardcoded `created_at` outright and produced
+  // CREATE INDEX statements against columns the table did not have.
+  //
+  // The name list fixed the crash and left the real defect in place. This
+  // detector MEASURES sequential scans and then indexed a column chosen by
+  // convention, so on a table whose queries filter `customer_ref` it would
+  // count the scans correctly and build the index on `created_at` — a
+  // permanent write-throughput cost on every insert and update, buying nothing,
+  // with the scans it was supposed to absorb still happening. And because
+  // `infra_hot_table` is classified auto, that index was APPLIED without asking
+  // whenever pressure reached high or critical.
+  //
+  // The codebase's own rule, written three times in these files, is that an
+  // index on a guessed column is worse than no index because nothing ever
+  // surfaces it. The rule was simply never applied here.
+  //
+  // So the column now comes from the same place the scans do: measurement.
+  // pg_stat_statements records the statements this schema actually spends time
+  // in; extractIndexCandidate parses the equality predicate out of one; the
+  // catalog confirms the column exists and nothing already leads an index with
+  // it. A table that survives none of that is reported with NO column, which
+  // classifyFix already routes to notify_only with a hint asking the owner
+  // which column their queries filter by. Saying "I measured the scans but
+  // cannot tell you which column" is worth more than a confident wrong answer.
+  const tableNames = rows.rows.map(r => r.tablename)
+  const indexColumn = await measuredFilterColumns(pool, schemaName, tableNames)
+
+  return rows.rows.map(r => {
+    const seqScans = Number(r.seq_scan)
+    const idxScans = Number(r.idx_scan)
+    const live = Number(r.n_live_tup)
+    const dead = Number(r.n_dead_tup)
+    const total = seqScans + idxScans
+    const idxHitPct = total > 0 ? Math.round((idxScans / total) * 100) : 0
+    const deadRatio = live + dead > 0 ? Math.round((dead / (live + dead)) * 100) : 0
+
+    // Index pressure and bloat are evaluated separately, because they are
+    // different faults with different repairs. Collapsing them into one
+    // ternary chain is what let a healthy, well-indexed table be reported as
+    // a "hot table" on the strength of its dead-tuple ratio alone.
     //
-    // This used to answer from a hardcoded name list — created_at, user_id,
-    // owner_id, updated_at — picking the first one that existed on the table.
-    // Two revisions before that it hardcoded `created_at` outright and produced
-    // CREATE INDEX statements against columns the table did not have.
+    // ── The size floor, and why its absence produced every stuck finding ──
     //
-    // The name list fixed the crash and left the real defect in place. This
-    // detector MEASURES sequential scans and then indexed a column chosen by
-    // convention, so on a table whose queries filter `customer_ref` it would
-    // count the scans correctly and build the index on `created_at` — a
-    // permanent write-throughput cost on every insert and update, buying nothing,
-    // with the scans it was supposed to absorb still happening. And because
-    // `infra_hot_table` is classified auto, that index was APPLIED without asking
-    // whenever pressure reached high or critical.
+    // Sequential-scan COUNT says nothing without table SIZE. Scanning a table
+    // that fits in one or two 8KB pages costs less than descending a B-tree,
+    // which is why the planner picks a seq scan there and would keep picking
+    // it even if an index existed.
     //
-    // The codebase's own rule, written three times in these files, is that an
-    // index on a guessed column is worse than no index because nothing ever
-    // surfaces it. The rule was simply never applied here.
+    // Without this floor the detector was reporting exactly that situation as
+    // a problem. Every one of the seven index-pressure findings sitting open
+    // on production was a table with between 0 and 19 LIVE ROWS — including a
+    // `users` table with zero rows credited with 13,255 sequential scans. None
+    // of them had anything wrong. They could not be auto-repaired either,
+    // because there was no sane column to index, so they sat in the review
+    // queue permanently telling the owner to fix a table that was empty.
     //
-    // So the column now comes from the same place the scans do: measurement.
-    // pg_stat_statements records the statements this schema actually spends time
-    // in; extractIndexCandidate parses the equality predicate out of one; the
-    // catalog confirms the column exists and nothing already leads an index with
-    // it. A table that survives none of that is reported with NO column, which
-    // classifyFix already routes to notify_only with a hint asking the owner
-    // which column their queries filter by. Saying "I measured the scans but
-    // cannot tell you which column" is worth more than a confident wrong answer.
-    const tableNames = rows.rows.map(r => r.tablename)
-    const indexColumn = await measuredFilterColumns(pool, schemaName, tableNames)
+    // 500 rows is where a scan starts to cost more than a lookup on typical
+    // row widths. Below it an index is pure write overhead, paid forever, to
+    // speed up a scan that was already free — so proposing one is worse than
+    // saying nothing.
+    const indexPressure: InfraPressure =
+      live < HOT_TABLE_MIN_LIVE_ROWS ? 'none' :
+      (idxHitPct < 20 && seqScans > 10_000) ? 'critical' :
+      (idxHitPct < 50 && seqScans > 1_000)  ? 'high' :
+      (idxHitPct < 70 && seqScans > 100)     ? 'medium' :
+      'none'
+    // Must agree with lib/autonomy/invariant-probes.ts (BLOAT_RATIO_PCT /
+    // BLOAT_MIN_DEAD_TUPLES), or the daily scan raises a finding the
+    // per-minute probe cannot re-detect and the reaper withdraws it minutes
+    // later, forever. 20% was Postgres's own autovacuum trigger point, i.e.
+    // the normal operating state of a healthy write-heavy table.
+    const bloatPressure: InfraPressure =
+      deadRatio >= 40 && dead >= 1_000 ? 'low' : 'none'
 
-    return rows.rows.map(r => {
-      const seqScans = Number(r.seq_scan)
-      const idxScans = Number(r.idx_scan)
-      const live = Number(r.n_live_tup)
-      const dead = Number(r.n_dead_tup)
-      const total = seqScans + idxScans
-      const idxHitPct = total > 0 ? Math.round((idxScans / total) * 100) : 0
-      const deadRatio = live + dead > 0 ? Math.round((dead / (live + dead)) * 100) : 0
+    // Index pressure wins when both are present: a table that is both
+    // under-indexed and bloated is hurting from the scans first, and the
+    // bloat finding will be raised on the next pass once the index lands.
+    const kind: 'index_pressure' | 'bloat' =
+      indexPressure !== 'none' ? 'index_pressure' : 'bloat'
+    const pressure: InfraPressure =
+      indexPressure !== 'none' ? indexPressure : bloatPressure
 
-      // Index pressure and bloat are evaluated separately, because they are
-      // different faults with different repairs. Collapsing them into one
-      // ternary chain is what let a healthy, well-indexed table be reported as
-      // a "hot table" on the strength of its dead-tuple ratio alone.
-      //
-      // ── The size floor, and why its absence produced every stuck finding ──
-      //
-      // Sequential-scan COUNT says nothing without table SIZE. Scanning a table
-      // that fits in one or two 8KB pages costs less than descending a B-tree,
-      // which is why the planner picks a seq scan there and would keep picking
-      // it even if an index existed.
-      //
-      // Without this floor the detector was reporting exactly that situation as
-      // a problem. Every one of the seven index-pressure findings sitting open
-      // on production was a table with between 0 and 19 LIVE ROWS — including a
-      // `users` table with zero rows credited with 13,255 sequential scans. None
-      // of them had anything wrong. They could not be auto-repaired either,
-      // because there was no sane column to index, so they sat in the review
-      // queue permanently telling the owner to fix a table that was empty.
-      //
-      // 500 rows is where a scan starts to cost more than a lookup on typical
-      // row widths. Below it an index is pure write overhead, paid forever, to
-      // speed up a scan that was already free — so proposing one is worse than
-      // saying nothing.
-      const indexPressure: InfraPressure =
-        live < HOT_TABLE_MIN_LIVE_ROWS ? 'none' :
-        (idxHitPct < 20 && seqScans > 10_000) ? 'critical' :
-        (idxHitPct < 50 && seqScans > 1_000)  ? 'high' :
-        (idxHitPct < 70 && seqScans > 100)     ? 'medium' :
-        'none'
-      // Must agree with lib/autonomy/invariant-probes.ts (BLOAT_RATIO_PCT /
-      // BLOAT_MIN_DEAD_TUPLES), or the daily scan raises a finding the
-      // per-minute probe cannot re-detect and the reaper withdraws it minutes
-      // later, forever. 20% was Postgres's own autovacuum trigger point, i.e.
-      // the normal operating state of a healthy write-heavy table.
-      const bloatPressure: InfraPressure =
-        deadRatio >= 40 && dead >= 1_000 ? 'low' : 'none'
+    const idxCol = indexColumn.get(r.tablename)
+    // Gated on `kind`, not on a second independent threshold. These used to
+    // disagree: a table at 60% coverage was rated 'medium' index pressure but
+    // described as a bloat problem and offered no index, because the pressure
+    // chain cut at 70 and the recommendation cut at 50.
+    // No DESC. It was there because the column used to be picked from a list
+    // headed by `created_at`, where a descending index matches "newest first"
+    // ordering. The column is now parsed from an equality predicate, and a
+    // btree serves equality identically in either direction — leaving DESC
+    // would describe an intent the measurement never showed.
+    const suggestedIndex = kind === 'index_pressure' && idxCol
+      ? `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_${r.tablename}_${idxCol} ON "${schemaName}"."${r.tablename}" ("${idxCol}");`
+      : undefined
 
-      // Index pressure wins when both are present: a table that is both
-      // under-indexed and bloated is hurting from the scans first, and the
-      // bloat finding will be raised on the next pass once the index lands.
-      const kind: 'index_pressure' | 'bloat' =
-        indexPressure !== 'none' ? 'index_pressure' : 'bloat'
-      const pressure: InfraPressure =
-        indexPressure !== 'none' ? indexPressure : bloatPressure
-
-      const idxCol = indexColumn.get(r.tablename)
-      // Gated on `kind`, not on a second independent threshold. These used to
-      // disagree: a table at 60% coverage was rated 'medium' index pressure but
-      // described as a bloat problem and offered no index, because the pressure
-      // chain cut at 70 and the recommendation cut at 50.
-      // No DESC. It was there because the column used to be picked from a list
-      // headed by `created_at`, where a descending index matches "newest first"
-      // ordering. The column is now parsed from an equality predicate, and a
-      // btree serves equality identically in either direction — leaving DESC
-      // would describe an intent the measurement never showed.
-      const suggestedIndex = kind === 'index_pressure' && idxCol
-        ? `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_${r.tablename}_${idxCol} ON "${schemaName}"."${r.tablename}" ("${idxCol}");`
-        : undefined
-
-      return {
-        table: r.tablename,
-        seqScans,
-        idxHitPct,
-        deadTupRatio: deadRatio,
-        liveRows: live,
-        pressure,
-        kind,
-        // Name the actual column when there is one. "add indexes on commonly
-        // filtered columns" told the owner nothing they could act on and did not
-        // match what the repair would do.
-        recommendation: kind === 'index_pressure'
-          ? idxCol
-            ? `Table "${r.tablename}" is read ${seqScans.toLocaleString()}× with only ${idxHitPct}% index coverage, and the statements doing it filter on "${idxCol}" — indexing that column should absorb most of those scans.`
-            : `Table "${r.tablename}" is read ${seqScans.toLocaleString()}× with only ${idxHitPct}% index coverage. Backenly could not measure which column those reads filter on, and will not guess — an index on the wrong column costs a write on every insert forever and nothing surfaces it. Name the column your queries filter or sort by.`
-          : `Table "${r.tablename}" is carrying ${deadRatio}% dead rows — Backenly runs VACUUM ANALYZE to reclaim the space and refresh planner statistics.`,
-        suggestedIndex,
-        indexColumn: idxCol,
-      }
-    }).filter(f => f.pressure !== 'none')
-  } catch {
-    return []
-  }
+    return {
+      table: r.tablename,
+      seqScans,
+      idxHitPct,
+      deadTupRatio: deadRatio,
+      liveRows: live,
+      pressure,
+      kind,
+      // Name the actual column when there is one. "add indexes on commonly
+      // filtered columns" told the owner nothing they could act on and did not
+      // match what the repair would do.
+      recommendation: kind === 'index_pressure'
+        ? idxCol
+          ? `Table "${r.tablename}" is read ${seqScans.toLocaleString()}× with only ${idxHitPct}% index coverage, and the statements doing it filter on "${idxCol}" — indexing that column should absorb most of those scans.`
+          : `Table "${r.tablename}" is read ${seqScans.toLocaleString()}× with only ${idxHitPct}% index coverage. Backenly could not measure which column those reads filter on, and will not guess — an index on the wrong column costs a write on every insert forever and nothing surfaces it. Name the column your queries filter or sort by.`
+        : `Table "${r.tablename}" is carrying ${deadRatio}% dead rows — Backenly runs VACUUM ANALYZE to reclaim the space and refresh planner statistics.`,
+      suggestedIndex,
+      indexColumn: idxCol,
+    }
+  }).filter(f => f.pressure !== 'none')
 }
 
 // ── Detection: Partitioning candidates ───────────────────────────────────────
-
-const PARTITION_PATTERN_TABLES = [
-  'events', 'logs', 'activities', 'notifications', 'audit', 'audit_logs',
-  'metrics', 'analytics', 'requests', 'access_log', 'errors',
-]
-
-async function detectPartitioningCandidates(
+//
+// A table larger than PostgreSQL's cache. The manual's rule of thumb (Table
+// Partitioning, 5.12.1) is that partitioning pays once "the size of the table
+// should exceed the physical memory of the database server". SQL cannot read
+// physical memory, so this compares against effective_cache_size, the server's
+// own estimate of the memory that caches its data (RDS sets it to half the
+// instance's memory), and the advice names both numbers.
+//
+// This advised partitioning for any table past a million rows, or past 100,000
+// with a log-like name, with a "migration" that began by renaming the live
+// table aside, and filed it as a change waiting for approval that had nothing
+// to approve (production QA, 2026-11-09: a "Partitioning candidate" with no
+// next step, for a table PostgreSQL served from memory).
+//
+// No catch: a read that failed rejects, and the report records it
+// (partitioningScanned), so findings are never withdrawn on a failed read.
+export async function detectPartitioningCandidates(
   pool: Pool,
   schemaName: string,
 ): Promise<PartitioningFinding[]> {
-  try {
-    const rows = await pool.query<{ tablename: string; n_live_tup: string }>(
-      // relname, not tablename — see detectHotTables. Same 42703, same swallow.
-      `SELECT relname AS tablename, n_live_tup::int
-         FROM pg_stat_user_tables
-        WHERE schemaname = $1
-          AND n_live_tup > 100000
-        ORDER BY n_live_tup DESC
-        LIMIT 15`,
-      [schemaName],
-    )
+  const rows = await pool.query<{ tablename: string; live_rows: string; bytes: string; cache_bytes: string }>(
+    // relname, not tablename — see detectHotTables. Backenly's own underscore
+    // tables are not the owner's to partition, and a partition is already
+    // partitioned (its parent has no storage of its own, so it never qualifies).
+    // The size is read once per table: the CTE holds a volatile function, so
+    // PostgreSQL keeps it rather than folding it into the filter and the sort.
+    `WITH sized AS (
+       SELECT s.relname, s.n_live_tup, pg_total_relation_size(s.relid) AS bytes
+         FROM pg_stat_user_tables s
+         JOIN pg_class c ON c.oid = s.relid
+        WHERE s.schemaname = $1
+          AND s.relname NOT LIKE '\\_%'
+          AND NOT c.relispartition
+     )
+     SELECT relname AS tablename,
+            n_live_tup::bigint AS live_rows,
+            bytes,
+            pg_size_bytes(current_setting('effective_cache_size')) AS cache_bytes
+       FROM sized
+      WHERE bytes > pg_size_bytes(current_setting('effective_cache_size'))
+      ORDER BY bytes DESC
+      LIMIT 15`,
+    [schemaName],
+  )
 
-    return rows.rows
-      .filter(r => {
-        const name = r.tablename
-        const isTimeSeriesPattern = PARTITION_PATTERN_TABLES.some(
-          p => name === p || name.startsWith(p + '_') || name.endsWith('_' + p),
-        )
-        return isTimeSeriesPattern || Number(r.n_live_tup) > 1_000_000
-      })
-      .map(r => {
-        const rows = Number(r.n_live_tup)
-        const growthClass: PartitioningFinding['growthClass'] =
-          rows > 10_000_000 ? 'critical' : rows > 1_000_000 ? 'very_high' : 'high'
+  return rows.rows.map(r => {
+    const bytes = Number(r.bytes)
+    const cacheBytes = Number(r.cache_bytes)
+    return {
+      table: r.tablename,
+      liveRows: Number(r.live_rows),
+      bytes,
+      cacheBytes,
+      recommendation:
+        `"${r.tablename}" takes ${sizeWords(bytes)}, more than the ${sizeWords(cacheBytes)} PostgreSQL ` +
+        `expects to have cached on this server, so reads of it cannot all come from memory.`,
+    }
+  })
+}
 
-        return {
-          table: r.tablename,
-          liveRows: rows,
-          growthClass,
-          recommendation: `Table "${r.tablename}" has ${rows.toLocaleString()} rows and is unbounded — partition by time to keep per-partition size manageable and enable fast archival.`,
-          migrationSql: `-- Partition "${r.tablename}" by month (requires downtime or pg_partman)
--- Step 1: rename existing table
-ALTER TABLE "${schemaName}"."${r.tablename}" RENAME TO "${r.tablename}_legacy";
--- Step 2: create partitioned table (schema must match)
--- CREATE TABLE "${schemaName}"."${r.tablename}" (...) PARTITION BY RANGE (created_at);
--- Step 3: attach existing data as first partition
--- See: https://www.postgresql.org/docs/current/ddl-partitioning.html`,
-        }
+// ── Partitioning findings: what one scan changes ─────────────────────────────
+
+export interface FiledPartitionFinding {
+  id: string
+  type: string
+  status: string
+  details: unknown
+}
+
+export interface PartitionFindingPlan {
+  /** Raised under the retired row-count rule: withdrawn as `detector_retired`. */
+  retire: FiledPartitionFinding[]
+  /** Its table fits in the cache again: withdrawn, a condition that cleared, never a fix. */
+  cleared: FiledPartitionFinding[]
+  /** Still true, with sizes that moved: the same finding, its numbers brought up to date. */
+  refresh: Array<{ id: string; details: Record<string, unknown> }>
+  /** New, assuming every row in `retire` was withdrawn. */
+  raise: PartitioningFinding[]
+}
+
+const partitionType = (table: string) => `infra_partition_${table}`
+
+/**
+ * Pure: what a scan does to the partitioning findings already filed, of every
+ * status. Nothing at all after a read that failed. A finding a person
+ * dismissed is never raised again; one Backenly withdrew may come back when
+ * its table outgrows the cache again (lib/core/finding-reaper.ts).
+ */
+export function planPartitionFindings(
+  filed: FiledPartitionFinding[],
+  scan: { scanned: boolean; candidates: PartitioningFinding[] },
+): PartitionFindingPlan {
+  const plan: PartitionFindingPlan = { retire: [], cleared: [], refresh: [], raise: [] }
+  if (!scan.scanned) return plan
+
+  const candidates = new Map(scan.candidates.map(f => [partitionType(f.table), f]))
+  const kept = new Set<string>()
+  for (const row of filed) {
+    if (!row.type.startsWith('infra_partition_')) continue
+    const d = (row.details ?? {}) as Record<string, unknown>
+    if (row.status === 'dismissed') {
+      // A person's dismissal stands; a withdrawal (withdrawnBy) does not.
+      if (!d.withdrawnBy) kept.add(row.type)
+      continue
+    }
+    if (row.status !== 'open' && row.status !== 'pending_approval') continue
+    if (typeof d.cacheBytes !== 'number') {
+      plan.retire.push(row)
+      continue
+    }
+    const now = candidates.get(row.type)
+    if (!now) {
+      plan.cleared.push(row)
+      continue
+    }
+    kept.add(row.type)
+    if (d.description !== now.recommendation) {
+      plan.refresh.push({
+        id: row.id,
+        details: { ...d, description: now.recommendation, liveRows: now.liveRows, bytes: now.bytes, cacheBytes: now.cacheBytes },
       })
-  } catch {
-    return []
+    }
   }
+  plan.raise = scan.candidates.filter(f => !kept.has(partitionType(f.table)))
+  return plan
 }
 
 // ── Detection: Slow queries (pg_stat_statements) ──────────────────────────────
@@ -400,25 +488,46 @@ export interface IndexCandidate {
 export function extractIndexCandidate(
   queryText: string,
   schemaName: string,
+  opts: {
+    /**
+     * The schema's tables, for a statement this project's own role ran (its
+     * functions' or its direct connections'). Such a statement need not name
+     * the schema: its search path is the project's schema, so an unqualified
+     * table name counts, but only when it is one of these.
+     */
+    tables?: ReadonlySet<string>
+  } = {},
 ): IndexCandidate | null {
   if (!queryText || !schemaName) return null
 
   // The table must be named with THIS project's schema. A bare "orders" could
-  // belong to any tenant sharing the database.
+  // belong to any tenant sharing the database. The schema is always quoted (its
+  // name has hyphens); the table after it may be quoted or not.
   const esc = schemaName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  const fromRe = new RegExp(`(?:FROM|JOIN|UPDATE|INTO)\\s+"${esc}"\\."([A-Za-z_][A-Za-z0-9_]*)"`, 'i')
+  const fromRe = new RegExp(`(?:FROM|JOIN|UPDATE|INTO)\\s+"${esc}"\\.${IDENT}${WORD_END}`, 'i')
   const fromMatch = fromRe.exec(queryText)
-  if (!fromMatch) return null
-  const table = fromMatch[1]
+  let table: string | null = fromMatch ? nameAt(fromMatch, 1) : null
+  if (!table && opts.tables) {
+    const unqualified = new RegExp(`(?:FROM|JOIN|UPDATE|INTO)\\s+${IDENT}${WORD_END}(?!\\s*\\.)`, 'gi')
+    for (let m = unqualified.exec(queryText); m; m = unqualified.exec(queryText)) {
+      const name = nameAt(m, 1)
+      if (opts.tables.has(name)) {
+        table = name
+        break
+      }
+    }
+  }
+  if (!table) return null
 
   const whereIdx = queryText.search(/\bWHERE\b/i)
   if (whereIdx === -1) return null
-  const predicate = queryText.slice(whereIdx)
+  const predicate = queryText.slice(whereIdx + 5)
 
-  // Qualified first ("orders"."status" = $1), then bare ("status" = $1). Only
-  // equality and IN: a range or a LIKE '%x' does not necessarily benefit from a
-  // plain btree index, and proposing one there would be cargo cult.
-  const qualified = /"([A-Za-z_][A-Za-z0-9_]*)"\."([A-Za-z_][A-Za-z0-9_]*)"\s*(?:=|IN)\s*/i.exec(predicate)
+  // Qualified first ("orders"."status" = $1), then bare (status = $1), each
+  // quoted or not. Only equality and IN: a range or a LIKE '%x' does not
+  // necessarily benefit from a plain btree index, and proposing one there would
+  // be cargo cult.
+  const qualified = new RegExp(`${IDENT}\\.${IDENT}${WORD_END}\\s*(?:=|IN\\b)`, 'i').exec(predicate)
   if (qualified) {
     // The predicate named its table explicitly. If that is not the table we
     // matched in FROM, this filter belongs to a JOINed relation and we know
@@ -430,12 +539,29 @@ export function extractIndexCandidate(
     // identifier immediately before the `=`) and attributes it to `orders`,
     // producing CREATE INDEX on a column `orders` does not have. Answering null
     // is the honest result.
-    return qualified[1] === table ? sane(table, qualified[2]) : null
+    return nameAt(qualified, 1) === table ? sane(table, nameAt(qualified, 3)) : null
   }
-  const bare = /"([A-Za-z_][A-Za-z0-9_]*)"\s*(?:=|IN)\s*/i.exec(predicate)
-  if (bare) return sane(table, bare[1])
+  const bare = new RegExp(`(?<![.A-Za-z0-9_$"])${IDENT}${WORD_END}\\s*(?:=|IN\\b)`, 'gi')
+  for (let m = bare.exec(predicate); m; m = bare.exec(predicate)) {
+    // `NOT IN (…)` reads as a name followed by IN; a keyword is never a column.
+    if (m[1] === undefined && PREDICATE_KEYWORDS.has(m[2].toLowerCase())) continue
+    return sane(table, nameAt(m, 1))
+  }
 
   return null
+}
+
+/**
+ * A name as SQL writes it: quoted, which keeps its case, or unquoted, which
+ * PostgreSQL folds to lower case. Two groups: the quoted text, the bare name.
+ */
+const IDENT = '(?:"((?:[^"]|"")+)"|([A-Za-z_][A-Za-z0-9_$]*))'
+/** The end of a bare name: no backtracking into `othe` from `other.t`. */
+const WORD_END = '(?![A-Za-z0-9_$])'
+const PREDICATE_KEYWORDS = new Set(['not', 'and', 'or', 'is', 'in', 'on', 'where', 'any', 'all', 'some', 'exists', 'between', 'like', 'ilike', 'similar', 'case', 'when', 'then', 'else', 'end'])
+
+function nameAt(m: RegExpExecArray, group: number): string {
+  return m[group] !== undefined ? m[group].replace(/""/g, '"') : m[group + 1].toLowerCase()
 }
 
 /**
@@ -484,13 +610,18 @@ async function detectSlowQueries(pool: Pool, schemaName: string): Promise<QueryF
       // `position()` rather than LIKE on purpose: in LIKE, the `_` in
       // `workspace_<id>` is a single-character wildcard, so the pattern would
       // also match schemas that merely resemble this one.
-      `SELECT LEFT(query, 400) AS query,
+      //
+      // No `NOT LIKE '%pg_catalog%'`: PostgREST, which serves /api/v2 and v1
+      // /db, selects `pg_catalog.count(…)` in every statement, so that filter
+      // hid all REST traffic (lib/autonomy/slow-query-index.ts has the
+      // measurement). The text is read long enough to reach PostgREST's WHERE,
+      // which follows fully qualified column lists.
+      `SELECT LEFT(query, 4000) AS query,
               calls,
               ROUND((total_exec_time / NULLIF(calls, 0))::numeric, 2) AS avg_ms,
               ROUND((rows / NULLIF(calls, 0))::numeric, 0) AS avg_rows
          FROM pg_stat_statements
         WHERE position($1 in query) > 0
-          AND query NOT LIKE '%pg_catalog%'
           AND query NOT LIKE '%information_schema%'
           AND (total_exec_time / NULLIF(calls, 0)) > 100
         ORDER BY avg_ms DESC
@@ -504,7 +635,7 @@ async function detectSlowQueries(pool: Pool, schemaName: string): Promise<QueryF
       const avgRows = Number(r.avg_rows)
       const candidate = extractIndexCandidate(r.query, schemaName)
       return {
-        queryPattern: r.query.replace(/\$\d+/g, '?').replace(/\s+/g, ' ').trim(),
+        queryPattern: r.query.replace(/\$\d+/g, '?').replace(/\s+/g, ' ').trim().slice(0, 400),
         avgMs,
         calls,
         avgRows,
@@ -621,11 +752,13 @@ async function measuredFilterColumns(
     // answer WHICH column, so a fast statement run ten thousand times is exactly
     // as informative as a slow one. Ordered by total time so the column the
     // table spends the most time filtering wins when several qualify.
+    // No `NOT LIKE '%pg_catalog%'` (see detectSlowQueries): it hid every
+    // PostgREST statement, so a table read only through the REST APIs could
+    // never name its measured column, and its Hot table finding named none.
     const stmts = await pool.query<{ query: string }>(
-      `SELECT LEFT(query, 400) AS query
+      `SELECT LEFT(query, 4000) AS query
          FROM pg_stat_statements
         WHERE position($1 in query) > 0
-          AND query NOT LIKE '%pg_catalog%'
           AND query NOT LIKE '%information_schema%'
         ORDER BY total_exec_time DESC
         LIMIT 100`,
@@ -709,6 +842,8 @@ export async function runInfraIntelligence(
       overallPressure: 'none',
       hotTables: hotTables.status === 'fulfilled' ? hotTables.value : [],
       partitioningCandidates: partitionCandidates.status === 'fulfilled' ? partitionCandidates.value : [],
+      hotTablesScanned: hotTables.status === 'fulfilled',
+      partitioningScanned: partitionCandidates.status === 'fulfilled',
       slowQueries: slowQueries.status === 'fulfilled' ? slowQueries.value : [],
       websocketPressure: wsPressure.status === 'fulfilled' ? wsPressure.value : null,
       topRecommendations: [],
@@ -720,9 +855,9 @@ export async function runInfraIntelligence(
     const pressureRank: Record<InfraPressure, number> = { none: 0, low: 1, medium: 2, high: 3, critical: 4 }
     const allPressures: InfraPressure[] = [
       ...report.hotTables.map(f => f.pressure),
-      ...report.partitioningCandidates.map(f =>
-        f.growthClass === 'critical' ? 'critical' : f.growthClass === 'very_high' ? 'high' : 'medium',
-      ),
+      // Advice, never pressure on its own: a table larger than the cache is
+      // served from disk, which is slower, not broken.
+      ...report.partitioningCandidates.map((): InfraPressure => 'low'),
       ...report.slowQueries.map(f => f.pressure),
     ]
     const maxPressure = allPressures.reduce<InfraPressure>(
@@ -737,7 +872,7 @@ export async function runInfraIntelligence(
       recs.push({ priority: pressureRank[f.pressure], text: f.recommendation })
     }
     for (const f of report.partitioningCandidates) {
-      recs.push({ priority: 2, text: f.recommendation })
+      recs.push({ priority: pressureRank.low, text: f.recommendation })
     }
     for (const f of report.slowQueries.filter(f => f.pressure === 'critical' || f.pressure === 'high')) {
       recs.push({ priority: pressureRank[f.pressure], text: f.recommendation })
@@ -756,10 +891,6 @@ export async function runInfraIntelligence(
     // Unused-index removal moved to lib/autonomy/unused-index.ts, which raises a
     // real `unused_index` finding through the approval queue instead of pushing
     // SQL into an array nothing reads.
-    // Partitioning always requires approval (structural change)
-    for (const f of report.partitioningCandidates) {
-      report.approvalRequired.push(f.migrationSql)
-    }
 
     return report
   } finally {
@@ -787,10 +918,26 @@ export async function runAndStoreInfraIntelligence(
 
     // Deduplicate against open findings
     const existing = await prisma.healthFinding.findMany({
-      where: { projectId, status: 'open', type: { startsWith: 'infra_' } },
-      select: { type: true },
+      where: { projectId, status: 'open', type: { startsWith: literalPrefix('infra_') } },
+      select: { id: true, type: true, details: true },
     }).catch(() => [])
     const existingTypes = new Set(existing.map(e => e.type))
+    // A hot table a person dismissed is not raised again: only Backenly's own
+    // withdrawals (details.withdrawnBy) may come back (lib/core/finding-reaper.ts).
+    // Deduplicating against open rows alone raised it again the next minute,
+    // undoing the person's decision. Null when the read failed: then no hot
+    // table is raised this pass, rather than one a person may have dismissed.
+    const dismissedHotRows = await prisma.healthFinding.findMany({
+      where: { projectId, status: 'dismissed', type: { startsWith: 'infra_hot_table_' } },
+      select: { type: true, details: true },
+    }).catch(() => null)
+    const dismissedHot = dismissedHotRows
+      ? new Set(
+          dismissedHotRows
+            .filter(r => !(r.details as { withdrawnBy?: unknown } | null)?.withdrawnBy)
+            .map(r => r.type),
+        )
+      : null
 
     type PrismaFindingCreate = {
       projectId: string
@@ -854,23 +1001,59 @@ export async function runAndStoreInfraIntelligence(
       }).catch(() => {})
     }
 
-    // ── Auto-resolve hot-table findings the scan no longer reports ────────────
+    // ── Withdraw hot-table findings the scan no longer reports ────────────────
     //
     // Without this a finding outlives its cause: add the index and the row stays
     // open forever, so the dashboard keeps showing a problem that no longer
     // exists. It is also how the platform-internal `_email_verifications` rows
     // clear now that underscore tables are excluded from detection.
-    const staleHotTypes = [...existingTypes].filter(
-      t =>
-        (t.startsWith('infra_hot_table_') || t.startsWith('infra_table_bloat_')) &&
-        !hotByType.has(t),
-    )
-    if (staleHotTypes.length) {
-      await prisma.healthFinding.updateMany({
-        where: { projectId, status: 'open', type: { in: staleHotTypes } },
-        data: { status: 'resolved' },
-      }).catch(() => {})
-      console.log(`[InfraIntelligence] resolved ${staleHotTypes.length} hot-table finding(s) no longer detected`)
+    //
+    // Through the reaper kernel, as a condition that cleared: these were marked
+    // 'resolved', a status no surface classifies (lib/autonomy/resolution.ts),
+    // and Backenly did not repair them. Only after a read that finished: an
+    // empty list from a failed one withdrew every hot-table finding at once.
+    if (report.hotTablesScanned) {
+      const stale = existing.filter(
+        e =>
+          (e.type.startsWith('infra_hot_table_') || e.type.startsWith('infra_table_bloat_')) &&
+          !hotByType.has(e.type),
+      )
+      if (stale.length) {
+        const { withdrawFindings } = await import('@/lib/core/finding-reaper')
+        const withdrawn = await withdrawFindings(stale, 'infra_reaper')
+        console.log(`[InfraIntelligence] withdrew ${withdrawn} hot-table finding(s) no longer detected`)
+      }
+    }
+
+    // ── Partitioning findings ────────────────────────────────────────────────
+    //
+    // Closed through the reaper kernel, so no surface reads a closure as a
+    // repair (lib/autonomy/resolution.ts): one raised under the retired
+    // row-count rule is withdrawn as `detector_retired`, and one whose table
+    // fits in the cache again as a condition that cleared. Nothing changes
+    // after a read that failed (planPartitionFindings).
+    const filedPartitions = await prisma.healthFinding.findMany({
+      where: { projectId, type: { startsWith: 'infra_partition_' } },
+      select: { id: true, type: true, status: true, details: true },
+    }).catch(() => null)
+    let partitionsToRaise: PartitioningFinding[] = []
+    if (filedPartitions) {
+      const plan = planPartitionFindings(filedPartitions, {
+        scanned: report.partitioningScanned,
+        candidates: report.partitioningCandidates,
+      })
+      const { withdrawFindings } = await import('@/lib/core/finding-reaper')
+      // A row raised under the old rule for a table that still outgrows the
+      // cache is replaced by a new one, and only once it is withdrawn: never two.
+      const stillFiled = new Set<string>()
+      for (const row of plan.retire) {
+        if ((await withdrawFindings([row], 'detector_retired')) === 0) stillFiled.add(row.type)
+      }
+      if (plan.cleared.length) await withdrawFindings(plan.cleared, 'infra_reaper')
+      for (const r of plan.refresh) {
+        await prisma.healthFinding.update({ where: { id: r.id }, data: { details: r.details as any } }).catch(() => {})
+      }
+      partitionsToRaise = plan.raise.filter(f => !stillFiled.has(`infra_partition_${f.table}`))
     }
 
     // Nothing under pressure — the resolve pass above has already withdrawn
@@ -880,7 +1063,7 @@ export async function runAndStoreInfraIntelligence(
     // Hot tables → HealthFinding
     for (const f of indexPressureTables) {
       const type = `infra_hot_table_${f.table}`
-      if (!existingTypes.has(type)) {
+      if (dismissedHot && !existingTypes.has(type) && !dismissedHot.has(type)) {
         toCreate.push({
           projectId,
           type,
@@ -908,28 +1091,29 @@ export async function runAndStoreInfraIntelligence(
       }
     }
 
-    // Partitioning candidates → HealthFinding (approval required)
-    for (const f of report.partitioningCandidates) {
-      const type = `infra_partition_${f.table}`
-      if (!existingTypes.has(type)) {
-        toCreate.push({
-          projectId,
-          type,
-          severity: f.growthClass === 'critical' ? 'critical' : 'warning',
-          details: {
-            title: `Partitioning candidate: ${f.table}`,
-            description: f.recommendation,
-            source: 'infra_intelligence',
-            table: f.table,
-            liveRows: f.liveRows,
-            migrationSql: f.migrationSql,
-            requiresApproval: true,
-            detectedAt: report.scannedAt,
-          },
-          status: 'open',
-          autoFixed: false,
-        })
-      }
+    // Partitioning candidates → HealthFinding. Advice with a next step, not a
+    // change waiting for approval: there is no statement to approve, since
+    // partitioning a table that holds data moves every row.
+    for (const f of partitionsToRaise) {
+      toCreate.push({
+        projectId,
+        type: `infra_partition_${f.table}`,
+        severity: 'info',
+        details: {
+          title: `Larger than the cache: ${f.table}`,
+          description: f.recommendation,
+          source: 'infra_intelligence',
+          table: f.table,
+          tableName: f.table,
+          liveRows: f.liveRows,
+          bytes: f.bytes,
+          cacheBytes: f.cacheBytes,
+          requiresApproval: false,
+          detectedAt: report.scannedAt,
+        },
+        status: 'open',
+        autoFixed: false,
+      })
     }
 
     // `infra_connection_pressure` was raised here until 2026-08-09. It was a

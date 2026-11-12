@@ -14,10 +14,20 @@
  */
 
 import { Router, Request, Response } from 'express'
+import rateLimit from 'express-rate-limit'
 import { workspaceRawClient, type WorkspaceRawClient } from '@/lib/data-plane/regional'
-import { v1AuthMiddleware } from '../lib/auth'
+import { v1AuthMiddleware, v1PresenceAuthMiddleware } from '../lib/auth'
+import { clientIpFromNodeRequest } from '@/lib/security/client-ip'
+import {
+  PRESENCE_WRITES_PER_ADDRESS_PER_MINUTE,
+  countPresenceWrite,
+  platformLimiterStore,
+  presenceAddressBucket,
+  presenceRefusal,
+} from '@/lib/security/shared-key-rate'
 import { resolveEndUserFromToken } from '../lib/end-user-identity'
 import { workspaceSchemaName, workspaceChannelName, quoteIdent } from '@/lib/security/workspace-schema'
+import { presenceMetadataTooLarge } from '@/lib/realtime/presence-metadata'
 import { asyncRoute } from '../lib/async-route'
 
 const router = Router()
@@ -75,6 +85,42 @@ async function presenceIdentityError(
     },
   }
 }
+
+/**
+ * A presence write spends nothing of the key's limit, or a heartbeat every 25
+ * seconds from every open tab would: it is counted per user instead, once the
+ * caller may write as that user (lib/security/shared-key-rate.ts). Answers 429
+ * and returns true when the user's window is full.
+ */
+async function refuseWhenPresenceWindowFull(req: Request, res: Response, userId: string): Promise<boolean> {
+  const decision = await countPresenceWrite(req.v1Context!.apiKey.id, userId)
+  if (decision.allowed) return false
+  const refusal = presenceRefusal(decision, 'user')
+  res.set(refusal.headers).status(refusal.status).json(refusal.body)
+  return true
+}
+
+/**
+ * Presence writes from one address to one project, counted before the key is
+ * looked up, in the window the Next route counts too: a flood of them, signed
+ * in or not, stops here, and none spends the key's limit.
+ */
+const presenceWritesFromAnAddress = rateLimit({
+  windowMs: 60_000,
+  limit: PRESENCE_WRITES_PER_ADDRESS_PER_MINUTE,
+  keyGenerator: (req) => presenceAddressBucket(req.params.projectId, clientIpFromNodeRequest(req)),
+  store: platformLimiterStore(PRESENCE_WRITES_PER_ADDRESS_PER_MINUTE, 60_000),
+  standardHeaders: false,
+  legacyHeaders: false,
+  // The address comes from lib/security/client-ip.ts, never from req.ip.
+  validate: { ip: false, trustProxy: false, xForwardedForHeader: false },
+  handler: (req, res) => {
+    const resetAt = (req as Request & { rateLimit?: { resetTime?: Date } }).rateLimit?.resetTime ?? new Date(Date.now() + 60_000)
+    const retryAfter = Math.max(1, Math.ceil((resetAt.getTime() - Date.now()) / 1000))
+    const refusal = presenceRefusal({ allowed: false, remaining: 0, resetAt, retryAfter }, 'address')
+    res.set(refusal.headers).status(refusal.status).json(refusal.body)
+  },
+})
 
 async function ensurePresenceTable(db: WorkspaceRawClient, projectId: string): Promise<void> {
   if (bootstrappedProjects.has(projectId)) return
@@ -153,7 +199,7 @@ router.get('/:projectId/presence', asyncRoute(v1AuthMiddleware), asyncRoute(asyn
   }
 }))
 
-router.post('/:projectId/presence', asyncRoute(v1AuthMiddleware), asyncRoute(async (req: Request, res: Response) => {
+router.post('/:projectId/presence', asyncRoute(presenceWritesFromAnAddress), asyncRoute(v1PresenceAuthMiddleware), asyncRoute(async (req: Request, res: Response) => {
   const { projectId } = req.params
   try {
     const qSchema = quoteIdent(workspaceSchemaName(projectId))
@@ -170,12 +216,19 @@ router.post('/:projectId/presence', asyncRoute(v1AuthMiddleware), asyncRoute(asy
       res.status(400).json({ error: 'userId too long (max 255)' })
       return
     }
+    // Refused here, not by pg_notify in the trigger, where it failed the upsert with a 500.
+    const tooLarge = presenceMetadataTooLarge(metadata)
+    if (tooLarge) {
+      res.status(tooLarge.status).json(tooLarge.body)
+      return
+    }
 
     const identityError = await presenceIdentityError(req, projectId, userId)
     if (identityError) {
       res.status(identityError.status).json(identityError.body)
       return
     }
+    if (await refuseWhenPresenceWindowFull(req, res, userId)) return
 
     await ensurePresenceTable(db, projectId)
 
@@ -197,7 +250,7 @@ router.post('/:projectId/presence', asyncRoute(v1AuthMiddleware), asyncRoute(asy
   }
 }))
 
-router.delete('/:projectId/presence', asyncRoute(v1AuthMiddleware), asyncRoute(async (req: Request, res: Response) => {
+router.delete('/:projectId/presence', asyncRoute(presenceWritesFromAnAddress), asyncRoute(v1PresenceAuthMiddleware), asyncRoute(async (req: Request, res: Response) => {
   const { projectId } = req.params
   try {
     const qSchema = quoteIdent(workspaceSchemaName(projectId))
@@ -216,6 +269,7 @@ router.delete('/:projectId/presence', asyncRoute(v1AuthMiddleware), asyncRoute(a
       res.status(identityError.status).json(identityError.body)
       return
     }
+    if (await refuseWhenPresenceWindowFull(req, res, userId)) return
 
     await ensurePresenceTable(db, projectId)
 

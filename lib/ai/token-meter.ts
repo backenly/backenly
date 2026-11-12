@@ -57,6 +57,13 @@ export interface TokenScope {
    * is logged to this project. Unset, such a call holds nothing.
    */
   billing?: { projectId?: string; billingAccountId?: string }
+  /**
+   * The account whose credits already hold this turn's whole price
+   * (holdTurnPrice in lib/entitlements/credit-holds.ts). A customer-paid call
+   * made inside the turn for that account is part of what the price pays for,
+   * so it holds nothing more of its own.
+   */
+  coveredFor?: string
 }
 
 const storage = new AsyncLocalStorage<TokenScope>()
@@ -89,6 +96,8 @@ export function activeTokenScope(): TokenScope | undefined {
 export function runInTokenScope<T>(scope: TokenScope, fn: () => Promise<T>): Promise<T> {
   return storage.run(scope, fn).finally(() => {
     scope.billing = undefined
+    // Background work outliving the turn is no part of what its price paid for.
+    scope.coveredFor = undefined
   })
 }
 

@@ -209,6 +209,9 @@ beforeAll(async () => {
   // READ_ONLY and READ_WRITE direct access, by production's own functions.
   await q(`SELECT public.backenly_direct_create_role($1, $2, $3, 'READ_ONLY')`, [R.ro, PW, A])
   await q(`SELECT public.backenly_direct_create_role($1, $2, $3, 'READ_WRITE')`, [R.rw, PW, A])
+  // The most a read-write login can do: its owner allowed schema changes over it,
+  // which makes it a member of the owner role (a new one is not).
+  await q(`SELECT public.backenly_direct_set_schema_changes($1, true)`, [R.rw])
   await directAccessSync()
 }, 180_000)
 

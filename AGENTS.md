@@ -364,6 +364,7 @@ STORAGE_S3_BUCKET=
 
 # Email
 SMTP_HOST=  SMTP_PORT=  SMTP_USER=  SMTP_PASS=  SMTP_FROM=
+SMTP_END_USER_FROM=               # Optional: address for auth emails to projects' own users, sent in the app's name
 SUPPORT_NOTIFY_EMAIL=             # Optional: operator inbox emailed when support cases are filed (Cloud)
 
 # OAuth

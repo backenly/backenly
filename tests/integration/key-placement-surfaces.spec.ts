@@ -205,9 +205,14 @@ describe('an MCP key on the runtime API', () => {
 
   it('is answered in each surface’s own vocabulary', async () => {
     const v1 = await call('GET', `/api/v1/${projectId}/db/things`, { headers: { 'x-api-key': mcpKey } })
-    expect(v1.json).toEqual({ error: expect.stringContaining('"MCP Key" is an MCP key'), code: MCP_KEY_IN_APP, hint: MCP_KEY_HINT })
+    expect(v1.json).toEqual({
+      error: expect.stringContaining('"MCP Key" is an MCP key'),
+      code: MCP_KEY_IN_APP,
+      message: expect.stringContaining('"MCP Key" is an MCP key'),
+      hint: MCP_KEY_HINT,
+    })
     const v2 = await call('GET', `/api/v2/${projectId}/things`, { headers: { apikey: mcpKey } })
-    expect(v2.json).toEqual({ code: MCP_KEY_IN_APP, message: expect.stringContaining('"MCP Key" is an MCP key'), hint: MCP_KEY_HINT })
+    expect(v2.json).toEqual({ code: MCP_KEY_IN_APP, message: expect.stringContaining('"MCP Key" is an MCP key'), details: null, hint: MCP_KEY_HINT })
   }, 60_000)
 
   it('never reached a route: the key was not stamped as used or charged a request', async () => {

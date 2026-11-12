@@ -64,6 +64,9 @@ const result = await esbuild.build({
     '.prisma/client',
     'prisma',
     'pg-native',
+    // Native password hashing (lib/auth/password.ts): its binary is chosen at
+    // load time from node_modules, which docker/runtime.Dockerfile copies in.
+    'bcrypt',
     // Optional native accelerators pulled in transitively. Absent at runtime,
     // and every require of them is already guarded.
     'bufferutil',

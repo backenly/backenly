@@ -21,6 +21,7 @@ jest.mock('@/lib/mcp/auth', () => {
 })
 
 import { annotationsFor, buildCatalog, buildDispatchable, isReadOnlyTool } from '@/lib/mcp/catalog'
+import { getDomainTool } from '@/lib/mcp/domains'
 import { POST } from '@/app/api/mcp/route'
 
 describe('catalog annotations', () => {
@@ -38,6 +39,18 @@ describe('catalog annotations', () => {
       .filter((t) => t.annotations!.readOnlyHint !== isReadOnlyTool(t.name))
       .map((t) => t.name)
     expect(disagree).toEqual([])
+  })
+
+  it('says a domain tool is read-only exactly when every action behind it reads', () => {
+    // Production QA (2026-11-09): monitoring, all reads, was advertised as writing.
+    expect(annotationsFor('monitoring')).toMatchObject({ readOnlyHint: true, destructiveHint: false, idempotentHint: true })
+    expect(annotationsFor('auth').readOnlyHint).toBe(false)
+    for (const t of dispatchable) {
+      const domain = getDomainTool(t.name)
+      if (!domain) continue
+      const everyActionReads = Object.values(domain.actions).every((a) => isReadOnlyTool(a.tool))
+      expect({ tool: t.name, readOnly: t.annotations!.readOnlyHint }).toEqual({ tool: t.name, readOnly: everyActionReads })
+    }
   })
 
   it('never marks a read as destructive', () => {

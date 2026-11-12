@@ -24,6 +24,7 @@ import {
   serviceRoleRefusalMessage,
 } from '@/lib/security/service-role-exposure'
 import { MCP_KEY_HINT, MCP_KEY_IN_APP, isMcpCredential, mcpKeyRefusalMessage } from '@/lib/security/key-placement'
+import { clientWindowOf, describeClientWindow, isSharedKey } from '@/lib/security/shared-key-rate'
 import { endUserBearerToken } from '@/lib/security/end-user-bearer'
 
 import { INTERNAL_DOMAINS, isInternalOrigin } from '@/lib/security/internal-origin'
@@ -77,7 +78,9 @@ export interface V1ApiContext {
  */
 export async function v1ApiMiddleware(
   request: NextRequest,
-  params: { projectId: string }
+  params: { projectId: string },
+  /** `countRequest: false` for a presence write, which the presence route counts per user (lib/security/shared-key-rate.ts). */
+  { countRequest = true }: { countRequest?: boolean } = {},
 ): Promise<{ context: V1ApiContext; response?: NextResponse }> {
   // 0. Generate correlation ID for request tracing
   const correlationId = request.headers.get('x-correlation-id') || crypto.randomUUID()
@@ -105,7 +108,7 @@ export async function v1ApiMiddleware(
   }
 
   // 1. Authenticate API key
-  const auth = await authenticateApiKey(request)
+  const auth = await authenticateApiKey(request, { count: countRequest })
 
   if (!auth.authenticated || !auth.apiKey) {
     // Self-diagnosing 401: return the SHAPE of what we received plus a
@@ -119,8 +122,9 @@ export async function v1ApiMiddleware(
     // "X requests from origin Y failed in the last 5 minutes" without
     // any extra logging plumbing on this hot path.
     //
-    // SKIP internal origins (backenly.com, localhost): those are dashboard
-    // pages dogfooding the v1 runtime — surfacing them on Connection Health
+    // SKIP internal origins (Backenly's own domains and the console's origin,
+    // lib/security/internal-origin.ts): those are dashboard pages dogfooding
+    // the v1 runtime — surfacing them on Connection Health
     // would falsely tell the project owner "your frontend backenly.com is
     // failing" when in reality it's our own UI hitting the runtime without
     // an anon key. Real customer frontends (lovable.app, vercel.app, the
@@ -193,18 +197,21 @@ export async function v1ApiMiddleware(
       summary: `Rate limit hit on project ${params.projectId} (key ${apiKeyRecord.keyPrefix})`,
       detail: { apiKeyId: apiKeyRecord.id, path: request.nextUrl.pathname, limit: apiKeyRecord.rateLimit },
     }).catch(() => {})
-    const rateLimit = apiKeyRecord.rateLimit || 100
+    // The window that decided: each address's for a shared key, any other
+    // key's own limit (lib/security/shared-key-rate.ts).
+    const window = clientWindowOf({ ...apiKeyRecord, shared: isSharedKey(apiKeyRecord) })
+    const retryAfter = Math.min(window.windowSeconds, 60)
     return {
       context: {} as V1ApiContext,
       response: NextResponse.json(
-        { error: 'Rate limit exceeded. Please slow down and retry after the window resets.' },
+        { error: `Rate limit exceeded. You may make ${describeClientWindow(window)}. Try again in ${retryAfter} second(s).` },
         {
           status: 429,
           headers: {
-            'Retry-After': '60',
-            'X-RateLimit-Limit': String(rateLimit),
+            'Retry-After': String(retryAfter),
+            'X-RateLimit-Limit': String(window.limit),
             'X-RateLimit-Remaining': '0',
-            'X-RateLimit-Reset': String(Math.floor(Date.now() / 1000) + 60),
+            'X-RateLimit-Reset': String(Math.floor(Date.now() / 1000) + retryAfter),
           },
         }
       ),

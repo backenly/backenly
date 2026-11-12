@@ -47,6 +47,28 @@ export interface ActionClass {
   /** Probes that must support the claim. Empty is not allowed. */
   requiredSensors: SensorRequirement[]
   /**
+   * The evidence for a finding this class serves that another probe raises.
+   *
+   * One mutation can answer different claims: `create_index` repairs "this
+   * relationship column has no index" and also "the database measurably spends
+   * time filtering on this column". The claim decides which probe can support
+   * it, so a finding type listed here is judged, and verified, on its own probe
+   * instead of `requiredSensors` and `verifier`. Backenly indexes every
+   * relationship column itself, so on a project it built the foreign-key probe
+   * never fires and stays unverified; judging a measured index on it narrowed
+   * every one to a person (reproduced: narrowedBy=sensor_unverified).
+   */
+  evidenceByFindingType?: Readonly<Record<string, { requiredSensors: SensorRequirement[]; verifier: SensorRequirement }>>
+  /**
+   * For an action that builds something on a table: how big a table, and how
+   * much of the storage the account's plan includes, it may take on its own.
+   * Past either, a person decides (lib/authority/decision.ts). Azure SQL's
+   * automatic tuning draws the same two lines for the indexes it creates: none
+   * for a table over 10 GB, none that would bring space use over 90% of the
+   * maximum (learn.microsoft.com, "Automatic tuning overview").
+   */
+  buildBounds?: { maxTableBytes: number; maxStorageShare: number }
+  /**
    * The probe that independently confirms success.
    *
    * May not be the executor (RFC P11). Structurally separate so an executor can
@@ -71,6 +93,7 @@ export interface ActionClass {
 
 const MINUTE = 60
 const HOUR = 60 * MINUTE
+const GIB = 1024 ** 3
 
 export const ACTION_CLASSES: Readonly<Record<string, ActionClass>> = {
   /**
@@ -102,6 +125,19 @@ export const ACTION_CLASSES: Readonly<Record<string, ActionClass>> = {
       { probeId: 'relationships_are_indexed', livenessBound: 24 * HOUR, evidenceBound: 6 * HOUR },
     ],
     verifier: { probeId: 'relationships_are_indexed', livenessBound: 24 * HOUR, evidenceBound: 6 * HOUR },
+    // A measured slow query is its own claim, raised by its own probe, and
+    // measurement goes stale in an hour, not six.
+    evidenceByFindingType: {
+      slow_query_missing_index: {
+        requiredSensors: [
+          { probeId: 'measured_slow_queries_are_indexed', livenessBound: 24 * HOUR, evidenceBound: 1 * HOUR },
+        ],
+        verifier: { probeId: 'measured_slow_queries_are_indexed', livenessBound: 24 * HOUR, evidenceBound: 1 * HOUR },
+      },
+    },
+    // Built online (lib/execution/online-index.ts), so size is time and I/O
+    // rather than blocked writes: 10 GB is minutes.
+    buildBounds: { maxTableBytes: 10 * GIB, maxStorageShare: 0.9 },
     recovery: 'drop_column',
     blastRadius: 'single_object',
     reversibility: 'reversible',
@@ -261,10 +297,14 @@ export const AUTONOMOUSLY_REPAIRABLE_FINDING_TYPES = Object.keys(FINDING_TYPE_TO
  * missing_api_definition, schema_not_registered, shadow_mutation,
  * verification_failed and workflow_broken are no longer autonomous at all, so
  * they have no place on a bridge for autonomous types.
+ *
+ * And to 7 when infra_hot_table moved to approval: its evidence is how often a
+ * table is scanned, no sensor stands behind it, and over this bridge it built
+ * an index with none of create_index's bounds. A query measured as slow is the
+ * claim create_index takes on its own (slow_query_missing_index).
  */
 export const LEGACY_AUTONOMY_COMPAT_TYPES: ReadonlySet<string> = new Set([
   'index_bloat',
-  'infra_hot_table',
   'infra_table_bloat',
   'missing_rate_limit',
   'orphan_table',
