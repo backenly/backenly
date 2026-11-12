@@ -11,6 +11,7 @@ import { keyKind, mintKey } from '@/lib/auth/key-prefix'
 import { isSharedKey } from '@/lib/security/shared-key'
 import { apiKeyRateCeilingViolation } from '@/lib/quota/kernel'
 import { governedChange } from '@/lib/changes/ledger'
+import { ADMIN_KEY_NEEDS_SERVICE_ROLE, ADMIN_KEY_NEEDS_SERVICE_ROLE_MESSAGE } from '@/lib/security/admin-key-placement'
 
 const createApiKeySchema = z.object({
   name: z.string().min(1, 'Name is required'),
@@ -156,12 +157,7 @@ export async function POST(request: NextRequest) {
     // (GHSA-348x). The console's Admin option already sends serviceRole.
     if (data.keyType === 'public' && data.role === 'admin' && !data.serviceRole) {
       return NextResponse.json(
-        {
-          error:
-            'An Admin key is a service key: server-side only, and it bypasses row-level security. Pass ' +
-            'serviceRole: true for that, or choose the Write or Client role for a key bound by row-level security.',
-          code: 'ADMIN_KEY_NEEDS_SERVICE_ROLE',
-        },
+        { error: ADMIN_KEY_NEEDS_SERVICE_ROLE_MESSAGE, code: ADMIN_KEY_NEEDS_SERVICE_ROLE },
         { status: 400 },
       )
     }

@@ -36,6 +36,16 @@ import type { BrowserOriginVerdict } from './service-role-exposure'
 export const ADMIN_KEY_IN_BROWSER = 'ADMIN_KEY_IN_BROWSER'
 export const ADMIN_KEY_BROWSER_USE = 'ADMIN_KEY_BROWSER_USE'
 
+/**
+ * What creating or changing a key gets when the key would come out with the
+ * admin role and without the service role (app/api/api-keys/route.ts and
+ * app/api/api-keys/[id]/route.ts).
+ */
+export const ADMIN_KEY_NEEDS_SERVICE_ROLE = 'ADMIN_KEY_NEEDS_SERVICE_ROLE'
+export const ADMIN_KEY_NEEDS_SERVICE_ROLE_MESSAGE =
+  'An Admin key is a service key: server-side only, and it bypasses row-level security. Pass ' +
+  'serviceRole: true for that, or choose the Write or Client role for a key bound by row-level security.'
+
 /** Recording at most this often per key and process: the evidence is that it happens, not a log of each request. */
 const RECORD_EVERY_MS = 15 * 60_000
 const lastRecorded = new Map<string, number>()

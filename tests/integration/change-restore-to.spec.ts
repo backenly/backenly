@@ -234,6 +234,38 @@ describe('restore to a point across an architecture change', () => {
   })
 })
 
+describe('restoring a change to an API key', () => {
+  it('does not give a key bound by row-level security the admin role back', async () => {
+    const key = await prisma.apiKey.create({
+      data: {
+        name: 'Shop Default Key', keyPrefix: 'proj_live_', keyHash: hex(16), userId: ownerId, projectId,
+        keyType: 'public', role: 'admin', permissions: [], capabilities: [], serviceRole: false,
+      },
+    })
+    const narrowed = await change('narrow the default key', () =>
+      prisma.apiKey.update({ where: { id: key.id }, data: { role: 'write', permissions: ['read', 'write'] } }))
+
+    const out = await restore(narrowed.id)
+    expect(out).toMatchObject({ ok: false, code: 'NOT_AVAILABLE' })
+    expect((out as { error: string }).error).toBe(
+      'API key Shop Default Key does not get the admin role back, since only a service key may have it now: create a service key for a server instead.',
+    )
+    expect(await prisma.apiKey.findUnique({ where: { id: key.id }, select: { role: true, permissions: true } })).toEqual({ role: 'write', permissions: ['read', 'write'] })
+  })
+
+  it('still gives a service key its admin role back', async () => {
+    const key = await prisma.apiKey.create({
+      data: {
+        name: 'worker', keyPrefix: 'svc_live_', keyHash: hex(16), userId: ownerId, projectId,
+        keyType: 'public', role: 'admin', permissions: [], capabilities: [], serviceRole: true,
+      },
+    })
+    const narrowed = await change('narrow the worker key', () => prisma.apiKey.update({ where: { id: key.id }, data: { role: 'service' } }))
+    expect(await restore(narrowed.id)).toMatchObject({ ok: true })
+    expect(await prisma.apiKey.findUnique({ where: { id: key.id }, select: { role: true } })).toEqual({ role: 'admin' })
+  })
+})
+
 describe('an agent asking for restores', () => {
   it('is held to a number of proofs a minute, so the tables they lock are not held locked', async () => {
     const c = await change('create titles', () => ddl(`CREATE TABLE ${T('titles')} (id serial PRIMARY KEY)`))

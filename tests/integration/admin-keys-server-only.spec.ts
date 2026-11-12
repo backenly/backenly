@@ -216,3 +216,69 @@ describe('an admin-role key already issued with the browser-safe prefix', () => 
     expect(await getProjectIdFromAuth(expressReq(legacyKey))).toMatchObject({ success: true, projectId })
   })
 })
+
+describe('a key changed after it was issued', () => {
+  const update = async (id: string, body: Record<string, unknown>) => {
+    const { PUT } = await import('@/app/api/api-keys/[id]/route')
+    const headers: Record<string, string> = { authorization: `Bearer ${token}` }
+    return (await PUT(
+      {
+        method: 'PUT',
+        url: `http://localhost:3000/api/api-keys/${id}`,
+        nextUrl: { pathname: `/api/api-keys/${id}`, searchParams: new URLSearchParams(), origin: 'http://localhost:3000' },
+        headers: { get: (k: string) => headers[k.toLowerCase()] ?? null },
+        cookies: { get: () => undefined },
+        json: async () => body,
+      } as any,
+      { params: Promise.resolve({ id }) },
+    )) as any
+  }
+  const issue = async (name: string, role: string, serviceRole: boolean) => {
+    const raw = `${serviceRole ? 'svc' : 'proj'}_live_${randomBytes(32).toString('hex')}`
+    return (
+      await prisma.apiKey.create({
+        data: {
+          name,
+          keyHash: hashApiKey(raw),
+          keyPrefix: raw.slice(0, 12),
+          keyType: 'public',
+          role,
+          permissions: ['read', 'write'],
+          capabilities: [],
+          serviceRole,
+          projectId,
+          userId: ownerId,
+        },
+        select: { id: true },
+      })
+    ).id
+  }
+  const stored = (id: string) => prisma.apiKey.findUnique({ where: { id }, select: { name: true, role: true, serviceRole: true } })
+
+  it('may not be given the admin role without being a service key', async () => {
+    const id = await issue('browser', 'client', false)
+    const res = await update(id, { role: 'admin' })
+    expect(res.status).toBe(400)
+    expect((await res.json()).code).toBe('ADMIN_KEY_NEEDS_SERVICE_ROLE')
+    expect(await stored(id)).toEqual({ name: 'browser', role: 'client', serviceRole: false })
+  })
+
+  it('may not stop being a service key while it has the admin role', async () => {
+    const id = await issue('server', 'admin', true)
+    const res = await update(id, { serviceRole: false })
+    expect(res.status).toBe(400)
+    expect((await res.json()).code).toBe('ADMIN_KEY_NEEDS_SERVICE_ROLE')
+    expect(await stored(id)).toEqual({ name: 'server', role: 'admin', serviceRole: true })
+  })
+
+  it('takes every other change, to an admin-role key already issued that way too', async () => {
+    const legacy = await issue('Old Default Key', 'admin', false)
+    expect((await update(legacy, { name: 'Shop server key' })).status).toBe(200)
+    expect((await update(legacy, { role: 'write' })).status).toBe(200)
+    expect(await stored(legacy)).toEqual({ name: 'Shop server key', role: 'write', serviceRole: false })
+
+    const service = await issue('worker', 'service', true)
+    expect((await update(service, { role: 'admin' })).status).toBe(200)
+    expect(await stored(service)).toEqual({ name: 'worker', role: 'admin', serviceRole: true })
+  })
+})

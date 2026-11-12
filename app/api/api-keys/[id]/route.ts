@@ -8,6 +8,12 @@ import { requireAuth } from '@/lib/auth/middleware'
 import { apiKeyRateCeilingViolation } from '@/lib/quota/kernel'
 import { z } from 'zod'
 import { governedChange } from '@/lib/changes/ledger'
+import { canAdministerProject } from '@/lib/edition/guard'
+import {
+  ADMIN_KEY_NEEDS_SERVICE_ROLE,
+  ADMIN_KEY_NEEDS_SERVICE_ROLE_MESSAGE,
+  isRlsBoundAdminKey,
+} from '@/lib/security/admin-key-placement'
 
 const updateApiKeySchema = z.object({
   name: z.string().min(1).optional(),
@@ -75,6 +81,41 @@ export async function PUT(request: NextRequest, props: { params: Promise<{ id: s
     const body = await request.json()
     const data = updateApiKeySchema.parse(body)
 
+    const current = await prisma.apiKey.findFirst({
+      where: { id: params.id, userId: auth.userId },
+      select: {
+        projectId: true, name: true, keyType: true, scope: true, role: true, serviceRole: true,
+        rateLimit: true, rateLimitWindow: true,
+      },
+    })
+    if (!current) {
+      return NextResponse.json({ error: 'API key not found' }, { status: 404 })
+    }
+
+    // A change can give a key anything a new key could have, so it takes what
+    // issuing one takes (../route.ts): ADMIN on the key's project, held now,
+    // not when the key was issued.
+    if (current.projectId && !(await canAdministerProject(auth.userId, current.projectId))) {
+      return NextResponse.json(
+        { error: 'Changing a project API key needs the ADMIN role on its project.', code: 'PROJECT_ROLE_INSUFFICIENT' },
+        { status: 403 },
+      )
+    }
+
+    // The rule a new key is held to: the admin role only on a service key. A
+    // key already issued with it may still be renamed, narrowed or expired.
+    const touchesRole = data.role !== undefined || data.serviceRole !== undefined
+    if (touchesRole && isRlsBoundAdminKey({
+      ...current,
+      role: data.role ?? current.role,
+      serviceRole: data.serviceRole ?? current.serviceRole,
+    })) {
+      return NextResponse.json(
+        { error: ADMIN_KEY_NEEDS_SERVICE_ROLE_MESSAGE, code: ADMIN_KEY_NEEDS_SERVICE_ROLE },
+        { status: 400 },
+      )
+    }
+
     const updateData: any = {}
     if (data.name !== undefined) updateData.name = data.name
     if (data.role !== undefined) updateData.role = data.role
@@ -97,11 +138,7 @@ export async function PUT(request: NextRequest, props: { params: Promise<{ id: s
     // shared (browser) key's rate is each address's (lib/security/shared-key.ts),
     // which a ceiling on one key's rate does not measure, so it is not checked.
     if (data.rateLimit !== undefined || data.rateLimitWindow !== undefined) {
-      const current = await prisma.apiKey.findFirst({
-        where: { id: params.id, userId: auth.userId },
-        select: { rateLimit: true, rateLimitWindow: true, projectId: true, keyType: true, serviceRole: true },
-      })
-      if (current && !isSharedKey(current)) {
+      if (!isSharedKey(current)) {
         const ceiling = await apiKeyRateCeilingViolation(
           current.projectId,
           auth.userId,
@@ -114,8 +151,7 @@ export async function PUT(request: NextRequest, props: { params: Promise<{ id: s
       }
     }
 
-    const owner = await prisma.apiKey.findFirst({ where: { id: params.id, userId: auth.userId }, select: { projectId: true, name: true } })
-    const apiKey = await governedChange(owner?.projectId, `Change API key ${owner?.name ?? ''}`.trim(), () => prisma.apiKey.updateMany({
+    const apiKey = await governedChange(current.projectId, `Change API key ${current.name}`, () => prisma.apiKey.updateMany({
       where: {
         id: params.id,
         userId: auth.userId,

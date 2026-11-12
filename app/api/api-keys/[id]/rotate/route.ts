@@ -8,6 +8,7 @@ import crypto from 'crypto'
 import { plaintextForStorage } from '@/lib/auth/api-key-plaintext'
 import { mintKey } from '@/lib/auth/key-prefix'
 import { governedChange } from '@/lib/changes/ledger'
+import { canAdministerProject } from '@/lib/edition/guard'
 
 /**
  * Rotate an API key - generates a new key while keeping the same settings
@@ -28,6 +29,15 @@ export async function POST(request: NextRequest, props: { params: Promise<{ id: 
       return NextResponse.json(
         { error: 'API key not found' },
         { status: 404 }
+      )
+    }
+
+    // A rotation hands back a new working secret, so it takes what issuing a
+    // key takes (../../route.ts): ADMIN on the key's project, held now.
+    if (apiKey.projectId && !(await canAdministerProject(auth.userId, apiKey.projectId))) {
+      return NextResponse.json(
+        { error: 'Rotating a project API key needs the ADMIN role on its project.', code: 'PROJECT_ROLE_INSUFFICIENT' },
+        { status: 403 },
       )
     }
 
