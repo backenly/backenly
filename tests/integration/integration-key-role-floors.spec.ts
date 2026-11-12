@@ -14,6 +14,14 @@
  *   check stored keys live      DEVELOPER   (integrations/health ?check=1), as credentials/verify
  *   clear function run logs     ADMIN       (ai-functions/logs DELETE), as deleting a function
  *
+ * And the other project routes the route audit lists that change the project
+ * or use its stored keys:
+ *
+ *   re-scan the project         DEVELOPER   (projects/[id]/health PATCH), as dismissing a finding
+ *   change a database issue     DEVELOPER   (database-brain/issues/[issueId] PUT)
+ *   change a bucket's settings  DEVELOPER   (storage/buckets/[bucketId] PATCH)
+ *   delete a bucket             ADMIN       (storage/buckets/[bucketId] DELETE), as deleting a function
+ *
  * Reads stay open to every member: masked keys only.
  *
  * Real database, real signed sessions, real wrappers, guard and resolver.
@@ -196,6 +204,10 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await prisma.aiFunction.deleteMany({ where: { projectId } }).catch(() => {})
+  await prisma.databaseIssue.deleteMany({ where: { projectId } }).catch(() => {})
+  await prisma.storageFile.deleteMany({ where: { projectId } }).catch(() => {})
+  await prisma.storageBucket.deleteMany({ where: { projectId } }).catch(() => {})
+  await prisma.backgroundJob.deleteMany({ where: { projectId } }).catch(() => {})
   if (ORIGINAL_EDITION === undefined) delete process.env.BACKENLY_EDITION
   else process.env.BACKENLY_EDITION = ORIGINAL_EDITION
   resetSingleTenantCache()
@@ -335,5 +347,95 @@ describe('clearing function run logs needs ADMIN', () => {
     const res: any = await clear(members.ADMIN)
     expect(res.status).toBe(200)
     expect(await runs()).toBe(0)
+  }, 60_000)
+})
+
+describe('a re-scan of the project needs DEVELOPER', () => {
+  const rescan = async (user: TestUser) => {
+    const { PATCH } = await import('@/app/api/projects/[id]/health/route')
+    return PATCH(req(user, 'PATCH', `/api/projects/${projectId}/health`), params()) as Promise<any>
+  }
+  let providerCalls: string[] = []
+  const realFetch = global.fetch
+  beforeEach(() => {
+    providerCalls = []
+    global.fetch = (async (input: any) => {
+      providerCalls.push(String(input?.url ?? input))
+      return new Response('{}', { status: 200 })
+    }) as typeof fetch
+  })
+  afterEach(() => {
+    global.fetch = realFetch
+  })
+
+  it('a VIEWER cannot start one; a DEVELOPER can', async () => {
+    await seedKey('stripe', stripeKey('scann'))
+    const asViewer: any = await rescan(members.VIEWER)
+    expect(asViewer.status).toBe(403)
+    expect(providerCalls).toEqual([])
+    const asDeveloper: any = await rescan(members.DEVELOPER)
+    expect(asDeveloper.status).toBe(200)
+  }, 60_000)
+})
+
+describe('changing a database issue needs DEVELOPER', () => {
+  it('a VIEWER cannot mark one resolved or rewrite its fix; a DEVELOPER can', async () => {
+    const issue = await prisma.databaseIssue.create({
+      data: {
+        projectId, title: 'Missing index', description: 'orders.customer_id has no index', severity: 'warning',
+        database: 'postgresql', category: 'performance', suggestedFix: 'Add an index', sqlFix: 'CREATE INDEX ON orders (customer_id);',
+      },
+      select: { id: true },
+    })
+    const { PUT } = await import('@/app/api/database-brain/issues/[issueId]/route')
+    const change = (user: TestUser, body: unknown) =>
+      PUT(req(user, 'PUT', `/api/database-brain/issues/${issue.id}?projectId=${projectId}`, body), { params: Promise.resolve({ issueId: issue.id }) }) as Promise<any>
+
+    const asViewer: any = await change(members.VIEWER, { status: 'resolved', sqlFix: 'DROP TABLE orders;' })
+    expect(asViewer.status).toBe(403)
+    expect(await prisma.databaseIssue.findUnique({ where: { id: issue.id }, select: { status: true, sqlFix: true } }))
+      .toEqual({ status: 'open', sqlFix: 'CREATE INDEX ON orders (customer_id);' })
+
+    const asDeveloper: any = await change(members.DEVELOPER, { status: 'resolved' })
+    expect(asDeveloper.status).toBe(200)
+    expect((await prisma.databaseIssue.findUnique({ where: { id: issue.id }, select: { status: true } }))?.status).toBe('resolved')
+  }, 60_000)
+})
+
+describe("a bucket's settings need DEVELOPER, and deleting it needs ADMIN", () => {
+  const bucketRoute = () => import('@/app/api/storage/buckets/[bucketId]/route')
+  const at = (bucketId: string) => ({ params: Promise.resolve({ bucketId }) })
+  const makeBucket = async (name: string) =>
+    (await prisma.storageBucket.create({ data: { projectId, name, isPublic: false, accessPolicy: 'private' }, select: { id: true } })).id
+  const policyOf = async (id: string) => (await prisma.storageBucket.findUnique({ where: { id }, select: { accessPolicy: true } }))?.accessPolicy
+  // Governed changes keep a two-minute cooldown per project (lib/ai/build-runtime/build-lock.ts),
+  // which is not what these tests are about.
+  beforeEach(async () => {
+    await prisma.backgroundJob.deleteMany({ where: { projectId, type: 'build_lock' } })
+  })
+
+  it('a VIEWER cannot open a private bucket to the public; a DEVELOPER can change its policy', async () => {
+    const { PATCH } = await bucketRoute()
+    const id = await makeBucket(`payslips-${randomUUID().slice(0, 6)}`)
+    const asViewer: any = await PATCH(req(members.VIEWER, 'PATCH', `/api/storage/buckets/${id}?projectId=${projectId}`, { accessPolicy: 'public_read' }), at(id))
+    expect(asViewer.status).toBe(403)
+    expect(await policyOf(id)).toBe('private')
+
+    const asDeveloper: any = await PATCH(req(members.DEVELOPER, 'PATCH', `/api/storage/buckets/${id}?projectId=${projectId}`, { accessPolicy: 'owner_only' }), at(id))
+    expect(asDeveloper.status).toBe(200)
+    expect(await policyOf(id)).toBe('owner_only')
+  }, 60_000)
+
+  it('a VIEWER and a DEVELOPER cannot delete a bucket; an ADMIN can', async () => {
+    const { DELETE } = await bucketRoute()
+    const id = await makeBucket(`archive-${randomUUID().slice(0, 6)}`)
+    for (const role of ['VIEWER', 'DEVELOPER'] as Role[]) {
+      const res: any = await DELETE(req(members[role], 'DELETE', `/api/storage/buckets/${id}?projectId=${projectId}`), at(id))
+      expect(res.status).toBe(403)
+      expect(await prisma.storageBucket.count({ where: { id } })).toBe(1)
+    }
+    const res: any = await DELETE(req(members.ADMIN, 'DELETE', `/api/storage/buckets/${id}?projectId=${projectId}`), at(id))
+    expect(res.status).toBe(200)
+    expect(await prisma.storageBucket.count({ where: { id } })).toBe(0)
   }, 60_000)
 })
