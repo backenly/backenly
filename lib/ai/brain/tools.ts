@@ -521,6 +521,12 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
         },
         required: ['name', 'type'],
       },
+      asWritten: {
+        type: 'boolean',
+        description:
+          'true: add exactly this column with exactly the flags given, inferring nothing from its name ' +
+          '(no UNIQUE on email, no foreign key on *_id). apply_migration sets it for ADD COLUMN.',
+      },
     },
     ['tableName', 'column']),
   fn('create_index',
@@ -1648,6 +1654,8 @@ export const TOOL_TO_ACTION: Record<string, (args: any) => AIAction> = {
       nullable: a.column?.nullable,
       default: a.column?.default,
       column: a.column,
+      // From SQL (lib/mcp/migration-parser.ts): nothing is inferred from the name.
+      ...(a.asWritten === true ? { asWritten: true } : {}),
     },
   }),
   // Every declared field is forwarded. A mapper that quietly drops one is the

@@ -1386,7 +1386,10 @@ function translateAlterAction(tableName: string, action: string, stmt: string): 
     if (col.unique !== undefined) column.unique = col.unique
     if (col.fkTo !== undefined) column.fkTo = col.fkTo
     if (col.references !== undefined) column.references = col.references
-    const actions: PlannedAction[] = [{ tool: 'add_column', args: { tableName, column }, source: stmt }]
+    // As written, like CREATE TABLE: the column gets the type, NOT NULL, DEFAULT,
+    // UNIQUE and REFERENCES it declares and nothing its name suggests, so
+    // `ADD COLUMN customer_email text` is not made UNIQUE.
+    const actions: PlannedAction[] = [{ tool: 'add_column', args: { tableName, column, asWritten: true }, source: stmt }]
     for (const check of checks) actions.push(checkAction(tableName, check, `${stmt} → CHECK (${check.expression})`))
     return actions
   }
