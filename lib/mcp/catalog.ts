@@ -708,7 +708,7 @@ export function buildDispatchable(): McpToolDescriptor[] {
       tier: 'data',
       description:
         'Insert one row as the project owner, for seeding and repair: end-user RLS does not apply; row-event ' +
-        `functions and webhooks still fire. Returns the row. ${docsPointer('database')}`,
+        `functions and row webhooks still fire. Returns the row. ${docsPointer('database')}`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -725,7 +725,7 @@ export function buildDispatchable(): McpToolDescriptor[] {
       tier: 'data',
       description:
         'Set `patch` on the rows `filter` matches, as the project owner (no end-user RLS; row-event functions and ' +
-        `webhooks fire). An empty filter is refused. ${docsPointer('database')}`,
+        `row webhooks fire). An empty filter is refused. ${docsPointer('database')}`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -742,8 +742,8 @@ export function buildDispatchable(): McpToolDescriptor[] {
       name: 'db_delete',
       tier: 'data',
       description:
-        'Delete the rows `filter` matches, as the project owner (no end-user RLS; row-event functions and webhooks ' +
-        `fire). An empty filter is refused: there is no delete-all. ${docsPointer('database')}`,
+        'Delete the rows `filter` matches, as the project owner (no end-user RLS; row-event functions and row ' +
+        `webhooks fire). An empty filter is refused: there is no delete-all. ${docsPointer('database')}`,
       inputSchema: {
         type: 'object',
         properties: {
