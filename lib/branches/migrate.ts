@@ -38,6 +38,7 @@ import {
   fullyAppliedStatements,
   planMigration,
   refusedDrop,
+  refusedExtension,
   runPlan,
   tablesNamed,
   type MigrationOutcome,
@@ -83,7 +84,7 @@ export async function applyBranchMigration(
   const checked = checkPlan(planned, existing, `on branch "${branch.name}"`)
   if (!checked.ok) return checked as MigrationRefusal
   const { workspaceSchemaName } = await import('@/lib/security/workspace-schema')
-  const refused = await refusedDrop(projectId, workspaceSchemaName(projectId), planned)
+  const refused = (await refusedDrop(projectId, workspaceSchemaName(projectId), planned)) ?? (await refusedExtension(projectId, planned))
   if (refused) return refused
   const ok = checked as Extract<typeof checked, { ok: true }>
 
@@ -92,6 +93,19 @@ export async function applyBranchMigration(
   const created: string[] = []
 
   const outcome = await runPlan(ok.planned, ok.notes, async (step) => {
+    // An extension has no branch of its own: it is installed for the whole
+    // database, production included, exactly as on main, and said so. The
+    // merge replays the statement, which then finds it installed.
+    if (step.tool === 'install_extension') {
+      const { installForMigration } = await import('@/lib/services/extensions')
+      const r = await installForMigration(projectId, step.args, userId)
+      return {
+        ok: r.ok,
+        summary: r.ok
+          ? `${r.summary} A branch cannot hold an extension of its own, so production can use it now too.`
+          : r.summary,
+      }
+    }
     const toAction = TOOL_TO_ACTION[step.tool]
     if (!toAction) return { ok: false, summary: `${step.tool} cannot be applied to a branch.` }
     const result = await executeBranchSchemaAction(toAction(step.args), projectId, branch.schemaName)

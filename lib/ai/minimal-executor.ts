@@ -9480,6 +9480,36 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
     }
   }
 
+  // Operator classes, per column: `{ name: "gin_trgm_ops" }` for a trigram
+  // index, `{ data: "jsonb_path_ops" }`. A migration's `(name gin_trgm_ops)`
+  // used to lose its class before it got here (lib/mcp/migration-parser.ts).
+  const operatorClasses: Record<string, string> = {}
+  if (params.operatorClasses && typeof params.operatorClasses === 'object' && !Array.isArray(params.operatorClasses)) {
+    for (const [column, raw] of Object.entries(params.operatorClasses as Record<string, unknown>)) {
+      const opclass = String(raw ?? '').trim().toLowerCase()
+      if (!opclass) continue
+      if (!columns.includes(column)) {
+        return {
+          success: false,
+          message: `An operator class was given for "${column}", which is not one of the index's columns (${columns.join(', ')}).`,
+          error: 'Operator class for a column not indexed',
+          code: 'VALIDATION',
+        }
+      }
+      if (!SAFE_IDENT.test(opclass)) {
+        return {
+          success: false,
+          message: `"${opclass}" is not a valid PostgreSQL identifier.`,
+          error: 'Invalid identifier',
+          code: 'VALIDATION',
+        }
+      }
+      operatorClasses[column] = opclass
+    }
+  }
+  /** A column as an index definition writes it: with its operator class, when it has one. */
+  const indexed = (c: string) => (operatorClasses[c] ? `${c} ${operatorClasses[c]}` : c)
+
   // `where: "true"` asks for an index over every row, soft-deleted ones
   // included: the only kind of UNIQUE index an ON CONFLICT upsert can target.
   // It names no column, so it is not a predicate to validate, and it is never
@@ -9504,8 +9534,42 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
     const postgresSchema = target.targetSchema ?? getWorkspaceDatabaseNames(projectId).postgresSchema
 
     let idxName = params.indexName || defaultIndexName(tableName, columns, unique)
-    const colList = columns.map((c) => `"${c}"`).join(', ')
+    // Each class is found for the index's method in pg_catalog or in the schema
+    // Backenly installs extensions into, and the DDL names that schema rather
+    // than trusting a search_path. Nowhere else: a class in another schema
+    // would make this table's index depend on it. Missing, it is refused with
+    // the way forward, before any DDL.
+    const { EXTENSION_SCHEMA } = await import('@/lib/services/extension-allowlist')
+    const classSql: Record<string, string> = {}
+    for (const [column, opclass] of Object.entries(operatorClasses)) {
+      const found = await db.$queryRawUnsafe<Array<{ schema: string }>>(
+        `SELECT n.nspname AS schema
+           FROM pg_opclass c
+           JOIN pg_namespace n ON n.oid = c.opcnamespace
+           JOIN pg_am a        ON a.oid = c.opcmethod
+          WHERE c.opcname = $1 AND a.amname = $2 AND n.nspname IN ('pg_catalog', $3)
+          ORDER BY n.nspname = 'pg_catalog' DESC
+          LIMIT 1`,
+        opclass, method || 'btree', EXTENSION_SCHEMA,
+      )
+      if (found.length === 0) {
+        return {
+          success: false,
+          message:
+            `There is no "${opclass}" operator class for ${method || 'btree'} indexes on this database, so the index on ` +
+            `${tableName} (${column}) was not created. When an extension provides it (gin_trgm_ops and gist_trgm_ops ` +
+            `come from pg_trgm), install the extension first, earlier in the same migration: CREATE EXTENSION IF NOT EXISTS <name>.`,
+          error: 'Unknown operator class',
+          code: 'VALIDATION',
+        }
+      }
+      classSql[column] = found[0].schema === 'pg_catalog' ? `"${opclass}"` : `"${found[0].schema}"."${opclass}"`
+    }
+    const colList = columns.map((c) => (classSql[c] ? `"${c}" ${classSql[c]}` : `"${c}"`)).join(', ')
     const usingClause = method ? ` USING ${method}` : ''
+    /** How an index definition's columns compare: no quotes, a class's schema dropped. */
+    const columnKey = (cols: string[]) =>
+      cols.map((c) => c.replace(/"/g, '').replace(/\s(?:pg_catalog|public)\./, ' ').toLowerCase()).join(',')
 
     // ── A UNIQUE index must not count soft-deleted rows ──────────────────────
     //
@@ -9550,19 +9614,19 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
         `SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = $1 AND tablename = $2`,
         postgresSchema, tableName,
       )
-      const wanted = columns.map((c) => c.toLowerCase()).join(',')
+      const wanted = columnKey(columns.map(indexed))
       let same = all.find((r) =>
         r.indexname !== idxName &&
         !/\sWHERE\s/i.test(r.indexdef) &&
         /CREATE UNIQUE/i.test(r.indexdef) === unique &&
         new RegExp(`USING ${method ?? 'btree'}\\b`, 'i').test(r.indexdef) &&
-        indexDefColumns(r.indexdef).join(',') === wanted)
+        columnKey(indexDefColumns(r.indexdef)) === wanted)
       // One a failed CREATE INDEX CONCURRENTLY left behind does no job.
       if (same && (await validity(same.indexname))?.valid === false) same = undefined
       if (same && !params.indexName) {
         return {
           success: true,
-          message: `${tableName} already has this index, "${same.indexname}" (${columns.join(', ')})${unique ? ', unique' : ''}, so a second one was not built.`,
+          message: `${tableName} already has this index, "${same.indexname}" (${columns.map(indexed).join(', ')})${unique ? ', unique' : ''}, so a second one was not built.`,
           data: { tableName, columns, unique, indexName: same.indexname, alreadyExisted: true, definition: same.indexdef },
         }
       }
@@ -9579,7 +9643,7 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
           return {
             success: true,
             message:
-              `${tableName} already had this index, as Backenly's "${same.indexname}" (${columns.join(', ')})${unique ? ', unique' : ''}. ` +
+              `${tableName} already had this index, as Backenly's "${same.indexname}" (${columns.map(indexed).join(', ')})${unique ? ', unique' : ''}. ` +
               `It is now named "${idxName}", as asked, and a second one was not built.`,
             data: { tableName, columns, unique, indexName: idxName, alreadyExisted: true, renamedFrom: same.indexname },
           }
@@ -9600,7 +9664,7 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
       const def = existing[0].indexdef
       const existingShape = indexDefShape(def)
       const sameUnique = /CREATE UNIQUE/i.test(def) === unique
-      const sameCols = existingShape.columns.join(',') === columns.map((c) => c.toLowerCase()).join(',')
+      const sameCols = columnKey(existingShape.columns) === columnKey(columns.map(indexed))
       // A partial index is a different index: one scoped to live rows cannot
       // serve a request for one over every row, which an upsert needs.
       const samePredicate = samePredicateText(existingShape.where, effectiveWhere)
@@ -9612,7 +9676,7 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
       if (sameShape && valid) {
         return {
           success: true,
-          message: `Index "${idxName}" already exists on ${tableName} (${columns.join(', ')})${unique ? ', unique' : ''} — nothing to do.`,
+          message: `Index "${idxName}" already exists on ${tableName} (${columns.map(indexed).join(', ')})${unique ? ', unique' : ''} — nothing to do.`,
           data: { tableName, columns, unique, indexName: idxName, alreadyExisted: true, definition: def },
         }
       }
@@ -9651,7 +9715,7 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
           `An index named "${idxName}" already exists on ${tableName} with a DIFFERENT definition, ` +
           `so the requested one was not created.\n` +
           `  existing:  ${def}\n` +
-          `  requested: ${unique ? 'UNIQUE ' : ''}(${columns.join(', ')})` +
+          `  requested: ${unique ? 'UNIQUE ' : ''}(${columns.map(indexed).join(', ')})` +
           `${effectiveWhere ? ` WHERE ${effectiveWhere}` : everyRow ? ' over every row' : ''}\n` +
           `Pass a different indexName, or drop the existing index first (destructive — route it through backend_chat).`,
         error: 'Index name conflict',
@@ -9711,7 +9775,7 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
     }
 
     const shape =
-      `${unique ? 'unique ' : ''}index on ${tableName} (${columns.join(', ')})` +
+      `${unique ? 'unique ' : ''}index on ${tableName} (${columns.map(indexed).join(', ')})` +
       `${method ? ` using ${method}` : ''}${effectiveWhere ? ` where ${effectiveWhere}` : ''}`
     return {
       success: true,
@@ -9737,6 +9801,7 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
       data: {
         tableName,
         columns,
+        ...(Object.keys(operatorClasses).length ? { operatorClasses } : {}),
         unique,
         method: method || 'btree',
         where: effectiveWhere || null,
