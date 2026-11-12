@@ -1995,3 +1995,11 @@ tests/integration/guessed-constraints.spec.ts
 # A column added in SQL is added as written, on production and on a branch:
 # no UNIQUE from an email name, no foreign key from an *_id name.
 tests/integration/add-column-as-written.spec.ts
+
+# An agent installs an allowlisted extension with CREATE EXTENSION in
+# apply_migration, as the console's Install button does: into public, said to
+# be database-wide, usable by the project's REST roles, seen by a second
+# project, recorded from either door, refused off the allowlist or without
+# superuser, never dropped, and installed from a branch on a protected
+# production. Real catalog, real MCP route and console route.
+tests/integration/agent-installs-extensions.spec.ts
