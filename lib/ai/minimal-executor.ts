@@ -10,6 +10,7 @@
 import { isReservedWorkspaceTable } from '@/lib/security/workspace-schema'
 import type { RelatedRowsVia } from '@/lib/services/rls-ownership'
 import { addForeignKeySql, columnForeignKeySql, describeTarget, isDeclaredForeignKey } from '@/lib/db/declared-foreign-key'
+import { STATUS_DOMAIN_MAP, uniqueByName } from '@/lib/db/name-rules'
 import { getActiveGraph, saveNewGraph } from '@/lib/orchestration/graph-pointer'
 import { withoutTables } from '@/lib/orchestration/graph-tables'
 import { planDisplayName } from '@/lib/entitlements/plan-names'
@@ -589,7 +590,8 @@ function deriveConstraints(columnName: string, columnType: string, tableName: st
   
   const constraints: ColumnConstraints = {
     isPrimaryKey: lower === 'id',
-    isUnique: lower.includes('email') || lower.includes('username') || lower.includes('slug'),
+    // UNIQUE from the name alone (lib/db/name-rules.ts): email, username, slug.
+    isUnique: uniqueByName(columnName),
     // ── Nullable unless something below gives a POSITIVE reason to require it ──
     //
     // This read `!lower.includes('optional') && !startsWith('is_'/'has_')`, i.e.
@@ -4295,59 +4297,9 @@ async function executeCreateTable(
 
     // ── #94: Auto-inject CHECK constraints for any status-like column ────────
     // Extends beyond job tables: any table with a status/payment_status/order_status
-    // column gets a CHECK constraint derived from the known domain context.
-
-    // Status value sets keyed by table-name pattern
-    const STATUS_DOMAIN_MAP: Array<{ pattern: RegExp; column: string; values: string[] }> = [
-      // Job/async processing tables
-      {
-        pattern: /_jobs?$|^(generation|render|video|export|import|process|encode|transcode|clip)_/,
-        column: 'status',
-        values: ['queued', 'processing', 'completed', 'failed', 'cancelled'],
-      },
-      // Order / e-commerce tables
-      {
-        pattern: /^orders?$|^(order_items?|purchase)$/,
-        column: 'status',
-        values: ['pending', 'processing', 'shipped', 'delivered', 'cancelled', 'refunded'],
-      },
-      {
-        pattern: /^orders?$|^payments?$|^invoices?$|^checkouts?$/,
-        column: 'payment_status',
-        values: ['pending', 'paid', 'failed', 'refunded', 'disputed'],
-      },
-      // Subscriptions
-      {
-        pattern: /^subscriptions?$/,
-        column: 'status',
-        values: ['active', 'trialing', 'past_due', 'cancelled', 'unpaid', 'paused'],
-      },
-      // User / account tables
-      {
-        pattern: /^users?$|^accounts?$|^members?$/,
-        column: 'status',
-        values: ['active', 'suspended', 'deactivated', 'pending_verification'],
-      },
-      // Content / CMS tables
-      {
-        pattern: /^(posts?|articles?|pages?)$/,
-        column: 'status',
-        values: ['draft', 'published', 'archived', 'scheduled'],
-      },
-      // Tickets / support
-      {
-        pattern: /^tickets?$|^support_tickets?$/,
-        column: 'status',
-        values: ['open', 'in_progress', 'resolved', 'closed', 'on_hold'],
-      },
-      // Generic tasks
-      {
-        pattern: /^tasks?$|^todos?$/,
-        column: 'status',
-        values: ['todo', 'in_progress', 'done', 'cancelled'],
-      },
-    ]
-
+    // column gets a CHECK constraint derived from the known domain context, the
+    // value sets keyed by table-name pattern in lib/db/name-rules.ts, which the
+    // detector of rules nobody asked for reads too (lib/autonomy/guessed-constraints.ts).
     const alreadyHasStatusConstraint = checkConstraints.some(c => c.columnName === 'status')
     if (!asWritten && !alreadyHasStatusConstraint) {
       for (const rule of STATUS_DOMAIN_MAP) {
@@ -4356,7 +4308,7 @@ async function executeCreateTable(
         if (!colExists) continue
         const alreadyHas = checkConstraints.some(c => c.columnName === rule.column)
         if (alreadyHas) continue
-        checkConstraints.push({ columnName: rule.column, values: rule.values })
+        checkConstraints.push({ columnName: rule.column, values: [...rule.values] })
         console.log(`[AI Executor] Auto-injected CHECK constraint on "${rule.column}" for "${tableName}" (${rule.values.join(', ')})`)
       }
     }
@@ -4447,6 +4399,16 @@ async function executeCreateTable(
         if (await ensureReferencedAuthUsersTable(projectId, declared?.table ?? col?.fkTo, postgresSchema)) break
       }
     }
+
+    // Whether this statement makes the table, or finds it already there
+    // (IF NOT EXISTS): only a table made here is marked as made here.
+    const existedBefore = await db
+      .$queryRawUnsafe<Array<{ found: string | null }>>(
+        `SELECT to_regclass($1)::text AS found`,
+        `"${postgresSchema}"."${tableName}"`,
+      )
+      .then((r) => !!r[0]?.found)
+      .catch(() => true)
 
     console.log(`📝 [AI Executor] Executing SQL:`, createTableSQL)
     await db.$executeRawUnsafe(createTableSQL)
@@ -4804,10 +4766,13 @@ async function executeCreateTable(
     // Now that we just created 'users', repair orders.userId → users.id
     // A table declared in SQL is kept out of the name-based key repair, now and
     // on every later run of it (lib/db/declared-tables.ts); one built from a
-    // description takes part, whatever an earlier table of its name was.
+    // description takes part, whatever an earlier table of its name was. One
+    // Backenly designs and makes here is marked so: the rules its names gave
+    // it are that design, not a request's leftovers (lib/autonomy/guessed-constraints.ts).
     try {
-      const { markDeclaredInSql, unmarkDeclaredInSql } = await import('@/lib/db/declared-tables')
+      const { markDeclaredInSql, markDesignedByBackenly, unmarkDeclaredInSql } = await import('@/lib/db/declared-tables')
       if (asWritten) await markDeclaredInSql(projectId, tableName)
+      else if (!existedBefore) await markDesignedByBackenly(projectId, tableName)
       else await unmarkDeclaredInSql(projectId, tableName)
     } catch (markErr: any) {
       console.warn(`[AI Executor] Could not record how "${tableName}" was declared:`, markErr?.message)
@@ -6018,7 +5983,10 @@ async function executeAddColumn(
     // A migration's column carries its declared type (sqlType); keep it on this path too.
     const sqlType = spec && colsToAdd.length === 1 && typeof spec.sqlType === 'string' ? spec.sqlType : undefined
     for (const col of colsToAdd) {
-      await addColumnToTable(tableName, { name: col.name, type: col.type, ...(sqlType ? { sqlType } : {}) }, projectId, apiKey, target)
+      await addColumnToTable(
+        tableName, { name: col.name, type: col.type, ...(sqlType ? { sqlType } : {}) }, projectId, apiKey, target,
+        params.asWritten === true,
+      )
       addedCols.push(col.name)
     }
 
@@ -6287,6 +6255,8 @@ async function addColumnToTable(
   projectId: string,
   apiKey?: string,
   target: SchemaTarget = {},
+  // From SQL (apply_migration): the column as written, nothing from its name.
+  asWritten = false,
 ): Promise<void> {
   const db = await projectDb(projectId)
   try {
@@ -6308,8 +6278,14 @@ async function addColumnToTable(
     }
     
     // Apply constraint-first system: detect FK columns, unique columns, etc.
+    // Not for a column declared in SQL: `ADD COLUMN customer_email text` came
+    // out UNIQUE from its name, so each email could be on one row (production
+    // QA, 2026-11-09). What it declares beyond a type (NOT NULL, DEFAULT,
+    // UNIQUE, REFERENCES) is added by executeAddColumn, as written.
     const normalizedType = declaredSqlType(column) ?? normalizeColumnType(column.type, column.name)
-    const constraints = deriveConstraints(column.name, normalizedType, tableName)
+    const constraints: ColumnConstraints = asWritten
+      ? { isPrimaryKey: false, isUnique: false, isRequired: false, hasDefault: false, foreignKey: undefined }
+      : deriveConstraints(column.name, normalizedType, tableName)
     const columnDef = { name: column.name, type: normalizedType }
     const columnSQL = applyConstraintsToColumn(columnDef, constraints, postgresSchema)
 
