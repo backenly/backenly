@@ -2317,7 +2317,7 @@ export async function autoApplyRlsIfNeeded(
   // them from the browser has to be told why it cannot.
   const notice =
     result.success && plan.basis === 'grant_table'
-      ? `"${tableName}": ${plan.reason} To let users write rows under a rule of your own, set it with add_rls custom.`
+      ? `"${tableName}": ${plan.reason} To let users write rows under a rule of your own, set it with set_rls (or add_rls custom).`
       : null
   return { template: result.success ? plan.template : null, applied: result.success, closedByDefault: false, notice }
 }

@@ -1998,3 +1998,14 @@ __tests__/database/new-tables-closed-by-default.test.ts
 # restore from History; a later migration showing the owner opens it as one
 # verified change. Real schemas, executor, MCP route, branch engine and ledger.
 tests/integration/new-tables-closed-on-every-path.spec.ts
+
+# A table whose rows grant access (user_roles, team_members, invitations)
+# gets owner_read_only: each user reads their own rows and cannot write one
+# naming themselves; an ordinary owned table still lets its owner write.
+# Written as the REST API's authenticated role with production's grants.
+__tests__/database/grant-tables-are-not-self-writable.test.ts
+
+# The same on every door: apply_migration on production and on a branch, the
+# merge, backend_chat on a branch, a grant table that starts closed and is
+# opened by a later migration, the chat blueprint's steps and REGISTER_TABLE.
+tests/integration/grant-tables-on-every-path.spec.ts
