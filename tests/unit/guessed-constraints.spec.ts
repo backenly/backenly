@@ -11,6 +11,7 @@ import {
   checkNameFor,
   isPostgresConstraintName,
   postgresConstraintName,
+  statusValueListsFor,
   statusValuesFor,
   uniqueByName,
 } from '@/lib/db/name-rules'
@@ -21,21 +22,34 @@ import { decisionLabels, summariseFinding } from '@/lib/core/finding-summaries'
 
 const ORDER_STATES = "CHECK ((status = ANY (ARRAY['pending'::text, 'processing'::text, 'shipped'::text, 'delivered'::text, 'cancelled'::text, 'refunded'::text])))"
 
-describe('the name rules, as they have stood since 2026-07-23', () => {
+describe('the name rules', () => {
   it('gives UNIQUE to any column with email, username or slug in its name', () => {
     for (const c of ['email', 'customer_email', 'notifyEmail', 'username', 'slug', 'email_verified']) expect(uniqueByName(c)).toBe(true)
     for (const c of ['notify_to', 'contact', 'name', 'status']) expect(uniqueByName(c)).toBe(false)
   })
 
   it('gives a CHECK list by the table\'s name, the first rule that matches', () => {
-    expect(statusValuesFor('orders', 'status')).toEqual(['pending', 'processing', 'shipped', 'delivered', 'cancelled', 'refunded'])
+    expect(statusValuesFor('orders', 'status')).toEqual(
+      ['pending', 'processing', 'shipped', 'delivered', 'cancelled', 'refunded', 'awaiting_payment', 'paid', 'failed'],
+    )
     expect(statusValuesFor('orders', 'payment_status')).toEqual(['pending', 'paid', 'failed', 'refunded', 'disputed'])
-    expect(statusValuesFor('render_jobs', 'status')).toEqual(['queued', 'processing', 'completed', 'failed', 'cancelled'])
+    expect(statusValuesFor('render_jobs', 'status')).toEqual(['queued', 'processing', 'completed', 'failed', 'cancelled', 'pending'])
     expect(statusValuesFor('posts', 'status')).toEqual(['draft', 'published', 'archived', 'scheduled'])
     expect(statusValuesFor('shop_orders', 'status')).toBeNull()
     expect(statusValuesFor('orders', 'state')).toBeNull()
-    // Eight rules; a changed list changes what is recognised on old tables.
     expect(STATUS_DOMAIN_MAP).toHaveLength(8)
+  })
+
+  it('keeps every list a rule made since 2026-07-23, so tables made under it are still recognised', () => {
+    expect(statusValueListsFor('orders', 'status')).toEqual([
+      ['pending', 'processing', 'shipped', 'delivered', 'cancelled', 'refunded', 'awaiting_payment', 'paid', 'failed'],
+      ['pending', 'processing', 'shipped', 'delivered', 'cancelled', 'refunded'],
+    ])
+    expect(statusValueListsFor('subscriptions', 'status')[1]).toEqual(['active', 'trialing', 'past_due', 'cancelled', 'unpaid', 'paused'])
+    expect(statusValueListsFor('render_jobs', 'status')[1]).toEqual(['queued', 'processing', 'completed', 'failed', 'cancelled'])
+    expect(statusValueListsFor('tasks', 'status')[1]).toEqual(['todo', 'in_progress', 'done', 'cancelled'])
+    expect(statusValueListsFor('posts', 'status')).toEqual([['draft', 'published', 'archived', 'scheduled']])
+    expect(statusValueListsFor('orders', 'state')).toEqual([])
   })
 
   it('names a UNIQUE on a column as PostgreSQL does, shortening the longer name first', () => {
@@ -57,8 +71,14 @@ describe('a rule the name rules made', () => {
 
   it('is recognised by its exact name and definition', () => {
     expect(guessedCandidate(rule({}))).toMatchObject({ rule: 'unique_by_name', column: 'email', constraintName: 'orders_email_key' })
+    // The list the rule made until 2026-11-13: retired, since it refused paid.
     expect(guessedCandidate(rule({ kind: 'c', name: 'chk_orders_status', columns: ['status'], definition: ORDER_STATES })))
-      .toMatchObject({ rule: 'check_by_table_name', values: ['pending', 'processing', 'shipped', 'delivered', 'cancelled', 'refunded'] })
+      .toMatchObject({ rule: 'check_by_table_name', values: ['pending', 'processing', 'shipped', 'delivered', 'cancelled', 'refunded'], retired: true })
+    // The list it makes now.
+    const now = ORDER_STATES.replace("'refunded'::text]", "'refunded'::text, 'awaiting_payment'::text, 'paid'::text, 'failed'::text]")
+    const current = guessedCandidate(rule({ kind: 'c', name: 'chk_orders_status', columns: ['status'], definition: now }))
+    expect(current).toMatchObject({ rule: 'check_by_table_name', values: statusValuesFor('orders', 'status') })
+    expect(current!.retired).toBeUndefined()
     // A varchar column renders the list with casts on both sides.
     const varchar =
       "CHECK (((status)::text = ANY ((ARRAY['pending'::character varying, 'processing'::character varying, 'shipped'::character varying, " +
