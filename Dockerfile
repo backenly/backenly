@@ -40,6 +40,11 @@ COPY --from=builder /app/.next/static ./.next/static
 COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
 COPY --from=builder /app/node_modules/@prisma ./node_modules/@prisma
 
+# bcrypt, the native password hashing (lib/auth/password.ts), comes with the
+# standalone tree: output tracing follows its loader to the prebuilt binary for
+# this platform. The build fails unless this image can hash and verify.
+RUN node -e "const b=require('bcrypt');const h=b.hashSync('x',4);if(!b.compareSync('x',h)||b.compareSync('y',h))process.exit(1);console.log('bcrypt hashes in this image')"
+
 # Set correct permissions
 RUN chown -R nextjs:nodejs /app
 

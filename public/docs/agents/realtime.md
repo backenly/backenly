@@ -4,6 +4,8 @@ Index: https://backenly.com/llms.txt
 
 PostgreSQL `LISTEN/NOTIFY` delivered as Server-Sent Events: table changes (insert, update, delete), presence (a 60-second activity window) and broadcast (ephemeral, 6 KB payload limit). A table streams nothing until realtime is enabled for it.
 
+Each change travels as a PostgreSQL notification, which holds about 7.5 KB. A change too large for that arrives with `truncated: true` and only the row's primary key in `data` (and in an update's `old`): fetch the row by that key, or drop a deleted one. An update that fits only without its previous row arrives whole, with `oldTruncated: true` and only the previous row's primary key in `old`. Presence metadata may be up to 4 KB as JSON; more is refused with 413 `PRESENCE_METADATA_TOO_LARGE`.
+
 ## Actions
 
 <!-- generated:actions:realtime by scripts/generate-agent-docs.ts from lib/mcp/domains.ts; do not edit -->

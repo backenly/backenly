@@ -8,8 +8,10 @@ export const dynamic = 'force-dynamic'
  * undoing everything made since, newest first, each step an ordinary restore
  * held to its own rules (lib/changes/range.ts). A published version stands for
  * the point it was published at: the last change before it. GET says what it
- * would undo and where it would stop, without proving or changing anything;
- * POST runs it and stops at the first step that needs a person.
+ * would undo and where it would stop, having proved the whole sequence in a
+ * transaction that is rolled back (proveRestoreTo), so a step that would stop
+ * it is named before anything runs; it changes nothing. POST proves it again
+ * and runs it only when every step would run.
  *
  * Who can is who can restore (./[changeId]/restore): a person's session with
  * admin rights on the project. `steps` is the list the person saw, by record
@@ -25,7 +27,7 @@ export const dynamic = 'force-dynamic'
 import { NextRequest, NextResponse } from 'next/server'
 import { withAuth } from '@/lib/auth/route-protection'
 import { canAdministerProject } from '@/lib/edition/guard'
-import { planRestoreTo, publishedPoint, restoreTo, restoreToVersion } from '@/lib/changes/range'
+import { planRestoreTo, proveRestoreTo, publishedPoint, restoreTo, restoreToVersion } from '@/lib/changes/range'
 
 /** The point, from `after` or a published `version`; null when neither names one. */
 async function pointOf(projectId: string, after: unknown, version: unknown): Promise<{ after: number; version: number | null } | null> {
@@ -45,7 +47,9 @@ export const GET = withAuth(async (request: NextRequest, { user, params }) => {
   const q = new URL(request.url).searchParams
   const point = await pointOf(projectId, q.get('after'), q.get('version'))
   if (!point) return NextResponse.json({ error: 'Name a change number or a published version.' }, { status: 400 })
-  return NextResponse.json({ success: true, version: point.version, plan: await planRestoreTo(projectId, point.after) })
+  const plan = await planRestoreTo(projectId, point.after)
+  const blocked = await proveRestoreTo(projectId, plan)
+  return NextResponse.json({ success: true, version: point.version, plan: blocked ? { ...plan, stop: blocked } : plan })
 })
 
 export const POST = withAuth(async (request: NextRequest, { user, params }) => {

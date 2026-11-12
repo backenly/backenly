@@ -18,6 +18,9 @@
  * The console reads home's counter, so the region writes its counts there
  * every minute (mirrorRateWindows), with the key's last use. Until then the
  * console shows the count as of the last mirror; nothing is decided by it.
+ *
+ * A key every user of an app sends is limited per client instead, and its
+ * window here only keeps its count (lib/security/shared-key-rate.ts).
  */
 
 import { prisma } from '@/lib/db/prisma'
@@ -40,6 +43,11 @@ export interface RateKey {
   keyHash: string
   rateLimit: number
   rateLimitWindow: number
+  /**
+   * A key every user of an app sends, whose limit is each client's: its own
+   * window keeps the count and decides nothing (lib/security/shared-key-rate.ts).
+   */
+  shared?: boolean
 }
 
 /** How much of the hash marks the key's rotation. Enough to tell two keys apart, nothing to guess from. */

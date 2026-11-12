@@ -21,6 +21,7 @@ import { AiError, generate } from '../llm'
 import { kickReconciler, shouldKickFor } from '@/lib/autonomy/event-trigger'
 import { WEBHOOK_EVENT_TYPES } from '@/lib/webhooks/events'
 import { publicOrigin } from '@/lib/branches/preview'
+import type { BuildBranch } from '@/lib/branches/build-branch'
 import { SERVED_OAUTH_PROVIDERS, isServedOAuthProvider } from '@/lib/services/oauth-providers'
 
 /** Executor actions whose audit rows record who acted (see runExecutor). */
@@ -177,6 +178,12 @@ export type ToolName =
   | 'apply_proposal'
   | 'list_findings'
   | 'resolve_finding'
+  // apply_migration's DROP INDEX, ALTER TABLE … DROP CONSTRAINT and ALTER COLUMN
+  // … TYPE. Not offered to a model: only the migration parser plans them
+  // (lib/mcp/migration-parser.ts), and the brain runs only what it offered.
+  | 'drop_index'
+  | 'drop_constraint'
+  | 'alter_column_type'
   // Destructive
   | 'drop_table'
   | 'truncate_table'
@@ -232,8 +239,9 @@ export const DESTRUCTIVE_TOOLS: ReadonlySet<ToolName> = new Set<ToolName>([
   'remove_integration_key',
   // Drops the endpoint and its delivery history; not undoable from the dashboard
   'delete_webhook',
-  // DROP SCHEMA CASCADE on the branch — every experiment in it is gone.
-  'discard_branch',
+  // discard_branch is NOT here: it drops a preview branch's own schema and
+  // keys, never anything of production's, so an agent cleans up its own
+  // experiments without a person (production QA, 2026-11-09).
   // Replays the branch's migrations onto PRODUCTION. Reviewing a change before
   // it reaches production is what a branch is for, so a human approves it.
   'merge_branch',
@@ -389,6 +397,14 @@ export interface ToolDispatchContext {
    * tried to "repair" tables it had just built.
    */
   createdThisTurn?: Set<string>
+  /**
+   * backend_chat's turn on a project whose production is protected: its schema
+   * calls are built on this preview branch instead of being refused, and a step
+   * on a table only the branch has is saved for after the merge
+   * (lib/branches/build-branch.ts). The MCP tool route sets none, so an agent's
+   * own typed call there is still refused with the branch to use.
+   */
+  buildBranch?: BuildBranch
   onToolEvent?: (e: {
     phase: 'start' | 'done' | 'fail'
     tool: ToolName
@@ -460,7 +476,7 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
     'Alias of get_backend_metadata — a complete structured overview of the project backend (tables + counts + relationships + auth/storage/realtime/functions). Use to confirm the connection and ground your plan. Side-effect free.',
     {}),
   fn('get_table_schema',
-    'Complete, RLS-aware schema for ONE table: every column (type, nullable, default, primary key, max length), the primary key, foreign keys (with ON DELETE), indexes (with UNIQUE and the full column tuple), CHECK constraints (with the ACTUAL allowed values so you never violate them), triggers, whether RLS/FORCE-RLS is on, the live row-level-security policies (command, ROLES the policy applies to, PERMISSIVE/RESTRICTIVE, USING + WITH CHECK), and the exact record count. The policy roles matter: a `USING (true)` policy is not open access if it is granted only to an internal role, so read `roles` before concluding a table is exposed. Each policy also carries `editableUsing` / `editableCheck`: the SAME rule rewritten into the form set_rls accepts, so you can read a live policy and send it straight back unchanged. Use those when editing — the raw `using` / `withCheck` are PostgreSQL\'s rendering and include a service-role wrapper plus a schema-qualified claim reader, so sending them back is rejected. Call this before writing any query, insert, or migration against a table, and ALWAYS before changing one command of an existing policy. Reads the live PostgreSQL catalog — never stale. Side-effect free.',
+    'ONE table from the live catalog: columns (type, nullable, default, key, max length), primary and foreign keys (with ON DELETE), indexes, CHECK constraints with their ACTUAL allowed values, triggers, RLS / FORCE RLS, the policies (command, ROLES, permissive or restrictive, USING and WITH CHECK) and the exact row count. A `USING (true)` policy granted only to an internal role is not open access: read `roles` before calling a table exposed. To edit a policy with set_rls, send back its `editableUsing` / `editableCheck`, never the raw `using` / `withCheck`, which are refused. Call it before writing a query, insert or migration against a table, and ALWAYS before changing one command of a policy. Side-effect free.',
     { tableName: { type: 'string', description: 'The table to describe (snake_case).' } },
     ['tableName']),
   fn('create_table',
@@ -480,6 +496,12 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
           },
           required: ['name', 'type'],
         },
+      },
+      asWritten: {
+        type: 'boolean',
+        description:
+          'true: create exactly these columns with exactly the flags given, inferring nothing from their names ' +
+          '(no UNIQUE on email, no CHECK on status, no foreign key on *_id). apply_migration sets it for CREATE TABLE.',
       },
     },
     ['tableName', 'columns']),
@@ -512,14 +534,25 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
         items: { type: 'string' },
         description: 'Ordered column list. Several columns create ONE composite index over that exact tuple.',
       },
-      unique: { type: 'boolean', description: 'Enforce uniqueness over the whole column tuple.' },
+      unique: {
+        type: 'boolean',
+        description:
+          'Enforce uniqueness over the whole column tuple. On a table with soft delete (`deleted_at`) it counts ' +
+          'live rows only (the index is scoped WHERE deleted_at IS NULL) unless `where` says otherwise.',
+      },
       indexName: { type: 'string', description: 'Optional explicit index name. Omit and one is derived from the table and columns.' },
       method: {
         type: 'string',
         enum: ['btree', 'gin', 'gist', 'hash', 'brin'],
         description: 'Index method. Defaults to btree; use gin for array or jsonb containment queries.',
       },
-      where: { type: 'string', description: 'Optional predicate for a PARTIAL index — only rows matching it are indexed.' },
+      where: {
+        type: 'string',
+        description:
+          'Optional predicate for a PARTIAL index: only rows matching it are indexed. "true" indexes every row, ' +
+          'soft-deleted ones included; an upsert (ON CONFLICT, or on_conflict on the REST API) can only target a ' +
+          'unique index like that.',
+      },
     },
     ['tableName', 'columns']),
   fn('generate_api',
@@ -631,25 +664,21 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
     },
     ['tableName']),
   fn('set_rls',
-    'Write row-level security as EXACT SQL, one rule per command. Deterministic: your predicates are ' +
-    'installed verbatim — never re-derived, re-worded, simplified or inferred — and the result is read ' +
-    'back from pg_policies before this reports success. No language model is involved, so it cannot be ' +
-    'rate-limited and the same call twice produces the same state.\n' +
-    'USE THIS, not backend_chat, whenever you can write the predicate yourself. Prefer `add_rls` only ' +
-    'for the named templates (owner_read_write, participants, …).\n' +
-    'THE FOUR COMMANDS ARE INDEPENDENT. Name only the ones you want to change — the rest are left ' +
-    'byte-identical, so "fix UPDATE and DELETE, leave SELECT alone" is a supported operation rather ' +
-    'than a re-statement of the whole set. Naming a subset while a FOR ALL policy is present is refused ' +
-    'rather than silently widened.\n' +
-    'PREDICATE GRAMMAR: this table\'s columns, `backenly_jwt_claim(\'sub\')` for the calling end-user\'s ' +
-    'id, comparisons, AND/OR/NOT, IN, BETWEEN, IS NULL, casts, and pure functions. To depend on a PARENT ' +
-    'row, write `EXISTS (SELECT 1 FROM parent p WHERE p.id = this_table.parent_id AND …)` — the parent ' +
-    'and every column it names are checked against the live schema. Nothing else may read another table.\n' +
-    'USING = which rows the command may TARGET (select/update/delete). CHECK = which rows it may PRODUCE ' +
-    '(insert/update). Omitting `check` on insert/update means "anything the caller may target", so state ' +
-    'it whenever the write rule is narrower than the read rule.',
+    'Write row-level security as EXACT SQL, one rule per command: your predicates are installed verbatim ' +
+    'and read back from pg_policies before this reports success. No model is involved. USE THIS, not ' +
+    'backend_chat, whenever you can write the predicate; `add_rls` only for the named templates ' +
+    '(owner_read_write, participants, …).\n' +
+    'THE FOUR COMMANDS ARE INDEPENDENT: name only those to change, and the rest stay byte-identical. ' +
+    'Naming a subset while a FOR ALL policy exists is refused rather than silently widened.\n' +
+    'PREDICATE GRAMMAR: this table\'s columns, `backenly_jwt_claim(\'sub\')` for the end-user\'s id, ' +
+    'comparisons, AND/OR/NOT, IN, BETWEEN, IS NULL, casts and pure functions; a PARENT row through ' +
+    '`EXISTS (SELECT 1 FROM parent p WHERE p.id = this_table.parent_id AND …)`, checked against the live ' +
+    'schema. Nothing else may read another table.\n' +
+    'USING = rows the command may TARGET (select/update/delete); CHECK = rows it may PRODUCE (insert/update). ' +
+    'Without `check`, an insert or update may produce anything the caller may target: state it whenever ' +
+    'writing is narrower than reading.',
     {
-      tableName: { type: 'string' },
+      tableName: { type: 'string', description: 'The table whose row-level security rules to set.' },
       select: {
         type: 'object',
         description: 'SELECT rule. { using: "<predicate>" } — which rows are readable.',
@@ -855,14 +884,16 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
     {
       eventType: { type: 'string', enum: [...WEBHOOK_EVENT_TYPES], description: 'The event that fires it.' },
       targetUrl: { type: 'string', description: 'The https URL that receives the events.' },
+      tables: { type: 'array', items: { type: 'string' }, description: 'Row events only: the tables it receives events for. Leave out for every table.' },
     },
     ['eventType', 'targetUrl']),
   fn('update_webhook',
-    'Change an outbound webhook endpoint: its target URL, its event, or switch it on or off.',
+    'Change an outbound webhook endpoint: its target URL, its event, the tables it receives row events for, or switch it on or off.',
     {
       webhookId: { type: 'string', description: 'From list_webhooks.' },
       targetUrl: { type: 'string', description: 'A new https URL.' },
       eventType: { type: 'string', enum: [...WEBHOOK_EVENT_TYPES], description: 'A new event.' },
+      tables: { type: 'array', items: { type: 'string' }, description: 'Row events only: the tables it receives events for; [] for every table.' },
       active: { type: 'boolean', description: 'false stops deliveries without deleting the endpoint.' },
     },
     ['webhookId']),
@@ -929,6 +960,12 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
         description: 'What fires the function. Use an event type for automatic behaviour; http for a directly-callable endpoint.',
       },
       table: { type: 'string', description: 'Required for on_insert / on_update / on_delete — the table whose row events fire the function.' },
+      columns: {
+        type: 'array',
+        items: { type: 'string' },
+        description:
+          'on_update only: run only when an update changes one of these columns, e.g. ["status"]; other updates do not run it. Left out, every update does.',
+      },
       method: {
         type: 'string',
         enum: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
@@ -955,7 +992,7 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
     {},
     []),
   fn('list_schema_changes',
-    'The change history: every governed change to the production backend, newest first, with its changeId and number, who made it (a coding agent, a person, Backenly autonomy), what it did, and how its lifecycle ended: applied and verified; recovered automatically after it failed verification; restored by a person; waiting for a person to approve its recovery; or needing attention. Also whether restoring the state before it is available. Every apply_migration, typed schema tool, approved drop and branch merge is recorded here, with the checkpoint taken before it. Side-effect free.',
+    'The change history: every governed change to the production backend, newest first, with its changeId and number, who made it (a coding agent, a person, Backenly autonomy), what it did, and how its lifecycle ended: applied and verified; recovered automatically after it stopped part-way or failed verification, with the reason; restored by a person; waiting for a person to approve its recovery; or needing attention. Also whether restoring the state before it is available. Every apply_migration, typed schema tool, approved drop and branch merge is recorded here, with the checkpoint taken before it. Side-effect free.',
     { limit: { type: 'integer', minimum: 1, maximum: 50, description: 'How many changes, newest first (default 15).' } },
     []),
   fn('revert_schema_change',
@@ -1064,7 +1101,7 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
     {}),
   // ── Read tools (live state of every section) ──────────────────────────────
   fn('run_query',
-    "Run read-only SQL against this project's workspace schema. This is THE way to read data: full PostgreSQL SELECT including joins, GROUP BY, aggregates, window functions, CTEs, subqueries, and EXPLAIN (without ANALYZE). Tables are already in scope: write `SELECT * FROM posts`, not `workspace_x.posts`. Executes as a SELECT-only role inside a READ ONLY transaction — it cannot write, and it cannot read another project's DATA (Postgres grants refuse it, not a SQL check). The PostgreSQL system catalogs (`pg_*`, `information_schema`) are instance-wide rather than per-project, so they are refused outright; use read_backend_state or get_table_schema to inspect this project's schema. One statement per call. Results are capped (default 200 rows, max 1000) and `truncated` tells you whether more exist. Password, token and API-key columns come back as '[redacted]'. To change SCHEMA use apply_migration (ordinary DDL); to change ROWS use db_insert / db_update / db_delete.",
+    "Read-only SQL on this project's tables, THE way to read data: full SELECT with joins, GROUP BY, aggregates, window functions, CTEs, subqueries, and EXPLAIN (without ANALYZE). Write `SELECT * FROM posts`, not `workspace_x.posts`. It runs as a SELECT-only role in a READ ONLY transaction, so it cannot write or read another project's DATA (Postgres grants refuse it). The system catalogs (`pg_*`, `information_schema`) are shared by every project, so they are refused: use read_backend_state or get_table_schema. One statement per call; at most 1000 rows (default 200), and `truncated` says whether there are more. Password, token and API-key columns read '[redacted]'. SCHEMA changes: apply_migration; ROW changes: db_insert / db_update / db_delete.",
     {
       sql: { type: 'string', description: 'A single read-only SQL statement, e.g. "SELECT status, count(*) FROM orders GROUP BY status".' },
       limit: { type: 'number', description: 'Row cap. Default 200, max 1000.' },
@@ -1161,7 +1198,7 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
     { branchId: { type: 'string', description: 'The branch id from list_branches.' } },
     ['branchId']),
   fn('discard_branch',
-    'DESTRUCTIVE. Drop a preview branch and everything in it. Requires explicit human approval. Main is untouched.',
+    'Drop a preview branch, its rows and its keys. Runs at once, with no approval and no undo; production is untouched.',
     { branchId: { type: 'string', description: 'The branch id from list_branches.' } },
     ['branchId']),
   fn('list_integration_keys',
@@ -1228,6 +1265,13 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
         description:
           'Every column the constraint covers. Required for a composite UNIQUE (["user_a","user_b"]) and ' +
           'for a CHECK spanning several columns. Order matters for UNIQUE — it is the index column order.',
+      },
+      asWritten: {
+        type: 'boolean',
+        description:
+          'For UNIQUE: true makes a real UNIQUE constraint over every row, soft-deleted rows included, which ' +
+          'ON CONFLICT (…) can target. Without it, on a table with soft delete, uniqueness is enforced by an ' +
+          'index over live rows only. apply_migration sets it for UNIQUE written in SQL.',
       },
       constraintType: {
         type: 'string',
@@ -1384,8 +1428,7 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
         minimum: 1,
         maximum: 3650,
         description:
-          'Optional. Omitted means the key NEVER expires (same as dashboard keys). When set, the runtime ' +
-          'refuses the key after this many days and the response says the exact date.',
+          'Optional. Omitted, the key never expires; set, it is refused after this many days (the answer gives the date).',
       },
       serviceRole: {
         type: 'boolean',
@@ -1396,9 +1439,8 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
       branchId: {
         type: 'string',
         description:
-          'Optional. Bind this key to a preview branch (id from branch(action:"list")) so it reads that ' +
-          'branch instead of production. Omit for main. A key whose branch is later merged or discarded ' +
-          'is refused rather than silently falling back to production.',
+          'Optional. Bind the key to a preview branch (branch action:"list") instead of production. A key whose ' +
+          'branch is merged or discarded is refused, never pointed back at production.',
       },
     }),
   fn('revoke_api_key',
@@ -1429,6 +1471,7 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
       label: { type: 'string', description: 'Optional human label, e.g. "Stripe live key".' },
       webhookSecret: { type: 'string', description: 'Stripe only: the endpoint signing secret (whsec_…). Until it is stored, the Stripe receiver rejects every event.' },
       appId: { type: 'string', description: 'OneSignal only: the App ID, sent with the REST API key. Push stays off until both are stored.' },
+      fromEmail: { type: 'string', description: 'Resend / SendGrid only: verified sender email address (e.g. "noreply@yourdomain.com"). Defaults "from" for ctx.integrations.email.send().' },
     },
     ['integrationId']),
   fn('remove_integration_key',
@@ -1449,7 +1492,7 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
     },
     ['active']),
   fn('delete_ai_function',
-    'DESTRUCTIVE. Permanently delete an AI / serverless function and its history. Requires confirmation.',
+    'Delete a function. Runs at once when it is switched off or has not run in 7 days; one that ran in that time waits for a person\'s approval. The change history keeps the function, so restoring the change brings it back.',
     { functionId: { type: 'string' }, name: { type: 'string' } }),
   fn('delete_cron_job',
     'DESTRUCTIVE. Permanently delete a scheduled job — it stops running immediately. Requires confirmation.',
@@ -1479,7 +1522,16 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
     ['tableName']),
   fn('drop_column',
     'DESTRUCTIVE. Permanently drop a column and ALL of its data from a table. Reserved columns (id, createdAt, updatedAt) cannot be dropped — to remove the whole table use drop_table. Regenerates the table\'s REST API so the column disappears from CRUD payloads. Requires explicit user confirmation in the same turn.',
-    { tableName: { type: 'string' }, columnName: { type: 'string' } },
+    {
+      tableName: { type: 'string' },
+      columnName: { type: 'string' },
+      ifExists: { type: 'boolean', description: 'Succeed without a change when the table has no such column.' },
+      asWritten: {
+        type: 'boolean',
+        description:
+          'Drop only this column, as SQL without CASCADE does: refused while a view, a row policy or another table\'s foreign key depends on it, naming what does. apply_migration sets it.',
+      },
+    },
     ['tableName', 'columnName']),
   fn('disable_realtime',
     'DESTRUCTIVE (for live subscribers). Stop streaming realtime change events. Pass a tableName to disable a single table, or omit to disable realtime project-wide. Any client currently subscribed via SSE stops receiving events the moment the trigger is dropped. The shared NOTIFY function is preserved so re-enabling later is instant. Requires explicit user confirmation in the same turn.',
@@ -1569,7 +1621,11 @@ function fn(
  */
 export const TOOL_TO_ACTION: Record<string, (args: any) => AIAction> = {
   adopt_external_schema: () => ({ action: 'ADOPT_EXTERNAL_SCHEMA', params: {} }),
-  create_table: (a) => ({ action: 'CREATE_TABLE', params: { tableName: a.tableName, columns: a.columns } }),
+  create_table: (a) => ({
+    action: 'CREATE_TABLE',
+    // `asWritten`: from SQL (lib/mcp/migration-parser.ts), so nothing is inferred.
+    params: { tableName: a.tableName, columns: a.columns, ...(a.asWritten === true ? { asWritten: true } : {}) },
+  }),
   add_column: (a) => ({
     action: 'ADD_COLUMN',
     params: {
@@ -1613,6 +1669,8 @@ export const TOOL_TO_ACTION: Record<string, (args: any) => AIAction> = {
       referencedTable: a.referencedTable,
       // A foreign key exactly as declared (lib/db/declared-foreign-key.ts).
       references: a.references,
+      // From SQL: a UNIQUE is a real constraint, as written.
+      ...(a.asWritten === true ? { asWritten: true } : {}),
     },
   }),
   generate_api: (a) => ({ action: 'GENERATE_API', params: { tableName: a.tableName } }),
@@ -1845,7 +1903,29 @@ export const TOOL_TO_ACTION: Record<string, (args: any) => AIAction> = {
   rotate_webhook_secret: (a) => ({ action: 'ROTATE_WEBHOOK_SECRET', params: { triggerName: a.triggerName, triggerId: a.triggerId } }),
   drop_table: (a) => ({ action: 'DROP_TABLE', params: { tableName: a.tableName } }),
   truncate_table: (a) => ({ action: 'TRUNCATE_TABLE', params: { tableName: a.tableName } }),
-  drop_column: (a) => ({ action: 'DROP_COLUMN', params: { tableName: a.tableName, columnName: a.columnName } }),
+  drop_column: (a) => ({
+    action: 'DROP_COLUMN',
+    params: { tableName: a.tableName, columnName: a.columnName, ifExists: a.ifExists === true, asWritten: a.asWritten === true },
+  }),
+  alter_column_type: (a) => ({
+    action: 'ALTER_COLUMN_TYPE',
+    params: {
+      tableName: a.tableName,
+      columnName: a.columnName,
+      newType: a.newType,
+      sqlType: a.sqlType,
+      using: a.using,
+      asWritten: a.asWritten === true,
+    },
+  }),
+  drop_index: (a) => ({
+    action: 'DROP_INDEX',
+    params: { indexName: a.indexName, ifExists: a.ifExists === true, dropUniqueness: a.dropUniqueness === true, online: a.online === true },
+  }),
+  drop_constraint: (a) => ({
+    action: 'DROP_CONSTRAINT',
+    params: { tableName: a.tableName, constraintName: a.constraintName, ifExists: a.ifExists === true },
+  }),
   disable_realtime: (a) => ({ action: 'DISABLE_REALTIME', params: { tableName: a.tableName } }),
 
   // Reads — pure executor passthrough (no special handling)
@@ -1901,7 +1981,17 @@ export const TOOL_TO_ACTION: Record<string, (args: any) => AIAction> = {
   set_key_permissions: (a) => ({ action: 'SET_KEY_PERMISSIONS', params: { keyId: a.keyId, permissions: a.permissions } }),
 
   // Integrations
-  store_integration_key: (a) => ({ action: 'STORE_INTEGRATION_KEY', params: { integrationId: a.integrationId, apiKey: a.apiKey, label: a.label, webhookSecret: a.webhookSecret, appId: a.appId } }),
+  store_integration_key: (a) => ({
+    action: 'STORE_INTEGRATION_KEY',
+    params: {
+      integrationId: a.integrationId,
+      apiKey: a.apiKey,
+      label: a.label,
+      webhookSecret: a.webhookSecret,
+      appId: a.appId,
+      fromEmail: a.fromEmail,
+    },
+  }),
   remove_integration_key: (a) => ({ action: 'REMOVE_INTEGRATION_KEY', params: { integrationId: a.integrationId } }),
   delete_trigger: (a) => ({ action: 'DELETE_TRIGGER', params: { triggerId: a.triggerId, name: a.name } }),
 
@@ -2148,6 +2238,21 @@ function preflightValidate(
   }
 }
 
+/**
+ * A typed schema call on the turn's preview branch: written as SQL and applied
+ * as a branch migration, which logs it for the merge. Its events name the
+ * branch, so nothing reads it as a change to production.
+ */
+async function buildOnBranch(name: string, args: Record<string, unknown>, ctx: ToolDispatchContext, title: string): Promise<ToolResult> {
+  const branch = ctx.buildBranch!
+  ctx.onToolEvent?.({ phase: 'start', tool: name as ToolName, title: `${title} on a preview branch` })
+  const r = await branch.apply(name, args)
+  const where = branch.current ? ` on preview branch "${branch.current.name}"` : ''
+  ctx.onToolEvent?.({ phase: r.ok ? 'done' : 'fail', tool: name as ToolName, title: `${title}${where}`, detail: r.summary })
+  if (r.ok && name === 'create_table' && typeof args.tableName === 'string') ctx.createdThisTurn?.add(args.tableName)
+  return { ok: r.ok, summary: r.summary, ...(r.code ? { code: r.code } : {}), ...(r.data ? { data: r.data } : {}) }
+}
+
 export async function dispatchTool(
   name: string,
   args: Record<string, unknown>,
@@ -2167,8 +2272,19 @@ export async function dispatchTool(
   if (ctx.agentSurface) {
     const { GATED_SCHEMA_TOOLS, isProductionProtected, branchRequired } = await import('@/lib/branches/protection')
     if (GATED_SCHEMA_TOOLS.has(name) && (await isProductionProtected(ctx.projectId))) {
+      // backend_chat builds it on its turn's preview branch, for one merge a
+      // person approves (lib/branches/build-branch.ts).
+      if (ctx.buildBranch) return await buildOnBranch(name, args, ctx, title)
       const refusal = branchRequired(`${name}${args.tableName ? ` on "${String(args.tableName)}"` : ''}`)
       return { ok: false, summary: `${refusal.error} ${refusal.hint}`, code: refusal.code }
+    }
+    // A step on a table only the turn's branch has cannot run on production
+    // before the merge brings the table there: it is saved to run after it.
+    if (ctx.buildBranch && typeof args.tableName === 'string' && args.tableName) {
+      const { AFTER_MERGE_TOOLS } = await import('@/lib/branches/build-branch')
+      if (AFTER_MERGE_TOOLS.has(name) && (await isProductionProtected(ctx.projectId)) && (await ctx.buildBranch.onlyOnBranch(args.tableName))) {
+        return ctx.buildBranch.defer({ label: title, tool: name, args })
+      }
     }
   }
 
@@ -2453,6 +2569,45 @@ export async function dispatchTool(
       }
     }
 
+    // ── An agent's migration a person approved ─────────────────────────────
+    // apply_migration holds an agent's migration whose steps a person reviews
+    // first (app/api/mcp/tool/route.ts, parkMigration). This runs it once they
+    // approve, exactly as sent, as their change. No model is offered this
+    // name and the MCP door serves apply_migration itself, so the only way
+    // here is runApprovedCall, which sets destructiveConfirmed.
+    if (name === 'apply_migration') {
+      if (ctx.destructiveConfirmed !== true) {
+        return finalize({
+          ok: false,
+          summary: 'apply_migration runs here only once a person has approved the migration.',
+          code: 'NOT_APPROVED',
+        })
+      }
+      const sql = typeof args.sql === 'string' ? args.sql : ''
+      const { applyMigrationToMain } = await import('@/lib/mcp/apply-migration')
+      const { workspaceSchemaName } = await import('@/lib/security/workspace-schema')
+      const outcome = await applyMigrationToMain(ctx.projectId, ctx.userId ?? '', sql, {
+        agentSurface: false,
+        workspaceSchema: workspaceSchemaName(ctx.projectId),
+      })
+      if (outcome.ok) {
+        const done = outcome as import('@/lib/mcp/apply-migration').MigrationSuccess
+        return finalize({
+          ok: true,
+          summary: done.change
+            ? `${done.summary} Recorded as change #${done.change.seq}${done.change.verified ? ', verified' : ''}.`
+            : done.summary,
+          data: { applied: done.applied, ...(done.change ? { change: done.change } : {}) },
+        })
+      }
+      const failed = outcome as { error: string; detail?: string; hint?: string; code: string }
+      return finalize({
+        ok: false,
+        summary: [failed.error, failed.detail, failed.hint].filter(Boolean).join(' '),
+        code: failed.code,
+      })
+    }
+
     // ── Preview branches ───────────────────────────────────────────────────
     // Direct calls into lib/branches/engine.ts — there is no executor action
     // for these, so they do not go through TOOL_TO_ACTION.
@@ -2526,8 +2681,15 @@ export async function dispatchTool(
             data: { branches: [] },
           })
         }
-        const lines = branches.map((b: any) => `  • ${b.name} (${b.status}) — id ${b.id}`).join('\n')
-        return finalize({ ok: true, summary: `**Preview branches (${branches.length}):**\n${lines}`, data: { branches } })
+        // The limit counts active branches only. A total that included merged
+        // ones read "Preview branches (6)" on a project holding five of five,
+        // and an agent took it for a project past its limit.
+        const active = branches.filter((b: any) => b.status === 'active')
+        const rest = branches.filter((b: any) => b.status !== 'active')
+        const merged = rest.filter((b: any) => b.status === 'merged').length
+        const lines = [...active, ...rest].map((b: any) => `  • ${b.name} (${b.status}) — id ${b.id}`).join('\n')
+        const head = `**Preview branches:** ${active.length} of ${engine.MAX_ACTIVE_BRANCHES} active${merged ? `, ${merged} merged` : ''}.`
+        return finalize({ ok: true, summary: `${head}\n${lines}`, data: { branches, active: active.length, limit: engine.MAX_ACTIVE_BRANCHES } })
       }
 
       if (name === 'create_branch') {
@@ -2576,13 +2738,20 @@ export async function dispatchTool(
         // mergeBranch re-shapes its early return).
         const res = await engine.diffBranch(ctx.projectId, branchId)
         if (!res.ok) return finalize({ ok: false, summary: (res as { ok: false; error: string }).error })
+        const { renameText } = await import('@/lib/branches/renames')
         const full = res as Extract<typeof res, { ok: true }>
         const d: any = full.diff
         const parts: string[] = []
         if (d.addedTables?.length) parts.push(`Tables added: ${d.addedTables.map((t: any) => t.tableName).join(', ')}`)
         if (d.droppedTables?.length) parts.push(`Tables dropped: ${d.droppedTables.join(', ')}`)
         for (const a of d.altered ?? []) {
-          if (a.addedColumns?.length) parts.push(`${a.table}: +${a.addedColumns.map((c: any) => c.name).join(', +')}`)
+          // Renames come from the branch's statements (lib/branches/renames.ts),
+          // so the columns moved aside read as renamed, not as new.
+          const renamed: Array<{ from: string; to: string; readded: boolean }> = a.renamedColumns ?? []
+          for (const r of renamed) parts.push(`${a.table}: ${renameText(r)}`)
+          const readded = new Set(renamed.filter((r) => r.readded).map((r) => r.from))
+          const added = (a.addedColumns ?? []).map((c: any) => c.name).filter((n: string) => !readded.has(n))
+          if (added.length) parts.push(`${a.table}: +${added.join(', +')}`)
           if (a.droppedColumns?.length) parts.push(`${a.table}: -${a.droppedColumns.join(', -')}`)
           for (const tc of a.typeChanged ?? []) parts.push(`${a.table}.${tc.column}: ${tc.from} → ${tc.to}`)
         }
@@ -2619,8 +2788,8 @@ export async function dispatchTool(
         })
       }
 
-      // discard_branch — DESTRUCTIVE; the brain's gate parks it for approval
-      // before it ever reaches here.
+      // discard_branch — drops the branch's schema and ends its keys. No
+      // approval: nothing of production's is touched.
       const res = await engine.discardBranch(ctx.projectId, ctx.userId ?? '', branchId)
       if (!res.ok) return finalize({ ok: false, summary: (res as any).error })
       return finalize({ ok: true, summary: 'Branch discarded. Main is untouched.', data: res })
@@ -3444,11 +3613,14 @@ export async function dispatchTool(
           `${provisioned ? 'Provisioned' : 'Existing'} ${mode === 'READ_ONLY' ? 'read-only' : 'read-write'} Postgres access: role ${c.roleName} @ ${c.host}:${c.port}/${c.database} (TLS required, search_path pinned to ${status.schema}).`,
           mode === 'READ_ONLY'
             ? 'SELECT-only — safe for inspection, EXPLAIN, BI, and pg_dump (run pg_dump with --enable-row-security; the returned pgDumpCommand includes it). It cannot mutate anything.'
-            : 'DML + in-schema DDL. Every DDL statement you run is observed as drift — call adopt_external_schema when you finish migrating.',
+            : c.schemaChanges === 'allowed'
+              ? 'Rows and schema: the project owner allowed schema changes over it. They skip approvals and History and are observed as drift — call adopt_external_schema when you finish migrating.'
+              : 'Rows only: schema changes over it are refused (permission denied). Change the schema with apply_migration, which is governed, verified and reversible.',
           'The connection string is in data.connectionString — treat it as a secret (do not write it into code, files, or logs; reference it from env).',
         ].join('\n')),
         data: {
           mode: c.mode,
+          ...(c.schemaChanges ? { schemaChanges: c.schemaChanges } : {}),
           roleName: c.roleName,
           host: c.host,
           port: c.port,
@@ -3487,9 +3659,9 @@ export async function dispatchTool(
           'Read-write database access is not armed for this project, so there is no read-write connection ' +
           'string to hand you. Only the project OWNER can arm it, and it is one click:\n\n' +
           `  ${armUrl}\n\n` +
-          'Give the human that link and ask them to create read-write credentials (Connect → Direct). Every ' +
-          'schema change made over that connection is observed as drift and adopted by the autonomy loop, ' +
-          'which is why it is opt-in. Then call this tool again with mode=READ_WRITE.\n' +
+          'Give the human that link and ask them to create read-write credentials (Connect → Direct). The login ' +
+          'reads and writes rows; schema changes over it stay refused unless the owner allows them there. Then ' +
+          'call this tool again with mode=READ_WRITE.\n' +
           'Read-only access needs no approval and is available right now via mode=READ_ONLY — it covers ' +
           'inspection, EXPLAIN, BI and pg_dump (with --enable-row-security — the returned pgDumpCommand includes it). For SCHEMA CHANGES you do not need direct access at all: ' +
           'apply_migration takes ordinary DDL and is governed, verified and reversible.',
@@ -3524,10 +3696,11 @@ export async function dispatchTool(
       const OUTCOME: Record<string, string> = {
         healthy: 'applied and verified',
         unverified: 'applied, not verified',
-        recovered: 'failed verification, recovered automatically',
+        // Failed while running or in verification: the note says which, and why.
+        recovered: 'failed, recovered automatically',
         restored: 'restored to the state before it',
-        awaiting_approval: 'failed verification, recovery waiting for a person',
-        kept: 'failed verification, kept as it is by a person',
+        awaiting_approval: 'failed, recovery waiting for a person',
+        kept: 'failed, kept as it is by a person',
         needs_attention: 'failed, needs a person',
         in_progress: 'in progress',
       }
@@ -3857,6 +4030,9 @@ export function humanTitle(name: string, args: Record<string, unknown>): string 
     case 'drop_table': return `Dropping table ${args.tableName ?? ''}`.trim()
     case 'truncate_table': return `Truncating ${args.tableName ?? ''}`.trim()
     case 'drop_column': return `Dropping column ${args.columnName ?? ''} from ${args.tableName ?? ''}`.trim()
+    case 'drop_index': return `Dropping index ${args.indexName ?? ''}`.trim()
+    case 'drop_constraint': return `Dropping constraint ${args.constraintName ?? ''} from ${args.tableName ?? ''}`.trim()
+    case 'alter_column_type': return `Changing the type of ${args.tableName ?? ''}.${args.columnName ?? ''} to ${args.sqlType ?? args.newType ?? '…'}`
     case 'disable_realtime': return args.tableName ? `Disabling realtime on ${args.tableName}` : 'Disabling realtime project-wide'
     case 'rename_column': return `Renaming ${args.oldName ?? ''} → ${args.newName ?? ''} on ${args.tableName ?? ''}`.trim()
     case 'add_constraint': {
@@ -3885,6 +4061,7 @@ export function humanTitle(name: string, args: Record<string, unknown>): string 
     case 'list_branches': return 'Listing preview branches'
     case 'diff_branch': return `Diffing branch ${args.branchId ?? ''}`.trim()
     case 'merge_branch': return `Merging branch ${args.branchId ?? ''} into production`.replace(/\s+/g, ' ')
+    case 'apply_migration': return 'Applying an approved migration to production'
     case 'discard_branch': return `Discarding branch ${args.branchId ?? ''}`.trim()
     case 'list_integration_keys': return 'Listing integrations'
     case 'list_connected_apps': return 'Listing connected frontends'

@@ -60,6 +60,7 @@ import { executeInWorkspaceSchema, queryWorkspaceSchema } from '@/lib/services/w
 import { workspaceSchemaName } from '@/lib/security/workspace-schema'
 import { ROW_EVENT_TYPES, type RowEventType, type WebhookEventType } from './events'
 import { skipUnreachable } from '@/lib/autonomy/region-skip'
+import { RUNNABLE_FUNCTION_STATUS_FILTER } from '@/lib/services/ai-functions/status'
 
 /**
  * The trigger attached to every captured table. These names are left out of
@@ -99,8 +100,8 @@ const EVENT_FOR_OPERATION: Record<string, RowEventType> = {
 
 /**
  * Row-event AI functions ride the same capture. Their triggerType spelling
- * (on_db_*) maps onto the capture's event vocabulary here, and onto
- * fireAiFunctions' event.type below.
+ * (on_db_*) maps onto the capture's event vocabulary here, and onto the queued
+ * run's event.type below.
  */
 const EVENT_FOR_FUNCTION_TRIGGER: Record<string, RowEventType> = {
   on_db_insert: 'row.inserted',
@@ -132,8 +133,8 @@ export async function isCapturableTable(tableName: string): Promise<boolean> {
   return true
 }
 
-/** Every user table in the workspace schema that may carry a trigger. */
-async function capturableTables(projectId: string): Promise<string[]> {
+/** Every user table in the workspace schema that may carry a trigger: the tables an endpoint can name. */
+export async function capturableTables(projectId: string): Promise<string[]> {
   const schema = workspaceSchemaName(projectId)
   const rows = (await queryWorkspaceSchema(
     projectId,
@@ -285,25 +286,30 @@ async function uninstallCaptureTrigger(projectId: string, tableName: string): Pr
  * Called when a project is paused (lib/projects/pause-lifecycle.ts). Holding
  * these instead would turn them into deliveries weeks later, on resume, and a
  * receiver would get an "insert" for a row that may have changed ten times
- * since. Returns how many were discarded so the pause can record it; 0 when the
- * project never installed row capture and has no outbox at all.
+ * since. Function runs queued from captured rows are discarded too. Returns how
+ * many were discarded so the pause can record it; 0 when the project never
+ * installed row capture and has no outbox at all.
  */
 export async function discardOutbox(projectId: string): Promise<number> {
   const schema = workspaceSchemaName(projectId)
-  const present = (await queryWorkspaceSchema(
-    projectId,
-    `SELECT to_regclass($1) IS NOT NULL AS present`,
-    `"${schema}"."${OUTBOX_TABLE}"`,
-  )) as Array<{ present: boolean }>
-  if (!present?.[0]?.present) return 0
+  const { FUNCTION_JOBS_TABLE } = await import('@/lib/services/ai-functions/run-queue')
+  let discarded = 0
+  // The function runs queued from captured rows go with them, for the same
+  // reason: run on resume, they would act on rows as they were weeks before.
+  for (const table of [OUTBOX_TABLE, FUNCTION_JOBS_TABLE]) {
+    const present = (await queryWorkspaceSchema(
+      projectId,
+      `SELECT to_regclass($1) IS NOT NULL AS present`,
+      `"${schema}"."${table}"`,
+    )) as Array<{ present: boolean }>
+    if (!present?.[0]?.present) continue
 
-  // executeInWorkspaceSchema answers the row count, which is exactly the number
-  // wanted here (see the RETURNING note in drainProject for the reverse case).
-  const deleted = await executeInWorkspaceSchema(
-    projectId,
-    `DELETE FROM "${schema}"."${OUTBOX_TABLE}"`,
-  )
-  return typeof deleted === 'number' ? deleted : 0
+    // executeInWorkspaceSchema answers the row count, which is exactly the number
+    // wanted here (see the RETURNING note in drainProject for the reverse case).
+    const deleted = await executeInWorkspaceSchema(projectId, `DELETE FROM "${schema}"."${table}"`)
+    discarded += typeof deleted === 'number' ? deleted : 0
+  }
+  return discarded
 }
 
 /** Tables in this project that currently carry the capture trigger. */
@@ -341,7 +347,7 @@ export async function listCapturedTables(projectId: string): Promise<string[]> {
  */
 async function functionRowEvents(projectId: string): Promise<RowEventType[]> {
   const fns = await prisma.aiFunction.findMany({
-    where: { projectId, status: { notIn: ['inactive', 'disabled', 'deleted'] }, triggerType: { in: ROW_FUNCTION_TRIGGER_TYPES } },
+    where: { projectId, status: RUNNABLE_FUNCTION_STATUS_FILTER, triggerType: { in: ROW_FUNCTION_TRIGGER_TYPES } },
     select: { triggerType: true },
   })
   return [...new Set(fns.map(f => EVENT_FOR_FUNCTION_TRIGGER[f.triggerType]).filter(Boolean))]
@@ -514,8 +520,13 @@ async function drainProject(projectId: string): Promise<number> {
   if (!Array.isArray(claimed) || claimed.length === 0) return 0
 
   const { triggerWebhooks } = await import('./index')
-  const { fireAiFunctions } = await import('@/lib/services/ai-functions/executor')
+  const { enqueueReleasingOutbox, rowEventFunctions } = await import('@/lib/services/ai-functions/run-queue')
+  const { dueForUpdate, watchedColumnsOf } = await import('@/lib/services/ai-functions/executor')
+  const rowFunctions = await rowEventFunctions(projectId, ROW_FUNCTION_TRIGGER_TYPES)
+  // What each update function watches, read once for the batch.
+  const watched = await watchedColumnsOf(rowFunctions.filter((f) => f.triggerType === 'on_db_update').map((f) => f.id))
   const deliveredIds: string[] = []
+  const functionJobs: Array<{ functionId: string; event: { type: string; table: string; data: Record<string, any>; old?: Record<string, any> } }> = []
 
   for (const row of claimed) {
     const eventType = resolveEventType(row)
@@ -534,19 +545,24 @@ async function drainProject(projectId: string): Promise<number> {
         outboxId: String(row.id),
       })
 
-      // Row-event AI functions fire from the same captured event, so they fire
+      // Row-event AI functions run from the same captured event, so they run
       // for EVERY writer — PostgREST, MCP, SQL inside functions — not only the
-      // legacy routes that used to call them inline. Not awaited: a function
-      // runs customer code for up to 10s, and one slow handler must not stall
-      // the whole drain. fireAiFunctions matches trigger type + table itself
-      // and never throws. A crash between this and the delete below means the
-      // reclaim re-fires it — at-least-once, the same contract webhooks carry.
-      fireAiFunctions(projectId, {
-        type: FUNCTION_EVENT_FOR_OPERATION[row.event_type],
-        table: row.table_name,
-        data: row.row_data ?? {},
-        old: row.old_data ?? undefined,
-      }).catch(() => {})
+      // legacy routes that used to call them inline. Each matching function
+      // gets a job, queued below in the transaction that deletes this row, and
+      // run at a bounded pace (lib/services/ai-functions/run-queue.ts).
+      const type = FUNCTION_EVENT_FOR_OPERATION[row.event_type]
+      const event = { type, table: row.table_name, data: row.row_data ?? {}, ...(row.old_data ? { old: row.old_data } : {}) }
+      // An update that changed nothing but Backenly's own "updatedAt" stamp
+      // runs no function: nothing a function could act on changed. Webhooks
+      // still receive it, as they always have.
+      const unchanged = type === 'update' && changedNothing(row.row_data, row.old_data)
+      for (const fn of unchanged ? [] : rowFunctions) {
+        if (fn.triggerType !== `on_db_${type}` || fn.triggerTable !== row.table_name) continue
+        // An update that changed none of the columns a function watches is not
+        // queued for it at all (deploy_code's `columns`).
+        if (type === 'update' && !dueForUpdate(watched.get(fn.id), event)) continue
+        functionJobs.push({ functionId: fn.id, event })
+      }
 
       deliveredIds.push(row.id)
     } catch (err: any) {
@@ -556,15 +572,29 @@ async function drainProject(projectId: string): Promise<number> {
     }
   }
 
-  if (deliveredIds.length > 0) {
-    await executeInWorkspaceSchema(
-      projectId,
-      `DELETE FROM "${schema}"."${OUTBOX_TABLE}" WHERE id = ANY($1::bigint[])`,
-      deliveredIds,
-    )
-  }
+  // The functions' jobs and the end of these rows, together: an event is
+  // either still here or queued for its functions, never neither.
+  await enqueueReleasingOutbox(projectId, functionJobs, OUTBOX_TABLE, deliveredIds)
 
   return deliveredIds.length
+}
+
+/** The column Backenly stamps on every update of its tables. */
+const UPDATE_STAMP = 'updatedAt'
+
+/**
+ * Whether an update left every value as it was, apart from the update stamp.
+ * Without both rows (a payload too large to capture) a change cannot be ruled
+ * out. Values are compared as the capture trigger stored them (jsonb, whose
+ * keys PostgreSQL keeps in one order).
+ */
+export function changedNothing(after: Record<string, unknown> | null, before: Record<string, unknown> | null): boolean {
+  if (!after || !before) return false
+  for (const key of new Set([...Object.keys(after), ...Object.keys(before)])) {
+    if (key === UPDATE_STAMP) continue
+    if (JSON.stringify(after[key] ?? null) !== JSON.stringify(before[key] ?? null)) return false
+  }
+  return true
 }
 
 /**
@@ -576,6 +606,22 @@ async function drainProject(projectId: string): Promise<number> {
  */
 function resolveEventType(row: OutboxRow): RowEventType | null {
   return EVENT_FOR_OPERATION[row.event_type] ?? null
+}
+
+let draining: Promise<number> | null = null
+
+/**
+ * drainWebhookOutbox, one at a time in this process. Row events are drained
+ * every few seconds (instrumentation.ts) and by the minute's system tasks, which
+ * a deployment without the in-process scheduler calls over HTTP; whichever comes
+ * while one is going shares it.
+ */
+export function drainRowEvents(): Promise<number> {
+  if (draining) return draining
+  draining = drainWebhookOutbox().finally(() => {
+    draining = null
+  })
+  return draining
 }
 
 /**
@@ -596,7 +642,7 @@ export async function drainWebhookOutbox(): Promise<number> {
   })
   const withRowFunctions = await prisma.aiFunction.findMany({
     where: {
-      status: { notIn: ['inactive', 'disabled', 'deleted'] },
+      status: RUNNABLE_FUNCTION_STATUS_FILTER,
       triggerType: { in: ROW_FUNCTION_TRIGGER_TYPES },
       project: { pausedAt: null, deletedAt: null },
     },
@@ -611,12 +657,18 @@ export async function drainWebhookOutbox(): Promise<number> {
   )
 
   let total = 0
+  const { kickFunctionRuns } = await import('@/lib/services/ai-functions/run-queue')
+  const rowFunctionProjects = new Set(withRowFunctions.map((p) => p.projectId))
   for (const { id: projectId } of projects) {
     try {
       total += await drainProject(projectId)
     } catch (err: any) {
       console.warn(`[webhooks] drain failed for ${projectId}:`, err?.message ?? err)
     }
+    // Queued runs are worked through in the background, at a bounded pace,
+    // taking in newly captured rows as the queue empties. Not awaited: a burst
+    // takes longer than a tick, and the tick's other tasks must not wait on it.
+    if (rowFunctionProjects.has(projectId)) void kickFunctionRuns(projectId, () => drainProject(projectId))
   }
 
   if (total > 0) console.log(`[webhooks] drained ${total} captured event(s)`)

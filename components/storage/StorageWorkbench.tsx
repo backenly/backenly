@@ -83,6 +83,20 @@ const shortType = (mimeType: string | null): string => {
   return (sub || mimeType).split(';')[0]
 }
 
+/**
+ * Who sent a file, in the table and the detail pane. An anonymous upload is
+ * marked like a public file: it came from anyone holding the public key.
+ */
+const UPLOADER_TITLE: Record<NonNullable<StorageFile['uploader']>['kind'], string> = {
+  end_user: 'A signed-in user of your app',
+  anonymous: 'Sent with the public key, by no signed-in user',
+  server_key: 'Sent by a server with a service key',
+  console: 'Uploaded from the console',
+}
+const uploaderLabel = (file: StorageFile): string => file.uploader?.label ?? '—'
+const uploaderTitle = (file: StorageFile): string =>
+  file.uploader ? UPLOADER_TITLE[file.uploader.kind] : 'Not recorded for this file'
+
 function timeAgo(iso?: string | Date | null): string {
   if (!iso) return ''
   const t = new Date(iso).getTime()
@@ -731,6 +745,7 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
                         {!selectedFile && <th className={`${TH} hidden xl:table-cell`}>Type</th>}
                         <th className={`${TH_BASE} text-right`}>Size</th>
                         <th className={TH}>Access</th>
+                        {!selectedFile && <th className={`${TH} hidden xl:table-cell`}>Uploaded by</th>}
                         {!selectedFile && <th className={`${TH} hidden lg:table-cell`}>Uploaded</th>}
                         <th className={`${TH} w-20`}>
                           <span className="sr-only">Actions</span>
@@ -799,6 +814,16 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
                                 {file.isPublic ? 'Public' : 'Private'}
                               </span>
                             </td>
+                            {!selectedFile && (
+                              <td className={`${TD} hidden max-w-[200px] xl:table-cell`}>
+                                <span
+                                  className={`block truncate text-[12.5px] ${file.uploader?.kind === 'anonymous' ? 'text-amber-200/90' : 'text-faint'}`}
+                                  title={`${uploaderLabel(file)}: ${uploaderTitle(file)}`}
+                                >
+                                  {uploaderLabel(file)}
+                                </span>
+                              </td>
+                            )}
                             {!selectedFile && (
                               <td className={`${TD} hidden text-[12.5px] tabular-nums text-faint lg:table-cell`}>
                                 <time dateTime={new Date(file.createdAt).toISOString()} title={new Date(file.createdAt).toLocaleString()}>
@@ -907,6 +932,7 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
                       ['Bucket', selectedFile.bucket],
                       ['Access', selectedFile.isPublic ? 'Public' : 'Private'],
                       ['Uploaded', formatStamp(selectedFile.createdAt)],
+                      ['Uploaded by', uploaderLabel(selectedFile)],
                     ].map(([label, value]) => (
                       <div key={label} className="flex items-baseline justify-between gap-3 px-4 py-2.5">
                         <dt className="flex-shrink-0 text-[12px] font-medium text-faint">
@@ -914,9 +940,12 @@ export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: str
                         </dt>
                         <dd
                           className={`min-w-0 truncate text-right text-[12.5px] tabular-nums ${
-                            label === 'Access' && selectedFile.isPublic ? 'text-amber-200/90' : 'text-zinc-300'
+                            (label === 'Access' && selectedFile.isPublic) ||
+                            (label === 'Uploaded by' && selectedFile.uploader?.kind === 'anonymous')
+                              ? 'text-amber-200/90'
+                              : 'text-zinc-300'
                           }`}
-                          title={String(value)}
+                          title={label === 'Uploaded by' ? `${value}: ${uploaderTitle(selectedFile)}` : String(value)}
                         >
                           {value}
                         </dd>

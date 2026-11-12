@@ -2,7 +2,7 @@
 
 Index: https://backenly.com/llms.txt
 
-Every tool and route answers failures as JSON: `{ ok: false, error, code }`, often with `hint`, and over MCP also as `structuredContent` with a second text block saying what the fields mean for your next step. Branch on `code`, not on the message.
+Every tool and route answers failures as JSON: `{ ok: false, error, code }`, often with `hint`, and over MCP also as `structuredContent` with a second text block saying what the fields mean for your next step. Every error from the app-facing `/api/v1` API also carries a top-level `code` and `message`, beside whatever else its body says, and `/api/v2` answers in PostgREST's shape, `{ code, message, details, hint }`. Branch on `code`, not on the message.
 
 | Code | Meaning | What to do |
 | --- | --- | --- |
@@ -17,6 +17,7 @@ Every tool and route answers failures as JSON: `{ ok: false, error, code }`, oft
 | `DESTRUCTIVE_NEEDS_APPROVAL` | A destructive tool was called directly | Use the section tool's action, which parks it for approval (`autonomy`) |
 | `INVALID_KEY` / `NO_AUTH` | The key is missing, wrong or revoked | Ask your human for a new key from Connect → Agents |
 | `PROJECT_PAUSED` | The project is paused | Your human resumes it in the dashboard |
+| `PRESENCE_METADATA_TOO_LARGE` | Presence metadata is over 4 KB as JSON (413) | Keep it to small display fields, such as a name or an avatar URL, and send it again |
 | `UNKNOWN_ACTION` | A section tool got an action it does not have | The response lists `supported` |
 | `UNKNOWN_PARAMS` | An argument the tool does not take | The response lists `unsupported` and `supported` |
 | `UNSUPPORTED_PARAMS` | An argument asking for work the tool cannot do (`select`, `groupBy`, `join` on a row tool) | Use the tool the `hint` names, usually `run_query` |
@@ -32,7 +33,7 @@ Every tool and route answers failures as JSON: `{ ok: false, error, code }`, oft
 | `API_KEY_PROJECT_MISMATCH` | A preview key of one project was sent to another project's auth endpoint | Use a key of the project in the URL |
 | `MCP_KEY_IN_APP` | An app sent an MCP key to the runtime API, which serves only project keys | Give the app a project key from `connect` `create_api_key`; if the MCP key was committed or shipped, ask your human to revoke it in Connect → Agents |
 | `SERVICE_ROLE_IN_BROWSER` | A service-role key was sent from a browser, where it would expose every row | Use a publishable key in browser code and keep the service-role key on a server |
-| `BRANCH_REQUIRED` | Production is protected, so a schema change was refused on main, whether sent as `apply_migration` or asked of `backend_chat` | `branch` `create`, then `apply_migration { sql, branchId }`, then `branch` `merge` |
+| `BRANCH_REQUIRED` | Production is protected, so a schema change sent as `apply_migration` or a typed schema tool was refused on main. `backend_chat` builds on a branch itself instead | `branch` `create`, then `apply_migration { sql, branchId }`, then `branch` `merge` |
 | `RUN_INTERRUPTED` | A `backend_chat` request stopped because Backenly restarted while it ran | What is in `applied` landed. Send `backend_chat { "message": "continue" }` to finish it |
 | `MERGE_CONFLICT` | Production changed a table the branch's migrations touch since the branch was cut | Create a fresh branch and apply the change there |
 

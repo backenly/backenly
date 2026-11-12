@@ -68,7 +68,6 @@ const STILL_AUTOMATIC: Array<[type: string, details: Record<string, unknown>]> =
   ['rls_expression_invalid', { tableName: 'notes', policyName: 'p_open' }],
   ['missing_fk_index', { tableName: 'line_items', columnName: 'order_id' }],
   ['slow_query_missing_index', { tableName: 'line_items', columnName: 'order_id' }],
-  ['infra_hot_table', { tableName: 'line_items', columnName: 'order_id' }],
   ['infra_table_bloat', { tableName: 'line_items' }],
   ['index_bloat', { tableName: 'line_items', indexName: 'idx_line_items_order_id' }],
   ['missing_rate_limit', { tableName: 'notes' }],

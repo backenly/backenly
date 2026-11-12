@@ -34,6 +34,7 @@ import {
   SectionTitle,
   StatusDot,
 } from '@/components/inspector/kit'
+import { sharedRead } from '@/lib/client/shared-read'
 
 // ── Connection health types ───────────────────────────────────────────────────
 type FailureKind = 'missing' | 'placeholder' | 'malformed' | 'unknown_key' | 'expired' | 'unknown'
@@ -57,6 +58,7 @@ interface ConnectionHealth {
     failures24h: number
     failures1h: number
     bootstraps24h: number
+    requests24h: number
     distinctOriginsFailing: number
     distinctOriginsConnected: number
   }
@@ -97,7 +99,7 @@ interface ActivityCardProps {
 function ActivityCard({ health, refreshing, onRefresh, onCopyFix, copiedIdx, formatTimeAgo }: ActivityCardProps) {
   const totals = health?.totals
   const hasErrors = !!totals && totals.failures24h > 0
-  const hasTraffic = !!totals && totals.bootstraps24h > 0
+  const hasTraffic = !!totals && totals.requests24h > 0
   const accent = hasErrors
     ? (totals!.failures1h > 0 ? 'red' : 'amber')
     : (hasTraffic ? 'ok' : 'neutral')
@@ -126,7 +128,7 @@ function ActivityCard({ health, refreshing, onRefresh, onCopyFix, copiedIdx, for
       <div className="space-y-3 px-4 py-3.5">
         {!hasErrors && !hasTraffic && (
           <p className="text-[13px] leading-[20px] text-faint">
-            No SDK requests yet. Traffic and failures appear here once your app calls Backenly.
+            No requests from an app yet. Traffic and failures appear here once your app calls Backenly.
           </p>
         )}
 
@@ -135,7 +137,7 @@ function ActivityCard({ health, refreshing, onRefresh, onCopyFix, copiedIdx, for
             <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
               <StatusDot tone="operational" label="All clear" />
               <span className="text-[12px] tabular-nums text-faint">
-                {totals!.bootstraps24h.toLocaleString()} requests
+                {totals!.requests24h.toLocaleString()} requests
                 {totals!.distinctOriginsConnected > 0 &&
                   ` from ${totals!.distinctOriginsConnected} ${totals!.distinctOriginsConnected === 1 ? 'origin' : 'origins'}`}
               </span>
@@ -161,7 +163,7 @@ function ActivityCard({ health, refreshing, onRefresh, onCopyFix, copiedIdx, for
                 <span className="text-[12px] tabular-nums text-rose-300">{totals!.failures1h} in the last hour</span>
               )}
               {hasTraffic && (
-                <span className="text-[12px] tabular-nums text-faint">{totals!.bootstraps24h.toLocaleString()} succeeded</span>
+                <span className="text-[12px] tabular-nums text-faint">{totals!.requests24h.toLocaleString()} succeeded</span>
               )}
             </div>
             {health!.failures.slice(0, 1).map((f, idx) => (
@@ -185,14 +187,17 @@ function ActivityCard({ health, refreshing, onRefresh, onCopyFix, copiedIdx, for
           </>
         )}
 
-        {/* Origin-less rejections: bots, curl, or server scripts probing the
-            public endpoint. Informational: real browser frontends always send
-            an Origin header, so these never turn the card red. */}
+        {/* Requests without an Origin that failed the API key check: bots,
+            curl, or server scripts. Informational: real browser frontends
+            always send an Origin header, so these never turn the card red.
+            They were refused for the key, not for the missing Origin: a
+            request without one and with a valid key is served (production
+            QA, 2026-11-09). */}
         {(health?.probes?.count ?? 0) > 0 && (
           <p className={`border-t ${KIT.hairline} pt-2.5 text-[12px] leading-[18px] text-faint`}>
             {health!.probes!.count.toLocaleString()} {health!.probes!.count === 1 ? 'request' : 'requests'} without an Origin header
-            {health!.probes!.lastSeen ? ` (last ${formatTimeAgo(health!.probes!.lastSeen)})` : ''} were rejected. These are
-            usually bots, curl, or a server script missing its API key.
+            failed the API key check{health!.probes!.lastSeen ? ` (last ${formatTimeAgo(health!.probes!.lastSeen)})` : ''}. Usually
+            bots, curl, or a server script missing its key.
           </p>
         )}
       </div>
@@ -233,8 +238,8 @@ function RegisteredCard({
         title="Allowed origins"
         description={
           active.length > 0
-            ? `${active.length} active. Only these origins can call the SDK.`
-            : 'Optional. Until you add one, any origin can call the SDK.'
+            ? `${active.length} active. Browsers block calls from other sites; servers and mobile apps are not affected.`
+            : 'Optional. Until you add one, a web app on any site can call the SDK.'
         }
       />
 
@@ -367,8 +372,9 @@ export function FrontendRuntimeCards({ projectId }: { projectId: string }) {
   async function loadHealth() {
     setHealthRefreshing(true)
     try {
-      const res = await fetch(`/api/projects/${projectId}/connection-health`, { credentials: 'include' })
-      if (res.ok) setHealth(await res.json())
+      // The sidebar pill reads and polls the same thing (lib/client/shared-read.ts).
+      const res = await sharedRead(`/api/projects/${projectId}/connection-health`)
+      if (res.ok && res.data) setHealth(res.data)
     } catch {}
     finally { setHealthRefreshing(false) }
   }

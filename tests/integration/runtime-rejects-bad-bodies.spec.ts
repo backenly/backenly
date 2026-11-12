@@ -44,7 +44,7 @@ describe('a body that is not valid JSON', () => {
   it('is answered 400 with the shape every other v1 error has', async () => {
     const res = await post('{not json')
     expect(res.status).toBe(400)
-    expect(await res.json()).toEqual({ error: 'The request body is not valid JSON.', code: 'BAD_REQUEST' })
+    expect(await res.json()).toEqual({ error: 'The request body is not valid JSON.', code: 'BAD_REQUEST', message: 'The request body is not valid JSON.' })
   })
 
   it('is answered 400 for bytes that are not text at all', async () => {

@@ -100,9 +100,10 @@ export async function POST(request: NextRequest) {
     })
   } catch (e: any) {
     const code = e instanceof ReadQueryError ? e.code : 'QUERY_ERROR'
+    const status = e instanceof ReadQueryError ? e.status : 400
     recordMcpCall(
       { ...auth, endpoint: ENDPOINT, startedAt },
-      { statusCode: 400, tool: 'query', mutation: false, error: String(e?.message ?? '').slice(0, 120) },
+      { statusCode: status, tool: 'query', mutation: false, error: String(e?.message ?? '').slice(0, 120) },
     )
     return NextResponse.json(
       {
@@ -111,7 +112,7 @@ export async function POST(request: NextRequest) {
         code,
         ...(e instanceof ReadQueryError && e.hint ? { hint: e.hint } : {}),
       },
-      { status: 400 },
+      { status },
     )
   }
 }

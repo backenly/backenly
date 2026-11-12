@@ -48,6 +48,7 @@ import { recordUsage } from '@/lib/usage/ledger'
 import { recordQuotaWarning } from '@/lib/usage/alerts'
 import { effectiveCap } from '@/lib/usage/overage'
 import type { UserEntitlements } from '@/lib/entitlements'
+import { planDisplayName } from '@/lib/entitlements/plan-names'
 
 const MB = 1024 * 1024
 
@@ -142,6 +143,11 @@ export async function trackEndUserActive(
 ): Promise<void> {
   if (!projectId || !endUserId) return
   if (isReservedTestEmail(email)) return
+  // The same use is the user's "Last active" on the Auth page, in the
+  // project's own users table (lib/services/end-user-auth-table.ts).
+  const stamped = import('@/lib/services/end-user-auth-table')
+    .then(({ stampLastActive }) => stampLastActive(projectId, endUserId))
+    .catch(() => {})
   const month = thisMonth()
   try {
     // A project kept in another region is counted under a per-project stand-in
@@ -163,6 +169,7 @@ export async function trackEndUserActive(
   } catch {
     /* tracking must never break auth */
   }
+  await stamped
 }
 
 // One tracking write per end user per UTC day per process, however many
@@ -208,7 +215,7 @@ export async function canAcceptNewEndUser(projectId: string): Promise<QuotaDecis
     if (count >= cap) {
       return blocked(
         info.ent.planName,
-        `The account this app bills to has reached the ${cap.toLocaleString()} monthly active users its ${info.ent.planName} plan allows across all of its projects. New sign-ups resume on the 1st, or when its limit is raised.`,
+        `The account this app bills to has reached the ${cap.toLocaleString()} monthly active users its ${planDisplayName(info.ent.planName)} plan allows across all of its projects. New sign-ups resume on the 1st, or when its limit is raised.`,
         count,
         cap,
       )
@@ -255,7 +262,7 @@ export async function enforceRealtimeConnection(
     if (existing >= max) {
       return blocked(
         ent.planName,
-        `The account this app bills to has reached the ${max.toLocaleString()} concurrent realtime connections its ${ent.planName} plan allows across all of its projects.`,
+        `The account this app bills to has reached the ${max.toLocaleString()} concurrent realtime connections its ${planDisplayName(ent.planName)} plan allows across all of its projects.`,
         existing,
         max,
       )
@@ -308,7 +315,7 @@ export async function enforceDbStorage(projectId: string): Promise<QuotaDecision
       const capMb = Math.floor(cap / MB)
       return blocked(
         info.ent.planName,
-        `Your account has reached ${capMb.toLocaleString()} MB of PostgreSQL storage, shared by all of your projects, on the ${info.ent.planName} plan. Remove data, raise your spend limit or upgrade to continue.`,
+        `Your account has reached ${capMb.toLocaleString()} MB of PostgreSQL storage, shared by all of your projects, on the ${planDisplayName(info.ent.planName)} plan. Remove data, raise your spend limit or upgrade to continue.`,
         usedMb,
         capMb,
       )
@@ -317,6 +324,21 @@ export async function enforceDbStorage(projectId: string): Promise<QuotaDecision
   } catch {
     return ALLOW
   }
+}
+
+/**
+ * The account's measured PostgreSQL storage and the storage its plan includes,
+ * in bytes. Null when the plan sets no limit (or there is no plan, as on a
+ * self-hosted install). Throws when it could not be read: unknown is not
+ * "plenty". Read by Backenly's own repairs before they add storage
+ * (lib/authority/gate.ts), which never count on a spend limit: what the plan
+ * includes is the ceiling, so an autonomous change never causes an overage.
+ */
+export async function accountDbStorage(projectId: string): Promise<{ usedBytes: number; includedBytes: number } | null> {
+  const info = await accountEntitlements(projectId)
+  const maxMb = info?.ent.maxPostgresStorageMb ?? null
+  if (!info || maxMb === null) return null
+  return { usedBytes: await accountDbBytes(info.accountId), includedBytes: maxMb * MB }
 }
 
 /** Each of the account's projects' latest measured database size, summed, in bytes. */
@@ -387,7 +409,7 @@ export async function apiKeyRateCeilingViolation(
     if (requested <= perMin) return null
     const allowed = Math.floor((perMin * rateLimitWindowSec) / 60)
     return (
-      `The ${ent!.planName} plan allows up to ${perMin.toLocaleString()} requests per minute per API key. ` +
+      `The ${planDisplayName(ent!.planName)} plan allows up to ${perMin.toLocaleString()} requests per minute per API key. ` +
       `For a ${rateLimitWindowSec}-second window that is at most ${allowed.toLocaleString()} requests.`
     )
   } catch {

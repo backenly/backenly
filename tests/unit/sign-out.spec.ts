@@ -100,7 +100,7 @@ describe('signOut', () => {
     await signOut()
     const session = await checkSession()
     expect(session.isLoggedIn).toBe(false)
-    expect(b.requests.map((r) => r.url)).toContain('/api/auth/me')
+    expect(b.requests.map((r) => r.url)).toContain('/api/auth/session')
   })
 
   it('does not read a 401 as "already signed out"', async () => {

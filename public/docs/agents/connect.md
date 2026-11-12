@@ -33,8 +33,8 @@ Call as `connect { action: "<action>", … }`.
 
 ## Environment variables
 
-`set_env { key, value }` stores an encrypted variable that sandbox functions read as `ctx.env.KEY`. Keys are `UPPER_SNAKE_CASE`. Use it for values the app needs; provider keys go in `integrations`, and Backenly's own secrets are never settable here.
+`set_env { key, value }` stores an encrypted variable that sandbox functions read as `ctx.env.KEY` and http functions read as `process.env.KEY`. Keys are `UPPER_SNAKE_CASE`. Use it for values the app needs; provider keys go in `integrations`, and Backenly's own secrets are never settable here.
 
 ## Database credentials
 
-`database_credentials` issues a read-only Postgres role on demand, and a read-write role only after a human arms it in the dashboard. See `database`.
+`database_credentials` issues a read-only Postgres role on demand, and a read-write role only after a human arms it in the dashboard. A read-write role changes rows, not the schema, unless the human also allows schema changes over it. See `database`.
