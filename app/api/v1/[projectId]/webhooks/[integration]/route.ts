@@ -24,6 +24,7 @@ import { executeAiFunction, FunctionEvent } from '@/lib/services/ai-functions/ex
 import { RUNNABLE_FUNCTION_STATUS_FILTER } from '@/lib/services/ai-functions/status'
 import { ERROR_TAXONOMY } from '@/lib/errors/taxonomy'
 import { recordedV1 } from '@/lib/traffic/recorded-v1'
+import { applyStripeEvent, syncReply, type SyncOutcome } from '@/lib/integrations/stripe-sync'
 
 // ── Stripe signature validation ────────────────────────────────────────────────
 
@@ -236,10 +237,16 @@ async function handlePOST(
   // ── Stripe: deterministic business logic for standard events ──────────────
   // These run regardless of whether AI functions are configured, providing
   // reliable workspace-table updates for the most important Stripe events.
+  // What could not be applied is in the project's logs, in payment_events and
+  // in this reply (lib/integrations/stripe-sync.ts). The reply stays 200: a
+  // redelivery would meet the same tables, and functions it fired have run.
+  let sync: ReturnType<typeof syncReply> | undefined
   if (integrationLower === 'stripe' && payload.type) {
-    await handleStripeBusinessLogic(projectId, payload).catch(err =>
+    const outcome = await handleStripeBusinessLogic(projectId, payload).catch((err) => {
       console.error(`[Webhook] Stripe business logic error for project ${projectId}:`, err)
-    )
+      return undefined
+    })
+    if (outcome) sync = syncReply(outcome)
   }
 
   // ── Find and fire matching AI functions ───────────────────────────────────
@@ -269,14 +276,14 @@ async function handlePOST(
     if (wildcardFunctions.length === 0) {
       // No functions registered — still return 200 so the provider doesn't retry
       console.log(`[Webhook] No active on_webhook functions for ${integrationLower} on project ${projectId}`)
-      return NextResponse.json({ received: true, functionsTriggered: 0 })
+      return NextResponse.json({ received: true, functionsTriggered: 0, ...(sync ? { sync } : {}) })
     }
 
     // Execute wildcard functions
     await Promise.allSettled(
       wildcardFunctions.map(fn => executeAiFunction(fn.id, projectId, event))
     )
-    return NextResponse.json({ received: true, functionsTriggered: wildcardFunctions.length })
+    return NextResponse.json({ received: true, functionsTriggered: wildcardFunctions.length, ...(sync ? { sync } : {}) })
   }
 
   // Execute matching functions in parallel (non-blocking from caller's perspective)
@@ -285,303 +292,16 @@ async function handlePOST(
   )
 
   console.log(`[Webhook] Fired ${functions.length} function(s) for ${integrationLower} webhook on project ${projectId}`)
-  return NextResponse.json({ received: true, functionsTriggered: functions.length })
+  return NextResponse.json({ received: true, functionsTriggered: functions.length, ...(sync ? { sync } : {}) })
 }
 
 // ── Stripe business logic ─────────────────────────────────────────────────────
-// Handles standard Stripe events deterministically against workspace tables.
-// This runs in addition to (not instead of) any AI-function webhook handlers.
+// Standard Stripe events applied to the project's own tables, as those tables
+// are: lib/integrations/stripe-sync.ts. This runs in addition to (not instead
+// of) any AI-function webhook handlers.
 
-export async function handleStripeBusinessLogic(projectId: string, payload: Record<string, any>): Promise<void> {
-  const eventType: string = payload.type
-  const data = payload.data?.object ?? {}
-  const schemaName = `workspace_${projectId}`
-
-  // Workspace tables carry FORCE ROW LEVEL SECURITY. A bare prisma call runs
-  // as the app role with NO claims, so the policies filtered every row and
-  // denied every write — silently, because every call ended in catch(() => {}).
-  // These are Backenly's own deterministic writes, so they run with the
-  // service-role claims, and a failure is LOGGED before it is absorbed
-  // (a missing optional table is normal; an invisible one never is).
-  const { executeWithUserContext } = await import('@/lib/services/workspace-rls')
-  const svcSql = async <T = any>(sql: string, ...values: unknown[]): Promise<T[]> => {
-    try {
-      return await executeWithUserContext<T>(projectId, '', true, sql, values)
-    } catch (err: any) {
-      console.error('[Webhook] Stripe business logic SQL failed:', err?.message ?? err)
-      throw err
-    }
-  }
-
-  // Idempotency: skip if already logged
-  const eventId: string = payload.id
-  if (eventId) {
-    const alreadyLogged = await svcSql<{ count: number }>(
-      `SELECT COUNT(*)::int AS count
-         FROM information_schema.tables
-        WHERE table_schema = $1 AND table_name = 'payment_events'`,
-      schemaName
-    ).then(r => {
-      if (Number(r[0]?.count ?? 0) === 0) return false
-      return svcSql<{ count: number }>(
-        `SELECT COUNT(*)::int AS count FROM "${schemaName}"."payment_events" WHERE stripe_event_id = $1`,
-        eventId
-      ).then(r2 => Number(r2[0]?.count ?? 0) > 0)
-    }).catch(() => false)
-
-    if (alreadyLogged) {
-      console.log(`[Webhook] Stripe event ${eventId} already processed (idempotent), skipping`)
-      return
-    }
-
-    // Log the event
-    await svcSql(
-      `INSERT INTO "${schemaName}"."payment_events"
-         (stripe_event_id, event_type, payload, processed, processed_at)
-       VALUES ($1, $2, $3::jsonb, true, now())
-       ON CONFLICT (stripe_event_id) DO NOTHING`,
-      eventId, eventType, JSON.stringify(payload)
-    ).catch(() => {}) // Table may not exist yet on first event before executor runs
-  }
-
-  switch (eventType) {
-    // ── payment_intent.succeeded → update order, credit wallet, send notification ─
-    case 'payment_intent.succeeded': {
-      const paymentIntentId: string = data.id
-      const amountReceived: number = data.amount_received ?? data.amount ?? 0
-      const currency: string = data.currency ?? 'usd'
-      const metadata: Record<string, string> = data.metadata ?? {}
-      if (!paymentIntentId) break
-
-      // 1. Update orders table (match by stripe_payment_intent_id)
-      const updatedOrders = await svcSql(
-        `UPDATE "${schemaName}"."orders"
-            SET status = 'paid',
-                stripe_payment_intent_id = $1,
-                "updatedAt" = now()
-          WHERE stripe_payment_intent_id = $1
-          RETURNING 1`,
-        paymentIntentId
-      ).then(rows => rows.length).catch(() => 0)
-
-      // 2. Update payments table
-      await svcSql(
-        `UPDATE "${schemaName}"."payments"
-            SET status = 'paid',
-                stripe_payment_intent_id = $1,
-                "updatedAt" = now()
-          WHERE stripe_payment_intent_id = $1`,
-        paymentIntentId
-      ).catch(() => {})
-
-      // 3. Credit wallet top-up — if metadata.credits_amount is set, this was a
-      //    credit purchase. Add credits to the user's wallet atomically.
-      const creditsAmount = metadata.credits_amount ? parseInt(metadata.credits_amount, 10) : 0
-      const userId = metadata.user_id ?? metadata.userId ?? null
-      if (creditsAmount > 0 && userId) {
-        // Try wallet model first (single row with balance column)
-        const walletUpdated = await svcSql(
-          `UPDATE "${schemaName}"."credit_wallets"
-              SET balance = balance + $1, "updatedAt" = now()
-            WHERE user_id = $2
-            RETURNING 1`,
-          creditsAmount, userId
-        ).then(rows => rows.length).catch(() => 0)
-
-        // Fall back to ledger model (insert positive credit transaction)
-        if (!walletUpdated) {
-          await svcSql(
-            `INSERT INTO "${schemaName}"."credit_transactions" (user_id, amount, reason, stripe_payment_intent_id, "createdAt")
-             VALUES ($1, $2, 'purchase', $3, now())
-             ON CONFLICT DO NOTHING`,
-            userId, creditsAmount, paymentIntentId
-          ).catch(() => {})
-        }
-
-        console.log(`[Webhook] Credited ${creditsAmount} credits to user ${userId}`)
-      }
-
-      // 4. Decrement stock for ordered products (if order line items exist)
-      //    Looks for an order_items / line_items table linked to the paid order
-      if (updatedOrders > 0) {
-        // Try to decrement product stock atomically (prevents overselling)
-        await svcSql(
-          `UPDATE "${schemaName}"."products" p
-              SET stock_quantity = GREATEST(0, p.stock_quantity - oi.quantity),
-                  "updatedAt" = now()
-             FROM "${schemaName}"."order_items" oi
-             JOIN "${schemaName}"."orders" o ON oi.order_id = o.id
-            WHERE p.id = oi.product_id
-              AND o.stripe_payment_intent_id = $1`,
-          paymentIntentId
-        ).catch(() => {}) // Tables may not exist in all projects — non-fatal
-
-        // Insert success notification for the end-user who placed the order
-        const orderUserRow = await svcSql<{ user_id: string; id: string }>(
-          `SELECT user_id, id FROM "${schemaName}"."orders"
-            WHERE stripe_payment_intent_id = $1 LIMIT 1`,
-          paymentIntentId
-        ).catch(() => [] as { user_id: string; id: string }[])
-
-        const orderUserId = orderUserRow[0]?.user_id
-        const orderId = orderUserRow[0]?.id
-        if (orderUserId) {
-          await svcSql(
-            `INSERT INTO "${schemaName}"."notifications" (user_id, type, title, message, "createdAt")
-             VALUES ($1, 'payment_succeeded', 'Payment Confirmed',
-                     $2, now())
-             ON CONFLICT DO NOTHING`,
-            orderUserId,
-            `Your payment of ${(amountReceived / 100).toFixed(2)} ${currency.toUpperCase()} was successful. Order ${orderId ?? paymentIntentId} is confirmed.`
-          ).catch(() => {})
-        }
-      }
-
-      console.log(`[Webhook] payment_intent.succeeded processed: ${paymentIntentId} (${(amountReceived / 100).toFixed(2)} ${currency})`)
-      break
-    }
-
-    // ── checkout.session.completed → mark order paid, record intent ──────────
-    case 'checkout.session.completed': {
-      const sessionId: string = data.id
-      const paymentIntentId: string | undefined = data.payment_intent
-      if (!sessionId) break
-
-      await svcSql(
-        `UPDATE "${schemaName}"."orders"
-            SET status = 'paid',
-                stripe_payment_intent_id = $1,
-                "updatedAt" = now()
-          WHERE "stripeSessionId" = $2`,
-        paymentIntentId ?? null, sessionId
-      ).catch(() => {})
-
-      await svcSql(
-        `UPDATE "${schemaName}"."payments"
-            SET status = 'paid',
-                stripe_payment_intent_id = $1,
-                "updatedAt" = now()
-          WHERE "stripeSessionId" = $2`,
-        paymentIntentId ?? null, sessionId
-      ).catch(() => {})
-
-      console.log(`[Webhook] checkout.session.completed processed for project ${projectId}`)
-      break
-    }
-
-    // ── customer.subscription.updated ────────────────────────────────────────
-    case 'customer.subscription.updated': {
-      const subscriptionId: string = data.id
-      const status: string = data.status ?? 'unknown'
-      const currentPeriodEnd: Date | null = data.current_period_end
-        ? new Date(data.current_period_end * 1000)
-        : null
-
-      await svcSql(
-        `UPDATE "${schemaName}"."subscriptions"
-            SET status = $1,
-                current_period_end = $2,
-                updated_at = now()
-          WHERE stripe_subscription_id = $3`,
-        status, currentPeriodEnd, subscriptionId
-      ).catch(() => {})
-
-      console.log(`[Webhook] customer.subscription.updated (${status}) processed for project ${projectId}`)
-      break
-    }
-
-    // ── customer.subscription.deleted → downgrade to inactive ────────────────
-    case 'customer.subscription.deleted': {
-      const subscriptionId: string = data.id
-
-      await svcSql(
-        `UPDATE "${schemaName}"."subscriptions"
-            SET status = 'inactive',
-                cancel_at_period_end = true,
-                updated_at = now()
-          WHERE stripe_subscription_id = $1`,
-        subscriptionId
-      ).catch(() => {})
-
-      // Send dunning / downgrade notification via workspace notification system
-      const userRow = await svcSql<{ user_id: string }>(
-        `SELECT user_id FROM "${schemaName}"."subscriptions"
-          WHERE stripe_subscription_id = $1 LIMIT 1`,
-        subscriptionId
-      ).catch(() => [] as { user_id: string }[])
-
-      const endUserId = userRow[0]?.user_id
-      if (endUserId) {
-        await svcSql(
-          `INSERT INTO "${schemaName}"."notifications" (user_id, type, title, message, created_at)
-           VALUES ($1, 'subscription_canceled', 'Subscription Canceled',
-                   'Your subscription has been canceled. You have been downgraded to the free tier.', now())
-           ON CONFLICT DO NOTHING`,
-          endUserId
-        ).catch(() => {}) // notifications table may not exist
-      }
-
-      console.log(`[Webhook] customer.subscription.deleted processed for project ${projectId}`)
-      break
-    }
-
-    // ── invoice.payment_failed → mark subscription past_due + send dunning ───
-    case 'invoice.payment_failed': {
-      const subscriptionId: string | undefined = data.subscription
-
-      if (subscriptionId) {
-        await svcSql(
-          `UPDATE "${schemaName}"."subscriptions"
-              SET status = 'past_due',
-                  updated_at = now()
-            WHERE stripe_subscription_id = $1`,
-          subscriptionId
-        ).catch(() => {})
-
-        // Retrieve the user_id for dunning email
-        const userRow = await svcSql<{ user_id: string }>(
-          `SELECT user_id FROM "${schemaName}"."subscriptions"
-            WHERE stripe_subscription_id = $1 LIMIT 1`,
-          subscriptionId
-        ).catch(() => [] as { user_id: string }[])
-
-        const endUserId = userRow[0]?.user_id
-        if (endUserId) {
-          // Insert dunning notification
-          await svcSql(
-            `INSERT INTO "${schemaName}"."notifications" (user_id, type, title, message, created_at)
-             VALUES ($1, 'payment_failed', 'Payment Failed',
-                     'Your most recent payment failed. Please update your payment method to keep your subscription active.', now())
-             ON CONFLICT DO NOTHING`,
-            endUserId
-          ).catch(() => {})
-        }
-      }
-
-      console.log(`[Webhook] invoice.payment_failed processed for project ${projectId}`)
-      break
-    }
-
-    // ── invoice.paid → reset any past_due status ──────────────────────────────
-    case 'invoice.paid': {
-      const subscriptionId: string | undefined = data.subscription
-      if (subscriptionId) {
-        await svcSql(
-          `UPDATE "${schemaName}"."subscriptions"
-              SET status = 'active',
-                  updated_at = now()
-            WHERE stripe_subscription_id = $1
-              AND status = 'past_due'`,
-          subscriptionId
-        ).catch(() => {})
-      }
-      break
-    }
-
-    default:
-      // Unrecognised event — already logged in payment_events, nothing else to do
-      break
-  }
+export async function handleStripeBusinessLogic(projectId: string, payload: Record<string, any>): Promise<SyncOutcome> {
+  return applyStripeEvent(projectId, payload)
 }
 
 export const POST = recordedV1(handlePOST)

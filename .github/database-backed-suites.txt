@@ -44,6 +44,14 @@ tests/integration/webhook-delivery.spec.ts
 tests/integration/webhook-trigger-url-required.spec.ts
 tests/integration/state-webhooks-section.spec.ts
 tests/integration/integrations-auto-wiring.spec.ts
+# Stripe's built-in sync applies events to tables made by create_table:
+# subscription status (cancelled as its CHECK spells it), period from the
+# items (API 2025-03-31.basil), past_due and back on invoices found under
+# parent.subscription_details, notifications in body, a checkout's order by
+# stripe_session_id into payment_status, and a payment intent's order, wallet
+# and notice. What a table cannot take is reported in the project's logs, in
+# payment_events and in the reply (#610). Real executor, routes and vault.
+tests/integration/stripe-sync-on-create-table-tables.spec.ts
 tests/integration/end-user-email-verification-opt-in.spec.ts
 tests/integration/signin-enumeration.spec.ts
 tests/integration/project-smtp-and-templates.spec.ts
