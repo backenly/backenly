@@ -335,6 +335,9 @@ export async function listWebhookLogs(
         (logs.length > 10 ? `\n…${logs.length - 10} more in data.deliveries.` : '')
       : `Webhook ${args.webhookId} has no deliveries yet. Send one with webhooks { action: "test", webhookId }.`,
     data: {
+      // The fields the console's delivery list has
+      // (app/api/projects/[id]/webhooks/[webhookId]/logs): the receiver's
+      // answer, and not the request payload, which is the project's row data.
       deliveries: logs.map((l) => ({
         id: l.id,
         status: l.status,
@@ -346,7 +349,6 @@ export async function listWebhookLogs(
         nextRetryAt: l.nextRetryAt,
         deliveredAt: l.deliveredAt,
         createdAt: l.createdAt,
-        payload: l.payload,
       })),
     },
   }

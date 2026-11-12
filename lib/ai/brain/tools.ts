@@ -906,7 +906,7 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
     { webhookId: { type: 'string', description: 'From list_webhooks.' } },
     ['webhookId']),
   fn('list_webhook_logs',
-    'Delivery history of one outbound webhook endpoint, newest first: status, HTTP code, attempts, error, the receiver\'s response and the payload.',
+    'Delivery history of one outbound webhook endpoint, newest first: status, HTTP code, attempts, error and the receiver\'s response. The payload sent is not returned: it is the project\'s row data.',
     {
       webhookId: { type: 'string', description: 'From list_webhooks.' },
       limit: { type: 'integer', minimum: 1, maximum: 200 },
