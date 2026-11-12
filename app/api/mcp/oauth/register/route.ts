@@ -48,8 +48,7 @@ export async function POST(request: NextRequest) {
   // loop was free to mint millions of client_ids — each a valid consent-screen
   // starter. Real hosts register once per install, so a per-IP minute cap
   // never touches them. `consume` is the shared, fail-closed store the auth
-  // surfaces use — NOT lib/middleware/rateLimiter.checkRateLimit, which counts
-  // marker rows nothing writes and skips itself under NODE_ENV=test.
+  // surfaces use.
   const rate = await consume(`mcp-register:${clientIp(request)}`, 5, 60_000)
   if (!rate.allowed) {
     return NextResponse.json(

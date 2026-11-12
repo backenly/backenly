@@ -534,6 +534,10 @@ tests/integration/fixed-claims-from-verified-state.spec.ts
 # replied/unavailable/failed truthfully, and 404 CLOUD_ONLY_FEATURE off Cloud.
 # Case rows, thread rows and the in-app notification are the property.
 tests/integration/support-center.spec.ts
+# Filing a case, replying and asking the AI first responder again each stop
+# at the person's hourly budget: the next call is 429 and files, saves or
+# dispatches nothing, and another person's budget is untouched.
+tests/integration/support-limits.spec.ts
 
 # Five destructive routes that did not check who was asking. Three had NO
 # authentication at all - anyone reaching the server could roll back a live
