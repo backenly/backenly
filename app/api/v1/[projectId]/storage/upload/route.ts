@@ -11,6 +11,7 @@ import { assertQuotaAvailable, QuotaExceededError } from '@/lib/services/storage
 import { isUploadRejected, MAX_BUFFERED_UPLOAD_BYTES } from '@/lib/storage/upload-policy'
 import path from 'path'
 import { recordedV1 } from '@/lib/traffic/recorded-v1'
+import { apiUploader } from '@/lib/storage/uploader'
 
 // ── Global hard limit (defence-in-depth before any bucket config) ──────────
 // The file travels through this server in memory, so it is bounded by the
@@ -53,7 +54,7 @@ const BLOCKED_EXTENSIONS = new Set([
  *   file      — the File blob
  *   bucket    — bucket name (default: 'default')
  *   path      — desired file path/name inside the bucket
- *   isPublic  — 'true' | 'false'
+ *   isPublic  — 'true' | 'false'; absent, the bucket's access policy decides
  */
 async function handlePOST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
   const params = await props.params;
@@ -87,7 +88,11 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
     const file = formData.get('file') as File | null
     const bucketName = (formData.get('bucket') as string | null) || 'default'
     const filePath = (formData.get('path') as string | null) || ''
-    const isPublic = formData.get('isPublic') === 'true'
+    // A file follows its bucket unless the upload says otherwise: absent, the
+    // bucket's access policy decides (clampIsPublic). Reading absent as false
+    // made every file uploaded into a Public bucket private, with expiring links.
+    const requestedPublic = formData.get('isPublic')
+    const isPublic = requestedPublic === null || requestedPublic === '' ? undefined : requestedPublic === 'true'
 
     if (!file) {
       return createErrorResponse(ErrorCodes.BAD_REQUEST, 'Missing required field: file', 400)
@@ -199,7 +204,9 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
       // is not an end user, and recording it made owner_only buckets
       // unreadable by their own uploaders. Key-only server calls record null,
       // which owner_only treats as operator-only: closed, not broken.
-      { isPublic, projectId: context.projectId, uploadedBy: context.endUserId ?? undefined }
+      // The kind of uploader is recorded beside it, so the console can say an
+      // upload came from the public key alone (lib/storage/uploader.ts).
+      { isPublic, projectId: context.projectId, uploadedBy: context.endUserId ?? undefined, uploader: apiUploader(context) }
     )
 
 

@@ -26,6 +26,7 @@ import { prisma } from '@/lib/db/prisma'
 import type { OverageAxis } from '@/lib/pricing/catalog'
 import { utcDay } from '@/lib/usage/axes'
 import { egressSources } from '@/lib/usage/close'
+import { literalPrefix } from '@/lib/projects/backend-presence'
 
 const DAY_MS = 86_400_000
 const BASELINE_DAYS = 14
@@ -170,7 +171,7 @@ export async function evaluateUsageAnomalies(day: Date = new Date(utcDay().getTi
   // A spike whose project has no usage left in the window at all is over too;
   // it simply produced no reading to judge above.
   const open = await prisma.healthFinding.findMany({
-    where: { status: 'open', type: { startsWith: 'usage_anomaly_' } },
+    where: { status: 'open', type: { startsWith: literalPrefix('usage_anomaly_') } },
     select: { id: true, projectId: true, type: true },
   })
   const quiet = open.filter((f) => !series.has(`${f.projectId}\u0000${f.type.slice('usage_anomaly_'.length)}`))

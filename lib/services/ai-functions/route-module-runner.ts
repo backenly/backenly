@@ -148,8 +148,15 @@ function assertNotBlocked(code: string): void {
 // project's receiver (/api/v1/{projectId}/webhooks/stripe); the template now
 // reads an empty value and fails closed. Only NODE_ENV, which is not a secret,
 // still comes from the platform.
-function makeCuratedProcess(auth: ProjectFnAuth): { env: Record<string, string> } {
+//
+// The project's own environment variables (Settings → Environment, ctx.env in
+// a described function) are here too, as process.env.KEY, which is how a route
+// function reads configuration: one set of variables for both kinds of
+// function. Backenly's own variables are set after them, so a project
+// variable cannot replace one of them.
+function makeCuratedProcess(auth: ProjectFnAuth, projectEnv: Record<string, string> = {}): { env: Record<string, string> } {
   const env: Record<string, string> = {
+    ...projectEnv,
     ADMIN_API_KEY: auth.adminKey ?? '',
     AI_EXECUTION_TOKEN: auth.adminKey ?? '',
     JWT_SECRET: auth.jwtSecret ?? '',
@@ -540,6 +547,8 @@ export class RouteModuleHandlerError extends Error {
 export interface RouteModuleRunResult {
   logs: string[]
   returnValue: { status: number; body: any }
+  /** The headers the handler set on its response (NextResponse.json's init.headers, content type included). */
+  headers: Record<string, string>
 }
 
 export interface RouteModuleRunOptions {
@@ -699,6 +708,8 @@ export async function executeRouteModuleFunction(
   }
 
   // 2. Run the module in a vm with a curated require + console capture.
+  const { getDecryptedEnvMap } = await import('@/lib/services/projectEnvVars')
+  const projectEnv = await getDecryptedEnvMap(projectId).catch(() => ({} as Record<string, string>))
   const logs: string[] = []
   const moduleExports: Record<string, any> = {}
   const sandbox: Record<string, any> = {
@@ -730,7 +741,7 @@ export async function executeRouteModuleFunction(
     Number,
     Boolean,
     RegExp,
-    process: makeCuratedProcess(auth),
+    process: makeCuratedProcess(auth, projectEnv),
     global: undefined,
     globalThis: undefined,
   }
@@ -797,7 +808,8 @@ export async function executeRouteModuleFunction(
   // 5. Normalise the response.
   const status = typeof raw?.status === 'number' ? raw.status : 200
   const body = raw && raw.__backenlyResponse ? raw.body : (raw ?? null)
-  return { logs, returnValue: { status, body } }
+  const answerHeaders: Record<string, string> = raw && raw.__backenlyResponse && raw.headers ? raw.headers : {}
+  return { logs, returnValue: { status, body }, headers: answerHeaders }
 }
 
 function stringify(v: any): string {

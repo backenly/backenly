@@ -99,7 +99,7 @@
         "config": [
           "search_path=pg_catalog, public"
         ],
-        "body_sha256": "vDtLHvbqFhL8EneFnK33xh5XTfJo3YYerxMA3Bh1mgQ="
+        "body_sha256": "YqWPlnLdyZQ/qX7JIo/twIx8rNyj4eFCEe52aH0Avus="
       }
     },
     {
@@ -135,6 +135,22 @@
       }
     },
     {
+      "key": "routine public.backenly_direct_set_schema_changes(p_role text, p_allow boolean)",
+      "expect": {
+        "result": "boolean",
+        "kind": "f",
+        "language": "plpgsql",
+        "security_definer": true,
+        "volatility": "v",
+        "strict": false,
+        "leakproof": false,
+        "config": [
+          "search_path=pg_catalog, public"
+        ],
+        "body_sha256": "sD9BSLAZBdyIOtVUCvXmli0xzH8qq/sZl97HX3dj5o4="
+      }
+    },
+    {
       "key": "routine public.backenly_direct_sync_schema(p_schema text, p_ro text, p_rw text, p_owner text)",
       "expect": {
         "result": "boolean",
@@ -147,7 +163,7 @@
         "config": [
           "search_path=pg_catalog, public"
         ],
-        "body_sha256": "JVPZ8XZFZBJPt4SkQDxcZH7U4CMCn1DtaLl0YQe34t4="
+        "body_sha256": "zb4J5o59g5ESgxYyxDZ3d40K06pMbxkugkhMUbB1nDw="
       }
     }
   ]

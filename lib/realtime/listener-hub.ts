@@ -55,6 +55,26 @@ const RECONNECT_MAX_MS = 15_000
 // subscriber notices missing events. Local DB, so this is nearly free.
 const PING_INTERVAL_MS = 4 * 60_000
 
+/**
+ * Bring a project's notify function up to date the first time this process
+ * streams for it (lib/services/realtimeTriggers.ts ensureRealtimeFunctionCurrent):
+ * a schema whose realtime was enabled before the function last changed still
+ * runs the old body until then. In the background, so it never delays or fails
+ * the stream, and once per project per process.
+ */
+function upgradeNotifyFunction(projectId: string): void {
+  import('@/lib/services/realtimeTriggers')
+    .then(({ ensureRealtimeFunctionCurrent }) => ensureRealtimeFunctionCurrent(projectId))
+    .catch((err) => {
+      // A constant format: the project id is passed as a value, never read as a format.
+      console.warn(
+        '[ListenerHub] could not bring the realtime notify function of %s up to date:',
+        projectId,
+        err instanceof Error ? err.message : err,
+      )
+    })
+}
+
 /** One region's LISTEN connection and the channels it carries. */
 class RegionListener {
   private client: Client | null = null
@@ -240,6 +260,7 @@ class ListenerHub {
 
       // The channel is NOTIFYed by the project's own database, in its region.
       const stopListening = await this.listenerFor(await projectRegion(projectId)).listen(channel, handler)
+      upgradeNotifyFunction(projectId)
 
       const unsubscribe = () => {
         release()

@@ -73,6 +73,7 @@ export async function executeEmailIntegration(
   projectId: string,
   provider: EmailProvider,
   apiKey?: string,
+  fromEmail?: string,
 ): Promise<EmailIntegrationResult> {
   const keyExists = await hasIntegrationKey(projectId, provider)
   const providerName = provider === 'sendgrid' ? 'SendGrid' : 'Resend'
@@ -123,6 +124,10 @@ export async function executeEmailIntegration(
     if (apiKey) {
       await storeIntegrationKey(projectId, provider, apiKey)
       ctx.record({ type: 'key_stored', payload: { integrationId: provider } })
+    }
+    if (fromEmail) {
+      await storeIntegrationKey(projectId, 'email_from', fromEmail.trim())
+      ctx.record({ type: 'key_stored', payload: { integrationId: 'email_from' } })
     }
 
     // email_events — delivery log for every sent message
@@ -201,6 +206,7 @@ export async function executeEmailIntegration(
             activatedAt: existing[provider]?.activatedAt ?? new Date().toISOString(),
             activatedBy: 'integration_executor',
             tables: ['email_events', 'email_templates'],
+            fromEmail: fromEmail ? fromEmail.trim() : existing[provider]?.fromEmail,
           },
         },
       },
@@ -229,7 +235,7 @@ export async function executeEmailIntegration(
         functionName: 'welcome-email',
         description: [
           `Welcome email triggered on user sign-up.`,
-          `Use ctx.integrations.${provider}.send() to send an email.`,
+          `Use ctx.integrations.email.send() to send an email.`,
           `Look up the "welcome" template from the email_templates table.`,
           `Substitute {{user_name}} with the user's name or email prefix, {{app_name}} with the project name.`,
           `Insert a row into email_events with status="sent" (or "failed" on error) and the returned message_id.`,
@@ -257,7 +263,7 @@ export async function executeEmailIntegration(
         functionName: 'password-reset-email',
         description: [
           `Password reset email triggered when a row is inserted into \`${resetTable.name}\`.`,
-          `Use ctx.integrations.${provider}.send() to send the email.`,
+          `Use ctx.integrations.email.send() to send the email.`,
           `Look up the "password_reset" template from email_templates.`,
           `Substitute {{reset_url}} with the token from the inserted row, {{app_name}} with the project name.`,
           `Set the expiry message to "This link expires in 1 hour."`,
@@ -281,7 +287,7 @@ export async function executeEmailIntegration(
         `Accept { to, templateName, variables } in the request body.`,
         `Look up the named template from email_templates.`,
         `Replace all {{variable}} placeholders with the provided values.`,
-        `Use ctx.integrations.${provider}.send() to deliver the email.`,
+        `Use ctx.integrations.email.send() to deliver the email.`,
         `Insert a row into email_events recording recipient, template, provider, status, and message_id.`,
         `Require authentication.`,
       ].join(' '),
@@ -306,7 +312,7 @@ export async function executeEmailIntegration(
         functionName: 'payment-confirmation-email',
         description: [
           `Payment confirmation email triggered when a row is updated in \`${commerceTable.name}\` with status="paid".`,
-          `Use ctx.integrations.${provider}.send() to send the email.`,
+          `Use ctx.integrations.email.send() to send the email.`,
           `Look up the "notification" template from email_templates or compose a simple receipt message.`,
           `Include the order/payment ID, amount if available, and a thank-you message.`,
           `Send to the user email associated with the record (look up from workspace users table if needed).`,
@@ -352,6 +358,7 @@ export async function executeEmailIntegration(
           activatedAt: existingIntegrations[provider]?.activatedAt ?? new Date().toISOString(),
           activatedBy: 'integration_executor',
           tables: ['email_events', 'email_templates'],
+          fromEmail: fromEmail ? fromEmail.trim() : existingIntegrations[provider]?.fromEmail,
         }),
       },
     },

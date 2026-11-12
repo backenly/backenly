@@ -88,7 +88,7 @@ export interface StripeIntegration {
 }
 
 export interface EmailIntegration {
-  send(opts: { to: string | string[]; subject: string; html: string; from?: string; text?: string }): Promise<{ id: string }>
+  send(opts: { to: string | string[]; subject: string; html?: string; from?: string; text?: string }): Promise<{ id: string }>
 }
 
 export interface TwilioIntegration {
@@ -272,9 +272,19 @@ function buildStripeIntegration(secretKey: string): StripeIntegration {
 
 // ── Email wrapper (Resend-first, fallback SendGrid) ───────────────────────────
 
-function buildEmailIntegration(resendKey: string | null, sendgridKey: string | null): EmailIntegration {
+export function buildEmailIntegration(
+  resendKey: string | null,
+  sendgridKey: string | null,
+  defaultFrom?: string | null,
+): EmailIntegration {
   return {
-    async send({ to, subject, html, from = 'noreply@backenly.com', text }) {
+    async send({ to, subject, html, from, text }) {
+      const sender = from || defaultFrom
+      if (!sender) {
+        throw new Error(
+          'No sender email configured. Provide "from" in email.send({ from, ... }) or configure a verified sender when connecting Resend/SendGrid.',
+        )
+      }
       const toArr = Array.isArray(to) ? to : [to]
 
       if (resendKey) {
@@ -284,7 +294,7 @@ function buildEmailIntegration(resendKey: string | null, sendgridKey: string | n
             'Authorization': `Bearer ${resendKey}`,
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify({ from, to: toArr, subject, html, text }),
+          body: JSON.stringify({ from: sender, to: toArr, subject, html, text }),
           signal: AbortSignal.timeout(8000),
         })
         const data = await res.json()
@@ -293,6 +303,11 @@ function buildEmailIntegration(resendKey: string | null, sendgridKey: string | n
       }
 
       if (sendgridKey) {
+        const content: Array<{ type: string; value: string }> = []
+        if (text) content.push({ type: 'text/plain', value: text })
+        if (html) content.push({ type: 'text/html', value: html })
+        if (content.length === 0) content.push({ type: 'text/html', value: '' })
+
         const res = await fetch('https://api.sendgrid.com/v3/mail/send', {
           method: 'POST',
           headers: {
@@ -301,9 +316,9 @@ function buildEmailIntegration(resendKey: string | null, sendgridKey: string | n
           },
           body: JSON.stringify({
             personalizations: [{ to: toArr.map(e => ({ email: e })) }],
-            from: { email: from },
+            from: { email: sender },
             subject,
-            content: [{ type: 'text/html', value: html }],
+            content,
           }),
           signal: AbortSignal.timeout(8000),
         })
@@ -597,7 +612,7 @@ export async function buildIntegrationContext(projectId: string): Promise<Integr
   const connected = new Set<string>()
 
   // Load all integration keys in parallel
-  const [stripeKey, resendKey, sendgridKey, openaiKey, anthropicKey, twilioRaw, posthogKey, posthogHost] =
+  const [stripeKey, resendKey, sendgridKey, openaiKey, anthropicKey, twilioRaw, posthogKey, posthogHost, emailFromVault] =
     await Promise.all([
       getIntegrationKey(projectId, 'stripe').catch(() => null),
       getIntegrationKey(projectId, 'resend').catch(() => null),
@@ -607,6 +622,7 @@ export async function buildIntegrationContext(projectId: string): Promise<Integr
       getIntegrationKey(projectId, 'twilio').catch(() => null),
       getIntegrationKey(projectId, 'posthog').catch(() => null),
       getIntegrationKey(projectId, 'posthog_host').catch(() => null),
+      getIntegrationKey(projectId, 'email_from').catch(() => null),
     ])
 
   const ctx: IntegrationContext = {
@@ -621,7 +637,22 @@ export async function buildIntegrationContext(projectId: string): Promise<Integr
   }
 
   if (resendKey || sendgridKey) {
-    ctx.email = buildEmailIntegration(resendKey, sendgridKey)
+    let defaultFrom = emailFromVault
+    if (!defaultFrom) {
+      try {
+        const { prisma } = await import('@/lib/db/prisma')
+        const project = await prisma.project.findUnique({
+          where: { id: projectId },
+          select: { activeIntegrations: true },
+        })
+        const active = (project?.activeIntegrations as Record<string, any>) ?? {}
+        defaultFrom = active.resend?.fromEmail ?? active.sendgrid?.fromEmail ?? active.email?.fromEmail ?? null
+      } catch {
+        // non-fatal
+      }
+    }
+
+    ctx.email = buildEmailIntegration(resendKey, sendgridKey, defaultFrom)
     connected.add('email')
     if (resendKey) connected.add('resend')
     if (sendgridKey) connected.add('sendgrid')
@@ -687,6 +718,18 @@ export async function buildIntegrationContext(projectId: string): Promise<Integr
       connected.add(spec.id.toLowerCase())
     }),
   )
+
+  // Defensive alias: if mail sending is configured, alias .send onto ctx.resend / ctx.sendgrid
+  // so any existing code or model output that calls ctx.integrations.resend.send() routes
+  // safely to ctx.integrations.email.send() rather than throwing TypeError.
+  if (ctx.email) {
+    if (ctx.resend && typeof ctx.resend === 'object' && typeof (ctx.resend as any).send !== 'function') {
+      ;(ctx.resend as any).send = ctx.email.send
+    }
+    if (ctx.sendgrid && typeof ctx.sendgrid === 'object' && typeof (ctx.sendgrid as any).send !== 'function') {
+      ;(ctx.sendgrid as any).send = ctx.email.send
+    }
+  }
 
   return ctx
 }

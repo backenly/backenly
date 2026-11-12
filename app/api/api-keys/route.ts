@@ -8,6 +8,7 @@ import crypto from 'crypto'
 import { maskFromPrefix, plaintextForStorage } from '@/lib/auth/api-key-plaintext'
 import { canAccessProject, canAdministerProject } from '@/lib/edition/guard'
 import { keyKind, mintKey } from '@/lib/auth/key-prefix'
+import { isSharedKey } from '@/lib/security/shared-key'
 import { apiKeyRateCeilingViolation } from '@/lib/quota/kernel'
 import { governedChange } from '@/lib/changes/ledger'
 
@@ -216,8 +217,12 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // The plan's fair-use ceiling on how fast one key may go (never billed).
-    const ceiling = await apiKeyRateCeilingViolation(projectId || null, auth.userId, data.rateLimit, data.rateLimitWindow)
+    // The plan's fair-use ceiling on how fast one key may go (never billed). A
+    // shared (browser) key's rate is each address's (lib/security/shared-key.ts),
+    // which a ceiling on one key's rate does not measure.
+    const ceiling = isSharedKey(data)
+      ? null
+      : await apiKeyRateCeilingViolation(projectId || null, auth.userId, data.rateLimit, data.rateLimitWindow)
     if (ceiling) {
       return NextResponse.json({ error: ceiling, code: 'PLAN_LIMIT_EXCEEDED' }, { status: 400 })
     }

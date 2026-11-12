@@ -44,6 +44,7 @@ export const RESOURCES: ReadonlyArray<{ id: string; label: string }> = [
   { id: 'webhooks', label: 'Webhooks' },
   { id: 'env', label: 'Environment' },
   { id: 'keys', label: 'API keys' },
+  { id: 'frontends', label: 'Allowed origins' },
 ]
 const RESOURCE_LABEL = new Map(RESOURCES.map((r) => [r.id, r.label]))
 

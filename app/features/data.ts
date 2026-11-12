@@ -417,7 +417,7 @@ const FEATURE_LIST: FeatureData[] = [
     headline: 'Undo a change, keep your data',
     subheadline:
       'Every change to your backend is one entry in History. Restore the state before one change, or roll the backend back to a point or a published version, and the rows your app wrote since are never rewound.',
-    what: 'Backenly records every change to a project as one entry in its History, whoever made it: the schema, auth, storage, functions, webhooks, environment variables, API keys and integrations. Any entry can be undone on its own, or the whole backend restored to a point or to a published version, without rewinding the data your app wrote.',
+    what: 'Backenly records every change to a project as one entry in its History, whoever made it: the schema, auth, storage, functions, webhooks, environment variables, API keys, integrations and allowed origins. Any entry can be undone on its own, or the whole backend restored to a point or to a published version, without rewinding the data your app wrote.',
     how: 'Before a change runs, Backenly takes a checkpoint; after it runs, it verifies the result. A restore is planned from that record and from today\'s data: Backenly measures what it would do, refuses one it cannot run safely, and stops for a person before anything that would set data aside. A restore is itself a change in History, with its own restore point, so it can be reapplied.',
     why: 'Agents make many changes quickly, and the one that broke something is rarely the last. Restoring a backup to undo it costs every row written since. Undoing that one change keeps them.',
     inPractice:
@@ -425,7 +425,7 @@ const FEATURE_LIST: FeatureData[] = [
     details: [
       {
         title: 'One History for the backend',
-        body: 'Schema, auth, storage, functions, webhooks, environment variables, API keys and integrations: each change is one entry, with who made it and what it touched, whether your agent, Backenly or you made it.',
+        body: 'Schema, auth, storage, functions, webhooks, environment variables, API keys, integrations and allowed origins: each change is one entry, with who made it and what it touched, whether your agent, Backenly or you made it.',
       },
       {
         title: 'Undo one change',

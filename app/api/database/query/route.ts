@@ -90,7 +90,11 @@ export const POST = withProjectAccess(async (request: NextRequest, { projectId }
     })
   } catch (error: any) {
     if (error instanceof ReadQueryError) {
-      return NextResponse.json({ error: error.message, code: 'QUERY_FAILED' }, { status: 400 })
+      // 503 when the connection failed (DATABASE_UNAVAILABLE): Backenly's side, not the statement.
+      return NextResponse.json(
+        { error: error.message, code: error.status === 400 ? 'QUERY_FAILED' : error.code },
+        { status: error.status },
+      )
     }
     // A privilege error that survived the retry is a genuine refusal by
     // PostgreSQL — most often a cross-tenant reference — and is reported as

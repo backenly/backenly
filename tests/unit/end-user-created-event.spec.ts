@@ -17,6 +17,11 @@ import { join } from 'path'
 const triggerWebhooks = jest.fn()
 jest.mock('@/lib/webhooks', () => ({ triggerWebhooks: (...a: unknown[]) => triggerWebhooks(...a) }))
 
+const fireAiFunctionsOnSignup = jest.fn()
+jest.mock('@/lib/services/ai-functions/executor', () => ({
+  fireAiFunctionsOnSignup: (...a: unknown[]) => fireAiFunctionsOnSignup(...a),
+}))
+
 import { emitEndUserCreated } from '@/lib/services/end-user-auth-events'
 
 const ROOT = join(__dirname, '..', '..')
@@ -26,16 +31,19 @@ const RUNTIME_ROUTE = 'server/routes/auth.ts'
 beforeEach(() => {
   triggerWebhooks.mockReset()
   triggerWebhooks.mockResolvedValue(undefined)
+  fireAiFunctionsOnSignup.mockReset()
+  fireAiFunctionsOnSignup.mockResolvedValue(undefined)
 })
 
 describe('emitEndUserCreated', () => {
-  it('never emits for the contract sweep’s synthetic account', async () => {
+  it('never emits webhooks or fires AI functions for the contract sweep’s synthetic account', async () => {
     await emitEndUserCreated('p1', { id: 'u1', email: '__cv_m1a2b3@backenly.internal' })
     await emitEndUserCreated('p1', { id: 'u2', email: 'probe@backenly-selftest.com' })
     expect(triggerWebhooks).not.toHaveBeenCalled()
+    expect(fireAiFunctionsOnSignup).not.toHaveBeenCalled()
   })
 
-  it('emits for a real sign-up, with exactly the fixed fields', async () => {
+  it('emits for a real sign-up, with exactly the fixed fields and fires on_signup AI functions', async () => {
     await emitEndUserCreated('p1', {
       id: 'u3',
       email: 'ada@example.com',
@@ -56,12 +64,28 @@ describe('emitEndUserCreated', () => {
       role: 'user',
       createdAt: '2026-09-29T00:00:00.000Z',
     })
+
+    expect(fireAiFunctionsOnSignup).toHaveBeenCalledTimes(1)
+    expect(fireAiFunctionsOnSignup).toHaveBeenCalledWith('p1', {
+      id: 'u3',
+      email: 'ada@example.com',
+      name: 'Ada',
+    })
   })
 
-  it('never throws, even when delivery fails', async () => {
+  it('never throws, even when webhook delivery fails', async () => {
     triggerWebhooks.mockRejectedValue(new Error('receiver down'))
     const warn = jest.spyOn(console, 'warn').mockImplementation(() => {})
     await expect(emitEndUserCreated('p1', { id: 'u4', email: 'bob@example.com' })).resolves.toBeUndefined()
+    expect(fireAiFunctionsOnSignup).toHaveBeenCalledTimes(1)
+    warn.mockRestore()
+  })
+
+  it('never throws, even when fireAiFunctionsOnSignup fails', async () => {
+    fireAiFunctionsOnSignup.mockRejectedValue(new Error('ai service down'))
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {})
+    await expect(emitEndUserCreated('p1', { id: 'u5', email: 'clara@example.com' })).resolves.toBeUndefined()
+    expect(triggerWebhooks).toHaveBeenCalledTimes(1)
     warn.mockRestore()
   })
 })
@@ -71,6 +95,7 @@ describe('both signup servers', () => {
     const src = readFileSync(join(ROOT, rel), 'utf8')
     expect(src).toMatch(/emitEndUserCreated\(projectId, user\)/)
     expect(src).not.toMatch(/'auth\.user\.created'/)
+    expect(src).not.toContain('fireAiFunctionsOnSignup')
   })
 
   // WH-F6: a first OAuth sign-in and a first magic-link sign-in each CREATE

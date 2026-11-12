@@ -19,6 +19,8 @@ import { isRegionError } from '@/lib/data-plane/regional'
 import { authorizingKeyByHash, isAuthorizationUnavailable } from '@/lib/auth-projection/read'
 import { verify } from 'jsonwebtoken'
 import { enforceKeyRateLimit, enforceRateLimitByKeyId } from '../lib/auth'
+import { clientIpFromNodeRequest } from '@/lib/security/client-ip'
+import { isSharedKey } from '@/lib/security/shared-key-rate'
 import { regionalRateCounting, type RateKey } from '@/lib/auth-projection/rate'
 import { hashApiKey, resolveEndUserFromToken, crossEnvironmentUserToken } from '../lib/end-user-identity'
 import { handleViaPostgrest } from './postgrest-handler'
@@ -40,6 +42,7 @@ import {
 } from '@/lib/security/key-placement'
 import { endUserBearerToken } from '@/lib/security/end-user-bearer'
 import { asyncRoute } from '../lib/async-route'
+import { markAsWritten } from '../lib/v1-error-shape'
 import { refuseUnlessServing } from '../lib/serving-gate'
 import { touchProjectActivity } from '@/lib/projects/activity'
 import { ENVIRONMENT_HEADER, environmentHeaderValue } from '@/lib/branches/key-scope'
@@ -300,7 +303,7 @@ export async function getProjectIdFromAuth(req: Request): Promise<AuthResolution
       branchSchema: key.branch?.schemaName,
       branchName: key.branch?.name,
       permissions: key.permissions ?? [],
-      rateKey: { id: key.id, keyHash, rateLimit: key.rateLimit, rateLimitWindow: key.rateLimitWindow },
+      rateKey: { id: key.id, keyHash, rateLimit: key.rateLimit, rateLimitWindow: key.rateLimitWindow, shared: isSharedKey(key) },
     }
   }
 
@@ -530,6 +533,7 @@ async function handleDynamicRequest(req: Request, res: Response) {
       const fwdHeaders = pickFnHeaders(h => req.headers[h])
 
       const { executeAiFunction } = await import('@/lib/services/ai-functions/executor')
+      const { answerHeaders, logsFor } = await import('@/lib/services/ai-functions/reply')
       const result = await executeAiFunction(fn.id, projectId!, {
         type: 'manual',
         data: eventData,
@@ -540,6 +544,8 @@ async function handleDynamicRequest(req: Request, res: Response) {
         endUserId,
         endUserRole: userRole,
         serviceRole: isServiceRole,
+        // Recorded as an HTTP call, which it is; the event keeps type 'manual'.
+        trigger: 'http',
         headers: fwdHeaders,
       })
 
@@ -547,9 +553,17 @@ async function handleDynamicRequest(req: Request, res: Response) {
         res.status(500).json({
           error: result.error || 'Function execution failed',
           code: 'FUNCTION_EXECUTION_ERROR',
-          logs: result.logs,
+          ...logsFor(result.logs, !!isServiceRole),
           durationMs: result.durationMs,
         })
+        return
+      }
+
+      // A route module answers for itself: its status, its body and its
+      // content type, as it wrote them (lib/services/ai-functions/reply.ts).
+      if (result.answer) {
+        const { status, body, headers } = result.answer
+        markAsWritten(res).status(status >= 100 && status <= 599 ? status : 200).set(answerHeaders(headers)).json(body ?? null)
         return
       }
 
@@ -578,11 +592,12 @@ async function handleDynamicRequest(req: Request, res: Response) {
           ? result.httpStatus
           : 200
 
-      res.status(httpStatus).json({
+      // The status is the function's choice, not one of Backenly's errors.
+      markAsWritten(res).status(httpStatus).json({
         success: httpStatus < 400,
         name: fnName,
         result: result.returnValue ?? null,
-        logs: result.logs,
+        ...logsFor(result.logs, !!isServiceRole),
         durationMs: result.durationMs,
       })
       return
@@ -598,7 +613,8 @@ async function handleDynamicRequest(req: Request, res: Response) {
 
   // Enforce hard rate limit on API key routes (JWT-authed dynamic routes skip this)
   if (keyId) {
-    const rl = authResult.rateKey ? await enforceKeyRateLimit(authResult.rateKey) : await enforceRateLimitByKeyId(keyId)
+    const client = clientIpFromNodeRequest(req)
+    const rl = authResult.rateKey ? await enforceKeyRateLimit(authResult.rateKey, client) : await enforceRateLimitByKeyId(keyId, client)
     res.setHeader('X-RateLimit-Remaining', String(rl.remaining))
     res.setHeader('X-RateLimit-Reset', String(Math.floor(rl.resetAt.getTime() / 1000)))
 

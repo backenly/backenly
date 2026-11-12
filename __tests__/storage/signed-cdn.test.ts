@@ -148,7 +148,12 @@ describe('delivery', () => {
     const location = res.headers.get('location')
     expect(location).toContain(`https://files.test.invalid/${projectId}/`)
     expect(verifies(location)).toBe(true)
-    expect(res.headers.get('cache-control')).toBe('private, no-store')
+    // A public file's redirect is kept by the browser for the rest of the
+    // URL's signing window, so a page showing it again does not come back here
+    // (lib/storage/cdn.ts windowedPublicCdnUrl). A non-public one stays no-store.
+    const maxAge = Number(/^private, max-age=(\d+)$/.exec(res.headers.get('cache-control') ?? '')?.[1])
+    expect(maxAge).toBeGreaterThan(0)
+    expect(maxAge).toBeLessThanOrEqual(86_400)
   })
 
   it('signs nothing for a reader the bucket refuses, or while egress is restricted', async () => {

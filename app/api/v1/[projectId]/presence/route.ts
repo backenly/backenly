@@ -16,9 +16,12 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { workspaceRawClient, type WorkspaceRawClient } from '@/lib/data-plane/regional'
+import { clientIpFromHeaders } from '@/lib/security/client-ip'
+import { countPresenceAddress, countPresenceWrite, presenceRefusal } from '@/lib/security/shared-key-rate'
 import { regionErrorResponse } from '@/lib/api/v1/errors'
 import { v1ApiMiddleware } from '@/lib/api/v1/middleware'
 import { recordedV1 } from '@/lib/traffic/recorded-v1'
+import { presenceMetadataTooLarge } from '@/lib/realtime/presence-metadata'
 
 export const dynamic = 'force-dynamic'
 
@@ -161,6 +164,30 @@ function presenceIdentityError(
   )
 }
 
+/**
+ * A presence write spends nothing of the key's limit, or a heartbeat every 25
+ * seconds from every open tab would: it is counted per user instead, once the
+ * caller may write as that user (lib/security/shared-key-rate.ts).
+ */
+async function presenceWindowFull(keyId: string, userId: string): Promise<NextResponse | null> {
+  const decision = await countPresenceWrite(keyId, userId)
+  if (decision.allowed) return null
+  const refusal = presenceRefusal(decision, 'user')
+  return NextResponse.json(refusal.body, { status: refusal.status, headers: refusal.headers })
+}
+
+/**
+ * Presence writes from one address to one project, counted before the key is
+ * looked up, in the window the runtime counts too: a flood of them, signed in
+ * or not, stops here, and none spends the key's limit.
+ */
+async function presenceAddressFull(projectId: string, request: NextRequest): Promise<NextResponse | null> {
+  const decision = await countPresenceAddress(projectId, clientIpFromHeaders(request))
+  if (decision.allowed) return null
+  const refusal = presenceRefusal(decision, 'address')
+  return NextResponse.json(refusal.body, { status: refusal.status, headers: refusal.headers })
+}
+
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
 /** GET — list users online right now */
@@ -196,7 +223,9 @@ async function handleGET(request: NextRequest, props: { params: Promise<{ projec
 /** POST — join or heartbeat (upsert lastSeen) */
 async function handlePOST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
   const params = await props.params;
-  const auth = await v1ApiMiddleware(request, params)
+  const addressFull = await presenceAddressFull(params.projectId, request)
+  if (addressFull) return addressFull
+  const auth = await v1ApiMiddleware(request, params, { countRequest: false })
   if (auth.response) return auth.response
 
   const { projectId } = params
@@ -212,9 +241,14 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
     if (userId.length > 255) {
       return NextResponse.json({ error: 'userId too long (max 255)' }, { status: 400 })
     }
+    // Refused here, not by pg_notify in the trigger, where it failed the upsert with a 500.
+    const tooLarge = presenceMetadataTooLarge(metadata)
+    if (tooLarge) return NextResponse.json(tooLarge.body, { status: tooLarge.status })
 
     const identityError = presenceIdentityError(auth.context, userId)
     if (identityError) return identityError
+    const windowFull = await presenceWindowFull(auth.context.apiKey.id, userId)
+    if (windowFull) return windowFull
 
     // The project's database, in its region, whose trigger NOTIFYs the channel
     // its listeners hear (lib/realtime/listener-hub.ts).
@@ -247,7 +281,9 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
 /** DELETE — explicit leave */
 async function handleDELETE(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
   const params = await props.params;
-  const auth = await v1ApiMiddleware(request, params)
+  const addressFull = await presenceAddressFull(params.projectId, request)
+  if (addressFull) return addressFull
+  const auth = await v1ApiMiddleware(request, params, { countRequest: false })
   if (auth.response) return auth.response
 
   const { projectId } = params
@@ -267,6 +303,8 @@ async function handleDELETE(request: NextRequest, props: { params: Promise<{ pro
 
     const identityError = presenceIdentityError(auth.context, userId)
     if (identityError) return identityError
+    const windowFull = await presenceWindowFull(auth.context.apiKey.id, userId)
+    if (windowFull) return windowFull
 
     // The project's database, in its region, whose trigger NOTIFYs the channel
     // its listeners hear (lib/realtime/listener-hub.ts).

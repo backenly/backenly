@@ -106,7 +106,7 @@ export const PAUSE_EXEMPT_JOB_TYPES: readonly JobType[] = ['cleanup']
  *   detectAndTimeoutStuckJobs status = 'running' AND timeoutAt <= now
  *   handleCleanupJob          status = 'dead_letter'
  *   prune-background-jobs     status IN ('completed', 'failed')
- *   build-lock reaper         type = 'build_lock'
+ *   build-lock budget         type = 'build_lock' AND status IN ('completed', 'failed')
  *
  * There is no catch-all sweep. So a row parked in a status outside that set is
  * unreachable by any of them: an old worker cannot claim it, time it out,

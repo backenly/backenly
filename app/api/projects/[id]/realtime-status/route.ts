@@ -70,11 +70,13 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
       // Presence table hasn't been bootstrapped yet — ignore
     }
 
+    // The NOTIFY channel behind the stream is how Backenly carries changes,
+    // not something to build on: clients use the stream. It used to be handed
+    // out here and shown on the Realtime page (production QA, 2026-11-09).
     return NextResponse.json({
       enabled,
       triggeredTables,
       onlineUsers,
-      channel: `workspace_${projectId}_changes`,
     })
   } catch (err: any) {
     console.error('[realtime-status]', err)
