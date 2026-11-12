@@ -11,6 +11,8 @@
  *   store or replace a key      DEVELOPER   (credentials, integrations/keys POST)
  *   turn an integration on      DEVELOPER   (integrations POST)
  *   remove a key                ADMIN       (integrations/keys DELETE)
+ *   check stored keys live      DEVELOPER   (integrations/health ?check=1), as credentials/verify
+ *   clear function run logs     ADMIN       (ai-functions/logs DELETE), as deleting a function
  *
  * Reads stay open to every member: masked keys only.
  *
@@ -193,6 +195,7 @@ beforeAll(async () => {
 }, 120_000)
 
 afterAll(async () => {
+  await prisma.aiFunction.deleteMany({ where: { projectId } }).catch(() => {})
   if (ORIGINAL_EDITION === undefined) delete process.env.BACKENLY_EDITION
   else process.env.BACKENLY_EDITION = ORIGINAL_EDITION
   resetSingleTenantCache()
@@ -268,5 +271,69 @@ describe('reading stays open to every member', () => {
     const body = await res.json()
     expect(body.data.map((k: any) => k.integrationId)).toContain('stripe')
     expect(JSON.stringify(body)).not.toContain(stripeKey('readm'))
+  }, 60_000)
+})
+
+describe('a live check of the stored keys needs DEVELOPER', () => {
+  const health = async (user: TestUser, query: string) => {
+    const { GET } = await import('@/app/api/integrations/health/route')
+    return GET(req(user, 'GET', `/api/integrations/health?projectId=${projectId}${query}`)) as Promise<any>
+  }
+  let providerCalls: string[] = []
+  const realFetch = global.fetch
+  beforeEach(() => {
+    providerCalls = []
+    global.fetch = (async (input: any) => {
+      providerCalls.push(String(input?.url ?? input))
+      return new Response('{}', { status: 200 })
+    }) as typeof fetch
+  })
+  afterEach(() => {
+    global.fetch = realFetch
+  })
+
+  it('a VIEWER reads which keys are stored, and cannot make Backenly call the providers with them', async () => {
+    await seedKey('stripe', stripeKey('probe'))
+    const read: any = await health(members.VIEWER, '')
+    expect(read.status).toBe(200)
+    expect((await read.json()).integrations.find((i: any) => i.integrationId === 'stripe').status).toBe('unchecked')
+
+    const live: any = await health(members.VIEWER, '&check=1')
+    expect(live.status).toBe(403)
+    expect(providerCalls).toEqual([])
+  }, 60_000)
+
+  it('a DEVELOPER runs the live check', async () => {
+    await seedKey('stripe', stripeKey('probe'))
+    const live: any = await health(members.DEVELOPER, '&check=1')
+    expect(live.status).toBe(200)
+    expect((await live.json()).integrations.find((i: any) => i.integrationId === 'stripe').status).toBe('ok')
+    expect(providerCalls).toContain('https://api.stripe.com/v1/balance')
+  }, 60_000)
+})
+
+describe('clearing function run logs needs ADMIN', () => {
+  const clear = async (user: TestUser) => {
+    const { DELETE } = await import('@/app/api/projects/[id]/ai-functions/logs/route')
+    return DELETE(req(user, 'DELETE', `/api/projects/${projectId}/ai-functions/logs`), params()) as Promise<any>
+  }
+  const runs = () => prisma.aiFunctionLog.count({ where: { projectId } })
+
+  it('a VIEWER and a DEVELOPER are refused and the runs stay; an ADMIN clears them', async () => {
+    const fn = await prisma.aiFunction.create({
+      data: { projectId, name: 'welcome', description: 'Send a welcome email', generatedCode: 'return 1', triggerType: 'manual' },
+      select: { id: true },
+    })
+    await prisma.aiFunctionLog.createMany({
+      data: [1, 2].map((n) => ({ functionId: fn.id, projectId, success: true, logs: [`run ${n}`], durationMs: 5, triggerType: 'manual' })),
+    })
+    for (const role of ['VIEWER', 'DEVELOPER'] as Role[]) {
+      const res: any = await clear(members[role])
+      expect(res.status).toBe(403)
+      expect(await runs()).toBe(2)
+    }
+    const res: any = await clear(members.ADMIN)
+    expect(res.status).toBe(200)
+    expect(await runs()).toBe(0)
   }, 60_000)
 })

@@ -42,6 +42,9 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
 /**
  * DELETE /api/projects/:id/ai-functions/logs
  * Clear all logs for a project (or a specific function with ?functionId=xxx).
+ *
+ * Needs ADMIN, as deleting a function does (../[functionId]): cleared runs do
+ * not come back.
  */
 export async function DELETE(request: NextRequest, props: { params: Promise<{ id: string }> }) {
   const params = await props.params
@@ -54,5 +57,5 @@ export async function DELETE(request: NextRequest, props: { params: Promise<{ id
     await deleteFunctionRuns(projectId, functionId)
 
     return NextResponse.json({ success: true, message: 'Logs cleared' })
-  })
+  }, { floor: 'administer' })
 }
