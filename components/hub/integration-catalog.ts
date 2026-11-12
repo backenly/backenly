@@ -35,6 +35,16 @@ export interface SecondaryCredential {
   label: string
   helperText: string
   docsUrl: string
+  /**
+   * What stays off until this credential is stored. The provider counts as
+   * connected only with both, and the console says why beside the field.
+   */
+  missingMeans: string
+  /**
+   * Where the provider sends events, under the project's API base URL, for a
+   * credential the provider issues only once that address is entered there.
+   */
+  endpointPath?: string
 }
 
 export interface CatalogProvider {
@@ -108,6 +118,10 @@ const PRESENTATION: Record<string, Presentation> = {
       label: 'Webhook Secret',
       helperText: 'Dashboard → Webhooks → your endpoint → Signing secret',
       docsUrl: 'https://dashboard.stripe.com/webhooks',
+      // app/api/v1/[projectId]/webhooks/[integration]/route.ts answers 401 to
+      // every Stripe event until the signing secret is stored.
+      missingMeans: 'Until it is stored, Backenly refuses every event Stripe sends, so no function runs on a Stripe event.',
+      endpointPath: 'webhooks/stripe',
     },
   },
   resend: {
@@ -180,6 +194,7 @@ const PRESENTATION: Record<string, Presentation> = {
       label: 'App ID',
       helperText: 'OneSignal → Settings → Keys & IDs → OneSignal App ID',
       docsUrl: 'https://dashboard.onesignal.com',
+      missingMeans: 'Until it is stored, push notifications are not sent.',
     },
   },
   openai: {

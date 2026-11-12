@@ -14,7 +14,7 @@ Storing the key from an agent also creates a `stripe-checkout-session` function 
 
 ## Receiving events
 
-Stripe events arrive at `https://backenly.com/api/v1/{projectId}/webhooks/stripe`. It checks the `Stripe-Signature` HMAC with a five-minute replay window, and rejects every event until the project's webhook signing secret is stored. Stripe has no API for creating a webhook on a merchant's behalf, so the human pastes that URL into the Stripe dashboard and gives Backenly the signing secret.
+Stripe events arrive at `https://backenly.com/api/v1/{projectId}/webhooks/stripe`. It checks the `Stripe-Signature` HMAC with a five-minute replay window, and rejects every event until the project's webhook signing secret is stored. Stripe has no API for creating a webhook on a merchant's behalf, so the human pastes that URL into the Stripe dashboard and gives Backenly the signing secret. On the console's Integrations page, Stripe shows the project's endpoint URL and takes the signing secret on its own; until the secret is stored, Stripe shows there as "Webhook Secret missing", not connected.
 
 ## In a function
 

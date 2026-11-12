@@ -1918,6 +1918,14 @@ tests/integration/signed-out-session-answers.spec.ts
 # roles and database; Stripe's API answer is stubbed at fetch.
 tests/integration/integration-key-checked-on-continue.spec.ts
 
+# The integrations page adds Stripe's webhook signing secret, or OneSignal's
+# App ID, on its own through POST /api/projects/[id]/credentials: stored alone
+# it is kept without switching the provider on, stored beside a key it leaves
+# the provider connected as it was, a malformed secret is refused with its
+# reason, and a provider's own key still connects it (#611). Real sessions,
+# routes and database; no provider is called.
+tests/integration/second-credential-on-its-own.spec.ts
+
 # Connection Health counts a frontend's successful production requests by the
 # origin the request log keeps (localhost included); a bootstrap ping is
 # counted once. Real session, recorder and route.
