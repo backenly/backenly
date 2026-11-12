@@ -56,6 +56,16 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
     if (!fileRecord) {
       return createErrorResponse(ErrorCodes.NOT_FOUND, 'File record not found', 404)
     }
+    // Confirming is the last step of an upload, and it answers with the file's
+    // link, so it is for the end user who started the upload, or for a server
+    // holding a service-role key, as every step of a multipart upload is.
+    if (!context.apiKey.serviceRole && fileRecord.uploadedBy !== context.endUserId) {
+      return createErrorResponse(
+        ErrorCodes.FORBIDDEN,
+        'Only the end user who started this upload, or a server-side service key, may confirm it.',
+        403,
+      )
+    }
 
     const meta: any = fileRecord.metadata || {}
 

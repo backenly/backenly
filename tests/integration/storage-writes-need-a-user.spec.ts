@@ -27,7 +27,7 @@ let serviceKey = ''
 const tokenFor = (userId: string) =>
   jwt.sign({ userId, projectId, role: 'user' }, PROJECT_JWT_SECRET, { algorithm: 'HS256', expiresIn: '1h' })
 
-function req(opts: { method: string; path: string; key: string; userToken?: string; form?: FormData; json?: unknown; query?: string }): any {
+function req(opts: { method: string; path: string; key: string; userToken?: string; form?: FormData; json?: unknown; query?: string; bytes?: string }): any {
   const headers = new Headers()
   headers.set('x-api-key', opts.key)
   if (opts.userToken) headers.set('x-user-token', opts.userToken)
@@ -41,6 +41,7 @@ function req(opts: { method: string; path: string; key: string; userToken?: stri
     formData: async () => opts.form,
     json: async () => opts.json ?? {},
     text: async () => JSON.stringify(opts.json ?? {}),
+    arrayBuffer: async () => new TextEncoder().encode(opts.bytes ?? '').buffer,
   }
 }
 
@@ -161,5 +162,85 @@ describe('who may write to storage', () => {
     expect(await prisma.storageFile.findUnique({ where: { id: row.id } })).not.toBeNull()
     // The user who started it may.
     expect(await abort(publishableKey, tokenFor(USER))).toBeLessThan(300)
+  })
+
+  it('continues and completes a multipart upload only for the end user who started it, or a service key', async () => {
+    const { POST, PUT } = await import('@/app/api/v1/[projectId]/storage/upload-multipart/route')
+    const path = `/api/v1/${projectId}/storage/upload-multipart`
+    const started: any = await POST(req({
+      method: 'POST', path, key: publishableKey, userToken: tokenFor(USER), query: '?action=initiate',
+      json: { bucket: 'uploads', filename: 'clip.txt', contentType: 'text/plain', contentLength: 11 },
+    }) as any, params())
+    expect(started.status).toBe(200)
+    const uploadId = (await started.json()).data.uploadId as string
+    const part = async (userToken: string | undefined, bytes: string, key = publishableKey) =>
+      (await PUT(req({ method: 'PUT', path, key, userToken, bytes, query: `?action=upload&uploadId=${uploadId}&partNumber=1&totalParts=1` }) as any, params()) as any).status
+    const complete = async (userToken: string | undefined, key = publishableKey) =>
+      (await POST(req({ method: 'POST', path, key, userToken, query: `?action=complete&uploadId=${uploadId}&totalParts=1` }) as any, params()) as any)
+
+    const someoneElse = tokenFor(randomUUID())
+    expect(await part(someoneElse, 'B wrote this instead')).toBe(403)
+    expect(await part(tokenFor(USER), 'part from A')).toBe(200)
+    expect((await complete(someoneElse)).status).toBe(403)
+    const tracking = await prisma.storageFile.findFirst({ where: { projectId, metadata: { path: ['uploadId'], equals: uploadId } }, select: { id: true } })
+    expect(tracking).not.toBeNull()
+
+    const done = await complete(tokenFor(USER))
+    expect(done.status).toBe(200)
+    const file = (await done.json()).data
+    expect(file.size).toBe('part from A'.length)
+    expect(await prisma.storageFile.findUnique({ where: { id: file.id }, select: { uploadedBy: true } })).toEqual({ uploadedBy: USER })
+  })
+
+  it("lets a server's service key carry on an upload an end user started", async () => {
+    const { POST, PUT } = await import('@/app/api/v1/[projectId]/storage/upload-multipart/route')
+    const path = `/api/v1/${projectId}/storage/upload-multipart`
+    const started: any = await POST(req({
+      method: 'POST', path, key: publishableKey, userToken: tokenFor(USER), query: '?action=initiate',
+      json: { bucket: 'uploads', filename: 'clip2.txt', contentType: 'text/plain', contentLength: 6 },
+    }) as any, params())
+    const uploadId = (await started.json()).data.uploadId as string
+    const put: any = await PUT(req({ method: 'PUT', path, key: serviceKey, bytes: 'server', query: `?action=upload&uploadId=${uploadId}&partNumber=1&totalParts=1` }) as any, params())
+    expect(put.status).toBe(200)
+    const done: any = await POST(req({ method: 'POST', path, key: serviceKey, query: `?action=complete&uploadId=${uploadId}&totalParts=1` }) as any, params())
+    expect(done.status).toBe(200)
+  })
+
+  it('confirms a signed upload, and hands back its link, only for the end user who started it or a service key', async () => {
+    const { POST } = await import('@/app/api/v1/[projectId]/storage/confirm-upload/route')
+    const payslips = await prisma.storageBucket.create({
+      data: { name: 'payslips', projectId, isPublic: false, accessPolicy: 'private' },
+      select: { id: true },
+    })
+    const started = (uploadedBy: string | null) =>
+      prisma.storageFile.create({
+        data: {
+          bucketId: payslips.id, projectId, name: 'payslip.pdf', path: `projects/${projectId}/buckets/payslips/${randomUUID()}/payslip.pdf`,
+          size: BigInt(10), mimeType: 'application/pdf', isPublic: false, uploadedBy,
+          metadata: { uploadId: randomUUID(), status: 'pending' },
+        },
+        select: { id: true },
+      })
+    const confirm = async (fileId: string, key: string, userToken?: string) => {
+      const res: any = await POST(req({
+        method: 'POST', path: `/api/v1/${projectId}/storage/confirm-upload`, key, userToken, json: { fileId },
+      }) as any, params())
+      return { status: res.status as number, body: await res.json() }
+    }
+    const status = async (fileId: string) =>
+      ((await prisma.storageFile.findUnique({ where: { id: fileId }, select: { metadata: true } }))!.metadata as any).status
+
+    const theirs = await started(USER)
+    const other = await confirm(theirs.id, publishableKey, tokenFor(randomUUID()))
+    expect(other.status).toBe(403)
+    expect(JSON.stringify(other.body)).not.toContain('token=')
+    expect(await status(theirs.id)).toBe('pending')
+
+    const mine = await confirm(theirs.id, publishableKey, tokenFor(USER))
+    expect(mine.status).toBe(200)
+    expect(mine.body.data).toMatchObject({ id: theirs.id, status: 'complete' })
+
+    const anyones = await started(USER)
+    expect((await confirm(anyones.id, serviceKey)).status).toBe(200)
   })
 })
