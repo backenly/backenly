@@ -22,7 +22,9 @@
  * And what an agent does next: its first set_rls naming some commands gives
  * those commands its rule and keeps the rest service-role only, and History
  * still restores the change that created the table after direct access's sync
- * has given it a read policy.
+ * has given it a read policy. On production a closed table also carries the
+ * data plane's soft-delete filter and direct access's read policy within
+ * moments; neither makes it someone else's rule.
  *
  * And the tables it leaves as they are, because they may already serve an app:
  * one adopted from the database (REGISTER_TABLE), and one that was there when a
@@ -418,6 +420,56 @@ describe('an agent\'s first rule for a table Backenly closed', () => {
     // UPDATE and DELETE were not named: as the closed table had them, service-role keys only.
     expect(await as('authenticated', alice, `UPDATE ${T(schema, 'memos')} SET body = 'changed' RETURNING body`)).toEqual([])
     expect(await as('authenticated', alice, `DELETE FROM ${T(schema, 'memos')} RETURNING body`)).toEqual([])
+  }, 120_000)
+})
+
+describe('a closed table carrying what the platform keeps on it', () => {
+  // As production has it within moments of closing: the data plane's
+  // soft-delete filter (backenly_pgrst_apply_soft_delete, run on every CREATE
+  // and ALTER TABLE of a served schema) and direct access's read policy.
+  async function platformKept(table: string) {
+    await ddl(
+      `CREATE POLICY bkn_pgrst_soft_delete ON ${T(schema, table)} AS RESTRICTIVE FOR SELECT ` +
+        `TO anon, authenticated USING (deleted_at IS NULL)`,
+    )
+    await readOnlyLogin(projectId)
+    await syncDirectAccessGrants(projectId)
+    expect(await rules(schema, table)).toEqual({ rls: true, policies: ['backenly_admin_only', 'bkn_direct_read', 'bkn_pgrst_soft_delete'] })
+  }
+
+  it('still opens when a migration shows who owns a row', async () => {
+    expect((await call('apply_migration', { sql: 'CREATE TABLE journals (body text)' })).status).toBe(200)
+    await platformKept('journals')
+    const shown = await call('apply_migration', { sql: 'ALTER TABLE journals ADD COLUMN user_id uuid REFERENCES users(id)' })
+    expect(shown.status).toBe(200)
+    expect(shown.body.data.change.status).toBe('healthy')
+    const now = await rules(schema, 'journals')
+    expect(now.policies).toContain('backenly_own_rows_select')
+    expect(now.policies).not.toContain('backenly_admin_only')
+  }, 180_000)
+
+  it('takes an agent\'s first set_rls naming some commands', async () => {
+    expect((await call('apply_migration', { sql: 'CREATE TABLE bulletins (author uuid, body text)' })).status).toBe(200)
+    await platformKept('bulletins')
+    const r = await call('set_rls', { tableName: 'bulletins', select: { using: 'true' } })
+    expect(r.body.ok).toBe(true)
+    expect((await rules(schema, 'bulletins')).policies).toEqual([
+      'backenly_custom_delete', 'backenly_custom_insert', 'backenly_custom_select', 'backenly_custom_update', 'bkn_direct_read', 'bkn_pgrst_soft_delete',
+    ])
+  }, 180_000)
+})
+
+describe('a table whose one rule is admin_only, chosen', () => {
+  it('takes set_rls naming some commands: they get its rule, the rest stay service-role only', async () => {
+    expect((await run('CREATE_TABLE', { tableName: 'payouts', columns: [{ name: 'amount', type: 'INTEGER' }] })).success).toBe(true)
+    expect((await run('SET_PERMISSION', { tableName: 'payouts', template: 'admin_only' })).success).toBe(true)
+    const r = await call('set_rls', { tableName: 'payouts', select: { using: 'true' } })
+    expect(r.body.ok).toBe(true)
+    await grantRestRoles(schema)
+    await ddl(`INSERT INTO ${T(schema, 'payouts')} (amount) VALUES (5)`)
+    expect(await as('anon', null, `SELECT amount FROM ${T(schema, 'payouts')}`)).toEqual([{ amount: 5 }])
+    await expect(as('authenticated', alice, `INSERT INTO ${T(schema, 'payouts')} (amount) VALUES (6)`)).rejects.toThrow(/row-level security/)
+    expect(await as('authenticated', alice, `DELETE FROM ${T(schema, 'payouts')} RETURNING amount`)).toEqual([])
   }, 120_000)
 })
 
