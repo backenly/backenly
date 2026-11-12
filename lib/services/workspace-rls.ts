@@ -1395,15 +1395,16 @@ async function installCustomPolicySet(
   // it. Refusing is the only honest outcome: the caller has to say what the
   // whole set should be.
   //
-  // Except on a table Backenly closed because it could not tell who owns a row
-  // (autoApplyRlsIfNeeded): its one FOR ALL rule, admin_only, is nobody's
-  // choice, and naming some commands is the first rule anyone states. Those
-  // commands get theirs; the others keep what the closed table gave them,
-  // service-role keys only, now as a rule of their own.
+  // Except when that one FOR ALL rule is admin_only, which gives every command
+  // to service-role keys alone: a table Backenly closed because it could not
+  // tell who owns a row, or one whose rows grant access to several users. The
+  // commands named get their rule; the others keep what admin_only gave them,
+  // service-role keys only, now as a rule of their own. Nothing is opened
+  // beyond what was named.
   if (plan.scoped) {
     const blanket = before.filter((p) => p.policyName.startsWith('backenly_') && commandsCoveredBy(p).length === 4)
-    if (blanket.length && (await stillClosedByDefault(projectId, schemaName, tableName)) &&
-        (await closedByDefaultTables(projectId, schemaName)).has(tableName)) {
+    const ours = before.filter((p) => p.policyName.startsWith('backenly_'))
+    if (blanket.length === 1 && blanket[0].policyName === 'backenly_admin_only' && ours.length === 1) {
       const named = plan.rules.map((r) => r.command)
       plan = {
         ...plan,
@@ -2369,10 +2370,39 @@ export async function closedByDefaultTables(projectId: string, schemaName: strin
   return new Set(rows.map((r) => r.key.slice(schemaName.length + 1)))
 }
 
-/** The table still has exactly the rule Backenly closed it with, and no other. */
+/**
+ * The table still has exactly the rule Backenly closed it with, and no other.
+ * The policies the platform's own syncs keep beside it do not count: the data
+ * plane gives a served table with `deleted_at` its soft-delete filter on every
+ * CREATE and ALTER TABLE, and direct access its pass-throughs, so a closed
+ * table carries them within moments of being closed.
+ */
 async function stillClosedByDefault(projectId: string, schemaName: string, tableName: string): Promise<boolean> {
-  const live = await readLivePolicies(projectId, schemaName, tableName)
+  const live = (await readLivePolicies(projectId, schemaName, tableName)).filter((p) => !isPlatformKeptPolicy(p))
   return live.length === 1 && live[0].policyName === 'backenly_admin_only'
+}
+
+/**
+ * A policy the platform keeps on a table by its own sync, exactly as that sync
+ * writes it: the data plane's soft-delete filter
+ * (backenly_pgrst_apply_soft_delete, scripts/sql/postgrest-schema-registry.sql)
+ * and direct access's pass-throughs (backenly_direct_sync_schema,
+ * scripts/setup-direct-access.sql). A policy of the same name in another shape
+ * is someone's rule.
+ */
+function isPlatformKeptPolicy(p: LivePolicyRow): boolean {
+  const roles = [...p.roles].sort()
+  if (p.policyName === 'bkn_pgrst_soft_delete') {
+    return p.permissive === 'RESTRICTIVE' && p.cmd === 'SELECT' && roles.join(',') === 'anon,authenticated'
+  }
+  if (p.policyName === 'bkn_direct_read') {
+    return p.permissive === 'PERMISSIVE' && p.cmd === 'SELECT' && roles.join(',') === 'backenly_external' && p.using === 'true'
+  }
+  if (p.policyName === 'bkn_direct_write') {
+    return p.permissive === 'PERMISSIVE' && p.cmd === 'ALL' && roles.length === 1 && /^bkn_rw_[0-9a-f]{12}$/.test(roles[0]) &&
+      p.using === 'true' && p.withCheck === 'true'
+  }
+  return false
 }
 
 /**
