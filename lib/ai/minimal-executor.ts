@@ -14975,8 +14975,11 @@ async function executeRotateWebhookSecret(params: any, projectId: string): Promi
       message:
         `✅ Rotated the signing secret for webhook trigger **${trigger.name}**.\n\n` +
         `**New secret** (shown once — save it now):\n\n\`${newSecret}\`\n\n` +
-        `Future deliveries to \`${trigger.webhookUrl}\` are signed with this secret as \`X-Backenly-Signature: sha256=<hmac>\`. ` +
-        `Verify in your receiver before trusting any payload.`,
+        `Future deliveries to \`${trigger.webhookUrl}\` are signed with this secret. Each carries \`X-Backenly-Timestamp\` ` +
+        `(unix seconds), \`X-Backenly-Delivery\` and \`X-Backenly-Signature-V2: sha256=<HMAC-SHA256 of ` +
+        `"<timestamp>.<delivery>.<raw body>">\`. Verify it in your receiver before trusting any payload, and refuse a ` +
+        `timestamp more than 5 minutes old or a delivery id already handled. \`X-Backenly-Signature\` (the raw body ` +
+        `alone) is still sent for older receivers.`,
       // The docs promise the secret in data.secret — an agent updating a
       // receiver should not have to parse it out of prose. Shown once, as
       // the message says; it is never readable again.
