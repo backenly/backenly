@@ -13,6 +13,7 @@
 
 import { act, fireEvent, render, screen } from '@testing-library/react'
 import { clearAgentConnectionCache } from '@/lib/hooks/useAgentConnection'
+import { forgetSharedReads } from '@/lib/client/shared-read'
 import { WorkspaceHome } from '@/components/workspace/WorkspaceHome'
 import { TopBar } from '@/components/shell/TopBar'
 
@@ -70,6 +71,9 @@ const renderOverview = () =>
 
 beforeEach(() => {
   clearAgentConnectionCache()
+  // Reads the page's components share are kept for two seconds; each case
+  // answers differently.
+  forgetSharedReads()
   push.mockReset()
   health = healthWith({})
   global.fetch = jest.fn((input: RequestInfo | URL) => Promise.resolve(answer(String(input)))) as unknown as typeof fetch

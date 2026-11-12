@@ -69,13 +69,13 @@ describe('probe signups do not trigger on_signup handlers', () => {
     expect(findMany.mock.calls[0][0].where).toMatchObject({
       projectId: 'proj-1',
       triggerType: 'on_signup',
-      status: 'active',
+      status: { notIn: expect.arrayContaining(['inactive', 'disabled', 'deleted']) },
     })
   })
 
-  it('neither signup route guards this itself, so the shared function must', () => {
-    // If a future change moves the filter back to a call site, this catches the
-    // half of production that would silently keep firing.
+  it('signup routes delegate to the shared emitter rather than guarding or calling functions themselves', () => {
+    // Both signup routes (and OAuth and magic-link) delegate to emitEndUserCreated (#599).
+    // The shared emitter in lib/services/end-user-auth-events.ts guards and calls fireAiFunctionsOnSignup.
     const fs = require('fs') as typeof import('fs')
     const routes = [
       'server/routes/auth.ts',
@@ -83,7 +83,10 @@ describe('probe signups do not trigger on_signup handlers', () => {
     ]
     for (const rel of routes) {
       const src = fs.readFileSync(rel, 'utf8')
-      expect(src).toContain('fireAiFunctionsOnSignup')
+      expect(src).toContain('emitEndUserCreated')
+      expect(src).not.toContain('fireAiFunctionsOnSignup')
     }
+    const sharedEmitter = fs.readFileSync('lib/services/end-user-auth-events.ts', 'utf8')
+    expect(sharedEmitter).toContain('fireAiFunctionsOnSignup')
   })
 })

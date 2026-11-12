@@ -22,6 +22,9 @@
  */
 
 import { normalizeFindingType } from './types'
+import { triggerPhrase } from './function-trigger-words'
+import { sizeWords } from './size-words'
+import { missingFrom, missingIntegrationHint } from './function-integration-words'
 import type { AIAction } from '@/lib/ai/minimal-executor'
 import { WITHHELD } from '@/lib/mcp/withhold-secrets'
 import { unsealParams } from '@/lib/operational-memory/sealed-params'
@@ -189,6 +192,9 @@ export function buildFixAction(
         },
       }
 
+    // Every index Backenly builds as a repair is built online (CREATE INDEX
+    // CONCURRENTLY): these tables are live, and a plain build blocks their
+    // writes for as long as it runs.
     case 'missing_fk_index':
       return {
         action: 'CREATE_INDEX',
@@ -197,6 +203,7 @@ export function buildFixAction(
           // executeCreateIndex reads `columnName` — emitting `columns: [...]`
           // here silently failed every FK-index fix with "Missing parameters".
           columnName: details.columnName,
+          online: true,
         },
       }
 
@@ -213,6 +220,7 @@ export function buildFixAction(
         params: {
           tableName: details.tableName,
           columnName: details.columnName,
+          online: true,
         },
       }
 
@@ -275,7 +283,7 @@ export function buildFixAction(
       if (!table || !details.columnName) return null
       return {
         action: 'CREATE_INDEX',
-        params: { tableName: table, columnName: details.columnName },
+        params: { tableName: table, columnName: details.columnName, online: true },
       }
     }
 
@@ -460,12 +468,48 @@ export function getManualRemediationHint(
   type: string,
   details?: Record<string, unknown> | null,
 ): string | null {
+  // A migration Backenly's architecture review proposed
+  // (lib/ai/architecture-evolution.ts): advice that hands over its statement.
+  // Applying it is the owner's call, through the coding agent's governed
+  // apply_migration, never a repair Backenly runs on its own.
+  if (type.startsWith('arch_migration')) {
+    const sql = typeof details?.sqlFix === 'string' && details.sqlFix.trim() ? details.sqlFix.trim() : null
+    const proposal = 'This is a proposal from Backenly’s architecture review, not a fault, and Backenly does not apply it on its own.'
+    return sql
+      ? `${proposal} To apply it, ask your coding agent to run it with apply_migration:\n\n${sql}`
+      : `${proposal} If you want it, ask your coding agent to plan and apply it.`
+  }
+
   const norm = normalizeFindingType(type, details ?? null)
   switch (norm?.base) {
     case 'orphan_table':
       // Registration is handled by buildFixAction (REGISTER_TABLE), so this hint
       // is only a fallback. It describes the safe path, not dropping.
       return 'This table exists in your database but is not yet managed by the platform. Click Register to generate its REST API and adopt it — your data is untouched. (To remove it instead, drop it from the Database section.)'
+    // A table larger than PostgreSQL's cache: advice with two ways forward,
+    // neither Backenly's to take on its own. One raised under the retired
+    // row-count rule carries no sizes, and is not said to be larger than anything.
+    case 'infra_partition': {
+      const t = norm.tableName
+      const bytes = details?.bytes
+      const cache = details?.cacheBytes
+      if (typeof bytes !== 'number' || typeof cache !== 'number') {
+        return (
+          'Raised by a check Backenly has retired, which counted rows rather than size. The next scan ' +
+          `withdraws it unless ${t ?? 'the table'} is larger than PostgreSQL's cache. Nothing is broken.`
+        )
+      }
+      return (
+        `${t ?? 'This table'} takes ${sizeWords(bytes)}, more than the ${sizeWords(cache)} PostgreSQL expects ` +
+        'to have cached on this server, so reads of it cannot all come from memory. Nothing is broken.\n\n' +
+        `If old rows in ${t ?? 'the table'} can go after a while, keep the table smaller: ask your coding agent ` +
+        'to deploy a scheduled function that deletes rows older than the retention you choose. If every row ' +
+        `must stay, ask your coding agent to plan partitioning ${t ?? 'it'} by the column your queries filter ` +
+        'on, usually a date. That means creating a partitioned table and moving the rows across, which ' +
+        'Backenly does not do on its own.'
+      )
+    }
+
     // Only reached when the detector found no indexable column, since
     // buildFixAction handles the repairable case. Names the real numbers so the
     // owner can judge it, and asks for the column instead of guessing one — an
@@ -477,7 +521,7 @@ export function getManualRemediationHint(
       const measured = scans !== undefined && pct !== undefined
         ? ` It was read ${scans.toLocaleString()}× with ${pct}% index coverage.`
         : ''
-      return `"${t}" is taking heavy sequential scans and Backenly could not find a column it is safe to index automatically.${measured} Add an index on whichever column your queries filter or sort by — in the AI chat, say "add an index on <table>.<column>".`
+      return `"${t}" is taking heavy sequential scans and Backenly could not find a column it is safe to index automatically.${measured} Add an index on the column your queries on "${t}" filter or sort by: ask your coding agent to add it with apply_migration (CREATE INDEX ON ${t} (<column>)).`
     }
 
     // No executable repair exists and none is coming: the finding's whole claim
@@ -560,6 +604,27 @@ export function getManualRemediationHint(
     // follows from a deviation alone. What it can do is hand over the specific
     // numbers and the specific changes, which is what the developer was about
     // to go and look up.
+    // The refusals are evidence; the rule is the likely cause, not a proven one
+    // (a conflict can also be a reference to a row that does not exist).
+    case 'unrequested_unique_refusing_writes': {
+      const t = typeof details?.tableName === 'string' ? details.tableName : 'This table'
+      const col = typeof details?.columnName === 'string' ? details.columnName : 'a column'
+      const refused = Number(details?.refused ?? 0)
+      const writes = Number(details?.writes ?? 0)
+      const hours = Number(details?.windowHours ?? 24)
+      const others = Array.isArray(details?.otherRules) && details.otherRules.length > 0
+        ? ` ${t} has other rules against repeated values too (${(details.otherRules as string[]).join('; ')}), so some refusals may be theirs.`
+        : ''
+      const drop = typeof details?.drop === 'string' ? `\n\n  ${details.drop}` : ''
+      return (
+        `${t} refused ${refused} of its ${writes} writes in the last ${hours} hours with a conflict. ` +
+        `${t}.${col} is kept unique by a rule that nothing recorded for ${t} asked for.${others}` +
+        `\n\nIf the same ${col} can appear on more than one row, ask your coding agent to remove the ` +
+        `rule with apply_migration:${drop}\n\nIf it should stay unique, dismiss this: the refusals are ` +
+        `the rule working.`
+      )
+    }
+
     case 'behavioural_regression': {
       const measure = String(details?.measure ?? 'this measure').replace(/_/g, ' ')
       const ratio = details?.ratio ? `${details.ratio}x` : 'well above'
@@ -596,6 +661,29 @@ ${details.migration}` : ''
 If the column is deliberately different now, tell your coding agent to rebuild it ` +
         `through Backenly so the recorded intent matches what you actually have.`
       )
+    }
+
+    // The function's code is its owner's: the hint is what the run log shows
+    // and what to ask for.
+    case 'function_failing': {
+      const name = typeof details?.functionName === 'string' ? details.functionName : 'This function'
+      const failures = Number(details?.failures ?? 0)
+      const runs = Number(details?.runs ?? 0)
+      const hours = Number(details?.windowHours ?? 24)
+      const error = typeof details?.lastError === 'string' ? `\n\nThe last failure: ${details.lastError}` : ''
+      return (
+        `${name} ${triggerPhrase(details?.trigger, details?.tableName)}, and it failed ${failures} of its ` +
+        `${runs} runs in the last ${hours} hours, the latest one included.${error}` +
+        `\n\nAsk your coding agent to fix ${name} and deploy it again. Its runs are on the Functions ` +
+        `page, and this clears once a run succeeds.`
+      )
+    }
+
+    // The key is the owner's and the code is whoever wrote it: the hint says
+    // which calls have nothing behind them and both ways out.
+    case 'function_integration_missing': {
+      const name = typeof details?.functionName === 'string' ? details.functionName : 'This function'
+      return missingIntegrationHint(name, triggerPhrase(details?.trigger, details?.tableName), missingFrom(details?.missing))
     }
 
     // No repair exists and none should. Terminating a backend rolls back
@@ -684,7 +772,8 @@ If the column is deliberately different now, tell your coding agent to rebuild i
       return (
         `Queries against "${t}"${timing} are scanning rather than using an index, and Backenly ` +
         `could not confirm which column to index safely. Add an index on the column your ` +
-        `queries filter by, or say "add an index on ${t}.<column>" in the AI chat.`
+        `queries filter by: ask your coding agent to add it with apply_migration ` +
+        `(CREATE INDEX ON ${t} (<column>)).`
       )
     }
 
@@ -706,10 +795,14 @@ If the column is deliberately different now, tell your coding agent to rebuild i
       return `${problem ? problem + ' ' : ''}Run this when you are ready:\n\n${sql}`
     }
 
-    case 'missing_archival_job':
-      return 'This table will keep growing without bound. In the AI chat, say "schedule a nightly cleanup on <table> older than 90 days" — Backenly will create the cron + the cleanup function with the retention you pick.'
-    case 'missing_token_cleanup_cron':
-      return 'Expired tokens are accumulating. In the AI chat, say "schedule a daily cron to delete expired rows from <table>" — Backenly will create the cleanup job.'
+    case 'missing_archival_job': {
+      const t = (details?.tableName ?? details?.table ?? 'this table') as string
+      return `${t} will keep growing without bound. If its old rows can go after a while, ask your coding agent to deploy a scheduled function that deletes ${t}'s rows older than the retention you choose (90 days, say).`
+    }
+    case 'missing_token_cleanup_cron': {
+      const t = (details?.tableName ?? details?.table ?? 'the token table') as string
+      return `Expired tokens are accumulating in ${t}. Ask your coding agent to deploy a scheduled function that deletes the expired rows from ${t} once a day.`
+    }
 
     // Informational by design: an integration you connected has no code path
     // using it yet. There is nothing to repair — the finding exists so a
@@ -728,7 +821,7 @@ If the column is deliberately different now, tell your coding agent to rebuild i
     // getting it wrong the other way exposes rows. It states the repair
     // precisely instead, so the user (or their coding agent) can apply it.
     case 'runtime_engine_mismatch':
-      return 'One or more RLS policies on this project read the legacy app.* session variables, which the current data plane never sets — so those policies match no rows and the API returns an empty list instead of an error. Nothing looks broken from the outside, which is why this is flagged rather than waited on. Ask your coding agent to rewrite the affected policies to the claim form (current_setting(\'request.jwt.claims\', true)::json ->> \'sub\'), or say "fix my RLS identity" in the AI chat. Backenly does not rewrite live policies on its own.'
+      return 'One or more RLS policies on this project read the legacy app.* session variables, which the current data plane never sets — so those policies match no rows and the API returns an empty list instead of an error. Nothing looks broken from the outside, which is why this is flagged rather than waited on. Ask your coding agent to rewrite the affected policies to the claim form (current_setting(\'request.jwt.claims\', true)::json ->> \'sub\'). Backenly does not rewrite live policies on its own.'
 
     // A gated action re-runs from the exact AIAction recorded in its details.
     // Without that payload there is nothing to re-run, and inventing one from
@@ -743,7 +836,7 @@ If the column is deliberately different now, tell your coding agent to rebuild i
       if (details?.executorAction && !heldArguments(details)) {
         return 'The exact arguments of this held change could not be opened, so nothing was run: the copy shown here has its secret values withheld and is never replayed in their place. Dismiss it and ask your agent to make the change again; it will be held again for your approval.'
       }
-      return 'The details of this queued change were not recorded, so it cannot be replayed automatically. Dismiss it and ask the AI chat to make the change again — it will re-queue with a full record.'
+      return 'The details of this queued change were not recorded, so it cannot be replayed automatically. Dismiss it and ask your coding agent to make the change again; it will be held again with a full record.'
 
     // Surface probes that are NOT a data-plane outage. Named per surface,
     // because "check your dashboard" is useless for a fault whose cause is in
@@ -767,7 +860,7 @@ If the column is deliberately different now, tell your coding agent to rebuild i
       // Unrecognized type with no executable fix — give a generic, non-dev
       // friendly next step instead of a silent dead end.
       if (!norm) {
-        return 'Backenly flagged this but has no automatic repair for it yet. Open the relevant section of your dashboard, or describe the problem in the AI chat and it will help you resolve it.'
+        return 'Backenly flagged this but has no automatic repair for it yet. Open the relevant section of your dashboard, or ask your coding agent to look into it.'
       }
       return null
   }

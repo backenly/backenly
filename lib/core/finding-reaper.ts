@@ -20,7 +20,7 @@
  */
 
 import { prisma } from '@/lib/db/prisma'
-import { builtEvidenceWhere } from '@/lib/projects/backend-presence'
+import { builtEvidenceWhere, literalPrefix } from '@/lib/projects/backend-presence'
 
 export type WithdrawnBy =
   | 'evolution_reaper'
@@ -40,6 +40,9 @@ export type WithdrawnBy =
   | 'verification_reaper'
   // A live probe of the surface answers correctly again (contract-verifier.ts).
   | 'contract_reaper'
+  // The infrastructure scan no longer sees it: a table that fits in
+  // PostgreSQL's cache again (lib/ai/infra-intelligence.ts).
+  | 'infra_reaper'
 
 /**
  * Close findings whose condition is gone without Backenly repairing it:
@@ -160,7 +163,7 @@ export async function reapCoevolutionFindings(
   if (!cleanScan) return 0
 
   const open = await prisma.healthFinding.findMany({
-    where: { projectId, status: { in: ['open', 'pending_approval'] }, type: { startsWith: 'coevo_' } },
+    where: { projectId, status: { in: ['open', 'pending_approval'] }, type: { startsWith: literalPrefix('coevo_') } },
     select: { id: true, type: true, details: true },
   }).catch(() => [] as Array<{ id: string; type: string; details: unknown }>)
   if (open.length === 0) return 0
@@ -209,6 +212,9 @@ export async function reapArchFindings(projectId: string): Promise<number> {
  * the withdrawal on the same cadence as the claim.
  */
 const INVARIANT_REAPABLE_TYPES = [
+  // Its probe reads the run log on every pass, so a function whose next run
+  // succeeds stops being reported and the finding withdraws itself.
+  'function_failing',
   // Withdraws when repairs stop recurring in that area, and ALSO when the
   // component's membership changes: the identity carries a membership hash, so
   // a table joining or leaving produces a different gap and leaves the old
@@ -271,6 +277,9 @@ const INVARIANT_REAPABLE_TYPES = [
   // Its probe compares the intent ledger to the live catalog on every tick, so
   // a column the owner migrates back into shape clears on the next pass.
   'intent_drift',
+  // Its probe reads the last day's refusals and the live catalog each pass, so
+  // a dropped rule, or a day without refusals, withdraws the finding.
+  'unrequested_unique_refusing_writes',
   // Its probe judges the most recent complete hour against the trailing window,
   // so a subject that returns to normal stops being reported on the next hour
   // and the finding withdraws itself. Without this a one-hour spike would sit in
@@ -343,7 +352,8 @@ export async function reapInvariantFindings(
 /**
  * Static finding types written exclusively by workspace-observer.ts's own
  * detectors (detectOrphanTables, detectApiDrift, detectBrokenWebhooks,
- * detectAuthSpike, detectDeployFailure, checkIntegrationHealth) and by no
+ * detectAuthSpike, detectDeployFailure, checkIntegrationHealth,
+ * detectFunctionsMissingIntegrations) and by no
  * other pipeline — verified by grepping
  * every `type: '<value>'` write site in the codebase before adding an entry
  * here. Getting this wrong in either direction is a real bug: omit a type
@@ -381,6 +391,9 @@ const OBSERVER_LOCATABLE_REAPABLE_TYPES: ReadonlySet<string> = new Set([
   'integration_smtp_unreachable',
   'oauth_config_invalid',
   'integration_connected_unused',
+  // Located by function (gapIdentity), so a function whose integration is
+  // connected, or whose code stops using it, is withdrawn on its own.
+  'function_integration_missing',
 ])
 
 /**

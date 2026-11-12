@@ -47,7 +47,10 @@ jest.mock('@/lib/services/ai-functions/executor', () => ({
 }))
 jest.mock('@/lib/services/end-user-auth-events', () => ({
   ...jest.requireActual('@/lib/services/end-user-auth-events'),
-  emitEndUserCreated: jest.fn(async () => {}),
+  emitEndUserCreated: jest.fn(async (projectId: string, user: any) => {
+    const { fireAiFunctionsOnSignup } = require('@/lib/services/ai-functions/executor')
+    await fireAiFunctionsOnSignup(projectId, { id: user.id, email: user.email, name: user.name })
+  }),
 }))
 jest.mock('@/lib/quota/kernel', () => ({
   ...jest.requireActual('@/lib/quota/kernel'),

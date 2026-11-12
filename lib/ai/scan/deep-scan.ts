@@ -6,7 +6,7 @@
  *
  * Sources (all already exist — this is composition, not new logic):
  *   - collectProof()                  → live DB ground truth (tables, APIs, auth, storage, RLS, integrations)
- *   - scoreReadiness({ autoFix:false}) → 11 production checks (env, JWT, route auth, RLS, webhooks, security audit, …)
+ *   - scoreReadiness({ autoFix:false}) → the production checks (env, JWT, route auth, RLS, webhooks, security audit, open problems, …)
  *   - analyzeProductionReadiness()    → 7 deep checks (missing indexes, N+1, weak RLS, pagination, replay risk, …)
  *   - loadBuildLedger()               → executor record (built / planned / blocked / failed)
  *   - checkAllIntegrationReadiness()  → per-integration 3-state readiness
@@ -661,7 +661,9 @@ export async function runDeepScan(
   const proofPromise = collectProof(projectId).catch(() => null)
 
   emit('Checking auth, permissions, and deploy gates…')
-  const readinessPromise = scoreReadiness(projectId, { autoFix: false }).catch(() => null)
+  // A read: the verifier's latest run of the backend as it is now is enough
+  // (lib/deployment/verification-reuse.ts).
+  const readinessPromise = scoreReadiness(projectId, { autoFix: false, reuseRecentVerification: true }).catch(() => null)
 
   emit('Analyzing production safety risks…')
   const prodIntelPromise = analyzeProductionReadiness(projectId).catch(() => null)

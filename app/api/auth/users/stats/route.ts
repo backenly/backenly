@@ -8,11 +8,20 @@ import { executeWithUserContext } from '@/lib/services/workspace-rls'
 const ZERO = {
   totalUsers: 0,
   activeUsers: 0,
-  activeUsersDelta: 0,
+  activeUsersDelta: null,
   verifications: 0,
   signups24h: 0,
-  signupsDelta: 0,
+  signupsDelta: null,
   signups7d: 0,
+}
+
+/**
+ * The change from the previous period, in percent, or null when the previous
+ * period had nothing to compare against: a rise from zero has no percentage.
+ * Production QA (2026-11-09): "+100% vs previous period" from zero sign-ups.
+ */
+function percentChange(now: number, before: number): number | null {
+  return before > 0 ? Math.round(((now - before) / before) * 100) : null
 }
 
 /**
@@ -79,21 +88,11 @@ export async function GET(request: NextRequest) {
 
       const activeUsers = Number(r.activeUsers ?? 0)
       const prevActive = Number(r.prevActiveUsers ?? 0)
-      const activeUsersDelta =
-        prevActive > 0
-          ? Math.round(((activeUsers - prevActive) / prevActive) * 100)
-          : activeUsers > 0
-            ? 100
-            : 0
+      const activeUsersDelta = percentChange(activeUsers, prevActive)
 
       const signups24h = Number(r.signups24h ?? 0)
       const prevSignups = Number(r.prevSignups ?? 0)
-      const signupsDelta =
-        prevSignups > 0
-          ? Math.round(((signups24h - prevSignups) / prevSignups) * 100)
-          : signups24h > 0
-            ? 100
-            : 0
+      const signupsDelta = percentChange(signups24h, prevSignups)
 
       return NextResponse.json({
         totalUsers: Number(r.totalUsers ?? 0),

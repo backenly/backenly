@@ -3,7 +3,7 @@ export const dynamic = 'force-dynamic'
 import { NextRequest } from 'next/server'
 import { v1ApiMiddleware, requirePermission, requireCapability } from '@/lib/api/v1/middleware'
 import { createErrorResponse, createSuccessResponse, handleValidationError, ErrorCodes, regionErrorResponse, dataRefusalResponse } from '@/lib/api/v1/errors'
-import { querySchema, PAGINATION_DEFAULT_LIMIT, PAGINATION_MAX_LIMIT } from '@/lib/api/v1/schemas'
+import { querySchema, PAGINATION_DEFAULT_LIMIT, PAGINATION_MAX_LIMIT, unknownQueryFields, unknownQueryFieldsMessage } from '@/lib/api/v1/schemas'
 import { typedParams } from '@/lib/api/v1/typed-params'
 import { whereConditions } from '@/lib/api/v1/where'
 import { validateRequestBody } from '@/lib/validation/schemas'
@@ -191,6 +191,12 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
     const capabilityCheck = requireCapability(context, request.nextUrl.pathname)
     if (capabilityCheck) {
       return capabilityCheck
+    }
+
+    // A misspelt filter must not become a query with no filter.
+    const unknown = unknownQueryFields(await request.clone().json().catch(() => null))
+    if (unknown.length > 0) {
+      return createErrorResponse('UNKNOWN_FIELD', unknownQueryFieldsMessage(unknown), 400, { fields: unknown })
     }
 
     const validation = await validateRequestBody(querySchema, request)

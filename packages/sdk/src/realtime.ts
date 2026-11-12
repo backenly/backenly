@@ -39,7 +39,13 @@ export interface DBChangeEvent<T = Record<string, unknown>> {
   table: string
   data?: T
   old?: T
+  /**
+   * The change was too large to send whole: `data`, and an update's `old`,
+   * carry only the row's primary key. Fetch the row by it, or drop a deleted one.
+   */
   truncated?: boolean
+  /** An update too large to send with its previous row: `old` carries only its primary key, even to a service-role client. */
+  oldTruncated?: boolean
   timestamp?: number
 }
 

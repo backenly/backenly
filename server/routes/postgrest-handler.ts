@@ -38,6 +38,8 @@ import {
   toListEnvelope,
   toRecordEnvelope,
   translateReadQuery,
+  v2GrammarIn,
+  wantsExactCount,
 } from '@/lib/postgrest/translate'
 import { checkExposure, operationFor, tableHasSoftDelete } from '@/lib/postgrest/exposure'
 import { ensureSchemaRegistered } from '@/lib/postgrest/registration'
@@ -227,6 +229,13 @@ export async function handleViaPostgrest(
     return answer(exposure.status ?? 404, { error: exposure.error, code: exposure.code })
   }
 
+  // /db reads filter by equality; /api/v2's grammar would be read as data and
+  // answer a wrong 200, so it is refused with the request that would work.
+  if (operation === 'list' || operation === 'get') {
+    const refusal = v2GrammarIn(req.query as Record<string, string | string[] | undefined>, { projectId: ctx.projectId, table })
+    if (refusal) return answer(400, { error: refusal, code: 'UNSUPPORTED_QUERY' })
+  }
+
   // Throws rather than falling back to main if the branch does not belong to
   // this project. Silently serving main to a credential the owner scoped to a
   // branch is worse than an error: staging writes would land in production and
@@ -236,6 +245,11 @@ export async function handleViaPostgrest(
   let upstream: globalThis.Response
   let limit = 0
   let offset = 0
+  // A list counts its rows only when the caller asks (wantsExactCount); it
+  // always reads one row past the page, so hasMore is exact either way.
+  const exactCount =
+    operation === 'list' &&
+    wantsExactCount(req.query as Record<string, string | string[] | undefined>, req.headers.prefer)
   // Hoisted so the PGRST106 self-heal below can replay the identical request
   // after repairing the registration, rather than rebuilding it and risking a
   // retry that differs from what originally failed.
@@ -264,6 +278,7 @@ export async function handleViaPostgrest(
         query: req.query as Record<string, string | string[] | undefined>,
         hasSoftDelete,
         recordId,
+        extraRow: operation === 'list',
       })
       limit = translated.limit
       offset = translated.offset
@@ -293,15 +308,16 @@ export async function handleViaPostgrest(
       branchSchema: ctx.branchSchema,
     })
     headers['content-type'] = 'application/json'
-    // `count=exact` is what populates Content-Range, which the pagination
-    // envelope needs; `return=representation` makes writes echo the row the way
-    // the old executor did.
-    headers['prefer'] =
-      operation === 'list'
-        ? 'count=exact'
-        : operation === 'create' || operation === 'update'
-          ? 'return=representation'
-          : 'return=representation'
+    // `count=exact` populates Content-Range with the total, and is sent only
+    // when the caller asked for one: counting runs the filtered query a second
+    // time. `return=representation` makes writes echo the row the way the old
+    // executor did.
+    if (operation === 'list') {
+      if (exactCount) headers['prefer'] = 'count=exact'
+      else delete headers['prefer']
+    } else {
+      headers['prefer'] = 'return=representation'
+    }
 
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS)
@@ -482,11 +498,9 @@ export async function handleViaPostgrest(
       // reported with a diagnosis naming the auth layer — see
       // classifyRequestOutcome. A genuinely empty table for an authenticated
       // caller passes through untouched.
-      const envelope = toListEnvelope(
-        rows, upstream.headers.get('content-range'), limit, offset,
-      ) as unknown as Record<string, unknown>
-      return answer(200, envelope, {
-        rowCount: rows.length,
+      const envelope = toListEnvelope(rows, upstream.headers.get('content-range'), limit, offset, { extraRow: true })
+      return answer(200, envelope as unknown as Record<string, unknown>, {
+        rowCount: envelope.data.length,
         tableHasRls: await tableHasRls(ctx.projectId, schema, table),
       })
     }

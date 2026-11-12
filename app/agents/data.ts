@@ -174,7 +174,7 @@ export const CLAUDE_CODE: ClaudeCodePage = {
     },
     {
       q: 'Claude Code changed something I did not want. Can I undo it?',
-      a: 'Yes, from the project’s History: restore that one change, or everything back to a point. History covers the schema, auth, storage, functions, webhooks, environment variables, keys and integrations, and each restore is checked before it runs. Data your app wrote since is never rewound, and a restore that would affect it waits for your approval. Claude Code can ask for a restore, but only you can approve one.',
+      a: 'Yes, from the project’s History: restore that one change, or everything back to a point. History covers the schema, auth, storage, functions, webhooks, environment variables, keys, integrations and allowed origins, and each restore is checked before it runs. Data your app wrote since is never rewound, and a restore that would affect it waits for your approval. Claude Code can ask for a restore, but only you can approve one.',
     },
     {
       q: 'Does it work with a self-hosted Backenly?',
@@ -334,7 +334,7 @@ export const CURSOR: CursorPage = {
     },
     {
       q: 'Can I undo something the agent changed?',
-      a: 'Yes, from the project’s History: restore that one change, or everything back to a point. History covers the schema, auth, storage, functions, webhooks, environment variables, keys and integrations, and each restore is checked before it runs. Data your app wrote since is never rewound, and a restore that would affect it waits for your approval. The agent can ask for a restore, but only you can approve one.',
+      a: 'Yes, from the project’s History: restore that one change, or everything back to a point. History covers the schema, auth, storage, functions, webhooks, environment variables, keys, integrations and allowed origins, and each restore is checked before it runs. Data your app wrote since is never rewound, and a restore that would affect it waits for your approval. The agent can ask for a restore, but only you can approve one.',
     },
   ],
 

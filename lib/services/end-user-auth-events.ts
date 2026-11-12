@@ -1,14 +1,16 @@
 /**
- * `auth.user.created`, emitted the same way by both servers that take end-user
- * sign-ups.
+ * `auth.user.created` and `on_signup` AI functions, emitted the same way by
+ * every path that creates an end user (#147, #599).
  *
  * The Next route (app/api/v1/[projectId]/auth/signup, where Backenly Cloud's
- * load balancer sends sign-ups) and the Express runtime (server/routes/auth.ts,
- * what a single-box install serves) each had their own copy of what follows a
- * sign-up. Only the Next route emitted this event, so a self-hosted project's
- * webhook for it never fired. And it emitted it for the contract sweep's
- * synthetic `…@*.internal` sign-ups too, so any customer who subscribed would
- * have received a fake sign-up every minute.
+ * load balancer sends sign-ups), the Express runtime (server/routes/auth.ts,
+ * what a single-box install serves), the OAuth callback (server/routes/oauth.ts),
+ * and magic-link sign-in (lib/services/end-user-auth-flows.ts) all create
+ * end users.
+ *
+ * Both the external webhook (`auth.user.created`) and internal serverless
+ * AI functions (`on_signup`) are dispatched from this single helper so the
+ * two cannot drift apart (#599).
  *
  * The payload is built field by field from a fixed list, never by spreading the
  * inserted row: the users table holds the password hash, and any credential
@@ -39,16 +41,30 @@ export function endUserCreatedPayload(user: CreatedEndUser) {
 }
 
 /**
- * Notify the project's `auth.user.created` subscribers. Never throws and never
- * delays the sign-up; reserved test accounts are skipped here, in the one
- * function both servers call, so neither can forget.
+ * Notify the project's `auth.user.created` subscribers and trigger any
+ * `on_signup` AI functions. Never throws and never delays the sign-up;
+ * reserved test accounts are skipped here, in the one function every
+ * creation path calls, so none can forget (#599).
  */
 export async function emitEndUserCreated(projectId: string, user: CreatedEndUser): Promise<void> {
   if (isReservedTestEmail(user.email)) return
-  try {
-    const { triggerWebhooks } = await import('@/lib/webhooks')
-    await triggerWebhooks(projectId, 'auth.user.created', endUserCreatedPayload(user))
-  } catch (err: any) {
-    console.warn('[Webhooks] auth.user.created failed (non-fatal):', err?.message)
-  }
+
+  await Promise.allSettled([
+    (async () => {
+      try {
+        const { triggerWebhooks } = await import('@/lib/webhooks')
+        await triggerWebhooks(projectId, 'auth.user.created', endUserCreatedPayload(user))
+      } catch (err: any) {
+        console.warn('[Webhooks] auth.user.created failed (non-fatal):', err?.message)
+      }
+    })(),
+    (async () => {
+      try {
+        const { fireAiFunctionsOnSignup } = await import('@/lib/services/ai-functions/executor')
+        await fireAiFunctionsOnSignup(projectId, { id: user.id, email: user.email, name: user.name })
+      } catch (err: any) {
+        console.warn('[AiFunctions] on_signup failed (non-fatal):', err?.message)
+      }
+    })(),
+  ])
 }

@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express'
+import rateLimit from 'express-rate-limit'
 import { clientIpFromNodeRequest } from '@/lib/security/client-ip'
 import { prisma } from '@/lib/db'
 import { workspaceRawClient } from '@/lib/data-plane/regional'
@@ -10,6 +11,7 @@ import { sendError, sendSuccess, ErrorCodes } from '../lib/response'
 import {
   refreshEndUserToken,
   logoutEndUser,
+  currentEndUser,
   forgotEndUserPassword,
   resetEndUserPassword,
   requestEmailVerification,
@@ -20,6 +22,8 @@ import {
 } from '@/lib/services/end-user-auth-flows'
 import { getAuthEmailContext } from '@/lib/services/end-user-auth-email'
 import { z } from 'zod'
+import { signInSchema, signUpSchema } from '@/lib/api/v1/schemas'
+import { describeIssues, plainErrorMap } from '@/lib/validation/plain-issues'
 import jwt from 'jsonwebtoken'
 import { JWTSecretManager, resolveJwtSecret } from '@/lib/services/jwtSecretManager'
 import { asyncRoute } from '../lib/async-route'
@@ -38,7 +42,15 @@ import { admitSigninAttempt, admitSigninRequest } from '@/lib/security/end-user-
 import { admitExistenceCheck, admitSignupRequest } from '@/lib/security/end-user-signup-limit'
 import { isPlatformProbe } from '@/lib/security/platform-probe'
 import { throttleDecision } from '@/lib/security/rate-limit-decision'
-import type { RateLimitResult } from '@/lib/security/auth-rate-limit'
+import { AUTH_LIMITS, consume, type RateLimitResult } from '@/lib/security/auth-rate-limit'
+import { platformLimiterStore } from '@/lib/security/shared-key-rate'
+import {
+  RESET_PAGE_HEADERS,
+  resetPasswordPage,
+  submitResetPasswordForm,
+  throttledResetPage,
+  type ResetPage,
+} from '@/lib/services/end-user-reset-page'
 
 const router = Router()
 
@@ -73,17 +85,8 @@ async function authEnvironment(req: Request, res: Response): Promise<AuthEnviron
 
 // End-user passwords must be at least 8 chars. Project owners can opt into
 // stricter rules via their auth config; this is the floor that the runtime
-// enforces regardless of project config.
-const signUpSchema = z.object({
-  email: z.string().email(),
-  password: z.string().min(8, 'Password must be at least 8 characters'),
-  name: z.string().optional(),
-})
-
-const signInSchema = z.object({
-  email: z.string().email(),
-  password: z.string(),
-})
+// enforces regardless of project config. The schemas and their words are the
+// web tier's own (lib/api/v1/schemas.ts), so a body is refused the same way here.
 
 // In-memory IP throttle for the emailed end-user flows below (recovery,
 // verification, magic links). The address is the one lib/security/client-ip.ts
@@ -155,11 +158,10 @@ async function handleSignUp(req: Request, res: Response) {
     const env = await authEnvironment(req, res)
     if (!env) return
 
-    const parsed = signUpSchema.safeParse(req.body)
+    const parsed = signUpSchema.safeParse(req.body, { errorMap: plainErrorMap })
     if (!parsed.success) {
-      sendError(res, ErrorCodes.VALIDATION_ERROR, 'Request validation failed', 400, {
-        fields: parsed.error.flatten().fieldErrors,
-      })
+      const refused = describeIssues(parsed.error)
+      sendError(res, ErrorCodes.VALIDATION_ERROR, refused.message, 400, { fields: refused.fields })
       return
     }
 
@@ -274,19 +276,9 @@ async function handleSignUp(req: Request, res: Response) {
       // installs, did not.
       trackEndUserActive(projectId, String(user.id), user.email).catch(() => {})
 
-      // auth.user.created, through the emitter the Next route also uses. This
-      // server never emitted it, so a single-box install's subscribers never heard
-      // of a sign-up. Reserved test accounts are skipped inside.
+      // auth.user.created and on_signup AI functions (#599), through the emitter
+      // the Next route also uses. Reserved test accounts are skipped inside.
       void emitEndUserCreated(projectId, user)
-
-      // Non-blocking: fire on_signup AI functions. Synthetic verifier accounts are
-      // filtered inside fireAiFunctionsOnSignup, not here — two signup routes call
-      // it and a guard at the call site only ever covers one of them.
-      import('@/lib/services/ai-functions/executor').then(({ fireAiFunctionsOnSignup }) => {
-        fireAiFunctionsOnSignup(projectId, { id: user.id, email: user.email, name: user.name }).catch(
-          (err: any) => console.warn('[AiFunctions] on_signup failed (non-fatal):', err?.message)
-        )
-      }).catch(() => {})
     }
 
     // Non-blocking: the branded verification email (24h token), only where the
@@ -349,11 +341,10 @@ async function handleSignIn(req: Request, res: Response) {
     const env = await authEnvironment(req, res)
     if (!env) return
 
-    const parsed = signInSchema.safeParse(req.body)
+    const parsed = signInSchema.safeParse(req.body, { errorMap: plainErrorMap })
     if (!parsed.success) {
-      sendError(res, ErrorCodes.VALIDATION_ERROR, 'Request validation failed', 400, {
-        fields: parsed.error.flatten().fieldErrors,
-      })
+      const refused = describeIssues(parsed.error)
+      sendError(res, ErrorCodes.VALIDATION_ERROR, refused.message, 400, { fields: refused.fields })
       return
     }
 
@@ -512,6 +503,47 @@ async function handleLogout(req: Request, res: Response) {
   res.status(result.status).json(result.body)
 }
 
+/**
+ * Reads of /auth/me from one address, per project (AUTH_LIMITS.endUserMe), in
+ * the platform's shared store so every runtime process counts the same
+ * window. The address is lib/security/client-ip.ts's, never req.ip.
+ */
+const meReadsFromAnAddress = rateLimit({
+  windowMs: AUTH_LIMITS.endUserMe.ip.windowMs,
+  limit: AUTH_LIMITS.endUserMe.ip.limit,
+  keyGenerator: (req) => `end-user-me:${req.params.projectId}:${ipFrom(req)}`,
+  store: platformLimiterStore(AUTH_LIMITS.endUserMe.ip.limit, AUTH_LIMITS.endUserMe.ip.windowMs),
+  standardHeaders: false,
+  legacyHeaders: false,
+  validate: { ip: false, trustProxy: false, xForwardedForHeader: false },
+  handler: (req, res) => {
+    const resetAt = (req as Request & { rateLimit?: { resetTime?: Date } }).rateLimit?.resetTime?.getTime()
+      ?? Date.now() + AUTH_LIMITS.endUserMe.ip.windowMs
+    sendThrottled(res, {
+      allowed: false,
+      outcome: 'limit_exceeded',
+      remaining: 0,
+      resetAt,
+      retryAfter: Math.max(1, Math.ceil((resetAt - Date.now()) / 1000)),
+    })
+  },
+})
+
+/**
+ * GET /api/v1/:projectId/auth/me
+ * The signed-in end user. The token is read from Authorization (Bearer) or
+ * X-User-Token, the header the SDK sends it in. Mounted before the OAuth
+ * router, whose /auth/:provider used to answer this path with a 404.
+ */
+async function handleMe(req: Request, res: Response) {
+  const env = await authEnvironment(req, res)
+  if (!env) return
+  const header = req.headers['x-user-token']
+  const token = tokenFrom(req) ?? (typeof header === 'string' && header ? header : null)
+  const result = await currentEndUser(req.params.projectId, token, env)
+  res.status(result.status).json(result.body)
+}
+
 async function handleForgotPassword(req: Request, res: Response) {
   const { projectId } = req.params
   // IP rate limit — this endpoint can trigger emails, so it needs its own
@@ -534,6 +566,40 @@ async function handleResetPassword(req: Request, res: Response) {
     req.body?.password,
   )
   res.status(result.status).json(result.body)
+}
+
+function sendResetPage(res: Response, page: ResetPage) {
+  res.status(page.status).set(RESET_PAGE_HEADERS).type('html').send(page.html)
+}
+
+/**
+ * GET /auth/reset?token=… — where a reset email links when the project has no
+ * App URL: Backenly's own reset form (lib/services/end-user-reset-page.ts).
+ * Opening it never spends the link.
+ */
+async function handleResetPage(req: Request, res: Response) {
+  sendResetPage(res, await resetPasswordPage(req.params.projectId, req.query.token))
+}
+
+/**
+ * POST /auth/reset — the hosted form's submission. Limited per address from
+ * the same budget as Next's POST /auth/reset-password, so the form is not a
+ * way around it.
+ */
+async function handleResetForm(req: Request, res: Response) {
+  const { projectId } = req.params
+  const limit = await consume(
+    `v1:endUserRecover:${projectId}:${ipFrom(req)}`,
+    AUTH_LIMITS.endUserRecover.ip.limit,
+    AUTH_LIMITS.endUserRecover.ip.windowMs,
+  )
+  if (!limit.allowed) {
+    const d = throttleDecision(limit)
+    res.set(d.headers)
+    sendResetPage(res, await throttledResetPage(projectId, d.status, limit.retryAfter))
+    return
+  }
+  sendResetPage(res, await submitResetPasswordForm(projectId, req.body ?? {}))
 }
 
 // ── Email verification + magic links ─────────────────────────────────────────
@@ -648,6 +714,7 @@ router.post('/:projectId/auth/signup', asyncRoute(handleSignUp))
 router.post('/:projectId/auth/signin', asyncRoute(handleSignIn))
 router.post('/:projectId/auth/refresh-token', asyncRoute(handleRefreshToken))
 router.post('/:projectId/auth/logout', asyncRoute(handleLogout))
+router.get('/:projectId/auth/me', asyncRoute(meReadsFromAnAddress), asyncRoute(handleMe))
 router.post('/:projectId/auth/verify-email', asyncRoute(handleVerifyEmail))
 router.get('/:projectId/auth/verify-email', asyncRoute(handleVerifyEmailPage))
 router.post('/:projectId/auth/resend-verification', asyncRoute(handleResendVerification))
@@ -656,6 +723,8 @@ router.post('/:projectId/auth/magic-link/verify', asyncRoute(handleMagicLinkVeri
 router.get('/:projectId/auth/magic', asyncRoute(handleMagicPage))
 router.post('/:projectId/auth/forgot-password', asyncRoute(handleForgotPassword))
 router.post('/:projectId/auth/reset-password', asyncRoute(handleResetPassword))
+router.get('/:projectId/auth/reset', asyncRoute(handleResetPage))
+router.post('/:projectId/auth/reset', asyncRoute(handleResetForm))
 
 // Aliases — AI platforms (Lovable, Replit, Base44) generate /auth/login and
 // /auth/register instead of Backenly's /auth/signin and /auth/signup.

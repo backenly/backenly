@@ -11,6 +11,8 @@ import path from 'path'
 import fs from 'fs/promises'
 import os from 'os'
 import { recordedV1 } from '@/lib/traffic/recorded-v1'
+import { cacheControlFor, clampIsPublic } from '@/lib/storage/access-policy'
+import { apiUploader, uploaderOf } from '@/lib/storage/uploader'
 import { forgetFileNames, keepFileNames, storedFileName, withFileName } from '@/lib/storage/file-names'
 
 const CHUNK_UPLOAD_DIR = process.env.CHUNK_TEMP_DIR || path.join(os.tmpdir(), 'backenly-chunks')
@@ -70,7 +72,8 @@ async function handleInitiate(request: NextRequest, context: { projectId: string
     return createErrorResponse(ErrorCodes.BAD_REQUEST, 'Request body must be JSON', 400)
   }
 
-  const { filename, contentType, contentLength, bucket: bucketName = 'videos', isPublic = false } = body
+  const { filename, contentType, contentLength, bucket: bucketName = 'videos' } = body
+  const requestedPublic = body.isPublic === undefined || body.isPublic === null ? undefined : body.isPublic === true || body.isPublic === 'true'
 
   if (!filename || !contentType || !contentLength) {
     return createErrorResponse(ErrorCodes.BAD_REQUEST, 'filename, contentType, and contentLength are required', 400)
@@ -95,10 +98,18 @@ async function handleInitiate(request: NextRequest, context: { projectId: string
   })
   if (!bucketRecord) {
     // history: provisioned by the first upload, on the data plane, which never waits for the change lock
+    // An upload never opens a bucket: one it creates is private until its owner
+    // sets the access policy.
     bucketRecord = await prisma.storageBucket.create({
-      data: { name: bucketName, projectId: context.projectId, isPublic: Boolean(isPublic), maxFileSizeBytes: BigInt(MAX_ASSEMBLED_BYTES) },
+      data: { name: bucketName, projectId: context.projectId, isPublic: false, maxFileSizeBytes: BigInt(MAX_ASSEMBLED_BYTES) },
     })
   }
+  // The file follows its bucket unless the upload says otherwise, and never past
+  // it (lib/storage/access-policy.ts).
+  const isPublic = clampIsPublic(requestedPublic, bucketRecord.accessPolicy)
+  // Who is sending it, recorded on the tracking row and carried to the file
+  // (lib/storage/uploader.ts): the signed-in end user, else the key.
+  const uploader = apiUploader(context)
 
   // S3 multipart initiation
   if (process.env.STORAGE_DRIVER === 's3' && isS3Configured()) {
@@ -111,10 +122,15 @@ async function handleInitiate(request: NextRequest, context: { projectId: string
       // The key is recorded on the platform row (its path), so a regional
       // project's names only by their stand-in (lib/storage/file-names.ts).
       const s3Key = `projects/${context.projectId}/buckets/${bucketName}/${uploadId}/${await storedFileName(context.projectId, safeFilename)}`
+      // A public object says how long it may be kept, as the S3 driver's
+      // uploads do (lib/services/s3Storage.ts): set here, on the object the
+      // parts assemble into.
+      const cacheControl = cacheControlFor(bucketRecord.accessPolicy, isPublic)
       const cmd = new CreateMultipartUploadCommand({
         Bucket: s3Bucket,
         Key: s3Key,
         ContentType: contentType,
+        ...(cacheControl.startsWith('public') ? { CacheControl: cacheControl } : {}),
         Metadata: { projectId: context.projectId, bucketId: bucketRecord.id },
       })
       const { UploadId: s3UploadId } = await s3.send(cmd)
@@ -134,11 +150,11 @@ async function handleInitiate(request: NextRequest, context: { projectId: string
           path: s3Key,
           size: BigInt(contentLength),
           mimeType: contentType,
-          isPublic: Boolean(isPublic),
+          isPublic,
           // The end user who started it (requireStorageWriter): it may be aborted
           // by them, and the finished file is theirs under owner_only.
           uploadedBy: context.endUserId ?? null,
-          metadata: { uploadId, s3UploadId, s3Key, status: 'uploading' },
+          metadata: { uploadId, s3UploadId, s3Key, status: 'uploading', uploader: { ...uploader } },
         },
       })
 
@@ -172,9 +188,9 @@ async function handleInitiate(request: NextRequest, context: { projectId: string
       path: `${uploadId}/${stored.name}`,
       size: BigInt(contentLength),
       mimeType: contentType,
-      isPublic: Boolean(isPublic),
+      isPublic,
       uploadedBy: context.endUserId ?? null,
-      metadata: { uploadId, chunkDir, status: 'uploading', contentType, bucketId: bucketRecord.id },
+      metadata: { uploadId, chunkDir, status: 'uploading', contentType, bucketId: bucketRecord.id, uploader: { ...uploader } },
     },
   })
 
@@ -348,9 +364,10 @@ async function handleComplete(request: NextRequest, uploadId: string, totalParts
     bucket.id,
     // The real name: a regional project's tracking row holds only its stand-in.
     { name: (await withFileName(projectId, fileRecord)).name, buffer: assembled, mimeType: fileRecord.mimeType || 'application/octet-stream' },
-    // The uploader recorded when it started: the end user, or null for a
-    // service-key upload, which reads as operator-only under owner_only.
-    { isPublic: fileRecord.isPublic, projectId, uploadedBy: fileRecord.uploadedBy ?? undefined }
+    // The uploader the initiate step recorded on the tracking row. A row
+    // without one (an upload begun before it was recorded) stays unknown,
+    // which owner_only reads as operator-only: closed rather than broken.
+    { isPublic: fileRecord.isPublic, projectId, uploadedBy: fileRecord.uploadedBy ?? undefined, uploader: uploaderOf(fileRecord) ?? undefined }
   )
   // Clean up temp chunks
   fs.rm(chunkDir, { recursive: true, force: true }).catch(() => null)

@@ -8,6 +8,8 @@ import { assertQuotaAvailable, QuotaExceededError } from '@/lib/services/storage
 import { getS3Client, getS3Config, isS3Configured } from '@/lib/services/s3-config'
 import crypto from 'crypto'
 import { recordedV1 } from '@/lib/traffic/recorded-v1'
+import { clampIsPublic } from '@/lib/storage/access-policy'
+import { apiUploader } from '@/lib/storage/uploader'
 import { keepFileNames, storedFileName } from '@/lib/storage/file-names'
 
 const ALLOWED_VIDEO_TYPES = new Set([
@@ -50,7 +52,7 @@ const SIGNED_URL_TTL_SECONDS = parseInt(
  *   contentLength: number,   // file size in bytes
  *   bucket?: string,         // default: "videos"
  *   path?: string,           // optional path prefix inside bucket
- *   isPublic?: boolean,      // default: false
+ *   isPublic?: boolean,      // default: the bucket's access policy
  * }
  *
  * Response: {
@@ -83,7 +85,8 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
       return createErrorResponse(ErrorCodes.BAD_REQUEST, 'Request body must be JSON', 400)
     }
 
-    const { filename, contentType, contentLength, bucket: bucketName = 'videos', path: pathPrefix = '', isPublic = false } = body
+    const { filename, contentType, contentLength, bucket: bucketName = 'videos', path: pathPrefix = '' } = body
+    const requestedPublic = body.isPublic === undefined || body.isPublic === null ? undefined : body.isPublic === true || body.isPublic === 'true'
 
     if (!filename || typeof filename !== 'string') {
       return createErrorResponse(ErrorCodes.BAD_REQUEST, '"filename" is required', 400)
@@ -132,14 +135,20 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
     })
     if (!bucketRecord) {
       // history: provisioned by the first upload, on the data plane, which never waits for the change lock
+      // An upload never opens a bucket: one it creates is private until its
+      // owner sets the access policy. Labelling it public from one file's flag
+      // left isPublic and accessPolicy disagreeing.
       bucketRecord = await prisma.storageBucket.create({
         data: {
           name: bucketName,
           projectId: context.projectId,
-          isPublic: Boolean(isPublic),
+          isPublic: false,
         },
       })
     }
+    // The file follows its bucket unless the upload says otherwise, and never
+    // past it (lib/storage/access-policy.ts).
+    const isPublic = clampIsPublic(requestedPublic, bucketRecord.accessPolicy)
 
     // ── Build storage path ────────────────────────────────────────────────
     const safeFilename = filename.replace(/[^a-zA-Z0-9._\-]/g, '_')
@@ -200,8 +209,12 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
             path: s3Key,
             size: BigInt(contentLength),
             mimeType: contentType,
-            isPublic: Boolean(isPublic),
-            metadata: { uploadId, status: 'pending', s3Key },
+            isPublic,
+            // Who is sending it (lib/storage/uploader.ts): the signed-in end
+            // user, else the key. The end user is the uploader owner_only
+            // buckets compare against, as with the form upload.
+            uploadedBy: context.endUserId ?? null,
+            metadata: { uploadId, status: 'pending', s3Key, uploader: { ...apiUploader(context) } },
           },
         })
 

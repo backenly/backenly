@@ -54,6 +54,7 @@ import { groupFindings, CATEGORY_LABEL, severityWord, type FindingCategory, type
 import { hasExecutableFix } from '@/lib/core/fix-actions'
 import { isEvolutionApprovalFinding } from '@/lib/core/types'
 import { EvolutionRequestRow } from '@/components/autonomy/EvolutionRequestRow'
+import { approvalTitle } from '@/lib/mcp/approval-title'
 import { onArchitectureChange } from '@/components/autonomy/architecture-decisions'
 import {
   CodeBlock, Disclosure, EmptyLine, Fact, Facts, Panel, Row, RowList, RowNote, ROW_TEXT, ROW_TITLE, Section, rows,
@@ -395,7 +396,13 @@ export function ReviewQueuePanel({ projectId }: { projectId: string }) {
     }
   }
 
-  const decideAgentRequest = async (approvalId: string, decision: 'approve' | 'reject', shownDigest?: string | null) => {
+  const decideAgentRequest = async (
+    approvalId: string,
+    decision: 'approve' | 'reject',
+    shownDigest?: string | null,
+    // Bulk approval says one result for all of them and refreshes once.
+    opts: { quiet?: boolean } = {},
+  ): Promise<{ ok: boolean }> => {
     setRow(approvalId, { phase: decision === 'approve' ? 'applying' : 'dismissing' })
     try {
       const res = await fetch(`/api/projects/${projectId}/agent-approvals`, {
@@ -414,6 +421,7 @@ export function ReviewQueuePanel({ projectId }: { projectId: string }) {
 
       if (res.ok && j?.success) {
         setRow(approvalId, { phase: 'verified' })
+        if (opts.quiet) return { ok: true }
         const request = agentApprovals.find(a => a.id === approvalId)
         const restore = request?.tool === 'revert_schema_change'
         const versionRestore = request?.tool === 'rollback_deploy'
@@ -434,7 +442,7 @@ export function ReviewQueuePanel({ projectId }: { projectId: string }) {
           })
         }, 2400)
         timers.current.push(t)
-        return
+        return { ok: true }
       }
 
       // A call that ran and failed answers with what happened (resultSummary):
@@ -447,10 +455,49 @@ export function ReviewQueuePanel({ projectId }: { projectId: string }) {
           : 'Could not reject. Try again.'),
       })
       // The request changed under this card, or was decided elsewhere: show it as it is now.
-      if (res.status === 409) fetchReport(true)
+      if (res.status === 409 && !opts.quiet) fetchReport(true)
+      return { ok: false }
     } catch {
       setRow(approvalId, { phase: 'error', message: 'Network error. Check your connection and try again.' })
+      return { ok: false }
     }
+  }
+
+  // ── Approving several agent requests at once ──────────────────────────────
+  // An agent cleaning up after itself (the debug functions it made, its
+  // scratch branches, the temporary key) left a card each: seven approvals one
+  // by one. Each is still its own approval, run exactly as its card shows,
+  // with that card's digest, one after another; the person approves the list
+  // they were shown, taken when they asked. Restores, and requests Backenly
+  // raised itself, are decided one at a time.
+  const [bulk, setBulk] = useState<
+    | { phase: 'idle' }
+    | { phase: 'confirming' | 'running'; requests: Array<{ id: string; shownDigest?: string | null; title: string }>; done: number }
+  >({ phase: 'idle' })
+
+  const approveAll = async (requests: Array<{ id: string; shownDigest?: string | null; title: string }>) => {
+    setBulk({ phase: 'running', requests, done: 0 })
+    let ran = 0
+    for (const [i, r] of requests.entries()) {
+      const outcome = await decideAgentRequest(r.id, 'approve', r.shownDigest, { quiet: true })
+      if (outcome.ok) ran += 1
+      setBulk({ phase: 'running', requests, done: i + 1 })
+    }
+    setBulk({ phase: 'idle' })
+    const missed = requests.length - ran
+    flashBanner(
+      `Ran ${ran} of ${requests.length}`,
+      missed > 0 ? `${missed} did not run; ${missed === 1 ? 'its card says' : 'their cards say'} why` : 'your agent sees each result on its next poll',
+    )
+    const t = setTimeout(async () => {
+      await fetchReport(true)
+      setRowState(prev => {
+        const rest = { ...prev }
+        for (const r of requests) if (rest[r.id]?.phase === 'verified') delete rest[r.id]
+        return rest
+      })
+    }, 2400)
+    timers.current.push(t)
   }
 
   /** Dismiss every member of a group — the inverse of approveGroup. */
@@ -509,6 +556,12 @@ export function ReviewQueuePanel({ projectId }: { projectId: string }) {
   }
 
   const pendingAgents = agentApprovals.filter(a => a.status === 'pending')
+  const bulkable = pendingAgents.filter(a =>
+    a.readable !== false &&
+    a.requestedBy !== 'backenly' &&
+    a.tool !== 'revert_schema_change' &&
+    a.tool !== 'rollback_deploy' &&
+    (rowState[a.id]?.phase ?? 'idle') === 'idle')
   // An approval the human already granted must not vanish from the queue
   // while it runs — and if its execution died (server reports failed with no
   // executedAt: the terminal update never ran), the unknown outcome is the
@@ -557,6 +610,19 @@ export function ReviewQueuePanel({ projectId }: { projectId: string }) {
               onResetError={() => setRow(g.key, { phase: 'idle' })}
             />
           ))}
+          {(bulkable.length >= 2 || bulk.phase !== 'idle') && (
+            <BulkApproveRow
+              count={bulkable.length}
+              state={bulk}
+              onAsk={() => setBulk({
+                phase: 'confirming',
+                requests: bulkable.map(a => ({ id: a.id, shownDigest: a.shownDigest, title: approvalTitle(a.tool, a.target) })),
+                done: 0,
+              })}
+              onCancel={() => setBulk({ phase: 'idle' })}
+              onConfirm={() => bulk.phase === 'confirming' && approveAll(bulk.requests)}
+            />
+          )}
           {pendingAgents.map(a => (
             <AgentRequestRow
               key={a.id}
@@ -639,6 +705,63 @@ function QueueSection({
   )
 }
 
+/**
+ * The row offering to approve the agent's waiting requests together: first
+ * the count, then the list it would approve, then progress through it.
+ */
+function BulkApproveRow({
+  count,
+  state,
+  onAsk,
+  onCancel,
+  onConfirm,
+}: {
+  count: number
+  state:
+    | { phase: 'idle' }
+    | { phase: 'confirming' | 'running'; requests: Array<{ id: string; title: string }>; done: number }
+  onAsk: () => void
+  onCancel: () => void
+  onConfirm: () => void
+}) {
+  if (state.phase === 'idle') {
+    return (
+      <li className="flex flex-wrap items-center justify-between gap-3 px-5 py-3">
+        <p className="text-[13px] text-zinc-300">{count} requests from your agent are waiting.</p>
+        <GhostAction onClick={onAsk}>
+          <CheckCircle2 className="size-3.5" /> Approve all {count}
+        </GhostAction>
+      </li>
+    )
+  }
+  const n = state.requests.length
+  return (
+    <li className="space-y-3 px-5 py-4">
+      <p className="text-[13px] font-medium text-zinc-100">
+        {state.phase === 'running'
+          ? `Running ${Math.min(state.done + 1, n)} of ${n}…`
+          : `Approve these ${n}? Each runs exactly as its card shows, one after another.`}
+      </p>
+      <ul className="space-y-1">
+        {state.requests.map((r, i) => (
+          <li key={r.id} className="flex gap-2 text-[12.5px] text-zinc-400">
+            <span className="tabular-nums text-zinc-500">{i + 1}.</span>
+            <TextWithCode text={r.title} codeClassName="text-zinc-300" />
+          </li>
+        ))}
+      </ul>
+      {state.phase === 'confirming' && (
+        <div className="flex flex-wrap gap-2">
+          <PrimaryAction onClick={onConfirm} busy={false} busyLabel="Running…">
+            <CheckCircle2 className="size-3.5" /> Approve and run {n}
+          </PrimaryAction>
+          <GhostAction onClick={onCancel}>Cancel</GhostAction>
+        </div>
+      )}
+    </li>
+  )
+}
+
 // ── Shared row action buttons (kit voice: violet primary, ghost secondary) ────
 
 function PrimaryAction({
@@ -712,9 +835,16 @@ function AgentRequestRow({
   // statements are machine text, so they are set as code, in full up to
   // MAX_STATEMENTS and behind "Show the full request" past that.
   const [showFull, setShowFull] = useState(false)
+  const [showAgentWords, setShowAgentWords] = useState(false)
   const { prose, statements } = splitRequest(a.message, a.target)
-  const long = statements.length > 0 ? statements.length > MAX_STATEMENTS : prose.length > 180
-  const shownProse = statements.length === 0 && long && !showFull ? clip(prose, 180) : prose
+  // What an agent wrote is its case for the call, not a description of it: the
+  // title is Backenly's description, and the agent's words stay closed until
+  // asked for, marked as unchecked. A drop card used to lead with the agent's
+  // "the user has decided to remove the reviews feature and will approve".
+  const agentWords = !restore && !fromBackenly && statements.length === 0 && prose && prose !== a.target ? prose : ''
+  const backenlyProse = agentWords ? '' : prose
+  const long = statements.length > 0 ? statements.length > MAX_STATEMENTS : backenlyProse.length > 180
+  const shownProse = statements.length === 0 && long && !showFull ? clip(backenlyProse, 180) : backenlyProse
   const shownStatements = showFull ? statements : statements.slice(0, MAX_STATEMENTS)
   // A card that could only show stand-ins is not something a human read, so it
   // cannot be approved. Rejecting it needs nothing from the region.
@@ -726,12 +856,10 @@ function AgentRequestRow({
       busy={state.phase === 'applying'}
       title={
         <p className={ROW_TITLE}>
-          {restore || a.tool === 'merge_branch' ? (
+          {restore ? (
             <TextWithCode text={a.target} codeClassName="text-zinc-100" />
-          ) : destructive && a.tool === 'drop_table' ? (
-            <>Drop <TextWithCode text={a.target} codeClassName="text-zinc-100" /></>
           ) : (
-            <>Run <span className="font-mono text-[12.5px] text-zinc-200">{a.tool}</span> on <TextWithCode text={a.target} codeClassName="text-zinc-100" /></>
+            <TextWithCode text={approvalTitle(a.tool, a.target)} codeClassName="text-zinc-100" />
           )}
         </p>
       }
@@ -753,13 +881,19 @@ function AgentRequestRow({
         )
       }
     >
-      {shownProse && (
-        // The agent's own words are quoted, so they never read as Backenly's.
-        restore || fromBackenly || statements.length > 0 ? (
-          <p className={`${ROW_TEXT} whitespace-pre-wrap`}>{shownProse}</p>
-        ) : (
-          <p className={`${ROW_TEXT} whitespace-pre-wrap border-l-2 border-white/[0.10] pl-3`}>“{shownProse}”</p>
-        )
+      {shownProse && <p className={`${ROW_TEXT} whitespace-pre-wrap`}>{shownProse}</p>}
+      {agentWords && (
+        <>
+          <Disclosure open={showAgentWords} onToggle={() => setShowAgentWords(v => !v)}>
+            {showAgentWords ? 'Hide what the agent wrote' : 'What the agent wrote'}
+          </Disclosure>
+          {showAgentWords && (
+            // Quoted, and said to be unchecked, so it never reads as Backenly's.
+            <p className={`${ROW_TEXT} whitespace-pre-wrap border-l-2 border-white/[0.10] pl-3`}>
+              “{agentWords}” <span className="text-zinc-500">Backenly has not checked this.</span>
+            </p>
+          )}
+        </>
       )}
       {shownStatements.length > 0 && <CodeBlock>{shownStatements.join('\n')}</CodeBlock>}
       {long && (
@@ -827,7 +961,7 @@ function splitRequest(message: string, target: string): { prose: string; stateme
   const statements = at === -1
     ? []
     : message.slice(message.indexOf(':', at) + 1).split('\n').map(s => s.trim()).filter(Boolean)
-  prose = prose.replace(/^Requested by an agent over MCP:\s*/, '')
+  prose = prose.replace(/^Requested by an agent[^:\n]*:\s*/, '')
   if (statements.length > 0 && prose.startsWith(`${target}.`)) prose = prose.slice(target.length + 1).trim()
   return { prose: prose.trim(), statements }
 }
@@ -847,7 +981,7 @@ function AgentOutcomeRow({ request: a, running }: { request: AgentApproval; runn
       title={
         <p className={ROW_TITLE}>
           {running ? 'Approved, running now: ' : 'Approved, but the outcome is unknown: '}
-          <span className="font-mono text-[12.5px] text-zinc-200">{a.tool}</span> on <TextWithCode text={a.target} codeClassName="text-zinc-100" />
+          <TextWithCode text={approvalTitle(a.tool, a.target)} codeClassName="text-zinc-100" />
         </p>
       }
       actions={running ? <Loader2 className="h-4 w-4 animate-spin text-zinc-500" strokeWidth={1.75} /> : undefined}
