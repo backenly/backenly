@@ -17,3 +17,13 @@ export const FUNCTION_OFF_STATUSES = ['inactive', 'disabled', 'deleted'] as cons
 export function isFunctionSwitchedOff(status: string | null | undefined): boolean {
   return status != null && (FUNCTION_OFF_STATUSES as readonly string[]).includes(status)
 }
+
+/**
+ * Prisma `where` clause fragment for functions that are runnable (not switched off).
+ *
+ * Excludes deliberate OFF states ('inactive', 'disabled', 'deleted') while keeping
+ * 'active' and 'error' (whose last run failed but remains deployed).
+ */
+export const RUNNABLE_FUNCTION_STATUS_FILTER: { notIn: string[] } = {
+  notIn: [...FUNCTION_OFF_STATUSES],
+}

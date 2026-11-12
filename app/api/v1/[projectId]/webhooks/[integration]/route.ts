@@ -21,6 +21,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db/prisma'
 import { getIntegrationKey } from '@/lib/services/integrationKeyStore'
 import { executeAiFunction, FunctionEvent } from '@/lib/services/ai-functions/executor'
+import { RUNNABLE_FUNCTION_STATUS_FILTER } from '@/lib/services/ai-functions/status'
 import { ERROR_TAXONOMY } from '@/lib/errors/taxonomy'
 import { recordedV1 } from '@/lib/traffic/recorded-v1'
 
@@ -246,7 +247,7 @@ async function handlePOST(
   const functions = await prisma.aiFunction.findMany({
     where: {
       projectId,
-      status: 'active',
+      status: RUNNABLE_FUNCTION_STATUS_FILTER,
       triggerType: 'on_webhook',
       triggerTable: integrationLower,
     },
@@ -258,7 +259,7 @@ async function handlePOST(
     const wildcardFunctions = await prisma.aiFunction.findMany({
       where: {
         projectId,
-        status: 'active',
+        status: RUNNABLE_FUNCTION_STATUS_FILTER,
         triggerType: 'on_webhook',
         triggerTable: null,
       },

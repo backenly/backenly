@@ -26,10 +26,10 @@ describe('the functions docs match the runtime', () => {
     expect(docs).toContain('a row trigger: `{ type, table, data, old }`. `type` is `"insert"`, `"update"` or `"delete"`')
   })
 
-  it('give the sign-up event the fields both servers send', () => {
-    for (const file of ['server/routes/auth.ts', 'app/api/v1/[projectId]/auth/signup/route.ts']) {
-      expect(read(file)).toContain('fireAiFunctionsOnSignup(projectId, { id: user.id, email: user.email, name: user.name })')
-    }
+  it('give the sign-up event the fields every sign-up path sends', () => {
+    // Password, OAuth and magic-link sign-ups all go through emitEndUserCreated,
+    // which fires on_signup functions with these fields (#599).
+    expect(read('lib/services/end-user-auth-events.ts')).toContain('fireAiFunctionsOnSignup(projectId, { id: user.id, email: user.email, name: user.name })')
     expect(docs).toContain('`on_signup`: `{ type: "signup", data: { id, email, name } }`')
   })
 

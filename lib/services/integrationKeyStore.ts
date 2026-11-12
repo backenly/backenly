@@ -130,6 +130,10 @@ const INTEGRATION_KEY_FORMATS: Record<string, KeyFormatSpec> = {
     valid: (k) => k.startsWith('re_'),
     hint: 'Resend API keys must start with re_',
   },
+  email_from: {
+    valid: (k) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(k.trim()),
+    hint: 'Sender email must be a valid email address (e.g. noreply@yourdomain.com)',
+  },
   posthog: {
     valid: (k) => k.startsWith('phc_'),
     hint: 'PostHog project API keys start with phc_. Find yours in PostHog → Project Settings → Project API key.',

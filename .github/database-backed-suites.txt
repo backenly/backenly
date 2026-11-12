@@ -1990,3 +1990,9 @@ tests/integration/readiness-counts-open-problems.spec.ts
 # minutes old and says when it was measured: a real schema with rows measured
 # by the production catalog query.
 tests/integration/usage-storage-measured-on-read.spec.ts
+
+# Connecting Resend or SendGrid stores the sender a function's email.send()
+# uses by default (email_from), says when none is set, and writes the
+# auto-wired functions against ctx.integrations.email.send(). A real project,
+# the real connect action and the real key store (#609).
+tests/integration/email-integration-wiring-sender.spec.ts
