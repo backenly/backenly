@@ -1432,6 +1432,14 @@ tests/integration/brain-chat-follow-up.spec.ts
 # Postgres.
 tests/integration/functions-runtime-honesty.spec.ts
 
+# A function whose code has started and then fails is run once: an order
+# insert, a receipt email and a ctx.http.post to a host that refuses the
+# connection, or drops it, give one order and one receipt, as does an error the
+# code throws itself and a call it never awaited. A sandbox that fails before
+# the code starts is started again, and the code still runs once (#606). Real
+# sandbox worker, function, log and workspace rows, and real connections.
+tests/integration/function-failure-runs-once.spec.ts
+
 # A service-role key is never minted by an agent: create_api_key with
 # serviceRole true is refused on the typed MCP door and the brain's door with
 # SERVICE_KEY_REQUIRES_HUMAN and mints nothing, publishable keys still work, and
