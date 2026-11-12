@@ -17,7 +17,8 @@
  *     with the workspace schema and public on its search_path, so a request is
  *     run here in exactly that session;
  *   - a second project on the database sees it installed;
- *   - an install is recorded where the console's is, from either door;
+ *   - an install is recorded where the console's is, from either door, and
+ *     a recovery of the rest of its migration leaves it and says so;
  *   - a name off the allowlist and a superuser-only one are refused before
  *     anything runs, with the console's reason; DROP and ALTER EXTENSION stay
  *     refused;
@@ -69,7 +70,7 @@ import { forgetProtection } from '@/lib/branches/protection'
 import { listExtensions, resetExtensionPool } from '@/lib/services/extensions'
 
 /** Installed or refused here, so absent when the suite starts. */
-const MANAGED = ['pg_trgm', 'citext', 'fuzzystrmatch', 'pgstattuple']
+const MANAGED = ['pg_trgm', 'citext', 'unaccent', 'fuzzystrmatch', 'pgstattuple']
 
 let ownerId: string
 let ownerEmail: string
@@ -294,6 +295,22 @@ describe('an agent installs an allowlisted extension in its migration', () => {
       (await c.query(`SELECT 'Ada@Example.com'::citext = 'ada@example.com' AS same`)).rows[0].same)
     expect(equal).toBe(true)
   }, 120_000)
+
+  it('keeps the extension when the rest of its migration is recovered, and says so', async () => {
+    // The seeded skus repeat, so the unique index fails after the install and
+    // a new table ran: Backenly restores the table, and the extension stays.
+    const r = await call(projects.store.key, 'apply_migration', {
+      sql: 'create extension if not exists unaccent; create table brands (label text); create unique index products_sku_key on products (sku)',
+    })
+    expect(r.status).toBe(400)
+    expect(r.body).toMatchObject({ code: 'MIGRATION_FAILED', recovered: true })
+    expect(r.body.applied.map((a: any) => a.tool)).toEqual(['install_extension'])
+    expect(r.body.rolledBack.map((a: any) => a.tool)).toEqual(['create_table'])
+    expect(r.body.hint).toMatch(/^Nothing but its extensions was applied\. The 1 statement\(s\) that ran before the failure were restored/)
+    expect(r.body.hint).toContain('The extensions it installed stay installed: an extension is database-wide, and Backenly never removes one.')
+    expect(await installedIn('unaccent')).toBe('public')
+    expect(await tableExists(projects.store.schema, 'brands')).toBe(false)
+  }, 180_000)
 })
 
 describe('what stays refused', () => {
