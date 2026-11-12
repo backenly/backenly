@@ -58,7 +58,7 @@ import { prisma } from '@/lib/db'
 import { verifyToken } from '@/lib/auth/jwt'
 import * as bcryptjs from 'bcryptjs'
 import * as jsonwebtoken from 'jsonwebtoken'
-import { loadProjectFnAuth, mintTestRunToken, ProjectFnAuth } from './project-fn-auth'
+import { loadProjectFnAuth, ProjectFnAuth, TEST_RUN_USER_ID } from './project-fn-auth'
 import { makeRlsAwarePrisma, refusingPrisma, type RlsAwarePrisma } from './rls-aware-db'
 import { functionDbClient, forgetFunctionDbClient } from './function-db-role'
 import type { RlsIdentity } from '@/lib/services/rls-session'
@@ -165,15 +165,59 @@ function makeCuratedProcess(withheld: string, projectEnv: Record<string, string>
   return Object.freeze({ env: Object.freeze(env) }) as { env: Record<string, string> }
 }
 
+// ─── An owner's test run ─────────────────────────────────────────────────────
+// The dashboard's Test, functions { action: "invoke" } and the generator's
+// smoke test run a function for someone who may change the project
+// (opts.testRun), and its admin and signed-in paths should answer them. The
+// runner used to do that by putting the project's admin key in x-admin-key and
+// a ten-minute token with role "admin", signed with the project's secret, in
+// x-user-token. Function code reads request.headers, so a function could keep
+// both when its owner clicked Test: the key passes every admin check of the
+// project's functions and runs their SQL as the service role, until the
+// project's signing secret changes, and the project's data API took the token
+// as an end user with role "admin".
+//
+// Nothing on the request is a credential now. The runner holds the fact that
+// the run is an owner's test (OwnerTest, which function code can neither read
+// nor set):
+//   - the function's SQL runs as the service role, as the admin key made it
+//     (the run's database handle keeps that identity, as an asService block's
+//     does);
+//   - until the run ends, isAdminRequest(request) answers true;
+//   - where a user's token would be, the request carries OWNER_TEST_TOKEN, and
+//     until the run ends every token check the function can make (verifyToken,
+//     jsonwebtoken's verify and decode) reads it as the test user.
+// The placeholder is not a secret: in any other run, and in this one once it
+// has ended, it is nobody.
+
+/** This run is an owner's test while `live`; the runner sets it false when the run ends. */
+interface OwnerTest {
+  live: boolean
+}
+
+/** What an owner's test request carries in x-user-token. Only that run's token checks read it, as the test user. */
+export const OWNER_TEST_TOKEN = 'owner-test-run'
+
+function isOwnerTestToken(ownerTest: OwnerTest | null, token: unknown): boolean {
+  return ownerTest?.live === true && token === OWNER_TEST_TOKEN
+}
+
+/** The test user an owner's test is signed in as: the claims the old test token carried, ten minutes of them. */
+function ownerTestUser(projectId: string) {
+  const iat = Math.floor(Date.now() / 1000)
+  return { userId: TEST_RUN_USER_ID, email: 'test-run@backenly.internal', role: 'admin', projectId, testRun: true, iat, exp: iat + 600 }
+}
+
 // ─── Project-aware auth shims ────────────────────────────────────────────────
 // Templates import verifyToken from '@/lib/auth/jwt'. Here it verifies against
 // the PROJECT's secret only: real end-user tokens are signed with it. It used to
 // fall back to the platform verifier for "legacy/internal tokens", which let a
 // Backenly session token, signed with the platform's secret for a person using
 // the console, pass as one of the project's end users.
-function makeProjectVerifyToken(auth: ProjectFnAuth) {
+function makeProjectVerifyToken(projectId: string, auth: ProjectFnAuth, ownerTest: OwnerTest | null) {
   const realJwt: typeof jsonwebtoken = (jsonwebtoken as any).default ?? jsonwebtoken
   return function projectVerifyToken(token: string): any {
+    if (isOwnerTestToken(ownerTest, token)) return ownerTestUser(projectId)
     if (!token || typeof token !== 'string' || !auth.jwtSecret) return null
     try {
       return realJwt.verify(token, auth.jwtSecret, { algorithms: ['HS256'] })
@@ -187,10 +231,12 @@ function makeProjectVerifyToken(auth: ProjectFnAuth) {
  * `isAdminRequest(request)`: true when the request carries this project's admin
  * key (Settings → Functions shows it), in `x-admin-key` or as a bearer token.
  * Compared here, so the function never holds the key. A project without one,
- * or a request without one, is never an admin.
+ * or a request without one, is never an admin. An owner's test run is one,
+ * while it lasts, and its request carries no key.
  */
-function makeIsAdminRequest(auth: ProjectFnAuth) {
+function makeIsAdminRequest(auth: ProjectFnAuth, ownerTest: OwnerTest | null) {
   return function isAdminRequest(request: any): boolean {
+    if (ownerTest?.live === true) return true
     if (!auth.adminKey) return false
     const headers = request?.headers
     const read = (name: string): string => {
@@ -284,11 +330,15 @@ function safeEqual(a: string, b: string): boolean {
 // Templates that signed tokens with the project secret omitted the projectId
 // claim, which the runtime requires; sign still adds it for a payload naming a
 // userId, for tokens a function signs with a secret of its own.
+//
+// In an owner's test run, verify (with any secret) and decode read
+// OWNER_TEST_TOKEN as the test user, so a token check that passed the signed
+// test token the placeholder replaces passes it too.
 export const SIGN_REFUSED =
   "Functions cannot sign the project's end-user sessions: Backenly no longer gives function code the project's signing secret. " +
   "Check a caller's token with verifyToken(token) from '@/lib/auth/jwt'."
 
-function makeJsonwebtokenShim(projectId: string, auth: ProjectFnAuth, withheld: string) {
+function makeJsonwebtokenShim(projectId: string, auth: ProjectFnAuth, withheld: string, ownerTest: OwnerTest | null) {
   const real: any = (jsonwebtoken as any).default ?? jsonwebtoken
   const sign = (payload: any, secret: any, ...rest: any[]) => {
     if (secret === withheld) throw new Error(SIGN_REFUSED)
@@ -300,9 +350,23 @@ function makeJsonwebtokenShim(projectId: string, auth: ProjectFnAuth, withheld: 
       !payload.projectId
     return real.sign(needsProjectId ? { ...payload, projectId } : payload, secret, ...rest)
   }
-  const verify = (token: any, secret: any, ...rest: any[]) =>
-    real.verify(token, secret === withheld ? (auth.jwtSecret ?? withheld) : secret, ...rest)
-  const shim: any = { ...real, sign, verify }
+  const testUser = (options: any) => {
+    const payload = ownerTestUser(projectId)
+    return options && typeof options === 'object' && options.complete
+      ? { header: { alg: 'HS256', typ: 'JWT' }, payload, signature: '' }
+      : payload
+  }
+  const verify = (token: any, secret: any, ...rest: any[]) => {
+    if (isOwnerTestToken(ownerTest, token)) {
+      // jsonwebtoken returns what its callback returns, when it is given one.
+      const done = typeof rest[rest.length - 1] === 'function' ? rest[rest.length - 1] : null
+      return done ? done(null, testUser(rest[0])) : testUser(rest[0])
+    }
+    return real.verify(token, secret === withheld ? (auth.jwtSecret ?? withheld) : secret, ...rest)
+  }
+  const decode = (token: any, ...rest: any[]) =>
+    isOwnerTestToken(ownerTest, token) ? testUser(rest[0]) : real.decode(token, ...rest)
+  const shim: any = { ...real, sign, verify, decode }
   shim.default = shim // CJS/ESM interop — `import jwt from 'jsonwebtoken'` gets the shim too
   return shim
 }
@@ -416,11 +480,12 @@ function buildRequire(
   auth: ProjectFnAuth,
   db: { prisma: RlsAwarePrisma; asService: AsService },
   withheld: string,
+  ownerTest: OwnerTest | null,
 ): (id: string) => any {
   const nextServer = makeNextServerShim()
-  const projectVerifyToken = makeProjectVerifyToken(auth)
-  const isAdminRequest = makeIsAdminRequest(auth)
-  const jwtShim = makeJsonwebtokenShim(projectId, auth, withheld)
+  const projectVerifyToken = makeProjectVerifyToken(projectId, auth, ownerTest)
+  const isAdminRequest = makeIsAdminRequest(auth, ownerTest)
+  const jwtShim = makeJsonwebtokenShim(projectId, auth, withheld, ownerTest)
   return (id: string) => {
     switch (id) {
       case 'next/server':
@@ -593,6 +658,7 @@ export function validateRouteModule(code: string, expectedMethod?: string | null
         asService: () => Promise.reject(new Error('The database is not reachable while a function is being validated.')),
       },
       validationWithheld,
+      null,
     ),
     console: { log() {}, error() {}, warn() {}, info() {} },
     URL, URLSearchParams, TextEncoder, TextDecoder, Buffer,
@@ -664,10 +730,12 @@ export interface RouteModuleRunOptions {
    */
   headers?: Record<string, string | undefined>
   /**
-   * True for owner-initiated dashboard test runs. Injects the project's
-   * admin key (x-admin-key) and a short-lived project-scoped admin end-user
-   * token, so auth-gated endpoints can actually be exercised instead of
-   * dead-ending in 401/403. Never set on public invocation paths.
+   * True for an owner's test run (the dashboard's Test, functions invoke, the
+   * generator's smoke test), so auth-gated endpoints are exercised instead of
+   * dead-ending in 401/403: the function's SQL runs as the service role,
+   * isAdminRequest answers true, and verifyToken reads OWNER_TEST_TOKEN as the
+   * test user. The request carries no key or signed token. Never set on public
+   * invocation paths.
    */
   testRun?: boolean
   /** Test hook: bypass the DB lookup for project auth material. */
@@ -683,7 +751,8 @@ export interface RouteModuleRunOptions {
  * Auth reaches the handler three ways, in priority order:
  *   1. forwarded real headers (opts.headers)
  *   2. legacy body fields (event.data.__authToken / .authorization / .token)
- *   3. test-run injection (opts.testRun) — project admin key + minted token
+ *   3. an owner's test run (opts.testRun), which the runner itself knows: the
+ *      request carries OWNER_TEST_TOKEN, never a key or a signed token
  */
 export async function executeRouteModuleFunction(
   code: string,
@@ -691,6 +760,26 @@ export async function executeRouteModuleFunction(
   event: { type: string; data: Record<string, any> },
   triggerTableHint?: string | null,
   opts: RouteModuleRunOptions = {}
+): Promise<RouteModuleRunResult> {
+  const ownerTest: OwnerTest | null = opts.testRun ? { live: true } : null
+  try {
+    return await runRouteModule(code, projectId, event, triggerTableHint, opts, ownerTest)
+  } finally {
+    // A helper the function kept hold of (in a timer, say) no longer answers as
+    // the owner's test: isAdminRequest needs the key again and the placeholder
+    // is nobody. The run's database handle keeps the identity it was given, as
+    // an asService block's does.
+    if (ownerTest) ownerTest.live = false
+  }
+}
+
+async function runRouteModule(
+  code: string,
+  projectId: string,
+  event: { type: string; data: Record<string, any> },
+  triggerTableHint: string | null | undefined,
+  opts: RouteModuleRunOptions,
+  ownerTest: OwnerTest | null,
 ): Promise<RouteModuleRunResult> {
   assertNotBlocked(code)
 
@@ -757,19 +846,17 @@ export async function executeRouteModuleFunction(
   } else if (headers['x-user-token'] && !headers['authorization']) {
     headers['authorization'] = headers['x-user-token']
   }
-  if (opts.testRun) {
-    if (auth.adminKey && !headers['x-admin-key']) {
-      headers['x-admin-key'] = auth.adminKey
-    }
-    if (auth.jwtSecret && !headers['x-user-token']) {
-      const bearer = `Bearer ${mintTestRunToken(projectId, auth.jwtSecret)}`
-      headers['x-user-token'] = bearer
-      if (!headers['authorization']) headers['authorization'] = bearer
-    }
+  // An owner's test run: the request carries the placeholder where a user's
+  // token would be, never the admin key or a token signed with the project's
+  // secret, and its identity is the runner's to give (see OwnerTest).
+  if (ownerTest && !headers['x-user-token']) {
+    headers['x-user-token'] = `Bearer ${OWNER_TEST_TOKEN}`
+    if (!headers['authorization']) headers['authorization'] = headers['x-user-token']
   }
 
-
-  const callerIdentity = await resolveCallerIdentity(projectId, headers, auth)
+  const callerIdentity: RlsIdentity = ownerTest
+    ? { userId: null, isServiceRole: true }
+    : await resolveCallerIdentity(projectId, headers, auth)
 
   // Outbound HTTP for module code: fetch's call shape, the egress guard's
   // rules. The host's bare fetch reaches everything this PROCESS can reach —
@@ -826,6 +913,7 @@ export async function executeRouteModuleFunction(
       auth,
       { prisma: scopedDb(projectId, callerIdentity), asService: makeAsService(projectId, logs) },
       withheld,
+      ownerTest,
     ),
     console: {
       log: (...a: any[]) => logs.push(a.map(stringify).join(' ')),

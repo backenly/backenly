@@ -92,9 +92,11 @@ export interface FunctionCallerContext {
    */
   headers?: Record<string, string | undefined>
   /**
-   * Owner-initiated dashboard test run. The route-module runner injects the
-   * project's admin key and a short-lived project-scoped admin token so the
-   * endpoint's real logic can be exercised. Never set on public paths.
+   * Owner-initiated test run (the dashboard's Test, functions invoke). The
+   * route-module runner treats the run as the project's admin, so the
+   * endpoint's real logic can be exercised, without putting a key or a signed
+   * token on the request (route-module-runner.ts, OwnerTest). Never set on
+   * public paths.
    */
   testRun?: boolean
   /**

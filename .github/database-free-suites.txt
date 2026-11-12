@@ -49,6 +49,7 @@ tests/build-runtime/marketplace-regression.test.ts
 tests/build-runtime/reliability-regression.test.ts
 tests/chat-execution-pipeline.test.ts
 tests/concurrency/concurrency-hardening.test.ts
+tests/execution/route-module-owner-test-run.test.ts
 tests/execution/route-module-runner-contract.test.ts
 tests/execution/route-module-withheld-secrets.test.ts
 tests/migration/upgrade-safety.test.ts

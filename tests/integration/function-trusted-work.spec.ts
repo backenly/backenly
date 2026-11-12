@@ -21,7 +21,7 @@ import { randomUUID } from 'node:crypto'
 import * as jsonwebtoken from 'jsonwebtoken'
 import { Client } from 'pg'
 import { prisma } from '@/lib/db'
-import { AS_SERVICE_NOTE, executeRouteModuleFunction } from '@/lib/services/ai-functions/route-module-runner'
+import { AS_SERVICE_NOTE, executeRouteModuleFunction, OWNER_TEST_TOKEN } from '@/lib/services/ai-functions/route-module-runner'
 import { forgetFunctionDbClient, functionRoleName } from '@/lib/services/ai-functions/function-db-role'
 
 jest.setTimeout(120_000)
@@ -159,4 +159,32 @@ it('leaves the caller’s own queries as the caller', async () => {
   // The shopper's UPDATE matches no row the UPDATE policy admits: nothing changes.
   expect(returnValue).toMatchObject({ status: 200, body: { stock: 4 } })
   expect(logs).not.toContain(AS_SERVICE_NOTE)
+})
+
+describe("an owner's test run (the dashboard's Test, functions invoke)", () => {
+  const whoRuns = `
+    import { NextResponse } from 'next/server'
+    import { prisma } from '@/lib/db'
+    export async function POST() {
+      const [row] = await prisma.$queryRawUnsafe("SELECT ${role} AS role")
+      return NextResponse.json(row)
+    }
+  `
+  const auth = { jwtSecret: SECRET, adminKey: `bk_admin_${'c'.repeat(64)}` }
+
+  it("runs the function's SQL as the service role, with no key on the request", async () => {
+    const { returnValue } = await executeRouteModuleFunction(whoRuns, projectId, { type: 'manual', data: {} }, 'POST /fn/who', {
+      testRun: true,
+      authMaterial: auth,
+    })
+    expect(returnValue.body).toEqual({ role: 'service_role' })
+  })
+
+  it('runs a caller who sends its placeholder as nobody', async () => {
+    const { returnValue } = await executeRouteModuleFunction(whoRuns, projectId, { type: 'http', data: {} }, 'POST /fn/who', {
+      authMaterial: auth,
+      headers: { 'x-user-token': `Bearer ${OWNER_TEST_TOKEN}` },
+    })
+    expect(returnValue.body).toEqual({ role: 'anon' })
+  })
 })

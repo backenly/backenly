@@ -261,9 +261,10 @@ async function runSmokeOnce(
         projectId,
         { type: 'manual', data },
         `${method.toUpperCase()} /api/v1/${projectId}/fn/${functionName}`,
-        // testRun mints a project-scoped admin token + admin key, so an
-        // auth-gated handler exercises its real path instead of dead-ending on a
-        // 401 that tells us nothing about whether its logic works.
+        // testRun runs it as the project's admin (without a key or a token on
+        // the request), so an auth-gated handler exercises its real path instead
+        // of dead-ending on a 401 that tells us nothing about whether its logic
+        // works.
         { testRun: true },
       )
 
