@@ -2,7 +2,10 @@
  * AI credit holds on a real Postgres. Each customer-paid call holds its worst
  * case before it is sent, keeps counting at what it used until its turn is
  * charged, and only then stops counting, so usage is never uncounted. A call
- * starts while any credit is left, so the last one may go over by what it uses.
+ * starts while any credit is left, so the last one may use more than is left;
+ * the charge stops at the cap, and Backenly absorbs the rest. A price a turn
+ * knows before its work starts (a confirmed build's) is held whole, or the work
+ * does not start.
  *
  * Two things are stubbed, both commercial and neither the subject here:
  *   - the credit cap, because the OSS edition these tests run as is unlimited;
@@ -39,7 +42,7 @@ import { generate, setProviderForTests } from '@/lib/ai/llm'
 import { scriptedMessage, scriptedProvider } from '@/lib/ai/llm/providers/scripted'
 import { memorySpendLedger, setCustomerSpendHook, setSpendLedgerForTests } from '@/lib/ai/llm/spend'
 import { createTokenScope, runInTokenScope, type TokenScope } from '@/lib/ai/token-meter'
-import { closeCreditTurn, creditHoldHook } from '@/lib/entitlements/credit-holds'
+import { closeCreditTurn, creditHoldHook, holdTurnPrice } from '@/lib/entitlements/credit-holds'
 import { thisMonth } from '@/lib/entitlements/policy'
 
 const account = `holds-${crypto.randomBytes(6).toString('hex')}`
@@ -221,7 +224,7 @@ describe('AI credit holds', () => {
     expect(await charged()).toBe(0)
   })
 
-  it('sends the last call though its worst case is more than is left, charges what it used, and refuses the next unsent', async () => {
+  it('sends the last call though its worst case is more than is left, charges no further than the cap, and refuses the next unsent', async () => {
     cap = 1 // 1,000 tokens, less than brain.answer's output ceiling
     setSpendLedgerForTests(memorySpendLedger())
     const turn = createTokenScope()
@@ -231,8 +234,10 @@ describe('AI credit holds', () => {
       generate({ purpose: 'brain.answer', messages: [{ role: 'user', content: 'hi' }], billing: { billingAccountId: account } }),
     )
     expect(last.calls).toHaveLength(1)
+    expect(turn.tokens).toBe(1_500)
     await closeCreditTurn(account, turn, turn.tokens)
-    expect(await charged()).toBe(turn.tokens)
+    // The 500 tokens past the cap are Backenly's: the account is never charged more credits than it has.
+    expect(await charged()).toBe(1_000)
 
     const next = scriptedProvider([scriptedMessage({ text: 'never sent' })])
     setProviderForTests(next)
@@ -240,6 +245,105 @@ describe('AI credit holds', () => {
       generate({ purpose: 'brain.answer', messages: [{ role: 'user', content: 'again' }], billing: { billingAccountId: account } }),
     ).rejects.toMatchObject({ kind: 'credits_exhausted', message: expect.stringContaining('used all its AI credits') })
     expect(next.calls).toHaveLength(0)
+  })
+})
+
+describe('a charge', () => {
+  it('never takes the account past its cap, whatever the turn reports', async () => {
+    await spend(4_000)
+    const turn = createTokenScope()
+    const a = await reserveIn(turn, 6_000)
+    await ran(a.id, 6_000)
+    await closeCreditTurn(account, turn, 50_000)
+    expect(await charged()).toBe(10_000)
+    expect((await hold(a.id)).status).toBe('charged')
+  })
+
+  it('is made in full where nothing is enforced', async () => {
+    cap = null
+    await closeCreditTurn(account, createTokenScope(), 50_000)
+    expect(await charged()).toBe(50_000)
+  })
+
+  it('leaves room for what other turns used and are not yet charged for, so turns closing at once stay within the cap', async () => {
+    const one = createTokenScope()
+    const two = createTokenScope()
+    const a = await reserveIn(one, 6_000)
+    const b = await reserveIn(two, 6_000)
+    await ran(a.id, 6_000)
+    await ran(b.id, 6_000)
+    await Promise.all([closeCreditTurn(account, one, 6_000), closeCreditTurn(account, two, 6_000)])
+    expect(await charged()).toBeLessThanOrEqual(10_000)
+    expect((await hold(a.id)).status).toBe('charged')
+    expect((await hold(b.id)).status).toBe('charged')
+  })
+
+  it('charges a turn all it used while the account has room, though another call is still in flight', async () => {
+    // A call in flight counts at its worst case for the next call's gate, not
+    // against what a finished turn is charged: it will use far less.
+    const finished = createTokenScope()
+    const a = await reserveIn(finished, 3_000)
+    await ran(a.id, 3_000)
+    await reserveIn(createTokenScope(), 7_000)
+    await closeCreditTurn(account, finished, 3_000)
+    expect(await charged()).toBe(3_000)
+  })
+})
+
+describe('a turn’s price', () => {
+  const priceIn = (scope: TokenScope, tokens: number) => runInTokenScope(scope, () => holdTurnPrice('unused', tokens))
+
+  it('is held whole when it fits, as used, and the turn is charged it like any other hold', async () => {
+    await spend(2_000)
+    const turn = createTokenScope({ billingAccountId: account })
+    await expect(priceIn(turn, 8_000)).resolves.toBeNull()
+    expect(turn.holds).toHaveLength(1)
+    expect(await hold(turn.holds[0])).toMatchObject({ status: 'used', tokens: 8_000, usedTokens: 8_000, turnScoped: true })
+    // It counts: nothing is left for another turn's call.
+    await expect(reserveIn(createTokenScope(), 1_000)).rejects.toMatchObject({ kind: 'credits_exhausted' })
+    await closeCreditTurn(account, turn, 8_000)
+    expect(await charged()).toBe(10_000)
+    expect((await hold(turn.holds[0])).status).toBe('charged')
+  })
+
+  it('is refused whole when it does not fit, holding nothing', async () => {
+    await spend(2_000)
+    const turn = createTokenScope({ billingAccountId: account })
+    await expect(priceIn(turn, 8_001)).resolves.toEqual({ reason: 'credits', neededCredits: 9, leftCredits: 8, heldByOtherWork: false })
+    expect(turn.holds).toHaveLength(0)
+    expect(await prisma.aiCreditHold.count({ where: { billingAccountId: account } })).toBe(0)
+  })
+
+  /** A call the active turn makes. */
+  const callNow = (maxTokens: number) =>
+    creditHoldHook.reserve({ purpose: 'brain.agent', model: 'test', maxUsd: 0, maxTokens, expiresInMs: 300_000, billingAccountId: account })
+
+  it('counts what other turns hold, not what its own turn holds, and says when other work is in the way', async () => {
+    await reserveIn(createTokenScope(), 6_000) // another turn's call, in flight
+    await runInTokenScope(createTokenScope({ billingAccountId: account }), async () => {
+      await callNow(3_000) // this turn's own call, already sent
+      expect(await holdTurnPrice('unused', 5_000)).toEqual({ reason: 'credits', neededCredits: 5, leftCredits: 10, heldByOtherWork: true })
+      expect(await holdTurnPrice('unused', 4_000)).toBeNull()
+    })
+  })
+
+  it('covers the turn’s own calls, which hold nothing more, while another turn’s are refused', async () => {
+    const turn = createTokenScope({ billingAccountId: account })
+    await runInTokenScope(turn, async () => {
+      expect(await holdTurnPrice('unused', 10_000)).toBeNull()
+      expect(await callNow(5_000)).toEqual({ id: 'none' })
+    })
+    await expect(reserveIn(createTokenScope(), 1_000)).rejects.toMatchObject({ kind: 'credits_exhausted' })
+    // Once the turn is over, its scope covers nothing.
+    expect(turn.coveredFor).toBeUndefined()
+  })
+
+  it('holds nothing where nothing is enforced, or outside a turn that will be charged', async () => {
+    cap = null
+    await expect(priceIn(createTokenScope({ billingAccountId: account }), 1_000_000)).resolves.toBeNull()
+    cap = 10
+    await expect(holdTurnPrice('unused', 1_000_000)).resolves.toBeNull()
+    expect(await prisma.aiCreditHold.count({ where: { billingAccountId: account } })).toBe(0)
   })
 })
 

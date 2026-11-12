@@ -369,6 +369,8 @@ describe('a dropped required column with rows written since', () => {
     const p = (await previewRecovery(projectId, changeId))!
     expect(p.safety).toBe('blocked')
     expect(p.reason).toMatch(/no value for email/)
+    // The data check names what blocks it, never "no data would be removed".
+    expect(p.checks.find((c) => c.id === 'data')).toMatchObject({ ok: false, detail: expect.stringMatching(/no value for email/) })
     const out = await restore(changeId, { anything: 1 })
     expect(out.ok).toBe(false)
     expect((out as any).code).toBe('BLOCKED')
@@ -490,11 +492,13 @@ describe('a data migration that rewrote values', () => {
 
 // ── Guarantees removed, keys moved, tables consolidated ──────────────────────
 //
-// No agent path does any of these: apply_migration refuses DROP CONSTRAINT,
-// DROP INDEX and every primary-key change (change-classes-executor.spec.ts),
-// and moves no rows between tables. A person's governed change still can, and
-// its restore must put each back exactly, or refuse where today's rows would
-// break what it puts back. Never offered as lossless and then failed.
+// No agent does any of these to production on its own: its DROP CONSTRAINT or
+// DROP INDEX runs on a branch and reaches production through a merge a person
+// approves (migrations-drop-index-and-constraint.spec.ts), apply_migration
+// refuses every primary-key change, and it moves no rows between tables. A
+// person's governed change still can, and its restore must put each back
+// exactly, or refuse where today's rows would break what it puts back. Never
+// offered as lossless and then failed.
 
 describe('a dropped CHECK, UNIQUE and FOREIGN KEY constraint', () => {
   let changeId: string
@@ -548,6 +552,11 @@ describe('a dropped constraint that a row written since would break', () => {
     const p = (await previewRecovery(projectId, closed.id))!
     expect(p.safety).toBe('blocked')
     expect(p.reason).toMatch(new RegExp(`${constraint}|violat|would fail`, 'i'))
+    // Production QA (2026-11-09): a red cross beside "No expected data loss"
+    // with the sentence that no data would be removed. A blocked restore never
+    // fails the data check while saying that.
+    const data = p.checks.find((c) => c.id === 'data')
+    expect(Boolean(data && !data.ok && /No data written since/.test(data.detail))).toBe(false)
     // Run anyway, the proof runs for real inside the restore's transaction and is
     // rolled back: the change stays in effect, untouched, and nothing escalates.
     const out = await restore(closed.id, { anything: 1 })

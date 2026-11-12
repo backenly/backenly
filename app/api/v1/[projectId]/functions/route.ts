@@ -59,6 +59,8 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
       endUserRole: middleware.context.endUserRole,
       serviceRole: middleware.context.apiKey.serviceRole,
       headers: pickFnHeaders(h => request.headers.get(h)),
+      // Recorded as an HTTP call, which it is; the event keeps type 'manual'.
+      trigger: 'http',
     })
 
     if (!result.success) {
@@ -80,11 +82,12 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
       )
     }
 
+    const { logsFor } = await import('@/lib/services/ai-functions/reply')
     return createSuccessResponse({
       name,
       success: true,
       result: result.returnValue ?? null,
-      logs: result.logs,
+      ...logsFor(result.logs, !!middleware.context.apiKey.serviceRole),
       durationMs: result.durationMs,
     })
   } catch (error: any) {

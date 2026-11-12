@@ -70,7 +70,11 @@ export function signCdnUrl(
   now: Date = new Date(),
 ): string {
   const ttl = Math.min(Math.max(Math.floor(ttlSeconds), 60), 86_400)
-  const expires = Math.floor(now.getTime() / 1000) + ttl
+  return signCdnUrlUntil(key, Math.floor(now.getTime() / 1000) + ttl, config)
+}
+
+/** A CloudFront signed URL for one object, valid until `expires` (epoch seconds). */
+function signCdnUrlUntil(key: string, expires: number, config: SignedCdnConfig): string {
   const resource = `${config.baseUrl}/${encodeKey(key)}`
   const signer = createSign('RSA-SHA1')
   signer.update(cannedPolicy(resource, expires))
@@ -80,3 +84,32 @@ export function signCdnUrl(
 
 /** How long a download redirect's signed URL lives: long enough to start, short enough to revoke. */
 export const DOWNLOAD_URL_TTL_SECONDS = 15 * 60
+
+/**
+ * The signed URL for a PUBLIC file, the same for every request in one window
+ * of `windowSeconds`, and how long a browser may keep the redirect to it.
+ *
+ * A fresh signature on every request made every view of a public image a new
+ * URL: the browser could reuse neither the redirect nor the bytes, so each
+ * page load went back through the app and out to the edge again. Signed
+ * with an expiry fixed to the window, the URL repeats until the window ends
+ * (the canned-policy signature is deterministic), and the redirect can be
+ * kept for exactly the rest of the window. The URL stays valid one window
+ * past that, so a redirect kept to the end never points at an expired URL.
+ *
+ * Private files keep a fresh, short URL and an uncached redirect: who may
+ * read them is decided on every request.
+ */
+export function windowedPublicCdnUrl(
+  key: string,
+  config: SignedCdnConfig,
+  now: Date = new Date(),
+  windowSeconds: number = DOWNLOAD_URL_TTL_SECONDS,
+): { url: string; maxAge: number } {
+  const nowSeconds = Math.floor(now.getTime() / 1000)
+  const windowEnd = (Math.floor(nowSeconds / windowSeconds) + 1) * windowSeconds
+  return {
+    url: signCdnUrlUntil(key, windowEnd + windowSeconds, config),
+    maxAge: windowEnd - nowSeconds,
+  }
+}

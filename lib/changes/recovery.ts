@@ -44,7 +44,7 @@ import type { PoolClient } from 'pg'
 import { Prisma } from '@prisma/client'
 import { prisma } from '@/lib/db/prisma'
 import type { RemovedEndpoint } from '@/lib/services/domain-endpoints'
-import type { CatalogSnapshot } from './catalog'
+import { readCatalog, type CatalogSnapshot } from './catalog'
 import { describeChange } from './describe'
 import {
   acknowledgementOf,
@@ -83,9 +83,13 @@ import {
 import { createVaultStatements, qualified, vaultSchemaName } from './names'
 import { planRestore, verifyAgainstCheckpoint, type PlanConflict, type PlannedStep, type RestorePlan } from './plan'
 import { rollbackWindowDays, windowEndsAt } from './policy'
-import { IN_EFFECT, RECOVERY_OWED, restoreRequestChangeId, type ChangePreservation, type ChangeStatus, type PreservedEntry, type TableChange } from './types'
+import { IN_EFFECT, RECOVERY_OWED, restoreRequestChangeId, type ChangePreservation, type ChangeStatus, type ChangeStep, type PreservedEntry, type TableChange } from './types'
 import { catalogStructure, definitionsFromRegion, keptText, quotesKeptHere } from './residency'
 import type { ChangeVerification, VerificationCheck } from './verify'
+import { rlsSessionParams, rlsSessionSql, type RlsIdentity } from '@/lib/services/rls-session'
+
+/** Who a restore runs as inside the workspace: Backenly, which every policy's service-role clause admits. */
+const PLATFORM_CONTEXT: RlsIdentity = { userId: '', isServiceRole: true, userRole: 'service' }
 
 // ── Loading ──────────────────────────────────────────────────────────────────
 
@@ -124,6 +128,12 @@ interface LoadedChange {
   sealed: boolean
   /** What it did to the rest of the backend, item by item (lib/changes/resources). */
   resourceOps: ResourceOp[]
+  /** Why it stopped, for one that stopped part-way. */
+  error: string | null
+  /** What was asked for and what took effect, in order: a failed step names its statement and why. */
+  steps: ChangeStep[] | null
+  /** Its protected verification, for one that was verified. */
+  verification: ChangeVerification | null
 }
 
 async function load(projectId: string, changeId: string): Promise<LoadedChange | null> {
@@ -169,6 +179,9 @@ async function load(projectId: string, changeId: string): Promise<LoadedChange |
       (row.checkpoint as { resources?: ResourceSnapshot } | null)?.resources,
       (row.resultState as { resources?: ResourceSnapshot } | null)?.resources,
     ),
+    error: row.error ?? null,
+    steps: Array.isArray(row.steps) ? (row.steps as unknown as ChangeStep[]) : null,
+    verification: (row.verification as unknown as ChangeVerification | null) ?? null,
   }
 }
 
@@ -336,7 +349,7 @@ export function availabilityOf(
   }
   if (change.kind === 'recovery' && opts.targetStatus !== 'restored') {
     return opts.targetStatus === 'recovered'
-      ? { available: false, code: 'FAILED_CHANGE_REAPPLY', reason: 'That change failed verification. Ask for it again instead of reapplying it.' }
+      ? { available: false, code: 'FAILED_CHANGE_REAPPLY', reason: 'That change failed and was recovered. Ask for it again instead of reapplying it.' }
       : { available: false, code: 'NOT_RESTORABLE', reason: 'Only the latest restore of a change can be reapplied, from that change.' }
   }
   if (change.kind === 'recovery' && opts.targetVerified !== true) {
@@ -427,30 +440,26 @@ async function runPlan(
   },
 ): Promise<Impact> {
   await client.query('BEGIN')
-  let index = -1
   try {
+    // As Backenly, seeing every row: what it measures, the keys it puts back
+    // and the checks it runs are about the whole table, not about the rows an
+    // end user may see. Every workspace table has FORCE ROW LEVEL SECURITY,
+    // which binds this connection too (it is the tables' owner and does not
+    // bypass RLS), and with no claims set every owner-scoped policy hides every
+    // row. PostgreSQL's bulk check of a foreign key added to existing rows
+    // (RI_Initial_Check, on ADD CONSTRAINT and on VALIDATE) runs under those
+    // policies, unlike the per-row check, so restoring a dropped `reviews`
+    // failed with `violates foreign key constraint "fk_reviews_user"` while
+    // every user it referenced existed (production, 2026-11-09). The service
+    // role is the context the platform's own policies give owner tooling
+    // (lib/postgrest/rls-translation.ts), as queryWorkspaceAsOwner uses it.
+    // Transaction-local: it ends with this transaction.
+    await client.query(rlsSessionSql(), rlsSessionParams(PLATFORM_CONTEXT))
     // Bounded waits: a restore that queues behind a long transaction holds
     // every request behind it, so it gives up instead and says why.
     await client.query(`SET LOCAL lock_timeout = '5s'`)
     await client.query(`SET LOCAL statement_timeout = '${opts.commit ? '10min' : '2min'}'`)
-    for (const t of plan.lockTables) {
-      await client.query(`LOCK TABLE ${qualified(plan.schema, t)} IN ACCESS EXCLUSIVE MODE`)
-    }
-    const impact = await opts.measure()
-    opts.gate(impact)
-    if (opts.vault) for (const sql of createVaultStatements(opts.vault)) await client.query(sql)
-    for (index = 0; index < plan.steps.length; index++) {
-      await client.query(plan.steps[index].sql)
-    }
-    index = plan.steps.length
-    if (opts.vault) {
-      const readers = await vaultReaders(async <R>(sql: string, params: unknown[]) => (await client.query(sql, params)).rows as R[], opts.vault)
-      if (readers.length > 0) throw new VaultReadersConflict(readers)
-    }
-    for (const check of plan.checks) {
-      const r = await client.query<{ n: string }>(check.sql)
-      if (Number(r.rows[0]?.n ?? 0) !== 0) throw new RecoveryStepError(-1, null, `${check.describe} — ${r.rows[0]?.n} did not.`)
-    }
+    const impact = await runPlanSteps(client, plan, opts)
     if (opts.beforeCommit) {
       try {
         await opts.beforeCommit()
@@ -462,10 +471,187 @@ async function runPlan(
     return impact
   } catch (err: any) {
     await client.query('ROLLBACK').catch(() => {})
-    if (err instanceof ImpactRefusal || err instanceof RecoveryStepError || err instanceof VaultReadersConflict) throw err
-    if (index >= 0 && index < plan.steps.length) throw new RecoveryStepError(index, plan.steps[index], err?.message ?? String(err))
     throw err
   }
+}
+
+/**
+ * Everything a restore does inside its transaction, once the transaction and
+ * its context are open: lock, measure, gate, move into the vault, run every
+ * statement, prove nothing reads the vault, run the checks. Shared by one
+ * restore (runPlan) and by the proof of a whole sequence (proveSequence),
+ * which runs several of these in one transaction.
+ */
+async function runPlanSteps(
+  client: PoolClient,
+  plan: RestorePlan & { schema: string },
+  opts: { vault: string | null; measure: () => Promise<Impact>; gate: (impact: Impact) => void },
+): Promise<Impact> {
+  for (const t of plan.lockTables) {
+    await client.query(`LOCK TABLE ${qualified(plan.schema, t)} IN ACCESS EXCLUSIVE MODE`)
+  }
+  const impact = await opts.measure()
+  opts.gate(impact)
+  if (opts.vault) for (const sql of createVaultStatements(opts.vault)) await client.query(sql)
+  for (let index = 0; index < plan.steps.length; index++) {
+    try {
+      await client.query(plan.steps[index].sql)
+    } catch (err: any) {
+      throw new RecoveryStepError(index, plan.steps[index], err?.message ?? String(err))
+    }
+  }
+  if (opts.vault) {
+    const readers = await vaultReaders(async <R>(sql: string, params: unknown[]) => (await client.query(sql, params)).rows as R[], opts.vault)
+    if (readers.length > 0) throw new VaultReadersConflict(readers)
+  }
+  for (const check of plan.checks) {
+    const r = await client.query<{ n: string }>(check.sql)
+    if (Number(r.rows[0]?.n ?? 0) !== 0) throw new RecoveryStepError(-1, null, `${check.describe} — ${r.rows[0]?.n} did not.`)
+  }
+  return impact
+}
+
+// ── Proving a sequence ───────────────────────────────────────────────────────
+
+export type SequenceProof =
+  | { ok: true; ms: number }
+  | {
+      ok: false
+      /** The record that would stop it (a change, or the restore a reapply undoes). */
+      recordId: string
+      seq: number
+      code: 'NEEDS_APPROVAL' | 'BLOCKED' | 'UNAVAILABLE'
+      reason: string
+    }
+
+/** Statements that would open or end a transaction. */
+const TRANSACTION_CONTROL = /^\s*(begin|start\s+transaction|commit|end|abort|rollback(?!\s+to\b)|prepare\s+transaction)\b/i
+
+/**
+ * The client a proof's steps get: the same connection and transaction, but a
+ * statement that would end the transaction (and so make the proof's restores
+ * real) or open another is refused instead of run.
+ */
+function inProof(client: PoolClient): PoolClient {
+  return new Proxy(client, {
+    get(target, prop, receiver) {
+      if (prop !== 'query') return Reflect.get(target, prop, receiver)
+      return (text: unknown, ...rest: unknown[]) => {
+        const sql = typeof text === 'string' ? text : (text as { text?: unknown } | null)?.text
+        if (typeof sql === 'string' && TRANSACTION_CONTROL.test(sql)) {
+          return Promise.reject(new Error(`A proof may not run "${sql.trim().split(/\s+/)[0]}": it would end or open a transaction.`))
+        }
+        return (target.query as (...a: unknown[]) => unknown)(text, ...rest)
+      }
+    },
+  })
+}
+
+/**
+ * Prove restoring every one of `recordIds`, in order, before running any.
+ *
+ * Restore to a point (lib/changes/range.ts) runs one restore after another,
+ * each proved just before it runs. A step that could not run was therefore
+ * found only after the steps before it had run and been recorded: on
+ * production (2026-11-09) "Restore to v1" undid #46, then stopped at #45, and
+ * left the backend between v1 and where it was.
+ *
+ * So every step is proved first, in one transaction that is rolled back:
+ * each step is planned against the schema the steps before it leave, and runs
+ * exactly as its restore would (as Backenly, every row visible, with its
+ * measurement and gate), so a step whose conflict only the steps before it
+ * clear is proved as it will run. The first that would stop the sequence is
+ * named, with why, and nothing runs. What it proves is the database; the rest
+ * of the backend each step puts back (keys, functions, storage, …) is checked
+ * when that step runs, against what the steps before it left, as before.
+ *
+ * A change only a credential rule keeps (NOT_REVERSIBLE) is passed over, as
+ * restoreTo passes over it.
+ */
+export async function proveSequence(projectId: string, recordIds: string[]): Promise<SequenceProof> {
+  const windowDays = await rollbackWindowDays(projectId)
+  const changes: LoadedChange[] = []
+  for (const id of recordIds) {
+    const change = await load(projectId, id)
+    if (!change) return { ok: false, recordId: id, seq: -1, code: 'UNAVAILABLE', reason: 'One of the changes could not be read.' }
+    const availability = availabilityOf(change, windowDays, await targetOf(change))
+    if (!availability.available) {
+      if (availability.code === 'NOT_REVERSIBLE') continue
+      return { ok: false, recordId: id, seq: change.seq, code: 'UNAVAILABLE', reason: availability.reason ?? `#${change.seq} cannot be restored.` }
+    }
+    changes.push(change)
+  }
+  if (changes.length === 0) return { ok: true, ms: 0 }
+
+  const started = Date.now()
+  return withChangeLock(projectId, async (client) => {
+    const { resolveWorkspaceSchema } = await import('@/lib/services/workspace-pool')
+    const schema = await resolveWorkspaceSchema(projectId)
+    const last = await prisma.backendChange.findFirst({ where: { projectId }, orderBy: { seq: 'desc' }, select: { seq: true } })
+    // Kept data is checked as previewRecovery checks it, before the
+    // transaction and its context: each checksum is compared the way it was
+    // taken. Each step's vault is its own, so the steps before it leave it as is.
+    const kept: Array<{ intact: PreservedEntry[]; altered: string[] }> = []
+    for (const change of changes) kept.push(await intactEntries(client, await candidateEntries(projectId, change)))
+    // Everything below runs inside ONE transaction that is rolled back, so no
+    // step may end it: a COMMIT there would make the proof's restores real.
+    // readCatalogOn, for one, opens and commits its own transaction; the
+    // catalog is read on this transaction instead, and the client the steps
+    // get refuses any statement that would end or open one.
+    const tx = inProof(client)
+    const readLive = async () => {
+      const prev = (await tx.query<{ search_path: string }>('SHOW search_path')).rows[0]?.search_path ?? '"$user", public'
+      // Pinned to pg_catalog while it reads, as readCatalogOn does, so every
+      // definition comes back schema-qualified.
+      await tx.query(`SELECT set_config('search_path', 'pg_catalog', true)`)
+      try {
+        return await readCatalog({ query: async (sql, params) => (await tx.query(sql, params as unknown[])).rows }, schema)
+      } finally {
+        await tx.query(`SELECT set_config('search_path', $1, true)`, [prev])
+      }
+    }
+    await client.query('BEGIN')
+    try {
+      // The context and limits runPlan gives one restore's proof.
+      await client.query(rlsSessionSql(), rlsSessionParams(PLATFORM_CONTEXT))
+      await client.query(`SET LOCAL lock_timeout = '5s'`)
+      await client.query(`SET LOCAL statement_timeout = '2min'`)
+      for (const [n, change] of changes.entries()) {
+        const stop = (code: 'NEEDS_APPROVAL' | 'BLOCKED', reason: string): SequenceProof => ({ ok: false, recordId: change.id, seq: change.seq, code, reason })
+        const { intact, altered } = kept[n]
+        if (altered.length > 0) {
+          return stop('BLOCKED', `The data kept for ${altered.join(', ')} has been altered since it was kept, so it cannot be trusted.`)
+        }
+        // Each step gets the vault its own restore record would.
+        const vault = vaultSchemaName(projectId, (last?.seq ?? 0) + 1 + n)
+        const live = await readLive()
+        const plan = { ...planRestore({ schema, footprint: change.footprint, checkpoint: change.checkpoint, resultState: change.resultState, preserved: intact, live, vault }), schema }
+        if (plan.conflicts.length > 0) return stop('BLOCKED', plan.conflicts.map((c) => c.reason).join('; '))
+        try {
+          await runPlanSteps(tx, plan, {
+            vault: plan.archives.length > 0 ? vault : null,
+            measure: () => measureImpact(runner(tx), { schema, footprint: change.footprint, checkpoint: change.checkpoint, resultState: change.resultState, preserved: intact }),
+            gate: (impact) => {
+              if (impact.blockers.length > 0) throw new ImpactRefusal('BLOCKED', impact)
+              if (impact.needsApproval || plan.unrecoverable.length > 0) throw new ImpactRefusal('NEEDS_APPROVAL', impact)
+            },
+          })
+        } catch (err: any) {
+          if (err instanceof ImpactRefusal) {
+            return err.code === 'BLOCKED'
+              ? stop('BLOCKED', err.impact.blockers[0] ?? `Restoring #${change.seq} is blocked.`)
+              : stop('NEEDS_APPROVAL', err.impact.items.find((i) => i.needsApproval)?.detail ?? plan.unrecoverable[0] ?? `Restoring #${change.seq} needs your approval.`)
+          }
+          if (err instanceof VaultReadersConflict) return stop('BLOCKED', err.conflicts.map((c) => c.reason).join('; '))
+          const cause = err instanceof RecoveryStepError ? err.cause : err?.message ?? String(err)
+          return stop('BLOCKED', `The restore would fail against today's data: ${cause}`)
+        }
+      }
+      return { ok: true, ms: Date.now() - started }
+    } finally {
+      await client.query('ROLLBACK').catch(() => {})
+    }
+  }, { waitMs: 10_000 })
 }
 
 // ── Preview ──────────────────────────────────────────────────────────────────
@@ -692,16 +878,28 @@ export async function previewRecovery(projectId: string, changeId: string): Prom
       : needsApproval
         ? (impact?.items.find((i) => i.needsApproval)?.detail ?? plan.unrecoverable[0] ?? null)
         : null
+    // What is known about data written since, and only that. A restore that
+    // failed its proof before its effect on data was measured says nothing
+    // about data: the plan check already says why it is blocked. The data check
+    // used to fail whenever the restore was blocked, beside the sentence that
+    // no data would be removed (production QA, 2026-11-09: a red cross on "No
+    // expected data loss" for a restore refused by a foreign key).
+    const NO_LOSS = 'No data written since this change would be removed or overwritten.'
+    const dataCheck: RecoveryCheckRow | null = impact
+      ? {
+          id: 'data' as const,
+          ok: impact.blockers.length === 0 && !needsApproval,
+          label: 'No expected data loss',
+          detail: impact.blockers[0] ?? (needsApproval ? (out.reason ?? '') : NO_LOSS),
+        }
+      : blocked
+        ? null
+        : { id: 'data' as const, ok: !needsApproval, label: 'No expected data loss', detail: needsApproval ? (out.reason ?? '') : NO_LOSS }
     out.checks = [
       restorePoint,
       protectedNow,
       { id: 'plan', ok: proofOk && !blocked, label: 'Recovery plan verified', detail: proofOk ? `Checked end to end without changing anything (${out.details.proof!.ms} ms).` : (out.reason ?? 'The plan could not be verified.') },
-      {
-        id: 'data',
-        ok: !blocked && !needsApproval,
-        label: 'No expected data loss',
-        detail: !needsApproval ? 'No data written since this change would be removed or overwritten.' : (out.reason ?? ''),
-      },
+      ...(dataCheck ? [dataCheck] : []),
     ]
     return out
   }, { waitMs: 10_000 })
@@ -1065,7 +1263,7 @@ async function escalate(projectId: string, change: LoadedChange, explanation: st
     const row = await createApprovalRequest({
       projectId,
       userId: project.userId,
-      message: `Change #${change.seq} (${change.summary}) failed verification. ${keptText(explanation, quote)}`,
+      message: `Change #${change.seq} (${change.summary}) ${whyItFailed(change)}. ${keptText(explanation, quote)}`,
       danger: { tool: 'revert_schema_change', target: restore.target, rowCount: rows, reversible: true },
       toolArgs: { ...restore.toolArgs },
       restore,
@@ -1073,7 +1271,7 @@ async function escalate(projectId: string, change: LoadedChange, explanation: st
     approvalId = row.id
   }
   await recordEvent(change.id, projectId, 'recovery_escalated', { approvalId, explanation: keptText(explanation, quote) })
-  await audit(projectId, null, 'CHANGE_RECOVERY_AWAITING_APPROVAL', { changeId: change.id, seq: change.seq, summary: `Change #${change.seq} failed verification and needs your approval to recover: ${change.summary}` })
+  await audit(projectId, null, 'CHANGE_RECOVERY_AWAITING_APPROVAL', { changeId: change.id, seq: change.seq, summary: `Waiting for your approval to recover: change #${change.seq} (${change.summary}) ${whyItFailed(change)}` })
   return approvalId
 }
 
@@ -1258,11 +1456,11 @@ async function restorePlatformRecords(
  * still listed them.
  *
  * A table the restore removed takes its generated endpoints with it, and the
- * restore's own record keeps each row as it was. Only undoing that restore (a
- * reapply: the change being undone is itself a restore) puts rows back, and
- * only those, exactly: one switched off stays off, rewritten code is kept,
- * and one the owner had deleted before is not invented. A restore of anything
- * else brings no generated endpoint back.
+ * restore's own record keeps each row as it was; a drop does the same
+ * (removeEndpointsOfDroppedTable). Undoing what removed them, a restore of the
+ * drop or a reapply that undoes the restore, puts those rows back and only
+ * those, exactly: one switched off stays off, rewritten code is kept, and one
+ * the owner had deleted before is not invented.
  *
  * `change.resultState` is what the restore started from, since a later change
  * to the same tables refuses the restore. Best-effort, as the rest of the
@@ -1277,7 +1475,9 @@ export async function generatedEndpointsFollow(
 ): Promise<void> {
   const touched = tablesTouched(change.footprint)
   const gone = touched.filter((t) => !live.tables[t])
-  const back = change.kind === 'recovery' ? touched.filter((t) => live.tables[t] && !change.resultState.tables[t]) : []
+  // Back: here now, not after the change being undone. That change's record
+  // keeps the endpoints it removed with them, if it removed any.
+  const back = touched.filter((t) => live.tables[t] && !change.resultState.tables[t])
   if (gone.length === 0 && back.length === 0) return
   try {
     const endpoints = await import('@/lib/services/domain-endpoints')
@@ -1335,6 +1535,32 @@ async function supersedeRestoredIntents(projectId: string, change: LoadedChange)
   }
 }
 
+/**
+ * How a change failed, as a person reads it: the check it failed, or the
+ * statement it stopped at and why. Every automatic recovery used to say
+ * "failed verification", so a merge that stopped at a statement read as one
+ * that had applied and then failed a check, and the reason was nowhere
+ * (production QA, 2026-11-09). For a project kept in another region the steps
+ * carry no statement and the error is kept as the residency rules keep it.
+ */
+function whyItFailed(change: Pick<LoadedChange, 'status' | 'error' | 'steps' | 'verification'>): string {
+  const flat = (s: string, max: number) => {
+    const t = s.replace(/\s+/g, ' ').trim()
+    return t.length > max ? `${t.slice(0, max - 1)}…` : t
+  }
+  // A reason's first sentence, without its full stop: what follows is advice
+  // for the agent that made the change ("Find the offending rows with
+  // run_query, …"), and the sentence goes on after it.
+  const reason = (s: string) => flat(s.split('\n')[0].split(/(?<=[.!?])\s+(?=[A-Z])/)[0], 300).replace(/\.$/, '')
+  // The finding, not the check's name, as the change history says it.
+  const failing = change.verification?.checks?.find((c) => c.outcome === 'contradicted')
+  if (failing) return `failed verification: ${reason(failing.detail)}`
+  const stopped = change.steps?.find((s) => !s.ok)
+  if (stopped?.summary) return `stopped at ${flat(stopped.statement, 200)}: ${reason(stopped.summary)}`
+  if (change.error) return `stopped part-way: ${reason(change.error)}`
+  return change.status === 'partially_applied' ? 'stopped part-way' : 'failed verification'
+}
+
 async function audit(projectId: string, userId: string | null, action: string, details: Record<string, unknown>) {
   await prisma.auditLog.create({
     data: { projectId, userId, action, type: 'schema', details: JSON.stringify({ ...details, at: new Date().toISOString() }), timestamp: new Date() },
@@ -1356,7 +1582,7 @@ async function afterRecovery(projectId: string, change: LoadedChange, recoverySe
   const sentence = reapply
     ? `Reapplied a change that had been restored (#${recoverySeq})`
     : opts.mode === 'automatic'
-      ? `Recovered automatically: change #${change.seq} (${change.summary}) failed verification; the previous state is back and verified`
+      ? `Recovered automatically: change #${change.seq} (${change.summary}) ${whyItFailed(change)}; the previous state is back and verified`
       : opts.mode === 'repair'
         ? `Undid its own repair: change #${change.seq} (${change.summary}) did not fix what it was meant to; the previous state is back and verified`
         : `Restored the state before change #${change.seq} (${change.summary}), verified`

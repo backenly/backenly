@@ -41,6 +41,7 @@ import { DetectedFindingsPanel } from '@/components/DetectedFindingsPanel'
 import { AppliedChangesPanel, type AppliedChange } from '@/components/AppliedChangesPanel'
 import { MaintenanceLadderPanel } from '@/components/MaintenanceLadderPanel'
 import { ArchitectureChangesPanel } from '@/components/autonomy/ArchitectureChangesPanel'
+import { ArchitectureLookNow } from '@/components/autonomy/ArchitectureLookNow'
 import { onArchitectureChange } from '@/components/autonomy/architecture-decisions'
 import type { ArchitectureChangeView } from '@/lib/evolution-engine/views'
 
@@ -362,6 +363,9 @@ export function AutonomyGuardrailsSettings({ projectId }: { projectId: string })
           changes={data.architectureChanges ?? []}
           onChanged={fetchReport}
         />
+
+        {/* When Backenly last looked for architecture changes, and a look now. */}
+        <ArchitectureLookNow projectId={projectId} onLooked={fetchReport} />
 
         {/* ── Activity: what Backenly did lately, and its track record ── */}
         <Section

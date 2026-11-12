@@ -6,6 +6,7 @@ import { validateAiFunctionData } from '@/lib/ai/function-validation'
 import { canAccessProject, canWriteProject } from '@/lib/edition/guard'
 import { rowLastError, withLastErrors } from '@/lib/services/ai-functions/run-records'
 import { governedChange, withChangeAttribution } from '@/lib/changes/ledger'
+import { isGeneratedEndpoint, projectGeneratedRoutes } from '@/lib/services/domain-endpoints'
 
 /**
  * GET /api/projects/[id]/ai-functions
@@ -109,7 +110,12 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
       })
     }
 
-    return NextResponse.json({ functions: deduped })
+    // `generated`: Backenly made it for a table (lib/services/domain-endpoints.ts).
+    // The console counts and groups by this, never by a name's shape.
+    const generated = await projectGeneratedRoutes(params.id)
+    return NextResponse.json({
+      functions: deduped.map((fn) => ({ ...fn, generated: isGeneratedEndpoint(fn, generated) })),
+    })
   } catch (error: any) {
     console.error('[AI Functions] GET error:', error)
     return NextResponse.json({ error: 'Failed to fetch functions' }, { status: 500 })

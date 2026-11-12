@@ -64,6 +64,12 @@ interface AiFunction {
   generatedCode?: string | null
   /** 'generated' (Backenly's model) | 'agent' (deploy_code, stored verbatim). */
   codeOrigin?: string
+  /**
+   * Backenly generated it for one of the project's tables, as part of the
+   * table's API (lib/services/domain-endpoints.ts). The server decides; the
+   * page counts and groups by it, never by a name's shape.
+   */
+  generated?: boolean
 }
 
 interface TestRunResult {
@@ -180,23 +186,18 @@ function getEndpointUrl(fn: AiFunction): string | null {
   return `${origin}${path}`
 }
 
-// Auto-generated schema-query helpers: no business logic, always manual, never
-// run. They are real endpoints, just noise in the list.
+// Generated schema-query helpers: no business logic, never run yet. They are
+// real endpoints, just noise in the list, and the one kind "Remove all" offers.
 //
-// codeOrigin is the gate that keeps "Remove all" honest: the name pattern
-// alone matched any agent-deployed function named like `*-schema` with no run
-// yet, and the bulk cleanup deleted it as an "auto-generated endpoint". Only
-// Backenly-generated rows ('generated' — also the backfill for rows that
-// predate the column) qualify; anything deployed verbatim through
-// deploy_code ('agent') is someone's code, never cleanup fodder.
+// The server's `generated` flag is the gate that keeps "Remove all" honest. A
+// name pattern alone matched any function named like `*-schema` with no run
+// yet, and the bulk cleanup deleted it as an "auto-generated endpoint": code an
+// agent deployed, or an endpoint an agent asked Backenly to write. Only what
+// Backenly generated for a table qualifies, and a helper something already
+// calls is never offered.
 const SCHEMA_FN_RE = /(-schema|-full|_schema|_full)$|(^workspaces?-|^workspace_)/i
 function isSchemaQueryFunction(fn: AiFunction): boolean {
-  return (
-    fn.codeOrigin !== 'agent' &&
-    SCHEMA_FN_RE.test(fn.name) &&
-    fn.triggerType === 'manual' &&
-    fn.runCount === 0
-  )
+  return fn.generated === true && SCHEMA_FN_RE.test(fn.name) && fn.runCount === 0
 }
 
 const TRIGGER_FILTERS: Array<{ key: string; label: string }> = [
@@ -552,7 +553,8 @@ export function FunctionsWorkbench({ projectId }: { projectId: string }) {
           (f.triggerTable || '').toLowerCase().includes(q)
       )
     }
-    return list
+    // The project's own first; what Backenly generated for its tables after.
+    return [...list.filter((f) => !f.generated), ...list.filter((f) => f.generated)]
   }, [functions, filter, query])
 
   // Keep a selection alive as filters change: the reader is browsing, and an
@@ -570,13 +572,16 @@ export function FunctionsWorkbench({ projectId }: { projectId: string }) {
 
   /** Loaded, and the project has no function yet: the first-run state. */
   const noFunctions = !loading && functions.length === 0
-  const activeFns = functions.filter((f) => f.status === 'active')
-  const errorFns = functions.filter((f) => f.status === 'error')
-  const totalRuns = functions.reduce((sum, f) => sum + f.runCount, 0)
+  // The project's own functions, what a person or an agent made, are what the
+  // page counts and asks about. The endpoints Backenly generated for its tables
+  // are listed apart (production QA, 2026-11-09: "Functions 9" for two).
+  const ownFns = functions.filter((f) => !f.generated)
+  const generatedCount = functions.length - ownFns.length
+  const activeFns = ownFns.filter((f) => f.status === 'active')
+  const errorFns = ownFns.filter((f) => f.status === 'error')
+  const totalRuns = ownFns.reduce((sum, f) => sum + f.runCount, 0)
   const schemaFns = functions.filter(isSchemaQueryFunction)
-  const untestedActiveFns = functions.filter(
-    (f) => f.runCount === 0 && f.status === 'active' && !isSchemaQueryFunction(f)
-  )
+  const untestedActiveFns = ownFns.filter((f) => f.runCount === 0 && f.status === 'active')
   const runnableUntestedFns = untestedActiveFns.filter((fn) => {
     const kind = getTriggerKind(fn)
     return kind === 'manual' || kind === 'http'
@@ -700,6 +705,42 @@ export function FunctionsWorkbench({ projectId }: { projectId: string }) {
   const endpointUrl = selected ? getEndpointUrl(selected) : null
   const endpointMethod = selected ? (selected.triggerTable || '').split(/\s+/)[0].toUpperCase() : ''
 
+  /** One function in the rail. */
+  const railItem = (fn: AiFunction) => {
+    const active = selectedId === fn.id
+    const kind = getTriggerKind(fn)
+    return (
+      <li key={fn.id}>
+        <button
+          type="button"
+          aria-current={active ? 'true' : undefined}
+          onClick={() => { setSelectedId(fn.id); setMobilePane('detail') }}
+          className={`group flex w-full items-center gap-3 rounded-[7px] px-2.5 py-2 text-left transition-colors ${FOCUS_INSET} ${
+            active ? 'bg-white/[0.07]' : 'hover:bg-white/[0.04]'
+          }`}
+        >
+          <StatusDot tone={STATUS_TONE[fn.status] ?? 'neutral'} className="flex-shrink-0" />
+          <span className="min-w-0 flex-1">
+            <span
+              className={`block truncate font-mono text-[12.5px] leading-[18px] ${
+                active ? 'text-zinc-50' : fn.status === 'inactive' ? 'text-faint' : 'text-zinc-200'
+              }`}
+            >
+              {fn.name}
+            </span>
+            <span className="mt-0.5 flex items-center gap-1.5 truncate text-[12px] leading-[16px] text-faint">
+              <TriggerIcon kind={kind} className={`h-3 w-3 flex-shrink-0 ${getTriggerStyle(kind)}`} />
+              <span className="truncate">{getTriggerLabel(fn)}</span>
+            </span>
+          </span>
+          <ChevronRight
+            className={`h-3.5 w-3.5 flex-shrink-0 md:hidden ${active ? 'text-zinc-500' : 'text-zinc-700'}`}
+          />
+        </button>
+      </li>
+    )
+  }
+
   return (
     <div className={`console-fill flex flex-col overflow-hidden ${KIT.bg}`}>
 
@@ -707,11 +748,11 @@ export function FunctionsWorkbench({ projectId }: { projectId: string }) {
       <CommandBar
         title="Functions"
         context={
-          functions.length > 0 ? (
+          ownFns.length > 0 ? (
             <>
               <StatusDot
                 tone={activeFns.length > 0 ? 'operational' : 'paused'}
-                label={<span className="tabular-nums">{activeFns.length} of {functions.length} active</span>}
+                label={<span className="tabular-nums">{activeFns.length} of {ownFns.length} active</span>}
               />
               {errorFns.length > 0 && <StatusDot tone="failed" label={`${errorFns.length} errored`} />}
               <span className="hidden tabular-nums sm:inline">
@@ -842,42 +883,22 @@ export function FunctionsWorkbench({ projectId }: { projectId: string }) {
                   No function matches{query.trim() ? ` “${query.trim()}”` : ' this filter'}.
                 </p>
               ) : (
-                <ul className="space-y-px px-2">
-                  {visibleFunctions.map((fn) => {
-                    const active = selectedId === fn.id
-                    const kind = getTriggerKind(fn)
-                    return (
-                      <li key={fn.id}>
-                        <button
-                          type="button"
-                          aria-current={active ? 'true' : undefined}
-                          onClick={() => { setSelectedId(fn.id); setMobilePane('detail') }}
-                          className={`group flex w-full items-center gap-3 rounded-[7px] px-2.5 py-2 text-left transition-colors ${FOCUS_INSET} ${
-                            active ? 'bg-white/[0.07]' : 'hover:bg-white/[0.04]'
-                          }`}
-                        >
-                          <StatusDot tone={STATUS_TONE[fn.status] ?? 'neutral'} className="flex-shrink-0" />
-                          <span className="min-w-0 flex-1">
-                            <span
-                              className={`block truncate font-mono text-[12.5px] leading-[18px] ${
-                                active ? 'text-zinc-50' : fn.status === 'inactive' ? 'text-faint' : 'text-zinc-200'
-                              }`}
-                            >
-                              {fn.name}
-                            </span>
-                            <span className="mt-0.5 flex items-center gap-1.5 truncate text-[12px] leading-[16px] text-faint">
-                              <TriggerIcon kind={kind} className={`h-3 w-3 flex-shrink-0 ${getTriggerStyle(kind)}`} />
-                              <span className="truncate">{getTriggerLabel(fn)}</span>
-                            </span>
-                          </span>
-                          <ChevronRight
-                            className={`h-3.5 w-3.5 flex-shrink-0 md:hidden ${active ? 'text-zinc-500' : 'text-zinc-700'}`}
-                          />
-                        </button>
-                      </li>
-                    )
-                  })}
-                </ul>
+                <>
+                  {visibleFunctions.some((f) => !f.generated) && (
+                    <ul className="space-y-px px-2">{visibleFunctions.filter((f) => !f.generated).map(railItem)}</ul>
+                  )}
+                  {visibleFunctions.some((f) => f.generated) && (
+                    <section
+                      aria-labelledby="generated-functions"
+                      className={visibleFunctions.some((f) => !f.generated) ? 'mt-3' : undefined}
+                    >
+                      <h3 id="generated-functions" className="px-4 pb-1.5 text-[12px] font-medium leading-[16px] text-faint">
+                        Generated for your tables
+                      </h3>
+                      <ul className="space-y-px px-2">{visibleFunctions.filter((f) => f.generated).map(railItem)}</ul>
+                    </section>
+                  )}
+                </>
               )}
             </div>
 
@@ -885,7 +906,8 @@ export function FunctionsWorkbench({ projectId }: { projectId: string }) {
               <div className="flex h-[36px] flex-shrink-0 items-center border-t border-white/[0.06] px-4 text-[12px] tabular-nums text-faint">
                 {query.trim() || filter !== 'all'
                   ? `${visibleFunctions.length} of ${functions.length}`
-                  : `${functions.length} ${functions.length === 1 ? 'function' : 'functions'}`}
+                  : `${ownFns.length} ${ownFns.length === 1 ? 'function' : 'functions'}` +
+                    (generatedCount > 0 ? ` · ${generatedCount} generated` : '')}
               </div>
             )}
           </div>

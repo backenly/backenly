@@ -35,6 +35,7 @@ import {
 } from '@/components/inspector/kit'
 import { EDGE, FOCUS, PAGE_GUTTER, PAGE_WIDTH, RULE } from '@/components/console/tokens'
 import { useAgentConnection } from '@/lib/hooks/useAgentConnection'
+import { readinessHeadline } from '@/components/deploy/readiness-headline'
 
 type ProjectStatus = 'PRIVATE' | 'DEPLOYING' | 'LIVE' | 'FAILED'
 
@@ -64,6 +65,8 @@ interface PublishedVersion {
 
 interface BackendState {
   entities: Array<{ name: string; fieldCount: number }>
+  /** The tables a publish puts live, as the publish counts them. */
+  liveTableCount?: number | null
   apis: Array<{ method: string; path: string }>
   endpointCount?: number
   capabilities: Array<{ name: string; enabled: boolean; icon: string }>
@@ -295,15 +298,20 @@ export default function PublishPage() {
   const hasRealBackend = (backendState?.hasContent ?? false) || hasAuth
   const latestPublishedVersion = publishedVersions[0]
   const endpointCount = backendState?.endpointCount ?? (backendState?.apis.length ?? 0) * 5
-  const tableCount = backendState?.entities.length ?? 0
+  // Registered tables decide whether the engine accepts a publish, so
+  // `publishable` reads them; the number shown is what a publish puts live, as
+  // the version it records counts it.
+  const registeredTableCount = backendState?.entities.length ?? 0
+  const tableCount = backendState?.liveTableCount ?? registeredTableCount
   const apiResourceCount = backendState?.apis.length ?? 0
   // What the publish ENGINE will accept (lib/deployment/go-live.ts refuses
   // when tables, exposed APIs and auth are all absent). hasContent is wider —
   // functions, buckets or realtime alone flip it — and offering Publish on
   // that wider set meant the button led straight to a refusal.
-  const publishable = tableCount > 0 || apiResourceCount > 0 || hasAuth
+  const publishable = registeredTableCount > 0 || apiResourceCount > 0 || hasAuth
 
-  const passingChecks = readinessChecks.filter(c => c.status === 'pass').length
+  // Blockers, failing warnings and the checks that ran, counted honestly.
+  const headline = readinessHeadline(readinessChecks)
   const blockingChecks = readinessChecks.filter(c => c.status === 'fail' && c.severity === 'blocking')
   const warningChecks = readinessChecks.filter(c => c.status === 'fail' && c.severity !== 'blocking')
   // What "Apply safe fixes" would change: failing checks the engine can fix.
@@ -362,13 +370,7 @@ export default function PublishPage() {
               {title}
             </span>
           }
-          actions={
-            blockingChecks.length === 0 ? (
-              <StatusDot tone="operational" label={`${passingChecks} of ${readinessChecks.length} passing`} />
-            ) : (
-              <StatusDot tone="attention" label={`${blockingChecks.length} to clear`} />
-            )
-          }
+          actions={<StatusDot tone={headline.tone} label={headline.label} />}
         />
         <ul className="space-y-2.5 px-4 py-3.5">
           {visibleChecks.map(check => (

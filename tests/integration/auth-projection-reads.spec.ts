@@ -318,7 +318,7 @@ describe("the runtime's own v1 routes (database, logs, presence, broadcast, real
     expect(await res.json()).toMatchObject({ error: 'channel is required' })
   })
 
-  it('keep one counter with the Next-owned routes: past the limit, both refuse', async () => {
+  it('keep one counter per address with the Next-owned routes: past the limit, both refuse', async () => {
     const raw = `proj_live_${randomBytes(24).toString('hex')}`
     const created = await prisma.apiKey.create({
       data: {
@@ -327,22 +327,29 @@ describe("the runtime's own v1 routes (database, logs, presence, broadcast, real
       },
       select: { id: true },
     })
+    // A browser key is limited per address (lib/security/shared-key-rate.ts):
+    // one client, its address behind the proxies, through both runtimes.
+    const from = { 'x-forwarded-for': '203.0.113.9' }
+    const broadcastFrom = () =>
+      fetch(`${baseUrl}/api/v1/${projectId}/broadcast`, {
+        method: 'POST',
+        headers: { 'x-api-key': raw, 'content-type': 'application/json', ...from },
+        body: '{}',
+      })
+    const nextFrom = () =>
+      authenticateApiKey(new NextRequest(`http://localhost/api/v1/${projectId}/storage/files`, { headers: { 'x-api-key': raw, ...from } }))
     try {
       await deliverRegion(REGION)
       mode('enforce')
-      expect((await broadcast(raw)).status).toBe(400)
-      const viaNext = await authenticateApiKey(
-        new NextRequest(`http://localhost/api/v1/${projectId}/storage/files`, { headers: { 'x-api-key': raw } }),
-      )
+      expect((await broadcastFrom()).status).toBe(400)
+      const viaNext = await nextFrom()
       expect(viaNext).toMatchObject({ authenticated: true })
       expect(viaNext.rateLimited).toBeUndefined()
       // Two counted, of two: the runtime route is refused now, as the Next route is.
-      const refused = await broadcast(raw)
+      const refused = await broadcastFrom()
       expect(refused.status).toBe(429)
       expect(refused.headers.get('retry-after')).not.toBeNull()
-      const refusedNext = await authenticateApiKey(
-        new NextRequest(`http://localhost/api/v1/${projectId}/storage/files`, { headers: { 'x-api-key': raw } }),
-      )
+      const refusedNext = await nextFrom()
       expect(refusedNext.rateLimited).toBe(true)
       expect(await regionCount(created.id)).toBe(2)
       // And home's counter, which the console reads, was not written on a request.

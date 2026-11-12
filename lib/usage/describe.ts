@@ -16,6 +16,7 @@ import { OVERAGE_AXES, overageCents, type OverageAxis } from '@/lib/pricing/cata
 import { accountLimits } from './overage'
 import { forecastAccount } from './forecast'
 import { accountRestriction, GRACE_DAYS, type RestrictedAxis } from './restrictions'
+import { measureAccountDbStorage } from './storage-on-read'
 
 const LABEL: Record<OverageAxis, string> = {
   mau: 'Monthly active users',
@@ -57,6 +58,12 @@ export interface AxisDescription {
   projectedCents: number
   /** Database and egress only: the grace period after the cap is reached. */
   grace: { overSince: string; graceEndsAt: string; restricted: boolean } | null
+  /**
+   * Database storage only: when the oldest project reading in `used` was taken
+   * (it is measured, not counted). Null for the counters, which are live, and
+   * when nothing has been measured yet.
+   */
+  measuredAt: string | null
 }
 
 export interface AccountUsageDescription {
@@ -79,6 +86,9 @@ export async function describeAccountUsage(
   billingAccountId: string,
   now: Date = new Date(),
 ): Promise<AccountUsageDescription | null> {
+  // Storage is measured, not counted: re-measured here when a reading is more
+  // than five minutes old, so what a person or an agent reads is recent.
+  const storageMeasuredAt = await measureAccountDbStorage(billingAccountId, now)
   const limits = await accountLimits(billingAccountId, { fresh: true })
   if (!limits) return null
   const [forecast, policy] = await Promise.all([
@@ -109,6 +119,7 @@ export async function describeAccountUsage(
       estimatedCents: Math.floor(a.estimatedCents),
       projectedCents: a.billable ? Math.floor(overageCents(axis, projectedOver, limits.terms)) : 0,
       grace,
+      measuredAt: axis === 'db_bytes' ? (storageMeasuredAt?.toISOString() ?? null) : null,
     })
   }
 

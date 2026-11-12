@@ -116,16 +116,25 @@ async function actorsFor(rows: Row[]): Promise<Map<string, ChangeActor>> {
   const keyIds = [...new Set(rows.map((r) => r.apiKeyId).filter((x): x is string => !!x))]
   const [users, keys] = await Promise.all([
     userIds.length ? prisma.user.findMany({ where: { id: { in: userIds } }, select: { id: true, name: true, email: true } }) : Promise.resolve([]),
-    keyIds.length ? prisma.apiKey.findMany({ where: { id: { in: keyIds } }, select: { id: true, name: true } }) : Promise.resolve([]),
+    keyIds.length
+      ? prisma.apiKey.findMany({ where: { id: { in: keyIds } }, select: { id: true, name: true, mcpClientLabel: true } })
+      : Promise.resolve([]),
   ])
   const userBy = new Map<string, string>(users.map((u): [string, string] => [u.id, u.name || u.email]))
-  const keyBy = new Map<string, string>(keys.map((k): [string, string] => [k.id, k.name]))
+  // An agent's key by the label its person gave it, as Connect lists it
+  // ("Agent setup"), not the stored name ("MCP Key").
+  const keyBy = new Map<string, string>(keys.map((k): [string, string] => [k.id, k.mcpClientLabel || k.name]))
   const out = new Map<string, ChangeActor>()
   for (const r of rows) {
     const person = r.actorUserId ? userBy.get(r.actorUserId) ?? 'a former member' : null
     let actor: ChangeActor
     if (r.source === 'system') {
       actor = { type: 'system', label: 'Backenly', userId: null, apiKeyId: null }
+    } else if (r.source === 'approval' && !r.apiKeyId && r.groupId?.startsWith('evolution:')) {
+      // A step of an architecture change: Backenly runs it, on the consent of
+      // the person who approved the change. Crediting the approver alone read
+      // as if they had made each step themselves.
+      actor = { type: 'system', label: person ? `Backenly, approved by ${person}` : 'Backenly', userId: r.actorUserId, apiKeyId: null }
     } else if (r.apiKeyId && (r.source === 'approval' || r.source === 'branch_merge')) {
       actor = { type: 'person', label: `${person ?? 'Someone'}, approving ${keyBy.get(r.apiKeyId) ?? 'an agent'}'s request`, userId: r.actorUserId, apiKeyId: r.apiKeyId }
     } else if (r.apiKeyId) {

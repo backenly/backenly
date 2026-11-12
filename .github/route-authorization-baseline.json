@@ -90,6 +90,11 @@
     "reason": "ACCEPTED: unauthenticated by design; authority comes from the six-digit code mailed to the address, not a session. The code is stored as an HMAC, dies after five wrong guesses and is single-use. Rate-limited via AUTH_LIMITS."
   },
   {
+    "route": "/api/auth/session",
+    "status": "ACCEPTED",
+    "reason": "ACCEPTED: unauthenticated by design - it answers whether the caller is signed in, so a signed-out caller gets an answer instead of a 401. Authority is the caller's own session cookie: with a valid one it returns that user's own profile, without one only { user: null, canRefresh }. It takes no identifier, names no resource and is read-only."
+  },
+  {
     "route": "/api/auth/verify-email",
     "status": "ACCEPTED",
     "reason": "ACCEPTED: unauthenticated by design; authority comes from the signed token in the link."
@@ -273,6 +278,11 @@
     "route": "/api/v1/[projectId]/auth/logout",
     "status": "ACCEPTED",
     "reason": "Public by design and idempotent. Invalidates the caller\u2019s own token; holding a token is the authority, and revoking one you already hold grants nothing."
+  },
+  {
+    "route": "/api/v1/[projectId]/auth/me",
+    "status": "ACCEPTED",
+    "reason": "Public by design, like signin and refresh-token: authority is the end-user token presented. It is verified for this project and environment the way every data request verifies it (server/lib/end-user-identity.ts resolveEndUserFromToken), so a token revoked by logout or held by a suspended user is refused, and it returns only that token's own user (id, email, name, role). It takes no identifier and is read-only."
   },
   {
     "route": "/api/v1/[projectId]/auth/refresh-token",

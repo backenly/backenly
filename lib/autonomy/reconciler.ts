@@ -814,6 +814,14 @@ export async function runReconcilerLive(projectId: string): Promise<LiveReconcil
     // Repairs that nothing could restore wait for a person, in the queue.
     const parked = await parkRepairsOutsideTheLedger(projectId, plan.decisions)
 
+    // Indexes Backenly built on its own because queries measured slow are
+    // judged on those queries, and kept or taken away (./index-trials.ts).
+    // Every pass, whatever else it has to do: the calls since the build are
+    // counted pass by pass.
+    await import('./index-trials')
+      .then(m => m.reviewIndexTrials(projectId))
+      .catch(err => console.warn(`[Reconciler:live] project=${projectId} index trials not reviewed:`, err?.message ?? err))
+
     const toApply = plan.decisions.filter(d => d.action === 'WOULD_AUTO_APPLY')
     if (toApply.length === 0) {
       // Why nothing will happen this tick.

@@ -11,9 +11,11 @@ import {
   parseContentRange,
   toApiError,
   toListEnvelope,
+  wantsExactCount,
   toRecordEnvelope,
   translateReadQuery,
   stripUpstreamError,
+  v2GrammarIn,
 } from '@/lib/postgrest/translate'
 import { isOperationEnabled, operationFor } from '@/lib/postgrest/exposure'
 
@@ -174,6 +176,30 @@ describe('pagination envelope', () => {
     expect(env.pagination.hasMore).toBe(false)
   })
 
+  it('with one row past the page, trims it and knows hasMore exactly', () => {
+    const more = toListEnvelope([{ id: 1 }, { id: 2 }, { id: 3 }], '0-2/*', 2, 0, { extraRow: true })
+    expect(more.data).toEqual([{ id: 1 }, { id: 2 }])
+    expect(more.pagination).toEqual({ total: null, limit: 2, offset: 0, hasMore: true, nextCursor: 2 })
+
+    // Exactly a page left: a full page is no longer read as "more follow".
+    const end = toListEnvelope([{ id: 1 }, { id: 2 }], '0-1/*', 2, 0, { extraRow: true })
+    expect(end.pagination).toEqual({ total: 2, limit: 2, offset: 0, hasMore: false, nextCursor: null })
+  })
+
+  it('does not place the end of the rows by an offset past it', () => {
+    expect(toListEnvelope([], '*/*', 2, 10, { extraRow: true }).pagination.total).toBeNull()
+    expect(toListEnvelope([], '*/*', 2, 0, { extraRow: true }).pagination.total).toBe(0)
+  })
+
+  it('reads count=exact as a request for a total, not a filter', () => {
+    expect(wantsExactCount({ count: 'exact' }, undefined)).toBe(true)
+    expect(wantsExactCount({}, 'return=minimal, count=exact')).toBe(true)
+    expect(wantsExactCount({ count: '5' }, undefined)).toBe(false)
+    expect(wantsExactCount({}, undefined)).toBe(false)
+    expect(translateReadQuery({ query: { count: 'exact' }, hasSoftDelete: false }).search).not.toContain('count')
+    expect(translateReadQuery({ query: { count: '5' }, hasSoftDelete: false }).search).toContain('count=eq.5')
+  })
+
   it('infers hasMore from a full page when the total is unknown', () => {
     // Claiming "no more rows" without knowing would stop a paginating client
     // early and silently truncate its results.
@@ -273,6 +299,20 @@ describe('record envelopes', () => {
  *  2. That message enumerates every OTHER tenant's schema. A real user's
  *     unrelated key was handed four other customers' project ids.
  */
+describe('toApiError — an upsert with no conflict target', () => {
+  it('names the problem and how to make an index an upsert can use', () => {
+    const out = toApiError(400, {
+      code: '42P10',
+      message: 'there is no unique or exclusion constraint matching the ON CONFLICT specification',
+    })
+    expect(out.status).toBe(400)
+    expect(out.body.code).toBe('UPSERT_TARGET_NOT_UNIQUE')
+    expect(out.body.error).toMatch(/on_conflict columns/)
+    expect(out.body.hint).toMatch(/WHERE deleted_at IS NULL/)
+    expect(out.body.hint).toMatch(/where: "true"/)
+  })
+})
+
 describe('toApiError — data-plane provisioning errors', () => {
   it('maps PGRST106 to 503, never a 4xx', () => {
     const out = toApiError(406, {
@@ -368,11 +408,133 @@ describe('stripUpstreamError — v2 passthrough', () => {
     expect(JSON.stringify(out.body)).not.toMatch(/users/)
   })
 
+  it('says why an upsert found no conflict target, and how to make one', () => {
+    const out = stripUpstreamError(400, {
+      code: '42P10',
+      message: 'there is no unique or exclusion constraint matching the ON CONFLICT specification',
+      details: null,
+      hint: null,
+    })
+    expect(out.status).toBe(400)
+    expect(out.body.code).toBe('42P10')
+    expect(out.body.message).toBe('there is no unique or exclusion constraint matching the ON CONFLICT specification')
+    expect(out.body.hint).toMatch(/where: "true"/)
+    expect(out.body.hint).toMatch(/WHERE true/)
+  })
+
   it('reduces anything unrecognised rather than forwarding it', () => {
     const out = stripUpstreamError(500, {
       code: 'XX000',
       message: 'internal error: connection to backenly_authenticator@10.0.0.4 failed',
     })
     expect(JSON.stringify(out.body)).not.toMatch(/backenly_authenticator|10\.0\.0\.4/)
+  })
+})
+
+/**
+ * Production QA (2026-11-09): "abc" sent for an integer column through /db came
+ * back DB_CONSTRAINT_ERROR, while /database/insert answered the same row
+ * VALIDATION_ERROR. A value of the wrong type or format, a value too long and
+ * a column the table does not have are about the request's values, not a
+ * constraint the row broke.
+ */
+describe('toApiError — which errors are about the values sent', () => {
+  const code = (pg: string) => toApiError(400, { code: pg, message: 'm' }).body.code
+
+  it('labels a value of the wrong type, format or length, and an unknown column, VALIDATION_ERROR', () => {
+    expect(code('22P02')).toBe('VALIDATION_ERROR') // invalid input syntax for type integer: "abc"
+    expect(code('22007')).toBe('VALIDATION_ERROR') // invalid datetime format
+    expect(code('22001')).toBe('VALIDATION_ERROR') // value too long
+    expect(code('42703')).toBe('VALIDATION_ERROR') // column does not exist
+  })
+
+  it('keeps DB_CONSTRAINT_ERROR for a constraint the row broke, and TABLE_NOT_FOUND', () => {
+    for (const pg of ['23502', '23503', '23505', '23514']) expect(code(pg)).toBe('DB_CONSTRAINT_ERROR')
+    expect(code('42P01')).toBe('TABLE_NOT_FOUND')
+  })
+
+  it('keeps the status it had', () => {
+    expect(toApiError(400, { code: '22P02', message: 'm' }).status).toBe(400)
+    expect(toApiError(400, { code: '42703', message: 'm' }).status).toBe(400)
+  })
+})
+
+/**
+ * Production QA (2026-11-09): a 20,000-row batch to /api/v2 came back
+ * `400 REQUEST_FAILED, "Request could not be completed"`, and the reason was
+ * only in the runtime's log. stripUpstreamError forwarded a short list of
+ * codes and replaced every other 4xx with that sentence, PostgREST's own
+ * request errors included: rows whose keys differ (PGRST102), a column the
+ * table does not have (PGRST204), the project's own RAISE EXCEPTION (P0001).
+ * Each describes the request the caller made.
+ */
+describe('stripUpstreamError — errors about the request the caller made', () => {
+  const forwarded = (status: number, body: Record<string, unknown>) => stripUpstreamError(status, body)
+
+  it('keeps PostgREST’s reason for a request it refused', () => {
+    const out = forwarded(400, { code: 'PGRST102', message: 'All object keys must match', details: null, hint: null })
+    expect(out).toEqual({ status: 400, body: { code: 'PGRST102', message: 'All object keys must match', details: null, hint: null } })
+    expect(forwarded(400, { code: 'PGRST122', message: 'Invalid preferences given with handling=strict' }).body.code).toBe('PGRST122')
+  })
+
+  it('keeps an unknown column on a write, the v2 form of 42703', () => {
+    const out = forwarded(400, { code: 'PGRST204', message: "Could not find the 'colour' column of 'products' in the schema cache" })
+    expect(out.body).toMatchObject({ code: 'PGRST204', message: expect.stringContaining("'colour' column") })
+  })
+
+  it('keeps the project’s own RAISE EXCEPTION text', () => {
+    const out = forwarded(400, { code: 'P0001', message: 'Orders over 500 need approval' })
+    expect(out.body).toMatchObject({ code: 'P0001', message: 'Orders over 500 need approval' })
+  })
+
+  it('still hides the schema list and anything it does not recognise', () => {
+    expect(JSON.stringify(forwarded(406, { code: 'PGRST106', message: 'Only the following schemas are exposed: workspace_b' }).body)).not.toMatch(/workspace_/)
+    expect(forwarded(400, { code: 'XX000', message: 'internal error at 10.0.0.4' }).body).toEqual({
+      code: 'REQUEST_FAILED',
+      message: 'Request could not be completed',
+    })
+  })
+})
+
+/**
+ * Production QA (2026-11-09): /db reads filters by equality only, and read
+ * /api/v2's grammar as data. `?status=eq.paid` matched the literal "eq.paid"
+ * and answered 200 with no rows; `?order=created_at.desc` and
+ * `?select=*,author(*)` were dropped without a word. Each is refused with the
+ * /api/v2 request that does what was asked.
+ */
+describe('v2GrammarIn — /api/v2 syntax sent to /db', () => {
+  const target = { projectId: 'p1', table: 'orders' }
+  const refuse = (query: Record<string, string>) => v2GrammarIn(query, target)
+
+  it('refuses an operator filter, naming the /api/v2 request', () => {
+    expect(refuse({ status: 'eq.paid' })).toBe(
+      '"status=eq.paid" is /api/v2\'s filter syntax. On /db a filter is an equality (?status=paid); ' +
+        'for operators, use /api/v2/p1/orders?status=eq.paid.',
+    )
+    expect(refuse({ total: 'gt.100' })).toMatch(/\/api\/v2\/p1\/orders\?total=gt\.100/)
+    expect(refuse({ id: 'in.(1,2)' })).not.toBeNull()
+    expect(refuse({ deleted_at: 'is.null' })).not.toBeNull()
+    expect(refuse({ name: 'not.ilike.*bot*' })).not.toBeNull()
+  })
+
+  it('refuses or/and, a v2 order and an embedding select', () => {
+    expect(refuse({ or: '(status.eq.paid,status.eq.sent)' })).toMatch(/^"or" combines filters on \/api\/v2 only/)
+    expect(refuse({ order: 'created_at.desc' })).toBe(
+      'On /db, sort names the column and order is asc or desc (?sort=created_at&order=desc). ' +
+        '"order=created_at.desc" is /api/v2\'s syntax: /api/v2/p1/orders?order=created_at.desc.',
+    )
+    expect(refuse({ select: '*,author(*)' })).toBe(
+      'On /db, select lists columns (?select=id,title). To embed related rows or rename columns, use ' +
+        '/api/v2/p1/orders?select=*,author(*).',
+    )
+  })
+
+  it('leaves /db’s own grammar, and literal values that only look alike, alone', () => {
+    expect(refuse({ status: 'paid' })).toBeNull()
+    expect(refuse({ domain: 'is.gd' })).toBeNull()
+    expect(refuse({ team: 'in.house' })).toBeNull()
+    expect(refuse({ sort: 'created_at', order: 'desc', select: 'id,title', limit: '10' })).toBeNull()
+    expect(refuse({ select: '*' })).toBeNull()
   })
 })

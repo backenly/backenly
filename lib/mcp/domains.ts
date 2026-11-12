@@ -25,6 +25,7 @@
 
 import { BRAIN_TOOLS, READ_ONLY_TOOLS, TOOL_TO_ACTION, isDestructiveTool } from '@/lib/ai/brain/tools'
 import { riskLevelForExecutorAction } from '@/lib/operational-memory/ledger'
+import { connectableProviderIds } from '@/lib/services/ai-functions/integration-registry'
 
 export interface DomainAction {
   /** The brain tool that performs this action. */
@@ -120,8 +121,9 @@ export const DOMAIN_TOOLS: DomainTool[] = [
     name: 'integrations',
     title: 'Integrations',
     summary:
-      'Third-party providers used from functions as ctx.integrations.<id>: stripe, resend, sendgrid, ' +
-      'openai, anthropic, twilio, posthog, onesignal, replicate, runway, stability. A key is verified with ' +
+      // The registry's list, the same one the Integrations page offers.
+      `Third-party providers used from functions as ctx.integrations.<id>: ${connectableProviderIds()}. ` +
+      'A key is verified with ' +
       'the provider before it is stored; the human can also paste it on the Integrations page, which keeps it ' +
       'out of this conversation.',
     openWorld: true,
@@ -129,7 +131,7 @@ export const DOMAIN_TOOLS: DomainTool[] = [
       list: { tool: 'list_integration_keys', gloss: 'connected providers, masked keys and verification state' },
       capabilities: { tool: 'list_integration_capabilities', gloss: 'the exact ctx.integrations methods each provider gives a function, and for Stripe its receiver URL and signing-secret state' },
       verify: { tool: 'verify_integration_key', gloss: 'ask the provider again whether the stored key works' },
-      connect: { tool: 'store_integration_key', gloss: 'store a provider key (Stripe also takes webhookSecret, OneSignal also takes appId) and wire the first functions, which Backenly\'s model writes' },
+      connect: { tool: 'store_integration_key', gloss: 'store a provider key (Stripe also takes webhookSecret, OneSignal also takes appId, Resend/SendGrid also takes fromEmail) and wire the first functions, which Backenly\'s model writes' },
       disconnect: { tool: 'remove_integration_key', gloss: 'remove a provider key' },
       send_push: { tool: 'send_push', gloss: 'a push notification through the connected OneSignal app' },
     },
@@ -174,8 +176,8 @@ export const DOMAIN_TOOLS: DomainTool[] = [
     openWorld: true,
     actions: {
       list: { tool: 'list_webhooks', gloss: 'every endpoint with its event, URL, on/off state and capture health' },
-      create: { tool: 'create_webhook', gloss: 'an endpoint for row.inserted, row.updated, row.deleted or auth.user.created' },
-      update: { tool: 'update_webhook', gloss: 'change the URL or event of an endpoint, or switch it on or off' },
+      create: { tool: 'create_webhook', gloss: 'an endpoint for row.inserted, row.updated, row.deleted or auth.user.created; tables limits a row event to some tables' },
+      update: { tool: 'update_webhook', gloss: 'change the URL, event or tables of an endpoint, or switch it on or off' },
       delete: { tool: 'delete_webhook', gloss: 'remove an endpoint and its delivery history' },
       test: { tool: 'test_webhook', gloss: 'send one real signed test delivery now and see what the receiver answered' },
       logs: { tool: 'list_webhook_logs', gloss: 'the deliveries of one endpoint, with status, HTTP code, error and payload' },
@@ -256,6 +258,22 @@ export function needsApproval(target: string): boolean {
 }
 
 /**
+ * needsApproval for one call, asked by both doors (the MCP tool route and the
+ * brain's gate). Deleting a function nothing calls, one switched off or not
+ * run in 7 days, runs at once: History keeps its code, and restoring the
+ * change brings it back (lib/services/ai-functions/delete-rule.ts). Every
+ * other call answers as needsApproval does.
+ */
+export async function approvalNeededFor(target: string, args: Record<string, unknown>, projectId: string): Promise<boolean> {
+  if (!needsApproval(target)) return false
+  if (target === 'delete_ai_function') {
+    const { deleteWaitsForPerson } = await import('@/lib/services/ai-functions/delete-rule')
+    return deleteWaitsForPerson(projectId, args)
+  }
+  return true
+}
+
+/**
  * A domain as a read-only key sees it: only the actions whose target is a read,
  * or null when there are none.
  *
@@ -284,6 +302,13 @@ export function readOnlyView(domain: DomainTool): DomainTool | null {
 
 /** Arguments that ask a read to write, never offered to a read-only key. */
 const WRITE_ONLY_ARGS = new Set(['autoFix'])
+
+/**
+ * Arguments only the brain's own model uses. `force` answers a confirmation
+ * prompt in backend_chat; the typed door binds without one, so offering it
+ * there only cost every session its description.
+ */
+const BRAIN_ONLY_ARGS = new Set(['force'])
 
 export type DomainResolution =
   | { kind: 'ok'; domain: DomainTool; action: string; target: string; approval: boolean }
@@ -343,6 +368,7 @@ export function domainInputSchema(domain: DomainTool, opts?: { readOnly?: boolea
     for (const [prop, schema] of Object.entries(brainParams(tool).properties)) {
       if (prop === 'action') continue
       if (opts?.readOnly && WRITE_ONLY_ARGS.has(prop)) continue
+      if (BRAIN_ONLY_ARGS.has(prop)) continue
       if (!properties[prop]) {
         properties[prop] = { ...schema }
         usedBy[prop] = [action]
@@ -369,7 +395,7 @@ export function domainInputSchema(domain: DomainTool, opts?: { readOnly?: boolea
       action: {
         type: 'string',
         enum: Object.keys(domain.actions),
-        description: 'What to do. The tool description lists each action and the arguments it needs.',
+        description: 'One of the actions the description lists.',
       },
       ...properties,
     },

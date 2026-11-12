@@ -11,6 +11,8 @@ import { isReservedWorkspaceTable } from '@/lib/security/workspace-schema'
 import type { RelatedRowsVia } from '@/lib/services/rls-ownership'
 import { addForeignKeySql, columnForeignKeySql, describeTarget, isDeclaredForeignKey } from '@/lib/db/declared-foreign-key'
 import { getActiveGraph, saveNewGraph } from '@/lib/orchestration/graph-pointer'
+import { withoutTables } from '@/lib/orchestration/graph-tables'
+import { planDisplayName } from '@/lib/entitlements/plan-names'
 import { withTimeout } from './with-timeout'
 import { trackAction } from './execution-timeline'
 import { classifyErrorCode } from '@/lib/errors/taxonomy'
@@ -50,6 +52,10 @@ export interface AIAction {
     // Finish a constraint that was added NOT VALID. Approval-gated: it scans the
     // whole table and fails if the existing rows do not satisfy it.
     | 'VALIDATE_CONSTRAINT'
+    // A migration's ALTER TABLE … DROP CONSTRAINT. Reached from apply_migration
+    // on a branch, from a merge a person approved, or from a person's own
+    // migration on main; an agent's on production is refused (lib/mcp/apply-migration.ts).
+    | 'DROP_CONSTRAINT'
     | 'DROP_COLUMN'
     | 'DROP_TABLE' | 'TRUNCATE_TABLE'
     // API
@@ -169,6 +175,13 @@ export interface ExecutionResult {
    * and a caller that does not care can ignore it.
    */
   advisories?: string[]
+  /**
+   * What automatic row-level security has to tell whoever created a table: it
+   * starts closed, or it could not be protected. Also in `message`; kept apart
+   * so an action that created the table on the way to another (the dependency
+   * resolver's CREATE_TABLE before an ADD_COLUMN) says it in that one's result.
+   */
+  rlsNotice?: string
   /** ISO timestamp set when a live DB read-back confirmed the artifact exists */
   verifiedAt?: string
   /**
@@ -886,6 +899,23 @@ function normalizeUserInput(input: string): string {
 }
 
 /**
+ * A type a statement declared, exactly (lib/mcp/migration-parser.ts: exactSqlType).
+ *
+ * When a column carries one, it is created with that type and nothing about
+ * its name is consulted: on production (2026-11-09) `session_id text` became
+ * uuid by name, and `refunded_at timestamptz`, carried only as the vocabulary's
+ * "timestamp", became timestamp without time zone on merge. Checked against the
+ * spellings the parser emits, since it is interpolated into DDL.
+ */
+const DECLARED_SQL_TYPE =
+  /^(?:text|varchar(?:\(\d{1,5}\))?|char(?:\(\d{1,4}\))?|smallint|integer|bigint|boolean|timestamp(?:\([0-6]\))?|timestamptz(?:\([0-6]\))?|date|time(?:\([0-6]\))?|uuid|json|jsonb|numeric(?:\(\d{1,4}(?:,\d{1,4})?\))?|real|double precision|money)(?:\[\])?$/
+
+function declaredSqlType(col: unknown): string | null {
+  const t = (col as { sqlType?: unknown } | null)?.sqlType
+  return typeof t === 'string' && DECLARED_SQL_TYPE.test(t) ? t.toUpperCase() : null
+}
+
+/**
  * Validate and normalize column type with guards
  */
 function normalizeColumnType(type: string | undefined, columnName: string): string {
@@ -1577,9 +1607,9 @@ AI FUNCTIONS (serverless logic — "when X happens, run this logic automatically
 - CREATE_AI_FUNCTION - Create an AI-generated serverless function from a description
   triggerType: on_signup | on_db_insert | on_db_update | on_db_delete | on_webhook | manual
   for on_webhook: triggerTable = integration name (e.g. "stripe") to match that webhook source
-- LIST_AI_FUNCTIONS - List all AI functions
-- DELETE_AI_FUNCTION - Delete an AI function
-- TOGGLE_AI_FUNCTION - Enable or disable an AI function
+- LIST_AI_FUNCTIONS - List all functions
+- DELETE_AI_FUNCTION - Delete a function
+- TOGGLE_AI_FUNCTION - Enable or disable a function
 - FIX_AI_FUNCTION - Regenerate code for a broken function. Use when user pastes a function error,
   shows "Syntax error: ..." from a function, says a function is broken/not working, or asks you
   to fix/repair an existing function. NEVER create new functions when the user is showing an error
@@ -2198,7 +2228,7 @@ export async function validateAction(
     case 'DELETE_ENV_VAR':
       if (!action.params.key) errors.push('Env var key is required')
       preview = `Delete env var "${action.params.key}"`
-      warnings.push('AI functions using this env var will start failing on next invocation')
+      warnings.push('Functions using this env var will start failing on their next run')
       break
 
     case 'GET_DEPLOY_STATUS':
@@ -2389,22 +2419,22 @@ export async function validateAction(
     case 'CREATE_AI_FUNCTION':
       if (!action.params.description) errors.push('description is required')
       if (!action.params.triggerType) errors.push('triggerType is required (on_signup | on_db_insert | on_db_update | on_db_delete | manual)')
-      preview = `Create AI function: "${action.params.description?.slice(0, 60)}"`
+      preview = `Create function: "${action.params.description?.slice(0, 60)}"`
       break
 
     case 'LIST_AI_FUNCTIONS':
-      preview = 'List all AI functions'
+      preview = 'List all functions'
       break
 
     case 'DELETE_AI_FUNCTION':
       if (!action.params.functionId && !action.params.name) errors.push('functionId or name is required')
-      preview = `Delete AI function "${action.params.name || action.params.functionId}"`
+      preview = `Delete function "${action.params.name || action.params.functionId}"`
       break
 
     case 'TOGGLE_AI_FUNCTION':
       if (!action.params.functionId && !action.params.name) errors.push('functionId or name is required')
       if (action.params.active === undefined) errors.push('active (true/false) is required')
-      preview = `${action.params.active ? 'Enable' : 'Disable'} AI function "${action.params.name || action.params.functionId}"`
+      preview = `${action.params.active ? 'Enable' : 'Disable'} function "${action.params.name || action.params.functionId}"`
       break
 
     // ========== INTEGRATION KEY MANAGEMENT ==========
@@ -3138,7 +3168,7 @@ async function _writeDecisionMemory(action: AIAction, projectId: string): Promis
  */
 const GOVERNED_ACTIONS = new Set<AIAction['action']>([
   'CREATE_TABLE', 'CREATE_JUNCTION_TABLE', 'ADD_COLUMN', 'DROP_COLUMN', 'DROP_TABLE',
-  'RENAME_COLUMN', 'ADD_CONSTRAINT', 'VALIDATE_CONSTRAINT', 'CREATE_INDEX', 'DROP_INDEX',
+  'RENAME_COLUMN', 'ADD_CONSTRAINT', 'VALIDATE_CONSTRAINT', 'DROP_CONSTRAINT', 'CREATE_INDEX', 'DROP_INDEX',
   'ALTER_COLUMN_TYPE', 'ENABLE_AUTH', 'ENABLE_TEAMS', 'ENABLE_VECTOR_SEARCH', 'ADD_FULLTEXT_SEARCH',
   'SET_PERMISSION', 'REMOVE_PERMISSION', 'ENABLE_REALTIME', 'DISABLE_REALTIME',
   'CREATE_TRIGGER', 'DELETE_TRIGGER', 'SYNC_COLUMN', 'REMOVE_SYNC_COLUMN',
@@ -3183,8 +3213,9 @@ export async function executeAction(
     return r
   }
   try {
+    const plain = plainWordsForLedger(action)
     const { result, change } = await withGovernedChange(
-      { projectId, title: describeActionForLedger(action) },
+      { projectId, title: plain?.title ?? describeActionForLedger(action), ...(plain ? { summaryIfApplied: plain.summary } : {}) },
       recorded,
       (r) => ({
         ok: r.success,
@@ -3245,6 +3276,30 @@ function expectationsFor(action: AIAction): Array<{ action: string; table?: stri
   }
 }
 
+/**
+ * The change history's words for an action whose database effect would misname
+ * it: turning on sign-in creates a users table, and turning on realtime adds a
+ * trigger, so History read "Created table users" and "Changed the triggers on
+ * orders" (production QA, 2026-11-09). The title is what was asked; the
+ * summary is what was done, used when it was applied.
+ */
+function plainWordsForLedger(action: AIAction): { title: string; summary: string } | null {
+  const p = (action.params ?? {}) as Record<string, any>
+  const table: string | undefined = p.table ?? p.tableName
+  switch (action.action) {
+    case 'ENABLE_AUTH':
+      return { title: 'Turn on email and password sign-in', summary: 'Turned on email and password sign-in' }
+    case 'ENABLE_TEAMS':
+      return { title: 'Turn on teams', summary: 'Turned on teams' }
+    case 'ENABLE_REALTIME':
+      return table ? { title: `Turn on realtime for ${table}`, summary: `Turned on realtime for ${table}` } : null
+    case 'DISABLE_REALTIME':
+      return table ? { title: `Turn off realtime for ${table}`, summary: `Turned off realtime for ${table}` } : null
+    default:
+      return null
+  }
+}
+
 /** One line for the change history: what was asked for, in the executor's terms. */
 function describeActionForLedger(action: AIAction): string {
   const p = action.params ?? {}
@@ -3300,6 +3355,10 @@ async function executeActionUnrecorded(
       'ENABLE_AUTH',       // creates `users`, the anchor every plan resolves against
     ])
 
+    // A table the resolver created on the way to the action asked for may have
+    // started closed; the caller hears that in the asked action's result.
+    const createdOnTheWay: string[] = []
+
     for (const act of finalActions) {
       // Phase 8: wrap each action with timeline tracking
       lastResult = await trackAction(
@@ -3309,6 +3368,9 @@ async function executeActionUnrecorded(
         () => executeSingleAction(act, projectId, apiKey),
         { retryCount },
       )
+      if (lastResult.success && lastResult.rlsNotice && act !== finalActions[finalActions.length - 1]) {
+        createdOnTheWay.push(lastResult.rlsNotice)
+      }
 
       // Phase 7: Regenerate TypeScript types after schema mutations (non-blocking)
       if (TYPEGEN_TRIGGER_ACTIONS.has(act.action) && lastResult.success) {
@@ -3411,6 +3473,9 @@ async function executeActionUnrecorded(
       _writeDecisionMemory(act, projectId).catch(() => {})
     }
 
+    if (createdOnTheWay.length > 0 && lastResult.success) {
+      return { ...lastResult, message: [lastResult.message, ...createdOnTheWay].join('\n\n') }
+    }
     return lastResult
   } catch (error: any) {
     console.error('[AI Executor] Error:', error)
@@ -3559,6 +3624,9 @@ async function executeSingleAction(
 
       case 'DROP_INDEX':
         return await executeDropIndex(action.params, projectId)
+
+      case 'DROP_CONSTRAINT':
+        return await executeDropConstraint(action.params, projectId)
 
       case 'REINDEX_INDEX':
         return await executeReindexIndex(action.params, projectId)
@@ -4182,6 +4250,17 @@ async function executeCreateTable(
     }
   }
 
+  // ── Declared in SQL: exactly as written ──────────────────────────────────
+  //
+  // A table from apply_migration gets the columns, keys, uniques, checks and
+  // defaults its statement declares, and nothing its column names suggest: no
+  // UNIQUE on `email`, no CHECK value list on `status`, no foreign key with
+  // ON DELETE CASCADE on `user_id`, no NOT NULL the statement left out. Those
+  // guesses are for a table the brain designs from a description; on SQL they
+  // rewrote what the author said. The platform's own columns (id, "createdAt",
+  // "updatedAt", "deleted_at") are still added, and the result says so.
+  const asWritten = params.asWritten === true
+
   try {
     // Import Prisma and database utility functions
     const { prisma } = await import('@/lib/db')
@@ -4288,7 +4367,7 @@ async function executeCreateTable(
     ]
 
     const alreadyHasStatusConstraint = checkConstraints.some(c => c.columnName === 'status')
-    if (!alreadyHasStatusConstraint) {
+    if (!asWritten && !alreadyHasStatusConstraint) {
       for (const rule of STATUS_DOMAIN_MAP) {
         if (!rule.pattern.test(tableName)) continue
         const colExists = safeColumns.some(c => c.name.toLowerCase() === rule.column)
@@ -4309,8 +4388,10 @@ async function executeCreateTable(
         if (existingCols.has(colLower)) continue
         existingCols.add(colLower)
 
-        const normalizedType = normalizeColumnType(col.type, col.name)
-        const constraints = deriveConstraints(col.name, normalizedType, tableName)
+        const normalizedType = declaredSqlType(col) ?? normalizeColumnType(col.type, col.name)
+        const constraints = asWritten
+          ? { isPrimaryKey: false, isUnique: false, isRequired: false, hasDefault: false, foreignKey: undefined }
+          : deriveConstraints(col.name, normalizedType, tableName)
         // Hand the column the value set its CHECK will enforce, so its DEFAULT
         // is derived from that list rather than guessed from its name. A default
         // outside the CHECK is what made every generated `orders` table reject
@@ -4333,10 +4414,10 @@ async function executeCreateTable(
         colSql = colSql.replace(/\s+REFERENCES\s+"[^"]*"\."[^"]*"\("[^"]*"\)[^,;]*/gi, '').trim()
         // A foreign key declared in a migration is installed exactly as written,
         // in this same statement, so a key that cannot be created leaves no table
-        // behind (lib/db/declared-foreign-key.ts). A branch is built without
-        // foreign keys, and gets this one when its merge replays the statement.
+        // behind (lib/db/declared-foreign-key.ts). On a branch it references the
+        // branch's own tables (postgresSchema is the branch's), as main's would.
         const declaredFk = (col as { references?: unknown }).references
-        if (declaredFk !== undefined && !branchMode) {
+        if (declaredFk !== undefined) {
           if (!isDeclaredForeignKey(declaredFk)) {
             return {
               success: false,
@@ -4375,14 +4456,22 @@ async function executeCreateTable(
     const createTableSQL = `CREATE TABLE IF NOT EXISTS "${postgresSchema}"."${tableName}" (\n  ${columnDefs.join(',\n  ')}\n);`
 
     // A key into `users` needs the end-user auth table, which otherwise only
-    // the first sign-up creates (lib/services/auth-users-reference.ts).
-    if (!branchMode && tableName !== 'users') {
+    // the first sign-up creates (lib/services/auth-users-reference.ts). On a
+    // branch it is created in the branch's schema, where the key points.
+    if (tableName !== 'users') {
       const { ensureReferencedAuthUsersTable } = await import('@/lib/services/auth-users-reference')
       for (const { col } of columnPlans) {
         const declared = (col as { references?: { table?: unknown } }).references
         if (await ensureReferencedAuthUsersTable(projectId, declared?.table ?? col?.fkTo, postgresSchema)) break
       }
     }
+
+    // Whether this call creates the table or finds it there: only a table it
+    // creates starts closed when no owner can be inferred (auto-RLS below).
+    const [{ existed: tableExisted }] = await db.$queryRawUnsafe<Array<{ existed: boolean }>>(
+      `SELECT to_regclass($1) IS NOT NULL AS existed`,
+      `"${postgresSchema}"."${tableName}"`,
+    )
 
     console.log(`📝 [AI Executor] Executing SQL:`, createTableSQL)
     await db.$executeRawUnsafe(createTableSQL)
@@ -4504,8 +4593,9 @@ async function executeCreateTable(
     // indexes above are the DDL main will get, issued into the branch schema.
     // Everything below is keyed by the project (metadata, realtime, buckets,
     // foreign keys across main, auto-RLS, generated endpoints) and happens on
-    // main when the merge replays this statement. Foreign keys are not enforced
-    // on a branch, matching how a branch is cloned (lib/branches/engine.ts).
+    // main when the merge replays this statement. A key the statement declared
+    // was installed with the table above; the keys Backenly infers below (fkTo,
+    // and *_id columns by name) are added on main when the merge replays it.
     if (branchMode) {
       return {
         success: true,
@@ -4737,6 +4827,16 @@ async function executeCreateTable(
     // ── Global FK repair: also fix FKs on OTHER tables that reference THIS newly created table
     // e.g., if 'orders' was created before 'users', orders.userId had its REFERENCES stripped.
     // Now that we just created 'users', repair orders.userId → users.id
+    // A table declared in SQL is kept out of the name-based key repair, now and
+    // on every later run of it (lib/db/declared-tables.ts); one built from a
+    // description takes part, whatever an earlier table of its name was.
+    try {
+      const { markDeclaredInSql, unmarkDeclaredInSql } = await import('@/lib/db/declared-tables')
+      if (asWritten) await markDeclaredInSql(projectId, tableName)
+      else await unmarkDeclaredInSql(projectId, tableName)
+    } catch (markErr: any) {
+      console.warn(`[AI Executor] Could not record how "${tableName}" was declared:`, markErr?.message)
+    }
     try {
       const { repairForeignKeysGlobally } = await import('./fk-repair')
       const repairedCount = await repairForeignKeysGlobally(projectId)
@@ -4753,17 +4853,17 @@ async function executeCreateTable(
     // owner's rows when an owner can be inferred, closed to all but
     // service-role keys when not (lib/services/workspace-rls.ts). This runs
     // unconditionally so security never depends on the AI "remembering" to call
-    // SET_PERMISSION, and the caller is told when the table starts closed.
+    // SET_PERMISSION, and the caller is told when the table starts closed. A
+    // table that was already there (CREATE TABLE IF NOT EXISTS found it) may be
+    // serving an app, so it is never closed here.
     let rlsNotice: string | null = null
+    const { autoApplyRlsIfNeeded, rlsNotSetNotice } = await import('@/lib/services/workspace-rls')
     try {
-      const { autoApplyRlsIfNeeded } = await import('@/lib/services/workspace-rls')
-      rlsNotice = (await autoApplyRlsIfNeeded(projectId, tableName, safeColumns, {}, { closeWhenUndecidable: true })).notice
+      rlsNotice = (await autoApplyRlsIfNeeded(projectId, tableName, safeColumns, {}, { closeWhenUndecidable: !tableExisted })).notice
     } catch (rlsErr: any) {
       // Non-fatal — table is created; RLS can be applied manually via SET_PERMISSION
       console.warn(`[AI Executor] Auto-RLS failed (non-fatal):`, rlsErr?.message)
-      rlsNotice =
-        `Backenly could not set row-level security on "${tableName}" (${rlsErr?.message ?? rlsErr}). ` +
-        `Until it has a rule, its rows can be read with the publishable key and written by any signed-in user: set one with add_rls.`
+      if (!tableExisted) rlsNotice = rlsNotSetNotice(tableName, rlsErr?.message ?? String(rlsErr))
     }
 
     // ── Domain endpoint generation ────────────────────────────────────────────
@@ -4906,8 +5006,12 @@ async function executeCreateTable(
       // Who may read and write the new table is part of what was created, so
       // a table that starts closed says so here, where agents read.
       message:
-        `✅ Created table "${tableName}" with ${safeColumns.length + 3} columns (including id, createdAt, updatedAt)` +
+        (asWritten
+          ? `✅ Created table "${tableName}" as written: ${safeColumns.length} declared column(s), and the four every ` +
+            `table gets: id (uuid primary key), "createdAt", "updatedAt" and "deleted_at" (a client DELETE sets it).`
+          : `✅ Created table "${tableName}" with ${safeColumns.length + 3} columns (including id, createdAt, updatedAt)`) +
         (rlsNotice ? `\n\n${rlsNotice}` : ''),
+      ...(rlsNotice ? { rlsNotice } : {}),
       data: {
         tableName,
         schema: postgresSchema,
@@ -5099,13 +5203,11 @@ async function executeCreateJunctionTable(
     // the rows of an owned parent's, or closed until someone says the rule.
     let rlsNotice: string | null = null
     if (!existed) {
+      const { autoApplyRlsIfNeeded, rlsNotSetNotice } = await import('@/lib/services/workspace-rls')
       try {
-        const { autoApplyRlsIfNeeded } = await import('@/lib/services/workspace-rls')
         rlsNotice = (await autoApplyRlsIfNeeded(projectId, finalName, [], {}, { closeWhenUndecidable: true })).notice
       } catch (rlsErr: any) {
-        rlsNotice =
-          `Backenly could not set row-level security on "${finalName}" (${rlsErr?.message ?? rlsErr}). ` +
-          `Until it has a rule, its rows can be read with the publishable key and written by any signed-in user: set one with add_rls.`
+        rlsNotice = rlsNotSetNotice(finalName, rlsErr?.message ?? String(rlsErr))
       }
     }
 
@@ -5128,6 +5230,7 @@ async function executeCreateJunctionTable(
       message:
         `✅ Created junction table **${finalName}** linking **${tableA}** ↔ **${tableB}**.\n\nColumns: id, ${singularA}Id (FK→${first}), ${singularB}Id (FK→${second})${extraColNames}, createdAt` +
         (rlsNotice ? `\n\n${rlsNotice}` : ''),
+      ...(rlsNotice ? { rlsNotice } : {}),
       data: { junctionName: finalName, tableA, tableB },
     }
   } catch (error: any) {
@@ -5798,12 +5901,39 @@ export async function GET(req: NextRequest, { params }: { params: { projectId: s
 
 /**
  * REAL BACKEND CALL: Add Column (via raw SQL)
+ *
+ * Outside a branch, a table missing from the database is created first
+ * (addColumns). That table is protected as create_table protects a new one
+ * (autoApplyRlsIfNeeded), once its columns are there: the owner's rows when
+ * they show an owner, closed to all but service-role keys when not. It was
+ * left without row-level security, readable with the publishable key and
+ * writable by any signed-in end user.
  */
 async function executeAddColumn(
   params: any,
   projectId: string,
   apiKey?: string,
   target: SchemaTarget = {},
+): Promise<ExecutionResult> {
+  const created: { table?: string } = {}
+  const result = await addColumns(params, projectId, apiKey, target, created)
+  if (!created.table) return result
+  const { autoApplyRlsIfNeeded, rlsNotSetNotice } = await import('@/lib/services/workspace-rls')
+  let notice: string | null
+  try {
+    notice = (await autoApplyRlsIfNeeded(projectId, created.table, [], {}, { closeWhenUndecidable: true })).notice
+  } catch (rlsErr: any) {
+    notice = rlsNotSetNotice(created.table, rlsErr?.message ?? String(rlsErr))
+  }
+  return notice ? { ...result, message: `${result.message}\n\n${notice}`, rlsNotice: notice } : result
+}
+
+async function addColumns(
+  params: any,
+  projectId: string,
+  apiKey: string | undefined,
+  target: SchemaTarget,
+  created: { table?: string },
 ): Promise<ExecutionResult> {
   const db = await projectDb(projectId)
   const branchMode = !!target.targetSchema
@@ -5857,6 +5987,7 @@ async function executeAddColumn(
            "updatedAt" TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
          )`
       )
+      created.table = tableName
       // Register in Prisma metadata
       const existsMeta = await prisma.table.findFirst({ where: { projectId, name: tableName } })
       if (!existsMeta) {
@@ -5866,6 +5997,25 @@ async function executeAddColumn(
       }
     }
     // ── END REAL DB CHECK ────────────────────────────────────────────────────
+
+    // ── Intent ledger ────────────────────────────────────────────────────────
+    // What was asked for, recorded once the column exists: a refused ADD COLUMN
+    // leaves its table without it, which the ledger would then report as a
+    // missing column. Like create_table's, it describes main; a branch's request
+    // is recorded when it is merged. Without it a column added later was held to
+    // nothing, so `refunded_at timestamptz` turning into timestamp without time
+    // zone on a merge was never reported (production QA, 2026-11-09).
+    const recordAdded = async (
+      cols: Array<{ name: string; type: string; sqlType?: string; nullable?: boolean; unique?: boolean; fkTo?: string }>,
+    ) => {
+      if (branchMode) return
+      try {
+        const { recordSchemaIntent } = await import('@/lib/autonomy/intent-conformance')
+        await recordSchemaIntent(projectId, tableName, cols, 'add_column')
+      } catch (intentErr: any) {
+        console.error('[IntentLedger] record failed (non-fatal):', intentErr?.message)
+      }
+    }
 
     // ── A column declared with constraints is added as declared ──────────────
     //
@@ -5908,7 +6058,7 @@ async function executeAddColumn(
         if (!ident.test(spec!.fkTo)) return { success: false, message: `"${spec!.fkTo}" is not a table this path can reference.` }
         referencesSql = ` REFERENCES "${postgresSchema}"."${spec!.fkTo}"("id")`
       }
-      const type = normalizeColumnType(String(spec!.type ?? colsToAdd[0].type), name)
+      const type = declaredSqlType(spec) ?? normalizeColumnType(String(spec!.type ?? colsToAdd[0].type), name)
       const definition = `${type}${defaultSql}${spec!.nullable === false ? ' NOT NULL' : ''}${spec!.unique === true ? ' UNIQUE' : ''}${referencesSql}`
       if (referencesSql) {
         // A key into `users` needs the end-user auth table (lib/services/auth-users-reference.ts),
@@ -5936,17 +6086,33 @@ async function executeAddColumn(
         await db.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS "${indexName}" ON "${postgresSchema}"."${tableName}" ("${name}")`)
       }
       import('@/lib/services/workspace-validator').then(({ invalidateSchemaCache }) => invalidateSchemaCache(projectId, tableName)).catch(() => {})
+      await recordAdded([{
+        name,
+        type: String(spec!.type ?? colsToAdd[0].type),
+        ...(typeof spec!.sqlType === 'string' ? { sqlType: spec!.sqlType } : {}),
+        ...(typeof spec!.nullable === 'boolean' ? { nullable: spec!.nullable } : {}),
+        ...(typeof spec!.unique === 'boolean' ? { unique: spec!.unique } : {}),
+        ...(isDeclaredForeignKey(declaredFk) ? { fkTo: declaredFk.table } : typeof spec!.fkTo === 'string' ? { fkTo: spec!.fkTo } : {}),
+      }])
       return { success: true, message: `✅ Added "${name}" ${definition.replace(` REFERENCES "${postgresSchema}".`, ' REFERENCES ')} to table "${tableName}"` }
     }
 
     const addedCols: string[] = []
+    // A migration's column carries its declared type (sqlType); keep it on this path too.
+    const sqlType = spec && colsToAdd.length === 1 && typeof spec.sqlType === 'string' ? spec.sqlType : undefined
     for (const col of colsToAdd) {
-      await addColumnToTable(tableName, { name: col.name, type: col.type }, projectId, apiKey, target)
+      await addColumnToTable(tableName, { name: col.name, type: col.type, ...(sqlType ? { sqlType } : {}) }, projectId, apiKey, target)
       addedCols.push(col.name)
     }
 
     // Column schema changed — evict cached Zod validation schema
     import('@/lib/services/workspace-validator').then(({ invalidateSchemaCache }) => invalidateSchemaCache(projectId, tableName)).catch(() => {})
+    await recordAdded(colsToAdd.map((c) => ({
+      name: c.name,
+      type: c.type,
+      ...(sqlType ? { sqlType } : {}),
+      ...(spec && colsToAdd.length === 1 && typeof spec.nullable === 'boolean' ? { nullable: spec.nullable } : {}),
+    })))
 
     return {
       success: true,
@@ -5982,26 +6148,32 @@ async function executeDropTable(params: any, projectId: string): Promise<Executi
     const { supersedeSchemaIntent } = await import('@/lib/autonomy/intent-conformance')
     await supersedeSchemaIntent(projectId, { kind: 'drop_table', tableName })
 
-    // Best-effort: strip the entity from the BackendStateGraph so graph-based
-    // API counts stay in sync. Failure here must never block the deletion itself.
+    // Its generated endpoints go with it, kept on the change's record so that
+    // restoring the drop puts them back (lib/services/domain-endpoints.ts).
+    // Left behind, each was a callable route over a table that was gone. The
+    // drop is done whatever happens here, and a failed removal removes nothing.
     try {
-      const graphRecord = await prisma.backendGraph.findFirst({ where: { projectId } })
-      if (graphRecord) {
-        const graph = graphRecord.graphData as any
-        if (graph?.entities?.[tableName]) {
-          delete graph.entities[tableName]
-          // Also remove any graph API entries associated with the table
-          if (graph?.apis) {
-            for (const path of Object.keys(graph.apis)) {
-              if (path.startsWith(`/${tableName}`) || (graph.apis[path] as any)?.entity === tableName) {
-                delete graph.apis[path]
-              }
-            }
-          }
-          await prisma.backendGraph.update({ where: { id: graphRecord.id }, data: { graphData: graph } })
-        }
-      }
-    } catch { /* non-fatal — graph cleanup is best-effort */ }
+      const { removeEndpointsOfDroppedTable } = await import('@/lib/services/domain-endpoints')
+      const { currentChange } = await import('@/lib/changes/ledger')
+      await removeEndpointsOfDroppedTable(projectId, tableName, currentChange(projectId)?.id ?? null)
+    } catch (err: any) {
+      console.warn(`[AI Executor] Dropped ${tableName}; its generated endpoints were left in place:`, err?.message)
+    }
+
+    // The table leaves the ACTIVE graph, as a new version of it like every
+    // graph change. This used to edit whichever graph row the database returned
+    // first: for a project provisioned today, its empty first version, so
+    // nothing changed and the Database page kept listing the table (production
+    // QA, 2026-11-09); for an older project, a past version, edited in place. The
+    // drop is done whatever happens here; a graph left behind is set right by
+    // the next reconciliation (lib/services/workspace-schema-resolver.ts).
+    try {
+      const graph = await getActiveGraph(projectId)
+      const next = graph && withoutTables(graph, [tableName])
+      if (next) await saveNewGraph(projectId, next, undefined, { skipBillingCheck: true })
+    } catch (err: any) {
+      console.warn(`[AI Executor] Dropped ${tableName}; the graph still holds it until the next reconciliation:`, err?.message)
+    }
 
     import('@/lib/ai/execution-cache').then(({ invalidateSchemaCache }) => invalidateSchemaCache(projectId)).catch(() => {})
     import('@/lib/services/workspace-validator').then(({ invalidateSchemaCache: invalidateValidatorCache }) => invalidateValidatorCache(projectId, tableName)).catch(() => {})
@@ -6194,7 +6366,7 @@ async function executeInsertData(
  */
 async function addColumnToTable(
   tableName: string,
-  column: { name: string; type: string },
+  column: { name: string; type: string; sqlType?: string },
   projectId: string,
   apiKey?: string,
   target: SchemaTarget = {},
@@ -6219,7 +6391,7 @@ async function addColumnToTable(
     }
     
     // Apply constraint-first system: detect FK columns, unique columns, etc.
-    const normalizedType = normalizeColumnType(column.type, column.name)
+    const normalizedType = declaredSqlType(column) ?? normalizeColumnType(column.type, column.name)
     const constraints = deriveConstraints(column.name, normalizedType, tableName)
     const columnDef = { name: column.name, type: normalizedType }
     const columnSQL = applyConstraintsToColumn(columnDef, constraints, postgresSchema)
@@ -6291,14 +6463,17 @@ async function addColumnToTable(
  *   • Schema snapshot is captured before this runs (SCHEMA_MUTATING_ACTIONS),
  *     so the change is reversible via LIST_SCHEMA_VERSIONS / ROLLBACK_TO_VERSION
  */
-async function executeDropColumn(params: any, projectId: string): Promise<ExecutionResult> {
+async function executeDropColumn(params: any, projectId: string, target: SchemaTarget = {}): Promise<ExecutionResult> {
   const db = await projectDb(projectId)
   const tableName = String(params?.tableName ?? '').trim()
   const columnName = String(params?.columnName ?? '').trim()
-
+  const ifExists = params?.ifExists === true
+  // A migration's DROP COLUMN runs as written: without CASCADE, so PostgreSQL
+  // refuses it while a view, a row policy or another table's foreign key
+  // depends on the column (lib/mcp/migration-parser.ts, translateDropColumn).
+  const asWritten = params?.asWritten === true
   if (!tableName) return { success: false, message: 'Table name is required' }
   if (!columnName) return { success: false, message: 'Column name is required' }
-
   const RESERVED = new Set(['id', 'createdAt', 'updatedAt'])
   if (RESERVED.has(columnName)) {
     return {
@@ -6307,11 +6482,11 @@ async function executeDropColumn(params: any, projectId: string): Promise<Execut
       error: 'RESERVED_COLUMN',
     }
   }
-
   try {
     const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
-    const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
-
+    const mainSchema = getWorkspaceDatabaseNames(projectId).postgresSchema
+    const postgresSchema = target.targetSchema ?? mainSchema
+    const onBranch = !!target.targetSchema
     // Verify the column actually exists before issuing the DDL — gives a
     // truthful "no such column" error rather than the cryptic Postgres one.
     const exists = await db.$queryRawUnsafe<Array<{ exists: boolean }>>(
@@ -6322,28 +6497,68 @@ async function executeDropColumn(params: any, projectId: string): Promise<Execut
       postgresSchema, tableName, columnName,
     )
     if (!exists[0]?.exists) {
+      if (ifExists) {
+        return {
+          success: true,
+          message: `${tableName} has no column "${columnName}", so there was nothing to drop.`,
+          data: { tableName, columnName, alreadyAbsent: true },
+        }
+      }
       return {
         success: false,
         message: `Column \`${columnName}\` does not exist on \`${tableName}\`.`,
         error: 'COLUMN_NOT_FOUND',
       }
     }
+    const { quoteIdent } = await import('@/lib/changes/names')
+    const table = `${quoteIdent(postgresSchema)}.${quoteIdent(tableName)}`
+    // Otherwise CASCADE, so any view / trigger / index that references this
+    // column is also dropped — without it Postgres refuses on dependent objects.
+    const dropSql = asWritten
+      ? `ALTER TABLE ${table} DROP COLUMN ${quoteIdent(columnName)}`
+      : `ALTER TABLE ${table} DROP COLUMN IF EXISTS ${quoteIdent(columnName)} CASCADE`
 
-    // CASCADE so any view / trigger / index that references this column is
-    // also dropped — without it Postgres refuses on dependent objects.
-    //
-    // Inside a recorded change its values are kept first, in the same
-    // transaction, so rolling the change back restores them row by row.
-    const dropSql = `ALTER TABLE "${postgresSchema}"."${tableName}" DROP COLUMN IF EXISTS "${columnName}" CASCADE`
-    const { keepColumnValues } = await import('@/lib/changes/preserve')
-    const kept = await keepColumnValues(projectId, postgresSchema, tableName, columnName, 'dropped', dropSql)
-    if (!kept.handled) await db.$executeRawUnsafe(dropSql)
+    let kept: Awaited<ReturnType<typeof import('@/lib/changes/preserve').keepColumnValues>> = { handled: false }
+    try {
+      if (onBranch) {
+        // A branch keeps no vault: it is a copy, and discarding it is the undo.
+        await db.$executeRawUnsafe(dropSql)
+      } else {
+        // Inside a recorded change its values are kept first, in the same
+        // transaction, so rolling the change back restores them row by row.
+        const { keepColumnValues } = await import('@/lib/changes/preserve')
+        kept = await keepColumnValues(projectId, postgresSchema, tableName, columnName, 'dropped', dropSql)
+        if (!kept.handled) await db.$executeRawUnsafe(dropSql)
+      }
+    } catch (err: any) {
+      const text = `${err?.code ?? ''} ${err?.message ?? ''}`
+      if (!asWritten || !/2BP01|other objects depend on it/i.test(text)) throw err
+      const dependents = await columnDependents(db, postgresSchema, tableName, columnName).catch(() => [] as string[])
+      return {
+        success: false,
+        message:
+          `Column \`${columnName}\` was not dropped from \`${tableName}\`: ` +
+          (dependents.length
+            ? `${dependents.join(', ')} ${dependents.length === 1 ? 'depends' : 'depend'} on it. `
+            : `other objects depend on it. `) +
+          `Remove or change ${dependents.length === 1 ? 'that' : 'those'} first, then drop the column.`,
+        error: 'Column has dependents',
+        code: 'COLUMN_HAS_DEPENDENTS',
+      } as ExecutionResult
+    }
+
+    if (onBranch) {
+      return {
+        success: true,
+        message: `Dropped column ${columnName} from ${tableName} on the branch. Merging the branch drops it from production, keeping its values with the change.`,
+        data: { tableName, columnName },
+      }
+    }
 
     // The drop was asked for, so the column is no longer requested: without
     // this the intent ledger would report it missing (lib/autonomy/intent-conformance).
     const { supersedeSchemaIntent } = await import('@/lib/autonomy/intent-conformance')
     await supersedeSchemaIntent(projectId, { kind: 'drop_column', tableName, columnName })
-
     // Regenerate the REST API for this table so the column disappears from
     // its generated CRUD payloads. Non-fatal — the column is gone either way.
     try {
@@ -6351,7 +6566,6 @@ async function executeDropColumn(params: any, projectId: string): Promise<Execut
     } catch {
       // intentional — drop succeeded, API regen is best-effort
     }
-
     // Evict cached validation schemas so the next request sees the new shape.
     import('@/lib/services/workspace-validator')
       .then(({ invalidateSchemaCache }) => invalidateSchemaCache(projectId, tableName))
@@ -6379,6 +6593,36 @@ async function executeDropColumn(params: any, projectId: string): Promise<Execut
       error: err.message,
     }
   }
+}
+
+/**
+ * What stops a column being dropped without CASCADE: the objects with a
+ * normal dependency on it (row policies, views, other tables' foreign keys),
+ * as PostgreSQL describes them. Indexes and the table's own constraints on the
+ * column go with it, so they are not listed.
+ */
+async function columnDependents(
+  db: Awaited<ReturnType<typeof projectDb>>,
+  schema: string,
+  tableName: string,
+  column: string,
+): Promise<string[]> {
+  const { quoteIdent } = await import('@/lib/changes/names')
+  const table = `${quoteIdent(schema)}.${quoteIdent(tableName)}`
+  const rows = await db.$queryRawUnsafe<Array<{ what: string }>>(
+    `SELECT DISTINCT pg_describe_object(d.classid, d.objid, d.objsubid) AS what
+       FROM pg_depend d
+       JOIN pg_attribute a ON a.attrelid = d.refobjid AND a.attnum = d.refobjsubid
+      WHERE d.refclassid = 'pg_class'::regclass
+        AND d.refobjid = $1::regclass
+        AND a.attname = $2
+        AND d.deptype = 'n'
+      ORDER BY 1`,
+    table,
+    column,
+  )
+  // Names in the project's own schema read bare, as the migration wrote them.
+  return rows.map((r) => r.what.split(`${quoteIdent(schema)}.`).join('').split(`${schema}.`).join(''))
 }
 
 /**
@@ -6507,7 +6751,7 @@ async function executeInfo(params: any, projectId?: string): Promise<ExecutionRe
       import('@/lib/api/exposed-resources').then(m => m.listExposedResources(projectId)),
       prisma.appTrigger.findMany({ where: { projectId }, select: { name: true, sourceTable: true, event: true, actionType: true, enabled: true } }),
       prisma.permissionPolicy.findMany({ where: { projectId }, select: { tableName: true, policyName: true, operation: true } }),
-      prisma.aiFunction.findMany({ where: { projectId, status: 'active' }, select: { name: true, description: true, triggerType: true, triggerTable: true, runCount: true } }),
+      prisma.aiFunction.findMany({ where: { projectId, status: 'active' }, select: { name: true, description: true, triggerType: true, triggerTable: true, runCount: true, codeOrigin: true } }),
       prisma.storageBucket.findMany({ where: { projectId }, select: { name: true, isPublic: true } }),
       prisma.project.findFirst({ where: { id: projectId }, select: { jwtSecret: true } }),
     ])
@@ -6556,15 +6800,25 @@ async function executeInfo(params: any, projectId?: string): Promise<ExecutionRe
       lines.push('')
     }
 
-    // AI Functions
-    if (aiFunctions.length > 0) {
-      lines.push(`### AI Functions (${aiFunctions.length} active)`)
-      for (const fn of aiFunctions) {
+    // AI Functions: the project's own, then the endpoints Backenly generated
+    // for its tables, apart, so the count means what a person or agent made.
+    const { generatedEndpointRoutes, isGeneratedEndpoint } = await import('@/lib/services/domain-endpoints')
+    const generatedRoutes = generatedEndpointRoutes(projectId, tables.map((t) => t.name))
+    const ownFunctions = aiFunctions.filter((fn) => !isGeneratedEndpoint(fn, generatedRoutes))
+    const generatedFunctions = aiFunctions.filter((fn) => isGeneratedEndpoint(fn, generatedRoutes))
+    if (ownFunctions.length > 0) {
+      lines.push(`### Functions (${ownFunctions.length} active)`)
+      for (const fn of ownFunctions) {
         const trigger = fn.triggerType === 'cron'
           ? `cron: \`${fn.triggerTable}\``
           : fn.triggerType.replace('on_db_', 'on ').replace('_', ' ')
         lines.push(`- **${fn.name}** — ${fn.description} (${trigger}, ${fn.runCount} runs)`)
       }
+      lines.push('')
+    }
+    if (generatedFunctions.length > 0) {
+      lines.push(`### Generated for your tables (${generatedFunctions.length})`)
+      lines.push(generatedFunctions.map((fn) => `\`${fn.name}\``).join(', '))
       lines.push('')
     }
 
@@ -6621,7 +6875,7 @@ const INFO_HELP_TEXT = `💡 **I can help you build your backend!**
 - "Restore my database to yesterday" — point-in-time restore
 - "List my backups" — show backup history
 
-⚡ **AI Functions:**
+⚡ **Functions:**
 - "When a user signs up, send them a welcome email"
 - "Every day at 9am, send digest emails"
 
@@ -7332,7 +7586,8 @@ async function executeListKeys(projectId: string): Promise<ExecutionResult> {
         permissions: true,
         createdAt: true,
         lastUsed: true,
-        expiresAt: true
+        expiresAt: true,
+        branch: { select: { name: true, status: true } },
       },
       orderBy: { createdAt: 'desc' }
     })
@@ -7348,7 +7603,9 @@ async function executeListKeys(projectId: string): Promise<ExecutionResult> {
     const keyList = keys.map(key => {
       const age = Math.floor((Date.now() - new Date(key.createdAt).getTime()) / (1000 * 60 * 60 * 24))
       const lastUsed = key.lastUsed ? `(used ${Math.floor((Date.now() - new Date(key.lastUsed).getTime()) / (1000 * 60 * 60))}h ago)` : '(never used)'
-      return `🔑 **${key.name}** (${key.keyPrefix}...) - Created ${age}d ago ${lastUsed}`
+      // A preview key ends with its branch: say so, rather than list it as live.
+      const ended = key.branch && key.branch.status !== 'active' ? ` · ended with branch ${key.branch.name} (${key.branch.status})` : ''
+      return `🔑 **${key.name}** (${key.keyPrefix}...) - Created ${age}d ago ${lastUsed}${ended}`
     }).join('\n')
     
     return {
@@ -8489,7 +8746,8 @@ async function executeGetUsage(projectId: string): Promise<ExecutionResult> {
     const lines = usage.axes.map((a) => {
       const of = a.included === null ? 'unlimited' : `${fmt(a.included, a.unit)} included`
       const grace = a.grace ? (a.grace.restricted ? ' — RESTRICTED (grace ended)' : ` — over since ${a.grace.overSince.slice(0, 10)}, grace ends ${a.grace.graceEndsAt.slice(0, 10)}`) : ''
-      return `- ${a.label}: ${fmt(a.used, a.unit)} (${of}); projected ${fmt(a.projected, a.unit)}${grace}`
+      const measured = a.measuredAt ? `, measured ${a.measuredAt}` : ''
+      return `- ${a.label}: ${fmt(a.used, a.unit)} (${of}${measured}); projected ${fmt(a.projected, a.unit)}${grace}`
     })
     const overage =
       usage.overage.mode === null
@@ -8500,7 +8758,7 @@ async function executeGetUsage(projectId: string): Promise<ExecutionResult> {
     return {
       success: true,
       message: [
-        `Usage for ${usage.period} on the ${usage.planName} plan, across every project of this account:`,
+        `Usage for ${usage.period} on the ${planDisplayName(usage.planName)} plan, across every project of this account:`,
         ...lines,
         overage,
         'Projections assume the last seven days continue. Only the account owner can raise the spend limit.',
@@ -8684,10 +8942,71 @@ async function executeVacuumTable(params: any, projectId: string): Promise<Execu
  * A plain DROP INDEX takes a brief ACCESS EXCLUSIVE lock on the table, which is
  * the cost of the approved change and is stated in the result.
  */
-async function executeDropIndex(params: any, projectId: string): Promise<ExecutionResult> {
+/**
+ * A branch is cloned with LIKE … INCLUDING ALL, and Postgres names the indexes
+ * and unique constraints it copies by its own rules, so a name production uses
+ * may not exist on the branch. The copy is the one on the same table with the
+ * same definition. A migration names production's objects, because that is
+ * what the merge replays, so on a branch the name is resolved to its copy.
+ */
+async function branchCopyOfIndex(
+  db: { $queryRawUnsafe: <T = unknown>(sql: string, ...args: unknown[]) => Promise<T> },
+  mainSchema: string,
+  branchSchema: string,
+  indexName: string,
+): Promise<string | null> {
+  const defs = (schema: string, name: string | null) =>
+    db.$queryRawUnsafe<Array<{ index_name: string; table_name: string; definition: string }>>(
+      `SELECT i.relname AS index_name, t.relname AS table_name, pg_get_indexdef(i.oid) AS definition
+         FROM pg_index ix
+         JOIN pg_class i     ON i.oid = ix.indexrelid
+         JOIN pg_class t     ON t.oid = ix.indrelid
+         JOIN pg_namespace n ON n.oid = i.relnamespace
+        WHERE n.nspname = $1 AND ($2::text IS NULL OR i.relname = $2)`,
+      schema, name,
+    )
+  // Everything from USING on, plus UNIQUE: the definition without its name and schema.
+  const shape = (def: string) => `${/^CREATE UNIQUE/i.test(def)}|${def.slice(def.indexOf(' USING '))}`
+  const [main] = await defs(mainSchema, indexName)
+  if (!main) return null
+  const copy = (await defs(branchSchema, null)).find(
+    (b) => b.table_name === main.table_name && shape(b.definition) === shape(main.definition),
+  )
+  return copy?.index_name ?? null
+}
+
+async function branchCopyOfConstraint(
+  db: { $queryRawUnsafe: <T = unknown>(sql: string, ...args: unknown[]) => Promise<T> },
+  mainSchema: string,
+  branchSchema: string,
+  tableName: string,
+  constraintName: string,
+): Promise<string | null> {
+  const defs = (schema: string, name: string | null) =>
+    db.$queryRawUnsafe<Array<{ conname: string; contype: string; definition: string }>>(
+      `SELECT c.conname, c.contype::text AS contype, pg_get_constraintdef(c.oid) AS definition
+         FROM pg_constraint c
+         JOIN pg_class t     ON t.oid = c.conrelid
+         JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE n.nspname = $1 AND t.relname = $2 AND ($3::text IS NULL OR c.conname = $3)`,
+      schema, tableName, name,
+    )
+  const [main] = await defs(mainSchema, constraintName)
+  if (!main) return null
+  const copy = (await defs(branchSchema, null)).find((b) => b.contype === main.contype && b.definition === main.definition)
+  return copy?.conname ?? null
+}
+
+async function executeDropIndex(params: any, projectId: string, target: SchemaTarget = {}): Promise<ExecutionResult> {
   const db = await projectDb(projectId)
   const indexName = params?.indexName ?? params?.index
   const tableName = params?.tableName ?? params?.table
+  // A migration's plain DROP INDEX expects the index to be there, as Postgres
+  // does; IF EXISTS, and every internal caller, take "already gone" as done.
+  const mustExist = params?.ifExists === false
+  // Removing a uniqueness guarantee is what a migration's DROP INDEX on a
+  // unique index asks for in so many words. Backenly's own repairs never do it.
+  const mayDropUnique = params?.dropUniqueness === true
 
   if (!indexName) {
     return {
@@ -8700,7 +9019,7 @@ async function executeDropIndex(params: any, projectId: string): Promise<Executi
 
   try {
     const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
-    const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
+    const postgresSchema = target.targetSchema ?? getWorkspaceDatabaseNames(projectId).postgresSchema
 
     const { SAFE_IDENT } = await import('@/lib/db/sql-expression')
     if (!SAFE_IDENT.test(String(indexName))) {
@@ -8719,12 +9038,14 @@ async function executeDropIndex(params: any, projectId: string): Promise<Executi
       is_primary: boolean
       is_unique: boolean
       constraint_backed: boolean
+      constraint_name: string | null
       definition: string
     }>>(
       `SELECT t.relname                AS table_name,
               ix.indisprimary          AS is_primary,
               ix.indisunique           AS is_unique,
               EXISTS (SELECT 1 FROM pg_constraint c WHERE c.conindid = i.oid) AS constraint_backed,
+              (SELECT c.conname FROM pg_constraint c WHERE c.conindid = i.oid LIMIT 1) AS constraint_name,
               pg_get_indexdef(i.oid)   AS definition
          FROM pg_index ix
          JOIN pg_class i     ON i.oid = ix.indexrelid
@@ -8734,7 +9055,20 @@ async function executeDropIndex(params: any, projectId: string): Promise<Executi
       postgresSchema, indexName,
     ).catch(() => [] as any[])
 
+    if (rows.length === 0 && target.targetSchema) {
+      const copy = await branchCopyOfIndex(db, getWorkspaceDatabaseNames(projectId).postgresSchema, postgresSchema, String(indexName))
+      if (copy) return executeDropIndex({ ...params, indexName: copy, productionName: indexName }, projectId, target)
+    }
+
     if (rows.length === 0) {
+      if (mustExist) {
+        return {
+          success: false,
+          message: `There is no index named "${indexName}" here, so nothing was dropped. DROP INDEX IF EXISTS treats a missing index as done.`,
+          error: 'Index not found',
+          code: 'INDEX_NOT_FOUND',
+        }
+      }
       // Already gone is the goal state, not a failure — a finding can outlive
       // the index it names, and reporting an error here would escalate a change
       // that has in fact been made.
@@ -8758,7 +9092,19 @@ async function executeDropIndex(params: any, projectId: string): Promise<Executi
       }
     }
 
-    if (idx.is_primary || idx.is_unique || idx.constraint_backed) {
+    if (mayDropUnique && idx.constraint_backed && !idx.is_primary) {
+      return {
+        success: false,
+        message:
+          `"${indexName}" is the index behind the constraint "${idx.constraint_name}" on "${idx.table_name}", ` +
+          `so DROP INDEX cannot remove it. Drop the constraint instead: ` +
+          `ALTER TABLE ${idx.table_name} DROP CONSTRAINT ${idx.constraint_name}. Nothing was dropped.`,
+        error: 'Constraint-backed index',
+        code: 'CONSTRAINT_BACKED_INDEX',
+      }
+    }
+
+    if (idx.is_primary || (idx.is_unique && !mayDropUnique) || idx.constraint_backed) {
       return {
         success: false,
         message:
@@ -8771,19 +9117,211 @@ async function executeDropIndex(params: any, projectId: string): Promise<Executi
       }
     }
 
-    await db.$executeRawUnsafe(`DROP INDEX "${postgresSchema}"."${indexName}"`)
+    if (params?.online === true) {
+      // DROP INDEX CONCURRENTLY (lib/execution/online-index.ts): the plain
+      // statement takes ACCESS EXCLUSIVE, and while it waits for one long query
+      // every new query on the table queues behind it.
+      const { dropIndexOnline } = await import('@/lib/execution/online-index')
+      const dropped = await dropIndexOnline(projectId, postgresSchema, indexName)
+      if (dropped.kind === 'failed') {
+        return {
+          success: false,
+          message: `Could not drop index "${indexName}" without blocking the table. ${dropped.message}`,
+          error: dropped.message,
+          code: dropped.code,
+        }
+      }
+    } else {
+      await db.$executeRawUnsafe(`DROP INDEX "${postgresSchema}"."${indexName}"`)
+    }
 
+    const what = idx.is_unique
+      ? `Its columns no longer have to be unique.`
+      : `Writes to that table no longer maintain it.`
     return {
       success: true,
-      message:
-        `Dropped index "${indexName}" on "${idx.table_name}". Writes to that table no longer ` +
-        `maintain it. The pre-fix snapshot holds its definition, so undo recreates it exactly.`,
-      data: { indexName, tableName: idx.table_name, definition: idx.definition },
+      message: target.targetSchema
+        ? `Dropped ${idx.is_unique ? 'unique ' : ''}index "${params?.productionName ?? indexName}" on "${idx.table_name}" on the branch` +
+          `${params?.productionName ? ` (its copy there is named "${indexName}")` : ''}. ${what} ` +
+          `Merging the branch drops it from production.`
+        : `Dropped ${idx.is_unique ? 'unique ' : ''}index "${indexName}" on "${idx.table_name}". ${what} ` +
+          `The pre-fix snapshot holds its definition, so undo recreates it exactly.`,
+      data: { indexName, tableName: idx.table_name, definition: idx.definition, unique: idx.is_unique },
     }
   } catch (err: any) {
     return {
       success: false,
       message: `Could not drop index "${indexName}": ${err.message}`,
+      error: err.message,
+    }
+  }
+}
+
+/**
+ * DATABASE: Drop a constraint, as a migration's ALTER TABLE … DROP CONSTRAINT.
+ *
+ * Unique, check, foreign-key and exclusion constraints. The primary key is
+ * refused: a Backenly table's managed `id` is what its API, its policies and
+ * the foreign keys pointing at it stand on. Dropping a constraint removes a
+ * rule, not a row, so it is a governed change like adding one: the checkpoint
+ * keeps its definition, and restoring the change puts it back, or waits for a
+ * person when rows written since would break it.
+ *
+ * A UNIQUE that Backenly made as an index (on a soft-delete table every one is
+ * a partial unique index, which has no constraint) is named as an index, so the
+ * caller is told the DROP INDEX that removes it. A branch is cloned without
+ * foreign keys, so dropping one there is recorded and done when the merge
+ * replays it on production, as adding one is.
+ */
+async function executeDropConstraint(params: any, projectId: string, target: SchemaTarget = {}): Promise<ExecutionResult> {
+  const db = await projectDb(projectId)
+  const tableName = params?.tableName
+  const constraintName = params?.constraintName
+  const ifExists = params?.ifExists === true
+  if (!tableName || !constraintName) {
+    return { success: false, message: 'tableName and constraintName are required', error: 'Missing parameters', code: 'VALIDATION' }
+  }
+  const { SAFE_IDENT } = await import('@/lib/db/sql-expression')
+  for (const ident of [tableName, constraintName]) {
+    if (!SAFE_IDENT.test(String(ident))) {
+      return { success: false, message: `"${ident}" is not a valid PostgreSQL identifier.`, error: 'Invalid identifier', code: 'VALIDATION' }
+    }
+  }
+
+  try {
+    const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
+    const mainSchema = getWorkspaceDatabaseNames(projectId).postgresSchema
+    const postgresSchema = target.targetSchema ?? mainSchema
+    const onBranch = !!target.targetSchema
+
+    const constraintIn = (schema: string) =>
+      db.$queryRawUnsafe<Array<{ contype: string; definition: string }>>(
+        `SELECT c.contype::text AS contype, pg_get_constraintdef(c.oid) AS definition
+           FROM pg_constraint c
+           JOIN pg_class t     ON t.oid = c.conrelid
+           JOIN pg_namespace n ON n.oid = t.relnamespace
+          WHERE n.nspname = $1 AND t.relname = $2 AND c.conname = $3`,
+        schema, tableName, constraintName,
+      )
+    let rows = await constraintIn(postgresSchema)
+    let dropName = String(constraintName)
+    if (rows.length === 0 && onBranch) {
+      const copy = await branchCopyOfConstraint(db, mainSchema, postgresSchema, tableName, String(constraintName))
+      if (copy) {
+        dropName = copy
+        rows = await db.$queryRawUnsafe<Array<{ contype: string; definition: string }>>(
+          `SELECT c.contype::text AS contype, pg_get_constraintdef(c.oid) AS definition
+             FROM pg_constraint c
+             JOIN pg_class t     ON t.oid = c.conrelid
+             JOIN pg_namespace n ON n.oid = t.relnamespace
+            WHERE n.nspname = $1 AND t.relname = $2 AND c.conname = $3`,
+          postgresSchema, tableName, copy,
+        )
+      }
+    }
+
+    if (rows.length === 0) {
+      if (onBranch) {
+        const onMain = await constraintIn(mainSchema)
+        if (onMain[0]?.contype === 'f') {
+          return {
+            success: true,
+            message:
+              `Recorded dropping foreign key "${constraintName}" from ${tableName}. A branch has no foreign keys, ` +
+              `so it is dropped from production when the branch is merged.`,
+            data: { tableName, constraintName, kind: 'foreign key', enforcedOnBranch: false },
+          }
+        }
+      }
+      const index = await db.$queryRawUnsafe<Array<{ is_unique: boolean }>>(
+        `SELECT ix.indisunique AS is_unique
+           FROM pg_index ix
+           JOIN pg_class i     ON i.oid = ix.indexrelid
+           JOIN pg_class t     ON t.oid = ix.indrelid
+           JOIN pg_namespace n ON n.oid = i.relnamespace
+          WHERE n.nspname = $1 AND t.relname = $2 AND i.relname = $3`,
+        postgresSchema, tableName, constraintName,
+      )
+      if (index.length > 0) {
+        return {
+          success: false,
+          message:
+            `"${constraintName}" on ${tableName} is ${index[0].is_unique ? 'a unique index' : 'an index'}, not a constraint. ` +
+            `Drop it with DROP INDEX ${constraintName}. Nothing was dropped.`,
+          error: 'Not a constraint',
+          code: 'NOT_A_CONSTRAINT',
+        }
+      }
+      if (ifExists) {
+        return {
+          success: true,
+          message: `${tableName} has no constraint named "${constraintName}", so there was nothing to drop.`,
+          data: { tableName, constraintName, alreadyAbsent: true },
+        }
+      }
+      return {
+        success: false,
+        message:
+          `${tableName} has no constraint named "${constraintName}", so nothing was dropped. ` +
+          `get_table_schema lists its constraints.`,
+        error: 'Constraint not found',
+        code: 'CONSTRAINT_NOT_FOUND',
+      }
+    }
+
+    const { contype, definition } = rows[0]
+    if (contype === 'p') {
+      return {
+        success: false,
+        message:
+          `"${constraintName}" is ${tableName}'s primary key. Backenly does not drop it: the table's API, its row ` +
+          `policies and the foreign keys pointing at it depend on it. Nothing was dropped.`,
+        error: 'Primary key',
+        code: 'PRIMARY_KEY',
+      }
+    }
+    if (contype === 'n') {
+      return {
+        success: false,
+        message: `"${constraintName}" is a NOT NULL rule. Remove it with ALTER TABLE ${tableName} ALTER COLUMN … DROP NOT NULL. Nothing was dropped.`,
+        error: 'Not null constraint',
+        code: 'VALIDATION',
+      }
+    }
+
+    await db.$executeRawUnsafe(`ALTER TABLE "${postgresSchema}"."${tableName}" DROP CONSTRAINT "${dropName}"`)
+    const still = await db.$queryRawUnsafe<Array<{ n: number }>>(
+      `SELECT count(*)::int AS n FROM pg_constraint c JOIN pg_class t ON t.oid = c.conrelid JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE n.nspname = $1 AND t.relname = $2 AND c.conname = $3`,
+      postgresSchema, tableName, dropName,
+    )
+    if (still[0]?.n > 0) {
+      return {
+        success: false,
+        message: `ALTER TABLE … DROP CONSTRAINT reported no error but "${constraintName}" is still on ${tableName}.`,
+        error: 'Verification failed',
+        code: 'VERIFY_FAILED',
+      }
+    }
+    if (!onBranch) {
+      import('@/lib/services/workspace-validator')
+        .then(({ invalidateSchemaCache }) => invalidateSchemaCache(projectId, tableName)).catch(() => {})
+    }
+
+    const kind = ({ u: 'unique', c: 'check', f: 'foreign key', x: 'exclusion' } as Record<string, string>)[contype] ?? 'constraint'
+    return {
+      success: true,
+      message: onBranch
+        ? `Dropped ${kind} constraint "${constraintName}" (${definition}) from ${tableName} on the branch` +
+          `${dropName !== constraintName ? ` (its copy there is named "${dropName}")` : ''}. Merging the branch drops it from production.`
+        : `Dropped ${kind} constraint "${constraintName}" (${definition}) from ${tableName}. ` +
+          `Its definition is kept with this change, so restoring the change puts it back.`,
+      data: { tableName, constraintName, kind, definition },
+    }
+  } catch (err: any) {
+    return {
+      success: false,
+      message: `Could not drop constraint "${constraintName}" from ${tableName}: ${err.message}`,
       error: err.message,
     }
   }
@@ -9013,6 +9551,10 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
   const unique = !!params.unique
   const method = typeof params.method === 'string' ? params.method.toLowerCase().trim() : ''
   const where = typeof params.where === 'string' ? params.where.trim() : ''
+  // CREATE INDEX CONCURRENTLY, on a connection of its own (lib/execution/
+  // online-index.ts): writes to the table go on during the build. Asked for by
+  // Backenly's own repairs (buildFixAction), which build on live tables.
+  const online = params.online === true
 
   const INDEX_METHODS = new Set(['btree', 'gin', 'gist', 'hash', 'brin'])
   if (method && !INDEX_METHODS.has(method)) {
@@ -9027,7 +9569,7 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
   // Identifiers reach raw DDL, so they are VALIDATED rather than stripped. The
   // old `replace(/[^a-z0-9_]/gi, '')` silently turned `user-id` into `userid` and
   // indexed a column that does not exist — or worse, a different one that does.
-  const { SAFE_IDENT, validateBooleanExpression } = await import('@/lib/db/sql-expression')
+  const { SAFE_IDENT, validateBooleanExpression, isEveryRowPredicate } = await import('@/lib/db/sql-expression')
   for (const ident of [tableName, ...columns, params.indexName].filter(Boolean)) {
     if (!SAFE_IDENT.test(String(ident))) {
       return {
@@ -9039,8 +9581,13 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
     }
   }
 
+  // `where: "true"` asks for an index over every row, soft-deleted ones
+  // included: the only kind of UNIQUE index an ON CONFLICT upsert can target.
+  // It names no column, so it is not a predicate to validate, and it is never
+  // scoped to live rows below.
+  const everyRow = !!where && isEveryRowPredicate(where)
   let wherePredicate = ''
-  if (where) {
+  if (where && !everyRow) {
     const checked = validateBooleanExpression(where, { requireColumn: true })
     if (checked.kind !== 'ok') {
       return {
@@ -9057,7 +9604,7 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
     const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
     const postgresSchema = target.targetSchema ?? getWorkspaceDatabaseNames(projectId).postgresSchema
 
-    const idxName = params.indexName || defaultIndexName(tableName, columns, unique)
+    let idxName = params.indexName || defaultIndexName(tableName, columns, unique)
     const colList = columns.map((c) => `"${c}"`).join(', ')
     const usingClause = method ? ` USING ${method}` : ''
 
@@ -9083,15 +9630,63 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
     // question.
     let softDeleteScoped = false
     let effectiveWhere = wherePredicate
-    if (unique && !wherePredicate && (await hasSoftDeleteColumn(db, postgresSchema, tableName))) {
+    if (unique && !wherePredicate && !everyRow && (await hasSoftDeleteColumn(db, postgresSchema, tableName))) {
       effectiveWhere = '"deleted_at" IS NULL'
       softDeleteScoped = true
     }
 
     const whereClause = effectiveWhere ? ` WHERE (${effectiveWhere})` : ''
-    const ddl =
-      `CREATE${unique ? ' UNIQUE' : ''} INDEX IF NOT EXISTS "${idxName}" ` +
-      `ON "${postgresSchema}"."${tableName}"${usingClause} (${colList})${whereClause}`
+    const { buildIndexOnline, dropIndexOnline, indexValidity } = await import('@/lib/execution/online-index')
+    const validity = (name: string = idxName) =>
+      indexValidity((sql, args) => db.$queryRawUnsafe<Array<{ valid: boolean }>>(sql, ...args).then((rows) => ({ rows })), postgresSchema, name)
+
+    // ── The same index under another name is not built twice ────────────────
+    // An agent's `CREATE INDEX product_views_product_idx ON product_views
+    // (product_id)` was built beside Backenly's own idx_product_views_product_id
+    // (production QA, 2026-11-09): two indexes, every write paying for both. An
+    // index over the same columns, as unique or not, with no predicate and the
+    // same method, already does the job; say which.
+    if (!effectiveWhere) {
+      const all = await db.$queryRawUnsafe<Array<{ indexname: string; indexdef: string }>>(
+        `SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = $1 AND tablename = $2`,
+        postgresSchema, tableName,
+      )
+      const wanted = columns.map((c) => c.toLowerCase()).join(',')
+      let same = all.find((r) =>
+        r.indexname !== idxName &&
+        !/\sWHERE\s/i.test(r.indexdef) &&
+        /CREATE UNIQUE/i.test(r.indexdef) === unique &&
+        new RegExp(`USING ${method ?? 'btree'}\\b`, 'i').test(r.indexdef) &&
+        indexDefColumns(r.indexdef).join(',') === wanted)
+      // One a failed CREATE INDEX CONCURRENTLY left behind does no job.
+      if (same && (await validity(same.indexname))?.valid === false) same = undefined
+      if (same && !params.indexName) {
+        return {
+          success: true,
+          message: `${tableName} already has this index, "${same.indexname}" (${columns.join(', ')})${unique ? ', unique' : ''}, so a second one was not built.`,
+          data: { tableName, columns, unique, indexName: same.indexname, alreadyExisted: true, definition: same.indexdef },
+        }
+      }
+      // Asked for by name: when the index doing the job is one Backenly made,
+      // it takes the name asked for, so the name exists and the index is not
+      // built twice. One a person named is left, and this one built as asked.
+      if (same && isBackenlyIndexName(tableName, columns, unique, same.indexname)) {
+        const taken = await db.$queryRawUnsafe<Array<{ n: number }>>(
+          `SELECT count(*)::int AS n FROM pg_class c JOIN pg_namespace ns ON ns.oid = c.relnamespace WHERE ns.nspname = $1 AND c.relname = $2`,
+          postgresSchema, idxName,
+        )
+        if (!taken[0]?.n) {
+          await db.$executeRawUnsafe(`ALTER INDEX "${postgresSchema}"."${same.indexname}" RENAME TO "${idxName}"`)
+          return {
+            success: true,
+            message:
+              `${tableName} already had this index, as Backenly's "${same.indexname}" (${columns.join(', ')})${unique ? ', unique' : ''}. ` +
+              `It is now named "${idxName}", as asked, and a second one was not built.`,
+            data: { tableName, columns, unique, indexName: idxName, alreadyExisted: true, renamedFrom: same.indexname },
+          }
+        }
+      }
+    }
 
     // ── Name-collision check BEFORE creating ────────────────────────────────
     // `IF NOT EXISTS` matches on NAME only. If an index of this name already
@@ -9104,30 +9699,86 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
     )
     if (existing.length > 0) {
       const def = existing[0].indexdef
+      const existingShape = indexDefShape(def)
       const sameUnique = /CREATE UNIQUE/i.test(def) === unique
-      const sameCols = indexDefColumns(def).join(',') === columns.map((c) => c.toLowerCase()).join(',')
-      if (sameUnique && sameCols) {
+      const sameCols = existingShape.columns.join(',') === columns.map((c) => c.toLowerCase()).join(',')
+      // A partial index is a different index: one scoped to live rows cannot
+      // serve a request for one over every row, which an upsert needs.
+      const samePredicate = samePredicateText(existingShape.where, effectiveWhere)
+      const sameShape = sameUnique && sameCols && samePredicate
+      // Same shape but not valid: what a failed CREATE INDEX CONCURRENTLY leaves
+      // (or one still running). Queries ignore it and writes still maintain it,
+      // so it is not "already there".
+      const valid = sameShape ? (await validity())?.valid !== false : true
+      if (sameShape && valid) {
         return {
           success: true,
           message: `Index "${idxName}" already exists on ${tableName} (${columns.join(', ')})${unique ? ', unique' : ''} — nothing to do.`,
           data: { tableName, columns, unique, indexName: idxName, alreadyExisted: true, definition: def },
         }
       }
-      return {
+      if (sameShape && !online) {
+        return {
+          success: false,
+          message:
+            `An index named "${idxName}" exists on ${tableName} but PostgreSQL marks it invalid: queries ignore it, ` +
+            `and every write still maintains it. A CREATE INDEX CONCURRENTLY that failed, or one still running, leaves one. ` +
+            `Drop it with drop_index, then create the index again.`,
+          error: 'Invalid index',
+          code: 'INDEX_INVALID',
+          data: { indexName: idxName, existingDefinition: def },
+        }
+      }
+      if (sameShape && online) {
+        // Built online, so removed online. A build still running holds a lock
+        // this waits for, and gives up on, without touching it.
+        const dropped = await dropIndexOnline(projectId, postgresSchema, idxName)
+        if (dropped.kind === 'failed') {
+          return {
+            success: false,
+            message: `An unusable copy of index "${idxName}" is on ${tableName} and could not be removed before rebuilding it. ${dropped.message}`,
+            error: dropped.message,
+            code: dropped.code,
+          }
+        }
+      } else if (!params.indexName) {
+        // A name Backenly chose is taken by another index (one left on a column
+        // renamed from under it, or made by hand): the next free one. A merge
+        // failed on exactly this, production QA 2026-11-09.
+        idxName = await freeIndexName(db, postgresSchema, idxName)
+      } else return {
         success: false,
         message:
           `An index named "${idxName}" already exists on ${tableName} with a DIFFERENT definition, ` +
           `so the requested one was not created.\n` +
           `  existing:  ${def}\n` +
-          `  requested: ${unique ? 'UNIQUE ' : ''}(${columns.join(', ')})\n` +
+          `  requested: ${unique ? 'UNIQUE ' : ''}(${columns.join(', ')})` +
+          `${effectiveWhere ? ` WHERE ${effectiveWhere}` : everyRow ? ' over every row' : ''}\n` +
           `Pass a different indexName, or drop the existing index first (destructive — route it through backend_chat).`,
         error: 'Index name conflict',
         code: 'INDEX_CONFLICT',
-        data: { indexName: idxName, existingDefinition: def, requested: { columns, unique } },
+        data: { indexName: idxName, existingDefinition: def, requested: { columns, unique, where: effectiveWhere || (everyRow ? 'true' : null) } },
       }
     }
 
-    await db.$executeRawUnsafe(ddl)
+    // The name is settled now: it may be the next free one.
+    const ddl =
+      `CREATE${unique ? ' UNIQUE' : ''} INDEX${online ? ' CONCURRENTLY' : ''} IF NOT EXISTS "${idxName}" ` +
+      `ON "${postgresSchema}"."${tableName}"${usingClause} (${colList})${whereClause}`
+    if (online) {
+      const built = await buildIndexOnline(projectId, postgresSchema, idxName, ddl)
+      if (built.kind === 'failed') {
+        return {
+          success: false,
+          message: `Could not build the index on ${tableName} (${columns.join(', ')}) without blocking writes. ${built.message}`,
+          error: built.message,
+          code: built.code,
+          data: { indexName: idxName, online: true, transient: built.transient, started: built.started, leftover: built.leftover },
+        }
+      }
+    } else {
+      await db.$executeRawUnsafe(ddl)
+    }
 
     // ── Verify, do not assume ───────────────────────────────────────────────
     const after = await db.$queryRawUnsafe<Array<{ indexdef: string }>>(
@@ -9143,6 +9794,14 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
       }
     }
     const def = after[0].indexdef
+    if (online && (await validity())?.valid !== true) {
+      return {
+        success: false,
+        message: `CREATE INDEX CONCURRENTLY reported no error but "${idxName}" is not valid, so queries cannot use it.`,
+        error: 'Index not valid',
+        code: 'VERIFY_FAILED',
+      }
+    }
     if (unique && !/CREATE UNIQUE/i.test(def)) {
       return {
         success: false,
@@ -9163,12 +9822,18 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
       // to know it did not get that.
       message:
         `✅ Created ${shape} as "${idxName}"` +
+        (online ? ', built alongside live traffic: writes to the table were never blocked' : '') +
+        (everyRow && unique
+          ? `\n\nIt covers every row, soft-deleted ones included, so an upsert (ON CONFLICT, or on_conflict ` +
+            `on the REST API) can target it.`
+          : '') +
         (softDeleteScoped
           ? `\n\nScoped to \`WHERE deleted_at IS NULL\`, because "${tableName}" uses soft delete: a client ` +
             `DELETE sets \`deleted_at\` instead of removing the row. An unscoped UNIQUE index would keep ` +
             `enforcing uniqueness against rows the app can no longer see — so a user who deleted their ` +
             `record and created a new one would hit a unique violation against an invisible row. ` +
-            `If you DO want uniqueness across deleted rows, pass \`where\` explicitly (e.g. "true").`
+            `An upsert cannot target a scoped index. If you want uniqueness across deleted rows too, or an ` +
+            `upsert on these columns, pass \`where: "true"\`.`
           : ''),
       data: {
         tableName,
@@ -9176,9 +9841,11 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
         unique,
         method: method || 'btree',
         where: effectiveWhere || null,
+        everyRow,
         softDeleteScoped,
         indexName: idxName,
         definition: def,
+        online,
       },
     }
   } catch (error: any) {
@@ -9259,25 +9926,191 @@ export function defaultIndexName(tableName: string, columns: string[], unique: b
   return `${prefix}_${tableName}`.slice(0, 54) + `_${hash}`
 }
 
+/**
+ * The column list and the WHERE predicate of a pg_indexes definition: the
+ * columns lower-cased for comparison, the predicate as Postgres wrote it, null
+ * for an index over every row.
+ *
+ * The column list is the parenthesised group after `USING <method>`. Reading
+ * the LAST group, as this used to, read a partial index's predicate as its
+ * columns, so an index scoped to live rows never matched the request that made
+ * it, and nothing could tell it from one over every row.
+ */
+export function indexDefShape(indexdef: string): { columns: string[]; where: string | null } {
+  const using = /\bUSING\s+[A-Za-z_][A-Za-z0-9_]*\s*\(/i.exec(indexdef)
+  if (!using) return { columns: [], where: null }
+  const open = using.index + using[0].length - 1
+  let depth = 0
+  let quoted = false
+  let close = -1
+  for (let i = open; i < indexdef.length; i++) {
+    const ch = indexdef[i]
+    if (ch === '"') quoted = !quoted
+    if (quoted) continue
+    if (ch === '(') depth++
+    else if (ch === ')' && --depth === 0) {
+      close = i
+      break
+    }
+  }
+  if (close === -1) return { columns: [], where: null }
+
+  const columns: string[] = []
+  let part = ''
+  depth = 0
+  quoted = false
+  for (const ch of indexdef.slice(open + 1, close)) {
+    if (ch === '"') quoted = !quoted
+    if (!quoted && ch === '(') depth++
+    if (!quoted && ch === ')') depth--
+    if (!quoted && depth === 0 && ch === ',') {
+      columns.push(part)
+      part = ''
+    } else {
+      part += ch
+    }
+  }
+  columns.push(part)
+
+  const where = /^\s*(?:INCLUDE\s*\([^)]*\)\s*)?WHERE\s+(\S[\s\S]*)$/i.exec(indexdef.slice(close + 1))
+  return {
+    columns: columns
+      // Sort modifiers are stripped BEFORE the quotes. The other order leaves
+      // `"createdAt" DESC` as `createdat"` — the closing quote is no longer at
+      // the end of the string once DESC follows it.
+      .map((c) =>
+        c.trim()
+          .replace(/\s+(ASC|DESC|NULLS\s+(FIRST|LAST))$/i, '')
+          .trim()
+          .replace(/^"|"$/g, '')
+          .toLowerCase(),
+      )
+      .filter(Boolean),
+    where: where ? where[1].trim() : null,
+  }
+}
+
+/**
+ * Whether an index name is one Backenly made for these columns: its default
+ * (defaultIndexName, in either case style, or with the _2, _3 a free name
+ * takes) or the one create_table and add_column give a column they index.
+ */
+function isBackenlyIndexName(table: string, columns: string[], unique: boolean, name: string): boolean {
+  const lower = name.toLowerCase()
+  const made = defaultIndexName(table, columns, unique).toLowerCase()
+  if (lower === made || new RegExp(`^${made.replace(/[^a-z0-9_]/g, '\\$&')}_\\d+$`).test(lower)) return true
+  return columns.length === 1 && name === `idx_${table}_${columns[0].toLowerCase().replace(/[^a-z0-9]/g, '_')}`.slice(0, 63)
+}
+
+/** `name`, or the first of name_2, name_3, … that no relation in the schema has. */
+async function freeIndexName(db: Awaited<ReturnType<typeof projectDb>>, schema: string, name: string): Promise<string> {
+  for (let n = 2; n < 100; n++) {
+    const suffix = `_${n}`
+    const candidate = `${name.slice(0, 63 - suffix.length)}${suffix}`
+    const taken = await db.$queryRawUnsafe<Array<{ n: number }>>(
+      `SELECT count(*)::int AS n FROM pg_class c JOIN pg_namespace ns ON ns.oid = c.relnamespace WHERE ns.nspname = $1 AND c.relname = $2`,
+      schema, candidate,
+    )
+    if (!taken[0]?.n) return candidate
+  }
+  return `${name.slice(0, 54)}_${Date.now().toString(36)}`.slice(0, 63)
+}
+
+/**
+ * After a column is renamed, the names Backenly made from it follow it: an
+ * index named by defaultIndexName (idx_ or uniq_, in either case style) and a
+ * foreign key named fk_<table>_<column> or fk_<table>_<column without _id>.
+ * Left behind, idx_orders_status kept naming the index on legacy_status, and
+ * the next CREATE INDEX ON orders (status) collided with it: on production a
+ * merge failed there (QA, 2026-11-09). Names a person chose are left alone,
+ * and so is a name whose new form is taken. Returns "old → new" for each.
+ */
+async function renameNamesWithColumn(
+  db: Awaited<ReturnType<typeof projectDb>>,
+  schema: string,
+  table: string,
+  oldColumn: string,
+  newColumn: string,
+): Promise<string[]> {
+  const moved: string[] = []
+  const free = async (name: string) => {
+    const rows = await db.$queryRawUnsafe<Array<{ n: number }>>(
+      `SELECT (SELECT count(*) FROM pg_class c JOIN pg_namespace ns ON ns.oid = c.relnamespace WHERE ns.nspname = $1 AND c.relname = $2)
+            + (SELECT count(*) FROM pg_constraint k JOIN pg_namespace ns ON ns.oid = k.connamespace WHERE ns.nspname = $1 AND k.conname = $2) AS n`,
+      schema, name,
+    )
+    return Number(rows[0]?.n ?? 0) === 0
+  }
+  // The name in the style it was made in: Backenly writes some lower-cased.
+  const styled = (made: string, like: string) => (like === like.toLowerCase() ? made.toLowerCase() : made)
+
+  try {
+    const indexes = await db.$queryRawUnsafe<Array<{ name: string; def: string; isunique: boolean }>>(
+      `SELECT i.relname AS name, pg_get_indexdef(ix.indexrelid) AS def, ix.indisunique AS isunique
+         FROM pg_index ix
+         JOIN pg_class i ON i.oid = ix.indexrelid
+         JOIN pg_class t ON t.oid = ix.indrelid
+         JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE n.nspname = $1 AND t.relname = $2
+          AND NOT EXISTS (SELECT 1 FROM pg_constraint c WHERE c.conindid = ix.indexrelid)`,
+      schema, table,
+    )
+    for (const ix of indexes) {
+      const cols = indexDefColumns(ix.def)
+      if (!cols.includes(newColumn.toLowerCase())) continue
+      const before = cols.map((c) => (c === newColumn.toLowerCase() ? oldColumn : c))
+      const after = cols.map((c) => (c === newColumn.toLowerCase() ? newColumn : c))
+      if (ix.name.toLowerCase() !== defaultIndexName(table, before, ix.isunique).toLowerCase()) continue
+      const next = styled(defaultIndexName(table, after, ix.isunique), ix.name)
+      if (next === ix.name || !(await free(next))) continue
+      await db.$executeRawUnsafe(`ALTER INDEX "${schema}"."${ix.name}" RENAME TO "${next}"`)
+      moved.push(`${ix.name} → ${next}`)
+    }
+
+    const keys = await db.$queryRawUnsafe<Array<{ name: string }>>(
+      `SELECT k.conname AS name
+         FROM pg_constraint k
+         JOIN pg_class t ON t.oid = k.conrelid
+         JOIN pg_namespace n ON n.oid = t.relnamespace
+         JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.conkey[1]
+        WHERE n.nspname = $1 AND t.relname = $2 AND k.contype = 'f'
+          AND array_length(k.conkey, 1) = 1 AND a.attname = $3`,
+      schema, table, newColumn,
+    )
+    const base = (c: string) => c.replace(/_id$/i, '')
+    for (const key of keys) {
+      const forms: Array<[string, string]> = [
+        [`fk_${table}_${oldColumn}`, `fk_${table}_${newColumn}`],
+        [`fk_${table}_${base(oldColumn)}`, `fk_${table}_${base(newColumn)}`],
+      ]
+      const form = forms.find(([was]) => was.slice(0, 63).toLowerCase() === key.name.toLowerCase())
+      if (!form) continue
+      const next = styled(form[1].slice(0, 63), key.name)
+      if (next === key.name || !(await free(next))) continue
+      await db.$executeRawUnsafe(`ALTER TABLE "${schema}"."${table}" RENAME CONSTRAINT "${key.name}" TO "${next}"`)
+      moved.push(`${key.name} → ${next}`)
+    }
+  } catch (err: any) {
+    // The rename itself stands; a name left behind only risks a later collision.
+    console.warn(`[RenameColumn] names for ${table}.${newColumn} not followed:`, err?.message ?? err)
+  }
+  return moved
+}
+
 /** Column list of a pg_indexes definition, lower-cased for comparison. */
 export function indexDefColumns(indexdef: string): string[] {
-  const open = indexdef.lastIndexOf('(')
-  const close = indexdef.indexOf(')', open)
-  if (open === -1 || close === -1) return []
-  return indexdef
-    .slice(open + 1, close)
-    .split(',')
-    // Sort modifiers are stripped BEFORE the quotes. The other order leaves
-    // `"createdAt" DESC` as `createdat"` — the closing quote is no longer at the
-    // end of the string once DESC follows it.
-    .map((c) =>
-      c.trim()
-        .replace(/\s+(ASC|DESC|NULLS\s+(FIRST|LAST))$/i, '')
-        .trim()
-        .replace(/^"|"$/g, '')
-        .toLowerCase(),
-    )
-    .filter(Boolean)
+  return indexDefShape(indexdef).columns
+}
+
+/**
+ * Whether two index predicates are the same text once quoting, parentheses,
+ * spacing and case are set aside: how Postgres writes a predicate back
+ * (`(deleted_at IS NULL)`) differs from how it was asked for
+ * (`"deleted_at" IS NULL`). No predicate matches only no predicate.
+ */
+function samePredicateText(a: string | null | undefined, b: string | null | undefined): boolean {
+  const norm = (p: string | null | undefined) => (p ?? '').replace(/["()\s]/g, '').toLowerCase()
+  return norm(a) === norm(b)
 }
 
 /**
@@ -9296,6 +10129,8 @@ async function executeRenameColumn(params: any, projectId: string, target: Schem
     await db.$executeRawUnsafe(
       `ALTER TABLE "${postgresSchema}"."${safe(tableName)}" RENAME COLUMN "${safe(oldName)}" TO "${safe(newName)}"`
     )
+    // Names Backenly made from the old column follow it (renameNamesWithColumn).
+    const followed = await renameNamesWithColumn(db, postgresSchema, safe(tableName), safe(oldName), safe(newName))
     // The ledger describes MAIN; a branch's rename is applied when it is merged.
     if (!target.targetSchema) {
       const { supersedeSchemaIntent } = await import('@/lib/autonomy/intent-conformance')
@@ -9305,8 +10140,10 @@ async function executeRenameColumn(params: any, projectId: string, target: Schem
     import('@/lib/services/workspace-validator').then(({ invalidateSchemaCache }) => invalidateSchemaCache(projectId, tableName)).catch(() => {})
     return {
       success: true,
-      message: `✅ Column renamed from "${oldName}" to "${newName}" in ${tableName}`,
-      data: { tableName, oldName, newName }
+      message:
+        `✅ Column renamed from "${oldName}" to "${newName}" in ${tableName}` +
+        (followed.length ? `. Backenly's names for it followed: ${followed.join(', ')}.` : ''),
+      data: { tableName, oldName, newName, ...(followed.length ? { renamedWithIt: followed } : {}) }
     }
   } catch (error: any) {
     return { success: false, message: `Failed to rename column: ${error.message}`, error: error.message }
@@ -9358,8 +10195,8 @@ async function executeRenameColumn(params: any, projectId: string, target: Schem
  * merge replays the statement, but with the handler in branch mode (see
  * SchemaTarget): DDL into the branch schema, nothing keyed by the project.
  *
- * Only the five actions the parser emits are accepted. Anything else is
- * refused rather than run against main by the default path.
+ * Only the actions the parser emits are accepted. Anything else is refused
+ * rather than run against main by the default path.
  */
 export async function executeBranchSchemaAction(
   action: { action: string; params: any },
@@ -9380,6 +10217,10 @@ export async function executeBranchSchemaAction(
     case 'CREATE_INDEX':   return executeCreateIndex(action.params, projectId, target)
     case 'RENAME_COLUMN':  return executeRenameColumn(action.params, projectId, target)
     case 'ADD_CONSTRAINT': return executeAddConstraint(action.params, projectId, target)
+    case 'DROP_INDEX':     return executeDropIndex(action.params, projectId, target)
+    case 'DROP_CONSTRAINT': return executeDropConstraint(action.params, projectId, target)
+    case 'DROP_COLUMN':    return executeDropColumn(action.params, projectId, target)
+    case 'ALTER_COLUMN_TYPE': return executeAlterColumnType(action.params, projectId, target)
     default:
       return {
         success: false,
@@ -9413,15 +10254,18 @@ async function executeAddConstraint(params: any, projectId: string, schemaTarget
     // explicit referencedTable, then the expression, then inference.
     const fromExpr = /^([A-Za-z_][A-Za-z0-9_$]*)\s*\(/.exec(expression)?.[1]
     const target = referencedTable || fromExpr
-    // fk-repair works on main's catalog. A branch does not enforce foreign keys
-    // (it is cloned without them), so the statement is recorded and the key is
-    // added when the merge replays it on main. Said, not silently skipped.
-    if (branchMode) {
+    // A key the migration declares is installed below, on the branch as on
+    // main. One Backenly would infer from the column name goes through
+    // fk-repair, which works on main's catalog, so on a branch the statement
+    // is recorded and the key is added when the merge replays it on main.
+    // Said, not silently skipped.
+    if (branchMode && params.references === undefined) {
       return {
         success: true,
         message:
-          `Recorded foreign key ${tableName}.${columnName}${target ? ` → ${target}` : ''}; it is not enforced on a ` +
-          `branch and is added to production when the branch is merged.`,
+          `Recorded foreign key ${tableName}.${columnName}${target ? ` → ${target}` : ''}. Backenly infers it from ` +
+          `the column name on production, so it is added there when the branch is merged and is not checked on ` +
+          `the branch. Declare it with REFERENCES to have the branch check it too.`,
         data: { tableName, columnName, referencedTable: target ?? null, enforcedOnBranch: false },
       }
     }
@@ -9439,11 +10283,13 @@ async function executeAddConstraint(params: any, projectId: string, schemaTarget
         }
       }
       const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
-      const sql = addForeignKeySql(getWorkspaceDatabaseNames(projectId).postgresSchema, tableName, columnName, fk)
+      // On a branch, the branch's own tables: the key checks what production's will.
+      const schema = schemaTarget.targetSchema ?? getWorkspaceDatabaseNames(projectId).postgresSchema
+      const sql = addForeignKeySql(schema, tableName, columnName, fk)
       try {
         // A key into `users` needs the end-user auth table (lib/services/auth-users-reference.ts).
         const { ensureReferencedAuthUsersTable } = await import('@/lib/services/auth-users-reference')
-        await ensureReferencedAuthUsersTable(projectId, fk.table)
+        await ensureReferencedAuthUsersTable(projectId, fk.table, schema)
         await db.$executeRawUnsafe(sql)
       } catch (err: any) {
         const reason = err?.meta?.message ?? err?.message ?? String(err)
@@ -9456,8 +10302,11 @@ async function executeAddConstraint(params: any, projectId: string, schemaTarget
       }
       return {
         success: true,
-        message: `✅ Added foreign key ${tableName}.${columnName} → ${describeTarget(fk)} ON DELETE ${fk.onDelete} ON UPDATE ${fk.onUpdate}`,
-        data: { tableName, columnName, referencedTable: fk.table, referencedColumn: fk.column ?? null, onDelete: fk.onDelete, onUpdate: fk.onUpdate },
+        message: `✅ Added foreign key ${tableName}.${columnName} → ${describeTarget(fk)} ON DELETE ${fk.onDelete} ON UPDATE ${fk.onUpdate}${branchMode ? ' on the branch' : ''}`,
+        data: {
+          tableName, columnName, referencedTable: fk.table, referencedColumn: fk.column ?? null, onDelete: fk.onDelete, onUpdate: fk.onUpdate,
+          ...(branchMode ? { enforcedOnBranch: true } : {}),
+        },
       }
     }
     const { repairForeignKeyColumn } = await import('./fk-repair')
@@ -9659,7 +10508,12 @@ async function executeAddConstraint(params: any, projectId: string, schemaTarget
       // is routed to executeCreateIndex, which applies the `deleted_at IS NULL`
       // scoping and reports it. Uniqueness is delivered; only the catalog object
       // differs, and the response says so.
-      if (await hasSoftDeleteColumn(db, postgresSchema, tableName)) {
+      //
+      // Not for a UNIQUE declared in SQL (`asWritten`): the author named a
+      // constraint, and ON CONFLICT on its columns needs a real one; a scoped
+      // index is refused there (42P10). It is made as written, and the result
+      // says what soft delete means for it.
+      if (params.asWritten !== true && (await hasSoftDeleteColumn(db, postgresSchema, tableName))) {
         const idxResult = await executeCreateIndex(
           { tableName, columns, unique: true, ...(constraintName ? { indexName: constraintName } : {}) },
           projectId,
@@ -9790,7 +10644,15 @@ async function executeAddConstraint(params: any, projectId: string, schemaTarget
       success: true,
       // The ACTUAL installed definition is echoed, so a caller can see what it
       // got rather than trusting that it matches what it sent.
-      message: `✅ Added constraint "${cName}" to ${tableName}: ${after[0].def}`,
+      message:
+        `✅ Added constraint "${cName}" to ${tableName}: ${after[0].def}` +
+        // A UNIQUE over every row counts the rows a client DELETE only marks
+        // deleted, which is what the author asked for and worth saying once.
+        (ct === 'unique' && params.asWritten === true && (await hasSoftDeleteColumn(db, postgresSchema, tableName))
+          ? `\n\nIt covers every row, soft-deleted ones too: a client DELETE on ${tableName} sets "deleted_at" and keeps ` +
+            `the row, so its value stays taken. For uniqueness among live rows only, create a unique index ` +
+            `WHERE deleted_at IS NULL instead (ON CONFLICT then has to name that WHERE).`
+          : ''),
       data: { tableName, constraintName: cName, constraintDefinition: after[0].def, columns },
     }
   } catch (error: any) {
@@ -10022,7 +10884,7 @@ async function executeSetEnvVar(params: any, projectId: string): Promise<Executi
         success: true,
         message:
           `Stored encrypted env var **${summary.key}** (\`${summary.preview}\`).\n\n` +
-          `It will be available inside AI functions as \`ctx.env.${summary.key}\` on the next invocation.`,
+          `Functions read it from their next run: \`ctx.env.${summary.key}\`, or \`process.env.${summary.key}\` in a route module.`,
         data: { key: summary.key, preview: summary.preview },
       }
     } catch (err: any) {
@@ -10044,14 +10906,14 @@ async function executeListEnvVars(projectId: string): Promise<ExecutionResult> {
       return {
         success: true,
         message:
-          '**Project env vars:**\n\nNone yet. Set one with: _"Save STRIPE_WEBHOOK_SECRET as whsec_…"_\n\nAccess from AI functions via `ctx.env.YOUR_KEY`.',
+          '**Project env vars:**\n\nNone yet. Set one with: _"Save STRIPE_WEBHOOK_SECRET as whsec_…"_\n\nAccess from functions via `ctx.env.YOUR_KEY`.',
         data: { vars: [] },
       }
     }
     const list = rows.map((r) => `• \`${r.key}\` — ${r.preview}${r.description ? `  _(${r.description})_` : ''}`).join('\n')
     return {
       success: true,
-      message: `**Project env vars (${rows.length}):**\n\n${list}\n\nAccess from AI functions via \`ctx.env.<KEY>\`.`,
+      message: `**Project env vars (${rows.length}):**\n\n${list}\n\nAccess from functions via \`ctx.env.<KEY>\`.`,
       data: { vars: rows },
     }
   } catch (error: any) {
@@ -11123,7 +11985,7 @@ async function executeCreateAiFunction(params: any, projectId: string): Promise<
     const fnValidation = validateAiFunctionData(name, description)
     if (!fnValidation.valid) {
       console.warn(`[AI Executor] GENERATE_FUNCTION blocked: ${fnValidation.reason}`)
-      return { success: false, message: `Could not create AI function — ${fnValidation.reason}. Please provide a concrete description of what this function should do.` }
+      return { success: false, message: `Could not create the function — ${fnValidation.reason}. Please provide a concrete description of what this function should do.` }
     }
 
     // The generated name (when none was supplied) can collide as well.
@@ -11199,7 +12061,7 @@ async function executeCreateAiFunction(params: any, projectId: string): Promise<
       : `⚠️ Syntax error: ${syntaxCheck.error} — function saved but will NOT execute until corrected`
 
     const baseMessage = [
-      `**AI Function \`${fn.name}\` registered.**`,
+      `**Function \`${fn.name}\` registered.**`,
       ``,
       `Trigger: ${triggerLabel[triggerType] ?? triggerType}`,
       syntaxLine,
@@ -11245,7 +12107,7 @@ async function executeCreateAiFunction(params: any, projectId: string): Promise<
       },
     }
   } catch (error: any) {
-    return { success: false, message: `Failed to create AI function: ${error.message}`, error: error.message }
+    return { success: false, message: `Failed to create the function: ${error.message}`, error: error.message }
   }
 }
 
@@ -11280,7 +12142,7 @@ async function existingFunctionResult(
   }
   return {
     success: true,
-    message: `AI function \`${names[0]}\` already exists; it was left unchanged.`,
+    message: `Function \`${names[0]}\` already exists; it was left unchanged.`,
     data: fn ? { id: fn.id, name: fn.name, status: fn.status, existed: true } : { names, existed: true },
     artifacts: { functions: [names[0]] },
     verifiedAt: new Date().toISOString(),
@@ -11421,7 +12283,7 @@ async function executeListAiFunctions(projectId: string): Promise<ExecutionResul
     if (functions.length === 0) {
       return {
         success: true,
-        message: 'No AI functions yet. Describe what you want to happen and I\'ll create one automatically.',
+        message: 'No functions yet. Describe what you want to happen and I\'ll create one automatically.',
         data: { functions: [] },
       }
     }
@@ -11475,12 +12337,12 @@ async function executeListAiFunctions(projectId: string): Promise<ExecutionResul
     return {
       success: true,
       message:
-        `**${functions.length} AI Function${functions.length !== 1 ? 's' : ''}:**\n\n${list}\n\n` +
+        `**${functions.length} Function${functions.length !== 1 ? 's' : ''}:**\n\n${list}\n\n` +
         `Full source, recent runs and last errors are in \`data.functions[]\` — you never need to regenerate a function to read it (regenerating OVERWRITES it).`,
       data: { functions: enriched },
     }
   } catch (error: any) {
-    return { success: false, message: `Failed to list AI functions: ${error.message}`, error: error.message }
+    return { success: false, message: `Failed to list functions: ${error.message}`, error: error.message }
   }
 }
 
@@ -11569,13 +12431,22 @@ async function executeDeleteAiFunction(params: any, projectId: string): Promise<
     const { syncCaptureForFunctionChange } = await import('@/lib/webhooks/capture')
     await syncCaptureForFunctionChange(projectId, fn.triggerType)
 
+    // The delete is a governed change, which keeps the function as it was:
+    // restoring the change brings it back, code and trigger.
+    const { currentChange } = await import('@/lib/changes/ledger')
+    const open = currentChange(projectId)
+    const change = open ? { id: open.id, seq: open.seq } : null
+
     return {
       success: true,
-      message: `✅ AI function \`${fn.name}\` deleted.`,
-      data: { deleted: true, name: fn.name },
+      message: `✅ Function \`${fn.name}\` deleted.` + (change
+        ? ` It is kept in the change history as change #${change.seq}: restore that change in History to bring it back, ` +
+          `or ask with deploy { action: "revert_change", changeId: "${change.id}" } (a person approves it).`
+        : ''),
+      data: { deleted: true, name: fn.name, change },
     }
   } catch (error: any) {
-    return { success: false, message: `Failed to delete AI function: ${error.message}`, error: error.message }
+    return { success: false, message: `Failed to delete the function: ${error.message}`, error: error.message }
   }
 }
 
@@ -11596,14 +12467,14 @@ async function findAiFunctionForAction(
   const { prisma } = await import('@/lib/db')
   if (typeof functionId === 'string' && functionId) {
     const byId = await prisma.aiFunction.findFirst({ where: { ...where, id: functionId, projectId } })
-    return byId ?? { result: { success: false, message: `AI function "${functionId}" not found`, error: 'NOT_FOUND' } }
+    return byId ?? { result: { success: false, message: `Function "${functionId}" not found`, error: 'NOT_FOUND' } }
   }
   if (typeof name !== 'string' || !name.trim()) {
     return { result: { success: false, message: 'functionId or name is required', error: 'INVALID_ARGUMENT' } }
   }
   const { resolveFunctionByName } = await import('@/lib/services/ai-functions/names')
   const found = await resolveFunctionByName(projectId, name, where as any)
-  if (!found) return { result: { success: false, message: `AI function "${name}" not found`, error: 'NOT_FOUND' } }
+  if (!found) return { result: { success: false, message: `Function "${name}" not found`, error: 'NOT_FOUND' } }
   if ('ambiguous' in found) {
     return {
       result: {
@@ -11646,11 +12517,11 @@ async function executeToggleAiFunction(params: any, projectId: string): Promise<
 
     return {
       success: true,
-      message: `✅ AI function \`${fn.name}\` is now **${newStatus}**.`,
+      message: `✅ Function \`${fn.name}\` is now **${newStatus}**.`,
       data: { functionId: fn.id, name: fn.name, status: newStatus },
     }
   } catch (error: any) {
-    return { success: false, message: `Failed to toggle AI function: ${error.message}`, error: error.message }
+    return { success: false, message: `Failed to switch the function: ${error.message}`, error: error.message }
   }
 }
 
@@ -11733,12 +12604,20 @@ async function executeStoreIntegrationKey(params: any, projectId: string): Promi
       luma: 'luma_...',
     }
     const example = rawIntegrationId ? (KEY_EXAMPLES[rawIntegrationId.toLowerCase()] ?? `your ${providerName} API key`) : 'your API key'
+    const isEmail = rawIntegrationId && ['resend', 'sendgrid'].includes(rawIntegrationId.toLowerCase())
+    const emailPrompt = isEmail
+      ? [
+          ``,
+          `Also provide your verified sender email address (\`fromEmail: "you@yourdomain.com"\`). Resend and SendGrid require emails to come from a verified domain on your account.`,
+        ]
+      : []
     return {
       success: false,
       message: [
         `**To connect ${providerName}**, paste your API key here:`,
         ``,
         `Example format: \`${example}\``,
+        ...emailPrompt,
         ``,
         `Or say **"skip for now"** to continue without it — you can connect it later.`,
       ].join('\n'),
@@ -11808,6 +12687,21 @@ async function executeStoreIntegrationKey(params: any, projectId: string): Promi
       } else {
         const { hasIntegrationKey } = await import('@/lib/services/integrationKeyStore')
         oneSignalAppIdPending = !(await hasIntegrationKey(projectId, 'onesignal_app_id'))
+      }
+    }
+
+    // Resend / SendGrid: store verified sender email (fromEmail) when provided
+    let senderEmailPending = false
+    const rawFromEmail = params.fromEmail ?? params.from ?? params.senderEmail
+    let trimmedFromEmail: string | null = null
+    if (integrationId === 'resend' || integrationId === 'sendgrid') {
+      if (rawFromEmail) {
+        trimmedFromEmail = String(rawFromEmail).trim()
+        await storeIntegrationKey(projectId, 'email_from', trimmedFromEmail)
+      } else {
+        const { getIntegrationKey } = await import('@/lib/services/integrationKeyStore')
+        trimmedFromEmail = await getIntegrationKey(projectId, 'email_from').catch(() => null)
+        senderEmailPending = !trimmedFromEmail
       }
     }
 
@@ -11913,13 +12807,13 @@ async function executeStoreIntegrationKey(params: any, projectId: string): Promi
         const welcomeResult = await executeCreateAiFunction(
           {
             name: `${integrationId}-welcome-email`,
-            description: `When a user signs up, send them a welcome email using ctx.integrations.${integrationId}.send(). Address the email to the user's email, use a friendly subject line, and include their name if available.`,
+            description: `When a user signs up, send them a welcome email using ctx.integrations.email.send(). Address the email to the user's email, use a friendly subject line, and include their name if available.`,
             triggerType: 'on_signup',
           },
           projectId,
         )
         if (welcomeResult.success) {
-          autoWiredSteps.push(`✅ Created welcome email trigger (on_signup → ${integrationId})`)
+          autoWiredSteps.push(`✅ Created welcome email trigger (on_signup → ctx.integrations.email.send)`)
         } else {
           wiringFailed(`welcome email on sign-up (${integrationId})`, welcomeResult)
         }
@@ -11934,14 +12828,14 @@ async function executeStoreIntegrationKey(params: any, projectId: string): Promi
           const resetResult = await executeCreateAiFunction(
             {
               name: `${integrationId}-password-reset-email`,
-              description: `When a password reset record is inserted into \`${resetTable.name}\`, send a password reset email to the user using ctx.integrations.${integrationId}.send(). Include the reset token as a link. Log the delivery result.`,
+              description: `When a password reset record is inserted into \`${resetTable.name}\`, send a password reset email to the user using ctx.integrations.email.send(). Include the reset token as a link. Log the delivery result.`,
               triggerType: 'on_db_insert',
               triggerTable: resetTable.name,
             },
             projectId,
           )
           if (resetResult.success) {
-            autoWiredSteps.push(`✅ Created password reset trigger (${resetTable.name}.insert → ${integrationId})`)
+            autoWiredSteps.push(`✅ Created password reset trigger (${resetTable.name}.insert → ctx.integrations.email.send)`)
           } else {
             wiringFailed(`password reset email on ${resetTable.name} insert (${integrationId})`, resetResult)
           }
@@ -12023,6 +12917,8 @@ async function executeStoreIntegrationKey(params: any, projectId: string): Promi
               verification: status.verification,
               verificationDetail: status.verificationDetail,
               webhookSecretPending,
+              senderEmailPending,
+              fromEmail: trimmedFromEmail ?? _existing[integrationId]?.fromEmail,
             },
           },
         },
@@ -12064,9 +12960,25 @@ async function executeStoreIntegrationKey(params: any, projectId: string): Promi
         `call integrations { "action": "connect", "integrationId": "onesignal", "apiKey": "<same REST key>", "appId": "<your App ID>" }.`
       : ''
 
+    const senderEmailGap = senderEmailPending
+      ? [
+          '',
+          '⚠ **Default sender email is NOT set.**',
+          `Resend and SendGrid require emails to come from a verified domain on your account (they refuse to send as backenly.com).`,
+          `To set your default sender, call:`,
+          `integrations { "action": "connect", "integrationId": "${integrationId}", "apiKey": "<same API key>", "fromEmail": "you@yourdomain.com" }`,
+          `or pass an explicit \`from\` in each \`ctx.integrations.email.send({ from: "you@yourdomain.com", ... })\` call.`,
+        ].join('\n')
+      : ''
+
+    const fromNote = trimmedFromEmail ? `\n\nDefault sender email: \`${trimmedFromEmail}\`` : ''
+    const functionCapabilityNote = (integrationId === 'resend' || integrationId === 'sendgrid')
+      ? 'Functions can now use `ctx.integrations.email.send()` to send emails.'
+      : `Functions can now use \`ctx.integrations.${integrationId}.*\` to call ${integrationId} APIs.`
+
     return {
       success: true,
-      message: `${integrationId} connected. Key stored securely (${status.maskedKey}).${keyValidationNote}${webhookUrl}${webhookGap}${appIdGap}${autoWiredMsg}${notWiredMsg}\n\nAI functions can now use \`ctx.integrations.${integrationId}.*\` to call ${integrationId} APIs.`,
+      message: `${integrationId} connected. Key stored securely (${status.maskedKey}).${keyValidationNote}${fromNote}${webhookUrl}${webhookGap}${appIdGap}${senderEmailGap}${autoWiredMsg}${notWiredMsg}\n\n${functionCapabilityNote}`,
       data: {
         integrationId,
         maskedKey: status.maskedKey,
@@ -12074,6 +12986,8 @@ async function executeStoreIntegrationKey(params: any, projectId: string): Promi
         verificationDetail: status.verificationDetail,
         webhookSecretPending,
         oneSignalAppIdPending,
+        senderEmailPending,
+        fromEmail: trimmedFromEmail ?? undefined,
         autoWired: autoWiredSteps,
         notWired,
       },
@@ -14249,86 +15163,157 @@ async function executeSendPush(params: any, projectId: string): Promise<Executio
 // Safe, AI-managed column type migration with automatic data casting.
 // ============================================================================
 
-async function executeAlterColumnType(params: any, projectId: string): Promise<ExecutionResult> {
+async function executeAlterColumnType(params: any, projectId: string, target: SchemaTarget = {}): Promise<ExecutionResult> {
   const db = await projectDb(projectId)
-  const { tableName, columnName, newType, castExpression } = params
-  if (!tableName || !columnName || !newType) {
+  const tableName = String(params?.tableName ?? '').trim()
+  const columnName = String(params?.columnName ?? '').trim()
+  const { newType, castExpression } = params ?? {}
+  // A migration's ALTER COLUMN … TYPE (lib/mcp/migration-parser.ts): the
+  // declared type exactly, and PostgreSQL's own conversion unless it says USING.
+  const asWritten = params?.asWritten === true
+  if (!tableName || !columnName || (!newType && !params?.sqlType)) {
     return { success: false, message: 'tableName, columnName, and newType are required' }
   }
+  if (['id', 'createdAt', 'updatedAt'].includes(columnName)) {
+    return {
+      success: false,
+      message: `"${columnName}" is a column Backenly keeps on every table; its type is not changed.`,
+      error: 'RESERVED_COLUMN',
+      code: 'RESERVED_COLUMN',
+    } as ExecutionResult
+  }
 
+  let type = ''
   try {
     const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
-    const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
-    const safe = (s: string) => s.replace(/[^a-z0-9_]/gi, '')
+    const mainSchema = getWorkspaceDatabaseNames(projectId).postgresSchema
+    const postgresSchema = target.targetSchema ?? mainSchema
+    const onBranch = !!target.targetSchema
+    const { quoteIdent: q } = await import('@/lib/changes/names')
+    const table = `${q(postgresSchema)}.${q(tableName)}`
+    const column = q(columnName)
 
-    const normalizedType = normalizeColumnType(newType, columnName)
-
-    // Smart USING clause for common type migrations
-    const USING_CLAUSES: Record<string, Record<string, string>> = {
-      'INTEGER': {
-        'TEXT': `"${safe(columnName)}"::INTEGER`,
-        'DECIMAL': `"${safe(columnName)}"::INTEGER`,
-        'FLOAT': `"${safe(columnName)}"::INTEGER`,
-      },
-      'DECIMAL': {
-        'INTEGER': `"${safe(columnName)}"::DECIMAL`,
-        'TEXT': `"${safe(columnName)}"::DECIMAL`,
-      },
-      'TEXT': {
-        'INTEGER': `"${safe(columnName)}"::TEXT`,
-        'DECIMAL': `"${safe(columnName)}"::TEXT`,
-        'BOOLEAN': `CASE WHEN "${safe(columnName)}" THEN 'true' ELSE 'false' END`,
-        'TIMESTAMP': `"${safe(columnName)}"::TEXT`,
-      },
-      'BOOLEAN': {
-        'TEXT': `"${safe(columnName)}"::BOOLEAN`,
-        'INTEGER': `("${safe(columnName)}"::BOOLEAN)::INTEGER`,
-      },
-      'TIMESTAMP': {
-        'TEXT': `"${safe(columnName)}"::TIMESTAMP`,
-      },
+    const typeOf = () =>
+      db.$queryRawUnsafe<Array<{ t: string; data_type: string }>>(
+        `SELECT format_type(a.atttypid, a.atttypmod) AS t, upper(c.data_type) AS data_type
+           FROM pg_attribute a
+           JOIN information_schema.columns c ON c.table_schema = $1 AND c.table_name = $2 AND c.column_name = a.attname
+          WHERE a.attrelid = to_regclass($3) AND a.attname = $4 AND a.attnum > 0 AND NOT a.attisdropped`,
+        postgresSchema, tableName, table, columnName,
+      )
+    const before = await typeOf()
+    if (before.length === 0) {
+      return { success: false, message: `Column \`${columnName}\` does not exist on \`${tableName}\`.`, error: 'COLUMN_NOT_FOUND' }
     }
+    const currentType = before[0].t
 
-    // Get current column type
-    const colInfo = await db.$queryRawUnsafe<{data_type: string}[]>(
-      `SELECT data_type FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2 AND column_name = $3`,
-      postgresSchema, safe(tableName), safe(columnName)
-    )
-    const currentType = colInfo[0]?.data_type?.toUpperCase() || 'TEXT'
+    // The declared type when a migration gave one; the vocabulary's otherwise.
+    const declared = declaredSqlType(params)
+    if (asWritten && !declared) {
+      return { success: false, message: `"${params?.sqlType ?? newType}" is not a type a migration can change a column to.`, code: 'VALIDATION' } as ExecutionResult
+    }
+    type = declared ?? normalizeColumnType(newType, columnName)
 
-    // Build USING clause: castExpression > auto-derived > direct cast
-    const usingExpr = castExpression
-      || USING_CLAUSES[normalizedType]?.[currentType]
-      || `"${safe(columnName)}"::${normalizedType}`
+    // A conversion someone wrote (USING, or the older castExpression) runs over
+    // every row as the platform, so it is held to the closed grammar here too,
+    // whichever door it came through. Otherwise a migration gets PostgreSQL's
+    // own conversion, and every other caller the usual cast.
+    let usingExpr: string | null = null
+    const written = typeof params?.using === 'string' ? params.using : typeof castExpression === 'string' && castExpression.trim() ? castExpression : undefined
+    if (written !== undefined) {
+      const { validateConversionExpression } = await import('@/lib/db/sql-expression')
+      const { exactSqlType } = await import('@/lib/mcp/migration-parser')
+      const checked = validateConversionExpression(written, { column: columnName, castType: (t) => exactSqlType(t) !== undefined })
+      if (checked.kind !== 'ok') {
+        return {
+          success: false,
+          message: `USING ${written} cannot run here: ${checked.reason} ${checked.hint}`,
+          error: 'Unsafe conversion',
+          code: 'UNSAFE_EXPRESSION',
+        } as ExecutionResult
+      }
+      usingExpr = checked.expression
+    } else if (!asWritten) {
+      // Smart USING clause for common type migrations
+      const USING_CLAUSES: Record<string, Record<string, string>> = {
+        'INTEGER': { 'TEXT': `${column}::INTEGER`, 'DECIMAL': `${column}::INTEGER`, 'FLOAT': `${column}::INTEGER` },
+        'DECIMAL': { 'INTEGER': `${column}::DECIMAL`, 'TEXT': `${column}::DECIMAL` },
+        'TEXT': {
+          'INTEGER': `${column}::TEXT`,
+          'DECIMAL': `${column}::TEXT`,
+          'BOOLEAN': `CASE WHEN ${column} THEN 'true' ELSE 'false' END`,
+          'TIMESTAMP': `${column}::TEXT`,
+        },
+        'BOOLEAN': { 'TEXT': `${column}::BOOLEAN`, 'INTEGER': `(${column}::BOOLEAN)::INTEGER` },
+        'TIMESTAMP': { 'TEXT': `${column}::TIMESTAMP` },
+      }
+      usingExpr = USING_CLAUSES[type]?.[before[0].data_type] || `${column}::${type}`
+    }
 
     // A cast need not round-trip (numeric → integer rounds, text → date
     // normalises), so inside a recorded change the original values are kept
-    // first and a rollback puts back exactly what was there.
-    const alterSql = `
-      ALTER TABLE "${postgresSchema}"."${safe(tableName)}"
-      ALTER COLUMN "${safe(columnName)}"
-      TYPE ${normalizedType}
-      USING ${usingExpr}
-    `
-    const { keepColumnValues } = await import('@/lib/changes/preserve')
-    const kept = await keepColumnValues(projectId, postgresSchema, safe(tableName), safe(columnName), 'retyped', alterSql)
-    if (!kept.handled) await db.$executeRawUnsafe(alterSql)
+    // first and a rollback puts back exactly what was there. The statement runs
+    // with search_path set to pg_catalog: every function, operator and type in
+    // it is then a built-in, whatever the project's schema holds.
+    const alterSql = `ALTER TABLE ${table} ALTER COLUMN ${column} TYPE ${type}${usingExpr ? ` USING ${usingExpr}` : ''}`
+    const underCatalogPath = () =>
+      db.$transaction(async (tx) => {
+        await tx.$executeRawUnsafe('SET LOCAL search_path TO pg_catalog, pg_temp')
+        await tx.$executeRawUnsafe(alterSql)
+      }, { maxWait: 10_000, timeout: 30 * 60_000 })
 
-    // Invalidate schema cache
+    let kept: Awaited<ReturnType<typeof import('@/lib/changes/preserve').keepColumnValues>> = { handled: false }
+    if (onBranch) {
+      await underCatalogPath()
+    } else {
+      const { keepColumnValues } = await import('@/lib/changes/preserve')
+      kept = await keepColumnValues(projectId, postgresSchema, tableName, columnName, 'retyped', alterSql, { catalogSearchPath: true })
+      if (!kept.handled) await underCatalogPath()
+    }
+    const now = (await typeOf())[0]?.t ?? type
+
+    if (onBranch) {
+      return {
+        success: true,
+        message: `On the branch, ${tableName}.${columnName} is now ${now} (was ${currentType}). Merging the branch changes it on production, keeping the values before with the change.`,
+        data: { tableName, columnName, oldType: currentType, newType: now },
+      }
+    }
+
+    // The new type is what is requested now, not drift (lib/autonomy/intent-conformance).
+    const { supersedeSchemaIntent } = await import('@/lib/autonomy/intent-conformance')
+    await supersedeSchemaIntent(projectId, { kind: 'retype_column', tableName, columnName, type: now })
+    // The generated API describes the column's type; regenerate it, best effort.
+    try {
+      await executeGenerateAPI({ tableName }, projectId)
+    } catch {
+      // the type changed either way
+    }
     const { invalidateSchemaCache } = await import('@/lib/services/workspace-validator')
     try { invalidateSchemaCache(projectId, tableName) } catch { /* best-effort */ }
+    import('@/lib/ai/execution-cache')
+      .then(({ invalidateSchemaCache: invalidate }) => invalidate(projectId))
+      .catch(() => {})
 
     return {
       success: true,
-      message: `✅ Column **${columnName}** in **${tableName}** changed from \`${currentType}\` → \`${normalizedType}\`.\n\nExisting data was automatically cast using: \`${usingExpr}\``,
-      data: { tableName, columnName, oldType: currentType, newType: normalizedType },
+      message: kept.handled
+        ? `✅ ${tableName}.${columnName} is now ${now} (was ${currentType})${usingExpr ? `, converted with ${usingExpr}` : ''}. ` +
+          `Its ${kept.rows} value${kept.rows === 1 ? '' : 's'} before ${kept.rows === 1 ? 'is' : 'are'} kept: restoring the state before change #${kept.seq} puts them back.`
+        : `✅ ${tableName}.${columnName} is now ${now} (was ${currentType})${usingExpr ? `, converted with ${usingExpr}` : ''}.`,
+      data: { tableName, columnName, oldType: currentType, newType: now },
     }
   } catch (error: any) {
+    const reason = String(error?.meta?.message ?? error?.message ?? error)
+    const noCast = /cannot be cast automatically/i.test(reason)
     return {
       success: false,
-      message: `Failed to change column type: ${error.message}\n\nThis usually means existing data cannot be safely cast. Try exporting your data first, or specify a custom cast expression.`,
-      error: error.message,
-    }
+      message:
+        `${tableName}.${columnName} was not changed${type ? ` to ${type}` : ''}: ${reason}` +
+        (noCast ? ` Say how to convert it with USING, e.g. USING ${columnName}::${type.toLowerCase() || 'integer'}.` : ''),
+      error: reason,
+      code: noCast ? 'NEEDS_USING' : 'RETYPE_FAILED',
+    } as ExecutionResult
   }
 }
 

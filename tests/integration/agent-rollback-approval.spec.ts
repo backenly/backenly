@@ -139,8 +139,9 @@ describe('an agent migration, restored on a person\'s say-so', () => {
     expect((row.verification as any).checks.map((c: any) => c.id)).toEqual([
       'expected_effects', 'collateral', 'rls', 'credentials', 'api_access', 'auth', 'indexes', 'queryable',
     ])
-    // The table, and the updatedAt helper function a project's first table brings.
-    expect((row.footprint as any[]).map((c) => c.after).sort()).toEqual(['invoices', 'set_updated_at()'])
+    // The table, the updatedAt helper function a project's first table brings,
+    // and the claim reader the rule closing it reads (no column shows an owner).
+    expect((row.footprint as any[]).map((c) => c.after).sort()).toEqual(['backenly_jwt_claim(claim text)', 'invoices', 'set_updated_at()'])
     expect((row.steps as any[]).map((s) => s.statement)).toEqual([
       'CREATE TABLE invoices (number text NOT NULL, amount integer)',
       'CREATE INDEX invoices_number_idx ON invoices (number)',

@@ -122,6 +122,16 @@ COPY --from=build /src/node_modules/@esbuild ./node_modules/@esbuild
 # TypeScript the way the function runner does.
 RUN node -e "const e=require('esbuild');const o=e.transformSync('export const n: number = 1',{loader:'ts',format:'cjs'});if(!o.code.includes('exports'))process.exit(1);console.log('esbuild '+e.version+' compiles TypeScript in this image')"
 
+# bcrypt, the native password hashing (lib/auth/password.ts), and the loader
+# that picks its prebuilt binary for this platform. A native module cannot be
+# bundled, so scripts/build-runtime-bundle.mjs leaves it external; without these
+# the runtime cannot verify a password or an older API key.
+COPY --from=build /src/node_modules/bcrypt ./node_modules/bcrypt
+COPY --from=build /src/node_modules/node-gyp-build ./node_modules/node-gyp-build
+
+# Asserted, not assumed: the build fails unless this image can hash and verify.
+RUN node -e "const b=require('bcrypt');const h=b.hashSync('x',4);if(!b.compareSync('x',h)||b.compareSync('y',h))process.exit(1);console.log('bcrypt hashes in this image')"
+
 # overlay-allowlist.json and, when composed, lib/cloud/** — read from disk by
 # the startup edition assertion. Without these a Cloud Runtime refuses to boot.
 COPY --from=build /src/edition-files/ ./

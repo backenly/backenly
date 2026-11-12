@@ -10,6 +10,7 @@
  */
 
 import {
+  exactSqlType,
   parseMigration,
   splitStatements,
   MigrationParseError,
@@ -63,30 +64,68 @@ describe('splitStatements', () => {
   })
 })
 
+describe('declared types are carried exactly, for the executor to create as written', () => {
+  // The vocabulary (`type`) folds timestamptz, date and time into "timestamp"
+  // and drops numeric scale; `sqlType` keeps what the statement said. On
+  // production a merge turned `refunded_at timestamptz` into timestamp without
+  // time zone, and `session_id text` was created as uuid by its name.
+  it.each([
+    ['timestamptz', 'timestamptz'],
+    ['timestamp with time zone', 'timestamptz'],
+    ['timestamp(3) with time zone', 'timestamptz(3)'],
+    ['timestamp', 'timestamp'],
+    ['date', 'date'],
+    ['time', 'time'],
+    ['numeric(10, 2)', 'numeric(10,2)'],
+    ['decimal', 'numeric'],
+    ['double precision', 'double precision'],
+    ['float8', 'double precision'],
+    ['VARCHAR(40)', 'varchar(40)'],
+    ['int', 'integer'],
+    ['int8', 'bigint'],
+    ['json', 'json'],
+    ['text[]', 'text[]'],
+    ['uuid ARRAY', 'uuid[]'],
+  ])('%s → %s', (raw, exact) => {
+    expect(exactSqlType(raw)).toBe(exact)
+  })
+
+  it.each(['serial', 'bigserial', 'citext', 'name'])('%s stays on the vocabulary: it is a sequence or an extension, not a type', (raw) => {
+    expect(exactSqlType(raw)).toBeUndefined()
+  })
+
+  it('reaches both statements an agent sends', () => {
+    const create = parseOne('CREATE TABLE views (session_id text NOT NULL, at timestamptz)')
+    expect((create.args.columns as any[]).map((c) => c.sqlType)).toEqual(['text', 'timestamptz'])
+    const add = parseOne('ALTER TABLE orders ADD COLUMN refunded_at timestamptz')
+    expect((add.args.column as any).sqlType).toBe('timestamptz')
+  })
+})
+
 describe('CREATE TABLE', () => {
   it('maps columns and types', () => {
     const a = parseOne('CREATE TABLE posts (title text NOT NULL, views integer)')
     expect(a.tool).toBe('create_table')
     expect(a.args.tableName).toBe('posts')
     expect(a.args.columns).toEqual([
-      { name: 'title', type: 'text', nullable: false },
-      { name: 'views', type: 'int', nullable: true },
+      { name: 'title', type: 'text', sqlType: 'text', nullable: false },
+      { name: 'views', type: 'int', sqlType: 'integer', nullable: true },
     ])
   })
 
   it('keeps precision types intact rather than splitting on their comma', () => {
     const a = parseOne('CREATE TABLE items (price numeric(10,2), label varchar(255))')
     expect(a.args.columns).toEqual([
-      { name: 'price', type: 'numeric', nullable: true },
-      { name: 'label', type: 'text', nullable: true },
+      { name: 'price', type: 'numeric', sqlType: 'numeric(10,2)', nullable: true },
+      { name: 'label', type: 'text', sqlType: 'varchar(255)', nullable: true },
     ])
   })
 
   it('handles multi-word types', () => {
     const a = parseOne('CREATE TABLE m (at timestamp with time zone, ratio double precision)')
     expect(a.args.columns).toEqual([
-      { name: 'at', type: 'timestamp', nullable: true },
-      { name: 'ratio', type: 'numeric', nullable: true },
+      { name: 'at', type: 'timestamp', sqlType: 'timestamptz', nullable: true },
+      { name: 'ratio', type: 'numeric', sqlType: 'double precision', nullable: true },
     ])
   })
 
@@ -94,11 +133,11 @@ describe('CREATE TABLE', () => {
     const a = parseOne(
       'CREATE TABLE posts (id uuid PRIMARY KEY, title text, created_at timestamptz, updated_at timestamptz)',
     )
-    expect(a.args.columns).toEqual([{ name: 'title', type: 'text', nullable: true }])
+    expect(a.args.columns).toEqual([{ name: 'title', type: 'text', sqlType: 'text', nullable: true }])
     expect(a.notes?.join(' ')).toMatch(/id, created_at, updated_at/)
     // The note must NOT leak into args — dispatchTool forwards args straight to
     // the executor, and an unknown key there is a silent contract violation.
-    expect(Object.keys(a.args).sort()).toEqual(['columns', 'tableName'])
+    expect(Object.keys(a.args).sort()).toEqual(['asWritten', 'columns', 'tableName'])
   })
 
   it('names the camelCase columns that replace a skipped created_at', () => {
@@ -112,7 +151,7 @@ describe('CREATE TABLE', () => {
   it('reads an inline REFERENCES as a foreign key', () => {
     const a = parseOne('CREATE TABLE posts (author_id uuid REFERENCES users(id), title text)')
     expect((a.args.columns as any[])[0]).toEqual({
-      name: 'author_id', type: 'uuid', fkTo: 'users', references: fk('users'), nullable: true,
+      name: 'author_id', type: 'uuid', sqlType: 'uuid', fkTo: 'users', references: fk('users'), nullable: true,
     })
   })
 
@@ -121,7 +160,7 @@ describe('CREATE TABLE', () => {
       'CREATE TABLE posts (author_id uuid, title text, FOREIGN KEY (author_id) REFERENCES users(id))',
     )
     expect((a.args.columns as any[])[0]).toEqual({
-      name: 'author_id', type: 'uuid', fkTo: 'users', references: fk('users'), nullable: true,
+      name: 'author_id', type: 'uuid', sqlType: 'uuid', fkTo: 'users', references: fk('users'), nullable: true,
     })
   })
 
@@ -141,9 +180,9 @@ describe('CREATE TABLE', () => {
       )`)
     expect(a.args.tableName).toBe('posts')
     expect(a.args.columns).toEqual([
-      { name: 'title', type: 'text', nullable: false },
-      { name: 'body', type: 'text', nullable: true },
-      { name: 'author_id', type: 'uuid', fkTo: 'users', references: fk('users'), nullable: true },
+      { name: 'title', type: 'text', sqlType: 'text', nullable: false },
+      { name: 'body', type: 'text', sqlType: 'text', nullable: true },
+      { name: 'author_id', type: 'uuid', sqlType: 'uuid', fkTo: 'users', references: fk('users'), nullable: true },
     ])
   })
 
@@ -241,7 +280,7 @@ describe('ALTER TABLE', () => {
 
   it('translates UNIQUE and FOREIGN KEY constraints', () => {
     expect(parseOne('ALTER TABLE u ADD CONSTRAINT ue UNIQUE (email)').args).toEqual({
-      tableName: 'u', columnName: 'email', constraintType: 'unique', constraintName: 'ue',
+      tableName: 'u', columnName: 'email', columns: ['email'], constraintType: 'unique', constraintName: 'ue', asWritten: true,
     })
     expect(parseOne('ALTER TABLE p ADD FOREIGN KEY (author_id) REFERENCES users(id)').args).toEqual({
       tableName: 'p',
@@ -255,17 +294,18 @@ describe('ALTER TABLE', () => {
 
   // Defect #10: this was refused, and its own hint pointed at CREATE UNIQUE
   // INDEX — which then silently dropped both the composite-ness and the
-  // uniqueness (defects #5 and #4). Three bugs in one dead end.
-  it('applies a multi-column UNIQUE as a composite unique index', () => {
+  // uniqueness (defects #5 and #4). Three bugs in one dead end. Now it is the
+  // constraint as written, by its name, which ON CONFLICT (user_a, user_b) can use.
+  it('applies a multi-column UNIQUE as the composite constraint written', () => {
     const a = parseOne('ALTER TABLE conversations ADD CONSTRAINT pair UNIQUE (user_a, user_b)')
-    expect(a.tool).toBe('create_index')
+    expect(a.tool).toBe('add_constraint')
     expect(a.args).toEqual({
       tableName: 'conversations',
       columns: ['user_a', 'user_b'],
-      unique: true,
-      indexName: 'pair',
+      constraintType: 'unique',
+      asWritten: true,
+      constraintName: 'pair',
     })
-    expect(a.notes?.join(' ')).toMatch(/unique index/i)
   })
 
   it('translates ALTER COLUMN DROP NOT NULL and DEFAULT changes', () => {
@@ -292,14 +332,111 @@ describe('ALTER TABLE', () => {
     expect(err.hint).toMatch(/managed `id`|UNIQUE/)
   })
 
-  it('refuses DROP COLUMN as destructive, naming the approval path', () => {
-    const err = expectRefusal('ALTER TABLE posts DROP COLUMN body')
-    expect(err.code).toBe('DESTRUCTIVE_REFUSED')
-    expect(err.hint).toMatch(/backend_chat/)
+  it('translates DROP CONSTRAINT, carrying IF EXISTS', () => {
+    expect(parseOne('ALTER TABLE orders DROP CONSTRAINT total_positive').args).toEqual({
+      tableName: 'orders', constraintName: 'total_positive',
+    })
+    expect(parseOne('ALTER TABLE orders DROP CONSTRAINT IF EXISTS "Fk_Owner" RESTRICT').args).toEqual({
+      tableName: 'orders', constraintName: 'Fk_Owner', ifExists: true,
+    })
+  })
+
+  it('refuses DROP CONSTRAINT … CASCADE', () => {
+    expect(expectRefusal('ALTER TABLE orders DROP CONSTRAINT total_positive CASCADE').code).toBe('UNSUPPORTED_STATEMENT')
+  })
+
+  it('translates comma-separated actions one by one, each with a source of its own', () => {
+    const drops = parseMigration('ALTER TABLE orders DROP CONSTRAINT a, DROP CONSTRAINT b')
+    expect(drops.map((a) => [a.tool, a.args])).toEqual([
+      ['drop_constraint', { tableName: 'orders', constraintName: 'a' }],
+      ['drop_constraint', { tableName: 'orders', constraintName: 'b' }],
+    ])
+    expect(drops.map((a) => a.source)).toEqual([
+      'ALTER TABLE orders DROP CONSTRAINT a, DROP CONSTRAINT b → DROP CONSTRAINT a',
+      'ALTER TABLE orders DROP CONSTRAINT a, DROP CONSTRAINT b → DROP CONSTRAINT b',
+    ])
+    // The comma used to run into the first action: this was ONE column whose
+    // default was "0, ADD COLUMN qty int".
+    const added = parseMigration('ALTER TABLE orders ADD COLUMN price numeric(10,2) DEFAULT 0, ADD COLUMN qty int')
+    expect(added.map((a) => (a.args.column as { name: string }).name)).toEqual(['price', 'qty'])
+    expect((added[0].args.column as { default: string }).default).toBe('0')
+    // An inline CHECK is a step of its own, with a source of its own.
+    const checked = parseMigration('ALTER TABLE orders ADD COLUMN qty int CHECK (qty > 0)')
+    expect(checked.map((a) => a.source)).toEqual([
+      'ALTER TABLE orders ADD COLUMN qty int CHECK (qty > 0)',
+      'ALTER TABLE orders ADD COLUMN qty int CHECK (qty > 0) → CHECK (qty > 0)',
+    ])
+  })
+
+  it('reads a comma inside ARRAY[…] as part of the default', () => {
+    const [create] = parseMigration("CREATE TABLE posts (tags text[] DEFAULT ARRAY['a','b'], title text)")
+    expect((create.args.columns as Array<{ name: string }>).map((c) => c.name)).toEqual(['tags', 'title'])
+  })
+
+  it('translates DROP COLUMN as written, carrying IF EXISTS', () => {
+    expect(parseOne('ALTER TABLE posts DROP COLUMN body').args).toEqual({ tableName: 'posts', columnName: 'body', asWritten: true })
+    expect(parseOne('ALTER TABLE posts DROP IF EXISTS "Body" RESTRICT').args).toEqual({
+      tableName: 'posts', columnName: 'Body', ifExists: true, asWritten: true,
+    })
+  })
+
+  it('refuses DROP COLUMN … CASCADE, and dropping a column Backenly keeps', () => {
+    expect(expectRefusal('ALTER TABLE posts DROP COLUMN body CASCADE').code).toBe('UNSUPPORTED_STATEMENT')
+    expect(expectRefusal('ALTER TABLE posts DROP COLUMN id').code).toBe('RESERVED_COLUMN')
+    expect(expectRefusal('ALTER TABLE posts DROP COLUMN "updatedAt"').code).toBe('RESERVED_COLUMN')
+  })
+
+  it('translates ALTER COLUMN … TYPE to the declared type, exactly', () => {
+    expect(parseOne("ALTER TABLE orders ALTER COLUMN refunded_at TYPE timestamptz USING refunded_at AT TIME ZONE 'UTC'").args).toEqual({
+      tableName: 'orders',
+      columnName: 'refunded_at',
+      newType: 'timestamp',
+      sqlType: 'timestamptz',
+      asWritten: true,
+      using: "refunded_at AT TIME ZONE 'UTC'",
+    })
+    expect(parseOne('ALTER TABLE orders ALTER total SET DATA TYPE numeric(10,2)').args).toMatchObject({ sqlType: 'numeric(10,2)' })
+    expect(parseOne('ALTER TABLE orders ALTER COLUMN sku TYPE varchar(40)').args).toMatchObject({ sqlType: 'varchar(40)' })
+    expect(parseOne('ALTER TABLE orders ALTER COLUMN qty TYPE bigint USING CAST(qty AS bigint)').args).toMatchObject({
+      sqlType: 'bigint', using: 'CAST(qty AS bigint)',
+    })
+    expect(parseOne("ALTER TABLE orders ALTER COLUMN qty TYPE int USING NULLIF(qty, '')::integer").args).toMatchObject({
+      sqlType: 'integer', using: "NULLIF(qty, '')::integer",
+    })
+    expect(parseOne("ALTER TABLE orders ALTER COLUMN tags TYPE text[] USING string_to_array(tags, ',')").args).toMatchObject({
+      sqlType: 'text[]',
+    })
+    expect(parseOne("ALTER TABLE orders ALTER COLUMN paid TYPE timestamptz USING 'epoch'::timestamptz + paid * interval '1 second'").args)
+      .toMatchObject({ sqlType: 'timestamptz' })
+  })
+
+  it('refuses a USING that reads anything but the column through built-ins', () => {
+    for (const using of [
+      "query_to_xml('select 1', true, true, '')",
+      '(SELECT email FROM users LIMIT 1)',
+      'c::regclass::text',
+      'other_schema.lower(c)',
+      'lower(d)',
+      "E'\\'' || c",
+      'c || $$x$$',
+      "c AT TIME ZONE 'UTC; DROP TABLE t'",
+      '5',
+    ]) {
+      const err = expectRefusal(`ALTER TABLE t ALTER COLUMN c TYPE text USING ${using}`)
+      expect({ using, code: err.code }).toEqual({ using, code: 'UNSAFE_EXPRESSION' })
+      expect(err.hint).toMatch(/run_data_migration|built-in|literals|zone|Cast to one of/)
+    }
+  })
+
+  it('refuses a new type without an exact spelling, COLLATE, and retyping a column Backenly keeps', () => {
+    expect(expectRefusal('ALTER TABLE t ALTER COLUMN c TYPE serial').code).toBe('UNSUPPORTED_TYPE')
+    expect(expectRefusal('ALTER TABLE t ALTER COLUMN c TYPE geometry').code).toBe('UNSUPPORTED_TYPE')
+    expect(expectRefusal('ALTER TABLE t ALTER COLUMN c TYPE text COLLATE "C"').code).toBe('UNSUPPORTED_STATEMENT')
+    expect(expectRefusal('ALTER TABLE t ALTER COLUMN "createdAt" TYPE timestamptz').code).toBe('RESERVED_COLUMN')
   })
 
   it('refuses an unmodelled ALTER action with a route forward', () => {
-    const err = expectRefusal('ALTER TABLE posts ALTER COLUMN title TYPE integer')
+    const err = expectRefusal('ALTER TABLE posts ALTER COLUMN title SET STATISTICS 100')
     expect(err.code).toBe('UNSUPPORTED_STATEMENT')
     expect(err.hint).toMatch(/backend_chat/)
   })
@@ -343,6 +480,21 @@ describe('CREATE INDEX', () => {
     })
   })
 
+  it('passes WHERE true on as an index over every row, which an upsert can target', () => {
+    for (const sql of [
+      'CREATE UNIQUE INDEX cart_all ON cart_items (user_id, product_id) WHERE true',
+      'CREATE UNIQUE INDEX cart_all ON cart_items (user_id, product_id) WHERE (TRUE)',
+    ]) {
+      expect(parseOne(sql).args).toEqual({
+        tableName: 'cart_items', columns: ['user_id', 'product_id'], unique: true, indexName: 'cart_all', where: 'true',
+      })
+    }
+  })
+
+  it('still refuses a predicate that names no column and is not simply true', () => {
+    expect(expectRefusal('CREATE UNIQUE INDEX ON cart_items (user_id) WHERE 1 = 1').code).toBe('UNSAFE_CONSTRAINT')
+  })
+
   it('refuses an index clause it cannot translate rather than ignoring it', () => {
     const err = expectRefusal('CREATE INDEX ON posts (author_id) INCLUDE (title)')
     expect(err.code).toBe('UNSUPPORTED_STATEMENT')
@@ -376,6 +528,25 @@ describe('refusals route somewhere', () => {
     expect(expectRefusal('DELETE FROM posts').hint).toMatch(/db_delete/)
   })
 
+  it('translates DROP INDEX, one step per index, allowing a unique one', () => {
+    const steps = parseMigration('DROP INDEX IF EXISTS orders_total_idx, orders_coupon_key')
+    expect(steps.map((p) => [p.tool, p.args])).toEqual([
+      ['drop_index', { indexName: 'orders_total_idx', ifExists: true, dropUniqueness: true }],
+      ['drop_index', { indexName: 'orders_coupon_key', ifExists: true, dropUniqueness: true }],
+    ])
+  })
+
+  it('accepts DROP INDEX CONCURRENTLY and says it does not apply', () => {
+    const [step] = parseMigration('DROP INDEX CONCURRENTLY orders_total_idx')
+    expect(step.args).toEqual({ indexName: 'orders_total_idx', dropUniqueness: true })
+    expect(step.notes?.[0]).toMatch(/without CONCURRENTLY/)
+  })
+
+  it('refuses DROP INDEX … CASCADE and a schema-qualified index', () => {
+    expect(expectRefusal('DROP INDEX orders_total_idx CASCADE').code).toBe('UNSUPPORTED_STATEMENT')
+    expect(expectRefusal('DROP INDEX public.orders_total_idx').code).toBe('QUALIFIED_NAME')
+  })
+
   it('refuses DROP TABLE via the approval path', () => {
     const err = expectRefusal('DROP TABLE posts')
     expect(err.code).toBe('DESTRUCTIVE_REFUSED')
@@ -405,7 +576,8 @@ describe('refusals route somewhere', () => {
       'DROP TABLE posts',
       'SELECT 1',
       "INSERT INTO t (a) VALUES (1)",
-      'ALTER TABLE t ALTER COLUMN c TYPE int',
+      'ALTER TABLE t ALTER COLUMN c TYPE int USING lower(d)',
+      'ALTER TABLE t DROP COLUMN c CASCADE',
       'CREATE TABLE t (x geometry)',
       'VACUUM',
     ]) {
@@ -432,6 +604,7 @@ describe('conformance with the real dispatch contract', () => {
     'ALTER TABLE u ADD CONSTRAINT ue UNIQUE (email)',
     'ALTER TABLE p ADD FOREIGN KEY (author_id) REFERENCES users(id)',
     'ALTER TABLE posts ALTER COLUMN title SET NOT NULL',
+    'ALTER TABLE posts DROP COLUMN IF EXISTS body',
     'CREATE UNIQUE INDEX idx_email ON users (email)',
     'CREATE INDEX ON posts (author_id, created_at DESC)',
   ]
@@ -473,6 +646,22 @@ describe('conformance with the real dispatch contract', () => {
       const missing = schema.required.filter((k) => action.args[k] === undefined)
       expect({ tool: action.tool, missing }).toEqual({ tool: action.tool, missing: [] })
     }
+  })
+
+  it('emits for alter_column_type, which no model is offered, exactly what its mapper forwards', () => {
+    const { TOOL_TO_ACTION } = require('@/lib/ai/brain/tools')
+    const [step] = parseMigration("ALTER TABLE t ALTER COLUMN c TYPE timestamptz USING c AT TIME ZONE 'UTC'")
+    const read = new Set<string>()
+    const { params } = TOOL_TO_ACTION[step.tool](new Proxy(step.args, {
+      get(target, key, receiver) {
+        if (typeof key === 'string') read.add(key)
+        return Reflect.get(target, key, receiver)
+      },
+    }))
+    expect(Object.keys(step.args).filter((k) => !read.has(k))).toEqual([])
+    expect(params).toEqual({
+      tableName: 't', columnName: 'c', newType: 'timestamp', sqlType: 'timestamptz', using: "c AT TIME ZONE 'UTC'", asWritten: true,
+    })
   })
 
   it('only ever emits constraintType values the enum accepts', () => {
@@ -533,8 +722,8 @@ describe('declared DDL survives translation', () => {
   it('treats absence of NOT NULL as an explicit nullable declaration', () => {
     const a = parseOne('CREATE TABLE products (description text, image_url text)')
     expect(a.args.columns).toEqual([
-      { name: 'description', type: 'text', nullable: true },
-      { name: 'image_url', type: 'text', nullable: true },
+      { name: 'description', type: 'text', sqlType: 'text', nullable: true },
+      { name: 'image_url', type: 'text', sqlType: 'text', nullable: true },
     ])
   })
 
@@ -553,9 +742,9 @@ describe('declared DDL survives translation', () => {
        )`,
     )
     expect(a.args.columns).toEqual([
-      { name: 'active', type: 'boolean', nullable: false, default: 'true' },
-      { name: 'stock', type: 'int', nullable: false, default: '0' },
-      { name: 'status', type: 'text', nullable: false, default: "'pending'" },
+      { name: 'active', type: 'boolean', sqlType: 'boolean', nullable: false, default: 'true' },
+      { name: 'stock', type: 'int', sqlType: 'integer', nullable: false, default: '0' },
+      { name: 'status', type: 'text', sqlType: 'text', nullable: false, default: "'pending'" },
     ])
   })
 
@@ -599,7 +788,7 @@ describe('silent loss — nothing declared may vanish without a refusal', () => 
     // The column itself keeps its declared shape — the CHECK is lifted out, not
     // traded against the DEFAULT or the nullability.
     const status = (actions[0].args.columns as any[]).find((c) => c.name === 'status')
-    expect(status).toEqual({ name: 'status', type: 'text', nullable: false, default: "'pending'" })
+    expect(status).toEqual({ name: 'status', type: 'text', sqlType: 'text', nullable: false, default: "'pending'" })
 
     expect(actions[1].args).toMatchObject({
       tableName: 'connections',

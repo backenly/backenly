@@ -157,6 +157,11 @@ export const AUTH_LIMITS = {
     ipConflicts: { limit: 10, windowMs: 60 * 60_000 },
   },
   endUserRecover: { ip: { limit: 5,  windowMs: 15 * 60_000 } },
+  // GET /auth/me, the signed-in user: no API key is needed, so the project
+  // key's own rate limit never applies, and each call with a valid token reads
+  // the project's database. An app asks it on page loads, often many users
+  // behind one address, so the budget is a ceiling on hammering, not on use.
+  endUserMe: { ip: { limit: 300, windowMs: 60_000 } },
 } as const
 
 /**

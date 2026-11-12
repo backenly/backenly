@@ -11,7 +11,8 @@
  *                  window length changes, and when the key is rotated
  *   atomic         concurrent requests never pass the limit together
  *   one counter    the Express runtime and the Next-owned routes count the same
- *                  window, and neither writes home on a request
+ *                  window, one per address for a browser key, and neither
+ *                  writes home on a request
  *   the mirror     counts and last use reach home for the console, each use once
  *   the switch     off and shadow keep counting at home, exactly as before
  *
@@ -182,25 +183,37 @@ describe("home's rules, counted in the region", () => {
 })
 
 describe('one counter for the key', () => {
-  it('is counted by the Express runtime and the Next-owned routes alike, and the runtime refuses past it', async () => {
+  // A region's copy holds browser keys, which are limited per address
+  // (lib/security/shared-key-rate.ts): one client, its address behind the
+  // proxies, through both runtimes, and the region's window keeps the key's count.
+  it('is counted per address by the Express runtime and the Next-owned routes alike, and the runtime refuses past it', async () => {
     const { raw, key } = await makeKey(3)
     await deliverRegion(REGION)
+    const from = '203.0.113.9'
+    const nextRequest = () =>
+      new NextRequest(`http://localhost/api/v1/${projectId}/storage/files`, { headers: { 'x-api-key': raw, 'x-forwarded-for': from } })
 
     // Two through the runtime's limiter, one through the Next-owned routes'.
-    expect((await enforceKeyRateLimit({ ...key })).allowed).toBe(true)
-    expect((await enforceKeyRateLimit({ ...key })).allowed).toBe(true)
-    const next = await authenticateApiKey(new NextRequest(`http://localhost/api/v1/${projectId}/storage/files`, { headers: { 'x-api-key': raw } }))
+    expect((await enforceKeyRateLimit({ ...key, shared: true }, from)).allowed).toBe(true)
+    expect((await enforceKeyRateLimit({ ...key, shared: true }, from)).allowed).toBe(true)
+    const next = await authenticateApiKey(nextRequest())
     expect(next).toMatchObject({ authenticated: true })
     expect(next.rateLimited).toBeUndefined()
     expect((await windowOf(key.id))?.count).toBe(3)
 
-    const refusedNext = await authenticateApiKey(new NextRequest(`http://localhost/api/v1/${projectId}/storage/files`, { headers: { 'x-api-key': raw } }))
+    const refusedNext = await authenticateApiKey(nextRequest())
     expect(refusedNext).toMatchObject({ authenticated: true, rateLimited: true })
 
-    const res = await fetch(`${baseUrl}/api/v1/${projectId}/db/notes`, { headers: { 'x-api-key': raw } })
+    const res = await fetch(`${baseUrl}/api/v1/${projectId}/db/notes`, { headers: { 'x-api-key': raw, 'x-forwarded-for': from } })
     expect(res.status).toBe(429)
     expect(res.headers.get('x-ratelimit-remaining')).toBe('0')
     expect(await res.json()).toMatchObject({ error: { code: 'RATE_LIMIT_EXCEEDED' } })
+
+    // The refused requests are not on the key's count. Another address is not
+    // refused, and the window counts past the key's limit, deciding nothing.
+    expect((await windowOf(key.id))?.count).toBe(3)
+    expect((await enforceKeyRateLimit({ ...key, shared: true }, '203.0.113.10')).allowed).toBe(true)
+    expect((await windowOf(key.id))?.count).toBe(4)
     expect(await homeCount(key.id)).toBe(0)
   })
 

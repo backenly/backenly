@@ -29,7 +29,9 @@ jest.mock('@/lib/middleware/projectValidation', () => ({
 import '../helpers/real-web-standard'
 import fs from 'fs'
 import path from 'path'
+import { spawnSync } from 'child_process'
 import { randomUUID } from 'crypto'
+import { Client } from 'pg'
 import { NextRequest } from 'next/server'
 import { prisma } from '@/lib/db/prisma'
 import { GET as exportGET } from '@/app/api/projects/[id]/export/database/route'
@@ -48,6 +50,48 @@ let ownerId = ''
 let projectId = ''
 let schema = ''
 const savedBackupUrl = process.env.BACKUP_DATABASE_URL
+// A role a policy is written for. Roles belong to the whole server, so every
+// database restored here has it until the test drops it.
+const ROLE = `bkn_export_rls_${randomUUID().slice(0, 8)}`
+const RESTORED = `export_rls_restore_${randomUUID().slice(0, 8)}`
+const restoredDatabases: string[] = []
+
+const urlOf = (database: string) => DB_URL!.replace(/\/[^/?]+(\?|$)/, `/${database}$1`)
+const ident = (name: string) => (/^[a-z_][a-z0-9_]*$/.test(name) ? name : `"${name.replace(/"/g, '""')}"`)
+
+async function asAdmin(sql: string): Promise<void> {
+  const c = new Client({ connectionString: DB_URL })
+  await c.connect()
+  try {
+    await c.query(sql)
+  } finally {
+    await c.end()
+  }
+}
+
+/** Restores an export into a new database the way its header says to: psql -d yourdb -f this-file.sql. */
+async function restore(sql: string, database: string) {
+  await asAdmin(`CREATE DATABASE "${database}"`)
+  restoredDatabases.push(database)
+  // ON_ERROR_STOP: any statement that fails fails the restore.
+  const run = spawnSync('psql', ['-X', '-q', '-v', 'ON_ERROR_STOP=1', '-d', urlOf(database)], { input: sql, encoding: 'utf8' })
+  if (run.error) throw run.error
+  return { status: run.status, stderr: run.stderr }
+}
+
+async function policiesIn(database: string) {
+  const c = new Client({ connectionString: urlOf(database) })
+  await c.connect()
+  try {
+    const { rows } = await c.query(
+      `SELECT policyname, roles::text[] AS roles FROM pg_policies WHERE schemaname = $1 ORDER BY policyname`,
+      [schema],
+    )
+    return rows
+  } finally {
+    await c.end()
+  }
+}
 
 async function callExport(mode = 'full') {
   const req = new NextRequest(`http://localhost:3000/api/projects/${projectId}/export/database?mode=${mode}`)
@@ -81,6 +125,8 @@ beforeAll(async () => {
   await prisma.$executeRawUnsafe(
     `CREATE POLICY own_rows ON "${schema}"."orders" USING (user_id = current_setting('app.user_id', true))`,
   )
+  await prisma.$executeRawUnsafe(`CREATE ROLE "${ROLE}" NOLOGIN`)
+  await prisma.$executeRawUnsafe(`CREATE POLICY direct_read ON "${schema}"."orders" FOR SELECT TO "${ROLE}" USING (true)`)
   await prisma.$executeRawUnsafe(
     `INSERT INTO "${schema}"."orders" (item, user_id) VALUES ('golden-widget', 'u1'), ('silver-widget', 'u2')`,
   )
@@ -89,7 +135,11 @@ beforeAll(async () => {
 afterAll(async () => {
   if (savedBackupUrl === undefined) delete process.env.BACKUP_DATABASE_URL
   else process.env.BACKUP_DATABASE_URL = savedBackupUrl
+  for (const database of restoredDatabases) {
+    await asAdmin(`DROP DATABASE IF EXISTS "${database}" WITH (FORCE)`).catch(() => {})
+  }
   await prisma.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`).catch(() => {})
+  await prisma.$executeRawUnsafe(`DROP ROLE IF EXISTS "${ROLE}"`).catch(() => {})
   await prisma.project.delete({ where: { id: projectId } }).catch(() => {})
   await prisma.user.delete({ where: { id: ownerId } }).catch(() => {})
 })
@@ -112,6 +162,38 @@ describe('with the backup credential configured', () => {
     expect(res.status).toBe(200)
     expect(res.text).toContain('CREATE TABLE')
     expect(res.text).not.toContain('golden-widget')
+  }, 120_000)
+})
+
+describe('a portable export restores with its row-level security whole', () => {
+  // Production QA (2026-11-09): the portable export left out every CREATE
+  // POLICY, so a restore had FORCE ROW LEVEL SECURITY on every table and
+  // nothing that allowed a row.
+  it('every policy comes back; one written for a role comes back where the role exists, and is skipped with a warning where it does not', async () => {
+    process.env.BACKUP_DATABASE_URL = DB_URL!
+    const res = await callExport('schema')
+    expect(res.status).toBe(200)
+    expect(res.text).toMatch(/^CREATE POLICY own_rows ON /m)
+    expect(res.text).not.toMatch(/^CREATE POLICY direct_read /m)
+    expect(res.text).toContain(`WHERE rolname IN ('${ROLE}')`)
+
+    const here = await restore(res.text, `${RESTORED}_a`)
+    expect(here).toEqual({ status: 0, stderr: '' })
+    expect(await policiesIn(`${RESTORED}_a`)).toEqual([
+      { policyname: 'direct_read', roles: [ROLE] },
+      { policyname: 'own_rows', roles: ['public'] },
+    ])
+
+    // The same file on a server without the role.
+    await asAdmin(`DROP DATABASE "${RESTORED}_a" WITH (FORCE)`)
+    await prisma.$executeRawUnsafe(`DROP POLICY direct_read ON "${schema}"."orders"`)
+    await prisma.$executeRawUnsafe(`DROP ROLE "${ROLE}"`)
+    const elsewhere = await restore(res.text, `${RESTORED}_b`)
+    expect(elsewhere.status).toBe(0)
+    expect(elsewhere.stderr).toContain(
+      `WARNING:  Policy direct_read on ${ident(schema)}.orders was not restored: this server has none of its roles (${ROLE}).`,
+    )
+    expect(await policiesIn(`${RESTORED}_b`)).toEqual([{ policyname: 'own_rows', roles: ['public'] }])
   }, 120_000)
 })
 
