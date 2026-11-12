@@ -475,12 +475,16 @@ function scopedDb(projectId: string, identity: RlsIdentity): RlsAwarePrisma {
  * own function login all the same (function-db-role.ts): nothing outside the
  * project's schema, ever. It is explicit in the code, a line in the run's logs
  * says it ran, and deploy_code says the function uses it.
+ *
+ * The service-role handle is made the first time a block runs, so a run that
+ * never calls asService holds one database handle, its caller's.
  */
 function makeAsService(projectId: string, logs: string[]): AsService {
-  const serviceDb = scopedDb(projectId, { userId: null, isServiceRole: true })
+  let serviceDb: RlsAwarePrisma | null = null
   return async (fn) => {
     if (typeof fn !== 'function') throw new TypeError('asService takes a function: asService(async (db) => { ... })')
     logs.push(AS_SERVICE_NOTE)
+    serviceDb ??= scopedDb(projectId, { userId: null, isServiceRole: true })
     return serviceDb.$transaction(fn)
   }
 }
