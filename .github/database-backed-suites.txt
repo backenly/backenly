@@ -1985,3 +1985,11 @@ tests/integration/usage-storage-measured-on-read.spec.ts
 # auto-wired functions against ctx.integrations.email.send(). A real project,
 # the real connect action and the real key store (#609).
 tests/integration/email-integration-wiring-sender.spec.ts
+
+# An agent installs an allowlisted extension with CREATE EXTENSION in
+# apply_migration, as the console's Install button does: into public, said to
+# be database-wide, usable by the project's REST roles, seen by a second
+# project, recorded from either door, refused off the allowlist or without
+# superuser, never dropped, and installed from a branch on a protected
+# production. Real catalog, real MCP route and console route.
+tests/integration/agent-installs-extensions.spec.ts

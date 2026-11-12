@@ -765,8 +765,11 @@ export function buildDispatchable(): McpToolDescriptor[] {
     description:
       'Apply a schema migration written as ordinary PostgreSQL DDL: CREATE TABLE; ALTER TABLE (ADD / DROP / RENAME ' +
       'COLUMN, ALTER COLUMN … TYPE [USING], SET|DROP NOT NULL, SET|DROP DEFAULT, ADD / DROP CONSTRAINT, several ' +
-      'comma-separated); CREATE [UNIQUE] INDEX; DROP INDEX. Statements apply in order, all or nothing; write bare ' +
-      'table names. Every table gets `id`, `"createdAt"`, `"updatedAt"` (camelCase) and `"deleted_at"`; a declared ' +
+      'comma-separated); CREATE [UNIQUE] INDEX, with operator classes such as gin_trgm_ops; DROP INDEX; CREATE ' +
+      'EXTENSION of an allowlisted extension such as pg_trgm or citext (read_backend_state section "schema" lists ' +
+      'them), installed for the whole database, so every project on it can use it, and never removed. Statements ' +
+      'apply in order, all or nothing; write bare table names. Every table gets `id`, `"createdAt"`, `"updatedAt"` ' +
+      '(camelCase) and `"deleted_at"`; a declared ' +
       '`id`, `created_at` or `updated_at` gives way to them, so order by `"createdAt"`. Each statement becomes a ' +
       'governed action, planned, verified and reversible: this is NOT raw SQL execution, and anything else is refused ' +
       'with the tool to use. A new type is exactly the one written; USING may cast the column\'s own value. Dropped ' +
@@ -774,9 +777,9 @@ export function buildDispatchable(): McpToolDescriptor[] {
       'column, a constraint or a unique index, or changing a type, waits for a person: status "awaiting_approval" ' +
       'with an approval id to poll with check_approval; approval runs the migration exactly as sent. Rows: ' +
       'db_insert/db_update/db_delete; reads: run_query; dropping a table and anything else: backend_chat.\n' +
-      'With `branchId` it applies to that preview branch ONLY and is logged for the merge. A branch has production\'s ' +
-      'foreign keys and checks one a migration declares with REFERENCES; a key Backenly infers from a column name ' +
-      'is added at the merge.',
+      'With `branchId` it applies to that preview branch ONLY, an extension excepted, and is logged for the merge. ' +
+      'A branch has production\'s foreign keys and checks one a migration declares with REFERENCES; a key Backenly ' +
+      'infers from a column name is added at the merge.',
     inputSchema: {
       type: 'object',
       properties: {
