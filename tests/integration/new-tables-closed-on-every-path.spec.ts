@@ -14,7 +14,9 @@
  *     production;
  *   backend_chat building on a preview branch while production is protected;
  *   generate_api and add_column, which create a table they do not find, and a
- *     junction table;
+ *     junction table, with the parents it creates when they are missing;
+ *   FIX_TABLE and the schema reconcile route, which recreate a table the
+ *     database lost, with its columns and none of its rules;
  *   a restore from History of a dropped table, which brings it back closed.
  *
  * And what an agent does next: its first set_rls naming some commands gives
@@ -46,6 +48,13 @@ jest.mock('@/lib/postgrest/registration', () => {
   }
 })
 
+// The reconcile route's platform session: the project's owner. Only that route uses it here.
+const session = { projectId: '', userId: '' }
+jest.mock('@/lib/middleware/projectValidation', () => ({
+  ...jest.requireActual('@/lib/middleware/projectValidation'),
+  withProjectValidation: (_req: unknown, handler: (v: { projectId: string; userId: string }) => unknown) => handler(session),
+}))
+
 import '../helpers/next-request-polyfill'
 import crypto from 'crypto'
 import { execFileSync } from 'child_process'
@@ -54,6 +63,7 @@ import { prisma } from '@/lib/db/prisma'
 import { hashApiKey } from '@/lib/auth/apiKeyAuth'
 import { createProvisionedProject } from '@/lib/projects/provision'
 import { POST } from '@/app/api/mcp/tool/route'
+import { POST as RECONCILE } from '@/app/api/projects/[id]/reconcile/route'
 import { dispatchTool } from '@/lib/ai/brain/tools'
 import { executeAction } from '@/lib/ai/minimal-executor'
 import { createBranch, mergeBranch } from '@/lib/branches/engine'
@@ -165,6 +175,7 @@ beforeAll(async () => {
   const project = await createProvisionedProject({ name: 'new-tables-closed-on-every-path', userId: ownerId })
   projectId = project.id
   schema = project.postgresSchema
+  Object.assign(session, { projectId, userId: ownerId })
   // Production unprotected, so an agent's apply_migration reaches it; the
   // backend_chat case protects it for its own turn.
   await setProtected(false)
@@ -307,12 +318,64 @@ describe('a table created by a call that did not find it', () => {
     expect(now.policies).not.toContain('backenly_admin_only')
   }, 120_000)
 
+  it('a junction table whose parents it creates: the parents and the junction closed', async () => {
+    const r = await run('CREATE_JUNCTION_TABLE', { tableA: 'stickers', tableB: 'albums' })
+    expect(r.success).toBe(true)
+    expect(r.message).toContain('"albums" is closed: only service-role keys can read or write it')
+    expect(r.message).toContain('"stickers" is closed: only service-role keys can read or write it')
+    await expectClosed(schema, 'albums')
+    await expectClosed(schema, 'stickers')
+    await expectClosed(schema, 'albums_stickers', false)
+  }, 120_000)
+
   it('a junction table between two tables nobody owns: closed', async () => {
     const r = await run('CREATE_JUNCTION_TABLE', { tableA: 'scores', tableB: 'ledger_entries' })
     expect(r.success).toBe(true)
     expect(r.message).toContain('"ledger_entries_scores" is closed')
     // Its two keys are required, so no row is seeded; the insert is refused by the rule first.
     await expectClosed(schema, 'ledger_entries_scores', false)
+  }, 120_000)
+})
+
+describe('a table the database lost, recreated', () => {
+  it('by FIX_TABLE: closed, and it says so', async () => {
+    expect((await run('CREATE_TABLE', { tableName: 'receipts', columns: [{ name: 'total', type: 'INTEGER' }] })).success).toBe(true)
+    // Gone from the database outside Backenly; still declared.
+    await ddl(`DROP TABLE ${T(schema, 'receipts')}`)
+    const r = await run('FIX_TABLE', { tableName: 'receipts' })
+    expect(r.success).toBe(true)
+    expect(r.message).toContain('"receipts" is closed: only service-role keys can read or write it')
+    await expectClosed(schema, 'receipts')
+  }, 120_000)
+
+  it('by the schema reconcile route, from the last snapshot: closed, and it says so', async () => {
+    await prisma.workspaceSchemaSnapshot.create({
+      data: {
+        projectId,
+        versionNum: 1000,
+        trigger: 'manual',
+        rawDdl: '',
+        tables: [{
+          name: 'archived_notes',
+          columns: [
+            { name: 'id', type: 'uuid', nullable: false, isPrimary: true, default: 'gen_random_uuid()' },
+            { name: 'title', type: 'text', nullable: true },
+          ],
+        }],
+      },
+    })
+    const res = await RECONCILE(
+      new NextRequest(`https://backenly.test/api/projects/${projectId}/reconcile`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ apply: true }),
+      }),
+      { params: Promise.resolve({ id: projectId }) },
+    )
+    const body = await res.json() as any
+    expect(body.status).toBe('applied')
+    expect(body.notices.join(' ')).toContain('"archived_notes" is closed: only service-role keys can read or write it')
+    await expectClosed(schema, 'archived_notes')
   }, 120_000)
 })
 

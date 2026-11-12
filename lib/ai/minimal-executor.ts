@@ -5114,6 +5114,7 @@ async function executeCreateJunctionTable(
 
     // Pre-condition: ensure both referenced tables physically exist in the DB
     // (Prisma metadata can diverge from actual PostgreSQL state)
+    const createdParents: string[] = []
     for (const tbl of [first, second]) {
       const check = await db.$queryRawUnsafe<{ exists: boolean }[]>(
         `SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = $1 AND table_name = $2) AS exists`,
@@ -5124,6 +5125,7 @@ async function executeCreateJunctionTable(
         await db.$executeRawUnsafe(
           `CREATE TABLE IF NOT EXISTS "${postgresSchema}"."${tbl}" (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), "createdAt" TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP, "updatedAt" TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP)`
         )
+        createdParents.push(tbl)
         // Register in metadata if missing
         const meta = await prisma.table.findFirst({ where: { projectId, name: tbl } })
         if (!meta) {
@@ -5198,17 +5200,20 @@ async function executeCreateJunctionTable(
     await db.$executeRawUnsafe(indexASQL)
     await db.$executeRawUnsafe(indexBSQL)
 
-    // A new junction table is protected as a new table is (executeCreateTable):
-    // the rows of an owned parent's, or closed until someone says the rule.
-    let rlsNotice: string | null = null
-    if (!existed) {
-      const { autoApplyRlsIfNeeded, rlsNotSetNotice } = await import('@/lib/services/workspace-rls')
+    // A new junction table, and a parent created for it above, are protected as
+    // a new table is (executeCreateTable): the rows of an owned parent's, or
+    // closed until someone says the rule.
+    const notices: string[] = []
+    const { autoApplyRlsIfNeeded, rlsNotSetNotice } = await import('@/lib/services/workspace-rls')
+    for (const tbl of [...createdParents, ...(existed ? [] : [finalName])]) {
       try {
-        rlsNotice = (await autoApplyRlsIfNeeded(projectId, finalName, [], {}, { closeWhenUndecidable: true })).notice
+        const notice = (await autoApplyRlsIfNeeded(projectId, tbl, [], {}, { closeWhenUndecidable: true })).notice
+        if (notice) notices.push(notice)
       } catch (rlsErr: any) {
-        rlsNotice = rlsNotSetNotice(finalName, rlsErr?.message ?? String(rlsErr))
+        notices.push(rlsNotSetNotice(tbl, rlsErr?.message ?? String(rlsErr)))
       }
     }
+    const rlsNotice = notices.length > 0 ? notices.join('\n\n') : null
 
     // Save metadata
     const existingMeta = await prisma.table.findFirst({ where: { projectId, name: finalName } })
@@ -13699,6 +13704,14 @@ async function executeFixTable(params: any, projectId: string): Promise<Executio
         `CREATE TABLE IF NOT EXISTS "${schema}"."${tableName}" (\n  ${colDefs}\n)`
       )
       fixes.push(`Recreated table \`${tableName}\` in database (${blueprint ? blueprint.length + 2 : 2} columns)`)
+      // Recreated, it has no rules: protected as a new table is (executeCreateTable).
+      const { autoApplyRlsIfNeeded, rlsNotSetNotice } = await import('@/lib/services/workspace-rls')
+      try {
+        const notice = (await autoApplyRlsIfNeeded(projectId, tableName, [], {}, { closeWhenUndecidable: true })).notice
+        if (notice) fixes.push(notice)
+      } catch (rlsErr: any) {
+        fixes.push(rlsNotSetNotice(tableName, rlsErr?.message ?? String(rlsErr)))
+      }
 
       // Reinstall realtime trigger
       try {
