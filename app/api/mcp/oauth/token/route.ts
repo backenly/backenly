@@ -19,6 +19,12 @@ export const runtime = 'nodejs'
  * would be holding its replacement. So reuse does not merely fail: it revokes
  * every refresh token for that connection, which turns a silent compromise into
  * a visible re-login.
+ *
+ * ── A connection lasts while its approver is an ADMIN ───────────────────────
+ *
+ * Neither grant issues a token for a connection whose approver is no longer an
+ * ADMIN of the project (lib/mcp/auth.ts issuerStillAdministers), so a host that
+ * is refused on /api/mcp and tries to refresh is sent back to authorize again.
  */
 
 import { NextRequest, NextResponse } from 'next/server'
@@ -31,6 +37,11 @@ import {
   REFRESH_TOKEN_TTL_MS,
   verifyPkce,
 } from '@/lib/mcp/oauth'
+import { issuerStillAdministers } from '@/lib/mcp/auth'
+
+const NOT_APPROVED_BY_AN_ADMIN =
+  'The person who approved this connection is no longer an ADMIN of this project. Authorize the MCP host again, ' +
+  'and have a project ADMIN approve it.'
 
 const HEADERS = {
   'cache-control': 'no-store',
@@ -136,10 +147,13 @@ async function handleCode(form: URLSearchParams) {
 
   const connection = await prisma.apiKey.findUnique({
     where: { id: record.apiKeyId },
-    select: { id: true, projectId: true },
+    select: { id: true, projectId: true, userId: true },
   })
   if (!connection?.projectId) {
     return oauthError('invalid_grant', 'The connection for this code no longer exists.', 400)
+  }
+  if (!(await issuerStillAdministers(connection.userId, connection.projectId))) {
+    return oauthError('invalid_grant', NOT_APPROVED_BY_AN_ADMIN)
   }
 
   const { token, expiresIn } = mintAccessToken({
@@ -190,11 +204,16 @@ async function handleRefresh(form: URLSearchParams) {
 
   const connection = await prisma.apiKey.findUnique({
     where: { id: record.apiKeyId },
-    select: { id: true, projectId: true, mcpReadOnly: true },
+    select: { id: true, projectId: true, userId: true, mcpReadOnly: true },
   })
   if (!connection?.projectId) {
     // The human revoked the connection. That must end the token chain.
     return oauthError('invalid_grant', 'This connection was revoked.')
+  }
+  // A connection acts as the person who approved it, while they are an ADMIN
+  // of the project (lib/mcp/auth.ts).
+  if (!(await issuerStillAdministers(connection.userId, connection.projectId))) {
+    return oauthError('invalid_grant', NOT_APPROVED_BY_AN_ADMIN)
   }
 
   const scope = await prisma.mcpOAuthCode
