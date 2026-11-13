@@ -44,3 +44,34 @@ export function workspaceRoot(): string {
 export function projectWorkspaceDir(projectId: string): string {
   return path.join(workspaceRoot(), projectId)
 }
+
+/**
+ * The absolute path `relative` names inside one project's workspace, or null
+ * when it would land anywhere else.
+ *
+ * `relative` comes from a request, so it is checked, not trusted: a `..`
+ * segment, an absolute path or a NUL byte would otherwise name a file outside
+ * the project's workspace. Only the names are compared here. A caller that
+ * opens the file also asks `realPathInsideWorkspace`, because a symbolic link
+ * inside the workspace can point anywhere.
+ */
+export function resolveInsideWorkspace(projectId: string, relative: unknown): string | null {
+  if (typeof relative !== 'string' || relative.length === 0 || relative.includes('\0')) return null
+  const root = path.resolve(projectWorkspaceDir(projectId))
+  const target = path.resolve(root, relative)
+  return target.startsWith(root + path.sep) ? target : null
+}
+
+/**
+ * Whether `target` is still inside the project's workspace once symbolic links
+ * are followed. False when it is not, or when it does not exist.
+ */
+export async function realPathInsideWorkspace(projectId: string, target: string): Promise<boolean> {
+  const { realpath } = await import('fs/promises')
+  try {
+    const [root, real] = await Promise.all([realpath(projectWorkspaceDir(projectId)), realpath(target)])
+    return real.startsWith(root + path.sep)
+  } catch {
+    return false
+  }
+}
