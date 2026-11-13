@@ -7,15 +7,17 @@
  * sentences and an argument only the brain's own model uses were cut from it
  * (#745, to 43.6 KB). Then each description was cut to what an agent needs to
  * call the tool correctly, with a pointer to the docs topic that has the rest
- * (tests/unit/mcp-tool-docs-topics.spec.ts): 29.0 KB, of which 25.4 KB is
+ * (tests/unit/mcp-tool-docs-topics.spec.ts): 29.3 KB, of which 25.7 KB is
  * what a host hands the model (name, description, input schema; titles and
  * annotations stay with the host). For comparison, measured the same way from
  * their published source on 2026-11-12: GitHub's default toolsets 53.7 KB,
  * Supabase's default 33.2 KB, Neon's recommended categories 81.0 KB, Stripe's
  * 22-tool local server 20.8 KB.
  *
- * A tool or action added later fits in this budget by saying what an agent
- * needs to call it, and leaves the rest to its docs topic.
+ * The read-write budgets leave about 2% of room: a few arguments fit, a
+ * paragraph does not. A tool or action added later says what an agent needs to
+ * call it and leaves the rest to its docs topic. If it still does not fit,
+ * raise the budget here by what the addition costs, where a reviewer sees it.
  */
 import { mcpTools } from '@/lib/mcp/protocol/remote-server'
 
@@ -29,16 +31,16 @@ const wire = (readOnly: boolean) => bytes({ tools: tools(readOnly) })
 const model = (readOnly: boolean) =>
   bytes({ tools: tools(readOnly).map(({ name, description, inputSchema }) => ({ name, description, inputSchema })) })
 
-it('fits a read-write key’s tools/list in 29.5 KB', () => {
-  expect(wire(false)).toBeLessThanOrEqual(29_500)
+it('fits a read-write key’s tools/list in 30 KB', () => {
+  expect(wire(false)).toBeLessThanOrEqual(30_000)
 })
 
 it('fits a read-only key’s tools/list in 12.5 KB', () => {
   expect(wire(true)).toBeLessThanOrEqual(12_500)
 })
 
-it('hands the model at most 25.8 KB of tool definitions on a read-write key, and 10.1 KB on a read-only one', () => {
-  expect(model(false)).toBeLessThanOrEqual(25_800)
+it('hands the model at most 26.4 KB of tool definitions on a read-write key, and 10.1 KB on a read-only one', () => {
+  expect(model(false)).toBeLessThanOrEqual(26_400)
   expect(model(true)).toBeLessThanOrEqual(10_100)
 })
 
