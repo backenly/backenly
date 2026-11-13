@@ -461,7 +461,8 @@ async function handleDELETE(request: NextRequest, props: { params: Promise<{ pro
   if (middleware.response) return middleware.response
   const { context } = middleware
   // Aborting removes the upload's file record, so it is held to what writing
-  // is: it used to need no permission at all, from any key.
+  // is: the write permission, from the end user who started the upload or a
+  // service-role key.
   const permCheck = requirePermission(context, ['write', 'admin'])
   if (permCheck) return permCheck
   const writerCheck = requireStorageWriter(context)

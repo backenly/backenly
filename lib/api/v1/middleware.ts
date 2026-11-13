@@ -688,9 +688,7 @@ export function requirePermission(
  * A key alone is not enough. Every key but a service-role key may sit in a
  * browser bundle (service-role keys are refused from browsers), and the
  * publishable key sits in every one, so a write the key alone authorises is a
- * write by anyone who opens the app. Uploads were authorised that way, so
- * strangers could store files in a project's buckets, under its domain and
- * against its quota.
+ * write by anyone who opens the app.
  */
 export function requireStorageWriter(context: V1ApiContext): NextResponse | null {
   if (context.apiKey.serviceRole || context.endUserId) return null
