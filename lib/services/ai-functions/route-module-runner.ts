@@ -132,12 +132,11 @@ function assertNotBlocked(code: string): void {
 //   reads configuration: one set of variables for both kinds of function;
 //   NODE_ENV, which is not a secret.
 //
-// JWT_SECRET, ADMIN_API_KEY and AI_EXECUTION_TOKEN used to hold the project's
-// end-user signing secret and its derived admin key. Function code is
-// free-form (deploy_code stores what an agent wrote), and any function could
-// read and return them: the signing secret mints a session as any of the
-// project's users. They now hold WITHHELD, a value made for this invocation
-// that matches nothing:
+// JWT_SECRET, ADMIN_API_KEY and AI_EXECUTION_TOKEN never hold the project's
+// end-user signing secret or its derived admin key: function code is
+// free-form (deploy_code stores what an agent wrote), and whatever it can read
+// it can return. They hold WITHHELD, a value made for this invocation that
+// matches nothing:
 //
 //   - removed outright, a gate written `(header ?? '') === (env ?? '')`, or
 //     `header == env`, would let every caller in once the variable was gone;
@@ -168,21 +167,12 @@ function makeCuratedProcess(withheld: string, projectEnv: Record<string, string>
 // ─── An owner's test run ─────────────────────────────────────────────────────
 // The dashboard's Test, functions { action: "invoke" } and the generator's
 // smoke test run a function for someone who may change the project
-// (opts.testRun), and its admin and signed-in paths should answer them. The
-// runner used to do that by putting the project's admin key in x-admin-key and
-// a ten-minute token with role "admin", signed with the project's secret, in
-// x-user-token. Function code reads request.headers, so a function could keep
-// both when its owner clicked Test: the key passes every admin check of the
-// project's functions and runs their SQL as the service role, until the
-// project's signing secret changes, and the project's data API took the token
-// as an end user with role "admin".
-//
-// Nothing on the request is a credential now. The runner holds the fact that
-// the run is an owner's test (OwnerTest, which function code can neither read
-// nor set):
-//   - the function's SQL runs as the service role, as the admin key made it
-//     (the run's database handle keeps that identity, as an asService block's
-//     does);
+// (opts.testRun), and its admin and signed-in paths should answer them.
+// Function code reads request.headers, so nothing on the request is a
+// credential. The runner holds the fact that the run is an owner's test
+// (OwnerTest, which function code can neither read nor set):
+//   - the function's SQL runs as the service role (the run's database handle
+//     keeps that identity, as an asService block's does);
 //   - until the run ends, isAdminRequest(request) answers true;
 //   - where a user's token would be, the request carries OWNER_TEST_TOKEN, and
 //     until the run ends every token check the function can make (verifyToken,
@@ -210,10 +200,9 @@ function ownerTestUser(projectId: string) {
 
 // ─── Project-aware auth shims ────────────────────────────────────────────────
 // Templates import verifyToken from '@/lib/auth/jwt'. Here it verifies against
-// the PROJECT's secret only: real end-user tokens are signed with it. It used to
-// fall back to the platform verifier for "legacy/internal tokens", which let a
+// the PROJECT's secret only: real end-user tokens are signed with it, and a
 // Backenly session token, signed with the platform's secret for a person using
-// the console, pass as one of the project's end users.
+// the console, is not one of the project's end users.
 function makeProjectVerifyToken(projectId: string, auth: ProjectFnAuth, ownerTest: OwnerTest | null) {
   const realJwt: typeof jsonwebtoken = (jsonwebtoken as any).default ?? jsonwebtoken
   return function projectVerifyToken(token: string): any {
