@@ -23,6 +23,7 @@ import {
   Database, Copy, Check, Eye, EyeOff, RefreshCw, Trash2,
   Download, ShieldCheck, PencilRuler, Terminal, GitBranch,
 } from 'lucide-react'
+import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
 import { Toast } from '@/components/ui/Toast'
 import { formatDay } from '@/components/console/format'
 import {
@@ -334,9 +335,20 @@ export function DirectDatabasePanel({ projectId }: { projectId: string }) {
           </li>
           <li>
             TLS is required (<span className="font-mono text-[12px]">sslmode=require</span>) and access is scoped to
-            this project&apos;s schema. On the shared tier, catalogs can list other projects&apos; schema names, never
-            their data.
+            this project&apos;s schema.
           </li>
+          {/* Cloud only: a self-hosted deployment's database holds one project.
+              PostgreSQL gives every login in a database read access to its
+              catalogs, and nothing on a shared database can narrow that, so the
+              note says what they hold instead of naming schema names alone. */}
+          {CLOUD_CONTROL_PLANE && (
+            <li>
+              All projects in a region, from every account, share one PostgreSQL database, and any project&apos;s
+              login can read its catalogs. They show every project&apos;s ID, the names and definitions of its tables,
+              columns, constraints, policies, views and functions, and its row counts, yours included. They show no
+              row data. Keep secrets out of names, comments, defaults, policies, views and function code.
+            </li>
+          )}
         </ul>
       </KitNote>
 
