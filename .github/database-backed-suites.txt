@@ -46,6 +46,7 @@ tests/integration/state-webhooks-section.spec.ts
 tests/integration/integrations-auto-wiring.spec.ts
 tests/integration/end-user-email-verification-opt-in.spec.ts
 tests/integration/signin-enumeration.spec.ts
+tests/integration/account-emails-answer-at-once.spec.ts
 tests/integration/project-smtp-and-templates.spec.ts
 tests/integration/storage-bucket-policy.spec.ts
 tests/integration/storage-runtime-policy.spec.ts
