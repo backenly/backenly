@@ -46,6 +46,7 @@ import {
   recordServiceRoleBrowserBlock,
   serviceRoleRefusalMessage,
 } from '@/lib/security/service-role-exposure'
+import { ADMIN_KEY_IN_BROWSER, adminKeyInBrowser, isRlsBoundAdminKey } from '@/lib/security/admin-key-placement'
 
 export const MCP_KEY_IN_APP = 'MCP_KEY_IN_APP'
 
@@ -57,7 +58,7 @@ export const MCP_KEY_IN_APP = 'MCP_KEY_IN_APP'
  * different place for this one.
  */
 export function isKeyPlacementRefusal(code: string | null | undefined): boolean {
-  return code === MCP_KEY_IN_APP || code === SERVICE_ROLE_IN_BROWSER
+  return code === MCP_KEY_IN_APP || code === SERVICE_ROLE_IN_BROWSER || code === ADMIN_KEY_IN_BROWSER
 }
 
 /** Is this key row an agent's MCP credential: a minted MCP key or an OAuth connection? */
@@ -120,6 +121,8 @@ interface PlacementFacts {
   projectId: string | null
   mcp: boolean
   serviceRole: boolean
+  /** Admin role, bound by row-level security: server-only (lib/security/admin-key-placement.ts). */
+  rlsBoundAdmin: boolean
 }
 
 const CACHE_TTL_MS = 30_000
@@ -148,7 +151,7 @@ async function placementFacts(rawKey: string): Promise<PlacementFacts | null> {
     ? await authorizingKeyByHash(keyHash)
     : await prisma.apiKey.findFirst({
         where: { keyHash },
-        select: { id: true, name: true, keyPrefix: true, projectId: true, scope: true, keyType: true, serviceRole: true },
+        select: { id: true, name: true, keyPrefix: true, projectId: true, scope: true, keyType: true, serviceRole: true, role: true },
       })
   const facts: PlacementFacts | null = row
     ? {
@@ -158,6 +161,7 @@ async function placementFacts(rawKey: string): Promise<PlacementFacts | null> {
         projectId: row.projectId ?? null,
         mcp: isMcpCredential(row),
         serviceRole: !!row.serviceRole,
+        rlsBoundAdmin: isRlsBoundAdminKey(row),
       }
     : null
 
@@ -230,6 +234,11 @@ export async function refuseMisplacedKey(
       }
       return serviceRoleInBrowserRefusal(facts.name, pathname)
     }
+  }
+
+  if (facts.rlsBoundAdmin) {
+    const refused = adminKeyInBrowser(facts, detectBrowserOrigin(browserSignals(headers)), { method, path: pathname })
+    if (refused) return refusal(pathname, ADMIN_KEY_IN_BROWSER, refused.message)
   }
 
   return null

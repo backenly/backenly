@@ -7,6 +7,10 @@
  * revoked here reaches every region the way any revocation does (the triggers
  * on api_keys, lib/auth-projection).
  *
+ * The admin role comes back only on a service key, the rule a new or changed
+ * key is held to (app/api/api-keys): a key bound by row-level security that a
+ * change took the admin role from does not get it back.
+ *
  * Two kinds of key are not the history's: the project's public anon key, which
  * is one with Project.anonKey and is provisioned with the project, and a
  * preview branch's keys, which end with their branch (lib/branches/preview.ts).
@@ -14,6 +18,7 @@
 
 import { createHash } from 'crypto'
 import { prisma } from '@/lib/db/prisma'
+import { isRlsBoundAdminKey } from '@/lib/security/admin-key-placement'
 import { changedSecrets, secretDigest, type Irreversible, type ResourceAdapter, type ResourceItem, type ResourceOp, type Tx } from './core'
 
 export const keysAdapter: ResourceAdapter = {
@@ -45,6 +50,12 @@ export const keysAdapter: ResourceAdapter = {
     if (op.before && !op.after) {
       return { reason: `${capital(op.before.label)} was revoked, and a revoked key never comes back: create a new one instead.`, partial: false }
     }
+    if (op.before && op.after && rlsBoundAdmin(op.before) && !rlsBoundAdmin(op.after)) {
+      return {
+        reason: `${capital(op.before.label)} does not get the admin role back, since only a service key may have it now: create a service key for a server instead.`,
+        partial: false,
+      }
+    }
     if (op.before && op.after && changedSecrets(op.before, op.after).length > 0) {
       return { reason: `${capital(op.after.label)} was rotated, and its old secret never comes back: the new one stays.`, partial: true }
     }
@@ -67,6 +78,11 @@ export const keysAdapter: ResourceAdapter = {
       },
     })
   },
+}
+
+/** Whether a captured key is an admin-role key bound by row-level security (lib/security/admin-key-placement.ts). */
+function rlsBoundAdmin(item: ResourceItem): boolean {
+  return isRlsBoundAdminKey(item.fields as Parameters<typeof isRlsBoundAdminKey>[0])
 }
 
 function capital(s: string): string {

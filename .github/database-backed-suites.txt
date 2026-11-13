@@ -1290,6 +1290,12 @@ tests/integration/branch-key-surfaces.spec.ts
 # property, so it needs a real Postgres.
 tests/integration/key-placement-surfaces.spec.ts
 
+# A new project's Default Key is publishable, a new admin key must be a service
+# key, and an admin-role key issued before that is served to a browser (and
+# recorded) until ADMIN_KEYS_SERVER_ONLY_FROM, then refused at the door and in
+# each route's own authentication. Real key rows and audit log.
+tests/integration/admin-keys-server-only.spec.ts
+
 # A preview branch has a working endpoint: the agent tool issues a branch key,
 # the runtime serves the branch and tags its request log rows, every production
 # health reader ignores those rows, and the branch's OpenAPI spec reads the
