@@ -813,13 +813,16 @@ export function buildDispatchable(): McpToolDescriptor[] {
     // `remaining` (lib/mcp/apply-migration.ts), as the docs say.
     description:
       'Schema changes as PostgreSQL DDL: CREATE TABLE; ALTER TABLE (ADD / DROP / RENAME COLUMN, ALTER COLUMN … TYPE ' +
-      '[USING], SET|DROP NOT NULL, SET|DROP DEFAULT, ADD / DROP CONSTRAINT); CREATE [UNIQUE] INDEX; DROP INDEX. Bare ' +
-      'table names. Anything else is refused with the tool to use. All statements are checked before any runs; one ' +
-      'that fails while running stops it, and the answer lists `applied` (in effect: do not replay) and `remaining`. ' +
-      'Every table gets id, "createdAt", "updatedAt" and "deleted_at"; a declared id, created_at or updated_at ' +
-      'gives way to them. On production, dropping a column, a constraint or a unique index, or changing a type, waits ' +
-      'for a person (status "awaiting_approval"; poll check_approval). With branchId it changes that preview branch ' +
-      'only; protected production refuses a migration without one (BRANCH_REQUIRED). Rows: db_insert / db_update / ' +
+      '[USING], SET|DROP NOT NULL, SET|DROP DEFAULT, ADD / DROP CONSTRAINT); CREATE [UNIQUE] INDEX, with operator ' +
+      'classes such as gin_trgm_ops; DROP INDEX; CREATE EXTENSION of an allowlisted extension such as pg_trgm or ' +
+      'citext (read_backend_state section "schema" lists them), installed for the whole database, so every project ' +
+      'on it can use it, and never removed. Bare table names. Anything else is refused with the tool to use. All ' +
+      'statements are checked before any runs; one that fails while running stops it, and the answer lists ' +
+      '`applied` (in effect: do not replay) and `remaining`. Every table gets id, "createdAt", "updatedAt" and ' +
+      '"deleted_at"; a declared id, created_at or updated_at gives way to them. On production, dropping a column, a ' +
+      'constraint or a unique index, or changing a type, waits for a person (status "awaiting_approval"; poll ' +
+      'check_approval). With branchId it changes that preview branch only, an extension excepted; protected ' +
+      'production refuses a migration without a branchId (BRANCH_REQUIRED). Rows: db_insert / db_update / ' +
       `db_delete; dropping a table: backend_chat. ${docsPointer('database')}`,
     inputSchema: {
       type: 'object',

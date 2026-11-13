@@ -198,6 +198,52 @@ export async function refusedDrop(projectId: string, mainSchema: string, planned
   return null
 }
 
+/** The way forward for each reason an extension is not installed (lib/services/extensions.ts). */
+const EXTENSION_HINTS: Record<string, string> = {
+  NOT_AVAILABLE: 'This server\'s PostgreSQL does not have it packaged; whoever operates the database adds the package.',
+  NEEDS_SUPERUSER:
+    'Only a superuser can install it, at a psql prompt; Backenly\'s own role is deliberately not one. ' +
+    'read_backend_state { section: "schema" } lists the extensions Backenly can install here.',
+  VERSION_NOT_OFFERED: 'Leave VERSION out, and the version this server offers by default is installed.',
+}
+
+/**
+ * An extension the migration installs that this server will not install,
+ * refused before anything runs, in the words the console uses. The parser has
+ * already refused a name off the allowlist; whether the server has the
+ * extension, and lets Backenly's role install it, is the live catalog's to say.
+ */
+export async function refusedExtension(projectId: string, planned: PlannedAction[]): Promise<MigrationRefusal | null> {
+  const installs = planned.filter((p) => p.tool === 'install_extension')
+  if (installs.length === 0) return null
+  const { checkInstall } = await import('@/lib/services/extensions')
+  for (const step of installs) {
+    const version = typeof step.args.version === 'string' ? step.args.version : null
+    const verdict = await checkInstall(projectId, String(step.args.name ?? ''), { version })
+    if (verdict.ok) continue
+    const code = verdict.code ?? 'FAILED'
+    return {
+      ok: false,
+      code,
+      error: `${verdict.message ?? 'The extension cannot be installed here.'} Nothing was applied.`,
+      ...(EXTENSION_HINTS[code] ? { hint: EXTENSION_HINTS[code] } : {}),
+      statement: step.source,
+      applied: [],
+    }
+  }
+  return null
+}
+
+/**
+ * Steps no restore takes back. An extension is shared by every project on the
+ * database and Backenly never removes one, so a migration recovered after it
+ * ran still has it installed, and says so.
+ */
+const KEPT_BY_RESTORE = new Set(['install_extension'])
+const keptByRestore = (steps: AppliedStep[]) => steps.filter((s) => KEPT_BY_RESTORE.has(s.tool))
+const undoneByRestore = (steps: AppliedStep[]) => steps.filter((s) => !KEPT_BY_RESTORE.has(s.tool))
+const EXTENSIONS_STAY = ' The extensions it installed stay installed: an extension is database-wide, and Backenly never removes one.'
+
 const tableOf = (p: { args: Record<string, unknown> }) => String(p.args.tableName ?? '')
 
 /** Every table a plan names. */
@@ -443,7 +489,7 @@ export async function applyMigrationToMain(
   const existing = await existingTables(projectId, opts.workspaceSchema, tablesNamed(planned))
   const checked = checkPlan(planned, existing)
   if (!checked.ok) return checked as MigrationRefusal
-  const refused = await refusedDrop(projectId, opts.workspaceSchema, planned)
+  const refused = (await refusedDrop(projectId, opts.workspaceSchema, planned)) ?? (await refusedExtension(projectId, planned))
   if (refused) return refused
   const ok = checked as Extract<typeof checked, { ok: true }>
   // Checked first, so what a person is asked to approve is a migration that
@@ -520,14 +566,16 @@ export async function applyMigrationToMain(
         change: recorded,
       }
       if (change.status === 'recovered') {
+        const stays = keptByRestore(ranSteps)
         return {
           ...base,
-          applied: [],
-          rolledBack: ranSteps,
+          applied: stays,
+          rolledBack: undoneByRestore(ranSteps),
           recovered: true,
           hint:
-            `Nothing from this migration is in effect: Backenly restored the state before it and verified it ` +
-            `(change #${change.seq}, recovery #${change.recovery.recoverySeq}). Fix what verification found, then send the migration again.`,
+            `Nothing from this migration${stays.length ? ' but its extensions' : ''} is in effect: Backenly restored the state before it and verified it ` +
+            `(change #${change.seq}, recovery #${change.recovery.recoverySeq}). Fix what verification found, then send the migration again.` +
+            (stays.length ? EXTENSIONS_STAY : ''),
         }
       }
       return {
@@ -555,16 +603,18 @@ export async function applyMigrationToMain(
     // Failed part-way.
     const failure = result as MigrationFailure
     if (change.status === 'recovered') {
+      const stays = keptByRestore(failure.applied)
+      const undone = undoneByRestore(failure.applied)
       return {
         ...failure,
-        applied: [],
-        rolledBack: failure.applied,
+        applied: stays,
+        rolledBack: undone,
         recovered: true,
         change: recorded,
         hint:
-          `Nothing was applied. The ${failure.applied.length} statement(s) that ran before the failure were restored ` +
+          `${stays.length ? 'Nothing but its extensions was applied' : 'Nothing was applied'}. The ${undone.length} statement(s) that ran before the failure were restored ` +
           `to the checkpoint automatically (change #${change.seq}, recovery #${change.recovery?.recoverySeq}). ` +
-          'Fix the failing statement and send the whole migration again.',
+          'Fix the failing statement and send the whole migration again.' + (stays.length ? EXTENSIONS_STAY : ''),
       }
     }
     if (change.recovery) {
