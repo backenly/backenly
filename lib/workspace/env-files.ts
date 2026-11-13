@@ -32,18 +32,48 @@ export interface WorkspaceEnvFile {
   /** Relative to the project's workspace on disk; the row's path in the database. */
   file: string
   writtenByBackenly: boolean
+  /** Backenly's lines only (removed whole); false when it also holds a project's own variables (those are kept). */
+  onlyBackenly: boolean
   /** Absolute path, for a file on disk. */
   fullPath?: string
   /** workspace_files id, for a row. */
   rowId?: string
 }
 
-/** Every environment file in every project workspace, on disk and in workspace_files. */
-export async function findWorkspaceEnvFiles(): Promise<WorkspaceEnvFile[]> {
-  return [...(await onDisk()), ...(await inDatabase())]
+/**
+ * Whether a file Backenly wrote holds nothing else: setup-workspace wrote the
+ * header and one DATABASE_URL line, but the legacy engine's modifyEnvFile could
+ * append a project's own variables to the same file. Only a file with nothing
+ * but Backenly's lines (and blank or comment lines) is removed whole.
+ */
+export function onlyBackenlyLines(content: string): boolean {
+  return content.split(/\r?\n/).every((line) => {
+    const t = line.trim()
+    return t === '' || t.startsWith('#') || t.startsWith('DATABASE_URL=')
+  })
 }
 
-async function onDisk(): Promise<WorkspaceEnvFile[]> {
+/** The file without Backenly's header and DATABASE_URL lines; every other line kept as it was. */
+export function withoutBackenlyLines(content: string): string {
+  return content
+    .split(/\r?\n/)
+    .filter((line) => line.trim() !== BACKENLY_ENV_HEADER && !line.trim().startsWith('DATABASE_URL='))
+    .join('\n')
+}
+
+/** Every environment file in every project workspace, on disk and in workspace_files. */
+export async function findWorkspaceEnvFiles(): Promise<WorkspaceEnvFile[]> {
+  return (await scanWorkspaceEnvFiles()).found
+}
+
+/** The same, with every directory or file that could not be read (reported, not fatal). */
+export async function scanWorkspaceEnvFiles(): Promise<{ found: WorkspaceEnvFile[]; unreadable: string[] }> {
+  const unreadable: string[] = []
+  const found = [...(await onDisk(unreadable)), ...(await inDatabase())]
+  return { found, unreadable }
+}
+
+async function onDisk(unreadable: string[]): Promise<WorkspaceEnvFile[]> {
   const root = workspaceRoot()
   let projects
   try {
@@ -58,18 +88,34 @@ async function onDisk(): Promise<WorkspaceEnvFile[]> {
     if (!project.isDirectory()) continue
     const base = path.join(root, project.name)
     // Dirent types do not follow symbolic links, so a link is never entered or read.
+    // One directory or file that cannot be read (a permission, or a project
+    // purged mid-scan) is reported and skipped; the scan goes on.
     const walk = async (dir: string): Promise<void> => {
-      for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
+      let entries
+      try {
+        entries = await fs.readdir(dir, { withFileTypes: true })
+      } catch (error: any) {
+        unreadable.push(path.relative(root, dir) + ' (' + (error?.code ?? 'error') + ')')
+        return
+      }
+      for (const entry of entries) {
         const full = path.join(dir, entry.name)
         if (entry.isDirectory()) {
           if (!SKIPPED_DIRECTORIES.has(entry.name)) await walk(full)
         } else if (entry.isFile() && isEnvFile(entry.name)) {
-          const content = await fs.readFile(full, 'utf8')
+          let content: string
+          try {
+            content = await fs.readFile(full, 'utf8')
+          } catch (error: any) {
+            unreadable.push(path.relative(root, full) + ' (' + (error?.code ?? 'error') + ')')
+            continue
+          }
           found.push({
             where: 'disk',
             projectId: project.name,
             file: path.relative(base, full),
             writtenByBackenly: content.startsWith(BACKENLY_ENV_HEADER),
+            onlyBackenly: content.startsWith(BACKENLY_ENV_HEADER) && onlyBackenlyLines(content),
             fullPath: full,
           })
         }
@@ -94,28 +140,51 @@ async function inDatabase(): Promise<WorkspaceEnvFile[]> {
       projectId: row.projectId,
       file: row.path,
       writtenByBackenly: row.content.startsWith(BACKENLY_ENV_HEADER),
+      onlyBackenly: row.content.startsWith(BACKENLY_ENV_HEADER) && onlyBackenlyLines(row.content),
       rowId: row.id,
     }))
 }
 
-/** Remove the files and rows Backenly wrote; leave every other one. */
-export async function removeBackenlyEnvFiles(found: WorkspaceEnvFile[]): Promise<{ files: number; rows: number }> {
+/**
+ * Remove what Backenly wrote and leave every other line: a file or row holding
+ * only Backenly's lines is removed; one that also holds a project's own
+ * variables keeps them, without Backenly's header and DATABASE_URL lines.
+ */
+export async function removeBackenlyEnvFiles(
+  found: WorkspaceEnvFile[],
+): Promise<{ files: number; rows: number; strippedFiles: number; strippedRows: number }> {
   let files = 0
+  let strippedFiles = 0
   for (const f of found) {
     if (f.where !== 'disk' || !f.writtenByBackenly || !f.fullPath) continue
-    // Read again just before removing: only a file that still starts with the
-    // header is Backenly's to remove.
+    // Read again just before changing it: only a file that still starts with
+    // the header is Backenly's to change, and what it holds now decides how.
     const content = await fs.readFile(f.fullPath, 'utf8').catch(() => null)
     if (content === null || !content.startsWith(BACKENLY_ENV_HEADER)) continue
-    await fs.unlink(f.fullPath)
-    files++
+    if (onlyBackenlyLines(content)) {
+      await fs.unlink(f.fullPath)
+      files++
+    } else {
+      await fs.writeFile(f.fullPath, withoutBackenlyLines(content), 'utf8')
+      strippedFiles++
+    }
   }
 
-  const ids = found.filter((f) => f.where === 'database' && f.writtenByBackenly && f.rowId).map((f) => f.rowId!)
+  const ids = found.filter((f) => f.where === 'database' && f.writtenByBackenly && f.onlyBackenly && f.rowId).map((f) => f.rowId!)
   // history: workspace_files copies of the .env setup-workspace wrote; operator cleanup at release, not a change to a project's backend.
   const { count: rows } = ids.length
     ? await prisma.workspaceFile.deleteMany({ where: { id: { in: ids }, content: { startsWith: BACKENLY_ENV_HEADER } } })
     : { count: 0 }
 
-  return { files, rows }
+  let strippedRows = 0
+  for (const f of found) {
+    if (f.where !== 'database' || !f.writtenByBackenly || f.onlyBackenly || !f.rowId) continue
+    const row = await prisma.workspaceFile.findUnique({ where: { id: f.rowId }, select: { content: true } })
+    if (!row || !row.content.startsWith(BACKENLY_ENV_HEADER)) continue
+    // history: the same cleanup, keeping a project's own variables in its copy.
+    await prisma.workspaceFile.update({ where: { id: f.rowId }, data: { content: withoutBackenlyLines(row.content) } })
+    strippedRows++
+  }
+
+  return { files, rows, strippedFiles, strippedRows }
 }

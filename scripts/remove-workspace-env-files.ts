@@ -19,19 +19,30 @@
  */
 
 import { prisma } from '@/lib/db/prisma'
-import { findWorkspaceEnvFiles, removeBackenlyEnvFiles } from '@/lib/workspace/env-files'
+import { removeBackenlyEnvFiles, scanWorkspaceEnvFiles } from '@/lib/workspace/env-files'
 import { workspaceRoot } from '@/lib/workspace/paths'
 
 async function main(): Promise<void> {
   const apply = process.argv.includes('--apply')
-  const found = await findWorkspaceEnvFiles()
+  const { found, unreadable } = await scanWorkspaceEnvFiles()
 
   const count = (where: 'disk' | 'database', backenly: boolean) =>
     found.filter((f) => f.where === where && f.writtenByBackenly === backenly).length
+  const mixed = (where: 'disk' | 'database') =>
+    found.filter((f) => f.where === where && f.writtenByBackenly && !f.onlyBackenly).length
 
   console.log(`Environment files in project workspaces (workspace root ${workspaceRoot()}); contents not shown`)
-  console.log(`  on disk:     ${count('disk', true)} written by Backenly, ${count('disk', false)} other`)
-  console.log(`  in database: ${count('database', true)} written by Backenly, ${count('database', false)} other`)
+  console.log(`  on disk:     ${count('disk', true)} written by Backenly (${mixed('disk')} also holding a project's own variables), ${count('disk', false)} other`)
+  console.log(`  in database: ${count('database', true)} written by Backenly (${mixed('database')} also holding a project's own variables), ${count('database', false)} other`)
+
+  if (unreadable.length) {
+    console.log(`\nCould not be read, so not checked (${unreadable.length}):`)
+    for (const u of unreadable) console.log(`  ${u}`)
+  }
+
+  // The projects whose workspace held Backenly's file: the owners to tell.
+  const projects = [...new Set(found.filter((f) => f.writtenByBackenly).map((f) => f.projectId))].sort()
+  if (projects.length) console.log(`\nProjects whose workspace held the file Backenly wrote (${projects.length}): ${projects.join(' ')}`)
 
   const other = found.filter((f) => !f.writtenByBackenly)
   if (other.length) {
@@ -41,11 +52,13 @@ async function main(): Promise<void> {
 
   const backenly = found.filter((f) => f.writtenByBackenly).length
   if (!apply) {
-    console.log(backenly ? `\nRun with --apply to remove the ${backenly} written by Backenly.` : '\nNothing to remove.')
+    console.log(backenly ? `\nRun with --apply to remove what Backenly wrote in these ${backenly} (a project's own variables are kept).` : '\nNothing to remove.')
     return
   }
   const removed = await removeBackenlyEnvFiles(found)
-  console.log(`\nRemoved ${removed.files} file(s) from disk and ${removed.rows} row(s) from workspace_files.`)
+  console.log(`\nRemoved ${removed.files} file(s) from disk and ${removed.rows} row(s) from workspace_files; ` +
+    `took Backenly's lines out of ${removed.strippedFiles} file(s) and ${removed.strippedRows} row(s) that keep a project's own variables.`)
+  if (unreadable.length) process.exitCode = 1
 }
 
 main()
