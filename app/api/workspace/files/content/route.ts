@@ -3,7 +3,9 @@ export const dynamic = 'force-dynamic'
 import { projectWorkspaceDir } from '@/lib/workspace/paths'
 import { NextRequest, NextResponse } from 'next/server'
 import { requireAuth } from '@/lib/auth/middleware'
+import { roleRefusal } from '@/lib/auth/project-floor'
 import { prisma } from '@/lib/db/postgres'
+import { canAdministerProject } from '@/lib/edition/guard'
 import { getCurrentProjectId } from '@/lib/tenant/isolation'
 
 /**
@@ -17,7 +19,13 @@ export async function POST(request: NextRequest) {
     if (!projectId) {
       return NextResponse.json({ error: 'No project selected' }, { status: 400 })
     }
-    
+
+    // A workspace file can be the project's `.env`: Admin and above, like the
+    // workspace download.
+    if (!(await canAdministerProject(user.userId, projectId))) {
+      return roleRefusal(request.method)
+    }
+
     const { filePath } = await request.json()
     
     // CRITICAL FIX: Always try to read from file system first (for all files, not just .prisma)

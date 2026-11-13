@@ -28,6 +28,7 @@ import {
   DATABASE_UNAVAILABLE_BODY,
 } from '@/lib/errors/dependency-unavailable'
 import { withChangeAttribution } from '@/lib/changes/attribution'
+import { floorFor, roleMeetsFloor, roleRefusal, type ProjectFloor } from './project-floor'
 
 /**
  * The answer for an error that is NOT an authorization decision.
@@ -93,25 +94,38 @@ export function withAuth(
 }
 
 /**
- * 🔒 WITH PROJECT ACCESS - Requires user to own the project
+ * 🔒 WITH PROJECT ACCESS - Requires a member of the project with the role the
+ * request needs
  * 
  * Extracts projectId from:
  * - Query param: ?projectId=xxx
  * - Header: x-project-id
  * - Request body: { projectId: xxx }
  * 
+ * The role floor comes from the method: GET, HEAD and OPTIONS need membership,
+ * every other method needs the Developer role. `opts.floor` sets it for one
+ * route ('view' | 'write' | 'administer', see ./project-floor).
+ *
  * Usage:
  *   export const POST = withProjectAccess(async (request, { user, project, projectId }) => {
- *     // Guaranteed: user owns this project
+ *     // Guaranteed: user is a Developer or above in this project
  *     return NextResponse.json({ project })
  *   })
+ *
+ *   // Removal the dashboard cannot undo: Admin and above
+ *   export const DELETE = withProjectAccess(handler, { floor: 'administer' })
  */
 export function withProjectAccess(
-  handler: RouteHandler<Awaited<ReturnType<typeof requireProjectAccess>>>
+  handler: RouteHandler<Awaited<ReturnType<typeof requireProjectAccess>>>,
+  opts?: { floor?: ProjectFloor }
 ) {
   return async (request: NextRequest) => {
     try {
       const ctx = await requireProjectAccess(request as any)
+      // The role came back with the project, so this costs no second lookup.
+      if (!roleMeetsFloor(ctx.project.callerRole, floorFor(request.method, opts?.floor))) {
+        return roleRefusal(request.method)
+      }
       return await withChangeAttribution({ source: 'dashboard', actorUserId: ctx.user.userId }, () =>
         handler(request, ctx))
     } catch (error: any) {

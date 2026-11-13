@@ -34,10 +34,16 @@
  * human to look; a route it does not flag is not thereby proven safe. Saying
  * that plainly matters more than the count, because a green audit that is
  * actually a blind one is the failure mode this whole program keeps finding.
+ *
+ * ROLE FLOORS
+ * -----------
+ * A second question, asked per handler: does a handler that can change a
+ * project ask for the role the change needs, or does any member of the
+ * project get through? See "Role floors" below.
  */
 
-import { readFileSync, readdirSync, statSync, writeFileSync } from 'fs'
-import { join, relative, sep } from 'path'
+import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'fs'
+import { dirname, join, relative, sep } from 'path'
 
 const ROOT = process.cwd()
 const API_DIR = join(ROOT, 'app', 'api')
@@ -73,6 +79,8 @@ export interface RouteRecord {
   bareFindUnique: boolean
   risk: 'high' | 'medium' | 'none'
   why: string[]
+  /** Each exported handler that reaches a project through a session, with the role it needs. */
+  handlers: HandlerFloor[]
 }
 
 function walk(dir: string, out: string[] = []): string[] {
@@ -326,7 +334,344 @@ function classify(file: string): RouteRecord {
     route, file: relative(ROOT, file).split(sep).join('/'),
     verbs, authn, authz, pathParams, readsProjectIdFromInput,
     mutating, scopedByCallerIdentity, bareFindUnique, risk, why,
+    handlers: handlerFloors(file, src),
   }
+}
+
+// ── Role floors ─────────────────────────────────────────────────────────────
+//
+// Everything above asks whether a route checks the caller at all. This asks
+// the next question, one handler at a time: does a handler that can change a
+// project ask for the role the change needs, or does any member of the
+// project get through?
+//
+// Membership answers "may this caller see the project", and a Viewer is a
+// member. The three wrappers that hand a route its project (withProjectAccess,
+// withTenantIsolation, withProjectValidation) hold POST, PUT, PATCH and DELETE
+// to the Developer role unless the route passes `{ floor }`
+// (lib/auth/project-floor.ts). A handler that checks the project by hand asks
+// canWriteProject or canAdministerProject. That leaves two shapes in which a
+// mutating handler admits any member, and both are reported:
+//
+//   - a wrapper given `{ floor: 'view' }`
+//   - a hand check that establishes membership and nothing more
+//
+// Both are right for a handler that changes nothing: a read-only query sent
+// as a POST, a preview, a heartbeat. So each one is listed in the baseline
+// with its reason, as { route, method, floor: 'view', reason }. A new one
+// fails --check until it asks for a role or is explained, and an entry whose
+// handler asks for a role again fails until it is removed.
+//
+// The limit in the header applies here too. This reads route files: a guard
+// called on only one branch of a handler still counts, and a check made
+// inside a service the route calls is not seen.
+
+export type Floor = 'view' | 'write' | 'administer'
+
+export interface HandlerFloor {
+  route: string
+  method: string
+  /** The role the handler needs: 'view' is any member of the project. */
+  floor: Floor
+  /** What decided it: a wrapper's method default or option, or a hand check. */
+  via: string
+}
+
+/** A mutating handler that admits any member, reviewed, with the reason. */
+export interface FloorBaselineEntry {
+  route: string
+  method: string
+  floor: 'view'
+  reason: string
+}
+
+const FLOOR_RANK: Record<Floor, number> = { view: 0, write: 1, administer: 2 }
+const READ_METHODS: ReadonlySet<string> = new Set(['GET', 'HEAD', 'OPTIONS'])
+const HANDLER_METHODS = ['GET', 'HEAD', 'OPTIONS', 'POST', 'PUT', 'PATCH', 'DELETE']
+
+// Built from character codes for the reason given at WORD_BOUNDARY in classify().
+const NEWLINE = String.fromCharCode(10)
+const BACKSLASH = String.fromCharCode(92)
+const QUOTES = `'"` + String.fromCharCode(96)
+
+/** Wrappers that resolve the project and apply the role floor. */
+const FLOORED_WRAPPERS = ['withProjectAccess', 'withTenantIsolation', 'withProjectValidation']
+
+/** Hand checks that ask for a role, and the floor each one gives. */
+const ROLE_GUARDS: ReadonlyArray<readonly [string, Floor]> = [
+  ['canAdministerProject', 'administer'],
+  // Owner only (lib/context/execution-context.ts), which is above Admin.
+  ['createOrchestrationContext', 'administer'],
+  ['canWriteProject', 'write'],
+]
+
+/** guardWebhookRoute's access argument as a floor (lib/webhooks/route-guard.ts). */
+const WEBHOOK_ACCESS: Record<string, Floor> = { read: 'view', write: 'write', admin: 'administer' }
+
+/**
+ * Hand checks that establish membership and nothing more. withRole and
+ * requireRole are here because the role they compare is the caller's account
+ * role, not their role in the project.
+ */
+const MEMBERSHIP_CHECKS = [
+  'getCurrentProjectId', 'requireProjectId', 'canAccessProject', 'hasProjectAccess',
+  'verifyProjectAccess', 'resolveForUser', 'requireProjectAccess', 'validateProjectAccess',
+  'getProjectContext', 'withRole', 'requireRole',
+]
+
+/** Lines that start a top-level statement. Route files keep these at column 0. */
+const STATEMENT_START = /^(?:export|import|async|function|const|let|var|class|type|interface|enum)(?=[\s{*(])/gm
+const NAMED_DECLARATION = /^(?:export\s+)?(?:async\s+)?(?:function\s*\*?|const|let|var|class)\s+([A-Za-z_$][A-Za-z0-9_$]*)/gm
+const EXPORT_LIST = /^export\s*\{([^}]*)\}\s*(?:from\s*['"]([^'"]+)['"])?/gm
+
+/** `name` as a whole identifier outside quotes; `afterDot` also accepts `x.name`. */
+function identifier(name: string, afterDot: boolean): RegExp {
+  const edge = `A-Za-z0-9_$${QUOTES}`
+  return new RegExp(`(?<![${edge}${afterDot ? '' : '.'}])${name.replace(/[$]/g, '[$]')}(?![${edge}])`)
+}
+
+/**
+ * The source with its comments blanked, so a comment that names a guard is
+ * not read as a call to it. Strings are kept; offsets and lines are unchanged.
+ */
+export function withoutComments(src: string): string {
+  let out = ''
+  let quote = ''
+  let i = 0
+  const blank = (text: string) => text.split('').map(ch => (ch === NEWLINE ? NEWLINE : ' ')).join('')
+  while (i < src.length) {
+    const ch = src[i]
+    const next = src[i + 1] ?? ''
+    if (quote) {
+      if (ch === BACKSLASH) {
+        out += ch + next
+        i += 2
+        continue
+      }
+      // Only a template literal spans lines, so a misread quote costs one line at most.
+      if (ch === quote || (ch === NEWLINE && quote !== QUOTES[2])) quote = ''
+      out += ch
+      i++
+      continue
+    }
+    if (ch === '/' && next === '/') {
+      const end = src.indexOf(NEWLINE, i)
+      const stop = end === -1 ? src.length : end
+      out += blank(src.slice(i, stop))
+      i = stop
+      continue
+    }
+    if (ch === '/' && next === '*') {
+      const end = src.indexOf('*/', i + 2)
+      const stop = end === -1 ? src.length : end + 2
+      out += blank(src.slice(i, stop))
+      i = stop
+      continue
+    }
+    // A regular expression literal is copied whole, so the quote in `/['"]/`
+    // does not open a string and the `//` in `/a\//` does not open a comment.
+    // A `/` starts one where an expression can start; elsewhere it divides.
+    if (ch === '/' && /(?:^|[(,=:[!&|?{};])\s*$|(?:^|[^A-Za-z0-9_$])return\s*$/.test(out.slice(-40))) {
+      let inClass = false
+      out += ch
+      i++
+      while (i < src.length && src[i] !== NEWLINE) {
+        const c = src[i]
+        out += c
+        i++
+        if (c === BACKSLASH) {
+          out += src[i] ?? ''
+          i++
+        } else if (c === '[') {
+          inClass = true
+        } else if (c === ']') {
+          inClass = false
+        } else if (c === '/' && !inClass) {
+          break
+        }
+      }
+      continue
+    }
+    if (QUOTES.includes(ch)) quote = ch
+    out += ch
+    i++
+  }
+  return out
+}
+
+/** A module specifier in a route file, as a file on disk, or null. */
+function resolveModule(fromFile: string, specifier: string): string | null {
+  const base = specifier.startsWith('@/') ? join(ROOT, specifier.slice(2))
+    : specifier.startsWith('.') ? join(dirname(fromFile), specifier)
+    : null
+  if (!base) return null
+  for (const candidate of [`${base}.ts`, `${base}.tsx`, join(base, 'route.ts'), join(base, 'index.ts')]) {
+    if (existsSync(candidate)) return candidate
+  }
+  return null
+}
+
+/** A handler's source with the file's own functions it uses, three levels deep. */
+function withLocalHelpers(method: string, source: string, declarations: Map<string, string>): string {
+  const parts = [source]
+  const seen = new Set<string>([method])
+  let frontier = [source]
+  for (let level = 0; level < 3 && frontier.length > 0; level++) {
+    const next: string[] = []
+    for (const [name, body] of declarations) {
+      if (seen.has(name)) continue
+      const used = identifier(name, false)
+      if (frontier.some(text => used.test(text))) {
+        seen.add(name)
+        next.push(body)
+      }
+    }
+    parts.push(...next)
+    frontier = next
+  }
+  return parts.join(NEWLINE)
+}
+
+/**
+ * Each handler a route file exports, as the source that runs for it: the
+ * handler plus the file's own functions it uses, so that
+ * `export const POST = recordedV1(handlePOST)` is read through to handlePOST.
+ * Every export form counts (`export function`, `export async function`,
+ * `export const`, an export list), and a handler re-exported from another
+ * file is read in that file. Comments are left out.
+ */
+export function exportedHandlers(
+  file: string,
+  src?: string,
+  depth = 0,
+): Array<{ method: string; source: string }> {
+  const code = withoutComments(src ?? readFileSync(file, 'utf8'))
+  const starts = Array.from(code.matchAll(STATEMENT_START), m => m.index ?? 0)
+  const declarations = new Map<string, string>()
+  for (const m of code.matchAll(NAMED_DECLARATION)) {
+    const start = m.index ?? 0
+    const end = starts.find(s => s > start) ?? code.length
+    if (!declarations.has(m[1])) declarations.set(m[1], code.slice(start, end))
+  }
+
+  const handlers: Array<{ method: string; source: string }> = []
+  for (const method of HANDLER_METHODS) {
+    const exported = new RegExp(
+      `^export\\s+(?:const|let|var|(?:async\\s+)?function\\s*\\*?)\\s+${method}(?![A-Za-z0-9_$])`,
+      'm',
+    )
+    if (exported.test(code)) {
+      handlers.push({ method, source: withLocalHelpers(method, declarations.get(method) ?? '', declarations) })
+    }
+  }
+  for (const m of code.matchAll(EXPORT_LIST)) {
+    for (const part of m[1].split(',')) {
+      const [local, exportedAs = local] = part.trim().split(/\s+as\s+/)
+      if (!HANDLER_METHODS.includes(exportedAs)) continue
+      if (!m[2]) {
+        handlers.push({
+          method: exportedAs,
+          source: withLocalHelpers(exportedAs, declarations.get(local) ?? '', declarations),
+        })
+        continue
+      }
+      const target = depth < 3 ? resolveModule(file, m[2]) : null
+      const there = target ? exportedHandlers(target, undefined, depth + 1).find(h => h.method === local) : undefined
+      handlers.push({ method: exportedAs, source: there?.source ?? '' })
+    }
+  }
+  return handlers
+}
+
+/**
+ * The role a handler needs, from what its source calls, or null when it
+ * reaches no project through a platform session (a public route, an API key,
+ * a route about the caller's own account).
+ *
+ * A wrapper gives its option, or the method's default. A role guard in the
+ * handler raises that. A handler with neither, that still checks membership,
+ * needs only membership.
+ */
+export function handlerFloor(method: string, source: string): { floor: Floor; via: string } | null {
+  let floor: Floor | null = null
+  let via = ''
+
+  const wrapper = FLOORED_WRAPPERS.find(name =>
+    new RegExp(identifier(name, true).source + '\\s*[(<]').test(source),
+  )
+  if (wrapper) {
+    const options = Array.from(source.matchAll(/floor:\s*'(view|write|administer)'/g), m => m[1] as Floor)
+    if (options.length > 0) {
+      floor = options.reduce((low, f) => (FLOOR_RANK[f] < FLOOR_RANK[low] ? f : low))
+      via = `${wrapper} { floor: '${floor}' }`
+    } else {
+      floor = READ_METHODS.has(method) ? 'view' : 'write'
+      via = `${wrapper} default`
+    }
+  }
+
+  const guards: Array<{ floor: Floor; via: string }> = ROLE_GUARDS
+    .filter(([name]) => identifier(name, true).test(source))
+    .map(([name, f]) => ({ floor: f, via: name }))
+  for (const m of source.matchAll(/guardWebhookRoute\s*\([^)]*?'(read|write|admin)'/g)) {
+    guards.push({ floor: WEBHOOK_ACCESS[m[1]], via: `guardWebhookRoute '${m[1]}'` })
+  }
+  for (const guard of guards) {
+    if (floor === null || FLOOR_RANK[guard.floor] > FLOOR_RANK[floor]) {
+      floor = guard.floor
+      via = guard.via
+    }
+  }
+
+  if (floor === null) {
+    const membership = MEMBERSHIP_CHECKS.filter(name => identifier(name, true).test(source))
+    if (membership.length > 0) {
+      floor = 'view'
+      via = `${membership.join(', ')} only`
+    }
+  }
+  return floor === null ? null : { floor, via }
+}
+
+/** Every handler in a route file that reaches a project through a session, with its floor. */
+export function handlerFloors(file: string, src?: string): HandlerFloor[] {
+  const route = routePath(file)
+  return exportedHandlers(file, src).flatMap(({ method, source }) => {
+    const found = handlerFloor(method, source)
+    return found ? [{ route, method, ...found }] : []
+  })
+}
+
+/** A handler that can change the project and admits any member of it. */
+export function admitsAnyMember(handler: HandlerFloor): boolean {
+  return MUTATING.has(handler.method) && handler.floor === 'view'
+}
+
+function handlerKey(route: string, method: string): string {
+  return `${method} ${route}`
+}
+
+/**
+ * The handlers that admit any member, against the baseline's floor entries.
+ *
+ *   added        admit any member and are not in the baseline
+ *   stale        in the baseline, and no longer admit any member
+ *   unexplained  in the baseline without a reason
+ */
+export function compareFloors(handlers: HandlerFloor[], entries: FloorBaselineEntry[]) {
+  const open = handlers.filter(admitsAnyMember)
+  const listed = new Set(entries.map(e => handlerKey(e.route, e.method)))
+  const openKeys = new Set(open.map(h => handlerKey(h.route, h.method)))
+  return {
+    open,
+    added: open.filter(h => !listed.has(handlerKey(h.route, h.method))),
+    stale: entries.filter(e => !openKeys.has(handlerKey(e.route, e.method))),
+    unexplained: entries.filter(e => !e.reason || !e.reason.trim() || e.reason === 'UNREVIEWED'),
+  }
+}
+
+export function isFloorEntry(entry: BaselineEntry | FloorBaselineEntry): entry is FloorBaselineEntry {
+  return 'floor' in entry
 }
 
 const BASELINE = join(ROOT, '.github', 'route-authorization-baseline.json')
@@ -365,7 +710,7 @@ interface BaselineEntry {
  * without someone noticing.
  */
 function check(records: RouteRecord[]): void {
-  let baseline: BaselineEntry[] = []
+  let baseline: Array<BaselineEntry | FloorBaselineEntry> = []
   try {
     baseline = JSON.parse(readFileSync(BASELINE, 'utf8'))
   } catch {
@@ -376,6 +721,13 @@ function check(records: RouteRecord[]): void {
     process.exit(1)
   }
 
+  const routesOk = checkRoutes(records, baseline.filter((b): b is BaselineEntry => !isFloorEntry(b)))
+  const floorsOk = checkFloors(records.flatMap(r => r.handlers), baseline.filter(isFloorEntry))
+  if (!routesOk || !floorsOk) process.exit(1)
+}
+
+/** The route-level ratchet described above. True when nothing needs attention. */
+function checkRoutes(records: RouteRecord[], baseline: BaselineEntry[]): boolean {
   const known = new Map(baseline.map(b => [b.route, b]))
   const flagged = records.filter(r => r.risk !== 'none')
   const flaggedRoutes = new Set(flagged.map(r => r.route))
@@ -408,7 +760,7 @@ function check(records: RouteRecord[]): void {
     if ((counts.UNREVIEWED ?? 0) > 0) {
       console.log(`  ${counts.UNREVIEWED} entr(y/ies) still UNREVIEWED.`)
     }
-    return
+    return true
   }
 
   if (regressed.length > 0) {
@@ -446,15 +798,60 @@ function check(records: RouteRecord[]): void {
     console.error('')
   }
 
-  process.exit(1)
+  return false
+}
+
+/** The role-floor ratchet (see "Role floors"). True when nothing needs attention. */
+function checkFloors(handlers: HandlerFloor[], entries: FloorBaselineEntry[]): boolean {
+  const { open, added, stale, unexplained } = compareFloors(handlers, entries)
+
+  if (added.length === 0 && stale.length === 0 && unexplained.length === 0) {
+    console.log(
+      `  Role floors: ${open.length} mutating handler(s) admit any member of the project, ` +
+      'each in the baseline with its reason.',
+    )
+    return true
+  }
+
+  if (added.length > 0) {
+    console.error('')
+    console.error('  These handlers can change the project and admit any member of it:')
+    console.error('')
+    for (const h of added) console.error(`    ${h.method.padEnd(7)} ${h.route}  (${h.via})`)
+    console.error('')
+    console.error('  Ask for the role the change needs: the wrappers hold this method to the')
+    console.error('  Developer role unless given `{ floor }`, and a hand check uses')
+    console.error('  canWriteProject or canAdministerProject. If the handler changes nothing,')
+    console.error('  add { "route", "method", "floor": "view", "reason" } to the baseline.')
+    console.error('')
+  }
+
+  if (unexplained.length > 0) {
+    console.error('')
+    console.error('  These baseline entries admit any member and give no reason. Say why the')
+    console.error('  handler changes nothing:')
+    for (const e of unexplained) console.error(`    ${e.method.padEnd(7)} ${e.route}`)
+    console.error('')
+  }
+
+  if (stale.length > 0) {
+    console.error('')
+    console.error('  These baseline entries no longer admit any member. Remove them:')
+    for (const e of stale) console.error(`    ${e.method.padEnd(7)} ${e.route}`)
+    console.error('')
+  }
+
+  return false
 }
 
 function writeBaseline(records: RouteRecord[]): void {
   const flagged = records.filter(r => r.risk !== 'none')
   const existing = new Map<string, BaselineEntry>()
+  const existingFloors = new Map<string, FloorBaselineEntry>()
   try {
-    for (const b of JSON.parse(readFileSync(BASELINE, 'utf8')) as BaselineEntry[]) {
-      existing.set(b.route, b)
+    for (const b of JSON.parse(readFileSync(BASELINE, 'utf8')) as Array<BaselineEntry | FloorBaselineEntry>) {
+      if (isFloorEntry(b)) existingFloors.set(handlerKey(b.route, b.method), b)
+      else existing.set(b.route, b)
     }
   } catch { /* first run */ }
 
@@ -475,9 +872,24 @@ function writeBaseline(records: RouteRecord[]): void {
     }),
     ...safeKept,
   ].sort((a, b) => a.route.localeCompare(b.route))
-  writeFileSync(BASELINE, JSON.stringify(out, null, 2) + String.fromCharCode(10), 'utf8')
-  console.log(`  Wrote ${out.length} entries to ${relative(ROOT, BASELINE)}`)
+
+  // Floor entries follow the route entries, each keeping the reason written for it.
+  const floors: FloorBaselineEntry[] = records
+    .flatMap(r => r.handlers)
+    .filter(admitsAnyMember)
+    .map(h => ({
+      route: h.route,
+      method: h.method,
+      floor: 'view' as const,
+      reason: existingFloors.get(handlerKey(h.route, h.method))?.reason ?? 'UNREVIEWED',
+    }))
+    .sort((a, b) => a.route.localeCompare(b.route) || a.method.localeCompare(b.method))
+
+  writeFileSync(BASELINE, JSON.stringify([...out, ...floors], null, 2) + String.fromCharCode(10), 'utf8')
+  console.log(`  Wrote ${out.length + floors.length} entries to ${relative(ROOT, BASELINE)}`)
   console.log(`  ${out.filter(e => (e.status ?? 'UNREVIEWED') === 'UNREVIEWED').length} are UNREVIEWED.`)
+  const unexplained = floors.filter(f => f.reason === 'UNREVIEWED').length
+  if (unexplained > 0) console.log(`  ${unexplained} floor entr(y/ies) need a reason.`)
 }
 
 function main(): void {
@@ -512,6 +924,8 @@ function main(): void {
   console.log(`  scoped by caller    ${records.filter(r => r.scopedByCallerIdentity).length}`)
   console.log(`  explicit authz call ${records.filter(r => r.authz.length > 0).length}`)
   console.log(`  flagged             ${flagged.length}  (high ${flagged.filter(r => r.risk === 'high').length})`)
+  const open = records.flatMap(r => r.handlers).filter(admitsAnyMember)
+  console.log(`  any member changes  ${open.length}  (mutating handlers that admit any member)`)
   console.log('')
 
   for (const r of (showAll ? records : flagged)) {
@@ -519,6 +933,15 @@ function main(): void {
     const tag = r.risk === 'high' ? 'HIGH' : r.risk === 'medium' ? 'MED ' : '    '
     console.log(`  ${tag}  ${r.verbs.join(',').padEnd(18)} ${r.route}`)
     for (const w of r.why) console.log(`          ${w}`)
+    if (showAll) {
+      for (const h of r.handlers) console.log(`          ${h.method.padEnd(7)} ${h.floor.padEnd(10)} ${h.via}`)
+    }
+  }
+
+  if (open.length > 0) {
+    console.log('')
+    console.log('  Mutating handlers that admit any member of the project:')
+    for (const h of open) console.log(`        ${h.method.padEnd(18)} ${h.route}  (${h.via})`)
   }
 
   console.log('')
@@ -528,4 +951,4 @@ function main(): void {
   console.log('')
 }
 
-main()
+if (require.main === module) main()

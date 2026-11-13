@@ -25,6 +25,7 @@ export async function POST(request: NextRequest) {
 
     // Get current project ID
     console.log(`🎯 [${requestId}] Getting current project ID...`)
+    // Any member: this only reads the project's tables and says which have no API yet.
     const projectId = await getCurrentProjectId(request)
     
     if (!projectId) {

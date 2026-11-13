@@ -2,7 +2,9 @@ export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
 import { requireAuth } from '@/lib/auth/middleware'
+import { roleRefusal } from '@/lib/auth/project-floor'
 import { prisma } from '@/lib/db/postgres'
+import { canWriteProject } from '@/lib/edition/guard'
 import { getCurrentProjectId } from '@/lib/tenant/isolation'
 
 /**
@@ -11,13 +13,18 @@ import { getCurrentProjectId } from '@/lib/tenant/isolation'
  */
 export async function POST(request: NextRequest) {
   try {
-    await requireAuth(request)
+    const user = await requireAuth(request)
     const projectId = await getCurrentProjectId(request)
     
     if (!projectId) {
       return NextResponse.json({ error: 'No project selected' }, { status: 400 })
     }
-    
+
+    // The generated files are saved to the project: Developer and above.
+    if (!(await canWriteProject(user.userId, projectId))) {
+      return roleRefusal(request.method)
+    }
+
     // Fetch current auth configuration
     const [providers, policies] = await Promise.all([
       prisma.authProvider.findMany({ where: { enabled: true } }),

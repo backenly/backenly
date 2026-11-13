@@ -2,7 +2,9 @@ export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
 import { requireAuth } from '@/lib/auth/middleware'
+import { roleRefusal } from '@/lib/auth/project-floor'
 import { prisma } from '@/lib/db/postgres'
+import { canWriteProject } from '@/lib/edition/guard'
 import { getCurrentProjectId } from '@/lib/tenant/isolation'
 
 /**
@@ -16,7 +18,12 @@ export async function DELETE(request: NextRequest) {
     if (!projectId) {
       return NextResponse.json({ error: 'No project selected' }, { status: 400 })
     }
-    
+
+    // Removing a saved file changes the project: Developer and above.
+    if (!(await canWriteProject(user.userId, projectId))) {
+      return roleRefusal(request.method)
+    }
+
     const { filePath } = await request.json()
     
     // Delete file from database

@@ -24,14 +24,23 @@
  * belongs to lib/edition — one authority, per credential type, per edition.
  */
 
-import { NextRequest } from 'next/server'
+import { NextRequest, NextResponse } from 'next/server'
 import { clientIpFromHeaders } from '@/lib/security/client-ip'
 import { authenticateRequest } from '@/lib/auth/middleware'
+import {
+  floorFor,
+  roleInsufficientMessage,
+  roleMeetsFloor,
+  roleRefusal,
+  ROLE_INSUFFICIENT_CODE,
+  type ProjectFloor,
+} from '@/lib/auth/project-floor'
 import { recordSecurityEvent } from '@/lib/platform-controls'
 import {
   getProjectResolver,
   ProjectContextRequiredError,
   ProjectResolutionError,
+  type ProjectRole,
 } from '@/lib/edition'
 
 /**
@@ -70,8 +79,22 @@ export class TenantIsolationError extends Error {
  *
  * NO FALLBACK. When nothing names a project, Cloud refuses. Single-tenant
  * resolves the one project that exists, which is correct there and only there.
+ *
+ * This answers "may this caller see the project", which is any member. A
+ * handler that changes the project asks for more: `withTenantIsolation` applies
+ * the role floor for the request's method, and a handler that authorizes by
+ * hand follows this with `canWriteProject` or `canAdministerProject`.
  */
 export async function getCurrentProjectId(request: NextRequest): Promise<string> {
+  return (await resolveCurrentProject(request)).projectId
+}
+
+/**
+ * The request's project with the caller's role in it, from one resolver call.
+ */
+async function resolveCurrentProject(
+  request: NextRequest
+): Promise<{ projectId: string; callerRole: ProjectRole }> {
   const headerProjectId = request.headers.get('x-project-id')
   const url = new URL(request.url)
   const queryProjectId = url.searchParams.get('projectId')
@@ -84,7 +107,7 @@ export async function getCurrentProjectId(request: NextRequest): Promise<string>
 
   try {
     const project = await getProjectResolver().resolveForUser(auth.userId, requested)
-    return project.id
+    return { projectId: project.id, callerRole: project.callerRole }
   } catch (err) {
     if (err instanceof ProjectResolutionError) {
       // A caller asking for a project they may not have is a high-value signal
@@ -118,10 +141,9 @@ export async function getCurrentProjectId(request: NextRequest): Promise<string>
 /**
  * Resolve the request's project ID, or throw.
  *
- * Kept as a named export because `withTenantIsolation` and existing callers
- * read better with it. It adds nothing: authorization is entirely the
- * resolver's, and re-checking here would cost a second identity lookup while
- * being unable to reach a different verdict.
+ * Kept as a named export because existing callers read better with it. It adds
+ * nothing: authorization is entirely the resolver's, and re-checking here would
+ * cost a second identity lookup while being unable to reach a different verdict.
  */
 export async function requireProjectId(request: NextRequest): Promise<string> {
   return getCurrentProjectId(request)
@@ -181,11 +203,7 @@ export async function requireProjectCapability(
   }
 
   if (!(await may(auth.userId, projectId))) {
-    throw new TenantIsolationError(
-      'Your role in this project does not allow this change',
-      403,
-      'PROJECT_ROLE_INSUFFICIENT'
-    )
+    throw new TenantIsolationError(roleInsufficientMessage(request.method), 403, ROLE_INSUFFICIENT_CODE)
   }
   return { userId: auth.userId, projectId }
 }
@@ -196,12 +214,28 @@ export async function requireProjectCapability(
  * The wrapper 22 routes use. It is deliberately the only ergonomic way to get
  * a project id on this path, so that "which project may this caller act on" is
  * answered in one place.
+ *
+ * It also answers "may this caller do this here". The role floor comes from
+ * the method: GET, HEAD and OPTIONS need membership, every other method needs
+ * the Developer role. `opts.floor` sets it for one route ('view' | 'write' |
+ * 'administer', see lib/auth/project-floor). The project and the role come from
+ * the same resolver call.
+ *
+ * A caller who may not see the project is refused by throwing, as before. A
+ * member whose role is below the floor gets the refusal as the RESULT (403,
+ * PROJECT_ROLE_INSUFFICIENT) and the handler does not run: every route here
+ * returns its handler's response as it is, so the refusal reaches the client
+ * with its code whatever the route's own catch block does.
  */
 export async function withTenantIsolation<T>(
   request: NextRequest,
-  handler: (projectId: string, request: NextRequest) => Promise<T>
-): Promise<T> {
-  const projectId = await requireProjectId(request)
+  handler: (projectId: string, request: NextRequest) => Promise<T>,
+  opts?: { floor?: ProjectFloor }
+): Promise<T | NextResponse<{ error: string; code: string }>> {
+  const { projectId, callerRole } = await resolveCurrentProject(request)
+  if (!roleMeetsFloor(callerRole, floorFor(request.method, opts?.floor))) {
+    return roleRefusal(request.method)
+  }
   return handler(projectId, request)
 }
 
