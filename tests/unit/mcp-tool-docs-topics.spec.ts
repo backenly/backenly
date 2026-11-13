@@ -24,8 +24,9 @@ jest.mock('@/lib/mcp/guard', () => ({
 }))
 
 import { POST as toolPost } from '@/app/api/mcp/tool/route'
+import { BRAIN_TOOLS } from '@/lib/ai/brain/tools'
 import { AGENT_DOC_TOPICS, agentDocPublicPath, resolveDocTopic } from '@/lib/mcp/agent-docs'
-import { buildCatalog } from '@/lib/mcp/catalog'
+import { buildCatalog, buildDispatchable } from '@/lib/mcp/catalog'
 import { DOMAIN_TOOLS, domainDocsTopic } from '@/lib/mcp/domains'
 
 const POINTER = /fetch_docs \{ topic: "([a-z0-9-]+)" \}/g
@@ -88,7 +89,8 @@ describe('fetch_docs serves every topic a description names', () => {
  * What a shorter tools/list must still say on the first call: the refusals an
  * agent would otherwise hit, the arguments it must send, what waits for a
  * person or cannot be undone, and what a read-only key may do. Each line is a
- * failure an agent met when the text was missing.
+ * failure an agent met when the text was missing. And what it must not say: the
+ * name of a tool the host does not offer, which an agent cannot call.
  */
 describe('keeps the first-call rules in tools/list', () => {
   const rw = new Map(buildCatalog().map((t) => [t.name, t]))
@@ -120,6 +122,21 @@ describe('keeps the first-call rules in tools/list', () => {
     ['functions', /AI credits/, 'what create and schedule cost'],
   ] as const)('%s: %s (%s)', (name, rule) => {
     expect(text(rw.get(name)! as any)).toMatch(rule)
+  })
+
+  it('names no tool a read-write key is not offered, except as an action of a section tool', () => {
+    // The row tools said "as the owner (see db_query)", and the webhooks and
+    // deploy arguments said where an id comes from by naming list_webhooks or
+    // list_schema_changes: tools that tools/list does not offer.
+    const tools = new Set([...buildDispatchable().map((t) => t.name), ...BRAIN_TOOLS.map((t) => t.function.name)])
+    const offered = new Set([...rw.keys(), ...DOMAIN_TOOLS.filter((d) => rw.has(d.name)).flatMap((d) => Object.keys(d.actions))])
+    const mentions = [...rw.values()].flatMap((t) => [...text(t as any).matchAll(/\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b/g)]
+      .map((m) => ({ tool: t.name, name: m[0] }))
+      .filter(({ name }) => tools.has(name)))
+    // It reads real mentions: run_query names apply_migration, for one.
+    expect(mentions.length).toBeGreaterThan(5)
+    const notOffered = mentions.filter(({ name }) => !offered.has(name)).map(({ tool, name }) => `${tool} -> ${name}`)
+    expect([...new Set(notOffered)]).toEqual([])
   })
 
   it('tells a read-only key that each section tool narrowed for it only reads', () => {
