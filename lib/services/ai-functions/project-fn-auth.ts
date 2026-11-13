@@ -17,20 +17,18 @@
  *     are signed with project.jwtSecret, not the platform JWT_SECRET.
  *
  * This module derives PER-PROJECT auth material from the project's jwtSecret,
- * so the route-module runner can present project-correct secrets inside the vm
- * (fixing every stored function without regeneration) and dashboard test runs
- * can authenticate as the project owner legitimately.
+ * which the route-module runner checks admin keys and end-user tokens against
+ * for the project's functions. Function code never holds it: not in
+ * process.env, and not on an owner's test request either (route-module-runner.ts,
+ * OwnerTest).
  *
  * The admin key is deterministic — HMAC(project jwtSecret) — so it needs no
  * schema change and rotates automatically if the project's jwtSecret rotates.
  */
 
 import * as crypto from 'crypto'
-import * as jsonwebtoken from 'jsonwebtoken'
 import { prisma } from '@/lib/db'
 import { resolveJwtSecret, JWTSecretManager } from '@/lib/services/jwtSecretManager'
-
-const jwt: typeof jsonwebtoken = (jsonwebtoken as any).default ?? jsonwebtoken
 
 export interface ProjectFnAuth {
   /** Resolved (plaintext) project JWT signing secret, or null if unavailable. */
@@ -42,7 +40,7 @@ export interface ProjectFnAuth {
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 /**
- * Synthetic end-user id used for dashboard test runs. A valid UUID so
+ * Synthetic end-user id an owner's test run is signed in as. A valid UUID so
  * `WHERE user_id = $1::uuid` comparisons return empty rows instead of a type
  * error — test runs read as "no matching records", never as a crash.
  */
@@ -84,24 +82,4 @@ export async function loadProjectFnAuth(projectId: string): Promise<ProjectFnAut
 export async function getProjectAdminKey(projectId: string): Promise<string> {
   const secret = await JWTSecretManager.getOrCreateSecret(projectId)
   return deriveProjectAdminKey(secret)
-}
-
-/**
- * Mint a short-lived project-scoped end-user token with role=admin for a
- * dashboard test run. Signed with the project's own jwtSecret, so it passes
- * the exact same verification path a real end-user token does. Never returned
- * to the browser — it exists only inside the runner invocation.
- */
-export function mintTestRunToken(projectId: string, resolvedJwtSecret: string): string {
-  return jwt.sign(
-    {
-      userId: TEST_RUN_USER_ID,
-      email: 'test-run@backenly.internal',
-      role: 'admin',
-      projectId,
-      testRun: true,
-    },
-    resolvedJwtSecret,
-    { algorithm: 'HS256', expiresIn: '10m' }
-  )
 }

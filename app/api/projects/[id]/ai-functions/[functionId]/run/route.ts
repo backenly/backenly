@@ -35,10 +35,10 @@ export async function POST(
     // deliberately disabled functions, and a successful run already clears
     // 'error' on its own.
 
-    // testRun: the caller is the authenticated project OWNER, so the runner
-    // injects the project's admin key + a short-lived project-scoped admin
-    // token. Auth-gated endpoints exercise their real logic instead of
-    // dead-ending in 401/403 on every dashboard test.
+    // testRun: the caller may change the project, so the runner treats the run
+    // as the project's admin (without handing the function a key or a token).
+    // Auth-gated endpoints exercise their real logic instead of dead-ending in
+    // 401/403 on every dashboard test.
     const result = await executeAiFunction(params.functionId, params.id, {
       type: 'manual',
       data: testEvent,
