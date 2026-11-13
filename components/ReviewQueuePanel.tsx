@@ -52,6 +52,7 @@ import {
 } from 'lucide-react'
 import { groupFindings, CATEGORY_LABEL, severityWord, type FindingCategory, type FindingGroup } from '@/lib/core/finding-groups'
 import { hasExecutableFix } from '@/lib/core/fix-actions'
+import { decisionLabels } from '@/lib/core/finding-summaries'
 import { isEvolutionApprovalFinding } from '@/lib/core/types'
 import { EvolutionRequestRow } from '@/components/autonomy/EvolutionRequestRow'
 import { approvalTitle } from '@/lib/mcp/approval-title'
@@ -1037,6 +1038,8 @@ function ApprovalRow({
   const many = g.members.length > 1
   // A proposal is bound to one finding, so it is offered on single rows only.
   const proposal = !many ? head.proposal : undefined
+  // A row whose approval removes a rule says so on its buttons.
+  const labels = !many ? decisionLabels(head.type) : null
   const title = <p className={ROW_TITLE}><TextWithCode text={g.title} codeClassName="text-zinc-100" /></p>
 
   if (state.phase === 'verified') {
@@ -1081,7 +1084,7 @@ function ApprovalRow({
           <>
             <GhostAction onClick={onDismiss} disabled={busy}>
               {state.phase === 'dismissing' ? <Loader2 className="size-3.5 animate-spin" /> : null}
-              Dismiss
+              {labels?.dismiss ?? 'Dismiss'}
             </GhostAction>
             {/* The fix button exists only when a fix does. `fixableCount` is
                 computed from the executor's own action mapping, so this can
@@ -1095,9 +1098,9 @@ function ApprovalRow({
               <PrimaryAction
                 onClick={onApprove}
                 busy={state.phase === 'applying'}
-                busyLabel={g.fixableCount > 1 ? `Applying ${g.fixableCount}…` : 'Applying…'}
+                busyLabel={g.fixableCount > 1 ? `Applying ${g.fixableCount}…` : labels?.busy ?? 'Applying…'}
               >
-                {g.fixableCount > 1 ? `Approve & fix all ${g.fixableCount}` : 'Approve & fix'}
+                {g.fixableCount > 1 ? `Approve & fix all ${g.fixableCount}` : labels?.approve ?? 'Approve & fix'}
               </PrimaryAction>
             )}
             <OverflowMenu

@@ -66,6 +66,7 @@ import { detectMigrationResidue } from './migration-residue'
 import { detectSubsystemRecurrence } from './subsystem-recurrence'
 import { detectFailingFunctions } from './function-failures'
 import { detectRefusedWrites } from './refused-writes'
+import { detectGuessedConstraints } from './guessed-constraints'
 import { hasCapability, type PlatformCapability } from './platform-capabilities'
 import { projectRegion, requireRegionDatabaseUrl } from '@/lib/data-plane/regional'
 
@@ -266,6 +267,13 @@ export const INVARIANTS: readonly Invariant[] = [
     rationale:
       'A rule that keeps a column unique looks healthy on its own: it is a constraint doing its job. It is only wrong when nobody wanted it, and then it shows up as real writes refused. Production QA met exactly that: orders kept every email unique, which nobody had asked for, so each customer\'s second order was refused while every check stayed green. So this starts from the evidence, writes refused with a conflict in the last day, and names the single-column unique rules on that table that the intent ledger does not record as requested. Never repaired automatically: whether a value may repeat is the owner\'s decision.',
     probe: detectRefusedWrites,
+  },
+  {
+    id: 'rules_were_asked_for',
+    title: 'No rule Backenly guessed from a name is left unasked for',
+    rationale:
+      'Before a table declared in SQL was made exactly as written, Backenly added rules from names: UNIQUE on any column with email, username or slug in its name, and a fixed CHECK list on status for tables named like orders, posts or tasks. Production QA met both: orders_email_key let each customer place one order, and chk_orders_status refused "paid", which the request asked for. Each rule is held to what the platform recorded of the request: its SQL in History, the columns the intent ledger records, and otherwise the exact name and definition the rules give. Never removed automatically: an app may rely on one by now, so a person decides, and History restores a removal.',
+    probe: detectGuessedConstraints,
   },
   {
     id: 'indexes_are_not_mostly_empty_space',
@@ -675,6 +683,9 @@ const INVARIANT_EMITS: Readonly<Record<string, readonly FindingType[]>> = {
   // Re-detectable: the probe reads the last day's refusals and the live
   // catalog, so a dropped rule or a quiet day closes the gap.
   no_unrequested_rule_refuses_writes: ['unrequested_unique_refusing_writes'],
+  // Re-detectable: the probe reads the live catalog, so a removed rule is gone
+  // on the next pass, which is what certifies a person's approved removal.
+  rules_were_asked_for: ['guessed_constraint'],
   // Re-detectable: all three shapes are live catalog reads, so a completed
   // rebuild, validation or transaction resolution closes the gap.
   no_migration_was_left_half_finished: ['migration_residue'],

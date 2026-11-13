@@ -147,6 +147,10 @@ const NEEDS_APPROVAL = new Set<FindingType>([
   // states the measurement and the owner decides — exactly the line between
   // "add an obviously missing index" and "decide an index is not needed".
   'unused_index',
+  // A rule Backenly added from a name, which the request did not ask for. Its
+  // removal is a governed DROP CONSTRAINT that History restores, and still a
+  // person's call: an app may rely on the rule by now.
+  'guessed_constraint',
 ])
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -586,6 +590,7 @@ const APPROVAL_REASON_MAP: Partial<Record<FindingType, string>> = {
   auth_jwt_missing:             'Restoring or rotating a JWT secret invalidates all existing end-user sessions — project owner must confirm.',
   auth_users_table_missing:     'Creating the users table bootstraps the entire auth subsystem — project owner must confirm before activation.',
   unused_index:                 'Backenly measured that PostgreSQL never used this index, but only you know whether something that runs rarely still needs it.',
+  guessed_constraint:           'Removing a rule changes which rows production accepts, and only you know whether your app relies on it by now.',
 }
 
 const RISK_NOTE_MAP: Partial<Record<FindingType, string>> = {
@@ -595,5 +600,6 @@ const RISK_NOTE_MAP: Partial<Record<FindingType, string>> = {
   auth_jwt_missing:             'An incorrect or premature JWT secret rotation locks all end-users out immediately.',
   auth_users_table_missing:     'Auto-creating the users table without owner confirmation may interfere with existing auth flows.',
   unused_index:                 'If a rarely-run query does need it, that query gets slow until the index is rebuilt.',
+  guessed_constraint:           'Once it is removed, rows it refused are accepted. Restoring the change in History puts it back while the rows still meet it.',
   infra_hot_table:              'Every index costs a little on each insert and update to this table. It is built without blocking writes.',
 }
