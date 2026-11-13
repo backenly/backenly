@@ -79,6 +79,7 @@ describe('a typed schema call, written as SQL', () => {
     ['add_column', 'add_column', { tableName: 't', column: { name: 'notes', type: 'text', nullable: false, default: 'none' } }, { column: expect.objectContaining({ name: 'notes', nullable: false, default: "'none'" }) }],
     ['add_column, flat', 'add_column', { tableName: 't', columnName: 'score', columnType: 'int' }, { column: expect.objectContaining({ name: 'score', type: 'int' }) }],
     ['create_index', 'create_index', { tableName: 't', columns: ['a', 'b'], unique: true, indexName: 't_a_b', where: 'a > 0' }, { columns: ['a', 'b'], unique: true, indexName: 't_a_b', where: 'a > 0' }],
+    ['an index with an operator class', 'create_index', { tableName: 't', columns: ['name'], method: 'gin', operatorClasses: { name: 'gin_trgm_ops' } }, { columns: ['name'], method: 'gin', operatorClasses: { name: 'gin_trgm_ops' } }],
     ['rename_column', 'rename_column', { tableName: 't', oldName: 'a', newName: 'b' }, { oldName: 'a', newName: 'b' }],
     ['a unique constraint', 'add_constraint', { tableName: 't', constraintType: 'unique', columns: ['a', 'b'] }, { constraintType: 'unique', columns: ['a', 'b'] }],
     ['a check', 'add_constraint', { tableName: 't', constraintType: 'check', expression: 'a > 0', constraintName: 'a_positive' }, { constraintType: 'check', expression: 'a > 0', constraintName: 'a_positive' }],
