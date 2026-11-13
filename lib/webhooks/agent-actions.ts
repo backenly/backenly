@@ -46,8 +46,11 @@ export interface WebhookActionResult {
 
 /** How receivers verify a delivery. Stated once, so every answer says the same thing. */
 export const SIGNATURE_NOTE =
-  'Each delivery is a POST signed as X-Webhook-Signature: sha256=<HMAC-SHA256 of the raw body with the secret>, ' +
-  'with X-Webhook-Event and X-Webhook-Delivery (the log id) alongside.'
+  'Each delivery is a POST carrying X-Webhook-Timestamp (unix seconds) and X-Webhook-Signature-V2: ' +
+  'sha256=<HMAC-SHA256 with the secret of "<timestamp>.<X-Webhook-Delivery>.<raw body>">. A receiver should check ' +
+  'that signature and refuse a timestamp more than 5 minutes old or a delivery id it has already seen, so a captured ' +
+  'request cannot be sent again. X-Webhook-Signature (the raw body alone) is still sent for older receivers; ' +
+  'X-Webhook-Event and X-Webhook-Delivery (the log id) come alongside.'
 
 type Access = 'read' | 'write' | 'admin'
 const GUARD = { read: canAccessProject, write: canWriteProject, admin: canAdministerProject } as const
