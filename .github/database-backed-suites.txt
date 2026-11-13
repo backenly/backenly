@@ -49,6 +49,7 @@ tests/integration/signin-enumeration.spec.ts
 tests/integration/project-smtp-and-templates.spec.ts
 tests/integration/storage-bucket-policy.spec.ts
 tests/integration/storage-runtime-policy.spec.ts
+tests/integration/storage-writes-need-a-user.spec.ts
 tests/integration/function-off-switch.spec.ts
 
 # At /fn/{name} a route module's status, body and content type go out as it
