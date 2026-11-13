@@ -14,8 +14,8 @@ import * as os from 'os'
 import * as path from 'path'
 import { randomUUID } from 'crypto'
 
-jest.mock('@/lib/db', () => ({ prisma: {} }))
-jest.mock('@/lib/data-plane/regional', () => ({ workspaceRawClient: jest.fn() }))
+// The database is not mocked (the file branches under test never reach it); only the model client is, so the
+// suite does not depend on an AI provider's SDK.
 jest.mock('@/lib/ai/llm/chat', () => ({ chat: jest.fn() }))
 
 import { applyChangesFromPlan, type BackendChangePlan } from '@/lib/services/aiWorkspace'
