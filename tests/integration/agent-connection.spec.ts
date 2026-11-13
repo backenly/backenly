@@ -17,6 +17,32 @@
  * surface each handler reads, as in __tests__/auth/project-routes-authorization.
  */
 
+// A teammate holds their role through an organization, which the public
+// checkout resolves without the Cloud overlay; the real membership rows decide.
+jest.mock('@cloud/project-access', () => {
+  try {
+    return jest.requireActual('@/lib/cloud/project-access')
+  } catch {
+    return {
+      async organizationRoleForProject(_projectId: string, organizationId: string | null, userId: string) {
+        if (!organizationId) return null
+        const { prisma: db } = jest.requireActual('@/lib/db')
+        const member = await db.organizationMember.findUnique({
+          where: { orgId_userId: { orgId: organizationId, userId } },
+          select: { role: true },
+        })
+        return member?.role ?? null
+      },
+      async organizationProjectClauses(userId: string) {
+        return [
+          { organization: { members: { some: { userId, restricted: false } } } },
+          { projectMembers: { some: { userId } } },
+        ]
+      },
+    }
+  }
+})
+
 import { randomBytes, randomUUID } from 'crypto'
 import type { NextRequest } from 'next/server'
 import { prisma } from '@/lib/db/prisma'
@@ -38,6 +64,7 @@ function assertSafeTestDatabase(): void {
 
 const userIds: string[] = []
 const projectIds: string[] = []
+const orgIds: string[] = []
 
 async function makeUser() {
   const email = `agent-conn-${randomUUID()}@test.invalid`
@@ -47,13 +74,22 @@ async function makeUser() {
   return { id: u.id, token }
 }
 
-async function makeProject(userId: string) {
+async function makeProject(userId: string, organizationId?: string) {
   const p = await prisma.project.create({
-    data: { name: `agent-conn-${randomUUID().slice(0, 8)}`, userId },
+    data: { name: `agent-conn-${randomUUID().slice(0, 8)}`, userId, organizationId },
     select: { id: true },
   })
   projectIds.push(p.id)
   return p.id
+}
+
+/** An organization the owner owns, with these members. */
+async function makeOrg(ownerId: string, members: Array<{ userId: string; role: 'ADMIN' | 'DEVELOPER' | 'VIEWER' }>) {
+  const org = await prisma.organization.create({ data: { name: `agent-conn-${randomUUID().slice(0, 8)}`, ownerId }, select: { id: true } })
+  orgIds.push(org.id)
+  await prisma.organizationMember.create({ data: { orgId: org.id, userId: ownerId, role: 'OWNER' } })
+  for (const m of members) await prisma.organizationMember.create({ data: { orgId: org.id, userId: m.userId, role: m.role } })
+  return org.id
 }
 
 /** An MCP key exactly as app/api/projects/[id]/mcp/keys/route.ts mints it. */
@@ -132,6 +168,10 @@ afterAll(async () => {
     await prisma.auditLog.deleteMany({ where: { projectId: { in: projectIds } } }).catch(() => {})
     await prisma.project.deleteMany({ where: { id: { in: projectIds } } })
   }
+  if (orgIds.length) {
+    await prisma.organizationMember.deleteMany({ where: { orgId: { in: orgIds } } }).catch(() => {})
+    await prisma.organization.deleteMany({ where: { id: { in: orgIds } } }).catch(() => {})
+  }
   if (userIds.length) {
     await prisma.apiKey.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {})
     await prisma.session.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {})
@@ -179,7 +219,8 @@ describe('agentConnectionFor', () => {
   it('belongs to the user: a teammate connecting their agent does not connect this one', async () => {
     const owner = await makeUser()
     const teammate = await makeUser()
-    const projectId = await makeProject(owner.id)
+    // An ADMIN of the project's organization, as issuing an MCP key takes.
+    const projectId = await makeProject(owner.id, await makeOrg(owner.id, [{ userId: teammate.id, role: 'ADMIN' }]))
     const theirs = await mintMcpKey(projectId, teammate.id)
     await connectAgent(theirs.raw, theirs.id)
 
