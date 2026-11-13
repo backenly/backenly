@@ -1,6 +1,6 @@
 export const dynamic = 'force-dynamic'
 
-import { realPathInsideWorkspace, resolveInsideWorkspace } from '@/lib/workspace/paths'
+import { isEnvFile, realPathInsideWorkspace, resolveInsideWorkspace } from '@/lib/workspace/paths'
 import { NextRequest, NextResponse } from 'next/server'
 import { requireAuth } from '@/lib/auth/middleware'
 import { roleRefusal } from '@/lib/auth/project-floor'
@@ -35,6 +35,15 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(
         { error: "That file is not in this project's workspace.", code: 'PATH_OUTSIDE_WORKSPACE' },
         { status: 400 },
+      )
+    }
+
+    // An environment file holds credentials: never served, from disk or from
+    // the database copy.
+    if (isEnvFile(filePath)) {
+      return NextResponse.json(
+        { error: 'Environment files are not served from a workspace.', code: 'ENV_FILE_NOT_SERVED' },
+        { status: 403 },
       )
     }
 

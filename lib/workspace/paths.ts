@@ -63,6 +63,18 @@ export function resolveInsideWorkspace(projectId: string, relative: unknown): st
 }
 
 /**
+ * Whether a workspace file is an environment file: `.env`, `.env.local`,
+ * `.env.production` and the rest. One holds credentials, so the workspace
+ * routes never serve, list, copy or archive it. `.env.example` and its kin are
+ * templates without values, and are served like any other file.
+ */
+export function isEnvFile(filePath: string): boolean {
+  const name = filePath.split(/[\\/]/).pop() ?? ''
+  if (!/^\.env(\.|$)/i.test(name)) return false
+  return !/\.(example|sample|template|dist)$/i.test(name)
+}
+
+/**
  * Whether `target` is still inside the project's workspace once symbolic links
  * are followed. False when it is not, or when it does not exist.
  */

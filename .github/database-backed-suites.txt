@@ -172,6 +172,7 @@ __tests__/auth/workspace-oauth-authorization.test.ts
 # ADMIN or the owner reaches the route's own disk lookup.
 __tests__/auth/workspace-download-authorization.test.ts
 __tests__/workspace-paths/workspace-file-reads-stay-in-the-project.test.ts
+__tests__/workspace-paths/workspace-env-files-are-never-served.test.ts
 
 # Changing a project from the console needs the Developer role, through each
 # wrapper's method default (delete-table, storage file delete) and through a

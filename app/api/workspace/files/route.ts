@@ -1,6 +1,6 @@
 export const dynamic = 'force-dynamic'
 
-import { projectWorkspaceDir } from '@/lib/workspace/paths'
+import { isEnvFile, projectWorkspaceDir } from '@/lib/workspace/paths'
 import { NextRequest, NextResponse } from 'next/server'
 import { requireAuth } from '@/lib/auth/middleware'
 import { roleRefusal } from '@/lib/auth/project-floor'
@@ -31,7 +31,9 @@ export async function GET(request: NextRequest) {
     
     // CRITICAL FIX: Normalize all database file paths to start with 'workspace/'
     // This prevents duplicates where DB files appear at root and FS files appear in workspace folder
-    const dbFiles = rawDbFiles.map((file: any) => {
+    // An environment file holds credentials: never listed, even when an
+    // earlier sync copied one into the database.
+    const dbFiles = rawDbFiles.filter((file: any) => !isEnvFile(file.path)).map((file: any) => {
       let normalizedPath = file.path
       // If path doesn't start with 'workspace/', add it
       if (!normalizedPath.startsWith('workspace/')) {
@@ -82,6 +84,9 @@ export async function GET(request: NextRequest) {
             // Recursively scan subdirectories
             await scanDirectory(fullPath, relativePath)
           } else if (entry.isFile()) {
+            // An environment file holds credentials: never listed or copied.
+            if (isEnvFile(entry.name)) continue
+
             // Skip binary files and non-text files
             const ext = entry.name.split('.').pop()?.toLowerCase()
             const binaryExtensions = ['exe', 'dll', 'so', 'dylib', 'bin', 'node', 'wasm', 'png', 'jpg', 'jpeg', 'gif', 'ico', 'svg', 'woff', 'woff2', 'ttf', 'eot', 'zip', 'tar', 'gz']
