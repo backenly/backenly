@@ -8820,29 +8820,6 @@ async function executeVacuumTable(params: any, projectId: string): Promise<Execu
 }
 
 /**
- * Drop an index the database has measurably never used.
- *
- * Reached only from an `unused_index` finding a human approved — the classifier
- * gates the type on `approval`, and nothing else emits DROP_INDEX.
- *
- * Every refusal below is a case where `DROP INDEX` either cannot work or would
- * destroy something the finding never measured:
- *
- *   • a primary-key or unique index enforces a CONSTRAINT. Postgres refuses to
- *     drop it and tells you to use ALTER TABLE ... DROP CONSTRAINT, which is a
- *     different and far more destructive operation than the one approved.
- *   • an index backing any constraint (EXCLUDE, deferred UNIQUE) — same reason.
- *   • an index in another schema — the identifier is always qualified with THIS
- *     project's workspace schema, so a name collision across tenants cannot
- *     reach anyone else's catalog.
- *
- * By default, plain DROP INDEX is used because migrations run inside a transaction
- * block, taking a brief ACCESS EXCLUSIVE lock on the table.
- * When `params.online === true` is passed (e.g. Backenly's autonomous repairs),
- * `dropIndexOnline` (lib/execution/online-index.ts) drops the index CONCURRENTLY
- * on its own dedicated connection, avoiding table locks while traffic continues.
- */
-/**
  * A branch is cloned with LIKE … INCLUDING ALL, and Postgres names the indexes
  * and unique constraints it copies by its own rules, so a name production uses
  * may not exist on the branch. The copy is the one on the same table with the
@@ -8897,6 +8874,31 @@ async function branchCopyOfConstraint(
   return copy?.conname ?? null
 }
 
+/**
+ * Drop an index.
+ *
+ * Callers include an `unused_index` finding a human approved
+ * (lib/core/fix-actions.ts), a migration's DROP INDEX (lib/mcp/apply-migration.ts)
+ * and Backenly's own index trials (lib/autonomy/index-trials.ts).
+ *
+ * Every refusal below is a case where `DROP INDEX` either cannot work or would
+ * destroy something the caller never asked for:
+ *
+ *   • a primary-key or unique index enforces a CONSTRAINT. Postgres refuses to
+ *     drop it and tells you to use ALTER TABLE ... DROP CONSTRAINT, which is a
+ *     different and far more destructive operation than the one approved.
+ *   • an index backing any constraint (EXCLUDE, deferred UNIQUE) — same reason.
+ *   • an index in another schema — the identifier is always qualified with THIS
+ *     project's workspace schema, so a name collision across tenants cannot
+ *     reach anyone else's catalog.
+ *
+ * A plain DROP INDEX takes ACCESS EXCLUSIVE on the table, and while it waits
+ * for one long query every new query on the table queues behind it. So with
+ * `params.online === true`, which apply_migration and the index trials set,
+ * `dropIndexOnline` (lib/execution/online-index.ts) runs DROP INDEX
+ * CONCURRENTLY on a connection of its own. Otherwise the drop is plain, and its
+ * brief ACCESS EXCLUSIVE lock is the cost of the approved change.
+ */
 async function executeDropIndex(params: any, projectId: string, target: SchemaTarget = {}): Promise<ExecutionResult> {
   const db = await projectDb(projectId)
   const indexName = params?.indexName ?? params?.index
@@ -9022,10 +9024,7 @@ async function executeDropIndex(params: any, projectId: string, target: SchemaTa
       // statement takes ACCESS EXCLUSIVE, and while it waits for one long query
       // every new query on the table queues behind it.
       const { dropIndexOnline } = await import('@/lib/execution/online-index')
-      const timeouts = params?.timeouts ?? (params?.lockTimeoutMs || params?.buildTimeoutMs
-        ? { lockTimeoutMs: params.lockTimeoutMs, buildTimeoutMs: params.buildTimeoutMs }
-        : undefined)
-      const dropped = await dropIndexOnline(projectId, postgresSchema, indexName, timeouts)
+      const dropped = await dropIndexOnline(projectId, postgresSchema, indexName)
       if (dropped.kind === 'failed') {
         return {
           success: false,
@@ -9696,13 +9695,11 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
           data: { indexName: idxName, existingDefinition: def },
         }
       }
-      const timeouts = params?.timeouts ?? (params?.lockTimeoutMs || params?.buildTimeoutMs
-        ? { lockTimeoutMs: params.lockTimeoutMs, buildTimeoutMs: params.buildTimeoutMs }
-        : undefined)
       if (sameShape && online) {
-        // Built online, so removed online. A build still running holds a lock
-        // this waits for, and gives up on, without touching it.
-        const dropped = await dropIndexOnline(projectId, postgresSchema, idxName, timeouts)
+        // Built online, so removed online. A build still running is left
+        // alone: dropIndexOnline sees it and stops at once, and its lock
+        // timeout gives up on any it cannot see.
+        const dropped = await dropIndexOnline(projectId, postgresSchema, idxName)
         if (dropped.kind === 'failed') {
           return {
             success: false,
@@ -9736,10 +9733,7 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
       `CREATE${unique ? ' UNIQUE' : ''} INDEX${online ? ' CONCURRENTLY' : ''} IF NOT EXISTS "${idxName}" ` +
       `ON "${postgresSchema}"."${tableName}"${usingClause} (${colList})${whereClause}`
     if (online) {
-      const timeouts = params?.timeouts ?? (params?.lockTimeoutMs || params?.buildTimeoutMs
-        ? { lockTimeoutMs: params.lockTimeoutMs, buildTimeoutMs: params.buildTimeoutMs }
-        : undefined)
-      const built = await buildIndexOnline(projectId, postgresSchema, idxName, ddl, timeouts)
+      const built = await buildIndexOnline(projectId, postgresSchema, idxName, ddl)
       if (built.kind === 'failed') {
         return {
           success: false,

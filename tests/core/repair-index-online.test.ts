@@ -18,7 +18,14 @@ import { Client } from 'pg'
 import { prisma } from '@/lib/db/prisma'
 import { executeAction, type AIAction } from '@/lib/ai/minimal-executor'
 import { buildFixAction } from '@/lib/core/fix-actions'
-import { buildIndexOnline, dropIndexOnline, ONLINE_INDEX_LOCK_NAMESPACE } from '@/lib/execution/online-index'
+import {
+  buildIndexOnline,
+  dropIndexOnline,
+  onlineIndexBounds,
+  ONLINE_BUILD_TIMEOUT_MS,
+  ONLINE_INDEX_LOCK_NAMESPACE,
+  ONLINE_LOCK_TIMEOUT_MS,
+} from '@/lib/execution/online-index'
 import { withSqlCapture } from '@/lib/execution/sql-recorder'
 
 process.env.ENABLE_AUTONOMY_RECONCILER = 'true'
@@ -345,4 +352,15 @@ describe('a repair index is built online', () => {
     expect(drops[0].sql).toContain('idx_orders_captured')
     expect(creates[0].sql).toContain('idx_orders_captured')
   }, 60_000)
+
+  test('a timeout that is not a positive whole number of milliseconds is the default', () => {
+    const defaults = { lockTimeoutMs: ONLINE_LOCK_TIMEOUT_MS, buildTimeoutMs: ONLINE_BUILD_TIMEOUT_MS }
+    expect(onlineIndexBounds()).toEqual(defaults)
+    // 0 would turn the Postgres timeout off.
+    expect(onlineIndexBounds({ lockTimeoutMs: 0, buildTimeoutMs: -1 })).toEqual(defaults)
+    expect(onlineIndexBounds({ lockTimeoutMs: 1.5, buildTimeoutMs: Number.NaN })).toEqual(defaults)
+    // Each value is written into a SET statement.
+    expect(onlineIndexBounds({ lockTimeoutMs: '1; SELECT 1' as unknown as number })).toEqual(defaults)
+    expect(onlineIndexBounds({ lockTimeoutMs: 150, buildTimeoutMs: 300 })).toEqual({ lockTimeoutMs: 150, buildTimeoutMs: 300 })
+  })
 })
