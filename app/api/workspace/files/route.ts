@@ -53,7 +53,7 @@ export async function GET(request: NextRequest) {
       console.log('[DB Files] Content length: ' + firstFile.content.length)
       console.log('[DB Files] Has real newlines: ' + firstFile.content.includes('\n'))
       console.log('[DB Files] Has escaped newlines: ' + firstFile.content.includes('\\n'))
-      console.log('[DB Files] First 100 chars: ' + JSON.stringify(firstFile.content.substring(0, 100)))
+      // Never a file's content in the log: a workspace file can hold credentials.
     }
     
     // Also scan FILE SYSTEM for files that might not be in DB yet
@@ -121,12 +121,6 @@ export async function GET(request: NextRequest) {
             console.log('[FS Sync] File: ' + relativePath + ', Length: ' + content.length)
             console.log('[FS Sync] Has real newlines: ' + content.includes('\n'))
             console.log('[FS Sync] Has escaped newlines: ' + content.includes('\\n'))
-            
-            // SPECIAL DEBUG for schema.prisma
-            if (relativePath.includes('schema.prisma')) {
-              console.log('[FS Sync PRISMA] First 300 chars: ' + JSON.stringify(content.substring(0, 300)))
-              console.log('[FS Sync PRISMA] Char codes at positions 0-10:', Array.from(content.substring(0, 10)).map((c, i) => `${i}:${c.charCodeAt(0)}`).join(', '))
-            }
             
             // Fix: Ensure newlines are properly formatted
             // If content has literal \n (escaped), convert to actual newlines
@@ -197,7 +191,6 @@ export async function GET(request: NextRequest) {
               // Debug: Log content before saving
               console.log('[FS Sync] Saving to DB - Content length: ' + fixedContent.length)
               console.log('[FS Sync] Saving to DB - Has real newlines: ' + fixedContent.includes('\n'))
-              console.log('[FS Sync] Saving to DB - First 100 chars: ' + JSON.stringify(fixedContent.substring(0, 100)))
               
               // Also save to database for next time
               // @ts-ignore
