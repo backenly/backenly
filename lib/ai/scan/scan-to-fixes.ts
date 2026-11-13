@@ -82,9 +82,7 @@ export async function harvestScanFixes(projectId: string): Promise<ScanFixHarves
         }
         case 'weak_rls': {
           // 'auto' installs the rule the schema implies (lib/services/rls-ownership.ts),
-          // and refuses when it cannot tell. own_rows on user_id failed on a table
-          // owned through a parent, and on user_roles or team_members let a user
-          // write the row that grants them access.
+          // and refuses when it cannot tell.
           if (issue.table) {
             candidates.push({
               id: nextId(),
