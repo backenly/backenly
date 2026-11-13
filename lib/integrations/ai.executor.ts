@@ -123,7 +123,9 @@ export async function executeAiIntegration(
           { name: 'completion_tokens',type: 'INTEGER' },
           { name: 'latency_ms',       type: 'INTEGER' },
           { name: 'cached',           type: 'BOOLEAN', default: 'false' },
-          { name: 'user_id',          type: 'TEXT' },         // which end-user triggered this
+          // Which end-user triggered this, when one did: as declared, not
+          // uuid NOT NULL as its name made it (lib/db/name-rules.ts).
+          { name: 'user_id',          type: 'TEXT', nullable: true, sqlType: 'text' },
           { name: 'error',            type: 'TEXT' },
         ],
       },

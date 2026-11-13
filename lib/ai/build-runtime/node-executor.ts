@@ -27,8 +27,16 @@ export interface NodeExecutionResult {
 
 // ── Schema Column Definitions ─────────────────────────────────────────────────
 
-/** Standard column sets for common table types */
-const TABLE_COLUMNS: Record<string, Array<{ name: string; type: string; required?: boolean }>> = {
+/**
+ * Standard column sets for common table types.
+ *
+ * A flag on a column states what the name rules would otherwise guess
+ * (lib/db/name-rules.ts): `nullable: true` where Backenly's own endpoints
+ * write rows without the column, `unique: false` where they write the same
+ * value on many rows.
+ */
+type DesignedColumns = Array<{ name: string; type: string; required?: boolean; nullable?: boolean; unique?: boolean }>
+const TABLE_COLUMNS: Record<string, DesignedColumns> = {
   users: [
     { name: 'id', type: 'UUID' },
     { name: 'email', type: 'TEXT' },
@@ -77,7 +85,8 @@ const TABLE_COLUMNS: Record<string, Array<{ name: string; type: string; required
     { name: 'status', type: 'TEXT' },
     { name: 'total', type: 'DECIMAL' },
     { name: 'customer_name', type: 'TEXT' },
-    { name: 'customer_email', type: 'TEXT' },
+    // One guest orders again with the same email (POST /checkout writes it on each order).
+    { name: 'customer_email', type: 'TEXT', unique: false },
     { name: 'shipping_address', type: 'TEXT' },
     { name: 'created_at', type: 'TIMESTAMP' },
     { name: 'updated_at', type: 'TIMESTAMP' },
@@ -268,7 +277,8 @@ const TABLE_COLUMNS: Record<string, Array<{ name: string; type: string; required
   generation_jobs: [
     { name: 'id', type: 'UUID' },
     { name: 'user_id', type: 'UUID' },
-    { name: 'project_id', type: 'UUID' },
+    // The job endpoints create a job without one (lib/ai/build-runtime/domain-business-logic.ts).
+    { name: 'project_id', type: 'UUID', nullable: true },
     { name: 'status', type: 'TEXT' },         // pending/running/completed/failed/cancelled
     { name: 'model', type: 'TEXT' },
     { name: 'prompt', type: 'TEXT' },
@@ -298,7 +308,7 @@ const TABLE_COLUMNS: Record<string, Array<{ name: string; type: string; required
   render_jobs: [
     { name: 'id', type: 'UUID' },
     { name: 'user_id', type: 'UUID' },
-    { name: 'project_id', type: 'UUID' },
+    { name: 'project_id', type: 'UUID', nullable: true },
     { name: 'status', type: 'TEXT' },
     { name: 'input_url', type: 'TEXT' },
     { name: 'output_url', type: 'TEXT' },
@@ -331,7 +341,8 @@ const TABLE_COLUMNS: Record<string, Array<{ name: string; type: string; required
     { name: 'type', type: 'TEXT' },           // purchase/consume/refund/bonus
     { name: 'description', type: 'TEXT' },
     { name: 'balance_after', type: 'DECIMAL' },
-    { name: 'reference_id', type: 'UUID' },
+    // The credit endpoints write ledger rows without one (domain-business-logic.ts).
+    { name: 'reference_id', type: 'UUID', nullable: true },
     { name: 'created_at', type: 'TIMESTAMP' },
   ],
   notifications: [
@@ -383,7 +394,7 @@ const TABLE_COLUMNS: Record<string, Array<{ name: string; type: string; required
   ],
 }
 
-function defaultColumns(tableName: string): Array<{ name: string; type: string }> {
+function defaultColumns(tableName: string): DesignedColumns {
   return TABLE_COLUMNS[tableName] ?? inferColumnsFromTableName(tableName)
 }
 
@@ -402,7 +413,7 @@ function defaultColumns(tableName: string): Array<{ name: string; type: string }
  *  render_tasks     → task/job archetype
  *  audit_logs       → audit archetype (actor_id, action, resource_type, resource_id, meta…)
  */
-function inferColumnsFromTableName(tableName: string): Array<{ name: string; type: string }> {
+function inferColumnsFromTableName(tableName: string): DesignedColumns {
   const n = tableName.toLowerCase()
 
   // ── Job / Task / Queue archetype ──────────────────────────────────────────
@@ -487,7 +498,7 @@ function inferColumnsFromTableName(tableName: string): Array<{ name: string; typ
       { name: 'type',         type: 'TEXT' },     // purchase/consume/refund/bonus
       { name: 'description',  type: 'TEXT' },
       { name: 'balance_after',type: 'DECIMAL' },
-      { name: 'reference_id', type: 'UUID' },     // related job/order/etc.
+      { name: 'reference_id', type: 'UUID', nullable: true }, // related job/order/etc., when there is one
       { name: 'created_at',   type: 'TIMESTAMP' },
     ]
   }
@@ -773,8 +784,10 @@ async function executeSchemaNode(
     .filter((c: any) => Array.isArray(c.enumValues) && c.enumValues.length > 0)
     .map((c: any) => ({ columnName: c.name, values: c.enumValues }))
 
-  // Strip enumValues from columns (CREATE_TABLE only understands name+type)
-  const cleanColumns = columns.map(({ enumValues: _ev, foreignKey: _fk, unique: _uq, required: _req, ...rest }: any) => rest)
+  // Strip enumValues from columns (CREATE_TABLE only understands name+type).
+  // `unique: false` stays: it turns off the UNIQUE the column's name would get.
+  const cleanColumns = columns.map(({ enumValues: _ev, foreignKey: _fk, unique, required: _req, ...rest }: any) =>
+    unique === false ? { ...rest, unique } : rest)
 
   const createTableParams: Record<string, any> = {
     tableName,

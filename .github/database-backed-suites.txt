@@ -1999,3 +1999,17 @@ tests/integration/add-column-as-written.spec.ts
 # them is demoted or leaves the organization, and work again if the role comes
 # back. A provisioned project, the real issuing, consent, token and tool routes.
 tests/integration/mcp-credentials-follow-the-issuer.spec.ts
+
+# The tables Backenly designs (the Stripe and other integration wiring, the
+# build's tables, a description's) hold their own defaults and the values
+# Backenly writes into them; a Stripe-wired subscriptions table made before is
+# offered its guessed CHECK for removal.
+tests/integration/designed-tables-hold-their-values.spec.ts
+
+# An agent installs an allowlisted extension with CREATE EXTENSION in
+# apply_migration, as the console's Install button does: into public, said to
+# be database-wide, usable by the project's REST roles, seen by a second
+# project, recorded from either door, refused off the allowlist or without
+# superuser, never dropped, and installed from a branch on a protected
+# production. Real catalog, real MCP route and console route.
+tests/integration/agent-installs-extensions.spec.ts
