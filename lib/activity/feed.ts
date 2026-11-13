@@ -230,6 +230,14 @@ function labelForAudit(
     return { kind: 'auto_fix', label: `A repair failed its check, and the access rules${table} could not be put back: needs a look` }
   }
 
+  // A PostgreSQL extension installed through this project, from the console or
+  // an agent's migration (lib/services/extensions.ts). Database-wide, so said.
+  if (a === 'extension_installed') {
+    const what = typeof d.extension === 'string' ? `the ${d.extension} extension` : 'an extension'
+    const by = d.via === 'agent' ? 'Your coding agent installed' : 'Installed'
+    return { kind: 'general', label: `${by} ${what}, which every project on the database can use` }
+  }
+
   // An index Backenly built on its own, kept or taken away after its trial
   // (lib/autonomy/index-trials.ts). The row carries its own sentence.
   if (a === 'index_trial_result') {

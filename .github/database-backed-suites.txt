@@ -1986,3 +1986,26 @@ tests/integration/usage-storage-measured-on-read.spec.ts
 # auto-wired functions against ctx.integrations.email.send(). A real project,
 # the real connect action and the real key store (#609).
 tests/integration/email-integration-wiring-sender.spec.ts
+
+# A rule Backenly guessed from a name, which the request did not ask for, is
+# found on a table made before #654 (UNIQUE on an email column, a CHECK list on
+# status), never on one the SQL declared or made after #654; the loop and the
+# agent get a proposal, and a person's one click drops it as a change History
+# restores. A real project, History, the observer, the reconciler and the route.
+tests/integration/guessed-constraints.spec.ts
+# A column added in SQL is added as written, on production and on a branch:
+# no UNIQUE from an email name, no foreign key from an *_id name.
+tests/integration/add-column-as-written.spec.ts
+# The tables Backenly designs (the Stripe and other integration wiring, the
+# build's tables, a description's) hold their own defaults and the values
+# Backenly writes into them; a Stripe-wired subscriptions table made before is
+# offered its guessed CHECK for removal.
+tests/integration/designed-tables-hold-their-values.spec.ts
+
+# An agent installs an allowlisted extension with CREATE EXTENSION in
+# apply_migration, as the console's Install button does: into public, said to
+# be database-wide, usable by the project's REST roles, seen by a second
+# project, recorded from either door, refused off the allowlist or without
+# superuser, never dropped, and installed from a branch on a protected
+# production. Real catalog, real MCP route and console route.
+tests/integration/agent-installs-extensions.spec.ts

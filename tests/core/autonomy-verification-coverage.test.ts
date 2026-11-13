@@ -167,10 +167,13 @@ describe('no finding type is classified auto without an executable repair', () =
     // and a table name alone cannot name an index — a table normally has
     // several. Excluding it instead of widening the fixture would have weakened
     // the guard, since the type genuinely does have an executable repair.
+    // `guessed_constraint` is the same: its repair is DROP CONSTRAINT on the
+    // rule the detector named, and a column can carry more than one.
     const probeDetails = {
       tableName: 'probe_table',
       columnName: 'user_id',
       indexName: 'idx_probe_table_legacy',
+      constraintName: 'probe_table_user_id_key',
     }
     for (const t of ALL_FINDING_TYPES) {
       const { decision } = classifyFix(t, null)
