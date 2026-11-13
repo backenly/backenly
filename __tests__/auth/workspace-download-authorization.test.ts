@@ -8,15 +8,17 @@
  * The handler authenticated the caller and then took the project id from the
  * `X-Project-Id` header with no further question, so any signed-in account
  * could download another project's workspace by naming its id. It now resolves
- * the header through `getCurrentProjectId`, the same guard every sibling
- * workspace/files route uses: the header is a request, the resolver decides.
+ * the header through `withTenantIsolation`: the header is a request, the
+ * resolver decides, and the wrapper holds the caller to the Admin role.
  *
  * What is pinned here:
  *
  *   unauthenticated   401, before any project or disk access
  *   stranger          refused; a missing project answers 404
  *   no project named  400 on Cloud, never a guessed project
- *   VIEWER member     passes the guard (a read), reaching the disk lookup
+ *   VIEWER, DEVELOPER 403 PROJECT_ROLE_INSUFFICIENT: the archive can hold the
+ *                     `.env`, so it needs the Admin role
+ *   ADMIN member      passes the guard, reaching the disk lookup
  *   owner             passes the guard, reaching the disk lookup
  *
  * "Reaching the disk lookup" is asserted as the route's own 404 "Workspace not
@@ -214,8 +216,22 @@ describe('GET /api/workspace/download', () => {
     expect(body.error).toBe('Workspace not found')
   })
 
-  it('a VIEWER may read: the guard passes and the disk lookup answers', async () => {
-    const f = await fixture('VIEWER')
+  it.each(['VIEWER', 'DEVELOPER'] as const)(
+    'refuses a %s: the archive needs the Admin role',
+    async (role) => {
+      const f = await fixture(role)
+
+      const res: any = await download(f.member.token, f.projectId)
+      const body = await res.json()
+
+      expect(res.status).toBe(403)
+      expect(body.code).toBe('PROJECT_ROLE_INSUFFICIENT')
+      expect(res.headers?.get?.('Content-Type') ?? '').not.toContain('zip')
+    },
+  )
+
+  it('lets an ADMIN through the guard, to the route\'s own disk lookup', async () => {
+    const f = await fixture('ADMIN')
 
     const res: any = await download(f.member.token, f.projectId)
     const body = await res.json()
