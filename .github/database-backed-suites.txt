@@ -2003,6 +2003,11 @@ tests/integration/guessed-constraints.spec.ts
 # A column added in SQL is added as written, on production and on a branch:
 # no UNIQUE from an email name, no foreign key from an *_id name.
 tests/integration/add-column-as-written.spec.ts
+# The tables Backenly designs (the Stripe and other integration wiring, the
+# build's tables, a description's) hold their own defaults and the values
+# Backenly writes into them; a Stripe-wired subscriptions table made before is
+# offered its guessed CHECK for removal.
+tests/integration/designed-tables-hold-their-values.spec.ts
 
 # An agent installs an allowlisted extension with CREATE EXTENSION in
 # apply_migration, as the console's Install button does: into public, said to
