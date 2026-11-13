@@ -33,7 +33,7 @@
 
 import { BRAIN_TOOLS, READ_ONLY_TOOLS, isDestructiveTool } from '@/lib/ai/brain/tools'
 import { DOMAIN_TOOLS, domainDescription, domainInputSchema, getDomainTool, readOnlyView } from '@/lib/mcp/domains'
-import { AGENT_DOC_TOPICS } from '@/lib/mcp/agent-docs'
+import { AGENT_DOC_TOPICS, docsPointer } from '@/lib/mcp/agent-docs'
 
 export type McpTier = 'chat' | 'read' | 'build' | 'data'
 
@@ -185,6 +185,67 @@ function tierOf(name: string): McpTier | null {
   if (BUILD_TOOLS.has(name)) return 'build'
   return null
 }
+
+/**
+ * What tools/list says for the advertised tools defined in lib/ai/brain/tools.ts.
+ *
+ * Their schema stays the brain's, so the arguments an agent may pass are the
+ * ones dispatch runs. Their text does not: the brain's own model reads the long
+ * form there, while tools/list is sent to every session before the user types
+ * anything (production QA 2026-11-09, report 99). This keeps what an agent needs
+ * to call the tool correctly, its refusals and where else to go, and names the
+ * docs topic with the rest.
+ */
+const MCP_TEXT: Record<string, { description: string; args: Record<string, string> }> = {
+  run_query: {
+    description:
+      'Read-only SQL on this project\'s tables: SELECT with joins, GROUP BY, aggregates, window functions, CTEs, ' +
+      'EXPLAIN. Bare table names (SELECT * FROM posts), one statement per call. The system catalogs (pg_*, ' +
+      'information_schema) are refused: use get_table_schema. Writes: apply_migration for schema, db_insert / ' +
+      `db_update / db_delete for rows. ${docsPointer('database')}`,
+    args: {
+      sql: 'One read-only SQL statement.',
+    },
+  },
+  get_table_schema: {
+    description:
+      'One table from the live catalog: columns, keys, foreign keys, indexes, CHECK constraints with their allowed ' +
+      'values, triggers, and RLS policies with their roles. Read it before writing to a table. To edit a policy with ' +
+      'set_rls, send back its editableUsing / editableCheck (raw using / withCheck are refused). A USING (true) policy ' +
+      `for an internal role only is not open access. Side-effect free. ${docsPointer('database')}`,
+    args: { tableName: 'The table.' },
+  },
+  set_rls: {
+    description:
+      'Row-level security as exact SQL, one rule per command: predicates are installed verbatim and read back from ' +
+      'pg_policies, with no model involved. Use it instead of backend_chat whenever you can write the predicate. ' +
+      'Commands you do not name stay as they are; naming a subset while a FOR ALL policy exists is refused. A ' +
+      'predicate may use this table\'s columns, backenly_jwt_claim(\'sub\') (the end-user\'s id), comparisons, ' +
+      'AND/OR/NOT, IN, IS NULL, casts and pure functions, and reach a parent row only via EXISTS (SELECT 1 FROM parent ' +
+      'p WHERE p.id = this_table.parent_id AND …). USING: rows a command may target; CHECK: rows it may produce. Give ' +
+      `CHECK whenever writing is narrower than reading. ${docsPointer('database')}`,
+    args: {
+      tableName: 'The table.',
+      select: 'SELECT rule: { using }.',
+      insert: 'INSERT rule: { check }.',
+      update:
+        'UPDATE rule: { using, check }. Give both when they differ: using alone lets a caller target a row and ' +
+        'rewrite its owner column to themselves.',
+      delete: 'DELETE rule: { using }.',
+      role: 'Default authenticated.',
+    },
+  },
+}
+
+/** `properties` with each argument's text replaced where `args` has one. */
+function withArgText(properties: Record<string, unknown>, args: Record<string, string> | undefined): Record<string, unknown> {
+  if (!args) return properties
+  return Object.fromEntries(Object.entries(properties).map(([k, schema]) =>
+    [k, k in args ? { ...(schema as object), description: args[k] } : schema]))
+}
+
+/** A preview branch argument, as the row tools and apply_migration take it. */
+const BRANCH_ID_ARG = { type: 'string', description: 'A preview branch id: act on it, not production.' }
 
 /**
  * ── The advertised surface ───────────────────────────────────────────────────
@@ -458,21 +519,16 @@ export function buildDispatchable(): McpToolDescriptor[] {
     name: 'backend_chat',
     tier: 'chat',
     description:
-      'Ask Backenly\'s own model to plan and apply what you would rather describe than specify ("add likes and ' +
-      'comments to my posts table"), through the same governed tools; it returns a summary. It answers within about ' +
-      '45 s; a longer request keeps running and answers `status: "running"` with a run id and what has landed, and ' +
-      'backend_chat with "status" waits for it again. A message sent while one runs joins it. Whenever an answer ' +
-      'carries `next`, the request is not finished: make that call. For a whole schema, apply_migration with the ' +
-      'complete DDL is faster and exact. Where production is protected, the brain builds the schema on a preview ' +
-      'branch and asks a person for one merge: the answer carries the `approval` id to poll with check_approval and ' +
-      '`branch`, what waits for the merge; say "continue" once it is executed. A destructive step is NOT executed: ' +
-      'the answer carries an `approval` id to poll with check_approval while a person decides in the Review Queue.',
+      'Describe a change in plain words and Backenly\'s own model plans and applies it through the same governed ' +
+      'tools; it draws AI credits. For a whole schema, apply_migration is faster and exact. A destructive step is ' +
+      'NOT executed: the answer carries an `approval` id for check_approval. Whenever an answer carries `next`, make ' +
+      `that call. ${docsPointer('autonomy')}`,
     inputSchema: {
       type: 'object',
       properties: {
         message: {
           type: 'string',
-          description: 'The request, specific: "a posts table with title, body and author_id (FK users)" works better than "make a posts table".',
+          description: 'The request: name the tables, columns and relations.',
         },
       },
       required: ['message'],
@@ -487,9 +543,8 @@ export function buildDispatchable(): McpToolDescriptor[] {
     name: 'fetch_docs',
     tier: 'read',
     description:
-      'Fetch Backenly documentation as Markdown so you can answer questions and use the right tools without guessing. ' +
-      'Call with no arguments for the index (connecting, the tools, approvals, read-only keys, headers), or pass `topic` ' +
-      'for one area in full. Prefer this over assuming endpoint shapes or tool names.',
+      'Backenly\'s docs as Markdown, so you use the right tools and endpoints without guessing. No arguments: the ' +
+      'index; `topic`: one area in full.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -497,7 +552,7 @@ export function buildDispatchable(): McpToolDescriptor[] {
           type: 'string',
           // Not an enum: older clients send the section names the single-file
           // guide had ("mcp", …), which resolve through lib/mcp/agent-docs.ts.
-          description: `One topic: ${AGENT_DOC_TOPICS.map((t) => t.id).join(', ')}.`,
+          description: `One of: ${AGENT_DOC_TOPICS.map((t) => t.id).join(', ')}.`,
         },
       },
       additionalProperties: false,
@@ -514,19 +569,16 @@ export function buildDispatchable(): McpToolDescriptor[] {
     name: 'generate_types',
     tier: 'read',
     description:
-      'TypeScript types for every table, read from the live catalog: save the source (conventionally ' +
-      '`src/backenly.types.ts`) and import `Database`, `Row<T>`, `Insert<T>`, `Update<T>` and `TableName`. ' +
-      'ALWAYS use it instead of hand-writing row types, which drift when the schema changes; `schemaHash` says ' +
-      'whether a regeneration changed anything. Side-effect free.',
+      'TypeScript types for every table, from the live catalog: Database, Row<T>, Insert<T>, Update<T>, ' +
+      'TableName. Use them instead of hand-written row types. Side-effect free. ' +
+      docsPointer('database'),
     inputSchema: {
       type: 'object',
       properties: {
         format: {
           type: 'string',
           enum: ['dts', 'client', 'openapi'],
-          description:
-            'dts = type declarations (default); client = declarations plus a typed client for this project; ' +
-            'openapi = an OpenAPI 3.1 spec of the REST endpoints.',
+          description: 'Default dts; client adds a typed client; openapi is an OpenAPI 3.1 spec.',
         },
       },
       additionalProperties: false,
@@ -578,15 +630,14 @@ export function buildDispatchable(): McpToolDescriptor[] {
     name: 'check_approval',
     tier: 'read',
     description:
-      'The status of a call parked for a person, or of a backend_chat run by its run id: pending | approved | ' +
-      'executed | failed | rejected | expired (older requests may also read partial), with a result summary once ' +
-      'decided. Poll every 15-30s while pending; stop on any other status. Only a person approves, in the Review ' +
-      'Queue. Neither `failed` nor `partial` promises the backend is unchanged: read resultSummary and the current ' +
-      'state before raising the request again.',
+      'Status of a call parked for a person (approval id) or of a backend_chat run (run id): pending, approved, ' +
+      'executed, failed, rejected or expired. Poll every 15-30s while pending; only a person approves. failed (or ' +
+      'an older partial) may have changed something: read resultSummary and the state before asking again. ' +
+      docsPointer('autonomy'),
     inputSchema: {
       type: 'object',
       properties: {
-        id: { type: 'string', description: 'The approval request id returned by backend_chat.' },
+        id: { type: 'string', description: 'An approval id or a backend_chat run id.' },
       },
       required: ['id'],
       additionalProperties: false,
@@ -606,13 +657,14 @@ export function buildDispatchable(): McpToolDescriptor[] {
       properties?: Record<string, unknown>
       required?: string[]
     }
+    const text = MCP_TEXT[name]
     out.push({
       name,
       tier,
-      description: fn.description ?? '',
+      description: text?.description ?? fn.description ?? '',
       inputSchema: {
         type: 'object',
-        properties: params.properties ?? {},
+        properties: withArgText(params.properties ?? {}, text?.args),
         ...(params.required && params.required.length ? { required: params.required } : {}),
         additionalProperties: false,
       },
@@ -649,17 +701,20 @@ export function buildDispatchable(): McpToolDescriptor[] {
         additionalProperties: false,
       },
     },
+    // The three row writes are advertised and db_query is not, so each says
+    // what "as the owner" means itself instead of pointing at db_query.
     {
       name: 'db_insert',
       tier: 'data',
       description:
-        'Insert one row, as the owner (see db_query); returns it with its generated id and timestamps.',
+        'Insert one row as the project owner, for seeding and repair: end-user RLS does not apply; row-event ' +
+        `functions and row webhooks still fire. Returns the row. ${docsPointer('database')}`,
       inputSchema: {
         type: 'object',
         properties: {
-          table: { type: 'string', description: 'The table to insert the row into.' },
-          row: { type: 'object', description: 'Column → value pairs for the new row. Omit id/timestamps — they are auto-generated.' },
-          branchId: { type: 'string', description: 'A preview branch id (branch action:"list"): use that branch instead of production.' },
+          table: { type: 'string', description: 'The table.' },
+          row: { type: 'object', description: 'Column → value pairs; omit id and timestamps.' },
+          branchId: { ...BRANCH_ID_ARG },
         },
         required: ['table', 'row'],
         additionalProperties: false,
@@ -669,14 +724,15 @@ export function buildDispatchable(): McpToolDescriptor[] {
       name: 'db_update',
       tier: 'data',
       description:
-        'Set `patch` on the rows `filter` matches, as the owner (see db_query); returns how many changed.',
+        'Set `patch` on the rows `filter` matches, as the project owner (no end-user RLS; row-event functions and ' +
+        `row webhooks fire). An empty filter is refused. ${docsPointer('database')}`,
       inputSchema: {
         type: 'object',
         properties: {
-          table: { type: 'string', description: 'The table whose matching rows to update.' },
-          filter: { type: 'object', description: 'WHERE clause as column=value pairs (must not be empty — global updates are refused).' },
-          patch: { type: 'object', description: 'Columns to set on the matched rows.' },
-          branchId: { type: 'string', description: 'A preview branch id (branch action:"list"): use that branch instead of production.' },
+          table: { type: 'string', description: 'The table.' },
+          filter: { type: 'object', description: 'Column = value pairs. Must not be empty.' },
+          patch: { type: 'object', description: 'Columns to set.' },
+          branchId: { ...BRANCH_ID_ARG },
         },
         required: ['table', 'filter', 'patch'],
         additionalProperties: false,
@@ -686,14 +742,14 @@ export function buildDispatchable(): McpToolDescriptor[] {
       name: 'db_delete',
       tier: 'data',
       description:
-        'Delete the rows `filter` matches, as the owner (see db_query). A non-empty `filter` is required: there is no ' +
-        '"delete all rows" here; table-wide deletes belong to the dashboard.',
+        'Delete the rows `filter` matches, as the project owner (no end-user RLS; row-event functions and row ' +
+        `webhooks fire). An empty filter is refused: there is no delete-all. ${docsPointer('database')}`,
       inputSchema: {
         type: 'object',
         properties: {
-          table: { type: 'string', description: 'The table to delete the matching rows from.' },
-          filter: { type: 'object', description: 'WHERE clause as column=value pairs. Must not be empty.' },
-          branchId: { type: 'string', description: 'A preview branch id (branch action:"list"): use that branch instead of production.' },
+          table: { type: 'string', description: 'The table.' },
+          filter: { type: 'object', description: 'Column = value pairs. Must not be empty.' },
+          branchId: { ...BRANCH_ID_ARG },
         },
         required: ['table', 'filter'],
         additionalProperties: false,
@@ -711,40 +767,30 @@ export function buildDispatchable(): McpToolDescriptor[] {
     name: 'branch',
     tier: 'build',
     description:
-      'Preview branches: a copy of this project\'s SCHEMA (its row-security policies and sequences) where you build ' +
-      'and test a change while production keeps serving. Change a branch with apply_migration { sql, branchId }; ' +
-      'it is logged, and "merge" replays the log onto production. A branch starts EMPTY: rows are copied only with ' +
-      'includeData:true. Its preview endpoint is the usual base URL with a key bound to the branch, from "create" ' +
-      'or "connect": the data API and end-user auth run on the branch, every response carries ' +
-      'X-Backenly-Environment (branch:<name>), and other endpoints refuse the key with BRANCH_SURFACE_UNAVAILABLE. ' +
-      'fetch_docs topic "branches" has the details.\n' +
-      'Actions: "list" (existing branches + their ids) · "create" (needs `name`, lowercase kebab-case, max 5 active) · ' +
-      '"connect" (needs `branchId`; serviceRole:true for a server-side key) · ' +
-      '"diff" (needs `branchId` — the migrations a merge would replay, and any conflict with main) · "merge" (needs ' +
-      '`branchId` — replays the branch\'s migrations onto production; it WAITS FOR A HUMAN: you get an approval id to ' +
-      'poll with check_approval, and it is refused while main has changed a table the migrations touch) · "discard" ' +
-      '(needs `branchId` — drops the branch, its rows and its keys at once, with no approval and no undo; production ' +
-      'is untouched).',
+      'Preview branches: a copy of this project\'s schema to build and test a change on while production keeps ' +
+      'serving. It starts EMPTY unless includeData. Change it with apply_migration { sql, branchId }. ' +
+      `${docsPointer('branches')}\n` +
+      'Required arguments in parentheses:\n' +
+      '- create (name): kebab-case; at most 5 active\n' +
+      '- connect (branchId): a preview key\n' +
+      '- diff (branchId): what a merge would replay\n' +
+      '- merge (branchId): replays its migrations onto production; refused while production changed a table they ' +
+      'touch [waits for approval]\n' +
+      '- discard (branchId): drops the branch, its rows and keys at once; no approval, no undo',
     inputSchema: {
       type: 'object',
       properties: {
         action: {
           type: 'string',
           enum: Object.keys(BRANCH_ACTIONS),
-          description: 'What to do. Start with "list" if you do not have a branchId.',
+          description: 'Start with "list" for ids.',
         },
-        name: { type: 'string', description: 'For action:"create" — the branch name, e.g. "add-payments".' },
-        branchId: { type: 'string', description: 'For action:"connect" / "diff" / "merge" / "discard" — the id from action:"list".' },
-        includeData: {
-          type: 'boolean',
-          description:
-            'For action:"create". Default false: schema only. True also copies every production row, rarely worth it.',
-        },
+        name: { type: 'string', description: 'For create, e.g. "add-payments".' },
+        branchId: { type: 'string', description: 'From list.' },
+        includeData: { type: 'boolean', description: 'For create: also copy every production row.' },
         serviceRole: {
           type: 'boolean',
-          description:
-            'For action:"connect". Default false (a client key bound by row-level security). True issues a ' +
-            'server-side key that bypasses RLS on the branch only.',
+          description: 'For connect: a server-side key that bypasses RLS on the branch.',
         },
       },
       required: ['action'],
@@ -762,34 +808,27 @@ export function buildDispatchable(): McpToolDescriptor[] {
   out.push({
     name: 'apply_migration',
     tier: 'build',
+    // Not "all or nothing": every statement is checked before any runs, but one
+    // that fails while running stops the migration with `applied` and
+    // `remaining` (lib/mcp/apply-migration.ts), as the docs say.
     description:
-      'Apply a schema migration written as ordinary PostgreSQL DDL: CREATE TABLE; ALTER TABLE (ADD / DROP / RENAME ' +
-      'COLUMN, ALTER COLUMN … TYPE [USING], SET|DROP NOT NULL, SET|DROP DEFAULT, ADD / DROP CONSTRAINT, several ' +
-      'comma-separated); CREATE [UNIQUE] INDEX; DROP INDEX. Statements apply in order, all or nothing; write bare ' +
-      'table names. Every table gets `id`, `"createdAt"`, `"updatedAt"` (camelCase) and `"deleted_at"`; a declared ' +
-      '`id`, `created_at` or `updated_at` gives way to them, so order by `"createdAt"`. Each statement becomes a ' +
-      'governed action, planned, verified and reversible: this is NOT raw SQL execution, and anything else is refused ' +
-      'with the tool to use. A new type is exactly the one written; USING may cast the column\'s own value. Dropped ' +
-      'or retyped values are kept with the change, so restoring it brings them back. On production, dropping a ' +
-      'column, a constraint or a unique index, or changing a type, waits for a person: status "awaiting_approval" ' +
-      'with an approval id to poll with check_approval; approval runs the migration exactly as sent. Rows: ' +
-      'db_insert/db_update/db_delete; reads: run_query; dropping a table and anything else: backend_chat.\n' +
-      'With `branchId` it applies to that preview branch ONLY and is logged for the merge. A branch has production\'s ' +
-      'foreign keys and checks one a migration declares with REFERENCES; a key Backenly infers from a column name ' +
-      'is added at the merge.',
+      'Schema changes as PostgreSQL DDL: CREATE TABLE; ALTER TABLE (ADD / DROP / RENAME COLUMN, ALTER COLUMN … TYPE ' +
+      '[USING], SET|DROP NOT NULL, SET|DROP DEFAULT, ADD / DROP CONSTRAINT); CREATE [UNIQUE] INDEX, with operator ' +
+      'classes such as gin_trgm_ops; DROP INDEX; CREATE EXTENSION of an allowlisted extension such as pg_trgm or ' +
+      'citext (read_backend_state section "schema" lists them), installed for the whole database, so every project ' +
+      'on it can use it, and never removed. Bare table names. Anything else is refused with the tool to use. All ' +
+      'statements are checked before any runs; one that fails while running stops it, and the answer lists ' +
+      '`applied` (in effect: do not replay) and `remaining`. Every table gets id, "createdAt", "updatedAt" and ' +
+      '"deleted_at"; a declared id, created_at or updated_at gives way to them. On production, dropping a column, a ' +
+      'constraint or a unique index, or changing a type, waits for a person (status "awaiting_approval"; poll ' +
+      'check_approval). With branchId it changes that preview branch only, an extension excepted; protected ' +
+      'production refuses a migration without a branchId (BRANCH_REQUIRED). Rows: db_insert / db_update / ' +
+      `db_delete; dropping a table: backend_chat. ${docsPointer('database')}`,
     inputSchema: {
       type: 'object',
       properties: {
-        sql: {
-          type: 'string',
-          description:
-            'One or more DDL statements, semicolon-separated. e.g. ' +
-            '"CREATE TABLE posts (title text NOT NULL, author_id uuid REFERENCES users(id)); CREATE INDEX ON posts (author_id);"',
-        },
-        branchId: {
-          type: 'string',
-          description: 'A preview branch id (branch action:"list"): apply to that branch instead of production.',
-        },
+        sql: { type: 'string', description: 'One or more DDL statements, separated by semicolons.' },
+        branchId: { ...BRANCH_ID_ARG },
       },
       required: ['sql'],
       additionalProperties: false,
@@ -828,23 +867,16 @@ export function buildDispatchable(): McpToolDescriptor[] {
     tier: 'read',
     description:
       'What is currently true about this backend. No arguments: the overview (tables, APIs, auth, storage, RLS); ' +
-      'read it FIRST on any non-trivial task. `section` drills into one area. For questions about your own data, ' +
-      'use run_query. With `branchId` and section "schema", reads that preview branch\'s schema; read a branch\'s ' +
-      'rows with db_query { branchId }. Side-effect free.',
+      `read it FIRST on any non-trivial task. \`section\`: one area in full. Side-effect free. ${docsPointer('database')}`,
     inputSchema: {
       type: 'object',
       properties: {
         section: {
           type: 'string',
           enum: Object.keys(STATE_SECTIONS),
-          description:
-            'Which slice of state to read. Omit for the overview. ' +
-            '"schema" is the full table/column/FK map; "instructions" is the recommended agent workflow.',
+          description: 'Omit for the overview; "schema" maps every table, column and foreign key.',
         },
-        branchId: {
-          type: 'string',
-          description: 'With section "schema": a preview branch id, to read that branch\'s schema instead of production\'s.',
-        },
+        branchId: { type: 'string', description: 'With section "schema": that preview branch.' },
       },
       additionalProperties: false,
     },

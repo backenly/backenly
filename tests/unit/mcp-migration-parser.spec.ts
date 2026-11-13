@@ -607,6 +607,7 @@ describe('conformance with the real dispatch contract', () => {
     'ALTER TABLE posts DROP COLUMN IF EXISTS body',
     'CREATE UNIQUE INDEX idx_email ON users (email)',
     'CREATE INDEX ON posts (author_id, created_at DESC)',
+    'CREATE INDEX ON products USING gin (name gin_trgm_ops)',
   ]
 
   // Loaded lazily so a failure to import surfaces as a test failure, not a

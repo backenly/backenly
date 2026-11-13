@@ -136,14 +136,24 @@ export async function executeStripeIntegration(
     }
 
     // 3. Create subscriptions table
+    //
+    // As designed here, not as the name rules would have it
+    // (lib/db/name-rules.ts). `user_id` stays text, so an id from any sign-in
+    // fits (by name it became uuid). `status` holds Stripe's subscription
+    // status (incomplete, incomplete_expired, trialing, active, past_due,
+    // canceled, unpaid, paused) and `inactive` before there is one: Stripe owns
+    // that list and adds to it, so it gets no CHECK. The rule's CHECK for a
+    // table named subscriptions refused this table's own default, so every
+    // insert that left status out failed, and it refused Stripe's canceled,
+    // incomplete and incomplete_expired.
     const subResult = await executeAction({
       action: 'CREATE_TABLE',
       params: {
         tableName: 'subscriptions',
         columns: [
-          { name: 'user_id',                  type: 'TEXT',      notNull: true },
+          { name: 'user_id',                  type: 'TEXT',      notNull: true, sqlType: 'text' },
           { name: 'plan',                      type: 'TEXT',      notNull: true, default: 'free' },
-          { name: 'status',                    type: 'TEXT',      notNull: true, default: 'inactive' },
+          { name: 'status',                    type: 'TEXT',      notNull: true, default: 'inactive', check: false },
           { name: 'stripe_customer_id',        type: 'TEXT' },
           { name: 'stripe_subscription_id',    type: 'TEXT' },
           { name: 'stripe_price_id',           type: 'TEXT' },
