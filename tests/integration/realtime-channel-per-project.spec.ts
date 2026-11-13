@@ -49,6 +49,7 @@ jest.mock('@/lib/postgrest/registration', () => {
 
 import '@/tests/helpers/real-web-standard'
 
+import { execFileSync } from 'node:child_process'
 import http from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { randomUUID } from 'node:crypto'
@@ -250,6 +251,15 @@ async function serviceKeyFor(projectId: string, userId: string): Promise<string>
 beforeAll(async () => {
   process.env.BACKENLY_EDITION = 'cloud'
   for (const method of ['log', 'info', 'warn', 'error'] as const) consoleSpies.push(jest.spyOn(console, method))
+
+  // A generated route module runs its SQL on its function's own login, which
+  // the role helper creates (scripts/sql/function-roles.sql, which needs
+  // scripts/setup-direct-access.sql; a server gets both from
+  // scripts/postgrest-install.sh). Installed here, as the function suites do,
+  // so this file passes on its own and not only after one of them.
+  for (const file of ['scripts/setup-direct-access.sql', 'scripts/sql/function-roles.sql']) {
+    execFileSync('psql', ['-v', 'ON_ERROR_STOP=1', '-q', '-f', file, '-d', DB_URL], { stdio: 'pipe' })
+  }
 
   admin = new Client({ connectionString: DB_URL })
   await admin.connect()
