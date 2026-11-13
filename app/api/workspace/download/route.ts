@@ -1,6 +1,6 @@
 export const dynamic = 'force-dynamic'
 
-import { projectWorkspaceDir } from '@/lib/workspace/paths'
+import { isEnvFile, projectWorkspaceDir } from '@/lib/workspace/paths'
 import { NextRequest, NextResponse } from 'next/server'
 import { withTenantIsolation, TenantIsolationError } from '@/lib/tenant/isolation'
 import { promises as fs } from 'fs'
@@ -105,6 +105,8 @@ async function addDirectoryToArchive(
         // Recursively add subdirectories
         await addDirectoryToArchive(archive, fullPath, basePath)
       } else if (entry.isFile()) {
+        // An environment file holds credentials: never archived.
+        if (isEnvFile(entry.name)) continue
         // Add file to archive
         const fileContent = await fs.readFile(fullPath)
         archive.append(fileContent, { name: relativePath })

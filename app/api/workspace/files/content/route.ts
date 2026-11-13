@@ -1,6 +1,6 @@
 export const dynamic = 'force-dynamic'
 
-import { realPathInsideWorkspace, resolveInsideWorkspace } from '@/lib/workspace/paths'
+import { isEnvFile, realPathInWorkspace, resolveInsideWorkspace } from '@/lib/workspace/paths'
 import { NextRequest, NextResponse } from 'next/server'
 import { requireAuth } from '@/lib/auth/middleware'
 import { roleRefusal } from '@/lib/auth/project-floor'
@@ -38,19 +38,33 @@ export async function POST(request: NextRequest) {
       )
     }
 
+    // An environment file holds credentials: never served, from disk or from
+    // the database copy. Asked by the name requested AND the path it resolves
+    // to: `.env/`, `.env/.` and `x/../.env/.` all resolve to `.env`.
+    const envRefused = () =>
+      NextResponse.json(
+        { error: 'Environment files are not served from a workspace.', code: 'ENV_FILE_NOT_SERVED' },
+        { status: 403 },
+      )
+    if (isEnvFile(filePath) || isEnvFile(fsPath)) return envRefused()
+
+    // A symbolic link in the workspace is read only when it leads to a file
+    // that is in the workspace too, and never when it leads to an environment
+    // file. The real path is the one read, so what was checked is what is read.
+    const realPath = await realPathInWorkspace(projectId, fsPath)
+    if (realPath && isEnvFile(realPath)) return envRefused()
+
     // CRITICAL FIX: Always try to read from file system first (for all files, not just .prisma)
     // This ensures we get the latest content even if DB is not synced yet
     try {
       const fs = await import('fs/promises')
 
-      // A symbolic link in the workspace is read only when it leads to a file
-      // that is in the workspace too.
-      if (!(await realPathInsideWorkspace(projectId, fsPath))) {
+      if (!realPath) {
         throw new Error('not a file in the workspace')
       }
 
       console.log('[File Content] Trying to read from file system: ' + fsPath)
-      const content = await fs.readFile(fsPath, 'utf-8')
+      const content = await fs.readFile(realPath, 'utf-8')
       console.log('[File Content] FS read success! Length: ' + content.length + ', has newlines: ' + content.includes('\n'))
       
       // Successfully read from FS, return it
@@ -77,11 +91,10 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'File not found' }, { status: 404 })
     }
     
-    // Debug: Log content info
+    // Debug: Log content info (never the content itself: a file can hold credentials)
     console.log('[File Content] Raw content length: ' + file.content.length)
     console.log('[File Content] Has real newlines: ' + file.content.includes('\n'))
     console.log('[File Content] Has escaped newlines: ' + file.content.includes('\\n'))
-    console.log('[File Content] First 100 chars: ' + JSON.stringify(file.content.substring(0, 100)))
     
     // Fix: Ensure newlines are properly formatted
     // If content has literal \n (escaped), convert to actual newlines
