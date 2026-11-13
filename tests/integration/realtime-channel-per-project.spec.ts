@@ -546,12 +546,12 @@ describe('an older function body', () => {
 describe('the read-write login', () => {
   it('when issued, rotated or revoked, leaves the channel it could read quiet, and the stream keeps working', async () => {
     const stream = await openStream(first.id, first.key)
-    const eavesdrop = new Client({ connectionString: DB_URL })
-    await eavesdrop.connect()
-    const overheard: string[] = []
-    eavesdrop.on('notification', (msg) => {
+    const oldChannels = new Client({ connectionString: DB_URL })
+    await oldChannels.connect()
+    const heardOnOldChannels: string[] = []
+    oldChannels.on('notification', (msg) => {
       const payload = JSON.parse(msg.payload ?? '{}')
-      if (payload.type !== 'backenly.channel') overheard.push(msg.payload ?? '')
+      if (payload.type !== 'backenly.channel') heardOnOldChannels.push(msg.payload ?? '')
     })
     try {
       const before = await channelRow(first.id)
@@ -569,25 +569,25 @@ describe('the read-write login', () => {
       expect(rows).toEqual([{ channel: issued }])
       await rwLogin.end().catch(() => {})
 
-      await eavesdrop.query(`LISTEN "${issued}"`)
+      await oldChannels.query(`LISTEN "${issued}"`)
       const { rotateDirectAccess } = require('@/lib/services/direct-access')
       await rotateDirectAccess(first.id, 'READ_WRITE')
       const rotated = await channelRow(first.id)
       expect(rotated).not.toBe(issued)
       expect(await streamHearsSoon(stream, first.schema)).toBe(true)
-      await settle(eavesdrop)
-      expect(overheard).toEqual([])
+      await settle(oldChannels)
+      expect(heardOnOldChannels).toEqual([])
 
-      await eavesdrop.query(`LISTEN "${rotated}"`)
+      await oldChannels.query(`LISTEN "${rotated}"`)
       await revokeDirectAccess(first.id, 'READ_WRITE')
       const revoked = await channelRow(first.id)
       expect(revoked).not.toBe(rotated)
       expect(await streamHearsSoon(stream, first.schema)).toBe(true)
-      await settle(eavesdrop)
-      expect(overheard).toEqual([])
+      await settle(oldChannels)
+      expect(heardOnOldChannels).toEqual([])
     } finally {
       stream.close()
-      await eavesdrop.end().catch(() => {})
+      await oldChannels.end().catch(() => {})
     }
   })
 })
