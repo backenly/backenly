@@ -7,7 +7,9 @@ export const dynamic = 'force-dynamic'
  * administration reached through a project. On self-host that distinction is
  * theoretical — one deployment is one project — but the authorization is still
  * per project, and installing one is held at ADMIN because it changes the
- * database every project in the deployment shares.
+ * database every project in the deployment shares. An agent's CREATE EXTENSION
+ * (apply_migration) reaches the same installExtension, through a key only an
+ * ADMIN can issue.
  *
  * No DELETE. `DROP EXTENSION` cascades into columns and indexes that depend on
  * it, and the dashboard cannot show an operator what a CASCADE would take with
@@ -17,7 +19,13 @@ export const dynamic = 'force-dynamic'
 import { NextRequest, NextResponse } from 'next/server'
 import { withAuth } from '@/lib/auth/route-protection'
 import { canAccessProject, canAdministerProject } from '@/lib/edition/guard'
-import { installExtension, isAllowedExtension, listExtensions } from '@/lib/services/extensions'
+import {
+  describeInstall,
+  installExtension,
+  isAllowedExtension,
+  listExtensions,
+  notAllowedReason,
+} from '@/lib/services/extensions'
 
 export const GET = withAuth(async (_request: NextRequest, { user, params }) => {
   const { id: projectId } = await params
@@ -40,21 +48,21 @@ export const POST = withAuth(async (request: NextRequest, { user, params }) => {
   const name = body?.name
 
   // Checked before anything composes SQL. The allowlist is the control; the
-  // quoting inside the service is defence in depth.
+  // quoting inside the service is defence in depth. The reason is the one an
+  // agent's CREATE EXTENSION gets for the same name.
   if (!isAllowedExtension(name)) {
-    return NextResponse.json(
-      { error: 'That extension is not on Backenly’s allowlist.', code: 'NOT_ALLOWED' },
-      { status: 400 },
-    )
+    return NextResponse.json({ error: notAllowedReason(name), code: 'NOT_ALLOWED' }, { status: 400 })
   }
 
-  const result = await installExtension(projectId, name)
+  const result = await installExtension(projectId, name, { actor: { userId: user.userId, via: 'console' } })
 
   if (result.ok) {
     return NextResponse.json({
       installed: true,
       alreadyInstalled: result.alreadyInstalled,
       version: result.version,
+      schema: result.schema,
+      message: describeInstall(name, result),
       extensions: await listExtensions(projectId),
     })
   }
