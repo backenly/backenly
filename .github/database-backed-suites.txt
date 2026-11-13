@@ -2003,3 +2003,13 @@ tests/integration/add-column-as-written.spec.ts
 # superuser, never dropped, and installed from a branch on a protected
 # production. Real catalog, real MCP route and console route.
 tests/integration/agent-installs-extensions.spec.ts
+# Each project's realtime stream has its own channel, kept by the platform:
+# another project's read-only login receives none of a project's changes,
+# reaches none of its streams and reads no channel; the stream still gets every
+# change, broadcast and presence through both servers, and a generated route
+# module's own events; older function bodies are replaced when a stream opens
+# and by the repair pass; the channel a read-write login could read goes quiet
+# when the login is issued, rotated or revoked; a branch, a deleted project and
+# a missing platform schema behave; nothing sent out carries a channel. Real
+# logins, triggers, routes and the listener hub are the property.
+tests/integration/realtime-channel-per-project.spec.ts

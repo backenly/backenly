@@ -67,6 +67,8 @@ import { visibleChange, type RealtimeChange, type RealtimeSubscriber } from '@/l
 import { PRESENCE_METADATA_MAX_BYTES } from '@/lib/realtime/presence-metadata'
 import { POST as presencePost } from '@/app/api/v1/[projectId]/presence/route'
 import { flushRecordedRequests } from '@/lib/traffic/request-recorder'
+import { projectChannel } from '@/lib/realtime/channels'
+import { disconnectRegionalClients } from '@/lib/data-plane/regional'
 import app from '@/server/app'
 
 let ownerId = ''
@@ -84,26 +86,36 @@ const bob = randomUUID()
 /** Every notification on a channel, in arrival order. */
 const heard = new Map<string, Array<Record<string, any>>>()
 
-const channelOf = (id: string) => `workspace_${id}_changes`
+/** Each project's channel, as the platform keeps it (lib/realtime/channels.ts). */
+const channels = new Map<string, string>()
+const channelOf = (id: string) => channels.get(id)!
+/** The stream's label, which the body before this change sent on. */
+const labelOf = (id: string) => `workspace_${id}_changes`
 const big = (bytes: number) => 'x'.repeat(bytes)
 
-/** The next notification on the project's channel after `before` of them. */
-async function nextOn(id: string, before: number): Promise<Record<string, any>> {
+/** The next notification on a channel after `before` of them. */
+async function nextOnChannel(channel: string, before: number): Promise<Record<string, any>> {
   const until = Date.now() + 10_000
   for (;;) {
-    const got = heard.get(channelOf(id)) ?? []
+    const got = heard.get(channel) ?? []
     if (got.length > before) return got[before]
-    if (Date.now() > until) throw new Error(`no notification on ${channelOf(id)}`)
+    if (Date.now() > until) throw new Error('no notification arrived')
     await new Promise((resolve) => setTimeout(resolve, 20))
   }
 }
 
-/** Run a statement on the project's schema and return the notification it caused. */
-async function notified(id: string, sql: string, ...values: unknown[]): Promise<Record<string, any>> {
-  const before = (heard.get(channelOf(id)) ?? []).length
+/** The next notification on the project's channel after `before` of them. */
+const nextOn = (id: string, before: number) => nextOnChannel(channelOf(id), before)
+
+/** Run a statement and return the notification it caused on `channel`. */
+async function notifiedOn(channel: string, sql: string, ...values: unknown[]): Promise<Record<string, any>> {
+  const before = (heard.get(channel) ?? []).length
   await prisma.$executeRawUnsafe(sql, ...values)
-  return nextOn(id, before)
+  return nextOnChannel(channel, before)
 }
+
+/** Run a statement on the project's schema and return the notification it caused. */
+const notified = (id: string, sql: string, ...values: unknown[]) => notifiedOn(channelOf(id), sql, ...values)
 
 const as = (endUserId: string | null): RealtimeSubscriber => ({ projectId, endUserId, endUserRole: endUserId ? 'user' : null, serviceRole: false })
 
@@ -166,7 +178,7 @@ beforeAll(async () => {
   const older = `workspace_${olderProjectId}`
   await prisma.$executeRawUnsafe(`CREATE SCHEMA IF NOT EXISTS "${older}"`)
   await prisma.$executeRawUnsafe(`CREATE TABLE "${older}".posts (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), body text)`)
-  await prisma.$executeRawUnsafe(OLDER_BODY(older, channelOf(olderProjectId)))
+  await prisma.$executeRawUnsafe(OLDER_BODY(older, labelOf(olderProjectId)))
   await prisma.$executeRawUnsafe(
     `CREATE TRIGGER backenly_realtime AFTER INSERT OR UPDATE OR DELETE ON "${older}".posts FOR EACH ROW EXECUTE FUNCTION "${older}".backenly_notify_realtime()`,
   )
@@ -189,8 +201,11 @@ beforeAll(async () => {
     list.push(JSON.parse(msg.payload ?? 'null'))
     heard.set(msg.channel, list)
   })
-  await listener.query(`LISTEN "${channelOf(projectId)}"`)
-  await listener.query(`LISTEN "${channelOf(olderProjectId)}"`)
+  for (const id of [projectId, olderProjectId]) {
+    channels.set(id, await projectChannel(id))
+    await listener.query(`LISTEN "${channelOf(id)}"`)
+  }
+  await listener.query(`LISTEN "${labelOf(olderProjectId)}"`)
 
   runtime = http.createServer(app)
   await new Promise<void>((resolve) => runtime.listen(0, '127.0.0.1', resolve))
@@ -204,8 +219,10 @@ afterAll(async () => {
   for (const id of [projectId, olderProjectId]) {
     if (!id) continue
     await prisma.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "workspace_${id}" CASCADE`).catch(() => {})
+    await prisma.$executeRawUnsafe(`DELETE FROM backenly_realtime.channel_secrets WHERE schema_name = $1`, `workspace_${id}`).catch(() => {})
     await prisma.apiKey.deleteMany({ where: { projectId: id } }).catch(() => {})
   }
+  await disconnectRegionalClients().catch(() => {})
   await prisma.project.deleteMany({ where: { userId: ownerId } }).catch(() => {})
   await prisma.user.deleteMany({ where: { id: ownerId } }).catch(() => {})
 }, 60_000)
@@ -265,7 +282,7 @@ describe('a change on a realtime table', () => {
 describe('a schema whose realtime was enabled earlier', () => {
   it('is brought up to date once, and its tables then name the row of a large change', async () => {
     const id = randomUUID()
-    const before = await notified(olderProjectId, `INSERT INTO "workspace_${olderProjectId}".posts (id, body) VALUES ($1::uuid, $2)`, id, big(9_000))
+    const before = await notifiedOn(labelOf(olderProjectId), `INSERT INTO "workspace_${olderProjectId}".posts (id, body) VALUES ($1::uuid, $2)`, id, big(9_000))
     expect(before).toMatchObject({ data: null, truncated: true })
 
     expect(await ensureRealtimeFunctionCurrent(olderProjectId)).toBe('upgraded')
