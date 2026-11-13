@@ -129,6 +129,16 @@ export type FindingType =
   // notify_only: whether a value may repeat is the owner's decision, and the
   // remedy (dropping the rule) is theirs to take.
   | 'unrequested_unique_refusing_writes'
+  // ── A rule Backenly added because of a column's or a table's name, which the
+  // request that made the table did not ask for: UNIQUE on a column named like
+  // email, username or slug, or a CHECK value list on status
+  // (lib/autonomy/guessed-constraints.ts). Production QA 2026-11-09:
+  // orders_email_key let each customer place one order, and chk_orders_status
+  // refused "paid".
+  //
+  // approval: removing it is one click and History restores it, but an app may
+  // rely on the rule by now, so a person decides.
+  | 'guessed_constraint'
   // ── This backend is behaving unlike itself: a query far slower than its own
   // measured normal, a table taking far more sequential scans than usual, or
   // one growing far outside its own pattern.
@@ -381,6 +391,8 @@ export const ALL_FINDING_TYPES = [
   'intent_drift',
   // Added 2026-11-10 in the same commit that introduced it.
   'unrequested_unique_refusing_writes',
+  // Added 2026-11-12 in the same commit that introduced it.
+  'guessed_constraint',
   'behavioural_regression',
   'migration_residue',
   // Added 2026-09-14 in the same commit that introduced it, per the discipline

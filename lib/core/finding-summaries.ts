@@ -20,6 +20,7 @@
 
 import { normalizeFindingType } from './types'
 import { missingFrom, missingIntegrationSummary } from './function-integration-words'
+import { guessedConstraintSummary } from './guessed-constraint-words'
 
 type Details = Record<string, unknown> | null | undefined
 
@@ -40,6 +41,15 @@ function sentence(v: unknown): string | undefined {
   const cut = s.search(/[{[]\s*"/)
   const clean = (cut === -1 ? s : s.slice(0, cut)).replace(/[\s:—-]+$/, '').trim()
   return clean.length > 0 ? clean : undefined
+}
+
+/**
+ * The Review Queue's two buttons, for a type whose approval removes something:
+ * what each one does, in its own words. Null keeps "Approve & fix" and "Dismiss".
+ */
+export function decisionLabels(type: string): { approve: string; busy: string; dismiss: string } | null {
+  if (type === 'guessed_constraint') return { approve: 'Remove it', busy: 'Removing…', dismiss: 'Keep it' }
+  return null
 }
 
 /** Render a finding's type + details as one user-facing sentence. */
@@ -166,6 +176,10 @@ function summariseFindingText(type: string, details: Record<string, unknown>): s
         ? `\`${table}\` refused ${refused} of ${writes} writes; \`${col}\` is kept unique by a rule nobody asked for`
         : 'Writes are refused by a unique rule nobody asked for'
     }
+    // ── A rule guessed from a name ────────────────────────────────────────
+    case 'guessed_constraint':
+      return guessedConstraintSummary(d)
+
     // ── Size ──────────────────────────────────────────────────────────────
     // One raised under the retired row-count rule carries no sizes, and is not
     // said to be larger than anything (lib/ai/infra-intelligence.ts withdraws it).
