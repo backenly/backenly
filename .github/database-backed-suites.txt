@@ -167,10 +167,18 @@ __tests__/auth/project-delete-authorization.test.ts
 __tests__/auth/workspace-oauth-authorization.test.ts
 
 # The workspace ZIP download had the same shape: authenticated, then the header
-# project id trusted. Pins that the guard is getCurrentProjectId like its
-# workspace/files siblings: 401 / 403 / 404 / 400 before any disk access, and an
-# authorized caller reaches the route's own disk lookup.
+# project id trusted. Pins the guard: 401 / 403 / 404 / 400 before any disk
+# access, a VIEWER or DEVELOPER 403 (the archive needs the Admin role), and an
+# ADMIN or the owner reaches the route's own disk lookup.
 __tests__/auth/workspace-download-authorization.test.ts
+
+# Changing a project from the console needs the Developer role, through each
+# wrapper's method default (delete-table, storage file delete) and through a
+# hand check (workspace files); taking down a published link needs the Admin
+# role (share-report, preview-shares). Every refusal is 403
+# PROJECT_ROLE_INSUFFICIENT with the project unchanged; a VIEWER still runs a
+# read-only query, and on single-tenant every account is the operator.
+tests/integration/console-role-floors.spec.ts
 
 # The catalog routes (schemas, indexes, relationships) read only the named
 # project's own schemas, from its own database: a second tenant's schema,

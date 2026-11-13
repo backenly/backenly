@@ -20,5 +20,9 @@ import { withProjectValidation } from '@/lib/middleware/projectValidation'
 
 export async function POST(request: NextRequest, props: { params: Promise<{ id: string }> }) {
   await props.params
-  return withProjectValidation<null>(request, async () => new NextResponse(null, { status: 204 }))
+  return withProjectValidation<null>(
+    request,
+    async () => new NextResponse(null, { status: 204 }),
+    { floor: 'view' }, // any member: opening the console is the use this records, and nothing else is written
+  )
 }

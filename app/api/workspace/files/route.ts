@@ -3,7 +3,9 @@ export const dynamic = 'force-dynamic'
 import { projectWorkspaceDir } from '@/lib/workspace/paths'
 import { NextRequest, NextResponse } from 'next/server'
 import { requireAuth } from '@/lib/auth/middleware'
+import { roleRefusal } from '@/lib/auth/project-floor'
 import { prisma } from '@/lib/db/postgres'
+import { canWriteProject } from '@/lib/edition/guard'
 import { getCurrentProjectId } from '@/lib/tenant/isolation'
 
 /**
@@ -339,7 +341,12 @@ export async function POST(request: NextRequest) {
     if (!projectId) {
       return NextResponse.json({ error: 'No project selected' }, { status: 400 })
     }
-    
+
+    // Saving files changes the project: Developer and above.
+    if (!(await canWriteProject(user.userId, projectId))) {
+      return roleRefusal(request.method)
+    }
+
     const { files } = await request.json()
     
     // Upsert files (create or update)
@@ -386,7 +393,12 @@ export async function PUT(request: NextRequest) {
     if (!projectId) {
       return NextResponse.json({ error: 'No project selected' }, { status: 400 })
     }
-    
+
+    // Saving a file changes the project: Developer and above.
+    if (!(await canWriteProject(user.userId, projectId))) {
+      return roleRefusal(request.method)
+    }
+
     const { filePath, content } = await request.json()
     
     if (!filePath || content === undefined) {

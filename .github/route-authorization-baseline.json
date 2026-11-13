@@ -348,5 +348,59 @@
     "route": "/api/workspace-oauth/[provider]",
     "status": "SAFE",
     "reason": "DELETE now goes through requireProjectCapability(canAdministerProject) in lib/tenant/isolation.ts, which resolves the x-project-id header for the caller and refuses a project they may not administer. The earlier ACCEPTED reason was wrong: the handler carried a `// TODO: Verify user has access to this project` and scoped to the header, not the caller, so any signed-in account could delete another project's OAuth client. Pinned by __tests__/auth/workspace-oauth-authorization.test.ts."
+  },
+  {
+    "route": "/api/ai-workspace/detect-new-tables",
+    "method": "POST",
+    "floor": "view",
+    "reason": "Reads the project's tables and says which have no API yet. Writes nothing."
+  },
+  {
+    "route": "/api/ai-workspace/generate-plan",
+    "method": "POST",
+    "floor": "view",
+    "reason": "Returns a plan from the AI gateway and stores nothing. Applying a plan is /api/ai-workspace/apply-changes, which needs the Developer role."
+  },
+  {
+    "route": "/api/ai-workspace/preview-diff",
+    "method": "POST",
+    "floor": "view",
+    "reason": "Computes a diff from the plan in the request body and stores nothing."
+  },
+  {
+    "route": "/api/database-brain/issues/[issueId]",
+    "method": "PUT",
+    "floor": "view",
+    "reason": "Changes the status of one Database Brain finding. Listed until the handler asks for the Developer role; remove this entry when it does."
+  },
+  {
+    "route": "/api/database/query",
+    "method": "POST",
+    "floor": "view",
+    "reason": "Runs read-only SQL as the project's SELECT-only role (lib/mcp/read-query.ts), so the statement can change nothing."
+  },
+  {
+    "route": "/api/projects/[id]/activity",
+    "method": "POST",
+    "floor": "view",
+    "reason": "The console's open-project beacon. Opening the console is the use it records; nothing else is written."
+  },
+  {
+    "route": "/api/projects/[id]/assistant",
+    "method": "POST",
+    "floor": "view",
+    "reason": "Answers a question about the project. Only the AI usage is recorded."
+  },
+  {
+    "route": "/api/projects/[id]/realtime-ticket",
+    "method": "POST",
+    "floor": "view",
+    "reason": "Issues a short-lived single-use ticket that opens the read-only change stream the Realtime page shows."
+  },
+  {
+    "route": "/api/projects/[id]/simulate",
+    "method": "POST",
+    "floor": "view",
+    "reason": "A what-if projection from what the project already holds. Nothing is stored."
   }
 ]

@@ -116,4 +116,4 @@ export const POST = withProjectAccess(async (request: NextRequest, { projectId }
     console.error('[database/query POST] failed:', error)
     return NextResponse.json({ error: 'Query failed', code: 'INTERNAL' }, { status: 500 })
   }
-})
+}, { floor: 'view' }) // any member: the statement runs as the SELECT-only role and changes nothing

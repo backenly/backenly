@@ -14,9 +14,9 @@
 import { NextRequest, NextResponse } from 'next/server'
 
 import { requireAuth } from '@/lib/auth/middleware'
+import { floorFor, roleMeetsFloor, roleRefusal, type ProjectFloor } from '@/lib/auth/project-floor'
 import { getProjectResolver } from '@/lib/edition'
-import { canAdministerProject, canWriteProject } from '@/lib/edition/guard'
-import { ProjectResolutionError } from '@/lib/edition/types'
+import { ProjectResolutionError, type ProjectRole } from '@/lib/edition/types'
 import { touchProjectActivity } from '@/lib/projects/activity'
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS'])
@@ -24,6 +24,8 @@ const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS'])
 export interface ValidatedProjectRequest {
   projectId: string
   userId: string
+  /** The caller's role in the project, from the same lookup that admitted them. */
+  callerRole: ProjectRole
   project: {
     id: string
     name: string
@@ -92,9 +94,11 @@ export async function validateProjectAccess(
   // every authenticated account as the operator, which is what it already
   // claimed to do everywhere else.
   let project: { id: string; name: string; userId: string | null }
+  let callerRole: ProjectRole
   try {
     const resolved = await getProjectResolver().resolveForUser(user.userId, projectId)
     project = { id: resolved.id, name: resolved.name, userId: resolved.userId }
+    callerRole = resolved.callerRole
   } catch (err) {
     if (err instanceof ProjectResolutionError) {
       console.error(`❌ Project access denied: userId=${user.userId}, projectId=${projectId}`)
@@ -118,6 +122,7 @@ export async function validateProjectAccess(
   return {
     projectId: project.id,
     userId: user.userId,
+    callerRole,
     project,
   }
 }
@@ -197,25 +202,23 @@ export function extractProjectId(
 }
 
 /**
- * The authority a route needs beyond membership.
+ * The role a route needs on its project (lib/auth/project-floor).
  *
  * `validateProjectAccess` answers "may this caller reach this project", which
- * is VIEWER and above. That is the right default for the dashboard panels this
- * wrapper mostly serves, and it is the wrong answer for a route that issues,
- * rotates, revokes or exports something: an organization VIEWER could mint a
- * full-write MCP key or download a database dump, because membership was the
- * only question ever asked.
+ * is VIEWER and above. `withProjectValidation` then holds the request to a
+ * floor. Without `opts.floor` the method decides: GET, HEAD and OPTIONS need
+ * membership, every other method needs the Developer role.
  *
- *   'write'      DEVELOPER+  (canWriteProject)      changes to the project
- *   'administer' ADMIN+      (canAdministerProject) credentials, exports,
- *                                                   irreversible operations
+ *   'view'       any member  a POST that changes nothing, said at the call site
+ *   'write'      DEVELOPER+  changes to the project
+ *   'administer' ADMIN+      credentials, exports, irreversible operations
  *
- * The refusal is 403 with the same body `/api/api-keys` uses for the same
- * decision. It is not a 404: the caller is a member and can already see the
- * project exists, so there is nothing to hide, and a role refusal the UI can
- * distinguish from "gone" renders as a permissions message rather than a bug.
+ * The refusal is 403 PROJECT_ROLE_INSUFFICIENT. It is not a 404: the caller is
+ * a member and can already see the project exists, so there is nothing to
+ * hide, and a role refusal the UI can distinguish from "gone" renders as a
+ * permissions message rather than a bug.
  */
-export type ProjectCapabilityFloor = 'write' | 'administer'
+export type ProjectCapabilityFloor = ProjectFloor
 
 /**
  * Middleware wrapper for API routes that require project validation
@@ -231,7 +234,7 @@ export type ProjectCapabilityFloor = 'write' | 'administer'
  * }
  * ```
  *
- * Routes that grant more than a view pass the floor they need:
+ * A route whose floor is not its method's default passes the one it needs:
  * ```ts
  *   return withProjectValidation(request, handler, { floor: 'administer' })
  * ```
@@ -243,17 +246,8 @@ export async function withProjectValidation<T>(
 ): Promise<NextResponse<T>> {
   try {
     const validated = await validateProjectAccess(request)
-    if (opts?.floor) {
-      const may = opts.floor === 'administer' ? canAdministerProject : canWriteProject
-      if (!(await may(validated.userId, validated.projectId))) {
-        return NextResponse.json(
-          {
-            error: 'Project not found or access denied',
-            code: 'PROJECT_ROLE_INSUFFICIENT',
-          },
-          { status: 403 }
-        ) as NextResponse<T>
-      }
+    if (!roleMeetsFloor(validated.callerRole, floorFor(request.method, opts?.floor))) {
+      return roleRefusal(request.method) as NextResponse<T>
     }
     // A member CHANGING the project is using it. Reads are deliberately not
     // counted: this wrapper also serves history, usage, health and every other

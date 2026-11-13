@@ -4,6 +4,8 @@ import { NextRequest, NextResponse } from 'next/server'
 import { DatabaseBrain } from '@/lib/services/databaseBrain'
 import { getCurrentProjectId } from '@/lib/tenant/isolation'
 import { requireAuth } from '@/lib/auth/middleware'
+import { roleRefusal } from '@/lib/auth/project-floor'
+import { canWriteProject } from '@/lib/edition/guard'
 
 // POST /api/database-brain/analyze - Run project-scoped analysis
 export async function POST(request: NextRequest) {
@@ -36,6 +38,12 @@ export async function POST(request: NextRequest) {
     }
     
     console.log(`✅ [${requestId}] Project ID: ${projectId}`)
+
+    // An analysis saves the issues it finds to the project: Developer and above.
+    if (!(await canWriteProject(user.userId, projectId))) {
+      return roleRefusal(request.method)
+    }
+
     console.log(`🔍 [${requestId}] Running ${mode} analysis for project: ${projectId}`)
 
     // Run project-scoped analysis
