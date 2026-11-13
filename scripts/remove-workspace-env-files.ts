@@ -51,6 +51,8 @@ async function main(): Promise<void> {
   }
 
   const backenly = found.filter((f) => f.writtenByBackenly).length
+  // A path that could not be read was not checked: the run says so in its exit code, report or apply.
+  if (unreadable.length) process.exitCode = 1
   if (!apply) {
     console.log(backenly ? `\nRun with --apply to remove what Backenly wrote in these ${backenly} (a project's own variables are kept).` : '\nNothing to remove.')
     return
@@ -58,7 +60,6 @@ async function main(): Promise<void> {
   const removed = await removeBackenlyEnvFiles(found)
   console.log(`\nRemoved ${removed.files} file(s) from disk and ${removed.rows} row(s) from workspace_files; ` +
     `took Backenly's lines out of ${removed.strippedFiles} file(s) and ${removed.strippedRows} row(s) that keep a project's own variables.`)
-  if (unreadable.length) process.exitCode = 1
 }
 
 main()
