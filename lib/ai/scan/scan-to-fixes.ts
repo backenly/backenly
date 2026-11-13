@@ -81,11 +81,13 @@ export async function harvestScanFixes(projectId: string): Promise<ScanFixHarves
           break
         }
         case 'weak_rls': {
+          // 'auto' installs the rule the schema implies (lib/services/rls-ownership.ts),
+          // and refuses when it cannot tell.
           if (issue.table) {
             candidates.push({
               id: nextId(),
               action: 'SET_PERMISSION',
-              params: { template: 'own_rows', userIdColumn: 'user_id', table: issue.table },
+              params: { template: 'auto', table: issue.table },
               reason: `Row-level security is disabled on "${issue.table}" — any authenticated user can read every row.`,
               sourceCheckId: `scan:weak_rls:${issue.table}`,
             })

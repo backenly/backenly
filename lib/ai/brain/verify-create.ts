@@ -161,7 +161,7 @@ async function sampleValue(projectId: string, col: Column, tag: string): Promise
  * differ, and the other required ones are filled like any reference to users.
  */
 function ownerColumns(plan: RlsPlan): string[] {
-  if (plan.kind === 'own_rows') return [plan.userIdColumn]
+  if (plan.kind === 'own_rows' || plan.kind === 'own_rows_read') return [plan.userIdColumn]
   if (plan.kind === 'party_rows') return plan.partyColumns.slice(0, 1)
   return []
 }
@@ -402,6 +402,15 @@ async function refusalVerdict(
     }
   }
   const plan = await planOf(projectId, schema, tableName)
+  if (plan.basis === 'grant_table') {
+    return {
+      ok: true,
+      summary:
+        `${head}: signed-in users may not insert into "${tableName}". Its rows grant access, so only the service ` +
+        'role writes them, which is by design; the insert path itself was not exercised.',
+      exercised: false,
+    }
+  }
   if (USER_OWNED.has(plan.kind)) {
     return {
       ok: false,

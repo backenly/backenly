@@ -120,7 +120,7 @@ export const CHAT_APP_BLUEPRINT: Blueprint = {
     generateApi('read_receipts'),
 
     addRls('conversations', 'owner_read_write'),
-    addRls('conversation_participants', 'owner_read_write'),
+    addRls('conversation_participants', 'owner_read_only', 'Participants are written by your server: a user reads their own, and cannot add themselves to a conversation'),
     addRls('messages', 'owner_read_write'),
     addRls('reactions', 'owner_read_write'),
     addRlsVia('attachments', 'message_id', 'Attachments follow their message'),

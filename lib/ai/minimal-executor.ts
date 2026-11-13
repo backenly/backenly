@@ -1603,7 +1603,8 @@ TRIGGERS (event automation — "when X happens, do Y automatically"):
 
 PERMISSIONS (row-level security — "users can only see their own rows"):
 - SET_PERMISSION - Apply a row-level security policy to a table
-  Templates: auto, own_rows, party_rows, related_rows, public_read, admin_only, all_access, org_members,
+  Templates: auto, own_rows, own_rows_read (users read their own; only the server writes: roles, memberships),
+             party_rows, related_rows, public_read, admin_only, all_access, org_members,
              admin_read_all (admins see ALL; users see own), role_based (admins/superadmins bypass),
              moderator_access (admins+moderators see all; users see own)
   Optional: roleColumn (column name storing the role, defaults to 'role')
@@ -2409,7 +2410,7 @@ export async function validateAction(
     // ========== PERMISSION ACTIONS ==========
     case 'SET_PERMISSION':
       if (!action.params.tableName) errors.push('tableName is required')
-      if (!action.params.template) errors.push('template is required (auto | own_rows | party_rows | related_rows | public_read | admin_only | all_access | org_members | admin_read_all | role_based | moderator_access | custom)')
+      if (!action.params.template) errors.push('template is required (auto | own_rows | own_rows_read | party_rows | related_rows | public_read | admin_only | all_access | org_members | admin_read_all | role_based | moderator_access | custom)')
       preview = `Apply "${action.params.template}" policy to "${action.params.tableName}"`
       break
 
@@ -11328,7 +11329,7 @@ async function executeSetPermission(params: any, projectId: string): Promise<Exe
   // protects a table owned through a FK to a user-owned parent; `custom` takes
   // the caller's own predicate.
   const validTemplates = [
-    'auto', 'own_rows', 'party_rows', 'related_rows', 'public_read', 'admin_only',
+    'auto', 'own_rows', 'own_rows_read', 'party_rows', 'related_rows', 'public_read', 'admin_only',
     'all_access', 'org_members', 'admin_read_all', 'role_based', 'moderator_access', 'custom',
   ]
   if (!validTemplates.includes(template)) {
