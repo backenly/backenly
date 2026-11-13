@@ -206,19 +206,12 @@ async function signUp(request: NextRequest, projectId: string, env: AuthEnvironm
       // accounts are excluded inside trackEndUserActive itself.
       trackEndUserActive(projectId, String(user.id), email).catch(() => {})
 
-      // Notify webhook subscribers that an end user signed up. Emitted here, not
-      // by a database trigger: the `users` table deliberately carries none, since
-      // it holds the bcrypt hash (Realtime once leaked it by broadcasting
-      // row_to_json(NEW) from this table). The shared emitter builds the payload
-      // from a fixed field list and skips reserved test accounts.
+      // Notify webhook subscribers and fire on_signup AI functions (#599).
+      // Emitted here, not by a database trigger: the `users` table deliberately
+      // carries none, since it holds the bcrypt hash (Realtime once leaked it
+      // by broadcasting row_to_json(NEW) from this table). The shared emitter
+      // builds the payload from a fixed field list and skips reserved test accounts.
       void emitEndUserCreated(projectId, user)
-
-      // Fire on_signup AI functions (non-blocking — never fails the signup)
-      import('@/lib/services/ai-functions/executor').then(({ fireAiFunctionsOnSignup }) => {
-        fireAiFunctionsOnSignup(projectId, { id: user.id, email: user.email, name: user.name }).catch(
-          (err: any) => console.warn('[AiFunctions] on_signup failed (non-fatal):', err?.message)
-        )
-      }).catch(() => {})
     }
 
     // Non-blocking: the branded verification email (24h token), only where the

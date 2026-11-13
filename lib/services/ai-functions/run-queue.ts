@@ -42,6 +42,7 @@ import { prisma } from '@/lib/db/prisma'
 import { workspaceRawClient } from '@/lib/data-plane/regional'
 import { workspaceSchemaName } from '@/lib/security/workspace-schema'
 import type { FunctionEvent } from './executor'
+import { RUNNABLE_FUNCTION_STATUS_FILTER } from './status'
 
 /** The queue, one per workspace schema, beside the capture outbox. Leading underscore: never served by the API. */
 export const FUNCTION_JOBS_TABLE = '_backenly_function_jobs'
@@ -297,13 +298,17 @@ export function __runQueueState(): { runners: number } {
   return { runners: runners.size }
 }
 
-/** The active row-event functions of a project, matched to captured rows by the drain. */
+/**
+ * The row-event functions of a project that can run, matched to captured rows
+ * by the drain. A function whose last run failed ('error') still runs, so the
+ * next event can recover it; only one switched off is left out.
+ */
 export async function rowEventFunctions(
   projectId: string,
   triggerTypes: string[],
 ): Promise<Array<{ id: string; triggerType: string; triggerTable: string | null }>> {
   return prisma.aiFunction.findMany({
-    where: { projectId, status: 'active', triggerType: { in: triggerTypes } },
+    where: { projectId, status: RUNNABLE_FUNCTION_STATUS_FILTER, triggerType: { in: triggerTypes } },
     select: { id: true, triggerType: true, triggerTable: true },
   })
 }

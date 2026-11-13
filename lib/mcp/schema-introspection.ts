@@ -540,6 +540,18 @@ export interface BackendMetadata {
   storage: { buckets: string[] }
   realtime: { tables: string[] }
   functions: { count: number; names: string[] }
+  /**
+   * The extensions on Backenly's allowlist, from the live catalog
+   * (lib/services/extensions.ts). Database-wide, so the same for every project
+   * on the database and for a branch.
+   */
+  extensions: {
+    installed: Array<{ name: string; version: string | null; schema: string | null }>
+    /** What CREATE EXTENSION in apply_migration installs here. */
+    installable: Array<{ name: string; purpose: string }>
+    /** On the allowlist, and not installable on this server: why. */
+    unavailable: Array<{ name: string; reason: string }>
+  }
 }
 
 /**
@@ -607,6 +619,8 @@ export async function getBackendMetadata(projectId: string, scope: Introspection
   const fnRows = await prisma.aiFunction
     .findMany({ where: { projectId }, select: { name: true } })
     .catch(() => [] as Array<{ name: string }>)
+  const { listExtensions } = await import('@/lib/services/extensions')
+  const extensions = await listExtensions(projectId)
 
   return jsonSafe({
     projectId,
@@ -624,5 +638,12 @@ export async function getBackendMetadata(projectId: string, scope: Introspection
     storage: { buckets: (proof?.buckets as string[]) ?? [] },
     realtime: { tables: (proof?.realtimeTables as string[]) ?? [] },
     functions: { count: fnRows.length, names: fnRows.map((f) => f.name) },
+    extensions: {
+      installed: extensions.filter((e) => e.installed).map((e) => ({ name: e.name, version: e.installedVersion, schema: e.schema })),
+      installable: extensions.filter((e) => e.installable).map((e) => ({ name: e.name, purpose: e.purpose })),
+      unavailable: extensions
+        .filter((e) => !e.installed && !e.installable)
+        .map((e) => ({ name: e.name, reason: e.blockedReason ?? 'Not installable on this server.' })),
+    },
   })
 }

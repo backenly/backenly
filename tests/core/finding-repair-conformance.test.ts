@@ -82,6 +82,15 @@ const DETAILS_BY_TYPE: Partial<Record<string, Record<string, unknown>>> = {
     observedDays: 21,
     sizeBytes: 4 * 1024 * 1024,
   },
+  // The repair is DROP CONSTRAINT on the rule the detector named: a column can
+  // carry a declared rule beside the guessed one, so a column is not enough.
+  guessed_constraint: {
+    tableName: 'orders',
+    columnName: 'email',
+    constraintName: 'orders_email_key',
+    rule: 'unique_by_name',
+    evidence: 'sql',
+  },
   // Same reason as unused_index: the repair is REINDEX on one index, and a
   // table name cannot name which.
   index_bloat: {
