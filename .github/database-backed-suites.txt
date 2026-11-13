@@ -1933,6 +1933,10 @@ tests/integration/signed-out-session-answers.spec.ts
 # secret) is said on the key's own step; a VIEWER may not ask. Real sessions,
 # roles and database; Stripe's API answer is stubbed at fetch.
 tests/integration/integration-key-checked-on-continue.spec.ts
+# Storing, replacing or switching on an integration key needs DEVELOPER and
+# removing one needs ADMIN, the env-var floors: every console route that
+# writes the key vault, with real sessions, organization roles and database.
+tests/integration/integration-key-role-floors.spec.ts
 
 # Connection Health counts a frontend's successful production requests by the
 # origin the request log keeps (localhost included); a bootstrap ping is
