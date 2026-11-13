@@ -1156,6 +1156,7 @@ tests/integration/readiness-reads-never-write.spec.ts
 # minutes or a fix verify again, and a run that failed is not kept. Real
 # project, tables, end-user auth and HTTP stack are the property.
 tests/integration/readiness-reads-reuse-verification.spec.ts
+tests/integration/security-scans-need-a-project.spec.ts
 # Connection health counts the last day in the database: bootstraps per
 # origin, key failures per origin, kind and key shape, probes without an
 # origin, the platform's own origins left out, nothing capped at 5,000. Real
