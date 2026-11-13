@@ -57,6 +57,7 @@ import * as bcryptjs from 'bcryptjs'
 import * as jsonwebtoken from 'jsonwebtoken'
 import { loadProjectFnAuth, mintTestRunToken, ProjectFnAuth } from './project-fn-auth'
 import { makeRlsAwarePrisma, refusingPrisma, type RlsAwarePrisma } from './rls-aware-db'
+import { withProjectStreamNotify } from './stream-notify'
 import { functionDbClient, forgetFunctionDbClient } from './function-db-role'
 import type { RlsIdentity } from '@/lib/services/rls-session'
 import { safeFetch } from '@/lib/security/outbound-guard'
@@ -411,13 +412,18 @@ function buildRequire(
  * with the caller's identity set (rls-aware-db.ts), on a connection that logs in
  * as the project's own function role (function-db-role.ts). Handing over the
  * bare client instead is what made generated reads of RLS-protected tables come
- * back empty, and what let function SQL read the platform's own tables.
+ * back empty, and what let function SQL read the platform's own tables. An
+ * event the module sends on its project's stream label reaches the project's
+ * stream (stream-notify.ts).
  */
 function scopedDb(projectId: string, identity: RlsIdentity): RlsAwarePrisma {
-  return makeRlsAwarePrisma(identity, async (opts) => {
-    if (opts?.refresh) await forgetFunctionDbClient(projectId)
-    return functionDbClient(projectId)
-  })
+  return withProjectStreamNotify(
+    projectId,
+    makeRlsAwarePrisma(identity, async (opts) => {
+      if (opts?.refresh) await forgetFunctionDbClient(projectId)
+      return functionDbClient(projectId)
+    }),
+  )
 }
 
 // ─── Method resolution ────────────────────────────────────────────────────────

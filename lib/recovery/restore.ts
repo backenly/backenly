@@ -56,6 +56,7 @@ import {
   unwrapDataKey,
 } from './crypto'
 import { isChangeVaultSchema } from '@/lib/security/workspace-schema'
+import { ALL_FUNCTION_STATE_SQL, currentFunctionSql, type RealtimeFunctionName } from '@/lib/realtime/channel-sql'
 import { BUNDLE_FILES, MANIFEST_FILE } from './export'
 import { extractTar } from './tar'
 
@@ -826,11 +827,35 @@ async function reconcileDerivedState(
     await psql(admin, `SELECT public.backenly_pgrst_register_schema('${schema.replace(/'/g, "''")}')`)
   }
 
+  const realtime = await bringRealtimeFunctionsCurrent(options.targetUrl).catch(
+    (err: unknown) =>
+      `realtime functions not brought current (${err instanceof Error ? err.message : String(err)}); ` +
+      `run scripts/upgrade-realtime-channels.ts --apply`,
+  )
+
   return (
     `backenly.app_role=${appRole}; ` +
     `re-owned to ${adminRole}: ${reowned.join(', ') || 'nothing'}; ` +
-    `${applied.join(', ')} reinstalled; ${workspaces.length} workspace(s) re-registered`
+    `${applied.join(', ')} reinstalled; ${workspaces.length} workspace(s) re-registered; ${realtime}`
   )
+}
+
+/**
+ * The realtime notify and presence functions came back as the dumps held
+ * them, which may be an older release's. They are replaced with the current
+ * definitions (lib/realtime/channel-sql.ts) as the application role, which owns
+ * them. Each project's channel, and the table that keeps it, are not in the
+ * bundle: the application creates them on first use.
+ */
+async function bringRealtimeFunctionsCurrent(url: string): Promise<string> {
+  const stale = (await psql(url, ALL_FUNCTION_STATE_SQL))
+    .split('\n')
+    .map((line) => line.trim().split('|'))
+    .filter((cols) => cols.length === 3 && cols[2] === 'f')
+  for (const [schema, name] of stale) {
+    await psql(url, currentFunctionSql(schema, name as RealtimeFunctionName))
+  }
+  return `${stale.length} realtime function(s) brought current`
 }
 
 async function currentDatabase(options: RestoreOptions): Promise<string> {

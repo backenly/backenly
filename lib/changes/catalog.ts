@@ -37,6 +37,8 @@
  * a drop and an add: both survive `RENAME`, and neither survives a re-create.
  */
 
+import { NOTIFY_FUNCTION_NAME } from '@/lib/realtime/channel-sql'
+
 export interface ColumnState {
   name: string
   attnum: number
@@ -392,8 +394,20 @@ export function enumLabels(o: Pick<ObjectState, 'kind' | 'definition'> | undefin
   return [...o.definition.slice(at).matchAll(/'((?:[^']|'')*)'/g)].map((m) => m[1].replace(/''/g, "'"))
 }
 
+/**
+ * The realtime notify function. Its body is Backenly's, kept current by
+ * Backenly (lib/realtime/channels.ts) rather than by a project's changes, so
+ * the history records that it exists and not which version it was.
+ */
+export function isRealtimeNotifyFunction(o: ObjectState): boolean {
+  return o.kind === 'function' && o.identity === `${NOTIFY_FUNCTION_NAME}()`
+}
+
 /** Objects compare equal when they would behave the same: kind, definition, options. */
 export function sameObject(a: ObjectState, b: ObjectState): boolean {
+  // Any two versions of the realtime notify function are the same object: a
+  // restore puts back the current body, whatever was recorded (plan.ts).
+  if (isRealtimeNotifyFunction(a) && isRealtimeNotifyFunction(b)) return true
   return a.kind === b.kind && a.definition === b.definition && JSON.stringify([...a.options].sort()) === JSON.stringify([...b.options].sort())
 }
 
