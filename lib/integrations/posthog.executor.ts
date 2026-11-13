@@ -74,7 +74,8 @@ export async function executePostHogIntegration(
       params: {
         tableName: 'analytics_events',
         columns: [
-          { name: 'distinct_id',      type: 'TEXT', notNull: true },
+          // Any string the app identifies a person by; by name it became uuid (lib/db/name-rules.ts).
+          { name: 'distinct_id',      type: 'TEXT', notNull: true, sqlType: 'text' },
           { name: 'event',            type: 'TEXT', notNull: true },
           { name: 'properties',       type: 'JSONB' },
           { name: 'sent_to_posthog',  type: 'BOOLEAN', default: 'false' },

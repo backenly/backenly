@@ -24,6 +24,7 @@ import { detectSubsystemRecurrence } from '@/lib/autonomy/subsystem-recurrence'
 import { detectIntentDrift } from '@/lib/autonomy/intent-conformance'
 import { detectFailingFunctions } from '@/lib/autonomy/function-failures'
 import { detectFunctionsMissingIntegrations } from '@/lib/autonomy/function-integrations'
+import { detectGuessedConstraints } from '@/lib/autonomy/guessed-constraints'
 import { probeQueryFailed } from '@/lib/core/drift-detector'
 import { queryWorkspaceSchema } from './workspaceDatabase'
 import {
@@ -482,6 +483,10 @@ async function observeProject(projectId: string, result: ObserverResult): Promis
     // It runs and gets nothing, often without failing, so the run log alone
     // never shows it.
     detectFunctionsMissingIntegrations(projectId),
+    // A rule Backenly added from a name, which the request did not ask for.
+    // Approval-gated, so the loop never mints a finding for it: this is where
+    // it reaches the Review Queue, as a removal a person approves or declines.
+    detectGuessedConstraints(projectId),
   ]
 
   const settled = await Promise.allSettled(detectors)
@@ -939,6 +944,8 @@ async function writeFinding(
     missing_rls: 'tableName',
     // One row per rule: two rules refusing writes are two decisions.
     unrequested_unique_refusing_writes: ['tableName', 'columnName'],
+    // One row per rule: keeping one and removing another are two decisions.
+    guessed_constraint: ['tableName', 'constraintName'],
     rls_denies_everything: 'tableName',
   }
 
