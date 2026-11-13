@@ -130,13 +130,16 @@ export async function executeEmailIntegration(
       ctx.record({ type: 'key_stored', payload: { integrationId: 'email_from' } })
     }
 
-    // email_events — delivery log for every sent message
+    // email_events — delivery log for every sent message. `message_id` is
+    // the provider's id as it comes (SendGrid's is not a uuid) and is empty
+    // until the provider answers; by name it became uuid NOT NULL, with a key
+    // into a `messages` table when the project has one (lib/db/name-rules.ts).
     const evtResult = await executeAction({
       action: 'CREATE_TABLE',
       params: {
         tableName: 'email_events',
         columns: [
-          { name: 'message_id',       type: 'TEXT' },        // provider-assigned ID
+          { name: 'message_id',       type: 'TEXT', nullable: true, sqlType: 'text' }, // provider-assigned ID
           { name: 'recipient',        type: 'TEXT', notNull: true },
           { name: 'subject',          type: 'TEXT', notNull: true },
           { name: 'template',         type: 'TEXT' },         // template name used

@@ -5,11 +5,17 @@
  *
  * The detector that finds what these rules left on tables whose request did
  * not ask for it (lib/autonomy/guessed-constraints.ts) reads the same lists, so
- * the two cannot disagree. Every rule here has stood unchanged since
- * 2026-07-23, the first commit of this repository, and a table made under
- * them carries exactly the names and definitions computed below. A rule that
- * changes changes what the detector recognises on tables made before: keep
- * the old one beside the new.
+ * the two cannot disagree. A table made under them carries exactly the names
+ * and definitions computed below. A rule that changes changes what the
+ * detector recognises on tables made before: keep the old list beside the new
+ * (StatusRule.before).
+ *
+ * A rule fills in what a design leaves unsaid, and a design that says it
+ * outranks the rule. Per column: `unique: false` (no UNIQUE from the name),
+ * `notNull: false` or `nullable: true` (no NOT NULL from the name), `sqlType`
+ * (this exact type, nothing from the name), and `check: false` (no CHECK from
+ * the table's name), read by lib/ai/minimal-executor.ts and ruleChecksFor
+ * below.
  *
  * Pure: no database, safe anywhere.
  */
@@ -18,7 +24,18 @@ export interface StatusRule {
   /** Matched against the table's name. */
   pattern: RegExp
   column: string
+  /** What the CHECK allows on a table made now. */
   values: readonly string[]
+  /**
+   * Where a row starts when the design gives the column no default: one of
+   * `values`. Stated, so that adding a value Backenly writes does not move it.
+   */
+  initial: string
+  /**
+   * The lists the rule made before, newest first. Tables made then still carry
+   * them, and the detector still recognises them.
+   */
+  before?: ReadonlyArray<readonly string[]>
 }
 
 /**
@@ -27,67 +44,147 @@ export interface StatusRule {
  * the column; the first rule whose pattern matches decides, and a request
  * with a CHECK on `status` turns all of them off. It is named
  * `chk_<table>_<column>`.
+ *
+ * A list holds every value Backenly itself writes into that column, because a
+ * value it refuses is a write of Backenly's own that fails. Every list stood
+ * unchanged from 2026-07-23, the first commit of this repository, until
+ * 2026-11-13, when four of them gained the values on their second line; the
+ * list each had until then is its `before`.
  */
 export const STATUS_DOMAIN_MAP: readonly StatusRule[] = [
-  // Job/async processing tables
+  // Job/async processing tables. `pending`: the job endpoints Backenly
+  // generates for these tables create and retry a job as pending
+  // (lib/ai/build-runtime/domain-business-logic.ts).
   {
     pattern: /_jobs?$|^(generation|render|video|export|import|process|encode|transcode|clip)_/,
     column: 'status',
-    values: ['queued', 'processing', 'completed', 'failed', 'cancelled'],
+    values: ['queued', 'processing', 'completed', 'failed', 'cancelled',
+      'pending'],
+    initial: 'queued',
+    before: [['queued', 'processing', 'completed', 'failed', 'cancelled']],
   },
-  // Order / e-commerce tables
+  // Order / e-commerce tables. `awaiting_payment`, `paid` and `failed`: POST
+  // /stripe/session marks an order awaiting_payment, Backenly's Stripe wiring
+  // marks it paid, and the build's Stripe handler marks it failed when the
+  // payment fails.
   {
     pattern: /^orders?$|^(order_items?|purchase)$/,
     column: 'status',
-    values: ['pending', 'processing', 'shipped', 'delivered', 'cancelled', 'refunded'],
+    values: ['pending', 'processing', 'shipped', 'delivered', 'cancelled', 'refunded',
+      'awaiting_payment', 'paid', 'failed'],
+    initial: 'pending',
+    before: [['pending', 'processing', 'shipped', 'delivered', 'cancelled', 'refunded']],
   },
   {
     pattern: /^orders?$|^payments?$|^invoices?$|^checkouts?$/,
     column: 'payment_status',
     values: ['pending', 'paid', 'failed', 'refunded', 'disputed'],
+    initial: 'pending',
   },
-  // Subscriptions
+  // Subscriptions. `incomplete` and `incomplete_expired`: Stripe's subscription
+  // statuses, which Backenly's Stripe webhook handling writes into a
+  // subscriptions table by its Stripe subscription id. Stripe's `canceled` is
+  // the `cancelled` here.
   {
     pattern: /^subscriptions?$/,
     column: 'status',
-    values: ['active', 'trialing', 'past_due', 'cancelled', 'unpaid', 'paused'],
+    values: ['active', 'trialing', 'past_due', 'cancelled', 'unpaid', 'paused',
+      'incomplete', 'incomplete_expired'],
+    initial: 'active',
+    before: [['active', 'trialing', 'past_due', 'cancelled', 'unpaid', 'paused']],
   },
   // User / account tables
   {
     pattern: /^users?$|^accounts?$|^members?$/,
     column: 'status',
     values: ['active', 'suspended', 'deactivated', 'pending_verification'],
+    initial: 'active',
   },
   // Content / CMS tables
   {
     pattern: /^(posts?|articles?|pages?)$/,
     column: 'status',
     values: ['draft', 'published', 'archived', 'scheduled'],
+    initial: 'draft',
   },
   // Tickets / support
   {
     pattern: /^tickets?$|^support_tickets?$/,
     column: 'status',
     values: ['open', 'in_progress', 'resolved', 'closed', 'on_hold'],
+    initial: 'open',
   },
-  // Generic tasks
+  // Generic tasks. `pending`: Backenly's job endpoints serve a tasks table as
+  // a queue, and create and retry its rows as pending.
   {
     pattern: /^tasks?$|^todos?$/,
     column: 'status',
-    values: ['todo', 'in_progress', 'done', 'cancelled'],
+    values: ['todo', 'in_progress', 'done', 'cancelled',
+      'pending'],
+    initial: 'todo',
+    before: [['todo', 'in_progress', 'done', 'cancelled']],
   },
 ]
 
+/** The rule for this column of a table Backenly designs: the first whose pattern matches. */
+function statusRuleFor(table: string, column: string): StatusRule | null {
+  for (const rule of STATUS_DOMAIN_MAP) {
+    if (rule.column === column && rule.pattern.test(table)) return rule
+  }
+  return null
+}
+
 /**
- * The values Backenly's CHECK allows on this column of a table it designed,
+ * The values Backenly's CHECK allows on this column of a table it designs now,
  * or null when no rule applies: the first rule whose pattern matches the
  * table and whose column is this one, as executeCreateTable picks it.
  */
 export function statusValuesFor(table: string, column: string): readonly string[] | null {
+  return statusRuleFor(table, column)?.values ?? null
+}
+
+/** Every list the rule for this column has made, the current one first; empty when no rule applies. */
+export function statusValueListsFor(table: string, column: string): ReadonlyArray<readonly string[]> {
+  const rule = statusRuleFor(table, column)
+  return rule ? [rule.values, ...(rule.before ?? [])] : []
+}
+
+/** A column of a table Backenly designs, as the CHECK rule reads it. */
+export interface DesignedColumn {
+  name: string
+  /** `false`: the design states the column has no CHECK from the table's name. */
+  check?: unknown
+}
+
+/** A CHECK the rules give a designed table: its column, what it allows, and where a row starts. */
+export interface RuleCheck {
+  columnName: string
+  values: string[]
+  initial: string
+}
+
+/**
+ * The CHECKs the rules give the columns of a table Backenly designs: one per
+ * rule whose pattern matches the table, for a column the design has (by name,
+ * in any case), the first rule per column. None for a column whose CHECK the
+ * design states (`stated`), or that it marks `check: false`: a column whose
+ * values another system owns, such as Stripe's subscription statuses, which
+ * Stripe adds to.
+ */
+export function ruleChecksFor(
+  table: string,
+  columns: readonly DesignedColumn[],
+  stated: ReadonlySet<string> = new Set(),
+): RuleCheck[] {
+  const out: RuleCheck[] = []
   for (const rule of STATUS_DOMAIN_MAP) {
-    if (rule.column === column && rule.pattern.test(table)) return rule.values
+    if (!rule.pattern.test(table)) continue
+    const column = columns.find((c) => typeof c?.name === 'string' && c.name.toLowerCase() === rule.column)
+    if (!column || column.check === false) continue
+    if (stated.has(rule.column) || out.some((c) => c.columnName === rule.column)) continue
+    out.push({ columnName: rule.column, values: [...rule.values], initial: rule.initial })
   }
-  return null
+  return out
 }
 
 /**
