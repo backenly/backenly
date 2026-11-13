@@ -37,6 +37,7 @@
 
 import { isEveryRowPredicate, validateBooleanExpression, validateConversionExpression } from '@/lib/db/sql-expression'
 import { describeTarget, type DeclaredForeignKey, type ReferentialAction } from '@/lib/db/declared-foreign-key'
+import { ALLOWED_EXTENSIONS, EXTENSION_SCHEMA, isAllowedExtension, notAllowedReason } from '@/lib/services/extension-allowlist'
 
 /**
  * The typed-action vocabulary the governance kernel accepts.
@@ -1385,7 +1386,10 @@ function translateAlterAction(tableName: string, action: string, stmt: string): 
     if (col.unique !== undefined) column.unique = col.unique
     if (col.fkTo !== undefined) column.fkTo = col.fkTo
     if (col.references !== undefined) column.references = col.references
-    const actions: PlannedAction[] = [{ tool: 'add_column', args: { tableName, column }, source: stmt }]
+    // As written, like CREATE TABLE: the column gets the type, NOT NULL, DEFAULT,
+    // UNIQUE and REFERENCES it declares and nothing its name suggests, so
+    // `ADD COLUMN customer_email text` is not made UNIQUE.
+    const actions: PlannedAction[] = [{ tool: 'add_column', args: { tableName, column, asWritten: true }, source: stmt }]
     for (const check of checks) actions.push(checkAction(tableName, check, `${stmt} → CHECK (${check.expression})`))
     return actions
   }
@@ -1598,7 +1602,7 @@ function translateCreateIndex(stmt: string): PlannedAction[] {
     return [{
       tool: 'create_index',
       args: {
-        tableName, columns: indexColumns(paren.body), unique,
+        tableName, ...indexColumnSpecs(paren.body, stmt), unique,
         ...(method ? { method } : {}),
         ...(indexName ? { indexName } : {}),
         where: everyRow ? 'true' : where[1].trim(),
@@ -1615,7 +1619,7 @@ function translateCreateIndex(stmt: string): PlannedAction[] {
     tool: 'create_index',
     args: {
       tableName,
-      columns: indexColumns(paren.body),
+      ...indexColumnSpecs(paren.body, stmt),
       unique,
       ...(method ? { method } : {}),
       ...(indexName ? { indexName } : {}),
@@ -1624,11 +1628,142 @@ function translateCreateIndex(stmt: string): PlannedAction[] {
   }]
 }
 
-/** Column list of an index, with ordering/nulls modifiers stripped. */
-function indexColumns(body: string): string[] {
-  return splitTopLevel(body).map((c) =>
-    unquoteIdent(c.replace(/\s+(asc|desc|nulls\s+(first|last)|[a-z_]+_ops)\b/gi, '')),
-  )
+/** An identifier as SQL writes one: bare, or double-quoted. */
+const IDENT_OR_QUOTED = String.raw`"(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$]*`
+
+/** `column [opclass[(params)]]` once ordering is stripped, the opclass optionally schema-qualified. */
+const INDEX_ITEM = new RegExp(
+  `^(${IDENT_OR_QUOTED})\\s+(?:(${IDENT_OR_QUOTED})\\s*\\.\\s*)?(${IDENT_OR_QUOTED})\\s*(\\([\\s\\S]*\\))?$`,
+)
+
+/**
+ * The column list of an index, with ordering and NULLS placement stripped, and
+ * the operator class written after a column kept.
+ *
+ * The operator class used to be stripped with them, so `(name gin_trgm_ops)`
+ * reached the executor as `(name)` and failed with "data type text has no
+ * default operator class for access method gin", and `USING gin (data
+ * jsonb_path_ops)` built the default jsonb_ops index instead of the one written,
+ * without a word. A class may be qualified by `public`, where Backenly installs
+ * extensions, or by `pg_catalog`; any other schema is refused, because that is
+ * not where an extension a migration installs ends up.
+ */
+function indexColumnSpecs(body: string, stmt: string): { columns: string[]; operatorClasses?: Record<string, string> } {
+  const columns: string[] = []
+  const operatorClasses: Record<string, string> = {}
+  for (const raw of splitTopLevel(body)) {
+    const item = raw.replace(/\s+nulls\s+(first|last)\b/gi, '').replace(/\s+(asc|desc)\b/gi, '').trim()
+    const m = INDEX_ITEM.exec(item)
+    // Not `column opclass`: an expression or a COLLATE, passed on as written for
+    // the executor to refuse as an identifier, as before.
+    if (!m || (!m[2] && /^collate$/i.test(m[3]))) {
+      columns.push(unquoteIdent(item))
+      continue
+    }
+    const column = unquoteIdent(m[1])
+    const qualifier = m[2] ? unquoteIdent(m[2]) : null
+    const opclass = unquoteIdent(m[3])
+    if (m[4]) {
+      throw new MigrationParseError(
+        `Operator class parameters are not translated: "${item.slice(0, 60)}".`,
+        'UNSUPPORTED_STATEMENT',
+        `Write the operator class without parameters (e.g. \`${column} ${opclass}\`), which uses its defaults.`,
+        stmt,
+      )
+    }
+    if (qualifier && qualifier !== EXTENSION_SCHEMA && qualifier !== 'pg_catalog') {
+      throw new MigrationParseError(
+        `Operator class "${qualifier}.${opclass}" names a schema extensions are not installed in.`,
+        'QUALIFIED_NAME',
+        `Write it unqualified, \`${column} ${opclass}\`: Backenly installs every extension into ${EXTENSION_SCHEMA}, ` +
+        `which is on every project's search path.`,
+        stmt,
+      )
+    }
+    if (!/^[a-z_][a-z0-9_]*$/.test(opclass) || column in operatorClasses) {
+      throw new MigrationParseError(
+        `Unsupported operator class in "${item.slice(0, 60)}".`,
+        'UNSUPPORTED_STATEMENT',
+        'An operator class is one lowercase name after its column, given once per column, e.g. `name gin_trgm_ops`.',
+        stmt,
+      )
+    }
+    columns.push(column)
+    operatorClasses[column] = opclass
+  }
+  return Object.keys(operatorClasses).length > 0 ? { columns, operatorClasses } : { columns }
+}
+
+/** A VERSION as written: a string literal, a quoted identifier or a bare word. */
+function unquoteVersion(raw: string): string {
+  const t = raw.trim()
+  if (t.startsWith("'") && t.endsWith("'") && t.length > 1) return t.slice(1, -1).replace(/''/g, "'")
+  if (t.startsWith('"') && t.endsWith('"') && t.length > 1) return t.slice(1, -1).replace(/""/g, '"')
+  return t
+}
+
+/**
+ * `CREATE EXTENSION [IF NOT EXISTS] name [WITH] [SCHEMA s] [VERSION v] [CASCADE]`
+ * → install_extension, which installs it as the console's Install button does
+ * (lib/services/extensions.ts).
+ *
+ * A name off Backenly's allowlist refuses the whole migration here, before
+ * anything runs, with the reason the console gives. Whether this server has
+ * the extension, and lets a role that is not superuser install it, is the live
+ * catalog's to say: apply_migration asks it before the first statement runs.
+ * SCHEMA and VERSION are carried so the result can say what was not used:
+ * every extension goes into one schema at the server's default version.
+ * CASCADE has nothing to do, since no allowlisted extension requires another.
+ *
+ * With or without IF NOT EXISTS, one that is installed already is not an
+ * error: on a database several projects share, another may have installed it,
+ * and nothing in this project's migration could know.
+ */
+function translateCreateExtension(stmt: string): PlannedAction[] {
+  // A hyphen is allowed bare, so `uuid-ossp` written unquoted is read as meant.
+  const m = /^create\s+extension\s+(?:if\s+not\s+exists\s+)?("(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$-]*)([\s\S]*)$/i.exec(stmt)
+  if (!m) {
+    throw new MigrationParseError('Malformed CREATE EXTENSION.', 'BAD_STATEMENT', 'e.g. `CREATE EXTENSION IF NOT EXISTS pg_trgm`.', stmt)
+  }
+  const name = unquoteIdent(m[1])
+  if (!isAllowedExtension(name)) {
+    throw new MigrationParseError(
+      notAllowedReason(name),
+      'NOT_ALLOWED',
+      `The allowlist: ${ALLOWED_EXTENSIONS.map((e) => e.name).join(', ')}. read_backend_state { section: "schema" } ` +
+      'says which are installed, and which this server lets Backenly install.',
+      stmt,
+    )
+  }
+
+  let rest = m[2].trim()
+  const take = (re: RegExp): RegExpExecArray | null => {
+    const found = re.exec(rest)
+    if (found) rest = rest.slice(found[0].length).trim()
+    return found
+  }
+  take(/^with\b/i)
+  let schema: string | undefined
+  let version: string | undefined
+  while (rest) {
+    const s = take(/^schema\s+("(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$]*)/i)
+    if (s) { schema = unquoteIdent(s[1]); continue }
+    const v = take(/^version\s+('(?:[^']|'')*'|"(?:[^"]|"")+"|[A-Za-z0-9_.$-]+)/i)
+    if (v) { version = unquoteVersion(v[1]); continue }
+    if (take(/^cascade\b/i)) continue
+    throw new MigrationParseError(
+      `Unsupported clause in CREATE EXTENSION: "${rest.slice(0, 40)}".`,
+      'UNSUPPORTED_STATEMENT',
+      'Supported: CREATE EXTENSION [IF NOT EXISTS] name [WITH] [SCHEMA schema] [VERSION version] [CASCADE].',
+      stmt,
+    )
+  }
+
+  return [{
+    tool: 'install_extension',
+    args: { name, ...(schema ? { schema } : {}), ...(version ? { version } : {}) },
+    source: stmt,
+  }]
 }
 
 function translateDml(stmt: string, verb: string): never {
@@ -1659,6 +1794,32 @@ function translateStatement(stmt: string): PlannedAction[] {
   if (dml) return translateDml(s, dml[1])
 
   if (/^drop\s+index\b/i.test(s)) return translateDropIndex(s)
+
+  if (/^create\s+extension\b/i.test(s)) return translateCreateExtension(s)
+
+  // Neither door offers these (lib/services/extensions.ts): an extension is
+  // shared by every project on the database, and Backenly cannot show what a
+  // DROP would take from them.
+  if (/^drop\s+extension\b/i.test(s)) {
+    throw new MigrationParseError(
+      'DROP EXTENSION is refused: Backenly never removes an extension. It is database-wide, so any project on this ' +
+      'database may depend on it, and dropping it takes every column, index and function that uses it, in every project.',
+      'DROP_EXTENSION_REFUSED',
+      'Stop using it in your own schema instead (DROP INDEX, or ALTER TABLE … DROP COLUMN, through apply_migration); ' +
+      'an extension nothing uses costs nothing. Removing one is for whoever operates the database.',
+      s,
+    )
+  }
+  if (/^alter\s+extension\b/i.test(s)) {
+    throw new MigrationParseError(
+      'ALTER EXTENSION is refused: Backenly does not change an installed extension. It is database-wide, so a new ' +
+      'version, another schema, or a member added or dropped would change it for every project on this database.',
+      'ALTER_EXTENSION_REFUSED',
+      'CREATE EXTENSION IF NOT EXISTS installs one that is missing; read_backend_state { section: "schema" } lists ' +
+      'what is installed, and at which version.',
+      s,
+    )
+  }
 
   if (DESTRUCTIVE_VERBS.test(s)) {
     throw new MigrationParseError(
@@ -1697,7 +1858,7 @@ function translateStatement(stmt: string): PlannedAction[] {
     )
   }
 
-  if (/^create\s+(or\s+replace\s+)?(function|trigger|type|view|materialized|extension|schema|sequence|domain)\b/i.test(s)) {
+  if (/^create\s+(or\s+replace\s+)?(function|trigger|type|view|materialized|schema|sequence|domain)\b/i.test(s)) {
     const what = /^create\s+(?:or\s+replace\s+)?([a-z]+)/i.exec(s)?.[1]?.toLowerCase() ?? 'object'
     throw new MigrationParseError(
       `CREATE ${what.toUpperCase()} is not translated by apply_migration.`,

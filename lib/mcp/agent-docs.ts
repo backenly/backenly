@@ -62,6 +62,17 @@ function normalise(word: string): string {
   return word.trim().toLowerCase().replace(/[\s_]+/g, '-')
 }
 
+/**
+ * How a tool description names the topic with its long form. tools/list says
+ * only what an agent needs to call a tool correctly (production QA 2026-11-09,
+ * report 99); the rest is this topic. tests/unit/mcp-tool-docs-topics.spec.ts
+ * reads the topic back out of every description and fetches it.
+ */
+export function docsPointer(id: string): string {
+  if (!AGENT_DOC_TOPICS.some((t) => t.id === id)) throw new Error(`There is no agent docs topic "${id}"`)
+  return `Docs: fetch_docs { topic: "${id}" }.`
+}
+
 /** The topic `word` names, by id or alias, in any case and with `_` or `-`. */
 export function resolveDocTopic(word: string): AgentDocTopic | null {
   const w = normalise(word)
