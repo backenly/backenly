@@ -10,7 +10,7 @@
 import { isReservedWorkspaceTable } from '@/lib/security/workspace-schema'
 import type { RelatedRowsVia } from '@/lib/services/rls-ownership'
 import { addForeignKeySql, columnForeignKeySql, describeTarget, isDeclaredForeignKey } from '@/lib/db/declared-foreign-key'
-import { STATUS_DOMAIN_MAP, uniqueByName } from '@/lib/db/name-rules'
+import { ruleChecksFor, uniqueByName } from '@/lib/db/name-rules'
 import { getActiveGraph, saveNewGraph } from '@/lib/orchestration/graph-pointer'
 import { withoutTables } from '@/lib/orchestration/graph-tables'
 import { planDisplayName } from '@/lib/entitlements/plan-names'
@@ -239,6 +239,12 @@ interface ColumnConstraints {
    * SAME list the CHECK is built from — see `initialStateFor`.
    */
   stateValues?: string[]
+  /**
+   * Where a row starts, when the CHECK came from a name rule: the rule says
+   * (lib/db/name-rules.ts), so a value added to its list does not move it.
+   * Otherwise it is derived from `stateValues` (initialStateFor).
+   */
+  initialState?: string
   /** True when the caller stated nullability, rather than it being inferred. */
   explicitNotNull?: boolean
 }
@@ -837,7 +843,7 @@ function applyConstraintsToColumn(columnDef: any, constraints: ColumnConstraints
     // Derived from the SAME value list the CHECK constraint is built from, so a
     // default that violates its own CHECK is not expressible. This is what
     // `DEFAULT 'active'` against `CHECK (payment_status IN ('pending', …))` was.
-    const initial = initialStateFor(constraints.stateValues)
+    const initial = constraints.initialState ?? initialStateFor(constraints.stateValues)
     if (initial) defaultClause = ` DEFAULT ${sqlLiteral(initial)}`
   } else if (constraints.hasDefault) {
     if (columnDef.type === 'BOOLEAN') {
@@ -4292,7 +4298,7 @@ async function executeCreateTable(
     // default from the same list the CHECK is built from, which makes the two
     // incapable of disagreeing. See `initialStateFor`.
     // ── CHECK constraints for enum columns (e.g. status IN ('pending','shipped')) ──
-    const checkConstraints: Array<{ columnName: string; values: string[] }> =
+    const checkConstraints: Array<{ columnName: string; values: string[]; initial?: string }> =
       (params.checkConstraints as any[]) ?? []
 
     // ── #94: Auto-inject CHECK constraints for any status-like column ────────
@@ -4300,16 +4306,14 @@ async function executeCreateTable(
     // column gets a CHECK constraint derived from the known domain context, the
     // value sets keyed by table-name pattern in lib/db/name-rules.ts, which the
     // detector of rules nobody asked for reads too (lib/autonomy/guessed-constraints.ts).
+    // A column the design marks `check: false` gets none: Stripe's subscription
+    // statuses are Stripe's, and a list of today's refuses the one it adds next.
     const alreadyHasStatusConstraint = checkConstraints.some(c => c.columnName === 'status')
     if (!asWritten && !alreadyHasStatusConstraint) {
-      for (const rule of STATUS_DOMAIN_MAP) {
-        if (!rule.pattern.test(tableName)) continue
-        const colExists = safeColumns.some(c => c.name.toLowerCase() === rule.column)
-        if (!colExists) continue
-        const alreadyHas = checkConstraints.some(c => c.columnName === rule.column)
-        if (alreadyHas) continue
-        checkConstraints.push({ columnName: rule.column, values: [...rule.values] })
-        console.log(`[AI Executor] Auto-injected CHECK constraint on "${rule.column}" for "${tableName}" (${rule.values.join(', ')})`)
+      const stated = new Set(checkConstraints.map(c => c.columnName))
+      for (const rule of ruleChecksFor(tableName, safeColumns, stated)) {
+        checkConstraints.push(rule)
+        console.log(`[AI Executor] Auto-injected CHECK constraint on "${rule.columnName}" for "${tableName}" (${rule.values.join(', ')})`)
       }
     }
 
@@ -4334,6 +4338,8 @@ async function executeCreateTable(
           c => c.columnName?.toLowerCase() === col.name.toLowerCase(),
         )
         if (check?.values?.length) constraints.stateValues = check.values
+        // A rule's own starting state (lib/db/name-rules.ts), rather than one read off its list.
+        if (check?.initial) constraints.initialState = check.initial
         // Explicit { nullable, notNull, unique, fkTo, default } from the caller
         // wins over every name-based guess above.
         applyExplicitColumnFlags(constraints, col)
