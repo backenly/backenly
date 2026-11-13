@@ -368,12 +368,6 @@
     "reason": "Computes a diff from the plan in the request body and stores nothing."
   },
   {
-    "route": "/api/database-brain/issues/[issueId]",
-    "method": "PUT",
-    "floor": "view",
-    "reason": "Changes the status of one Database Brain finding. Listed until the handler asks for the Developer role; remove this entry when it does."
-  },
-  {
     "route": "/api/database/query",
     "method": "POST",
     "floor": "view",
