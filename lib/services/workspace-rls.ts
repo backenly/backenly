@@ -1941,19 +1941,88 @@ async function detectOrgIdColumn(
  * admin_only: Only service-role API keys bypass this.
  * Regular users see nothing.
  */
+/**
+ * admin_only: service-role keys only.
+ *
+ * FORCE ROW LEVEL SECURITY, as every other template: Backenly's own code reads
+ * workspace tables as the app role, which owns them, with the end user's
+ * identity in the session (realtime's per-change visibility check, functions'
+ * ctx.db), and PostgreSQL exempts a table's owner, and every member of the
+ * owning role, from row-level security that is not forced. Without it an end
+ * user subscribed to an admin_only table received every change to it.
+ */
 async function installAdminOnlyPolicy(
   projectId: string,
   tableName: string,
   schemaName: string
 ) {
-  await executeInWorkspaceSchema(
-    projectId,
-    `
+  await execStatements(projectId, `
+    ALTER TABLE "${schemaName}"."${tableName}" FORCE ROW LEVEL SECURITY;
+
     CREATE POLICY backenly_admin_only ON "${schemaName}"."${tableName}"
       FOR ALL
       USING (${serviceRoleClause(schemaName)});
-    `
+  `)
+}
+
+const namesForTitle = (tables: string[]) =>
+  tables.length <= 3 ? tables.join(', ') : `${tables.slice(0, 3).join(', ')} and ${tables.length - 3} more`
+
+/**
+ * Tables in `schemaName` whose rule is admin_only and whose owner is not held
+ * to it (installed before admin_only forced row-level security).
+ */
+export async function unforcedAdminOnlyTables(projectId: string, schemaName: string): Promise<string[]> {
+  const db = await workspaceRawClient(projectId)
+  const rows = await db.$queryRawUnsafe<Array<{ table: string }>>(
+    `SELECT DISTINCT c.relname AS "table"
+       FROM pg_policies p
+       JOIN pg_namespace n ON n.nspname = p.schemaname
+       JOIN pg_class c ON c.relnamespace = n.oid AND c.relname = p.tablename
+      WHERE p.schemaname = $1
+        AND p.policyname = 'backenly_admin_only'
+        AND NOT c.relforcerowsecurity
+      ORDER BY 1`,
+    schemaName,
   )
+  return rows.map((r) => r.table)
+}
+
+/**
+ * Hold every admin_only table of a project to its rule: production as one
+ * governed change attributed to Backenly, and each active preview branch.
+ * `apply: false` only reports. Used by scripts/force-admin-only-tables.ts.
+ */
+export async function forceAdminOnlyTables(
+  projectId: string,
+  opts: { apply: boolean },
+): Promise<Array<{ schema: string; tables: string[]; forced: boolean }>> {
+  const { resolveWorkspaceSchema } = await import('./workspace-pool')
+  const main = await resolveWorkspaceSchema(projectId)
+  const branches = await prisma.workspaceBranch.findMany({ where: { projectId, status: 'active' }, select: { schemaName: true } })
+  const out: Array<{ schema: string; tables: string[]; forced: boolean }> = []
+  for (const schema of [main, ...branches.map((b) => b.schemaName)]) {
+    const tables = await unforcedAdminOnlyTables(projectId, schema)
+    if (tables.length === 0) continue
+    if (!opts.apply) {
+      out.push({ schema, tables, forced: false })
+      continue
+    }
+    const force = async () => {
+      for (const t of tables) await executeInWorkspaceSchema(projectId, `ALTER TABLE "${schema}"."${t}" FORCE ROW LEVEL SECURITY;`)
+    }
+    if (schema === main) {
+      const { withGovernedChange } = await import('@/lib/changes/ledger')
+      const { withChangeAttribution } = await import('@/lib/changes/attribution')
+      await withChangeAttribution({ source: 'system' }, () =>
+        withGovernedChange({ projectId, title: `Enforced the service-role-only rule on ${namesForTitle(tables)}` }, force),
+      )
+    } else {
+      await force()
+    }
+    out.push({ schema, tables, forced: true })
+  }
+  return out
 }
 
 /**
