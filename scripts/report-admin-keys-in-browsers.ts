@@ -1,12 +1,12 @@
 /**
  * report-admin-keys-in-browsers.ts — who to tell before admin-role keys stop answering browsers.
  *
- * Read-only. Every project's Default Key used to be an admin-role key with a
- * browser-safe prefix (GHSA-348x). Such keys still answer browsers until
- * ADMIN_KEYS_SERVER_ONLY_FROM, and every browser use is recorded
- * (ADMIN_KEY_BROWSER_USE, lib/security/admin-key-placement.ts). This lists the
- * keys seen in a browser, with their project's owner and the sites that used
- * them, so the owners can be told the date and how to switch.
+ * Read-only. Admin-role keys that are not service keys (older projects'
+ * Default Keys) still answer browsers until ADMIN_KEYS_SERVER_ONLY_FROM, and
+ * every browser use is recorded (ADMIN_KEY_BROWSER_USE,
+ * lib/security/admin-key-placement.ts). This lists the keys seen in a browser,
+ * with their project's owner and the sites that used them, so the owners can
+ * be told the date and how to switch.
  *
  *   npx tsx scripts/report-admin-keys-in-browsers.ts             # the last 30 days
  *   npx tsx scripts/report-admin-keys-in-browsers.ts --days 90

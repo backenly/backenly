@@ -2,18 +2,17 @@
  * AN ADMIN-ROLE KEY BELONGS ON A SERVER
  * ====================================
  *
- * Until GHSA-348x every project's Default Key was minted with the admin role
- * and the `proj_live_` prefix, which Backenly documents as "bound by row-level
- * security; safe in a browser bundle". The admin role skips every permission
- * gate (lib/api/v1/middleware.ts requirePermission): storage treats it as an
- * operator that lists, downloads and deletes every file, private and
- * owner-only included, and it reaches ai/generate. The browser guard refused
- * only service-role keys, so such a key answered any browser.
+ * The admin role skips every permission gate (lib/api/v1/middleware.ts
+ * requirePermission): storage treats an admin-role key as an operator that
+ * lists, downloads and deletes every file, private and owner-only included,
+ * and it reaches ai/generate. Such a key belongs on a server, as a
+ * service-role key does.
  *
- * New projects' Default Key is publishable now (lib/projects/default-api-key.ts)
+ * A project's Default Key is publishable (lib/projects/default-api-key.ts),
  * and no new key may carry the admin role without being a service key
- * (app/api/api-keys/route.ts). This decides what the keys already issued that
- * way get from a browser:
+ * (app/api/api-keys/route.ts). Older projects' Default Keys carry the admin
+ * role with the `proj_live_` prefix. This decides what an admin-role key that
+ * is not a service key gets from a browser:
  *
  *   until ADMIN_KEYS_SERVER_ONLY_FROM   served, and the use is recorded
  *                                       (ADMIN_KEY_BROWSER_USE, at most once a

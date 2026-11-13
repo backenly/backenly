@@ -152,9 +152,9 @@ export async function POST(request: NextRequest) {
     const data = createApiKeySchema.parse(body)
 
     // An admin key is a service key. The admin role skips every permission
-    // check and makes storage treat the key as an operator; on a key bound by
-    // row-level security that is server power with a browser-safe prefix
-    // (GHSA-348x). The console's Admin option already sends serviceRole.
+    // check and makes storage treat the key as an operator, so a public key
+    // asking for it without serviceRole is refused. The console's Admin option
+    // already sends serviceRole.
     if (data.keyType === 'public' && data.role === 'admin' && !data.serviceRole) {
       return NextResponse.json(
         { error: ADMIN_KEY_NEEDS_SERVICE_ROLE_MESSAGE, code: ADMIN_KEY_NEEDS_SERVICE_ROLE },

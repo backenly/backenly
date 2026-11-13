@@ -17,10 +17,9 @@ import { mintKey } from '@/lib/auth/key-prefix'
  *
  * A publishable key: the `client` role, reads and writes bound by row-level
  * security, no AI generation, safe in a browser bundle, as its `proj_live_`
- * prefix says. It was minted with the admin role, which skips every permission
- * check and makes storage treat it as an operator (every file listed,
- * downloaded and deletable), while its prefix and the docs called it
- * browser-safe (GHSA-348x). A server that needs more creates a service key
+ * prefix says. Not the admin role, which skips every permission check and
+ * makes storage treat the key as an operator (every file listed, downloaded
+ * and deletable). A server that needs more creates a service key
  * (Settings → API keys → New key → Admin).
  *
  * Null on failure, never a throw. A project with no default key is repairable

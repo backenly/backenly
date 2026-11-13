@@ -62,7 +62,7 @@ export function issuedKeyPrefix(kind: {
  *   publishable  bound by row-level security; safe in a browser bundle
  *   service      bypasses row-level security; server-side only
  *   server       the admin role, bound by row-level security; server-side only
- *                (what every Default Key was until GHSA-348x)
+ *                (older projects' Default Keys)
  *   mcp          a coding agent's connection; never used by an app
  *   dashboard    a platform key for the dashboard API
  */
