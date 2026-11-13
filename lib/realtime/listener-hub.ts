@@ -159,8 +159,11 @@ class RegionListener {
     return regionDatabaseUrl(this.region, 'direct') ?? requireRegionDatabaseUrl(this.region, 'app')
   }
 
-  /** Start delivering a project's notifications to `handler`; returns the way to stop. */
-  async listen(projectId: string, handler: NotificationHandler): Promise<() => void> {
+  /**
+   * Start delivering a project's notifications to `handler`. Returns the way to
+   * stop, and whether this call opened the project's stream in this process.
+   */
+  async listen(projectId: string, handler: NotificationHandler): Promise<{ stop: () => void; opened: boolean }> {
     // Checked on every subscribe, as workspaceRawClient checks on every call:
     // a region whose connection was removed is refused even while a listener
     // opened earlier is still up.
@@ -168,6 +171,7 @@ class RegionListener {
     await this.ensureConnected()
 
     let stream = this.streams.get(projectId)
+    const opened = !stream
     if (!stream) {
       stream = {
         projectId,
@@ -199,7 +203,7 @@ class RegionListener {
       throw err
     }
     this.startRepairs()
-    return stop
+    return { stop, opened }
   }
 
   /** Read the project's channel (created the first time) and LISTEN on it. */
@@ -501,8 +505,9 @@ class ListenerHub {
       }
 
       // The channel is NOTIFYed by the project's own database, in its region.
-      const stopListening = await this.listenerFor(await projectRegion(projectId)).listen(projectId, handler)
-      await bringFunctionsCurrentBriefly(projectId)
+      const { stop: stopListening, opened } = await this.listenerFor(await projectRegion(projectId)).listen(projectId, handler)
+      // Once per stream this process opens; the repair pass keeps it so after.
+      if (opened) await bringFunctionsCurrentBriefly(projectId)
 
       const unsubscribe = () => {
         release()
