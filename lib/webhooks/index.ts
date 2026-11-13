@@ -77,11 +77,9 @@ export const WEBHOOK_TIMESTAMP_TOLERANCE_SECONDS = 300
  * The timestamped signature: HMAC-SHA256 over `<timestamp>.<delivery id>.<raw body>`,
  * sent as X-Webhook-Signature-V2 beside X-Webhook-Timestamp.
  *
- * X-Webhook-Signature signs the body alone, so a delivery anyone captured (a
- * proxy's log, a receiver's error report) verified forever and could be sent
- * again at will. Signing the time and the delivery's id with the body lets a
- * receiver refuse a stale delivery and drop a repeated id. The body-only
- * header is still sent, for receivers that check it today.
+ * Because the time and the delivery's id are signed with the body, a receiver
+ * can refuse a stale delivery and drop a repeated id. X-Webhook-Signature,
+ * over the body alone, is still sent for receivers that check it.
  */
 export function generateTimestampedSignature(timestamp: number, deliveryId: string, payload: string, secret: string): string {
   return 'sha256=' + crypto.createHmac('sha256', secret).update(`${timestamp}.${deliveryId}.${payload}`).digest('hex')
