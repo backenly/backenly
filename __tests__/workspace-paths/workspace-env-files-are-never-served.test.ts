@@ -174,12 +174,15 @@ afterAll(async () => {
 })
 
 describe('isEnvFile', () => {
-  it.each(['.env', '.env.local', '.env.production', '.env.development.local', 'app/.env', 'workspace/config/.env.test', '.ENV'])(
+  it.each(['.env', '.env.local', '.env.production', '.env.development.local', 'app/.env', 'workspace/config/.env.test', '.ENV',
+    // A trailing separator or space names the same file once the path is resolved.
+    '.env/', 'workspace/.env/', '.env ', '.envrc', '.env-local', '.env_local', 'prod.env', 'config/staging.env'])(
     '%s is an environment file',
     (name) => expect(isEnvFile(name)).toBe(true),
   )
 
-  it.each(['.env.example', '.env.sample', '.env.template', '.env.dist', 'env.example', '.environment', 'src/env.ts', 'notes.txt'])(
+  it.each(['.env.example', '.env.sample', '.env.template', '.env.dist', 'env.example', '.environment', 'src/env.ts', 'notes.txt',
+    'prod.env.example'])(
     '%s is not',
     (name) => expect(isEnvFile(name)).toBe(false),
   )
@@ -206,6 +209,32 @@ describe('POST /api/workspace/files/content', () => {
     workspaceWith(projectId, { '.env': backenlyEnv(marker), 'config/.env.local': backenlyEnv(marker) })
 
     const r = await readFile(projectId, filePath)
+
+    expect(r.status).toBe(403)
+    expect(r.body.code).toBe('ENV_FILE_NOT_SERVED')
+    expect(r.text).not.toContain(marker)
+  })
+
+  // Each of these resolves to `.env` on disk; the name asked for alone does not say so.
+  it.each(['.env/', '.env/.', 'x/../.env/.', 'workspace/.env/'])('refuses %s, which resolves to .env', async (filePath) => {
+    const marker = `marker-${randomUUID()}`
+    const projectId = await makeProject()
+    workspaceWith(projectId, { '.env': backenlyEnv(marker) })
+
+    const r = await readFile(projectId, filePath)
+
+    expect(r.status).toBe(403)
+    expect(r.body.code).toBe('ENV_FILE_NOT_SERVED')
+    expect(r.text).not.toContain(marker)
+  })
+
+  it('refuses a link in the workspace that leads to its .env', async () => {
+    const marker = `marker-${randomUUID()}`
+    const projectId = await makeProject()
+    const dir = workspaceWith(projectId, { '.env': backenlyEnv(marker) })
+    fs.symlinkSync(path.join(dir, '.env'), path.join(dir, 'notes.txt'))
+
+    const r = await readFile(projectId, 'notes.txt')
 
     expect(r.status).toBe(403)
     expect(r.body.code).toBe('ENV_FILE_NOT_SERVED')
@@ -295,12 +324,33 @@ describe('removing the copies made before', () => {
 
     const removed = await removeBackenlyEnvFiles(found)
 
-    expect(removed).toEqual({ files: 1, rows: 1 })
+    expect(removed).toEqual({ files: 1, rows: 1, strippedFiles: 0, strippedRows: 0 })
     expect(fs.existsSync(path.join(dir, '.env'))).toBe(false)
     expect(fs.existsSync(path.join(dir, 'api', '.env.local'))).toBe(true)
     expect(fs.existsSync(path.join(dir, '.env.example'))).toBe(true)
     const rows = await prisma.workspaceFile.findMany({ where: { projectId }, select: { path: true } })
     expect(rows.map((row) => row.path)).toEqual(['workspace/api/.env.local'])
+  })
+
+  it("keeps a project's own variables that were added to the file Backenly wrote, and takes Backenly's lines out", async () => {
+    const projectId = await makeProject()
+    const mixed = backenlyEnv(`marker-${randomUUID()}`) + 'MINE=2\n'
+    const dir = workspaceWith(projectId, { '.env': mixed })
+    await prisma.workspaceFile.create({ data: { projectId, path: 'workspace/.env', content: mixed } })
+
+    const found = (await findWorkspaceEnvFiles()).filter((f) => f.projectId === projectId)
+    expect(found.map((f) => `${f.where} ${f.writtenByBackenly} ${f.onlyBackenly}`).sort()).toEqual(['database true false', 'disk true false'])
+
+    const removed = await removeBackenlyEnvFiles(found)
+
+    expect(removed).toEqual({ files: 0, rows: 0, strippedFiles: 1, strippedRows: 1 })
+    const kept = fs.readFileSync(path.join(dir, '.env'), 'utf8')
+    expect(kept).toContain('MINE=2')
+    expect(kept).not.toContain('DATABASE_URL')
+    expect(kept).not.toContain(BACKENLY_ENV_HEADER)
+    const row = await prisma.workspaceFile.findFirstOrThrow({ where: { projectId, path: 'workspace/.env' } })
+    expect(row.content).toContain('MINE=2')
+    expect(row.content).not.toContain('DATABASE_URL')
   })
 
   it('leaves a file that no longer starts with the header when it is removed', async () => {
