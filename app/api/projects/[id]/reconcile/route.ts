@@ -67,12 +67,33 @@ export async function POST(
         { dryRun },
       )
 
+      // A table recreated from the snapshot has its columns and none of its
+      // rules: it is protected as a new table is (autoApplyRlsIfNeeded), the
+      // owner's rows or closed to all but service-role keys.
+      const notices: string[] = []
+      if (!dryRun) {
+        const { autoApplyRlsIfNeeded, rlsNotSetNotice } = await import('@/lib/services/workspace-rls')
+        const { existingTables } = await import('@/lib/mcp/apply-migration')
+        const { workspaceSchemaName } = await import('@/lib/security/workspace-schema')
+        const missing = report.drifts.filter((d) => d.type === 'missing_table').map((d) => d.tableName)
+        const recreated = await existingTables(validated.projectId, workspaceSchemaName(validated.projectId), missing)
+        for (const table of recreated) {
+          try {
+            const notice = (await autoApplyRlsIfNeeded(validated.projectId, table, [], {}, { closeWhenUndecidable: true })).notice
+            if (notice) notices.push(notice)
+          } catch (err) {
+            notices.push(rlsNotSetNotice(table, err instanceof Error ? err.message : String(err)))
+          }
+        }
+      }
+
       return NextResponse.json({
         projectId: validated.projectId,
         status: dryRun ? 'dry_run' : (result.failed > 0 ? 'partial' : 'applied'),
         applied: result.applied,
         failed: result.failed,
         errors: result.errors,
+        ...(notices.length ? { notices } : {}),
         migrations: report.migrations,
         report,
       })
