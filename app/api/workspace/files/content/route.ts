@@ -1,6 +1,6 @@
 export const dynamic = 'force-dynamic'
 
-import { projectWorkspaceDir } from '@/lib/workspace/paths'
+import { realPathInsideWorkspace, resolveInsideWorkspace } from '@/lib/workspace/paths'
 import { NextRequest, NextResponse } from 'next/server'
 import { requireAuth } from '@/lib/auth/middleware'
 import { roleRefusal } from '@/lib/auth/project-floor'
@@ -27,17 +27,28 @@ export async function POST(request: NextRequest) {
     }
 
     const { filePath } = await request.json()
-    
+
+    // The path names a file in this project's workspace, and only there.
+    const fsPath =
+      typeof filePath === 'string' ? resolveInsideWorkspace(projectId, filePath.replace(/^workspace\//, '')) : null
+    if (!fsPath) {
+      return NextResponse.json(
+        { error: "That file is not in this project's workspace.", code: 'PATH_OUTSIDE_WORKSPACE' },
+        { status: 400 },
+      )
+    }
+
     // CRITICAL FIX: Always try to read from file system first (for all files, not just .prisma)
     // This ensures we get the latest content even if DB is not synced yet
     try {
       const fs = await import('fs/promises')
-      const path = await import('path')
-      
-      // Remove 'workspace/' prefix and construct file system path
-      const relativePath = filePath.replace(/^workspace\//, '')
-      const fsPath = path.join(projectWorkspaceDir(projectId), relativePath)
-      
+
+      // A symbolic link in the workspace is read only when it leads to a file
+      // that is in the workspace too.
+      if (!(await realPathInsideWorkspace(projectId, fsPath))) {
+        throw new Error('not a file in the workspace')
+      }
+
       console.log('[File Content] Trying to read from file system: ' + fsPath)
       const content = await fs.readFile(fsPath, 'utf-8')
       console.log('[File Content] FS read success! Length: ' + content.length + ', has newlines: ' + content.includes('\n'))

@@ -171,6 +171,7 @@ __tests__/auth/workspace-oauth-authorization.test.ts
 # access, a VIEWER or DEVELOPER 403 (the archive needs the Admin role), and an
 # ADMIN or the owner reaches the route's own disk lookup.
 __tests__/auth/workspace-download-authorization.test.ts
+__tests__/workspace-paths/workspace-file-reads-stay-in-the-project.test.ts
 
 # Changing a project from the console needs the Developer role, through each
 # wrapper's method default (delete-table, storage file delete) and through a
