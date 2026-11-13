@@ -1,7 +1,7 @@
 export const dynamic = 'force-dynamic'
 
 import { NextRequest } from 'next/server'
-import { v1ApiMiddleware, requirePermission } from '@/lib/api/v1/middleware'
+import { v1ApiMiddleware, requirePermission, requireStorageWriter } from '@/lib/api/v1/middleware'
 import { createErrorResponse, createSuccessResponse, ErrorCodes } from '@/lib/api/v1/errors'
 import { prisma } from '@/lib/db'
 import { assertQuotaAvailable, incrementStorageUsed, QuotaExceededError } from '@/lib/services/storageQuota'
@@ -47,6 +47,26 @@ function safeChunkPath(uploadId: string, partFile?: string): string | null {
   const rel = path.relative(root, target)
   if (rel.startsWith('..') || path.isAbsolute(rel)) return null
   return target
+}
+
+/** What the steps after initiate know about the caller. */
+interface Caller {
+  projectId: string
+  apiKey: { serviceRole?: boolean | null }
+  endUserId: string | null
+}
+
+/**
+ * Every step after initiate (a part, complete, abort) is for the end user who
+ * started the upload, or for a server holding a service-role key.
+ */
+function notTheUploader(fileRecord: { uploadedBy: string | null }, caller: Caller, step: string) {
+  if (caller.apiKey.serviceRole || fileRecord.uploadedBy === caller.endUserId) return null
+  return createErrorResponse(
+    ErrorCodes.FORBIDDEN,
+    `Only the end user who started this upload, or a server-side service key, may ${step} it.`,
+    403,
+  )
 }
 
 /**
@@ -151,6 +171,8 @@ async function handleInitiate(request: NextRequest, context: { projectId: string
           size: BigInt(contentLength),
           mimeType: contentType,
           isPublic,
+          // The end user who started it (requireStorageWriter): it may be aborted
+          // by them, and the finished file is theirs under owner_only.
           uploadedBy: context.endUserId ?? null,
           metadata: { uploadId, s3UploadId, s3Key, status: 'uploading', uploader: { ...uploader } },
         },
@@ -202,7 +224,8 @@ async function handleInitiate(request: NextRequest, context: { projectId: string
 }
 
 // ── UPLOAD CHUNK ──────────────────────────────────────────────────────────────
-async function handleUploadChunk(request: NextRequest, uploadId: string, partNumber: number, totalParts: number, projectId: string) {
+async function handleUploadChunk(request: NextRequest, uploadId: string, partNumber: number, totalParts: number, caller: Caller) {
+  const { projectId } = caller
   if (!uploadId || partNumber < 1 || totalParts < 1) {
     return createErrorResponse(ErrorCodes.BAD_REQUEST, 'uploadId, partNumber, and totalParts are required', 400)
   }
@@ -226,6 +249,8 @@ async function handleUploadChunk(request: NextRequest, uploadId: string, partNum
   if (!fileRecord) {
     return createErrorResponse(ErrorCodes.NOT_FOUND, 'Upload session not found', 404)
   }
+  const notYours = notTheUploader(fileRecord, caller, 'add a part to')
+  if (notYours) return notYours
 
   const chunkBuffer = Buffer.from(await request.arrayBuffer())
   if (chunkBuffer.length > MAX_CHUNK_BYTES) {
@@ -267,7 +292,8 @@ async function handleUploadChunk(request: NextRequest, uploadId: string, partNum
 }
 
 // ── COMPLETE ──────────────────────────────────────────────────────────────────
-async function handleComplete(request: NextRequest, uploadId: string, totalParts: number, projectId: string) {
+async function handleComplete(request: NextRequest, uploadId: string, totalParts: number, caller: Caller) {
+  const { projectId } = caller
   if (!uploadId || totalParts < 1) {
     return createErrorResponse(ErrorCodes.BAD_REQUEST, 'uploadId and totalParts are required', 400)
   }
@@ -285,6 +311,8 @@ async function handleComplete(request: NextRequest, uploadId: string, totalParts
   if (!fileRecord) {
     return createErrorResponse(ErrorCodes.NOT_FOUND, 'Upload session not found', 404)
   }
+  const notYours = notTheUploader(fileRecord, caller, 'complete')
+  if (notYours) return notYours
 
   const meta: any = fileRecord.metadata || {}
 
@@ -392,6 +420,8 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
   const { context } = middleware
   const permCheck = requirePermission(context, ['write', 'admin'])
   if (permCheck) return permCheck
+  const writerCheck = requireStorageWriter(context)
+  if (writerCheck) return writerCheck
 
   const action = request.nextUrl.searchParams.get('action')
 
@@ -402,7 +432,7 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
   if (action === 'complete') {
     const uploadId = request.nextUrl.searchParams.get('uploadId') || ''
     const totalParts = parseInt(request.nextUrl.searchParams.get('totalParts') || '0', 10)
-    return handleComplete(request, uploadId, totalParts, context.projectId)
+    return handleComplete(request, uploadId, totalParts, context)
   }
 
   return createErrorResponse(ErrorCodes.BAD_REQUEST, 'Use ?action=initiate or ?action=complete', 400)
@@ -415,12 +445,14 @@ async function handlePUT(request: NextRequest, props: { params: Promise<{ projec
   const { context } = middleware
   const permCheck = requirePermission(context, ['write', 'admin'])
   if (permCheck) return permCheck
+  const writerCheck = requireStorageWriter(context)
+  if (writerCheck) return writerCheck
 
   const uploadId = request.nextUrl.searchParams.get('uploadId') || ''
   const partNumber = parseInt(request.nextUrl.searchParams.get('partNumber') || '0', 10)
   const totalParts = parseInt(request.nextUrl.searchParams.get('totalParts') || '0', 10)
 
-  return handleUploadChunk(request, uploadId, partNumber, totalParts, context.projectId)
+  return handleUploadChunk(request, uploadId, partNumber, totalParts, context)
 }
 
 async function handleDELETE(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
@@ -428,6 +460,13 @@ async function handleDELETE(request: NextRequest, props: { params: Promise<{ pro
   const middleware = await v1ApiMiddleware(request, params)
   if (middleware.response) return middleware.response
   const { context } = middleware
+  // Aborting removes the upload's file record, so it is held to what writing
+  // is: the write permission, from the end user who started the upload or a
+  // service-role key.
+  const permCheck = requirePermission(context, ['write', 'admin'])
+  if (permCheck) return permCheck
+  const writerCheck = requireStorageWriter(context)
+  if (writerCheck) return writerCheck
 
   const uploadId = request.nextUrl.searchParams.get('uploadId') || ''
   if (!uploadId) return createErrorResponse(ErrorCodes.BAD_REQUEST, 'uploadId is required', 400)
@@ -436,6 +475,11 @@ async function handleDELETE(request: NextRequest, props: { params: Promise<{ pro
   const fileRecord = await prisma.storageFile.findFirst({
     where: { projectId: context.projectId, metadata: { path: ['uploadId'], equals: uploadId } },
   }).catch(() => null)
+
+  if (fileRecord) {
+    const notYours = notTheUploader(fileRecord, context, 'abort')
+    if (notYours) return notYours
+  }
 
   if (fileRecord) {
     await prisma.storageFile.delete({ where: { id: fileRecord.id } }).catch(() => null)

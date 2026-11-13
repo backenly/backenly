@@ -738,8 +738,10 @@ describe('PostgREST, per region', () => {
 describe('realtime listens and notifies on the project’s own database', () => {
   // LISTEN/NOTIFY never crosses databases: a listener on the home database
   // would subscribe successfully and then hear nothing a regional project's
-  // database sends. Each event below is sent on one database only.
-  const channelOf = (projectId: string) => `workspace_${projectId}_changes`
+  // database sends. Each event below is sent on one database only, on the
+  // channel that database keeps for the project (lib/realtime/channels.ts).
+  const notifyIn = (url: string, projectId: string, payload: string) =>
+    run(url, `SELECT pg_notify(channel, '${payload}') FROM backenly_realtime.channel_secrets WHERE schema_name = '${schemaOf(projectId)}'`)
 
   async function subscribe(projectId: string) {
     let deliver!: (payload: Record<string, unknown>) => void
@@ -764,7 +766,7 @@ describe('realtime listens and notifies on the project’s own database', () => 
     process.env[REGION_VARIABLE] = regionalUrl
     const sub = await subscribe(regionalProject)
     try {
-      await run(regionalUrl, `SELECT pg_notify('${channelOf(regionalProject)}', '{"from":"us-east-1"}')`)
+      await notifyIn(regionalUrl, regionalProject, '{"from":"us-east-1"}')
       expect(await sub.event()).toEqual({ from: 'us-east-1' })
     } finally {
       sub.unsubscribe()
@@ -774,7 +776,7 @@ describe('realtime listens and notifies on the project’s own database', () => 
   it('still hears a home project’s channel on the home database', async () => {
     const sub = await subscribe(homeProject)
     try {
-      await run(homeUrl(), `SELECT pg_notify('${channelOf(homeProject)}', '{"from":"home"}')`)
+      await notifyIn(homeUrl(), homeProject, '{"from":"home"}')
       expect(await sub.event()).toEqual({ from: 'home' })
     } finally {
       sub.unsubscribe()

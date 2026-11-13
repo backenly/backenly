@@ -66,6 +66,7 @@ import {
   workspaceSchemaName,
 } from '@/lib/security/workspace-schema'
 import { functionRoleName } from '@/lib/services/ai-functions/function-db-role'
+import { CHANNEL_TABLE_EXISTS_SQL, DELETE_CHANNELS_SQL } from '@/lib/realtime/channel-sql'
 import { directAccessRoleNames } from '@/lib/services/direct-access'
 import { purgeProjectExternals } from '@/lib/projects/purge'
 import { PURGE_JOB_TYPE, PURGE_STATUS } from '@/lib/queue'
@@ -457,12 +458,26 @@ async function dropRegionalProjectData(
       const [{ present }] = await rtx.$queryRaw<{ present: boolean }[]>`
         SELECT to_regclass('public.regional_bodies') IS NOT NULL AS present`
       if (present) await rtx.$executeRaw`DELETE FROM public.regional_bodies WHERE "projectId" = ${projectId}`
+      await dropRealtimeChannels(rtx, projectId, schemas)
       // After the schemas, so the roles hold no grants that would block the drop.
       const retiredLogins = await dropRoles(rtx, projectRoleNames(projectId, credentialRoles, schemas))
       return { schemas, retiredLogins }
     },
     { timeout: TRANSACTION_TIMEOUT_MS, maxWait: TRANSACTION_MAX_WAIT_MS },
   )
+}
+
+/**
+ * The project's realtime channels go with its schemas
+ * (lib/realtime/channels.ts): the canonical schema's, which may exist with no
+ * schema left, and any other schema's that had one. A database that never
+ * needed a channel has no table to delete from.
+ */
+async function dropRealtimeChannels(tx: Tx, projectId: string, schemas: string[]): Promise<void> {
+  const [{ present }] = await tx.$queryRawUnsafe<{ present: boolean }[]>(CHANNEL_TABLE_EXISTS_SQL)
+  if (!present) return
+  const names = [...new Set([workspaceSchemaName(projectId), ...schemas])]
+  await tx.$executeRawUnsafe(DELETE_CHANNELS_SQL, names)
 }
 
 /**
@@ -484,6 +499,7 @@ async function purgeProjectInTransaction(
     // identifier cannot come from a request body: it came from pg_namespace.
     await tx.$executeRawUnsafe(`DROP SCHEMA IF EXISTS ${quoteIdent(schema)} CASCADE`)
   }
+  await dropRealtimeChannels(tx, projectId, schemas)
 
   // After the schemas, so the roles hold no grants that would block the drop.
   const retiredLogins = await dropProjectDatabaseRoles(tx, projectId, schemas)

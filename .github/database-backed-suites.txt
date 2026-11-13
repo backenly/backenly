@@ -46,9 +46,11 @@ tests/integration/state-webhooks-section.spec.ts
 tests/integration/integrations-auto-wiring.spec.ts
 tests/integration/end-user-email-verification-opt-in.spec.ts
 tests/integration/signin-enumeration.spec.ts
+tests/integration/account-emails-answer-at-once.spec.ts
 tests/integration/project-smtp-and-templates.spec.ts
 tests/integration/storage-bucket-policy.spec.ts
 tests/integration/storage-runtime-policy.spec.ts
+tests/integration/storage-writes-need-a-user.spec.ts
 tests/integration/function-off-switch.spec.ts
 
 # At /fn/{name} a route module's status, body and content type go out as it
@@ -167,10 +169,20 @@ __tests__/auth/project-delete-authorization.test.ts
 __tests__/auth/workspace-oauth-authorization.test.ts
 
 # The workspace ZIP download had the same shape: authenticated, then the header
-# project id trusted. Pins that the guard is getCurrentProjectId like its
-# workspace/files siblings: 401 / 403 / 404 / 400 before any disk access, and an
-# authorized caller reaches the route's own disk lookup.
+# project id trusted. Pins the guard: 401 / 403 / 404 / 400 before any disk
+# access, a VIEWER or DEVELOPER 403 (the archive needs the Admin role), and an
+# ADMIN or the owner reaches the route's own disk lookup.
 __tests__/auth/workspace-download-authorization.test.ts
+__tests__/workspace-paths/workspace-file-reads-stay-in-the-project.test.ts
+__tests__/workspace-paths/workspace-env-files-are-never-served.test.ts
+
+# Changing a project from the console needs the Developer role, through each
+# wrapper's method default (delete-table, storage file delete) and through a
+# hand check (workspace files); taking down a published link needs the Admin
+# role (share-report, preview-shares). Every refusal is 403
+# PROJECT_ROLE_INSUFFICIENT with the project unchanged; a VIEWER still runs a
+# read-only query, and on single-tenant every account is the operator.
+tests/integration/console-role-floors.spec.ts
 
 # The catalog routes (schemas, indexes, relationships) read only the named
 # project's own schemas, from its own database: a second tenant's schema,
@@ -249,6 +261,14 @@ __tests__/database/dashboard-row-writes-rls.test.ts
 # the row: a real own-rows policy, two end users, anonymous and service-role
 # subscribers, deletes reduced to the key, and a table without a primary key.
 __tests__/database/realtime-row-visibility.test.ts
+
+# admin_only forces row-level security like every other rule, so the role that
+# owns workspace tables is held to it: realtime's per-change visibility check
+# and the SDK's database routes, run as a NOSUPERUSER NOBYPASSRLS member of the
+# owning role, give an end user and the publishable key none of its rows; an
+# admin_only table installed before is found and forced.
+__tests__/database/admin-only-is-forced.test.ts
+
 # Schema snapshots stored ZERO tables (the parser expected a format the
 # introspector never emitted), so the History snapshot view was always empty
 # and rollback diffed two empty sets and reported "Dropped 0 table(s)" as
@@ -534,6 +554,10 @@ tests/integration/fixed-claims-from-verified-state.spec.ts
 # replied/unavailable/failed truthfully, and 404 CLOUD_ONLY_FEATURE off Cloud.
 # Case rows, thread rows and the in-app notification are the property.
 tests/integration/support-center.spec.ts
+# Filing a case, replying and asking the AI first responder again each stop
+# at the person's hourly budget: the next call is 429 and files, saves or
+# dispatches nothing, and another person's budget is untouched.
+tests/integration/support-limits.spec.ts
 
 # Five destructive routes that did not check who was asking. Three had NO
 # authentication at all - anyone reaching the server could roll back a live
@@ -1086,6 +1110,12 @@ tests/integration/user-avatar.spec.ts
 # DDL for the grandfathered email_verified column.
 tests/integration/auth-email-policy.spec.ts
 
+# A project's App URL is saved only as an http(s) address with a plain
+# hostname, and one stored before that check never reaches the hosted auth
+# pages or the auth emails; a real one still gets its links. Real workspace
+# users and the real runtime, so it needs a real Postgres.
+tests/integration/app-url-stays-a-link.spec.ts
+
 # rotate_trigger_secret keeps its advertised contract: the docs print the
 # declared triggerName-or-triggerId alternative instead of "nothing", the
 # new secret rides data.secret and really rotates the row, and a call with
@@ -1156,6 +1186,7 @@ tests/integration/readiness-reads-never-write.spec.ts
 # minutes or a fix verify again, and a run that failed is not kept. Real
 # project, tables, end-user auth and HTTP stack are the property.
 tests/integration/readiness-reads-reuse-verification.spec.ts
+tests/integration/security-scans-need-a-project.spec.ts
 # Connection health counts the last day in the database: bootstraps per
 # origin, key failures per origin, kind and key shape, probes without an
 # origin, the platform's own origins left out, nothing capped at 5,000. Real
@@ -1271,6 +1302,12 @@ tests/integration/branch-key-surfaces.spec.ts
 # own place still reaches its router. Real key rows and mount order are the
 # property, so it needs a real Postgres.
 tests/integration/key-placement-surfaces.spec.ts
+
+# A new project's Default Key is publishable, a new admin key must be a service
+# key, and an admin-role key issued before that is served to a browser (and
+# recorded) until ADMIN_KEYS_SERVER_ONLY_FROM, then refused at the door and in
+# each route's own authentication. Real key rows and audit log.
+tests/integration/admin-keys-server-only.spec.ts
 
 # A preview branch has a working endpoint: the agent tool issues a branch key,
 # the runtime serves the branch and tags its request log rows, every production
@@ -1917,6 +1954,10 @@ tests/integration/signed-out-session-answers.spec.ts
 # secret) is said on the key's own step; a VIEWER may not ask. Real sessions,
 # roles and database; Stripe's API answer is stubbed at fetch.
 tests/integration/integration-key-checked-on-continue.spec.ts
+# Storing, replacing or switching on an integration key needs DEVELOPER and
+# removing one needs ADMIN, the env-var floors: every console route that
+# writes the key vault, with real sessions, organization roles and database.
+tests/integration/integration-key-role-floors.spec.ts
 
 # Connection Health counts a frontend's successful production requests by the
 # origin the request log keeps (localhost included); a bootstrap ping is
@@ -1932,6 +1973,17 @@ tests/integration/v2-errors-in-postgrest-shape.spec.ts
 # restoring that change brings it back; an identical redeploy names none. Real
 # ledger and project.
 tests/integration/function-redeploy-in-history.spec.ts
+
+# A function does trusted work with asService: one transaction as the service
+# role, on the project's own login, so a checkout takes stock a shopper may not
+# update and still reaches nothing outside the project. Real policies and role.
+tests/integration/function-trusted-work.spec.ts
+
+# The release step for stored functions that read the withheld variables:
+# reports every one, rewrites only Backenly's template code as governed
+# changes History can restore, and deploy says when code runs as the service
+# role. Real ledger and project.
+tests/integration/function-withheld-env-migration.spec.ts
 
 # A person can ask Backenly to look for architecture changes from the console;
 # the route answers one look per project every 10 minutes and says when the
@@ -1970,6 +2022,10 @@ tests/integration/publish-counts-the-live-tables.spec.ts
 # capture trigger, outbox, drain and loopback receiver, the table list's
 # checks, History, and the agent's actions.
 tests/integration/webhooks-pick-tables.spec.ts
+# webhooks { action: "logs" } answers an agent with the fields the console's
+# delivery list has: a real delivery row, the MCP tool route with a read-only
+# key, and the console route.
+tests/integration/mcp-webhook-logs-match-console.spec.ts
 # Readiness counts the problems Backenly found: an open critical finding blocks
 # publishing and a warning warns, each named as the Autonomy page names it,
 # and it warns while magic links are on with no App URL. Real findings and
@@ -1986,6 +2042,30 @@ tests/integration/usage-storage-measured-on-read.spec.ts
 # the real connect action and the real key store (#609).
 tests/integration/email-integration-wiring-sender.spec.ts
 
+# A table Backenly creates whose owner it cannot infer starts closed to all but
+# service-role keys, opens once a foreign key shows the owner unless a rule was
+# chosen since, and a table adopted from the database is left as it is. Read
+# and written as the REST API's own roles with production's grants.
+__tests__/database/new-tables-closed-by-default.test.ts
+
+# The same, on every door a table comes through: apply_migration on production
+# and on a preview branch, the merge, backend_chat building on a branch,
+# generate_api and add_column creating a missing table, a junction table and a
+# restore from History; a later migration showing the owner opens it as one
+# verified change. Real schemas, executor, MCP route, branch engine and ledger.
+tests/integration/new-tables-closed-on-every-path.spec.ts
+
+# A table whose rows grant access (user_roles, team_members, invitations)
+# gets owner_read_only: each user reads their own rows and cannot write one
+# naming themselves; an ordinary owned table still lets its owner write.
+# Written as the REST API's authenticated role with production's grants.
+__tests__/database/grant-tables-are-not-self-writable.test.ts
+
+# The same on every door: apply_migration on production and on a branch, the
+# merge, backend_chat on a branch, a grant table that starts closed and is
+# opened by a later migration, the chat blueprint's steps and REGISTER_TABLE.
+tests/integration/grant-tables-on-every-path.spec.ts
+
 # A rule Backenly guessed from a name, which the request did not ask for, is
 # found on a table made before #654 (UNIQUE on an email column, a CHECK list on
 # status), never on one the SQL declared or made after #654; the loop and the
@@ -1995,6 +2075,11 @@ tests/integration/guessed-constraints.spec.ts
 # A column added in SQL is added as written, on production and on a branch:
 # no UNIQUE from an email name, no foreign key from an *_id name.
 tests/integration/add-column-as-written.spec.ts
+# An MCP key and an OAuth connection stop working when the ADMIN who issued
+# them is demoted or leaves the organization, and work again if the role comes
+# back. A provisioned project, the real issuing, consent, token and tool routes.
+tests/integration/mcp-credentials-follow-the-issuer.spec.ts
+
 # The tables Backenly designs (the Stripe and other integration wiring, the
 # build's tables, a description's) hold their own defaults and the values
 # Backenly writes into them; a Stripe-wired subscriptions table made before is
@@ -2008,3 +2093,13 @@ tests/integration/designed-tables-hold-their-values.spec.ts
 # superuser, never dropped, and installed from a branch on a protected
 # production. Real catalog, real MCP route and console route.
 tests/integration/agent-installs-extensions.spec.ts
+# Each project's realtime stream has its own channel, kept by the platform:
+# another project's read-only login receives none of a project's changes,
+# reaches none of its streams and reads no channel; the stream still gets every
+# change, broadcast and presence through both servers, and a generated route
+# module's own events; older function bodies are replaced when a stream opens
+# and by the repair pass; the channel a read-write login could read goes quiet
+# when the login is issued, rotated or revoked; a branch, a deleted project and
+# a missing platform schema behave; nothing sent out carries a channel. Real
+# logins, triggers, routes and the listener hub are the property.
+tests/integration/realtime-channel-per-project.spec.ts

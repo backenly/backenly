@@ -24,6 +24,7 @@ import {
   serviceRoleRefusalMessage,
 } from '@/lib/security/service-role-exposure'
 import { MCP_KEY_HINT, MCP_KEY_IN_APP, isMcpCredential, mcpKeyRefusalMessage } from '@/lib/security/key-placement'
+import { ADMIN_KEY_IN_BROWSER, adminKeyInBrowser, isRlsBoundAdminKey } from '@/lib/security/admin-key-placement'
 import { clientWindowOf, describeClientWindow, isSharedKey } from '@/lib/security/shared-key-rate'
 import { endUserBearerToken } from '@/lib/security/end-user-bearer'
 
@@ -448,6 +449,19 @@ export async function v1ApiMiddleware(
     }
   }
 
+  // 7b. An admin-role key bound by row-level security: server-only, refused
+  // from the cutoff date on and recorded until then (lib/security/admin-key-placement.ts).
+  if (isRlsBoundAdminKey(apiKeyRecord)) {
+    const refused = adminKeyInBrowser(
+      { id: apiKeyRecord.id, name: apiKeyRecord.name ?? null, keyPrefix: apiKeyRecord.keyPrefix ?? null, projectId },
+      detectBrowserOrigin(Object.fromEntries(request.headers)),
+      { method: request.method, path: request.nextUrl.pathname },
+    )
+    if (refused) {
+      return { context: {} as V1ApiContext, response: createErrorResponse(ADMIN_KEY_IN_BROWSER, refused.message, 403) }
+    }
+  }
+
   // No plan quota on API requests: they are unlimited on every plan. The
   // owner's monthly count for the Usage page is kept by the request recorder
   // every v1 route is wrapped in (lib/traffic/request-recorder.ts).
@@ -678,6 +692,26 @@ export function requirePermission(
     )
   }
   return null
+}
+
+/**
+ * Who may write to a project's storage through the public API: a signed-in
+ * end user (X-User-Token or a Bearer end-user session), or a server holding a
+ * service-role key.
+ *
+ * A key alone is not enough. Every key but a service-role key may sit in a
+ * browser bundle (service-role keys are refused from browsers), and the
+ * publishable key sits in every one, so a write the key alone authorises is a
+ * write by anyone who opens the app.
+ */
+export function requireStorageWriter(context: V1ApiContext): NextResponse | null {
+  if (context.apiKey.serviceRole || context.endUserId) return null
+  return createErrorResponse(
+    'SIGN_IN_REQUIRED',
+    "Changing files needs a signed-in user. Send the user's session token (X-User-Token), " +
+      'or make the call from your server with a service-role key.',
+    401,
+  )
 }
 
 /**

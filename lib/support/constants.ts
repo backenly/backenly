@@ -68,7 +68,7 @@ export const TICKET_SUBJECT_MAX = 160
 export const TICKET_BODY_MIN = 10
 export const TICKET_BODY_MAX = 10_000
 
-/** Creation and reply ceilings per user per hour (lib/middleware/rateLimiter.ts keys). */
+/** Creation and reply ceilings per user per hour, counted by spendSupportBudget (lib/support/http.ts). */
 export const TICKET_CREATE_LIMIT = { limit: 10, windowMs: 60 * 60 * 1000 }
 export const TICKET_REPLY_LIMIT = { limit: 60, windowMs: 60 * 60 * 1000 }
 /** Asking the AI first responder to try again, per user per hour. Each case has its own attempt cap too. */

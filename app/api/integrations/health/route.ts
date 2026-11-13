@@ -9,6 +9,11 @@
  *  - failure rate (from usage logs)
  *  - live key validity check (optional, ?check=1)
  *
+ * Any member reads the stored status. The live check decrypts the stored keys
+ * and calls each provider with them, so it needs write access to the project
+ * (DEVELOPER and above), as the key check before connecting does
+ * (app/api/projects/[id]/credentials/verify).
+ *
  * Used by the dashboard to show a real-time integration status panel.
  */
 
@@ -16,7 +21,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { authenticateRequest } from '@/lib/auth/middleware'
 import { prisma } from '@/lib/db'
 import { getIntegrationKey } from '@/lib/services/integrationKeyStore'
-import { canAccessProject } from '@/lib/edition/guard'
+import { canAccessProject, canWriteProject } from '@/lib/edition/guard'
 
 // ── Integration probe definitions ──────────────────────────────────────────────
 
@@ -196,6 +201,12 @@ export async function GET(req: NextRequest) {
     // Verify project ownership
     if (!(await canAccessProject(auth.userId, projectId))) {
       return NextResponse.json({ error: 'Project not found' }, { status: 404 })
+    }
+    if (liveCheck && !(await canWriteProject(auth.userId, projectId))) {
+      return NextResponse.json(
+        { error: 'A live check of the stored keys needs the DEVELOPER role or above.', code: 'PROJECT_ROLE_INSUFFICIENT' },
+        { status: 403 },
+      )
     }
 
     // Load all stored integration keys for this project

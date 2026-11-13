@@ -267,6 +267,9 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
 // Body: (empty) — runs the observer and returns a fresh health summary.
 // Useful when: user just fixed an issue and wants to confirm it without waiting
 // for the daily cron cycle.
+//
+// DEVELOPER and above, as dismissing a finding (POST) is: a scan writes
+// findings and checks the stored integration keys with their providers.
 
 export async function PATCH(request: NextRequest, props: { params: Promise<{ id: string }> }) {
   const params = await props.params
@@ -327,7 +330,7 @@ export async function PATCH(request: NextRequest, props: { params: Promise<{ id:
         summary: buildHealthSummary(findings),
       },
     })
-  })
+  }, { floor: 'write' })
 }
 
 // ─── POST /dismiss ────────────────────────────────────────────────────────────

@@ -245,3 +245,46 @@ describe('SET-04: withProjectAccess routes carry their own floors', () => {
     }
   }, 60_000)
 })
+
+describe('changing or rotating a key takes the authority that issues one', () => {
+  it("a key's creator changes and rotates it while an ADMIN, and not once demoted or removed", async () => {
+    const orgId = createdOrgIds[0]
+    const creator = await makeUser()
+    await prisma.organizationMember.create({ data: { orgId, userId: creator.id, role: 'ADMIN' } })
+    const raw = `proj_live_${randomBytes(24).toString('hex')}`
+    const keyId = (
+      await prisma.apiKey.create({
+        data: {
+          name: 'creator key', keyPrefix: raw.slice(0, 16), keyHash: hashApiKey(raw),
+          role: 'read-only', permissions: ['read'], capabilities: [], userId: creator.id, projectId,
+          keyType: 'public', scope: 'runtime', serviceRole: false, rateLimit: 1000,
+        },
+        select: { id: true },
+      })
+    ).id
+    const { PUT } = await import('@/app/api/api-keys/[id]/route')
+    const { POST: ROTATE } = await import('@/app/api/api-keys/[id]/rotate/route')
+    const change = (body: unknown) =>
+      PUT(req({ method: 'PUT', token: creator.token, path: `/api/api-keys/${keyId}`, body }) as any, params({ id: keyId })) as Promise<any>
+    const rotate = () =>
+      ROTATE(req({ method: 'POST', token: creator.token, path: `/api/api-keys/${keyId}/rotate` }) as any, params({ id: keyId })) as Promise<any>
+
+    expect((await change({ name: 'creator key (reads)' })).status).toBe(200)
+    const rotated = await rotate()
+    expect(rotated.status).toBe(200)
+    const secret = (await rotated.json()).apiKey.key as string
+    const now = () => prisma.apiKey.findUnique({ where: { id: keyId }, select: { role: true, permissions: true, keyHash: true } })
+    const asIssued = { role: 'read-only', permissions: ['read'], keyHash: hashApiKey(secret) }
+    expect(await now()).toEqual(asIssued)
+
+    await prisma.organizationMember.update({ where: { orgId_userId: { orgId, userId: creator.id } }, data: { role: 'VIEWER' } })
+    expect((await change({ role: 'write', permissions: ['read', 'write'] })).status).toBe(403)
+    expect((await rotate()).status).toBe(403)
+    expect(await now()).toEqual(asIssued)
+
+    await prisma.organizationMember.delete({ where: { orgId_userId: { orgId, userId: creator.id } } })
+    expect((await change({ role: 'write', permissions: ['read', 'write'] })).status).toBe(403)
+    expect((await rotate()).status).toBe(403)
+    expect(await now()).toEqual(asIssued)
+  }, 60_000)
+})

@@ -2,8 +2,9 @@ export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
 import { storageService } from '@/lib/services/storage'
-import { withTenantIsolation, TenantIsolationError } from '@/lib/tenant/isolation'
+import { withTenantIsolation, TenantIsolationError, requireProjectCapability } from '@/lib/tenant/isolation'
 import { validateProjectOwnership } from '@/lib/tenant/isolation'
+import { canAdministerProject, canWriteProject } from '@/lib/edition/guard'
 import { prisma } from '@/lib/db'
 import { runMutation, mutationHttpStatus } from '@/lib/ai/build-runtime/mutate'
 
@@ -41,10 +42,14 @@ export async function GET(request: NextRequest, props: { params: Promise<{ bucke
 //
 // Goes through runMutation() to enforce:
 //   budget → lock → snapshot → execute → audit → trace → UI sync → release
+//
+// ADMIN and above: the bucket and its files do not come back, as with deleting
+// a function or a webhook.
 export async function DELETE(request: NextRequest, props: { params: Promise<{ bucketId: string }> }) {
   const params = await props.params;
   try {
     return await withTenantIsolation(request, async (projectId) => {
+      await requireProjectCapability(request, canAdministerProject)
       // Ownership check BEFORE acquiring lock (read-only, safe)
       const bucketRecord = await prisma.storageBucket.findUnique({
         where:  { id: params.bucketId },
@@ -86,10 +91,14 @@ export async function DELETE(request: NextRequest, props: { params: Promise<{ bu
 }
 
 // PATCH /api/storage/buckets/[bucketId] — Update bucket security settings (GOVERNED)
+//
+// DEVELOPER and above: who may read the bucket's files is project
+// configuration, as the project's other settings are.
 export async function PATCH(request: NextRequest, props: { params: Promise<{ bucketId: string }> }) {
   const params = await props.params;
   try {
     return await withTenantIsolation(request, async (projectId) => {
+      await requireProjectCapability(request, canWriteProject)
       const bucketRecord = await prisma.storageBucket.findUnique({
         where:  { id: params.bucketId },
         select: { projectId: true },

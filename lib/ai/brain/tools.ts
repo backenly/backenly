@@ -598,9 +598,10 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
     ['bucketName']),
   fn('add_rls',
     'Add a row-level-security policy to a table. Templates:\n' +
-    '  • auto — RECOMMENDED DEFAULT. Reads the table\'s columns and foreign keys and installs the policy the schema implies: one owner column → owner_read_write, TWO OR MORE user columns → participants, ownership through a parent (order_items → orders → users) → owned_via_parent, reference data → public_read. Refuses with an explanation rather than guessing when ownership is genuinely ambiguous.\n' +
+    '  • auto — RECOMMENDED DEFAULT. Reads the table\'s columns and foreign keys and installs the policy the schema implies: one owner column → owner_read_write, TWO OR MORE user columns → participants, ownership through a parent (order_items → orders → users) → owned_via_parent, reference data → public_read, rows that grant access (user_roles, team_members, admins, invitations) → owner_read_only. Refuses with an explanation rather than guessing when ownership is genuinely ambiguous.\n' +
     '  • owner_read_write — each user can read/write only rows they own (table has ONE user column)\n' +
-    '  • participants — the row belongs to SEVERAL users and each of them can read and modify it. Use for every two-party table: connections(requester_id, addressee_id), conversations(user_a, user_b), messages(sender_id, recipient_id), follows, matches, invitations. owner_read_write is WRONG on these — it grants access to one side and locks the other out of their own row. Pass `partyColumns` to be explicit, or omit it and the foreign keys are read.\n' +
+    '  • owner_read_only — each user reads the rows they own; only service-role keys write. For rows that GRANT access (roles, memberships, permissions, invitations): with owner_read_write a user could insert the row that makes them an admin or a member of someone else\'s team. Your server writes these (an invite accepted, a role assigned).\n' +
+    '  • participants — the row belongs to SEVERAL users and each of them can read and modify it. Use for every two-party table: connections(requester_id, addressee_id), conversations(user_a, user_b), messages(sender_id, recipient_id), follows, matches. owner_read_write is WRONG on these — it grants access to one side and locks the other out of their own row. Pass `partyColumns` to be explicit, or omit it and the foreign keys are read.\n' +
     '  • owned_via_parent — the row belongs to whoever owns its PARENT row. Use for tables with no user column of their own but a foreign key to a user-owned table: line items, shipping addresses, saved cards, messages in a conversation. Works when the parent is itself two-party, so a message is visible to both participants. Without this such tables are readable by any API key.\n' +
     '  • public_read — anyone can read, only the owner can write (blogs, marketplaces)\n' +
     '  • org_members — multi-tenant B2B: users can access rows where organization_id matches an org they belong to. REQUIRES the table to have an organization_id column AND the project to have enable_teams already run.\n' +
@@ -633,7 +634,7 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
       policy: {
         type: 'string',
         enum: [
-          'auto', 'owner_read_write', 'participants', 'owned_via_parent', 'public_read',
+          'auto', 'owner_read_write', 'owner_read_only', 'participants', 'owned_via_parent', 'public_read',
           'org_members', 'admin_only', 'all_access', 'admin_read_all', 'role_based',
           'moderator_access', 'custom',
         ],
@@ -921,7 +922,7 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
     { webhookId: { type: 'string', description: 'From list_webhooks.' } },
     ['webhookId']),
   fn('list_webhook_logs',
-    'Delivery history of one outbound webhook endpoint, newest first: status, HTTP code, attempts, error, the receiver\'s response and the payload.',
+    'Delivery history of one outbound webhook endpoint, newest first: status, HTTP code, attempts, error and the receiver\'s response. The payload sent is not returned: it is the project\'s row data.',
     {
       webhookId: { type: 'string', description: 'From list_webhooks.' },
       limit: { type: 'integer', minimum: 1, maximum: 200 },
@@ -1752,6 +1753,8 @@ export const TOOL_TO_ACTION: Record<string, (args: any) => AIAction> = {
             auto: 'auto',
             owner_read_write: 'own_rows',
             own_rows: 'own_rows',
+            owner_read_only: 'own_rows_read',
+            own_rows_read: 'own_rows_read',
             participants: 'party_rows',
             party_rows: 'party_rows',
             owned_via_parent: 'related_rows',

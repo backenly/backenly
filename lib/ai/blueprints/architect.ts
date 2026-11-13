@@ -29,7 +29,7 @@ import { validateAndEnrichSpec, type ArchitectSpec } from './validate'
 const ARCHITECT_VERSION = 'architect-1.1.0'
 
 const COLUMN_TYPES = ['text', 'int', 'bigint', 'boolean', 'timestamp', 'uuid', 'jsonb', 'numeric'] as const
-const RLS_POLICIES = ['owner_read_write', 'public_read', 'org_members', 'admin_only', 'all_access'] as const
+const RLS_POLICIES = ['owner_read_write', 'owner_read_only', 'public_read', 'org_members', 'admin_only', 'all_access'] as const
 
 const ARCHITECT_PROMPT = `You are Backenly's principal backend architect. Given a user's product description, design the COMPLETE, PRODUCTION-GRADE backend for that product — the full surface a real product needs in market, not a tutorial-grade starter.
 
@@ -86,6 +86,7 @@ Column options: nullable?, unique?, fkTo? (name of another table)
 
 RLS policies (one per table — pick the strongest one that fits):
   owner_read_write : authenticated user can read/write only rows where user_id = auth user.id
+  owner_read_only  : the user reads rows where user_id = auth user.id; only the server writes them. For rows that GRANT access (user_roles, team_members, admins, invitations, conversation_participants): with owner_read_write a user could insert the row that makes them an admin or a member
   public_read      : anyone can read; only owner can write (good for public catalog: products, posts, profiles, songs, recipes, courses)
   org_members      : row.organization_id must match an org the user belongs to (B2B / multi-tenant)
   admin_only       : only service-role keys can access (e.g. audit_logs)

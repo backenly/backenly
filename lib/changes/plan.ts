@@ -35,7 +35,8 @@
  */
 
 import type { CatalogSnapshot, ColumnState, ConstraintState, GrantState, ObjectState, PolicyState, TableState, TriggerState } from './catalog'
-import { apiGrantsRemoved, CAPTURE_TRIGGER, enumLabels, isDomain, sameObject, sameTable } from './catalog'
+import { apiGrantsRemoved, CAPTURE_TRIGGER, enumLabels, isDomain, isRealtimeNotifyFunction, sameObject, sameTable } from './catalog'
+import { NOTIFY_FUNCTION_NAME, functionCommentSql, notifyFunctionSql } from '@/lib/realtime/channel-sql'
 import { columnKey, describeTableChange } from './diff'
 import { AFTER_COLUMN, literal, qualified, quoteIdent as q, vaultTableName } from './names'
 import type { PreservedEntry, TableChange } from './types'
@@ -746,6 +747,11 @@ export function planRestore(input: PlanInput): RestorePlan {
     if (o.kind === 'view') {
       const opts = o.options.length > 0 ? ` WITH (${o.options.join(', ')})` : ''
       add(PHASE.CREATE_VIEWS, `CREATE VIEW ${T(o.name)}${opts} AS ${o.definition.trim().replace(/;$/, '')}`, `Re-create view ${o.name}.`)
+    } else if (o.kind === 'function' && isRealtimeNotifyFunction(o)) {
+      // The current body, never the recorded one: an older body announces
+      // changes the way the release that wrote it did.
+      add(PHASE.CREATE_FUNCTIONS, notifyFunctionSql(schema), `Re-create function ${o.identity}.`)
+      add(PHASE.CREATE_FUNCTIONS, functionCommentSql(schema, NOTIFY_FUNCTION_NAME), `Record the version of function ${o.identity}.`)
     } else if (o.kind === 'function') {
       add(PHASE.CREATE_FUNCTIONS, o.definition, `Re-create function ${o.identity}.`)
     } else if (o.kind === 'type') {

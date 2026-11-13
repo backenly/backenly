@@ -54,7 +54,7 @@ export async function POST(request: NextRequest) {
       )
     }
     return NextResponse.json({ ticket: minted.ticket, expiresIn: minted.expiresIn }, { headers: NO_STORE })
-  })
+  }, { floor: 'view' }) // any member: the ticket only opens the read stream the Realtime page shows
 }
 
 export async function GET() {

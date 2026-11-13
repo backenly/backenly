@@ -11,6 +11,9 @@ export const dynamic = 'force-dynamic'
  *
  * Response:
  *   { success, resumed, message, buildResponse? }
+ *
+ * Storing a key needs write access to the project (DEVELOPER and above), as
+ * setting an env var does and as the key check before it (./verify) does.
  */
 
 import { NextRequest, NextResponse } from 'next/server'
@@ -204,5 +207,5 @@ export async function POST(request: NextRequest, props: { params: Promise<{ id: 
       stored,
       buildResponse,
     })
-  })
+  }, { floor: 'write' })
 }

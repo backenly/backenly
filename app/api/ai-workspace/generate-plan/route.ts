@@ -36,6 +36,8 @@ export async function POST(request: NextRequest) {
     if (!projectId) {
       return NextResponse.json({ error: 'Project ID is required' }, { status: 400 })
     }
+    // Any member: the plan is returned, not stored. Applying one is a separate
+    // route that needs the Developer role.
     if (!(await canAccessProject(auth.userId, projectId))) {
       // 404, not 403: the endpoint must not confirm which project ids exist.
       return NextResponse.json({ error: 'Project not found' }, { status: 404 })

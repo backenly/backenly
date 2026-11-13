@@ -38,9 +38,12 @@
  *    POST/PATCH/DELETE) AND must not contain eval/Function/child_process/
  *    dynamic-import/fs-write/worker_threads/process-control patterns. Fail
  *    closed otherwise. process.env IS readable — but only through a frozen
- *    allowlist shim (CURATED_ENV_KEYS), never the real process object.
+ *    shim (makeCuratedProcess) holding the project's own variables, never the
+ *    real process object, and never a secret Backenly signs or checks with.
  *  - Curated module resolver: only next/server (shim), @/lib/db, @/lib/auth/jwt,
- *    crypto, bcryptjs, jsonwebtoken resolve. Everything else throws.
+ *    crypto, bcryptjs, jsonwebtoken resolve. Everything else throws. Trusted
+ *    work and admin checks go through helpers those modules export (asService,
+ *    isAdminRequest), which use the project's material without handing it over.
  *  - 10s hard timeout via vm `timeout` + Promise.race backup.
  *  - Handler return value (a NextResponse) is normalised to { status, body }.
  *    A non-2xx status is still a SUCCESSFUL execution (the handler ran and
@@ -55,13 +58,15 @@ import { prisma } from '@/lib/db'
 import { verifyToken } from '@/lib/auth/jwt'
 import * as bcryptjs from 'bcryptjs'
 import * as jsonwebtoken from 'jsonwebtoken'
-import { loadProjectFnAuth, mintTestRunToken, ProjectFnAuth } from './project-fn-auth'
+import { loadProjectFnAuth, ProjectFnAuth, TEST_RUN_USER_ID } from './project-fn-auth'
 import { makeRlsAwarePrisma, refusingPrisma, type RlsAwarePrisma } from './rls-aware-db'
+import { withProjectStreamNotify } from './stream-notify'
 import { functionDbClient, forgetFunctionDbClient } from './function-db-role'
 import type { RlsIdentity } from '@/lib/services/rls-session'
 import { safeFetch } from '@/lib/security/outbound-guard'
 import { resolveEndUserFromToken } from '@/server/lib/end-user-identity'
 import { FORWARDABLE_FN_HEADERS } from './forward-headers'
+import { withoutComments } from './integration-use'
 
 // esbuild is a native binary package — load it lazily through a non-bundled
 // require so Next.js never tries to trace/bundle the binary into the server
@@ -100,9 +105,9 @@ export function isRouteModuleFunction(code: string | null | undefined): boolean 
 const HARD_BLOCKED: Array<[RegExp, string]> = [
   [/\bchild_process\b/, 'child_process is not permitted'],
   [/\bworker_threads\b/, 'worker_threads is not permitted'],
-  // process.env is NOT blocked: the first-party templates legitimately read a
-  // small set of vars (ADMIN_API_KEY, JWT_SECRET, ...). The vm receives a
-  // frozen allowlist-only env (see makeCuratedProcess) — never the real one.
+  // process.env is NOT blocked: a function reads the project's own variables
+  // there. The vm receives a frozen env of those (see makeCuratedProcess) —
+  // never the real one, and never a secret Backenly signs or checks with.
   [/\bprocess\s*\.\s*(exit|kill|binding|dlopen|mainModule|_getActiveHandles)\b/, 'process internals are not permitted'],
   [/\beval\s*\(/, 'eval() is not permitted'],
   [/\bnew\s+Function\s*\(/, 'new Function() is not permitted'],
@@ -121,68 +126,115 @@ function assertNotBlocked(code: string): void {
 }
 
 // ─── Curated process shim ─────────────────────────────────────────────────────
-// The generated templates read a small set of env vars (admin gate, JWT
-// signing, webhook signature, prod/dev branch). The vm gets a frozen,
-// PER-PROJECT env — never the real process object:
+// The vm gets a frozen, PER-PROJECT env — never the real process object:
 //
-//   JWT_SECRET         → the PROJECT's resolved jwtSecret. End-user tokens are
-//                        signed with it, so templates that sign (impersonate)
-//                        or verify now speak the project's own auth dialect.
-//   ADMIN_API_KEY /
-//   AI_EXECUTION_TOKEN → the derived per-project admin key. Previously these
-//                        exposed Backenly's PLATFORM secrets, which (a) leaked
-//                        infra credentials into generated-code space and
-//                        (b) made every admin endpoint uncallable by the
-//                        developer, who can never know a platform secret.
+//   the project's own variables (Settings → Environment, ctx.env in a
+//   described function), as process.env.KEY, which is how a route function
+//   reads configuration: one set of variables for both kinds of function;
+//   NODE_ENV, which is not a secret.
 //
-// When project auth material is unavailable the values are empty strings —
-// auth gates then fail closed (403), never open. The rest of process.env
-// (DATABASE_URL, SMTP creds, Paddle keys, ...) stays unreachable.
+// JWT_SECRET, ADMIN_API_KEY and AI_EXECUTION_TOKEN never hold the project's
+// end-user signing secret or its derived admin key: function code is
+// free-form (deploy_code stores what an agent wrote), and whatever it can read
+// it can return. They hold WITHHELD, a value made for this invocation that
+// matches nothing:
 //
-// STRIPE_WEBHOOK_SECRET and PAYMENT_WEBHOOK_SECRET used to be copied in from
-// the PLATFORM's environment, for the generated Stripe webhook template. That
-// handed every project the same platform value, which is never the secret of a
-// tenant's own Stripe account, and since functions { action: "deploy_code" }
-// stores code an agent wrote, any function could simply return it. A project's
-// signing secret lives in its own integration store and is verified by the
-// project's receiver (/api/v1/{projectId}/webhooks/stripe); the template now
-// reads an empty value and fails closed. Only NODE_ENV, which is not a secret,
-// still comes from the platform.
+//   - removed outright, a gate written `(header ?? '') === (env ?? '')`, or
+//     `header == env`, would let every caller in once the variable was gone;
+//     a random value no caller can send fails every such comparison closed;
+//   - jsonwebtoken refuses to sign with it, and verifies with the project's
+//     secret in its place, so code that checked a user's token with
+//     `jwt.verify(token, process.env.JWT_SECRET)` keeps working without holding
+//     the secret (makeJsonwebtokenShim).
 //
-// The project's own environment variables (Settings → Environment, ctx.env in
-// a described function) are here too, as process.env.KEY, which is how a route
-// function reads configuration: one set of variables for both kinds of
-// function. Backenly's own variables are set after them, so a project
-// variable cannot replace one of them.
-function makeCuratedProcess(auth: ProjectFnAuth, projectEnv: Record<string, string> = {}): { env: Record<string, string> } {
-  const env: Record<string, string> = {
-    ...projectEnv,
-    ADMIN_API_KEY: auth.adminKey ?? '',
-    AI_EXECUTION_TOKEN: auth.adminKey ?? '',
-    JWT_SECRET: auth.jwtSecret ?? '',
-  }
+// Admin endpoints check `isAdminRequest(request)` and token checks call
+// `verifyToken(token)`, both from '@/lib/auth/jwt'; trusted SQL runs in
+// `asService(fn)` from '@/lib/db'. Backenly's own variables are set after the
+// project's, so a project variable cannot take one of these names.
+export const WITHHELD_ENV_NAMES = ['JWT_SECRET', 'ADMIN_API_KEY', 'AI_EXECUTION_TOKEN'] as const
+
+/** A value for one invocation that no caller can know, so no comparison with it succeeds. */
+function makeWithheld(): string {
+  return `withheld:${nodeCrypto.randomBytes(24).toString('hex')}`
+}
+
+function makeCuratedProcess(withheld: string, projectEnv: Record<string, string> = {}): { env: Record<string, string> } {
+  const env: Record<string, string> = { ...projectEnv }
+  for (const name of WITHHELD_ENV_NAMES) env[name] = withheld
   if (process.env.NODE_ENV !== undefined) env.NODE_ENV = process.env.NODE_ENV
   return Object.freeze({ env: Object.freeze(env) }) as { env: Record<string, string> }
 }
 
+// ─── An owner's test run ─────────────────────────────────────────────────────
+// The dashboard's Test, functions { action: "invoke" } and the generator's
+// smoke test run a function for someone who may change the project
+// (opts.testRun), and its admin and signed-in paths should answer them.
+// Function code reads request.headers, so nothing on the request is a
+// credential. The runner holds the fact that the run is an owner's test
+// (OwnerTest, which function code can neither read nor set):
+//   - the function's SQL runs as the service role (the run's database handle
+//     keeps that identity, as an asService block's does);
+//   - until the run ends, isAdminRequest(request) answers true;
+//   - where a user's token would be, the request carries OWNER_TEST_TOKEN, and
+//     until the run ends every token check the function can make (verifyToken,
+//     jsonwebtoken's verify and decode) reads it as the test user.
+// The placeholder is not a secret: in any other run, and in this one once it
+// has ended, it is nobody.
+
+/** This run is an owner's test while `live`; the runner sets it false when the run ends. */
+interface OwnerTest {
+  live: boolean
+}
+
+/** What an owner's test request carries in x-user-token. Only that run's token checks read it, as the test user. */
+export const OWNER_TEST_TOKEN = 'owner-test-run'
+
+function isOwnerTestToken(ownerTest: OwnerTest | null, token: unknown): boolean {
+  return ownerTest?.live === true && token === OWNER_TEST_TOKEN
+}
+
+/** The test user an owner's test is signed in as: the claims the old test token carried, ten minutes of them. */
+function ownerTestUser(projectId: string) {
+  const iat = Math.floor(Date.now() / 1000)
+  return { userId: TEST_RUN_USER_ID, email: 'test-run@backenly.internal', role: 'admin', projectId, testRun: true, iat, exp: iat + 600 }
+}
+
 // ─── Project-aware auth shims ────────────────────────────────────────────────
-// Templates import verifyToken from '@/lib/auth/jwt' — which verifies against
-// the PLATFORM JWT_SECRET. Real end-user tokens are signed with the project's
-// jwtSecret, so every user-gated endpoint 401'd for every real user. The shim
-// verifies against the project secret first, then falls back to the platform
-// verifier for legacy/internal tokens. Fixes all stored functions at once.
-function makeProjectVerifyToken(auth: ProjectFnAuth) {
+// Templates import verifyToken from '@/lib/auth/jwt'. Here it verifies against
+// the PROJECT's secret only: real end-user tokens are signed with it, and a
+// Backenly session token, signed with the platform's secret for a person using
+// the console, is not one of the project's end users.
+function makeProjectVerifyToken(projectId: string, auth: ProjectFnAuth, ownerTest: OwnerTest | null) {
   const realJwt: typeof jsonwebtoken = (jsonwebtoken as any).default ?? jsonwebtoken
   return function projectVerifyToken(token: string): any {
-    if (!token || typeof token !== 'string') return null
-    if (auth.jwtSecret) {
-      try {
-        return realJwt.verify(token, auth.jwtSecret, { algorithms: ['HS256'] })
-      } catch {
-        /* fall through to platform verifier */
-      }
+    if (isOwnerTestToken(ownerTest, token)) return ownerTestUser(projectId)
+    if (!token || typeof token !== 'string' || !auth.jwtSecret) return null
+    try {
+      return realJwt.verify(token, auth.jwtSecret, { algorithms: ['HS256'] })
+    } catch {
+      return null
     }
-    return verifyToken(token)
+  }
+}
+
+/**
+ * `isAdminRequest(request)`: true when the request carries this project's admin
+ * key (Settings → Functions shows it), in `x-admin-key` or as a bearer token.
+ * Compared here, so the function never holds the key. A project without one,
+ * or a request without one, is never an admin. An owner's test run is one,
+ * while it lasts, and its request carries no key.
+ */
+function makeIsAdminRequest(auth: ProjectFnAuth, ownerTest: OwnerTest | null) {
+  return function isAdminRequest(request: any): boolean {
+    if (ownerTest?.live === true) return true
+    if (!auth.adminKey) return false
+    const headers = request?.headers
+    const read = (name: string): string => {
+      const v = typeof headers?.get === 'function' ? headers.get(name) : headers?.[name]
+      return typeof v === 'string' ? v.trim() : ''
+    }
+    const presented = read('x-admin-key') || read('authorization').replace(/^Bearer\s+/i, '')
+    return presented.length > 0 && safeEqual(presented, auth.adminKey)
   }
 }
 
@@ -257,22 +309,54 @@ function safeEqual(a: string, b: string): boolean {
   return nodeCrypto.timingSafeEqual(ab, bb)
 }
 
-// Templates that SIGN tokens (admin-impersonate) omitted the projectId claim,
-// so the issued token was rejected by v1ApiMiddleware (which requires
-// payload.projectId === projectId). Wrap jsonwebtoken.sign to inject the claim
-// for stored functions that predate the template fix.
-function makeJsonwebtokenShim(projectId: string) {
+// jsonwebtoken, as function code sees it.
+//
+// process.env.JWT_SECRET holds WITHHELD (makeCuratedProcess). Signing with it
+// is refused: a function does not mint sessions for the project's users.
+// Verifying with it checks the token against the project's own secret, so a
+// function that verified a caller's token that way keeps working. Any other
+// secret is the function's own business, as before.
+//
+// Templates that signed tokens with the project secret omitted the projectId
+// claim, which the runtime requires; sign still adds it for a payload naming a
+// userId, for tokens a function signs with a secret of its own.
+//
+// In an owner's test run, verify (with any secret) and decode read
+// OWNER_TEST_TOKEN as the test user, so a token check that passed the signed
+// test token the placeholder replaces passes it too.
+export const SIGN_REFUSED =
+  "Functions cannot sign the project's end-user sessions: Backenly no longer gives function code the project's signing secret. " +
+  "Check a caller's token with verifyToken(token) from '@/lib/auth/jwt'."
+
+function makeJsonwebtokenShim(projectId: string, auth: ProjectFnAuth, withheld: string, ownerTest: OwnerTest | null) {
   const real: any = (jsonwebtoken as any).default ?? jsonwebtoken
-  const sign = (payload: any, secret: any, opts?: any) => {
+  const sign = (payload: any, secret: any, ...rest: any[]) => {
+    if (secret === withheld) throw new Error(SIGN_REFUSED)
     const needsProjectId =
       payload &&
       typeof payload === 'object' &&
       !Buffer.isBuffer(payload) &&
       payload.userId &&
       !payload.projectId
-    return real.sign(needsProjectId ? { ...payload, projectId } : payload, secret, opts)
+    return real.sign(needsProjectId ? { ...payload, projectId } : payload, secret, ...rest)
   }
-  const shim: any = { ...real, sign }
+  const testUser = (options: any) => {
+    const payload = ownerTestUser(projectId)
+    return options && typeof options === 'object' && options.complete
+      ? { header: { alg: 'HS256', typ: 'JWT' }, payload, signature: '' }
+      : payload
+  }
+  const verify = (token: any, secret: any, ...rest: any[]) => {
+    if (isOwnerTestToken(ownerTest, token)) {
+      // jsonwebtoken returns what its callback returns, when it is given one.
+      const done = typeof rest[rest.length - 1] === 'function' ? rest[rest.length - 1] : null
+      return done ? done(null, testUser(rest[0])) : testUser(rest[0])
+    }
+    return real.verify(token, secret === withheld ? (auth.jwtSecret ?? withheld) : secret, ...rest)
+  }
+  const decode = (token: any, ...rest: any[]) =>
+    isOwnerTestToken(ownerTest, token) ? testUser(rest[0]) : real.decode(token, ...rest)
+  const shim: any = { ...real, sign, verify, decode }
   shim.default = shim // CJS/ESM interop — `import jwt from 'jsonwebtoken'` gets the shim too
   return shim
 }
@@ -374,22 +458,32 @@ class RunnerRequest {
 
 // ─── Curated module resolver ──────────────────────────────────────────────────
 
+/** `asService(fn)`: run `fn`'s SQL in one transaction as the service role. */
+export type AsService = <T>(fn: (db: RlsAwarePrisma) => Promise<T>) => Promise<T>
+
+/** The line a run's logs carry for each asService block, so it can be seen afterwards. */
+export const AS_SERVICE_NOTE =
+  'Backenly: a block ran with asService, as the service role; row-level security did not apply to its SQL.'
+
 function buildRequire(
   projectId: string,
   auth: ProjectFnAuth,
-  scopedPrisma: RlsAwarePrisma,
+  db: { prisma: RlsAwarePrisma; asService: AsService },
+  withheld: string,
+  ownerTest: OwnerTest | null,
 ): (id: string) => any {
   const nextServer = makeNextServerShim()
-  const projectVerifyToken = makeProjectVerifyToken(auth)
-  const jwtShim = makeJsonwebtokenShim(projectId)
+  const projectVerifyToken = makeProjectVerifyToken(projectId, auth, ownerTest)
+  const isAdminRequest = makeIsAdminRequest(auth, ownerTest)
+  const jwtShim = makeJsonwebtokenShim(projectId, auth, withheld, ownerTest)
   return (id: string) => {
     switch (id) {
       case 'next/server':
         return nextServer
       case '@/lib/db':
-        return { prisma: scopedPrisma }
+        return { prisma: db.prisma, asService: db.asService }
       case '@/lib/auth/jwt':
-        return { verifyToken: projectVerifyToken }
+        return { verifyToken: projectVerifyToken, isAdminRequest }
       case 'crypto':
       case 'node:crypto':
         return nodeCrypto
@@ -411,13 +505,78 @@ function buildRequire(
  * with the caller's identity set (rls-aware-db.ts), on a connection that logs in
  * as the project's own function role (function-db-role.ts). Handing over the
  * bare client instead is what made generated reads of RLS-protected tables come
- * back empty, and what let function SQL read the platform's own tables.
+ * back empty, and what let function SQL read the platform's own tables. An
+ * event the module sends on its project's stream label reaches the project's
+ * stream (stream-notify.ts).
  */
 function scopedDb(projectId: string, identity: RlsIdentity): RlsAwarePrisma {
-  return makeRlsAwarePrisma(identity, async (opts) => {
-    if (opts?.refresh) await forgetFunctionDbClient(projectId)
-    return functionDbClient(projectId)
-  })
+  return withProjectStreamNotify(
+    projectId,
+    makeRlsAwarePrisma(identity, async (opts) => {
+      if (opts?.refresh) await forgetFunctionDbClient(projectId)
+      return functionDbClient(projectId)
+    }),
+  )
+}
+
+/**
+ * Trusted work: `asService(async (db) => { … })` from '@/lib/db'.
+ *
+ * A function's SQL runs as its caller, so row-level security keeps a shopper to
+ * their own rows. Some work a function does on the caller's behalf must reach
+ * further: a checkout creates the order and takes the stock, and the shopper may
+ * not update products. The only way to do that used to be the caller sending
+ * the admin key, which no shopper has. QA's checkout answered "Your cart is
+ * empty": its SELECT … FOR UPDATE on products was filtered by the products
+ * UPDATE policy.
+ *
+ * asService runs the block in one transaction with the service-role identity,
+ * so policies admit it and FOR UPDATE locks what it reads. It is the project's
+ * own function login all the same (function-db-role.ts): nothing outside the
+ * project's schema, ever. It is explicit in the code, a line in the run's logs
+ * says it ran, and deploy_code says the function uses it.
+ *
+ * The service-role handle is made the first time a block runs, so a run that
+ * never calls asService holds one database handle, its caller's.
+ */
+function makeAsService(projectId: string, logs: string[]): AsService {
+  let serviceDb: RlsAwarePrisma | null = null
+  return async (fn) => {
+    if (typeof fn !== 'function') throw new TypeError('asService takes a function: asService(async (db) => { ... })')
+    logs.push(AS_SERVICE_NOTE)
+    serviceDb ??= scopedDb(projectId, { userId: null, isServiceRole: true })
+    return serviceDb.$transaction(fn)
+  }
+}
+
+/** True when the code runs SQL with asService, for the deploy answer. */
+export function usesAsService(code: string): boolean {
+  return /\basService\s*\(/.test(withoutComments(code))
+}
+
+/**
+ * Code that reads one of the variables Backenly no longer gives functions.
+ * Dotted, bracketed with a literal name, or destructured from process.env.
+ */
+const WITHHELD_READ = [
+  new RegExp(String.raw`\bprocess\s*\.\s*env\s*(?:\?\.|\.)\s*(${WITHHELD_ENV_NAMES.join('|')})\b`),
+  new RegExp(String.raw`\bprocess\s*\.\s*env\s*(?:\?\.)?\s*\[\s*(['"\x60])(${WITHHELD_ENV_NAMES.join('|')})\1\s*\]`),
+  new RegExp(String.raw`\{[^{}]*\b(${WITHHELD_ENV_NAMES.join('|')})\b[^{}]*\}\s*=\s*process\s*\.\s*env\b`),
+]
+
+export const WITHHELD_READ_REFUSED =
+  "function code cannot read process.env.JWT_SECRET, ADMIN_API_KEY or AI_EXECUTION_TOKEN: Backenly does not give functions the project's signing secret or admin key. " +
+  "Check an admin request with isAdminRequest(request) and a caller's token with verifyToken(token), both from '@/lib/auth/jwt', " +
+  "and run SQL the caller may not run themselves inside asService(async (db) => { ... }) from '@/lib/db'"
+
+/** The withheld variable the code reads, if any. */
+export function readsWithheldEnv(code: string): string | null {
+  const plain = withoutComments(code)
+  for (const re of WITHHELD_READ) {
+    const m = re.exec(plain)
+    if (m) return WITHHELD_ENV_NAMES.find((name) => m[0].includes(name)) ?? null
+  }
+  return null
 }
 
 // ─── Method resolution ────────────────────────────────────────────────────────
@@ -466,6 +625,7 @@ export function validateRouteModule(code: string, expectedMethod?: string | null
   } catch (err: any) {
     return { valid: false, methods: [], error: err?.message || String(err) }
   }
+  if (readsWithheldEnv(code)) return { valid: false, methods: [], error: WITHHELD_READ_REFUSED }
 
   let compiled: string
   try {
@@ -480,6 +640,7 @@ export function validateRouteModule(code: string, expectedMethod?: string | null
   }
 
   const moduleExports: Record<string, any> = {}
+  const validationWithheld = makeWithheld()
   const sandbox: Record<string, any> = {
     module: { exports: moduleExports },
     exports: moduleExports,
@@ -487,7 +648,12 @@ export function validateRouteModule(code: string, expectedMethod?: string | null
     require: buildRequire(
       '00000000-0000-4000-8000-000000000000',
       { jwtSecret: null, adminKey: null },
-      refusingPrisma('The database is not reachable while a function is being validated.'),
+      {
+        prisma: refusingPrisma('The database is not reachable while a function is being validated.'),
+        asService: () => Promise.reject(new Error('The database is not reachable while a function is being validated.')),
+      },
+      validationWithheld,
+      null,
     ),
     console: { log() {}, error() {}, warn() {}, info() {} },
     URL, URLSearchParams, TextEncoder, TextDecoder, Buffer,
@@ -498,7 +664,7 @@ export function validateRouteModule(code: string, expectedMethod?: string | null
     fetch: () => { throw new Error('fetch is not available while a function is being validated.') },
     setTimeout, clearTimeout,
     Promise, JSON, Math, Date, Error, Object, Array, String, Number, Boolean, RegExp,
-    process: makeCuratedProcess({ jwtSecret: null, adminKey: null }),
+    process: makeCuratedProcess(validationWithheld),
     global: undefined,
     globalThis: undefined,
   }
@@ -559,10 +725,12 @@ export interface RouteModuleRunOptions {
    */
   headers?: Record<string, string | undefined>
   /**
-   * True for owner-initiated dashboard test runs. Injects the project's
-   * admin key (x-admin-key) and a short-lived project-scoped admin end-user
-   * token, so auth-gated endpoints can actually be exercised instead of
-   * dead-ending in 401/403. Never set on public invocation paths.
+   * True for an owner's test run (the dashboard's Test, functions invoke, the
+   * generator's smoke test), so auth-gated endpoints are exercised instead of
+   * dead-ending in 401/403: the function's SQL runs as the service role,
+   * isAdminRequest answers true, and verifyToken reads OWNER_TEST_TOKEN as the
+   * test user. The request carries no key or signed token. Never set on public
+   * invocation paths.
    */
   testRun?: boolean
   /** Test hook: bypass the DB lookup for project auth material. */
@@ -578,7 +746,8 @@ export interface RouteModuleRunOptions {
  * Auth reaches the handler three ways, in priority order:
  *   1. forwarded real headers (opts.headers)
  *   2. legacy body fields (event.data.__authToken / .authorization / .token)
- *   3. test-run injection (opts.testRun) — project admin key + minted token
+ *   3. an owner's test run (opts.testRun), which the runner itself knows: the
+ *      request carries OWNER_TEST_TOKEN, never a key or a signed token
  */
 export async function executeRouteModuleFunction(
   code: string,
@@ -586,6 +755,26 @@ export async function executeRouteModuleFunction(
   event: { type: string; data: Record<string, any> },
   triggerTableHint?: string | null,
   opts: RouteModuleRunOptions = {}
+): Promise<RouteModuleRunResult> {
+  const ownerTest: OwnerTest | null = opts.testRun ? { live: true } : null
+  try {
+    return await runRouteModule(code, projectId, event, triggerTableHint, opts, ownerTest)
+  } finally {
+    // A helper the function kept hold of (in a timer, say) no longer answers as
+    // the owner's test: isAdminRequest needs the key again and the placeholder
+    // is nobody. The run's database handle keeps the identity it was given, as
+    // an asService block's does.
+    if (ownerTest) ownerTest.live = false
+  }
+}
+
+async function runRouteModule(
+  code: string,
+  projectId: string,
+  event: { type: string; data: Record<string, any> },
+  triggerTableHint: string | null | undefined,
+  opts: RouteModuleRunOptions,
+  ownerTest: OwnerTest | null,
 ): Promise<RouteModuleRunResult> {
   assertNotBlocked(code)
 
@@ -652,19 +841,17 @@ export async function executeRouteModuleFunction(
   } else if (headers['x-user-token'] && !headers['authorization']) {
     headers['authorization'] = headers['x-user-token']
   }
-  if (opts.testRun) {
-    if (auth.adminKey && !headers['x-admin-key']) {
-      headers['x-admin-key'] = auth.adminKey
-    }
-    if (auth.jwtSecret && !headers['x-user-token']) {
-      const bearer = `Bearer ${mintTestRunToken(projectId, auth.jwtSecret)}`
-      headers['x-user-token'] = bearer
-      if (!headers['authorization']) headers['authorization'] = bearer
-    }
+  // An owner's test run: the request carries the placeholder where a user's
+  // token would be, never the admin key or a token signed with the project's
+  // secret, and its identity is the runner's to give (see OwnerTest).
+  if (ownerTest && !headers['x-user-token']) {
+    headers['x-user-token'] = `Bearer ${OWNER_TEST_TOKEN}`
+    if (!headers['authorization']) headers['authorization'] = headers['x-user-token']
   }
 
-
-  const callerIdentity = await resolveCallerIdentity(projectId, headers, auth)
+  const callerIdentity: RlsIdentity = ownerTest
+    ? { userId: null, isServiceRole: true }
+    : await resolveCallerIdentity(projectId, headers, auth)
 
   // Outbound HTTP for module code: fetch's call shape, the egress guard's
   // rules. The host's bare fetch reaches everything this PROCESS can reach —
@@ -712,10 +899,17 @@ export async function executeRouteModuleFunction(
   const projectEnv = await getDecryptedEnvMap(projectId).catch(() => ({} as Record<string, string>))
   const logs: string[] = []
   const moduleExports: Record<string, any> = {}
+  const withheld = makeWithheld()
   const sandbox: Record<string, any> = {
     module: { exports: moduleExports },
     exports: moduleExports,
-    require: buildRequire(projectId, auth, scopedDb(projectId, callerIdentity)),
+    require: buildRequire(
+      projectId,
+      auth,
+      { prisma: scopedDb(projectId, callerIdentity), asService: makeAsService(projectId, logs) },
+      withheld,
+      ownerTest,
+    ),
     console: {
       log: (...a: any[]) => logs.push(a.map(stringify).join(' ')),
       error: (...a: any[]) => logs.push(a.map(stringify).join(' ')),
@@ -741,7 +935,7 @@ export async function executeRouteModuleFunction(
     Number,
     Boolean,
     RegExp,
-    process: makeCuratedProcess(auth, projectEnv),
+    process: makeCuratedProcess(withheld, projectEnv),
     global: undefined,
     globalThis: undefined,
   }

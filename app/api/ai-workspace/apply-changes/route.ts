@@ -61,10 +61,12 @@ export async function POST(request: NextRequest) {
         // Apply changes (file writes, schema mutations via aiWorkspace service)
         const applyResult = await applyChangesFromPlan(plan as BackendChangePlan, selectedIndices, projectId)
 
-        // Persist generated files to WorkspaceFile for the inspector UI
+        // Persist generated files to WorkspaceFile for the inspector UI: only the
+        // ones written, never a target the service refused.
+        const written = new Set(applyResult.applied)
         const filesToSave = selectedIndices.flatMap(i => {
           const change = (plan as BackendChangePlan).changes[i]
-          if (!change) return []
+          if (!change || !written.has(change.target)) return []
           if ((change.type === 'endpoint' || change.type === 'file') && change.code) {
             return [{
               projectId,

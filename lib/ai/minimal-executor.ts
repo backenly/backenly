@@ -176,6 +176,13 @@ export interface ExecutionResult {
    * and a caller that does not care can ignore it.
    */
   advisories?: string[]
+  /**
+   * What automatic row-level security has to tell whoever created a table: it
+   * starts closed, or it could not be protected. Also in `message`; kept apart
+   * so an action that created the table on the way to another (the dependency
+   * resolver's CREATE_TABLE before an ADD_COLUMN) says it in that one's result.
+   */
+  rlsNotice?: string
   /** ISO timestamp set when a live DB read-back confirmed the artifact exists */
   verifiedAt?: string
   /**
@@ -1596,7 +1603,8 @@ TRIGGERS (event automation — "when X happens, do Y automatically"):
 
 PERMISSIONS (row-level security — "users can only see their own rows"):
 - SET_PERMISSION - Apply a row-level security policy to a table
-  Templates: auto, own_rows, party_rows, related_rows, public_read, admin_only, all_access, org_members,
+  Templates: auto, own_rows, own_rows_read (users read their own; only the server writes: roles, memberships),
+             party_rows, related_rows, public_read, admin_only, all_access, org_members,
              admin_read_all (admins see ALL; users see own), role_based (admins/superadmins bypass),
              moderator_access (admins+moderators see all; users see own)
   Optional: roleColumn (column name storing the role, defaults to 'role')
@@ -2402,7 +2410,7 @@ export async function validateAction(
     // ========== PERMISSION ACTIONS ==========
     case 'SET_PERMISSION':
       if (!action.params.tableName) errors.push('tableName is required')
-      if (!action.params.template) errors.push('template is required (auto | own_rows | party_rows | related_rows | public_read | admin_only | all_access | org_members | admin_read_all | role_based | moderator_access | custom)')
+      if (!action.params.template) errors.push('template is required (auto | own_rows | own_rows_read | party_rows | related_rows | public_read | admin_only | all_access | org_members | admin_read_all | role_based | moderator_access | custom)')
       preview = `Apply "${action.params.template}" policy to "${action.params.tableName}"`
       break
 
@@ -3355,6 +3363,10 @@ async function executeActionUnrecorded(
       'ENABLE_AUTH',       // creates `users`, the anchor every plan resolves against
     ])
 
+    // A table the resolver created on the way to the action asked for may have
+    // started closed; the caller hears that in the asked action's result.
+    const createdOnTheWay: string[] = []
+
     for (const act of finalActions) {
       // Phase 8: wrap each action with timeline tracking
       lastResult = await trackAction(
@@ -3364,6 +3376,9 @@ async function executeActionUnrecorded(
         () => executeSingleAction(act, projectId, apiKey),
         { retryCount },
       )
+      if (lastResult.success && lastResult.rlsNotice && act !== finalActions[finalActions.length - 1]) {
+        createdOnTheWay.push(lastResult.rlsNotice)
+      }
 
       // Phase 7: Regenerate TypeScript types after schema mutations (non-blocking)
       if (TYPEGEN_TRIGGER_ACTIONS.has(act.action) && lastResult.success) {
@@ -3466,6 +3481,9 @@ async function executeActionUnrecorded(
       _writeDecisionMemory(act, projectId).catch(() => {})
     }
 
+    if (createdOnTheWay.length > 0 && lastResult.success) {
+      return { ...lastResult, message: [lastResult.message, ...createdOnTheWay].join('\n\n') }
+    }
     return lastResult
   } catch (error: any) {
     console.error('[AI Executor] Error:', error)
@@ -4406,6 +4424,12 @@ async function executeCreateTable(
       }
     }
 
+    // Whether this call creates the table or finds it there: only a table it
+    // creates starts closed when no owner can be inferred (auto-RLS below).
+    const [{ existed: tableExisted }] = await db.$queryRawUnsafe<Array<{ existed: boolean }>>(
+      `SELECT to_regclass($1) IS NOT NULL AS existed`,
+      `"${postgresSchema}"."${tableName}"`,
+    )
     // Whether this statement makes the table, or finds it already there
     // (IF NOT EXISTS): only a table made here is marked as made here.
     const existedBefore = await db
@@ -4795,15 +4819,21 @@ async function executeCreateTable(
     }
 
     // ── Phase 4.1: Deterministic auto-RLS ─────────────────────────────────────
-    // Inspect the column list now (not the AI prompt) and auto-apply own_rows
-    // if an ownership column is present.  This runs unconditionally so security
-    // is never dependent on the AI "remembering" to call SET_PERMISSION.
+    // Inspect the schema now (not the AI prompt) and protect the table: the
+    // owner's rows when an owner can be inferred, closed to all but
+    // service-role keys when not (lib/services/workspace-rls.ts). This runs
+    // unconditionally so security never depends on the AI "remembering" to call
+    // SET_PERMISSION, and the caller is told when the table starts closed. A
+    // table that was already there (CREATE TABLE IF NOT EXISTS found it) may be
+    // serving an app, so it is never closed here.
+    let rlsNotice: string | null = null
+    const { autoApplyRlsIfNeeded, rlsNotSetNotice } = await import('@/lib/services/workspace-rls')
     try {
-      const { autoApplyRlsIfNeeded } = await import('@/lib/services/workspace-rls')
-      await autoApplyRlsIfNeeded(projectId, tableName, safeColumns)
+      rlsNotice = (await autoApplyRlsIfNeeded(projectId, tableName, safeColumns, {}, { closeWhenUndecidable: !tableExisted })).notice
     } catch (rlsErr: any) {
       // Non-fatal — table is created; RLS can be applied manually via SET_PERMISSION
       console.warn(`[AI Executor] Auto-RLS failed (non-fatal):`, rlsErr?.message)
+      if (!tableExisted) rlsNotice = rlsNotSetNotice(tableName, rlsErr?.message ?? String(rlsErr))
     }
 
     // ── Domain endpoint generation ────────────────────────────────────────────
@@ -4943,10 +4973,15 @@ async function executeCreateTable(
       // The information is worth surfacing — a payments table with no Stripe key
       // really is inert. It just has to be a field the caller can render, ignore
       // or act on, rather than text welded to the outcome of the operation.
-      message: asWritten
-        ? `✅ Created table "${tableName}" as written: ${safeColumns.length} declared column(s), and the four every ` +
-          `table gets: id (uuid primary key), "createdAt", "updatedAt" and "deleted_at" (a client DELETE sets it).`
-        : `✅ Created table "${tableName}" with ${safeColumns.length + 3} columns (including id, createdAt, updatedAt)`,
+      // Who may read and write the new table is part of what was created, so
+      // a table that starts closed says so here, where agents read.
+      message:
+        (asWritten
+          ? `✅ Created table "${tableName}" as written: ${safeColumns.length} declared column(s), and the four every ` +
+            `table gets: id (uuid primary key), "createdAt", "updatedAt" and "deleted_at" (a client DELETE sets it).`
+          : `✅ Created table "${tableName}" with ${safeColumns.length + 3} columns (including id, createdAt, updatedAt)`) +
+        (rlsNotice ? `\n\n${rlsNotice}` : ''),
+      ...(rlsNotice ? { rlsNotice } : {}),
       data: {
         tableName,
         schema: postgresSchema,
@@ -5050,6 +5085,7 @@ async function executeCreateJunctionTable(
 
     // Pre-condition: ensure both referenced tables physically exist in the DB
     // (Prisma metadata can diverge from actual PostgreSQL state)
+    const createdParents: string[] = []
     for (const tbl of [first, second]) {
       const check = await db.$queryRawUnsafe<{ exists: boolean }[]>(
         `SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = $1 AND table_name = $2) AS exists`,
@@ -5060,6 +5096,7 @@ async function executeCreateJunctionTable(
         await db.$executeRawUnsafe(
           `CREATE TABLE IF NOT EXISTS "${postgresSchema}"."${tbl}" (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), "createdAt" TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP, "updatedAt" TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP)`
         )
+        createdParents.push(tbl)
         // Register in metadata if missing
         const meta = await prisma.table.findFirst({ where: { projectId, name: tbl } })
         if (!meta) {
@@ -5126,9 +5163,28 @@ async function executeCreateJunctionTable(
     const indexASQL = `CREATE INDEX IF NOT EXISTS "idx_${finalName}_${singularA}Id" ON "${postgresSchema}"."${finalName}"("${singularA}Id")`
     const indexBSQL = `CREATE INDEX IF NOT EXISTS "idx_${finalName}_${singularB}Id" ON "${postgresSchema}"."${finalName}"("${singularB}Id")`
 
+    const [{ existed }] = await db.$queryRawUnsafe<Array<{ existed: boolean }>>(
+      `SELECT to_regclass($1) IS NOT NULL AS existed`,
+      `"${postgresSchema}"."${finalName}"`,
+    )
     await db.$executeRawUnsafe(createTableSQL)
     await db.$executeRawUnsafe(indexASQL)
     await db.$executeRawUnsafe(indexBSQL)
+
+    // A new junction table, and a parent created for it above, are protected as
+    // a new table is (executeCreateTable): the rows of an owned parent's, or
+    // closed until someone says the rule.
+    const notices: string[] = []
+    const { autoApplyRlsIfNeeded, rlsNotSetNotice } = await import('@/lib/services/workspace-rls')
+    for (const tbl of [...createdParents, ...(existed ? [] : [finalName])]) {
+      try {
+        const notice = (await autoApplyRlsIfNeeded(projectId, tbl, [], {}, { closeWhenUndecidable: true })).notice
+        if (notice) notices.push(notice)
+      } catch (rlsErr: any) {
+        notices.push(rlsNotSetNotice(tbl, rlsErr?.message ?? String(rlsErr)))
+      }
+    }
+    const rlsNotice = notices.length > 0 ? notices.join('\n\n') : null
 
     // Save metadata
     const existingMeta = await prisma.table.findFirst({ where: { projectId, name: finalName } })
@@ -5146,7 +5202,10 @@ async function executeCreateJunctionTable(
     const extraColNames = isMembershipTable ? ', role, status, joinedAt' : ''
     return {
       success: true,
-      message: `✅ Created junction table **${finalName}** linking **${tableA}** ↔ **${tableB}**.\n\nColumns: id, ${singularA}Id (FK→${first}), ${singularB}Id (FK→${second})${extraColNames}, createdAt`,
+      message:
+        `✅ Created junction table **${finalName}** linking **${tableA}** ↔ **${tableB}**.\n\nColumns: id, ${singularA}Id (FK→${first}), ${singularB}Id (FK→${second})${extraColNames}, createdAt` +
+        (rlsNotice ? `\n\n${rlsNotice}` : ''),
+      ...(rlsNotice ? { rlsNotice } : {}),
       data: { junctionName: finalName, tableA, tableB },
     }
   } catch (error: any) {
@@ -5817,12 +5876,39 @@ export async function GET(req: NextRequest, { params }: { params: { projectId: s
 
 /**
  * REAL BACKEND CALL: Add Column (via raw SQL)
+ *
+ * Outside a branch, a table missing from the database is created first
+ * (addColumns). That table is protected as create_table protects a new one
+ * (autoApplyRlsIfNeeded), once its columns are there: the owner's rows when
+ * they show an owner, closed to all but service-role keys when not. It was
+ * left without row-level security, readable with the publishable key and
+ * writable by any signed-in end user.
  */
 async function executeAddColumn(
   params: any,
   projectId: string,
   apiKey?: string,
   target: SchemaTarget = {},
+): Promise<ExecutionResult> {
+  const created: { table?: string } = {}
+  const result = await addColumns(params, projectId, apiKey, target, created)
+  if (!created.table) return result
+  const { autoApplyRlsIfNeeded, rlsNotSetNotice } = await import('@/lib/services/workspace-rls')
+  let notice: string | null
+  try {
+    notice = (await autoApplyRlsIfNeeded(projectId, created.table, [], {}, { closeWhenUndecidable: true })).notice
+  } catch (rlsErr: any) {
+    notice = rlsNotSetNotice(created.table, rlsErr?.message ?? String(rlsErr))
+  }
+  return notice ? { ...result, message: `${result.message}\n\n${notice}`, rlsNotice: notice } : result
+}
+
+async function addColumns(
+  params: any,
+  projectId: string,
+  apiKey: string | undefined,
+  target: SchemaTarget,
+  created: { table?: string },
 ): Promise<ExecutionResult> {
   const db = await projectDb(projectId)
   const branchMode = !!target.targetSchema
@@ -5876,6 +5962,7 @@ async function executeAddColumn(
            "updatedAt" TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
          )`
       )
+      created.table = tableName
       // Register in Prisma metadata
       const existsMeta = await prisma.table.findFirst({ where: { projectId, name: tableName } })
       if (!existsMeta) {
@@ -11242,7 +11329,7 @@ async function executeSetPermission(params: any, projectId: string): Promise<Exe
   // protects a table owned through a FK to a user-owned parent; `custom` takes
   // the caller's own predicate.
   const validTemplates = [
-    'auto', 'own_rows', 'party_rows', 'related_rows', 'public_read', 'admin_only',
+    'auto', 'own_rows', 'own_rows_read', 'party_rows', 'related_rows', 'public_read', 'admin_only',
     'all_access', 'org_members', 'admin_read_all', 'role_based', 'moderator_access', 'custom',
   ]
   if (!validTemplates.includes(template)) {
@@ -13664,6 +13751,14 @@ async function executeFixTable(params: any, projectId: string): Promise<Executio
         `CREATE TABLE IF NOT EXISTS "${schema}"."${tableName}" (\n  ${colDefs}\n)`
       )
       fixes.push(`Recreated table \`${tableName}\` in database (${blueprint ? blueprint.length + 2 : 2} columns)`)
+      // Recreated, it has no rules: protected as a new table is (executeCreateTable).
+      const { autoApplyRlsIfNeeded, rlsNotSetNotice } = await import('@/lib/services/workspace-rls')
+      try {
+        const notice = (await autoApplyRlsIfNeeded(projectId, tableName, [], {}, { closeWhenUndecidable: true })).notice
+        if (notice) fixes.push(notice)
+      } catch (rlsErr: any) {
+        fixes.push(rlsNotSetNotice(tableName, rlsErr?.message ?? String(rlsErr)))
+      }
 
       // Reinstall realtime trigger
       try {
@@ -15022,8 +15117,11 @@ async function executeRotateWebhookSecret(params: any, projectId: string): Promi
       message:
         `✅ Rotated the signing secret for webhook trigger **${trigger.name}**.\n\n` +
         `**New secret** (shown once — save it now):\n\n\`${newSecret}\`\n\n` +
-        `Future deliveries to \`${trigger.webhookUrl}\` are signed with this secret as \`X-Backenly-Signature: sha256=<hmac>\`. ` +
-        `Verify in your receiver before trusting any payload.`,
+        `Future deliveries to \`${trigger.webhookUrl}\` are signed with this secret. Each carries \`X-Backenly-Timestamp\` ` +
+        `(unix seconds), \`X-Backenly-Delivery\` and \`X-Backenly-Signature-V2: sha256=<HMAC-SHA256 of ` +
+        `"<timestamp>.<delivery>.<raw body>">\`. Verify it in your receiver before trusting any payload, and refuse a ` +
+        `timestamp more than 5 minutes old or a delivery id already handled. \`X-Backenly-Signature\` (the raw body ` +
+        `alone) is still sent for older receivers.`,
       // The docs promise the secret in data.secret — an agent updating a
       // receiver should not have to parse it out of prose. Shown once, as
       // the message says; it is never readable again.

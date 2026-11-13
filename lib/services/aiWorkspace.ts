@@ -2245,6 +2245,15 @@ export async function applyChangesFromPlan(
             }
           }
 
+          // The plan comes from the request, so its target is checked, not
+          // trusted: a `..` segment or an absolute path in it would otherwise
+          // write into another project's workspace, or anywhere else the server
+          // can write. Only a path inside this project's workspace is written.
+          const workspaceRoot = path.resolve(workspaceBase)
+          if (!path.resolve(filePath).startsWith(workspaceRoot + path.sep)) {
+            throw new Error("That target is not inside this project's workspace.")
+          }
+
           // Ensure directory exists
           const dir = path.dirname(filePath)
           await fs.mkdir(dir, { recursive: true })
@@ -2343,14 +2352,10 @@ export async function applyChangesFromPlan(
           // For now, just mark as applied
           applied.push(change.target)
         } else if (change.type === 'config') {
-          // Update config file
-          const configPath = path.join(/*turbopackIgnore: true*/ process.cwd(), change.target)
-          if (change.code) {
-            // turbopackIgnore: writes generated config into the runtime
-            // workspace. A write has nothing for the tracer to include.
-            await fs.writeFile(/*turbopackIgnore: true*/ configPath, change.code, 'utf-8')
-            applied.push(change.target)
-          }
+          // A config change was written under the server's own working
+          // directory, outside every workspace, at whatever path the plan
+          // named. Nothing in the product sends one: it is refused.
+          errors.push({ change: change.target, error: 'Config changes are not applied from a plan.' })
         }
       } catch (error: any) {
         errors.push({

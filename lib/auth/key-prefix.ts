@@ -54,6 +54,33 @@ export function issuedKeyPrefix(kind: {
   return ISSUED_PREFIX.project
 }
 
+/**
+ * What a key is, in the words a developer chooses keys by. `keyType` cannot
+ * say it: every project key is 'public', service keys and admin keys included,
+ * which is how an admin key came back from its own creation as "public".
+ *
+ *   publishable  bound by row-level security; safe in a browser bundle
+ *   service      bypasses row-level security; server-side only
+ *   server       the admin role, bound by row-level security; server-side only
+ *                (older projects' Default Keys)
+ *   mcp          a coding agent's connection; never used by an app
+ *   dashboard    a platform key for the dashboard API
+ */
+export type KeyKind = 'publishable' | 'service' | 'server' | 'mcp' | 'dashboard'
+
+export function keyKind(row: {
+  keyType?: string | null
+  scope?: string | null
+  serviceRole?: boolean | null
+  role?: string | null
+}): KeyKind {
+  if (row.keyType === 'dashboard') return 'dashboard'
+  if (row.scope === 'mcp' || row.keyType === 'mcp' || row.keyType === 'mcp_oauth') return 'mcp'
+  if (row.serviceRole) return 'service'
+  if (row.role === 'admin') return 'server'
+  return 'publishable'
+}
+
 /** A new credential of this kind: its prefix and 32 random bytes as hex. */
 export function mintKey(kind: Parameters<typeof issuedKeyPrefix>[0]): { key: string; prefix: string } {
   const prefix = issuedKeyPrefix(kind)

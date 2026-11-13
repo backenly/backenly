@@ -18,6 +18,9 @@
  *                        functions, kept by its own sync and left out of the
  *                        history (lib/changes/catalog.ts PLATFORM_OBJECTS): a
  *                        table a change or restore brought in gets it here.
+ *   realtime functions   the notify and presence functions, whose bodies are
+ *                        Backenly's: a restore that put back an older body
+ *                        gets the current one here (lib/realtime/channels.ts).
  *
  * Each step is best-effort: a view that could not be refreshed is logged, and
  * never fails the change or the restore that already happened.
@@ -73,6 +76,13 @@ export async function refreshSchemaViews(projectId: string, tables: Iterable<str
     await captureSchemaSnapshot(projectId, 'post_migration')
   } catch (err) {
     logFailure(projectId, 'the schema baseline', err)
+  }
+
+  try {
+    const { bringProjectFunctionsCurrent } = await import('@/lib/realtime/channels')
+    await bringProjectFunctionsCurrent(projectId)
+  } catch (err) {
+    logFailure(projectId, 'the realtime functions', err)
   }
 
   if (names.length > 0) {
