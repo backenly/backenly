@@ -13,6 +13,8 @@
  * - Modify the app
  */
 
+import { BlockedOutboundError, safeFetch } from '@/lib/security/outbound-guard'
+
 export interface AppInspectionResult {
   success: boolean
   error?: string
@@ -65,11 +67,15 @@ export class AppInspector {
     try {
       console.log('[AppInspector] Inspecting:', url)
 
-      // Step 1: Fetch the app HTML
-      const response = await fetch(url, {
+      // Step 1: Fetch the app HTML. The address comes from the caller, so it
+      // goes through the outbound guard: a public address only, checked again
+      // at every redirect and when the connection is made. It is a destination
+      // the customer names, like a webhook's, so it takes the webhook scope.
+      const response = await safeFetch(url, {
         headers: {
           'User-Agent': 'Backenly-Inspector/1.0 (Backend-as-a-Service)',
         },
+        egressScope: 'webhook',
       })
 
       if (!response.ok) {
@@ -114,6 +120,9 @@ export class AppInspector {
         },
       }
     } catch (error) {
+      if (error instanceof BlockedOutboundError) {
+        return { success: false, error: `Couldn't inspect that app: ${error.message}` }
+      }
       console.error('[AppInspector] Failed:', error)
       return {
         success: false,
