@@ -19,7 +19,7 @@
  *                        names a UNIQUE written on the column
  *                        (`<table>_<column>_key`), defined `UNIQUE (<column>)`.
  *   check_by_table_name  a CHECK named `chk_<table>_<column>` whose value list
- *                        is exactly, in order, the one the rules give that
+ *                        is exactly, in order, one the rules give or gave that
  *                        column on a table of that name.
  *
  * ── Who asked for it ───────────────────────────────────────────────────────
@@ -31,7 +31,9 @@
  *   - how the table was made: one declared in SQL since #654 has what its
  *     statement says, and one Backenly designed itself since this check was
  *     added has its rules by design (#654 kept them for a table designed from
- *     a description). Neither is judged (lib/db/declared-tables.ts);
+ *     a description). Neither is judged (lib/db/declared-tables.ts), except a
+ *     designed table's CHECK list that Backenly has since retired because it
+ *     refused values Backenly writes there itself;
  *   - the SQL in History (backend_changes.steps, since 2026-10-19): the
  *     statement that made the table or added the column, parsed as
  *     apply_migration parses it, says whether it declared the rule;
@@ -55,7 +57,7 @@
 import { prisma } from '@/lib/db/prisma'
 import type { RawFinding } from '@/lib/core/types'
 import { workspaceRawClient } from '@/lib/data-plane/regional'
-import { checkNameFor, isPostgresConstraintName, statusValuesFor, uniqueByName } from '@/lib/db/name-rules'
+import { checkNameFor, isPostgresConstraintName, statusValueListsFor, uniqueByName } from '@/lib/db/name-rules'
 import { howTablesWereMade } from '@/lib/db/declared-tables'
 import {
   dropStatementFor,
@@ -85,6 +87,12 @@ export interface GuessedCandidate {
   definition: string
   /** check_by_table_name: the values it allows, in order. */
   values?: string[]
+  /**
+   * check_by_table_name: a list the rule made before and no longer makes,
+   * because it refused values Backenly itself writes there
+   * (StatusRule.before in lib/db/name-rules.ts).
+   */
+  retired?: true
 }
 
 /** The quoted string literals of a definition, in order. */
@@ -124,18 +132,20 @@ export function guessedCandidate(c: CatalogConstraint): GuessedCandidate | null 
     if (c.definition !== `UNIQUE (${asWrittenByPostgres(column)})`) return null
     return { table: c.table, column, constraintName: c.name, rule: 'unique_by_name', definition: c.definition }
   }
-  const expected = statusValuesFor(c.table, column)
-  if (!expected || c.name !== checkNameFor(c.table, column)) return null
+  const lists = statusValueListsFor(c.table, column)
+  if (lists.length === 0 || c.name !== checkNameFor(c.table, column)) return null
   const list = inListOf(c.definition)
   if (!list || list.column !== column) return null
-  if (list.values.length !== expected.length || list.values.some((v, i) => v !== expected[i])) return null
+  const made = lists.findIndex((l) => l.length === list.values.length && l.every((v, i) => v === list.values[i]))
+  if (made < 0) return null
   return {
     table: c.table,
     column,
     constraintName: c.name,
     rule: 'check_by_table_name',
     definition: c.definition,
-    values: [...expected],
+    values: [...lists[made]],
+    ...(made > 0 ? { retired: true } : {}),
   }
 }
 
@@ -353,8 +363,10 @@ export async function detectGuessedConstraints(projectId: string): Promise<RawFi
     // A table made since the marks were kept: declared in SQL (#654), so its
     // rules are what the statement said; or designed by Backenly, so they are
     // its design. The one exception is a column added later by an add_column
-    // that inferred UNIQUE, which the ledger records as such.
-    if (how === 'designed_by_backenly') continue
+    // that inferred UNIQUE, which the ledger records as such. A design's CHECK
+    // whose list Backenly has since retired is not its design any more: the
+    // list refused values Backenly writes there itself.
+    if (how === 'designed_by_backenly' && !c.retired) continue
     if (how === 'declared_in_sql' && !(c.rule === 'unique_by_name' && intent?.source === 'add_column' && intent.requestedUnique !== true)) continue
 
     let evidence: GuessEvidence
