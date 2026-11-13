@@ -2,9 +2,10 @@
  * Broadcast API
  *
  * Sends an ephemeral event to all connected SSE clients for a project.
- * Nothing is written to the database — this is a pure pg_notify call.
- * Because NOTIFY (unlike LISTEN) works fine through connection pooling,
- * we use Prisma for simplicity.
+ * Nothing is written to the database: the project's database sends the event
+ * on the project's realtime channel (notifyProjectChannel in
+ * lib/realtime/channels.ts), whose name this route never holds. NOTIFY,
+ * unlike LISTEN, works through connection pooling.
  *
  * POST /api/v1/:projectId/broadcast
  * Body: { channel: string, payload?: object }
@@ -18,7 +19,7 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server'
-import { workspaceRawClient } from '@/lib/data-plane/regional'
+import { notifyProjectChannel } from '@/lib/realtime/channels'
 import { regionErrorResponse } from '@/lib/api/v1/errors'
 import { v1ApiMiddleware } from '@/lib/api/v1/middleware'
 import { recordedV1 } from '@/lib/traffic/recorded-v1'
@@ -66,21 +67,14 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
       )
     }
 
-    const notifyChannel = `workspace_${projectId}_changes`
-
-    // pg_notify works fine through PgBouncer — no persistent connection needed.
     // On the project's database, in its region: only listeners on that
     // database hear it, and that is where the listener hub LISTENs for it.
-    const db = await workspaceRawClient(projectId)
-    await db.$executeRawUnsafe(
-      `SELECT pg_notify($1, $2)`,
-      notifyChannel,
-      notifyPayload
-    )
+    // A project no stream has been opened for has nobody to hear it.
+    await notifyProjectChannel(projectId, notifyPayload)
 
     return NextResponse.json({ success: true })
   } catch (err: any) {
-    return regionErrorResponse(err) ?? NextResponse.json({ error: err.message }, { status: 500 })
+    return regionErrorResponse(err) ?? NextResponse.json({ error: 'Broadcast failed' }, { status: 500 })
   }
 }
 

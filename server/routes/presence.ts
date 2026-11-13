@@ -15,7 +15,8 @@
 
 import { Router, Request, Response } from 'express'
 import rateLimit from 'express-rate-limit'
-import { workspaceRawClient, type WorkspaceRawClient } from '@/lib/data-plane/regional'
+import { workspaceRawClient } from '@/lib/data-plane/regional'
+import { ensurePresenceTable } from '@/lib/realtime/presence-store'
 import { v1AuthMiddleware, v1PresenceAuthMiddleware } from '../lib/auth'
 import { clientIpFromNodeRequest } from '@/lib/security/client-ip'
 import {
@@ -26,14 +27,13 @@ import {
   presenceRefusal,
 } from '@/lib/security/shared-key-rate'
 import { resolveEndUserFromToken } from '../lib/end-user-identity'
-import { workspaceSchemaName, workspaceChannelName, quoteIdent } from '@/lib/security/workspace-schema'
+import { workspaceSchemaName, quoteIdent } from '@/lib/security/workspace-schema'
 import { presenceMetadataTooLarge } from '@/lib/realtime/presence-metadata'
 import { asyncRoute } from '../lib/async-route'
 
 const router = Router()
 
 const PRESENCE_TTL_SECONDS = 60
-const bootstrappedProjects = new Set<string>()
 
 /**
  * Who may act as `userId`? Presence names are identities, not labels: a row
@@ -121,63 +121,6 @@ const presenceWritesFromAnAddress = rateLimit({
     res.set(refusal.headers).status(refusal.status).json(refusal.body)
   },
 })
-
-async function ensurePresenceTable(db: WorkspaceRawClient, projectId: string): Promise<void> {
-  if (bootstrappedProjects.has(projectId)) return
-
-  const schema = workspaceSchemaName(projectId)
-  const channel = workspaceChannelName(projectId)
-  const qSchema = quoteIdent(schema)
-
-  await db.$executeRawUnsafe(`
-    CREATE TABLE IF NOT EXISTS ${qSchema}."_backenly_presence" (
-      "userId"   TEXT        NOT NULL PRIMARY KEY,
-      "metadata" JSONB       NOT NULL DEFAULT '{}',
-      "joinedAt" TIMESTAMPTZ NOT NULL DEFAULT now(),
-      "lastSeen" TIMESTAMPTZ NOT NULL DEFAULT now()
-    )
-  `)
-
-  await db.$executeRawUnsafe(`
-    CREATE OR REPLACE FUNCTION ${qSchema}.backenly_notify_presence()
-    RETURNS trigger LANGUAGE plpgsql AS $$
-    BEGIN
-      IF TG_OP = 'DELETE' THEN
-        PERFORM pg_notify(
-          '${channel}',
-          json_build_object('type','presence','event','leave','userId',OLD."userId",'timestamp',extract(epoch from clock_timestamp()))::text
-        );
-        RETURN OLD;
-      ELSIF TG_OP = 'INSERT' THEN
-        PERFORM pg_notify(
-          '${channel}',
-          json_build_object('type','presence','event','join','userId',NEW."userId",'metadata',NEW."metadata",'timestamp',extract(epoch from clock_timestamp()))::text
-        );
-        RETURN NEW;
-      ELSE
-        IF NEW."metadata"::text IS DISTINCT FROM OLD."metadata"::text THEN
-          PERFORM pg_notify(
-            '${channel}',
-            json_build_object('type','presence','event','update','userId',NEW."userId",'metadata',NEW."metadata",'timestamp',extract(epoch from clock_timestamp()))::text
-          );
-        END IF;
-        RETURN NEW;
-      END IF;
-    END;
-    $$
-  `)
-
-  await db.$executeRawUnsafe(`
-    DROP TRIGGER IF EXISTS backenly_presence_notify ON ${qSchema}."_backenly_presence"
-  `)
-  await db.$executeRawUnsafe(`
-    CREATE TRIGGER backenly_presence_notify
-      AFTER INSERT OR UPDATE OR DELETE ON ${qSchema}."_backenly_presence"
-      FOR EACH ROW EXECUTE FUNCTION ${qSchema}.backenly_notify_presence()
-  `)
-
-  bootstrappedProjects.add(projectId)
-}
 
 router.get('/:projectId/presence', asyncRoute(v1AuthMiddleware), asyncRoute(async (req: Request, res: Response) => {
   const { projectId } = req.params

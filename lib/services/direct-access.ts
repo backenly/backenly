@@ -42,6 +42,7 @@ import { HOME_REGION, type CloudRegionId } from '@/lib/regions'
 import { resolveWorkspaceSchema } from '@/lib/services/workspace-pool'
 import { assertValidProjectId } from '@/lib/security/workspace-schema'
 import { encryptValue, decryptValue } from '@/lib/security/projectEnvCrypto'
+import { rotateProjectChannel } from '@/lib/realtime/channels'
 
 export type DirectAccessMode = 'READ_ONLY' | 'READ_WRITE'
 
@@ -256,6 +257,11 @@ async function provisionRole(projectId: string, mode: DirectAccessMode, schema: 
 
   await syncDirectAccessGrants(projectId)
 
+  // A read-write login can read its project's realtime channel
+  // (lib/realtime/channel-sql.ts). Issued or re-keyed, the project gets a new
+  // channel, so what an earlier key could read stops being the channel.
+  if (mode === 'READ_WRITE') await rotateProjectChannel(projectId)
+
   await prisma.auditLog.create({
     data: {
       projectId,
@@ -309,6 +315,11 @@ export async function rotateDirectAccess(projectId: string, mode: DirectAccessMo
     },
   })
 
+  // The old password's sessions are ended above; the realtime channel a
+  // read-write login could read is replaced after them. A failure here fails
+  // the rotation, which is safe to ask for again.
+  if (mode === 'READ_WRITE') await rotateProjectChannel(projectId)
+
   await prisma.auditLog.create({
     data: {
       projectId,
@@ -358,6 +369,10 @@ export async function revokeDirectAccess(projectId: string, mode: DirectAccessMo
         'removes what names it and drops it, or the project is deleted after that',
     )
   }
+  // The login is gone or cannot log in; the realtime channel it could read is
+  // replaced before the credential is forgotten, so a failure here leaves the
+  // revocation to be asked for again.
+  if (mode === 'READ_WRITE') await rotateProjectChannel(projectId)
   await prisma.databaseCredential.delete({ where: { id: existing.id } })
 
   await prisma.auditLog.create({
