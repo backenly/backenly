@@ -47,7 +47,7 @@ export const POST = withProjectAccess(async (request: NextRequest, { projectId, 
     console.error('Create share error:', error);
     return NextResponse.json({ error: 'Failed to create share' }, { status: 500 });
   }
-});
+}, { floor: 'administer' }); // a share link is access handed outside the team, like a report link
 
 export const GET = withProjectAccess(async (request: NextRequest, { projectId, user }) => {
   try {

@@ -65,4 +65,4 @@ export const DELETE = withProjectAccess(async (req: NextRequest, { projectId }) 
     return NextResponse.json({ success: false, error: 'Link not found or already revoked' }, { status: 404 })
   }
   return NextResponse.json({ success: true })
-})
+}, { floor: 'administer' }) // the role that publishes a link is the role that takes it down
