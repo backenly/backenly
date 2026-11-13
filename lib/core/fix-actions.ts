@@ -25,6 +25,7 @@ import { normalizeFindingType } from './types'
 import { triggerPhrase } from './function-trigger-words'
 import { sizeWords } from './size-words'
 import { missingFrom, missingIntegrationHint } from './function-integration-words'
+import { guessedConstraintHint } from './guessed-constraint-words'
 import type { AIAction } from '@/lib/ai/minimal-executor'
 import { WITHHELD } from '@/lib/mcp/withhold-secrets'
 import { unsealParams } from '@/lib/operational-memory/sealed-params'
@@ -268,6 +269,20 @@ export function buildFixAction(
       return {
         action: 'DROP_INDEX',
         params: { tableName: table, indexName: details.indexName },
+      }
+    }
+
+    // Remove a rule Backenly added from a name that the request did not ask
+    // for. Approval-gated (fix-classifier.ts), so it only ever runs after a
+    // person said yes, as a governed DROP CONSTRAINT that History restores.
+    // The constraint is named by the detector, never derived from the column:
+    // a declared rule on the same column must not be the one dropped.
+    case 'guessed_constraint': {
+      const table = details.tableName ?? details.table
+      if (!table || typeof details.constraintName !== 'string' || !details.constraintName) return null
+      return {
+        action: 'DROP_CONSTRAINT',
+        params: { tableName: table, constraintName: details.constraintName },
       }
     }
 
@@ -624,6 +639,10 @@ export function getManualRemediationHint(
         `the rule working.`
       )
     }
+
+    // What the rule does, why Backenly says nobody asked for it, and who removes it.
+    case 'guessed_constraint':
+      return guessedConstraintHint(details)
 
     case 'behavioural_regression': {
       const measure = String(details?.measure ?? 'this measure').replace(/_/g, ' ')

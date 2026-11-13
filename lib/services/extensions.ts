@@ -16,9 +16,9 @@
  * with extra steps — and quoting the identifier does not help, because the
  * danger is the script the name selects, not the syntax.
  *
- * So the name is not an input. It is a key into a table declared in this file,
- * and anything not in that table is refused before any SQL is composed. Adding
- * an extension is a code change, reviewed.
+ * So the name is not an input. It is a key into a table declared in
+ * ./extension-allowlist.ts, and anything not in that table is refused before
+ * any SQL is composed. Adding an extension is a code change, reviewed.
  *
  * This is the same reasoning AGENTS.md gives for refusing a dashboard SQL
  * editor: a parser must never be the boundary. Here the boundary is that there
@@ -44,116 +44,56 @@
  * dashboard has no way to show an operator what a CASCADE would take with it.
  * An extension left installed costs nothing; one dropped out from under a live
  * schema costs data. Removing one is a deliberate act at a psql prompt.
+ *
+ * ── Agents install them too ─────────────────────────────────────────────────
+ *
+ * A coding agent writes `CREATE EXTENSION [IF NOT EXISTS] name [WITH] [SCHEMA s]
+ * [VERSION v] [CASCADE]` in apply_migration (lib/mcp/migration-parser.ts), and
+ * it arrives here as the console's Install button does: the same allowlist, the
+ * same live checks, the same refusals in the same words. Neither door drops or
+ * alters one. Both install into one schema, `public` (EXTENSION_SCHEMA in
+ * ./extension-allowlist.ts says why), whatever SCHEMA the statement named, and
+ * the server's default version: the result says where it is and which version.
+ *
+ * Installing one waits for nobody, on a protected production too. Protection
+ * (lib/branches/protection.ts) is about a project's schema: production's tables
+ * change only through a merge a person approved. An extension creates nothing
+ * in any project's schema, and the index or column that uses it is a schema
+ * change, which still goes through the branch and that merge. Nor does it
+ * change what production accepts or returns, which is what holds a migration
+ * step for a person (REVIEWED_BEFORE_PRODUCTION in lib/mcp/apply-migration.ts).
+ * And it takes no more authority than the console asks for: the console
+ * installs at ADMIN, and ADMIN is the rank that issues an agent a read-write
+ * key (app/api/projects/[id]/mcp/keys) or connection (the OAuth consent). What
+ * Backenly cannot do is undo an install, which is why removal, not
+ * installation, is what no door offers.
+ *
+ * On a preview branch an install is not the branch's own: the extension is
+ * installed for the whole database, production included, and the result says
+ * so. The merge replays the statement, which then finds it installed.
+ *
+ * ── Recorded ────────────────────────────────────────────────────────────────
+ *
+ * Every install, from either door, is an `EXTENSION_INSTALLED` audit row on the
+ * project it was asked through, which that project's activity feed shows. It
+ * is not a History change of its own: History restores a project's backend,
+ * and nothing restores this. When the migration that installs one also changes
+ * the schema, that change in History lists the install among its steps, with
+ * its statement, and restoring the change leaves the extension where it is.
  */
 
 import { Pool } from 'pg'
 import { disconnectRegionalClients, projectPool } from '@/lib/data-plane/regional'
+import {
+  ALLOWED_EXTENSIONS,
+  EXTENSION_SCHEMA,
+  databaseWide,
+  isAllowedExtension,
+  notAllowedReason,
+  type AllowedExtension,
+} from './extension-allowlist'
 
-/** What an allowlisted extension is for, and whether we can install it. */
-export interface AllowedExtension {
-  name: string
-  /** Shown in the dashboard. Why an operator might want this. */
-  purpose: string
-  /**
-   * True when PostgreSQL marks it trusted, so a non-superuser role with CREATE
-   * on the database may install it. Checked against the live catalog rather
-   * than believed: this is a claim about the running server, and a build of
-   * PostgreSQL may disagree with this file.
-   */
-  expectedTrusted: boolean
-  /** Extra requirement this surface cannot satisfy, stated to the operator. */
-  caveat?: string
-}
-
-/**
- * The extensions Backenly will install on request.
- *
- * Chosen for being useful to a backend, widely packaged, and free of
- * server-level configuration. Everything here ships in the standard `contrib`
- * set, so an operator is not asked to install OS packages first.
- */
-export const ALLOWED_EXTENSIONS: readonly AllowedExtension[] = [
-  {
-    name: 'pgcrypto',
-    purpose: 'Hashing and encryption functions, including gen_random_uuid() on older servers.',
-    expectedTrusted: true,
-  },
-  {
-    name: 'uuid-ossp',
-    purpose: 'UUID generation in the v1/v3/v5 variants that gen_random_uuid() does not cover.',
-    expectedTrusted: true,
-  },
-  {
-    name: 'citext',
-    purpose: 'Case-insensitive text, for columns like email where LOWER() on every query is the alternative.',
-    expectedTrusted: true,
-  },
-  {
-    name: 'pg_trgm',
-    purpose: 'Trigram similarity and fast LIKE/ILIKE indexes, for search that is not full-text search.',
-    expectedTrusted: true,
-  },
-  {
-    name: 'unaccent',
-    purpose: 'Strips accents, so a search for "cafe" matches "café".',
-    expectedTrusted: true,
-  },
-  {
-    name: 'fuzzystrmatch',
-    purpose: 'Edit distance and sound-alike matching (levenshtein, soundex, metaphone), for search that forgives typos.',
-    expectedTrusted: true,
-  },
-  {
-    name: 'hstore',
-    purpose: 'Key/value pairs in a single column. Predates jsonb and is still lighter for flat string maps.',
-    expectedTrusted: true,
-  },
-  {
-    name: 'ltree',
-    purpose: 'Hierarchical label paths, for trees that recursive CTEs make awkward.',
-    expectedTrusted: true,
-  },
-  {
-    name: 'btree_gin',
-    purpose: 'Lets a GIN index cover ordinary scalar columns alongside jsonb or array columns.',
-    expectedTrusted: true,
-  },
-  {
-    name: 'btree_gist',
-    purpose: 'Scalar columns inside GiST indexes, which is what exclusion constraints need.',
-    expectedTrusted: true,
-  },
-  {
-    name: 'vector',
-    purpose: 'Vector similarity search for embeddings.',
-    // pgvector is trusted from 0.6, and is not part of contrib: a server that
-    // does not have it packaged cannot install it from here at all, which the
-    // availability check reports.
-    expectedTrusted: true,
-    caveat: 'Not part of the standard contrib set. The server must have pgvector packaged.',
-  },
-  {
-    name: 'pg_stat_statements',
-    purpose: 'Measured query latency, which Backenly uses to find slow queries by measurement rather than by shape.',
-    expectedTrusted: false,
-    caveat:
-      'Needs superuser AND shared_preload_libraries = \'pg_stat_statements\' in postgresql.conf, ' +
-      'followed by a PostgreSQL restart.',
-  },
-  {
-    name: 'pgstattuple',
-    purpose: 'Index bloat measurement, which no statistics view exposes.',
-    expectedTrusted: false,
-    caveat: 'Needs superuser. No restart required.',
-  },
-] as const
-
-const BY_NAME = new Map(ALLOWED_EXTENSIONS.map(e => [e.name, e]))
-
-/** Is this a name we are willing to compose DDL for? */
-export function isAllowedExtension(name: unknown): name is string {
-  return typeof name === 'string' && BY_NAME.has(name)
-}
+export { ALLOWED_EXTENSIONS, EXTENSION_SCHEMA, databaseWide, isAllowedExtension, notAllowedReason, type AllowedExtension }
 
 export interface ExtensionStatus extends AllowedExtension {
   /** Present on this server's disk, so installable in principle. */
@@ -259,7 +199,7 @@ export async function listExtensions(projectId: string): Promise<ExtensionStatus
   })
 }
 
-export type InstallFailureCode = 'NOT_ALLOWED' | 'NOT_AVAILABLE' | 'NEEDS_SUPERUSER' | 'FAILED'
+export type InstallFailureCode = 'NOT_ALLOWED' | 'NOT_AVAILABLE' | 'NEEDS_SUPERUSER' | 'VERSION_NOT_OFFERED' | 'FAILED'
 
 /**
  * Flat rather than a discriminated union, deliberately.
@@ -270,14 +210,55 @@ export type InstallFailureCode = 'NOT_ALLOWED' | 'NOT_AVAILABLE' | 'NEEDS_SUPERU
  * Assertions at call sites are how a shape drifts from what it claims.
  *
  * Every field is always present instead. `code` and `message` are null on
- * success, `version` is null when nothing was installed.
+ * success, `version` and `schema` are null when nothing is installed.
  */
 export interface InstallOutcome {
   ok: boolean
   alreadyInstalled: boolean
   version: string | null
+  /** Where it is installed: EXTENSION_SCHEMA, unless someone put it elsewhere first. */
+  schema: string | null
   code: InstallFailureCode | null
   message: string | null
+}
+
+export interface InstallOptions {
+  /** A VERSION the caller named. Only the server's default version is installed. */
+  version?: string | null
+  /** Who asked, and through which door: for the audit row a fresh install writes. */
+  actor?: { userId?: string | null; via: 'console' | 'agent' }
+}
+
+/**
+ * Whether `name` can be installed here, from the allowlist and the live
+ * catalog, without changing anything. installExtension asks it first, and an
+ * agent's migration asks it before its first statement runs, so a refusal there
+ * leaves nothing half-applied. The reasons are the console's.
+ */
+export async function checkInstall(
+  projectId: string,
+  name: string,
+  opts: Pick<InstallOptions, 'version'> = {},
+): Promise<{ ok: boolean; status: ExtensionStatus | null; code: InstallFailureCode | null; message: string | null }> {
+  if (!isAllowedExtension(name)) {
+    return { ok: false, status: null, code: 'NOT_ALLOWED', message: notAllowedReason(name) }
+  }
+  const status = (await listExtensions(projectId)).find(e => e.name === name)!
+  if (status.installed) return { ok: true, status, code: null, message: null }
+  if (!status.available) return { ok: false, status, code: 'NOT_AVAILABLE', message: status.blockedReason }
+  if (!status.installable) return { ok: false, status, code: 'NEEDS_SUPERUSER', message: status.blockedReason }
+  const version = opts.version?.trim()
+  if (version && status.defaultVersion && version !== status.defaultVersion) {
+    return {
+      ok: false,
+      status,
+      code: 'VERSION_NOT_OFFERED',
+      message:
+        `Backenly installs the version of ${name} this server offers by default, ${status.defaultVersion}, ` +
+        `and VERSION '${version.slice(0, 20)}' was asked for.`,
+    }
+  }
+  return { ok: true, status, code: null, message: null }
 }
 
 /**
@@ -290,45 +271,37 @@ export interface InstallOutcome {
  * `IF NOT EXISTS` so a second click is not an error, and the outcome says which
  * happened rather than reporting a no-op as a fresh install.
  */
-export async function installExtension(projectId: string, name: string): Promise<InstallOutcome> {
-  if (!isAllowedExtension(name)) {
-    return {
-      ok: false,
-      alreadyInstalled: false,
-      version: null,
-      code: 'NOT_ALLOWED',
-      message:
-        `${String(name).slice(0, 60)} is not on Backenly's extension allowlist. ` +
-        `Extensions run their own install scripts with the privileges of whoever ` +
-        `installs them, so the list is a code change rather than a form field.`,
-    }
+export async function installExtension(projectId: string, name: string, opts: InstallOptions = {}): Promise<InstallOutcome> {
+  const check = await checkInstall(projectId, name, opts)
+  if (!check.ok) {
+    return { ok: false, alreadyInstalled: false, version: null, schema: null, code: check.code, message: check.message }
   }
-
-  const status = (await listExtensions(projectId)).find(e => e.name === name)!
-
+  const status = check.status!
   if (status.installed) {
-    return { ok: true, alreadyInstalled: true, version: status.installedVersion, code: null, message: null }
-  }
-  if (!status.available) {
-    return { ok: false, alreadyInstalled: false, version: null, code: 'NOT_AVAILABLE', message: status.blockedReason }
-  }
-  if (!status.installable) {
-    return { ok: false, alreadyInstalled: false, version: null, code: 'NEEDS_SUPERUSER', message: status.blockedReason }
+    return { ok: true, alreadyInstalled: true, version: status.installedVersion, schema: status.schema, code: null, message: null }
   }
 
+  // Quoted because the name contains a hyphen in at least one case
+  // (`uuid-ossp`), and because an unquoted identifier here would be a habit
+  // worth not forming. The schema is named rather than left to whatever
+  // search_path this connection has, so the console and an agent's migration
+  // put it in the same place.
+  const sql = `CREATE EXTENSION IF NOT EXISTS "${name.replace(/"/g, '""')}" WITH SCHEMA ${EXTENSION_SCHEMA}`
   try {
-    // Quoted because the name contains a hyphen in at least one case
-    // (`uuid-ossp`), and because an unquoted identifier here would be a habit
-    // worth not forming.
-    await (await getPool(projectId)).query(`CREATE EXTENSION IF NOT EXISTS "${name.replace(/"/g, '""')}"`)
+    await (await getPool(projectId)).query(sql)
   } catch (err: any) {
     // The server's own words. An operator reading "permission denied to create
     // extension" can act; one reading "install failed" cannot.
     return {
-      ok: false, alreadyInstalled: false, version: null,
+      ok: false, alreadyInstalled: false, version: null, schema: null,
       code: 'FAILED', message: String(err?.message ?? err).slice(0, 400),
     }
   }
+  // Sent on a connection of its own, which the change's recorder does not see:
+  // put on the record of the agent's migration it ran in, when there is one.
+  const { currentChange, recordStatement } = await import('@/lib/changes/ledger')
+  const change = currentChange(projectId)
+  if (change) recordStatement(change, sql)
 
   const after = (await listExtensions(projectId)).find(e => e.name === name)!
   if (!after.installed) {
@@ -339,10 +312,98 @@ export async function installExtension(projectId: string, name: string): Promise
       ok: false,
       alreadyInstalled: false,
       version: null,
+      schema: null,
       code: 'FAILED',
       message: `${name} still does not appear in pg_extension after CREATE EXTENSION reported success.`,
     }
   }
 
-  return { ok: true, alreadyInstalled: false, version: after.installedVersion, code: null, message: null }
+  await recordInstall(projectId, name, after, opts.actor)
+  return { ok: true, alreadyInstalled: false, version: after.installedVersion, schema: after.schema, code: null, message: null }
+}
+
+/** The audit row an install leaves on the project it was asked through. Never fails the install. */
+async function recordInstall(
+  projectId: string,
+  name: string,
+  status: ExtensionStatus,
+  actor: InstallOptions['actor'],
+): Promise<void> {
+  try {
+    const { prisma } = await import('@/lib/db/prisma')
+    const { currentAttribution } = await import('@/lib/changes/attribution')
+    const apiKeyId = currentAttribution()?.apiKeyId
+    await prisma.auditLog.create({
+      data: {
+        projectId,
+        userId: actor?.userId ?? null,
+        action: 'EXTENSION_INSTALLED',
+        type: 'database',
+        details: JSON.stringify({
+          extension: name,
+          version: status.installedVersion,
+          schema: status.schema,
+          via: actor?.via ?? null,
+          ...(apiKeyId ? { apiKeyId } : {}),
+        }),
+        timestamp: new Date(),
+      },
+    })
+  } catch (err) {
+    console.warn(`[extensions] project=${projectId}: the install of ${name} was not recorded:`, err instanceof Error ? err.message : err)
+  }
+}
+
+/**
+ * What an install did, in one paragraph for whoever asked: where it is, that it
+ * is database-wide and stays, and which part of what was asked was not used.
+ */
+export function describeInstall(
+  name: string,
+  outcome: InstallOutcome,
+  asked: { schema?: string | null; version?: string | null } = {},
+): string {
+  const version = outcome.version ? ` ${outcome.version}` : ''
+  const where = outcome.schema ? ` in schema ${outcome.schema}` : ''
+  const lines = [
+    outcome.alreadyInstalled
+      ? `${name}${version} was already installed${where}, so nothing changed.`
+      : `Installed ${name}${version}${where}.`,
+    databaseWide(name),
+  ]
+  if (outcome.schema && outcome.schema !== EXTENSION_SCHEMA) {
+    lines.push(
+      `It is in schema ${outcome.schema}, not ${EXTENSION_SCHEMA}, so a project's API roles find its functions ` +
+      `only where ${outcome.schema} is on their search path.`,
+    )
+  } else if (asked.schema && asked.schema !== EXTENSION_SCHEMA) {
+    lines.push(
+      `SCHEMA ${asked.schema} was not used: Backenly installs every extension into ${EXTENSION_SCHEMA}, which ` +
+      `every project's API roles already search, so write its functions and operator classes unqualified.`,
+    )
+  }
+  if (asked.version && outcome.version && asked.version !== outcome.version) {
+    lines.push(`VERSION '${asked.version}' was not used: ${name} is installed at ${outcome.version}, and Backenly does not change an installed extension's version.`)
+  }
+  return lines.join(' ')
+}
+
+/**
+ * A migration's install_extension step (lib/mcp/migration-parser.ts), as
+ * apply_migration runs it on production and on a preview branch: the console's
+ * install, with the result written for the agent that asked.
+ */
+export async function installForMigration(
+  projectId: string,
+  args: Record<string, unknown>,
+  userId?: string | null,
+): Promise<{ ok: boolean; summary: string; code?: string; outcome: InstallOutcome }> {
+  const name = String(args.name ?? '')
+  const version = typeof args.version === 'string' ? args.version : null
+  const schema = typeof args.schema === 'string' ? args.schema : null
+  const outcome = await installExtension(projectId, name, { version, actor: { userId: userId ?? null, via: 'agent' } })
+  if (!outcome.ok) {
+    return { ok: false, summary: outcome.message ?? `${name} was not installed.`, code: outcome.code ?? 'FAILED', outcome }
+  }
+  return { ok: true, summary: describeInstall(name, outcome, { schema, version }), outcome }
 }

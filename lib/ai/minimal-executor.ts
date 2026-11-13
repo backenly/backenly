@@ -10,6 +10,7 @@
 import { isReservedWorkspaceTable } from '@/lib/security/workspace-schema'
 import type { RelatedRowsVia } from '@/lib/services/rls-ownership'
 import { addForeignKeySql, columnForeignKeySql, describeTarget, isDeclaredForeignKey } from '@/lib/db/declared-foreign-key'
+import { ruleChecksFor, uniqueByName } from '@/lib/db/name-rules'
 import { getActiveGraph, saveNewGraph } from '@/lib/orchestration/graph-pointer'
 import { withoutTables } from '@/lib/orchestration/graph-tables'
 import { planDisplayName } from '@/lib/entitlements/plan-names'
@@ -245,6 +246,12 @@ interface ColumnConstraints {
    * SAME list the CHECK is built from — see `initialStateFor`.
    */
   stateValues?: string[]
+  /**
+   * Where a row starts, when the CHECK came from a name rule: the rule says
+   * (lib/db/name-rules.ts), so a value added to its list does not move it.
+   * Otherwise it is derived from `stateValues` (initialStateFor).
+   */
+  initialState?: string
   /** True when the caller stated nullability, rather than it being inferred. */
   explicitNotNull?: boolean
 }
@@ -596,7 +603,8 @@ function deriveConstraints(columnName: string, columnType: string, tableName: st
   
   const constraints: ColumnConstraints = {
     isPrimaryKey: lower === 'id',
-    isUnique: lower.includes('email') || lower.includes('username') || lower.includes('slug'),
+    // UNIQUE from the name alone (lib/db/name-rules.ts): email, username, slug.
+    isUnique: uniqueByName(columnName),
     // ── Nullable unless something below gives a POSITIVE reason to require it ──
     //
     // This read `!lower.includes('optional') && !startsWith('is_'/'has_')`, i.e.
@@ -842,7 +850,7 @@ function applyConstraintsToColumn(columnDef: any, constraints: ColumnConstraints
     // Derived from the SAME value list the CHECK constraint is built from, so a
     // default that violates its own CHECK is not expressible. This is what
     // `DEFAULT 'active'` against `CHECK (payment_status IN ('pending', …))` was.
-    const initial = initialStateFor(constraints.stateValues)
+    const initial = constraints.initialState ?? initialStateFor(constraints.stateValues)
     if (initial) defaultClause = ` DEFAULT ${sqlLiteral(initial)}`
   } else if (constraints.hasDefault) {
     if (columnDef.type === 'BOOLEAN') {
@@ -4308,74 +4316,22 @@ async function executeCreateTable(
     // default from the same list the CHECK is built from, which makes the two
     // incapable of disagreeing. See `initialStateFor`.
     // ── CHECK constraints for enum columns (e.g. status IN ('pending','shipped')) ──
-    const checkConstraints: Array<{ columnName: string; values: string[] }> =
+    const checkConstraints: Array<{ columnName: string; values: string[]; initial?: string }> =
       (params.checkConstraints as any[]) ?? []
 
     // ── #94: Auto-inject CHECK constraints for any status-like column ────────
     // Extends beyond job tables: any table with a status/payment_status/order_status
-    // column gets a CHECK constraint derived from the known domain context.
-
-    // Status value sets keyed by table-name pattern
-    const STATUS_DOMAIN_MAP: Array<{ pattern: RegExp; column: string; values: string[] }> = [
-      // Job/async processing tables
-      {
-        pattern: /_jobs?$|^(generation|render|video|export|import|process|encode|transcode|clip)_/,
-        column: 'status',
-        values: ['queued', 'processing', 'completed', 'failed', 'cancelled'],
-      },
-      // Order / e-commerce tables
-      {
-        pattern: /^orders?$|^(order_items?|purchase)$/,
-        column: 'status',
-        values: ['pending', 'processing', 'shipped', 'delivered', 'cancelled', 'refunded'],
-      },
-      {
-        pattern: /^orders?$|^payments?$|^invoices?$|^checkouts?$/,
-        column: 'payment_status',
-        values: ['pending', 'paid', 'failed', 'refunded', 'disputed'],
-      },
-      // Subscriptions
-      {
-        pattern: /^subscriptions?$/,
-        column: 'status',
-        values: ['active', 'trialing', 'past_due', 'cancelled', 'unpaid', 'paused'],
-      },
-      // User / account tables
-      {
-        pattern: /^users?$|^accounts?$|^members?$/,
-        column: 'status',
-        values: ['active', 'suspended', 'deactivated', 'pending_verification'],
-      },
-      // Content / CMS tables
-      {
-        pattern: /^(posts?|articles?|pages?)$/,
-        column: 'status',
-        values: ['draft', 'published', 'archived', 'scheduled'],
-      },
-      // Tickets / support
-      {
-        pattern: /^tickets?$|^support_tickets?$/,
-        column: 'status',
-        values: ['open', 'in_progress', 'resolved', 'closed', 'on_hold'],
-      },
-      // Generic tasks
-      {
-        pattern: /^tasks?$|^todos?$/,
-        column: 'status',
-        values: ['todo', 'in_progress', 'done', 'cancelled'],
-      },
-    ]
-
+    // column gets a CHECK constraint derived from the known domain context, the
+    // value sets keyed by table-name pattern in lib/db/name-rules.ts, which the
+    // detector of rules nobody asked for reads too (lib/autonomy/guessed-constraints.ts).
+    // A column the design marks `check: false` gets none: Stripe's subscription
+    // statuses are Stripe's, and a list of today's refuses the one it adds next.
     const alreadyHasStatusConstraint = checkConstraints.some(c => c.columnName === 'status')
     if (!asWritten && !alreadyHasStatusConstraint) {
-      for (const rule of STATUS_DOMAIN_MAP) {
-        if (!rule.pattern.test(tableName)) continue
-        const colExists = safeColumns.some(c => c.name.toLowerCase() === rule.column)
-        if (!colExists) continue
-        const alreadyHas = checkConstraints.some(c => c.columnName === rule.column)
-        if (alreadyHas) continue
-        checkConstraints.push({ columnName: rule.column, values: rule.values })
-        console.log(`[AI Executor] Auto-injected CHECK constraint on "${rule.column}" for "${tableName}" (${rule.values.join(', ')})`)
+      const stated = new Set(checkConstraints.map(c => c.columnName))
+      for (const rule of ruleChecksFor(tableName, safeColumns, stated)) {
+        checkConstraints.push(rule)
+        console.log(`[AI Executor] Auto-injected CHECK constraint on "${rule.columnName}" for "${tableName}" (${rule.values.join(', ')})`)
       }
     }
 
@@ -4400,6 +4356,8 @@ async function executeCreateTable(
           c => c.columnName?.toLowerCase() === col.name.toLowerCase(),
         )
         if (check?.values?.length) constraints.stateValues = check.values
+        // A rule's own starting state (lib/db/name-rules.ts), rather than one read off its list.
+        if (check?.initial) constraints.initialState = check.initial
         // Explicit { nullable, notNull, unique, fkTo, default } from the caller
         // wins over every name-based guess above.
         applyExplicitColumnFlags(constraints, col)
@@ -4472,6 +4430,15 @@ async function executeCreateTable(
       `SELECT to_regclass($1) IS NOT NULL AS existed`,
       `"${postgresSchema}"."${tableName}"`,
     )
+    // Whether this statement makes the table, or finds it already there
+    // (IF NOT EXISTS): only a table made here is marked as made here.
+    const existedBefore = await db
+      .$queryRawUnsafe<Array<{ found: string | null }>>(
+        `SELECT to_regclass($1)::text AS found`,
+        `"${postgresSchema}"."${tableName}"`,
+      )
+      .then((r) => !!r[0]?.found)
+      .catch(() => true)
 
     console.log(`📝 [AI Executor] Executing SQL:`, createTableSQL)
     await db.$executeRawUnsafe(createTableSQL)
@@ -4829,10 +4796,13 @@ async function executeCreateTable(
     // Now that we just created 'users', repair orders.userId → users.id
     // A table declared in SQL is kept out of the name-based key repair, now and
     // on every later run of it (lib/db/declared-tables.ts); one built from a
-    // description takes part, whatever an earlier table of its name was.
+    // description takes part, whatever an earlier table of its name was. One
+    // Backenly designs and makes here is marked so: the rules its names gave
+    // it are that design, not a request's leftovers (lib/autonomy/guessed-constraints.ts).
     try {
-      const { markDeclaredInSql, unmarkDeclaredInSql } = await import('@/lib/db/declared-tables')
+      const { markDeclaredInSql, markDesignedByBackenly, unmarkDeclaredInSql } = await import('@/lib/db/declared-tables')
       if (asWritten) await markDeclaredInSql(projectId, tableName)
+      else if (!existedBefore) await markDesignedByBackenly(projectId, tableName)
       else await unmarkDeclaredInSql(projectId, tableName)
     } catch (markErr: any) {
       console.warn(`[AI Executor] Could not record how "${tableName}" was declared:`, markErr?.message)
@@ -6106,7 +6076,10 @@ async function addColumns(
     // A migration's column carries its declared type (sqlType); keep it on this path too.
     const sqlType = spec && colsToAdd.length === 1 && typeof spec.sqlType === 'string' ? spec.sqlType : undefined
     for (const col of colsToAdd) {
-      await addColumnToTable(tableName, { name: col.name, type: col.type, ...(sqlType ? { sqlType } : {}) }, projectId, apiKey, target)
+      await addColumnToTable(
+        tableName, { name: col.name, type: col.type, ...(sqlType ? { sqlType } : {}) }, projectId, apiKey, target,
+        params.asWritten === true,
+      )
       addedCols.push(col.name)
     }
 
@@ -6375,6 +6348,8 @@ async function addColumnToTable(
   projectId: string,
   apiKey?: string,
   target: SchemaTarget = {},
+  // From SQL (apply_migration): the column as written, nothing from its name.
+  asWritten = false,
 ): Promise<void> {
   const db = await projectDb(projectId)
   try {
@@ -6396,8 +6371,14 @@ async function addColumnToTable(
     }
     
     // Apply constraint-first system: detect FK columns, unique columns, etc.
+    // Not for a column declared in SQL: `ADD COLUMN customer_email text` came
+    // out UNIQUE from its name, so each email could be on one row (production
+    // QA, 2026-11-09). What it declares beyond a type (NOT NULL, DEFAULT,
+    // UNIQUE, REFERENCES) is added by executeAddColumn, as written.
     const normalizedType = declaredSqlType(column) ?? normalizeColumnType(column.type, column.name)
-    const constraints = deriveConstraints(column.name, normalizedType, tableName)
+    const constraints: ColumnConstraints = asWritten
+      ? { isPrimaryKey: false, isUnique: false, isRequired: false, hasDefault: false, foreignKey: undefined }
+      : deriveConstraints(column.name, normalizedType, tableName)
     const columnDef = { name: column.name, type: normalizedType }
     const columnSQL = applyConstraintsToColumn(columnDef, constraints, postgresSchema)
 
@@ -9586,6 +9567,36 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
     }
   }
 
+  // Operator classes, per column: `{ name: "gin_trgm_ops" }` for a trigram
+  // index, `{ data: "jsonb_path_ops" }`. A migration's `(name gin_trgm_ops)`
+  // used to lose its class before it got here (lib/mcp/migration-parser.ts).
+  const operatorClasses: Record<string, string> = {}
+  if (params.operatorClasses && typeof params.operatorClasses === 'object' && !Array.isArray(params.operatorClasses)) {
+    for (const [column, raw] of Object.entries(params.operatorClasses as Record<string, unknown>)) {
+      const opclass = String(raw ?? '').trim().toLowerCase()
+      if (!opclass) continue
+      if (!columns.includes(column)) {
+        return {
+          success: false,
+          message: `An operator class was given for "${column}", which is not one of the index's columns (${columns.join(', ')}).`,
+          error: 'Operator class for a column not indexed',
+          code: 'VALIDATION',
+        }
+      }
+      if (!SAFE_IDENT.test(opclass)) {
+        return {
+          success: false,
+          message: `"${opclass}" is not a valid PostgreSQL identifier.`,
+          error: 'Invalid identifier',
+          code: 'VALIDATION',
+        }
+      }
+      operatorClasses[column] = opclass
+    }
+  }
+  /** A column as an index definition writes it: with its operator class, when it has one. */
+  const indexed = (c: string) => (operatorClasses[c] ? `${c} ${operatorClasses[c]}` : c)
+
   // `where: "true"` asks for an index over every row, soft-deleted ones
   // included: the only kind of UNIQUE index an ON CONFLICT upsert can target.
   // It names no column, so it is not a predicate to validate, and it is never
@@ -9610,8 +9621,42 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
     const postgresSchema = target.targetSchema ?? getWorkspaceDatabaseNames(projectId).postgresSchema
 
     let idxName = params.indexName || defaultIndexName(tableName, columns, unique)
-    const colList = columns.map((c) => `"${c}"`).join(', ')
+    // Each class is found for the index's method in pg_catalog or in the schema
+    // Backenly installs extensions into, and the DDL names that schema rather
+    // than trusting a search_path. Nowhere else: a class in another schema
+    // would make this table's index depend on it. Missing, it is refused with
+    // the way forward, before any DDL.
+    const { EXTENSION_SCHEMA } = await import('@/lib/services/extension-allowlist')
+    const classSql: Record<string, string> = {}
+    for (const [column, opclass] of Object.entries(operatorClasses)) {
+      const found = await db.$queryRawUnsafe<Array<{ schema: string }>>(
+        `SELECT n.nspname AS schema
+           FROM pg_opclass c
+           JOIN pg_namespace n ON n.oid = c.opcnamespace
+           JOIN pg_am a        ON a.oid = c.opcmethod
+          WHERE c.opcname = $1 AND a.amname = $2 AND n.nspname IN ('pg_catalog', $3)
+          ORDER BY n.nspname = 'pg_catalog' DESC
+          LIMIT 1`,
+        opclass, method || 'btree', EXTENSION_SCHEMA,
+      )
+      if (found.length === 0) {
+        return {
+          success: false,
+          message:
+            `There is no "${opclass}" operator class for ${method || 'btree'} indexes on this database, so the index on ` +
+            `${tableName} (${column}) was not created. When an extension provides it (gin_trgm_ops and gist_trgm_ops ` +
+            `come from pg_trgm), install the extension first, earlier in the same migration: CREATE EXTENSION IF NOT EXISTS <name>.`,
+          error: 'Unknown operator class',
+          code: 'VALIDATION',
+        }
+      }
+      classSql[column] = found[0].schema === 'pg_catalog' ? `"${opclass}"` : `"${found[0].schema}"."${opclass}"`
+    }
+    const colList = columns.map((c) => (classSql[c] ? `"${c}" ${classSql[c]}` : `"${c}"`)).join(', ')
     const usingClause = method ? ` USING ${method}` : ''
+    /** How an index definition's columns compare: no quotes, a class's schema dropped. */
+    const columnKey = (cols: string[]) =>
+      cols.map((c) => c.replace(/"/g, '').replace(/\s(?:pg_catalog|public)\./, ' ').toLowerCase()).join(',')
 
     // ── A UNIQUE index must not count soft-deleted rows ──────────────────────
     //
@@ -9656,19 +9701,19 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
         `SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = $1 AND tablename = $2`,
         postgresSchema, tableName,
       )
-      const wanted = columns.map((c) => c.toLowerCase()).join(',')
+      const wanted = columnKey(columns.map(indexed))
       let same = all.find((r) =>
         r.indexname !== idxName &&
         !/\sWHERE\s/i.test(r.indexdef) &&
         /CREATE UNIQUE/i.test(r.indexdef) === unique &&
         new RegExp(`USING ${method ?? 'btree'}\\b`, 'i').test(r.indexdef) &&
-        indexDefColumns(r.indexdef).join(',') === wanted)
+        columnKey(indexDefColumns(r.indexdef)) === wanted)
       // One a failed CREATE INDEX CONCURRENTLY left behind does no job.
       if (same && (await validity(same.indexname))?.valid === false) same = undefined
       if (same && !params.indexName) {
         return {
           success: true,
-          message: `${tableName} already has this index, "${same.indexname}" (${columns.join(', ')})${unique ? ', unique' : ''}, so a second one was not built.`,
+          message: `${tableName} already has this index, "${same.indexname}" (${columns.map(indexed).join(', ')})${unique ? ', unique' : ''}, so a second one was not built.`,
           data: { tableName, columns, unique, indexName: same.indexname, alreadyExisted: true, definition: same.indexdef },
         }
       }
@@ -9685,7 +9730,7 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
           return {
             success: true,
             message:
-              `${tableName} already had this index, as Backenly's "${same.indexname}" (${columns.join(', ')})${unique ? ', unique' : ''}. ` +
+              `${tableName} already had this index, as Backenly's "${same.indexname}" (${columns.map(indexed).join(', ')})${unique ? ', unique' : ''}. ` +
               `It is now named "${idxName}", as asked, and a second one was not built.`,
             data: { tableName, columns, unique, indexName: idxName, alreadyExisted: true, renamedFrom: same.indexname },
           }
@@ -9706,7 +9751,7 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
       const def = existing[0].indexdef
       const existingShape = indexDefShape(def)
       const sameUnique = /CREATE UNIQUE/i.test(def) === unique
-      const sameCols = existingShape.columns.join(',') === columns.map((c) => c.toLowerCase()).join(',')
+      const sameCols = columnKey(existingShape.columns) === columnKey(columns.map(indexed))
       // A partial index is a different index: one scoped to live rows cannot
       // serve a request for one over every row, which an upsert needs.
       const samePredicate = samePredicateText(existingShape.where, effectiveWhere)
@@ -9718,7 +9763,7 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
       if (sameShape && valid) {
         return {
           success: true,
-          message: `Index "${idxName}" already exists on ${tableName} (${columns.join(', ')})${unique ? ', unique' : ''} — nothing to do.`,
+          message: `Index "${idxName}" already exists on ${tableName} (${columns.map(indexed).join(', ')})${unique ? ', unique' : ''} — nothing to do.`,
           data: { tableName, columns, unique, indexName: idxName, alreadyExisted: true, definition: def },
         }
       }
@@ -9757,7 +9802,7 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
           `An index named "${idxName}" already exists on ${tableName} with a DIFFERENT definition, ` +
           `so the requested one was not created.\n` +
           `  existing:  ${def}\n` +
-          `  requested: ${unique ? 'UNIQUE ' : ''}(${columns.join(', ')})` +
+          `  requested: ${unique ? 'UNIQUE ' : ''}(${columns.map(indexed).join(', ')})` +
           `${effectiveWhere ? ` WHERE ${effectiveWhere}` : everyRow ? ' over every row' : ''}\n` +
           `Pass a different indexName, or drop the existing index first (destructive — route it through backend_chat).`,
         error: 'Index name conflict',
@@ -9817,7 +9862,7 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
     }
 
     const shape =
-      `${unique ? 'unique ' : ''}index on ${tableName} (${columns.join(', ')})` +
+      `${unique ? 'unique ' : ''}index on ${tableName} (${columns.map(indexed).join(', ')})` +
       `${method ? ` using ${method}` : ''}${effectiveWhere ? ` where ${effectiveWhere}` : ''}`
     return {
       success: true,
@@ -9843,6 +9888,7 @@ async function executeCreateIndex(params: any, projectId: string, target: Schema
       data: {
         tableName,
         columns,
+        ...(Object.keys(operatorClasses).length ? { operatorClasses } : {}),
         unique,
         method: method || 'btree',
         where: effectiveWhere || null,
