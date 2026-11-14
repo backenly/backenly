@@ -125,22 +125,24 @@ function encodeAt(value: unknown, stack: Set<object>, depth: number): unknown {
       break
   }
   const obj = value as any
-  if (obj instanceof Date) {
+  // By internal tag, not instanceof, so a value from another realm keeps its type.
+  const kind = Object.prototype.toString.call(obj)
+  if (kind === '[object Date]') {
     const time = obj.getTime()
     return { [TAG]: 'd', v: Number.isNaN(time) ? null : obj.toISOString() }
   }
   if (Buffer.isBuffer(obj) || ArrayBuffer.isView(obj)) {
     return { [TAG]: 'b', v: Buffer.from(obj.buffer, obj.byteOffset, obj.byteLength).toString('base64') }
   }
-  if (obj instanceof ArrayBuffer) return { [TAG]: 'b', v: Buffer.from(obj).toString('base64') }
+  if (kind === '[object ArrayBuffer]') return { [TAG]: 'b', v: Buffer.from(obj).toString('base64') }
   if (stack.has(obj)) throw new TypeError('Converting circular structure to JSON')
   stack.add(obj)
   try {
     if (Array.isArray(obj)) return obj.map((item) => encodeAt(item, stack, depth + 1))
-    if (obj instanceof Map) {
+    if (kind === '[object Map]') {
       return { [TAG]: 'm', v: [...obj].map(([k, v]) => [encodeAt(k, stack, depth + 1), encodeAt(v, stack, depth + 1)]) }
     }
-    if (obj instanceof Set) return { [TAG]: 's', v: [...obj].map((item) => encodeAt(item, stack, depth + 1)) }
+    if (kind === '[object Set]') return { [TAG]: 's', v: [...obj].map((item) => encodeAt(item, stack, depth + 1)) }
     if (typeof obj.toJSON === 'function') return encodeAt(obj.toJSON(), stack, depth + 1)
     const out: Record<string, unknown> = {}
     for (const key of Object.keys(obj)) {
