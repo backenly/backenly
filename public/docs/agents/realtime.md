@@ -20,6 +20,10 @@ Call as `realtime { action: "<action>", … }`.
 
 Disabling a table disconnects its live subscribers, which is why it waits for a human.
 
+## Presence
+
+`backend.presence.join(user.id, metadata)` marks the signed-in user online, by the `user.id` sign-in returned, and heartbeats every 25 seconds until `leave()`. The server checks that id against the sign-in: `join` rejects with `PRESENCE_TOKEN_REQUIRED` (401) before sign-in and `PRESENCE_IDENTITY_MISMATCH` (403) for any other id, such as a username or an email, and a heartbeat refused with 401 or 403 stops. Only a service-role key, from a server, may announce other users.
+
 ## Subscribing from an app
 
 With the SDK the callback receives the event object itself: `backend.posts.subscribe((event) => { if (event.type === 'insert') addRow(event.data) })`.

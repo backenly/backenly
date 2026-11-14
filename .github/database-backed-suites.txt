@@ -1814,6 +1814,13 @@ tests/integration/project-creation-order.spec.ts
 # servers are the property, so it needs a real Postgres.
 tests/integration/sdk-data-routes.spec.ts
 
+# presence.join() rejects with the server's code when a presence route refuses
+# it: PRESENCE_TOKEN_REQUIRED before sign-in, PRESENCE_IDENTITY_MISMATCH for a
+# username, an email or any id but the signed-in user's, through the Next route
+# and the runtime; the signed-in user goes online, and a heartbeat refused after
+# sign-out stops. Real project, key and end-user tokens, so a real Postgres.
+tests/integration/sdk-presence-refusals.spec.ts
+
 # Workspace SQL after a table's columns change. Prisma reused a prepared
 # statement per pooled connection, and PostgreSQL refuses to run one whose
 # result columns changed (0A000), so after an ALTER TABLE the v1 query and
