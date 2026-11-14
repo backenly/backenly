@@ -156,8 +156,16 @@ export function stripSqlNoise(sql: string, options: { keepIdentifiers?: boolean 
       continue
     }
     if (two === '/*') {
-      const end = sql.indexOf('*/', i + 2)
-      i = end === -1 ? sql.length : end + 2
+      // Block comments nest in PostgreSQL: `/* /* */ show */ SELECT ...` is one
+      // comment and then a SELECT, not a comment and then SHOW.
+      let depth = 1
+      i += 2
+      while (i < sql.length && depth > 0) {
+        const pair = sql.slice(i, i + 2)
+        if (pair === '/*') { depth++; i += 2; continue }
+        if (pair === '*/') { depth--; i += 2; continue }
+        i++
+      }
       out += ' '
       continue
     }

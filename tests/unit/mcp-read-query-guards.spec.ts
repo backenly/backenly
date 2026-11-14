@@ -87,6 +87,13 @@ describe('stripSqlNoise — keyword checks must not read string contents', () =>
   it('still catches a real write verb outside any string', () => {
     rejects("SELECT * FROM t WHERE a = 'x'; DELETE FROM t")
   })
+
+  it('reads nested block comments the way PostgreSQL does', () => {
+    // `/* /* */ show */` is ONE comment in PostgreSQL. Ending it at the first
+    // `*/` left ` show */ SELECT ...`, which read as a SHOW.
+    expect(stripSqlNoise('/* /* */ show */ SELECT 1').trim()).toBe('SELECT 1')
+    expect(stripSqlNoise('SELECT 1 /* a /* b */ c */ + 2')).toBe('SELECT 1   + 2')
+  })
 })
 
 describe('redactRows — agent context is not a psql prompt', () => {
