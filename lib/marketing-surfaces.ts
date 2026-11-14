@@ -47,6 +47,7 @@ export const marketingPrefixes = [
   '/startups',
   '/guides',
   '/agents',
+  '/migrate',
 ]
 
 // Served under a marketing prefix but not marketing. The published CLI and

@@ -51,6 +51,8 @@ export function GuideDocument({
   meta,
   toc,
   close,
+  closeTitle = 'Try it on a live project',
+  closeActions,
   children,
 }: {
   icon: LucideIcon
@@ -61,6 +63,9 @@ export function GuideDocument({
   toc: SpyItem[]
   /** The closing panel's line under "Try it on a live project". */
   close: string
+  /** A guide whose ask is not "try it" names its own (the migration guide). The default keeps every other guide as it was. */
+  closeTitle?: string
+  closeActions?: ReactNode
   children: ReactNode
 }) {
   return (
@@ -109,14 +114,18 @@ export function GuideDocument({
               className={`mt-[72px] flex flex-col gap-[20px] p-[20px] md:flex-row md:items-center md:justify-between md:p-[24px] ${PANEL}`}
             >
               <div className="min-w-0">
-                <p className={`text-[16px] text-white ${HEADING}`}>Try it on a live project</p>
+                <p className={`text-[16px] text-white ${HEADING}`}>{closeTitle}</p>
                 <p className="mt-[6px] max-w-[52ch] text-[15px] leading-[1.65] text-zinc-400 [text-wrap:pretty]">{close}</p>
               </div>
               <div className="flex shrink-0 flex-wrap gap-[10px]">
-                <StartButton />
-                <ButtonLink href="/docs/connect" variant="secondary">
-                  Connect your agent
-                </ButtonLink>
+                {closeActions ?? (
+                  <>
+                    <StartButton />
+                    <ButtonLink href="/docs/connect" variant="secondary">
+                      Connect your agent
+                    </ButtonLink>
+                  </>
+                )}
               </div>
             </div>
           </article>

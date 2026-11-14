@@ -3,6 +3,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
+import { migrationPublished } from '@/components/migrate/flag'
 import { useSettledReducedMotion } from '@/lib/hooks/useSettledReducedMotion'
 import { Icon } from '@iconify/react'
 import { AnimatePresence, motion } from 'framer-motion'
@@ -459,6 +460,8 @@ export function SiteFooter() {
     { label: 'Agent skill', href: '/skill.md' },
     { label: 'llms.txt', href: '/llms.txt' },
     { label: 'Documentation', href: ROUTES.docs },
+    // The migration guide, once moving a project in is published (components/migrate/flag.ts).
+    ...(migrationPublished() ? [{ label: 'Migration guide', href: '/migrate' }] : []),
   ]
   const company = [
     { label: 'Contact', href: ROUTES.contact },

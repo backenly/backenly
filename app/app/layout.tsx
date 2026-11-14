@@ -53,7 +53,7 @@ function AppLayoutContent({ children }: { children: React.ReactNode }) {
 
 const ORG_SHELL_PREFIXES = [
   '/app/usage', '/app/billing', '/app/members', '/app/referral', '/app/support',
-  '/app/org/', '/app/organizations', '/app/new-organization',
+  '/app/org/', '/app/organizations', '/app/new-organization', '/app/welcome',
 ]
 
 function isSelfGuarded(pathname: string | null): boolean {
