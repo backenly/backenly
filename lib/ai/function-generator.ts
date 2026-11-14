@@ -205,7 +205,8 @@ async function buildSchemaContext(projectId: string, description: string): Promi
   }
 }
 
-type SmokeResult = { ok: boolean; untested?: boolean; error?: string; status?: number }
+/** `logs`, on a failed check: the lines the module logged up to the failure. */
+type SmokeResult = { ok: boolean; untested?: boolean; error?: string; status?: number; logs?: string[] }
 
 /** One creation check: what was sent, and how long it took, for the run log. */
 interface SmokeRun extends SmokeResult {
@@ -254,7 +255,7 @@ async function runSmokeOnce(
   data: Record<string, string>,
 ): Promise<SmokeResult> {
   try {
-    const { executeRouteModuleFunction, RouteModuleHandlerError } = await import('@/lib/services/ai-functions/route-module-runner')
+    const { executeRouteModuleFunction, RouteModuleHandlerError, RouteModuleRunError } = await import('@/lib/services/ai-functions/route-module-runner')
     try {
       const result = await executeRouteModuleFunction(
         code,
@@ -274,11 +275,12 @@ async function runSmokeOnce(
         const detail =
           (body && typeof body === 'object' && (body as any).error) ||
           (typeof body === 'string' ? body : JSON.stringify(body ?? {}).slice(0, 300))
-        return { ok: false, status, error: `HTTP ${status} — ${detail}` }
+        return { ok: false, status, error: `HTTP ${status} — ${detail}`, logs: result.logs }
       }
       return { ok: true, status }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
+      const logs = err instanceof RouteModuleRunError ? err.logs : []
       // "The function is broken" vs "we could not test it", decided by TYPE:
       // the runner throws RouteModuleHandlerError only for failures that came
       // out of the handler itself. The old text sniff here classified any
@@ -286,10 +288,10 @@ async function runSmokeOnce(
       // words in a broken query's message — as untestable infrastructure, and
       // the broken function was then reported clean.
       if (err instanceof RouteModuleHandlerError) {
-        return { ok: false, error: msg }
+        return { ok: false, error: msg, logs }
       }
       if (/failed to compile|evaluation error|exports no/i.test(msg)) {
-        return { ok: false, error: msg }
+        return { ok: false, error: msg, logs }
       }
       console.warn(`[FunctionGenerator] Smoke test could not run for ${functionName}: ${msg}`)
       return { ok: true, untested: true, error: msg }
@@ -613,7 +615,9 @@ export async function executeGenerateFunction(
     })
 
     // The creation checks are runs of this function: record them where its
-    // other runs are, so nothing it did at creation is invisible.
+    // other runs are, so nothing it did at creation is invisible. A check that
+    // failed keeps the lines the module logged up to the failure, as a failed
+    // run does (#605).
     for (const run of smokeRuns) {
       await recordFunctionRun({
         functionId: fn.id,
@@ -622,6 +626,7 @@ export async function executeGenerateFunction(
         logs: [
           `Creation check (${run.probe}): ` +
             (run.untested ? 'could not run' : run.status ? `HTTP ${run.status}` : run.ok ? 'ran' : 'failed'),
+          ...(run.logs ?? []),
         ],
         error: run.ok ? null : (run.error ?? null),
         durationMs: run.durationMs,

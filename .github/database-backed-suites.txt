@@ -1899,6 +1899,13 @@ tests/integration/sql-as-written.spec.ts
 # run. A route function reads the project's variables as process.env.KEY, and
 # none replaces a variable Backenly sets.
 tests/integration/function-run-record.spec.ts
+# A failed HTTP function run keeps the lines it logged up to the failure: a
+# handler that throws, a module whose top level throws, one that exports no
+# handler, and a handler that runs past the limit are each stored with their
+# lines and returned with the error, through the executor and the agent's
+# invoke and logs; a failed creation check records them too (#605). Real
+# function and run rows; only the model that writes code is stubbed.
+tests/integration/http-function-failure-keeps-logs.spec.ts
 # The runtime answers a body over its JSON limit 413 PAYLOAD_TOO_LARGE and names
 # the limit (server/app.ts), as the web tier does.
 tests/integration/runtime-body-limit.spec.ts

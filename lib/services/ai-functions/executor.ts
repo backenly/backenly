@@ -29,7 +29,7 @@ import { prisma } from '@/lib/db'
 import { buildIntegrationContext, IntegrationContext } from './integration-context'
 import { getProviderSpec } from './integration-registry'
 import { generateFixedFunctionCode } from './generator'
-import { isRouteModuleFunction, executeRouteModuleFunction, validateRouteModule } from './route-module-runner'
+import { isRouteModuleFunction, executeRouteModuleFunction, validateRouteModule, RouteModuleRunError } from './route-module-runner'
 import { recordFunctionRun, rowLastError, runTextKeptInRegion, withLastErrors } from './run-records'
 import { isFunctionSwitchedOff, RUNNABLE_FUNCTION_STATUS_FILTER } from './status'
 import { enforceAiFunctionInvocation, trackAiFunctionInvocation } from '@/lib/entitlements/policy'
@@ -943,7 +943,10 @@ export async function executeAiFunction(
     } catch (err: any) {
       const durationMs = Date.now() - startMs
       const errorMsg = err?.message || 'Route function error'
-      await persistExecutionLog(functionId, projectId, false, [], errorMsg, durationMs, caller.trigger ?? event.type)
+      // What the module logged before it failed, which is what explains it:
+      // stored with the run and returned with the error, as a sandbox run's are.
+      const logs = err instanceof RouteModuleRunError ? err.logs : []
+      await persistExecutionLog(functionId, projectId, false, logs, errorMsg, durationMs, caller.trigger ?? event.type)
       rowLastError(projectId, functionId, errorMsg)
         // history: how the last run went, not configuration (lib/changes/resources/functions.ts)
         .then((lastError) => prisma.aiFunction.update({
@@ -960,7 +963,7 @@ export async function executeAiFunction(
           functionId, projectId, errorMsg, fn.generatedCode, fn.description, fn.triggerTable
         ).catch(() => {})
       }
-      return { success: false, logs: [], error: errorMsg, durationMs }
+      return { success: false, logs, error: errorMsg, durationMs }
     }
   }
 
