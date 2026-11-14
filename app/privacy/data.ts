@@ -72,7 +72,7 @@
  * reordering; verify-content-integrity.ts enforces their uniqueness and shape.
  */
 
-export const EFFECTIVE_DATE = 'November 12, 2026'
+export const EFFECTIVE_DATE = 'November 14, 2026'
 export const PRIVACY_EMAIL = 'support@backenly.com'
 
 export type Provider = {
