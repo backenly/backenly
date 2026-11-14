@@ -311,6 +311,24 @@ describe('a checkout, against the orders table create_table makes', () => {
 
 describe('what cannot be applied is said, not swallowed', () => {
   it("a status the column's CHECK does not list: the rest is written, and the event is marked not applied, with why", async () => {
+    // Since main's 4ce06143 (2026-11-13) the status list create_table gives a new subscriptions table includes
+    // Stripe's incomplete statuses, so no Stripe status is refused there. Tables made before it keep the old list,
+    // which is the case this test is about: give this one that list.
+    const s = schemaOf(projectId)
+    const check = await one<{ name: string }>(
+      `SELECT k.conname AS name
+         FROM pg_constraint k
+         JOIN pg_class c ON c.oid = k.conrelid
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+         JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = k.conkey[1]
+        WHERE n.nspname = $1 AND c.relname = 'subscriptions' AND k.contype = 'c' AND a.attname = 'status'`,
+      s,
+    )
+    await prisma.$executeRawUnsafe(`ALTER TABLE "${s}".subscriptions DROP CONSTRAINT "${check.name}"`)
+    await prisma.$executeRawUnsafe(
+      `ALTER TABLE "${s}".subscriptions ADD CONSTRAINT "${check.name}"
+         CHECK (status IN ('active', 'trialing', 'past_due', 'cancelled', 'unpaid', 'paused'))`,
+    )
     const evt = eventId()
     const res = await deliver(projectId, {
       id: evt,
