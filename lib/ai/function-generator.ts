@@ -400,7 +400,7 @@ Check the error against the real schema above — a runtime failure here is most
     const fixed = stripCodeFences(response.text?.trim() ?? '')
     if (!fixed || fixed === originalCode.trim()) return null
 
-    const check = validateRouteModule(fixed, method)
+    const check = await validateRouteModule(fixed, method)
     return check.valid ? fixed : null
   } catch {
     return null
@@ -482,19 +482,20 @@ export async function executeGenerateFunction(
     }
 
     // ── Creation-time validation gate ─────────────────────────────────────
-    // Compile + evaluate + exported-handler check (never invokes the handler).
+    // Compile + evaluate + exported-handler check (never invokes the handler;
+    // the evaluation happens in a runner process of its own, never here).
     // A module that fails is repaired with the validation error fed back to
     // the LLM, up to 2 attempts. Broken code is NEVER stored as an active
     // function — this is the guarantee that an agent-created endpoint cannot
     // crash on its first invocation with a code-shape error.
     const { validateRouteModule } = await import('@/lib/services/ai-functions/route-module-runner')
-    let check = validateRouteModule(code, method)
+    let check = await validateRouteModule(code, method)
     for (let attempt = 0; !check.valid && attempt < 2; attempt++) {
       console.warn(`[FunctionGenerator] ${functionName} failed validation (${check.error}) — repair attempt ${attempt + 1}`)
       const fixed = await generateFixedRouteModule(code, check.error || 'validation failed', description, method, projectId)
       if (!fixed) break
       code = fixed
-      check = validateRouteModule(code, method)
+      check = await validateRouteModule(code, method)
     }
     // ── Behavioural gate: run it before calling it deployed ─────────────────
     //
@@ -537,7 +538,7 @@ export async function executeGenerateFunction(
         projectId,
       )
       if (fixed) {
-        const recheck = validateRouteModule(fixed, method)
+        const recheck = await validateRouteModule(fixed, method)
         if (recheck.valid) {
           const retry = await smokeTestRouteModule(fixed, projectId, functionName, method)
           smokeRuns.push(retry)

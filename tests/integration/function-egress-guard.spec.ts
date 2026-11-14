@@ -146,9 +146,9 @@ describe('the self-host escape hatch and the call shape still work', () => {
 })
 
 describe('validation never touches the network', () => {
-  it('a module that fetches at top level fails evaluation instead of reaching out', () => {
+  it('a module that fetches at top level fails evaluation instead of reaching out', async () => {
     hits = 0
-    const check = validateRouteModule(
+    const check = await validateRouteModule(
       `import { NextResponse } from 'next/server'
 fetch('${loopbackUrl}')
 export async function GET(req: Request) { return NextResponse.json({ ok: true }) }`,

@@ -160,8 +160,8 @@ describe('deploy-time validation', () => {
     ["const k = process.env['ADMIN_API_KEY']"],
     ['const t = process.env?.AI_EXECUTION_TOKEN'],
     ['const { JWT_SECRET } = process.env'],
-  ])('refuses code that reads one of them: %s', (line) => {
-    expect(validateRouteModule(handlerWith(line))).toEqual({ valid: false, methods: [], error: WITHHELD_READ_REFUSED })
+  ])('refuses code that reads one of them: %s', async (line) => {
+    expect(await validateRouteModule(handlerWith(line))).toEqual({ valid: false, methods: [], error: WITHHELD_READ_REFUSED })
   })
 
   it('names the helpers in the refusal', () => {
@@ -170,8 +170,8 @@ describe('deploy-time validation', () => {
     expect(WITHHELD_READ_REFUSED).toMatch(/asService/)
   })
 
-  it('accepts code that only names them in a comment, or reads the project’s own variables', () => {
-    expect(validateRouteModule(handlerWith('// never read process.env.JWT_SECRET\n      const plan = process.env.PLAN_NAME'))).toMatchObject({ valid: true })
+  it('accepts code that only names them in a comment, or reads the project’s own variables', async () => {
+    expect(await validateRouteModule(handlerWith('// never read process.env.JWT_SECRET\n      const plan = process.env.PLAN_NAME'))).toMatchObject({ valid: true })
   })
 })
 
@@ -184,9 +184,9 @@ describe('Backenly’s own admin endpoints', () => {
     expect(admins.map((e) => e.name)).not.toContain('admin-impersonate')
   })
 
-  it('read none of the withheld variables and pass validation', () => {
+  it('read none of the withheld variables and pass validation', async () => {
     for (const e of admins) {
-      expect({ name: e.name, check: validateRouteModule(e.code, e.method) }).toMatchObject({ name: e.name, check: { valid: true } })
+      expect({ name: e.name, check: await validateRouteModule(e.code, e.method) }).toMatchObject({ name: e.name, check: { valid: true } })
     }
   })
 

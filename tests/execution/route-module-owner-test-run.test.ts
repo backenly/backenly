@@ -135,13 +135,17 @@ describe("an owner's test run", () => {
 })
 
 describe("the placeholder an owner's test run carries", () => {
+  // The run happens in a process of its own, so a helper the function kept
+  // cannot be called from here after the run, as it once could. What it would
+  // answer then is what it answers while the answer is being serialised, which
+  // is after the run has ended: `later` is read through its toJSON.
   const code = `
     import { NextResponse } from 'next/server'
     import { verifyToken, isAdminRequest } from '@/lib/auth/jwt'
     export async function POST(request) {
       const token = (request.headers.get('x-user-token') || '').replace(/^Bearer /i, '')
       const now = () => ({ user: verifyToken(token), admin: isAdminRequest(request) })
-      return NextResponse.json({ ...now(), later: now })
+      return NextResponse.json({ ...now(), later: { toJSON: now } })
     }
   `
 
@@ -153,6 +157,6 @@ describe("the placeholder an owner's test run carries", () => {
   it('is nobody, and the run no admin, once the test has ended', async () => {
     const { returnValue } = await ownerTest(code)
     expect(returnValue.body).toMatchObject({ user: { userId: TEST_RUN_USER_ID }, admin: true })
-    expect(returnValue.body.later()).toEqual({ user: null, admin: false })
+    expect(returnValue.body.later).toEqual({ user: null, admin: false })
   })
 })

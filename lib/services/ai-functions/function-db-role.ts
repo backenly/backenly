@@ -5,7 +5,8 @@
  * role owns every platform table and every workspace schema, so a generated
  * function could read public.users or another project's schema. Each workspace
  * schema now has a LOGIN role holding DML on that schema alone, and function SQL
- * runs on a client that logs in as it (scripts/sql/function-roles.sql).
+ * runs on a client that logs in as it (scripts/sql/function-roles.sql), opened
+ * by the function's own runner process (functionDbConnection, isolation/).
  *
  * The login, not a SET ROLE on the app's connection, is what makes this a
  * boundary: function code runs arbitrary SQL, and `RESET ROLE` would take a
@@ -237,5 +238,63 @@ export async function functionDbClient(projectId: string): Promise<FunctionDbHan
  * derived password.
  */
 export async function forgetFunctionDbClient(projectId: string): Promise<void> {
-  evict(await resolveWorkspaceSchema(projectId))
+  const schema = await resolveWorkspaceSchema(projectId)
+  evict(schema)
+  roleSyncedAt.delete(schema)
+}
+
+// ── The login, handed to a function's runner ────────────────────────────────
+//
+// Function code runs in a runner process of its own (isolation/), never in
+// this one, and opens its own connection: interactive transactions, row by row,
+// need a connection the code drives. It is given this project's login and
+// nothing else: a role whose grants cover the project's schema alone, with a
+// password derived per schema (functionRolePassword) that does not reveal the
+// key it is derived from.
+
+/** When each schema's role was last re-asserted, so a run does not sync on every call. */
+const roleSyncedAt = new Map<string, number>()
+const roleSyncing = new Map<string, Promise<string>>()
+
+/** Prisma's connection arguments, which node-postgres neither needs nor knows. */
+const PRISMA_ONLY_PARAMS = ['connection_limit', 'pool_timeout', 'statement_cache_size', 'pgbouncer', 'schema', 'socket_timeout']
+
+/** The project database's own URL with the function login swapped in, for node-postgres. */
+export function functionConnectionString(role: string, password: string, base: string): string {
+  const url = new URL(base)
+  url.username = role
+  url.password = password
+  for (const name of PRISMA_ONLY_PARAMS) url.searchParams.delete(name)
+  return url.toString()
+}
+
+/**
+ * The connection string a run of this project's function logs in with, after
+ * making sure the role and its grants exist (at most every SYNC_TTL_MS, or now
+ * when `refresh`, after a refused login).
+ */
+export async function functionDbConnection(
+  projectId: string,
+  opts: { refresh?: boolean } = {},
+): Promise<{ connectionString: string; schema: string; role: string }> {
+  const schema = await resolveWorkspaceSchema(projectId)
+  if (!SCHEMA_RE.test(schema)) {
+    throw new FunctionDbRoleUnavailableError(`"${schema}" is not a workspace schema`)
+  }
+  const password = functionRolePassword(schema)
+  const fresh = !opts.refresh && Date.now() - (roleSyncedAt.get(schema) ?? 0) < SYNC_TTL_MS
+  let role = functionRoleName(schema)
+  if (!fresh) {
+    let pending = roleSyncing.get(schema)
+    if (!pending) {
+      pending = syncRole(projectId, schema, password).then((r) => {
+        roleSyncedAt.set(schema, Date.now())
+        return r
+      })
+      roleSyncing.set(schema, pending)
+      pending.then(() => roleSyncing.delete(schema), () => roleSyncing.delete(schema))
+    }
+    role = await pending
+  }
+  return { connectionString: functionConnectionString(role, password, await projectDatabaseUrl(projectId)), schema, role }
 }
