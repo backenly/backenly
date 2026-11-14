@@ -41,7 +41,9 @@ describe('the functions docs match the runtime', () => {
   })
 
   it('say an http function reads the project’s variables from process.env', () => {
-    const runner = read('lib/services/ai-functions/route-module-runner.ts')
+    // A route module's process.env is built in its runner process.
+    const runner = read('lib/services/ai-functions/isolation/function-runner.cjs')
+    expect(runner).toContain('function makeCuratedProcess(')
     const curated = runner.slice(runner.indexOf('function makeCuratedProcess('))
     expect(curated.slice(0, curated.indexOf('\n}\n'))).toContain('...projectEnv')
     expect(docs).toContain('`process.env` holds this project\'s variables')

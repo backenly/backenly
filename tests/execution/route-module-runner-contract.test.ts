@@ -12,7 +12,9 @@
  * these cases ever fails again, the generated-function surface is broken for
  * every agent-created HTTP endpoint. Do not delete or weaken these cases.
  *
- * No DB required: authMaterial is injected via the test hook.
+ * No DB required: authMaterial is injected via the test hook. Every module runs
+ * (and validates) in a runner process of its own, as in production; here as
+ * the test's own user (BACKENLY_UNSAFE_LOCAL_FUNCTIONS, set in jest.setup.js).
  */
 
 import {
@@ -112,8 +114,8 @@ describe('route-module runner invocation contract', () => {
 })
 
 describe('validateRouteModule creation gate', () => {
-  test('accepts a well-formed module and reports its methods', () => {
-    const check = validateRouteModule(`
+  test('accepts a well-formed module and reports its methods', async () => {
+    const check = await validateRouteModule(`
       import { NextResponse } from 'next/server'
       export async function GET() { return NextResponse.json({ ok: true }) }
     `, 'GET')
@@ -121,20 +123,20 @@ describe('validateRouteModule creation gate', () => {
     expect(check.methods).toEqual(['GET'])
   })
 
-  test('rejects a module with a syntax error', () => {
-    const check = validateRouteModule(`export async function GET( { return }`)
+  test('rejects a module with a syntax error', async () => {
+    const check = await validateRouteModule(`export async function GET( { return }`)
     expect(check.valid).toBe(false)
     expect(check.error).toMatch(/Compile error/i)
   })
 
-  test('rejects a module that exports no HTTP handler', () => {
-    const check = validateRouteModule(`export const helper = () => 42`)
+  test('rejects a module that exports no HTTP handler', async () => {
+    const check = await validateRouteModule(`export const helper = () => 42`)
     expect(check.valid).toBe(false)
     expect(check.error).toMatch(/exports no/i)
   })
 
-  test('rejects a module whose export does not match the declared method', () => {
-    const check = validateRouteModule(`
+  test('rejects a module whose export does not match the declared method', async () => {
+    const check = await validateRouteModule(`
       import { NextResponse } from 'next/server'
       export async function POST() { return NextResponse.json({}) }
     `, 'GET')
@@ -142,8 +144,8 @@ describe('validateRouteModule creation gate', () => {
     expect(check.error).toMatch(/declared as GET/i)
   })
 
-  test('rejects forbidden patterns (defence in depth)', () => {
-    const check = validateRouteModule(`
+  test('rejects forbidden patterns (defence in depth)', async () => {
+    const check = await validateRouteModule(`
       import { exec } from 'child_process'
       export async function GET() { return null }
     `)
@@ -151,10 +153,10 @@ describe('validateRouteModule creation gate', () => {
     expect(check.error).toMatch(/child_process/i)
   })
 
-  test('rejects disallowed imports at evaluation time', () => {
+  test('rejects disallowed imports at evaluation time', async () => {
     // The import must be USED — esbuild's TS loader elides unused imports,
     // which is correct (the runner elides them identically at execution).
-    const check = validateRouteModule(`
+    const check = await validateRouteModule(`
       import axios from 'axios'
       import { NextResponse } from 'next/server'
       export async function GET() {
@@ -166,8 +168,8 @@ describe('validateRouteModule creation gate', () => {
     expect(check.error).toMatch(/not available/i)
   })
 
-  test('unused disallowed imports are elided by the compiler and validate clean', () => {
-    const check = validateRouteModule(`
+  test('unused disallowed imports are elided by the compiler and validate clean', async () => {
+    const check = await validateRouteModule(`
       import axios from 'axios'
       import { NextResponse } from 'next/server'
       export async function GET() { return NextResponse.json({ ok: true }) }

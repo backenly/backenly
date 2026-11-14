@@ -14,30 +14,35 @@
  * inserted three orders and sent three receipts.
  *
  * Now the sandbox says when the function's code starts, and only a sandbox
- * that failed before then is started again. Here real function rows run in the
- * real sandbox worker (executeAiFunction) against a real workspace table, and
- * ctx.http makes real connections: to a port nothing listens on, and to a
+ * that failed before then is started again. Here real function rows run in
+ * real runner processes (executeAiFunction) against a real workspace table,
+ * and ctx.http makes real connections: to a port nothing listens on, and to a
  * server that closes each connection without answering. Only Resend's reply
  * to the receipt is stubbed, at fetch, where it is counted. A sandbox that
- * fails to start is made by swapping in, when asked, a worker that can't be
- * made or whose script can't load.
+ * fails to start is made by swapping in, when asked, a runner process that
+ * can't be made or whose script can't load.
  */
 
 const mockSandbox = { failures: [] as Array<'throw' | 'missing-script'>, starts: 0 }
 
-jest.mock('worker_threads', () => {
-  const actual = jest.requireActual('worker_threads')
+// Each sandbox run is a runner process, started here as in development and
+// tests (lib/services/ai-functions/isolation/client.ts). Each start is counted.
+jest.mock('child_process', () => {
+  const actual = jest.requireActual('child_process')
   const nodePath = jest.requireActual('path')
-  class SandboxThatMayNotStart extends actual.Worker {
-    constructor(file: string, options: unknown) {
+  const isRunner = (arg: unknown) => /function-runner\.cjs$/.test(String(arg))
+  return {
+    ...actual,
+    spawn(file: string, args: string[] = [], options?: unknown) {
+      if (!Array.isArray(args) || !args.some(isRunner)) return actual.spawn(file, args, options)
       mockSandbox.starts++
       const failure = mockSandbox.failures.shift()
       if (failure === 'throw') throw Object.assign(new Error('EMFILE: too many open files'), { code: 'EMFILE' })
-      // A worker whose script can't load comes up and fails before any code runs.
-      super(failure === 'missing-script' ? nodePath.join(process.cwd(), 'tests', 'no-such-sandbox-worker.cjs') : file, options)
-    }
+      // A runner whose script can't load comes up and fails before any code runs.
+      const missing = nodePath.join(process.cwd(), 'tests', 'no-such-function-runner.cjs')
+      return actual.spawn(file, failure === 'missing-script' ? args.map((a) => (isRunner(a) ? missing : a)) : args, options)
+    },
   }
-  return { ...actual, Worker: SandboxThatMayNotStart }
 })
 
 import crypto from 'crypto'
@@ -207,7 +212,7 @@ describe('a function whose code has started fails once', () => {
 })
 
 describe('a sandbox that fails before the code starts is started again', () => {
-  it('a worker whose script cannot load, or that cannot be made, is replaced, and the code runs once', async () => {
+  it('a runner whose script cannot load, or that cannot be made, is replaced, and the code runs once', async () => {
     mockSandbox.failures = ['missing-script', 'throw']
     const { result, runs } = await runFunction(
       'order-second-start',

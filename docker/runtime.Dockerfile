@@ -49,12 +49,15 @@ RUN npm ci --no-audit --no-fund
 # Only what the bundler actually reads. Copying the whole repository would drag
 # app/, .next/ and the test tree into the build for no benefit.
 COPY tsconfig.json tsconfig.server.json ./
-COPY scripts/build-runtime-bundle.mjs ./scripts/
+COPY scripts/build-runtime-bundle.mjs scripts/build-function-runner.mjs ./scripts/
 COPY server ./server
 COPY lib ./lib
 COPY overlay-allowlist.json ./
 
 RUN node scripts/build-runtime-bundle.mjs
+
+# The function runner and supervisor, self-contained (see the final stage).
+RUN node scripts/build-function-runner.mjs --out /src/dist-fn
 
 # The Cloud composition is verified from DISK at startup, not from the bundle.
 #
@@ -158,15 +161,65 @@ COPY --from=build /src/edition-files/ ./
 COPY docker/certs/rds-ca-ap-south-1.pem docker/certs/rds-ca-us-east-1.pem docker/certs/rds-ca-us-west-2.pem docker/certs/rds-ca-eu-central-1.pem docker/certs/rds-ca-ap-southeast-1.pem /app/certs/
 RUN cat /app/certs/rds-ca-ap-south-1.pem /app/certs/rds-ca-us-east-1.pem /app/certs/rds-ca-us-west-2.pem /app/certs/rds-ca-eu-central-1.pem /app/certs/rds-ca-ap-southeast-1.pem > /app/certs/rds-ca-cloud-regions.pem
 
+# lib/logger also writes log files (LOG_FILE_PATH, default ./logs, a directory
+# it creates when first loaded and throws where it cannot). This image writes
+# nothing outside /tmp, and its root may be read-only, so they go there.
 ENV NODE_ENV=production \
     RUNTIME_PORT=3001 \
-    NODE_EXTRA_CA_CERTS=/app/certs/rds-ca-cloud-regions.pem
+    NODE_EXTRA_CA_CERTS=/app/certs/rds-ca-cloud-regions.pem \
+    LOG_FILE_PATH=/tmp/backenly-logs/backenly.log
 
 EXPOSE 3001
 
-USER node
+# ── Function isolation ──────────────────────────────────────────────────────
+#
+# /api/v1/{projectId}/fn/{name} runs customer function code, and this process
+# holds every platform secret. Each run is a fresh process under a uid of its
+# own, started by a root supervisor (lib/services/ai-functions/isolation/), so
+# the image starts as ROOT, with no USER line:
+# docker/function-isolation/entrypoint.sh starts the supervisor with an empty
+# environment, then runs CMD as `node` under no_new_privs and umask 077. A task
+# or compose file must not set a user; started as anyone else, functions refuse
+# to run and say why. docker/web.Dockerfile has the full account of the pieces
+# below. A read-only root filesystem is fine: the supervisor writes only under
+# /tmp.
+#
+# Asserted, not assumed: the build fails unless a pool uid can run a module
+# through the runner and cannot read /app.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends tini \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=build /src/dist-fn/ /opt/backenly-fn/
+COPY docker/function-isolation/entrypoint.sh /opt/backenly-fn/entrypoint.sh
+RUN cp /app/certs/rds-ca-cloud-regions.pem /opt/backenly-fn/rds-ca-cloud-regions.pem \
+ && chown -R root:root /opt/backenly-fn \
+ && chmod -R u=rwX,go=rX /opt/backenly-fn \
+ && chmod 0755 /opt/backenly-fn/entrypoint.sh \
+ && chown root:node /app \
+ && chmod 0750 /app \
+ && chmod 0700 /home/node \
+ && find / -xdev -type f -perm /6000 -exec chmod ug-s {} +
+RUN setpriv --version && prlimit --version && choom --version && tini --version \
+ && test "$(stat -c '%U:%G %a' /app)" = "root:node 750" \
+ && test -z "$(find / -xdev -type f -perm /6000 -print -quit)" \
+ && printf '%s\n' '{"v":1,"kind":"selftest"}' \
+    | setpriv --reuid=20000 --regid=20000 --clear-groups --no-new-privs -- node /opt/backenly-fn/function-runner.cjs \
+    | grep -q '"ok":true' \
+ && printf '%s\n' '{"v":1,"kind":"probe","mustNotRead":["/app","/app/dist-runtime"]}' \
+    | setpriv --reuid=20000 --regid=20000 --clear-groups --no-new-privs -- node /opt/backenly-fn/function-runner.cjs \
+    | grep -q '"/app":"EACCES","/app/dist-runtime":"EACCES"' \
+ && node -e "for (const p of ['pdfkit','csv-parse/sync','date-fns','qrcode','nodemailer','archiver']) require(require.resolve(p, { paths: ['/opt/backenly-fn'] })); console.log('function isolation verified in this image')"
 
-# node directly, not npm or tsx: one process, so SIGTERM reaches the server and
-# the graceful-shutdown handler in server/index.ts runs instead of being
-# swallowed by a wrapper.
+# Children read the RDS roots from outside /app. Two runs at once, each held
+# under the supervisor's heap and resident limits; more wait up to 10 s, then
+# get a 503. Set BACKENLY_FN_MAX_CONCURRENCY, _MAX_QUEUE and _QUEUE_WAIT_MS on
+# the task to size it (.env.example, "Where function code runs").
+ENV BACKENLY_FN_CA_CERTS=/opt/backenly-fn/rds-ca-cloud-regions.pem \
+    BACKENLY_FN_MAX_CONCURRENCY=2
+
+ENTRYPOINT ["/usr/bin/tini", "--", "/opt/backenly-fn/entrypoint.sh"]
+
+# node directly, not npm or tsx: one process, so SIGTERM (which tini forwards
+# to it) reaches the server and the graceful-shutdown handler in
+# server/index.ts runs instead of being swallowed by a wrapper.
 CMD ["node", "dist-runtime/index.mjs"]

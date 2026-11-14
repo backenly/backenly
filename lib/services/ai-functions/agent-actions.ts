@@ -20,6 +20,7 @@ import { canAccessProject, canWriteProject } from '@/lib/edition/guard'
 import { workspaceSchemaName } from '@/lib/security/workspace-schema'
 import { executeAiFunction, validateSandboxFunction } from './executor'
 import { isRouteModuleFunction, usesAsService, validateRouteModule } from './route-module-runner'
+import { FunctionRunnerBusyError, FunctionRunnerUnavailableError } from './isolation/client'
 import { rowLastError, withLastErrors, withRunBodies } from './run-records'
 import { isFunctionSwitchedOff } from './status'
 import { workspaceRawClient } from '@/lib/data-plane/regional'
@@ -171,6 +172,16 @@ export async function invokeFunction(
   const clipped = text.length > MAX_RETURN_CHARS
   const httpStatus = result.httpStatus
 
+  if (result.errorCode === 'RUNNER_BUSY' || result.errorCode === 'RUNNER_UNAVAILABLE') {
+    return {
+      ok: false,
+      code: result.errorCode,
+      summary:
+        `Function ${fn.name} was not run, and nothing is wrong with it: ${result.error ?? 'the function runner turned the run away'} ` +
+        'Its code was not changed and the run was not counted.',
+      data: { functionId: fn.id, success: false, error: result.error ?? null, retryAfterSeconds: result.retryAfterSeconds ?? null },
+    }
+  }
   if (!result.success) {
     return {
       ok: false,
@@ -319,6 +330,13 @@ function literalCredential(code: string): string | null {
 
 const invalid = (summary: string): FunctionActionResult => ({ ok: false, code: 'INVALID_ARGUMENT', summary })
 
+/** Nothing was deployed because nothing could check the code: not the code's fault. */
+const runnerUnavailable = (err: FunctionRunnerUnavailableError): FunctionActionResult => ({
+  ok: false,
+  code: err instanceof FunctionRunnerBusyError ? 'RUNNER_BUSY' : 'RUNNER_UNAVAILABLE',
+  summary: `The function was not deployed: ${err.message}`,
+})
+
 export async function deployFunctionCode(
   actor: FunctionActor,
   args: {
@@ -413,7 +431,14 @@ export async function deployFunctionCode(
     }
     const requested = typeof args.method === 'string' ? args.method.trim().toUpperCase() : ''
     if (requested && !HTTP_METHODS.includes(requested)) return invalid(`method must be one of ${HTTP_METHODS.join(', ')}.`)
-    const check = validateRouteModule(code, requested || null)
+    // The module's top level is evaluated in a runner process of its own, never here.
+    let check: Awaited<ReturnType<typeof validateRouteModule>>
+    try {
+      check = await validateRouteModule(code, requested || null)
+    } catch (err) {
+      if (err instanceof FunctionRunnerUnavailableError) return runnerUnavailable(err)
+      throw err
+    }
     if (!check.valid) {
       return {
         ok: false,
@@ -436,7 +461,13 @@ export async function deployFunctionCode(
           'ctx.integrations and ctx.env, receive `event`, and may return a value. Deploy a route module with trigger "http".',
       }
     }
-    const check = await validateSandboxFunction(code)
+    let check: Awaited<ReturnType<typeof validateSandboxFunction>>
+    try {
+      check = await validateSandboxFunction(code)
+    } catch (err) {
+      if (err instanceof FunctionRunnerUnavailableError) return runnerUnavailable(err)
+      throw err
+    }
     if (!check.valid) {
       return { ok: false, code: 'INVALID_CODE', summary: `The function was not deployed: ${check.error}`, data: { error: check.error } }
     }

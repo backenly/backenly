@@ -146,7 +146,7 @@ it('rewrites only Backenly’s template code, each as a change History can resto
   expect(gate).toContain("import { isAdminRequest } from '@/lib/auth/jwt'")
   expect(gate).toContain("if (!isAdminRequest(req)) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })")
   expect(gate).not.toMatch(/ADMIN_KEY|ADMIN_API_KEY|AI_EXECUTION_TOKEN/)
-  expect(validateRouteModule(gate, 'GET')).toMatchObject({ valid: true })
+  expect(await validateRouteModule(gate, 'GET')).toMatchObject({ valid: true })
   expect(await codeOf('admin-impersonate')).toBe(IMPERSONATION_REFUSAL)
   expect(await codeOf('agent-signer')).toBe(AGENT_CODE)
   expect(await codeOf('other-gate')).toBe(OTHER_GENERATED)

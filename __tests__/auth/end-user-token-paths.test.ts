@@ -66,15 +66,19 @@ jest.mock('@/lib/data-plane/regional', () => {
   }
 })
 
-/** Every identity the function runner gave a function's database, in order. */
+/**
+ * Every identity the function runner gave a function's database, in order: the
+ * claims the app resolves for each run (functionDbClaims), which the run's own
+ * process then binds to every transaction of its SQL.
+ */
 const mockIdentities: any[] = []
 jest.mock('@/lib/services/ai-functions/rls-aware-db', () => {
   const actual = jest.requireActual('@/lib/services/ai-functions/rls-aware-db')
   return {
     ...actual,
-    makeRlsAwarePrisma: (identity: any, connect: any) => {
+    functionDbClaims: (identity: any) => {
       mockIdentities.push(identity)
-      return actual.makeRlsAwarePrisma(identity, connect)
+      return actual.functionDbClaims(identity)
     },
   }
 })

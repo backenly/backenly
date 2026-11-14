@@ -222,6 +222,19 @@ jobs:
           path: jest-unit.json
           if-no-files-found: ignore
 
+      # Function code runs in a process of its own under a uid of its own,
+      # started by a ROOT supervisor (lib/services/ai-functions/isolation/).
+      # That boundary can only be set up as root, so its suite runs again here
+      # under sudo: distinct uids, nothing secret in reach, timeouts, memory
+      # kills, nothing left behind. Above, as the runner user, it skips and says
+      # why. jest directly, not npx, with HOME and the cache under /tmp, so
+      # nothing root-owned lands in the checkout or the runner's npm cache.
+      - name: Function isolation, as root
+        run: |
+          sudo -E env "PATH=$PATH" HOME=/tmp/jest-root-home \
+            node node_modules/jest/bin/jest.js tests/unit/function-isolation-root.spec.ts \
+            --ci --verbose --cacheDirectory /tmp/jest-root-cache
+
       # tests/unit was not the only database-free suite, it was just the only
       # one anyone had pointed CI at. jest resolves 157 suites; the four paths
       # this workflow names cover 92, and the remaining 65 were not excluded on

@@ -13,6 +13,8 @@ README.md
 .idea
 coverage
 .nyc_output
+# Built inside the image by scripts/build-function-runner.mjs; a local build is never input.
+dist-fn
 *.log
 __tests__
 jest.config.js
