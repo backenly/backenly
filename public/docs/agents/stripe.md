@@ -16,6 +16,19 @@ Storing the key from an agent also creates a `stripe-checkout-session` function 
 
 Stripe events arrive at `https://backenly.com/api/v1/{projectId}/webhooks/stripe`. It checks the `Stripe-Signature` HMAC with a five-minute replay window, and rejects every event until the project's webhook signing secret is stored. Stripe has no API for creating a webhook on a merchant's behalf, so the human pastes that URL into the Stripe dashboard and gives Backenly the signing secret.
 
+## What the receiver applies
+
+Before any function triggered by the webhook runs, the receiver applies these events to the project's own tables. It writes only the columns a table has, casts each value to its column's type, and writes a status in a spelling the column's CHECK or enum lists.
+
+- `checkout.session.completed`: the order whose `orders.stripe_session_id` (or `orders.stripeSessionId`) is the session's id is marked paid, in `orders.payment_status` when the table has it and in `orders.status` otherwise, and `orders.stripe_payment_intent_id` gets the payment intent's id where that column exists. A `payments` row with that session id is marked paid too.
+- `payment_intent.succeeded`: the order or payment that carries the payment intent's id (`orders.stripe_payment_intent_id`, or `payments.stripe_payment_intent_id` or `payments.provider_payment_id`) is marked paid. A `metadata.credits_amount` with a `metadata.user_id` adds the credits to that user's `credit_wallets.balance`, or else records them in `credit_transactions.amount`. A paid order's items (`order_items.quantity`) come off `products.stock_quantity`, and its user gets a notification.
+- `customer.subscription.updated` and `customer.subscription.deleted`: the row whose `subscriptions.stripe_subscription_id` (or `subscriptions.provider_subscription_id`) is the subscription's id gets Stripe's status, spelled as `subscriptions.status` allows (`cancelled` on a table made by `create_table`), and `subscriptions.current_period_start`, `subscriptions.current_period_end` and `subscriptions.cancel_at_period_end` where it has those columns. A deleted subscription's user gets a notification.
+- `invoice.payment_failed` sets the invoice's subscription to past_due and notifies its user. `invoice.paid` sets a past_due subscription back to active.
+
+A notification is a `notifications` row with `user_id`, the text in `body` or `message`, `title` and `type`. Events from Stripe API version 2025-03-31.basil on are read as well as older ones: a subscription's period from its items, and an invoice's subscription from `parent.subscription_details`.
+
+A table that does not exist is passed over. When a table exists but cannot take the change (it has no column to find the row by or to hold the value, its CHECK lists no value for Stripe's, or the database refuses the write), the event is reported as not applied, with the reason, in three places: the console's Monitoring → Logs, the event's row in payment_events when that table exists (`payment_events.processed` is false and `payment_events.error` says why), and the reply Stripe shows for the event. An event whose id is already in payment_events is not applied again.
+
 ## In a function
 
 `ctx.integrations.stripe`:

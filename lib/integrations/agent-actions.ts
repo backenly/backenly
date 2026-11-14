@@ -69,6 +69,7 @@ export async function integrationCapabilities(
         entry.signingSecretStored = Boolean(byId.get('stripe_webhook_secret'))
         entry.eventLog =
           'Verified events are recorded in the workspace table payment_events when it exists (read it with run_query), ' +
+          'where processed is false and error says why when the receiver could not apply the event to the project\'s tables, ' +
           'and fire functions whose trigger is on_webhook, whose runs are in functions { action: "logs" }.'
       }
       return entry
