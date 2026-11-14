@@ -363,7 +363,11 @@ npx tsx scripts/setup-postgrest-roles.ts --project <PROJECT_ID> --apply
 docker compose -f docker-compose.dev.yml up -d postgrest
 
 # 4. optional. Only needed to hand out direct psql credentials to a project.
-#    Backenly is fully operational without it.
+#    Backenly is fully operational without it. The first line marks the database
+#    as holding this deployment's one project, so its admin may allow schema
+#    changes over a read-write login; a database left unmarked is treated as
+#    shared by several projects, where such a login changes rows only.
+bash scripts/install-sql.sh scripts/sql/dedicated-database.sql
 bash scripts/install-sql.sh scripts/setup-direct-access.sql
 ```
 

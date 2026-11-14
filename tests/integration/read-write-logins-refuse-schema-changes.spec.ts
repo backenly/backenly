@@ -406,12 +406,22 @@ describe('through the application', () => {
     const workspace = `workspace_${projectId}`
 
     const credential = await provisionDirectAccess(projectId, 'READ_WRITE')
-    expect(credential.schemaChanges).toBe('refused')
+    expect(credential).toMatchObject({ schemaChanges: 'refused', schemaChangesUnavailable: 'shared_database' })
     expect(await as(role, `CREATE TABLE "${workspace}".scratch (id int)`)).toMatch(/permission denied for schema/)
 
-    await expect(setSchemaChanges(projectId, true)).rejects.toThrow(/shared by several projects/)
-    expect((await getDirectAccessStatus(projectId)).credentials.find((c) => c.mode === 'READ_WRITE')?.schemaChanges).toBe('refused')
+    // The console and the route say why (409), from this error.
+    await expect(setSchemaChanges(projectId, true)).rejects.toMatchObject({
+      code: 'SCHEMA_CHANGES_UNAVAILABLE',
+      reason: 'shared_database',
+      message: expect.stringContaining('shared with other projects'),
+    })
+    expect((await getDirectAccessStatus(projectId)).credentials.find((c) => c.mode === 'READ_WRITE')).toMatchObject({
+      schemaChanges: 'refused',
+      schemaChangesUnavailable: 'shared_database',
+    })
     expect(await as(role, `CREATE TABLE "${workspace}".scratch (id int)`)).toMatch(/permission denied for schema/)
+    // Refusing them is still accepted.
+    expect(await setSchemaChanges(projectId, false)).toMatchObject({ schemaChanges: 'refused' })
   }, 120_000)
 
   it('refuses to set it where there is no read-write login', async () => {

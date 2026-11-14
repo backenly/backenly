@@ -37,4 +37,4 @@ Call as `connect { action: "<action>", … }`.
 
 ## Database credentials
 
-`database_credentials` issues a read-only Postgres role on demand, and a read-write role only after a human arms it in the dashboard. A read-write role changes rows, not the schema, unless the human also allows schema changes over it. See `database`.
+`database_credentials` issues a read-only Postgres role on demand, and a read-write role only after a human arms it in the dashboard. A read-write role changes rows, not the schema, unless the human also allows schema changes over it, which a database other projects share (Backenly Cloud's) never permits. See `database`.

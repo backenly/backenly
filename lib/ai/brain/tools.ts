@@ -3655,12 +3655,15 @@ export async function dispatchTool(
             ? 'SELECT-only — safe for inspection, EXPLAIN, BI, and pg_dump (run pg_dump with --enable-row-security; the returned pgDumpCommand includes it). It cannot mutate anything.'
             : c.schemaChanges === 'allowed'
               ? 'Rows and schema: the project owner allowed schema changes over it. They skip approvals and History and are observed as drift — call adopt_external_schema when you finish migrating.'
-              : 'Rows only: schema changes over it are refused (permission denied). Change the schema with apply_migration, which is governed, verified and reversible.',
+              : c.schemaChangesUnavailable === 'shared_database'
+                ? 'Rows only: schema changes over it are refused (permission denied), and cannot be allowed on this database, which other projects share. Change the schema with apply_migration, which is governed, verified and reversible.'
+                : 'Rows only: schema changes over it are refused (permission denied). Change the schema with apply_migration, which is governed, verified and reversible.',
           'The connection string is in data.connectionString — treat it as a secret (do not write it into code, files, or logs; reference it from env).',
         ].join('\n')),
         data: {
           mode: c.mode,
           ...(c.schemaChanges ? { schemaChanges: c.schemaChanges } : {}),
+          ...(c.schemaChangesUnavailable ? { schemaChangesUnavailable: c.schemaChangesUnavailable } : {}),
           roleName: c.roleName,
           host: c.host,
           port: c.port,
@@ -3700,7 +3703,8 @@ export async function dispatchTool(
           'string to hand you. Only the project OWNER can arm it, and it is one click:\n\n' +
           `  ${armUrl}\n\n` +
           'Give the human that link and ask them to create read-write credentials (Connect → Direct). The login ' +
-          'reads and writes rows; schema changes over it stay refused unless the owner allows them there. Then ' +
+          'reads and writes rows; schema changes over it stay refused unless the owner allows them there, which a ' +
+          'database other projects share never lets them do. Then ' +
           'call this tool again with mode=READ_WRITE.\n' +
           'Read-only access needs no approval and is available right now via mode=READ_ONLY — it covers ' +
           'inspection, EXPLAIN, BI and pg_dump (with --enable-row-security — the returned pgDumpCommand includes it). For SCHEMA CHANGES you do not need direct access at all: ' +

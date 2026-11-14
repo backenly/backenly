@@ -9,11 +9,15 @@
  *               psql, TablePlus, EXPLAIN, BI tools, self-serve pg_dump.
  *               Cannot mutate anything: no INSERT/UPDATE/DELETE/DDL grants.
  *   READ_WRITE (bkn_rw_<hex12>) — DML. Schema changes over it skip the
- *               approvals and History every other door goes through, so a new
- *               login is refused them by Postgres (no CREATE on the schema, no
- *               owner-role membership) until the project's admin allows them
- *               (setSchemaChanges). Allowed, every DDL statement it runs is
- *               captured by the backenly_ddl_watch event trigger into
+ *               approvals and History every other door goes through, and on a
+ *               database shared by several projects, which every Backenly Cloud
+ *               database is, a trigger, function or view created through it
+ *               would run in the sessions that serve all of them. So Postgres
+ *               refuses a login any schema change (no CREATE anywhere, no
+ *               owner-role membership, nothing it owns): on a shared database
+ *               always, and on one dedicated to a single project until its admin
+ *               allows them (setSchemaChanges). Allowed, every DDL statement it
+ *               runs is captured by the backenly_ddl_watch event trigger into
  *               SchemaDriftEvent, and the autonomy loop adopts or flags it
  *               (see lib/autonomy/drift-watch.ts).
  *
@@ -49,6 +53,30 @@ export type DirectAccessMode = 'READ_ONLY' | 'READ_WRITE'
 /** Whether a read-write login may change the schema (scripts/setup-direct-access.sql, section 5b). */
 export type SchemaChanges = 'allowed' | 'refused'
 
+/**
+ * Why schema changes cannot be allowed over a read-write login here: the
+ * database is shared by several projects (scripts/setup-direct-access.sql,
+ * section 5c), or its direct-access helpers predate the check.
+ */
+export type SchemaChangesUnavailable = 'shared_database' | 'helpers_outdated'
+
+export const SCHEMA_CHANGES_UNAVAILABLE_MESSAGE: Record<SchemaChangesUnavailable, string> = {
+  shared_database:
+    "This project's database is shared with other projects, so a read-write login changes rows only and schema changes " +
+    'cannot be allowed over it: a trigger, function or view made through it would run with access to every project in ' +
+    'the database. Change the schema with apply_migration or the dashboard.',
+  helpers_outdated: 'This database needs its direct-access helpers updated before this setting can change.',
+}
+
+/** Allowing schema changes over a read-write login was asked for where it cannot be. */
+export class SchemaChangesUnavailableError extends Error {
+  readonly code = 'SCHEMA_CHANGES_UNAVAILABLE'
+  constructor(readonly reason: SchemaChangesUnavailable) {
+    super(SCHEMA_CHANGES_UNAVAILABLE_MESSAGE[reason])
+    this.name = 'SchemaChangesUnavailableError'
+  }
+}
+
 export interface DirectAccessCredential {
   mode: DirectAccessMode
   roleName: string
@@ -63,6 +91,8 @@ export interface DirectAccessCredential {
   rotatedAt: string | null
   /** READ_WRITE only: whether schema changes over the login are allowed. */
   schemaChanges?: SchemaChanges
+  /** READ_WRITE only, and only where they cannot be allowed: why. */
+  schemaChangesUnavailable?: SchemaChangesUnavailable
 }
 
 export interface DirectAccessStatus {
@@ -189,23 +219,59 @@ async function schemaChangesOf(projectId: string, roleName: string): Promise<Sch
   return row?.refused ? 'refused' : 'allowed'
 }
 
+/**
+ * Why schema changes cannot be allowed over the project's read-write login, or
+ * null where they can. The database answers (public.backenly_direct_shared_database),
+ * not the edition: it is shared unless a superuser marked it as dedicated to one
+ * project and it holds one, which a self-hosted deployment's is
+ * (scripts/sql/dedicated-database.sql, run by scripts/selfhost.ts). A database
+ * whose helpers predate the question cannot answer it, and is treated as unable.
+ */
+async function schemaChangesUnavailable(projectId: string): Promise<SchemaChangesUnavailable | null> {
+  const db = await workspaceRawClient(projectId)
+  const [probe] = await db.$queryRaw<Array<{ present: boolean }>>`
+    SELECT to_regprocedure('public.backenly_direct_shared_database()') IS NOT NULL AS present`
+  if (!probe?.present) return 'helpers_outdated'
+  const [row] = await db.$queryRaw<Array<{ shared: boolean }>>`SELECT public.backenly_direct_shared_database() AS shared`
+  return row?.shared === false ? null : 'shared_database'
+}
+
 async function withSchemaChanges(projectId: string, credential: DirectAccessCredential): Promise<DirectAccessCredential> {
   if (credential.mode !== 'READ_WRITE') return credential
-  return { ...credential, schemaChanges: await schemaChangesOf(projectId, credential.roleName) }
+  const [schemaChanges, unavailable] = await Promise.all([
+    schemaChangesOf(projectId, credential.roleName),
+    schemaChangesUnavailable(projectId),
+  ])
+  return { ...credential, schemaChanges, ...(unavailable ? { schemaChangesUnavailable: unavailable } : {}) }
 }
 
 /**
  * Allow or refuse schema changes over the project's read-write login. Refused
  * is the default for a new one: they skip the approvals and History that
  * apply_migration and the dashboard go through, and are only observed as drift
- * afterwards. Applied by the grants sync, which runs straight after.
+ * afterwards. On a database shared by several projects they are never allowed
+ * (SchemaChangesUnavailableError): asked here first, so the person is told why,
+ * and refused by the database whatever this says. Applied by the grants sync,
+ * which runs straight after.
  */
 export async function setSchemaChanges(projectId: string, allowed: boolean): Promise<DirectAccessCredential> {
   assertValidProjectId(projectId)
   const existing = await prisma.databaseCredential.findUnique({ where: { projectId_mode: { projectId, mode: 'READ_WRITE' } } })
   if (!existing) throw new Error('This project has no read-write login to change.')
+  if (allowed) {
+    const unavailable = await schemaChangesUnavailable(projectId)
+    if (unavailable) throw new SchemaChangesUnavailableError(unavailable)
+  }
   const db = await workspaceRawClient(projectId)
-  await db.$queryRaw`SELECT public.backenly_direct_set_schema_changes(${existing.roleName}, ${allowed})`
+  try {
+    await db.$queryRaw`SELECT public.backenly_direct_set_schema_changes(${existing.roleName}, ${allowed})`
+  } catch (err) {
+    // The database decides; it refuses on a database that became shared since.
+    if (allowed && /shared by several projects/.test(err instanceof Error ? err.message : String(err))) {
+      throw new SchemaChangesUnavailableError('shared_database')
+    }
+    throw err
+  }
   await syncDirectAccessGrants(projectId)
   await prisma.auditLog.create({
     data: {
