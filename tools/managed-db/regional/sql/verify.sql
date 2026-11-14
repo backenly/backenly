@@ -137,6 +137,9 @@ BEGIN
       ('public.backenly_direct_drop_role(text)',                        true),
       ('public.backenly_direct_sync_schema(text,text,text,text)',       true),
       ('public.backenly_direct_set_schema_changes(text,boolean)',       true),
+      ('public.backenly_direct_shared_database()',                      true),
+      ('public.backenly_direct_schema_change_holds(text)',              false),
+      ('public.backenly_direct_strip_schema_changes(text,text)',        false),
       ('public.backenly_pgrst_prune_schemas()',                         false),
       ('public.backenly_pgrst_apply_owner_defaults(text)',              false),
       ('public.backenly_capture_ddl()',                                 false),
@@ -302,6 +305,59 @@ BEGIN
       END IF;
     END LOOP;
   END IF;
+
+  -- ── Direct access: on this shared database, read-write logins change rows ──
+  -- A region's database holds every project in the region. Code one project's
+  -- login created in its schema would run in the sessions that serve all of
+  -- them, so no login may create anything (scripts/setup-direct-access.sql,
+  -- sections 5c and 7, which the direct-access step applies).
+  IF to_regprocedure('public.backenly_direct_shared_database()') IS NOT NULL THEN
+    IF NOT public.backenly_direct_shared_database() THEN
+      problems := problems || 'this database is marked as dedicated to one project, but a region''s database is shared by its projects'::text;
+    END IF;
+  END IF;
+  IF to_regprocedure('public.backenly_direct_schema_change_holds(text)') IS NOT NULL THEN
+    FOR r IN
+      SELECT p.rolname::text AS login,
+             public.backenly_direct_schema_change_holds(p.rolname::text) AS holds,
+             EXISTS (SELECT 1 FROM pg_auth_members m JOIN pg_roles g ON g.oid = m.roleid
+                      WHERE m.member = p.oid AND g.rolname = 'backenly_no_schema_changes') AS marked
+        FROM pg_roles p
+       WHERE p.rolname ~ '^bkn_rw_[0-9a-f]{12}$'
+       ORDER BY 1
+    LOOP
+      IF cardinality(r.holds) > 0 THEN
+        problems := problems || format('read-write login %s can change the schema: %s', r.login, array_to_string(r.holds, ', '));
+      ELSIF NOT r.marked THEN
+        problems := problems || format('read-write login %s is not a member of backenly_no_schema_changes', r.login);
+      END IF;
+    END LOOP;
+  END IF;
+  -- What every direct-access login holds at once: through PUBLIC, through the
+  -- group each joins, or through the marker role, which must hold nothing.
+  IF has_database_privilege('public', current_database(), 'CREATE') THEN
+    problems := problems || 'PUBLIC can create schemas in this database, so every login can'::text;
+  END IF;
+  FOR r IN
+    SELECT CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee)::text END AS grantee,
+           'CREATE on schema ' || n.nspname AS what
+      FROM pg_namespace n CROSS JOIN LATERAL aclexplode(n.nspacl) a
+     WHERE a.privilege_type = 'CREATE' AND n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'
+       AND (a.grantee = 0 OR pg_get_userbyid(a.grantee) IN ('backenly_external', 'backenly_no_schema_changes'))
+    UNION ALL
+    SELECT CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee)::text END,
+           'TRIGGER on ' || c.oid::regclass::text
+      FROM pg_class c CROSS JOIN LATERAL aclexplode(c.relacl) a
+     WHERE c.relacl IS NOT NULL AND a.privilege_type = 'TRIGGER'
+       AND (a.grantee = 0 OR pg_get_userbyid(a.grantee) IN ('backenly_external', 'backenly_no_schema_changes'))
+    UNION ALL
+    SELECT mm.rolname::text, 'membership of ' || g.rolname
+      FROM pg_auth_members m JOIN pg_roles g ON g.oid = m.roleid JOIN pg_roles mm ON mm.oid = m.member
+     WHERE mm.rolname IN ('backenly_external', 'backenly_no_schema_changes')
+    ORDER BY 1, 2
+  LOOP
+    problems := problems || format('%s holds %s, and so every direct-access login does', r.grantee, r.what);
+  END LOOP;
 
   -- ── Extensions: installed in public, and working ──────────────────────────
   -- The probes are tools/managed-db/extension-spec.ts operationalProbe, verbatim.
