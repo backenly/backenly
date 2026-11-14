@@ -15018,9 +15018,14 @@ async function executeEnableTeams(params: any, projectId: string, apiKey?: strin
         tableName: 'organization_invitations',
         columns: [
           { name: 'organization_id', type: 'UUID', notNull: true, fkTo: 'organizations' },
-          { name: 'email', type: 'TEXT', notNull: true },
+          // Unique per organization, not across the table (the indexes in step
+          // 4): a table-wide UNIQUE told any owner whether an address or a
+          // token had been used anywhere, and let one organization hold an
+          // address so that another could not invite it.
+          { name: 'email', type: 'TEXT', notNull: true, unique: false },
           { name: 'role', type: 'TEXT', notNull: true, default: 'member' },
-          { name: 'token', type: 'TEXT', notNull: true, unique: true },
+          // Kept as its SHA-256 by the teams rules' trigger.
+          { name: 'token', type: 'TEXT', notNull: true, unique: false },
           { name: 'invited_by_user_id', type: 'UUID' },
           { name: 'expires_at', type: 'TIMESTAMP' },
           { name: 'accepted_at', type: 'TIMESTAMP' },
@@ -15044,24 +15049,24 @@ async function executeEnableTeams(params: any, projectId: string, apiKey?: strin
       await executeAction({ action: 'GENERATE_API', params: { tableName: t.tableName } }, projectId, apiKey, 0, undefined, false).catch(() => {})
     }
 
-    // 4. Indexes that matter for org lookup performance.
-    try {
-      const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
-      const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
-      await db.$executeRawUnsafe(`
-        CREATE INDEX IF NOT EXISTS idx_org_members_user
-          ON "${postgresSchema}"."organization_members" (user_id)
-      `)
-      await db.$executeRawUnsafe(`
-        CREATE INDEX IF NOT EXISTS idx_org_members_org_user
-          ON "${postgresSchema}"."organization_members" (organization_id, user_id)
-      `)
-      await db.$executeRawUnsafe(`
-        CREATE INDEX IF NOT EXISTS idx_org_invites_token
-          ON "${postgresSchema}"."organization_invitations" (token)
-      `)
-    } catch {
-      /* non-fatal */
+    // 4. Indexes that matter for org lookup performance, and the uniqueness an
+    //    invitation has: one pending invitation per address in an organization,
+    //    and a token used once in it. Each on its own, so a table made before
+    //    (whose rows may not satisfy one) still gets the others.
+    const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
+    const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
+    for (const sql of [
+      `CREATE INDEX IF NOT EXISTS idx_org_members_user ON "${postgresSchema}"."organization_members" (user_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_org_members_org_user ON "${postgresSchema}"."organization_members" (organization_id, user_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_org_invites_token ON "${postgresSchema}"."organization_invitations" (token)`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS organization_invitations_pending_email_key ` +
+        `ON "${postgresSchema}"."organization_invitations" (organization_id, lower(email)) WHERE accepted_at IS NULL`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS organization_invitations_org_token_key ` +
+        `ON "${postgresSchema}"."organization_invitations" (organization_id, token)`,
+    ]) {
+      await db.$executeRawUnsafe(sql).catch(() => {
+        /* non-fatal */
+      })
     }
 
     if (failed.length) {
@@ -15099,13 +15104,16 @@ async function executeEnableTeams(params: any, projectId: string, apiKey?: strin
         `- **Access rules** (row-level security): an organization is read by its owner and members and changed only by ` +
         `its owner; each user reads their own memberships, may leave them, and adds themselves only to an organization ` +
         `they own; invitations are read by the organization's owner and admins, and the owner invites with any role, ` +
-        `an admin only as "member" or "admin". Member lists and role changes are your server's (a service-role key).\n\n` +
+        `an admin only as "member" or "admin". Member lists and role changes are your server's (a service-role key).\n` +
+        `- **Invitations**: the token is kept only as its SHA-256, so keep the one you send; an invitation never changes ` +
+        `once written (withdraw it and send a new one); accepting checks that its inviter is still the owner or an admin.\n\n` +
         `Typical flow:\n` +
         `1. A user signs up via auth.\n` +
-        `2. They POST /organizations { name, slug, owner_user_id: <their id> }, then POST /organization_members ` +
-        `{ organization_id, user_id: <their id>, role: "owner" }.\n` +
+        `2. They POST /organizations { name, slug, owner_user_id: <their id> } (the server gives it its id), then POST ` +
+        `/organization_members { organization_id, user_id: <their id>, role: "owner" }.\n` +
         `3. An owner or admin POSTs /organization_invitations { organization_id, email, role, token, invited_by_user_id: ` +
-        `<their id> } with a random token, and emails the user a link with it.\n` +
+        `<their id> } with a token of 32 or more random characters (A-Z, a-z, 0-9, - and _, e.g. 16 random bytes in hex) ` +
+        `and emails the user a link with it.\n` +
         `4. The invited user signs up with that email, then POSTs /orgs/accept-invite { token } and is added to organization_members.\n\n` +
         `Scope your other tables by adding an \`organization_id UUID\` column and the org_members RLS policy.`,
       data: { created, tables: ['organizations', 'organization_members', 'organization_invitations'] },

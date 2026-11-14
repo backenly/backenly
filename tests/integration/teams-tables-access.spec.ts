@@ -122,6 +122,8 @@ let inviteToken = ''
 const T = (table: string) => `"${schema}"."${table}"`
 const ddl = (sql: string, ...values: unknown[]) => prisma.$executeRawUnsafe(sql, ...values)
 const randomToken = () => crypto.randomBytes(16).toString('hex')
+/** How the teams rules keep a token: its SHA-256. */
+const hashOf = (token: string) => `sha256:${crypto.createHash('sha256').update(token, 'utf8').digest('hex')}`
 /** An invitation: organization, email, role, token, inviter. */
 const inviteSql = () =>
   `INSERT INTO ${T('organization_invitations')} (organization_id, email, role, token, invited_by_user_id, expires_at)
@@ -364,7 +366,8 @@ describe('an owner', () => {
 
   it('reads the organization and its invitations', async () => {
     expect(await asUser(olivia.id, `SELECT id::text AS id FROM ${T('organizations')}`)).toEqual([{ id: orgId }])
-    expect(await asUser(olivia.id, `SELECT token FROM ${T('organization_invitations')}`)).toEqual([{ token: inviteToken }])
+    // The token as kept: its hash, never the token itself.
+    expect(await asUser(olivia.id, `SELECT token FROM ${T('organization_invitations')}`)).toEqual([{ token: hashOf(inviteToken) }])
   })
 })
 
@@ -418,10 +421,11 @@ describe('the publishable key', () => {
 })
 
 describe('the invitee', () => {
-  it('cannot accept an invitation addressed to someone else', async () => {
+  it('cannot accept an invitation addressed to someone else, and is not told whose it is', async () => {
     const out = await accept(mallory, inviteToken)
     expect(out.status).toBe(403)
     expect(out.body.code).toBe('INVITE_EMAIL_MISMATCH')
+    expect(JSON.stringify(out.body)).not.toContain(ines.email)
   }, 60_000)
 
   it('joins through POST /orgs/accept-invite, run as the application role', async () => {
@@ -430,7 +434,7 @@ describe('the invitee', () => {
     expect(out.body).toMatchObject({ ok: true, organizationId: orgId, role: 'member' })
     const [invite] = await prisma.$queryRawUnsafe<Array<{ accepted: boolean }>>(
       `SELECT accepted_at IS NOT NULL AS accepted FROM ${T('organization_invitations')} WHERE token = $1`,
-      inviteToken,
+      hashOf(inviteToken),
     )
     expect(invite.accepted).toBe(true)
     expect(await asUser(ines.id, `SELECT id::text AS id FROM ${T('organizations')}`)).toEqual([{ id: orgId }])
@@ -487,14 +491,19 @@ describe('the roles an invitation may carry', () => {
     }
   })
 
-  it('an admin cannot turn an invitation into an owner invitation', async () => {
-    await expect(
-      asUser(
+  it('an admin cannot turn an invitation into an owner invitation: no one changes one once written', async () => {
+    expect(
+      await asUser(
         adam.id,
         `UPDATE ${T('organization_invitations')} SET role = 'owner' WHERE invited_by_user_id = $1::uuid AND role = 'member' RETURNING id`,
         adam.id,
       ),
-    ).rejects.toThrow(/row-level security/)
+    ).toEqual([])
+    const roles = await prisma.$queryRawUnsafe<Array<{ role: string }>>(
+      `SELECT role FROM ${T('organization_invitations')} WHERE invited_by_user_id = $1::uuid ORDER BY role`,
+      adam.id,
+    )
+    expect(roles.map((r) => r.role)).toEqual(['admin', 'member'])
   })
 
   it("an owner's invitation as owner works, the admin cannot change it, and its invitee joins as owner", async () => {
@@ -571,6 +580,164 @@ describe('a repair or an agent that asks for an owner\'s rule on a teams table',
     expect({ success: r.success, message: r.message }).toMatchObject({ success: true, message: expect.stringContaining('kept the teams rules') })
     expect({ rules: await policies(tableName), forced: await forced(tableName) }).toEqual({ rules: TEAMS_RULES, forced: true })
   }, 120_000)
+})
+
+describe('what a reader of the tables, or another organization, cannot do with them', () => {
+  const kate = { id: crypto.randomUUID(), email: `kate-${tag}@example.test` }
+  /** Another account: the same address in capitals. */
+  const kateCapitals = { id: crypto.randomUUID(), email: `KATE-${tag}@EXAMPLE.TEST` }
+  /** Another account: a Kelvin sign (U+212A), which Unicode case folding takes for a k. */
+  const kateKelvin = { id: crypto.randomUUID(), email: `Kate-${tag}@example.test` }
+  /** The only account for zoe's address, written with capitals. */
+  const zoe = { id: crypto.randomUUID(), email: `Zoe-${tag}@Example.Test` }
+  const owen = { id: crypto.randomUUID(), email: `owen-${tag}@example.test` }
+  const adamsFriend = { id: crypto.randomUUID(), email: `adams-friend-${tag}@example.test` }
+
+  beforeAll(async () => {
+    for (const user of [kate, kateCapitals, kateKelvin, zoe, owen, adamsFriend]) {
+      await ddl(`INSERT INTO ${T('users')} (id, email, password) VALUES ($1::uuid, $2, 'x')`, user.id, user.email)
+    }
+  })
+
+  it('keeps an invitation token only as its hash, and refuses a short token or a hash sent as one', async () => {
+    const stored = await prisma.$queryRawUnsafe<Array<{ token: string }>>(
+      `SELECT token FROM ${T('organization_invitations')} WHERE email = $1`,
+      ines.email,
+    )
+    expect(stored).toEqual([{ token: hashOf(inviteToken) }])
+    await expect(
+      asUser(olivia.id, inviteSql(), orgId, `short-${tag}@example.test`, 'member', 'not-long-enough', olivia.id),
+    ).rejects.toThrow(/32 to 512 characters/)
+    await expect(
+      asUser(olivia.id, inviteSql(), orgId, `hashed-${tag}@example.test`, 'member', hashOf(randomToken()), olivia.id),
+    ).rejects.toThrow(/only its hash is kept/)
+  })
+
+  it("an admin who reads the owner's invitation cannot accept with what they read", async () => {
+    const token = randomToken()
+    await asUser(olivia.id, inviteSql(), orgId, owen.email, 'owner', token, olivia.id)
+    const [read] = await asUser<{ token: string }>(adam.id, `SELECT token FROM ${T('organization_invitations')} WHERE email = $1`, owen.email)
+    expect(read.token).toBe(hashOf(token))
+    expect((await accept(owen, read.token)).status).toBe(404)
+  }, 60_000)
+
+  it('tells no organization which tokens or addresses another has used', async () => {
+    const [p] = await asUser<{ id: string }>(
+      mallory.id,
+      `INSERT INTO ${T('organizations')} (name, slug, owner_user_id) VALUES ('Evil', $1, $2::uuid) RETURNING id::text AS id`,
+      `evil-${tag}`,
+      mallory.id,
+    )
+    await asUser(mallory.id, `INSERT INTO ${T('organization_members')} (organization_id, user_id, role) VALUES ($1::uuid, $2::uuid, 'owner')`, p.id, mallory.id)
+    // Another organization's real token among the guesses: every guess is written.
+    const guesses = [randomToken(), inviteToken, randomToken()]
+    const rows = guesses.map((_, i) => `($1::uuid, 'guess${i}-${tag}@example.test', 'member', $${i + 3}, $2::uuid)`).join(', ')
+    const written = await asUser<{ email: string }>(
+      mallory.id,
+      `INSERT INTO ${T('organization_invitations')} (organization_id, email, role, token, invited_by_user_id) VALUES ${rows} ON CONFLICT DO NOTHING RETURNING email`,
+      p.id,
+      mallory.id,
+      ...guesses,
+    )
+    expect(written).toHaveLength(guesses.length)
+    // No token is unique across the table, so there is nothing to collide with.
+    await expect(
+      asUser(
+        mallory.id,
+        `INSERT INTO ${T('organization_invitations')} (organization_id, email, role, token, invited_by_user_id) VALUES ($1::uuid, $2, 'member', $3, $4::uuid) ON CONFLICT (token) DO NOTHING`,
+        p.id,
+        `guess9-${tag}@example.test`,
+        inviteToken,
+        mallory.id,
+      ),
+    ).rejects.toThrow(/no unique or exclusion constraint/)
+    // An address another organization invited can be invited here too.
+    expect(await asUser(mallory.id, inviteSql(), p.id, ines.email, 'member', randomToken(), mallory.id)).toEqual([{ role: 'member' }])
+    await ddl(`DELETE FROM ${T('organization_invitations')} WHERE organization_id = $1::uuid`, p.id)
+  }, 60_000)
+
+  it('matches the address as written, or ASCII-lowercased when no other account has that form, never a look-alike', async () => {
+    const token = randomToken()
+    await asUser(olivia.id, inviteSql(), orgId, kate.email, 'member', token, olivia.id)
+    for (const other of [kateCapitals, kateKelvin]) {
+      const out = await accept(other, token)
+      expect({ status: out.status, code: out.body.code }).toEqual({ status: 403, code: 'INVITE_EMAIL_MISMATCH' })
+      expect(JSON.stringify(out.body).toLowerCase()).not.toContain(`kate-${tag}`)
+    }
+    expect((await accept(kate, token)).status).toBe(200)
+    const zoeToken = randomToken()
+    await asUser(olivia.id, inviteSql(), orgId, `zoe-${tag}@example.test`, 'member', zoeToken, olivia.id)
+    expect((await accept(zoe, zoeToken)).status).toBe(200)
+  }, 60_000)
+
+  it('lets no one change or withdraw an accepted invitation, or write one already accepted', async () => {
+    const accepted = hashOf(inviteToken)
+    expect(
+      await asUser(olivia.id, `UPDATE ${T('organization_invitations')} SET accepted_at = NULL, expires_at = NULL WHERE token = $1 RETURNING id`, accepted),
+    ).toEqual([])
+    expect(await asUser(olivia.id, `DELETE FROM ${T('organization_invitations')} WHERE token = $1 RETURNING id`, accepted)).toEqual([])
+    await expect(
+      asUser(
+        olivia.id,
+        `INSERT INTO ${T('organization_invitations')} (organization_id, email, role, token, invited_by_user_id, accepted_at)
+         VALUES ($1::uuid, $2, 'member', $3, $4::uuid, NOW())`,
+        orgId,
+        `pre-accepted-${tag}@example.test`,
+        randomToken(),
+        olivia.id,
+      ),
+    ).rejects.toThrow(/row-level security/)
+    // A pending one is withdrawn by deleting it.
+    const pending = randomToken()
+    await asUser(olivia.id, inviteSql(), orgId, `withdrawn-${tag}@example.test`, 'member', pending, olivia.id)
+    expect(await asUser(olivia.id, `DELETE FROM ${T('organization_invitations')} WHERE token = $1 RETURNING role`, hashOf(pending))).toEqual([
+      { role: 'member' },
+    ])
+  })
+
+  it('admits no one through an invitation whose inviter has since been removed', async () => {
+    const token = randomToken()
+    await asUser(adam.id, inviteSql(), orgId, adamsFriend.email, 'member', token, adam.id)
+    const [membership] = await prisma.$queryRawUnsafe<Array<{ id: string }>>(
+      `DELETE FROM ${T('organization_members')} WHERE user_id = $1::uuid AND organization_id = $2::uuid RETURNING id::text AS id`,
+      adam.id,
+      orgId,
+    )
+    const out = await accept(adamsFriend, token)
+    expect({ status: out.status, code: out.body.code }).toEqual({ status: 403, code: 'INVITE_INVITER_NOT_ALLOWED' })
+    // Back as he was, for the tests after.
+    await ddl(
+      `INSERT INTO ${T('organization_members')} (id, organization_id, user_id, role) VALUES ($1::uuid, $2::uuid, $3::uuid, 'admin')`,
+      membership.id,
+      orgId,
+      adam.id,
+    )
+  }, 60_000)
+
+  it('gives each organization an end user creates an id of its own, which no one changes', async () => {
+    const chosen = crypto.randomUUID()
+    const [made] = await asUser<{ id: string }>(
+      olivia.id,
+      `INSERT INTO ${T('organizations')} (id, name, slug, owner_user_id) VALUES ($1::uuid, 'Zed', $2, $3::uuid) RETURNING id::text AS id`,
+      chosen,
+      `zed-${tag}`,
+      olivia.id,
+    )
+    expect(made.id).not.toBe(chosen)
+    expect(await asUser(olivia.id, `DELETE FROM ${T('organizations')} WHERE id = $1::uuid RETURNING id`, made.id)).toHaveLength(1)
+    // A deleted organization's id cannot be taken by a new one.
+    const [reborn] = await asUser<{ id: string }>(
+      mallory.id,
+      `INSERT INTO ${T('organizations')} (id, name, slug, owner_user_id) VALUES ($1::uuid, 'Reborn', $2, $3::uuid) RETURNING id::text AS id`,
+      made.id,
+      `reborn-${tag}`,
+      mallory.id,
+    )
+    expect(reborn.id).not.toBe(made.id)
+    await expect(
+      asUser(mallory.id, `UPDATE ${T('organizations')} SET id = $1::uuid WHERE id = $2::uuid`, made.id, reborn.id),
+    ).rejects.toThrow(/cannot be changed/)
+  })
 })
 
 describe('a project whose teams tables have the rules releases before the fix gave them', () => {

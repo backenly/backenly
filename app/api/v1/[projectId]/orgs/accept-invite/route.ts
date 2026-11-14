@@ -11,18 +11,25 @@ export const maxDuration = 15
  * Flow:
  *   1. Resolve the end-user JWT through the check every data door uses:
  *      project.jwtSecret, this project, not revoked, user not blocked.
- *   2. In one transaction, as the service role: look up and lock
- *      `organization_invitations.token` in the workspace schema.
- *   3. Reject expired, already-accepted, or wrong-email invites, and one with a
- *      role other than member or admin that the organization's owner did not
- *      send.
+ *   2. In one transaction, as the service role: look up and lock the
+ *      invitation by its token's SHA-256, which is all the table keeps.
+ *   3. Reject expired, already-accepted, or wrong-email invites, and one whose
+ *      inviter is no longer the organization's owner or an admin, or could not
+ *      grant its role (only the owner invites with a role other than member or
+ *      admin).
  *   4. Insert into `organization_members` and stamp `accepted_at`.
  *
  * The invitation is matched on token, then verified against the end-user's
  * email so an attacker cannot accept a token issued to someone else (token
- * alone is not enough — they must also own the email it was sent to).
+ * alone is not enough — they must also own the email it was sent to). The
+ * emails are compared as written, or ASCII-lowercased when no other account
+ * shares that form: never with Unicode case folding, which takes the Kelvin
+ * sign for a k, and never to let a case variant of an address take the
+ * invitation of the account the address belongs to. A refusal does not say
+ * which address the invitation is for.
  */
 
+import { createHash } from 'crypto'
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
 import { isRegionError, workspaceRawClient } from '@/lib/data-plane/regional'
@@ -30,6 +37,17 @@ import { rlsSessionParams, rlsSessionSql } from '@/lib/services/rls-session'
 import { resolveEndUserFromToken } from '@/server/lib/end-user-identity'
 import { getWorkspaceDatabaseNames } from '@/lib/services/databaseProvisioning'
 import { recordedV1 } from '@/lib/traffic/recorded-v1'
+
+/** How the teams rules keep a token (lib/services/workspace-rls.ts, teamsPolicySql). */
+function tokenHash(token: string): string {
+  return `sha256:${createHash('sha256').update(token, 'utf8').digest('hex')}`
+}
+
+/** Printable ASCII and no spaces: an address with anything else may be a look-alike, and is refused. */
+const PLAIN_ADDRESS = /^[\x21-\x7e]+$/
+
+/** Lowercase A-Z only: no Unicode case folding. */
+const asciiLower = (s: string) => s.replace(/[A-Z]/g, (c) => c.toLowerCase())
 
 async function handlePOST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
   const params = await props.params;
@@ -79,7 +97,7 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
     // ── Body ───────────────────────────────────────────────────────────────
     const body = await request.json().catch(() => ({} as any))
     const inviteToken = typeof body?.token === 'string' ? body.token.trim() : ''
-    if (!inviteToken) {
+    if (!inviteToken || inviteToken.length > 512) {
       return NextResponse.json(
         { error: 'token is required (the invite token from the invitation email)', code: 'BAD_REQUEST' },
         { status: 400 },
@@ -108,6 +126,9 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
       await tx.$executeRawUnsafe(rlsSessionSql(), ...rlsSessionParams({ isServiceRole: true }))
 
       // ── Lookup invitation ────────────────────────────────────────────────
+      // By the token's hash. A table from before the teams rules may still
+      // hold a token as written, so that is matched too, but never a stored
+      // hash taken as a token: the owner and admins can read the hashes.
       const invites = await tx.$queryRawUnsafe<Array<{
         id: string
         organization_id: string
@@ -120,12 +141,15 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
         `SELECT id::text AS id, organization_id::text AS organization_id, email, role,
                 invited_by_user_id::text AS invited_by_user_id, expires_at, accepted_at
            FROM "${postgresSchema}"."organization_invitations"
-          WHERE token = $1
-          LIMIT 1
+          WHERE token = $1 OR (token = $2 AND token !~ '^sha256:[0-9a-f]{64}$')
+          LIMIT 2
           FOR UPDATE`,
+        tokenHash(inviteToken),
         inviteToken,
       )
-      const invite = invites[0]
+      // Two rows for one token (a client that reused one in two organizations)
+      // name no one invitation.
+      const invite = invites.length === 1 ? invites[0] : undefined
       if (!invite) {
         return { status: 404, body: { error: 'Invite not found or already consumed', code: 'INVITE_NOT_FOUND' } }
       }
@@ -156,36 +180,71 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
       if (!endUserEmail) {
         return { status: 409, body: { error: 'Could not resolve your account email', code: 'NO_USER_RECORD' } }
       }
-      if (endUserEmail.toLowerCase() !== String(invite.email).toLowerCase()) {
+      // The same address as written, or the same once A-Z are lowercased when
+      // no other account has that form: users.email is unique as written, so
+      // `INES@…` can be another account than `ines@…`, and the one holding the
+      // address as invited is the invitee. Anything outside printable ASCII is
+      // refused rather than folded. The refusal names no address.
+      const invited = String(invite.email)
+      let sameAddress = false
+      if (PLAIN_ADDRESS.test(endUserEmail) && PLAIN_ADDRESS.test(invited)) {
+        if (endUserEmail === invited) {
+          sameAddress = true
+        } else if (asciiLower(endUserEmail) === asciiLower(invited)) {
+          const [others] = await tx.$queryRawUnsafe<Array<{ n: number }>>(
+            `SELECT count(*)::int AS n FROM "${postgresSchema}"."users"
+              WHERE translate(email::text, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') = $1
+                AND id::text <> $2`,
+            asciiLower(invited),
+            endUser.userId,
+          )
+          sameAddress = Number(others?.n ?? 1) === 0
+        }
+      }
+      if (!sameAddress) {
         return {
           status: 403,
           body: {
-            error: `This invite was sent to a different email address. Sign in with the address it was sent to (${invite.email}).`,
+            error: 'This invite was sent to a different email address. Sign in with the address it was sent to.',
             code: 'INVITE_EMAIL_MISMATCH',
           },
         }
       }
 
-      // ── Who may hand out this role ───────────────────────────────────────
-      // The teams rules let an admin invite only members and admins: any other
-      // role, owner above all, is the organization's owner's to give. An
-      // invitation written before those rules, or by a server on an admin's
-      // say-so, could still carry one, so such a role is honoured only when the
-      // invitation names the organization's owner as its inviter.
+      // ── Its inviter, now ─────────────────────────────────────────────────
+      // An invitation stands only while whoever wrote it may still invite:
+      // the organization's owner, or a member whose role is owner or admin.
+      // And it grants only what they may grant: an admin invites members and
+      // admins, any other role (owner above all) is the owner's to give. Asked
+      // here, at acceptance, so an admin removed since, or an invitation
+      // written under earlier rules or by a server on someone's say-so, admits
+      // no one beyond what its inviter could grant today.
       const role = invite.role || 'member'
-      if (role !== 'member' && role !== 'admin') {
-        const owners = await tx.$queryRawUnsafe<Array<{ owner: string | null }>>(
-          `SELECT owner_user_id::text AS owner FROM "${postgresSchema}"."organizations" WHERE id::text = $1 LIMIT 1`,
-          invite.organization_id,
-        )
-        if (!invite.invited_by_user_id || owners[0]?.owner !== invite.invited_by_user_id) {
-          return {
-            status: 403,
-            body: {
-              error: `Only the organization's owner can invite you as "${role}", and this invite is not from them. Ask the owner to send it.`,
-              code: 'INVITE_ROLE_NOT_ALLOWED',
-            },
-          }
+      const [standing] = await tx.$queryRawUnsafe<Array<{ owner: boolean; admin: boolean }>>(
+        `SELECT EXISTS (SELECT 1 FROM "${postgresSchema}"."organizations" o
+                         WHERE o.id::text = $1 AND o.owner_user_id::text = $2) AS owner,
+                EXISTS (SELECT 1 FROM "${postgresSchema}"."organization_members" m
+                         WHERE m.organization_id::text = $1 AND m.user_id::text = $2
+                           AND m.role::text IN ('owner', 'admin')) AS admin`,
+        invite.organization_id,
+        invite.invited_by_user_id ?? '',
+      )
+      if (!invite.invited_by_user_id || !(standing?.owner || standing?.admin)) {
+        return {
+          status: 403,
+          body: {
+            error: 'Whoever sent this invite can no longer invite people to the organization. Ask its owner for a new one.',
+            code: 'INVITE_INVITER_NOT_ALLOWED',
+          },
+        }
+      }
+      if (!standing.owner && role !== 'member' && role !== 'admin') {
+        return {
+          status: 403,
+          body: {
+            error: `Only the organization's owner can invite you as "${role}", and this invite is not from them. Ask the owner to send it.`,
+            code: 'INVITE_ROLE_NOT_ALLOWED',
+          },
         }
       }
 

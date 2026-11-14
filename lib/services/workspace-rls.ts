@@ -1924,18 +1924,41 @@ async function installOrgMembersPolicy(
  *                             first, owner membership is made. Every other
  *                             membership and every role change is the server's:
  *                             POST /orgs/accept-invite, or a service-role key.
- *   organization_invitations  read and withdrawn by the organization's owner
- *                             and its admins (members whose role is owner or
- *                             admin); written by the owner with any role, and
- *                             by an admin only to invite a member or an admin,
- *                             so a place as owner is the owner's alone to give;
- *                             recorded as made by whoever wrote it
- *                             (invited_by_user_id).
+ *   organization_invitations  read by the organization's owner and its admins
+ *                             (members whose role is owner or admin), who may
+ *                             withdraw (delete) one not yet accepted; written by
+ *                             the owner with any role, and by an admin only to
+ *                             invite a member or an admin, so a place as owner
+ *                             is the owner's alone to give; recorded as made by
+ *                             whoever wrote it (invited_by_user_id). Never
+ *                             changed once written: re-sending is withdrawing
+ *                             and writing a new one, and an accepted invitation
+ *                             is the record of how its member joined.
  *
  * The ownership inference cannot say any of this: own rows on
  * organization_members let any signed-in user write the row that makes them a
  * member of any organization, with any role, and joining an organization opens
  * every table the org_members rule scopes to it.
+ *
+ * ── What a row cannot carry ─────────────────────────────────────────────────
+ *
+ * An invitation's token is kept only as its SHA-256 (`sha256:<hex>`). The
+ * owner and the admins read the table, and a token one of them could read
+ * would let them, or anyone they handed it to, join as its invitee at a role
+ * they could not grant themselves. A trigger refuses a token shorter than 32
+ * characters of A-Z, a-z, 0-9, - and _ (16 random bytes in hex, 24 in
+ * base64url), stores its hash, and refuses a hash sent by anyone but the
+ * service role. Whoever writes the invitation keeps the token they sent and
+ * emails it; POST /orgs/accept-invite hashes what it is given. (Supabase's own
+ * links carry a hash of the token for the server to check, {{ .TokenHash }}.)
+ *
+ * An organization's id is the server's: a trigger gives each organization an
+ * end user creates a fresh one, and refuses to change one. An id the caller
+ * chose would let a new organization take a deleted one's id and reach the rows
+ * still scoped to it in tables without a cascading foreign key.
+ *
+ * Both triggers leave the service role alone: a server, an import, a repair.
+ * A restore loads rows before it creates triggers.
  *
  * ── No policy on organization_members reads organization_members ──────────
  *
@@ -1987,17 +2010,18 @@ export function teamsPolicySql(schemaName: string, tableName: TeamsTable): strin
   const joined = `SELECT m."organization_id"::text FROM ${members} m WHERE m."user_id"::text = ${callerOnce}`
   /** Organizations the caller is an owner or admin member of. */
   const administered = `${joined} AND m."role"::text IN ('owner', 'admin')`
-  /** Invitations the caller may read and withdraw. */
+  /** Invitations the caller may read, and withdraw while they are pending. */
   const manages = `("organization_id"::text IN (${owned}) OR "organization_id"::text IN (${administered}))`
   /**
-   * Invitations the caller may create or change: any in an organization they
-   * own, and in one they administer only an invitation to be a member or an
-   * admin. The roles are listed, not the one refused, so `Owner` or a role
-   * the app adds later is the owner's to hand out too.
+   * Invitations the caller may write: any in an organization they own, and in
+   * one they administer only an invitation to be a member or an admin. The
+   * roles are listed, not the one refused, so `Owner` or a role the app adds
+   * later is the owner's to hand out too.
    */
   const writes =
     `("organization_id"::text IN (${owned}) OR ` +
     `("organization_id"::text IN (${administered}) AND "role"::text IN ('member', 'admin')))`
+  const fn = (name: string) => `"${schemaName}"."${name}"`
 
   switch (tableName) {
     case 'organizations':
@@ -2020,6 +2044,29 @@ export function teamsPolicySql(schemaName: string, tableName: TeamsTable): strin
         CREATE POLICY backenly_teams_delete ON ${t}
           FOR DELETE
           USING (${svc} OR "owner_user_id"::text = ${callerOnce});
+
+        CREATE OR REPLACE FUNCTION ${fn(TEAMS_TRIGGERS.organizations)}() RETURNS trigger
+          LANGUAGE plpgsql
+          SET search_path = pg_catalog
+        AS $teams$
+        BEGIN
+          IF ${svc} THEN
+            RETURN NEW;
+          END IF;
+          IF TG_OP = 'INSERT' THEN
+            NEW."id" := gen_random_uuid();
+          ELSIF NEW."id" IS DISTINCT FROM OLD."id" THEN
+            RAISE EXCEPTION 'an organization''s id is chosen by the server and cannot be changed' USING ERRCODE = '42501';
+          END IF;
+          RETURN NEW;
+        END
+        $teams$;
+
+        DROP TRIGGER IF EXISTS ${TEAMS_TRIGGERS.organizations} ON ${t};
+
+        CREATE TRIGGER ${TEAMS_TRIGGERS.organizations}
+          BEFORE INSERT OR UPDATE OF "id" ON ${t}
+          FOR EACH ROW EXECUTE FUNCTION ${fn(TEAMS_TRIGGERS.organizations)}();
       `
     case 'organization_members':
       return `
@@ -2052,19 +2099,56 @@ export function teamsPolicySql(schemaName: string, tableName: TeamsTable): strin
 
         CREATE POLICY backenly_teams_insert ON ${t}
           FOR INSERT
-          WITH CHECK (${svc} OR (${writes} AND "invited_by_user_id"::text = ${callerOnce}));
+          WITH CHECK (${svc} OR (${writes} AND "invited_by_user_id"::text = ${callerOnce} AND "accepted_at" IS NULL));
 
         CREATE POLICY backenly_teams_update ON ${t}
           FOR UPDATE
-          USING (${svc} OR ${writes})
-          WITH CHECK (${svc} OR (${writes} AND "invited_by_user_id"::text = ${callerOnce}));
+          USING (${svc})
+          WITH CHECK (${svc});
 
         CREATE POLICY backenly_teams_delete ON ${t}
           FOR DELETE
-          USING (${svc} OR ${manages});
+          USING (${svc} OR (${manages} AND "accepted_at" IS NULL));
+
+        CREATE OR REPLACE FUNCTION ${fn(TEAMS_TRIGGERS.organization_invitations)}() RETURNS trigger
+          LANGUAGE plpgsql
+          SET search_path = pg_catalog
+        AS $teams$
+        BEGIN
+          IF NEW."token" IS NULL THEN
+            RETURN NEW;
+          END IF;
+          IF NEW."token" ~ '^sha256:[0-9a-f]{64}$' THEN
+            IF ${svc} THEN
+              RETURN NEW;
+            END IF;
+            RAISE EXCEPTION 'send the invitation token itself: only its hash is kept' USING ERRCODE = '22023';
+          END IF;
+          IF NEW."token" !~ '^[A-Za-z0-9_-]{32,512}$' THEN
+            RAISE EXCEPTION 'an invitation token is 32 to 512 characters of A-Z, a-z, 0-9, - and _ (16 random bytes in hex, or 24 in base64url)' USING ERRCODE = '22023';
+          END IF;
+          NEW."token" := 'sha256:' || encode(sha256(convert_to(NEW."token", 'UTF8')), 'hex');
+          RETURN NEW;
+        END
+        $teams$;
+
+        DROP TRIGGER IF EXISTS ${TEAMS_TRIGGERS.organization_invitations} ON ${t};
+
+        CREATE TRIGGER ${TEAMS_TRIGGERS.organization_invitations}
+          BEFORE INSERT OR UPDATE OF "token" ON ${t}
+          FOR EACH ROW EXECUTE FUNCTION ${fn(TEAMS_TRIGGERS.organization_invitations)}();
       `
   }
 }
+
+/**
+ * The triggers the teams rules put on two of the tables (teamsPolicySql), by
+ * table: the organization's id, and the invitation's token.
+ */
+export const TEAMS_TRIGGERS = {
+  organizations: 'backenly_teams_organization_id',
+  organization_invitations: 'backenly_teams_invitation_token',
+} as const
 
 async function installTeamsPolicy(projectId: string, tableName: TeamsTable, schemaName: string) {
   await execStatements(projectId, teamsPolicySql(schemaName, tableName))
@@ -3061,7 +3145,7 @@ function getUsingExpression(
       return tableName === 'organization_members'
         ? `reads, deletes: user_id = current_user_id; inserts: own row, into an organization the user owns; updates: service_role only`
         : tableName === 'organization_invitations'
-          ? `reads, deletes: organization_id IN (organizations the user owns, or is an owner or admin member of); writes: any role where the user owns it, role IN ('member','admin') where they administer it, recording invited_by_user_id = current_user_id`
+          ? `reads: organization_id IN (organizations the user owns, or is an owner or admin member of); inserts: any role where the user owns it, role IN ('member','admin') where they administer it, invited_by_user_id = current_user_id, not accepted; updates: service_role only; deletes: by those readers, while not accepted; token kept as its SHA-256`
           : `owner_user_id = current_user_id OR id IN (organizations the user is a member of) (SELECT); owner_user_id = current_user_id (write)`
     case 'own_rows': return `"${uidColumn}"::text = current_user_id`
     case 'own_rows_read': return `reads: "${uidColumn}"::text = current_user_id; writes: service_role only`
@@ -3093,8 +3177,8 @@ function getPolicyDescription(
       return tableName === 'organization_members'
         ? `Teams: each user reads their own memberships and may leave them, and adds themselves only to an organization they own; every other membership and every role change is the server's (accept-invite, or a service-role key)`
         : tableName === 'organization_invitations'
-          ? `Teams: invitations are read and withdrawn by the organization's owner and admins; the owner invites with any role, an admin only as a member or an admin; each records whoever wrote it as the inviter`
-          : `Teams: an organization is read by its owner and its members, and created, changed or deleted only by its owner`
+          ? `Teams: invitations are read by the organization's owner and admins and withdrawn by them while pending; the owner invites with any role, an admin only as a member or an admin; each records whoever wrote it, never changes once written, and keeps only its token's hash`
+          : `Teams: an organization is read by its owner and its members, created, changed or deleted only by its owner, and given its id by the server`
     case 'own_rows': return `Users can only access rows where "${uidColumn}" matches their user ID`
     case 'own_rows_read': return `Users can read rows where "${uidColumn}" matches their user ID; only service-role API keys can write, because these rows grant access`
     case 'party_rows': {

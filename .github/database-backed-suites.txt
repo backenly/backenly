@@ -2073,11 +2073,16 @@ tests/integration/grant-tables-on-every-path.spec.ts
 # of the three; the invitee joins through accept-invite run as a NOSUPERUSER
 # NOBYPASSRLS member of the owning role; a member leaves. Only the owner invites
 # an owner: an admin's owner invitation is refused, and accept-invite honours an
-# owner invitation only from the owner. A project with the rules earlier
-# releases gave them is found, secured as one healthy change Backenly made, and
-# a rule a person chose is kept; a membership that looks like the old self-join
-# is listed in both modes and never removed. A provisioned project, the real
-# executor, route and change ledger.
+# invitation only while its inviter may still grant its role. Repairs that ask
+# for an owner's rule (FIX_WORKFLOW, SET_PERMISSION) keep the teams rules. A
+# token is kept as its hash and cannot be probed from another organization; an
+# address matches as written or ASCII-lowercased, never a case variant of an
+# existing account or a look-alike, and a refusal names no address; invitations
+# never change once written; an organization's id is the server's. A project
+# with the rules earlier releases gave them is found, secured as one healthy
+# change Backenly made, and a rule a person chose is kept; a membership that
+# looks like the old self-join is listed in both modes and never removed. A
+# provisioned project, the real executor, route and change ledger.
 tests/integration/teams-tables-access.spec.ts
 
 # A rule Backenly guessed from a name, which the request did not ask for, is

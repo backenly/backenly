@@ -125,7 +125,7 @@ export type TeamsTable = (typeof TEAMS_TABLES)[number]
 export const TEAMS_COLUMNS: Record<TeamsTable, readonly string[]> = {
   organizations: ['id', 'owner_user_id'],
   organization_members: ['organization_id', 'user_id', 'role'],
-  organization_invitations: ['organization_id', 'invited_by_user_id', 'role'],
+  organization_invitations: ['organization_id', 'invited_by_user_id', 'role', 'token', 'accepted_at'],
 }
 
 export function isTeamsTable(tableName: string): tableName is TeamsTable {
