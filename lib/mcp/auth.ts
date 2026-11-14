@@ -16,12 +16,19 @@
  *
  *   • lastUsed is updated fire-and-forget so we get fresh "active client" info
  *     in the dashboard without making every request wait on a write.
+ *
+ *   • A key or connection acts as the person who issued it, and only a project
+ *     ADMIN may issue one. Every request checks that the issuer still is one
+ *     (issuerStillAdministers), so the credential stops working when their
+ *     role is lowered or they leave the organization.
  */
 
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db/prisma'
 import { hashApiKey, timingSafeCompare } from '@/lib/auth/apiKeyAuth'
 import { protectedResourceMetadataUrl, scopeAllowsWrite, verifyAccessToken } from '@/lib/mcp/oauth'
+import { isCloudEdition } from '@/lib/edition/cloud-only'
+import { canAdministerProject } from '@/lib/edition/guard'
 
 export interface McpAuthResult {
   success: boolean
@@ -36,14 +43,48 @@ export interface McpAuthResult {
   status?: number
 }
 
+export const ISSUER_NOT_ADMIN = 'ISSUER_NOT_ADMIN'
+
+/**
+ * Whether the person who issued an MCP key or approved an OAuth connection is
+ * still an ADMIN of its project, the role issuing one takes
+ * (app/api/projects/[id]/mcp/keys, app/api/mcp/oauth/authorize). Asked on every
+ * request, so a credential follows its issuer's role as it is now: it stops
+ * working when the role is lowered or they leave the organization, and works
+ * again if the role comes back.
+ *
+ * Roles are Cloud's. On a self-hosted deployment every account operates its one
+ * project (lib/edition/single-tenant), and an account's credentials are deleted
+ * with the account.
+ */
+export async function issuerStillAdministers(userId: string, projectId: string): Promise<boolean> {
+  if (!isCloudEdition()) return true
+  return canAdministerProject(userId, projectId)
+}
+
+function issuerRefusal(credential: 'key' | 'connection'): McpAuthResult {
+  return {
+    success: false,
+    status: 401,
+    code: ISSUER_NOT_ADMIN,
+    error:
+      credential === 'key'
+        ? 'This MCP key no longer works: the person who issued it is no longer an ADMIN of this project (their role ' +
+          'changed, or they left the organization). A project ADMIN can issue a new key under Connect → Agents.'
+        : 'This connection no longer works: the person who approved it is no longer an ADMIN of this project (their ' +
+          'role changed, or they left the organization). Connect the MCP host again and have a project ADMIN approve it.',
+  }
+}
+
 /**
  * Validate an `x-api-key` header on an MCP endpoint.
  *
- *   - 401 NO_AUTH         — header missing
- *   - 401 INVALID_KEY     — key not found / expired
- *   - 403 WRONG_SCOPE     — scope is "runtime", not "mcp". User pasted their
- *                           SDK key into the MCP server.
- *   - 200                 — projectId, userId, keyId returned
+ *   - 401 NO_AUTH          — header missing
+ *   - 401 INVALID_KEY      — key not found / expired
+ *   - 403 WRONG_SCOPE      — scope is "runtime", not "mcp". User pasted their
+ *                            SDK key into the MCP server.
+ *   - 401 ISSUER_NOT_ADMIN — whoever issued the key is no longer a project ADMIN
+ *   - 200                  — projectId, userId, keyId returned
  */
 export async function authenticateMcp(request: NextRequest): Promise<McpAuthResult> {
   // OAuth first. A host that completed the browser flow sends a Bearer token
@@ -124,6 +165,8 @@ export async function authenticateMcp(request: NextRequest): Promise<McpAuthResu
     }
   }
 
+  if (!(await issuerStillAdministers(record.userId, record.projectId))) return issuerRefusal('key')
+
   prisma.apiKey
     .update({ where: { id: record.id }, data: { lastUsed: new Date() } })
     .catch(() => {})
@@ -182,6 +225,7 @@ async function authenticateBearer(token: string): Promise<McpAuthResult> {
   if (record.scope !== 'mcp') {
     return { success: false, status: 403, code: 'WRONG_SCOPE', error: 'Not an MCP connection.' }
   }
+  if (!(await issuerStillAdministers(record.userId, record.projectId))) return issuerRefusal('connection')
 
   // history: usage bookkeeping (last used, rate-limit window), not configuration
   prisma.apiKey.update({ where: { id: record.id }, data: { lastUsed: new Date() } }).catch(() => {})

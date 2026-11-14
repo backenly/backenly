@@ -178,12 +178,14 @@ export type ToolName =
   | 'apply_proposal'
   | 'list_findings'
   | 'resolve_finding'
-  // apply_migration's DROP INDEX, ALTER TABLE … DROP CONSTRAINT and ALTER COLUMN
-  // … TYPE. Not offered to a model: only the migration parser plans them
-  // (lib/mcp/migration-parser.ts), and the brain runs only what it offered.
+  // apply_migration's DROP INDEX, ALTER TABLE … DROP CONSTRAINT, ALTER COLUMN
+  // … TYPE and CREATE EXTENSION. Not offered to a model: only the migration
+  // parser plans them (lib/mcp/migration-parser.ts), and the brain runs only
+  // what it offered.
   | 'drop_index'
   | 'drop_constraint'
   | 'alter_column_type'
+  | 'install_extension'
   // Destructive
   | 'drop_table'
   | 'truncate_table'
@@ -519,6 +521,12 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
         },
         required: ['name', 'type'],
       },
+      asWritten: {
+        type: 'boolean',
+        description:
+          'true: add exactly this column with exactly the flags given, inferring nothing from its name ' +
+          '(no UNIQUE on email, no foreign key on *_id). apply_migration sets it for ADD COLUMN.',
+      },
     },
     ['tableName', 'column']),
   fn('create_index',
@@ -545,6 +553,13 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
         type: 'string',
         enum: ['btree', 'gin', 'gist', 'hash', 'brin'],
         description: 'Index method. Defaults to btree; use gin for array or jsonb containment queries.',
+      },
+      operatorClasses: {
+        type: 'object',
+        additionalProperties: { type: 'string' },
+        description:
+          'Optional operator class per column, e.g. { "name": "gin_trgm_ops" } with method gin for fast ILIKE and ' +
+          'similarity search (needs the pg_trgm extension), or { "data": "jsonb_path_ops" }.',
       },
       where: {
         type: 'string',
@@ -583,9 +598,10 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
     ['bucketName']),
   fn('add_rls',
     'Add a row-level-security policy to a table. Templates:\n' +
-    '  • auto — RECOMMENDED DEFAULT. Reads the table\'s columns and foreign keys and installs the policy the schema implies: one owner column → owner_read_write, TWO OR MORE user columns → participants, ownership through a parent (order_items → orders → users) → owned_via_parent, reference data → public_read. Refuses with an explanation rather than guessing when ownership is genuinely ambiguous.\n' +
+    '  • auto — RECOMMENDED DEFAULT. Reads the table\'s columns and foreign keys and installs the policy the schema implies: one owner column → owner_read_write, TWO OR MORE user columns → participants, ownership through a parent (order_items → orders → users) → owned_via_parent, reference data → public_read, rows that grant access (user_roles, team_members, admins, invitations) → owner_read_only. Refuses with an explanation rather than guessing when ownership is genuinely ambiguous.\n' +
     '  • owner_read_write — each user can read/write only rows they own (table has ONE user column)\n' +
-    '  • participants — the row belongs to SEVERAL users and each of them can read and modify it. Use for every two-party table: connections(requester_id, addressee_id), conversations(user_a, user_b), messages(sender_id, recipient_id), follows, matches, invitations. owner_read_write is WRONG on these — it grants access to one side and locks the other out of their own row. Pass `partyColumns` to be explicit, or omit it and the foreign keys are read.\n' +
+    '  • owner_read_only — each user reads the rows they own; only service-role keys write. For rows that GRANT access (roles, memberships, permissions, invitations): with owner_read_write a user could insert the row that makes them an admin or a member of someone else\'s team. Your server writes these (an invite accepted, a role assigned).\n' +
+    '  • participants — the row belongs to SEVERAL users and each of them can read and modify it. Use for every two-party table: connections(requester_id, addressee_id), conversations(user_a, user_b), messages(sender_id, recipient_id), follows, matches. owner_read_write is WRONG on these — it grants access to one side and locks the other out of their own row. Pass `partyColumns` to be explicit, or omit it and the foreign keys are read.\n' +
     '  • owned_via_parent — the row belongs to whoever owns its PARENT row. Use for tables with no user column of their own but a foreign key to a user-owned table: line items, shipping addresses, saved cards, messages in a conversation. Works when the parent is itself two-party, so a message is visible to both participants. Without this such tables are readable by any API key.\n' +
     '  • public_read — anyone can read, only the owner can write (blogs, marketplaces)\n' +
     '  • org_members — multi-tenant B2B: users can access rows where organization_id matches an org they belong to. REQUIRES the table to have an organization_id column AND the project to have enable_teams already run.\n' +
@@ -618,7 +634,7 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
       policy: {
         type: 'string',
         enum: [
-          'auto', 'owner_read_write', 'participants', 'owned_via_parent', 'public_read',
+          'auto', 'owner_read_write', 'owner_read_only', 'participants', 'owned_via_parent', 'public_read',
           'org_members', 'admin_only', 'all_access', 'admin_read_all', 'role_based',
           'moderator_access', 'custom',
         ],
@@ -906,7 +922,7 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
     { webhookId: { type: 'string', description: 'From list_webhooks.' } },
     ['webhookId']),
   fn('list_webhook_logs',
-    'Delivery history of one outbound webhook endpoint, newest first: status, HTTP code, attempts, error, the receiver\'s response and the payload.',
+    'Delivery history of one outbound webhook endpoint, newest first: status, HTTP code, attempts, error and the receiver\'s response. The payload sent is not returned: it is the project\'s row data.',
     {
       webhookId: { type: 'string', description: 'From list_webhooks.' },
       limit: { type: 'integer', minimum: 1, maximum: 200 },
@@ -1639,6 +1655,8 @@ export const TOOL_TO_ACTION: Record<string, (args: any) => AIAction> = {
       nullable: a.column?.nullable,
       default: a.column?.default,
       column: a.column,
+      // From SQL (lib/mcp/migration-parser.ts): nothing is inferred from the name.
+      ...(a.asWritten === true ? { asWritten: true } : {}),
     },
   }),
   // Every declared field is forwarded. A mapper that quietly drops one is the
@@ -1653,6 +1671,7 @@ export const TOOL_TO_ACTION: Record<string, (args: any) => AIAction> = {
       unique: !!a.unique,
       indexName: a.indexName,
       method: a.method,
+      operatorClasses: a.operatorClasses,
       where: a.where,
     },
   }),
@@ -1734,6 +1753,8 @@ export const TOOL_TO_ACTION: Record<string, (args: any) => AIAction> = {
             auto: 'auto',
             owner_read_write: 'own_rows',
             own_rows: 'own_rows',
+            owner_read_only: 'own_rows_read',
+            own_rows_read: 'own_rows_read',
             participants: 'party_rows',
             party_rows: 'party_rows',
             owned_via_parent: 'related_rows',
@@ -2374,7 +2395,7 @@ export async function dispatchTool(
         '## 2. Build',
         '- **Building an app?** Design its whole data model before writing any of it: every table its features need, with foreign keys, CHECKs and indexes. Send it as ONE `apply_migration`, parents first; it lands as one governed, verified, reversible change, with REST and row-level security on every table. Then `storage { action: "create_bucket" }` for each kind of upload, `auth { action: "enable" }`, and realtime on the tables that update live. A table at a time, or the app described to `backend_chat`, takes many more calls to reach the same backend.',
         '- On a project whose production is protected, `apply_migration` without a `branchId` is refused with BRANCH_REQUIRED, and so is a schema change asked of `backend_chat`: build the schema on a branch (below) and merge it.',
-        '- `apply_migration { sql }` for schema. Ordinary PostgreSQL DDL: CREATE TABLE, ALTER TABLE ADD COLUMN / RENAME COLUMN / ADD CONSTRAINT, CREATE INDEX. Multiple statements, semicolon-separated. Your DDL is applied AS WRITTEN — declared NOT NULL, DEFAULT and nullability are honoured exactly. Every table also gets `id`, `"createdAt"`, `"updatedAt"` (camelCase) and `"deleted_at"`; a declared `id`, `created_at` or `updated_at` is skipped in their favour and reported, so order by `"createdAt"`.',
+        '- `apply_migration { sql }` for schema. Ordinary PostgreSQL DDL: CREATE TABLE, ALTER TABLE ADD COLUMN / RENAME COLUMN / ADD CONSTRAINT, CREATE INDEX, and CREATE EXTENSION for an extension on Backenly\'s allowlist, such as pg_trgm for fast ILIKE and similarity search or citext (`read_backend_state { section: "schema" }` lists them). An extension is installed for the whole database, so every project on it can use it, and it is never removed. Multiple statements, semicolon-separated. Your DDL is applied AS WRITTEN — declared NOT NULL, DEFAULT and nullability are honoured exactly. Every table also gets `id`, `"createdAt"`, `"updatedAt"` (camelCase) and `"deleted_at"`; a declared `id`, `created_at` or `updated_at` is skipped in their favour and reported, so order by `"createdAt"`.',
         '- One tool per dashboard section, each with an `action`: `auth`, `storage`, `functions`, `realtime`, `integrations`, `monitoring`, `autonomy`, `webhooks`, `deploy`, `connect`. Each tool\'s description lists its actions and the arguments they need, e.g. `auth { action: "enable" }`, `storage { action: "create_bucket", bucketName }`, `integrations { action: "connect", integrationId, apiKey }`.',
         '- `set_rls` for row-level security as exact SQL; `generate_types` for TypeScript types after a schema change.',
         '- `backend_chat { message }` for anything you would rather describe than specify ("add likes and comments to posts"), or that no tool above covers. The brain plans, executes and verifies, and draws AI credits. A call answers within about 45 s; a request that takes longer keeps running and answers `status: "running"` with a run id, and `backend_chat { message: "status" }` waits for it and returns its result. Whenever an answer carries `next`, the request is not finished: make that call.',
@@ -2437,6 +2458,8 @@ export async function dispatchTool(
       const relLines = meta.relationships.length
         ? meta.relationships.map((r) => `• ${r.from}.${r.column} → ${r.to}.${r.toColumn}`).join('\n')
         : '_No foreign-key relationships._'
+      const installed = meta.extensions.installed.map((e) => `${e.name}${e.version ? ` ${e.version}` : ''}`).join(', ') || 'none'
+      const installable = meta.extensions.installable.map((e) => e.name).join(', ') || 'none'
       const summary =
         `**Backend metadata**\n\n` +
         `**Tables (${meta.tables.length})**\n${tableLines}\n\n` +
@@ -2444,7 +2467,8 @@ export async function dispatchTool(
         `**Auth:** ${meta.auth.enabled ? meta.auth.providers.join(', ') || 'enabled' : 'disabled'} · ` +
         `**Storage:** ${meta.storage.buckets.length} bucket(s) · ` +
         `**Realtime:** ${meta.realtime.tables.length} table(s) · ` +
-        `**Functions:** ${meta.functions.count}`
+        `**Functions:** ${meta.functions.count}\n\n` +
+        `**Extensions** (database-wide): installed ${installed}; installable with CREATE EXTENSION in apply_migration: ${installable}`
       return finalize({ ok: true, summary: clip(summary), data: meta })
     }
 
@@ -2605,6 +2629,22 @@ export async function dispatchTool(
         ok: false,
         summary: [failed.error, failed.detail, failed.hint].filter(Boolean).join(' '),
         code: failed.code,
+      })
+    }
+
+    // ── An extension, from a migration's CREATE EXTENSION ──────────────────
+    // Planned only by the migration parser: no model is offered this name and
+    // it is not on the MCP surface, so apply_migration is its one door. It is
+    // the console's install, with its allowlist, live checks and refusals
+    // (lib/services/extensions.ts, which says why it waits for nobody).
+    if (name === 'install_extension') {
+      const { installForMigration } = await import('@/lib/services/extensions')
+      const r = await installForMigration(ctx.projectId, args, ctx.userId)
+      return finalize({
+        ok: r.ok,
+        summary: r.summary,
+        ...(r.code ? { code: r.code } : {}),
+        ...(r.ok ? { data: { extension: String(args.name ?? ''), version: r.outcome.version, schema: r.outcome.schema, alreadyInstalled: r.outcome.alreadyInstalled } } : {}),
       })
     }
 
@@ -4033,6 +4073,7 @@ export function humanTitle(name: string, args: Record<string, unknown>): string 
     case 'drop_index': return `Dropping index ${args.indexName ?? ''}`.trim()
     case 'drop_constraint': return `Dropping constraint ${args.constraintName ?? ''} from ${args.tableName ?? ''}`.trim()
     case 'alter_column_type': return `Changing the type of ${args.tableName ?? ''}.${args.columnName ?? ''} to ${args.sqlType ?? args.newType ?? '…'}`
+    case 'install_extension': return `Installing the ${args.name ?? ''} extension`
     case 'disable_realtime': return args.tableName ? `Disabling realtime on ${args.tableName}` : 'Disabling realtime project-wide'
     case 'rename_column': return `Renaming ${args.oldName ?? ''} → ${args.newName ?? ''} on ${args.tableName ?? ''}`.trim()
     case 'add_constraint': {

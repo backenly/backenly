@@ -427,7 +427,7 @@ function RunResult({ result, onClose }: { result: TestRunResult; onClose: () => 
           {httpStatus === 400
             ? 'The endpoint answered 400 to the empty test event. If its code validates input, it will answer normally when your app sends a real payload. The response body below shows what it said.'
             : httpStatus === 401 || httpStatus === 403
-            ? 'Test runs call the endpoint with your project’s admin credentials. This response means the endpoint also checks ownership of specific records, or a credential this run didn’t carry. The auth gate itself is working.'
+            ? 'Test runs call the endpoint as your project’s admin. This response means the endpoint also checks ownership of specific records, or a credential this run didn’t carry. The auth gate itself is working.'
             : httpStatus === 404
             ? 'The endpoint ran correctly. The test run’s synthetic user has no matching records yet, so it answered 404 as designed.'
             : `The endpoint ran and answered HTTP ${httpStatus}, a response from its own validation logic rather than a code failure.`}

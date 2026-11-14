@@ -13,6 +13,10 @@
  * them, a signed-in end user by their email from the project's own users
  * table. A file uploaded before this was recorded says nothing rather than
  * guessing.
+ *
+ * Writing to storage now needs a signed-in end user or a service key
+ * (requireStorageWriter), so an anonymous file is one uploaded before that:
+ * written here as its row was, and still named for what it is.
  */
 import '@/tests/helpers/real-web-standard'
 import os from 'os'
@@ -36,7 +40,7 @@ let serviceKey = ''
 const shopperToken = () =>
   jwt.sign({ userId: SHOPPER, projectId, role: 'user' }, PROJECT_JWT_SECRET, { algorithm: 'HS256', expiresIn: '1h' })
 
-async function apiUpload(name: string, key: string, userToken?: string) {
+async function apiUpload(name: string, key: string, userToken?: string, expected = 200) {
   const { POST } = await import('@/app/api/v1/[projectId]/storage/upload/route')
   const form = new FormData()
   form.set('file', new File([`bytes of ${name}`], name, { type: 'text/plain' }))
@@ -48,7 +52,7 @@ async function apiUpload(name: string, key: string, userToken?: string) {
     new NextRequest(`http://localhost:3000/api/v1/${projectId}/storage/upload`, { method: 'POST', headers, body: form }),
     { params: Promise.resolve({ projectId }) },
   )
-  expect(res.status).toBe(200)
+  expect(res.status).toBe(expected)
 }
 
 const session = async () => `auth-token=${(await createSession(ownerId, ownerEmail)).token}`
@@ -116,11 +120,21 @@ beforeAll(async () => {
   await prisma.storageBucket.create({ data: { name: 'photos', projectId, isPublic: true, accessPolicy: 'public_read' } })
 
   await apiUpload('mug.txt', publicKey, shopperToken())
-  await apiUpload('anon.txt', publicKey)
+  // The public key alone may not upload any more.
+  await apiUpload('anon.txt', publicKey, undefined, 401)
   await apiUpload('feed.txt', serviceKey)
   await consoleUpload('banner.txt')
-  // A file from before the uploader was recorded: nothing but a null uploadedBy.
   const bucket = await prisma.storageBucket.findFirstOrThrow({ where: { projectId, name: 'photos' } })
+  // An anonymous upload from before uploads needed a user: its row as the
+  // upload route wrote it then, with the key it came with.
+  const webApp = await prisma.apiKey.findFirstOrThrow({ where: { projectId, name: 'web app' }, select: { id: true } })
+  await prisma.storageFile.create({
+    data: {
+      bucketId: bucket.id, projectId, name: 'anon.txt', path: `${projectId}/anon.txt`, size: BigInt(3), mimeType: 'text/plain',
+      metadata: { uploader: { kind: 'anonymous', apiKeyId: webApp.id } },
+    },
+  })
+  // A file from before the uploader was recorded: nothing but a null uploadedBy.
   await prisma.storageFile.create({
     data: { bucketId: bucket.id, projectId, name: 'old.txt', path: `${projectId}/old.txt`, size: BigInt(3), mimeType: 'text/plain' },
   })
@@ -138,7 +152,7 @@ afterAll(async () => {
 }, 60_000)
 
 describe('the Storage page names who sent each file', () => {
-  it('an upload with only the public key is Anonymous', async () => {
+  it('an upload made with only the public key, before uploads needed a user, is Anonymous', async () => {
     expect((await consoleListing())['anon.txt']).toEqual({ kind: 'anonymous', label: 'Anonymous' })
   })
 
@@ -182,7 +196,7 @@ describe('every upload path records who sent the file', () => {
     expect((row.metadata as any).uploader).toEqual({ kind: 'end_user' })
   }, 60_000)
 
-  it('a signed upload records an anonymous caller and the key it used', async () => {
+  it('a signed upload records a server and the key it used', async () => {
     const { POST } = await import('@/app/api/v1/[projectId]/storage/signed-upload/route')
     const before = { driver: process.env.STORAGE_DRIVER, bucket: process.env.STORAGE_S3_BUCKET, region: process.env.STORAGE_S3_REGION }
     process.env.STORAGE_DRIVER = 's3'
@@ -194,7 +208,7 @@ describe('every upload path records who sent the file', () => {
       const res = await POST(
         new NextRequest(`http://localhost:3000/api/v1/${projectId}/storage/signed-upload`, {
           method: 'POST',
-          headers: { 'content-type': 'application/json', 'x-api-key': publicKey },
+          headers: { 'content-type': 'application/json', 'x-api-key': serviceKey },
           body: JSON.stringify({ filename: 'movie.mp4', contentType: 'video/mp4', contentLength: 2048, bucket: 'photos' }),
         }),
         { params: Promise.resolve({ projectId }) },
@@ -202,9 +216,9 @@ describe('every upload path records who sent the file', () => {
       expect(res.status).toBe(200)
       const { fileId } = (await res.json()).data
       const row = await prisma.storageFile.findUniqueOrThrow({ where: { id: fileId }, select: { uploadedBy: true, metadata: true } })
-      const key = await prisma.apiKey.findFirstOrThrow({ where: { projectId, name: 'web app' }, select: { id: true } })
+      const key = await prisma.apiKey.findFirstOrThrow({ where: { projectId, name: 'backend' }, select: { id: true } })
       expect(row.uploadedBy).toBeNull()
-      expect((row.metadata as any).uploader).toEqual({ kind: 'anonymous', apiKeyId: key.id })
+      expect((row.metadata as any).uploader).toEqual({ kind: 'server_key', apiKeyId: key.id })
     } finally {
       process.env.STORAGE_DRIVER = before.driver
     }

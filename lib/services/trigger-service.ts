@@ -151,6 +151,9 @@ async function fireWebhookWithDLQ(
   event: TriggerEvent
 ): Promise<TriggerResult> {
   const payload = buildWebhookPayload(trigger, event)
+  // One id for the delivery, sent with every attempt and kept as its log row's
+  // id, so a receiver can drop an attempt it has already handled.
+  const deliveryId = crypto.randomUUID()
 
   let attempts = 0
   let lastError: string | undefined
@@ -160,7 +163,7 @@ async function fireWebhookWithDLQ(
     const { result, attempts: att } = await withRetry(
       async () => {
         attempts++
-        const { statusCode } = await executeWebhookRequest(trigger, payload)
+        const { statusCode } = await executeWebhookRequest(trigger, payload, deliveryId)
         lastStatusCode = statusCode
       },
       3,
@@ -169,7 +172,7 @@ async function fireWebhookWithDLQ(
     attempts = att
 
     // SUCCESS — log delivery
-    await recordDelivery(projectId, trigger, event, payload, {
+    await recordDelivery(deliveryId, projectId, trigger, event, payload, {
       status: 'SUCCESS',
       attemptCount: attempts,
       statusCode: lastStatusCode,
@@ -187,7 +190,7 @@ async function fireWebhookWithDLQ(
     lastError = err.message
 
     // DEAD — all retries exhausted, push to DLQ
-    await recordDelivery(projectId, trigger, event, payload, {
+    await recordDelivery(deliveryId, projectId, trigger, event, payload, {
       status: 'DEAD',
       attemptCount: attempts,
       statusCode: lastStatusCode,
@@ -227,6 +230,7 @@ async function fireWebhookWithDLQ(
  * of a failure on the row (lib/data-plane/regional-bodies.ts).
  */
 async function recordDelivery(
+  id: string,
   projectId: string,
   trigger: { id: string },
   event: TriggerEvent,
@@ -234,7 +238,6 @@ async function recordDelivery(
   outcome: { status: 'SUCCESS' | 'DEAD'; attemptCount: number; statusCode?: number; error?: string; deliveredAt?: Date },
 ): Promise<void> {
   const bodies = await regionalBodiesFor(projectId)
-  const id = crypto.randomUUID()
   await bodies.set('trigger', id, { payload, ...(outcome.error !== undefined ? { error: outcome.error } : {}) })
 
   await prisma.triggerDeliveryLog.create({
@@ -286,7 +289,7 @@ export async function replayDelivery(
   }
 
   try {
-    const { statusCode } = await executeWebhookRequest(trigger, payload)
+    const { statusCode } = await executeWebhookRequest(trigger, payload, deliveryLogId)
 
     // Mark original log as SUCCESS
     await prisma.triggerDeliveryLog.update({
@@ -360,9 +363,21 @@ function buildWebhookPayload(trigger: any, event: TriggerEvent): Record<string, 
   }
 }
 
+/**
+ * One attempt at a trigger's webhook.
+ *
+ * With a signing secret, each attempt carries X-Backenly-Timestamp (unix
+ * seconds, when the attempt is sent) and X-Backenly-Signature-V2: the
+ * signature endpoint deliveries carry (lib/webhooks/index.ts), HMAC-SHA256 of
+ * `<timestamp>.<X-Backenly-Delivery>.<raw body>`. A receiver checks it and
+ * refuses a timestamp more than five minutes old or a delivery id it has
+ * already handled. X-Backenly-Signature, over the body alone, is still sent
+ * for receivers that check it.
+ */
 async function executeWebhookRequest(
   trigger: any,
-  payload: Record<string, any>
+  payload: Record<string, any>,
+  deliveryId: string,
 ): Promise<{ statusCode: number }> {
   if (!trigger.webhookUrl) {
     throw new Error('webhook trigger requires webhookUrl')
@@ -375,6 +390,7 @@ async function executeWebhookRequest(
     'X-Backenly-Trigger': trigger.name,
     'X-Backenly-Event': payload.event,
     'X-Backenly-Table': payload.table,
+    'X-Backenly-Delivery': deliveryId,
   }
 
   // Sign payload if secret configured
@@ -384,6 +400,10 @@ async function executeWebhookRequest(
       .update(body)
       .digest('hex')
     headers['X-Backenly-Signature'] = `sha256=${signature}`
+    const { generateTimestampedSignature } = await import('@/lib/webhooks')
+    const timestamp = Math.floor(Date.now() / 1000)
+    headers['X-Backenly-Timestamp'] = String(timestamp)
+    headers['X-Backenly-Signature-V2'] = generateTimestampedSignature(timestamp, deliveryId, body, trigger.webhookSecret)
   }
 
   // safeFetch, NOT fetch — the same guard endpoint webhooks already deliver

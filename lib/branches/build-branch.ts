@@ -152,7 +152,10 @@ export function schemaCallSql(tool: string, args: Record<string, unknown>): { sq
       const name = typeof args.indexName === 'string' && args.indexName.trim() ? ` ${ident(args.indexName.trim())}` : ''
       const method = typeof args.method === 'string' && args.method.trim() ? ` USING ${args.method.trim().toLowerCase()}` : ''
       const where = typeof args.where === 'string' && args.where.trim() ? ` WHERE ${args.where.trim()}` : ''
-      return { sql: `CREATE ${args.unique === true ? 'UNIQUE ' : ''}INDEX${name} ON ${t}${method} (${columns.map(ident).join(', ')})${where}` }
+      // A column's operator class (`name gin_trgm_ops`) is written after it, as SQL does.
+      const classes = args.operatorClasses && typeof args.operatorClasses === 'object' ? (args.operatorClasses as Record<string, unknown>) : {}
+      const item = (c: string) => (typeof classes[c] === 'string' && classes[c] ? `${ident(c)} ${ident(String(classes[c]))}` : ident(c))
+      return { sql: `CREATE ${args.unique === true ? 'UNIQUE ' : ''}INDEX${name} ON ${t}${method} (${columns.map(item).join(', ')})${where}` }
     }
     case 'rename_column': {
       const from = String(args.oldName ?? '').trim()

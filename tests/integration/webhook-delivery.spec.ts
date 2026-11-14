@@ -42,6 +42,7 @@ import type { AddressInfo } from 'net'
 import {
   generateWebhookSignature,
   verifyWebhookSignature,
+  verifyTimestampedSignature,
   triggerWebhooks,
   createWebhook,
   getWebhook,
@@ -366,6 +367,24 @@ describe('delivery', () => {
 
     // De-duplication handle for at-least-once delivery.
     expect(got.headers['x-webhook-delivery']).toBeTruthy()
+
+    // The timestamped signature: the body-only one above verifies forever, so
+    // a captured delivery could be sent again at will. This one covers the
+    // time and the delivery id, and a receiver refuses a stale one.
+    const timestamp = got.headers['x-webhook-timestamp'] as string
+    const v2 = got.headers['x-webhook-signature-v2'] as string
+    const deliveryId = got.headers['x-webhook-delivery'] as string
+    expect(timestamp).toMatch(/^\d{10}$/)
+    expect(Math.abs(Date.now() / 1000 - Number(timestamp))).toBeLessThan(120)
+    expect(v2).toMatch(/^sha256=[0-9a-f]{64}$/)
+    expect(verifyTimestampedSignature({ payload: got.raw, deliveryId, timestamp, signature: v2, secret: hook.secret })).toBe(true)
+    // Replayed six minutes later, the same request is refused…
+    expect(verifyTimestampedSignature({
+      payload: got.raw, deliveryId, timestamp, signature: v2, secret: hook.secret, now: Date.now() + 6 * 60 * 1000,
+    })).toBe(false)
+    // …and a fresh timestamp or another delivery id cannot be put on it.
+    expect(verifyTimestampedSignature({ payload: got.raw, deliveryId, timestamp: Number(timestamp) + 60, signature: v2, secret: hook.secret })).toBe(false)
+    expect(verifyTimestampedSignature({ payload: got.raw, deliveryId: crypto.randomUUID(), timestamp, signature: v2, secret: hook.secret })).toBe(false)
 
     // The log is the durable record, and it records the receiver's answer.
     const success = await waitForLog(hook.id, l => l.status === 'SUCCESS')

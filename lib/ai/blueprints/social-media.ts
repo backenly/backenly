@@ -208,7 +208,7 @@ export const SOCIAL_MEDIA_BLUEPRINT: Blueprint = {
     addRls('bookmarks', 'owner_read_write'),
     addRls('notifications', 'owner_read_write'),
     addRls('conversations', 'owner_read_write'),
-    addRls('conversation_participants', 'owner_read_write'),
+    addRls('conversation_participants', 'owner_read_only', 'Participants are written by your server: a user reads their own, and cannot add themselves to a conversation'),
     addRls('messages', 'owner_read_write'),
 
     // ── Realtime for the live surfaces ──────────────────────────────────────

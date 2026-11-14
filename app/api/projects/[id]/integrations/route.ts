@@ -3,6 +3,9 @@
  *
  * GET  /api/projects/[id]/integrations  — Active integrations + key vault statuses
  * POST /api/projects/[id]/integrations  — Activate an integration (called by AI chat)
+ *
+ * Reading is any member; turning an integration on needs write access
+ * (DEVELOPER and above), as storing its key does.
  */
 
 import { NextRequest, NextResponse } from 'next/server'
@@ -93,5 +96,5 @@ export async function POST(
     }))
 
     return NextResponse.json({ integrations: updated, activated: integrationId })
-  })
+  }, { floor: 'write' })
 }

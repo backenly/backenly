@@ -55,6 +55,7 @@ export interface BlueprintColumn {
 /** RLS template names accepted by the add_rls tool. */
 export type BlueprintRlsPolicy =
   | 'owner_read_write'
+  | 'owner_read_only'
   | 'public_read'
   | 'org_members'
   | 'admin_only'

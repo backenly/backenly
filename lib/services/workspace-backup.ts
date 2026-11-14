@@ -628,6 +628,18 @@ export async function restoreWorkspace(
     else await replay()
     renamed = true
 
+    // The replay re-created the realtime notify and presence functions as the
+    // snapshot held them, which may be an older release's: the current ones go
+    // in at once (lib/realtime/channels.ts). Logged, never a failed restore.
+    try {
+      const { bringProjectFunctionsCurrent } = await import('@/lib/realtime/channels')
+      await bringProjectFunctionsCurrent(projectId)
+    } catch (fnErr: any) {
+      console.warn(
+        `[Restore] Restored ${projectId}, but its realtime functions were not brought current: ${sanitizeError(fnErr?.message ?? '')}`
+      )
+    }
+
     // From here the restore has happened: nothing below may report it failed.
     const [{ count }] = await db.$queryRawUnsafe<{ count: bigint | string }[]>(
       `SELECT count(*)::bigint AS count

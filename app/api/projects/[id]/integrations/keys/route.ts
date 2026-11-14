@@ -13,18 +13,31 @@ export const dynamic = 'force-dynamic'
  *
  * GET    /api/projects/[id]/integrations/keys
  *   Returns all masked keys for the project (safe to display in UI).
+ *
+ * The floors are the project env vars' (../../env-vars): any member reads the
+ * masked list, storing or replacing a key needs DEVELOPER, removing one needs
+ * ADMIN.
  */
 
 import { NextRequest, NextResponse } from 'next/server'
 import { withProjectAccess } from '@/lib/auth/route-protection'
 import { governedChange } from '@/lib/changes/ledger'
 import { prisma } from '@/lib/db/prisma'
+import { canAdministerProject, canWriteProject } from '@/lib/edition/guard'
 import {
   storeIntegrationKey,
   listKeyVaultStatuses,
   removeIntegrationKey,
   canonicalVaultId,
 } from '@/lib/services/integrationKeyStore'
+
+/** The answer withProjectValidation gives a member below a route's floor. */
+function belowFloor() {
+  return NextResponse.json(
+    { success: false, error: 'Project not found or access denied', code: 'PROJECT_ROLE_INSUFFICIENT' },
+    { status: 403 },
+  )
+}
 
 // ── GET — list all stored keys (masked) ───────────────────────────────────────
 
@@ -35,7 +48,9 @@ export const GET = withProjectAccess(async (_req: NextRequest, { projectId }) =>
 
 // ── POST — store or update a key ──────────────────────────────────────────────
 
-export const POST = withProjectAccess(async (req: NextRequest, { projectId }) => {
+export const POST = withProjectAccess(async (req: NextRequest, { user, projectId }) => {
+  if (!(await canWriteProject(user.userId, projectId))) return belowFloor()
+
   let body: { integrationId?: string; key?: string }
   try {
     body = await req.json()
@@ -115,7 +130,9 @@ export const POST = withProjectAccess(async (req: NextRequest, { projectId }) =>
 
 // ── DELETE — remove a key ─────────────────────────────────────────────────────
 
-export const DELETE = withProjectAccess(async (req: NextRequest, { projectId }) => {
+export const DELETE = withProjectAccess(async (req: NextRequest, { user, projectId }) => {
+  if (!(await canAdministerProject(user.userId, projectId))) return belowFloor()
+
   const { searchParams } = new URL(req.url)
   const integrationId = searchParams.get('integrationId')
 

@@ -9,9 +9,17 @@ export const dynamic = 'force-dynamic'
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { createPreviewShare, listProjectShares, revokePreviewShare, PreviewShareOptions } from '@/lib/services/previewShare';
+import {
+  createPreviewShare,
+  listProjectShares,
+  previewShareProjectId,
+  revokePreviewShare,
+  PreviewShareOptions,
+} from '@/lib/services/previewShare';
 import { z } from 'zod';
 import { withProjectAccess, withAuth } from '@/lib/auth/route-protection';
+import { roleRefusal } from '@/lib/auth/project-floor';
+import { canAccessProject, canAdministerProject } from '@/lib/edition/guard';
 
 const createShareSchema = z.object({
   accessLevel: z.enum(['read_only', 'full_preview']),
@@ -47,7 +55,7 @@ export const POST = withProjectAccess(async (request: NextRequest, { projectId, 
     console.error('Create share error:', error);
     return NextResponse.json({ error: 'Failed to create share' }, { status: 500 });
   }
-});
+}, { floor: 'administer' }); // a share link is access handed outside the team, like a report link
 
 export const GET = withProjectAccess(async (request: NextRequest, { projectId, user }) => {
   try {
@@ -87,6 +95,17 @@ export const DELETE = withAuth(async (request: NextRequest, { user }) => {
 
     if (!shareId) {
       return NextResponse.json({ error: 'Share ID required' }, { status: 400 });
+    }
+
+    // The share names its project. Someone outside that project gets the same
+    // answer as for a share that does not exist; a member needs the role that
+    // creates share links to take one down.
+    const projectId = await previewShareProjectId(shareId);
+    if (!projectId || !(await canAccessProject(user.userId, projectId))) {
+      return NextResponse.json({ error: 'Share not found or already revoked' }, { status: 404 });
+    }
+    if (!(await canAdministerProject(user.userId, projectId))) {
+      return roleRefusal(request.method);
     }
 
     const success = await revokePreviewShare(shareId, user.userId);

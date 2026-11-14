@@ -37,6 +37,8 @@
  * a drop and an add: both survive `RENAME`, and neither survives a re-create.
  */
 
+import { NOTIFY_FUNCTION_NAME } from '@/lib/realtime/channel-sql'
+
 export interface ColumnState {
   name: string
   attnum: number
@@ -392,8 +394,20 @@ export function enumLabels(o: Pick<ObjectState, 'kind' | 'definition'> | undefin
   return [...o.definition.slice(at).matchAll(/'((?:[^']|'')*)'/g)].map((m) => m[1].replace(/''/g, "'"))
 }
 
+/**
+ * The realtime notify function. Its body is Backenly's, kept current by
+ * Backenly (lib/realtime/channels.ts) rather than by a project's changes, so
+ * the history records that it exists and not which version it was.
+ */
+export function isRealtimeNotifyFunction(o: ObjectState): boolean {
+  return o.kind === 'function' && o.identity === `${NOTIFY_FUNCTION_NAME}()`
+}
+
 /** Objects compare equal when they would behave the same: kind, definition, options. */
 export function sameObject(a: ObjectState, b: ObjectState): boolean {
+  // Any two versions of the realtime notify function are the same object: a
+  // restore puts back the current body, whatever was recorded (plan.ts).
+  if (isRealtimeNotifyFunction(a) && isRealtimeNotifyFunction(b)) return true
   return a.kind === b.kind && a.definition === b.definition && JSON.stringify([...a.options].sort()) === JSON.stringify([...b.options].sort())
 }
 
@@ -403,6 +417,19 @@ const byName = <T extends { name: string }>(a: T, b: T) => (a.name < b.name ? -1
 
 /** The data plane's soft-delete policy (backenly_pgrst_apply_soft_delete). */
 export const DATA_PLANE_POLICY = 'bkn_pgrst_soft_delete'
+
+/**
+ * Direct access's pass-through policies, exactly as backenly_direct_sync_schema
+ * (scripts/setup-direct-access.sql) writes them on every table with row-level
+ * security: the project's read-only login reads every row, its read-write
+ * login writes them. Any other policy with one of these names is compared.
+ */
+export function isDirectAccessPolicy(p: PolicyState): boolean {
+  if (!p.permissive || p.using !== 'true' || p.roles.length !== 1) return false
+  if (p.name === 'bkn_direct_read') return p.cmd === 'r' && p.check === null && p.roles[0] === 'backenly_external'
+  if (p.name === 'bkn_direct_write') return p.cmd === '*' && p.check === 'true' && /^bkn_rw_[0-9a-f]{12}$/.test(p.roles[0])
+  return false
+}
 
 /** The owner default backenly_pgrst_apply_owner_defaults sets, as pg_get_expr renders it. */
 const DATA_PLANE_OWNER_DEFAULT = /^\(?(?:"[^"]+"|[A-Za-z_][A-Za-z0-9_$]*)\.backenly_jwt_claim\('sub'::text\)\)?(?:::uuid)?$/
@@ -430,6 +457,11 @@ const comparableDefault = (d: string | null | undefined) =>
  *     schema again (the PGRST106 self-heal, the schema_not_registered repair)
  *     adds both to every table outside any change, and compared, they made
  *     every earlier change "changed since" and refused its restore.
+ *   - direct access's pass-through policies (isDirectAccessPolicy), for the
+ *     same reason: its sync (lib/services/direct-access.ts, run by run_query,
+ *     the drift watch and backups) adds them to each table with row-level
+ *     security outside any change, so a change that created or protected a
+ *     table read as "changed since" once the sync had run.
  */
 export function tableSignature(t: TableState): string {
   return JSON.stringify({
@@ -437,7 +469,7 @@ export function tableSignature(t: TableState): string {
     constraints: [...t.constraints].sort(byName).map((c) => [c.name, c.type, c.definition]),
     indexes: [...t.indexes].sort(byName).map((i) => [i.name, i.definition]),
     rls: [t.rls.enabled, t.rls.forced],
-    policies: [...t.policies].filter((p) => p.name !== DATA_PLANE_POLICY).sort(byName)
+    policies: [...t.policies].filter((p) => p.name !== DATA_PLANE_POLICY && !isDirectAccessPolicy(p)).sort(byName)
       .map((p) => [p.name, p.cmd, p.permissive, [...p.roles].sort(), p.using, p.check]),
     triggers: [...t.triggers].sort(byName).map((g) => [g.name, g.definition, g.enabled]),
   })

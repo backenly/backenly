@@ -26,7 +26,7 @@ Call as `webhooks { action: "<action>", … }`.
 <!-- end generated -->
 
 - `create` returns the endpoint's signing secret once, in `data.secret`, never in the summary; store it where the receiver can read it.
-- Each delivery carries `X-Webhook-Signature: sha256=<HMAC-SHA256 of the raw body>`. Verify it against the raw bytes, before parsing.
+- Each delivery carries `X-Webhook-Timestamp` (unix seconds) and `X-Webhook-Signature-V2: sha256=<HMAC-SHA256 of "<timestamp>.<X-Webhook-Delivery>.<raw body>">`. Verify it against the raw bytes, before parsing, and refuse a timestamp more than 5 minutes old or a delivery id already handled. `X-Webhook-Signature` (the raw body alone) is still sent for older receivers.
 - `test` sends one real signed delivery now; a receiver that refuses it is recorded as a failed delivery.
 - `replay` sends a `FAILED` or `DEAD_LETTER` delivery again, as a new attempt; a delivered event is not sent twice, and a disabled endpoint is not sent to.
 - `rotate_secret` issues a new signing secret; the next delivery is signed with the new one only.

@@ -10,9 +10,8 @@ export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
 import { requireAuth } from '@/lib/auth/middleware'
-import { checkRateLimit } from '@/lib/middleware/rateLimiter'
 import { TICKET_REPLY_LIMIT } from '@/lib/support/constants'
-import { supportErrorResponse } from '@/lib/support/http'
+import { spendSupportBudget, supportErrorResponse } from '@/lib/support/http'
 import { addCustomerReply } from '@/lib/support/service'
 
 export async function POST(request: NextRequest, props: { params: Promise<{ id: string }> }) {
@@ -24,13 +23,8 @@ export async function POST(request: NextRequest, props: { params: Promise<{ id: 
     return NextResponse.json({ error: 'Authentication required' }, { status: 401 })
   }
 
-  const rl = await checkRateLimit(`support:reply:${auth.userId}`, TICKET_REPLY_LIMIT.limit, TICKET_REPLY_LIMIT.windowMs)
-  if (!rl.allowed) {
-    return NextResponse.json(
-      { error: 'Too many replies in the last hour. Please wait a little.', code: 'RATE_LIMITED' },
-      { status: 429 }
-    )
-  }
+  const refused = await spendSupportBudget('reply', auth.userId, TICKET_REPLY_LIMIT, 'Too many replies in the last hour. Please wait a little.')
+  if (refused) return refused
 
   let body: any
   try {

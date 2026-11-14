@@ -76,3 +76,25 @@ describe('a restore compares what a change made, not what the data plane keeps',
     expect(tableSignature(other)).not.toBe(tableSignature(base))
   })
 })
+
+describe('a restore compares what a change made, not what direct access keeps', () => {
+  // As backenly_direct_sync_schema (scripts/setup-direct-access.sql) writes them,
+  // on each table with row-level security, outside any change.
+  const read = { name: 'bkn_direct_read', cmd: 'r', permissive: true, roles: ['backenly_external'], using: 'true', check: null }
+  const write = { name: 'bkn_direct_write', cmd: '*', permissive: true, roles: ['bkn_rw_0123456789ab'], using: 'true', check: 'true' }
+
+  it('reads a table direct access synced afterwards as unchanged', () => {
+    const asTheChangeLeftIt = table()
+    expect(sameTable({ ...asTheChangeLeftIt, policies: [...asTheChangeLeftIt.policies, read, write] }, asTheChangeLeftIt)).toBe(true)
+  })
+
+  it('compares a policy of the same name that the sync does not write', () => {
+    const base = table()
+    const widened = { ...read, roles: ['public'] }
+    expect(sameTable({ ...base, policies: [...base.policies, widened] }, base)).toBe(false)
+    const otherCommand = { ...read, cmd: '*' }
+    expect(sameTable({ ...base, policies: [...base.policies, otherCommand] }, base)).toBe(false)
+    const otherWriter = { ...write, roles: ['authenticated'] }
+    expect(sameTable({ ...base, policies: [...base.policies, otherWriter] }, base)).toBe(false)
+  })
+})

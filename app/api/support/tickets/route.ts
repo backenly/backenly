@@ -12,10 +12,9 @@ export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
 import { requireAuth } from '@/lib/auth/middleware'
-import { checkRateLimit } from '@/lib/middleware/rateLimiter'
 import { dispatchSupportFirstResponse } from '@/lib/support/ai'
 import { TICKET_CREATE_LIMIT } from '@/lib/support/constants'
-import { supportErrorResponse } from '@/lib/support/http'
+import { spendSupportBudget, supportErrorResponse } from '@/lib/support/http'
 import { createTicket, listTickets } from '@/lib/support/service'
 
 export async function GET(request: NextRequest) {
@@ -45,13 +44,8 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'Authentication required' }, { status: 401 })
   }
 
-  const rl = await checkRateLimit(`support:create:${auth.userId}`, TICKET_CREATE_LIMIT.limit, TICKET_CREATE_LIMIT.windowMs)
-  if (!rl.allowed) {
-    return NextResponse.json(
-      { error: 'Too many cases filed in the last hour. Please wait a little.', code: 'RATE_LIMITED' },
-      { status: 429 }
-    )
-  }
+  const refused = await spendSupportBudget('create', auth.userId, TICKET_CREATE_LIMIT, 'Too many cases filed in the last hour. Please wait a little.')
+  if (refused) return refused
 
   let body: any
   try {

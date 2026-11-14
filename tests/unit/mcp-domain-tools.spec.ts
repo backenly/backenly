@@ -87,7 +87,7 @@ jest.mock('@/lib/entitlements/policy', () => ({
 import { BRAIN_TOOLS, TOOL_TO_ACTION, isDestructiveTool } from '@/lib/ai/brain/tools'
 import { riskLevelForExecutorAction } from '@/lib/operational-memory/ledger'
 import { buildCatalog, isReadOnlyTool } from '@/lib/mcp/catalog'
-import { DOMAIN_TOOLS, domainDescription, domainInputSchema, getDomainTool, needsApproval, resolveDomainAction } from '@/lib/mcp/domains'
+import { APPROVAL_MARK, DOMAIN_TOOLS, domainDescription, domainInputSchema, getDomainTool, needsApproval, resolveDomainAction } from '@/lib/mcp/domains'
 import { runApprovedCall } from '@/lib/mcp/approvals'
 import { POST } from '@/app/api/mcp/tool/route'
 
@@ -95,6 +95,11 @@ const brainNames = new Set(BRAIN_TOOLS.map((t) => t.function?.name).filter(Boole
 const everyAction = DOMAIN_TOOLS.flatMap((d) =>
   Object.entries(d.actions).map(([action, { tool }]) => ({ domain: d.name, action, tool })),
 )
+
+/** The description's line for one action ("- block_user (userId or email) [waits for approval]"), if it has one. */
+function actionLine(description: string, action: string): string | undefined {
+  return description.split('\n').find((l) => /^- ([a-z_]+)/.exec(l)?.[1] === action)
+}
 
 function call(tool: string, args: Record<string, unknown>) {
   return POST(
@@ -155,9 +160,14 @@ describe('the domain table', () => {
     for (const d of DOMAIN_TOOLS) {
       const text = domainDescription(d)
       for (const [action, { tool }] of Object.entries(d.actions)) {
-        const line = text.split('\n').find((l) => l.startsWith(`• ${action}:`))!
-        expect({ action, gated: /waits for human approval/.test(line) }).toEqual({ action, gated: needsApproval(tool) })
+        const line = actionLine(text, action)
+        expect({ action, gated: !!line?.includes(APPROVAL_MARK) }).toEqual({ action, gated: needsApproval(tool) })
       }
+    }
+    // The mark appears on action lines only, never loose in the summary.
+    for (const d of DOMAIN_TOOLS) {
+      const loose = domainDescription(d).split('\n').filter((l) => l.includes(APPROVAL_MARK) && !l.startsWith('- '))
+      expect(loose).toEqual([])
     }
   })
 
@@ -208,7 +218,7 @@ describe('what a read-only key discovers', () => {
       const t = served.get(a.domain)
       if (!t) return false
       const inEnum = (t.inputSchema.properties.action as any).enum.includes(a.action)
-      const inText = t.description.split('\n').some((line) => line.startsWith(`• ${a.action}:`))
+      const inText = actionLine(t.description, a.action) !== undefined
       return inEnum || inText
     })
     expect(leaked).toEqual([])

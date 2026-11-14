@@ -253,7 +253,7 @@ Created dynamically. Contains:
 - End-user `users` table
 - All tables the developer creates via AI
 - `_backenly_presence` — realtime presence tracking
-- Notification channel: `workspace_{projectId}_changes`
+- Notification channel: one per project, named by the platform and kept in `backenly_realtime.channel_secrets` (`lib/realtime/channels.ts`); `workspace_{projectId}_changes` is only the stream's label
 
 ### DB Files
 

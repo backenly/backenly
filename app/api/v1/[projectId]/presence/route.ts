@@ -15,7 +15,8 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server'
-import { workspaceRawClient, type WorkspaceRawClient } from '@/lib/data-plane/regional'
+import { workspaceRawClient } from '@/lib/data-plane/regional'
+import { ensurePresenceTable } from '@/lib/realtime/presence-store'
 import { clientIpFromHeaders } from '@/lib/security/client-ip'
 import { countPresenceAddress, countPresenceWrite, presenceRefusal } from '@/lib/security/shared-key-rate'
 import { regionErrorResponse } from '@/lib/api/v1/errors'
@@ -29,102 +30,6 @@ const PRESENCE_TTL_SECONDS = 60
 
 function schemaName(projectId: string) {
   return `workspace_${projectId}`
-}
-
-function channelName(projectId: string) {
-  return `workspace_${projectId}_changes`
-}
-
-// ── DDL bootstrap ─────────────────────────────────────────────────────────────
-// Module-level cache so we only run DDL once per warm function instance.
-// DDL is idempotent (IF NOT EXISTS / CREATE OR REPLACE) so cold-start repeats
-// are safe.
-const bootstrappedProjects = new Set<string>()
-
-async function ensurePresenceTable(db: WorkspaceRawClient, projectId: string): Promise<void> {
-  if (bootstrappedProjects.has(projectId)) return
-
-  const schema = schemaName(projectId)
-  const channel = channelName(projectId)
-
-  // 1. Create table
-  await db.$executeRawUnsafe(`
-    CREATE TABLE IF NOT EXISTS "${schema}"."_backenly_presence" (
-      "userId"   TEXT        NOT NULL PRIMARY KEY,
-      "metadata" JSONB       NOT NULL DEFAULT '{}',
-      "joinedAt" TIMESTAMPTZ NOT NULL DEFAULT now(),
-      "lastSeen" TIMESTAMPTZ NOT NULL DEFAULT now()
-    )
-  `)
-
-  // 2. Specialized NOTIFY function for presence events.
-  //    Fires { type: "presence", event: "join"|"leave"|"update", userId, metadata }
-  //    — NOT the generic insert/update/delete format.
-  //    UPDATE events are suppressed when only lastSeen changed (heartbeat noise).
-  await db.$executeRawUnsafe(`
-    CREATE OR REPLACE FUNCTION "${schema}".backenly_notify_presence()
-    RETURNS trigger LANGUAGE plpgsql AS $$
-    BEGIN
-      IF TG_OP = 'DELETE' THEN
-        PERFORM pg_notify(
-          '${channel}',
-          json_build_object(
-            'type',      'presence',
-            'event',     'leave',
-            'userId',    OLD."userId",
-            'timestamp', extract(epoch from clock_timestamp())
-          )::text
-        );
-        RETURN OLD;
-
-      ELSIF TG_OP = 'INSERT' THEN
-        PERFORM pg_notify(
-          '${channel}',
-          json_build_object(
-            'type',      'presence',
-            'event',     'join',
-            'userId',    NEW."userId",
-            'metadata',  NEW."metadata",
-            'timestamp', extract(epoch from clock_timestamp())
-          )::text
-        );
-        RETURN NEW;
-
-      ELSE
-        -- UPDATE: only fire if metadata actually changed, not just lastSeen heartbeat
-        IF NEW."metadata"::text IS DISTINCT FROM OLD."metadata"::text THEN
-          PERFORM pg_notify(
-            '${channel}',
-            json_build_object(
-              'type',      'presence',
-              'event',     'update',
-              'userId',    NEW."userId",
-              'metadata',  NEW."metadata",
-              'timestamp', extract(epoch from clock_timestamp())
-            )::text
-          );
-        END IF;
-        RETURN NEW;
-      END IF;
-    END;
-    $$
-  `)
-
-  // 3. Install trigger (drop first to handle function replacement)
-  await db.$executeRawUnsafe(`
-    DROP TRIGGER IF EXISTS backenly_presence_notify
-    ON "${schema}"."_backenly_presence"
-  `)
-
-  await db.$executeRawUnsafe(`
-    CREATE TRIGGER backenly_presence_notify
-      AFTER INSERT OR UPDATE OR DELETE
-      ON "${schema}"."_backenly_presence"
-      FOR EACH ROW
-      EXECUTE FUNCTION "${schema}".backenly_notify_presence()
-  `)
-
-  bootstrappedProjects.add(projectId)
 }
 
 // ── Identity ──────────────────────────────────────────────────────────────────

@@ -11,8 +11,10 @@
  *   • reserved column names (id / created_at / updated_at) are stripped
  *   • duplicate column names within a table are deduped
  *   • a table cannot be named 'users' (auth.users is platform-managed)
- *   • every table gets exactly one RLS policy — owner_read_write by default
- *   • owner_read_write tables MUST have a user_id column — added if missing
+ *   • every table gets exactly one RLS policy — owner_read_write by default,
+ *     owner_read_only for a table whose rows grant access (isGrantTable)
+ *   • owner_read_write and owner_read_only tables MUST have a user_id column —
+ *     added if missing
  *   • org_members tables MUST have an organization_id column — added if missing
  *   • needsAuth flips on whenever any owner_read_write / org_members RLS exists
  *   • realtimeTables / triggers / buckets are clamped to known shapes
@@ -29,13 +31,14 @@ import type {
   BlueprintRlsPolicy,
   BlueprintStep,
 } from './types'
+import { isGrantTable } from '@/lib/services/rls-ownership'
 
 const COLUMN_TYPES = new Set<BlueprintColumn['type']>([
   'text', 'int', 'bigint', 'boolean', 'timestamp', 'uuid', 'jsonb', 'numeric',
 ])
 
 const RLS_POLICIES = new Set<BlueprintRlsPolicy>([
-  'owner_read_write', 'public_read', 'org_members', 'admin_only', 'all_access',
+  'owner_read_write', 'owner_read_only', 'public_read', 'org_members', 'admin_only', 'all_access',
 ])
 
 const TRIGGER_OPS = new Set(['insert', 'update', 'delete'])
@@ -215,6 +218,10 @@ export function validateAndEnrichSpec(spec: unknown): ValidationResult {
   }
   for (const tn of tableMap.keys()) {
     if (!rlsByTable.has(tn)) rlsByTable.set(tn, 'owner_read_write')
+    // A row of user_roles, team_members or invitations grants access: with
+    // owner_read_write a user inserts the row that makes them an admin or a
+    // member of any team. Each user reads their own; the server writes them.
+    if (rlsByTable.get(tn) === 'owner_read_write' && isGrantTable(tn)) rlsByTable.set(tn, 'owner_read_only')
   }
 
   // ── Identity columns required by RLS ────────────────────────────────────
@@ -226,7 +233,7 @@ export function validateAndEnrichSpec(spec: unknown): ValidationResult {
     const t = tableMap.get(tn)!
     const cols = t.columns as unknown as BlueprintColumn[]
     const has = (n: string) => cols.some(c => c.name === n)
-    if (policy === 'owner_read_write') {
+    if (policy === 'owner_read_write' || policy === 'owner_read_only') {
       needsAuth = true
       if (!has('user_id')) cols.unshift({ name: 'user_id', type: 'uuid' })
     } else if (policy === 'org_members') {

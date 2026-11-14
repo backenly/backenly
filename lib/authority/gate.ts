@@ -31,6 +31,7 @@ import { DEFAULT_LEVEL, coerceAutonomyLevel, isTierAutoAllowed, type AutonomyLev
 import type { AutonomyTier } from '@/lib/autonomy/desired-state'
 import { resolveWorkspaceSchema } from '@/lib/services/workspace-pool'
 import { workspaceRawClient } from '@/lib/data-plane/regional'
+import { isGrantTable } from '@/lib/services/rls-ownership'
 import { loopPrincipals, principalsToMetadata, type PrincipalSet } from '@/lib/principal'
 
 import { actionClassForFindingType } from './action-classes'
@@ -449,5 +450,9 @@ export function applyIntentToFixDetails(
   if (decision.actionClassId !== 'tighten_policy') return details
   const intent = decision.intent
   if (!intent?.satisfied || !intent.ownerColumn) return details
-  return { ...details, rlsTemplate: 'own_rows', userIdColumn: intent.ownerColumn }
+  // A row of a table like user_roles or team_members grants access, and its
+  // owner writing it grants them that access: the owner reads it, the server
+  // writes it (own_rows_read), as the inference has it (isGrantTable).
+  const table = typeof details.tableName === 'string' ? details.tableName : ''
+  return { ...details, rlsTemplate: table && isGrantTable(table) ? 'own_rows_read' : 'own_rows', userIdColumn: intent.ownerColumn }
 }

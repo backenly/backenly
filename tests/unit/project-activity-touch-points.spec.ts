@@ -81,7 +81,7 @@ jest.mock('@/lib/auth/middleware', () => ({
 
 jest.mock('@/lib/edition', () => ({
   getProjectResolver: () => ({
-    resolveForUser: async (_u: string, id: string) => ({ id, name: 'p', userId: 'u1' }),
+    resolveForUser: async (_u: string, id: string) => ({ id, name: 'p', userId: 'u1', callerRole: 'OWNER' }),
   }),
 }))
 

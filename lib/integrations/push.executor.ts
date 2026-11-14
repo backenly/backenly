@@ -60,13 +60,19 @@ export async function executePushIntegration(
   const autoWired: string[] = ['✅ OneSignal credentials stored (App ID + REST API Key)']
 
   // device_tokens — maps end-user accounts to OneSignal player ids.
+  //
+  // Both tables are created as designed here, not as the name rules would have
+  // them (lib/db/name-rules.ts): by name `player_id` became uuid, with a key
+  // into a `players` table when the project has one, which no OneSignal id is
+  // in; `onesignal_id` became uuid NOT NULL, and `push_notifications.user_id`
+  // NOT NULL, which a broadcast, sent to no one user, cannot fill.
   const tokensTbl = await executeAction({
     action: 'CREATE_TABLE',
     params: {
       tableName: 'device_tokens',
       columns: [
         { name: 'user_id', type: 'UUID', notNull: true },
-        { name: 'player_id', type: 'TEXT', notNull: true, unique: true },
+        { name: 'player_id', type: 'TEXT', notNull: true, unique: true, sqlType: 'text' },
         { name: 'platform', type: 'TEXT' }, // 'ios' | 'android' | 'web'
         { name: 'registered_at', type: 'TIMESTAMP', default: 'NOW()' },
       ],
@@ -80,11 +86,11 @@ export async function executePushIntegration(
     params: {
       tableName: 'push_notifications',
       columns: [
-        { name: 'user_id', type: 'UUID' },
+        { name: 'user_id', type: 'UUID', nullable: true },
         { name: 'title', type: 'TEXT' },
         { name: 'body', type: 'TEXT', notNull: true },
         { name: 'status', type: 'TEXT', notNull: true, default: 'sent' },
-        { name: 'onesignal_id', type: 'TEXT' },
+        { name: 'onesignal_id', type: 'TEXT', nullable: true, sqlType: 'text' },
         { name: 'sent_at', type: 'TIMESTAMP', default: 'NOW()' },
       ],
     },

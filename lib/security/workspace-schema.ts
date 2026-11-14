@@ -57,8 +57,10 @@ export function projectIdOfWorkspaceSchema(schemaName: string): string | null {
 }
 
 /**
- * Workspace realtime notification channel name (`workspace_<id>_changes`).
- * Same validation; same rules.
+ * A project's realtime stream label (`workspace_<id>_changes`): what the SSE
+ * `connected` frame and status reports name the stream by. The notification
+ * channel that carries it is kept by the platform (lib/realtime/channels.ts)
+ * and is not this. Same validation; same rules.
  */
 export function workspaceChannelName(projectId: unknown): string {
   assertValidProjectId(projectId)
