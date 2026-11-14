@@ -59,6 +59,7 @@ import {
   StatusDot,
 } from '@/components/inspector/kit'
 import { FOCUS, PAGE_GUTTER, PAGE_WIDTH } from '@/components/console/tokens'
+import { getProject } from '@/lib/api/projects'
 import {
   integrationCatalog,
   type CatalogProvider,
@@ -149,6 +150,26 @@ interface WebhookKeyConfig extends SecondaryCredential {
   keyStatus?: KeyVaultStatus
 }
 
+/**
+ * The second credential a connected provider still needs, or null.
+ *
+ * Stripe's card read "Connected · key confirmed" from the secret key alone
+ * while its receiver answered 401 to every event: the signing secret's status
+ * was loaded and never shown. A provider is connected only with both.
+ */
+function missingSecondCredential(provider: Provider): WebhookKeyConfig | null {
+  const second = provider.webhookKey
+  return provider.enabled && second && !second.keyStatus ? second : null
+}
+
+/** A connected provider's status: its key's, unless a credential it needs is missing. */
+function connectedBadge(provider: Provider): { tone: 'operational' | 'failed' | 'attention' | 'neutral'; label: string } {
+  const missing = missingSecondCredential(provider)
+  // A key the provider rejected is the bigger problem, and says so.
+  if (missing && provider.keyStatus?.verification !== 'rejected') return { tone: 'attention', label: `${missing.label} missing` }
+  return provider.keyStatus ? keyVerificationBadge(provider.keyStatus) : { tone: 'operational', label: 'Connected' }
+}
+
 interface Provider extends Omit<CatalogProvider, 'webhookKey'> {
   /** Official brand mark — falls back to the category icon if omitted */
   logo?: React.ComponentType<{ className?: string; style?: React.CSSProperties }>
@@ -232,12 +253,14 @@ function ActivationModal({
   provider,
   category,
   projectId,
+  apiBase,
   onClose,
   onActivated,
 }: {
   provider: Provider
   category: IntegrationCategory
   projectId: string
+  apiBase: ApiBase
   onClose: () => void
   onActivated: (providerId: string) => void
 }) {
@@ -461,7 +484,7 @@ function ActivationModal({
               <label className="block">
                 <span className="mb-1.5 flex items-baseline gap-2">
                   <span className="font-mono text-[12px] text-zinc-300">{provider.webhookKey.envVar}</span>
-                  <span className="text-[12px] text-faint">Optional, add after deploying</span>
+                  <span className="text-[12px] text-faint">Can be added later</span>
                 </span>
                 <div className="relative">
                   <KitInput
@@ -486,6 +509,14 @@ function ActivationModal({
                 </div>
                 {webhookKeyError && <p role="alert" className="mt-1.5 text-[12px] text-rose-300">{webhookKeyError}</p>}
               </label>
+              {/* It read "Optional, add after deploying" while the receiver refused every event without it. */}
+              <p className="mt-2 text-[12px] leading-[18px] text-amber-200/80">{provider.webhookKey.missingMeans}</p>
+              {provider.webhookKey.endpointPath && (
+                <div className="mt-3">
+                  <p className="mb-1.5 text-[12px] text-zinc-400">Endpoint URL to add in {provider.name}:</p>
+                  <EndpointUrl apiBase={apiBase} path={provider.webhookKey.endpointPath} />
+                </div>
+              )}
               <a
                 href={provider.webhookKey.docsUrl}
                 target="_blank"
@@ -578,6 +609,132 @@ function ActivationModal({
   )
 }
 
+// ─── Second credential, on its own ────────────────────────────────────────────
+// Adding Stripe's signing secret later meant reopening the connect dialog,
+// whose Continue waited for the secret key again and whose Connect waited for
+// something to build. This stores the one credential, beside the stored key.
+
+function SecondCredentialModal({
+  provider,
+  category,
+  projectId,
+  apiBase,
+  onClose,
+  onSaved,
+}: {
+  provider: Provider
+  category: IntegrationCategory
+  projectId: string
+  apiBase: ApiBase
+  onClose: () => void
+  onSaved: () => void
+}) {
+  const second = provider.webhookKey!
+  const [value, setValue] = useState('')
+  const [show, setShow] = useState(false)
+  const [error, setError] = useState('')
+  const [saving, setSaving] = useState(false)
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    const t = setTimeout(() => inputRef.current?.focus(), 80)
+    return () => clearTimeout(t)
+  }, [])
+
+  async function save() {
+    const trimmed = value.trim()
+    if (!trimmed || saving) return
+    setSaving(true)
+    setError('')
+    try {
+      const res = await fetch(`/api/projects/${projectId}/credentials`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ integrationId: provider.id, values: { [second.envVar]: trimmed } }),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok || !data.success) {
+        setError(data.error || `The ${second.label} could not be saved. Try again.`)
+        return
+      }
+      onSaved()
+    } catch {
+      setError('Network error. Check your connection and try again.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <KitModal
+      open
+      onClose={onClose}
+      width="max-w-[520px]"
+      title={
+        <span className="flex items-center gap-3">
+          <ProviderMark provider={provider} category={category} />
+          {`${second.keyStatus ? 'Replace' : 'Add'} the ${provider.name} ${second.label}`}
+        </span>
+      }
+      footer={
+        <KitButton variant="primary" icon={Check} onClick={save} loading={saving} disabled={!value.trim()}>
+          {saving ? 'Saving…' : `Save ${second.label}`}
+        </KitButton>
+      }
+    >
+      <form className="space-y-4" onSubmit={(e) => { e.preventDefault(); save() }}>
+        {second.endpointPath && (
+          <div>
+            <p className="mb-1.5 text-[12.5px] text-zinc-400">1. Add this endpoint URL in {provider.name}:</p>
+            <EndpointUrl apiBase={apiBase} path={second.endpointPath} />
+          </div>
+        )}
+        <label className="block">
+          <span className="mb-1.5 block text-[12.5px] text-zinc-400">
+            {second.endpointPath ? `2. Paste the ${second.label} ${provider.name} shows for it:` : `Paste the ${second.label}:`}
+          </span>
+          <div className="relative">
+            <KitInput
+              ref={inputRef}
+              name={second.envVar}
+              autoComplete="off"
+              spellCheck={false}
+              type={show ? 'text' : 'password'}
+              value={value}
+              onChange={(e) => { setValue(e.target.value); setError('') }}
+              placeholder={second.placeholder}
+              aria-invalid={!!error}
+              className={`pr-10 font-mono ${error ? '!border-rose-400/50' : ''}`}
+            />
+            <button
+              type="button"
+              onClick={() => setShow((v) => !v)}
+              aria-label={show ? 'Hide secret' : 'Show secret'}
+              className="absolute right-1.5 top-1/2 flex h-[26px] w-[26px] -translate-y-1/2 items-center justify-center rounded-[6px] text-zinc-500 transition-colors hover:bg-white/[0.06] hover:text-zinc-200"
+            >
+              {show ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+            </button>
+          </div>
+          {error && <p role="alert" className="mt-1.5 text-[12px] text-rose-300">{error}</p>}
+        </label>
+        <a
+          href={second.docsUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="flex w-fit items-center gap-1.5 text-[12.5px] text-zinc-400 transition-colors hover:text-zinc-100"
+        >
+          <ExternalLink className="h-3.5 w-3.5" />
+          {second.helperText}
+        </a>
+        <p className="flex items-start gap-2 text-[12px] leading-[18px] text-faint">
+          <Lock className="mt-[2px] h-3.5 w-3.5 flex-shrink-0" />
+          Encrypted with AES-256-GCM, and never sent back to the browser after this step.
+        </p>
+      </form>
+    </KitModal>
+  )
+}
+
 /** The activation's two steps. Numbered because they are a sequence. */
 function StepIndicator({ step }: { step: 1 | 2 }) {
   const steps = ['Add your key', 'Choose what to build']
@@ -635,11 +792,7 @@ function ConnectorCard({
       <div className="flex flex-1 flex-col p-5">
         <div className="mb-4 flex items-start justify-between gap-3">
           <ProviderMark provider={provider} category={category} size="lg" />
-          {provider.enabled && (
-            provider.keyStatus
-              ? <StatusDot tone={keyVerificationBadge(provider.keyStatus).tone} label={keyVerificationBadge(provider.keyStatus).label} />
-              : <StatusDot tone="operational" label="Connected" />
-          )}
+          {provider.enabled && <StatusDot tone={connectedBadge(provider).tone} label={connectedBadge(provider).label} />}
         </div>
 
         <h3 className="text-[14px] font-semibold leading-[20px] tracking-[-0.01em] text-zinc-50">{provider.name}</h3>
@@ -659,16 +812,70 @@ function ConnectorCard({
 
 // ─── Connector detail ─────────────────────────────────────────────────────────
 
+/** A stored credential: its field name, masked value and what the provider said. */
+function CredentialRow({ envVar, status, action }: { envVar: string; status: KeyVaultStatus; action?: React.ReactNode }) {
+  const badge = keyVerificationBadge(status)
+  return (
+    <div className="flex items-center justify-between gap-3 rounded-[10px] border border-white/[0.08] bg-[#0f1012] px-4 py-3.5">
+      <div className="min-w-0">
+        <p className="font-mono text-[12.5px] text-zinc-100">{envVar}</p>
+        <p className="mt-0.5 font-mono text-[12px] text-faint">{status.maskedKey}</p>
+        {(status.verification === 'rejected' || status.verification === 'unreachable') && status.verificationDetail && (
+          <p className="mt-1 text-[12px] leading-[18px] text-amber-200/80">{status.verificationDetail}</p>
+        )}
+      </div>
+      <div className="flex flex-shrink-0 items-center gap-3">
+        <StatusDot tone={badge.tone} label={badge.label} />
+        {action}
+      </div>
+    </div>
+  )
+}
+
+/** Where the project's API is served, for an endpoint URL: loading, known (null when this server has none), or failed. */
+type ApiBase = { state: 'loading' } | { state: 'ready'; url: string | null } | { state: 'failed' }
+
+/**
+ * The address a provider sends events to, to paste into the provider. Stripe
+ * issues a signing secret only for an endpoint entered in its dashboard, and
+ * the console showed this address nowhere.
+ */
+function EndpointUrl({ apiBase, path }: { apiBase: ApiBase; path: string }) {
+  if (apiBase.state === 'loading') return <Skeleton className="h-[46px] w-full rounded-[10px]" />
+  if (apiBase.state === 'failed') {
+    return <p className="text-[12.5px] leading-[19px] text-faint">The endpoint URL couldn’t be loaded. Reload the page to try again.</p>
+  }
+  if (!apiBase.url) {
+    return (
+      <p className="text-[12.5px] leading-[19px] text-faint">
+        This server has no API address for the project’s region, so its endpoint URL can’t be shown.
+      </p>
+    )
+  }
+  const url = `${apiBase.url.replace(/\/+$/, '')}/${path}`
+  return (
+    <div className="flex items-center justify-between gap-3 rounded-[10px] border border-white/[0.08] bg-[#0f1012] px-4 py-3">
+      <code className="min-w-0 break-all font-mono text-[12.5px] text-zinc-100">{url}</code>
+      <CopyButton value={url} label="Copy endpoint URL" />
+    </div>
+  )
+}
+
 function ConnectorDetail({
   entry,
+  apiBase,
   onBack,
   onAddConnection,
+  onAddSecondCredential,
 }: {
   entry: { provider: Provider; category: IntegrationCategory }
+  apiBase: ApiBase
   onBack: () => void
   onAddConnection: () => void
+  onAddSecondCredential: () => void
 }) {
   const { provider, category } = entry
+  const second = provider.webhookKey
   return (
     <div className="max-w-[840px] pb-16">
       <nav aria-label="Breadcrumb" className="mb-6 flex items-center gap-1.5 text-[13px]">
@@ -690,8 +897,8 @@ function ConnectorDetail({
             <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
               <h1 className="text-[22px] font-semibold leading-[28px] tracking-[-0.022em] text-zinc-50">{provider.name}</h1>
               <StatusDot
-                tone={!provider.enabled ? 'neutral' : provider.keyStatus ? keyVerificationBadge(provider.keyStatus).tone : 'operational'}
-                label={!provider.enabled ? 'Not connected' : provider.keyStatus ? keyVerificationBadge(provider.keyStatus).label : 'Connected'}
+                tone={!provider.enabled ? 'neutral' : connectedBadge(provider).tone}
+                label={!provider.enabled ? 'Not connected' : connectedBadge(provider).label}
               />
             </div>
             <p className="mt-0.5 text-[14px] text-zinc-400">{provider.tagline}</p>
@@ -706,16 +913,27 @@ function ConnectorDetail({
         <section>
           <SectionTitle title="Connection" description={`The ${provider.name} credential your backend's functions reach as ctx.integrations.${provider.id}.`} />
           {provider.enabled && provider.keyStatus ? (
-            <div className="flex items-center justify-between gap-3 rounded-[10px] border border-white/[0.08] bg-[#0f1012] px-4 py-3.5">
-              <div className="min-w-0">
-                <p className="font-mono text-[12.5px] text-zinc-100">{provider.envVar}</p>
-                <p className="mt-0.5 font-mono text-[12px] text-faint">{provider.keyStatus.maskedKey}</p>
-                {(provider.keyStatus.verification === 'rejected' || provider.keyStatus.verification === 'unreachable') &&
-                  provider.keyStatus.verificationDetail && (
-                    <p className="mt-1 text-[12px] leading-[18px] text-amber-200/80">{provider.keyStatus.verificationDetail}</p>
-                  )}
-              </div>
-              <StatusDot tone={keyVerificationBadge(provider.keyStatus).tone} label={keyVerificationBadge(provider.keyStatus).label} />
+            <div className="space-y-2">
+              <CredentialRow envVar={provider.envVar} status={provider.keyStatus} />
+              {second && (second.keyStatus ? (
+                <CredentialRow
+                  envVar={second.envVar}
+                  status={second.keyStatus}
+                  action={<KitButton size="sm" variant="ghost" onClick={onAddSecondCredential}>Replace</KitButton>}
+                />
+              ) : (
+                // Added on its own: the connect dialog asked for the key again,
+                // and for something to build, before it would store this.
+                <div className="flex items-center justify-between gap-3 rounded-[10px] border border-amber-300/25 bg-[#0f1012] px-4 py-3.5">
+                  <div className="min-w-0">
+                    <p className="font-mono text-[12.5px] text-zinc-100">{second.envVar}</p>
+                    <p className="mt-0.5 text-[12px] leading-[18px] text-amber-200/80">Not stored. {second.missingMeans}</p>
+                  </div>
+                  <KitButton size="sm" variant="secondary" icon={Plus} onClick={onAddSecondCredential}>
+                    Add {second.label}
+                  </KitButton>
+                </div>
+              ))}
             </div>
           ) : (
             <div className="rounded-[10px] border border-white/[0.08] bg-[#0f1012]">
@@ -733,6 +951,19 @@ function ConnectorDetail({
             </div>
           )}
         </section>
+
+        {second?.endpointPath && (
+          <section>
+            <SectionTitle
+              title="Receiving events"
+              description={
+                `${provider.name} sends events to this address. Add it as an endpoint in ${provider.name}, ` +
+                `which then shows the ${second.label} to store here.`
+              }
+            />
+            <EndpointUrl apiBase={apiBase} path={second.endpointPath} />
+          </section>
+        )}
 
         <section>
           <SectionTitle title="What your agent can build" description={category.description} />
@@ -758,6 +989,24 @@ export function IntegrationsPanel() {
   const [filter, setFilter] = useState<'all' | 'enabled' | string>('all')
   const [detail, setDetail] = useState<{ provider: Provider; category: IntegrationCategory } | null>(null)
   const [modalOpen, setModalOpen] = useState(false)
+  const [secondModalOpen, setSecondModalOpen] = useState(false)
+  // The project's API base as the Connect page gives it out: an operator's
+  // override when one is set, else the address of the project's region. An
+  // endpoint URL is built from it, never from this page's own origin.
+  const [apiBase, setApiBase] = useState<ApiBase>({ state: 'loading' })
+
+  useEffect(() => {
+    let live = true
+    getProject(projectId).then(
+      (project) => {
+        if (!live) return
+        const url = project.apiUrlProd || project.apiUrlStaging || project.apiUrlDev || project.apiBaseUrl || null
+        setApiBase({ state: 'ready', url })
+      },
+      () => { if (live) setApiBase({ state: 'failed' }) },
+    )
+    return () => { live = false }
+  }, [projectId])
 
   const fetchIntegrations = useCallback(async () => {
     try {
@@ -806,7 +1055,12 @@ export function IntegrationsPanel() {
   }
 
   const allProviders = categories.flatMap((c) => c.providers.map((p) => ({ provider: p, category: c })))
-  const totalEnabled = allProviders.filter((x) => x.provider.enabled).length
+  // Connected means every credential the provider needs is stored.
+  const isConnected = (p: Provider) => p.enabled && !missingSecondCredential(p)
+  const totalEnabled = allProviders.filter((x) => isConnected(x.provider)).length
+  const needsSetup = allProviders.filter((x) => missingSecondCredential(x.provider)).length
+  // The "Needs setup" filter goes once nothing does.
+  const activeFilter = filter === 'setup' && needsSetup === 0 ? 'all' : filter
 
   // Keep the open detail view in sync with refetched enabled / keyStatus state.
   useEffect(() => {
@@ -820,8 +1074,9 @@ export function IntegrationsPanel() {
 
   const q = query.trim().toLowerCase()
   const visible = allProviders.filter(({ provider, category }) => {
-    if (filter === 'enabled' && !provider.enabled) return false
-    if (filter !== 'all' && filter !== 'enabled' && category.id !== filter) return false
+    if (activeFilter === 'enabled' && !isConnected(provider)) return false
+    if (activeFilter === 'setup' && !missingSecondCredential(provider)) return false
+    if (activeFilter !== 'all' && activeFilter !== 'enabled' && activeFilter !== 'setup' && category.id !== activeFilter) return false
     if (q && !`${provider.name} ${provider.tagline}`.toLowerCase().includes(q)) return false
     return true
   })
@@ -829,6 +1084,7 @@ export function IntegrationsPanel() {
   const filters: Array<{ id: string; label: string; count: number }> = [
     { id: 'all', label: 'All', count: allProviders.length },
     { id: 'enabled', label: 'Connected', count: totalEnabled },
+    ...(needsSetup > 0 ? [{ id: 'setup', label: 'Needs setup', count: needsSetup }] : []),
     ...categories.map((cat) => ({ id: cat.id, label: cat.title, count: cat.providers.length })),
   ]
 
@@ -838,8 +1094,10 @@ export function IntegrationsPanel() {
         <div className="pt-7 sm:pt-9">
           <ConnectorDetail
             entry={detail}
+            apiBase={apiBase}
             onBack={() => setDetail(null)}
             onAddConnection={() => setModalOpen(true)}
+            onAddSecondCredential={() => setSecondModalOpen(true)}
           />
         </div>
       ) : (
@@ -851,7 +1109,8 @@ export function IntegrationsPanel() {
             meta={
               !loading ? (
                 <span className="text-[13px] tabular-nums text-faint">
-                  {totalEnabled} of {allProviders.length} connected
+                  {`${totalEnabled} of ${allProviders.length} connected`}
+                  {needsSetup > 0 && ` · ${needsSetup} ${needsSetup === 1 ? 'needs' : 'need'} setup`}
                 </span>
               ) : undefined
             }
@@ -880,7 +1139,7 @@ export function IntegrationsPanel() {
           <div className="mb-5 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
             <div className="scrollbar-hide -mx-1 flex items-center gap-1 overflow-x-auto px-1" role="radiogroup" aria-label="Filter connectors">
               {filters.map((f) => {
-                const on = filter === f.id
+                const on = activeFilter === f.id
                 return (
                   <button
                     key={f.id}
@@ -934,7 +1193,7 @@ export function IntegrationsPanel() {
                 description={
                   q
                     ? `Nothing matches “${query}”. Try a different search, or request the connector you need.`
-                    : filter === 'enabled'
+                    : activeFilter === 'enabled'
                       ? 'Nothing is connected yet. Pick a connector from the catalog to start.'
                       : 'No connectors in this category yet.'
                 }
@@ -961,8 +1220,21 @@ export function IntegrationsPanel() {
           provider={detail.provider}
           category={detail.category}
           projectId={projectId}
+          apiBase={apiBase}
           onClose={() => setModalOpen(false)}
           onActivated={(id) => { handleProviderActivated(id) }}
+        />
+      )}
+
+      {/* A second credential on its own (opened from the connector's Connection section) */}
+      {secondModalOpen && detail?.provider.webhookKey && (
+        <SecondCredentialModal
+          provider={detail.provider}
+          category={detail.category}
+          projectId={projectId}
+          apiBase={apiBase}
+          onClose={() => setSecondModalOpen(false)}
+          onSaved={() => { setSecondModalOpen(false); fetchIntegrations() }}
         />
       )}
     </div>
