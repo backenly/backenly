@@ -13,6 +13,24 @@
  * `error` found nothing and showed "Request failed (400)".
  */
 
+/**
+ * The status a completed run is answered with on POST /functions and
+ * /functions/invoke: the one its handler chose, as at /fn/{name}, or 200 for a
+ * plain function, which chooses none. They answered 200 whatever the handler
+ * said, so a function that answered 401 or 503 reached its caller as a
+ * success (#604). A status a response can't have is a 200.
+ */
+export function completedRunStatus(httpStatus: number | undefined): number {
+  return typeof httpStatus === 'number' && Number.isInteger(httpStatus) && httpStatus >= 200 && httpStatus <= 599
+    ? httpStatus
+    : 200
+}
+
+/** Whether a response with this status may have a body: 204, 205 and 304 may not. */
+export function statusHasBody(status: number): boolean {
+  return status !== 204 && status !== 205 && status !== 304
+}
+
 /** The log lines this caller may be sent: all of them to a service-role key, none to anyone else. */
 export function logsFor(logs: string[] | undefined, serviceRole: boolean): { logs?: string[] } {
   return serviceRole ? { logs: logs ?? [] } : {}

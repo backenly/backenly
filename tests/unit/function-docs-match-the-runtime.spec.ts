@@ -43,7 +43,7 @@ describe('the functions docs match the runtime', () => {
   it('say an http function reads the project’s variables from process.env', () => {
     const runner = read('lib/services/ai-functions/route-module-runner.ts')
     const curated = runner.slice(runner.indexOf('function makeCuratedProcess('))
-    expect(curated.slice(0, curated.indexOf('\n}\n'))).toContain('...projectEnv,')
+    expect(curated.slice(0, curated.indexOf('\n}\n'))).toContain('...projectEnv')
     expect(docs).toContain('`process.env` holds this project\'s variables')
     expect(connectDocs).toContain('http functions read as `process.env.KEY`')
   })

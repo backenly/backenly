@@ -11,6 +11,9 @@ export const dynamic = 'force-dynamic'
  *
  * Response:
  *   { success, resumed, message, buildResponse? }
+ *
+ * Storing a key needs write access to the project (DEVELOPER and above), as
+ * setting an env var does and as the key check before it (./verify) does.
  */
 
 import { NextRequest, NextResponse } from 'next/server'
@@ -77,6 +80,12 @@ export async function POST(request: NextRequest, props: { params: Promise<{ id: 
       }
 
       if (stored.length === 0) return
+
+      // A provider is connected by its own key. A second credential stored on
+      // its own (Stripe's signing secret, OneSignal's App ID), as the console
+      // now offers, leaves the switch as it was: on beside a stored key, and
+      // never on with no key behind it.
+      if (!stored.some((envVar) => (vaultIdForEnvVar(envVar) ?? integrationId) === integrationId)) return
 
       // ── 2. Sync project.activeIntegrations so the dashboard reflects real state ─
       // The integrations page reads project.activeIntegrations[id].enabled.
@@ -204,5 +213,5 @@ export async function POST(request: NextRequest, props: { params: Promise<{ id: 
       stored,
       buildResponse,
     })
-  })
+  }, { floor: 'write' })
 }

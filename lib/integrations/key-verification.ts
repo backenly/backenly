@@ -19,21 +19,28 @@
  *
  * ── The four honest answers ──────────────────────────────────────────────────
  *
- *   verified      the provider accepted it. Safe to call `connected`.
- *   rejected      the provider refused it (401/403). Refuse to store — a wrong
- *                 credential in the vault is worse than none, because it looks
- *                 like a working one.
+ *   verified      the provider accepted it (a 2xx), or said in its own words
+ *                 that the key is real (Resend's answer to a Sending-access
+ *                 key). Safe to call `connected`.
+ *   rejected      the provider refused it (401/403, or the answer a provider
+ *                 documents for a key that does not exist). Refuse to store —
+ *                 a wrong credential in the vault is worse than none, because
+ *                 it looks like a working one.
  *   unverifiable  no endpoint exists that can confirm this credential. Webhook
  *                 signing secrets and write-only ingest keys are the real cases.
  *                 Say so; do NOT pretend it passed and do NOT pretend it failed.
- *   unreachable   we could not get an answer (network, timeout, provider down).
- *                 Store it, mark it, re-check later. Refusing here would make
- *                 Backenly unusable during someone else's outage.
+ *   unreachable   we could not get an answer that says either way (network,
+ *                 timeout, provider down, or a status that neither accepts nor
+ *                 refuses the key). Store it, mark it, re-check later. Refusing
+ *                 here would make Backenly unusable during someone else's
+ *                 outage.
  *
  * Nothing in this file may ever invent a credential value. See
  * `looksFabricated` — a placeholder is rejected before a request is made, so a
  * fabricated value can never be spent against a provider's rate limit either.
  */
+
+import { twilioCredentialParts, twilioCredentialProblem } from './twilio-credential'
 
 export type VerificationStatus = 'verified' | 'rejected' | 'unverifiable' | 'unreachable' | 'unchecked'
 
@@ -72,8 +79,17 @@ export function looksFabricated(rawKey: string): string | null {
 
 type Probe = (key: string) => Promise<VerificationResult>
 
-/** Turn an HTTP status into the right one of the four answers. */
+/**
+ * Turn an HTTP status into the right one of the four answers.
+ *
+ * Only a 2xx accepts a key. A 4xx other than 401, 403 and 429 says nothing
+ * about the key either way: it used to read as `verified`, which is how
+ * Resend's 400 for a deleted key stored that key as confirmed (#608).
+ */
 function fromStatus(status: number, provider: string): VerificationResult {
+  if (status >= 200 && status < 300) {
+    return { status: 'verified', detail: `${provider} accepted this key.` }
+  }
   if (status === 401 || status === 403) {
     return { status: 'rejected', detail: `${provider} rejected this key (HTTP ${status}) — it is not a valid credential for that account.` }
   }
@@ -83,13 +99,89 @@ function fromStatus(status: number, provider: string): VerificationResult {
   if (status === 429) {
     return { status: 'unreachable', detail: `${provider} rate-limited the verification request; the key could not be checked right now.` }
   }
-  return { status: 'verified', detail: `${provider} accepted this key.` }
+  return {
+    status: 'unreachable',
+    detail: `${provider} answered HTTP ${status}, which says neither that the key works nor that it does not; the key could not be checked.`,
+  }
 }
 
-async function probeGet(url: string, headers: Record<string, string>, provider: string): Promise<VerificationResult> {
+/**
+ * Resend's answer to GET /domains, read as Resend's error reference gives it
+ * (https://resend.com/docs/api-reference/errors). Read by status alone, two of
+ * its answers meant the opposite of what happened (#608):
+ *
+ *   401 restricted_api_key  "This API key is restricted to only send emails."
+ *       The key is real and has Sending access, Resend's least-privilege
+ *       option and all that sending mail needs. It was refused.
+ *   400 validation_error    "API key is invalid"
+ *       What every endpoint except sending answers for a key that does not
+ *       exist or was deleted. It was stored as confirmed.
+ *
+ * 403 restricted_api_key ("API key is not active") and 403 suspended_api_key
+ * are refusals, and say which. Anything else is read by its status. Also read
+ * by the live check of GET /api/integrations/health.
+ */
+export function readResendAnswer(status: number, body: unknown): VerificationResult {
+  const error = (body !== null && typeof body === 'object' ? body : {}) as { name?: unknown; message?: unknown }
+  const name = typeof error.name === 'string' ? error.name : ''
+  const message = typeof error.message === 'string' ? error.message : ''
+
+  if (status === 401 && name === 'restricted_api_key') {
+    return {
+      status: 'verified',
+      detail:
+        'Resend accepted this key. It has Sending access, which is what sending email needs; ' +
+        "Resend's other endpoints, called with ctx.integrations.resend.request(), need a key with Full access.",
+    }
+  }
+  if (status === 400 && name === 'validation_error' && /api key is invalid/i.test(message)) {
+    return {
+      status: 'rejected',
+      detail:
+        'Resend says this API key is invalid (HTTP 400): no such key exists, or it was deleted. ' +
+        'Create a key at resend.com/api-keys and use that one.',
+    }
+  }
+  if (status === 403 && name === 'restricted_api_key' && /not active/i.test(message)) {
+    return {
+      status: 'rejected',
+      detail: 'Resend says this API key is not active (HTTP 403). Check it at resend.com/api-keys, or create a new one.',
+    }
+  }
+  if (status === 403 && name === 'suspended_api_key') {
+    return {
+      status: 'rejected',
+      detail: 'Resend says this API key is suspended (HTTP 403). Resend support can say why.',
+    }
+  }
+  return fromStatus(status, 'Resend')
+}
+
+/** A refusal's JSON body, or null when it has none. */
+export async function errorBody(res: Response): Promise<unknown> {
+  try {
+    return await res.json()
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Ask `url` with the key in `headers`. A provider whose status codes alone do
+ * not say what happened to the key gives `read`, which gets the status and
+ * the body of anything but a 2xx. A 2xx body is never read: it is the
+ * account's own data.
+ */
+async function probeGet(
+  url: string,
+  headers: Record<string, string>,
+  provider: string,
+  read?: (status: number, body: unknown) => VerificationResult,
+): Promise<VerificationResult> {
   try {
     const res = await fetch(url, { headers, signal: AbortSignal.timeout(TIMEOUT_MS) })
-    return fromStatus(res.status, provider)
+    if (!read || (res.status >= 200 && res.status < 300)) return fromStatus(res.status, provider)
+    return read(res.status, await errorBody(res))
   } catch (err: any) {
     return {
       status: 'unreachable',
@@ -119,7 +211,9 @@ const PROBES: Record<string, Probe> = {
 
   anthropic: (k) => probeGet('https://api.anthropic.com/v1/models', { 'x-api-key': k, 'anthropic-version': '2023-06-01' }, 'Anthropic'),
 
-  resend: (k) => probeGet('https://api.resend.com/domains', { Authorization: `Bearer ${k}` }, 'Resend'),
+  // GET /domains needs Full access, so a Sending-access key is told no by name
+  // (readResendAnswer).
+  resend: (k) => probeGet('https://api.resend.com/domains', { Authorization: `Bearer ${k}` }, 'Resend', readResendAnswer),
 
   sendgrid: (k) => probeGet('https://api.sendgrid.com/v3/scopes', { Authorization: `Bearer ${k}` }, 'SendGrid'),
 
@@ -130,11 +224,21 @@ const PROBES: Record<string, Probe> = {
     'PostHog project API keys are write-only ingest keys with no endpoint that can confirm them without emitting a test event into your analytics. Format checked only.',
   ),
 
-  // Twilio authenticates with Account SID + auth token. We hold one value, so
-  // the pair cannot be assembled here.
-  twilio: UNVERIFIABLE(
-    'Twilio authenticates with an Account SID and auth token together; a single stored value cannot be confirmed on its own.',
-  ),
+  // Twilio's one stored value is accountSid:authToken:fromNumber
+  // (lib/integrations/twilio-credential.ts), so the pair that authenticates is
+  // in it, and Twilio answers for its own account. A value without that shape
+  // gives functions nothing to call, so it is refused here too: that is what a
+  // re-check says about one stored before the shape was checked.
+  twilio: (k) => {
+    const problem = twilioCredentialProblem(k)
+    if (problem) return Promise.resolve({ status: 'rejected', detail: problem })
+    const { accountSid, authToken } = twilioCredentialParts(k)!
+    return probeGet(
+      `https://api.twilio.com/2010-04-01/Accounts/${accountSid}.json`,
+      { Authorization: `Basic ${Buffer.from(`${accountSid}:${authToken}`).toString('base64')}` },
+      'Twilio',
+    )
+  },
 }
 
 /** How each provider is written where a person reads it ("your Stripe dashboard"). */

@@ -57,7 +57,7 @@ const KEY_PATTERNS: KeyPattern[] = [
   // OpenAI — sk-... or sk-proj-... (comes after Anthropic check)
   {
     integrationId: 'openai',
-    keyRegex: /\b(sk-(?:proj-)?[A-Za-z0-9]{20,})\b/,
+    keyRegex: /\b(sk-(?:proj-)?[A-Za-z0-9\-_]{20,})\b/,
     minLength: 24,
   },
 
@@ -238,13 +238,51 @@ export function detectWebhookSecret(message: string): DetectedWebhookSecret | nu
   return null
 }
 
+// ── Known integration key patterns ────────────────────────────────────────────
+// Keys matching these formats belong to legitimate third-party providers and
+// must never be misclassified as generic secrets or AWS keys.
+
+const KNOWN_PROVIDER_KEY_PATTERNS: RegExp[] = [
+  // Anthropic — sk-ant-...
+  /^sk-ant-[A-Za-z0-9\-_]{20,}$/,
+  // OpenAI & Stability AI — sk-... (including sk-proj-...)
+  /^sk-[A-Za-z0-9\-_]{20,}$/,
+  // Stripe secret / restricted keys
+  /^(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{20,}$/,
+  // Stripe webhook signing secret
+  /^whsec_[A-Za-z0-9+/=_\-]{12,}$/,
+  // Resend
+  /^re_[A-Za-z0-9_\-]{6,}$/,
+  // SendGrid
+  /^SG\.[A-Za-z0-9\-_]{16,}\.[A-Za-z0-9\-_]{16,}$/,
+  // PostHog
+  /^phc_[A-Za-z0-9_\-]{20,}$/,
+  // Replicate
+  /^r8_[A-Za-z0-9_\-]{20,}$/,
+  // Runway ML
+  /^key_[A-Za-z0-9_\-]{20,}$/,
+  // Pika Labs
+  /^pika_[A-Za-z0-9\-_]{20,}$/,
+  // Twilio Account SID or full sid:token:from credential
+  /^AC[0-9a-fA-F]{32}(?::[0-9a-fA-F]{32}:[+0-9]+)?$/,
+  // Email sender configuration (Resend/SendGrid fromEmail)
+  /^[^\s@]+@[^\s@]+\.[^\s@]+$/,
+]
+
+export function isKnownProviderKey(value: string): boolean {
+  const trimmed = String(value ?? '').trim()
+  if (!trimmed) return false
+  return KNOWN_PROVIDER_KEY_PATTERNS.some((p) => p.test(trimmed))
+}
+
 // ── Dangerous secret patterns ─────────────────────────────────────────────────
 // These patterns detect high-entropy or clearly dangerous values that should
 // never be stored as integration keys (private keys, JWTs, database passwords, etc.)
 
 interface DangerousSecretPattern {
   label: string
-  regex: RegExp
+  regex?: RegExp
+  matches?: (value: string) => boolean
   description: string
 }
 
@@ -266,8 +304,31 @@ const DANGEROUS_PATTERNS: DangerousSecretPattern[] = [
   },
   {
     label: 'aws_secret_key',
-    regex: /\b[A-Za-z0-9/+]{40}\b/,
     description: 'Possible AWS secret access key (40-char base64)',
+    matches: (val) => {
+      // Never fire on a value matching a known provider's key format
+      if (isKnownProviderKey(val)) return false
+
+      const trimmed = val.trim()
+
+      // 1. Standalone secret: the entire value is exactly 40 base64 characters
+      if (/^[A-Za-z0-9/+=]{40}$/.test(trimmed)) return true
+
+      // 2. Paired with an AWS access key ID (AKIA, ASIA, ABIA, ACCA)
+      const hasKeyId = /\b(AKIA|ASIA|ABIA|ACCA)[0-9A-Z]{16}\b/.test(trimmed)
+      if (hasKeyId) {
+        if (/(?<![A-Za-z0-9/+=])[A-Za-z0-9/+=]{40}(?![A-Za-z0-9/+=])/.test(trimmed) || /aws_secret/i.test(trimmed)) {
+          return true
+        }
+      }
+
+      // 3. Explicit AWS secret assignment (e.g. aws_secret_access_key = ...)
+      if (/\baws_secret(?:_access)?_key\s*[:=]\s*["']?[A-Za-z0-9/+=]{40}["']?/i.test(trimmed)) {
+        return true
+      }
+
+      return false
+    },
   },
   {
     label: 'github_token',
@@ -281,8 +342,9 @@ const DANGEROUS_PATTERNS: DangerousSecretPattern[] = [
   },
   {
     label: 'generic_high_entropy',
-    // Matches long strings (>40 chars) of hex that look like secrets
-    regex: /\b[0-9a-fA-F]{64}\b/,
+    // Matches long strings (>40 chars) of hex that look like raw secrets/hashes,
+    // excluding known provider keys
+    matches: (val) => !isKnownProviderKey(val) && /\b[0-9a-fA-F]{64}\b/.test(val),
     description: 'Long hex string (possible raw secret/hash)',
   },
 ]
@@ -308,10 +370,12 @@ export interface SecretScanResult {
  *   }
  */
 export function scanForDangerousSecret(value: string): SecretScanResult {
-  const trimmed = value.trim()
+  const trimmed = String(value ?? '').trim()
+  if (!trimmed) return { isDangerous: false }
 
-  for (const { label, regex, description } of DANGEROUS_PATTERNS) {
-    if (regex.test(trimmed)) {
+  for (const { label, regex, matches, description } of DANGEROUS_PATTERNS) {
+    const isMatch = matches ? matches(trimmed) : regex ? regex.test(trimmed) : false
+    if (isMatch) {
       return {
         isDangerous: true,
         label,

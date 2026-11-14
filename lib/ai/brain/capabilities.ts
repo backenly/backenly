@@ -393,7 +393,7 @@ export const TOOL_CAPABILITIES: Capability[] = [
   {
     id: 'list_webhook_logs',
     name: 'Webhook endpoint deliveries (read)',
-    what: 'One endpoint\'s deliveries, newest first: status, HTTP code, attempts, error, the receiver\'s response and the payload.',
+    what: 'One endpoint\'s deliveries, newest first: status, HTTP code, attempts, error and the receiver\'s response.',
     tool: 'list_webhook_logs',
   },
   {

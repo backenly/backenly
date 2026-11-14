@@ -1,6 +1,7 @@
 /**
  * Broadcast API — Express version.
- * Sends an ephemeral pg_notify event to all SSE subscribers for a project.
+ * Sends an ephemeral event to all SSE subscribers for a project, on the
+ * project's realtime channel (notifyProjectChannel in lib/realtime/channels.ts).
  *
  * POST /api/v1/:projectId/broadcast
  *
@@ -8,9 +9,9 @@
  */
 
 import { Router, Request, Response } from 'express'
-import { workspaceRawClient } from '@/lib/data-plane/regional'
+import { notifyProjectChannel } from '@/lib/realtime/channels'
 import { v1AuthMiddleware } from '../lib/auth'
-import { workspaceChannelName } from '@/lib/security/workspace-schema'
+import { assertValidProjectId } from '@/lib/security/workspace-schema'
 import { asyncRoute } from '../lib/async-route'
 
 const router = Router()
@@ -34,9 +35,8 @@ router.post('/:projectId/broadcast', asyncRoute(v1AuthMiddleware), asyncRoute(as
       return
     }
 
-    let notifyChannel: string
     try {
-      notifyChannel = workspaceChannelName(projectId)
+      assertValidProjectId(projectId)
     } catch {
       res.status(400).json({ error: 'Invalid project ID' })
       return
@@ -56,8 +56,8 @@ router.post('/:projectId/broadcast', asyncRoute(v1AuthMiddleware), asyncRoute(as
 
     // NOTIFY on the project's database, in its region: only listeners on that
     // database hear it, and that is where the listener hub LISTENs for it.
-    const db = await workspaceRawClient(projectId)
-    await db.$executeRawUnsafe(`SELECT pg_notify($1, $2)`, notifyChannel, notifyPayload)
+    // A project no stream has been opened for has nobody to hear it.
+    await notifyProjectChannel(projectId, notifyPayload)
 
     res.json({ success: true })
   } catch (err: any) {

@@ -90,6 +90,7 @@ const publicPathPrefixes = [
                     // can apply; signing in is a step inside the page
   '/guides',        // technical guides (app/guides)
   '/agents',        // per-agent setup pages (app/agents)
+  '/migrate',       // move a project in from Supabase, Firebase or Postgres (app/migrate)
 ]
 
 // ✅ MARKETING SURFACES — the hosted service's shop window. The lists, and why a

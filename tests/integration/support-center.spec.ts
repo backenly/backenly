@@ -25,6 +25,8 @@ import {
   setSupportAiRetrySchedulerForTests,
 } from '@/lib/support/ai'
 import { listAllTickets, setTicketStatus, staffReply } from '@/lib/support/service'
+import { supportBudgetKey } from '@/lib/support/http'
+import { reset as resetLimit } from '@/lib/security/auth-rate-limit'
 import { severityAllowedOnPlan } from '@/lib/support/constants'
 import { GET as listGET, POST as createPOST } from '@/app/api/support/tickets/route'
 import { GET as detailGET, PATCH as detailPATCH } from '@/app/api/support/tickets/[id]/route'
@@ -104,6 +106,15 @@ beforeAll(async () => {
 }, 60_000)
 
 const dispatched: string[] = []
+
+// The suite files and replies as alice and bob far past one person's hourly
+// budget; the budgets have their own suite (support-limits.spec.ts), so every
+// test here starts with fresh ones.
+beforeEach(async () => {
+  for (const user of [alice, bob]) {
+    for (const action of ['create', 'reply', 'ai-retry'] as const) await resetLimit(supportBudgetKey(action, user.id))
+  }
+})
 
 afterAll(async () => {
   setSupportAiDispatchForTests(null)

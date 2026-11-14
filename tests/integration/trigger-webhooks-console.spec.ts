@@ -18,7 +18,8 @@ import type { AddressInfo } from 'net'
 import crypto from 'crypto'
 
 import { prisma } from '@/lib/db/prisma'
-import { listTriggers, listDeliveryLogs, replayDelivery } from '@/lib/services/trigger-service'
+import { fireTriggers, listTriggers, listDeliveryLogs, replayDelivery } from '@/lib/services/trigger-service'
+import { verifyTimestampedSignature } from '@/lib/webhooks'
 
 const ROOT = process.cwd()
 
@@ -157,4 +158,115 @@ describe('WH-F7: the console wiring exists', () => {
     const replay = fs.readFileSync(path.join(ROOT, 'app', 'api', 'projects', '[id]', 'trigger-webhooks', 'replay', 'route.ts'), 'utf8')
     expect(replay).toContain('replayDelivery')
   })
+})
+
+describe("a trigger's webhook is signed with its time and its delivery id", () => {
+  const SECRET = `whsec_${crypto.randomBytes(24).toString('hex')}`
+  let hook: http.Server
+  let failNext = 0
+  const got: Array<{ headers: http.IncomingHttpHeaders; body: string }> = []
+
+  beforeAll(async () => {
+    hook = http.createServer((req, res) => {
+      let body = ''
+      req.on('data', (c) => (body += c))
+      req.on('end', () => {
+        got.push({ headers: req.headers, body })
+        if (failNext > 0) {
+          failNext--
+          res.writeHead(503).end('busy')
+        } else {
+          res.writeHead(200).end('ok')
+        }
+      })
+    })
+    await new Promise<void>((resolve) => hook.listen(0, '127.0.0.1', resolve))
+    await prisma.appTrigger.create({
+      data: {
+        projectId,
+        name: 'notify-billing',
+        sourceTable: 'invoices',
+        event: 'insert',
+        actionType: 'webhook',
+        webhookUrl: `http://127.0.0.1:${(hook.address() as AddressInfo).port}/billing`,
+        webhookSecret: SECRET,
+      },
+    })
+    process.env.BACKENLY_WEBHOOK_EGRESS_ALLOW_PRIVATE = 'true'
+  })
+
+  afterAll(async () => {
+    delete process.env.BACKENLY_WEBHOOK_EGRESS_ALLOW_PRIVATE
+    await new Promise<void>((resolve) => hook.close(() => resolve()))
+  })
+
+  beforeEach(() => {
+    got.length = 0
+    failNext = 0
+  })
+
+  /** What a receiver checks: the signature over this time, this delivery and these bytes, and a fresh time. */
+  const verifies = (r: { headers: http.IncomingHttpHeaders; body: string }, now?: number) =>
+    verifyTimestampedSignature({
+      payload: r.body,
+      deliveryId: String(r.headers['x-backenly-delivery']),
+      timestamp: String(r.headers['x-backenly-timestamp']),
+      signature: String(r.headers['x-backenly-signature-v2']),
+      secret: SECRET,
+      now,
+    })
+
+  it('signs a delivery, keeps the body-only signature, and logs the delivery under the id it sent', async () => {
+    await fireTriggers(projectId, { type: 'insert', table: 'invoices', data: { id: 7001, total: 40 } })
+    expect(got).toHaveLength(1)
+    const [r] = got
+    expect(r.headers['x-backenly-timestamp']).toMatch(/^\d{10}$/)
+    expect(Math.abs(Date.now() / 1000 - Number(r.headers['x-backenly-timestamp']))).toBeLessThan(120)
+    expect(r.headers['x-backenly-signature-v2']).toMatch(/^sha256=[0-9a-f]{64}$/)
+    expect(verifies(r)).toBe(true)
+    // The same request, sent again six minutes later, is refused…
+    expect(verifies(r, Date.now() + 6 * 60 * 1000)).toBe(false)
+    // …and neither a fresh time nor another delivery id can be put on it.
+    expect(verifyTimestampedSignature({
+      payload: r.body, deliveryId: String(r.headers['x-backenly-delivery']), timestamp: Number(r.headers['x-backenly-timestamp']) + 60,
+      signature: String(r.headers['x-backenly-signature-v2']), secret: SECRET,
+    })).toBe(false)
+    expect(verifyTimestampedSignature({
+      payload: r.body, deliveryId: crypto.randomUUID(), timestamp: String(r.headers['x-backenly-timestamp']),
+      signature: String(r.headers['x-backenly-signature-v2']), secret: SECRET,
+    })).toBe(false)
+    // Receivers that check the body-only signature keep working.
+    expect(r.headers['x-backenly-signature']).toBe(`sha256=${crypto.createHmac('sha256', SECRET).update(r.body).digest('hex')}`)
+
+    const log = await prisma.triggerDeliveryLog.findUnique({ where: { id: String(r.headers['x-backenly-delivery']) }, select: { status: true, table: true } })
+    expect(log).toEqual({ status: 'SUCCESS', table: 'invoices' })
+  }, 60_000)
+
+  it('sends every attempt of one delivery with the same delivery id, each signed when it is sent', async () => {
+    failNext = 1
+    await fireTriggers(projectId, { type: 'insert', table: 'invoices', data: { id: 7002, total: 41 } })
+    expect(got).toHaveLength(2)
+    expect(got[0].headers['x-backenly-delivery']).toBeTruthy()
+    expect(got[1].headers['x-backenly-delivery']).toBe(got[0].headers['x-backenly-delivery'])
+    expect(verifies(got[0])).toBe(true)
+    expect(verifies(got[1])).toBe(true)
+    const log = await prisma.triggerDeliveryLog.findUnique({ where: { id: String(got[1].headers['x-backenly-delivery']) }, select: { status: true, attemptCount: true } })
+    expect(log).toEqual({ status: 'SUCCESS', attemptCount: 2 })
+  }, 60_000)
+
+  it('replays a dead delivery under its own id, signed at the time of the replay', async () => {
+    const trigger = await prisma.appTrigger.findFirstOrThrow({ where: { projectId, name: 'notify-billing' }, select: { id: true } })
+    const dead = await prisma.triggerDeliveryLog.create({
+      data: {
+        triggerId: trigger.id, projectId, eventType: 'insert', table: 'invoices',
+        payload: { event: 'insert', table: 'invoices', data: { id: 7003 } },
+        status: 'DEAD', attemptCount: 3, error: 'receiver was down',
+      },
+      select: { id: true },
+    })
+    expect(await replayDelivery(projectId, dead.id)).toEqual({ success: true })
+    expect(got).toHaveLength(1)
+    expect(got[0].headers['x-backenly-delivery']).toBe(dead.id)
+    expect(verifies(got[0])).toBe(true)
+  }, 60_000)
 })

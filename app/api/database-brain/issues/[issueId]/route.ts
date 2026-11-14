@@ -4,6 +4,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db/postgres'
 import { getCurrentProjectId } from '@/lib/tenant/isolation'
 import { requireAuth } from '@/lib/auth/middleware'
+import { canWriteProject } from '@/lib/edition/guard'
 
 // GET /api/database-brain/issues/[id] - Get issue details (project-scoped)
 export async function GET(request: NextRequest, props: { params: Promise<{ issueId: string }> }) {
@@ -108,6 +109,15 @@ export async function PUT(request: NextRequest, props: { params: Promise<{ issue
     }
     
     console.log(`✅ [${requestId}] Project ID: ${projectId}`)
+
+    // Changing an issue (its status, its fix) is a change to the project:
+    // DEVELOPER and above, as dismissing a health finding is.
+    if (!(await canWriteProject(user.userId, projectId))) {
+      return NextResponse.json(
+        { success: false, error: 'Changing an issue needs the DEVELOPER role or above.', code: 'PROJECT_ROLE_INSUFFICIENT' },
+        { status: 403 }
+      )
+    }
 
     // SECURITY: Verify issue belongs to current project before update
     console.log(`🔍 [${requestId}] Verifying issue ownership...`)

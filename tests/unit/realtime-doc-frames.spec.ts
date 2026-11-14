@@ -29,7 +29,8 @@ it('broadcast and presence frames carry no table', () => {
     const frame = source.slice(source.lastIndexOf('{', at), source.indexOf('}', at) + 1)
     expect(frame).not.toMatch(/\btable\b/)
   }
-  const presence = [...read('server/routes/presence.ts').matchAll(/json_build_object\('type','presence'[^;]*?\)::text/g)]
+  // Both presence routes install the one function (lib/realtime/presence-store.ts).
+  const presence = [...read('lib/realtime/channel-sql.ts').matchAll(/json_build_object\(\s*'type',\s*'presence'[^;]*?\)::text/g)]
   expect(presence.length).toBe(3)
   for (const m of presence) expect(m[0]).not.toContain("'table'")
 })

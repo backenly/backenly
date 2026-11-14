@@ -1,9 +1,11 @@
 export const dynamic = 'force-dynamic'
 
-import { projectWorkspaceDir } from '@/lib/workspace/paths'
+import { isEnvFile, projectWorkspaceDir } from '@/lib/workspace/paths'
 import { NextRequest, NextResponse } from 'next/server'
 import { requireAuth } from '@/lib/auth/middleware'
+import { roleRefusal } from '@/lib/auth/project-floor'
 import { prisma } from '@/lib/db/postgres'
+import { canWriteProject } from '@/lib/edition/guard'
 import { getCurrentProjectId } from '@/lib/tenant/isolation'
 
 /**
@@ -29,7 +31,9 @@ export async function GET(request: NextRequest) {
     
     // CRITICAL FIX: Normalize all database file paths to start with 'workspace/'
     // This prevents duplicates where DB files appear at root and FS files appear in workspace folder
-    const dbFiles = rawDbFiles.map((file: any) => {
+    // An environment file holds credentials: never listed, even when an
+    // earlier sync copied one into the database.
+    const dbFiles = rawDbFiles.filter((file: any) => !isEnvFile(file.path)).map((file: any) => {
       let normalizedPath = file.path
       // If path doesn't start with 'workspace/', add it
       if (!normalizedPath.startsWith('workspace/')) {
@@ -49,7 +53,7 @@ export async function GET(request: NextRequest) {
       console.log('[DB Files] Content length: ' + firstFile.content.length)
       console.log('[DB Files] Has real newlines: ' + firstFile.content.includes('\n'))
       console.log('[DB Files] Has escaped newlines: ' + firstFile.content.includes('\\n'))
-      console.log('[DB Files] First 100 chars: ' + JSON.stringify(firstFile.content.substring(0, 100)))
+      // Never a file's content in the log: a workspace file can hold credentials.
     }
     
     // Also scan FILE SYSTEM for files that might not be in DB yet
@@ -80,6 +84,9 @@ export async function GET(request: NextRequest) {
             // Recursively scan subdirectories
             await scanDirectory(fullPath, relativePath)
           } else if (entry.isFile()) {
+            // An environment file holds credentials: never listed or copied.
+            if (isEnvFile(entry.name)) continue
+
             // Skip binary files and non-text files
             const ext = entry.name.split('.').pop()?.toLowerCase()
             const binaryExtensions = ['exe', 'dll', 'so', 'dylib', 'bin', 'node', 'wasm', 'png', 'jpg', 'jpeg', 'gif', 'ico', 'svg', 'woff', 'woff2', 'ttf', 'eot', 'zip', 'tar', 'gz']
@@ -114,12 +121,6 @@ export async function GET(request: NextRequest) {
             console.log('[FS Sync] File: ' + relativePath + ', Length: ' + content.length)
             console.log('[FS Sync] Has real newlines: ' + content.includes('\n'))
             console.log('[FS Sync] Has escaped newlines: ' + content.includes('\\n'))
-            
-            // SPECIAL DEBUG for schema.prisma
-            if (relativePath.includes('schema.prisma')) {
-              console.log('[FS Sync PRISMA] First 300 chars: ' + JSON.stringify(content.substring(0, 300)))
-              console.log('[FS Sync PRISMA] Char codes at positions 0-10:', Array.from(content.substring(0, 10)).map((c, i) => `${i}:${c.charCodeAt(0)}`).join(', '))
-            }
             
             // Fix: Ensure newlines are properly formatted
             // If content has literal \n (escaped), convert to actual newlines
@@ -190,7 +191,6 @@ export async function GET(request: NextRequest) {
               // Debug: Log content before saving
               console.log('[FS Sync] Saving to DB - Content length: ' + fixedContent.length)
               console.log('[FS Sync] Saving to DB - Has real newlines: ' + fixedContent.includes('\n'))
-              console.log('[FS Sync] Saving to DB - First 100 chars: ' + JSON.stringify(fixedContent.substring(0, 100)))
               
               // Also save to database for next time
               // @ts-ignore
@@ -339,7 +339,12 @@ export async function POST(request: NextRequest) {
     if (!projectId) {
       return NextResponse.json({ error: 'No project selected' }, { status: 400 })
     }
-    
+
+    // Saving files changes the project: Developer and above.
+    if (!(await canWriteProject(user.userId, projectId))) {
+      return roleRefusal(request.method)
+    }
+
     const { files } = await request.json()
     
     // Upsert files (create or update)
@@ -386,7 +391,12 @@ export async function PUT(request: NextRequest) {
     if (!projectId) {
       return NextResponse.json({ error: 'No project selected' }, { status: 400 })
     }
-    
+
+    // Saving a file changes the project: Developer and above.
+    if (!(await canWriteProject(user.userId, projectId))) {
+      return roleRefusal(request.method)
+    }
+
     const { filePath, content } = await request.json()
     
     if (!filePath || content === undefined) {

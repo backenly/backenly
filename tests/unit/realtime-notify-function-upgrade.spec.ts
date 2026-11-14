@@ -1,14 +1,14 @@
 /**
  * The listener hub brings a project's realtime notify function up to date when
- * it first streams for the project, and that never decides the stream (#620).
+ * a stream subscribes, and that never decides the stream (#620).
  *
  * A schema whose realtime was enabled before the notify function last changed
- * keeps the old body, which sends a large change with no row key, until
- * something replaces it (lib/services/realtimeTriggers.ts
- * ensureRealtimeFunctionCurrent; what replacing it does to a real schema is in
- * tests/integration/realtime-large-changes.spec.ts). The hub asks for that on
- * every subscribe, and the check runs once per project per process. Database-
- * free: the LISTEN connection, the plan check and the region are stubbed.
+ * keeps the old body until something replaces it (lib/realtime/channels.ts
+ * bringProjectFunctionsCurrent; what replacing it does to a real schema is in
+ * tests/integration/realtime-large-changes.spec.ts and
+ * tests/integration/realtime-channel-per-project.spec.ts). The hub asks for
+ * that on every subscribe. Database-free: the LISTEN connection, the plan
+ * check, the region and the project's channel are stubbed.
  *
  * The hub's warnings print the values they carry as they are, placeholders and
  * all: a value is never part of console.warn's first argument, which Node reads
@@ -26,7 +26,16 @@ jest.mock('@/lib/data-plane/regional', () => ({
   requireRegionDatabaseUrl: jest.fn(() => 'postgres://listener.test/db'),
 }))
 const mockEnsure = jest.fn()
-jest.mock('@/lib/services/realtimeTriggers', () => ({ ensureRealtimeFunctionCurrent: (...args: unknown[]) => mockEnsure(...args) }))
+// The channel the platform keeps for the project: what the hub must LISTEN on.
+const mockChannel = 'bkn_rt_' + 'a1'.repeat(24)
+jest.mock('@/lib/realtime/channels', () => ({
+  projectChannel: jest.fn(async () => mockChannel),
+  currentProjectChannel: jest.fn(async () => mockChannel),
+  channelsOfSchemas: jest.fn(async () => new Map()),
+  bringFunctionsCurrent: jest.fn(async () => ({ states: new Map(), failures: [] })),
+  bringProjectFunctionsCurrent: (...args: unknown[]) => mockEnsure(...args),
+  realtimePool: jest.fn(),
+}))
 // Off, the hub checks a project id as it does in production. On, any value
 // passes, which is what CodeQL assumes of an id read from a request.
 let mockAcceptAnyProjectId = false
@@ -36,6 +45,8 @@ jest.mock('@/lib/security/workspace-schema', () => {
     ...actual,
     workspaceChannelName: (projectId: unknown) =>
       mockAcceptAnyProjectId ? `workspace_${projectId}_changes` : actual.workspaceChannelName(projectId),
+    workspaceSchemaName: (projectId: unknown) =>
+      mockAcceptAnyProjectId ? `workspace_${projectId}` : actual.workspaceSchemaName(projectId),
   }
 })
 
@@ -47,7 +58,22 @@ const PROJECT = '11111111-2222-4333-8444-555555555555'
 const PLACEHOLDERS = '%s %d %i %f %j %o %O %c %%'
 const settle = () => new Promise((resolve) => setImmediate(resolve))
 
-afterEach(() => mockEnsure.mockReset())
+afterEach(() => {
+  mockEnsure.mockReset()
+  mockClient.query.mockClear()
+})
+
+it('listens on the channel the platform keeps for the project, and hands out only the stream\'s label', async () => {
+  mockEnsure.mockResolvedValue('current')
+  const subscription = await listenerHub.subscribe(PROJECT, () => {})
+  if (!subscription.ok) throw new Error('subscribe refused')
+  const sent = mockClient.query.mock.calls.map((call: unknown[]) => String(call[0]))
+  expect(sent).toContain(`LISTEN "${mockChannel}"`)
+  expect(sent.some((sql) => sql.includes('_changes'))).toBe(false)
+  expect(subscription.channel).toBe(`workspace_${PROJECT}_changes`)
+  subscription.unsubscribe()
+  expect(mockClient.query.mock.calls.map((call: unknown[]) => String(call[0]))).toContain(`UNLISTEN "${mockChannel}"`)
+})
 
 it('asks for the project\'s notify function to be brought up to date when a stream subscribes', async () => {
   mockEnsure.mockResolvedValue('upgraded')
@@ -124,7 +150,7 @@ describe('the hub\'s warnings print outside values as they are', () => {
       await settle()
       if (!subscription.ok) throw new Error('subscribe refused')
       const onNotification = mockClient.on.mock.calls.find(([event]) => event === 'notification')![1] as (msg: object) => void
-      onNotification({ channel: subscription.channel, payload: `{"data": "${PLACEHOLDERS}"` })
+      onNotification({ channel: mockChannel, payload: `{"data": "${PLACEHOLDERS}"` })
       expect(warn.mock.calls.map((call) => format(...call))).toEqual([
         `[ListenerHub] Malformed NOTIFY on workspace_${PROJECT}_changes — {"data": "${PLACEHOLDERS}"`,
       ])

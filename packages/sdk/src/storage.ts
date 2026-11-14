@@ -86,7 +86,9 @@ export class StorageModule {
       // v1 API wraps response in { data: { ... } }
       const data = json.data ?? json
       return {
-        url: data.url,
+        // A deployment storing files on its own disk answers with a path on its
+        // own origin, which a page on any other origin cannot load as it is.
+        url: typeof data.url === 'string' && /^\/(?!\/)/.test(data.url) ? `${this.client.getApiUrl()}${data.url}` : data.url,
         path: data.path,
         size: data.size,
         id: data.id,
@@ -115,12 +117,18 @@ export class StorageModule {
   }
 
   /**
-   * Get the URL for a file by its ID.
-   * Note: for private files this returns a metadata endpoint —
-   * use the `url` returned by `upload()` for direct access.
+   * The address a file is served at, by its ID (returned from upload).
+   *
+   * A public file, in a bucket whose policy lets files be public, is served
+   * there to anyone, so the address works as an `<img src>`. Any other file is
+   * served only to a reader its bucket's policy allows: for one of those, use
+   * the signed `url` that `upload()` returned.
+   *
+   * @example
+   * const { id } = await backend.storage.upload(file, 'me.png', { bucket: 'avatars', isPublic: true })
+   * avatar.src = backend.storage.getUrl(id)
    */
   getUrl(fileId: string): string {
-    const projectId = this.client.getProjectId()
-    return `${this.client.getApiUrl()}/api/v1/${projectId}/storage/files/${fileId}`
+    return `${this.client.getApiUrl()}/api/storage/files/${encodeURIComponent(fileId)}/download`
   }
 }

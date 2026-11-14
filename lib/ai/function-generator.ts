@@ -44,7 +44,15 @@ const ROUTE_MODULE_CONTRACT = `RUNTIME CONTRACT (the code runs in Backenly's rou
 - The second argument is ALWAYS provided; params.projectId is the project id. Query-string values are also merged into params.
 - request supports: request.url, request.method, request.nextUrl.searchParams.get(...), await request.json(), request.headers.get(name), request.cookies.get(name)?.value
 - Respond ONLY with NextResponse.json(body, { status }) from 'next/server'.
-- Imports allowed ONLY from: 'next/server', '@/lib/db' (prisma), '@/lib/auth/jwt' (verifyToken), 'crypto', 'bcryptjs', 'jsonwebtoken'. Any other import crashes.
+- Imports allowed ONLY from: 'next/server', '@/lib/db' (prisma, asService), '@/lib/auth/jwt' (verifyToken, isAdminRequest), 'crypto', 'bcryptjs', 'jsonwebtoken'. Any other import crashes.
+- process.env holds the project's own variables and NODE_ENV only. Never read process.env.JWT_SECRET, ADMIN_API_KEY or AI_EXECUTION_TOKEN: Backenly does not give them to functions, and code that reads them is refused.
+- An ADMIN-ONLY endpoint checks the project's admin key without holding it:
+    if (!isAdminRequest(request)) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+- Work the caller may not do themselves (a checkout that creates the order and takes stock the shopper cannot update) runs inside asService, in one transaction, as the service role. Row-level security does not apply to its SQL, so check who is calling first:
+    const order = await asService(async (db) => {
+      const [product] = await db.$queryRawUnsafe(\`SELECT id, stock FROM "workspace_\${params.projectId}"."products" WHERE id = $1 FOR UPDATE\`, productId)
+      ...
+    })
 - NEVER use: eval, new Function, dynamic import(), child_process, worker_threads, fs writes, process.exit.
 - End-user data tables live in the per-project PostgreSQL schema "workspace_{projectId}" — access them with parameterised raw SQL, e.g.:
     const rows = await prisma.$queryRawUnsafe(\`SELECT * FROM "workspace_\${params.projectId}"."posts" WHERE id = $1\`, id)
@@ -197,7 +205,8 @@ async function buildSchemaContext(projectId: string, description: string): Promi
   }
 }
 
-type SmokeResult = { ok: boolean; untested?: boolean; error?: string; status?: number }
+/** `logs`, on a failed check: the lines the module logged up to the failure. */
+type SmokeResult = { ok: boolean; untested?: boolean; error?: string; status?: number; logs?: string[] }
 
 /** One creation check: what was sent, and how long it took, for the run log. */
 interface SmokeRun extends SmokeResult {
@@ -246,16 +255,17 @@ async function runSmokeOnce(
   data: Record<string, string>,
 ): Promise<SmokeResult> {
   try {
-    const { executeRouteModuleFunction, RouteModuleHandlerError } = await import('@/lib/services/ai-functions/route-module-runner')
+    const { executeRouteModuleFunction, RouteModuleHandlerError, RouteModuleRunError } = await import('@/lib/services/ai-functions/route-module-runner')
     try {
       const result = await executeRouteModuleFunction(
         code,
         projectId,
         { type: 'manual', data },
         `${method.toUpperCase()} /api/v1/${projectId}/fn/${functionName}`,
-        // testRun mints a project-scoped admin token + admin key, so an
-        // auth-gated handler exercises its real path instead of dead-ending on a
-        // 401 that tells us nothing about whether its logic works.
+        // testRun runs it as the project's admin (without a key or a token on
+        // the request), so an auth-gated handler exercises its real path instead
+        // of dead-ending on a 401 that tells us nothing about whether its logic
+        // works.
         { testRun: true },
       )
 
@@ -265,11 +275,12 @@ async function runSmokeOnce(
         const detail =
           (body && typeof body === 'object' && (body as any).error) ||
           (typeof body === 'string' ? body : JSON.stringify(body ?? {}).slice(0, 300))
-        return { ok: false, status, error: `HTTP ${status} — ${detail}` }
+        return { ok: false, status, error: `HTTP ${status} — ${detail}`, logs: result.logs }
       }
       return { ok: true, status }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
+      const logs = err instanceof RouteModuleRunError ? err.logs : []
       // "The function is broken" vs "we could not test it", decided by TYPE:
       // the runner throws RouteModuleHandlerError only for failures that came
       // out of the handler itself. The old text sniff here classified any
@@ -277,10 +288,10 @@ async function runSmokeOnce(
       // words in a broken query's message — as untestable infrastructure, and
       // the broken function was then reported clean.
       if (err instanceof RouteModuleHandlerError) {
-        return { ok: false, error: msg }
+        return { ok: false, error: msg, logs }
       }
       if (/failed to compile|evaluation error|exports no/i.test(msg)) {
-        return { ok: false, error: msg }
+        return { ok: false, error: msg, logs }
       }
       console.warn(`[FunctionGenerator] Smoke test could not run for ${functionName}: ${msg}`)
       return { ok: true, untested: true, error: msg }
@@ -604,7 +615,9 @@ export async function executeGenerateFunction(
     })
 
     // The creation checks are runs of this function: record them where its
-    // other runs are, so nothing it did at creation is invisible.
+    // other runs are, so nothing it did at creation is invisible. A check that
+    // failed keeps the lines the module logged up to the failure, as a failed
+    // run does (#605).
     for (const run of smokeRuns) {
       await recordFunctionRun({
         functionId: fn.id,
@@ -613,6 +626,7 @@ export async function executeGenerateFunction(
         logs: [
           `Creation check (${run.probe}): ` +
             (run.untested ? 'could not run' : run.status ? `HTTP ${run.status}` : run.ok ? 'ran' : 'failed'),
+          ...(run.logs ?? []),
         ],
         error: run.ok ? null : (run.error ?? null),
         durationMs: run.durationMs,

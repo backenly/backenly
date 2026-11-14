@@ -35,21 +35,26 @@ export const GET = withAuth(async (request: NextRequest, { user }) => {
       projectId: searchParams.get('projectId') || undefined,
     })
 
-    // If projectId provided, verify ownership
-    if (params.projectId) {
-      if (!(await canAccessProject(user.userId, params.projectId))) {
-        return NextResponse.json(
-          { error: 'Invalid project access' },
-          { status: 403 }
-        )
-      }
+    // Scans belong to a project: the list is always one project's, for someone
+    // who may see that project.
+    if (!params.projectId) {
+      return NextResponse.json(
+        { error: 'Say which project: add ?projectId= to list its security scans.', code: 'PROJECT_ID_REQUIRED' },
+        { status: 400 }
+      )
+    }
+    if (!(await canAccessProject(user.userId, params.projectId))) {
+      return NextResponse.json(
+        { error: 'Invalid project access' },
+        { status: 403 }
+      )
     }
 
     const page = params.page || 1
     const limit = Math.min(params.limit || 50, 100)
     const skip = (page - 1) * limit
 
-    const where: any = {}
+    const where: any = { projectId: params.projectId }
 
     if (params.scanType) {
       where.scanType = params.scanType
@@ -59,9 +64,6 @@ export const GET = withAuth(async (request: NextRequest, { user }) => {
       where.status = params.status
     }
 
-    if (params.projectId) {
-      where.projectId = params.projectId
-    }
 
     const [scans, total] = await Promise.all([
       prisma.securityScan.findMany({
@@ -108,14 +110,18 @@ export const POST = withAuth(async (request: NextRequest, { user }) => {
     const body = await request.json()
     const data = createScanSchema.parse(body)
 
-    // If projectId provided, verify ownership
-    if (data.projectId) {
-      if (!(await canWriteProject(user.userId, data.projectId))) {
-        return NextResponse.json(
-          { error: 'Invalid project access' },
-          { status: 403 }
-        )
-      }
+    // A scan is of one project, started by someone who may change it.
+    if (!data.projectId) {
+      return NextResponse.json(
+        { error: 'Say which project to scan: add "projectId" to the request body.', code: 'PROJECT_ID_REQUIRED' },
+        { status: 400 }
+      )
+    }
+    if (!(await canWriteProject(user.userId, data.projectId))) {
+      return NextResponse.json(
+        { error: 'Invalid project access' },
+        { status: 403 }
+      )
     }
 
     // Create scan record

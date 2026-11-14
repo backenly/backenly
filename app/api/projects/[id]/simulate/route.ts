@@ -56,5 +56,5 @@ export async function POST(request: NextRequest) {
         { status: 500 },
       )
     }
-  })
+  }, { floor: 'view' }) // any member: a what-if projection from what the project already holds; nothing is stored
 }

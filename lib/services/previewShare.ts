@@ -167,6 +167,15 @@ export async function validatePreviewToken(token: string): Promise<ShareValidati
   }
 }
 
+/** The project a share belongs to, or null when there is no such share. */
+export async function previewShareProjectId(shareId: string): Promise<string | null> {
+  const share = await prisma.previewShare.findUnique({
+    where: { id: shareId },
+    select: { projectId: true },
+  });
+  return share?.projectId ?? null;
+}
+
 /**
  * Revoke a preview share
  */

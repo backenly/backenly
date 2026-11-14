@@ -41,13 +41,28 @@ import { v1ErrorBody } from '@/lib/api/v1/error-shape'
 /** A project id, as the runtime gate requires before it looks one up. */
 const PROJECT_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
+const writtenByFunctions = new WeakSet<Response>()
+
+/**
+ * A reply whose status a project's function chose, such as a 401 its handler
+ * answered: it is the function's, not one of Backenly's errors, so v1's error
+ * shaping leaves it as it is, as the runtime's markAsWritten does at /fn
+ * (server/lib/v1-error-shape.ts). Given Backenly's `code` for a 401, it would
+ * read as Backenly refusing the caller's key.
+ */
+export function markAsWritten<T extends Response>(response: T): T {
+  writtenByFunctions.add(response)
+  return response
+}
+
 /**
  * A JSON error with the top-level `code` and `message` every v1 error carries
  * (lib/api/v1/error-shape.ts). A success, a body that is not JSON (the realtime
- * stream) and an error that already has both are returned as they are.
+ * stream), an error that already has both and a function's own reply
+ * (markAsWritten) are returned as they are.
  */
 async function shapedError<T extends Response>(response: T): Promise<T> {
-  if (response.status < 400) return response
+  if (response.status < 400 || writtenByFunctions.has(response)) return response
   if (!(response.headers.get('content-type') ?? '').includes('application/json')) return response
   let body: unknown
   try {

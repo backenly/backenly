@@ -29,7 +29,7 @@ import { prisma } from '@/lib/db'
 import { buildIntegrationContext, IntegrationContext } from './integration-context'
 import { getProviderSpec } from './integration-registry'
 import { generateFixedFunctionCode } from './generator'
-import { isRouteModuleFunction, executeRouteModuleFunction, validateRouteModule } from './route-module-runner'
+import { isRouteModuleFunction, executeRouteModuleFunction, validateRouteModule, RouteModuleRunError } from './route-module-runner'
 import { recordFunctionRun, rowLastError, runTextKeptInRegion, withLastErrors } from './run-records'
 import { isFunctionSwitchedOff, RUNNABLE_FUNCTION_STATUS_FILTER } from './status'
 import { enforceAiFunctionInvocation, trackAiFunctionInvocation } from '@/lib/entitlements/policy'
@@ -92,9 +92,11 @@ export interface FunctionCallerContext {
    */
   headers?: Record<string, string | undefined>
   /**
-   * Owner-initiated dashboard test run. The route-module runner injects the
-   * project's admin key and a short-lived project-scoped admin token so the
-   * endpoint's real logic can be exercised. Never set on public paths.
+   * Owner-initiated test run (the dashboard's Test, functions invoke). The
+   * route-module runner treats the run as the project's admin, so the
+   * endpoint's real logic can be exercised, without putting a key or a signed
+   * token on the request (route-module-runner.ts, OwnerTest). Never set on
+   * public paths.
    */
   testRun?: boolean
   /**
@@ -117,20 +119,6 @@ const SANDBOX_WORKER_PATH = path.resolve(
   process.cwd(),
   'lib/services/ai-functions/sandbox-worker.cjs'
 )
-
-// ─── Transient error detection ────────────────────────────────────────────────
-
-function isTransientError(err: unknown): boolean {
-  const msg = (err instanceof Error ? err.message : String(err)).toLowerCase()
-  return (
-    msg.includes('connection refused') ||
-    msg.includes('connection reset') ||
-    msg.includes('econnrefused') ||
-    msg.includes('etimedout') ||
-    msg.includes('epipe') ||
-    msg.includes('socket hang up')
-  )
-}
 
 // ─── DB proxy handlers (executed in parent, called from worker) ───────────────
 
@@ -419,7 +407,17 @@ function getConnectedFromContext(integrations: IntegrationContext): string[] {
  * needed them for.
  */
 export class SandboxRunError extends Error {
-  constructor(message: string, readonly logs: string[]) {
+  constructor(
+    message: string,
+    readonly logs: string[],
+    /**
+     * The sandbox failed before the function's code started: the worker could
+     * not be made, or it failed or exited before it said the code was starting.
+     * Nothing the function does has happened yet, so this is the one failure a
+     * run is tried again for (#606).
+     */
+    readonly beforeCodeRan = false,
+  ) {
     super(message)
     this.name = 'SandboxRunError'
   }
@@ -444,19 +442,28 @@ function runInWorker(
   return new Promise((resolve, reject) => {
     // Spawn a disposable Worker Thread with strict memory limits
     // env: {} means the worker receives NO environment variables
-    const worker = new Worker(SANDBOX_WORKER_PATH, {
-      env: {}, // no process.env forwarded
-      resourceLimits: {
-        maxOldGenerationSizeMb: 64,
-        maxYoungGenerationSizeMb: 16,
-        codeRangeSizeMb: 8,
-      },
-    })
+    let worker: Worker
+    try {
+      worker = new Worker(SANDBOX_WORKER_PATH, {
+        env: {}, // no process.env forwarded
+        resourceLimits: {
+          maxOldGenerationSizeMb: 64,
+          maxYoungGenerationSizeMb: 16,
+          codeRangeSizeMb: 8,
+        },
+      })
+    } catch (err: any) {
+      reject(new SandboxRunError(`The sandbox could not start: ${err?.message ?? err}`, [], true))
+      return
+    }
 
     const dbProxy = buildDbProxy(projectId, caller)
     const allHandlers = { ...dbProxy, ...integrationProxy }
     const logs: string[] = []
     const runId = `r${Date.now()}`
+    // Set when the worker says the function's code starts. A failure before it
+    // is the sandbox's; a failure after it is the run's (SandboxRunError).
+    let codeStarted = false
 
     // Hard timeout: kill the worker after EXECUTION_TIMEOUT_MS
     const hardKillTimer = setTimeout(() => {
@@ -465,6 +472,11 @@ function runInWorker(
     }, EXECUTION_TIMEOUT_MS)
 
     worker.on('message', async (msg: any) => {
+      if (msg.type === 'started') {
+        codeStarted = true
+        return
+      }
+
       if (msg.type === 'log') {
         logs.push(msg.line)
         return
@@ -503,13 +515,13 @@ function runInWorker(
 
     worker.on('error', (err) => {
       clearTimeout(hardKillTimer)
-      reject(new SandboxRunError(err.message, logs))
+      reject(new SandboxRunError(err.message, logs, !codeStarted))
     })
 
     worker.on('exit', (code) => {
       clearTimeout(hardKillTimer)
       if (code !== 0) {
-        reject(new SandboxRunError(`Sandbox worker exited with code ${code}`, logs))
+        reject(new SandboxRunError(`Sandbox worker exited with code ${code}`, logs, !codeStarted))
       }
     })
 
@@ -931,7 +943,10 @@ export async function executeAiFunction(
     } catch (err: any) {
       const durationMs = Date.now() - startMs
       const errorMsg = err?.message || 'Route function error'
-      await persistExecutionLog(functionId, projectId, false, [], errorMsg, durationMs, caller.trigger ?? event.type)
+      // What the module logged before it failed, which is what explains it:
+      // stored with the run and returned with the error, as a sandbox run's are.
+      const logs = err instanceof RouteModuleRunError ? err.logs : []
+      await persistExecutionLog(functionId, projectId, false, logs, errorMsg, durationMs, caller.trigger ?? event.type)
       rowLastError(projectId, functionId, errorMsg)
         // history: how the last run went, not configuration (lib/changes/resources/functions.ts)
         .then((lastError) => prisma.aiFunction.update({
@@ -948,7 +963,7 @@ export async function executeAiFunction(
           functionId, projectId, errorMsg, fn.generatedCode, fn.description, fn.triggerTable
         ).catch(() => {})
       }
-      return { success: false, logs: [], error: errorMsg, durationMs }
+      return { success: false, logs, error: errorMsg, durationMs }
     }
   }
 
@@ -964,13 +979,19 @@ export async function executeAiFunction(
   const connectedIntegrations = getConnectedFromContext(integrations)
   const integrationManifest = buildIntegrationManifest(integrations)
 
+  // A run is tried again only when the sandbox failed before the function's
+  // code started (SandboxRunError.beforeCodeRan). Once the code has started, a
+  // failure is the run's and is recorded once, whatever its message: running
+  // the code again would repeat every write, email and call it made before it
+  // failed. A refused connection from ctx.http used to look "transient" here,
+  // and the whole function ran three times (#606).
   const MAX_RETRIES = 2
   let lastError: Error | null = null
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     if (attempt > 0) {
       await new Promise(r => setTimeout(r, Math.pow(2, attempt - 1) * 500))
-      console.log(`[AiFn] Retry ${attempt}/${MAX_RETRIES} for function ${functionId}`)
+      console.log(`[AiFn] Retry ${attempt}/${MAX_RETRIES} for function ${functionId}: the sandbox failed before its code started (${lastError?.message})`)
     }
 
     try {
@@ -999,7 +1020,7 @@ export async function executeAiFunction(
       return { success: true, logs, returnValue, durationMs }
     } catch (err: any) {
       lastError = err instanceof Error ? err : new Error(String(err))
-      if (attempt < MAX_RETRIES && isTransientError(err)) continue
+      if (attempt < MAX_RETRIES && err instanceof SandboxRunError && err.beforeCodeRan) continue
       break
     }
   }

@@ -15,10 +15,9 @@ export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
 import { requireAuth } from '@/lib/auth/middleware'
-import { checkRateLimit } from '@/lib/middleware/rateLimiter'
 import { dispatchSupportFirstResponse, resumeSupportFirstResponse } from '@/lib/support/ai'
 import { TICKET_AI_RETRY_LIMIT } from '@/lib/support/constants'
-import { supportErrorResponse } from '@/lib/support/http'
+import { spendSupportBudget, supportErrorResponse } from '@/lib/support/http'
 import { getSupportLevel, getTicket, reopenTicket, resolveTicket, retryAiAnswer } from '@/lib/support/service'
 
 export async function GET(request: NextRequest, props: { params: Promise<{ id: string }> }) {
@@ -67,13 +66,13 @@ export async function PATCH(request: NextRequest, props: { params: Promise<{ id:
       return NextResponse.json({ ticket: await reopenTicket(auth.userId, params.id) })
     }
     if (body?.action === 'retry_ai') {
-      const rl = await checkRateLimit(`support:ai-retry:${auth.userId}`, TICKET_AI_RETRY_LIMIT.limit, TICKET_AI_RETRY_LIMIT.windowMs)
-      if (!rl.allowed) {
-        return NextResponse.json(
-          { error: 'Too many retries in the last hour. The team has your cases and replies directly.', code: 'RATE_LIMITED' },
-          { status: 429 }
-        )
-      }
+      const refused = await spendSupportBudget(
+        'ai-retry',
+        auth.userId,
+        TICKET_AI_RETRY_LIMIT,
+        'Too many retries in the last hour. The team has your cases and replies directly.',
+      )
+      if (refused) return refused
       const ticket = await retryAiAnswer(auth.userId, params.id)
       dispatchSupportFirstResponse(ticket.id)
       return NextResponse.json({ ticket })

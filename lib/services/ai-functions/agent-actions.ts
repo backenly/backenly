@@ -19,7 +19,7 @@ import { prisma } from '@/lib/db/prisma'
 import { canAccessProject, canWriteProject } from '@/lib/edition/guard'
 import { workspaceSchemaName } from '@/lib/security/workspace-schema'
 import { executeAiFunction, validateSandboxFunction } from './executor'
-import { isRouteModuleFunction, validateRouteModule } from './route-module-runner'
+import { isRouteModuleFunction, usesAsService, validateRouteModule } from './route-module-runner'
 import { rowLastError, withLastErrors, withRunBodies } from './run-records'
 import { isFunctionSwitchedOff } from './status'
 import { workspaceRawClient } from '@/lib/data-plane/regional'
@@ -549,6 +549,8 @@ export async function deployFunctionCode(
 
   const sha = (s: string) => createHash('sha256').update(s, 'utf8').digest('hex')
   const renamed = rawName !== deployedName
+  // Trusted work is explicit in the code, and the answer says what it means.
+  const runsAsService = isHttp && usesAsService(code)
   return {
     ok: true,
     summary:
@@ -556,6 +558,9 @@ export async function deployFunctionCode(
       (endpoint ? `, ${method} ${endpoint}` : table ? ` on ${table}` : '') +
       (columns ? `, run only when ${columns.join(' or ')} changes` : '') +
       missingIntegrationDeployNote(missing) +
+      (runsAsService
+        ? '. Its asService blocks run as the service role, so row-level security does not apply to their SQL: check who is calling before one runs'
+        : '') +
       (renamed
         ? existing
           ? `. "${rawName}" is stored as "${deployedName}", which this replaced`
@@ -578,6 +583,8 @@ export async function deployFunctionCode(
       // Per kind of provider the code uses and cannot reach: the names it
       // wrote, and the vault ids any one of which would serve it.
       missingIntegrations: missing,
+      // True when the code runs SQL with asService, which bypasses row-level security.
+      runsAsService,
       codeSha256: sha(code),
       codeBytes: bytes,
       previousCodeSha256: existing ? sha(existing.generatedCode) : null,

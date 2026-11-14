@@ -12,6 +12,8 @@
  *   service   both, as sent
  *   delete    the primary key only, whoever subscribes
  *   a table with no primary key: nothing for a non-service subscriber
+ *   a burst   one query per identity for all its rows, each row still
+ *             decided by the policy (and a two-column key matched on both)
  *
  * The production app role is NOSUPERUSER NOBYPASSRLS. When this suite's
  * connection is a superuser (CI's), each check runs under such a role, so the
@@ -40,7 +42,14 @@ jest.mock('@/lib/services/workspace-rls', () => {
 
 import { prisma } from '@/lib/db/prisma'
 import { jwtClaimFunctionSql, ownRowsPredicate } from '@/lib/postgrest/rls-translation'
-import { visibleChange, type RealtimeSubscriber } from '@/lib/realtime/visibility'
+import {
+  createVisibilityChecker,
+  createVisibleEventQueue,
+  liveDeps,
+  visibleChange,
+  type RealtimeChange,
+  type RealtimeSubscriber,
+} from '@/lib/realtime/visibility'
 
 const DB_URL = process.env.TEST_DATABASE_URL
 
@@ -76,8 +85,9 @@ beforeAll(async () => {
   await prisma.$executeRawUnsafe(`CREATE SCHEMA IF NOT EXISTS "${schema}"`)
   await prisma.$executeRawUnsafe(`CREATE TABLE "${schema}"."notes" (id uuid PRIMARY KEY, owner_id text, body text)`)
   await prisma.$executeRawUnsafe(`CREATE TABLE "${schema}"."keyless" (owner_id text, body text)`)
+  await prisma.$executeRawUnsafe(`CREATE TABLE "${schema}"."pairs" (tenant text, n integer, owner_id text, body text, PRIMARY KEY (tenant, n))`)
   await prisma.$executeRawUnsafe(jwtClaimFunctionSql(schema))
-  for (const table of ['notes', 'keyless']) {
+  for (const table of ['notes', 'keyless', 'pairs']) {
     await prisma.$executeRawUnsafe(`ALTER TABLE "${schema}"."${table}" ENABLE ROW LEVEL SECURITY`)
     await prisma.$executeRawUnsafe(`ALTER TABLE "${schema}"."${table}" FORCE ROW LEVEL SECURITY`)
     const pred = ownRowsPredicate(schema, 'owner_id')
@@ -85,6 +95,10 @@ beforeAll(async () => {
   }
   await prisma.$executeRawUnsafe(`INSERT INTO "${schema}"."notes" (id, owner_id, body) VALUES ($1::uuid, $2, 'alice private'), ($3::uuid, $4, 'bob private')`, aliceNote, alice, bobNote, bob)
   await prisma.$executeRawUnsafe(`INSERT INTO "${schema}"."keyless" (owner_id, body) VALUES ($1, 'alice keyless')`, alice)
+  await prisma.$executeRawUnsafe(
+    `INSERT INTO "${schema}"."pairs" (tenant, n, owner_id, body) VALUES ('t1', 1, $1, 'alice pair'), ('t1', 2, $2, 'bob pair')`,
+    alice, bob,
+  )
 
   const [who] = await prisma.$queryRawUnsafe<Array<{ rolsuper: boolean; user: string }>>(
     `SELECT rolsuper, current_user AS "user" FROM pg_roles WHERE rolname = current_user`,
@@ -143,5 +157,48 @@ describe('deletes and tables without a key', () => {
 
   it('deliver nothing from a table without a primary key, even a row the subscriber owns', async () => {
     expect(await visibleChange(as(alice), change('insert', 'keyless', { owner_id: alice, body: 'alice keyless' }))).toBeNull()
+  })
+})
+
+describe('a burst', () => {
+  /** The live checks, with their queries counted. */
+  function counted() {
+    const visibleRows = jest.fn(liveDeps.visibleRows)
+    return { checker: createVisibilityChecker({ primaryKey: liveDeps.primaryKey, visibleRows }), visibleRows }
+  }
+
+  it('is one query per identity for all its rows, and each stream gets only the rows it can read, in order', async () => {
+    const { checker, visibleRows } = counted()
+    const received: Record<string, RealtimeChange[]> = { alice: [], anonymous: [] }
+    const queues = [
+      createVisibleEventQueue(as(alice), (c) => received.alice.push(c), checker),
+      createVisibleEventQueue(as(null), (c) => received.anonymous.push(c), checker),
+    ]
+    const burst = [
+      change('insert', 'notes', { id: aliceNote, owner_id: alice, body: 'alice private' }),
+      change('insert', 'notes', { id: bobNote, owner_id: bob, body: 'bob private' }),
+      change('update', 'notes', { id: aliceNote, owner_id: alice, body: 'alice edited' }),
+      change('update', 'notes', { id: bobNote, owner_id: bob, body: 'bob edited' }),
+    ]
+    for (const c of burst) for (const deliver of queues) deliver(c)
+    await new Promise((resolve) => setTimeout(resolve, 500))
+
+    expect(received.alice.map((c) => [c.type, c.data?.body])).toEqual([['insert', 'alice private'], ['update', 'alice edited']])
+    expect(received.anonymous).toEqual([])
+    // One query each for alice and for the anonymous stream, over the two distinct rows.
+    expect(visibleRows).toHaveBeenCalledTimes(2)
+    for (const call of visibleRows.mock.calls) expect(call[3]).toHaveLength(2)
+  })
+
+  it('matches a two-column primary key on both columns', async () => {
+    const { checker, visibleRows } = counted()
+    const [mine, theirs] = await Promise.all([
+      visibleChange(as(alice), change('insert', 'pairs', { tenant: 't1', n: 1, owner_id: alice, body: 'alice pair' }), checker),
+      visibleChange(as(alice), change('insert', 'pairs', { tenant: 't1', n: 2, owner_id: bob, body: 'bob pair' }), checker),
+    ])
+    expect(mine).toMatchObject({ data: { body: 'alice pair' } })
+    expect(theirs).toBeNull()
+    expect(visibleRows).toHaveBeenCalledTimes(1)
+    expect(visibleRows.mock.calls[0][3]).toEqual([['t1', 1], ['t1', 2]])
   })
 })

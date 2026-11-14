@@ -1,13 +1,9 @@
 /**
- * Rate Limiting Middleware
+ * Per-user limits on the AI routes.
  *
- * CRITICAL FOR PRODUCTION:
- * - Prevents DOS attacks
- * - Enforces per-API rate limits
- * - Uses database-backed storage (multi-instance safe)
- *
- * Flow:
- * Request → Check rate limit → Allow/Deny → Execute
+ * Each allowed request is an ApiRequestLog row under the route's path, so every
+ * instance counts the same requests. Every other surface counts with
+ * lib/security/auth-rate-limit `consume()`.
  */
 
 import { prisma } from '@/lib/db/prisma'
@@ -118,98 +114,6 @@ interface RateLimitResult {
   retryAfter?: number
 }
 
-/**
- * Check Rate Limit using database-backed storage
- * Multi-instance safe: all servers share same rate limit state via database
- * 
- * @param key - Unique identifier (e.g., "apiKey:xxx" or "ip:xxx")
- * @param limit - Max requests per window
- * @param windowMs - Time window in milliseconds (default: 60000 = 1 minute)
- */
-export async function checkRateLimit(
-  key: string,
-  limit: number,
-  windowMs: number = 60000
-): Promise<RateLimitResult> {
-  // Skip rate limiting in test/integration mode
-  if (process.env.NODE_ENV === 'test' || process.env.ENGINE_MODE === 'integration') {
-    return {
-      allowed: true,
-      limit,
-      remaining: limit,
-      resetAt: Date.now() + windowMs,
-    }
-  }
-
-  const now = Date.now()
-  const windowStart = new Date(now - (now % windowMs))
-  const resetAt = now + windowMs
-
-  try {
-    // Use intentLog as distributed rate limit counter
-    // Count API requests in current window
-    const requestCount = await prisma.intentLog.count({
-      where: {
-        // Use executionId to track rate limit keys
-        executionId: { startsWith: `ratelimit:${key}:` },
-        timestamp: { gte: windowStart },
-      },
-    })
-
-    if (requestCount >= limit) {
-      return {
-        allowed: false,
-        limit,
-        remaining: 0,
-        resetAt,
-        retryAfter: Math.ceil((resetAt - now) / 1000),
-      }
-    }
-
-    return {
-      allowed: true,
-      limit,
-      remaining: limit - requestCount - 1,
-      resetAt,
-    }
-  } catch (error) {
-    // Fail open on database error
-    console.error('[Rate Limit Middleware] Database error, failing open:', error)
-    return {
-      allowed: true,
-      limit,
-      remaining: limit,
-      resetAt,
-    }
-  }
-}
-
-/**
- * Enforce Rate Limit for API Key
- * 
- * Called BEFORE executing API request
- */
-export async function enforceApiKeyRateLimit(
-  keyId: string,
-  rateLimit: number
-): Promise<RateLimitResult> {
-  const key = `apiKey:${keyId}`
-  return checkRateLimit(key, rateLimit, 60000) // 1 minute window
-}
-
-/**
- * Enforce Rate Limit for IP Address
- * 
- * Fallback rate limiting for unauthenticated requests
- */
-export async function enforceIpRateLimit(
-  ipAddress: string,
-  limit: number = 10 // Much stricter for unauthenticated
-): Promise<RateLimitResult> {
-  const key = `ip:${ipAddress}`
-  return checkRateLimit(key, limit, 60000)
-}
-
 // enforceApiDefinitionRateLimit was removed on 2026-07-21. It had zero callers
 // for its entire life. Rate limiting is enforced per API KEY
 // (enforceRateLimitByKeyId in server/lib/auth.ts) on both /api/v1 and /api/v2 —
@@ -236,64 +140,3 @@ export function getRateLimitHeaders(result: RateLimitResult): Record<string, str
 
   return headers
 }
-
-/**
- * Clean up expired entries
- * 
- * NOTE: With database-backed rate limiting, no manual cleanup needed.
- * Time-windowed queries automatically exclude expired entries.
- * This function is kept for API compatibility but is now a no-op.
- */
-export function cleanupRateLimitStore() {
-  // No-op: Database-backed rate limiting uses time-windowed queries
-  // No in-memory store to clean up
-}
-
-// Auto-cleanup every 5 minutes (kept for compatibility, but now no-op)
-setInterval(cleanupRateLimitStore, 5 * 60 * 1000)
-
-/**
- * Redis-based Rate Limiter (for production multi-server setup)
- * 
- * Uncomment and configure when scaling to multiple servers
- */
-/*
-import { Redis } from 'ioredis'
-
-const redis = new Redis(process.env.REDIS_URL!)
-
-export async function checkRateLimitRedis(
-  key: string,
-  limit: number,
-  windowMs: number = 60000
-): Promise<RateLimitResult> {
-  const now = Date.now()
-  const windowKey = `ratelimit:${key}:${Math.floor(now / windowMs)}`
-  
-  const count = await redis.incr(windowKey)
-  
-  if (count === 1) {
-    await redis.expire(windowKey, Math.ceil(windowMs / 1000))
-  }
-  
-  const ttl = await redis.ttl(windowKey)
-  const resetAt = now + (ttl * 1000)
-  
-  if (count > limit) {
-    return {
-      allowed: false,
-      limit,
-      remaining: 0,
-      resetAt,
-      retryAfter: ttl,
-    }
-  }
-  
-  return {
-    allowed: true,
-    limit,
-    remaining: limit - count,
-    resetAt,
-  }
-}
-*/

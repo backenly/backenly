@@ -138,5 +138,5 @@ export async function POST(request: NextRequest) {
         ...getRateLimitHeaders(rate),
       },
     })
-  })
+  }, { floor: 'view' }) // any member: it answers a question and stores nothing in the project
 }

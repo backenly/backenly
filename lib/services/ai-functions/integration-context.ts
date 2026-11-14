@@ -23,22 +23,26 @@
  *   ctx.integrations.stripe.listCustomers(email?)
  *   ctx.integrations.email.send({ to, subject, html, from? })
  *   ctx.integrations.twilio.sendSms({ to, body })
- *   ctx.integrations.openai.complete(prompt, maxTokens?)
+ *   ctx.integrations.openai.complete(prompt, { model?, maxTokens?, system? })
  *   ctx.integrations.openai.embed(text)
- *   ctx.integrations.anthropic.complete(prompt, maxTokens?, systemPrompt?)
+ *   ctx.integrations.anthropic.complete(prompt, { model?, maxTokens?, system?, effort? })
  *   ctx.integrations.posthog.capture({ distinctId, event, properties? })
  *   ctx.integrations.posthog.identify({ distinctId, properties })
  *   ctx.integrations.posthog.isFeatureEnabled(flagKey, distinctId)
  *   ctx.integrations.isConnected(name)  → boolean
  */
 
+import { randomBytes } from 'crypto'
 import { getIntegrationKey } from '@/lib/services/integrationKeyStore'
 import { safeFetch } from '@/lib/security/outbound-guard'
+import { twilioCredentialParts, twilioCredentialProblem } from '@/lib/integrations/twilio-credential'
 import {
   INTEGRATION_PROVIDERS,
   genericRequestProviders,
   type ProviderSpec,
 } from './integration-registry'
+import Anthropic from '@anthropic-ai/sdk'
+import { AI_HELPER_DEFAULTS } from './model-defaults'
 
 // ── Types exposed to generated functions ──────────────────────────────────────
 
@@ -46,6 +50,11 @@ import {
  * Universal escape hatch present on EVERY connected provider. Guarantees that a
  * provider which stores a key is never "phantom": even without a hand-written
  * typed helper, `ctx.integrations.<id>.request(...)` makes a signed call.
+ *
+ * `path` is relative to the provider's base URL, and may repeat the base's
+ * version as the provider's docs write it (resolveProviderUrl). An object
+ * `body` is encoded as the provider takes it (encodeBody): JSON, a form for
+ * Stripe, multipart for Stability, or what the call's Content-Type names.
  */
 export interface GenericIntegration {
   request(
@@ -95,13 +104,36 @@ export interface TwilioIntegration {
   sendSms(opts: { to: string; body: string }): Promise<{ sid: string; status: string }>
 }
 
+/**
+ * What a completion helper takes besides the prompt. Anything left out comes
+ * from AI_HELPER_DEFAULTS (model-defaults.ts).
+ */
+export interface CompleteOptions {
+  /** The provider's model id. */
+  model?: string
+  /** The most tokens the reply may use. On Claude, thinking counts toward it too. */
+  maxTokens?: number
+  /** A system prompt. */
+  system?: string
+}
+
 export interface OpenAIIntegration {
-  complete(prompt: string, maxTokens?: number): Promise<string>
+  /** Single-turn chat completion. */
+  complete(prompt: string, options?: CompleteOptions): Promise<string>
+  /** The positional form functions were written with, still accepted. */
+  complete(prompt: string, maxTokens?: number, systemPrompt?: string): Promise<string>
   embed(text: string): Promise<number[]>
+}
+
+export interface AnthropicCompleteOptions extends CompleteOptions {
+  /** How much the model thinks before it answers. */
+  effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 }
 
 export interface AnthropicIntegration {
   /** Single-turn completion. Anthropic has no embeddings API — use openai.embed for vectors. */
+  complete(prompt: string, options?: AnthropicCompleteOptions): Promise<string>
+  /** The positional form functions were written with, still accepted. */
   complete(prompt: string, maxTokens?: number, systemPrompt?: string): Promise<string>
 }
 
@@ -130,12 +162,13 @@ export interface IntegrationContext {
   [provider: string]: any
 }
 
-// ── Stripe form encoder ────────────────────────────────────────────────────────
+// ── Form encoder ───────────────────────────────────────────────────────────────
 // Stripe's API uses application/x-www-form-urlencoded with PHP-style nesting:
 //   line_items[0][price]=price_x&line_items[0][quantity]=1&metadata[k]=v
 // This walks arrays + objects recursively so nested params encode correctly.
+// The Stripe helpers and request() for any form-encoded body both use it.
 
-function encodeStripeForm(obj: Record<string, any>): string {
+function encodeForm(obj: Record<string, any>): string {
   const pairs: string[] = []
   const walk = (key: string, val: any): void => {
     if (val === undefined || val === null) return
@@ -164,7 +197,7 @@ function buildStripeIntegration(secretKey: string): StripeIntegration {
     const res = await fetch(`${STRIPE_BASE}${path}`, {
       method: 'POST',
       headers,
-      body: encodeStripeForm(params),
+      body: encodeForm(params),
       signal: AbortSignal.timeout(8000),
     })
     const data = await res.json()
@@ -361,11 +394,43 @@ function buildTwilioIntegration(accountSid: string, authToken: string, fromNumbe
   }
 }
 
+/** ctx.integrations.twilio for a stored value it cannot send with: each call says what to store instead. */
+function unusableTwilioIntegration(problem: string): TwilioIntegration {
+  return {
+    async sendSms() {
+      throw new Error(
+        `Twilio cannot send: its stored credential is not accountSid:authToken:fromNumber. ${problem} ` +
+          'Connect Twilio again with its accountSid, authToken and fromNumber.',
+      )
+    },
+  }
+}
+
 // ── OpenAI wrapper ─────────────────────────────────────────────────────────────
 
-function buildOpenAIIntegration(apiKey: string): OpenAIIntegration {
+/**
+ * complete()'s options, from either form a function calls it with:
+ * complete(prompt, { model?, maxTokens?, system? }) or the positional
+ * complete(prompt, maxTokens?, systemPrompt?) generated code was written with.
+ */
+function completeOptions<T extends CompleteOptions>(second: unknown, systemPrompt: unknown): T {
+  if (second !== null && typeof second === 'object') return second as T
   return {
-    async complete(prompt, maxTokens = 256) {
+    ...(typeof second === 'number' ? { maxTokens: second } : {}),
+    ...(typeof systemPrompt === 'string' ? { system: systemPrompt } : {}),
+  } as T
+}
+
+/** The model a function named, or the default when it named none. */
+function modelOf(named: unknown, fallback: string): string {
+  return typeof named === 'string' && named.trim() ? named.trim() : fallback
+}
+
+export function buildOpenAIIntegration(apiKey: string): OpenAIIntegration {
+  return {
+    async complete(prompt: string, second?: number | CompleteOptions, systemPrompt?: string) {
+      const options = completeOptions<CompleteOptions>(second, systemPrompt)
+      const defaults = AI_HELPER_DEFAULTS.openai.complete
       const res = await fetch('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
         headers: {
@@ -373,9 +438,13 @@ function buildOpenAIIntegration(apiKey: string): OpenAIIntegration {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          model: 'gpt-4o-mini',
-          messages: [{ role: 'user', content: prompt }],
-          max_tokens: maxTokens,
+          model: modelOf(options.model, defaults.model),
+          messages: [
+            ...(options.system ? [{ role: 'system', content: options.system }] : []),
+            { role: 'user', content: prompt },
+          ],
+          // max_tokens is deprecated, and OpenAI's reasoning models refuse it.
+          max_completion_tokens: options.maxTokens ?? defaults.maxTokens,
         }),
         signal: AbortSignal.timeout(15000),
       })
@@ -391,7 +460,7 @@ function buildOpenAIIntegration(apiKey: string): OpenAIIntegration {
           'Authorization': `Bearer ${apiKey}`,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ model: 'text-embedding-3-small', input: text }),
+        body: JSON.stringify({ model: AI_HELPER_DEFAULTS.openai.embed.model, input: text }),
         signal: AbortSignal.timeout(10000),
       })
       const data = await res.json()
@@ -405,33 +474,70 @@ function buildOpenAIIntegration(apiKey: string): OpenAIIntegration {
 // Anthropic exposes the Messages API only — there is NO embeddings endpoint.
 // Functions that need vectors must use ctx.integrations.openai.embed().
 
-function buildAnthropicIntegration(apiKey: string): AnthropicIntegration {
-  return {
-    async complete(prompt, maxTokens = 512, systemPrompt) {
-      const body: Record<string, any> = {
-        model: 'claude-3-5-haiku-20241022',
-        max_tokens: maxTokens,
-        messages: [{ role: 'user', content: prompt }],
-      }
-      if (systemPrompt) body.system = systemPrompt
+/**
+ * An SDK error as this helper has always thrown them, "Anthropic error: …",
+ * with what the API said and its status. A retired or unknown model is a 404
+ * whose message names the model.
+ */
+function anthropicError(err: unknown): Error {
+  if (err instanceof Anthropic.APIError && err.status) {
+    const said = (err.error as { error?: { message?: unknown } } | undefined)?.error?.message
+    if (typeof said === 'string' && said) return new Error(`Anthropic error: ${said} (HTTP ${err.status})`)
+  }
+  return new Error(`Anthropic error: ${err instanceof Error ? err.message : String(err)}`)
+}
 
-      const res = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'x-api-key': apiKey,
-          'anthropic-version': '2023-06-01',
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(20000),
-      })
-      const data = await res.json()
-      if (data.error) throw new Error(`Anthropic error: ${data.error.message || data.error.type}`)
-      // content is an array of blocks — concatenate the text blocks.
-      return (data.content || [])
-        .filter((b: any) => b.type === 'text')
-        .map((b: any) => b.text)
-        .join('') || ''
+export function buildAnthropicIntegration(apiKey: string): AnthropicIntegration {
+  // The official SDK, which reads globalThis.fetch when the client is made. Its
+  // base URL and bearer token default to this server's ANTHROPIC_BASE_URL and
+  // ANTHROPIC_AUTH_TOKEN, which are Backenly's own settings, so both are pinned:
+  // the project's key goes to api.anthropic.com, alone. No retries, as before:
+  // the calling function decides what an error means.
+  const client = new Anthropic({
+    apiKey,
+    authToken: null,
+    baseURL: 'https://api.anthropic.com',
+    maxRetries: 0,
+    timeout: 20_000,
+  })
+  return {
+    async complete(prompt: string, second?: number | AnthropicCompleteOptions, systemPrompt?: string) {
+      const options = completeOptions<AnthropicCompleteOptions>(second, systemPrompt)
+      const defaults = AI_HELPER_DEFAULTS.anthropic.complete
+      const model = modelOf(options.model, defaults.model)
+      // The default effort goes with the default model only (model-defaults.ts).
+      const effort = options.effort ?? (model === defaults.model ? defaults.effort : undefined)
+      const maxTokens = options.maxTokens ?? defaults.maxTokens
+
+      let message: Anthropic.Message
+      try {
+        message = await client.messages.create({
+          model,
+          max_tokens: maxTokens,
+          messages: [{ role: 'user', content: prompt }],
+          ...(options.system ? { system: options.system } : {}),
+          ...(effort ? { output_config: { effort } } : {}),
+        })
+      } catch (err) {
+        throw anthropicError(err)
+      }
+
+      if (message.stop_reason === 'refusal') {
+        const category = message.stop_details?.category
+        throw new Error(`Anthropic declined this prompt (stop_reason "refusal"${category ? `, category "${category}"` : ''}).`)
+      }
+      // A reply can begin with thinking blocks: the answer is the text blocks.
+      const text = message.content
+        .filter((block): block is Anthropic.TextBlock => block.type === 'text')
+        .map((block) => block.text)
+        .join('')
+      if (!text && message.stop_reason === 'max_tokens') {
+        throw new Error(
+          `Anthropic reached maxTokens (${maxTokens}) before writing any reply; its thinking counts toward it. ` +
+            'Raise maxTokens, or lower effort.',
+        )
+      }
+      return text
     },
   }
 }
@@ -516,12 +622,16 @@ function buildPostHogIntegration(apiKey: string, host: string): PostHogIntegrati
  * The fix keeps the legitimate case — some APIs return absolute next-page URLs
  * on their own host — by requiring an absolute path to share the provider's
  * origin. Anything else is refused before a credential is attached.
+ *
+ * A relative path is appended to the base, never resolved against it, so it
+ * cannot leave the provider's host, and a path that repeats the base's own
+ * path is appended once (withoutBasePath).
  */
 export function resolveProviderUrl(base: string, path: string, providerId: string): string {
   const p = String(path ?? '')
 
   if (!/^[a-z][a-z0-9+.-]*:/i.test(p)) {
-    return `${base}${p.startsWith('/') ? '' : '/'}${p}`
+    return `${base}${withoutBasePath(base, p.startsWith('/') ? p : `/${p}`)}`
   }
 
   let target: URL
@@ -548,6 +658,155 @@ export function resolveProviderUrl(base: string, path: string, providerId: strin
   return target.toString()
 }
 
+/**
+ * A relative path without the base URL's own path, when it starts with it.
+ *
+ * Most bases end in their API version (https://api.openai.com/v1,
+ * https://api.sendgrid.com/v3, https://onesignal.com/api/v1), and providers
+ * document their paths with it, so OpenAI's '/v1/chat/completions' was sent to
+ * /v1/v1/chat/completions and answered 404. Only whole segments are dropped:
+ * '/v10/x' on a '/v1' base is left as it is.
+ */
+function withoutBasePath(base: string, relative: string): string {
+  let basePath: string
+  try {
+    basePath = new URL(base).pathname.replace(/\/+$/, '')
+  } catch {
+    return relative
+  }
+  if (!basePath || !relative.startsWith(basePath)) return relative
+  const next = relative.charAt(basePath.length)
+  return next === '' || next === '/' || next === '?' || next === '#' ? relative.slice(basePath.length) : relative
+}
+
+// ── Request bodies ─────────────────────────────────────────────────────────────
+
+const JSON_TYPE = 'application/json'
+const FORM_TYPE = 'application/x-www-form-urlencoded'
+const MULTIPART_TYPE = 'multipart/form-data'
+const BYTES_TYPE = 'application/octet-stream'
+
+type BodyEncoding = NonNullable<ProviderSpec['bodyEncoding']>
+
+/** The Content-Type a call's own headers name, whatever its case. */
+function contentTypeOf(headers: Record<string, string>): string | undefined {
+  const name = Object.keys(headers).find((h) => h.toLowerCase() === 'content-type')
+  return name ? headers[name] : undefined
+}
+
+function withoutContentType(headers: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(Object.entries(headers).filter(([h]) => h.toLowerCase() !== 'content-type'))
+}
+
+function encodingOfType(type: string): BodyEncoding {
+  const t = type.trim().toLowerCase()
+  if (t.startsWith(MULTIPART_TYPE)) return 'multipart'
+  if (t.startsWith(FORM_TYPE)) return 'form'
+  return 'json'
+}
+
+/**
+ * A request() body as the provider takes it.
+ *
+ * Every body used to be JSON.stringify'd and sent as application/json. Stripe
+ * takes only form-encoded bodies, so every Stripe write outside the typed
+ * helpers failed, and Stability's image endpoints take only multipart, so the
+ * registry's own Stability example could not work. A Content-Type the call
+ * names chooses the encoding; otherwise the provider's (spec.bodyEncoding),
+ * JSON unless it says otherwise. A string is sent as it is.
+ */
+function encodeBody(
+  spec: ProviderSpec,
+  body: unknown,
+  callerType: string | undefined,
+): { body: string | Uint8Array; contentType: string } {
+  const encoding = callerType ? encodingOfType(callerType) : spec.bodyEncoding ?? 'json'
+  if (typeof body === 'string') {
+    return { body, contentType: callerType ?? (encoding === 'form' ? FORM_TYPE : JSON_TYPE) }
+  }
+  if (encoding === 'json') return { body: JSON.stringify(body), contentType: callerType ?? JSON_TYPE }
+
+  if (!body || typeof body !== 'object' || Array.isArray(body) || body instanceof Uint8Array) {
+    throw new Error(`${spec.id}.request(): a ${encoding === 'form' ? 'form' : 'multipart'} body must be an object of fields.`)
+  }
+  if (encoding === 'form') return { body: encodeForm(body as Record<string, unknown>), contentType: FORM_TYPE }
+  const boundary = `BackenlyFormBoundary${randomBytes(16).toString('hex')}`
+  return {
+    body: encodeMultipart(body as Record<string, unknown>, boundary, spec.id),
+    contentType: `${MULTIPART_TYPE}; boundary=${boundary}`,
+  }
+}
+
+/**
+ * multipart/form-data. A field is a string, number or boolean, a list of those
+ * (sent as repeated fields), or a file. A function cannot build FormData or a
+ * Blob in the sandbox, and its arguments reach this process as plain values,
+ * so a file is described: { base64, filename?, contentType? }, or { data,
+ * filename?, contentType? } with text or bytes as data. Bytes alone are a file
+ * too.
+ */
+function encodeMultipart(fields: Record<string, unknown>, boundary: string, providerId: string): Buffer {
+  const parts: Buffer[] = []
+  const add = (name: string, value: unknown): void => {
+    if (value === undefined || value === null) return
+    const disposition = `--${boundary}\r\nContent-Disposition: form-data; name="${dispositionValue(name)}"`
+    const file = multipartFile(value)
+    if (file) {
+      if (/[\r\n]/.test(file.contentType)) {
+        throw new Error(`${providerId}.request(): the content type of file field "${name}" must be one line.`)
+      }
+      parts.push(
+        Buffer.from(`${disposition}; filename="${dispositionValue(file.filename)}"\r\nContent-Type: ${file.contentType}\r\n\r\n`),
+        file.bytes,
+        Buffer.from('\r\n'),
+      )
+      return
+    }
+    if (typeof value === 'object') {
+      throw new Error(
+        `${providerId}.request(): multipart field "${name}" must be a string, number, boolean, ` +
+          'or a file ({ base64, filename?, contentType? } or { data, filename?, contentType? }).',
+      )
+    }
+    parts.push(Buffer.from(`${disposition}\r\n\r\n${String(value)}\r\n`))
+  }
+  for (const [name, value] of Object.entries(fields)) {
+    if (Array.isArray(value)) value.forEach((v) => add(name, v))
+    else add(name, value)
+  }
+  parts.push(Buffer.from(`--${boundary}--\r\n`))
+  return Buffer.concat(parts)
+}
+
+/** A field name or filename inside Content-Disposition, escaped as browsers escape it. */
+function dispositionValue(s: string): string {
+  return s.replace(/"/g, '%22').replace(/\r/g, '%0D').replace(/\n/g, '%0A')
+}
+
+function bytesOf(v: unknown): Buffer | null {
+  if (v instanceof Uint8Array) return Buffer.from(v.buffer, v.byteOffset, v.byteLength)
+  if (v instanceof ArrayBuffer) return Buffer.from(v)
+  return null
+}
+
+/** The file a multipart field describes, or null for a field that is not one. */
+function multipartFile(value: unknown): { bytes: Buffer; filename: string; contentType: string } | null {
+  const raw = bytesOf(value)
+  if (raw) return { bytes: raw, filename: 'file', contentType: BYTES_TYPE }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const f = value as { base64?: unknown; data?: unknown; filename?: unknown; contentType?: unknown }
+  const bytes =
+    typeof f.base64 === 'string' ? Buffer.from(f.base64, 'base64')
+    : typeof f.data === 'string' ? Buffer.from(f.data, 'utf8')
+    : bytesOf(f.data)
+  if (!bytes) return null
+  return {
+    bytes,
+    filename: typeof f.filename === 'string' && f.filename ? f.filename : 'file',
+    contentType: typeof f.contentType === 'string' && f.contentType ? f.contentType : BYTES_TYPE,
+  }
+}
+
 // ── Universal request() builder ────────────────────────────────────────────────
 // Works for ANY registry provider that declares a baseUrl + buildHeaders. This is
 // the anti-phantom primitive: a stored key always yields a callable surface.
@@ -562,28 +821,29 @@ function buildGenericRequest(
     async request(method, path, body, headers) {
       const m = String(method || 'GET').toUpperCase()
       const url = resolveProviderUrl(base, path, spec.id)
+      const callerHeaders = headers ?? {}
+      const callerType = contentTypeOf(callerHeaders)
 
-      // Merge provider auth headers with any per-call overrides.
-      const finalHeaders: Record<string, string> = {
-        'Content-Type': 'application/json',
-        ...(spec.buildHeaders ? spec.buildHeaders(key) : {}),
-        ...(headers ?? {}),
-      }
-
-      // Inject aux fields (e.g. OneSignal app_id) into JSON bodies only.
+      // Inject aux fields (e.g. OneSignal app_id) into object bodies only.
       let finalBody = body
       if (spec.injectBody && finalBody && typeof finalBody === 'object' && !Array.isArray(finalBody)) {
         finalBody = { ...spec.injectBody(auxValue), ...(finalBody as Record<string, unknown>) }
       }
 
       const hasBody = finalBody !== undefined && finalBody !== null && m !== 'GET' && m !== 'HEAD'
+      const encoded = hasBody ? encodeBody(spec, finalBody, callerType) : null
+
+      // Provider auth headers, any per-call overrides, then the body's own type.
+      const finalHeaders: Record<string, string> = {
+        ...(spec.buildHeaders ? spec.buildHeaders(key) : {}),
+        ...withoutContentType(callerHeaders),
+        'Content-Type': encoded?.contentType ?? callerType ?? JSON_TYPE,
+      }
 
       const res = await safeFetch(url, {
         method: m,
         headers: finalHeaders,
-        body: hasBody
-          ? (typeof finalBody === 'string' ? finalBody : JSON.stringify(finalBody))
-          : undefined,
+        body: encoded?.body,
         timeoutMs: 20000,
       })
 
@@ -669,13 +929,16 @@ export async function buildIntegrationContext(projectId: string): Promise<Integr
   }
 
   if (twilioRaw) {
-    // Twilio key stored as "accountSid:authToken:fromNumber"
-    const parts = twilioRaw.split(':')
-    if (parts.length >= 3) {
-      ctx.twilio = buildTwilioIntegration(parts[0], parts[1], parts[2])
-      connected.add('twilio')
-      connected.add('sms')
-    }
+    // Stored as accountSid:authToken:fromNumber (lib/integrations/twilio-credential.ts),
+    // which every way of storing it now checks. A value stored before that may
+    // lack a part: the helper used to be left out for it, so every SMS function
+    // threw a TypeError, and its sendSms now says what to store instead.
+    const credential = twilioCredentialParts(twilioRaw)
+    ctx.twilio = credential
+      ? buildTwilioIntegration(credential.accountSid, credential.authToken, credential.fromNumber)
+      : unusableTwilioIntegration(twilioCredentialProblem(twilioRaw) ?? '')
+    connected.add('twilio')
+    connected.add('sms')
   }
 
   if (posthogKey) {

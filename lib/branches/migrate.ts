@@ -119,7 +119,8 @@ export async function applyBranchMigration(
     const { autoApplyRlsIfNeeded } = await import('@/lib/services/workspace-rls')
     for (const table of created) {
       try {
-        await autoApplyRlsIfNeeded(projectId, table, [], { schemaName: branch.schemaName })
+        const outcome = await autoApplyRlsIfNeeded(projectId, table, [], { schemaName: branch.schemaName }, { closeWhenUndecidable: true })
+        if (outcome.notice) rlsNotes.push(outcome.notice)
       } catch (err) {
         rlsNotes.push(`Row security for ${table} could not be applied on the branch: ${err instanceof Error ? err.message : String(err)}`)
       }
