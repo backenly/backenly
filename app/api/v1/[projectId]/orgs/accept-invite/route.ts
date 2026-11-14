@@ -11,7 +11,8 @@ export const maxDuration = 15
  * Flow:
  *   1. Resolve the end-user JWT through the check every data door uses:
  *      project.jwtSecret, this project, not revoked, user not blocked.
- *   2. Look up `organization_invitations.token` in the workspace schema.
+ *   2. In one transaction, as the service role: look up and lock
+ *      `organization_invitations.token` in the workspace schema.
  *   3. Reject expired, already-accepted, or wrong-email invites.
  *   4. Insert into `organization_members` and stamp `accepted_at`.
  *
@@ -23,7 +24,7 @@ export const maxDuration = 15
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
 import { isRegionError, workspaceRawClient } from '@/lib/data-plane/regional'
-import { executeWithUserContext } from '@/lib/services/workspace-rls'
+import { rlsSessionParams, rlsSessionSql } from '@/lib/services/rls-session'
 import { resolveEndUserFromToken } from '@/server/lib/end-user-identity'
 import { getWorkspaceDatabaseNames } from '@/lib/services/databaseProvisioning'
 import { recordedV1 } from '@/lib/traffic/recorded-v1'
@@ -84,123 +85,126 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
     }
 
     const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
-    // The project's database, in its region. Resolved before the users
-    // lookup's fail-soft catch, which would read an unreachable region as
-    // "no account".
+    // The project's database, in its region.
     const db = await workspaceRawClient(projectId)
 
-    // ── Lookup invitation ──────────────────────────────────────────────────
-    const invites = await db.$queryRawUnsafe<Array<{
-      id: string
-      organization_id: string
-      email: string
-      role: string
-      expires_at: Date | null
-      accepted_at: Date | null
-    }>>(
-      `SELECT id, organization_id, email, role, expires_at, accepted_at
-         FROM "${postgresSchema}"."organization_invitations"
-        WHERE token = $1 LIMIT 1`,
-      inviteToken,
-    )
-    const invite = invites[0]
-    if (!invite) {
-      return NextResponse.json(
-        { error: 'Invite not found or already consumed', code: 'INVITE_NOT_FOUND' },
-        { status: 404 },
-      )
-    }
-    if (invite.accepted_at) {
-      return NextResponse.json(
-        { error: 'This invite has already been accepted', code: 'INVITE_ALREADY_ACCEPTED' },
-        { status: 409 },
-      )
-    }
-    if (invite.expires_at && new Date(invite.expires_at).getTime() < Date.now()) {
-      return NextResponse.json(
-        { error: 'This invite has expired. Ask the inviter to send a new one.', code: 'INVITE_EXPIRED' },
-        { status: 410 },
-      )
-    }
+    // ── One transaction, as the service role ──────────────────────────────
+    // The teams tables are row-level secured (lib/services/workspace-rls.ts,
+    // template "teams"): an invitation is readable only by its organization's
+    // owner and admins, and an end user writes a membership only into an
+    // organization they own. This route is the server side of an invitation,
+    // the one door through which an end user joins someone else's
+    // organization, so every statement here is the service role's, never the
+    // caller's. Without claims, under the application role production runs as
+    // (no BYPASSRLS, held to FORCE row-level security), the lookup matched no
+    // invitation and every invite answered 404.
+    //
+    // The invitation is locked (FOR UPDATE) before it is checked, so two
+    // accepts of one token cannot both find it unaccepted: the second waits for
+    // the first to commit, then reads it accepted.
+    const outcome = await db.$transaction(async (tx): Promise<{ status: number; body: Record<string, unknown> }> => {
+      await tx.$executeRawUnsafe(rlsSessionSql(), ...rlsSessionParams({ isServiceRole: true }))
 
-    // ── Email match (anti-token-theft) ─────────────────────────────────────
-    // Look up the end-user's email from the workspace users table — the JWT
-    // payload may not include it. The invite is only valid for the user it
-    // was addressed to. Read as the service role: the users table is row-level
-    // secured against the app role, so a read without session claims matched
-    // no row (lib/services/end-user-blocked.ts). And a bare $1 arrives as text,
-    // which a uuid id refuses (42883), so the id is compared as text.
-    let endUserEmail: string | null = null
-    try {
-      const rows = await executeWithUserContext<{ email: string }>(
-        projectId,
-        '',
-        true,
-        `SELECT email FROM "${postgresSchema}"."users" WHERE id::text = $1 LIMIT 1`,
-        [endUser.userId],
+      // ── Lookup invitation ────────────────────────────────────────────────
+      const invites = await tx.$queryRawUnsafe<Array<{
+        id: string
+        organization_id: string
+        email: string
+        role: string | null
+        expires_at: Date | null
+        accepted_at: Date | null
+      }>>(
+        `SELECT id::text AS id, organization_id::text AS organization_id, email, role, expires_at, accepted_at
+           FROM "${postgresSchema}"."organization_invitations"
+          WHERE token = $1
+          LIMIT 1
+          FOR UPDATE`,
+        inviteToken,
       )
-      endUserEmail = rows[0]?.email ?? null
-    } catch {
-      /* users table may not exist if auth wasn't enabled — handled below */
-    }
-    if (!endUserEmail) {
-      return NextResponse.json(
-        { error: 'Could not resolve your account email', code: 'NO_USER_RECORD' },
-        { status: 409 },
-      )
-    }
-    if (endUserEmail.toLowerCase() !== String(invite.email).toLowerCase()) {
-      return NextResponse.json(
-        {
-          error: `This invite was sent to a different email address. Sign in with the address it was sent to (${invite.email}).`,
-          code: 'INVITE_EMAIL_MISMATCH',
-        },
-        { status: 403 },
-      )
-    }
+      const invite = invites[0]
+      if (!invite) {
+        return { status: 404, body: { error: 'Invite not found or already consumed', code: 'INVITE_NOT_FOUND' } }
+      }
+      if (invite.accepted_at) {
+        return { status: 409, body: { error: 'This invite has already been accepted', code: 'INVITE_ALREADY_ACCEPTED' } }
+      }
+      if (invite.expires_at && new Date(invite.expires_at).getTime() < Date.now()) {
+        return { status: 410, body: { error: 'This invite has expired. Ask the inviter to send a new one.', code: 'INVITE_EXPIRED' } }
+      }
 
-    // ── Already a member? Treat as idempotent success ──────────────────────
-    const existing = await db.$queryRawUnsafe<Array<{ id: string }>>(
-      `SELECT id FROM "${postgresSchema}"."organization_members"
-        WHERE organization_id = $1::uuid AND user_id = $2::uuid LIMIT 1`,
-      invite.organization_id, endUser.userId,
-    )
-    if (existing.length > 0) {
-      // Still mark the invite consumed so it can't be reused later.
-      await db.$executeRawUnsafe(
+      // ── Email match (anti-token-theft) ───────────────────────────────────
+      // The end-user's email, from the workspace users table: the JWT payload
+      // may not include it. The invite is only valid for the user it was
+      // addressed to. A project without the table has no account to match, said
+      // as such rather than as an aborted transaction. A bare $1 arrives as
+      // text, which a uuid id refuses (42883), so the id is compared as text.
+      const [usersTable] = await tx.$queryRawUnsafe<Array<{ present: boolean }>>(
+        `SELECT to_regclass($1) IS NOT NULL AS present`,
+        `"${postgresSchema}"."users"`,
+      )
+      const users = usersTable?.present
+        ? await tx.$queryRawUnsafe<Array<{ email: string | null }>>(
+            `SELECT email FROM "${postgresSchema}"."users" WHERE id::text = $1 LIMIT 1`,
+            endUser.userId,
+          )
+        : []
+      const endUserEmail = users[0]?.email ?? null
+      if (!endUserEmail) {
+        return { status: 409, body: { error: 'Could not resolve your account email', code: 'NO_USER_RECORD' } }
+      }
+      if (endUserEmail.toLowerCase() !== String(invite.email).toLowerCase()) {
+        return {
+          status: 403,
+          body: {
+            error: `This invite was sent to a different email address. Sign in with the address it was sent to (${invite.email}).`,
+            code: 'INVITE_EMAIL_MISMATCH',
+          },
+        }
+      }
+
+      // ── Already a member? Treat as idempotent success ────────────────────
+      const existing = await tx.$queryRawUnsafe<Array<{ id: string }>>(
+        `SELECT id::text AS id FROM "${postgresSchema}"."organization_members"
+          WHERE organization_id = $1::uuid AND user_id = $2::uuid LIMIT 1`,
+        invite.organization_id, endUser.userId,
+      )
+      if (existing.length === 0) {
+        await tx.$executeRawUnsafe(
+          `INSERT INTO "${postgresSchema}"."organization_members"
+             (id, organization_id, user_id, role, joined_at)
+           VALUES (gen_random_uuid(), $1::uuid, $2::uuid, $3, NOW())`,
+          invite.organization_id, endUser.userId, invite.role || 'member',
+        )
+      }
+      // Consumed either way, so it cannot be used again.
+      await tx.$executeRawUnsafe(
         `UPDATE "${postgresSchema}"."organization_invitations"
             SET accepted_at = NOW() WHERE id = $1::uuid`,
         invite.id,
       )
-      return NextResponse.json({
-        ok: true,
-        message: 'You were already a member of this organization.',
-        organizationId: invite.organization_id,
-        role: invite.role,
-      })
-    }
 
-    // ── Insert member + consume invite atomically ──────────────────────────
-    await db.$transaction([
-      db.$executeRawUnsafe(
-        `INSERT INTO "${postgresSchema}"."organization_members"
-           (id, organization_id, user_id, role, joined_at)
-         VALUES (gen_random_uuid(), $1::uuid, $2::uuid, $3, NOW())`,
-        invite.organization_id, endUser.userId, invite.role || 'member',
-      ),
-      db.$executeRawUnsafe(
-        `UPDATE "${postgresSchema}"."organization_invitations"
-            SET accepted_at = NOW() WHERE id = $1::uuid`,
-        invite.id,
-      ),
-    ])
-
-    return NextResponse.json({
-      ok: true,
-      message: 'Joined the organization.',
-      organizationId: invite.organization_id,
-      role: invite.role || 'member',
+      return existing.length > 0
+        ? {
+            status: 200,
+            body: {
+              ok: true,
+              message: 'You were already a member of this organization.',
+              organizationId: invite.organization_id,
+              role: invite.role,
+            },
+          }
+        : {
+            status: 200,
+            body: {
+              ok: true,
+              message: 'Joined the organization.',
+              organizationId: invite.organization_id,
+              role: invite.role || 'member',
+            },
+          }
     })
+
+    return NextResponse.json(outcome.body, { status: outcome.status })
   } catch (err: any) {
     // A region this process cannot reach: say so, without the message's
     // variable names.
