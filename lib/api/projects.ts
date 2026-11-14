@@ -27,6 +27,20 @@ export interface Project {
   /** The Backenly Cloud region holding the project's data (lib/regions.ts). Null is the home region. */
   region?: string | null
   /**
+   * Set when the project was moved in from another platform (components/migrate):
+   * where it came from, when, what matched, and how many access rules still
+   * wait for a person's approval.
+   */
+  importedFrom?: {
+    source: 'supabase' | 'firebase' | 'postgres'
+    at: string
+    tables: number
+    rows: number
+    users?: number
+    files?: number
+    rulesPending: number
+  } | null
+  /**
    * `{origin}/api/v1/{id}` in the project's region (lib/data-plane/regional.ts
    * regionApiOrigin). Null when the server has no API address for that region.
    */

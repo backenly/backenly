@@ -38,6 +38,7 @@ import { EDGE, FOCUS, PAGE_GUTTER, PAGE_WIDTH, PLATE, RULE, R_CONTROL, R_PANEL, 
 import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
 import { CLOUD_REGIONS, HOME_REGION, regionLabel, type CloudRegion, type CloudRegionId } from '@/lib/regions'
 import { sharedRead } from '@/lib/client/shared-read'
+import { MovedNotice, MovedLine } from '@/components/migrate/MovedNotice'
 
 type UserProfile = { id: string; name?: string; email?: string }
 
@@ -402,6 +403,8 @@ export function ProjectsHome({ org = null }: { org?: ProjectsHomeOrg | null }) {
             />
           </div>
         ) : (
+          <>
+          <MovedNotice projects={projects} />
           <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
             {visibleProjects.map((project) => (
               <li key={project.id}>
@@ -419,6 +422,7 @@ export function ProjectsHome({ org = null }: { org?: ProjectsHomeOrg | null }) {
               </li>
             ))}
           </ul>
+          </>
         )}
       </div>
 
@@ -937,7 +941,7 @@ function ProjectCard({
           description ? 'text-zinc-400' : 'text-faint'
         }`}
       >
-        {description || 'No description yet.'}
+        {description || (project.importedFrom ? <MovedLine moved={project.importedFrom} /> : 'No description yet.')}
       </p>
 
       <div className={`mt-auto flex items-center gap-3 border-t ${RULE} pt-3 text-[12px] leading-[16px] text-faint`}>
