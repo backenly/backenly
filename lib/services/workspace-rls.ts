@@ -969,10 +969,11 @@ async function installPermissionPolicy(
       )
     }
     // Invitations withdrawn before the failure stay withdrawn, and are said.
+    const gone: WithdrawnInvitation[] = withdrawn.length ? withdrawn : Array.isArray(err?.withdrawn) ? err.withdrawn : []
     return {
       success: false,
-      message: err.message + (withdrawn.length ? ` ${withdrawalNotice(withdrawn)}` : ''),
-      ...(withdrawn.length ? { withdrawn } : {}),
+      message: err.message + (gone.length ? ` ${withdrawalNotice(gone)}` : ''),
+      ...(gone.length ? { withdrawn: gone } : {}),
     }
   }
 }
@@ -2270,7 +2271,13 @@ async function installTeamsPolicy(projectId: string, tableName: TeamsTable, sche
   const hashing = await hashesInvitationTokens(projectId, schemaName)
   await execStatements(projectId, teamsPoliciesSql(schemaName, tableName))
   const withdrawn = hashing ? [] : await withdrawPreRuleInvitations(projectId, schemaName)
-  await execStatements(projectId, teamsTriggerSql(schemaName, tableName))
+  try {
+    await execStatements(projectId, teamsTriggerSql(schemaName, tableName))
+  } catch (err: any) {
+    // The withdrawal stands: the caller must still be able to list it.
+    if (withdrawn.length && err && typeof err === 'object') err.withdrawn = withdrawn
+    throw err
+  }
   return withdrawn
 }
 
@@ -2284,7 +2291,12 @@ async function installTeamsPolicy(projectId: string, tableName: TeamsTable, sche
 async function hashInvitationTokens(projectId: string, schema: string): Promise<WithdrawnInvitation[]> {
   if (await hashesInvitationTokens(projectId, schema)) return []
   const withdrawn = await withdrawPreRuleInvitations(projectId, schema)
-  await execStatements(projectId, teamsTriggerSql(schema, 'organization_invitations'))
+  try {
+    await execStatements(projectId, teamsTriggerSql(schema, 'organization_invitations'))
+  } catch (err: any) {
+    // The withdrawal stands, and is said with the failure.
+    throw new Error(`${err?.message ?? String(err)}${withdrawn.length ? ` ${withdrawalNotice(withdrawn)}` : ''}`)
+  }
   return withdrawn
 }
 
