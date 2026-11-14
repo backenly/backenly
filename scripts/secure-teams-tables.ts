@@ -24,12 +24,18 @@
  *   npx tsx scripts/secure-teams-tables.ts --apply --project <uuid>
  *
  * Existing memberships are never changed, in either mode: a row an end user
- * wrote under the old rules is still there afterwards. The ones that look like
- * that self-join (a member who is not the organization's owner, with no
- * accepted invitation to that organization addressed to their email) are
- * listed, one line each: project, owner's email, schema, organization id,
- * member user id, role, created_at. A member a server added with a
- * service-role key looks the same, so each is for a person to judge.
+ * wrote under the old rules is still there afterwards. The ones not accounted
+ * for are listed, one line each: project, owner's email, schema, organization
+ * id, member user id, role, created_at. A member is accounted for when they own
+ * the organization, or joined through an accepted invitation to their email
+ * that someone else wrote who is accounted for and is the organization's owner
+ * or an admin of it, at no higher a role than that invitation gave. So a
+ * self-join is listed, and so is a membership through an invitation its member
+ * wrote themselves, or one an outsider wrote. A member a server added with a
+ * service-role key is listed too, so each is for a person to judge.
+ *
+ * Also listed, never changed: an invitation table made unique on email or token
+ * across every organization (newer ones are unique per organization).
  */
 import { prisma } from '@/lib/db'
 import { secureTeamsTables } from '@/lib/services/workspace-rls'
@@ -48,6 +54,7 @@ async function main(): Promise<void> {
   let kept = 0
   let blocked = 0
   let suspects = 0
+  let shared = 0
   let affected = 0
   let failed = 0
   for (const p of projects) {
@@ -68,10 +75,14 @@ async function main(): Promise<void> {
           blocked++
           console.log(`${where}\tcannot take the teams rules: ${f.blocked.join('; ')}`)
         }
+        if (f.sharedUniques.length) {
+          shared++
+          console.log(`${where}\tinvitations unique across every organization, not per organization: ${f.sharedUniques.join(', ')}`)
+        }
         for (const s of f.suspects) {
           suspects++
           console.log(
-            `${where}\tmember without an accepted invitation\torganization ${s.organizationId}\tuser ${s.userId}\t` +
+            `${where}\tmember not accounted for\torganization ${s.organizationId}\tuser ${s.userId}\t` +
               `role ${s.role ?? '-'}\tcreated_at ${s.createdAt ? new Date(s.createdAt).toISOString() : '-'}`,
           )
         }
@@ -84,7 +95,8 @@ async function main(): Promise<void> {
   console.log(
     `${APPLY ? 'Secured' : 'Found'} ${tables} teams table(s) ${APPLY ? '' : 'to secure '}in ${affected} of ${projects.length} project(s); ` +
       `${kept} kept because a person chose their rules; ` +
-      `${suspects} membership(s) without an accepted invitation listed, none changed` +
+      `${suspects} membership(s) not accounted for listed, none changed` +
+      (shared ? `; ${shared} invitation table(s) unique across organizations listed` : '') +
       (blocked ? `; ${blocked} schema(s) cannot take the teams rules` : '') +
       (failed ? `; ${failed} project(s) failed` : '') +
       (APPLY ? '.' : '. Run with --apply to secure them.'),

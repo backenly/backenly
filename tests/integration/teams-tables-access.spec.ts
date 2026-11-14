@@ -81,6 +81,7 @@ import { createProvisionedProject } from '@/lib/projects/provision'
 import { executeAction } from '@/lib/ai/minimal-executor'
 import { forgetProtection } from '@/lib/branches/protection'
 import { withChangeAttribution } from '@/lib/changes/attribution'
+import { expectEffect, withGovernedChange } from '@/lib/changes/ledger'
 import { closeChangeLockPool } from '@/lib/changes/lock'
 import { inferRlsPlan } from '@/lib/services/rls-ownership'
 import { secureTeamsTables } from '@/lib/services/workspace-rls'
@@ -769,13 +770,28 @@ describe('a project whose teams tables have the rules releases before the fix ga
       ),
     )
     expect({ success: chosen.success, message: chosen.message }).toMatchObject({ success: true })
+    // And invitations unique on their token across every organization, as a
+    // table made before they were unique per organization is.
+    await ddl(`CREATE UNIQUE INDEX organization_invitations_token_shared ON ${T('organization_invitations')} (token)`)
   }, 120_000)
 
   /** The membership the premise below writes, as the report lists it. */
   const selfJoin = () => ({ organizationId: orgId, userId: mallory.id, role: 'admin', createdAt: expect.any(Date) })
+  const SHARED = ['organization_invitations_token_shared (token)']
 
   it('the premise: under those rules a signed-in user joins another owner\'s organization as its admin', async () => {
     expect(await policies('organization_members')).toEqual(OWN_ROWS)
+    // With an accepted invitation she wrote to herself, so a report that took
+    // any accepted invitation as the way in would not list her.
+    await asUser(
+      mallory.id,
+      `INSERT INTO ${T('organization_invitations')} (organization_id, email, role, token, invited_by_user_id, accepted_at)
+       VALUES ($1::uuid, $2, 'admin', $3, $4::uuid, NOW())`,
+      orgId,
+      mallory.email,
+      randomToken(),
+      mallory.id,
+    )
     const joined = await asUser<{ role: string }>(
       mallory.id,
       `INSERT INTO ${T('organization_members')} (organization_id, user_id, role) VALUES ($1::uuid, $2::uuid, 'admin') RETURNING role`,
@@ -794,6 +810,7 @@ describe('a project whose teams tables have the rules releases before the fix ga
         tables: ['organizations', 'organization_members'],
         kept: [{ table: 'organization_invitations', reason: expect.stringContaining('backenly_custom_select') }],
         blocked: [],
+        sharedUniques: SHARED,
         suspects: [selfJoin()],
         secured: false,
       },
@@ -810,6 +827,7 @@ describe('a project whose teams tables have the rules releases before the fix ga
         tables: ['organizations', 'organization_members'],
         kept: [{ table: 'organization_invitations', reason: expect.any(String) }],
         blocked: [],
+        sharedUniques: SHARED,
         suspects: [selfJoin()],
         secured: true,
       },
@@ -828,14 +846,15 @@ describe('a project whose teams tables have the rules releases before the fix ga
   }, 120_000)
 
   it('lists the membership that looks like the old self-join in both modes, and only it, and removes nothing', async () => {
-    // The owner, the admin and the owner the owner invited are members too:
-    // the owner owns the organization, and the other two accepted invitations
-    // to it addressed to their own emails.
+    // The owner, the admin, the owner the owner invited and the members who
+    // joined through invitations to their own emails are members too, and are
+    // not listed.
     const members = await prisma.$queryRawUnsafe<Array<{ user: string }>>(
       `SELECT user_id::text AS "user" FROM ${T('organization_members')} WHERE organization_id = $1::uuid`,
       orgId,
     )
-    expect(members.map((m) => m.user).sort()).toEqual([olivia.id, adam.id, otto.id, mallory.id].sort())
+    expect(members.map((m) => m.user)).toEqual(expect.arrayContaining([olivia.id, adam.id, otto.id, mallory.id]))
+    expect(members.length).toBeGreaterThan(4)
     for (const apply of [false, true]) {
       const [report] = await secureTeamsTables(projectId, { apply })
       expect({ apply, suspects: report.suspects }).toEqual({ apply, suspects: [selfJoin()] })
@@ -861,6 +880,7 @@ describe('a project whose teams tables have the rules releases before the fix ga
         tables: [],
         kept: [{ table: 'organization_invitations', reason: expect.any(String) }],
         blocked: [],
+        sharedUniques: SHARED,
         suspects: [selfJoin()],
         secured: false,
       },
@@ -876,4 +896,28 @@ describe('a project whose teams tables have the rules releases before the fix ga
       expect({ table, rules: await policies(table), forced: await forced(table) }).toEqual({ table, rules: TEAMS_RULES, forced: true })
     }
   }, 240_000)
+})
+
+describe('a rule a merged preview branch gave a teams table', () => {
+  it('is kept, though no change on production names the table in its title', async () => {
+    const svc = serviceRoleClause(schema)
+    const { change } = await withChangeAttribution({ source: 'branch_merge', actorUserId: ownerId }, () =>
+      withGovernedChange({ projectId, title: 'Merge branch members-read-only' }, async () => {
+        for (const p of TEAMS_RULES) await ddl(`DROP POLICY IF EXISTS ${p} ON ${T('organization_members')}`)
+        await ddl(
+          `CREATE POLICY backenly_own_rows_read_select ON ${T('organization_members')} FOR SELECT ` +
+            `USING (${svc} OR "user_id"::text = ${claimExpr(schema, SUBJECT_CLAIM)})`,
+        )
+        await ddl(`CREATE POLICY backenly_own_rows_read_insert ON ${T('organization_members')} FOR INSERT WITH CHECK (${svc})`)
+        await ddl(`CREATE POLICY backenly_own_rows_read_update ON ${T('organization_members')} FOR UPDATE USING (${svc})`)
+        await ddl(`CREATE POLICY backenly_own_rows_read_delete ON ${T('organization_members')} FOR DELETE USING (${svc})`)
+        // Setting this table's rules is what the merge was for.
+        expectEffect(projectId, { action: 'SET_PERMISSION', table: 'organization_members' })
+      }),
+    )
+    expect(change?.status).toBe('healthy')
+    const [report] = await secureTeamsTables(projectId, { apply: false })
+    expect(report.tables).toEqual([])
+    expect(report.kept).toEqual([{ table: 'organization_members', reason: expect.stringContaining('branch_merge') }])
+  }, 120_000)
 })

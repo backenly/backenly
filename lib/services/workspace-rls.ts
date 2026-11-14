@@ -44,6 +44,7 @@ import {
   type TeamsTable,
 } from './rls-ownership'
 import type { ExistsContext } from '@/lib/db/sql-expression'
+import type { TableChange } from '@/lib/changes/types'
 
 /**
  * Split a SQL string on semicolons that are NOT inside $$ dollar-quoted blocks,
@@ -2455,8 +2456,11 @@ interface TeamsRuleChoices {
   /** PermissionPolicy record names, per table. */
   records: Map<string, string[]>
   /** The latest change in effect that set or removed the table's rules for a person or their agent. */
-  changes: Map<string, number>
+  changes: Map<string, { seq: number; source: string }>
 }
+
+/** A footprint line about a table's policies or its row-level security (lib/changes/diff.ts). */
+const RULE_LINE = /\bpolicy\b|row-level security/
 
 async function teamsRuleChoices(projectId: string): Promise<TeamsRuleChoices> {
   const records = new Map<string, string[]>()
@@ -2466,24 +2470,29 @@ async function teamsRuleChoices(projectId: string): Promise<TeamsRuleChoices> {
   })
   for (const r of rows) records.set(r.tableName, [...(records.get(r.tableName) ?? []), r.policyName])
 
-  // A change set_rls, add_rls or remove_rls made is titled with its action and
-  // table (describeActionForLedger, lib/ai/minimal-executor.ts). One Backenly
-  // made by itself (system, autonomy) is no one's choice; one a person made in
-  // the console, approved, or had their agent make is theirs.
+  // A change that set or removed a teams table's rules, made by anyone but
+  // Backenly by itself (system, autonomy): a person in the console, an
+  // approval, their agent, or a preview branch merged. set_rls, add_rls and
+  // remove_rls title theirs with the action and table (describeActionForLedger,
+  // lib/ai/minimal-executor.ts); any other change, a merge among them, shows it
+  // in its footprint, read from the catalog.
   const { IN_EFFECT } = await import('@/lib/changes/types')
-  const changes = new Map<string, number>()
+  const changes = new Map<string, { seq: number; source: string }>()
   const made = await prisma.backendChange.findMany({
-    where: {
-      projectId,
-      kind: 'change',
-      source: { notIn: ['system', 'autonomy'] },
-      status: { in: [...IN_EFFECT] },
-      title: { in: TEAMS_TABLES.flatMap((t) => [`SET_PERMISSION ${t}`, `REMOVE_PERMISSION ${t}`]) },
-    },
-    select: { seq: true, title: true },
+    where: { projectId, kind: 'change', source: { notIn: ['system', 'autonomy'] }, status: { in: [...IN_EFFECT] } },
+    select: { seq: true, title: true, source: true, footprint: true },
     orderBy: { seq: 'asc' },
   })
-  for (const c of made) changes.set(c.title.slice(c.title.indexOf(' ') + 1), c.seq)
+  for (const c of made) {
+    const footprint = Array.isArray(c.footprint) ? (c.footprint as unknown as TableChange[]) : []
+    for (const table of TEAMS_TABLES) {
+      const named = c.title === `SET_PERMISSION ${table}` || c.title === `REMOVE_PERMISSION ${table}`
+      const touched = footprint.some(
+        (f) => !f.object && f.kind === 'modified' && f.after === table && (f.details ?? []).some((d) => RULE_LINE.test(d)),
+      )
+      if (named || touched) changes.set(table, { seq: c.seq, source: c.source })
+    }
+  }
   return { records, changes }
 }
 
@@ -2511,8 +2520,8 @@ function teamsRuleChosenBy(
   }
   const chosen = (choices.records.get(table) ?? []).filter((name) => !AUTOMATIC_TEAMS_TABLE_RECORDS.has(name))
   if (chosen.length) return `a rule was chosen for it (${chosen.join(', ')})`
-  const seq = choices.changes.get(table)
-  if (seq !== undefined) return `its rules were set in change #${seq}, by a person or their agent`
+  const change = choices.changes.get(table)
+  if (change) return `its rules were set in change #${change.seq} (${change.source}), by a person, their agent or a merge`
   return null
 }
 
@@ -2526,45 +2535,115 @@ export interface SuspectMembership {
 }
 
 /**
- * Memberships that look like the old self-join: the member is not the
- * organization's owner, and no accepted invitation to that organization was
- * addressed to the member's email. Any signed-in user could write such a row
- * before the teams rules, which stop new ones and leave these. Only read, as
- * the service role (the application role is held to the tables' rules), for a
- * person to judge: a member a server added with a service-role key looks the
- * same. Without a users table to read emails from, every member but the owner
- * is listed.
+ * Memberships that look like the old self-join, or a forged way in. A member
+ * is accounted for when they own the organization, or when an accepted
+ * invitation to it, addressed to their email (compared ASCII-lowercased), was
+ * written by someone else who is themselves accounted for in it and is its
+ * owner or an owner or admin member, granting no less than the role the member
+ * holds (an admin grants member or admin, the owner any role). Every other
+ * member is listed: a row a user wrote under the earlier rules, joining
+ * themselves, inviting themselves, or raising their own role, and anyone let
+ * in by such a member.
+ *
+ * "Is an owner or admin" is asked of the organization as it is now: an inviter
+ * removed since makes the members they let in show here too, for a person to
+ * judge, as does a member a server added with a service-role key. Only read, as
+ * the service role (the application role is held to the tables' rules).
+ * Without a users table to read emails from, every member but the owner is
+ * listed.
  */
 async function suspectMemberships(projectId: string, schema: string, catalog: OwnershipCatalog): Promise<SuspectMembership[]> {
   const columnsOf = (table: string) => catalog.columns.get(table) ?? []
   const has = (table: string, columns: string[]) => columns.every((c) => columnsOf(table).includes(c))
   if (!has('organization_members', ['organization_id', 'user_id']) || !has('organizations', ['id', 'owner_user_id'])) return []
+  const q = (table: string) => `"${schema}"."${table}"`
   const created = ['created_at', 'createdAt', 'joined_at'].find((c) => columnsOf('organization_members').includes(c))
-  const invited =
-    has('organization_invitations', ['organization_id', 'email', 'accepted_at']) && has('users', ['id', 'email'])
-      ? `EXISTS (
-           SELECT 1 FROM "${schema}"."organization_invitations" i
-             JOIN "${schema}"."users" u ON u."id"::text = m."user_id"::text
-            WHERE i."organization_id"::text = m."organization_id"::text
-              AND i."accepted_at" IS NOT NULL
-              AND lower(i."email"::text) = lower(u."email"::text))`
-      : 'false'
+  const roleOf = (alias: string, table: string) => (has(table, ['role']) ? `${alias}."role"::text` : 'NULL::text')
+  /** member, admin, owner as 1, 2, 3; any other role above them all. */
+  const rank = (role: string) =>
+    `(CASE lower(coalesce(${role}, 'member')) WHEN 'member' THEN 1 WHEN 'admin' THEN 2 WHEN 'owner' THEN 3 ELSE 4 END)`
+  const ascii = (text: string) => `translate(${text}, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')`
+  const invitations =
+    has('organization_invitations', ['organization_id', 'email', 'accepted_at', 'invited_by_user_id']) && has('users', ['id', 'email'])
+  const memberRole = roleOf('m', 'organization_members')
+  const invitedRole = roleOf('i', 'organization_invitations')
+  const admitted = invitations
+    ? `
+      UNION
+        SELECT m."organization_id"::text, m."user_id"::text
+          FROM ${q('organization_members')} m
+          JOIN ${q('users')} u ON u."id"::text = m."user_id"::text
+          JOIN ${q('organization_invitations')} i
+            ON i."organization_id"::text = m."organization_id"::text
+           AND i."accepted_at" IS NOT NULL
+           AND ${ascii('i."email"::text')} = ${ascii('u."email"::text')}
+           AND i."invited_by_user_id" IS NOT NULL
+           AND i."invited_by_user_id"::text <> m."user_id"::text
+           AND ${rank(memberRole)} <= ${rank(invitedRole)}
+          JOIN legit l ON l.org = m."organization_id"::text AND l.usr = i."invited_by_user_id"::text
+         WHERE EXISTS (
+                 SELECT 1 FROM ${q('organizations')} o
+                  WHERE o."id"::text = m."organization_id"::text AND o."owner_user_id"::text = i."invited_by_user_id"::text)
+            OR (${rank(invitedRole)} <= 2 AND EXISTS (
+                 SELECT 1 FROM ${q('organization_members')} im
+                  WHERE im."organization_id"::text = m."organization_id"::text
+                    AND im."user_id"::text = i."invited_by_user_id"::text
+                    AND ${rank(roleOf('im', 'organization_members'))} IN (2, 3)))`
+    : ''
   return executeWithUserContext<SuspectMembership>(
     projectId,
     '',
     true,
-    `SELECT m."organization_id"::text AS "organizationId",
+    `WITH RECURSIVE legit(org, usr) AS (
+         SELECT o."id"::text, o."owner_user_id"::text FROM ${q('organizations')} o WHERE o."owner_user_id" IS NOT NULL
+         ${admitted}
+     )
+     SELECT m."organization_id"::text AS "organizationId",
             m."user_id"::text AS "userId",
-            ${has('organization_members', ['role']) ? 'm."role"::text' : 'NULL::text'} AS "role",
+            ${memberRole} AS "role",
             ${created ? `m."${created}"` : 'NULL::timestamptz'} AS "createdAt"
-       FROM "${schema}"."organization_members" m
-      WHERE NOT EXISTS (
-              SELECT 1 FROM "${schema}"."organizations" o
-               WHERE o."id"::text = m."organization_id"::text
-                 AND o."owner_user_id"::text = m."user_id"::text)
-        AND NOT ${invited}
+       FROM ${q('organization_members')} m
+      WHERE NOT EXISTS (SELECT 1 FROM legit l WHERE l.org = m."organization_id"::text AND l.usr = m."user_id"::text)
       ORDER BY 1, 2`,
   )
+}
+
+/**
+ * Unique indexes on an invitation's email or token that span every
+ * organization: tables made before invitations were unique per organization.
+ * They tell any owner whether an address or token was used elsewhere, and let
+ * one organization hold an address another cannot then invite. Reported, never
+ * changed: rows may depend on them.
+ */
+async function sharedInvitationUniques(projectId: string, schema: string): Promise<string[]> {
+  const db = await workspaceRawClient(projectId)
+  const rows = await db.$queryRawUnsafe<Array<{ index: string; column: string }>>(
+    `SELECT c.relname::text AS "index", a.attname::text AS "column"
+       FROM pg_index x
+       JOIN pg_class c ON c.oid = x.indexrelid
+       JOIN pg_attribute a ON a.attrelid = x.indrelid AND a.attnum = x.indkey[0]
+      WHERE x.indrelid = to_regclass($1)
+        AND x.indisunique
+        AND x.indnkeyatts = 1
+        AND a.attname IN ('email', 'token')
+      ORDER BY 1`,
+    `"${schema}"."organization_invitations"`,
+  )
+  return rows.map((r) => `${r.index} (${r.column})`)
+}
+
+/** The teams rules' triggers present in a schema, as `table.trigger`. */
+async function teamsTriggersIn(projectId: string, schema: string): Promise<Set<string>> {
+  const db = await workspaceRawClient(projectId)
+  const rows = await db.$queryRawUnsafe<Array<{ name: string }>>(
+    `SELECT c.relname || '.' || t.tgname AS name
+       FROM pg_trigger t
+       JOIN pg_class c ON c.oid = t.tgrelid
+       JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = $1 AND NOT t.tgisinternal AND t.tgenabled <> 'D'`,
+    schema,
+  )
+  return new Set(rows.map((r) => r.name))
 }
 
 /** What secureTeamsTables found, or did, in one schema. */
@@ -2576,6 +2655,8 @@ export interface TeamsTablesRepair {
   kept: Array<{ table: TeamsTable; reason: string }>
   /** Why the teams rules cannot go on in this schema at all. */
   blocked: string[]
+  /** Unique indexes on an invitation's email or token across every organization. Listed, never changed. */
+  sharedUniques: string[]
   /** Memberships that look like the old self-join. Listed, never changed. */
   suspects: SuspectMembership[]
   secured: boolean
@@ -2600,19 +2681,26 @@ export async function secureTeamsTables(projectId: string, opts: { apply: boolea
     const catalog = await loadOwnershipCatalog(projectId, schema)
     if (!TEAMS_TABLES.some((t) => catalog.columns.has(t))) continue
     const suspects = await suspectMemberships(projectId, schema, catalog)
+    const sharedUniques = catalog.columns.has('organization_invitations') ? await sharedInvitationUniques(projectId, schema) : []
     const blocked = teamsRulesBlockers(catalog)
     if (blocked.length) {
-      out.push({ schema, tables: [], kept: [], blocked, suspects, secured: false })
+      out.push({ schema, tables: [], kept: [], blocked, sharedUniques, suspects, secured: false })
       continue
     }
 
     const closed = await closedByDefaultTables(projectId, schema).catch(() => new Set<string>())
+    const triggers = await teamsTriggersIn(projectId, schema)
     const tables: TeamsTable[] = []
     const kept: Array<{ table: TeamsTable; reason: string }> = []
     const loops: string[] = []
     for (const table of TEAMS_TABLES) {
       const live = (await readLivePolicies(projectId, schema, table)).filter((p) => !isPlatformKeptPolicy(p))
-      if (holdsTeamsRules(live) && (await readRlsState(projectId, schema, table)).forceRowSecurity) continue
+      const trigger = (TEAMS_TRIGGERS as Partial<Record<TeamsTable, string>>)[table]
+      const secured =
+        holdsTeamsRules(live) &&
+        (!trigger || triggers.has(`${table}.${trigger}`)) &&
+        (await readRlsState(projectId, schema, table)).forceRowSecurity
+      if (secured) continue
       const reason = teamsRuleChosenBy(table, live, closed.has(table), choices)
       if (!reason) {
         tables.push(table)
@@ -2630,13 +2718,13 @@ export async function secureTeamsTables(projectId: string, opts: { apply: boolea
         )
       }
     }
-    if (tables.length === 0 && kept.length === 0 && suspects.length === 0) continue
+    if (tables.length === 0 && kept.length === 0 && suspects.length === 0 && sharedUniques.length === 0) continue
     if (loops.length && tables.length) {
-      out.push({ schema, tables: [], kept, blocked: loops, suspects, secured: false })
+      out.push({ schema, tables: [], kept, blocked: loops, sharedUniques, suspects, secured: false })
       continue
     }
     if (!opts.apply || tables.length === 0) {
-      out.push({ schema, tables, kept, blocked: [], suspects, secured: false })
+      out.push({ schema, tables, kept, blocked: [], sharedUniques, suspects, secured: false })
       continue
     }
 
@@ -2661,7 +2749,7 @@ export async function secureTeamsTables(projectId: string, opts: { apply: boolea
       const applied = await applyTeamsRules(projectId, { schemaName: schema }, tables)
       if (!applied.success) throw new Error(`${schema}: ${applied.message}`)
     }
-    out.push({ schema, tables, kept, blocked: [], suspects, secured: true })
+    out.push({ schema, tables, kept, blocked: [], sharedUniques, suspects, secured: true })
   }
   return out
 }
