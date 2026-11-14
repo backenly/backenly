@@ -56,6 +56,10 @@ describe('assertReadOnlySql — refuses writes and smuggling', () => {
     rejects('EXPLAIN ANALYZE SELECT * FROM posts', 'NOT_READ_ONLY')
   })
 
+  it('refuses EXPLAIN ANALYSE, the same option in its British spelling', () => {
+    rejects('EXPLAIN ANALYSE SELECT * FROM posts', 'NOT_READ_ONLY')
+  })
+
   it('refuses an empty query', () => rejects('   ', 'EMPTY_QUERY'))
 })
 
@@ -206,5 +210,56 @@ describe('system catalogs are refused', () => {
         'SELECT u.id, count(o.id) FROM users u LEFT JOIN orders o ON o.user_id = u.id GROUP BY u.id',
       ),
     ).not.toThrow()
+  })
+})
+
+/**
+ * ── A quoted identifier names what the bare word names ───────────────────────
+ *
+ * stripSqlNoise blanked `"..."` exactly as it blanks `'...'`, so the catalog
+ * check never saw `"pg_proc"`, and `SELECT proname, prosrc FROM "pg_proc"` ran
+ * and read every project's function source: the 2026-07-22 leak again, one pair
+ * of quotes away. A string literal is data; a quoted identifier is a name.
+ */
+describe('the text check sees quoted identifiers', () => {
+  const refuse = (sql: string) => rejects(sql, 'CATALOG_NOT_READABLE')
+
+  it('refuses the double-quoted catalog that read every project\'s function source', () => {
+    refuse('SELECT proname, prosrc FROM "pg_proc"')
+  })
+
+  it('refuses every quoted spelling of a catalog', () => {
+    refuse('SELECT nspname FROM "pg_namespace"')
+    refuse('SELECT * FROM "pg_catalog"."pg_proc"')
+    refuse('SELECT * FROM "pg_catalog".pg_proc')
+    refuse('SELECT * FROM pg_catalog."pg_proc"')
+    refuse('SELECT * FROM "information_schema"."columns"')
+    refuse('SELECT * FROM "information_schema".columns')
+    refuse('TABLE "pg_proc"')
+    refuse('SELECT * FROM posts p JOIN "pg_class" c ON c.relname = p.title')
+  })
+
+  it('still reads string literals as data', () => {
+    expect(() => assertReadOnlySql("SELECT * FROM posts WHERE title = 'pg_proc'")).not.toThrow()
+    expect(() => assertReadOnlySql("SELECT * FROM logs WHERE msg = '\"pg_proc\"'")).not.toThrow()
+  })
+
+  it('does not trip on a quoted name that merely contains pg_ inside a word', () => {
+    expect(() => assertReadOnlySql('SELECT "user_pg_notes" FROM "Docs"')).not.toThrow()
+  })
+
+  it('keeps quoted identifiers out of the keyword checks, as before', () => {
+    // A column named "delete" or "comment" is a name, not a verb.
+    expect(() => assertReadOnlySql('SELECT "delete", "comment" FROM audit')).not.toThrow()
+    expect(() => assertReadOnlySql('SELECT "a;b" FROM t')).not.toThrow()
+  })
+
+  it('stripSqlNoise keeps an identifier\'s text only when asked', () => {
+    expect(stripSqlNoise('SELECT * FROM "pg_proc"')).not.toMatch(/pg_proc/)
+    expect(stripSqlNoise('SELECT * FROM "pg_proc"', { keepIdentifiers: true })).toMatch(/\bpg_proc\b/)
+    // A doubled quote inside an identifier is one quote.
+    expect(stripSqlNoise('SELECT "a""b" FROM t', { keepIdentifiers: true })).toMatch(/a"b/)
+    // String literals are blanked either way.
+    expect(stripSqlNoise("SELECT 'pg_proc'", { keepIdentifiers: true })).not.toMatch(/pg_proc/)
   })
 })

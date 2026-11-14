@@ -130,8 +130,15 @@ export function readOnlyConnection(
  * checks, so a row containing the word "delete" can never look like a DELETE.
  * Analysing raw text without this is how naive SQL guards produce both false
  * positives and false negatives.
+ *
+ * Double-quoted IDENTIFIERS are blanked too by default, which is right for the
+ * keyword checks: a column named "delete_flag" or "order" is not a verb. It is
+ * wrong for anything that asks what a statement NAMES: `"pg_proc"` is the same
+ * relation as `pg_proc`, not a string. `keepIdentifiers` emits a quoted
+ * identifier's text instead (a doubled `""` read as one quote), for the
+ * catalog check.
  */
-export function stripSqlNoise(sql: string): string {
+export function stripSqlNoise(sql: string, options: { keepIdentifiers?: boolean } = {}): string {
   let out = ''
   let i = 0
   while (i < sql.length) {
@@ -150,16 +157,18 @@ export function stripSqlNoise(sql: string): string {
     const ch = sql[i]
     if (ch === "'" || ch === '"') {
       const quote = ch
+      let text = ''
       i++
       while (i < sql.length) {
         if (sql[i] === quote) {
-          if (sql[i + 1] === quote) { i += 2; continue } // escaped quote
+          if (sql[i + 1] === quote) { text += quote; i += 2; continue } // escaped quote
           i++
           break
         }
+        text += sql[i]
         i++
       }
-      out += ' '
+      out += quote === '"' && options.keepIdentifiers ? ` ${text} ` : ' '
       continue
     }
     if (ch === '$') {
@@ -230,14 +239,18 @@ export function assertReadOnlySql(sqlRaw: string): void {
   // EXPLAIN ANALYZE actually EXECUTES the plan. Harmless for a SELECT under a
   // read-only role, but it would run a data-modifying statement for real if one
   // ever slipped past the checks above, so refuse it rather than depend on them.
-  if (/^explain\b/i.test(bare) && /\banalyze\b/i.test(bare)) {
+  // PostgreSQL accepts the British spelling, EXPLAIN ANALYSE, as the same option.
+  if (/^explain\b/i.test(bare) && /\banaly[sz]e\b/i.test(bare)) {
     throw new ReadQueryError(
       'EXPLAIN ANALYZE executes the statement. Use plain EXPLAIN for the plan.',
       'NOT_READ_ONLY',
     )
   }
 
-  const catalog = CATALOG_REFERENCE.exec(bare)
+  // With quoted identifiers kept: `"pg_proc"` names pg_proc exactly as the bare
+  // word does, and blanking it like a string literal let
+  // `SELECT proname, prosrc FROM "pg_proc"` read every project's function source.
+  const catalog = CATALOG_REFERENCE.exec(stripSqlNoise(sql, { keepIdentifiers: true }))
   if (catalog) {
     throw new ReadQueryError(
       `run_query does not read the PostgreSQL system catalogs (matched "${catalog[0]}").`,
@@ -292,9 +305,10 @@ export function assertReadOnlySql(sqlRaw: string): void {
  * enumerated list would have to be maintained forever and would be wrong the
  * first time it was not.
  *
- * Matched after `stripSqlNoise`, so a row whose TEXT contains "pg_proc" cannot
- * trip it, and on word boundaries, so a column named `information_schema_notes`
- * is not a false positive.
+ * Matched after `stripSqlNoise` with quoted identifiers kept, so a row whose
+ * TEXT contains "pg_proc" cannot trip it while `"pg_proc"`, an identifier, does;
+ * and on word boundaries, so a column named `information_schema_notes` is not a
+ * false positive.
  */
 const CATALOG_REFERENCE = /\b(?:information_schema|pg_[a-z0-9_]+)\b/i
 
