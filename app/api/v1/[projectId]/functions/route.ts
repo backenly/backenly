@@ -9,12 +9,12 @@ export const dynamic = 'force-dynamic'
  * Body: { name: string, data?: Record<string, any> }
  */
 
-import { NextRequest } from 'next/server'
+import { NextRequest, NextResponse } from 'next/server'
 import { v1ApiMiddleware } from '@/lib/api/v1/middleware'
-import { createErrorResponse, createSuccessResponse, ErrorCodes } from '@/lib/api/v1/errors'
+import { createErrorResponse, ErrorCodes } from '@/lib/api/v1/errors'
 import { prisma } from '@/lib/db'
 import { FUNCTION_OFF_STATUSES } from '@/lib/services/ai-functions/status'
-import { recordedV1 } from '@/lib/traffic/recorded-v1'
+import { markAsWritten, recordedV1 } from '@/lib/traffic/recorded-v1'
 
 async function handlePOST(request: NextRequest, props: { params: Promise<{ projectId: string }> }) {
   const params = await props.params;
@@ -82,14 +82,20 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
       )
     }
 
-    const { logsFor } = await import('@/lib/services/ai-functions/reply')
-    return createSuccessResponse({
+    // The status line is the handler's own, as at /fn/{name}: a 401 or 503 the
+    // function answered went out as a 200 here (#604). The envelope is kept.
+    const { logsFor, completedRunStatus, statusHasBody } = await import('@/lib/services/ai-functions/reply')
+    const status = completedRunStatus(result.httpStatus)
+    const envelope = {
       name,
-      success: true,
+      success: status < 400,
       result: result.returnValue ?? null,
       ...logsFor(result.logs, !!middleware.context.apiKey.serviceRole),
       durationMs: result.durationMs,
-    })
+    }
+    return markAsWritten(
+      statusHasBody(status) ? NextResponse.json({ data: envelope }, { status }) : new NextResponse(null, { status }),
+    )
   } catch (error: any) {
     console.error('[fn/invoke-by-name] Error:', error)
     return createErrorResponse(ErrorCodes.INTERNAL_ERROR, 'Failed to invoke function', 500)
