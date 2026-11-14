@@ -203,6 +203,12 @@ export interface PolicyConfig {
    * fixed a security hole by breaking the feature it protected.
    */
   commands?: Partial<Record<RlsCommand, string | CommandRule>>
+  /**
+   * The template was read off the schema (autoApplyRlsIfNeeded,
+   * reconcileAutoRls) rather than asked for. On a teams table that makes it
+   * Backenly's own choice, so a rule someone chose stays in its place.
+   */
+  inferred?: boolean
 }
 
 /** One command's resolved rule, ready to become a CREATE POLICY statement. */
@@ -554,20 +560,39 @@ async function installPermissionPolicy(
     template = config.template
   }
 
-  // ── The teams tables keep the teams rules ─────────────────────────────────
+  // ── The teams tables keep the teams rules, or the rule a person chose ─────
   // Membership decides who may read and change these rows. Repairs and build
   // steps ask for a rule by name (FIX_WORKFLOW's user_data_rls, the auto-fix
   // engine's apply_rls and the build runtime's permission nodes all send
   // own_rows), and any rule read from one owner column lets a signed-in user
   // write the row that makes them a member of any organization. So once all
-  // three tables exist, whichever rule is asked for, from whichever path, they
-  // keep the teams rules and the result says so. A rule of one's own stays
-  // possible (set_rls, custom), and admin_only still closes a table.
+  // three tables exist, a template other than teams, custom or admin_only, or
+  // one read off the schema (auto, the auto-RLS paths), never lands on them.
+  // A table whose rule someone chose (in the console, an approval, through
+  // their agent or a merged branch; found as secureTeamsTables finds it) keeps
+  // it, and the request is refused saying why: a repair must not weaken or
+  // undo a person's decision. Any other gets the teams rules, and the result
+  // says so. Asked for by name, teams, custom and admin_only replace whatever
+  // rule the table has: that is a decision about this table.
   let teamsInsteadOf: PolicyTemplate | null = null
-  if (isTeamsTable(tableName) && template !== 'teams' && template !== 'custom' && template !== 'admin_only') {
+  const named =
+    !config.inferred && (config.template === 'teams' || config.template === 'custom' || config.template === 'admin_only')
+  if (isTeamsTable(tableName) && !named) {
     if (teamsRulesBlockers(await loadOwnershipCatalog(projectId, schemaName)).length === 0) {
-      teamsInsteadOf = template
-      template = 'teams'
+      const chosen = await teamsRuleChosenFor(projectId, schemaName, tableName)
+      if (chosen) {
+        return {
+          success: false,
+          message:
+            `Left the rules on "${tableName}" as they are: ${chosen}. "${config.template}" was asked for, and on a ` +
+            `teams table Backenly puts a rule of its own only in place of one it set itself. To replace that rule, ` +
+            `ask for "teams" by name, or set one of your own with set_rls.`,
+        }
+      }
+      if (template !== 'teams') {
+        teamsInsteadOf = template
+        template = 'teams'
+      }
     }
   }
 
@@ -2456,12 +2481,15 @@ const holdsTeamsRules = (live: LivePolicyRow[]) => live.map((p) => p.policyName)
 interface TeamsRuleChoices {
   /** PermissionPolicy record names, per table. */
   records: Map<string, string[]>
-  /** The latest change in effect that set or removed the table's rules for a person or their agent. */
+  /** The latest change in effect that set or removed the table's rules, and where it came from. */
   changes: Map<string, { seq: number; source: string }>
 }
 
 /** A footprint line about a table's policies or its row-level security (lib/changes/diff.ts). */
 const RULE_LINE = /\bpolicy\b|row-level security/
+
+/** Changes Backenly made by itself; any other source is a person, their agent or a merge. */
+const BACKENLY_SOURCES: ReadonlySet<string> = new Set(['system', 'autonomy'])
 
 async function teamsRuleChoices(projectId: string): Promise<TeamsRuleChoices> {
   const records = new Map<string, string[]>()
@@ -2471,16 +2499,18 @@ async function teamsRuleChoices(projectId: string): Promise<TeamsRuleChoices> {
   })
   for (const r of rows) records.set(r.tableName, [...(records.get(r.tableName) ?? []), r.policyName])
 
-  // A change that set or removed a teams table's rules, made by anyone but
-  // Backenly by itself (system, autonomy): a person in the console, an
-  // approval, their agent, or a preview branch merged. set_rls, add_rls and
-  // remove_rls title theirs with the action and table (describeActionForLedger,
-  // lib/ai/minimal-executor.ts); any other change, a merge among them, shows it
-  // in its footprint, read from the catalog.
+  // The latest change in effect that set or removed a teams table's rules. Who
+  // made it says whose the rules are: Backenly by itself (system, autonomy), or
+  // a person in the console, an approval, their agent, a preview branch merged.
+  // A later change of Backenly's own (restoring the teams rules, say) makes them
+  // Backenly's again. set_rls, add_rls and remove_rls title theirs with the
+  // action and table (describeActionForLedger, lib/ai/minimal-executor.ts); any
+  // other change, a merge among them, shows it in its footprint, read from the
+  // catalog.
   const { IN_EFFECT } = await import('@/lib/changes/types')
   const changes = new Map<string, { seq: number; source: string }>()
   const made = await prisma.backendChange.findMany({
-    where: { projectId, kind: 'change', source: { notIn: ['system', 'autonomy'] }, status: { in: [...IN_EFFECT] } },
+    where: { projectId, kind: 'change', status: { in: [...IN_EFFECT] } },
     select: { seq: true, title: true, source: true, footprint: true },
     orderBy: { seq: 'asc' },
   })
@@ -2499,13 +2529,14 @@ async function teamsRuleChoices(projectId: string): Promise<TeamsRuleChoices> {
 
 /**
  * Why a teams table's rules are a person's choice, or null when they are a rule
- * Backenly gave it by itself: its policies are exactly one of the rules the
- * inference gives these tables (owner's rows, owner-read-only, teams), or none
+ * Backenly gave it by itself: the teams rules, exactly one of the rules the
+ * inference gave these tables before them (owner's rows, owner-read-only), none
  * at all (row-level security off: what releases before the users foreign keys
  * left organizations and organization_invitations with), or the service-role
- * rule Backenly closed it with (the closed-by-default mark). Anything else
- * (set_rls's custom rules, another template, a policy of another name, a
- * record of all_access, a change a person or their agent made) is theirs.
+ * rule Backenly closed it with (the closed-by-default mark), when no change a
+ * person, their agent or a merge made set them last. Anything else (set_rls's
+ * custom rules, another template, a policy of another name, a record of
+ * all_access, admin_only someone asked for) is theirs.
  */
 function teamsRuleChosenBy(
   table: TeamsTable,
@@ -2514,6 +2545,8 @@ function teamsRuleChosenBy(
   choices: TeamsRuleChoices,
 ): string | null {
   const names = live.map((p) => p.policyName).sort()
+  // The teams rules are Backenly's model for these tables, whoever last set them.
+  if (names.join(',') === TEAMS_RULE) return null
   if (names.length === 1 && names[0] === 'backenly_admin_only') {
     if (!closedByDefault) return 'it is closed to all but service-role keys by a rule someone chose (admin_only)'
   } else if (names.length > 0 && !AUTOMATIC_TEAMS_TABLE_RULES.includes(names.join(','))) {
@@ -2522,8 +2555,18 @@ function teamsRuleChosenBy(
   const chosen = (choices.records.get(table) ?? []).filter((name) => !AUTOMATIC_TEAMS_TABLE_RECORDS.has(name))
   if (chosen.length) return `a rule was chosen for it (${chosen.join(', ')})`
   const change = choices.changes.get(table)
-  if (change) return `its rules were set in change #${change.seq} (${change.source}), by a person, their agent or a merge`
+  if (change && !BACKENLY_SOURCES.has(change.source)) {
+    return `its rules were set in change #${change.seq} (${change.source}), by a person, their agent or a merge`
+  }
   return null
+}
+
+/** teamsRuleChosenBy for one table as it is now, in `schema`, against main's records. */
+async function teamsRuleChosenFor(projectId: string, schema: string, table: TeamsTable): Promise<string | null> {
+  const live = (await readLivePolicies(projectId, schema, table)).filter((p) => !isPlatformKeptPolicy(p))
+  if (holdsTeamsRules(live)) return null
+  const closed = await closedByDefaultTables(projectId, schema).catch(() => new Set<string>())
+  return teamsRuleChosenBy(table, live, closed.has(table), await teamsRuleChoices(projectId))
 }
 
 /** A membership that looks like a self-join made under the rules before the teams rules. */
@@ -3003,6 +3046,7 @@ export async function autoApplyRlsIfNeeded(
   const result = await applyPermissionPolicy(projectId, {
     tableName,
     template: plan.template,
+    inferred: true,
     ...(plan.kind === 'own_rows' || plan.kind === 'own_rows_read' ? { userIdColumn: plan.userIdColumn } : {}),
     ...(plan.kind === 'party_rows' ? { partyColumns: plan.partyColumns } : {}),
     ...(plan.kind === 'related_rows' ? { via: plan.via } : {}),
@@ -3148,6 +3192,7 @@ export async function reconcileAutoRls(
     const result = await applyPermissionPolicy(projectId, {
       tableName,
       template: plan.template,
+      inferred: true,
       ...(plan.kind === 'own_rows' || plan.kind === 'own_rows_read' ? { userIdColumn: plan.userIdColumn } : {}),
       ...(plan.kind === 'party_rows' ? { partyColumns: plan.partyColumns } : {}),
       ...(plan.kind === 'related_rows' ? { via: plan.via } : {}),

@@ -583,6 +583,51 @@ describe('a repair or an agent that asks for an owner\'s rule on a teams table',
   }, 120_000)
 })
 
+describe('a rule a person chose on a teams table, then a repair', () => {
+  const MEMBER_RULE = "user_id::text = backenly_jwt_claim('sub')"
+  const run = (action: string, params: Record<string, unknown>) =>
+    executeAction({ action, params } as any, projectId, undefined, 0, undefined, false)
+  /** As the project's owner, in the console. */
+  const asPerson = <R>(fn: () => Promise<R>) => withChangeAttribution({ source: 'dashboard', actorUserId: ownerId }, fn)
+  const fixWorkflow = () => run('FIX_WORKFLOW', { workflow: 'auth', missingComponents: ['user_data_rls'] })
+
+  it("FIX_WORKFLOW leaves a custom rule a person set on organization_members in place, and says why", async () => {
+    const chosen = await asPerson(() =>
+      run('SET_PERMISSION', {
+        tableName: 'organization_members',
+        template: 'custom',
+        commands: { select: MEMBER_RULE, insert: MEMBER_RULE, update: MEMBER_RULE, delete: MEMBER_RULE },
+      }),
+    )
+    expect({ success: chosen.success, message: chosen.message }).toMatchObject({ success: true })
+    const custom = await policies('organization_members')
+    expect(custom).toEqual(['backenly_custom_delete', 'backenly_custom_insert', 'backenly_custom_select', 'backenly_custom_update'])
+    const fix = await fixWorkflow()
+    expect(fix.message).toContain('Left the rules on "organization_members" as they are')
+    expect(await policies('organization_members')).toEqual(custom)
+  }, 240_000)
+
+  it('FIX_WORKFLOW, and a rule read off the schema, leave admin_only a person chose', async () => {
+    const chosen = await asPerson(() => run('SET_PERMISSION', { tableName: 'organization_members', template: 'admin_only' }))
+    expect({ success: chosen.success, message: chosen.message }).toMatchObject({ success: true })
+    expect(await policies('organization_members')).toEqual(['backenly_admin_only'])
+    const fix = await fixWorkflow()
+    expect(fix.message).toContain('Left the rules on "organization_members" as they are')
+    const auto = await run('SET_PERMISSION', { tableName: 'organization_members', template: 'auto' })
+    expect({ success: auto.success, message: auto.message }).toMatchObject({ success: false, message: expect.stringContaining('(admin_only)') })
+    expect(await policies('organization_members')).toEqual(['backenly_admin_only'])
+  }, 240_000)
+
+  it('the teams rules, asked for by name, replace it', async () => {
+    const r = await run('SET_PERMISSION', { tableName: 'organization_members', template: 'teams' })
+    expect({ success: r.success, message: r.message }).toMatchObject({ success: true })
+    expect({ rules: await policies('organization_members'), forced: await forced('organization_members') }).toEqual({
+      rules: TEAMS_RULES,
+      forced: true,
+    })
+  }, 120_000)
+})
+
 describe('what a reader of the tables, or another organization, cannot do with them', () => {
   const kate = { id: crypto.randomUUID(), email: `kate-${tag}@example.test` }
   /** Another account: the same address in capitals. */
