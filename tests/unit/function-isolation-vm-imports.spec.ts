@@ -14,7 +14,9 @@
  * A vm context anywhere else is that hole coming back, however well it is
  * meant, so the build fails on the load itself: the vm module (bare or with
  * the node: prefix) or the isolated-vm package, by require, import, dynamic
- * import or process.getBuiltinModule, in any tracked or new source file.
+ * import, process.getBuiltinModule or any other call given its name
+ * (createRequire(…)(…), eval('require')(…)), or the contextify binding vm is
+ * built on, in any tracked or new source file.
  */
 
 import { execFileSync } from 'node:child_process'
@@ -39,6 +41,11 @@ const LOADS: RegExp[] = [
   new RegExp(`\\bfrom\\s*${Q}(?:${NAMES})${Q}`),
   new RegExp(`\\bimport\\s+${Q}(?:${NAMES})${Q}`),
   new RegExp(`\\bgetBuiltinModule\\s*\\(\\s*${Q}(?:${NAMES})${Q}\\s*\\)`),
+  // Any call given the name: a require by another name, eval('require')(…),
+  // createRequire(…)(…), obj['require'](…).
+  new RegExp(`[\\w$\\])]\\s*\\(\\s*${Q}(?:${NAMES})${Q}\\s*\\)`),
+  // The binding the module is built on, reached without it.
+  new RegExp(`\\b(?:binding|_linkedBinding|internalBinding)\\s*\\(\\s*${Q}contextify${Q}\\s*\\)`),
 ]
 
 const loads = (text: string) => LOADS.some((re) => re.test(text))
@@ -97,6 +104,13 @@ describe('node:vm', () => {
     [`process.getBuiltinModule('${VM}')`],
     [`import '${VM}'`],
     [`require( \`${VM}\` )`],
+    [`const m = createRequire(import.meta.url)('${VM}')`],
+    [`module.createRequire(__filename)("node:${VM}")`],
+    [`eval('require')('${VM}')`],
+    [`const r = eval('require'); const m = r('node:${VM}')`],
+    [`const m = globalThis['require']('${VM}')`],
+    [`process.binding('contextify')`],
+    [`process._linkedBinding("contextify")`],
   ])('is caught when loaded as: %s', (line) => {
     expect(loads(line)).toBe(true)
   })
@@ -106,6 +120,9 @@ describe('node:vm', () => {
     [`const ${VM}Name = 'a ${VM} context'`],
     [`require('./${VM}-free')`],
     [`import { x } from '@/lib/${VM}'`],
+    [`eval('require')('esbuild')`],
+    [`createRequire(here)('esbuild')`],
+    [`process.binding('fs')`],
   ])('is not claimed for a line that loads nothing of it: %s', (line) => {
     expect(loads(line)).toBe(false)
   })
