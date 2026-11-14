@@ -92,6 +92,9 @@ RUN npm run build
 # only what the build was TOLD. This proves the value reached the artifact.
 RUN npx tsx scripts/verify-public-build-inputs.ts --artifact
 
+# The function runner and supervisor, self-contained (see the final stage).
+RUN node scripts/build-function-runner.mjs --out /src/dist-fn
+
 # ── Runtime ─────────────────────────────────────────────────────────────────
 FROM node:20-slim AS runtime
 
@@ -227,7 +230,57 @@ ENV NODE_ENV=production \
 
 EXPOSE 3000
 
-USER node
+# ── Function isolation ──────────────────────────────────────────────────────
+#
+# Customer function code must never run in a process holding a platform
+# secret, and this process holds all of them. Each run is a fresh process
+# under a uid of its own, started by a root supervisor
+# (lib/services/ai-functions/isolation/). So the image starts as ROOT, with no
+# USER line: docker/function-isolation/entrypoint.sh starts the supervisor with
+# an empty environment, then runs CMD as `node` under no_new_privs and umask
+# 077. A task or compose file must not set a user; started as anyone else,
+# functions refuse to run and say why.
+#
+#   tini            PID 1, reaping what a killed run leaves behind
+#   /opt/backenly-fn  runner, supervisor and sandbox packages, outside /app
+#   /app 0750 root:node  pool uids cannot traverse the app tree, and so cannot
+#                   reach the EFS volumes mounted in it: an EFS access point
+#                   with a POSIX user answers every client uid as that user,
+#                   so the mount's own modes protect nothing
+#   no setuid bits  nothing a run executes can raise its privileges
+#
+# Asserted, not assumed: the build fails unless a pool uid can run a module
+# through the runner and cannot read /app.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends tini \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=build /src/dist-fn/ /opt/backenly-fn/
+COPY docker/function-isolation/entrypoint.sh /opt/backenly-fn/entrypoint.sh
+RUN cp /app/certs/rds-ca-cloud-regions.pem /opt/backenly-fn/rds-ca-cloud-regions.pem \
+ && chown -R root:root /opt/backenly-fn \
+ && chmod -R u=rwX,go=rX /opt/backenly-fn \
+ && chmod 0755 /opt/backenly-fn/entrypoint.sh \
+ && chown root:node /app \
+ && chmod 0750 /app \
+ && chmod 0700 /home/node \
+ && find / -xdev -type f -perm /6000 -exec chmod ug-s {} +
+RUN setpriv --version && prlimit --version && choom --version && tini --version \
+ && test "$(stat -c '%U:%G %a' /app)" = "root:node 750" \
+ && test -z "$(find / -xdev -type f -perm /6000 -print -quit)" \
+ && printf '%s\n' '{"v":1,"kind":"selftest"}' \
+    | setpriv --reuid=20000 --regid=20000 --clear-groups --no-new-privs -- node /opt/backenly-fn/function-runner.cjs \
+    | grep -q '"ok":true' \
+ && printf '%s\n' '{"v":1,"kind":"probe","mustNotRead":["/app","/app/workspace","/app/backups"]}' \
+    | setpriv --reuid=20000 --regid=20000 --clear-groups --no-new-privs -- node /opt/backenly-fn/function-runner.cjs \
+    | grep -q '"/app":"EACCES","/app/workspace":"EACCES","/app/backups":"EACCES"' \
+ && node -e "for (const p of ['pdfkit','csv-parse/sync','date-fns','qrcode','nodemailer','archiver']) require(require.resolve(p, { paths: ['/opt/backenly-fn'] })); console.log('function isolation verified in this image')"
+
+# Children read the RDS roots from outside /app. Three runs at once in a 1 GB
+# task, each held under the supervisor's heap and resident limits.
+ENV BACKENLY_FN_CA_CERTS=/opt/backenly-fn/rds-ca-cloud-regions.pem \
+    BACKENLY_FN_MAX_CONCURRENCY=3
+
+ENTRYPOINT ["/usr/bin/tini", "--", "/opt/backenly-fn/entrypoint.sh"]
 
 # server.js calls process.chdir(__dirname) on startup, which is why .env has to
 # live beside it on the Hetzner host. In a container there is no .env at all:
@@ -240,6 +293,6 @@ USER node
 # listened on loopback. The ALB still worked (it targets that address), which
 # is why it looked healthy, while everything in the task that calls
 # 127.0.0.1:3000 failed. The contract sweep reported "ingress_unreachable" every
-# minute and never verified a single project. `exec` keeps node as PID 1 so
-# SIGTERM still reaches it.
+# minute and never verified a single project. `exec` hands node the process,
+# which is tini's child, so SIGTERM from tini reaches it directly.
 CMD ["sh", "-c", "HOSTNAME=0.0.0.0 exec node server.js"]
