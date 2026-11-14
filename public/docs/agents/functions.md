@@ -90,6 +90,8 @@ The name is lowercased to kebab-case, because it is a URL path segment, and the 
 
 `invoke` runs a function once as the owner's test run and returns what its handler answered, its return value and its log lines. A failure is reported with its error and the code is left exactly as it was: nothing repairs it behind your back. A function that is switched off is refused, not switched on. Each run counts as one invocation against the plan. `logs` returns recent runs from every trigger, successes and failures, with their error and `ctx.log` lines, kept 30 days.
 
+A run that fails once its code has started, because the code throws or a call it makes through `ctx` fails, is recorded as one failed run and is not run again: whatever it wrote, sent or called before the failure happened once. Only a sandbox that fails before the code starts is started again. A row-event run can still run twice if the server running it stops part-way, because those runs are delivered at least once.
+
 ## Schedules
 
 `schedule { description, schedule }` takes "every 15 minutes" or a five-field cron expression. Backenly's model writes the job's code from `description`, which draws AI credits; with none left the call is refused with `AI_CREDITS_EXHAUSTED` and nothing is created.
