@@ -32,9 +32,41 @@
  *
  * Whatever else calls such a routine (a policy, a view, a default, a
  * constraint, an index, an operator, a cast) is reported: it now fails closed
- * rather than runs. So is a definition that calls a built-in which runs SQL or
- * changes the session (query_to_xml, pg_notify, set_config and the like): no
- * privilege can take those back, so a person reviews it.
+ * rather than runs.
+ *
+ * ── Expressions that call something no privilege of the project's can stop ──
+ *
+ * A column default, a generated column, a check constraint, a domain's default
+ * or check, a policy, a view or a trigger's WHEN condition runs its functions
+ * in whichever session reaches it, and a function of the platform's runs there
+ * with the platform's role: a default calling
+ * public.backenly_direct_sync_schema('workspace_B', NULL, '<A's login>', NULL)
+ * gave project A's login project B's tables the moment the platform inserted a
+ * row. Revoking the project's own routines cannot stop that, so each such
+ * expression is read in the catalog (its stored tree names every function and
+ * relation it reaches by object id) and is planted when it calls a function
+ * outside what may run there, or reads a relation outside its own project:
+ *
+ *   - a built-in PostgreSQL declares immutable or stable, except those that
+ *     run SQL handed to them as text (the *_to_xml family, two-argument
+ *     ts_rewrite, ts_stat) or read other sessions, files or objects by name
+ *     (pg_stat_*, pg_get_*, pg_read_*, pg_ls_*, lo_*);
+ *   - a volatile built-in that only makes a value (nextval, gen_random_uuid,
+ *     random, clock_timestamp and the like), and nothing else volatile:
+ *     set_config, pg_notify, setval and the rest change something;
+ *   - the immutable and stable functions of extensions that only compute
+ *     (citext, pg_trgm, vector...), and every function of pgcrypto and
+ *     uuid-ossp;
+ *   - a function in one of the project's own schemas: Backenly's claim reader,
+ *     or the project's own routines, which are switched off above.
+ *
+ * Switched off as a person would want a table left: a default is dropped, a
+ * generated column becomes an ordinary one with its values kept, a check is
+ * dropped, a policy's expression becomes `false` (its table held to Backenly's
+ * closed rule, service-role keys only, when no rule of Backenly's is left on
+ * it), and a view is replaced by an empty one with the same columns. A
+ * materialized view, which runs its query only when refreshed, as its owner,
+ * is reported for a person.
  *
  * ── Who wrote it ─────────────────────────────────────────────────────────────
  *
@@ -54,30 +86,32 @@
  *   - a role that is neither Backenly's nor a superuser owns it;
  *   - Backenly's role owns it and it is not in Backenly's set. Ownership alone
  *     cannot say who wrote it: revoking a login hands what it owned to the
- *     platform role (backenly_direct_drop_role), and a branch copies a schema as
- *     the platform role;
+ *     platform role (backenly_direct_drop_role), a branch copies a schema as
+ *     the platform role, and a snapshot restore replays one as it;
  *   - the drift ledger (public.schema_drift_events) records a direct-access
  *     login creating it.
  *
  * A trigger is a project's unless it is one of Backenly's by name, runs the
  * function of Backenly's its name goes with, and has no WHEN condition (an
- * architecture change's bkn_evo_ triggers excepted). A rule is always a
- * project's.
+ * architecture change's bkn_evo_ triggers excepted, whose condition must call
+ * nothing above). A rule is always a project's.
  *
  * Definitions are read and matched in the database that holds them: what
- * leaves it is kinds, names, owners and the names of built-ins found, never a
- * definition (lib/changes/residency.ts says why a regional project's words stay
- * in its region). scripts/neutralize-planted-objects.ts runs this in every
- * region.
+ * leaves it is kinds, names, owners and the names of the functions and
+ * relations found, never a definition (lib/changes/residency.ts says why a
+ * regional project's words stay in its region). scripts/neutralize-planted-objects.ts
+ * runs this in every region, and a snapshot restore runs it again for the
+ * project it restored (lib/services/workspace-backup.ts).
  */
 
 import { prisma } from '@/lib/db/prisma'
 import { CAPTURE_TRIGGER, PLATFORM_OBJECTS } from '@/lib/changes/catalog'
 import { SECURITY_CHANGE_GROUP } from '@/lib/changes/recovery'
-import { JWT_CLAIM_FN } from '@/lib/postgrest/rls-translation'
+import { JWT_CLAIM_FN, jwtClaimFunctionSql, serviceRoleClause } from '@/lib/postgrest/rls-translation'
 import { NOTIFY_FUNCTION_NAME, PRESENCE_FUNCTION_NAME } from '@/lib/realtime/channel-sql'
 import { LADDER_OBJECT_PREFIX } from '@/lib/structural-evolution/facts'
 import { projectIdOfWorkspaceSchema, quoteIdent } from '@/lib/security/workspace-schema'
+import type { CloudRegionId } from '@/lib/regions'
 
 /** One connection; a pg Client or PoolClient. Scans run on it in one transaction. */
 export interface PgClient {
@@ -119,13 +153,29 @@ function backenlyTrigger(name: string): { runs: (fn: string) => boolean; when: b
   return null
 }
 
+// ── What an expression may call ─────────────────────────────────────────────
+
 /**
- * Built-ins that run SQL handed to them as text, or change the session or the
- * server, matched as a word followed by `(` in a definition. A privilege on a
- * project's routine cannot stop these, since everyone may run them, so what
- * calls one is reported for a person.
+ * Built-ins PostgreSQL declares immutable or stable that still run SQL handed
+ * to them as text, or read other sessions, files or objects by name: an
+ * expression calling one runs it as whoever reaches the expression.
  */
-const SIDE_EFFECT_BUILTINS = String.raw`\m(query_to_xml(?:_and_xmlschema)?|query_to_xmlschema|cursor_to_xml(?:schema)?|table_to_xml(?:_and_xmlschema)?|table_to_xmlschema|schema_to_xml(?:_and_xmlschema)?|schema_to_xmlschema|database_to_xml(?:_and_xmlschema)?|database_to_xmlschema|pg_notify|set_config|setval|dblink[a-z_]*|lo_import|lo_export|lo_from_bytea|lo_put|pg_read_file|pg_read_binary_file|pg_ls_dir|pg_stat_file|pg_terminate_backend|pg_cancel_backend|pg_reload_conf|pg_sleep[a-z_]*|pg_advisory[a-z_]*|pg_logical_emit_message)\s*\(`
+export const DENIED_BUILTINS = String.raw`^((query|table|schema|database|cursor)_to_xml(schema|_and_xmlschema)?|ts_stat|pg_stat_.*|pg_get_.*|pg_read_.*|pg_ls_.*|pg_stat_file|lo_.*)$`
+/** ts_rewrite(query, select text) runs the SELECT it is handed; the three-argument form only rewrites. */
+const TEXT_RUNNING_TS_REWRITE_ARGS = 2
+
+/** Volatile built-ins that only make a value, as a default does. Every other volatile one changes something. */
+export const VALUE_BUILTINS = [
+  'nextval', 'currval', 'lastval', 'gen_random_uuid', 'random', 'random_normal', 'clock_timestamp', 'timeofday',
+  'txid_current', 'txid_current_if_assigned', 'pg_current_xact_id', 'pg_current_xact_id_if_assigned', 'uuidv4', 'uuidv7',
+]
+/** Extensions whose immutable and stable functions compute from their arguments alone. */
+export const COMPUTING_EXTENSIONS = [
+  'citext', 'pg_trgm', 'unaccent', 'fuzzystrmatch', 'hstore', 'ltree', 'btree_gin', 'btree_gist', 'vector',
+  'cube', 'earthdistance', 'intarray', 'isn',
+]
+/** Extensions every function of which computes, or makes a random value. */
+export const VALUE_EXTENSIONS = ['pgcrypto', 'uuid-ossp']
 
 const LOGIN_ROLE = /^bkn_(ro|rw|fn)_[0-9a-f]{12}$/
 const OWNER_ROLE = /^bkn_own_[0-9a-f]{12}$/
@@ -245,13 +295,18 @@ export async function projectSchemas(db: PgClient, projectId?: string): Promise<
 
 // ── What a project planted ───────────────────────────────────────────────────
 
-export type PlantedKind = 'function' | 'procedure' | 'aggregate' | 'trigger' | 'rule'
+/** An expression that runs in whichever session reaches it, and calls or reads what it must not. */
+export type ExpressionKind = 'default' | 'generated column' | 'check' | 'domain default' | 'domain check' | 'policy' | 'view'
+export type PlantedKind = 'function' | 'procedure' | 'aggregate' | 'trigger' | 'rule' | ExpressionKind
+
+const EXPRESSION_KINDS = new Set<string>(['default', 'generated column', 'check', 'domain default', 'domain check', 'policy', 'view'])
+const isExpression = (p: Planted) => EXPRESSION_KINDS.has(p.kind)
 
 export interface Planted {
   kind: PlantedKind
   schema: string
   projectId: string | null
-  /** A routine's signature, or `name on table`. */
+  /** A routine's signature, `name on table`, or for an expression what it belongs to. */
   name: string
   /** Why it is read as the project's rather than Backenly's. */
   why: string
@@ -262,12 +317,28 @@ export interface Planted {
   definer?: boolean
   /** Roles holding an explicit grant on it, `PUBLIC` included. */
   grantees?: string[]
-  // Triggers and rules.
-  /** The trigger's or rule's own name. */
+  // Triggers, rules and expressions.
+  /** The trigger's, rule's, constraint's, policy's or column's own name. */
   objectName?: string
+  /** The table, view or domain it is on. */
   table?: string
   onView?: boolean
   enabled?: boolean
+  // Expressions.
+  /** The catalog the expression is kept in, as an oid: with `oid`, how it is found again. */
+  classid?: string
+  /** pg_class.relkind of `table`. */
+  relkind?: string
+  /** A policy's command (pg_policy.polcmd). */
+  command?: string
+  /** Functions it calls that may not run there. */
+  calls?: string[]
+  /** Relations outside its project it reads. */
+  reads?: string[]
+  /** A policy whose table has no rule of Backenly's left, so switching it off holds the table to Backenly's closed rule. */
+  closesTable?: boolean
+  /** A view's columns, for the empty view that replaces it. */
+  columns?: Array<{ name: string; type: string; collation: string | null }>
 }
 
 /** Something that calls a planted routine, and now fails closed instead. */
@@ -279,12 +350,13 @@ export interface CallsPlanted {
   calls: string
 }
 
-/** A definition that calls a built-in no privilege can take back, for a person to review. */
+/** Something that reaches what it must not and is not switched off here, for a person to review. */
 export interface ForReview {
   projectId: string | null
   schema: string
   kind: string
   name: string
+  /** The functions it calls and the relations outside its project it reads. */
   builtins: string[]
 }
 
@@ -324,16 +396,220 @@ function triggerAuthor(t: any, planted: Map<string, Planted>, facts: DatabaseFac
   return null
 }
 
+/** What an expression reaches that it must not, in words: names only. */
+function reachOf(calls: string[], reads: string[]): string {
+  return [
+    calls.length ? `calls ${calls.join(', ')}, which is not a function that only computes a value` : '',
+    reads.length ? `reads ${reads.join(', ')}, outside its project` : '',
+  ].filter(Boolean).join('; ')
+}
+
+interface ExpressionRow {
+  kind: string
+  classid: string
+  oid: string
+  schema: string
+  rel: string
+  relkind: string | null
+  item: string | null
+  cmd: string | null
+  calls: string[]
+  reads: string[]
+  rls: boolean | null
+  backenly_rules: number | null
+  columns: Array<{ name: string; type: string; collation: string | null }> | null
+}
+
 /**
- * Everything in `schemas` a project planted, what calls it, and what calls a
- * built-in a person should look at. Read in one transaction, with names
- * resolved against pg_catalog alone so every signature comes back qualified.
+ * Every expression in `schemas` that calls a function outside what may run in
+ * a shared session, or reads a relation outside its own project. Read from the
+ * stored trees, in which a function is `:funcid`, `:opfuncid` and the like and
+ * a relation `:relid`, and from pg_depend, which names the relations an
+ * expression's constants point at (nextval('...'::regclass)). The caller sets
+ * search_path to pg_catalog, so every name comes back qualified.
  */
-export async function findPlanted(db: PgClient, schemas: string[], facts: DatabaseFacts): Promise<PlantedReport> {
-  if (schemas.length === 0) return { planted: [], callers: [], review: [] }
+async function scanExpressions(db: PgClient, schemas: string[]): Promise<ExpressionRow[]> {
+  if (schemas.length === 0) return []
+  const { rows } = await db.query(
+    `WITH exprs AS (
+       SELECT CASE WHEN a.attgenerated <> '' THEN 'generated column' ELSE 'default' END AS kind,
+              'pg_attrdef'::regclass::oid AS classid, ad.oid AS objid, c.oid AS relid,
+              n.nspname::text AS schema, c.relname::text AS rel, c.relkind::text AS relkind,
+              a.attname::text AS item, ad.adbin::text AS tree, NULL::text AS cmd
+         FROM pg_attrdef ad
+         JOIN pg_attribute a ON a.attrelid = ad.adrelid AND a.attnum = ad.adnum
+         JOIN pg_class c ON c.oid = ad.adrelid
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = ANY ($1::text[])
+          -- An inherited generation expression is its parent's, switched off there.
+          AND NOT (a.attgenerated <> '' AND a.attinhcount > 0)
+       UNION ALL
+       SELECT 'check', 'pg_constraint'::regclass::oid, con.oid, c.oid, n.nspname::text, c.relname::text,
+              c.relkind::text, con.conname::text, con.conbin::text, NULL
+         FROM pg_constraint con
+         JOIN pg_class c ON c.oid = con.conrelid
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = ANY ($1::text[]) AND con.contype = 'c' AND con.coninhcount = 0
+       UNION ALL
+       SELECT 'domain check', 'pg_constraint'::regclass::oid, con.oid, NULL::oid, n.nspname::text, t.typname::text,
+              NULL, con.conname::text, con.conbin::text, NULL
+         FROM pg_constraint con
+         JOIN pg_type t ON t.oid = con.contypid
+         JOIN pg_namespace n ON n.oid = t.typnamespace
+        WHERE n.nspname = ANY ($1::text[]) AND con.contype = 'c'
+       UNION ALL
+       SELECT 'domain default', 'pg_type'::regclass::oid, t.oid, NULL::oid, n.nspname::text, t.typname::text,
+              NULL, NULL, t.typdefaultbin::text, NULL
+         FROM pg_type t
+         JOIN pg_namespace n ON n.oid = t.typnamespace
+        WHERE n.nspname = ANY ($1::text[]) AND t.typtype = 'd' AND t.typdefaultbin IS NOT NULL
+       UNION ALL
+       SELECT 'policy', 'pg_policy'::regclass::oid, pol.oid, c.oid, n.nspname::text, c.relname::text, c.relkind::text,
+              pol.polname::text, coalesce(pol.polqual::text, '') || ' ' || coalesce(pol.polwithcheck::text, ''),
+              pol.polcmd::text
+         FROM pg_policy pol
+         JOIN pg_class c ON c.oid = pol.polrelid
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = ANY ($1::text[])
+       UNION ALL
+       SELECT CASE c.relkind WHEN 'm' THEN 'materialized view' ELSE 'view' END, 'pg_rewrite'::regclass::oid, r.oid,
+              c.oid, n.nspname::text, c.relname::text, c.relkind::text, NULL, r.ev_action::text, NULL
+         FROM pg_rewrite r
+         JOIN pg_class c ON c.oid = r.ev_class
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = ANY ($1::text[]) AND r.rulename = '_RETURN' AND c.relkind IN ('v', 'm')
+       UNION ALL
+       SELECT 'trigger condition', 'pg_trigger'::regclass::oid, t.oid, c.oid, n.nspname::text, c.relname::text,
+              c.relkind::text, t.tgname::text, t.tgqual::text, NULL
+         FROM pg_trigger t
+         JOIN pg_class c ON c.oid = t.tgrelid
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = ANY ($1::text[]) AND NOT t.tgisinternal AND t.tgparentid = 0 AND t.tgqual IS NOT NULL
+     ),
+     refs AS (
+       SELECT e.classid, e.objid, m[1] AS field, m[2]::oid AS ref
+         FROM exprs e
+         CROSS JOIN LATERAL regexp_matches(e.tree, ':(funcid|opfuncid|aggfnoid|winfnoid|opno|hashfuncid|negfuncid|relid) ([0-9]+)', 'g') AS m
+     ),
+     fns AS (
+       SELECT DISTINCT r.classid, r.objid, CASE WHEN r.field = 'opno' THEN o.oprcode::oid ELSE r.ref END AS fn
+         FROM refs r
+         LEFT JOIN pg_operator o ON r.field = 'opno' AND o.oid = r.ref
+        WHERE r.field <> 'relid' AND r.ref <> 0
+     ),
+     calls AS (
+       SELECT f.classid, f.objid, p.oid::regprocedure::text AS name
+         FROM fns f
+         JOIN exprs e ON e.classid = f.classid AND e.objid = f.objid
+         JOIN pg_proc p ON p.oid = f.fn
+         JOIN pg_namespace pn ON pn.oid = p.pronamespace
+         LEFT JOIN LATERAL (
+           SELECT x.extname::text AS ext
+             FROM pg_depend d JOIN pg_extension x ON x.oid = d.refobjid
+            WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid
+              AND d.refclassid = 'pg_extension'::regclass AND d.deptype = 'e'
+            LIMIT 1) x ON true
+        -- Each test is false, never null, where it does not apply: NOT of a null
+        -- would drop the row, and with it what the expression calls.
+        WHERE NOT (
+          coalesce(x.ext IS NULL AND pn.nspname IN ('pg_catalog', 'information_schema')
+             AND ((p.provolatile IN ('i', 's') AND p.proname !~ $2
+                   AND NOT (p.proname = 'ts_rewrite' AND p.pronargs = $3))
+                  OR p.proname = ANY ($4::text[])), false)
+          OR coalesce(x.ext = ANY ($5::text[]) AND p.provolatile IN ('i', 's'), false)
+          OR coalesce(x.ext = ANY ($6::text[]), false)
+          -- The project's own: Backenly's claim reader, or a routine switched off on its own.
+          OR coalesce(substring(pn.nspname FROM '^workspace_([0-9a-fA-F-]{36})')
+                      = substring(e.schema FROM '^workspace_([0-9a-fA-F-]{36})'), false)
+        )
+     ),
+     rels AS (
+       SELECT r.classid, r.objid, r.ref AS rel FROM refs r WHERE r.field = 'relid' AND r.ref <> 0
+       UNION
+       SELECT d.classid, d.objid, d.refobjid
+         FROM pg_depend d JOIN exprs e ON e.classid = d.classid AND e.objid = d.objid
+        WHERE d.refclassid = 'pg_class'::regclass AND d.deptype = 'n'
+     ),
+     reads AS (
+       SELECT r.classid, r.objid, c.oid::regclass::text AS name
+         FROM rels r
+         JOIN exprs e ON e.classid = r.classid AND e.objid = r.objid
+         JOIN pg_class c ON c.oid = r.rel
+         JOIN pg_namespace cn ON cn.oid = c.relnamespace
+        WHERE substring(cn.nspname FROM '^workspace_([0-9a-fA-F-]{36})')
+              IS DISTINCT FROM substring(e.schema FROM '^workspace_([0-9a-fA-F-]{36})')
+     )
+     SELECT e.kind, e.classid::text AS classid, e.objid::text AS oid, e.schema, e.rel, e.relkind, e.item, e.cmd,
+            coalesce((SELECT array_agg(DISTINCT c.name ORDER BY c.name) FROM calls c
+                       WHERE c.classid = e.classid AND c.objid = e.objid), '{}'::text[]) AS calls,
+            coalesce((SELECT array_agg(DISTINCT r.name ORDER BY r.name) FROM reads r
+                       WHERE r.classid = e.classid AND r.objid = e.objid), '{}'::text[]) AS reads,
+            CASE WHEN e.kind = 'policy' THEN (SELECT c.relrowsecurity FROM pg_class c WHERE c.oid = e.relid) END AS rls,
+            -- Backenly's rules left on a policy's table once what is switched off here is.
+            CASE WHEN e.kind = 'policy' THEN (
+              SELECT count(*)::int FROM pg_policy p2
+               WHERE p2.polrelid = e.relid AND p2.polname LIKE 'backenly\\_%'
+                 AND NOT EXISTS (SELECT 1 FROM calls c WHERE c.classid = 'pg_policy'::regclass AND c.objid = p2.oid)
+                 AND NOT EXISTS (SELECT 1 FROM reads r WHERE r.classid = 'pg_policy'::regclass AND r.objid = p2.oid))
+            END AS backenly_rules,
+            CASE WHEN e.kind = 'view' THEN (
+              SELECT coalesce(json_agg(json_build_object(
+                       'name', a.attname,
+                       'type', format_type(a.atttypid, a.atttypmod),
+                       'collation', CASE WHEN a.attcollation <> 0 AND a.attcollation <> t.typcollation
+                                         THEN quote_ident(cn.nspname) || '.' || quote_ident(co.collname) END)
+                     ORDER BY a.attnum), '[]'::json)
+                FROM pg_attribute a
+                JOIN pg_type t ON t.oid = a.atttypid
+                LEFT JOIN pg_collation co ON co.oid = a.attcollation
+                LEFT JOIN pg_namespace cn ON cn.oid = co.collnamespace
+               WHERE a.attrelid = e.relid AND a.attnum > 0 AND NOT a.attisdropped)
+            END AS columns
+       FROM exprs e
+      WHERE EXISTS (SELECT 1 FROM calls c WHERE c.classid = e.classid AND c.objid = e.objid)
+         OR EXISTS (SELECT 1 FROM reads r WHERE r.classid = e.classid AND r.objid = e.objid)
+      ORDER BY e.schema, e.kind, e.rel, e.item`,
+    [schemas, DENIED_BUILTINS, TEXT_RUNNING_TS_REWRITE_ARGS, VALUE_BUILTINS, COMPUTING_EXTENSIONS, VALUE_EXTENSIONS],
+  )
+  return rows as ExpressionRow[]
+}
+
+/** Run `fn` in a read-only transaction resolving names against pg_catalog alone, so every name comes back qualified. */
+async function inCatalog<T>(db: PgClient, fn: () => Promise<T>): Promise<T> {
   await db.query('BEGIN READ ONLY')
   try {
     await db.query(`SET LOCAL search_path = pg_catalog`)
+    const out = await fn()
+    await db.query('COMMIT')
+    return out
+  } catch (err) {
+    await db.query('ROLLBACK').catch(() => {})
+    throw err
+  }
+}
+
+function expressionName(r: ExpressionRow): string {
+  switch (r.kind) {
+    case 'default':
+    case 'generated column':
+      return `${r.rel}.${r.item}`
+    case 'domain default':
+    case 'view':
+    case 'materialized view':
+      return r.rel
+    default:
+      return `${r.item} on ${r.rel}`
+  }
+}
+
+/**
+ * Everything in `schemas` a project planted, what calls it, and what a person
+ * should look at. Read in one transaction, with names resolved against
+ * pg_catalog alone so every signature comes back qualified.
+ */
+export async function findPlanted(db: PgClient, schemas: string[], facts: DatabaseFacts): Promise<PlantedReport> {
+  if (schemas.length === 0) return { planted: [], callers: [], review: [] }
+  return inCatalog(db, async () => {
     const routines = (await db.query(
       `SELECT p.oid::text AS oid, n.nspname::text AS schema, p.proname::text AS name, p.prokind::text AS kind,
               p.prosecdef AS definer, pg_get_userbyid(p.proowner)::text AS owner, o.rolsuper AS owner_super,
@@ -377,6 +653,7 @@ export async function findPlanted(db: PgClient, schemas: string[], facts: Databa
         ORDER BY 2, 3, 5`,
       [schemas],
     )).rows
+    const expressions = await scanExpressions(db, schemas)
 
     const planted: Planted[] = []
     const plantedRoutines = new Map<string, Planted>()
@@ -398,8 +675,15 @@ export async function findPlanted(db: PgClient, schemas: string[], facts: Databa
       planted.push(p)
       plantedRoutines.set(r.oid, p)
     }
+    // A trigger whose WHEN condition calls or reads what it must not is the
+    // project's, whatever its name.
+    const conditions = new Map(
+      expressions.filter((e) => e.kind === 'trigger condition').map((e): [string, ExpressionRow] => [e.oid, e]),
+    )
     for (const t of triggers) {
-      const why = triggerAuthor(t, plantedRoutines, facts)
+      const condition = conditions.get(t.oid)
+      const why = triggerAuthor(t, plantedRoutines, facts) ??
+        (condition ? `its WHEN condition ${reachOf(condition.calls, condition.reads)}` : null)
       if (!why) continue
       planted.push({
         kind: 'trigger',
@@ -426,6 +710,38 @@ export async function findPlanted(db: PgClient, schemas: string[], facts: Databa
         table: r.table,
         onView: r.relkind === 'v' || r.relkind === 'm',
         enabled: r.enabled !== 'D',
+      })
+    }
+    const review: ForReview[] = []
+    for (const e of expressions) {
+      if (e.kind === 'trigger condition') continue
+      if (e.kind === 'materialized view') {
+        // Runs its query when refreshed, as its owner: nothing here replaces it.
+        review.push({
+          projectId: projectIdOfWorkspaceSchema(e.schema),
+          schema: e.schema,
+          kind: e.kind,
+          name: e.rel,
+          builtins: [...e.calls, ...e.reads],
+        })
+        continue
+      }
+      planted.push({
+        kind: e.kind as ExpressionKind,
+        schema: e.schema,
+        projectId: projectIdOfWorkspaceSchema(e.schema),
+        name: expressionName(e),
+        why: reachOf(e.calls, e.reads),
+        oid: e.oid,
+        classid: e.classid,
+        objectName: e.item ?? undefined,
+        table: e.rel,
+        relkind: e.relkind ?? undefined,
+        command: e.cmd ?? undefined,
+        calls: e.calls,
+        reads: e.reads,
+        closesTable: e.kind === 'policy' ? e.rls === true && e.backenly_rules === 0 : undefined,
+        columns: e.kind === 'view' ? (e.columns ?? []) : undefined,
       })
     }
 
@@ -457,55 +773,8 @@ export async function findPlanted(db: PgClient, schemas: string[], facts: Databa
       }
     }
 
-    const review = (await db.query(
-      `WITH defs AS (
-         SELECT 'policy'::text AS kind, n.nspname::text AS schema, (pol.polname || ' on ' || c.relname)::text AS name,
-                coalesce(pg_get_expr(pol.polqual, pol.polrelid), '') || ' ' || coalesce(pg_get_expr(pol.polwithcheck, pol.polrelid), '') AS def
-           FROM pg_policy pol JOIN pg_class c ON c.oid = pol.polrelid JOIN pg_namespace n ON n.oid = c.relnamespace
-          WHERE n.nspname = ANY ($1::text[])
-         UNION ALL
-         SELECT CASE c.relkind WHEN 'm' THEN 'materialized view' ELSE 'view' END, n.nspname::text, c.relname::text,
-                pg_get_viewdef(c.oid)
-           FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-          WHERE n.nspname = ANY ($1::text[]) AND c.relkind IN ('v', 'm')
-         UNION ALL
-         SELECT 'trigger', n.nspname::text, (t.tgname || ' on ' || c.relname)::text, pg_get_triggerdef(t.oid)
-           FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace
-          WHERE n.nspname = ANY ($1::text[]) AND NOT t.tgisinternal AND t.tgqual IS NOT NULL
-         UNION ALL
-         SELECT 'rule', n.nspname::text, (r.rulename || ' on ' || c.relname)::text, pg_get_ruledef(r.oid)
-           FROM pg_rewrite r JOIN pg_class c ON c.oid = r.ev_class JOIN pg_namespace n ON n.oid = c.relnamespace
-          WHERE n.nspname = ANY ($1::text[]) AND r.rulename <> '_RETURN'
-         UNION ALL
-         SELECT 'default', n.nspname::text, (c.relname || '.' || a.attname)::text, pg_get_expr(ad.adbin, ad.adrelid)
-           FROM pg_attrdef ad
-           JOIN pg_attribute a ON a.attrelid = ad.adrelid AND a.attnum = ad.adnum
-           JOIN pg_class c ON c.oid = ad.adrelid JOIN pg_namespace n ON n.oid = c.relnamespace
-          WHERE n.nspname = ANY ($1::text[])
-         UNION ALL
-         SELECT 'constraint', n.nspname::text, (con.conname || ' on ' || c.relname)::text, pg_get_constraintdef(con.oid)
-           FROM pg_constraint con JOIN pg_class c ON c.oid = con.conrelid JOIN pg_namespace n ON n.oid = c.relnamespace
-          WHERE n.nspname = ANY ($1::text[]) AND con.contype = 'c'
-       )
-       SELECT kind, schema, name, array_agg(DISTINCT m[1] ORDER BY m[1]) AS builtins
-         FROM defs CROSS JOIN LATERAL regexp_matches(lower(def), $2, 'g') AS m
-        GROUP BY kind, schema, name
-        ORDER BY 2, 1, 3`,
-      [schemas, SIDE_EFFECT_BUILTINS],
-    )).rows.map((r): ForReview => ({
-      projectId: projectIdOfWorkspaceSchema(r.schema),
-      schema: r.schema,
-      kind: r.kind,
-      name: r.name,
-      builtins: r.builtins,
-    }))
-
-    await db.query('COMMIT')
     return { planted, callers, review }
-  } catch (err) {
-    await db.query('ROLLBACK').catch(() => {})
-    throw err
-  }
+  })
 }
 
 // ── Switching it off ─────────────────────────────────────────────────────────
@@ -519,11 +788,85 @@ export interface Action {
 }
 
 const qualified = (schema: string, name: string) => `${quoteIdent(schema)}.${quoteIdent(name)}`
+const sqlLiteral = (s: string) => `'${s.replace(/'/g, "''")}'`
+
+/** What ALTER calls a relation of this kind. */
+function relationWord(relkind: string | undefined): string {
+  switch (relkind) {
+    case 'v': return 'VIEW'
+    case 'm': return 'MATERIALIZED VIEW'
+    case 'f': return 'FOREIGN TABLE'
+    default: return 'TABLE'
+  }
+}
+
+/**
+ * Backenly's closed rule, as the admin_only template installs it
+ * (lib/services/workspace-rls.ts): row-level security on and forced, and one
+ * policy letting service-role keys alone through. Idempotent.
+ */
+function closedRuleStatements(schema: string, table: string): string[] {
+  const on = qualified(schema, table)
+  return [
+    jwtClaimFunctionSql(schema),
+    `ALTER TABLE ${on} ENABLE ROW LEVEL SECURITY`,
+    `ALTER TABLE ${on} FORCE ROW LEVEL SECURITY`,
+    `DO $close$ BEGIN
+       IF NOT EXISTS (SELECT 1 FROM pg_policy WHERE polrelid = ${sqlLiteral(on)}::regclass AND polname = 'backenly_admin_only') THEN
+         CREATE POLICY backenly_admin_only ON ${on} FOR ALL USING (${serviceRoleClause(schema)});
+       END IF;
+     END $close$`,
+  ]
+}
+
+/** The actions that switch off one expression. */
+function expressionActions(p: Planted): Action[] {
+  const on = qualified(p.schema, p.table!)
+  const name = quoteIdent(p.objectName ?? '')
+  switch (p.kind) {
+    case 'default':
+      return [{ object: p, does: 'default dropped', statements: [`ALTER ${relationWord(p.relkind)} ${on} ALTER COLUMN ${name} DROP DEFAULT`] }]
+    case 'generated column':
+      return [{ object: p, does: 'made an ordinary column, its values kept', statements: [`ALTER TABLE ${on} ALTER COLUMN ${name} DROP EXPRESSION`] }]
+    case 'check':
+      return [{ object: p, does: 'check dropped', statements: [`ALTER TABLE ${on} DROP CONSTRAINT ${name}`] }]
+    case 'domain default':
+      return [{ object: p, does: 'default dropped', statements: [`ALTER DOMAIN ${on} DROP DEFAULT`] }]
+    case 'domain check':
+      return [{ object: p, does: 'check dropped', statements: [`ALTER DOMAIN ${on} DROP CONSTRAINT ${name}`] }]
+    case 'policy': {
+      // A policy without a USING (an INSERT one) takes only WITH CHECK, and one
+      // without a WITH CHECK (SELECT, DELETE) only USING.
+      const clause = p.command === 'a' ? 'WITH CHECK (false)'
+        : p.command === 'r' || p.command === 'd' ? 'USING (false)'
+          : 'USING (false) WITH CHECK (false)'
+      return [{
+        object: p,
+        does: p.closesTable
+          ? 'made false, and its table held to Backenly\'s closed rule (service-role keys only)'
+          : 'made false',
+        statements: [`ALTER POLICY ${name} ON ${on} ${clause}`, ...(p.closesTable ? closedRuleStatements(p.schema, p.table!) : [])],
+      }]
+    }
+    case 'view': {
+      const columns = (p.columns ?? [])
+        .map((c) => `NULL::${c.type}${c.collation ? ` COLLATE ${c.collation}` : ''} AS ${quoteIdent(c.name)}`)
+        .join(', ')
+      return [{
+        object: p,
+        does: 'replaced by an empty view with the same columns',
+        statements: [`CREATE OR REPLACE VIEW ${on} AS SELECT ${columns} WHERE false`],
+      }]
+    }
+    default:
+      return []
+  }
+}
 
 /**
  * The statements that switch off what was planted: a routine's privileges,
- * then its security; a trigger or a rule. Each action stands alone, so one
- * that fails leaves the rest to run and is reported.
+ * then its security; a trigger or a rule; an expression. Each action stands
+ * alone, so one that fails leaves the rest to run and is reported.
  */
 export function actionsFor(planted: Planted[]): Action[] {
   const actions: Action[] = []
@@ -546,6 +889,10 @@ export function actionsFor(planted: Planted[]): Action[] {
       }
       continue
     }
+    if (isExpression(p)) {
+      actions.push(...expressionActions(p))
+      continue
+    }
     const on = qualified(p.schema, p.table!)
     const name = quoteIdent(p.objectName!)
     if (p.kind === 'trigger' && p.onView) {
@@ -563,10 +910,12 @@ export function actionsFor(planted: Planted[]): Action[] {
 
 /**
  * What of `planted` still runs, read from the catalog rather than assumed: a
- * routine PUBLIC or a shared role can execute, or a definer that runs as a role
- * reaching other projects; a trigger or a rule still enabled, or still there on
- * a view. Empty when everything is off. Read before acting, so a run acts only
- * on what is still on, and after, so what could not be switched off is said.
+ * routine PUBLIC or a shared role can execute, a definer that runs as a role
+ * reaching other projects, or one whose owner a direct-access login acts as
+ * (it could grant its use again); a trigger or a rule still enabled, or still
+ * there on a view; an expression that still calls or reads what it must not.
+ * Empty when everything is off. Read before acting, so a run acts only on what
+ * is still on, and after, so what could not be switched off is said.
  */
 export async function stillRunning(
   db: PgClient,
@@ -575,7 +924,10 @@ export async function stillRunning(
 ): Promise<Array<{ object: Planted; what: string }>> {
   const left: Array<{ object: Planted; what: string }> = []
   const byOid = new Map<string, Planted>(
-    planted.map((p): [string, Planted] => [`${p.kind === 'trigger' ? 't' : p.kind === 'rule' ? 'r' : 'p'}${p.oid}`, p]),
+    planted.map((p): [string, Planted] => [
+      isExpression(p) ? `x${p.classid}:${p.oid}` : `${p.kind === 'trigger' ? 't' : p.kind === 'rule' ? 'r' : 'p'}${p.oid}`,
+      p,
+    ]),
   )
   const routines = planted.filter((p) => p.signature)
   if (routines.length > 0) {
@@ -589,13 +941,25 @@ export async function stillRunning(
       [routines.map((p) => p.oid), facts.sharedRoles],
     )
     for (const r of rows) left.push({ object: byOid.get(`p${r.oid}`)!, what: `can be run by ${r.roles}` })
-    const { rows: definers } = await db.query(
-      `SELECT oid::text AS oid, pg_get_userbyid(proowner)::text AS owner FROM pg_proc WHERE oid = ANY ($1::oid[]) AND prosecdef`,
+    const { rows: owned } = await db.query(
+      `SELECT p.oid::text AS oid, pg_get_userbyid(p.proowner)::text AS owner, p.prosecdef AS definer,
+              (pg_get_userbyid(p.proowner) ~ '^bkn_(ro|rw|fn)_[0-9a-f]{12}$'
+               OR pg_get_userbyid(p.proowner) = 'backenly_external'
+               OR EXISTS (SELECT 1 FROM pg_auth_members m JOIN pg_roles l ON l.oid = m.member
+                           WHERE m.roleid = p.proowner AND l.rolname ~ '^bkn_(ro|rw)_[0-9a-f]{12}$')) AS login_owns
+         FROM pg_proc p WHERE p.oid = ANY ($1::oid[])`,
       [routines.map((p) => p.oid)],
     )
-    for (const d of definers) {
-      if (!LOGIN_ROLE.test(d.owner) && !OWNER_ROLE.test(d.owner)) {
+    for (const d of owned) {
+      if (d.definer && !LOGIN_ROLE.test(d.owner) && !OWNER_ROLE.test(d.owner)) {
         left.push({ object: byOid.get(`p${d.oid}`)!, what: `runs as ${d.owner} whoever calls it` })
+      }
+      if (d.login_owns) {
+        left.push({
+          object: byOid.get(`p${d.oid}`)!,
+          what: `is owned by ${d.owner}, which a direct-access login acts as, so the login can grant its use again: ` +
+            'install scripts/setup-direct-access.sql, whose strip gives it to the project\'s owner role',
+        })
       }
     }
   }
@@ -621,6 +985,14 @@ export async function stillRunning(
       const rule = byOid.get(`r${r.oid}`)!
       if (rule.onView) left.push({ object: rule, what: 'is on a view, where it applies' })
       else if (r.enabled !== 'D') left.push({ object: rule, what: 'applies' })
+    }
+  }
+  const expressions = planted.filter(isExpression)
+  if (expressions.length > 0) {
+    const rows = await inCatalog(db, () => scanExpressions(db, [...new Set(expressions.map((p) => p.schema))]))
+    for (const r of rows) {
+      const p = byOid.get(`x${r.classid}:${r.oid}`)
+      if (p) left.push({ object: p, what: reachOf(r.calls, r.reads) })
     }
   }
   return left
@@ -703,4 +1075,73 @@ export async function recordSwitchedOff(projectId: string, report: PlantedReport
       timestamp: new Date(),
     },
   })
+}
+
+/** What the report holds for one project. */
+export function ofProject(report: PlantedReport, projectId: string): PlantedReport {
+  return {
+    planted: report.planted.filter((p) => p.projectId === projectId),
+    callers: report.callers.filter((c) => c.projectId === projectId),
+    review: report.review.filter((r) => r.projectId === projectId),
+  }
+}
+
+/** A pool of connections to one region's database, as lib/data-plane/regional.ts regionPool gives. */
+export interface PgPool {
+  connect(): Promise<PgClient & { release(): void }>
+}
+
+export interface ProjectSwitchOff {
+  actions: Action[]
+  result: Switched
+  /** What is still on once the actions ran, read back from the catalog. */
+  left: Array<{ object: Planted; what: string }>
+  governed: boolean
+}
+
+/**
+ * Switch off what `live` holds of one project's, in the region `pool` reaches:
+ * as one change on its History where its record says this region holds it,
+ * written down in its audit log where it has a record, and read back after.
+ * What scripts/neutralize-planted-objects.ts does with --apply, project by
+ * project, and what a snapshot restore does for the project it restored.
+ */
+export async function switchOffProject(opts: {
+  region: CloudRegionId
+  projectId: string
+  report: PlantedReport
+  live: Array<{ object: Planted; what: string }>
+  facts: DatabaseFacts
+  pool: PgPool
+}): Promise<ProjectSwitchOff> {
+  const { region, projectId, report, facts, pool } = opts
+  const targets = [...new Set(opts.live.filter((l) => l.object.projectId === projectId).map((l) => l.object))]
+  const actions = actionsFor(targets)
+  if (actions.length === 0) return { actions, result: { done: [], failed: [], changeSeq: null }, left: [], governed: false }
+
+  const [{ projectRegion, regionRawClient }, { resolveWorkspaceSchema }] = await Promise.all([
+    import('@/lib/data-plane/regional'),
+    import('@/lib/services/workspace-pool'),
+  ])
+  // Governed only where the project's record says this region holds it: its
+  // History and its change lock are about that database.
+  const record = await prisma.project.findUnique({ where: { id: projectId }, select: { id: true } })
+  const governed = !!record && (await projectRegion(projectId)) === region
+  const mainSchema = governed ? await resolveWorkspaceSchema(projectId) : `workspace_${projectId}`
+  const db = regionRawClient(region, projectId)
+  const result = await switchOff(projectId, actions, {
+    execute: (sql) => db.$executeRawUnsafe(sql),
+    governed,
+    mainSchema,
+  })
+
+  const after = await pool.connect()
+  let left: Array<{ object: Planted; what: string }>
+  try {
+    left = await stillRunning(after, targets, facts)
+  } finally {
+    after.release()
+  }
+  if (record) await recordSwitchedOff(projectId, ofProject(report, projectId), result)
+  return { actions, result, left, governed }
 }

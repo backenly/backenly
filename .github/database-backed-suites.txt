@@ -2113,6 +2113,9 @@ tests/integration/realtime-channel-per-project.spec.ts
 # lib/security/planted-objects.ts finds it and, as a NOSUPERUSER stand-in for
 # the platform's role, disables the trigger and rule and takes EXECUTE from
 # the functions; the platform's writes then run none of it, and what calls them
-# fails closed. For a project with a record it is one History change Backenly
-# made, which History refuses to restore. Real roles, logins and catalog.
+# fails closed. A default, policy or view calling one of the platform's own
+# functions or a built-in that runs SQL is switched off too, and a function a
+# login gave the group every login joins is reported as still on until the
+# sync takes it back. For a project with a record it is one History change
+# Backenly made, which History refuses to restore. Real roles, logins and catalog.
 tests/integration/neutralize-planted-objects.spec.ts

@@ -20,6 +20,14 @@
  * fire, and the policy, view, default and a direct call fail with "permission
  * denied for function" instead of running the planted code.
  *
+ * An expression that calls one of the platform's own functions, or a built-in
+ * that runs SQL, needs no planted routine at all: a default calling
+ * public.backenly_direct_sync_schema gave a project's login another project's
+ * tables the moment the platform inserted a row. Those are found from the
+ * catalog's stored trees and switched off too. So is a function a login gave
+ * to the group every login joins, once the sync has taken it back from the
+ * group: until then the platform's role cannot, and the run says so.
+ *
  * Last, for a project with a record, the switch-off is one change on its
  * History, attributed to Backenly, that History refuses to restore, with an
  * audit entry naming what was switched off.
@@ -217,6 +225,8 @@ describe('found, and switched off as the platform\'s role', () => {
       `function ${sig('as_platform')}`,
       `function ${sig('peek')}`,
       `function ${sig('steal')}`,
+      // set_config changes the session that reads the table: no privilege can take it back.
+      'policy marks_mark',
       'rule peek_on_insert',
       'trigger steal_trg',
     ])
@@ -230,15 +240,15 @@ describe('found, and switched off as the platform\'s role', () => {
       `policy ${sig('peek')}`,
       `view ${sig('peek')}`,
     ])
-    // A definition calling a built-in nothing can take back, for a person.
-    expect(report.review).toEqual([
-      { projectId: projectA, schema: A, kind: 'policy', name: 'marks_mark on marks', builtins: ['set_config'] },
-    ])
+    const policy = report.planted.find((p) => p.kind === 'policy')!
+    expect(policy).toMatchObject({ name: 'marks_mark on marks', closesTable: true })
+    expect(policy.calls!.join()).toMatch(/set_config\(text,text,boolean\)/)
+    expect(report.review).toEqual([])
   })
 
   it('switches every one of them off, as the platform\'s role, and reads them back off', async () => {
     const live = [...new Set((await stillRunning(platform, report.planted, facts)).map((l) => l.object))]
-    expect(live).toHaveLength(5)
+    expect(live).toHaveLength(6)
     const actions = actionsFor(live)
     const result = await switchOff(projectA, actions, {
       execute: (sql) => platform.query(sql),
@@ -253,8 +263,19 @@ describe('found, and switched off as the platform\'s role', () => {
       'disabled',
       'disabled',
       'made SECURITY INVOKER',
+      'made false, and its table held to Backenly\'s closed rule (service-role keys only)',
     ].sort())
     expect(await stillRunning(platform, report.planted, facts)).toEqual([])
+    // The policy runs nothing now, and the table it was on is closed to all but service-role keys.
+    expect(await q(
+      `SELECT pol.polname::text AS name, pg_get_expr(pol.polqual, pol.polrelid) AS qual FROM pg_policy pol
+        WHERE pol.polrelid = to_regclass($1) ORDER BY 1`,
+      [t(A, 'marks')],
+    )).toEqual([
+      { name: 'backenly_admin_only', qual: expect.stringContaining("'service_role'") },
+      { name: 'marks_mark', qual: 'false' },
+    ])
+    expect((await q(`SELECT relforcerowsecurity AS f FROM pg_class WHERE oid = to_regclass($1)`, [t(A, 'marks')]))[0].f).toBe(true)
     // Run again, it finds nothing left to do.
     expect(await stillRunning(platform, (await findPlanted(platform, [A, B], facts)).planted, facts)).toEqual([])
   })
@@ -370,4 +391,232 @@ describe('for a project with a record', () => {
     expect(details.switchedOff.map((s: { kind: string }) => s.kind).sort()).toEqual(['function', 'trigger'])
     expect(details.changeSeq).toBe(result.changeSeq)
   })
+})
+
+describe('an expression that calls one of the platform\'s functions, or a built-in that runs SQL', () => {
+  // Two more projects, as the platform makes them: owner roles it is a member
+  // of, and project A2's read-write login, made and synced by the helpers.
+  const h = randomBytes(6).toString('hex')
+  const A2 = `workspace_${randomUUID()}`
+  const B2 = `workspace_${randomUUID()}`
+  const ownA2 = `bkn_own_${h}`
+  const rwA2 = `bkn_rw_${h}`
+  const ownB2 = `bkn_own_${randomBytes(6).toString('hex')}`
+  const LOGIN_PW = randomBytes(24).toString('base64url')
+  let found: Awaited<ReturnType<typeof findPlanted>>
+  let facts: Awaited<ReturnType<typeof readDatabaseFacts>>
+
+  async function asLogin<T>(fn: (c: Client) => Promise<T>): Promise<T> {
+    const u = new URL(CONN)
+    u.username = rwA2
+    u.password = LOGIN_PW
+    const c = new Client({ connectionString: u.toString() })
+    c.on('error', () => {})
+    await c.connect()
+    try {
+      return await fn(c)
+    } finally {
+      await c.end().catch(() => {})
+    }
+  }
+  const loginReadsB = () =>
+    asLogin((c) => c.query(`SELECT value FROM ${t(B2, 'secrets')}`).then((r) => r.rows.map((x) => x.value), (e) => (e as Error).message))
+
+  beforeAll(async () => {
+    for (const role of [ownA2, ownB2]) {
+      await q(`CREATE ROLE ${role} NOLOGIN`)
+      await q(`GRANT ${role} TO ${PLATFORM}`)
+    }
+    await q(`CREATE SCHEMA "${B2}" AUTHORIZATION ${ownB2}`)
+    await q(`CREATE TABLE ${t(B2, 'secrets')} (id int PRIMARY KEY, value text)`)
+    await q(`INSERT INTO ${t(B2, 'secrets')} VALUES (1, 'tenant-B-only')`)
+    await q(`ALTER TABLE ${t(B2, 'secrets')} OWNER TO ${ownB2}`)
+    await q(`CREATE SCHEMA "${A2}" AUTHORIZATION ${ownA2}`)
+    for (const ddl of [
+      `CREATE TABLE ${t(A2, 'items')} (id int PRIMARY KEY, tag text)`,
+      `CREATE TABLE ${t(A2, 'notes')} (id int PRIMARY KEY, body text)`,
+      `CREATE TABLE ${t(A2, 'shown')} (id int PRIMARY KEY)`,
+    ]) await asRole(ownA2, ddl)
+    await q(`ALTER TABLE ${t(A2, 'shown')} ENABLE ROW LEVEL SECURITY`)
+    await q(`SELECT public.backenly_direct_create_role($1, $2, $3, 'READ_WRITE')`, [rwA2, LOGIN_PW, A2])
+    await q(`SELECT public.backenly_direct_sync_schema($1, NULL, $2, $3)`, [A2, rwA2, ownA2])
+    // As the application's role holds it.
+    await q(`GRANT EXECUTE ON FUNCTION public.backenly_direct_sync_schema(text, text, text, text) TO ${PLATFORM}`)
+
+    // Planted as A2's owner role, which its login could act as before the strip.
+    await asRole(ownA2, `ALTER TABLE ${t(A2, 'items')} ALTER COLUMN tag SET DEFAULT
+      (public.backenly_direct_sync_schema('${B2}', NULL, '${rwA2}', NULL))::text`)
+    await asRole(ownA2, `ALTER TABLE ${t(A2, 'notes')} ALTER COLUMN body SET DEFAULT
+      (ts_rewrite('x'::tsquery, 'SELECT ''x''::tsquery, plainto_tsquery(''simple'', value) FROM "${B2}".secrets'))::text`)
+    await asRole(ownA2, `CREATE POLICY shown_read ON ${t(A2, 'shown')} FOR SELECT USING (public.backenly_direct_shared_database())`)
+    // A view of another project's table: made by a superuser, since A2's owner
+    // role cannot see into B2, then handed to it.
+    await q(`CREATE VIEW ${t(A2, 'peek_b')} AS SELECT id, value FROM ${t(B2, 'secrets')}`)
+    await q(`ALTER VIEW ${t(A2, 'peek_b')} OWNER TO ${ownA2}`)
+  }, 120_000)
+
+  afterAll(async () => {
+    for (const s of [A2, B2]) await q(`DROP SCHEMA IF EXISTS "${s}" CASCADE`).catch(() => {})
+    await q(`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = $1`, [rwA2]).catch(() => {})
+    for (const role of [rwA2, ownA2, ownB2]) {
+      await q(`DROP OWNED BY ${role}`).catch(() => {})
+      await q(`DROP ROLE IF EXISTS ${role}`).catch(() => {})
+    }
+  }, 120_000)
+
+  it('before: the platform inserting a row of A2 gives A2\'s login B2\'s tables, and copies B2\'s rows into A2', async () => {
+    expect(await loginReadsB()).toMatch(/permission denied/)
+    await platform.query(`INSERT INTO ${t(A2, 'items')} (id) VALUES (1)`)
+    expect(await loginReadsB()).toEqual(['tenant-B-only'])
+    await platform.query(`INSERT INTO ${t(A2, 'notes')} (id) VALUES (1)`)
+    expect((await q(`SELECT body FROM ${t(A2, 'notes')} WHERE id = 1`))[0].body).toMatch(/tenant/)
+    // Put back, so what follows starts from a login that cannot read B2.
+    await q(`REVOKE ALL ON ALL TABLES IN SCHEMA "${B2}" FROM ${rwA2}`)
+    await q(`REVOKE ALL ON SCHEMA "${B2}" FROM ${rwA2}`)
+    await q(`DELETE FROM ${t(A2, 'items')}`)
+    await q(`DELETE FROM ${t(A2, 'notes')}`)
+    expect(await loginReadsB()).toMatch(/permission denied/)
+  }, 60_000)
+
+  it('finds each expression, with what it calls or reads, and switches it off as the platform\'s role', async () => {
+    facts = await readDatabaseFacts(platform)
+    found = await findPlanted(platform, [A2, B2], facts)
+    const byName = Object.fromEntries(found.planted.map((p) => [`${p.kind} ${p.name}`, p]))
+    expect(Object.keys(byName).sort()).toEqual(['default items.tag', 'default notes.body', 'policy shown_read on shown', 'view peek_b'])
+    expect(byName['default items.tag'].calls).toEqual(['public.backenly_direct_sync_schema(text,text,text,text)'])
+    expect(byName['default notes.body'].calls!.join()).toMatch(/ts_rewrite\(tsquery,text\)/)
+    expect(byName['policy shown_read on shown']).toMatchObject({ calls: ['public.backenly_direct_shared_database()'], closesTable: true })
+    expect(byName['view peek_b'].reads).toEqual([`"${B2}".secrets`])
+    expect(found.planted.every((p) => p.projectId === A2.slice(10))).toBe(true)
+
+    const live = [...new Set((await stillRunning(platform, found.planted, facts)).map((l) => l.object))]
+    expect(live).toHaveLength(4)
+    const result = await switchOff(A2.slice(10), actionsFor(live), {
+      execute: (sql) => platform.query(sql),
+      governed: false,
+      mainSchema: A2,
+    })
+    expect(result.failed).toEqual([])
+    expect(await stillRunning(platform, found.planted, facts)).toEqual([])
+    expect((await findPlanted(platform, [A2, B2], facts)).planted).toEqual([])
+  }, 60_000)
+
+  it('after: the platform inserting rows of A2 runs none of it, and A2\'s login still cannot read B2', async () => {
+    await platform.query(`INSERT INTO ${t(A2, 'items')} (id) VALUES (2)`)
+    await platform.query(`INSERT INTO ${t(A2, 'notes')} (id) VALUES (2)`)
+    expect(await loginReadsB()).toMatch(/permission denied/)
+    expect(await q(`SELECT tag FROM ${t(A2, 'items')}`)).toEqual([{ tag: null }])
+    expect(await q(`SELECT body FROM ${t(A2, 'notes')}`)).toEqual([{ body: null }])
+    // The view keeps its columns for whatever reads it, and returns nothing.
+    expect(await q(`SELECT * FROM ${t(A2, 'peek_b')}`)).toEqual([])
+    expect(await q(
+      `SELECT attname::text AS name, format_type(atttypid, atttypmod) AS type FROM pg_attribute
+        WHERE attrelid = to_regclass($1) AND attnum > 0 ORDER BY attnum`,
+      [t(A2, 'peek_b')],
+    )).toEqual([{ name: 'id', type: 'integer' }, { name: 'value', type: 'text' }])
+    // The policy's table is held to Backenly's closed rule.
+    expect((await q(`SELECT relforcerowsecurity AS f FROM pg_class WHERE oid = to_regclass($1)`, [t(A2, 'shown')]))[0].f).toBe(true)
+    expect((await q(`SELECT count(*)::int AS n FROM pg_policy WHERE polrelid = to_regclass($1) AND polname = 'backenly_admin_only'`,
+      [t(A2, 'shown')]))[0].n).toBe(1)
+    // Its data is where it was.
+    expect(await q(`SELECT value FROM ${t(B2, 'secrets')}`)).toEqual([{ value: 'tenant-B-only' }])
+  }, 60_000)
+})
+
+describe('a function a login gave to the group every login joins', () => {
+  const h = randomBytes(6).toString('hex')
+  const S = `workspace_${randomUUID()}`
+  const ownS = `bkn_own_${h}`
+  const L = `bkn_rw_${h}`
+  const LOGIN_PW = randomBytes(24).toString('base64url')
+  const persist = `"${S}".persist()`
+  let before: Array<{ object: { name: string }; what: string }> = []
+  let beforeLeft: Array<{ object: { name: string }; what: string }> = []
+
+  async function asL<T>(fn: (c: Client) => Promise<T>): Promise<T> {
+    const u = new URL(CONN)
+    u.username = L
+    u.password = LOGIN_PW
+    const c = new Client({ connectionString: u.toString() })
+    c.on('error', () => {})
+    await c.connect()
+    try {
+      return await fn(c)
+    } finally {
+      await c.end().catch(() => {})
+    }
+  }
+  const run = (c: Client, sql: string) => c.query(sql).then(() => 'ok', (e) => (e as Error).message)
+
+  beforeAll(async () => {
+    await q(`CREATE ROLE ${ownS} NOLOGIN`)
+    await q(`GRANT ${ownS} TO ${PLATFORM}`)
+    await q(`CREATE SCHEMA "${S}" AUTHORIZATION ${ownS}`)
+    for (const ddl of [`CREATE TABLE ${t(S, 'notes')} (id int PRIMARY KEY, body text)`, `CREATE TABLE ${t(S, 'loot')} (value text)`]) {
+      await asRole(ownS, ddl)
+    }
+    await q(`INSERT INTO ${t(S, 'notes')} VALUES (1, 'n')`)
+    await q(`ALTER TABLE ${t(S, 'notes')} ENABLE ROW LEVEL SECURITY`)
+    await q(`ALTER TABLE ${t(S, 'notes')} FORCE ROW LEVEL SECURITY`)
+    // A read-write login as the helpers made one before: joined to the group
+    // with SET, a member of its owner role, CREATE on its schema.
+    await q(`CREATE ROLE ${L} LOGIN PASSWORD '${LOGIN_PW}' IN ROLE backenly_external`)
+    await q(`GRANT ${ownS} TO ${L}`)
+    await q(`GRANT USAGE, CREATE ON SCHEMA "${S}" TO ${L}`)
+    // What it does with that, logged in as itself.
+    const done = await asL(async (c) => [
+      await run(c, `GRANT CREATE ON SCHEMA "${S}" TO backenly_external`),
+      await run(c, `CREATE FUNCTION ${persist.replace('()', '')}() RETURNS text LANGUAGE plpgsql AS $$
+                      BEGIN INSERT INTO ${t(S, 'loot')} SELECT value FROM ${t(B, 'secrets')}; RETURN 'x'; END $$`),
+      await run(c, `ALTER FUNCTION ${persist} OWNER TO backenly_external`),
+      await run(c, `REVOKE CREATE ON SCHEMA "${S}" FROM backenly_external`),
+      await run(c, `CREATE POLICY notes_read ON ${t(S, 'notes')} FOR SELECT USING (${persist} IS NOT NULL)`),
+    ])
+    expect(done).toEqual(['ok', 'ok', 'ok', 'ok', 'ok'])
+  }, 120_000)
+
+  afterAll(async () => {
+    await q(`DROP SCHEMA IF EXISTS "${S}" CASCADE`).catch(() => {})
+    await q(`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = $1`, [L]).catch(() => {})
+    for (const role of [L, ownS]) {
+      await q(`DROP OWNED BY ${role}`).catch(() => {})
+      await q(`DROP ROLE IF EXISTS ${role}`).catch(() => {})
+    }
+  }, 120_000)
+
+  it('cannot be switched off by the platform\'s role while the group owns it, and the run says so rather than claim it did', async () => {
+    const facts = await readDatabaseFacts(platform)
+    const report = await findPlanted(platform, [S], facts)
+    expect(report.planted.map((p) => `${p.kind} ${p.name}`)).toEqual([`function ${persist}`])
+    before = await stillRunning(platform, report.planted, facts)
+    expect(before.map((l) => l.what).join('\n')).toMatch(/owned by backenly_external, which a direct-access login acts as/)
+    await switchOff(S.slice(10), actionsFor(report.planted), { execute: (sql) => platform.query(sql), governed: false, mainSchema: S })
+    beforeLeft = await stillRunning(platform, report.planted, facts)
+    expect(beforeLeft.length).toBeGreaterThan(0)
+  }, 60_000)
+
+  it('is the owner role\'s once the sync strips the login, and is then switched off for good', async () => {
+    await q(`SELECT public.backenly_direct_sync_schema($1, NULL, $2, $3)`, [S, L, ownS])
+    expect((await q(`SELECT pg_get_userbyid(proowner)::text AS o FROM pg_proc WHERE oid = to_regprocedure($1)`, [persist]))[0].o).toBe(ownS)
+    expect(await q(`SELECT public.backenly_direct_schema_change_holds($1) AS h`, [L])).toEqual([{ h: [] }])
+
+    const facts = await readDatabaseFacts(platform)
+    const report = await findPlanted(platform, [S], facts)
+    const live = [...new Set((await stillRunning(platform, report.planted, facts)).map((l) => l.object))]
+    const result = await switchOff(S.slice(10), actionsFor(live), { execute: (sql) => platform.query(sql), governed: false, mainSchema: S })
+    expect(result.failed).toEqual([])
+    expect(await stillRunning(platform, report.planted, facts)).toEqual([])
+
+    // The platform reading the table fails closed, and copies nothing.
+    await expect(platform.query(`SELECT * FROM ${t(S, 'notes')}`)).rejects.toThrow(/permission denied for function/)
+    expect(await q(`SELECT value FROM ${t(S, 'loot')}`)).toEqual([])
+    // The login can neither switch it back on nor become the group.
+    const tried = await asL(async (c) => [
+      await run(c, `GRANT EXECUTE ON FUNCTION ${persist} TO PUBLIC`),
+      await run(c, `SET ROLE backenly_external`),
+    ])
+    expect(tried[0]).toMatch(/permission denied/)
+    expect(tried[1]).toMatch(/permission denied to set role/)
+    expect((await q(`SELECT has_function_privilege('public', to_regprocedure($1), 'EXECUTE') AS e`, [persist]))[0].e).toBe(false)
+  }, 60_000)
 })

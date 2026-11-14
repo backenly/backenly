@@ -20,9 +20,19 @@
  *
  * No table, column or row is touched. Policies, views, defaults, constraints,
  * indexes, operators and casts that call such a function are listed: they now
- * fail closed. So is any definition that calls a built-in which runs SQL or
- * changes the session (query_to_xml, pg_notify, set_config...): no privilege
- * can switch that off, and a person reviews it.
+ * fail closed. A default, generated column, check, domain, policy, view or
+ * trigger condition that calls one of the platform's functions or a built-in
+ * that runs SQL or changes the session (ts_rewrite, query_to_xml, set_config,
+ * pg_notify...), or reads another project's tables, is switched off itself: a
+ * default or check dropped, a generated column made ordinary, a policy made
+ * false (its table held to Backenly's closed rule), a view emptied. A
+ * materialized view doing so is listed for a person.
+ *
+ * A function a login gave to the group every login joins (backenly_external)
+ * cannot be switched off by the application's role, and a login could grant
+ * its use again: it is reported as still on, and the run fails, until
+ * scripts/setup-direct-access.sql has taken it back from the group. Sessions a
+ * strip left are ended first.
  *
  * Each project's own schema changes as one governed change attributed to
  * Backenly, which History never restores (PLANTED_CHANGE_GROUP); its branches
@@ -49,17 +59,16 @@
  */
 
 import { CLOUD_REGIONS, type CloudRegionId } from '../lib/regions'
-import { disconnectRegionalClients, projectRegion, regionDatabaseUrl, regionPool, regionRawClient } from '../lib/data-plane/regional'
+import { disconnectRegionalClients, regionDatabaseUrl, regionPool } from '../lib/data-plane/regional'
 import { prisma } from '../lib/db/prisma'
-import { resolveWorkspaceSchema } from '../lib/services/workspace-pool'
 import {
-  actionsFor,
   findPlanted,
+  ofProject,
   projectSchemas,
   readDatabaseFacts,
-  recordSwitchedOff,
   stillRunning,
-  switchOff,
+  switchOffProject,
+  type PgPool,
   type Planted,
   type PlantedReport,
 } from '../lib/security/planted-objects'
@@ -87,18 +96,9 @@ function shown<T>(items: T[], line: (item: T) => string, say: (s: string) => voi
 
 const describe = (p: Planted) => `${p.kind} ${p.schema}: ${p.name} (${p.why})`
 
-/** What the report holds for one project. */
-function ofProject(report: PlantedReport, projectId: string): PlantedReport {
-  return {
-    planted: report.planted.filter((p) => p.projectId === projectId),
-    callers: report.callers.filter((c) => c.projectId === projectId),
-    review: report.review.filter((r) => r.projectId === projectId),
-  }
-}
-
 async function neutralizeRegion(region: CloudRegionId): Promise<boolean> {
   const say = (line: string) => console.log(`[${region}] ${line}`)
-  const pool = regionPool(region, 'planted-objects', { max: 2 })
+  const pool = regionPool(region, 'planted-objects', { max: 2 }) as unknown as PgPool
 
   const client = await pool.connect()
   let facts: Awaited<ReturnType<typeof readDatabaseFacts>>
@@ -106,6 +106,16 @@ async function neutralizeRegion(region: CloudRegionId): Promise<boolean> {
   let report: PlantedReport
   let live: Awaited<ReturnType<typeof stillRunning>>
   try {
+    // Sessions a strip left (scripts/setup-direct-access.sql, 5c): ended
+    // before anything is read, so none outlives this run holding an owner role.
+    const [{ present }] = (await client.query(
+      `SELECT to_regprocedure('public.backenly_direct_end_stripped_sessions(text)') IS NOT NULL
+              AND has_function_privilege(to_regprocedure('public.backenly_direct_end_stripped_sessions(text)'), 'EXECUTE') AS present`,
+    )).rows
+    if (present) {
+      const [{ ended }] = (await client.query(`SELECT public.backenly_direct_end_stripped_sessions() AS ended`)).rows
+      if (ended > 0) say(`ended the sessions of ${ended} read-write login(s) a strip left`)
+    }
     facts = await readDatabaseFacts(client)
     schemas = await projectSchemas(client, projectArg)
     report = await findPlanted(client, schemas, facts)
@@ -155,30 +165,9 @@ async function neutralizeRegion(region: CloudRegionId): Promise<boolean> {
 
   let ok = true
   for (const projectId of projects) {
-    const targets = [...new Set(live.filter((l) => l.object.projectId === projectId).map((l) => l.object))]
-    if (targets.length === 0) continue
-    const actions = actionsFor(targets)
+    if (!live.some((l) => l.object.projectId === projectId)) continue
     try {
-      // Governed only where the project's record says this region holds it:
-      // its History and its change lock are about that database.
-      const record = await prisma.project.findUnique({ where: { id: projectId }, select: { id: true } })
-      const governed = !!record && (await projectRegion(projectId)) === region
-      const mainSchema = governed ? await resolveWorkspaceSchema(projectId) : `workspace_${projectId}`
-      const db = regionRawClient(region, projectId)
-      const result = await switchOff(projectId, actions, {
-        execute: (sql) => db.$executeRawUnsafe(sql),
-        governed,
-        mainSchema,
-      })
-
-      const after = await pool.connect()
-      let left: Awaited<ReturnType<typeof stillRunning>>
-      try {
-        left = await stillRunning(after, targets, facts)
-      } finally {
-        after.release()
-      }
-      if (record) await recordSwitchedOff(projectId, ofProject(report, projectId), result)
+      const { actions, result, left, governed } = await switchOffProject({ region, projectId, report, live, facts, pool })
 
       say(
         `project ${projectId}: ${result.done.length} of ${actions.length} action(s) done` +
