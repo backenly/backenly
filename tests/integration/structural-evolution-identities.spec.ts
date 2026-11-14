@@ -18,11 +18,16 @@
  *                      scripts/setup-postgrest-roles.ts gives them
  *   MCP and direct     bkn_ro_<hex>, SELECT only, its own login
  *   read-only          (lib/mcp/read-query.ts connects as it)
- *   direct read-write  bkn_rw_<hex>, a member of bkn_own_<hex>, which owns the
- *                      schema and every table in it once main's
- *                      backenly_direct_sync_schema has run — the satellite
- *                      included, mid-ladder, as drift-watch and the MCP read
- *                      path run it
+ *   direct read-write  bkn_rw_<hex>, rows only: on a database shared by several
+ *                      projects, as this one is, it may not change the schema
+ *                      (scripts/setup-direct-access.sql, section 5c)
+ *   project owner      bkn_own_<hex>, which owns the schema and every table in
+ *                      it once main's backenly_direct_sync_schema has run (the
+ *                      satellite included, mid-ladder, as drift-watch and the
+ *                      MCP read path run it), and which a read-write login acts
+ *                      as where its admin allowed schema changes: a database
+ *                      dedicated to one project, or one from before. What a
+ *                      project plants in its schema is planted here as it.
  *   backup             BYPASSRLS, SELECT only
  *
  * For each it proves: what it reads and may write through the new table is what
@@ -41,7 +46,7 @@
  *     bkn_own_<hex>, the guard stopped matching, and every host write was
  *     applied twice (the customer's own triggers fired twice).
  *   - The ladder's functions ran with the workspace schema on their search
- *     path. A READ_WRITE role may create objects there, and an operator it
+ *     path. A READ_WRITE role could create objects there, and an operator it
  *     created ran inside the SECURITY DEFINER forward sync, as the platform.
  *   - The rehearsal left out the platform identity unless the platform owned
  *     the host, which a direct-access project's host never is.
@@ -132,6 +137,22 @@ async function asPlatform<T = any>(claims: RlsIdentity, sql: string | string[], 
   })
 }
 
+/**
+ * As the project's owner role: what a read-write login acts as where its admin
+ * allowed schema changes, so what a project can plant in its own schema.
+ */
+async function asOwner(sql: string): Promise<void> {
+  await admin.query('BEGIN')
+  try {
+    await admin.query(`SET LOCAL ROLE ${R.own}`)
+    await admin.query(sql)
+    await admin.query('COMMIT')
+  } catch (err) {
+    await admin.query('ROLLBACK').catch(() => {})
+    throw err
+  }
+}
+
 /** What production's direct-access sync does for this project, as drift-watch and the MCP read path run it. */
 async function directAccessSync(): Promise<void> {
   await q(`SET backenly.app_role = '${R.platform}'`)
@@ -209,9 +230,9 @@ beforeAll(async () => {
   // READ_ONLY and READ_WRITE direct access, by production's own functions.
   await q(`SELECT public.backenly_direct_create_role($1, $2, $3, 'READ_ONLY')`, [R.ro, PW, A])
   await q(`SELECT public.backenly_direct_create_role($1, $2, $3, 'READ_WRITE')`, [R.rw, PW, A])
-  // The most a read-write login can do: its owner allowed schema changes over it,
-  // which makes it a member of the owner role (a new one is not).
-  await q(`SELECT public.backenly_direct_set_schema_changes($1, true)`, [R.rw])
+  // Rows only: this database holds several projects, so no read-write login may
+  // be allowed schema changes here. What one could do where it may is done
+  // below as the owner role it would act as (asOwner).
   await directAccessSync()
 }, 180_000)
 
@@ -527,20 +548,21 @@ describe('the ladder\'s functions', () => {
     ).rejects.toThrow(/fires only for orders/)
   })
 
-  it('cannot be replaced by the project\'s read-write role, which owns the tables but not them', async () => {
+  it('cannot be replaced by the project\'s read-write role, which may not change the schema, nor by the owner role, which owns the tables but not them', async () => {
+    const replace = `CREATE OR REPLACE FUNCTION ${a(N.forward)}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$`
     await rwLogin.query('BEGIN')
     try {
-      await expect(
-        rwLogin.query(`CREATE OR REPLACE FUNCTION ${a(N.forward)}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$`),
-      ).rejects.toThrow(/must be owner of function/)
+      await expect(rwLogin.query(replace)).rejects.toThrow(/permission denied for schema/)
     } finally {
       await rwLogin.query('ROLLBACK').catch(() => {})
     }
+    await expect(asOwner(replace)).rejects.toThrow(/must be owner of function/)
   })
 
   it('never run what a project role creates in the schema, whoever writes', async () => {
-    // A read-write role may create objects in its schema. Each of these would
-    // be chosen over a built-in by a function that searched the schema.
+    // The owner role may create objects in its schema, and so could a
+    // read-write login allowed schema changes. Each of these would be chosen
+    // over a built-in by a function that searched the schema.
     const shadows = [
       `CREATE TABLE ${a('seen')} (who text, what text)`,
       `GRANT INSERT, SELECT ON ${a('seen')} TO PUBLIC`,
@@ -554,7 +576,7 @@ describe('the ladder\'s functions', () => {
       `CREATE FUNCTION ${a('set_config')}(text, text, boolean) RETURNS text LANGUAGE plpgsql AS $$
          BEGIN INSERT INTO ${a('seen')} VALUES (current_user, 'set_config'); RETURN pg_catalog.set_config($1, $2, $3); END $$`,
     ]
-    for (const s of shadows) await rwLogin.query(s)
+    for (const s of shadows) await asOwner(s)
     // Fresh sessions, so no function was compiled before the objects existed.
     const runtime = await login(R.platform)
     const rest = await login(R.authenticator)
@@ -577,23 +599,25 @@ describe('the ladder\'s functions', () => {
 
 // ── Owner-level tampering is caught, never called consistent ─────────────────
 
-describe('the project\'s read-write role, an owner of the tables', () => {
+describe('the project\'s owner role, which owns the tables', () => {
   it('can bypass the sync on its own data, and reconciliation reports it instead of calling it consistent', async () => {
     const [k] = (await q(`SELECT ${N.fkColumn}::text AS k FROM ${a('order_refunds')} ORDER BY 1 LIMIT 1`)).map(r => r.k)
-    await rwLogin.query('BEGIN')
+    // As a read-write login allowed schema changes would, acting as the owner role.
+    const owner = admin
+    await owner.query('BEGIN')
     try {
-      await rwLogin.query(`SET LOCAL ROLE ${R.own}`)
-      await rwLogin.query(`ALTER TABLE ${a('order_refunds')} DISABLE TRIGGER ${N.reverse}`)
-      await rwLogin.query(rlsSessionSql(1), rlsSessionParams(SERVICE))
-      await rwLogin.query(`SELECT set_config($1, 'on', true)`, [N.access])
+      await owner.query(`SET LOCAL ROLE ${R.own}`)
+      await owner.query(`ALTER TABLE ${a('order_refunds')} DISABLE TRIGGER ${N.reverse}`)
+      await owner.query(rlsSessionSql(1), rlsSessionParams(SERVICE))
+      await owner.query(`SELECT set_config($1, 'on', true)`, [N.access])
       // As the owner, with the owner exempted only by turning FORCE off: its own data.
-      await rwLogin.query(`ALTER TABLE ${a('order_refunds')} NO FORCE ROW LEVEL SECURITY`)
-      await rwLogin.query(`UPDATE ${a('order_refunds')} SET refund_reason = 'diverged' WHERE ${N.fkColumn} = $1`, [k])
+      await owner.query(`ALTER TABLE ${a('order_refunds')} NO FORCE ROW LEVEL SECURITY`)
+      await owner.query(`UPDATE ${a('order_refunds')} SET refund_reason = 'diverged' WHERE ${N.fkColumn} = $1`, [k])
       const f = await facts()
       // The platform's view in a separate transaction sees the committed state only; check inside.
-      await rwLogin.query(`ALTER TABLE ${a('order_refunds')} FORCE ROW LEVEL SECURITY`)
-      await rwLogin.query(`ALTER TABLE ${a('order_refunds')} ENABLE TRIGGER ${N.reverse}`)
-      await rwLogin.query('COMMIT')
+      await owner.query(`ALTER TABLE ${a('order_refunds')} FORCE ROW LEVEL SECURITY`)
+      await owner.query(`ALTER TABLE ${a('order_refunds')} ENABLE TRIGGER ${N.reverse}`)
+      await owner.query('COMMIT')
       const r = await appDb.$transaction(async tx => {
         await tx.$executeRawUnsafe(rlsSessionSql(1), ...rlsSessionParams(SERVICE))
         await tx.$executeRawUnsafe(ladderAccessSql(SPEC))
@@ -601,7 +625,7 @@ describe('the project\'s read-write role, an owner of the tables', () => {
       })
       expect(r).toMatchObject({ complete: true, consistent: false, mismatched: 1 })
     } catch (err) {
-      await rwLogin.query('ROLLBACK').catch(() => {})
+      await owner.query('ROLLBACK').catch(() => {})
       throw err
     }
     // Put it back the way the host has it, through the host, so undo below is lossless.

@@ -425,13 +425,24 @@ describe('the application, against the database the procedure built', () => {
     await rows(app(), `INSERT INTO "${schema}".notes (body) VALUES ('from the app')`)
   })
 
-  it('hands out direct access, and DDL over it is captured as drift in the region', async () => {
+  it('hands out direct access that changes rows only, and cannot be allowed more on a region’s shared database', async () => {
     await rows(app(), `SELECT public.backenly_direct_create_role($1, $2, $3, 'READ_WRITE')`, [rw, rwPassword, schema])
     await rows(app(), `SELECT public.backenly_direct_create_role($1, $2, $3, 'READ_ONLY')`, [ro, roPassword, schema])
-    // A new read-write login changes rows only; its owner allows schema changes.
-    await rows(app(), `SELECT public.backenly_direct_set_schema_changes($1, true)`, [rw])
     await rows(app(), `SELECT public.backenly_direct_sync_schema($1, $2, $3, $4)`, [schema, ro, rw, owner])
     expect(await rows(superUrl(), `SELECT pg_get_userbyid(nspowner) AS owner FROM pg_namespace WHERE nspname = $1`, [schema])).toEqual([{ owner }])
+
+    expect(await refusal(app(), `SELECT public.backenly_direct_set_schema_changes('${rw}', true)`)).toMatch(/shared by several projects/)
+    expect(await refusal(url(rw, rwPassword), `CREATE TABLE "${schema}".probe (id int)`)).toMatch(/permission denied for schema/)
+    expect(await refusal(url(rw, rwPassword), `INSERT INTO "${schema}".notes (body) VALUES ('over direct access')`)).toBeNull()
+    await rows(app(), `DELETE FROM "${schema}".notes WHERE body = 'over direct access'`)
+  })
+
+  it('captures DDL a read-write login from before runs as drift in the region, and its next sync takes what let it', async () => {
+    // A login from before a login could be refused schema changes, as the sync
+    // then made it, by this definer: no mark, a member of the owner role, CREATE.
+    await rows(adminUrl(), `REVOKE backenly_no_schema_changes FROM ${rw}`)
+    await rows(adminUrl(), `GRANT ${owner} TO ${rw}`)
+    await rows(adminUrl(), `GRANT CREATE ON SCHEMA "${schema}" TO ${rw}`)
 
     await rows(url(rw, rwPassword), `CREATE TABLE "${schema}".probe (id int)`)
     const events = await rows<{ roleName: string; commandTag: string; status: string; projectId: string }>(
@@ -445,6 +456,18 @@ describe('the application, against the database the procedure built', () => {
     // and are captured too. A GRANT names no object, and is still the project's.
     expect(events.length).toBeGreaterThan(1)
     expect(events.every((e) => e.roleName === rw && e.projectId === id)).toBe(true)
+
+    // The application syncs after DDL; on this shared database that strips the
+    // login, as the definer RDS has holds it (section 5c of setup-direct-access.sql).
+    await rows(app(), `SELECT public.backenly_direct_sync_schema($1, $2, $3, $4)`, [schema, ro, rw, owner])
+    expect(await rows(superUrl(), `SELECT public.backenly_direct_schema_change_holds($1) AS holds`, [rw])).toEqual([{ holds: [] }])
+    // As the application does right after each sync, once the strip has
+    // committed: the sessions that logged in while it ran are ended.
+    expect(await rows(app(), `SELECT public.backenly_direct_end_stripped_sessions($1) AS ended`, [rw])).toEqual([{ ended: 1 }])
+    expect(await refusal(url(rw, rwPassword), `CREATE TABLE "${schema}".again (id int)`)).toMatch(/permission denied for schema/)
+    expect(
+      await rows(superUrl(), `SELECT pg_get_userbyid(relowner) AS owner FROM pg_class WHERE oid = to_regclass($1)`, [`"${schema}".probe`]),
+    ).toEqual([{ owner }])
 
     expect(await rows(url(ro, roPassword), `SELECT body FROM "${schema}".notes`)).toEqual([{ body: 'from the app' }])
     expect(await refusal(url(ro, roPassword), `INSERT INTO "${schema}".notes (body) VALUES ('x')`)).toMatch(/read-only|permission denied/)

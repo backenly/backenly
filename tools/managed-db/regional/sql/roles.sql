@@ -21,6 +21,14 @@
 --   backenly_no_schema_changes  NOLOGIN, no privileges: a read-write login that
 --                           is a member may not change the schema.
 --
+-- A region's database holds every project in the region, so it is shared, and
+-- on a shared database a read-write login changes rows only
+-- (scripts/setup-direct-access.sql, section 5c). This refuses a database marked
+-- as dedicated to one project (backenly.database_tenancy), and takes CREATE on
+-- the public schema and on the database from PUBLIC: every login is a member of
+-- PUBLIC, and a function or operator created in the public schema, which every
+-- session's search path holds, can stand in for a built-in one.
+--
 -- The administrator running this ends up holding the privileges of
 -- backenly_app (INHERIT, not SET), and roles created in the app's sessions are
 -- granted back to it: the definer functions it installs next run as it, on what
@@ -100,6 +108,16 @@ BEGIN
         rname, array_to_string(managed, ', ');
     END IF;
   END LOOP;
+
+  -- A region's database is shared by every project in the region. Marked as
+  -- dedicated to one, its read-write logins could be allowed schema changes.
+  IF EXISTS (SELECT 1 FROM pg_db_role_setting s CROSS JOIN LATERAL unnest(s.setconfig) AS c(setting)
+              WHERE s.setrole = 0
+                AND s.setdatabase = (SELECT oid FROM pg_database WHERE datname = current_database())
+                AND c.setting LIKE 'backenly.database\_tenancy=%') THEN
+    RAISE EXCEPTION 'refusing: database % carries backenly.database_tenancy, but a region''s database holds every project in the region and is shared. Remove it: ALTER DATABASE % RESET backenly.database_tenancy',
+      current_database(), quote_ident(current_database());
+  END IF;
 
   -- ── Decide ────────────────────────────────────────────────────────────────
   FOR r IN
@@ -198,8 +216,8 @@ BEGIN
   -- ── PostgREST, and the direct-access group ────────────────────────────────
   -- postgrest-schema-registry.sql and setup-direct-access.sql create the same
   -- roles the same way. Created here first, by the administrator, so it holds
-  -- ADMIN on each (backenly_direct_create_role puts every login it makes IN ROLE
-  -- backenly_external, and grants a new read-write one backenly_no_schema_changes)
+  -- ADMIN on each (backenly_direct_create_role grants every login it makes
+  -- backenly_external, without SET, and a new read-write one backenly_no_schema_changes)
   -- and the authenticator's password is set in the run that creates it.
   FOREACH rname IN ARRAY ARRAY['anon', 'authenticated', 'service_role', 'backenly_external', 'backenly_no_schema_changes'] LOOP
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = rname) THEN
@@ -221,6 +239,18 @@ BEGIN
     END IF;
   END LOOP;
   EXECUTE format('GRANT CONNECT ON DATABASE %I TO backenly_authenticator', current_database());
+
+  -- ── What every login holds through PUBLIC ─────────────────────────────────
+  -- PostgreSQL 15 and later create a database without either; one made or
+  -- restored otherwise has them taken here. Narrowing only, like the rest.
+  IF has_schema_privilege('public', 'public', 'CREATE') THEN
+    REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+    RAISE NOTICE 'took CREATE on schema public from PUBLIC';
+  END IF;
+  IF has_database_privilege('public', current_database(), 'CREATE') THEN
+    EXECUTE format('REVOKE CREATE ON DATABASE %I FROM PUBLIC', current_database());
+    RAISE NOTICE 'took CREATE on the database from PUBLIC';
+  END IF;
 
   -- ── Passwords, only where decided above ───────────────────────────────────
   FOREACH rname IN ARRAY to_set LOOP

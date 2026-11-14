@@ -459,6 +459,14 @@ function installSuperuserPrerequisites(projectId: string): void {
     }
   }
 
+  // One deployment is one project, so its database holds one project's data.
+  // Marked so first: the helpers below treat an unmarked database as shared by
+  // several projects, where a read-write login changes rows only and its admin
+  // can never allow schema changes over it (setup-direct-access.sql, section 5c).
+  const dedicated = capture('bash', ['scripts/install-sql.sh', 'scripts/sql/dedicated-database.sql'])
+  if (dedicated.code === 0) ok('database marked as holding this deployment\'s one project')
+  else info('database not marked as holding one project; read-write database logins will change rows only')
+
   // Optional, and reported as optional by bootstrap. Installed here because
   // "one command" should mean the whole product, and it is the difference
   // between direct psql access working and being advertised but absent.
