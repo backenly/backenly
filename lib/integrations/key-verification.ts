@@ -40,6 +40,8 @@
  * fabricated value can never be spent against a provider's rate limit either.
  */
 
+import { twilioCredentialParts, twilioCredentialProblem } from './twilio-credential'
+
 export type VerificationStatus = 'verified' | 'rejected' | 'unverifiable' | 'unreachable' | 'unchecked'
 
 export interface VerificationResult {
@@ -222,11 +224,21 @@ const PROBES: Record<string, Probe> = {
     'PostHog project API keys are write-only ingest keys with no endpoint that can confirm them without emitting a test event into your analytics. Format checked only.',
   ),
 
-  // Twilio authenticates with Account SID + auth token. We hold one value, so
-  // the pair cannot be assembled here.
-  twilio: UNVERIFIABLE(
-    'Twilio authenticates with an Account SID and auth token together; a single stored value cannot be confirmed on its own.',
-  ),
+  // Twilio's one stored value is accountSid:authToken:fromNumber
+  // (lib/integrations/twilio-credential.ts), so the pair that authenticates is
+  // in it, and Twilio answers for its own account. A value without that shape
+  // gives functions nothing to call, so it is refused here too: that is what a
+  // re-check says about one stored before the shape was checked.
+  twilio: (k) => {
+    const problem = twilioCredentialProblem(k)
+    if (problem) return Promise.resolve({ status: 'rejected', detail: problem })
+    const { accountSid, authToken } = twilioCredentialParts(k)!
+    return probeGet(
+      `https://api.twilio.com/2010-04-01/Accounts/${accountSid}.json`,
+      { Authorization: `Basic ${Buffer.from(`${accountSid}:${authToken}`).toString('base64')}` },
+      'Twilio',
+    )
+  },
 }
 
 /** How each provider is written where a person reads it ("your Stripe dashboard"). */

@@ -28,13 +28,14 @@ Either the human pastes it on the Integrations page, which keeps it out of the c
 ```
 integrations { action: "connect", integrationId: "stripe", apiKey: "sk_test_…", webhookSecret: "whsec_…" }
 integrations { action: "connect", integrationId: "onesignal", apiKey: "<REST API Key>", appId: "<App ID>" }
+integrations { action: "connect", integrationId: "twilio", accountSid: "AC…", authToken: "<auth token>", fromNumber: "+15550001111" }
 ```
 
-OneSignal needs both values (Settings → Keys & IDs on onesignal.com); `send_push` refuses until both are stored and names what is missing. Unknown integration ids are refused with the list of providers the runtime serves — a stored key under an id nothing looks up is a credential that exists and does nothing.
+OneSignal needs both values (Settings → Keys & IDs on onesignal.com); `send_push` refuses until both are stored and names what is missing. Twilio needs three values from the Twilio Console: the Account SID, the auth token, and the number SMS is sent from, as `accountSid`, `authToken` and `fromNumber` (or one `apiKey` of the form `AC…:auth-token:+15550001111`). A value without all three is refused, because a function cannot send SMS without them. Unknown integration ids are refused with the list of providers the runtime serves — a stored key under an id nothing looks up is a credential that exists and does nothing. Email is sent through Resend or SendGrid, so its key is connected as `resend` or `sendgrid`; `integrationId: "email"` stores a Resend (`re_…`) or SendGrid (`SG.…`) key as that provider and refuses any other.
 
 From the shell: `npx -y @backenly/cli@latest call integrations action=connect integrationId=stripe apiKey=sk_test_…`.
 
-The key is checked with the provider before it is stored: Stripe, Resend, OpenAI and Anthropic are asked directly, and a key the provider rejects is refused rather than filed. PostHog project keys and webhook signing secrets cannot be checked by an API call and are stored as unverifiable, never reported as verified. `verify` asks the provider again about a stored key and records the answer. Backenly never invents a credential.
+The key is checked with the provider before it is stored: Stripe, Resend, OpenAI, Anthropic and Twilio are asked directly, and a key the provider rejects is refused rather than filed. PostHog project keys and webhook signing secrets cannot be checked by an API call and are stored as unverifiable, never reported as verified. `verify` asks the provider again about a stored key and records the answer. Backenly never invents a credential.
 
 Storing a key from an agent also builds the first functions for that provider (each provider's topic says which). Backenly's model writes them, which draws AI credits. With none left the key is still stored, and the receipt lists each function under "Not wired" with the reason (`data.notWired`); connect again later to wire them. Connecting from the dashboard stores the key only. Anything beyond that is built by asking for it, with `functions` `deploy_code` for code you write or `backend_chat` for an outcome you describe.
 
