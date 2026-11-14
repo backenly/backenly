@@ -25,7 +25,7 @@ const PLACEHOLDER = '[withheld]'
 export const WITHHELD = PLACEHOLDER
 
 /** Field names whose string values are credentials. */
-const SECRET_FIELD = /^(apiKey|newKey|secret|webhookSecret|signingSecret|password|connectionString|psqlCommand|pgDumpCommand|token|accessToken|refreshToken|clientSecret)$/i
+const SECRET_FIELD = /^(apiKey|newKey|secret|webhookSecret|signingSecret|password|connectionString|psqlCommand|pgDumpCommand|token|accessToken|refreshToken|clientSecret|authToken)$/i
 
 /**
  * Credential shapes Backenly issues, found wherever they sit. A word boundary

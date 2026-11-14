@@ -1640,6 +1640,7 @@ INTEGRATIONS (third-party APIs — Stripe, email, SMS, AI):
   integrationId: stripe | resend | sendgrid | openai | twilio
   apiKey: the raw API key (will be encrypted)
   webhookSecret: (optional) webhook signing secret
+  accountSid, authToken, fromNumber: Twilio's three values, in place of apiKey
 - LIST_INTEGRATION_KEYS - Show all connected integrations
 - REMOVE_INTEGRATION_KEY - Disconnect an integration
 
@@ -12629,6 +12630,7 @@ async function executeRollbackToVersion(_params: any, _projectId: string): Promi
 /**
  * STORE_INTEGRATION_KEY: Securely store a third-party API key
  * params: { integrationId: string, apiKey: string, webhookSecret?: string }
+ *   Twilio: accountSid, authToken and fromNumber may stand in for apiKey.
  *
  * After storing the key, performs provider-specific auto-wiring:
  *   stripe     → validates webhookSecret, adds columns to orders/payments table,
@@ -12637,7 +12639,15 @@ async function executeRollbackToVersion(_params: any, _projectId: string): Promi
  *   openai/anthropic → generates /ai/chat and /ai/embed endpoints with rate limiting
  */
 async function executeStoreIntegrationKey(params: any, projectId: string): Promise<ExecutionResult> {
-  const { integrationId: rawIntegrationId, apiKey, webhookSecret } = params
+  const { integrationId: rawIntegrationId, webhookSecret } = params
+  const { resolveProviderId, connectableProviderIds } = await import('@/lib/services/ai-functions/integration-registry')
+  const requestedId = rawIntegrationId ? resolveProviderId(String(rawIntegrationId).trim()) : null
+
+  // Twilio's credential is three values, which may come as accountSid,
+  // authToken and fromNumber instead of one apiKey (lib/integrations/twilio-credential.ts).
+  const { joinTwilioCredential, twilioCredentialParts } = await import('@/lib/integrations/twilio-credential')
+  const apiKey = params.apiKey || (requestedId === 'twilio' ? joinTwilioCredential(params) : null)
+
   if (!rawIntegrationId || !apiKey) {
     // Friendly pending state — never a hard error. Show inline key prompt with skip option.
     const providerName = rawIntegrationId
@@ -12647,27 +12657,39 @@ async function executeStoreIntegrationKey(params: any, projectId: string): Promi
       stripe: 'sk_live_... or sk_test_...',
       resend: 're_...',
       sendgrid: 'SG.xxx.yyy',
+      email: 're_... (Resend) or SG.xxx.yyy (SendGrid)',
       openai: 'sk-...',
       anthropic: 'sk-ant-api03-...',
-      twilio: 'AC... (Account SID) + auth token',
+      twilio: 'AC...:your-auth-token:+15550001111',
       replicate: 'r8_...',
       runway: 'rw_...',
       luma: 'luma_...',
     }
-    const example = rawIntegrationId ? (KEY_EXAMPLES[rawIntegrationId.toLowerCase()] ?? `your ${providerName} API key`) : 'your API key'
-    const isEmail = rawIntegrationId && ['resend', 'sendgrid'].includes(rawIntegrationId.toLowerCase())
+    const example = rawIntegrationId
+      ? (KEY_EXAMPLES[requestedId ?? rawIntegrationId.toLowerCase()] ?? `your ${providerName} API key`)
+      : 'your API key'
+    const isEmail = requestedId === 'email' || requestedId === 'resend' || requestedId === 'sendgrid'
     const emailPrompt = isEmail
       ? [
           ``,
           `Also provide your verified sender email address (\`fromEmail: "you@yourdomain.com"\`). Resend and SendGrid require emails to come from a verified domain on your account.`,
         ]
       : []
+    // The runtime sends SMS only with all three, and this asked for two.
+    const twilioPrompt = requestedId === 'twilio'
+      ? [
+          ``,
+          `Twilio needs three values from the Twilio Console: the Account SID (AC…), the auth token, and the number SMS is sent from (e.g. +15550001111). ` +
+            'Give them as `accountSid`, `authToken` and `fromNumber`, or as one value in the format above.',
+        ]
+      : []
     return {
       success: false,
       message: [
-        `**To connect ${providerName}**, paste your API key here:`,
+        `**To connect ${providerName}**, paste your ${requestedId === 'twilio' ? 'credentials' : 'API key'} here:`,
         ``,
         `Example format: \`${example}\``,
+        ...twilioPrompt,
         ...emailPrompt,
         ``,
         `Or say **"skip for now"** to continue without it — you can connect it later.`,
@@ -12682,21 +12704,40 @@ async function executeStoreIntegrationKey(params: any, projectId: string): Promi
   // marked connected, and promised a `ctx.integrations.hubspot.*` surface that
   // does not exist; a capitalised id ("Stripe") was stored under a key the
   // runtime, the receiver and the console all look up lowercased, so the
-  // credential existed and nothing could find it.
-  const { resolveProviderId, allProviderIds } = await import('@/lib/services/ai-functions/integration-registry')
-  const canonicalId = resolveProviderId(String(rawIntegrationId).trim())
+  // credential existed and nothing could find it. The providers listed are
+  // the ones a key is connected for: "email" is not one (below).
+  const canonicalId = requestedId
   if (!canonicalId) {
     return {
       success: false,
       message:
         `"${rawIntegrationId}" is not an integration this runtime serves. ` +
-        `Known providers: ${allProviderIds().sort().join(', ')}.`,
+        `Known providers: ${connectableProviderIds()}.`,
       error: 'UNKNOWN_INTEGRATION',
     }
   }
+  // ── "email" names a helper, not a key ─────────────────────────────────────
+  //
+  // ctx.integrations.email sends with the Resend or SendGrid key; the runtime
+  // reads no key stored as "email". One was stored there and reported "email
+  // connected" while functions had no email. A Resend or SendGrid key, which
+  // its prefix tells apart, is stored as that provider; any other is refused.
+  let integrationId = canonicalId
+  let storedAsNote = ''
+  if (canonicalId === 'email') {
+    const key = String(apiKey).trim()
+    const provider = key.startsWith('re_') ? 'resend' : key.startsWith('SG.') ? 'sendgrid' : null
+    if (!provider) {
+      const { EMAIL_IS_NOT_A_KEY } = await import('@/lib/services/integrationKeyStore')
+      return { success: false, message: `**email was not connected.** ${EMAIL_IS_NOT_A_KEY}`, error: 'EMAIL_PROVIDER_REQUIRED' }
+    }
+    integrationId = provider
+    storedAsNote =
+      `\n\nThat is a ${provider === 'resend' ? 'Resend' : 'SendGrid'} key, so it is stored as ${provider}, ` +
+      'which `ctx.integrations.email.send()` sends with.'
+  }
   // Every reference below — vault rows, auto-wiring, activeIntegrations, the
-  // ctx.integrations surface named in the receipt — uses the CANONICAL id.
-  const integrationId = canonicalId
+  // ctx.integrations surface named in the receipt — uses this provider's id.
 
   // ── Stripe without a webhook secret is a DEGRADED connect, not a refusal ───
   //
@@ -12711,11 +12752,11 @@ async function executeStoreIntegrationKey(params: any, projectId: string): Promi
   // Connect the key, do the work that does not need the secret, and say plainly
   // which capability is off until the real secret arrives. A missing credential
   // is a known gap; a fabricated one is a lie in the vault.
-  const webhookSecretPending = canonicalId === 'stripe' && !webhookSecret
+  const webhookSecretPending = integrationId === 'stripe' && !webhookSecret
 
   try {
     const { storeIntegrationKey } = await import('@/lib/services/integrationKeyStore')
-    const status = await storeIntegrationKey(projectId, canonicalId, String(apiKey).trim())
+    const status = await storeIntegrationKey(projectId, integrationId, String(apiKey).trim())
     const keyValidationNote =
       status.verification === 'verified' ? ''
       : status.verification === 'unreachable' ? `\n\n⚠ ${status.verificationDetail}`
@@ -13025,11 +13066,13 @@ async function executeStoreIntegrationKey(params: any, projectId: string): Promi
     const fromNote = trimmedFromEmail ? `\n\nDefault sender email: \`${trimmedFromEmail}\`` : ''
     const functionCapabilityNote = (integrationId === 'resend' || integrationId === 'sendgrid')
       ? 'Functions can now use `ctx.integrations.email.send()` to send emails.'
-      : `Functions can now use \`ctx.integrations.${integrationId}.*\` to call ${integrationId} APIs.`
+      : integrationId === 'twilio'
+        ? `Functions can now send SMS from ${twilioCredentialParts(apiKey)?.fromNumber} with \`ctx.integrations.twilio.sendSms({ to, body })\`.`
+        : `Functions can now use \`ctx.integrations.${integrationId}.*\` to call ${integrationId} APIs.`
 
     return {
       success: true,
-      message: `${integrationId} connected. Key stored securely (${status.maskedKey}).${keyValidationNote}${fromNote}${webhookUrl}${webhookGap}${appIdGap}${senderEmailGap}${autoWiredMsg}${notWiredMsg}\n\n${functionCapabilityNote}`,
+      message: `${integrationId} connected. Key stored securely (${status.maskedKey}).${storedAsNote}${keyValidationNote}${fromNote}${webhookUrl}${webhookGap}${appIdGap}${senderEmailGap}${autoWiredMsg}${notWiredMsg}\n\n${functionCapabilityNote}`,
       data: {
         integrationId,
         maskedKey: status.maskedKey,
@@ -13096,6 +13139,14 @@ async function executeListIntegrationKeys(projectId: string): Promise<ExecutionR
     for (const k of keys) {
       // Skip internal compound keys (e.g. stripe_webhook_secret) — they are shown inside the parent report
       if (k.integrationId.includes('_webhook_secret') || k.integrationId.includes('_secret')) continue
+
+      // A key connect used to file as "email", which nothing reads (it is refused now).
+      if (k.integrationId === 'email') {
+        lines.push('⚠ **email** — Not connected: a key stored as "email" is read by nothing.')
+        lines.push(`  Key: \`${k.maskedKey}\`. To send email, connect it again as \`resend\` (re_…) or \`sendgrid\` (SG.…).`)
+        lines.push('')
+        continue
+      }
 
       const report = readinessByProvider[k.integrationId]
       const connectedDate = new Date(k.connectedAt).toLocaleDateString()

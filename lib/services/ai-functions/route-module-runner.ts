@@ -698,14 +698,29 @@ export function validateRouteModule(code: string, expectedMethod?: string | null
 // ─── Public executor ──────────────────────────────────────────────────────────
 
 /**
- * Thrown when the HANDLER itself failed — distinct from compile errors,
- * timeouts and machinery failures, which stay plain Errors. The smoke test
- * keys off this class to decide between "the function is broken" and "we
- * could not test it".
+ * Thrown when a run fails after the module started running: its top level
+ * threw, it exports no handler, its handler threw, or the handler passed the
+ * time limit. It carries the lines the module logged up to the failure, which
+ * are what explain it; they used to be dropped with everything else, so a
+ * failed HTTP function run was recorded and returned with no log lines (#605).
+ * A compile error comes before anything runs and stays a plain Error.
  */
-export class RouteModuleHandlerError extends Error {
-  constructor(message: string) {
+export class RouteModuleRunError extends Error {
+  constructor(message: string, readonly logs: string[] = []) {
     super(message)
+    this.name = 'RouteModuleRunError'
+  }
+}
+
+/**
+ * Thrown when the HANDLER itself failed — distinct from compile errors,
+ * timeouts and machinery failures, which are not of this class. The smoke
+ * test keys off it to decide between "the function is broken" and "we could
+ * not test it".
+ */
+export class RouteModuleHandlerError extends RouteModuleRunError {
+  constructor(message: string, logs: string[] = []) {
+    super(message, logs)
     this.name = 'RouteModuleHandlerError'
   }
 }
@@ -946,14 +961,14 @@ async function runRouteModule(
       timeout: EXECUTION_TIMEOUT_MS,
     })
   } catch (err: any) {
-    throw new Error(`Route module evaluation error: ${err?.message || String(err)}`)
+    throw new RouteModuleRunError(`Route module evaluation error: ${err?.message || String(err)}`, [...logs])
   }
 
   // esbuild cjs output puts exports on module.exports
   const finalExports = sandbox.module.exports || moduleExports
   const resolved = resolveMethod(finalExports, triggerTableHint)
   if (!resolved) {
-    throw new Error('Route module exports no GET/POST/PUT/PATCH/DELETE handler')
+    throw new RouteModuleRunError('Route module exports no GET/POST/PUT/PATCH/DELETE handler', [...logs])
   }
 
   // 3. Build the request from the event payload.
@@ -990,13 +1005,16 @@ async function runRouteModule(
   } catch (err: any) {
     const msg = err?.message || String(err)
     // The 10s race cannot tell a hung handler from slow infrastructure, so a
-    // timeout stays a plain Error. Everything else thrown here came out of the
-    // HANDLER itself, and the type says so: callers that must distinguish "the
-    // function is broken" from "the machinery failed" check the class instead
-    // of sniffing message text, which misread any handler error that happened
-    // to mention "database" or "connect" as an infrastructure failure.
-    if (msg === 'Route function timed out after 10s') throw new Error(msg)
-    throw new RouteModuleHandlerError(msg)
+    // timeout is not a RouteModuleHandlerError. Everything else thrown here
+    // came out of the HANDLER itself, and the type says so: callers that must
+    // distinguish "the function is broken" from "the machinery failed" check
+    // the class instead of sniffing message text, which misread any handler
+    // error that happened to mention "database" or "connect" as an
+    // infrastructure failure. Either way the error carries the lines logged up
+    // to now: a handler that timed out may still be running, and what it logs
+    // after this is not this run's.
+    if (msg === 'Route function timed out after 10s') throw new RouteModuleRunError(msg, [...logs])
+    throw new RouteModuleHandlerError(msg, [...logs])
   }
 
   // 5. Normalise the response.

@@ -121,7 +121,8 @@ export class BackenlyClient {
    * Presence — who is online right now.
    *
    * @example
-   * await backend.presence.join('user-123', { name: 'Ajay' })
+   * const { user } = await backend.auth.signIn({ email, password })
+   * await backend.presence.join(user.id, { name: 'Ajay' }) // the signed-in user's own id
    * const unsub = backend.presence.subscribe((event) => {
    *   if (event.event === 'join')  addAvatar(event.userId)
    *   if (event.event === 'leave') removeAvatar(event.userId)

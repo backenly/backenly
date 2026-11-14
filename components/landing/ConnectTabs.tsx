@@ -92,7 +92,7 @@ const { data } = await backend
   .select('*, author(*)')
   .eq('post_id', postId)
 
-backend.realtime.onTableChange('comments', (event) => render(event))`,
+backend.realtime.subscribe('comments', (event) => render(event))`,
     note: 'The same REST contract your agent built against, with types generated from it.',
   },
 ]
