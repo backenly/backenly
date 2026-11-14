@@ -5,15 +5,16 @@
  * role has no grant on another project's schema (sql-workspace-isolation.test.ts
  * proves that). The system catalogs are different. They are readable by PUBLIC
  * and describe every project in the database, so the role itself can read
- * another project's function source and schema name, and the only thing between
- * run_query and that read is the check on the statement (lib/mcp/read-query-ast.ts).
+ * another project's function source, schema name and table names, and the only
+ * thing between run_query and that read is the check on the statement
+ * (lib/mcp/read-query-ast.ts).
  *
  * So each route here is run twice: directly as the project's bkn_ro_ role, with
  * nothing in front, to prove it really reaches the other project, and then
  * through runReadQuery, which must refuse it before PostgreSQL sees it. A
  * refusal of something the role could not read anyway would prove nothing.
  *
- * Positive reads of the project's own tables are here too, so the refusals
+ * Analytics reads of the project's own tables are here too, so the refusals
  * cannot pass because nothing works.
  */
 
@@ -33,9 +34,14 @@ let projectId: string
 let otherProjectId: string
 let schema: string
 let otherSchema: string
+/** The other project's schema, its table, the table's row type and its sequence, by object id. */
 let otherSchemaOid: number
+let otherTableOid: number
+let otherRowTypeOid: number
 
 const raw = (sql: string) => prisma.$executeRawUnsafe(sql)
+const oidOf = async (sql: string, ...args: unknown[]) =>
+  (await prisma.$queryRawUnsafe<Array<{ oid: number }>>(sql, ...args))[0].oid
 
 beforeAll(async () => {
   // The SECURITY DEFINER helpers that provision the per-project bkn_ro_ role
@@ -56,21 +62,26 @@ beforeAll(async () => {
   otherSchema = `workspace_${otherProjectId}`
 
   await raw(`CREATE SCHEMA "${schema}"`)
-  await raw(`CREATE TABLE "${schema}"."notes" (id serial primary key, body text)`)
-  await raw(`INSERT INTO "${schema}"."notes"(body) VALUES ('mine one'), ('mine two')`)
+  await raw(`CREATE TABLE "${schema}"."notes" (id serial primary key, body text, amount numeric, "createdAt" timestamptz)`)
+  await raw(
+    `INSERT INTO "${schema}"."notes"(body, amount, "createdAt") VALUES ` +
+      `('mine one', 10, '2026-01-05'), ('mine two', 30, '2026-02-07')`,
+  )
   await raw(`CREATE TABLE "${schema}"."Mixed Case Notes" ("Body" text)`)
   await raw(`INSERT INTO "${schema}"."Mixed Case Notes"("Body") VALUES ('beta'), ('alpha')`)
 
-  // Another project with a function worth stealing.
+  // Another project with a table and a function worth stealing.
   await raw(`CREATE SCHEMA "${otherSchema}"`)
+  await raw(`CREATE TABLE "${otherSchema}".customer_ledger (id serial primary key, note text)`)
   await raw(
     `CREATE FUNCTION "${otherSchema}".pricing_rule() RETURNS text LANGUAGE sql AS $fn$ SELECT '${MARKER}'::text $fn$`,
   )
-  const rows = await prisma.$queryRawUnsafe<Array<{ oid: number }>>(
-    'SELECT oid::int AS oid FROM pg_namespace WHERE nspname = $1',
-    otherSchema,
+  otherSchemaOid = await oidOf('SELECT oid::int AS oid FROM pg_namespace WHERE nspname = $1', otherSchema)
+  otherTableOid = await oidOf(
+    `SELECT oid::int AS oid FROM pg_class WHERE relname = 'customer_ledger' AND relnamespace = $1::int::oid`,
+    otherSchemaOid,
   )
-  otherSchemaOid = rows[0].oid
+  otherRowTypeOid = await oidOf('SELECT reltype::int AS oid FROM pg_class WHERE oid = $1::int::oid', otherTableOid)
 }, 180_000)
 
 afterAll(async () => {
@@ -93,54 +104,74 @@ async function asReadOnlyRole<T>(fn: (client: Client) => Promise<T>): Promise<T>
   }
 }
 
-type Rows = Array<Record<string, unknown>>
+/** Everything the role gets back for a statement: its rows, or its error's text, which names objects too. */
+async function directly(sql: string): Promise<string> {
+  return asReadOnlyRole((c) =>
+    c.query(sql).then(
+      (r) => JSON.stringify(r.rows),
+      (e: Error) => `ERROR ${e.message}`,
+    ),
+  )
+}
 
-/** [what, the statement, how its rows show the other project when run directly] */
-const ROUTES: Array<[string, () => string, (rows: Rows) => boolean]> = [
-  [
-    'the reported query: a double-quoted pg_proc',
-    () => 'SELECT proname, prosrc FROM "pg_proc"',
-    (rows) => rows.some((r) => String(r.prosrc).includes(MARKER)),
-  ],
-  [
-    'schema enumeration through a double-quoted pg_namespace',
-    () => 'SELECT nspname FROM "pg_namespace"',
-    (rows) => rows.some((r) => r.nspname === otherSchema),
-  ],
-  [
-    'both names quoted',
-    () => 'SELECT prosrc FROM "pg_catalog"."pg_proc"',
-    (rows) => rows.some((r) => String(r.prosrc).includes(MARKER)),
-  ],
-  [
-    'a unicode-escaped name',
-    () => 'SELECT prosrc FROM U&"\\0070g_proc"',
-    (rows) => rows.some((r) => String(r.prosrc).includes(MARKER)),
-  ],
-  [
-    'an object id cast to its name',
-    // Output is quoted where the name needs it, as a workspace schema's hyphens do.
-    () => `SELECT ${otherSchemaOid}::regnamespace::text AS name`,
-    (rows) => rows.some((r) => String(r.name).includes(otherSchema)),
-  ],
+/** [what, the statement, the code run_query refuses it with, what the role reads that names the other project] */
+const ROUTES: Array<[string, () => string, string, () => string]> = [
+  ['the reported query: a double-quoted pg_proc', () => 'SELECT proname, prosrc FROM "pg_proc"', 'CATALOG_NOT_READABLE', () => MARKER],
+  ['a double-quoted pg_namespace', () => 'SELECT nspname FROM "pg_namespace"', 'CATALOG_NOT_READABLE', () => otherSchema],
+  ['both names quoted', () => 'SELECT prosrc FROM "pg_catalog"."pg_proc"', 'CATALOG_NOT_READABLE', () => MARKER],
+  ['a unicode-escaped name', () => 'SELECT prosrc FROM U&"\\0070g_proc"', 'CATALOG_NOT_READABLE', () => MARKER],
+  ['an object id cast to its name', () => `SELECT ${otherSchemaOid}::regnamespace::text AS name`, 'TYPE_NOT_ALLOWED', () => otherSchema],
   [
     'a query passed as text',
     () => "SELECT query_to_xml('select nspname from pg_namespace', true, false, '') AS x",
-    (rows) => rows.some((r) => String(r.x).includes(otherSchema)),
+    'FUNCTION_NOT_ALLOWED',
+    () => otherSchema,
+  ],
+  ['a probe by name', () => `SELECT to_regnamespace('"${otherSchema}"')::text AS found`, 'FUNCTION_NOT_ALLOWED', () => otherSchema],
+  // Found by review: column notation calls a function on a FROM function's scalar.
+  [
+    'column notation: g.regnamespace over the schema ids',
+    () => `SELECT g.regnamespace AS n FROM generate_series(${otherSchemaOid}, ${otherSchemaOid}) g`,
+    'FUNCTION_NOT_ALLOWED',
+    () => otherSchema,
   ],
   [
-    'a probe by name',
-    () => `SELECT to_regnamespace('"${otherSchema}"')::text AS found`,
-    (rows) => rows.some((r) => String(r.found).includes(otherSchema)),
+    'column notation: g.regclass',
+    () => `SELECT g.regclass AS r FROM generate_series(${otherTableOid}, ${otherTableOid}) g`,
+    'FUNCTION_NOT_ALLOWED',
+    () => 'customer_ledger',
   ],
+  [
+    'column notation: t.ts_stat, which runs SQL given as text',
+    () =>
+      "SELECT t.ts_stat FROM unnest(ARRAY['SELECT array_to_tsvector(ARRAY[prosrc]) FROM pg_proc WHERE prosrc LIKE ''%2j8x%''']) t",
+    'FUNCTION_NOT_ALLOWED',
+    () => MARKER,
+  ],
+  [
+    'column notation: g.currval, whose error names any relation',
+    () => `SELECT g.currval FROM generate_series(${otherTableOid}, ${otherTableOid}) g`,
+    'FUNCTION_NOT_ALLOWED',
+    () => 'customer_ledger',
+  ],
+  // Found by review: a built-in the deny list did not name.
+  ['oidvectortypes, which names any type by id', () => `SELECT oidvectortypes('${otherRowTypeOid}') AS t`, 'FUNCTION_NOT_ALLOWED', () => 'customer_ledger'],
 ]
 
 describe('every route to another project\'s catalog entries', () => {
-  test.each(ROUTES)('%s: the role reads it, and run_query refuses it', async (_label, sql, leaks) => {
-    const direct = await asReadOnlyRole((c) => c.query(sql()))
-    expect(leaks(direct.rows as Rows)).toBe(true)
+  test.each(ROUTES)('%s: the role reads it, and run_query refuses it', async (_label, sql, code, leaked) => {
+    expect(await directly(sql())).toContain(leaked())
+    await expect(runReadQuery(projectId, sql(), 10)).rejects.toMatchObject({ code })
+  }, 60_000)
 
-    await expect(runReadQuery(projectId, sql(), 10)).rejects.toMatchObject({ code: 'CATALOG_NOT_READABLE' })
+  test('SHOW ALL and current_setting are refused', async () => {
+    await expect(runReadQuery(projectId, 'SHOW ALL', 10)).rejects.toMatchObject({ code: 'SETTING_NOT_ALLOWED' })
+    await expect(runReadQuery(projectId, "SELECT current_setting('server_version')", 10)).rejects.toMatchObject({
+      code: 'FUNCTION_NOT_ALLOWED',
+    })
+    await expect(runReadQuery(projectId, 'SELECT inet_server_addr()', 10)).rejects.toMatchObject({
+      code: 'FUNCTION_NOT_ALLOWED',
+    })
   }, 60_000)
 })
 
@@ -175,6 +206,59 @@ describe('reading this project still works', () => {
     expect(r.rows.map((x) => x.t)).toEqual(['1', '2'])
     expect(r.rows.map((x) => x.x)).toEqual(['1.50', '3.00'])
   }, 60_000)
+
+  test('monthly totals over a calendar from generate_series', async () => {
+    const r = await runReadQuery(
+      projectId,
+      "SELECT to_char(m.month, 'YYYY-MM') AS month, coalesce(sum(n.amount), 0) AS total " +
+        "FROM generate_series('2026-01-01'::date, '2026-03-01'::date, interval '1 month') AS m(month) " +
+        "LEFT JOIN notes n ON date_trunc('month', n.\"createdAt\") = m.month GROUP BY 1 ORDER BY 1",
+      10,
+    )
+    expect(r.rows.map((x) => [x.month, Number(x.total)])).toEqual([
+      ['2026-01', 10],
+      ['2026-02', 30],
+      ['2026-03', 0],
+    ])
+  }, 60_000)
+
+  test('JSON functions in FROM, read by their columns', async () => {
+    const r = await runReadQuery(
+      projectId,
+      "SELECT e.key, e.value FROM jsonb_each('{\"a\": 1, \"b\": 2}'::jsonb) e ORDER BY e.key",
+      10,
+    )
+    expect(r.rows.map((x) => x.key)).toEqual(['a', 'b'])
+  }, 60_000)
+
+  test('a column the alias declares is read as that column, even one named like a function', async () => {
+    // The declared column wins over column notation, so this is the integer,
+    // never regclass(g): the exception checkColumnRef makes is a real column.
+    const r = await runReadQuery(
+      projectId,
+      `SELECT g.regclass AS v FROM generate_series(${otherTableOid}, ${otherTableOid}) AS g(regclass)`,
+      10,
+    )
+    expect(r.rows.map((x) => Number(x.v))).toEqual([otherTableOid])
+  }, 60_000)
+
+  test('SHOW of a listed setting', async () => {
+    const r = await runReadQuery(projectId, 'SHOW search_path', 10)
+    expect(JSON.stringify(r.rows)).toContain(schema)
+  }, 60_000)
+})
+
+/**
+ * The row cap wraps every SELECT. Whether to wrap was once decided from the
+ * statement's text, and `/* /* *\/ show *\/ SELECT ...` (one nested comment, then a
+ * SELECT) read as SHOW, so it ran unwrapped and materialised every row.
+ */
+describe('the row cap holds for every SELECT', () => {
+  test('a SELECT behind a nested comment is capped', async () => {
+    const r = await runReadQuery(projectId, '/* /* */ show */ SELECT g FROM generate_series(1, 5000) g', 10)
+    expect(r.rowCount).toBe(10)
+    expect(r.truncated).toBe(true)
+  }, 60_000)
 })
 
 /**
@@ -192,7 +276,7 @@ describe('the statement runs as it was checked', () => {
     await raw(`ALTER ROLE "${roleName}" SET standard_conforming_strings = off`)
     try {
       // Directly, exactly as run_query would send it: the subquery on pg_proc runs.
-      const direct = await asReadOnlyRole((c) => c.query(capped(PAYLOAD, 10)))
+      const direct = await asReadOnlyRole((c) => c.query(capped(PAYLOAD, 10, 'select')))
       expect(direct.fields.map((f) => f.name)).toContain('leak')
 
       // Through run_query, which pins standard_conforming_strings on: two

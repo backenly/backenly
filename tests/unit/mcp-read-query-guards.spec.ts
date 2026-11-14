@@ -116,22 +116,31 @@ describe('redactRows — agent context is not a psql prompt', () => {
 
 describe('capped — the row cap is enforced in Postgres', () => {
   it('wraps a select so the database applies the limit', () => {
-    const out = capped('SELECT * FROM big', 200)
+    const out = capped('SELECT * FROM big', 200, 'select')
     expect(out).toMatch(/LIMIT 201/)
     expect(out).toMatch(/_bkn_read_query/)
   })
 
   it('asks for one extra row so truncation can be reported honestly', () => {
-    expect(capped('SELECT 1', 5)).toMatch(/LIMIT 6/)
+    expect(capped('SELECT 1', 5, 'select')).toMatch(/LIMIT 6/)
   })
 
   it('strips a trailing semicolon before wrapping (else the wrap is invalid SQL)', () => {
-    expect(capped('SELECT 1;', 10)).not.toMatch(/;\s*\n\)/)
+    expect(capped('SELECT 1;', 10, 'select')).not.toMatch(/;\s*\n\)/)
   })
 
   it('does not wrap EXPLAIN or SHOW, which cannot be subqueried', () => {
-    expect(capped('EXPLAIN SELECT 1', 10)).toBe('EXPLAIN SELECT 1')
-    expect(capped('SHOW search_path', 10)).toBe('SHOW search_path')
+    expect(capped('EXPLAIN SELECT 1', 10, 'explain')).toBe('EXPLAIN SELECT 1')
+    expect(capped('SHOW search_path', 10, 'show')).toBe('SHOW search_path')
+  })
+
+  it('wraps by what the parser said the statement is, never by how its text begins', () => {
+    // The parse tree of this is a SELECT; its text begins with a comment that a
+    // text reading once ended early, leaving "show" first, so it ran unwrapped
+    // and materialised every row.
+    const out = capped('/* /* */ show */ SELECT g FROM generate_series(1, 3000000) g', 10, 'select')
+    expect(out).toMatch(/^SELECT \* FROM \(/)
+    expect(out).toMatch(/LIMIT 11$/)
   })
 })
 

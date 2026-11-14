@@ -45,7 +45,7 @@
 
 import { Client } from 'pg'
 import { projectDatabaseUrl } from '@/lib/data-plane/regional'
-import { inspectReadQuery, type StatementRefusal } from '@/lib/mcp/read-query-ast'
+import { checkReadQuery, type StatementKind, type StatementRefusal } from '@/lib/mcp/read-query-ast'
 import { readOnlyLogin } from '@/lib/services/direct-access'
 import { workspaceSchemaName } from '@/lib/security/workspace-schema'
 
@@ -229,6 +229,16 @@ const HINTS = {
   schema:
     'Leave table and function names unqualified: run_query resolves them in this project\'s schema, ' +
     'the only one it reads. To see what is there use read_backend_state {section:"tables"}.',
+  function:
+    'Rewrite the query with the listed built-ins: count, sum, avg, min, max, string_agg, array_agg, ' +
+    'row_number, rank, lag, lead, round, abs, lower, upper, substring, replace, regexp_replace, split_part, ' +
+    'concat, date_trunc, extract, now, to_char, generate_series, unnest, jsonb_build_object, jsonb_agg, ' +
+    'jsonb_array_elements, to_tsvector and the like. To learn about the schema use read_backend_state ' +
+    '{section:"tables"} or get_table_schema {tableName}.',
+  type:
+    'Cast to one of the listed types. To compare an id, compare it as text or an integer.',
+  setting:
+    'Use SHOW with one of the listed settings, one at a time.',
 }
 
 /**
@@ -241,17 +251,18 @@ export const MAX_SQL_LENGTH = 100_000
  * Everything a statement must pass before it runs, in order:
  *
  *   1. PostgreSQL's own parser (lib/mcp/read-query-ast.ts): exactly one
- *      SELECT / EXPLAIN SELECT / SHOW, nothing in it that names a catalog, a
- *      schema other than this project's, an OID alias type, or a function that
- *      runs SQL given as text or reads the catalog by name or id. This is the
- *      boundary for catalog METADATA, which grants cannot hide.
+ *      SELECT / EXPLAIN SELECT / SHOW, using only allowlisted functions, types
+ *      and settings, naming no catalog and no schema but this project's. This
+ *      is the boundary for catalog METADATA, which grants cannot hide.
  *   2. The text checks (assertReadOnlySql), an independent second layer.
  *
  * A statement that does not parse is refused. If the parser cannot be loaded,
  * nothing runs (SQL_PARSER_UNAVAILABLE, 503). Neither falls back to the text
  * checks alone.
+ *
+ * Answers what the statement is, from its parse tree, for the row cap.
  */
-export async function admitReadQuery(sqlRaw: string, projectId: string): Promise<void> {
+export async function admitReadQuery(sqlRaw: string, projectId: string): Promise<StatementKind> {
   const sql = typeof sqlRaw === 'string' ? sqlRaw.trim() : ''
   if (!sql) throw new ReadQueryError('Empty query.', 'EMPTY_QUERY')
   if (sql.length > MAX_SQL_LENGTH) {
@@ -260,9 +271,10 @@ export async function admitReadQuery(sqlRaw: string, projectId: string): Promise
       'QUERY_TOO_LONG',
     )
   }
-  const refusal = await inspectReadQuery(sql, workspaceSchemaName(projectId))
-  if (refusal) throw refusalError(refusal)
+  const verdict = await checkReadQuery(sql, workspaceSchemaName(projectId))
+  if (verdict.refusal) throw refusalError(verdict.refusal)
   assertReadOnlySql(sql)
+  return verdict.kind
 }
 
 function refusalError(refusal: StatementRefusal): ReadQueryError {
@@ -431,9 +443,9 @@ export async function runReadQuery(
   sql: string,
   limit: number = DEFAULT_ROWS,
 ): Promise<ReadQueryResult> {
-  await admitReadQuery(sql, projectId)
+  const kind = await admitReadQuery(sql, projectId)
   try {
-    return await execute(projectId, sql, limit)
+    return await execute(projectId, sql, limit, kind)
   } catch (err) {
     // 42501 = insufficient_privilege. A table created outside the governed DDL
     // path has no grant for the read-only role yet, and the agent would see a
@@ -443,7 +455,7 @@ export async function runReadQuery(
     if ((err as { code?: string })?.code !== '42501') throw err
     const { syncDirectAccessGrants } = await import('@/lib/services/direct-access')
     await syncDirectAccessGrants(projectId)
-    return execute(projectId, sql, limit)
+    return execute(projectId, sql, limit, kind)
   }
 }
 
@@ -451,6 +463,7 @@ async function execute(
   projectId: string,
   sql: string,
   limit: number,
+  kind: StatementKind,
 ): Promise<ReadQueryResult> {
   const cap = Math.min(Math.max(1, Math.floor(limit)), MAX_ROWS)
   const schema = workspaceSchemaName(projectId)
@@ -492,7 +505,7 @@ async function execute(
     // the check sees two string literals and the server would run a subquery
     // on pg_proc. Pinned for this transaction, so both read the same statement.
     await client.query('SET LOCAL standard_conforming_strings = on')
-    const res = await client.query({ text: capped(sql, cap), rowMode: 'array' })
+    const res = await client.query({ text: capped(sql, cap, kind), rowMode: 'array' })
     await client.query('ROLLBACK')
 
     const fields = (res.fields ?? []).map((f: any) => ({ name: f.name, dataType: String(f.dataTypeID) }))
@@ -539,11 +552,14 @@ function connectionFailed(projectId: string, err: unknown): ReadQueryError {
  * join selecting `a.id` and `b.id` wraps without complaint.
  *
  * EXPLAIN / SHOW cannot be wrapped in a subquery and return trivially few rows,
- * so they are passed through untouched.
+ * so they are passed through untouched. Which one a statement is comes from its
+ * parse tree (admitReadQuery), never from its text: reading the text, a nested
+ * comment (`/* /* *\/ show *\/ SELECT ...`) made a SELECT look like SHOW, and it
+ * ran unwrapped, every row materialised.
  */
-export function capped(sql: string, cap: number): string {
+export function capped(sql: string, cap: number, kind: StatementKind): string {
   const bare = sql.trim().replace(/;\s*$/, '')
-  if (/^(explain|show)\b/i.test(stripSqlNoise(bare).trim())) return bare
+  if (kind !== 'select') return bare
   return `SELECT * FROM (\n${bare}\n) AS _bkn_read_query LIMIT ${cap + 1}`
 }
 
