@@ -388,7 +388,9 @@ function localChildEnv(dir: string): NodeJS.ProcessEnv {
       if (v) env[key] = v
     }
   }
-  return env
+  // ProcessEnv declares NODE_ENV as always set; a child of a process without
+  // one gets none either.
+  return env as NodeJS.ProcessEnv
 }
 
 function rssKbOf(pid: number): number {
