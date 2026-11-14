@@ -24,6 +24,11 @@
  * implementations are not duplicated.
  */
 
+import { AI_HELPER_DEFAULTS } from './model-defaults'
+
+const OPENAI_DEFAULTS = AI_HELPER_DEFAULTS.openai
+const ANTHROPIC_DEFAULTS = AI_HELPER_DEFAULTS.anthropic.complete
+
 export type IntegrationCategory =
   | 'payments'
   | 'email'
@@ -172,8 +177,13 @@ export const INTEGRATION_PROVIDERS: Record<string, ProviderSpec> = {
     keyFormat: 'sk-…',
     docsUrl: 'https://platform.openai.com/docs/api-reference',
     methods: [
-      { name: 'complete', signature: 'complete(prompt, maxTokens?) → string (gpt-4o-mini chat completion)' },
-      { name: 'embed', signature: 'embed(text) → number[] (text-embedding-3-small)' },
+      {
+        name: 'complete',
+        signature:
+          `complete(prompt, { model?, maxTokens?, system? }?) → string (a chat completion with ${OPENAI_DEFAULTS.complete.model} ` +
+          'unless model names another; complete(prompt, maxTokens?, systemPrompt?) also works)',
+      },
+      { name: 'embed', signature: `embed(text) → number[] (${OPENAI_DEFAULTS.embed.model})` },
       REQUEST_DOC,
     ],
   },
@@ -190,7 +200,13 @@ export const INTEGRATION_PROVIDERS: Record<string, ProviderSpec> = {
     keyFormat: 'sk-ant-…',
     docsUrl: 'https://docs.anthropic.com/en/api',
     methods: [
-      { name: 'complete', signature: 'complete(prompt, maxTokens?, systemPrompt?) → string. Anthropic has NO embeddings API — use openai.embed for vectors.' },
+      {
+        name: 'complete',
+        signature:
+          `complete(prompt, { model?, maxTokens?, system?, effort? }?) → string (${ANTHROPIC_DEFAULTS.model} at effort ` +
+          `${ANTHROPIC_DEFAULTS.effort} unless model names another; complete(prompt, maxTokens?, systemPrompt?) also works). ` +
+          'Anthropic has NO embeddings API — use openai.embed for vectors.',
+      },
       REQUEST_DOC,
     ],
   },

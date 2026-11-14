@@ -23,9 +23,9 @@
  *   ctx.integrations.stripe.listCustomers(email?)
  *   ctx.integrations.email.send({ to, subject, html, from? })
  *   ctx.integrations.twilio.sendSms({ to, body })
- *   ctx.integrations.openai.complete(prompt, maxTokens?)
+ *   ctx.integrations.openai.complete(prompt, { model?, maxTokens?, system? })
  *   ctx.integrations.openai.embed(text)
- *   ctx.integrations.anthropic.complete(prompt, maxTokens?, systemPrompt?)
+ *   ctx.integrations.anthropic.complete(prompt, { model?, maxTokens?, system?, effort? })
  *   ctx.integrations.posthog.capture({ distinctId, event, properties? })
  *   ctx.integrations.posthog.identify({ distinctId, properties })
  *   ctx.integrations.posthog.isFeatureEnabled(flagKey, distinctId)
@@ -39,6 +39,8 @@ import {
   genericRequestProviders,
   type ProviderSpec,
 } from './integration-registry'
+import Anthropic from '@anthropic-ai/sdk'
+import { AI_HELPER_DEFAULTS } from './model-defaults'
 
 // ── Types exposed to generated functions ──────────────────────────────────────
 
@@ -95,13 +97,36 @@ export interface TwilioIntegration {
   sendSms(opts: { to: string; body: string }): Promise<{ sid: string; status: string }>
 }
 
+/**
+ * What a completion helper takes besides the prompt. Anything left out comes
+ * from AI_HELPER_DEFAULTS (model-defaults.ts).
+ */
+export interface CompleteOptions {
+  /** The provider's model id. */
+  model?: string
+  /** The most tokens the reply may use. On Claude, thinking counts toward it too. */
+  maxTokens?: number
+  /** A system prompt. */
+  system?: string
+}
+
 export interface OpenAIIntegration {
-  complete(prompt: string, maxTokens?: number): Promise<string>
+  /** Single-turn chat completion. */
+  complete(prompt: string, options?: CompleteOptions): Promise<string>
+  /** The positional form functions were written with, still accepted. */
+  complete(prompt: string, maxTokens?: number, systemPrompt?: string): Promise<string>
   embed(text: string): Promise<number[]>
+}
+
+export interface AnthropicCompleteOptions extends CompleteOptions {
+  /** How much the model thinks before it answers. */
+  effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 }
 
 export interface AnthropicIntegration {
   /** Single-turn completion. Anthropic has no embeddings API — use openai.embed for vectors. */
+  complete(prompt: string, options?: AnthropicCompleteOptions): Promise<string>
+  /** The positional form functions were written with, still accepted. */
   complete(prompt: string, maxTokens?: number, systemPrompt?: string): Promise<string>
 }
 
@@ -363,9 +388,29 @@ function buildTwilioIntegration(accountSid: string, authToken: string, fromNumbe
 
 // ── OpenAI wrapper ─────────────────────────────────────────────────────────────
 
-function buildOpenAIIntegration(apiKey: string): OpenAIIntegration {
+/**
+ * complete()'s options, from either form a function calls it with:
+ * complete(prompt, { model?, maxTokens?, system? }) or the positional
+ * complete(prompt, maxTokens?, systemPrompt?) generated code was written with.
+ */
+function completeOptions<T extends CompleteOptions>(second: unknown, systemPrompt: unknown): T {
+  if (second !== null && typeof second === 'object') return second as T
   return {
-    async complete(prompt, maxTokens = 256) {
+    ...(typeof second === 'number' ? { maxTokens: second } : {}),
+    ...(typeof systemPrompt === 'string' ? { system: systemPrompt } : {}),
+  } as T
+}
+
+/** The model a function named, or the default when it named none. */
+function modelOf(named: unknown, fallback: string): string {
+  return typeof named === 'string' && named.trim() ? named.trim() : fallback
+}
+
+export function buildOpenAIIntegration(apiKey: string): OpenAIIntegration {
+  return {
+    async complete(prompt: string, second?: number | CompleteOptions, systemPrompt?: string) {
+      const options = completeOptions<CompleteOptions>(second, systemPrompt)
+      const defaults = AI_HELPER_DEFAULTS.openai.complete
       const res = await fetch('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
         headers: {
@@ -373,9 +418,13 @@ function buildOpenAIIntegration(apiKey: string): OpenAIIntegration {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          model: 'gpt-4o-mini',
-          messages: [{ role: 'user', content: prompt }],
-          max_tokens: maxTokens,
+          model: modelOf(options.model, defaults.model),
+          messages: [
+            ...(options.system ? [{ role: 'system', content: options.system }] : []),
+            { role: 'user', content: prompt },
+          ],
+          // max_tokens is deprecated, and OpenAI's reasoning models refuse it.
+          max_completion_tokens: options.maxTokens ?? defaults.maxTokens,
         }),
         signal: AbortSignal.timeout(15000),
       })
@@ -391,7 +440,7 @@ function buildOpenAIIntegration(apiKey: string): OpenAIIntegration {
           'Authorization': `Bearer ${apiKey}`,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ model: 'text-embedding-3-small', input: text }),
+        body: JSON.stringify({ model: AI_HELPER_DEFAULTS.openai.embed.model, input: text }),
         signal: AbortSignal.timeout(10000),
       })
       const data = await res.json()
@@ -405,33 +454,70 @@ function buildOpenAIIntegration(apiKey: string): OpenAIIntegration {
 // Anthropic exposes the Messages API only — there is NO embeddings endpoint.
 // Functions that need vectors must use ctx.integrations.openai.embed().
 
-function buildAnthropicIntegration(apiKey: string): AnthropicIntegration {
-  return {
-    async complete(prompt, maxTokens = 512, systemPrompt) {
-      const body: Record<string, any> = {
-        model: 'claude-3-5-haiku-20241022',
-        max_tokens: maxTokens,
-        messages: [{ role: 'user', content: prompt }],
-      }
-      if (systemPrompt) body.system = systemPrompt
+/**
+ * An SDK error as this helper has always thrown them, "Anthropic error: …",
+ * with what the API said and its status. A retired or unknown model is a 404
+ * whose message names the model.
+ */
+function anthropicError(err: unknown): Error {
+  if (err instanceof Anthropic.APIError && err.status) {
+    const said = (err.error as { error?: { message?: unknown } } | undefined)?.error?.message
+    if (typeof said === 'string' && said) return new Error(`Anthropic error: ${said} (HTTP ${err.status})`)
+  }
+  return new Error(`Anthropic error: ${err instanceof Error ? err.message : String(err)}`)
+}
 
-      const res = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'x-api-key': apiKey,
-          'anthropic-version': '2023-06-01',
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(20000),
-      })
-      const data = await res.json()
-      if (data.error) throw new Error(`Anthropic error: ${data.error.message || data.error.type}`)
-      // content is an array of blocks — concatenate the text blocks.
-      return (data.content || [])
-        .filter((b: any) => b.type === 'text')
-        .map((b: any) => b.text)
-        .join('') || ''
+export function buildAnthropicIntegration(apiKey: string): AnthropicIntegration {
+  // The official SDK, which reads globalThis.fetch when the client is made. Its
+  // base URL and bearer token default to this server's ANTHROPIC_BASE_URL and
+  // ANTHROPIC_AUTH_TOKEN, which are Backenly's own settings, so both are pinned:
+  // the project's key goes to api.anthropic.com, alone. No retries, as before:
+  // the calling function decides what an error means.
+  const client = new Anthropic({
+    apiKey,
+    authToken: null,
+    baseURL: 'https://api.anthropic.com',
+    maxRetries: 0,
+    timeout: 20_000,
+  })
+  return {
+    async complete(prompt: string, second?: number | AnthropicCompleteOptions, systemPrompt?: string) {
+      const options = completeOptions<AnthropicCompleteOptions>(second, systemPrompt)
+      const defaults = AI_HELPER_DEFAULTS.anthropic.complete
+      const model = modelOf(options.model, defaults.model)
+      // The default effort goes with the default model only (model-defaults.ts).
+      const effort = options.effort ?? (model === defaults.model ? defaults.effort : undefined)
+      const maxTokens = options.maxTokens ?? defaults.maxTokens
+
+      let message: Anthropic.Message
+      try {
+        message = await client.messages.create({
+          model,
+          max_tokens: maxTokens,
+          messages: [{ role: 'user', content: prompt }],
+          ...(options.system ? { system: options.system } : {}),
+          ...(effort ? { output_config: { effort } } : {}),
+        })
+      } catch (err) {
+        throw anthropicError(err)
+      }
+
+      if (message.stop_reason === 'refusal') {
+        const category = message.stop_details?.category
+        throw new Error(`Anthropic declined this prompt (stop_reason "refusal"${category ? `, category "${category}"` : ''}).`)
+      }
+      // A reply can begin with thinking blocks: the answer is the text blocks.
+      const text = message.content
+        .filter((block): block is Anthropic.TextBlock => block.type === 'text')
+        .map((block) => block.text)
+        .join('')
+      if (!text && message.stop_reason === 'max_tokens') {
+        throw new Error(
+          `Anthropic reached maxTokens (${maxTokens}) before writing any reply; its thinking counts toward it. ` +
+            'Raise maxTokens, or lower effort.',
+        )
+      }
+      return text
     },
   }
 }
