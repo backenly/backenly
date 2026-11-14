@@ -15033,6 +15033,13 @@ async function executeEnableTeams(params: any, projectId: string, apiKey?: strin
       },
     ] as const
 
+    // An organization_invitations table from before the teams rules: what is
+    // pending in it is withdrawn when they go on (lib/services/workspace-rls.ts,
+    // installTeamsPolicy), and this run says so. Read before the tables are
+    // touched, since creating them already puts the rules on.
+    const { invitationsToWithdraw, withdrawalNotice } = await import('@/lib/services/workspace-rls')
+    const preRule = await invitationsToWithdraw(projectId).catch(() => [])
+
     const created: string[] = []
     const failed: string[] = []
     // Never replanned: a failed step here is reported in `failed`. A model's
@@ -15106,7 +15113,9 @@ async function executeEnableTeams(params: any, projectId: string, apiKey?: strin
         `they own; invitations are read by the organization's owner and admins, and the owner invites with any role, ` +
         `an admin only as "member" or "admin". Member lists and role changes are your server's (a service-role key).\n` +
         `- **Invitations**: the token is kept only as its SHA-256, so keep the one you send; an invitation never changes ` +
-        `once written (withdraw it and send a new one); accepting checks that its inviter is still the owner or an admin.\n\n` +
+        `once written (withdraw it and send a new one); accepting checks that its inviter is still the owner or an admin.\n` +
+        (preRule.length ? `- **Withdrawn**: ${withdrawalNotice(preRule)}\n` : '') +
+        `\n` +
         `Typical flow:\n` +
         `1. A user signs up via auth.\n` +
         `2. They POST /organizations { name, slug, owner_user_id: <their id> } (the server gives it its id), then POST ` +

@@ -154,6 +154,36 @@ async function oldOwnRows(table: string, column: string): Promise<void> {
   })
 }
 
+/**
+ * Every membership but an organization's owner's, as the report lists them
+ * while no invitation counts as a way in (one written before the teams rules
+ * proves nothing).
+ */
+async function membersButOwners() {
+  const rows = await prisma.$queryRawUnsafe<Array<{ organizationId: string; userId: string; role: string }>>(
+    `SELECT m.organization_id::text AS "organizationId", m.user_id::text AS "userId", m.role::text AS "role"
+       FROM ${T('organization_members')} m
+      WHERE NOT EXISTS (SELECT 1 FROM ${T('organizations')} o WHERE o.id = m.organization_id AND o.owner_user_id = m.user_id)
+      ORDER BY 1, 2`,
+  )
+  return rows.map((r) => ({ ...r, createdAt: expect.any(Date) }))
+}
+
+/** An address as the report shows it: a***@d***.com. */
+const masked = (address: string) => {
+  const at = address.lastIndexOf('@')
+  const domain = address.slice(at + 1)
+  return `${address[0]}***@${domain[0]}***${domain.slice(domain.lastIndexOf('.'))}`
+}
+
+/** The invitations still pending, as the report lists the ones to withdraw. */
+async function pendingAsListed() {
+  const rows = await prisma.$queryRawUnsafe<Array<{ organizationId: string; email: string; role: string }>>(
+    `SELECT organization_id::text AS "organizationId", email, role FROM ${T('organization_invitations')} WHERE accepted_at IS NULL`,
+  )
+  return rows.map((r) => ({ organizationId: r.organizationId, address: masked(r.email), role: r.role, createdAt: expect.any(Date) }))
+}
+
 /** Run as a REST API role, with the claims PostgREST would set. */
 async function as<R>(role: 'anon' | 'authenticated', userId: string | null, sql: string, ...values: unknown[]): Promise<R[]> {
   return prisma.$transaction(async (tx) => {
@@ -827,6 +857,12 @@ describe('what a reader of the tables, or another organization, cannot do with t
   })
 })
 
+describe('the report on a project that has held the teams rules from the start', () => {
+  it('lists nothing: each member owns the organization or joined through an invitation written under the rules', async () => {
+    expect(await secureTeamsTables(projectId, { apply: false })).toEqual([])
+  }, 60_000)
+})
+
 describe('a project whose teams tables have the rules releases before the fix gave them', () => {
   beforeAll(async () => {
     // organizations: row-level security off, as tables made before the users
@@ -862,8 +898,10 @@ describe('a project whose teams tables have the rules releases before the fix ga
   }, 120_000)
 
   /** The membership the premise below writes, as the report lists it. */
-  const selfJoin = () => ({ organizationId: orgId, userId: mallory.id, role: 'admin', createdAt: expect.any(Date) })
+  const selfJoin = () => expect.objectContaining({ organizationId: orgId, userId: mallory.id, role: 'admin' })
   const SHARED = ['organization_invitations_token_shared (token)']
+  /** What the report listed to withdraw, for --apply to withdraw. */
+  let toWithdraw: unknown[] = []
 
   it('the premise: under those rules a signed-in user joins another owner\'s organization as its admin', async () => {
     expect(await policies('organization_members')).toEqual(OWN_ROWS)
@@ -889,6 +927,14 @@ describe('a project whose teams tables have the rules releases before the fix ga
   })
 
   it("are found and reported, the person's rule kept, and nothing is changed", async () => {
+    // The rules do not hold on all three tables, so no invitation proves how
+    // anyone joined: every member but an owner is listed, the self-join among
+    // them. And every invitation still pending was written while they did not
+    // hold, so applying withdraws each one, listed here with its address masked.
+    toWithdraw = await pendingAsListed()
+    expect(toWithdraw.length).toBeGreaterThan(0)
+    const suspects = await membersButOwners()
+    expect(suspects).toContainEqual(selfJoin())
     const found = await secureTeamsTables(projectId, { apply: false })
     expect(found).toEqual([
       {
@@ -897,15 +943,19 @@ describe('a project whose teams tables have the rules releases before the fix ga
         kept: [{ table: 'organization_invitations', reason: expect.stringContaining('backenly_custom_select') }],
         blocked: [],
         sharedUniques: SHARED,
-        suspects: [selfJoin()],
+        suspects,
+        withdrawn: expect.arrayContaining(toWithdraw),
         secured: false,
       },
     ])
+    expect(found[0].withdrawn).toHaveLength(toWithdraw.length)
+    expect(await pendingAsListed()).toHaveLength(toWithdraw.length)
     expect(await policies('organizations')).toEqual([])
     expect(await policies('organization_members')).toEqual(OWN_ROWS)
   }, 60_000)
 
-  it("get the teams rules as one change Backenly made, and the person's rule stays", async () => {
+  it("get the teams rules as one change Backenly made, which withdraws what was pending, and the person's rule stays", async () => {
+    const suspects = await membersButOwners()
     const done = await secureTeamsTables(projectId, { apply: true })
     expect(done).toEqual([
       {
@@ -914,10 +964,20 @@ describe('a project whose teams tables have the rules releases before the fix ga
         kept: [{ table: 'organization_invitations', reason: expect.any(String) }],
         blocked: [],
         sharedUniques: SHARED,
-        suspects: [selfJoin()],
+        suspects,
+        withdrawn: expect.arrayContaining(toWithdraw),
         secured: true,
       },
     ])
+    expect(done[0].withdrawn).toHaveLength(toWithdraw.length)
+    // Withdrawn: nothing pending is left. Marked: every accepted invitation,
+    // the self-written one among them, now proves nothing.
+    expect(await pendingAsListed()).toEqual([])
+    const accepted = await prisma.$queryRawUnsafe<Array<{ token: string }>>(
+      `SELECT token FROM ${T('organization_invitations')} WHERE accepted_at IS NOT NULL`,
+    )
+    expect(accepted.length).toBeGreaterThan(0)
+    for (const { token } of accepted) expect(token).toMatch(/^pre-rule:/)
     for (const table of ['organizations', 'organization_members']) {
       expect({ table, rules: await policies(table), forced: await forced(table) }).toEqual({ table, rules: TEAMS_RULES, forced: true })
     }
@@ -931,19 +991,19 @@ describe('a project whose teams tables have the rules releases before the fix ga
     expect(change).toEqual({ source: 'system', status: 'healthy' })
   }, 120_000)
 
-  it('lists the membership that looks like the old self-join in both modes, and only it, and removes nothing', async () => {
-    // The owner, the admin, the owner the owner invited and the members who
-    // joined through invitations to their own emails are members too, and are
-    // not listed.
+  it('lists every member but the owners in both modes, the self-join among them, and removes no one', async () => {
     const members = await prisma.$queryRawUnsafe<Array<{ user: string }>>(
       `SELECT user_id::text AS "user" FROM ${T('organization_members')} WHERE organization_id = $1::uuid`,
       orgId,
     )
     expect(members.map((m) => m.user)).toEqual(expect.arrayContaining([olivia.id, adam.id, otto.id, mallory.id]))
     expect(members.length).toBeGreaterThan(4)
+    const suspects = await membersButOwners()
+    expect(suspects).toContainEqual(selfJoin())
+    expect(suspects.map((s) => s.userId)).not.toContain(olivia.id)
     for (const apply of [false, true]) {
       const [report] = await secureTeamsTables(projectId, { apply })
-      expect({ apply, suspects: report.suspects }).toEqual({ apply, suspects: [selfJoin()] })
+      expect({ apply, suspects: report.suspects }).toEqual({ apply, suspects })
     }
     // Mallory also owns an organization of her own (made by the probing test above); the self-join is the row here.
     expect(
@@ -972,7 +1032,8 @@ describe('a project whose teams tables have the rules releases before the fix ga
         kept: [{ table: 'organization_invitations', reason: expect.any(String) }],
         blocked: [],
         sharedUniques: SHARED,
-        suspects: [selfJoin()],
+        suspects: await membersButOwners(),
+        withdrawn: [],
         secured: false,
       },
     ])
@@ -1011,4 +1072,153 @@ describe('a rule a merged preview branch gave a teams table', () => {
     expect(report.tables).toEqual([])
     expect(report.kept).toEqual([{ table: 'organization_members', reason: expect.stringContaining('branch_merge') }])
   }, 120_000)
+})
+
+describe('invitations written before the teams rules', () => {
+  /** Writes herself an owner invitation, "from" the owner, with a token she chose. */
+  const trudy = { id: crypto.randomUUID(), email: `trudy-${tag}@example.test` }
+  /** Writes herself an accepted admin invitation, "from" the owner, then joins. */
+  const mona = { id: crypto.randomUUID(), email: `mona-${tag}@example.test` }
+  /** The owner invited her as an owner then; her account comes later. */
+  const newbie = { id: crypto.randomUUID(), email: `newbie-${tag}@example.test` }
+  const plantedToken = randomToken()
+  const ownersToken = randomToken()
+  /** A pending invitation as owner: organization, email, token, inviter. */
+  const ownerInvite = () =>
+    `INSERT INTO ${T('organization_invitations')} (organization_id, email, role, token, invited_by_user_id, expires_at)
+     VALUES ($1::uuid, $2, 'owner', $3, $4::uuid, NOW() + INTERVAL '30 days')`
+  /** Both invitations still pending, as the report lists them: masked, never the address itself. */
+  const listed = () => [
+    { organizationId: orgId, address: 't***@e***.test', role: 'owner', createdAt: expect.any(Date) },
+    { organizationId: orgId, address: 'n***@e***.test', role: 'owner', createdAt: expect.any(Date) },
+  ]
+  const pendingCount = async () =>
+    (await prisma.$queryRawUnsafe<Array<{ n: number }>>(
+      `SELECT count(*)::int AS n FROM ${T('organization_invitations')} WHERE accepted_at IS NULL`,
+    ))[0].n
+
+  beforeAll(async () => {
+    // The teams rules by name on organization_members, in place of the merged
+    // branch's rule, so the rules of all three are Backenly's own again.
+    const r = await executeAction(
+      { action: 'SET_PERMISSION', params: { tableName: 'organization_members', template: 'teams' } },
+      projectId,
+      undefined,
+      0,
+      undefined,
+      false,
+    )
+    expect({ success: r.success, message: r.message }).toMatchObject({ success: true })
+    // Then the oldest shape: row-level security off on organizations and
+    // organization_invitations and neither trigger, organization_members its
+    // owner's rows.
+    for (const table of ['organizations', 'organization_invitations']) {
+      for (const p of await policies(table)) await ddl(`DROP POLICY IF EXISTS "${p}" ON ${T(table)}`)
+      await ddl(`ALTER TABLE ${T(table)} NO FORCE ROW LEVEL SECURITY`)
+      await ddl(`ALTER TABLE ${T(table)} DISABLE ROW LEVEL SECURITY`)
+      await prisma.permissionPolicy.deleteMany({ where: { projectId, tableName: table } })
+    }
+    await ddl(`DROP TRIGGER IF EXISTS ${TEAMS_TRIGGERS.organizations} ON ${T('organizations')}`)
+    await ddl(`DROP TRIGGER IF EXISTS ${TEAMS_TRIGGERS.organization_invitations} ON ${T('organization_invitations')}`)
+    await oldOwnRows('organization_members', 'user_id')
+    for (const user of [trudy, mona]) {
+      await ddl(`INSERT INTO ${T('users')} (id, email, password) VALUES ($1::uuid, $2, 'x')`, user.id, user.email)
+    }
+  }, 240_000)
+
+  it('the premise: under those rules signed-in users write invitations to themselves naming the owner as inviter', async () => {
+    await asUser(trudy.id, ownerInvite(), orgId, trudy.email, plantedToken, olivia.id)
+    await asUser(
+      mona.id,
+      `INSERT INTO ${T('organization_invitations')} (organization_id, email, role, token, invited_by_user_id, accepted_at)
+       VALUES ($1::uuid, $2, 'admin', $3, $4::uuid, NOW())`,
+      orgId,
+      mona.email,
+      randomToken(),
+      olivia.id,
+    )
+    expect(
+      await asUser(
+        mona.id,
+        `INSERT INTO ${T('organization_members')} (organization_id, user_id, role) VALUES ($1::uuid, $2::uuid, 'admin') RETURNING role`,
+        orgId,
+        mona.id,
+      ),
+    ).toEqual([{ role: 'admin' }])
+    // And the owner's own invitation from those days, its token kept as written.
+    await asUser(olivia.id, ownerInvite(), orgId, newbie.email, ownersToken, olivia.id)
+    const kept = await prisma.$queryRawUnsafe<Array<{ token: string }>>(
+      `SELECT token FROM ${T('organization_invitations')} WHERE email = $1`,
+      newbie.email,
+    )
+    expect(kept).toEqual([{ token: ownersToken }])
+  })
+
+  it('accept-invite takes neither token, even before the rules go on', async () => {
+    expect((await accept(trudy, plantedToken)).status).toBe(404)
+    // An account for the address the owner invited: signing up does not prove
+    // an address by default, so whoever read the token could make it.
+    await ddl(`INSERT INTO ${T('users')} (id, email, password) VALUES ($1::uuid, $2, 'x')`, newbie.id, newbie.email)
+    expect((await accept(newbie, ownersToken)).status).toBe(404)
+  }, 60_000)
+
+  it('the report lists both invitations to withdraw, masked, and every member but the owners, and changes nothing', async () => {
+    const [report] = await secureTeamsTables(projectId, { apply: false })
+    expect({ tables: report.tables, kept: report.kept, blocked: report.blocked, secured: report.secured }).toEqual({
+      tables: ['organizations', 'organization_members', 'organization_invitations'],
+      kept: [],
+      blocked: [],
+      secured: false,
+    })
+    expect(report.withdrawn).toEqual(listed())
+    expect(JSON.stringify(report.withdrawn)).not.toContain(trudy.email)
+    // Mona's invitation names the owner, and proves nothing: she is listed.
+    expect(report.suspects).toContainEqual({ organizationId: orgId, userId: mona.id, role: 'admin', createdAt: expect.any(Date) })
+    expect(report.suspects).toEqual(await membersButOwners())
+    expect(await pendingCount()).toBe(2)
+  }, 60_000)
+
+  it('--apply puts the rules on as one change Backenly made, withdrawing both and marking the accepted ones', async () => {
+    const [done] = await secureTeamsTables(projectId, { apply: true })
+    expect({ tables: done.tables, kept: done.kept, secured: done.secured }).toEqual({
+      tables: ['organizations', 'organization_members', 'organization_invitations'],
+      kept: [],
+      secured: true,
+    })
+    expect(done.withdrawn).toEqual(listed())
+    expect(await pendingCount()).toBe(0)
+    const accepted = await prisma.$queryRawUnsafe<Array<{ email: string; token: string }>>(
+      `SELECT email, token FROM ${T('organization_invitations')} WHERE accepted_at IS NOT NULL`,
+    )
+    expect(accepted.map((a) => a.email)).toContain(mona.email)
+    for (const { token } of accepted) expect(token).toMatch(/^pre-rule:/)
+    for (const table of TABLES) {
+      expect({ table, rules: await policies(table), forced: await forced(table) }).toEqual({ table, rules: TEAMS_RULES, forced: true })
+    }
+    const change = await prisma.backendChange.findFirst({
+      where: { projectId, title: 'Set the teams rules on organizations, organization_members, organization_invitations' },
+      orderBy: { seq: 'desc' },
+      select: { source: true, status: true },
+    })
+    expect(change).toEqual({ source: 'system', status: 'healthy' })
+    // No membership is removed: Mona is still one, and still listed.
+    const [report] = await secureTeamsTables(projectId, { apply: false })
+    expect(report.suspects).toContainEqual({ organizationId: orgId, userId: mona.id, role: 'admin', createdAt: expect.any(Date) })
+    expect(report.withdrawn).toEqual([])
+  }, 120_000)
+
+  it('afterwards neither invitation admits anyone, and an admin reads no usable token', async () => {
+    expect((await accept(trudy, plantedToken)).status).toBe(404)
+    expect((await accept(newbie, ownersToken)).status).toBe(404)
+    const read = await asUser<{ token: string }>(adam.id, `SELECT token FROM ${T('organization_invitations')}`)
+    expect(read.length).toBeGreaterThan(0)
+    for (const { token } of read) {
+      expect(token).toMatch(/^(sha256:[0-9a-f]{64}$|pre-rule:)/)
+      expect([plantedToken, ownersToken]).not.toContain(token)
+    }
+    // The mark is the service role's to write, not an end user's.
+    await expect(
+      asUser(olivia.id, inviteSql(), orgId, `marked-${tag}@example.test`, 'member', `pre-rule:${randomToken()}`, olivia.id),
+    ).rejects.toThrow(/only its hash is kept/)
+  }, 60_000)
 })

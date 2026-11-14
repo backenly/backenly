@@ -41,7 +41,7 @@ import { resolveEndUserFromToken } from '@/server/lib/end-user-identity'
 import { getWorkspaceDatabaseNames } from '@/lib/services/databaseProvisioning'
 import { recordedV1 } from '@/lib/traffic/recorded-v1'
 
-/** How the teams rules keep a token (lib/services/workspace-rls.ts, teamsPolicySql). */
+/** How the teams rules keep a token (lib/services/workspace-rls.ts, teamsTriggerSql). */
 function tokenHash(token: string): string {
   return `sha256:${createHash('sha256').update(token, 'utf8').digest('hex')}`
 }
@@ -133,7 +133,9 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
       // hash. A token kept as written (a table from before the teams rules)
       // is matched by no path, because the owner, the admins and, under the
       // earlier rules, anyone could read it; and a stored hash given as the
-      // token hashes to something else. Their organizations' owners invite again.
+      // token hashes to something else. Putting the teams rules on withdraws
+      // such invitations, and lists them for their owners to send again
+      // (lib/services/workspace-rls.ts, withdrawPreRuleInvitations).
       const invites = await tx.$queryRawUnsafe<Array<{
         id: string
         organization_id: string
