@@ -37,7 +37,7 @@ import { partitionServed, serviceRegion } from '@/lib/data-plane/serving'
 import type { CloudRegionId } from '@/lib/regions'
 import { mirrorRateWindows, pruneRateWindows, regionalRateCounting } from '@/lib/auth-projection/rate'
 import { matchesCronExpression } from '@/lib/services/cron-expression'
-import { executeAiFunction, FunctionEvent } from '@/lib/services/ai-functions/executor'
+import { executeTriggeredRun, FunctionEvent } from '@/lib/services/ai-functions/executor'
 import { RUNNABLE_FUNCTION_STATUS_FILTER } from '@/lib/services/ai-functions/status'
 import { retryFailedWebhooks } from '@/lib/webhooks/index'
 import { drainRowEvents } from '@/lib/webhooks/capture'
@@ -115,7 +115,8 @@ export async function runDueCronJobs(now?: Date): Promise<CronRunResult> {
   }
 
   const results = await Promise.allSettled(
-    dueJobs.map(job => executeAiFunction(job.id, job.projectId, event))
+    // A run turned away for capacity is tried again, then recorded (executeTriggeredRun).
+    dueJobs.map(job => executeTriggeredRun(job.id, job.projectId, event))
   )
 
   const succeeded = results.filter(

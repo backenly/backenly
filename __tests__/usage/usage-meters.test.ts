@@ -28,8 +28,8 @@ import { internalTrafficHeaders } from '@/lib/traffic/request-recorder'
 import { trackEndUserActive, noteEndUserActivity } from '@/lib/quota/kernel'
 import { measureProjectDbBytes, snapshotProjectDbStorage } from '@/lib/usage/db-storage'
 import { reconcileFileStorage } from '@/lib/usage/file-storage'
-import { executeAiFunction } from '@/lib/services/ai-functions/executor'
-import { startStandInSupervisor } from '../../tests/helpers/stand-in-function-supervisor'
+import { executeAiFunction, executeTriggeredRun } from '@/lib/services/ai-functions/executor'
+import { BUSY_REFUSAL, START_FAILURE, startStandInSupervisor } from '../../tests/helpers/stand-in-function-supervisor'
 
 const DB_URL = process.env.TEST_DATABASE_URL ?? ''
 const users: string[] = []
@@ -262,4 +262,74 @@ describe('fn_runs', () => {
     },
     60_000,
   )
+
+  // Turned away on every try, or on the retry after a sandbox that could not
+  // start: the code never ran, so the answer is the server's, as above.
+  ;(process.platform === 'win32' ? it.skip : it).each([
+    ['a runner that cannot start, three times', [START_FAILURE], 'RUNNER_UNAVAILABLE', 1],
+    ['a retry turned away as busy', [START_FAILURE, BUSY_REFUSAL], 'RUNNER_BUSY', 0],
+  ] as const)('does not count %s, nor mark the function failed or rewrite it', async (_name, answers, errorCode, recorded) => {
+    const { projectId } = await makeProject()
+    const fn = await prisma.aiFunction.create({
+      data: { projectId, name: 'meter-no-start', description: 'meter-no-start', generatedCode: 'return { ok: true }', triggerType: 'manual', status: 'active' },
+    })
+    const supervisor = await startStandInSupervisor([...answers])
+    supervisor.use()
+    let result: Awaited<ReturnType<typeof executeAiFunction>>
+    try {
+      result = await executeAiFunction(fn.id, projectId, { type: 'manual', data: {} })
+    } finally {
+      await supervisor.close()
+    }
+    expect(result).toMatchObject({ success: false, errorCode })
+    expect(await quantity(projectId, 'fn_runs', 'executor')).toBe(BigInt(0))
+    const after = await prisma.aiFunction.findUniqueOrThrow({ where: { id: fn.id } })
+    expect(after).toMatchObject({ status: 'active', lastError: null, generatedCode: 'return { ok: true }' })
+    expect(await prisma.aiFunctionLog.count({ where: { functionId: fn.id } })).toBe(recorded)
+  }, 60_000)
+
+  // A schedule or a sign-up has nobody to answer a 503 to.
+  ;(process.platform === 'win32' ? describe.skip : describe)('a triggered run turned away for capacity', () => {
+    const cronFunction = async (projectId: string) =>
+      prisma.aiFunction.create({
+        data: { projectId, name: 'meter-cron', description: 'meter-cron', generatedCode: 'return { ok: true }', triggerType: 'cron', status: 'active' },
+      })
+
+    it('is tried again, and recorded where the developer sees it when the server stays busy', async () => {
+      const { projectId } = await makeProject()
+      const fn = await cronFunction(projectId)
+      const supervisor = await startStandInSupervisor()
+      supervisor.use()
+      let result: Awaited<ReturnType<typeof executeTriggeredRun>>
+      try {
+        result = await executeTriggeredRun(fn.id, projectId, { type: 'cron', data: {} }, {}, { retries: 2, backoffMs: 20 })
+      } finally {
+        await supervisor.close()
+      }
+      expect(supervisor.headers).toHaveLength(3)
+      expect(result).toMatchObject({ success: false, errorCode: 'RUNNER_BUSY' })
+      const runs = await prisma.aiFunctionLog.findMany({ where: { functionId: fn.id } })
+      expect(runs).toHaveLength(1)
+      expect(runs[0]).toMatchObject({ success: false, triggerType: 'cron' })
+      expect(runs[0].error).toMatch(/^Not run: every function slot on this server stayed in use through 3 attempts/)
+      expect(await quantity(projectId, 'fn_runs', 'executor')).toBe(BigInt(0))
+      expect(await prisma.aiFunction.findUniqueOrThrow({ where: { id: fn.id } })).toMatchObject({ status: 'active', lastError: null })
+    }, 60_000)
+
+    it('runs once a slot frees up', async () => {
+      const { projectId } = await makeProject()
+      const fn = await cronFunction(projectId)
+      const supervisor = await startStandInSupervisor()
+      supervisor.use()
+      const pending = executeTriggeredRun(fn.id, projectId, { type: 'cron', data: {} }, {}, { retries: 2, backoffMs: 500 })
+      // Turned away once; then this machine's own runner has room again.
+      for (let i = 0; i < 500 && supervisor.headers.length === 0; i++) await new Promise((r) => setTimeout(r, 10))
+      await supervisor.close()
+      const result = await pending
+      expect(supervisor.headers).toHaveLength(1)
+      expect(result).toMatchObject({ success: true, returnValue: { ok: true } })
+      expect(await quantity(projectId, 'fn_runs', 'executor')).toBe(BigInt(1))
+      expect(await prisma.aiFunctionLog.count({ where: { functionId: fn.id, success: true } })).toBe(1)
+    }, 60_000)
+  })
 })

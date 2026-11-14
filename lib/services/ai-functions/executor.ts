@@ -990,15 +990,30 @@ export async function executeAiFunction(
 
       return { success: true, logs, returnValue, durationMs }
     } catch (err: any) {
+      // Turned away, first time or on a retry: a retry only follows a sandbox
+      // that failed before the code started, so the code has not run.
       if (err instanceof FunctionRunnerUnavailableError) {
-        // A retry turned away ends with the failure of the run before it.
-        if (lastError) break
         return runnerRefused(err, functionId, projectId, Date.now() - startMs, caller.trigger ?? event.type)
       }
       lastError = err instanceof Error ? err : new Error(String(err))
       if (attempt < MAX_RETRIES && err instanceof SandboxRunError && err.beforeCodeRan) continue
       break
     }
+  }
+
+  // Every attempt failed before the function's code started: the sandbox
+  // never ran it. That is this server's failure, answered as functions being
+  // unavailable here (a 503): not counted, not the function's error, and not
+  // a reason to rewrite it.
+  if (lastError instanceof SandboxRunError && lastError.beforeCodeRan) {
+    const detail = lastError.message
+    return runnerRefused(
+      new FunctionRunnerUnavailableError(detail, `The sandbox could not run the function, ${MAX_RETRIES + 1} times: ${detail}`),
+      functionId,
+      projectId,
+      Date.now() - startMs,
+      caller.trigger ?? event.type,
+    )
   }
 
   countRun()
@@ -1054,6 +1069,44 @@ async function runnerRefused(
   console.error(`[AiFn] ${err.message}`)
   await persistExecutionLog(functionId, projectId, false, [], err.message, durationMs, triggerType)
   return { success: false, logs: [], error: err.message, errorCode: 'RUNNER_UNAVAILABLE', durationMs }
+}
+
+/** Retries, and the first backoff (doubled each time), for a triggered run turned away for capacity. */
+export const TRIGGERED_RUN_BUSY_RETRIES = 3
+export const TRIGGERED_RUN_BUSY_BACKOFF_MS = 5_000
+
+/**
+ * A run a trigger fires (a schedule, a sign-up) has no caller to answer a 503
+ * to, so one turned away because every function slot on this server is taken
+ * is tried again: after 5, 10 and 20 seconds. Still turned away, the miss is
+ * recorded in the function's run log, so it is seen rather than lost. A run
+ * that happened, or one turned away for any other reason, is returned as it is.
+ */
+export async function executeTriggeredRun(
+  functionId: string,
+  projectId: string,
+  event: FunctionEvent,
+  caller: FunctionCallerContext = {},
+  opts: { retries?: number; backoffMs?: number } = {},
+): Promise<FunctionExecutionResult> {
+  const retries = opts.retries ?? TRIGGERED_RUN_BUSY_RETRIES
+  const backoffMs = opts.backoffMs ?? TRIGGERED_RUN_BUSY_BACKOFF_MS
+  const startMs = Date.now()
+  let result = await executeAiFunction(functionId, projectId, event, caller)
+  for (let retry = 0; result.errorCode === 'RUNNER_BUSY' && retry < retries; retry++) {
+    await new Promise((r) => setTimeout(r, backoffMs * 2 ** retry))
+    result = await executeAiFunction(functionId, projectId, event, caller)
+  }
+  if (result.errorCode === 'RUNNER_BUSY') {
+    const seconds = Math.round((Date.now() - startMs) / 1000)
+    const error =
+      `Not run: every function slot on this server stayed in use through ${retries + 1} attempts over ${seconds}s, ` +
+      `so this ${caller.trigger ?? event.type} run was dropped. ${result.error ?? ''}`.trim()
+    console.warn(`[AiFn] function ${functionId} of project ${projectId}: ${error}`)
+    await persistExecutionLog(functionId, projectId, false, [], error, 0, caller.trigger ?? event.type)
+    return { ...result, error }
+  }
+  return result
 }
 
 // ─── Execution Log Persistence (for GAP 9 — function logs UI) ────────────────
@@ -1146,7 +1199,7 @@ export async function fireAiFunctionsOnSignup(
     })
     if (functions.length === 0) return
     const event: FunctionEvent = { type: 'signup', data: user }
-    await Promise.allSettled(functions.map(fn => executeAiFunction(fn.id, projectId, event)))
+    await Promise.allSettled(functions.map(fn => executeTriggeredRun(fn.id, projectId, event)))
   } catch (err: any) {
     console.warn('[AiFunctions] fireAiFunctionsOnSignup failed (non-fatal):', err?.message)
   }
