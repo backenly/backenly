@@ -42,9 +42,9 @@ const IMAGE_MIME_TYPES = new Set([
 
 const FORMAT_TO_MIME: Record<string, string> = {
   jpeg: 'image/jpeg',
-  jpg:  'image/jpeg',
-  png:  'image/png',
-  gif:  'image/gif',
+  jpg: 'image/jpeg',
+  png: 'image/png',
+  gif: 'image/gif',
   webp: 'image/webp',
   avif: 'image/avif',
 }
@@ -84,7 +84,9 @@ export async function processImage(
   const targetHeight = options.height ?? globalMaxHeight
 
   try {
-    let pipeline = sharp(buffer)
+    // Auto-orient from EXIF before resizing: sharp drops the orientation tag
+    // on re-encode, so without this, phone photos end up sideways.
+    let pipeline = sharp(buffer).rotate();
 
     // Resize if dimensions are requested
     if (targetWidth || targetHeight) {
@@ -134,14 +136,25 @@ export async function processImage(
 
     const outputBuffer = await pipeline.toBuffer()
 
-    // Only use processed output if it's actually smaller (no-op guard)
-    const finalBuffer = outputBuffer.length < buffer.length ? outputBuffer : buffer
-    const finalMime = outputBuffer.length < buffer.length ? outputMime : mimeType
+    // Check whether the caller explicitly requested a transformation.
+    const hasExplicitTransformation =
+      options.width !== undefined ||
+      options.height !== undefined ||
+      options.format !== undefined
+
+    // Explicit transformations must always be applied,
+    // regardless of whether the output is larger.
+    const useProcessedOutput =
+      hasExplicitTransformation ||
+      outputBuffer.length < buffer.length
+
+    const finalBuffer = useProcessedOutput ? outputBuffer : buffer
+    const finalMime = useProcessedOutput ? outputMime : mimeType
 
     return {
       buffer: finalBuffer,
       mimeType: finalMime,
-      processed: true,
+      processed: useProcessedOutput,
       originalSize,
       finalSize: finalBuffer.length,
     }
@@ -159,8 +172,8 @@ export async function processImage(
 export function mimeToExtension(mimeType: string): string {
   const map: Record<string, string> = {
     'image/jpeg': '.jpg',
-    'image/png':  '.png',
-    'image/gif':  '.gif',
+    'image/png': '.png',
+    'image/gif': '.gif',
     'image/webp': '.webp',
     'image/avif': '.avif',
   }
