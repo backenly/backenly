@@ -112,6 +112,13 @@ describe('docker/web.Dockerfile, where the app writes', () => {
   )
 })
 
+describe('docker/runtime.Dockerfile, where the app writes', () => {
+  it('sends the log files lib/logger writes to /tmp, the only place this image writes', () => {
+    const env = instructions(stage('runtime.Dockerfile')).filter((i) => /^ENV\s/.test(i)).join(' ')
+    expect(env).toMatch(/\bLOG_FILE_PATH=\/tmp\/\S+/)
+  })
+})
+
 describe('docker/compose.stack.yml', () => {
   it('sets no user on the services that run functions', () => {
     const compose = read('docker/compose.stack.yml')

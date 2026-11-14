@@ -147,9 +147,13 @@ COPY --from=build /src/edition-files/ ./
 COPY docker/certs/rds-ca-ap-south-1.pem docker/certs/rds-ca-us-east-1.pem docker/certs/rds-ca-us-west-2.pem docker/certs/rds-ca-eu-central-1.pem docker/certs/rds-ca-ap-southeast-1.pem /app/certs/
 RUN cat /app/certs/rds-ca-ap-south-1.pem /app/certs/rds-ca-us-east-1.pem /app/certs/rds-ca-us-west-2.pem /app/certs/rds-ca-eu-central-1.pem /app/certs/rds-ca-ap-southeast-1.pem > /app/certs/rds-ca-cloud-regions.pem
 
+# lib/logger also writes log files (LOG_FILE_PATH, default ./logs, a directory
+# it creates when first loaded and throws where it cannot). This image writes
+# nothing outside /tmp, and its root may be read-only, so they go there.
 ENV NODE_ENV=production \
     RUNTIME_PORT=3001 \
-    NODE_EXTRA_CA_CERTS=/app/certs/rds-ca-cloud-regions.pem
+    NODE_EXTRA_CA_CERTS=/app/certs/rds-ca-cloud-regions.pem \
+    LOG_FILE_PATH=/tmp/backenly-logs/backenly.log
 
 EXPOSE 3001
 
