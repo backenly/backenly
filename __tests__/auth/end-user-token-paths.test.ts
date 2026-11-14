@@ -32,7 +32,7 @@ import type { AddressInfo } from 'net'
 import { mkdtempSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { randomBytes, randomUUID } from 'crypto'
+import { createHash, randomBytes, randomUUID } from 'crypto'
 import jwt from 'jsonwebtoken'
 
 /** The role the project's client runs as; set in beforeAll on a superuser connection. */
@@ -430,10 +430,12 @@ describe('C: accept-invite resolves its token through the shared check and reads
       `INSERT INTO "${schemaName}"."organizations" (id, name, owner_user_id) VALUES ($1::uuid, 'Org', $2::uuid)`,
       organizationId, owner,
     )
+    // The token as the teams rules keep it, its SHA-256: accept-invite matches
+    // nothing else (these tables carry no trigger to hash it).
     await prisma.$executeRawUnsafe(
       `INSERT INTO "${schemaName}"."organization_invitations" (organization_id, email, role, token, invited_by_user_id, expires_at)
        VALUES ($1::uuid, $2, 'member', $3, $4::uuid, NOW() + INTERVAL '1 day')`,
-      organizationId, email, token, owner,
+      organizationId, email, `sha256:${createHash('sha256').update(token, 'utf8').digest('hex')}`, owner,
     )
     return { token, organizationId }
   }

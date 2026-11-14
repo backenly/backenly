@@ -84,7 +84,7 @@ import { withChangeAttribution } from '@/lib/changes/attribution'
 import { expectEffect, withGovernedChange } from '@/lib/changes/ledger'
 import { closeChangeLockPool } from '@/lib/changes/lock'
 import { inferRlsPlan } from '@/lib/services/rls-ownership'
-import { secureTeamsTables } from '@/lib/services/workspace-rls'
+import { secureTeamsTables, TEAMS_TRIGGERS } from '@/lib/services/workspace-rls'
 import { jwtClaimsJson } from '@/lib/services/rls-session'
 import { claimExpr, serviceRoleClause, SUBJECT_CLAIM } from '@/lib/postgrest/rls-translation'
 import { installChangeLedgerGuard } from '../helpers/change-ledger-guard'
@@ -656,9 +656,11 @@ describe('what a reader of the tables, or another organization, cannot do with t
   const zoe = { id: crypto.randomUUID(), email: `Zoe-${tag}@Example.Test` }
   const owen = { id: crypto.randomUUID(), email: `owen-${tag}@example.test` }
   const adamsFriend = { id: crypto.randomUUID(), email: `adams-friend-${tag}@example.test` }
+  /** Invited the way tables before the teams rules kept an invitation: its token as written. */
+  const pat = { id: crypto.randomUUID(), email: `pat-${tag}@example.test` }
 
   beforeAll(async () => {
-    for (const user of [kate, kateCapitals, kateKelvin, zoe, owen, adamsFriend]) {
+    for (const user of [kate, kateCapitals, kateKelvin, zoe, owen, adamsFriend, pat]) {
       await ddl(`INSERT INTO ${T('users')} (id, email, password) VALUES ($1::uuid, $2, 'x')`, user.id, user.email)
     }
   })
@@ -676,6 +678,27 @@ describe('what a reader of the tables, or another organization, cannot do with t
       asUser(olivia.id, inviteSql(), orgId, `hashed-${tag}@example.test`, 'member', hashOf(randomToken()), olivia.id),
     ).rejects.toThrow(/only its hash is kept/)
   })
+
+  it('accepts no invitation whose token was kept as written, as tables before the teams rules kept them', async () => {
+    const token = randomToken()
+    // Such a row, as the earlier rules left one: the trigger that hashes
+    // tokens is set aside for this one insert.
+    await ddl(`ALTER TABLE ${T('organization_invitations')} DISABLE TRIGGER ${TEAMS_TRIGGERS.organization_invitations}`)
+    try {
+      await ddl(inviteSql(), orgId, pat.email, 'member', token, olivia.id)
+    } finally {
+      await ddl(`ALTER TABLE ${T('organization_invitations')} ENABLE TRIGGER ${TEAMS_TRIGGERS.organization_invitations}`)
+    }
+    const [kept] = await prisma.$queryRawUnsafe<Array<{ token: string }>>(
+      `SELECT token FROM ${T('organization_invitations')} WHERE email = $1`,
+      pat.email,
+    )
+    expect(kept.token).toBe(token)
+    // Its invitee, signed in with its address and holding its token: no match.
+    const out = await accept(pat, token)
+    expect({ status: out.status, code: out.body.code }).toEqual({ status: 404, code: 'INVITE_NOT_FOUND' })
+    await ddl(`DELETE FROM ${T('organization_invitations')} WHERE email = $1`, pat.email)
+  }, 60_000)
 
   it("an admin who reads the owner's invitation cannot accept with what they read", async () => {
     const token = randomToken()

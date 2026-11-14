@@ -12,7 +12,10 @@ export const maxDuration = 15
  *   1. Resolve the end-user JWT through the check every data door uses:
  *      project.jwtSecret, this project, not revoked, user not blocked.
  *   2. In one transaction, as the service role: look up and lock the
- *      invitation by its token's SHA-256, which is all the table keeps.
+ *      invitation by its token's SHA-256, which is all the table keeps. Only a
+ *      stored hash is ever matched: an invitation whose token was kept as
+ *      written (one from before the teams rules) is never accepted, since
+ *      whoever could read the table could read its token.
  *   3. Reject expired, already-accepted, or wrong-email invites, and one whose
  *      inviter is no longer the organization's owner or an admin, or could not
  *      grant its role (only the owner invites with a role other than member or
@@ -126,9 +129,11 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
       await tx.$executeRawUnsafe(rlsSessionSql(), ...rlsSessionParams({ isServiceRole: true }))
 
       // ── Lookup invitation ────────────────────────────────────────────────
-      // By the token's hash. A table from before the teams rules may still
-      // hold a token as written, so that is matched too, but never a stored
-      // hash taken as a token: the owner and admins can read the hashes.
+      // By the token's hash, and nothing else: the stored token must be that
+      // hash. A token kept as written (a table from before the teams rules)
+      // is matched by no path, because the owner, the admins and, under the
+      // earlier rules, anyone could read it; and a stored hash given as the
+      // token hashes to something else. Their organizations' owners invite again.
       const invites = await tx.$queryRawUnsafe<Array<{
         id: string
         organization_id: string
@@ -141,11 +146,10 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
         `SELECT id::text AS id, organization_id::text AS organization_id, email, role,
                 invited_by_user_id::text AS invited_by_user_id, expires_at, accepted_at
            FROM "${postgresSchema}"."organization_invitations"
-          WHERE token = $1 OR (token = $2 AND token !~ '^sha256:[0-9a-f]{64}$')
+          WHERE token = $1
           LIMIT 2
           FOR UPDATE`,
         tokenHash(inviteToken),
-        inviteToken,
       )
       // Two rows for one token (a client that reused one in two organizations)
       // name no one invitation.
