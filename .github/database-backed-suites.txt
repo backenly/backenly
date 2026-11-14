@@ -520,6 +520,15 @@ __tests__/database/sql-workspace-isolation.test.ts
 # errors still reach the caller. Real bkn_ro_ role, refused with NOLOGIN.
 __tests__/database/read-query-connection.test.ts
 
+# The system catalogs are readable by PUBLIC and describe every project, so for
+# catalog metadata the statement is run_query's boundary, checked with
+# PostgreSQL's own parser. Each route (a double-quoted or unicode-escaped
+# pg_proc, an id cast to regnamespace, query_to_xml, to_regnamespace) is run as
+# the real bkn_ro_ role first to prove it reads another project, then refused
+# through run_query; own-table reads still work; and a role with
+# standard_conforming_strings off cannot turn a checked literal into SQL.
+__tests__/database/run-query-catalog-guard.test.ts
+
 # Function SQL ran on the app's own connection, whose role owns every platform
 # table and workspace schema, so generated function code could read public.users
 # or another tenant's tables; claims filter rows, not schemas. It now logs in as
@@ -1084,9 +1093,12 @@ tests/integration/scheduler-leader-lock.spec.ts
 tests/integration/direct-access-backup-grants.spec.ts
 
 # A new read-write Postgres login reads and writes rows, and Postgres refuses
-# it any schema change (no CREATE on the schema, no owner-role membership)
-# until its project's admin allows schema changes; a login from before the
-# setting keeps what it had. Real roles, grants and definer functions.
+# it any schema change (no CREATE anywhere, no owner-role membership). On a
+# database shared by several projects its admin cannot allow them, and the sync
+# and installing the SQL strip a login from before, its open session included;
+# on one dedicated to a project they can be allowed until a second project's
+# workspace arrives. Real roles, grants, logins and definer functions, one held
+# as Amazon RDS holds them.
 tests/integration/read-write-logins-refuse-schema-changes.spec.ts
 
 # Both storage drivers apply one per-file rule: the bucket's own limit under the
@@ -2165,6 +2177,25 @@ __tests__/database/grant-tables-are-not-self-writable.test.ts
 # opened by a later migration, the chat blueprint's steps and REGISTER_TABLE.
 tests/integration/grant-tables-on-every-path.spec.ts
 
+# The teams tables enable_teams creates hold to membership, written as the REST
+# API's roles with production's grants: an owner creates an organization with
+# its first membership and invites; another signed-in user can neither join it
+# with any role nor write an invitation into it; the publishable key reads none
+# of the three; the invitee joins through accept-invite run as a NOSUPERUSER
+# NOBYPASSRLS member of the owning role; a member leaves. Only the owner invites
+# an owner: an admin's owner invitation is refused, and accept-invite honours an
+# invitation only while its inviter may still grant its role. Repairs that ask
+# for an owner's rule (FIX_WORKFLOW, SET_PERMISSION) keep the teams rules. A
+# token is kept as its hash and cannot be probed from another organization; an
+# address matches as written or ASCII-lowercased, never a case variant of an
+# existing account or a look-alike, and a refusal names no address; invitations
+# never change once written; an organization's id is the server's. A project
+# with the rules earlier releases gave them is found, secured as one healthy
+# change Backenly made, and a rule a person chose is kept; a membership that
+# looks like the old self-join is listed in both modes and never removed. A
+# provisioned project, the real executor, route and change ledger.
+tests/integration/teams-tables-access.spec.ts
+
 # A rule Backenly guessed from a name, which the request did not ask for, is
 # found on a table made before #654 (UNIQUE on an email column, a CHECK list on
 # status), never on one the SQL declared or made after #654; the loop and the
@@ -2202,3 +2233,20 @@ tests/integration/agent-installs-extensions.spec.ts
 # a missing platform schema behave; nothing sent out carries a channel. Real
 # logins, triggers, routes and the listener hub are the property.
 tests/integration/realtime-channel-per-project.spec.ts
+# Code a project planted in its schema over a direct-access login runs in the
+# platform's own sessions, which reach every project: a planted trigger copies
+# another project's rows when the platform writes the table, even after the
+# session assumed the project's owner role (SET ROLE NONE inside the trigger).
+# lib/security/planted-objects.ts finds it and, as a NOSUPERUSER stand-in for
+# the platform's role, disables the trigger and rule and takes EXECUTE from
+# the functions; the platform's writes then run none of it, and what calls them
+# fails closed. A default, policy or view calling one of the platform's own
+# functions or a built-in that runs SQL is switched off too, and a function a
+# login gave the group every login joins is reported as still on until the
+# sync takes it back. For a project with a record it is one History change
+# Backenly made, which History refuses to restore. Real roles, logins and catalog.
+tests/integration/neutralize-planted-objects.spec.ts
+# A snapshot is replayed without privileges, as the platform: planted code that
+# was switched off comes back on. The restore switches it off again. Real
+# pg_dump and psql.
+tests/integration/restore-switches-planted-code-off.spec.ts

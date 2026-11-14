@@ -2411,7 +2411,7 @@ export async function validateAction(
     // ========== PERMISSION ACTIONS ==========
     case 'SET_PERMISSION':
       if (!action.params.tableName) errors.push('tableName is required')
-      if (!action.params.template) errors.push('template is required (auto | own_rows | own_rows_read | party_rows | related_rows | public_read | admin_only | all_access | org_members | admin_read_all | role_based | moderator_access | custom)')
+      if (!action.params.template) errors.push('template is required (auto | own_rows | own_rows_read | party_rows | related_rows | public_read | admin_only | all_access | org_members | admin_read_all | role_based | moderator_access | teams | custom)')
       preview = `Apply "${action.params.template}" policy to "${action.params.tableName}"`
       break
 
@@ -3280,6 +3280,11 @@ function expectationsFor(action: AIAction): Array<{ action: string; table?: stri
     case 'SET_PERMISSION':
     case 'REMOVE_PERMISSION':
       return table ? [{ action: action.action, table }] : []
+    // Turning teams on sets the teams tables' access rules (TEAMS_TABLES,
+    // lib/services/rls-ownership.ts): run again on tables that already exist,
+    // replacing the rules they had is the request.
+    case 'ENABLE_TEAMS':
+      return ['organizations', 'organization_members', 'organization_invitations'].map((t) => ({ action: 'SET_PERMISSION', table: t }))
     default:
       return []
   }
@@ -11333,9 +11338,11 @@ async function executeSetPermission(params: any, projectId: string): Promise<Exe
   // OR MORE users (connections, conversations, messages); `related_rows`
   // protects a table owned through a FK to a user-owned parent; `custom` takes
   // the caller's own predicate.
+  // `teams` is the rule the inference gives the three tables enable_teams
+  // creates, so a repair that carries the detector's template can install it.
   const validTemplates = [
     'auto', 'own_rows', 'own_rows_read', 'party_rows', 'related_rows', 'public_read', 'admin_only',
-    'all_access', 'org_members', 'admin_read_all', 'role_based', 'moderator_access', 'custom',
+    'all_access', 'org_members', 'admin_read_all', 'role_based', 'moderator_access', 'teams', 'custom',
   ]
   if (!validTemplates.includes(template)) {
     // A REFUSAL, not a fallback to `auto`. Silently resolving an unrecognised
@@ -15013,7 +15020,12 @@ async function executeEnableVectorSearch(params: any, projectId: string): Promis
 //
 // Plus an `accept-invite` runtime endpoint at
 //   POST /api/v1/{projectId}/orgs/accept-invite { token }
-// that consumes the token, deletes the invitation, and creates the member row.
+// that checks the invitation, creates the member row and marks the invitation
+// accepted, as the service role.
+//
+// The three tables get the teams rules (lib/services/workspace-rls.ts,
+// template "teams") once all three exist: membership decides who reads and
+// changes them, which no owner column of their own can say.
 //
 // Authentication for the workspace `users` table is required up-front: orgs
 // without sign-in have no value. If auth is not yet enabled the executor calls
@@ -15061,15 +15073,27 @@ async function executeEnableTeams(params: any, projectId: string, apiKey?: strin
         tableName: 'organization_invitations',
         columns: [
           { name: 'organization_id', type: 'UUID', notNull: true, fkTo: 'organizations' },
-          { name: 'email', type: 'TEXT', notNull: true },
+          // Unique per organization, not across the table (the indexes in step
+          // 4): a table-wide UNIQUE told any owner whether an address or a
+          // token had been used anywhere, and let one organization hold an
+          // address so that another could not invite it.
+          { name: 'email', type: 'TEXT', notNull: true, unique: false },
           { name: 'role', type: 'TEXT', notNull: true, default: 'member' },
-          { name: 'token', type: 'TEXT', notNull: true, unique: true },
+          // Kept as its SHA-256 by the teams rules' trigger.
+          { name: 'token', type: 'TEXT', notNull: true, unique: false },
           { name: 'invited_by_user_id', type: 'UUID' },
           { name: 'expires_at', type: 'TIMESTAMP' },
           { name: 'accepted_at', type: 'TIMESTAMP' },
         ],
       },
     ] as const
+
+    // An organization_invitations table from before the teams rules: what is
+    // pending in it is withdrawn when they go on (lib/services/workspace-rls.ts,
+    // installTeamsPolicy), and this run says so. Read before the tables are
+    // touched, since creating them already puts the rules on.
+    const { invitationsToWithdraw, withdrawalNotice } = await import('@/lib/services/workspace-rls')
+    const preRule = await invitationsToWithdraw(projectId).catch(() => [])
 
     const created: string[] = []
     const failed: string[] = []
@@ -15087,24 +15111,24 @@ async function executeEnableTeams(params: any, projectId: string, apiKey?: strin
       await executeAction({ action: 'GENERATE_API', params: { tableName: t.tableName } }, projectId, apiKey, 0, undefined, false).catch(() => {})
     }
 
-    // 4. Indexes that matter for org lookup performance.
-    try {
-      const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
-      const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
-      await db.$executeRawUnsafe(`
-        CREATE INDEX IF NOT EXISTS idx_org_members_user
-          ON "${postgresSchema}"."organization_members" (user_id)
-      `)
-      await db.$executeRawUnsafe(`
-        CREATE INDEX IF NOT EXISTS idx_org_members_org_user
-          ON "${postgresSchema}"."organization_members" (organization_id, user_id)
-      `)
-      await db.$executeRawUnsafe(`
-        CREATE INDEX IF NOT EXISTS idx_org_invites_token
-          ON "${postgresSchema}"."organization_invitations" (token)
-      `)
-    } catch {
-      /* non-fatal */
+    // 4. Indexes that matter for org lookup performance, and the uniqueness an
+    //    invitation has: one pending invitation per address in an organization,
+    //    and a token used once in it. Each on its own, so a table made before
+    //    (whose rows may not satisfy one) still gets the others.
+    const { getWorkspaceDatabaseNames } = await import('@/lib/services/databaseProvisioning')
+    const { postgresSchema } = getWorkspaceDatabaseNames(projectId)
+    for (const sql of [
+      `CREATE INDEX IF NOT EXISTS idx_org_members_user ON "${postgresSchema}"."organization_members" (user_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_org_members_org_user ON "${postgresSchema}"."organization_members" (organization_id, user_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_org_invites_token ON "${postgresSchema}"."organization_invitations" (token)`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS organization_invitations_pending_email_key ` +
+        `ON "${postgresSchema}"."organization_invitations" (organization_id, lower(email)) WHERE accepted_at IS NULL`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS organization_invitations_org_token_key ` +
+        `ON "${postgresSchema}"."organization_invitations" (organization_id, token)`,
+    ]) {
+      await db.$executeRawUnsafe(sql).catch(() => {
+        /* non-fatal */
+      })
     }
 
     if (failed.length) {
@@ -15116,19 +15140,48 @@ async function executeEnableTeams(params: any, projectId: string, apiKey?: strin
       }
     }
 
+    // 5. The teams rules. Each table got the rule its own columns imply as it
+    //    was created; membership is what decides access to these rows, so the
+    //    teams rules replace them now that all three exist. Teams are not
+    //    reported on unless the rules hold: without them any signed-in end
+    //    user could add themselves to any organization, with any role.
+    const { applyTeamsRules } = await import('@/lib/services/workspace-rls')
+    const rules = await applyTeamsRules(projectId)
+    if (!rules.success) {
+      return {
+        success: false,
+        message: `The teams tables exist, but their access rules could not be set, so teams are not on. ${rules.message}`,
+        error: rules.message,
+        code: 'RLS_NOT_APPLIED',
+      }
+    }
+
     return {
       success: true,
       message:
         `✅ Team / organization multi-tenancy is now wired up.\n\n` +
         `- **Tables**: organizations, organization_members, organization_invitations\n` +
         `- **REST APIs**: CRUD generated for all three\n` +
-        `- **Invite-accept endpoint**: \`POST /api/v1/${projectId}/orgs/accept-invite { token }\`\n\n` +
+        `- **Invite-accept endpoint**: \`POST /api/v1/${projectId}/orgs/accept-invite { token }\`\n` +
+        `- **Access rules** (row-level security): an organization is read by its owner and members and changed only by ` +
+        `its owner; each user reads their own memberships, may leave them, and adds themselves only to an organization ` +
+        `they own; invitations are read by the organization's owner and admins, and the owner invites with any role, ` +
+        `an admin only as "member" or "admin". Member lists and role changes are your server's (a service-role key).\n` +
+        `- **Invitations**: the token is kept only as its SHA-256, so keep the one you send; an invitation never changes ` +
+        `once written (withdraw it and send a new one); accepting checks that its inviter is still the owner or an admin.\n` +
+        (preRule.length ? `- **Withdrawn**: ${withdrawalNotice(preRule)}\n` : '') +
+        `\n` +
         `Typical flow:\n` +
         `1. A user signs up via auth.\n` +
-        `2. They POST /organizations to create an org (they become the owner_user_id).\n` +
-        `3. They POST /organization_invitations { email, role } — generate a random token and email the user a link with it.\n` +
-        `4. The invited user signs up, then POSTs /orgs/accept-invite { token } and is added to organization_members.\n\n` +
-        `Scope your other tables by adding an \`organization_id UUID\` column and an RLS policy that filters by the user's org membership.`,
+        `2. They POST /organizations { name, slug, owner_user_id: <their id> } (the server gives it its id), then POST ` +
+        `/organization_members { organization_id, user_id: <their id>, role: "owner" }.\n` +
+        `3. An owner or admin POSTs /organization_invitations { organization_id, email, role, token, invited_by_user_id: ` +
+        `<their id> } and emails the user a link with the token. Make the token with a cryptographic random generator, ` +
+        `crypto.randomBytes(16).toString('hex') in Node or crypto.getRandomValues in a browser: 32 to 512 characters of ` +
+        `A-Z, a-z, 0-9, - and _. It must be random, never a value someone could guess: Backenly checks its length and ` +
+        `characters, and cannot check that.\n` +
+        `4. The invited user signs up with that email, then POSTs /orgs/accept-invite { token } and is added to organization_members.\n\n` +
+        `Scope your other tables by adding an \`organization_id UUID\` column and the org_members RLS policy.`,
       data: { created, tables: ['organizations', 'organization_members', 'organization_invitations'] },
     }
   } catch (error: any) {

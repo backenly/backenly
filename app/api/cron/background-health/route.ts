@@ -13,6 +13,7 @@
 export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
+import { isCronRequest } from '@/lib/security/cron-auth'
 import { prisma } from '@/lib/db/prisma'
 import { runMonitoredHealthScan } from '@/lib/ai/background-monitor'
 import { getFleetScheduler } from '@/lib/edition'
@@ -24,9 +25,7 @@ function chunk<T>(arr: T[], size: number): T[][] {
 }
 
 export async function POST(request: NextRequest) {
-  const secret = request.headers.get('x-cron-secret') || request.nextUrl.searchParams.get('secret')
-  const expectedSecret = process.env.CRON_SECRET
-  if (expectedSecret && secret !== expectedSecret) {
+  if (!isCronRequest(request, { query: true })) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 

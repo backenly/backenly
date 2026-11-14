@@ -36,6 +36,13 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret-key-minimum-32-c
 process.env.NODE_ENV = 'test'
 process.env.ENGINE_MODE = 'integration' // Integration tests should not execute real DDL
 
+// Function code runs in a runner process of its own, never in this one
+// (lib/services/ai-functions/isolation/). Production starts that process under
+// its own uid through the root function supervisor; tests start it as the
+// test's own user, which only a non-production NODE_ENV allows. The uid
+// boundary itself is tested as root in tests/unit/function-isolation-root.spec.ts.
+if (process.env.BACKENLY_UNSAFE_LOCAL_FUNCTIONS === undefined) process.env.BACKENLY_UNSAFE_LOCAL_FUNCTIONS = '1'
+
 console.log('✅ Test database configured:', process.env.TEST_DATABASE_URL.replace(/:[^:]*@/, ':***@'))
 
 // Record every database handle this test file opens, so the test environment

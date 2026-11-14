@@ -172,7 +172,7 @@ export const ACCEPTANCE_CASES: AcceptanceCase[] = [
   { id: 'FN-LOGS-SUCCESS', area: 'Functions', title: 'a successful run is in the logs', evidence: ops('deploys an http route module exactly as written, runs it, and records the run') },
   { id: 'FN-LOGS-FAILURE', area: 'Functions', title: 'a failed run is in the logs with its error and log lines', evidence: ops('records a failing run with its error and log lines') },
   { id: 'FN-ISOLATION', area: 'Functions', title: 'function SQL reaches its own tables and none of the platform\'s', evidence: ops('reaches this project', 'cannot reach another project') },
-  { id: 'FN-ENV-ISOLATION', area: 'Functions', title: 'process.env carries no platform secret', evidence: unit('function-deploy-code.spec.ts', 'holds the project\'s own values and none of the platform\'s') },
+  { id: 'FN-ENV-ISOLATION', area: 'Functions', title: 'process.env carries no platform secret', evidence: unit('function-deploy-code.spec.ts', 'holds none of the platform\'s values, and neither the project\'s signing secret nor its admin key') },
   { id: 'FN-STAGING', area: 'Functions', title: 'deploy_code isolation on RDS with function-roles.sql installed', evidence: live(['STAGING-deploy-code-isolation'], 'STAGING-deploy-code-isolation passes: the probe function is refused public.users with permission denied.', 'The project function role is created by scripts/sql/function-roles.sql on RDS; only the final staging database has it installed.') },
 
   // ── Realtime ───────────────────────────────────────────────────────────────

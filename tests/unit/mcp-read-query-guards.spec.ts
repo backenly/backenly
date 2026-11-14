@@ -56,6 +56,10 @@ describe('assertReadOnlySql — refuses writes and smuggling', () => {
     rejects('EXPLAIN ANALYZE SELECT * FROM posts', 'NOT_READ_ONLY')
   })
 
+  it('refuses EXPLAIN ANALYSE, the same option in its British spelling', () => {
+    rejects('EXPLAIN ANALYSE SELECT * FROM posts', 'NOT_READ_ONLY')
+  })
+
   it('refuses an empty query', () => rejects('   ', 'EMPTY_QUERY'))
 })
 
@@ -82,6 +86,13 @@ describe('stripSqlNoise — keyword checks must not read string contents', () =>
 
   it('still catches a real write verb outside any string', () => {
     rejects("SELECT * FROM t WHERE a = 'x'; DELETE FROM t")
+  })
+
+  it('reads nested block comments the way PostgreSQL does', () => {
+    // `/* /* */ show */` is ONE comment in PostgreSQL. Ending it at the first
+    // `*/` left ` show */ SELECT ...`, which read as a SHOW.
+    expect(stripSqlNoise('/* /* */ show */ SELECT 1').trim()).toBe('SELECT 1')
+    expect(stripSqlNoise('SELECT 1 /* a /* b */ c */ + 2')).toBe('SELECT 1   + 2')
   })
 })
 
@@ -112,22 +123,31 @@ describe('redactRows — agent context is not a psql prompt', () => {
 
 describe('capped — the row cap is enforced in Postgres', () => {
   it('wraps a select so the database applies the limit', () => {
-    const out = capped('SELECT * FROM big', 200)
+    const out = capped('SELECT * FROM big', 200, 'select')
     expect(out).toMatch(/LIMIT 201/)
     expect(out).toMatch(/_bkn_read_query/)
   })
 
   it('asks for one extra row so truncation can be reported honestly', () => {
-    expect(capped('SELECT 1', 5)).toMatch(/LIMIT 6/)
+    expect(capped('SELECT 1', 5, 'select')).toMatch(/LIMIT 6/)
   })
 
   it('strips a trailing semicolon before wrapping (else the wrap is invalid SQL)', () => {
-    expect(capped('SELECT 1;', 10)).not.toMatch(/;\s*\n\)/)
+    expect(capped('SELECT 1;', 10, 'select')).not.toMatch(/;\s*\n\)/)
   })
 
   it('does not wrap EXPLAIN or SHOW, which cannot be subqueried', () => {
-    expect(capped('EXPLAIN SELECT 1', 10)).toBe('EXPLAIN SELECT 1')
-    expect(capped('SHOW search_path', 10)).toBe('SHOW search_path')
+    expect(capped('EXPLAIN SELECT 1', 10, 'explain')).toBe('EXPLAIN SELECT 1')
+    expect(capped('SHOW search_path', 10, 'show')).toBe('SHOW search_path')
+  })
+
+  it('wraps by what the parser said the statement is, never by how its text begins', () => {
+    // The parse tree of this is a SELECT; its text begins with a comment that a
+    // text reading once ended early, leaving "show" first, so it ran unwrapped
+    // and materialised every row.
+    const out = capped('/* /* */ show */ SELECT g FROM generate_series(1, 3000000) g', 10, 'select')
+    expect(out).toMatch(/^SELECT \* FROM \(/)
+    expect(out).toMatch(/LIMIT 11$/)
   })
 })
 
@@ -177,9 +197,11 @@ describe('system catalogs are refused', () => {
     refuse('SELECT * FROM pg_settings')
   })
 
-  it('covers catalogs that do not exist yet, via the reserved pg_ prefix', () => {
-    // Postgres refuses `CREATE TABLE pg_foo`, so "starts with pg_" is
-    // exhaustive over the catalogs AND cannot collide with a tenant's table.
+  it('covers catalogs that do not exist yet, via the pg_ prefix', () => {
+    // Every catalog schema and every relation in pg_catalog begins with pg_, so
+    // "starts with pg_" is exhaustive over the catalogs. PostgreSQL reserves the
+    // prefix only for schema, tablespace and role names: a project's own table
+    // named pg_foo is legal, and is refused too.
     refuse('SELECT * FROM pg_some_future_catalog')
   })
 
@@ -206,5 +228,60 @@ describe('system catalogs are refused', () => {
         'SELECT u.id, count(o.id) FROM users u LEFT JOIN orders o ON o.user_id = u.id GROUP BY u.id',
       ),
     ).not.toThrow()
+  })
+})
+
+/**
+ * ── A quoted identifier names what the bare word names ───────────────────────
+ *
+ * stripSqlNoise blanked `"..."` exactly as it blanks `'...'`, so the catalog
+ * check never saw `"pg_proc"`, and `SELECT proname, prosrc FROM "pg_proc"` ran
+ * and read every project's function source: the 2026-07-22 leak again, one pair
+ * of quotes away. A string literal is data; a quoted identifier is a name.
+ *
+ * The parser in lib/mcp/read-query-ast.ts decides this first now
+ * (tests/unit/mcp-read-query-catalog-parse.spec.ts); these pin the text check,
+ * which stays behind it as an independent second layer.
+ */
+describe('the text check sees quoted identifiers', () => {
+  const refuse = (sql: string) => rejects(sql, 'CATALOG_NOT_READABLE')
+
+  it('refuses the double-quoted catalog that read every project\'s function source', () => {
+    refuse('SELECT proname, prosrc FROM "pg_proc"')
+  })
+
+  it('refuses every quoted spelling of a catalog', () => {
+    refuse('SELECT nspname FROM "pg_namespace"')
+    refuse('SELECT * FROM "pg_catalog"."pg_proc"')
+    refuse('SELECT * FROM "pg_catalog".pg_proc')
+    refuse('SELECT * FROM pg_catalog."pg_proc"')
+    refuse('SELECT * FROM "information_schema"."columns"')
+    refuse('SELECT * FROM "information_schema".columns')
+    refuse('TABLE "pg_proc"')
+    refuse('SELECT * FROM posts p JOIN "pg_class" c ON c.relname = p.title')
+  })
+
+  it('still reads string literals as data', () => {
+    expect(() => assertReadOnlySql("SELECT * FROM posts WHERE title = 'pg_proc'")).not.toThrow()
+    expect(() => assertReadOnlySql("SELECT * FROM logs WHERE msg = '\"pg_proc\"'")).not.toThrow()
+  })
+
+  it('does not trip on a quoted name that merely contains pg_ inside a word', () => {
+    expect(() => assertReadOnlySql('SELECT "user_pg_notes" FROM "Docs"')).not.toThrow()
+  })
+
+  it('keeps quoted identifiers out of the keyword checks, as before', () => {
+    // A column named "delete" or "comment" is a name, not a verb.
+    expect(() => assertReadOnlySql('SELECT "delete", "comment" FROM audit')).not.toThrow()
+    expect(() => assertReadOnlySql('SELECT "a;b" FROM t')).not.toThrow()
+  })
+
+  it('stripSqlNoise keeps an identifier\'s text only when asked', () => {
+    expect(stripSqlNoise('SELECT * FROM "pg_proc"')).not.toMatch(/pg_proc/)
+    expect(stripSqlNoise('SELECT * FROM "pg_proc"', { keepIdentifiers: true })).toMatch(/\bpg_proc\b/)
+    // A doubled quote inside an identifier is one quote.
+    expect(stripSqlNoise('SELECT "a""b" FROM t', { keepIdentifiers: true })).toMatch(/a"b/)
+    // String literals are blanked either way.
+    expect(stripSqlNoise("SELECT 'pg_proc'", { keepIdentifiers: true })).not.toMatch(/pg_proc/)
   })
 })

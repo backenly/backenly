@@ -1,16 +1,20 @@
 /**
  * AI FUNCTION EXECUTOR
  * ====================
- * Runs AI-generated function code in a sandboxed Worker Thread.
+ * Runs AI-generated function code, never in this process.
  *
- * Security model (replaces the insecure vm.runInNewContext() approach):
- *  - Each execution spawns a disposable Node.js Worker Thread
- *  - Worker Thread = separate V8 isolate — no shared module cache with parent
- *  - process.env is NOT forwarded to the worker
- *  - Static code analysis blocks forbidden patterns BEFORE execution
- *  - All DB / HTTP calls are proxied from the worker back to this module
- *  - Memory hard-limited to 64 MB per execution (resourceLimits)
- *  - Parent-side 10-second hard timeout kills the worker thread
+ * Security model:
+ *  - Each execution is a fresh runner process (isolation/function-runner.cjs).
+ *    In production the root function supervisor starts it under a uid no other
+ *    running process shares, with no secret in its environment, a private
+ *    working directory, a heap limit, an RSS watchdog and a wall-clock kill
+ *    (isolation/function-supervisor.cjs). That boundary, not node:vm, is what
+ *    keeps function code away from this process's secrets and memory.
+ *  - Static code analysis still blocks forbidden patterns BEFORE execution
+ *    (defence in depth: it matches spellings, not capabilities)
+ *  - ctx.db, ctx.http and ctx.integrations are calls from the runner back to
+ *    this module, answered for the run's own project; integration keys stay here
+ *  - Without the supervisor, functions fail closed (FunctionRunnerUnavailableError)
  *
  * Context API available to generated functions:
  *  ctx.db.query(table, where?, opts?) → Promise<rows[]>  (where: equality, ANDed; opts: { limit ≤ 1000, default 100, offset, orderBy })
@@ -22,14 +26,22 @@
  *  ctx.log(...args)                   → void
  */
 
-import { Worker } from 'worker_threads'
 import { createHash } from 'crypto'
-import * as path from 'path'
 import { prisma } from '@/lib/db'
 import { buildIntegrationContext, IntegrationContext } from './integration-context'
 import { getProviderSpec } from './integration-registry'
 import { generateFixedFunctionCode } from './generator'
 import { isRouteModuleFunction, executeRouteModuleFunction, validateRouteModule, RouteModuleRunError } from './route-module-runner'
+import {
+  encodeValue,
+  endedForMemory,
+  FunctionRunnerBusyError,
+  FunctionRunnerStartError,
+  FunctionRunnerUnavailableError,
+  runIsolated,
+  stderrReason,
+  type IsolatedOutcome,
+} from './isolation/client'
 import { recordFunctionRun, rowLastError, runTextKeptInRegion, withLastErrors } from './run-records'
 import { isFunctionSwitchedOff, RUNNABLE_FUNCTION_STATUS_FILTER } from './status'
 import { enforceAiFunctionInvocation, trackAiFunctionInvocation } from '@/lib/entitlements/policy'
@@ -74,7 +86,18 @@ export interface FunctionExecutionResult {
    */
   answer?: { status: number; body: unknown; headers: Record<string, string> }
   error?: string
-  errorCode?: 'PLAN_LIMIT_EXCEEDED' | 'NOT_FOUND'
+  /**
+   * The function did not run, and it is not the function's fault: its state
+   * is left alone, nothing rewrites its code, and the run is not counted.
+   *   RUNNER_UNAVAILABLE  function isolation is missing here (no supervisor,
+   *                       or it refused the run): recorded in the run log.
+   *   RUNNER_BUSY         every function slot on this server was taken: try
+   *                       again after retryAfterSeconds (a 503). Not in the
+   *                       run log, which would make a busy server look like a
+   *                       failing function.
+   */
+  errorCode?: 'PLAN_LIMIT_EXCEEDED' | 'NOT_FOUND' | 'RUNNER_UNAVAILABLE' | 'RUNNER_BUSY'
+  retryAfterSeconds?: number
   upgradeRequired?: boolean
   requiredPlan?: string
   durationMs: number
@@ -114,11 +137,10 @@ export interface FunctionCallerContext {
   selfHeal?: boolean
 }
 
-const EXECUTION_TIMEOUT_MS = 10_000
-const SANDBOX_WORKER_PATH = path.resolve(
-  process.cwd(),
-  'lib/services/ai-functions/sandbox-worker.cjs'
-)
+/** A sandbox body's own budget inside the runner; the run is killed a little after it. */
+const SANDBOX_TIMEOUT_MS = 9_500
+const SANDBOX_HARD_TIMEOUT_MS = 12_000
+const SANDBOX_VALIDATION_HARD_TIMEOUT_MS = 5_000
 
 // ─── DB proxy handlers (executed in parent, called from worker) ───────────────
 
@@ -394,25 +416,22 @@ function getConnectedFromContext(integrations: IntegrationContext): string[] {
   return [...names]
 }
 
-// ─── Worker-based execution ───────────────────────────────────────────────────
+// ─── Execution in a runner process ────────────────────────────────────────────
 
 /**
  * A sandbox run that failed, carrying the lines the function logged first.
  *
- * The worker sends its log lines in the message that ends the run, `done` or
- * `error`, and never one at a time. This used to reject with a bare Error and
- * resolve with the parent's own list, which only ever filled from per-line
- * messages that were never sent, so every sandbox run was recorded with no
- * log lines at all: after a success, and after the failure an agent most
- * needed them for.
+ * The runner sends its log lines in the message that ends the run, and never
+ * one at a time, so a failure carries them: an agent needs them most after a
+ * failure.
  */
 export class SandboxRunError extends Error {
   constructor(
     message: string,
     readonly logs: string[],
     /**
-     * The sandbox failed before the function's code started: the worker could
-     * not be made, or it failed or exited before it said the code was starting.
+     * The sandbox failed before the function's code started: its runner process
+     * could not be made, or it ended before it said the code was starting.
      * Nothing the function does has happened yet, so this is the one failure a
      * run is tried again for (#606).
      */
@@ -423,13 +442,7 @@ export class SandboxRunError extends Error {
   }
 }
 
-/** The lines a finished run logged: the ones the worker sent, else any streamed. */
-function workerLines(streamed: string[], msg: { logs?: unknown }): string[] {
-  const sent = Array.isArray(msg.logs) ? msg.logs.map((l) => String(l)) : []
-  return sent.length ? sent : streamed
-}
-
-function runInWorker(
+async function runInSandbox(
   code: string,
   event: FunctionEvent,
   projectId: string,
@@ -439,127 +452,75 @@ function runInWorker(
   caller: FunctionCallerContext = {},
   integrationManifest: Record<string, string[]> = {}
 ): Promise<{ logs: string[]; returnValue?: any }> {
-  return new Promise((resolve, reject) => {
-    // Spawn a disposable Worker Thread with strict memory limits
-    // env: {} means the worker receives NO environment variables
-    let worker: Worker
-    try {
-      worker = new Worker(SANDBOX_WORKER_PATH, {
-        env: {}, // no process.env forwarded
-        resourceLimits: {
-          maxOldGenerationSizeMb: 64,
-          maxYoungGenerationSizeMb: 16,
-          codeRangeSizeMb: 8,
+  // Every call the run makes is answered here, for this project only: ctx.db
+  // through the typed proxy, ctx.http through the egress guard, and
+  // ctx.integrations with keys that never leave this process.
+  const handlers = { ...buildDbProxy(projectId, caller), ...integrationProxy }
+  let outcome: IsolatedOutcome
+  try {
+    outcome = await runIsolated(
+      {
+        kind: 'sandbox',
+        payload: {
+          code,
+          event: encodeValue(event),
+          connectedIntegrations,
+          envVars,
+          integrationManifest,
+          timeoutMs: SANDBOX_TIMEOUT_MS,
         },
-      })
-    } catch (err: any) {
-      reject(new SandboxRunError(`The sandbox could not start: ${err?.message ?? err}`, [], true))
-      return
-    }
-
-    const dbProxy = buildDbProxy(projectId, caller)
-    const allHandlers = { ...dbProxy, ...integrationProxy }
-    const logs: string[] = []
-    const runId = `r${Date.now()}`
-    // Set when the worker says the function's code starts. A failure before it
-    // is the sandbox's; a failure after it is the run's (SandboxRunError).
-    let codeStarted = false
-
-    // Hard timeout: kill the worker after EXECUTION_TIMEOUT_MS
-    const hardKillTimer = setTimeout(() => {
-      worker.terminate().catch(() => {})
-      reject(new SandboxRunError('Function timed out after 10s', logs))
-    }, EXECUTION_TIMEOUT_MS)
-
-    worker.on('message', async (msg: any) => {
-      if (msg.type === 'started') {
-        codeStarted = true
-        return
-      }
-
-      if (msg.type === 'log') {
-        logs.push(msg.line)
-        return
-      }
-
-      if (msg.type === 'call') {
-        // Proxy DB/HTTP/integration call from worker to parent — execute here and send result back
-        const handler = allHandlers[msg.method]
-        if (!handler) {
-          worker.postMessage({ type: 'result', callId: msg.callId, error: `Unknown method: ${msg.method}` })
-          return
-        }
-        try {
-          const result = await handler(msg.args)
-          worker.postMessage({ type: 'result', callId: msg.callId, result: result ?? null })
-        } catch (err: any) {
-          worker.postMessage({ type: 'result', callId: msg.callId, error: err.message })
-        }
-        return
-      }
-
-      if (msg.type === 'done') {
-        clearTimeout(hardKillTimer)
-        worker.terminate().catch(() => {})
-        resolve({ logs: workerLines(logs, msg), returnValue: msg.result })
-        return
-      }
-
-      if (msg.type === 'error') {
-        clearTimeout(hardKillTimer)
-        worker.terminate().catch(() => {})
-        reject(new SandboxRunError(msg.error, workerLines(logs, msg)))
-        return
-      }
-    })
-
-    worker.on('error', (err) => {
-      clearTimeout(hardKillTimer)
-      reject(new SandboxRunError(err.message, logs, !codeStarted))
-    })
-
-    worker.on('exit', (code) => {
-      clearTimeout(hardKillTimer)
-      if (code !== 0) {
-        reject(new SandboxRunError(`Sandbox worker exited with code ${code}`, logs, !codeStarted))
-      }
-    })
-
-    // Start execution — pass connectedIntegrations so worker can build ctx.integrations,
-    // and decrypted envVars so worker can expose ctx.env (frozen).
-    worker.postMessage({ type: 'run', id: runId, code, event, connectedIntegrations, envVars, integrationManifest })
-  })
+        hardTimeoutMs: SANDBOX_HARD_TIMEOUT_MS,
+      },
+      handlers,
+    )
+  } catch (err) {
+    // Its process could not be made: nothing the function does has happened.
+    if (err instanceof FunctionRunnerStartError) throw new SandboxRunError(`The sandbox could not start: ${err.detail}`, [], true)
+    throw err
+  }
+  const result = outcome.result
+  if (result?.ok) return { logs: result.logs, returnValue: result.value }
+  // The runner answered with the failure: the code threw, a call it made
+  // through ctx failed, or the code was refused before it ran. Never tried again.
+  if (result) throw new SandboxRunError(result.error || 'Function failed', result.logs)
+  // Ended without answering. Before the runner said the function's code was
+  // starting, nothing the function does has happened, so that run may be
+  // tried again (#606); a run stopped at its time limit is not.
+  const beforeCodeRan = !outcome.codeStarted
+  if (outcome.killed === 'timeout') throw new SandboxRunError('Function timed out after 10s', [])
+  if (endedForMemory(outcome)) throw new SandboxRunError('Function used more memory than a function may, and was stopped', [], beforeCodeRan)
+  if (outcome.killed === 'output') throw new SandboxRunError('Function wrote more output than a function may, and was stopped', [], beforeCodeRan)
+  const reason = stderrReason(outcome.stderr)
+  throw new SandboxRunError(
+    `The sandbox exited with ${outcome.signal ? `signal ${outcome.signal}` : `code ${outcome.exitCode}`} before answering${reason ? `: ${reason}` : ''}`,
+    [],
+    beforeCodeRan,
+  )
 }
 
 /**
- * Whether the sandbox would accept `code`, asked of the sandbox worker itself:
- * the import rewrite, the blocked-pattern check, the ctx.require() package list
- * and a compile of the wrapper the worker runs. The function body is never run.
- * Deploying agent-written code checks this before storing it, so what is stored
- * is what the runtime can execute.
+ * Whether the sandbox would accept `code`, asked of the runner itself: the
+ * import rewrite, the blocked-pattern check, the ctx.require() package list and
+ * a compile of the wrapper it runs. The function body is never run. Deploying
+ * agent-written code checks this before storing it, so what is stored is what
+ * the runtime can execute.
+ *
+ * Throws FunctionRunnerUnavailableError when there is nowhere isolated to ask.
  */
-export function validateSandboxFunction(code: string): Promise<{ valid: boolean; error?: string }> {
-  return new Promise((resolve) => {
-    let settled = false
-    const worker = new Worker(SANDBOX_WORKER_PATH, {
-      env: {},
-      resourceLimits: { maxOldGenerationSizeMb: 64, maxYoungGenerationSizeMb: 16, codeRangeSizeMb: 8 },
-    })
-    const finish = (result: { valid: boolean; error?: string }) => {
-      if (settled) return
-      settled = true
-      clearTimeout(timer)
-      worker.terminate().catch(() => {})
-      resolve(result)
-    }
-    const timer = setTimeout(() => finish({ valid: false, error: 'The sandbox did not answer within 5s.' }), 5_000)
-    worker.on('message', (msg: any) => {
-      if (msg?.type === 'validated') finish(msg.error ? { valid: false, error: String(msg.error) } : { valid: true })
-    })
-    worker.on('error', (err) => finish({ valid: false, error: `The sandbox could not start: ${err.message}` }))
-    worker.on('exit', (exitCode) => finish({ valid: false, error: `The sandbox exited with code ${exitCode} before answering.` }))
-    worker.postMessage({ type: 'validate', id: `v${Date.now()}`, code })
+export async function validateSandboxFunction(code: string): Promise<{ valid: boolean; error?: string }> {
+  const outcome = await runIsolated({
+    kind: 'sandbox-validate',
+    payload: { code },
+    hardTimeoutMs: SANDBOX_VALIDATION_HARD_TIMEOUT_MS,
   })
+  const result = outcome.result
+  if (result?.ok) {
+    const error = (result.value as { error?: unknown } | null)?.error
+    return error ? { valid: false, error: String(error) } : { valid: true }
+  }
+  if (result) return { valid: false, error: result.error || 'The sandbox refused the code.' }
+  if (outcome.killed === 'timeout') return { valid: false, error: 'The sandbox did not answer within 5s.' }
+  return { valid: false, error: `The sandbox exited with code ${outcome.exitCode} before answering.` }
 }
 
 // ─── Auto-Fix ─────────────────────────────────────────────────────────────────
@@ -781,7 +742,9 @@ export async function healErroredAiFunctions(
     const lastError = fn.lastError ?? ''
     try {
       if (isRouteModuleFunction(fn.generatedCode)) {
-        const check = validateRouteModule(fn.generatedCode)
+        // Evaluated in a runner process; without one this throws, and the
+        // function is counted as failed here with nothing about it changed.
+        const check = await validateRouteModule(fn.generatedCode)
         if (check.valid && RUNNER_CONTRACT_BUG_RE.test(lastError)) {
           // history: how the last run went, not configuration (lib/changes/resources/functions.ts)
           await prisma.aiFunction.update({
@@ -883,17 +846,21 @@ export async function executeAiFunction(
         durationMs: 0,
       }
     }
+  }
+  // The run's count against the plan and its billing record (lib/usage/axes.ts
+  // `fn_runs`): once for every invocation that runs the function, whatever its
+  // outcome, and never for one the function runner turned away, since the code
+  // did not run.
+  const countRun = () => {
+    if (!account) return
     trackAiFunctionInvocation(account).catch(() => {})
-    // The billing record of the run (lib/usage/axes.ts `fn_runs`): counted
-    // here, after the plan check and before execution, so every invocation that
-    // actually runs the function counts once, whatever its outcome.
     recordUsage({ projectId, axis: 'fn_runs', quantity: 1, source: 'executor', billingAccountId: account })
   }
 
   // ─── Route-module path ──────────────────────────────────────────────────────
   // Platform-generated Next.js endpoint handlers (jobs/wallets/orders/admin/
-  // *-schema/...) are a different code shape than NL sandbox bodies and CANNOT
-  // run in the Worker sandbox. They run in-process via the route-module runner.
+  // *-schema/...) are a different code shape than NL sandbox bodies. They run
+  // through the route-module runner, in a runner process of their own.
   // A non-2xx HTTP status is still a SUCCESSFUL execution — the handler ran and
   // answered (e.g. a 401 from an auth-gated endpoint on a no-token test run is
   // correct behaviour, not a failure). Only thrown errors / timeouts fail.
@@ -906,6 +873,7 @@ export async function executeAiFunction(
         fn.triggerTable,
         { headers: caller.headers, testRun: caller.testRun }
       )
+      countRun()
       const durationMs = Date.now() - startMs
       // The run's record says what the handler answered. A 4xx is the caller's
       // error and the run still succeeded; a 5xx is the function's own, and the
@@ -942,6 +910,8 @@ export async function executeAiFunction(
       }
     } catch (err: any) {
       const durationMs = Date.now() - startMs
+      if (err instanceof FunctionRunnerUnavailableError) return runnerRefused(err, functionId, projectId, durationMs, caller.trigger ?? event.type)
+      countRun()
       const errorMsg = err?.message || 'Route function error'
       // What the module logged before it failed, which is what explains it:
       // stored with the run and returned with the error, as a sandbox run's are.
@@ -967,7 +937,7 @@ export async function executeAiFunction(
     }
   }
 
-  // Load integration context + per-project env vars in parallel — workers are
+  // Load integration context + per-project env vars in parallel — runs are
   // short-lived so no caching needed. `ctx.env` is the canonical secret store
   // for anything that isn't a first-class typed integration.
   const { getDecryptedEnvMap } = await import('@/lib/services/projectEnvVars')
@@ -995,7 +965,7 @@ export async function executeAiFunction(
     }
 
     try {
-      const { logs, returnValue } = await runInWorker(
+      const { logs, returnValue } = await runInSandbox(
         fn.generatedCode,
         event,
         projectId,
@@ -1005,6 +975,7 @@ export async function executeAiFunction(
         caller,
         integrationManifest,
       )
+      countRun()
       const durationMs = Date.now() - startMs
 
       // Persist execution log
@@ -1019,12 +990,33 @@ export async function executeAiFunction(
 
       return { success: true, logs, returnValue, durationMs }
     } catch (err: any) {
+      // Turned away, first time or on a retry: a retry only follows a sandbox
+      // that failed before the code started, so the code has not run.
+      if (err instanceof FunctionRunnerUnavailableError) {
+        return runnerRefused(err, functionId, projectId, Date.now() - startMs, caller.trigger ?? event.type)
+      }
       lastError = err instanceof Error ? err : new Error(String(err))
       if (attempt < MAX_RETRIES && err instanceof SandboxRunError && err.beforeCodeRan) continue
       break
     }
   }
 
+  // Every attempt failed before the function's code started: the sandbox
+  // never ran it. That is this server's failure, answered as functions being
+  // unavailable here (a 503): not counted, not the function's error, and not
+  // a reason to rewrite it.
+  if (lastError instanceof SandboxRunError && lastError.beforeCodeRan) {
+    const detail = lastError.message
+    return runnerRefused(
+      new FunctionRunnerUnavailableError(detail, `The sandbox could not run the function, ${MAX_RETRIES + 1} times: ${detail}`),
+      functionId,
+      projectId,
+      Date.now() - startMs,
+      caller.trigger ?? event.type,
+    )
+  }
+
+  countRun()
   const durationMs = Date.now() - startMs
   const errorMsg = lastError?.message || 'Unknown error'
   // What the function logged before it failed, which is what an agent reads
@@ -1051,6 +1043,70 @@ export async function executeAiFunction(
   }
 
   return { success: false, logs, error: errorMsg, durationMs }
+}
+
+/**
+ * The function did not run: the function runner turned it away. Its status and
+ * last error are left as they were, nothing rewrites its code and the run is
+ * not counted, because nothing about the code is known to be wrong.
+ *
+ * Turned away for capacity, the caller is told to try again (a 503) and the
+ * run log is left alone: the failing-function check reads that log, and a
+ * busy server is not a failing function. Turned away because isolation is
+ * missing here, the run log says why, so whoever runs this deployment sees it.
+ */
+async function runnerRefused(
+  err: FunctionRunnerUnavailableError,
+  functionId: string,
+  projectId: string,
+  durationMs: number,
+  triggerType: string,
+): Promise<FunctionExecutionResult> {
+  if (err instanceof FunctionRunnerBusyError) {
+    console.warn(`[AiFn] function ${functionId} of project ${projectId} was not run: ${err.message}`)
+    return { success: false, logs: [], error: err.message, errorCode: 'RUNNER_BUSY', retryAfterSeconds: err.retryAfterSeconds, durationMs }
+  }
+  console.error(`[AiFn] ${err.message}`)
+  await persistExecutionLog(functionId, projectId, false, [], err.message, durationMs, triggerType)
+  return { success: false, logs: [], error: err.message, errorCode: 'RUNNER_UNAVAILABLE', durationMs }
+}
+
+/** Retries, and the first backoff (doubled each time), for a triggered run turned away for capacity. */
+export const TRIGGERED_RUN_BUSY_RETRIES = 3
+export const TRIGGERED_RUN_BUSY_BACKOFF_MS = 5_000
+
+/**
+ * A run a trigger fires (a schedule, a sign-up) has no caller to answer a 503
+ * to, so one turned away because every function slot on this server is taken
+ * is tried again: after 5, 10 and 20 seconds. Still turned away, the miss is
+ * recorded in the function's run log, so it is seen rather than lost. A run
+ * that happened, or one turned away for any other reason, is returned as it is.
+ */
+export async function executeTriggeredRun(
+  functionId: string,
+  projectId: string,
+  event: FunctionEvent,
+  caller: FunctionCallerContext = {},
+  opts: { retries?: number; backoffMs?: number } = {},
+): Promise<FunctionExecutionResult> {
+  const retries = opts.retries ?? TRIGGERED_RUN_BUSY_RETRIES
+  const backoffMs = opts.backoffMs ?? TRIGGERED_RUN_BUSY_BACKOFF_MS
+  const startMs = Date.now()
+  let result = await executeAiFunction(functionId, projectId, event, caller)
+  for (let retry = 0; result.errorCode === 'RUNNER_BUSY' && retry < retries; retry++) {
+    await new Promise((r) => setTimeout(r, backoffMs * 2 ** retry))
+    result = await executeAiFunction(functionId, projectId, event, caller)
+  }
+  if (result.errorCode === 'RUNNER_BUSY') {
+    const seconds = Math.round((Date.now() - startMs) / 1000)
+    const error =
+      `Not run: every function slot on this server stayed in use through ${retries + 1} attempts over ${seconds}s, ` +
+      `so this ${caller.trigger ?? event.type} run was dropped. ${result.error ?? ''}`.trim()
+    console.warn(`[AiFn] function ${functionId} of project ${projectId}: ${error}`)
+    await persistExecutionLog(functionId, projectId, false, [], error, 0, caller.trigger ?? event.type)
+    return { ...result, error }
+  }
+  return result
 }
 
 // ─── Execution Log Persistence (for GAP 9 — function logs UI) ────────────────
@@ -1143,7 +1199,7 @@ export async function fireAiFunctionsOnSignup(
     })
     if (functions.length === 0) return
     const event: FunctionEvent = { type: 'signup', data: user }
-    await Promise.allSettled(functions.map(fn => executeAiFunction(fn.id, projectId, event)))
+    await Promise.allSettled(functions.map(fn => executeTriggeredRun(fn.id, projectId, event)))
   } catch (err: any) {
     console.warn('[AiFunctions] fireAiFunctionsOnSignup failed (non-fatal):', err?.message)
   }

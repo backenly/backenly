@@ -533,7 +533,7 @@ async function handleDynamicRequest(req: Request, res: Response) {
       const fwdHeaders = pickFnHeaders(h => req.headers[h])
 
       const { executeAiFunction } = await import('@/lib/services/ai-functions/executor')
-      const { answerHeaders, logsFor } = await import('@/lib/services/ai-functions/reply')
+      const { answerHeaders, logsFor, runnerRefusal } = await import('@/lib/services/ai-functions/reply')
       const result = await executeAiFunction(fn.id, projectId!, {
         type: 'manual',
         data: eventData,
@@ -560,6 +560,15 @@ async function handleDynamicRequest(req: Request, res: Response) {
           upgradeRequired: true,
           ...(result.requiredPlan ? { requiredPlan: result.requiredPlan } : {}),
         })
+        return
+      }
+
+      // Turned away by the function runner: the function did not run, and
+      // the answer is the server's 503, not the function's 500.
+      const refusal = runnerRefusal(result)
+      if (refusal) {
+        if (refusal.retryAfter) res.setHeader('Retry-After', String(refusal.retryAfter))
+        res.status(refusal.status).json({ error: refusal.error, code: refusal.code, ...(refusal.retryAfter ? { retryAfter: refusal.retryAfter } : {}) })
         return
       }
 

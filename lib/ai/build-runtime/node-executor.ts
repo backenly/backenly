@@ -1014,7 +1014,9 @@ async function executePermissionsNode(
 
     // BUG-12: Re-read the actual count from the DB instead of trusting the execution-time
     // counter, which can under-count when idempotent "already exists" results are treated
-    // as failures. Count policies actually present in the workspace schema.
+    // as failures. Count policies actually present in the workspace schema. The teams
+    // tables count too: own_rows asked of them installs the teams rules instead
+    // (lib/services/workspace-rls.ts), and those protect them.
     let actualApplied = successCount
     try {
       // The catalog of the project's database, in its region.
@@ -1023,7 +1025,7 @@ async function executePermissionsNode(
       const schemaName = `workspace_${projectId}`
       const policyRows = await db.$queryRawUnsafe<Array<{ tablename: string }>>(
         `SELECT DISTINCT tablename FROM pg_policies
-         WHERE schemaname = $1 AND policyname LIKE '%own_rows%'`,
+         WHERE schemaname = $1 AND (policyname LIKE '%own_rows%' OR policyname LIKE 'backenly_teams_%')`,
         schemaName
       )
       if (policyRows.length > 0) {

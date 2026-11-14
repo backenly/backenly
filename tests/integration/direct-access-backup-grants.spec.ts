@@ -13,7 +13,10 @@
  *   a table the application adds later       a default privilege for the
  *                                            application role
  *   a table the developer adds directly      a default privilege for their
- *                                            read-write role, before adoption
+ *                                            read-write role, before adoption,
+ *                                            where it may still change the
+ *                                            schema (a database dedicated to
+ *                                            one project, or a login from before)
  *   a table no default privilege covers      the next sync
  *   every workspace that already exists      installing the file again
  *   a project the application creates        provisioning (lib/projects/provision.ts)
@@ -86,7 +89,8 @@ beforeAll(async () => {
   await q(`SET backenly.app_role = '${app}'`)
   await q(`CREATE SCHEMA "${schema}" AUTHORIZATION ${app}`)
   await q(`CREATE ROLE ${rw} NOLOGIN`)
-  // Provision: the rw role gets USAGE + CREATE, the owner role takes the schema.
+  // Provision: the owner role takes the schema, and the rw role gets USAGE, rows
+  // only, since this database holds several projects (setup-direct-access.sql, 5c).
   await sync()
 }, 120_000)
 
@@ -137,7 +141,10 @@ describe('the sync and the backup role', () => {
   })
 
   it('lets it read a table the developer creates directly, from its creation through adoption', async () => {
-    // The developer's own DDL, as their read-write role.
+    // The developer's own DDL, as their read-write role, where it may still
+    // change the schema. Granted by hand: on this shared database the sync gives
+    // it none, and the adoption sync below takes this one back.
+    await q(`GRANT CREATE ON SCHEMA "${schema}" TO ${rw}`)
     await q(`SET ROLE ${rw}`)
     await q(`CREATE TABLE "${schema}".orders (id serial PRIMARY KEY, total int)`)
     await q(`RESET ROLE`)
@@ -151,6 +158,7 @@ describe('the sync and the backup role', () => {
     // Adoption syncs again and hands the table to the owner role; the read stays.
     await sync()
     expect(await ownerOf(table)).toBe(own)
+    expect((await q(`SELECT has_schema_privilege($1, $2, 'CREATE') AS ok`, [rw, schema]))[0].ok).toBe(false)
     expect(await canRead(BACKUP, table)).toBe(true)
     expect(await canRead(BACKUP, seq)).toBe(true)
     expect(await canUse(BACKUP, schema)).toBe(true)

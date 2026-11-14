@@ -137,6 +137,12 @@ BEGIN
       ('public.backenly_direct_drop_role(text)',                        true),
       ('public.backenly_direct_sync_schema(text,text,text,text)',       true),
       ('public.backenly_direct_set_schema_changes(text,boolean)',       true),
+      ('public.backenly_direct_shared_database()',                      true),
+      ('public.backenly_direct_end_stripped_sessions(text)',            true),
+      ('public.backenly_direct_login_holds(text,text)',                 false),
+      ('public.backenly_direct_schema_change_holds(text)',              false),
+      ('public.backenly_direct_shared_holds(text,text)',                false),
+      ('public.backenly_direct_strip_schema_changes(text,text,text)',   false),
       ('public.backenly_pgrst_prune_schemas()',                         false),
       ('public.backenly_pgrst_apply_owner_defaults(text)',              false),
       ('public.backenly_capture_ddl()',                                 false),
@@ -300,6 +306,56 @@ BEGIN
         problems := problems || format('backenly_backup cannot read %s in workspace schema %s, so its snapshots fail',
                                        array_to_string(r.unreadable, ', '), r.workspace);
       END IF;
+    END LOOP;
+  END IF;
+
+  -- ── Direct access: on this shared database, read-write logins change rows ──
+  -- A region's database holds every project in the region. Code one project's
+  -- login created in its schema would run in the sessions that serve all of
+  -- them, so no login may create anything (scripts/setup-direct-access.sql,
+  -- sections 5c and 7, which the direct-access step applies).
+  IF to_regprocedure('public.backenly_direct_shared_database()') IS NOT NULL THEN
+    IF NOT public.backenly_direct_shared_database() THEN
+      problems := problems || 'this database is marked as dedicated to one project, but a region''s database is shared by its projects'::text;
+    END IF;
+  END IF;
+  IF to_regprocedure('public.backenly_direct_schema_change_holds(text)') IS NOT NULL THEN
+    FOR r IN
+      SELECT p.rolname::text AS login,
+             public.backenly_direct_schema_change_holds(p.rolname::text) AS holds,
+             EXISTS (SELECT 1 FROM pg_auth_members m JOIN pg_roles g ON g.oid = m.roleid
+                      WHERE m.member = p.oid AND g.rolname = 'backenly_no_schema_changes') AS marked
+        FROM pg_roles p
+       WHERE p.rolname ~ '^bkn_rw_[0-9a-f]{12}$'
+       ORDER BY 1
+    LOOP
+      IF cardinality(r.holds) > 0 THEN
+        problems := problems || format('read-write login %s can change the schema: %s', r.login, array_to_string(r.holds, ', '));
+      ELSIF NOT r.marked THEN
+        problems := problems || format('read-write login %s is not a member of backenly_no_schema_changes', r.login);
+      END IF;
+    END LOOP;
+  END IF;
+  -- A strip ends its login's sessions as it runs, and marks the login so that
+  -- the sessions that logged in before it committed are ended once it has.
+  -- The application does that right after each sync, and the direct-access
+  -- step itself (section 7b), so a mark still here is a strip whose sessions
+  -- nothing ended.
+  FOR r IN
+    SELECT a.rolname::text AS login
+      FROM pg_shdescription d JOIN pg_roles a ON a.oid = d.objoid
+     WHERE d.classoid = 'pg_authid'::regclass AND a.rolname ~ '^bkn_rw_[0-9a-f]{12}$'
+       AND d.description LIKE 'backenly: sessions to end after a strip%'
+     ORDER BY 1
+  LOOP
+    problems := problems || format('read-write login %s was stripped and its sessions were not ended since: SELECT public.backenly_direct_end_stripped_sessions()', r.login);
+  END LOOP;
+  -- What every direct-access login holds at once: through PUBLIC, through the
+  -- group each joins and whose privileges each has, or through the marker
+  -- role, which must hold nothing (section 5c, backenly_direct_shared_holds).
+  IF to_regprocedure('public.backenly_direct_shared_holds(text,text)') IS NOT NULL THEN
+    FOR r IN SELECT h.holder, h.item FROM public.backenly_direct_shared_holds() h ORDER BY 1, 2 LOOP
+      problems := problems || format('%s holds %s, and so every direct-access login does', r.holder, r.item);
     END LOOP;
   END IF;
 

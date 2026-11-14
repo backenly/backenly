@@ -249,8 +249,19 @@ const nextConfig = {
     // so only the upload routes can use the larger buffer.
     proxyClientMaxBodySize: 101 * 1024 * 1024,
   },
+  // libpg-query is the PostgreSQL parser every read-only SQL statement is
+  // checked with before it runs (lib/mcp/read-query-ast.ts). Its loader reads
+  // libpg-query.wasm from beside its own file (__dirname), so it is required
+  // from node_modules at run time rather than bundled into a chunk that has no
+  // .wasm beside it. Without the file the check fails closed and every
+  // run_query and SQL-tab query is refused.
+  serverExternalPackages: ['libpg-query'],
   outputFileTracingIncludes: {
-    '/api/**/*': ['./node_modules/.prisma/**/*'],
+    // libpg-query.wasm is read through a path built at run time, which output
+    // tracing cannot follow, so the package is named whole, with @pgsql/types,
+    // which it requires. docker/web.Dockerfile also copies both in and asserts
+    // that the image can parse.
+    '/api/**/*': ['./node_modules/.prisma/**/*', './node_modules/libpg-query/**/*', './node_modules/@pgsql/types/**/*'],
     // Cloud composition, named explicitly because it is read at RUNTIME by
     // lib/edition/cloud-extension.ts and cannot be traced:
     //

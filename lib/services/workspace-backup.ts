@@ -684,6 +684,31 @@ export async function restoreWorkspace(
       )
     }
 
+    // The replay made the schema's code anew as the application's role from a
+    // dump that carries no privileges: a function a project planted, and that
+    // was switched off, is the platform's again with EXECUTE for everyone, and
+    // a snapshot older than the switch-off brings its triggers back on. On a
+    // database shared by several projects it is switched off again, as one
+    // more change on the project's History (lib/security/planted-objects.ts).
+    // Logged, never a failed restore: the restored data is in place.
+    try {
+      const { switchOffAfterRestore } = await import('@/lib/security/planted-objects')
+      const outcome = await switchOffAfterRestore(projectId, region, [schemaName])
+      if (outcome && (outcome.result.failed.length > 0 || outcome.left.length > 0)) {
+        console.error(
+          `[Restore] Restored ${projectId}, but code a project planted is still on in it: ` +
+            [...outcome.result.failed.map((f) => `${f.action.object.kind} ${f.action.object.name}`),
+             ...outcome.left.map((l) => `${l.object.kind} ${l.object.name}`)].join(', ') +
+            '. Run scripts/neutralize-planted-objects.ts --apply for this project.',
+        )
+      }
+    } catch (plantedErr: any) {
+      console.error(
+        `[Restore] Restored ${projectId}, but the code a project planted was not switched off again: ` +
+          `${sanitizeError(plantedErr?.message ?? '')}. Run scripts/neutralize-planted-objects.ts --apply for this project.`,
+      )
+    }
+
     // Every view of the schema follows it, as after a governed change: the REST
     // API's cache, the reconciler's baseline (measured against the replaced
     // schema it would re-create what the restore removed), this process's

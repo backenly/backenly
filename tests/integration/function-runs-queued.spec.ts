@@ -19,6 +19,8 @@
  *     MAX_ATTEMPTS times is recorded as a failed run and dropped.
  *  4. A function that throws is recorded as failed once and not run again.
  *  5. Pausing a project discards its queued runs with its outbox.
+ *  6. A run the function supervisor turns away for capacity goes back on the
+ *     queue as it was, unrecorded, and runs once a slot is free.
  */
 
 import { randomUUID } from 'crypto'
@@ -34,6 +36,7 @@ import {
   ensureFunctionJobs,
   kickFunctionRuns,
 } from '@/lib/services/ai-functions/run-queue'
+import { startStandInSupervisor } from '../helpers/stand-in-function-supervisor'
 
 let ownerId = ''
 let projectId = ''
@@ -220,3 +223,35 @@ it('discards queued runs with the outbox when the project is paused', async () =
   expect(await count(FUNCTION_JOBS_TABLE)).toBe(0)
   expect(await count(OUTBOX_TABLE)).toBe(0)
 }, 60_000)
+
+// A stand-in supervisor on a UNIX socket; Windows has no supervisor.
+;(process.platform === 'win32' ? it.skip : it)(
+  'puts back a run the function supervisor turned away for capacity, unrecorded, and runs it once a slot is free',
+  async () => {
+    await executeInWorkspaceSchema(
+      projectId,
+      `INSERT INTO "${schema}"."${FUNCTION_JOBS_TABLE}" (function_id, event) VALUES ($1, '{"type":"insert","table":"orders","data":{"n":6001}}'::jsonb)`,
+      countFnId,
+    )
+    const recorded = (await runs(countFnId)).length
+    const supervisor = await startStandInSupervisor()
+    supervisor.use()
+    try {
+      expect(await kickFunctionRuns(projectId, async () => 0)).toMatchObject({ ran: 0, deferred: 1 })
+    } finally {
+      await supervisor.close()
+    }
+    // As it was before the claim: waiting, no attempt spent, nothing recorded.
+    const queued = (await queryWorkspaceSchema(
+      projectId,
+      `SELECT attempts, claimed_at FROM "${schema}"."${FUNCTION_JOBS_TABLE}" WHERE event->'data'->>'n' = '6001'`,
+    )) as Array<{ attempts: number; claimed_at: Date | null }>
+    expect(queued).toEqual([{ attempts: 0, claimed_at: null }])
+    expect(await runs(countFnId)).toHaveLength(recorded)
+    expect((await prisma.aiFunction.findUniqueOrThrow({ where: { id: countFnId } })).status).toBe('active')
+
+    await settled()
+    expect((await runs(countFnId)).filter((r) => r.logs[0] === 'order 6001' && r.success)).toHaveLength(1)
+  },
+  60_000,
+)

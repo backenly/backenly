@@ -15,10 +15,11 @@
 export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
+import { isCronRequest } from '@/lib/security/cron-auth'
 import { prisma } from '@/lib/db/prisma'
 
 function verifyCronAuth(request: NextRequest): boolean {
-  return request.headers.get('authorization') === `Bearer ${process.env.CRON_SECRET}`
+  return isCronRequest(request)
 }
 
 export async function GET(request: NextRequest) {

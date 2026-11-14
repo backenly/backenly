@@ -9,7 +9,8 @@
  * READ_ONLY: SELECT-only role — psql/TablePlus/BI/pg_dump, cannot mutate.
  * READ_WRITE: DML. Schema changes over it are refused until the admin allows
  * them; allowed, they skip approvals and History and are captured as drift,
- * adopted or flagged by the autonomy loop (lib/autonomy/drift-watch.ts).
+ * adopted or flagged by the autonomy loop (lib/autonomy/drift-watch.ts). On a
+ * database shared by several projects they cannot be allowed (409, with why).
  *
  * Secrets: responses include the decrypted password/connection string — this
  * is the owner-authenticated management surface, same trust boundary as the
@@ -23,6 +24,8 @@ import {
   provisionDirectAccess,
   revokeDirectAccess,
   setSchemaChanges,
+  SCHEMA_CHANGES_UNAVAILABLE_MESSAGE,
+  SchemaChangesUnavailableError,
   type DirectAccessMode,
 } from '@/lib/services/direct-access'
 
@@ -81,6 +84,15 @@ export async function PATCH(request: NextRequest) {
       const credential = await setSchemaChanges(validated.projectId, value === 'allowed')
       return NextResponse.json({ credential })
     } catch (err: any) {
+      // Not allowed here, and the reason is the answer: a database shared by
+      // several projects never allows them (scripts/setup-direct-access.sql,
+      // section 5c); one whose helpers predate that cannot say.
+      if (err instanceof SchemaChangesUnavailableError) {
+        return NextResponse.json(
+          { error: err.message, code: err.code, reason: err.reason },
+          { status: err.reason === 'shared_database' ? 409 : 503 },
+        )
+      }
       const msg: string = err?.message ?? ''
       if (msg.includes('no read-write login')) {
         return NextResponse.json({ error: 'This project has no read-write login.' }, { status: 404 })
@@ -90,7 +102,7 @@ export async function PATCH(request: NextRequest) {
       // that has not had it reinstalled cannot apply the setting.
       if (msg.includes('backenly_direct_set_schema_changes') && msg.includes('does not exist')) {
         return NextResponse.json(
-          { error: 'This database needs its direct-access helpers updated before this setting can change.' },
+          { error: SCHEMA_CHANGES_UNAVAILABLE_MESSAGE.helpers_outdated },
           { status: 503 },
         )
       }

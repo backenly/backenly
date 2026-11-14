@@ -14,6 +14,7 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server'
+import { isCronRequest } from '@/lib/security/cron-auth'
 import { runLifecycleCleanup, getStorageHealth, STORAGE_SOFT_DELETE_RETENTION_DAYS } from '@/lib/storage/storage-lifecycle'
 import { s3LocationFor } from '@/lib/services/s3-config'
 import { serviceRegion } from '@/lib/data-plane/serving'
@@ -51,7 +52,7 @@ export const maxDuration = 300 // 5 minutes
  * - Only accessible via cron or admin
  */
 function verifyCronAuth(request: NextRequest): boolean {
-  return request.headers.get('authorization') === `Bearer ${process.env.CRON_SECRET}`
+  return isCronRequest(request)
 }
 
 export async function POST(request: NextRequest) {

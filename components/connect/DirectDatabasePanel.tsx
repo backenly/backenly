@@ -9,7 +9,9 @@
  *   • Read-write — rows only, until the admin allows schema changes over it:
  *                  those skip approvals and History, so Postgres refuses them
  *                  by default. Allowed, they are captured by the drift watch
- *                  and adopted/flagged by autonomy.
+ *                  and adopted/flagged by autonomy. On a database shared with
+ *                  other projects they cannot be allowed at all, and the card
+ *                  says why instead of offering the switch.
  *
  * Plus the portability guarantee made concrete: one-click pg_dump exports
  * (full / schema / data) that restore on any PostgreSQL.
@@ -45,6 +47,8 @@ interface Credential {
   rotatedAt: string | null
   /** READ_WRITE only. */
   schemaChanges?: 'allowed' | 'refused'
+  /** READ_WRITE only, where schema changes cannot be allowed: why. */
+  schemaChangesUnavailable?: 'shared_database' | 'helpers_outdated'
 }
 
 interface Status {
@@ -255,7 +259,16 @@ export function DirectDatabasePanel({ projectId }: { projectId: string }) {
                     }
                   >
                     They skip approvals and History. Autonomy asks you before it adopts them into your APIs.
+                    {readWrite.schemaChangesUnavailable === 'shared_database' &&
+                      ' This project’s database is shared with other projects, so Backenly takes them away at the login’s next sync.'}
                   </KitNote>
+                ) : readWrite.schemaChangesUnavailable ? (
+                  <p className="text-[12.5px] leading-relaxed text-faint">
+                    Schema changes over this login are refused.{' '}
+                    {readWrite.schemaChangesUnavailable === 'shared_database'
+                      ? 'They cannot be allowed here: this project’s database is shared with other projects, and a trigger, function or view made over the login would run with access to all of them.'
+                      : 'This database needs its direct-access helpers updated before this setting can change.'}
+                  </p>
                 ) : (
                   <div className="flex flex-wrap items-center justify-between gap-2 text-[12.5px] text-faint">
                     <span>Schema changes over this login are refused.</span>

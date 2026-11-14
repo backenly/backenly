@@ -20,7 +20,8 @@ export const dynamic = 'force-dynamic'
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db/prisma'
 import { getIntegrationKey } from '@/lib/services/integrationKeyStore'
-import { executeAiFunction, FunctionEvent } from '@/lib/services/ai-functions/executor'
+import { executeAiFunction, FunctionEvent, type FunctionExecutionResult } from '@/lib/services/ai-functions/executor'
+import { runnerRefusal } from '@/lib/services/ai-functions/reply'
 import { RUNNABLE_FUNCTION_STATUS_FILTER } from '@/lib/services/ai-functions/status'
 import { ERROR_TAXONOMY } from '@/lib/errors/taxonomy'
 import { recordedV1 } from '@/lib/traffic/recorded-v1'
@@ -280,19 +281,43 @@ async function handlePOST(
     }
 
     // Execute wildcard functions
-    await Promise.allSettled(
+    const fired = await Promise.allSettled(
       wildcardFunctions.map(fn => executeAiFunction(fn.id, projectId, event))
     )
-    return NextResponse.json({ received: true, functionsTriggered: wildcardFunctions.length, ...(sync ? { sync } : {}) })
+    return firedAnswer(fired, sync)
   }
 
   // Execute matching functions in parallel (non-blocking from caller's perspective)
-  await Promise.allSettled(
+  const fired = await Promise.allSettled(
     functions.map(fn => executeAiFunction(fn.id, projectId, event))
   )
 
   console.log(`[Webhook] Fired ${functions.length} function(s) for ${integrationLower} webhook on project ${projectId}`)
-  return NextResponse.json({ received: true, functionsTriggered: functions.length, ...(sync ? { sync } : {}) })
+  return firedAnswer(fired, sync)
+}
+
+/**
+ * The answer once the matching functions were fired. When the function runner
+ * turned every one of them away (no free slot, or no isolation here), none ran:
+ * a 503 has the provider deliver the event again later, as Stripe and the
+ * others do for any non-2xx. Nothing runs twice: no function ran, and the
+ * Stripe sync does not apply an event payment_events already holds. If any
+ * function ran, the event was delivered.
+ */
+function firedAnswer(
+  fired: PromiseSettledResult<FunctionExecutionResult>[],
+  sync: ReturnType<typeof syncReply> | undefined,
+): NextResponse {
+  const refusals = fired.map((f) => (f.status === 'fulfilled' ? runnerRefusal(f.value) : null))
+  const first = refusals[0]
+  if (first && refusals.every((r) => r !== null)) {
+    const headers: Record<string, string> = first.retryAfter ? { 'Retry-After': String(first.retryAfter) } : {}
+    return NextResponse.json(
+      { received: false, error: first.error, code: first.code, ...(sync ? { sync } : {}) },
+      { status: first.status, headers },
+    )
+  }
+  return NextResponse.json({ received: true, functionsTriggered: fired.length, ...(sync ? { sync } : {}) })
 }
 
 // ── Stripe business logic ─────────────────────────────────────────────────────

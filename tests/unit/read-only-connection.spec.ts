@@ -12,7 +12,13 @@
  * role and the database name, reached customers and their agents verbatim.
  */
 
-import { isConnectionFailure, readOnlyConnection, READ_CONNECTION_FAILED } from '@/lib/mcp/read-query'
+import {
+  isConnectionFailure,
+  ownCodeRefusal,
+  readOnlyConnection,
+  READ_CONNECTION_FAILED,
+  resourceRefusal,
+} from '@/lib/mcp/read-query'
 
 // What node-postgres's Client itself derives from a config: host, user, TLS.
 const ConnectionParameters = require('pg/lib/connection-parameters')
@@ -78,12 +84,72 @@ describe('isConnectionFailure — what is Backenly\'s side, and what is the stat
     ['42601', 'syntax error'],
     ['57014', 'canceling statement due to statement timeout'],
     ['42501', 'permission denied for table users'],
+    ['53100', 'could not write to file "base/pgsql_tmp/pgsql_tmp1.0": No space left on device'],
+    ['53200', 'out of memory'],
+    ['53400', 'temporary file size exceeds temp_file_limit (1048576kB)'],
   ])('%s is the statement\'s own error', (code, message) => {
     expect(isConnectionFailure(Object.assign(new Error(message), { code }))).toBe(false)
   })
 
   it('a connection dropped mid-query is a connection failure', () => {
     expect(isConnectionFailure(new Error('Connection terminated unexpectedly'))).toBe(true)
+  })
+})
+
+/**
+ * Found by the audit: `SELECT g FROM generate_series(1, 2000000000) g` hit
+ * temp_file_limit (53400) and the caller was told the database was
+ * unavailable, because all of class 53 counted as a lost connection.
+ */
+describe('resourceRefusal: a statement that ran out of disk, memory or temp_file_limit', () => {
+  it.each([['53100'], ['53200'], ['53400']])('%s is QUERY_TOO_EXPENSIVE, the caller\'s to narrow', (code) => {
+    const refusal = resourceRefusal(Object.assign(new Error('stopped'), { code }))
+    expect(refusal).toMatchObject({ code: 'QUERY_TOO_EXPENSIVE', status: 400 })
+    expect(refusal?.hint).toMatch(/generate_series/)
+  })
+
+  it.each([['53300'], ['57014'], ['08006'], ['42601']])('%s is not', (code) => {
+    expect(resourceRefusal(Object.assign(new Error('x'), { code }))).toBeNull()
+  })
+
+  it('does not repeat PostgreSQL\'s text, which names server paths', () => {
+    const refusal = resourceRefusal(Object.assign(new Error('could not write to file "base/pgsql_tmp/x"'), { code: '53100' }))
+    expect(refusal?.message).not.toMatch(/pgsql_tmp/)
+  })
+})
+
+/**
+ * Found by the audit: search_path reaches the project's own schema, so an
+ * operator there (`SELECT ### 1`) or an overload of a listed name (lower(int))
+ * ran code that is not PostgreSQL's.
+ */
+describe('ownCodeRefusal: names the project\'s own schema defines', () => {
+  const statement = { calls: ['lower', 'total'], operators: ['=', '<>', '+'] }
+
+  it('refuses a call whose name the schema defines', () => {
+    const refusal = ownCodeRefusal([{ kind: 'function', name: 'lower' }], statement)
+    expect(refusal).toMatchObject({ code: 'FUNCTION_NOT_ALLOWED' })
+    expect(refusal?.message).toMatch(/lower\(\)/)
+    expect(refusal?.hint).toMatch(/Rename or drop/)
+  })
+
+  it('refuses an operator the schema defines, written or applied by a comparison', () => {
+    expect(ownCodeRefusal([{ kind: 'operator', name: '+' }], statement)).toMatchObject({ code: 'OPERATOR_NOT_ALLOWED' })
+    expect(ownCodeRefusal([{ kind: 'operator', name: '=' }], statement)).toMatchObject({ code: 'OPERATOR_NOT_ALLOWED' })
+  })
+
+  it('refuses every statement while the schema defines a cast through its own function', () => {
+    expect(ownCodeRefusal([{ kind: 'cast', name: 'mood_text' }], { calls: [], operators: [] })).toMatchObject({
+      code: 'FUNCTION_NOT_ALLOWED',
+    })
+  })
+
+  it('admits a statement that names none of them', () => {
+    const defined = [
+      { kind: 'function', name: 'set_updated_at' },
+      { kind: 'operator', name: '###' },
+    ]
+    expect(ownCodeRefusal(defined, statement)).toBeNull()
   })
 })
 

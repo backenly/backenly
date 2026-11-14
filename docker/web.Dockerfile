@@ -24,7 +24,8 @@
 #   no secrets are baked in — every value arrives at run time
 #
 # NOT read-only root: Next writes into .next/cache at runtime. The writable
-# surface is that plus the two EFS mounts and /tmp.
+# surface is that, the other app directories created below, the two EFS
+# mounts and /tmp.
 # ============================================================================
 
 # ── Build ───────────────────────────────────────────────────────────────────
@@ -92,6 +93,9 @@ RUN npm run build
 # only what the build was TOLD. This proves the value reached the artifact.
 RUN npx tsx scripts/verify-public-build-inputs.ts --artifact
 
+# The function runner and supervisor, self-contained (see the final stage).
+RUN node scripts/build-function-runner.mjs --out /src/dist-fn
+
 # ── Runtime ─────────────────────────────────────────────────────────────────
 FROM node:20-slim AS runtime
 
@@ -147,6 +151,19 @@ RUN node -e "const b=require('bcrypt');const h=b.hashSync('x',4);if(!b.compareSy
 # TypeScript the way the function runner does.
 RUN node -e "const e=require('esbuild');const o=e.transformSync('export const n: number = 1',{loader:'ts',format:'cjs'});if(!o.code.includes('exports'))process.exit(1);console.log('esbuild '+e.version+' compiles TypeScript in this image')"
 
+# libpg-query, the PostgreSQL 16 parser every run_query, SQL-tab and CLI
+# console statement is checked with before it runs (lib/mcp/read-query-ast.ts),
+# and @pgsql/types, which it requires. Its loader reads libpg-query.wasm from
+# beside its own file at run time, a path output tracing cannot follow, so the
+# package is copied in whole even though next.config.js also names it. Without
+# it the check fails closed: no read query runs at all.
+COPY --from=build /src/node_modules/libpg-query ./node_modules/libpg-query
+COPY --from=build /src/node_modules/@pgsql/types ./node_modules/@pgsql/types
+
+# Asserted, not assumed: the build fails unless this image loads the
+# WebAssembly and parses SQL with the PostgreSQL 16 grammar the server runs.
+RUN node -e "const q=require('libpg-query');q.parse('SELECT 1').then(function(r){if(!r||!r.stmts||r.stmts.length!==1||Math.floor(r.version/10000)!==16)process.exit(1);console.log('libpg-query '+require('libpg-query/package.json').version+' parses PostgreSQL 16 SQL in this image')}).catch(function(e){console.error(e);process.exit(1)})"
+
 # ── Containment at the boundary that can actually assert it ─────────────────
 #
 # next.config.js bounds ROUTE traces, and that works. It cannot bound
@@ -174,9 +191,22 @@ RUN rm -rf ./tests ./docs ./scripts ./__tests__ \
  && echo "excluded-tree files remaining: $REMAIN" \
  && test "$REMAIN" -eq 0
 
-# The EFS mount points. Created here so the image is correct even when nothing
-# is mounted, and owned by the runtime user so the app can write to them.
-RUN mkdir -p /app/workspace /app/backups && chown -R node:node /app/workspace /app/backups
+# Every directory the app writes under /app at run time, owned by the runtime
+# user. /app itself is root:node 0750 (below), so the app can create nothing
+# else in it, and the uids function code runs as cannot reach any of these.
+#   workspace, backups  the EFS mount points (WORKSPACE_DIR, BACKUP_DIR),
+#                       created so the image is correct with nothing mounted
+#   .next/cache         Next's image optimizer and data cache
+#   logs                lib/logger's files (LOG_FILE_PATH, default ./logs); it
+#                       creates the directory when imported and throws where
+#                       it cannot, so every route importing it fails to load
+#   storage             local file storage (STORAGE_DIR, default ./storage)
+#   recovery            deployment recovery bundles (RECOVERY_DIR, default ./recovery)
+#   tmp                 the preflight route's scratch space (./tmp/preflight)
+# .next/server stays root's: it is the server's own code, and a page Next
+# renders on demand and cannot write back is kept in memory instead.
+RUN mkdir -p /app/workspace /app/backups /app/.next/cache /app/logs /app/storage /app/recovery /app/tmp \
+ && chown -R node:node /app/workspace /app/backups /app/.next/cache /app/logs /app/storage /app/recovery /app/tmp
 
 # HOSTNAME=0.0.0.0 is REQUIRED, not cosmetic. Next's standalone server binds to
 # process.env.HOSTNAME, and Docker sets that to the container's own hostname —
@@ -227,7 +257,59 @@ ENV NODE_ENV=production \
 
 EXPOSE 3000
 
-USER node
+# ── Function isolation ──────────────────────────────────────────────────────
+#
+# Customer function code must never run in a process holding a platform
+# secret, and this process holds all of them. Each run is a fresh process
+# under a uid of its own, started by a root supervisor
+# (lib/services/ai-functions/isolation/). So the image starts as ROOT, with no
+# USER line: docker/function-isolation/entrypoint.sh starts the supervisor with
+# an empty environment, then runs CMD as `node` under no_new_privs and umask
+# 077. A task or compose file must not set a user; started as anyone else,
+# functions refuse to run and say why.
+#
+#   tini            PID 1, reaping what a killed run leaves behind
+#   /opt/backenly-fn  runner, supervisor and sandbox packages, outside /app
+#   /app 0750 root:node  pool uids cannot traverse the app tree, and so cannot
+#                   reach the EFS volumes mounted in it: an EFS access point
+#                   with a POSIX user answers every client uid as that user,
+#                   so the mount's own modes protect nothing
+#   no setuid bits  nothing a run executes can raise its privileges
+#
+# Asserted, not assumed: the build fails unless a pool uid can run a module
+# through the runner and cannot read /app.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends tini \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=build /src/dist-fn/ /opt/backenly-fn/
+COPY docker/function-isolation/entrypoint.sh /opt/backenly-fn/entrypoint.sh
+RUN cp /app/certs/rds-ca-cloud-regions.pem /opt/backenly-fn/rds-ca-cloud-regions.pem \
+ && chown -R root:root /opt/backenly-fn \
+ && chmod -R u=rwX,go=rX /opt/backenly-fn \
+ && chmod 0755 /opt/backenly-fn/entrypoint.sh \
+ && chown root:node /app \
+ && chmod 0750 /app \
+ && chmod 0700 /home/node \
+ && find / -xdev -type f -perm /6000 -exec chmod ug-s {} +
+RUN setpriv --version && prlimit --version && choom --version && tini --version \
+ && test "$(stat -c '%U:%G %a' /app)" = "root:node 750" \
+ && test -z "$(find / -xdev -type f -perm /6000 -print -quit)" \
+ && printf '%s\n' '{"v":1,"kind":"selftest"}' \
+    | setpriv --reuid=20000 --regid=20000 --clear-groups --no-new-privs -- node /opt/backenly-fn/function-runner.cjs \
+    | grep -q '"ok":true' \
+ && printf '%s\n' '{"v":1,"kind":"probe","mustNotRead":["/app","/app/workspace","/app/backups"]}' \
+    | setpriv --reuid=20000 --regid=20000 --clear-groups --no-new-privs -- node /opt/backenly-fn/function-runner.cjs \
+    | grep -q '"/app":"EACCES","/app/workspace":"EACCES","/app/backups":"EACCES"' \
+ && node -e "for (const p of ['pdfkit','csv-parse/sync','date-fns','qrcode','nodemailer','archiver']) require(require.resolve(p, { paths: ['/opt/backenly-fn'] })); console.log('function isolation verified in this image')"
+
+# Children read the RDS roots from outside /app. Three runs at once, each held
+# under the supervisor's heap and resident limits; more wait up to 10 s, then
+# get a 503. Set BACKENLY_FN_MAX_CONCURRENCY, _MAX_QUEUE and _QUEUE_WAIT_MS on
+# the task to size it (.env.example, "Where function code runs").
+ENV BACKENLY_FN_CA_CERTS=/opt/backenly-fn/rds-ca-cloud-regions.pem \
+    BACKENLY_FN_MAX_CONCURRENCY=3
+
+ENTRYPOINT ["/usr/bin/tini", "--", "/opt/backenly-fn/entrypoint.sh"]
 
 # server.js calls process.chdir(__dirname) on startup, which is why .env has to
 # live beside it on the Hetzner host. In a container there is no .env at all:
@@ -240,6 +322,6 @@ USER node
 # listened on loopback. The ALB still worked (it targets that address), which
 # is why it looked healthy, while everything in the task that calls
 # 127.0.0.1:3000 failed. The contract sweep reported "ingress_unreachable" every
-# minute and never verified a single project. `exec` keeps node as PID 1 so
-# SIGTERM still reaches it.
+# minute and never verified a single project. `exec` hands node the process,
+# which is tini's child, so SIGTERM from tini reaches it directly.
 CMD ["sh", "-c", "HOSTNAME=0.0.0.0 exec node server.js"]

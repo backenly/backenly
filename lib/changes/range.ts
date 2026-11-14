@@ -50,6 +50,7 @@ import { IN_EFFECT } from './types'
 import {
   ARCHITECTURE_CHANGE_GROUP,
   ARCHITECTURE_UNDO_SUFFIX,
+  SECURITY_CHANGE_GROUP,
   previewRecovery,
   proveSequence,
   recoverChange,
@@ -164,6 +165,16 @@ export async function planRestoreTo(projectId: string, afterSeq: number): Promis
     const entry = { id: r.id, seq: r.seq, summary: label(r) }
     if (r.kind === 'snapshot_restore') {
       plan.stop = { ...entry, recordId: r.id, code: 'SNAPSHOT', reason: `#${r.seq} restored a snapshot, which History cannot undo. Restore an earlier snapshot from Database → Snapshots instead.` }
+      break
+    }
+    // Never passed over: undoing it would switch planted code back on (SECURITY_CHANGE_GROUP).
+    if (r.groupId?.startsWith(SECURITY_CHANGE_GROUP) && r.status !== 'failed') {
+      plan.stop = {
+        ...entry,
+        recordId: r.id,
+        code: 'UNAVAILABLE',
+        reason: `#${r.seq} switched off database code that could reach other projects, which History does not switch back on. Pick a point after #${r.seq}.`,
+      }
       break
     }
     const a = architectureOf(r.groupId)

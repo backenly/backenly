@@ -85,7 +85,9 @@ services:
     ports: ['3001:3001']
     read_only: true
     tmpfs: ['/tmp']
-    user: node
+    # No `user:`. The image starts as root to start its function supervisor,
+    # then runs the server as `node` itself (docker/function-isolation/
+    # entrypoint.sh). Set a user here and functions refuse to run.
     deploy:
       resources:
         limits: { cpus: '0.25', memory: 512M }

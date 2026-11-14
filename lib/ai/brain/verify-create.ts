@@ -402,6 +402,16 @@ async function refusalVerdict(
     }
   }
   const plan = await planOf(projectId, schema, tableName)
+  if (plan.kind === 'teams') {
+    return {
+      ok: true,
+      summary:
+        `${head}: the teams rules refused the test row. Who may write "${tableName}" depends on the organization a ` +
+        'row belongs to (its owner, or its owner and admins), which the test row did not meet; that is by design, and ' +
+        'the insert path itself was not exercised.',
+      exercised: false,
+    }
+  }
   if (plan.basis === 'grant_table') {
     return {
       ok: true,

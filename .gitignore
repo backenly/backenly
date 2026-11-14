@@ -228,6 +228,9 @@ jest-integration.json
 # Runtime container bundle (scripts/build-runtime-bundle.mjs)
 /dist-runtime
 
+# Function runner bundle and its packages (scripts/build-function-runner.mjs)
+/dist-fn
+
 # RDS rehearsal build artifacts (scripts/run-rds-rehearsal-fargate.ts).
 # Both are regenerated per run and platform-specific: the base64 bundle is
 # emitted where esbuild works, the compiled launcher is what actually runs where

@@ -13,11 +13,11 @@ export const maxDuration = 60
  */
 
 import { NextRequest, NextResponse } from 'next/server'
+import { isCronRequest } from '@/lib/security/cron-auth'
 import { prisma } from '@/lib/db/prisma'
 
 export async function POST(request: NextRequest) {
-  const secret = request.headers.get('x-cron-secret') ?? request.headers.get('authorization')?.replace('Bearer ', '')
-  if (secret !== process.env.CRON_SECRET) {
+  if (!isCronRequest(request)) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 

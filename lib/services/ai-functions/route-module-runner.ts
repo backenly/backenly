@@ -10,63 +10,58 @@
  * `AiFunction.generatedCode`:
  *
  *   1. Sandbox bodies  — bare `ctx.db / ctx.http / ctx.log` code authored by
- *                         the NL function generator. Run in sandbox-worker.cjs.
+ *                         the NL function generator (executor.ts runs them).
  *   2. Route modules   — full Next.js handlers authored by
  *                         lib/ai/build-runtime/domain-business-logic.ts:
  *                           import { NextRequest, NextResponse } from 'next/server'
  *                           import { prisma } from '@/lib/db'
  *                           export async function GET(req: NextRequest) { ... }
  *
- * The Worker sandbox can only run #1. Before this runner existed, #2 was routed
- * into the sandbox too, where preprocessImports() rewrote its `import` lines to
- * `ctx.require(...)` and the blocklist then rejected the `require(` it had just
- * produced — so EVERY domain/schema endpoint (jobs, wallets, orders, admin,
- * *-schema, ...) failed on every invocation path with:
- *   "Blocked: code contains forbidden pattern '\brequire\s*\('"
+ * WHERE THE CODE RUNS
+ * -------------------
+ * Not here. This process holds every platform secret, and route modules are
+ * free-form code (functions deploy_code stores what an agent wrote, the
+ * generator what a model wrote). They used to run in a node:vm context in this
+ * process, and node:vm is not a security mechanism: `Object.constructor('return
+ * process')()` reached the real process, its environment and the platform's
+ * database client. Each run, and each deploy-time validation, now happens in a
+ * fresh runner process under its own uid (isolation/function-runner.cjs,
+ * started by isolation/function-supervisor.cjs, reached through
+ * isolation/client.ts). This file does what needs the project's material, and
+ * hands the runner only the result:
  *
- * Route modules were once *first-party deterministic templates* from our own
- * repo. That premise no longer holds: functions deploy_code stores agent-written
- * modules verbatim and the generator stores model-written ones, so the code
- * here is free-form. They still run in an in-process vm — NOT the locked
- * ctx-only sandbox — because they need the real `prisma` client + `verifyToken`,
- * but every capability handed into that vm must now assume hostile code:
- * the static denylist, the curated require/process shims, and outbound HTTP
- * through the same egress guard as ctx.http (never the host's bare fetch).
- *
- * Security model:
- *  - Static signature check: must be a recognised route module (export GET/
- *    POST/PATCH/DELETE) AND must not contain eval/Function/child_process/
- *    dynamic-import/fs-write/worker_threads/process-control patterns. Fail
- *    closed otherwise. process.env IS readable — but only through a frozen
- *    shim (makeCuratedProcess) holding the project's own variables, never the
- *    real process object, and never a secret Backenly signs or checks with.
- *  - Curated module resolver: only next/server (shim), @/lib/db, @/lib/auth/jwt,
- *    crypto, bcryptjs, jsonwebtoken resolve. Everything else throws. Trusted
- *    work and admin checks go through helpers those modules export (asService,
- *    isAdminRequest), which use the project's material without handing it over.
- *  - 10s hard timeout via vm `timeout` + Promise.race backup.
+ *  - Static signature check (defence in depth only: the denylist matches
+ *    spellings, not capabilities) and the withheld-variable check.
+ *  - TypeScript to CommonJS with esbuild, here: parsing runs no code.
+ *  - The caller's identity, from verified request material only: a token this
+ *    project signed (checked here, with the project's secret, which never
+ *    leaves this process) or this project's derived admin key.
+ *  - The tokens the request carries that the project signed, so the runner's
+ *    verifyToken and jsonwebtoken.verify answer for them without the secret;
+ *    the admin key, only when the caller presented it.
+ *  - The project's database login, its realtime stream and outbound HTTP
+ *    (through the egress guard) are calls the runner makes back to here,
+ *    answered for this project only.
+ *  - 10s for the handler; the supervisor kills the process at the deadline,
+ *    so a synchronous or microtask loop in a handler costs that one process,
+ *    not this one's event loop.
  *  - Handler return value (a NextResponse) is normalised to { status, body }.
  *    A non-2xx status is still a SUCCESSFUL execution (the handler ran and
- *    answered) — only thrown errors / timeouts are failures. This stops
- *    auth-gated endpoints from showing a false red "Failed" when a manual
- *    test run legitimately returns 401.
+ *    answered) — only thrown errors / timeouts are failures.
  */
 
-import * as vm from 'vm'
 import * as nodeCrypto from 'crypto'
-import { prisma } from '@/lib/db'
-import { verifyToken } from '@/lib/auth/jwt'
-import * as bcryptjs from 'bcryptjs'
 import * as jsonwebtoken from 'jsonwebtoken'
 import { loadProjectFnAuth, ProjectFnAuth, TEST_RUN_USER_ID } from './project-fn-auth'
-import { makeRlsAwarePrisma, refusingPrisma, type RlsAwarePrisma } from './rls-aware-db'
-import { withProjectStreamNotify } from './stream-notify'
-import { functionDbClient, forgetFunctionDbClient } from './function-db-role'
+import { FUNCTION_DB_SESSION_SQL, SERVICE_DB_CLAIMS, functionDbClaims, functionSearchPath, type RlsAwarePrisma } from './rls-aware-db'
+import { projectStreamLabel, sendToProjectStream } from './stream-notify'
+import { functionDbConnection } from './function-db-role'
 import type { RlsIdentity } from '@/lib/services/rls-session'
 import { safeFetch } from '@/lib/security/outbound-guard'
 import { resolveEndUserFromToken } from '@/server/lib/end-user-identity'
 import { FORWARDABLE_FN_HEADERS } from './forward-headers'
 import { withoutComments } from './integration-use'
+import { encodeValue, endedForMemory, runIsolated, type CallHandlers, type IsolatedOutcome } from './isolation/client'
 
 // esbuild is a native binary package — load it lazily through a non-bundled
 // require so Next.js never tries to trace/bundle the binary into the server
@@ -85,6 +80,20 @@ function getEsbuildTransformSync() {
 }
 
 const EXECUTION_TIMEOUT_MS = 10_000
+const VALIDATION_TIMEOUT_MS = 3_000
+/** The handler's 10s, plus the module's own evaluation and the process starting. */
+const RUN_HARD_TIMEOUT_MS = 15_000
+const VALIDATION_HARD_TIMEOUT_MS = 8_000
+const TIMEOUT_MESSAGE = 'Route function timed out after 10s'
+
+function compileModule(code: string): string {
+  return getEsbuildTransformSync()(code, {
+    loader: 'ts',
+    format: 'cjs',
+    target: 'node18',
+    platform: 'node',
+  }).code
+}
 
 // ─── Format detection ─────────────────────────────────────────────────────────
 
@@ -100,14 +109,14 @@ export function isRouteModuleFunction(code: string | null | undefined): boolean 
   return ROUTE_EXPORT_RE.test(code) || NEXT_SERVER_IMPORT_RE.test(code)
 }
 
-// ─── Hardened denylist (defence in depth — these templates are first-party) ───
+// ─── Denylist (defence in depth: the process boundary is the security boundary) ─
 
 const HARD_BLOCKED: Array<[RegExp, string]> = [
   [/\bchild_process\b/, 'child_process is not permitted'],
   [/\bworker_threads\b/, 'worker_threads is not permitted'],
   // process.env is NOT blocked: a function reads the project's own variables
-  // there. The vm receives a frozen env of those (see makeCuratedProcess) —
-  // never the real one, and never a secret Backenly signs or checks with.
+  // there. The runner gives it a frozen env of those (makeCuratedProcess in
+  // isolation/function-runner.cjs), never a secret Backenly signs or checks with.
   [/\bprocess\s*\.\s*(exit|kill|binding|dlopen|mainModule|_getActiveHandles)\b/, 'process internals are not permitted'],
   [/\beval\s*\(/, 'eval() is not permitted'],
   [/\bnew\s+Function\s*\(/, 'new Function() is not permitted'],
@@ -125,8 +134,10 @@ function assertNotBlocked(code: string): void {
   }
 }
 
-// ─── Curated process shim ─────────────────────────────────────────────────────
-// The vm gets a frozen, PER-PROJECT env — never the real process object:
+// ─── What process.env holds ──────────────────────────────────────────────────
+// The runner's process.env for a route module (makeCuratedProcess in
+// isolation/function-runner.cjs) is a frozen, PER-PROJECT env, never a process
+// environment:
 //
 //   the project's own variables (Settings → Environment, ctx.env in a
 //   described function), as process.env.KEY, which is how a route function
@@ -142,10 +153,11 @@ function assertNotBlocked(code: string): void {
 //   - removed outright, a gate written `(header ?? '') === (env ?? '')`, or
 //     `header == env`, would let every caller in once the variable was gone;
 //     a random value no caller can send fails every such comparison closed;
-//   - jsonwebtoken refuses to sign with it, and verifies with the project's
-//     secret in its place, so code that checked a user's token with
+//   - jsonwebtoken refuses to sign with it, and a verify with it checks the
+//     token against the project's secret (which the app checked before the
+//     run), so code that checked a user's token with
 //     `jwt.verify(token, process.env.JWT_SECRET)` keeps working without holding
-//     the secret (makeJsonwebtokenShim).
+//     the secret.
 //
 // Admin endpoints check `isAdminRequest(request)` and token checks call
 // `verifyToken(token)`, both from '@/lib/auth/jwt'; trusted SQL runs in
@@ -153,27 +165,14 @@ function assertNotBlocked(code: string): void {
 // project's, so a project variable cannot take one of these names.
 export const WITHHELD_ENV_NAMES = ['JWT_SECRET', 'ADMIN_API_KEY', 'AI_EXECUTION_TOKEN'] as const
 
-/** A value for one invocation that no caller can know, so no comparison with it succeeds. */
-function makeWithheld(): string {
-  return `withheld:${nodeCrypto.randomBytes(24).toString('hex')}`
-}
-
-function makeCuratedProcess(withheld: string, projectEnv: Record<string, string> = {}): { env: Record<string, string> } {
-  const env: Record<string, string> = { ...projectEnv }
-  for (const name of WITHHELD_ENV_NAMES) env[name] = withheld
-  if (process.env.NODE_ENV !== undefined) env.NODE_ENV = process.env.NODE_ENV
-  return Object.freeze({ env: Object.freeze(env) }) as { env: Record<string, string> }
-}
-
 // ─── An owner's test run ─────────────────────────────────────────────────────
 // The dashboard's Test, functions { action: "invoke" } and the generator's
 // smoke test run a function for someone who may change the project
 // (opts.testRun), and its admin and signed-in paths should answer them.
 // Function code reads request.headers, so nothing on the request is a
-// credential. The runner holds the fact that the run is an owner's test
-// (OwnerTest, which function code can neither read nor set):
-//   - the function's SQL runs as the service role (the run's database handle
-//     keeps that identity, as an asService block's does);
+// credential. The runner holds the fact that the run is an owner's test,
+// which function code can neither read nor set:
+//   - the function's SQL runs as the service role;
 //   - until the run ends, isAdminRequest(request) answers true;
 //   - where a user's token would be, the request carries OWNER_TEST_TOKEN, and
 //     until the run ends every token check the function can make (verifyToken,
@@ -181,62 +180,8 @@ function makeCuratedProcess(withheld: string, projectEnv: Record<string, string>
 // The placeholder is not a secret: in any other run, and in this one once it
 // has ended, it is nobody.
 
-/** This run is an owner's test while `live`; the runner sets it false when the run ends. */
-interface OwnerTest {
-  live: boolean
-}
-
 /** What an owner's test request carries in x-user-token. Only that run's token checks read it, as the test user. */
 export const OWNER_TEST_TOKEN = 'owner-test-run'
-
-function isOwnerTestToken(ownerTest: OwnerTest | null, token: unknown): boolean {
-  return ownerTest?.live === true && token === OWNER_TEST_TOKEN
-}
-
-/** The test user an owner's test is signed in as: the claims the old test token carried, ten minutes of them. */
-function ownerTestUser(projectId: string) {
-  const iat = Math.floor(Date.now() / 1000)
-  return { userId: TEST_RUN_USER_ID, email: 'test-run@backenly.internal', role: 'admin', projectId, testRun: true, iat, exp: iat + 600 }
-}
-
-// ─── Project-aware auth shims ────────────────────────────────────────────────
-// Templates import verifyToken from '@/lib/auth/jwt'. Here it verifies against
-// the PROJECT's secret only: real end-user tokens are signed with it, and a
-// Backenly session token, signed with the platform's secret for a person using
-// the console, is not one of the project's end users.
-function makeProjectVerifyToken(projectId: string, auth: ProjectFnAuth, ownerTest: OwnerTest | null) {
-  const realJwt: typeof jsonwebtoken = (jsonwebtoken as any).default ?? jsonwebtoken
-  return function projectVerifyToken(token: string): any {
-    if (isOwnerTestToken(ownerTest, token)) return ownerTestUser(projectId)
-    if (!token || typeof token !== 'string' || !auth.jwtSecret) return null
-    try {
-      return realJwt.verify(token, auth.jwtSecret, { algorithms: ['HS256'] })
-    } catch {
-      return null
-    }
-  }
-}
-
-/**
- * `isAdminRequest(request)`: true when the request carries this project's admin
- * key (Settings → Functions shows it), in `x-admin-key` or as a bearer token.
- * Compared here, so the function never holds the key. A project without one,
- * or a request without one, is never an admin. An owner's test run is one,
- * while it lasts, and its request carries no key.
- */
-function makeIsAdminRequest(auth: ProjectFnAuth, ownerTest: OwnerTest | null) {
-  return function isAdminRequest(request: any): boolean {
-    if (ownerTest?.live === true) return true
-    if (!auth.adminKey) return false
-    const headers = request?.headers
-    const read = (name: string): string => {
-      const v = typeof headers?.get === 'function' ? headers.get(name) : headers?.[name]
-      return typeof v === 'string' ? v.trim() : ''
-    }
-    const presented = read('x-admin-key') || read('authorization').replace(/^Bearer\s+/i, '')
-    return presented.length > 0 && safeEqual(presented, auth.adminKey)
-  }
-}
 
 /**
  * Who is this invocation acting as, for the purposes of RLS?
@@ -274,8 +219,7 @@ async function resolveCallerIdentity(
 
   let payload: any
   try {
-    const realJwt: typeof jsonwebtoken = (jsonwebtoken as any).default ?? jsonwebtoken
-    payload = realJwt.verify(token, auth.jwtSecret, { algorithms: ['HS256'] }) as any
+    payload = realJwt().verify(token, auth.jwtSecret, { algorithms: ['HS256'] }) as any
   } catch {
     // An unverifiable token is not an identity. Falling back to service_role
     // here would turn a bad token into full table access.
@@ -302,6 +246,10 @@ async function resolveCallerIdentity(
   }
 }
 
+function realJwt(): typeof jsonwebtoken {
+  return (jsonwebtoken as any).default ?? jsonwebtoken
+}
+
 function safeEqual(a: string, b: string): boolean {
   const ab = Buffer.from(a)
   const bb = Buffer.from(b)
@@ -309,13 +257,64 @@ function safeEqual(a: string, b: string): boolean {
   return nodeCrypto.timingSafeEqual(ab, bb)
 }
 
-// jsonwebtoken, as function code sees it.
+const JWT_SHAPE = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*$/
+const MAX_TOKEN_CANDIDATES = 32
+
+/**
+ * The tokens this request carries that the project signed: in its headers
+ * (as sent, or after `Bearer `), its cookies, and the top level of its body or
+ * query. The runner's verifyToken and jsonwebtoken.verify accept these and no
+ * others, which is what they would have answered with the secret in hand,
+ * for every token a request can bring.
+ */
+function projectSignedTokens(headers: Record<string, string>, data: Record<string, unknown>, auth: ProjectFnAuth): string[] {
+  if (!auth.jwtSecret) return []
+  const candidates = new Set<string>()
+  const offer = (value: unknown) => {
+    if (typeof value !== 'string' || value.length > 8192) return
+    const v = value.replace(/^Bearer\s+/i, '').trim()
+    if (JWT_SHAPE.test(v)) candidates.add(v)
+  }
+  for (const value of Object.values(headers)) offer(value)
+  for (const pair of (headers['cookie'] ?? '').split(';')) {
+    const idx = pair.indexOf('=')
+    if (idx <= 0) continue
+    const raw = pair.slice(idx + 1).trim()
+    offer(raw)
+    try {
+      offer(decodeURIComponent(raw))
+    } catch {
+      // not URI-encoded
+    }
+  }
+  for (const value of Object.values(data)) offer(value)
+
+  const verified: string[] = []
+  for (const token of [...candidates].slice(0, MAX_TOKEN_CANDIDATES)) {
+    try {
+      const payload = realJwt().verify(token, auth.jwtSecret, { algorithms: ['HS256'] })
+      if (payload && typeof payload === 'object') verified.push(token)
+    } catch {
+      // not this project's
+    }
+  }
+  return verified
+}
+
+/** The project's admin key, when and only when the caller presented it. */
+function presentedAdminKey(headers: Record<string, string>, auth: ProjectFnAuth): string | null {
+  if (!auth.adminKey) return null
+  const presented = (headers['x-admin-key'] ?? '').trim() || (headers['authorization'] ?? '').trim().replace(/^Bearer\s+/i, '')
+  return presented.length > 0 && safeEqual(presented, auth.adminKey) ? auth.adminKey : null
+}
+
+// jsonwebtoken, as function code sees it (the runner's jsonwebtokenShim).
 //
-// process.env.JWT_SECRET holds WITHHELD (makeCuratedProcess). Signing with it
-// is refused: a function does not mint sessions for the project's users.
-// Verifying with it checks the token against the project's own secret, so a
-// function that verified a caller's token that way keeps working. Any other
-// secret is the function's own business, as before.
+// process.env.JWT_SECRET holds WITHHELD. Signing with it is refused: a
+// function does not mint sessions for the project's users. Verifying with it
+// accepts a token the project signed, so a function that verified a caller's
+// token that way keeps working. Any other secret is the function's own
+// business, as before.
 //
 // Templates that signed tokens with the project secret omitted the projectId
 // claim, which the runtime requires; sign still adds it for a payload naming a
@@ -328,135 +327,7 @@ export const SIGN_REFUSED =
   "Functions cannot sign the project's end-user sessions: Backenly no longer gives function code the project's signing secret. " +
   "Check a caller's token with verifyToken(token) from '@/lib/auth/jwt'."
 
-function makeJsonwebtokenShim(projectId: string, auth: ProjectFnAuth, withheld: string, ownerTest: OwnerTest | null) {
-  const real: any = (jsonwebtoken as any).default ?? jsonwebtoken
-  const sign = (payload: any, secret: any, ...rest: any[]) => {
-    if (secret === withheld) throw new Error(SIGN_REFUSED)
-    const needsProjectId =
-      payload &&
-      typeof payload === 'object' &&
-      !Buffer.isBuffer(payload) &&
-      payload.userId &&
-      !payload.projectId
-    return real.sign(needsProjectId ? { ...payload, projectId } : payload, secret, ...rest)
-  }
-  const testUser = (options: any) => {
-    const payload = ownerTestUser(projectId)
-    return options && typeof options === 'object' && options.complete
-      ? { header: { alg: 'HS256', typ: 'JWT' }, payload, signature: '' }
-      : payload
-  }
-  const verify = (token: any, secret: any, ...rest: any[]) => {
-    if (isOwnerTestToken(ownerTest, token)) {
-      // jsonwebtoken returns what its callback returns, when it is given one.
-      const done = typeof rest[rest.length - 1] === 'function' ? rest[rest.length - 1] : null
-      return done ? done(null, testUser(rest[0])) : testUser(rest[0])
-    }
-    return real.verify(token, secret === withheld ? (auth.jwtSecret ?? withheld) : secret, ...rest)
-  }
-  const decode = (token: any, ...rest: any[]) =>
-    isOwnerTestToken(ownerTest, token) ? testUser(rest[0]) : real.decode(token, ...rest)
-  const shim: any = { ...real, sign, verify, decode }
-  shim.default = shim // CJS/ESM interop — `import jwt from 'jsonwebtoken'` gets the shim too
-  return shim
-}
-
-// ─── next/server shim ─────────────────────────────────────────────────────────
-// The generated code only ever uses NextResponse.json(body, { status }) and
-// the NextRequest accessors req.headers.get / req.json / req.url. We provide
-// faithful, dependency-free shims so execution is deterministic and does not
-// require booting the Next.js runtime inside the Express server process.
-
-interface ShimResponse {
-  __backenlyResponse: true
-  status: number
-  body: any
-  headers: Record<string, string>
-}
-
-function makeNextServerShim() {
-  const NextResponse = {
-    json(body: any, init?: { status?: number; headers?: Record<string, string> }): ShimResponse {
-      return {
-        __backenlyResponse: true,
-        status: init?.status ?? 200,
-        body,
-        headers: { 'content-type': 'application/json', ...(init?.headers || {}) },
-      }
-    },
-  }
-  // NextRequest is only used as a type in the generated code; a value export
-  // keeps `import { NextRequest } from 'next/server'` from being undefined.
-  class NextRequest {}
-  return { NextResponse, NextRequest }
-}
-
-class RunnerRequest {
-  url: string
-  method: string
-  /**
-   * Real URL instance, so `req.nextUrl.searchParams.get('x')` and
-   * `req.nextUrl.pathname` behave exactly like NextRequest. Generated code
-   * alternates between `new URL(req.url)` and `req.nextUrl` — both must work,
-   * or half the generated GET endpoints crash on their first invocation.
-   */
-  nextUrl: URL
-  private _headers: Map<string, string>
-  private _body: any
-  constructor(opts: { url: string; headers: Record<string, string>; body: any; method?: string }) {
-    this.url = opts.url
-    this.method = (opts.method || 'GET').toUpperCase()
-    this.nextUrl = new URL(opts.url)
-    this._headers = new Map(
-      Object.entries(opts.headers || {}).map(([k, v]) => [k.toLowerCase(), String(v)])
-    )
-    this._body = opts.body
-  }
-  get headers() {
-    const m = this._headers
-    return {
-      get: (name: string) => m.get(String(name).toLowerCase()) ?? null,
-      has: (name: string) => m.has(String(name).toLowerCase()),
-      forEach: (cb: (value: string, key: string) => void) => m.forEach((v, k) => cb(v, k)),
-      entries: () => m.entries(),
-    }
-  }
-  /** NextRequest-compatible cookie accessor: `req.cookies.get('x')?.value`. */
-  get cookies() {
-    const parsed = new Map<string, string>()
-    const raw = this._headers.get('cookie') || ''
-    for (const pair of raw.split(';')) {
-      const idx = pair.indexOf('=')
-      if (idx > 0) {
-        const name = pair.slice(0, idx).trim()
-        if (name) parsed.set(name, decodeURIComponent(pair.slice(idx + 1).trim()))
-      }
-    }
-    return {
-      get: (name: string) => (parsed.has(name) ? { name, value: parsed.get(name)! } : undefined),
-      has: (name: string) => parsed.has(name),
-      getAll: () => [...parsed.entries()].map(([name, value]) => ({ name, value })),
-    }
-  }
-  async json() {
-    return this._body ?? {}
-  }
-  async text() {
-    return typeof this._body === 'string' ? this._body : JSON.stringify(this._body ?? {})
-  }
-  async formData() {
-    // Generated handlers occasionally probe formData on JSON invocations —
-    // return an empty-compatible Map-backed shim instead of crashing.
-    const entries = Object.entries(this._body && typeof this._body === 'object' ? this._body : {})
-    return {
-      get: (name: string) => entries.find(([k]) => k === name)?.[1] ?? null,
-      has: (name: string) => entries.some(([k]) => k === name),
-      entries: () => entries[Symbol.iterator](),
-    }
-  }
-}
-
-// ─── Curated module resolver ──────────────────────────────────────────────────
+// ─── The database a function receives ───────────────────────────────────────
 
 /** `asService(fn)`: run `fn`'s SQL in one transaction as the service role. */
 export type AsService = <T>(fn: (db: RlsAwarePrisma) => Promise<T>) => Promise<T>
@@ -465,89 +336,17 @@ export type AsService = <T>(fn: (db: RlsAwarePrisma) => Promise<T>) => Promise<T
 export const AS_SERVICE_NOTE =
   'Backenly: a block ran with asService, as the service role; row-level security did not apply to its SQL.'
 
-function buildRequire(
-  projectId: string,
-  auth: ProjectFnAuth,
-  db: { prisma: RlsAwarePrisma; asService: AsService },
-  withheld: string,
-  ownerTest: OwnerTest | null,
-): (id: string) => any {
-  const nextServer = makeNextServerShim()
-  const projectVerifyToken = makeProjectVerifyToken(projectId, auth, ownerTest)
-  const isAdminRequest = makeIsAdminRequest(auth, ownerTest)
-  const jwtShim = makeJsonwebtokenShim(projectId, auth, withheld, ownerTest)
-  return (id: string) => {
-    switch (id) {
-      case 'next/server':
-        return nextServer
-      case '@/lib/db':
-        return { prisma: db.prisma, asService: db.asService }
-      case '@/lib/auth/jwt':
-        return { verifyToken: projectVerifyToken, isAdminRequest }
-      case 'crypto':
-      case 'node:crypto':
-        return nodeCrypto
-      case 'bcryptjs':
-        return (bcryptjs as any).default ?? bcryptjs
-      case 'jsonwebtoken':
-        return jwtShim
-      default:
-        throw new Error(
-          `Module "${id}" is not available to route functions. ` +
-          `Allowed: next/server, @/lib/db, @/lib/auth/jwt, crypto, bcryptjs, jsonwebtoken.`
-        )
-    }
-  }
-}
-
-/**
- * The database handle a function receives as `@/lib/db`: every raw query runs
- * with the caller's identity set (rls-aware-db.ts), on a connection that logs in
- * as the project's own function role (function-db-role.ts). Handing over the
- * bare client instead is what made generated reads of RLS-protected tables come
- * back empty, and what let function SQL read the platform's own tables. An
- * event the module sends on its project's stream label reaches the project's
- * stream (stream-notify.ts).
- */
-function scopedDb(projectId: string, identity: RlsIdentity): RlsAwarePrisma {
-  return withProjectStreamNotify(
-    projectId,
-    makeRlsAwarePrisma(identity, async (opts) => {
-      if (opts?.refresh) await forgetFunctionDbClient(projectId)
-      return functionDbClient(projectId)
-    }),
-  )
-}
-
-/**
- * Trusted work: `asService(async (db) => { … })` from '@/lib/db'.
- *
- * A function's SQL runs as its caller, so row-level security keeps a shopper to
- * their own rows. Some work a function does on the caller's behalf must reach
- * further: a checkout creates the order and takes the stock, and the shopper may
- * not update products. The only way to do that used to be the caller sending
- * the admin key, which no shopper has. QA's checkout answered "Your cart is
- * empty": its SELECT … FOR UPDATE on products was filtered by the products
- * UPDATE policy.
- *
- * asService runs the block in one transaction with the service-role identity,
- * so policies admit it and FOR UPDATE locks what it reads. It is the project's
- * own function login all the same (function-db-role.ts): nothing outside the
- * project's schema, ever. It is explicit in the code, a line in the run's logs
- * says it ran, and deploy_code says the function uses it.
- *
- * The service-role handle is made the first time a block runs, so a run that
- * never calls asService holds one database handle, its caller's.
- */
-function makeAsService(projectId: string, logs: string[]): AsService {
-  let serviceDb: RlsAwarePrisma | null = null
-  return async (fn) => {
-    if (typeof fn !== 'function') throw new TypeError('asService takes a function: asService(async (db) => { ... })')
-    logs.push(AS_SERVICE_NOTE)
-    serviceDb ??= scopedDb(projectId, { userId: null, isServiceRole: true })
-    return serviceDb.$transaction(fn)
-  }
-}
+// Trusted work: `asService(async (db) => { … })` from '@/lib/db'.
+//
+// A function's SQL runs as its caller, so row-level security keeps a shopper to
+// their own rows. Some work a function does on the caller's behalf must reach
+// further: a checkout creates the order and takes the stock, and the shopper may
+// not update products. asService runs the block in one transaction with the
+// service-role identity, so policies admit it and FOR UPDATE locks what it
+// reads. It is the project's own function login all the same
+// (function-db-role.ts): nothing outside the project's schema, ever. It is
+// explicit in the code, a line in the run's logs says it ran, and deploy_code
+// says the function uses it.
 
 /** True when the code runs SQL with asService, for the deploy answer. */
 export function usesAsService(code: string): boolean {
@@ -579,27 +378,14 @@ export function readsWithheldEnv(code: string): string | null {
   return null
 }
 
-// ─── Method resolution ────────────────────────────────────────────────────────
-
-const METHOD_RE = /^\s*(GET|POST|PUT|PATCH|DELETE)\b/i
-
-/**
- * Pick which exported handler to call. Prefer the method declared on the
- * function's triggerTable (e.g. "GET /api/v1/<pid>/fn/<name>"); otherwise fall
- * back to the single exported handler.
- */
-function resolveMethod(
-  exportsObj: Record<string, any>,
-  triggerTableHint?: string | null
-): { method: string; handler: (req: any, ctx?: any) => any } | null {
-  const available = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].filter(
-    m => typeof exportsObj[m] === 'function'
-  )
-  if (available.length === 0) return null
-
-  const hinted = triggerTableHint?.match(METHOD_RE)?.[1]?.toUpperCase()
-  const chosen = (hinted && available.includes(hinted) ? hinted : available[0])
-  return { method: chosen, handler: exportsObj[chosen] }
+/** What the runner needs, in every run, to give function code the helpers above. */
+function helperText() {
+  return {
+    text: { asServiceNote: AS_SERVICE_NOTE, signRefused: SIGN_REFUSED },
+    withheldNames: [...WITHHELD_ENV_NAMES],
+    ownerTest: { token: OWNER_TEST_TOKEN, userId: TEST_RUN_USER_ID },
+    nodeEnv: process.env.NODE_ENV ?? null,
+  }
 }
 
 // ─── Creation-time validation gate ───────────────────────────────────────────
@@ -613,13 +399,16 @@ export interface RouteModuleValidation {
 
 /**
  * Validate a route module WITHOUT invoking its handler: safety scan → esbuild
- * compile → vm module evaluation → exported-handler check. This is the gate
- * every generated/repaired route module must pass BEFORE it is stored as an
- * active function, so an agent can never persist code that crashes on its
- * first invocation. Zero side effects: the handler is never called, no DB or
- * network is touched (module top-level only defines functions).
+ * compile → module evaluation (in a runner process, never here) → exported-
+ * handler check. This is the gate every generated/repaired route module must
+ * pass BEFORE it is stored as an active function, so an agent can never persist
+ * code that crashes on its first invocation. The handler is never called; the
+ * module's top level runs in the runner with no database and no network.
+ *
+ * Throws FunctionRunnerUnavailableError when there is nowhere isolated to
+ * evaluate it: that is not the code's fault, so it is not reported as invalid.
  */
-export function validateRouteModule(code: string, expectedMethod?: string | null): RouteModuleValidation {
+export async function validateRouteModule(code: string, expectedMethod?: string | null): Promise<RouteModuleValidation> {
   try {
     assertNotBlocked(code)
   } catch (err: any) {
@@ -629,58 +418,24 @@ export function validateRouteModule(code: string, expectedMethod?: string | null
 
   let compiled: string
   try {
-    compiled = getEsbuildTransformSync()(code, {
-      loader: 'ts',
-      format: 'cjs',
-      target: 'node18',
-      platform: 'node',
-    }).code
+    compiled = compileModule(code)
   } catch (err: any) {
     return { valid: false, methods: [], error: `Compile error: ${err?.message || String(err)}` }
   }
 
-  const moduleExports: Record<string, any> = {}
-  const validationWithheld = makeWithheld()
-  const sandbox: Record<string, any> = {
-    module: { exports: moduleExports },
-    exports: moduleExports,
-    // Dummy auth material — evaluation only defines the handlers; nothing runs.
-    require: buildRequire(
-      '00000000-0000-4000-8000-000000000000',
-      { jwtSecret: null, adminKey: null },
-      {
-        prisma: refusingPrisma('The database is not reachable while a function is being validated.'),
-        asService: () => Promise.reject(new Error('The database is not reachable while a function is being validated.')),
-      },
-      validationWithheld,
-      null,
-    ),
-    console: { log() {}, error() {}, warn() {}, info() {} },
-    URL, URLSearchParams, TextEncoder, TextDecoder, Buffer,
-    // Evaluation only defines the handlers, but TOP-LEVEL statements do run —
-    // and they must not reach the network, let alone through the host's fetch.
-    // A synchronous throw (not a rejected promise) so a fire-and-forget call
-    // fails the evaluation instead of surfacing as an unhandled rejection.
-    fetch: () => { throw new Error('fetch is not available while a function is being validated.') },
-    setTimeout, clearTimeout,
-    Promise, JSON, Math, Date, Error, Object, Array, String, Number, Boolean, RegExp,
-    process: makeCuratedProcess(validationWithheld),
-    global: undefined,
-    globalThis: undefined,
+  const outcome = await runIsolated({
+    kind: 'route-validate',
+    payload: { compiled, timeoutMs: VALIDATION_TIMEOUT_MS, ...helperText() },
+    hardTimeoutMs: VALIDATION_HARD_TIMEOUT_MS,
+  })
+  const result = outcome.result
+  if (!result) {
+    return { valid: false, methods: [], error: `Evaluation error: ${endedWithoutAnswer(outcome, 'module')}` }
   }
-  vm.createContext(sandbox)
-  try {
-    new vm.Script(compiled, { filename: 'route-function-validate.js' }).runInContext(sandbox, {
-      timeout: 3_000,
-    })
-  } catch (err: any) {
-    return { valid: false, methods: [], error: `Evaluation error: ${err?.message || String(err)}` }
-  }
+  if (!result.ok) return { valid: false, methods: [], error: `Evaluation error: ${result.error}` }
 
-  const finalExports = sandbox.module.exports || moduleExports
-  const methods = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].filter(
-    m => typeof finalExports[m] === 'function'
-  )
+  const reported = (result.value as { methods?: unknown } | null)?.methods
+  const methods = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].filter((m) => Array.isArray(reported) && reported.includes(m))
   if (methods.length === 0) {
     return { valid: false, methods: [], error: 'Module exports no GET/POST/PUT/PATCH/DELETE handler' }
   }
@@ -752,6 +507,49 @@ export interface RouteModuleRunOptions {
   authMaterial?: ProjectFnAuth
 }
 
+/** How a run that never answered ended, in words for its error. */
+function endedWithoutAnswer(outcome: IsolatedOutcome, what: string): string {
+  if (outcome.killed === 'timeout') return `the ${what} did not finish in time`
+  if (endedForMemory(outcome)) return `the ${what} used more memory than a function may`
+  if (outcome.killed === 'output') return `the ${what} wrote more output than a function may`
+  const how = outcome.signal ? `signal ${outcome.signal}` : `exit code ${outcome.exitCode}`
+  return `the ${what}'s process ended before it answered (${how})`
+}
+
+/** The answers a route module's runner gets to its calls, all for `projectId`. */
+function routeCallHandlers(projectId: string): CallHandlers {
+  return {
+    // Outbound HTTP for module code: fetch's call shape, the egress guard's
+    // rules. The runner never gets a fetch of its own from us; it asks here.
+    async fetch([url, init]) {
+      const options = (init && typeof init === 'object' ? init : {}) as Record<string, unknown>
+      const headers: Record<string, string> = {}
+      if (options.headers && typeof options.headers === 'object') {
+        for (const [k, v] of Object.entries(options.headers as Record<string, unknown>)) headers[String(k)] = String(v)
+      }
+      const res = await safeFetch(String(url), {
+        method: typeof options.method === 'string' ? options.method : 'GET',
+        headers,
+        body: typeof options.body === 'string' ? options.body : undefined,
+        egressScope: 'function',
+      })
+      return { status: res.status, headers: [...res.headers.entries()], body: Buffer.from(await res.arrayBuffer()) }
+    },
+    // The project's own function login, on the first query; `refresh` after a
+    // refused login re-derives and re-asserts it (function-db-role.ts).
+    async 'db.connection'([opts]) {
+      const refresh = !!(opts && typeof opts === 'object' && (opts as { refresh?: unknown }).refresh)
+      const { connectionString, schema } = await functionDbConnection(projectId, { refresh })
+      return { connectionString, searchPath: functionSearchPath(schema) }
+    },
+    // An event the module sends on its project's own stream label
+    // (stream-notify.ts).
+    async 'stream.notify'([payload]) {
+      await sendToProjectStream(projectId, String(payload ?? ''))
+      return true
+    },
+  }
+}
 
 /**
  * Compile and execute a route-module AiFunction.
@@ -771,55 +569,24 @@ export async function executeRouteModuleFunction(
   triggerTableHint?: string | null,
   opts: RouteModuleRunOptions = {}
 ): Promise<RouteModuleRunResult> {
-  const ownerTest: OwnerTest | null = opts.testRun ? { live: true } : null
-  try {
-    return await runRouteModule(code, projectId, event, triggerTableHint, opts, ownerTest)
-  } finally {
-    // A helper the function kept hold of (in a timer, say) no longer answers as
-    // the owner's test: isAdminRequest needs the key again and the placeholder
-    // is nobody. The run's database handle keeps the identity it was given, as
-    // an asService block's does.
-    if (ownerTest) ownerTest.live = false
-  }
-}
-
-async function runRouteModule(
-  code: string,
-  projectId: string,
-  event: { type: string; data: Record<string, any> },
-  triggerTableHint: string | null | undefined,
-  opts: RouteModuleRunOptions,
-  ownerTest: OwnerTest | null,
-): Promise<RouteModuleRunResult> {
   assertNotBlocked(code)
 
-  // Project auth material — resolved once per execution. Fail-soft to nulls;
-  // the curated env then holds empty secrets and gates fail closed.
+  // Project auth material — resolved once per execution, used here only.
+  // Fail-soft to nulls; gates then fail closed.
   const auth: ProjectFnAuth = opts.authMaterial ?? (await loadProjectFnAuth(projectId))
 
   // 1. Strip TypeScript → runnable CommonJS. esbuild generates the import/cjs
   //    interop helpers (__toESM etc.) so default + named imports both work.
   let compiled: string
   try {
-    compiled = getEsbuildTransformSync()(code, {
-      loader: 'ts',
-      format: 'cjs',
-      target: 'node18',
-      platform: 'node',
-    }).code
+    compiled = compileModule(code)
   } catch (err: any) {
     throw new Error(`Route module failed to compile: ${err?.message || String(err)}`)
   }
 
-  // ── Caller identity, resolved BEFORE the sandbox is built ─────────────────
-  //
-  // The curated `require` hands the function its database handle, and that
-  // handle carries the caller's RLS identity. So the headers have to be
-  // assembled first — they are the only verified evidence of who is calling.
-  //
-  // This block used to run after the module had already been compiled and
-  // given a bare Prisma client, which is why generated functions queried with
-  // no identity at all and got empty results back from every RLS policy.
+  // 2. The request, and who sent it. The headers are the only verified
+  //    evidence of who is calling, and the caller's identity is what the
+  //    function's database runs as.
   const data = (event.data && typeof event.data === 'object') ? event.data : {}
   // Headers, in priority order: forwarded real headers → legacy body token →
   // test-run injection. Later sources never overwrite earlier ones.
@@ -842,15 +609,11 @@ async function runRouteModule(
   //     verifyToken(request.headers.get('x-user-token')?.replace(/^Bearer /,''))
   //
   // because that is the single line the generator's runtime contract shows them.
-  // So a client sending the far more idiomatic `Authorization: Bearer <token>`
-  // got a 401 from `/fn/*` — while `/auth/*` on the same project accepted it.
-  // One backend, two contradictory answers to "how do I authenticate", and the
-  // one that worked was the non-obvious one.
-  //
-  // Normalising here rather than in the prompt fixes EVERY function already
-  // deployed, without regenerating any of them — the same reason the
-  // jsonwebtoken and verifyToken shims exist above. A function written against
-  // either header now works with either header.
+  // A client sending the far more idiomatic `Authorization: Bearer <token>` got
+  // a 401 from `/fn/*`, while `/auth/*` on the same project accepted it.
+  // Normalising here fixes every function already deployed, without
+  // regenerating any of them. A function written against either header now
+  // works with either header.
   if (headers['authorization'] && !headers['x-user-token']) {
     headers['x-user-token'] = headers['authorization']
   } else if (headers['x-user-token'] && !headers['authorization']) {
@@ -858,177 +621,83 @@ async function runRouteModule(
   }
   // An owner's test run: the request carries the placeholder where a user's
   // token would be, never the admin key or a token signed with the project's
-  // secret, and its identity is the runner's to give (see OwnerTest).
-  if (ownerTest && !headers['x-user-token']) {
+  // secret, and its identity is the runner's to give.
+  const testRun = opts.testRun === true
+  if (testRun && !headers['x-user-token']) {
     headers['x-user-token'] = `Bearer ${OWNER_TEST_TOKEN}`
     if (!headers['authorization']) headers['authorization'] = headers['x-user-token']
   }
 
-  const callerIdentity: RlsIdentity = ownerTest
+  const callerIdentity: RlsIdentity = testRun
     ? { userId: null, isServiceRole: true }
     : await resolveCallerIdentity(projectId, headers, auth)
 
-  // Outbound HTTP for module code: fetch's call shape, the egress guard's
-  // rules. The host's bare fetch reaches everything this PROCESS can reach —
-  // the cloud metadata service, the VPC, the loopback admin ports (PostgREST,
-  // the runtime) — and module code is free-form, so it goes through the same
-  // guard as ctx.http. The response is the guard's SafeResponse (ok/status/
-  // headers.get/json/text/arrayBuffer), the same shape ctx.http returns.
-  const guardedFetch = (input: any, init?: any) => {
-    const url =
-      typeof input === 'string' ? input
-        : input instanceof URL ? input.toString()
-          : typeof input?.url === 'string' ? input.url
-            : String(input)
-    const method = String(init?.method ?? (typeof input === 'object' && input?.method) ?? 'GET').toUpperCase()
-    const outHeaders: Record<string, string> = {}
-    const rawHeaders = init?.headers ?? (typeof input === 'object' ? input?.headers : undefined)
-    if (rawHeaders) {
-      if (typeof rawHeaders.forEach === 'function') {
-        rawHeaders.forEach((v: unknown, k: unknown) => { outHeaders[String(k)] = String(v) })
-      } else if (Array.isArray(rawHeaders)) {
-        for (const [k, v] of rawHeaders) outHeaders[String(k)] = String(v)
-      } else {
-        for (const [k, v] of Object.entries(rawHeaders)) outHeaders[k] = String(v)
-      }
-    }
-    let body: string | undefined
-    const rawBody = init?.body
-    if (rawBody !== undefined && rawBody !== null) {
-      if (typeof rawBody === 'string') body = rawBody
-      else if (Buffer.isBuffer(rawBody)) body = rawBody.toString('utf8')
-      else if (rawBody instanceof URLSearchParams) body = rawBody.toString()
-      else if (rawBody instanceof ArrayBuffer) body = Buffer.from(rawBody).toString('utf8')
-      else if (ArrayBuffer.isView(rawBody)) body = Buffer.from(rawBody.buffer, rawBody.byteOffset, rawBody.byteLength).toString('utf8')
-      else throw new TypeError('fetch body must be a string, Buffer, URLSearchParams or ArrayBuffer in function code — stringify JSON yourself')
-    }
-    const p = safeFetch(url, { method, headers: outHeaders, body, egressScope: 'function' })
-    // A module that fires-and-forgets a blocked fetch must not take the process
-    // down with an unhandled rejection; a caller that awaits still sees it.
-    p.catch(() => {})
-    return p
-  }
-
-  // 2. Run the module in a vm with a curated require + console capture.
   const { getDecryptedEnvMap } = await import('@/lib/services/projectEnvVars')
   const projectEnv = await getDecryptedEnvMap(projectId).catch(() => ({} as Record<string, string>))
-  const logs: string[] = []
-  const moduleExports: Record<string, any> = {}
-  const withheld = makeWithheld()
-  const sandbox: Record<string, any> = {
-    module: { exports: moduleExports },
-    exports: moduleExports,
-    require: buildRequire(
-      projectId,
-      auth,
-      { prisma: scopedDb(projectId, callerIdentity), asService: makeAsService(projectId, logs) },
-      withheld,
-      ownerTest,
-    ),
-    console: {
-      log: (...a: any[]) => logs.push(a.map(stringify).join(' ')),
-      error: (...a: any[]) => logs.push(a.map(stringify).join(' ')),
-      warn: (...a: any[]) => logs.push(a.map(stringify).join(' ')),
-      info: (...a: any[]) => logs.push(a.map(stringify).join(' ')),
+
+  // 3. Run it, in a runner process of its own.
+  const outcome = await runIsolated(
+    {
+      kind: 'route',
+      payload: {
+        projectId,
+        compiled,
+        hint: triggerTableHint ?? null,
+        data: encodeValue(data),
+        headers,
+        env: projectEnv,
+        testRun,
+        verifiedTokens: projectSignedTokens(headers, data, auth),
+        adminKey: presentedAdminKey(headers, auth),
+        db: {
+          sessionSql: FUNCTION_DB_SESSION_SQL,
+          claims: functionDbClaims(callerIdentity),
+          serviceClaims: [...SERVICE_DB_CLAIMS],
+          streamLabel: projectStreamLabel(projectId),
+        },
+        timeoutMs: EXECUTION_TIMEOUT_MS,
+        ...helperText(),
+      },
+      hardTimeoutMs: RUN_HARD_TIMEOUT_MS,
     },
-    URL,
-    URLSearchParams,
-    TextEncoder,
-    TextDecoder,
-    Buffer,
-    fetch: guardedFetch,
-    setTimeout,
-    clearTimeout,
-    Promise,
-    JSON,
-    Math,
-    Date,
-    Error,
-    Object,
-    Array,
-    String,
-    Number,
-    Boolean,
-    RegExp,
-    process: makeCuratedProcess(withheld, projectEnv),
-    global: undefined,
-    globalThis: undefined,
+    routeCallHandlers(projectId),
+  )
+
+  // 4. What it answered, or why it did not.
+  const result = outcome.result
+  if (!result) {
+    // Stopped before it answered. The runner sends a run's log lines with its
+    // answer, so these carry none.
+    if (outcome.killed === 'timeout') throw new RouteModuleRunError(TIMEOUT_MESSAGE)
+    throw new RouteModuleHandlerError(`The function did not answer: ${endedWithoutAnswer(outcome, 'run')}.`)
   }
-  vm.createContext(sandbox)
-
-  try {
-    new vm.Script(compiled, { filename: 'route-function.js' }).runInContext(sandbox, {
-      timeout: EXECUTION_TIMEOUT_MS,
-    })
-  } catch (err: any) {
-    throw new RouteModuleRunError(`Route module evaluation error: ${err?.message || String(err)}`, [...logs])
-  }
-
-  // esbuild cjs output puts exports on module.exports
-  const finalExports = sandbox.module.exports || moduleExports
-  const resolved = resolveMethod(finalExports, triggerTableHint)
-  if (!resolved) {
-    throw new RouteModuleRunError('Route module exports no GET/POST/PUT/PATCH/DELETE handler', [...logs])
-  }
-
-  // 3. Build the request from the event payload.
-  const query = new URLSearchParams()
-  for (const [k, v] of Object.entries(data)) {
-    if (k.startsWith('__') || k === 'authorization' || k === 'token') continue
-    if (v != null && typeof v !== 'object') query.set(k, String(v))
-  }
-  const qs = query.toString()
-
-  const reqObj = new RunnerRequest({
-    url: `https://app.backenly.com/api/v1/${projectId}/fn${qs ? `?${qs}` : ''}`,
-    headers,
-    body: data,
-    method: resolved.method,
-  })
-
-  // 4. Invoke with a hard timeout backstop.
-  // Next.js route handlers are called as (request, { params }). Generated
-  // functions frequently destructure the second arg (`const { projectId } =
-  // params`), so we MUST supply it — passing only the request made every such
-  // function crash with "Cannot destructure property 'params' of 'undefined'".
-  // params carries projectId (the only dynamic segment on /fn routes) plus any
-  // query values, matching what Next would provide.
-  const routeCtx = { params: { projectId, ...Object.fromEntries(new URLSearchParams(qs)) } }
-  let raw: any
-  try {
-    raw = await Promise.race([
-      Promise.resolve(resolved.handler(reqObj, routeCtx)),
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('Route function timed out after 10s')), EXECUTION_TIMEOUT_MS)
-      ),
-    ])
-  } catch (err: any) {
-    const msg = err?.message || String(err)
+  if (!result.ok) {
     // The 10s race cannot tell a hung handler from slow infrastructure, so a
-    // timeout is not a RouteModuleHandlerError. Everything else thrown here
-    // came out of the HANDLER itself, and the type says so: callers that must
-    // distinguish "the function is broken" from "the machinery failed" check
-    // the class instead of sniffing message text, which misread any handler
-    // error that happened to mention "database" or "connect" as an
-    // infrastructure failure. Either way the error carries the lines logged up
-    // to now: a handler that timed out may still be running, and what it logs
-    // after this is not this run's.
-    if (msg === 'Route function timed out after 10s') throw new RouteModuleRunError(msg, [...logs])
-    throw new RouteModuleHandlerError(msg, [...logs])
+    // timeout is not a RouteModuleHandlerError. Everything else thrown by the
+    // handler came out of the HANDLER itself, and the type says so: callers
+    // that must distinguish "the function is broken" from "the machinery
+    // failed" check the class instead of sniffing message text. Either way the
+    // error carries the lines the module logged up to the failure (#605).
+    const logs = result.logs
+    switch (result.errorKind) {
+      case 'evaluation':
+        throw new RouteModuleRunError(`Route module evaluation error: ${result.error}`, logs)
+      case 'exports':
+        throw new RouteModuleRunError('Route module exports no GET/POST/PUT/PATCH/DELETE handler', logs)
+      case 'timeout':
+        throw new RouteModuleRunError(TIMEOUT_MESSAGE, logs)
+      default:
+        throw new RouteModuleHandlerError(result.error || 'Route function error', logs)
+    }
   }
 
-  // 5. Normalise the response.
-  const status = typeof raw?.status === 'number' ? raw.status : 200
-  const body = raw && raw.__backenlyResponse ? raw.body : (raw ?? null)
-  const answerHeaders: Record<string, string> = raw && raw.__backenlyResponse && raw.headers ? raw.headers : {}
-  return { logs, returnValue: { status, body }, headers: answerHeaders }
-}
-
-function stringify(v: any): string {
-  if (typeof v === 'string') return v
-  try {
-    return JSON.stringify(v)
-  } catch {
-    return String(v)
+  const answer = (result.value && typeof result.value === 'object' ? result.value : {}) as Record<string, unknown>
+  const status = typeof answer.status === 'number' ? answer.status : 200
+  const answerHeaders: Record<string, string> = {}
+  if (answer.headers && typeof answer.headers === 'object' && !Array.isArray(answer.headers)) {
+    for (const [k, v] of Object.entries(answer.headers as Record<string, unknown>)) {
+      if (typeof v === 'string') answerHeaders[k] = v
+    }
   }
+  return { logs: result.logs, returnValue: { status, body: answer.body as any }, headers: answerHeaders }
 }

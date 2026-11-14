@@ -8,7 +8,7 @@
  *   • integration-context.ts  builds ctx.integrations.<id> (typed methods +
  *                             the universal .request() escape hatch)
  *   • executor.ts             forwards every method to the sandbox generically
- *   • sandbox-worker.cjs       exposes the methods to generated function code
+ *   • isolation/function-runner.cjs  exposes the methods to generated function code
  *   • generator.ts            documents the surface in the codegen prompt
  *   • getConnectedIntegrationNames  lists it to the brain + generator
  *
