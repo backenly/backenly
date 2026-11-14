@@ -461,6 +461,9 @@ describe('the application, against the database the procedure built', () => {
     // login, as the definer RDS has holds it (section 5c of setup-direct-access.sql).
     await rows(app(), `SELECT public.backenly_direct_sync_schema($1, $2, $3, $4)`, [schema, ro, rw, owner])
     expect(await rows(superUrl(), `SELECT public.backenly_direct_schema_change_holds($1) AS holds`, [rw])).toEqual([{ holds: [] }])
+    // As the application does right after each sync, once the strip has
+    // committed: the sessions that logged in while it ran are ended.
+    expect(await rows(app(), `SELECT public.backenly_direct_end_stripped_sessions($1) AS ended`, [rw])).toEqual([{ ended: 1 }])
     expect(await refusal(url(rw, rwPassword), `CREATE TABLE "${schema}".again (id int)`)).toMatch(/permission denied for schema/)
     expect(
       await rows(superUrl(), `SELECT pg_get_userbyid(relowner) AS owner FROM pg_class WHERE oid = to_regclass($1)`, [`"${schema}".probe`]),

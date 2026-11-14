@@ -535,6 +535,18 @@ export async function syncDirectAccessGrants(projectId: string): Promise<void> {
 
   const db = regionRawClient(region, projectId)
   await db.$queryRaw`SELECT public.backenly_direct_sync_schema(${schema}, ${ro}, ${rw}, ${owner})`
+
+  // A sync that took schema changes from the read-write login ended its
+  // sessions as it ran, but one that logged in before the sync committed saw
+  // the owner role still granted and may have taken it. The sync marked the
+  // login; now that it has committed, those sessions are ended
+  // (scripts/setup-direct-access.sql, section 5c). Asked first: a database
+  // whose helpers predate it has nothing to end.
+  if (rw) {
+    const [probe] = await db.$queryRaw<Array<{ present: boolean }>>`
+      SELECT to_regprocedure('public.backenly_direct_end_stripped_sessions(text)') IS NOT NULL AS present`
+    if (probe?.present) await db.$queryRaw`SELECT public.backenly_direct_end_stripped_sessions(${rw})`
+  }
 }
 
 /**

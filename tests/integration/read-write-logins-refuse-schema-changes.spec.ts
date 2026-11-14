@@ -52,6 +52,14 @@ function legacyNames() {
 const bySync = legacyNames()
 const byInstall = legacyNames()
 const onRds = legacyNames()
+/** Logins from before that the later cases make, and other roles they add, all removed at the end. */
+const madeLater: Array<ReturnType<typeof legacyNames>> = []
+const rolesLater: string[] = []
+function anotherFromBefore(): ReturnType<typeof legacyNames> {
+  const l = legacyNames()
+  madeLater.push(l)
+  return l
+}
 
 let db: Client
 let ownerId = ''
@@ -124,6 +132,23 @@ const functionOwner = async (s: string, name: string, client = db) =>
       WHERE n.nspname = $1 AND p.proname = $2`,
     [s, name],
   )).rows[0]?.owner as string | undefined
+/** Whether `member` may SET ROLE to `role` (PostgreSQL 16's membership option). */
+const canBecome = async (member: string, role: string) =>
+  (await q(`SELECT m.set_option FROM pg_auth_members m WHERE m.roleid = $1::regrole AND m.member = $2::regrole`, [role, member]))[0]
+    ?.set_option as boolean | undefined
+/** The mark a strip leaves on its login until the sessions that may have outlived it are ended. */
+const strippedMark = async (role: string) =>
+  ((await q(
+    `SELECT d.description FROM pg_shdescription d JOIN pg_roles r ON r.oid = d.objoid
+      WHERE d.classoid = 'pg_authid'::regclass AND r.rolname = $1`,
+    [role],
+  ))[0]?.description ?? null) as string | null
+/** What every login holds at once in a project's schemas (scripts/setup-direct-access.sql, 5c). */
+const sharedHolds = async (s: string, owner: string) =>
+  (await q(`SELECT holder || ' holds ' || item AS held FROM public.backenly_direct_shared_holds($1, $2)`, [s, owner]))
+    .map((r) => r.held as string)
+    .sort()
+
 /** Sessions of `role` still open, waiting up to five seconds for ended ones to go. */
 async function sessionsOf(role: string): Promise<number> {
   for (let i = 0; ; i++) {
@@ -178,8 +203,14 @@ afterAll(async () => {
     await prisma.user.deleteMany({ where: { id: ownerId } }).catch(() => {})
   }
   await q(`RESET backenly.app_role`).catch(() => {})
-  for (const s of [schema, bySync.schema, byInstall.schema, onRds.schema]) await q(`DROP SCHEMA IF EXISTS "${s}" CASCADE`).catch(() => {})
-  for (const role of [rw, own, bySync.login, bySync.owner, byInstall.login, byInstall.owner, onRds.login, onRds.owner, app]) {
+  for (const s of [schema, bySync.schema, byInstall.schema, onRds.schema, ...madeLater.map((l) => l.schema)]) {
+    await q(`DROP SCHEMA IF EXISTS "${s}" CASCADE`).catch(() => {})
+  }
+  for (const role of [
+    rw, own, bySync.login, bySync.owner, byInstall.login, byInstall.owner, onRds.login, onRds.owner,
+    ...madeLater.flatMap((l) => [l.login, l.owner]), ...rolesLater, app,
+  ]) {
+    await q(`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = $1`, [role]).catch(() => {})
     await q(`DROP OWNED BY ${role}`).catch(() => {})
     await q(`DROP ROLE IF EXISTS ${role}`).catch(() => {})
   }
@@ -274,7 +305,126 @@ describe('on a database shared by several projects, as this one is', () => {
     // Nor does any login get it through PUBLIC.
     expect((await q(`SELECT has_schema_privilege('public', 'public', 'CREATE') AS c`))[0].c).toBe(false)
     expect((await q(`SELECT has_database_privilege('public', current_database(), 'CREATE') AS c`))[0].c).toBe(false)
+    // The sessions the strip left were ended by the install's next statement (section 7b).
+    expect(await strippedMark(byInstall.login)).toBeNull()
   }, 120_000)
+
+  it('takes every grant option, default privilege and membership from a login from before, so a table its owner role makes later gives it nothing', async () => {
+    const l = anotherFromBefore()
+    await loginFromBefore(l)
+    const other = `bkn_test_other_${hex}`
+    rolesLater.push(other)
+    await q(`CREATE ROLE ${other} NOLOGIN`)
+    await q(`GRANT ${other} TO ${l.login}`)
+    await q(`GRANT CREATE ON DATABASE "${thisDatabase()}" TO ${l.login}`)
+    // What such a login could give itself, acting as the owner role.
+    expect(await as(l.owner, `GRANT SELECT, INSERT ON "${l.schema}".orders TO ${l.login} WITH GRANT OPTION`)).toBe('ok')
+    expect(await as(l.owner, `ALTER DEFAULT PRIVILEGES FOR ROLE ${l.owner} IN SCHEMA "${l.schema}" GRANT TRIGGER ON TABLES TO ${l.login}`)).toBe('ok')
+    expect(await holds(l.login)).toEqual(expect.arrayContaining([
+      `member of ${other}`,
+      `CREATE on database ${thisDatabase()}`,
+      expect.stringMatching(/^grant option on table .*\.orders$/),
+      `default privileges of ${l.owner} in schema ${l.schema} on tables`,
+    ]))
+
+    await sync(l.schema, l.login, l.owner)
+
+    expect(await holds(l.login)).toEqual([])
+    const [{ roles }] = await q(
+      `SELECT array_agg(g.rolname::text ORDER BY 1) AS roles FROM pg_auth_members m JOIN pg_roles g ON g.oid = m.roleid
+        WHERE m.member = $1::regrole`,
+      [l.login],
+    )
+    expect(roles).toEqual(['backenly_external', 'backenly_no_schema_changes'])
+    expect((await q(`SELECT has_database_privilege($1, current_database(), 'CREATE') AS c`, [l.login]))[0].c).toBe(false)
+    expect((await q(
+      `SELECT has_table_privilege($1, $2, 'SELECT WITH GRANT OPTION') OR has_table_privilege($1, $2, 'INSERT WITH GRANT OPTION') AS g`,
+      [l.login, `"${l.schema}".orders`],
+    ))[0].g).toBe(false)
+    // It keeps the rows it may change.
+    expect((await q(`SELECT has_table_privilege($1, $2, 'INSERT') AS i`, [l.login, `"${l.schema}".orders`]))[0].i).toBe(true)
+    expect(await q(
+      `SELECT 1 FROM pg_default_acl d CROSS JOIN LATERAL aclexplode(d.defaclacl) a WHERE a.grantee = $1::regrole`,
+      [l.login],
+    )).toEqual([])
+    expect(await as(l.owner, `CREATE TABLE "${l.schema}".later (id int)`)).toBe('ok')
+    expect((await q(`SELECT has_table_privilege($1, $2, 'TRIGGER') AS t`, [l.login, `"${l.schema}".later`]))[0].t).toBe(false)
+  }, 60_000)
+
+  it('does not take a temporary table for a way to change the schema, and leaves the session that made it alone', async () => {
+    const c = await login(rw)
+    expect(await attempt(c, `CREATE TEMP TABLE scratch_tmp (x int)`)).toBe('ok')
+    expect(await holds(rw)).toEqual([])
+    await sync(schema, rw, own)
+    expect(await attempt(c, `SELECT count(*) FROM scratch_tmp`)).toBe('ok')
+    expect(await strippedMark(rw)).toBeNull()
+  }, 60_000)
+
+  it('ends, once the strip has committed, a session that logged in while it ran and took the owner role', async () => {
+    const l = anotherFromBefore()
+    await loginFromBefore(l)
+    let late: Client | null = null
+    let tookRole = ''
+    await q('BEGIN')
+    try {
+      expect(await q(`SELECT public.backenly_direct_strip_schema_changes($1, $2, $3) AS taken`, [l.login, l.owner, l.schema]))
+        .toEqual([{ taken: true }])
+      // Logs in before the strip commits, so it sees the membership still there.
+      late = await login(l.login)
+      tookRole = await attempt(late, `SET ROLE ${l.owner}`)
+    } finally {
+      await q('COMMIT')
+    }
+    // What no ordering inside the strip's own transaction can stop.
+    expect(tookRole).toBe('ok')
+    expect(await holds(l.login)).toEqual([])
+    expect(await strippedMark(l.login)).toMatch(/^backenly: sessions to end after a strip/)
+
+    // As the application does right after each sync, now that the strip has committed.
+    expect(await q(`SELECT public.backenly_direct_end_stripped_sessions($1) AS ended`, [l.login])).toEqual([{ ended: 1 }])
+    expect(await sessionsOf(l.login)).toBe(0)
+    expect(await attempt(late!, `CREATE FUNCTION "${l.schema}".after_strip() RETURNS int LANGUAGE sql AS 'SELECT 1'`))
+      .toMatch(/terminat|Connection/i)
+    expect(await strippedMark(l.login)).toBeNull()
+
+    // A session that logs in after that cannot take the role, and the next sync leaves it alone.
+    const next = await login(l.login)
+    expect(await attempt(next, `SET ROLE ${l.owner}`)).toMatch(/permission denied to set role/)
+    await sync(l.schema, l.login, l.owner)
+    expect(await attempt(next, `SELECT 1`)).toBe('ok')
+  }, 60_000)
+
+  it('lets no login become the group every login joins, and gives what that group owned to the project\'s owner role', async () => {
+    // A login made now joins backenly_external without SET.
+    expect(await canBecome(rw, 'backenly_external')).toBe(false)
+
+    // One from before joined it with SET, and gave the group a function in its
+    // schema, which every login then acted as the owner of.
+    const l = anotherFromBefore()
+    await loginFromBefore(l)
+    expect(await canBecome(l.login, 'backenly_external')).toBe(true)
+    await q(`GRANT CREATE ON SCHEMA "${l.schema}" TO backenly_external`)
+    const c = await login(l.login)
+    expect(await attempt(c, `ALTER FUNCTION "${l.schema}".planted() OWNER TO backenly_external`)).toBe('ok')
+    await q(`REVOKE CREATE ON SCHEMA "${l.schema}" FROM backenly_external`)
+    // And had the owner role give PUBLIC TRIGGER on every table it makes later.
+    expect(await as(l.owner, `ALTER DEFAULT PRIVILEGES FOR ROLE ${l.owner} IN SCHEMA "${l.schema}" GRANT TRIGGER ON TABLES TO PUBLIC`)).toBe('ok')
+    expect(await sharedHolds(l.schema, l.owner)).toEqual([
+      `PUBLIC holds default privileges of ${l.owner} in schema ${l.schema} on tables: TRIGGER`,
+      `backenly_external holds ownership of function "${l.schema}".planted()`,
+    ])
+
+    await sync(l.schema, l.login, l.owner)
+
+    expect(await canBecome(l.login, 'backenly_external')).toBe(false)
+    expect(await functionOwner(l.schema, 'planted')).toBe(l.owner)
+    expect(await sharedHolds(l.schema, l.owner)).toEqual([])
+    const again = await login(l.login)
+    expect(await attempt(again, `ALTER FUNCTION "${l.schema}".planted() SECURITY DEFINER`)).toMatch(/must be owner/)
+    expect(await attempt(again, `SET ROLE backenly_external`)).toMatch(/permission denied to set role/)
+    expect(await as(l.owner, `CREATE TABLE "${l.schema}".later_public (id int)`)).toBe('ok')
+    expect((await q(`SELECT has_table_privilege('public', $1, 'TRIGGER') AS t`, [`"${l.schema}".later_public`]))[0].t).toBe(false)
+  }, 60_000)
 })
 
 describe('held by a definer that is not a superuser, as on Amazon RDS', () => {
@@ -296,8 +446,11 @@ describe('held by a definer that is not a superuser, as on Amazon RDS', () => {
         'backenly_direct_create_role(text, text, text, text)',
         'backenly_direct_set_schema_changes(text, boolean)',
         'backenly_direct_shared_database()',
+        'backenly_direct_login_holds(text, text)',
         'backenly_direct_schema_change_holds(text)',
-        'backenly_direct_strip_schema_changes(text, text)',
+        'backenly_direct_shared_holds(text, text)',
+        'backenly_direct_strip_schema_changes(text, text, text)',
+        'backenly_direct_end_stripped_sessions(text)',
       ]) {
         await q(`ALTER FUNCTION public.${fn} OWNER TO ${definer}`)
       }

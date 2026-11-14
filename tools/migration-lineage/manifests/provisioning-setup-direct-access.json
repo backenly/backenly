@@ -99,7 +99,7 @@
         "config": [
           "search_path=pg_catalog, public"
         ],
-        "body_sha256": "YqWPlnLdyZQ/qX7JIo/twIx8rNyj4eFCEe52aH0Avus="
+        "body_sha256": "LbAcp+54St9xtGuyOVJum+eyx1DwVccNbwux+5du+II="
       }
     },
     {
@@ -119,6 +119,38 @@
       }
     },
     {
+      "key": "routine public.backenly_direct_end_stripped_sessions(p_role text)",
+      "expect": {
+        "result": "integer",
+        "kind": "f",
+        "language": "plpgsql",
+        "security_definer": true,
+        "volatility": "v",
+        "strict": false,
+        "leakproof": false,
+        "config": [
+          "search_path=pg_catalog, public"
+        ],
+        "body_sha256": "9eTdZTMjVZ7ue2N7LsGCcVXaJPmRPeyLIFkfB5fLzgo="
+      }
+    },
+    {
+      "key": "routine public.backenly_direct_login_holds(p_role text, p_owner text)",
+      "expect": {
+        "result": "TABLE(item text, fix text, needs text[], step integer)",
+        "kind": "f",
+        "language": "sql",
+        "security_definer": true,
+        "volatility": "s",
+        "strict": false,
+        "leakproof": false,
+        "config": [
+          "search_path=pg_catalog"
+        ],
+        "body_sha256": "Un/f84Mv6E+ieY7lzNTV1hHd5OSNYkuTdV5eF7mtFHI="
+      }
+    },
+    {
       "key": "routine public.backenly_direct_schema_change_holds(p_role text)",
       "expect": {
         "result": "text[]",
@@ -131,7 +163,7 @@
         "config": [
           "search_path=pg_catalog"
         ],
-        "body_sha256": "TjC53+n7r98aoU2AaIWGN1V+8JOeSAsLHGmEvHH+H8w="
+        "body_sha256": "IqHQZIhZunbPiUnP9IuyIiBhgNNGeh1KM9eqlHdD9Ts="
       }
     },
     {
@@ -183,7 +215,23 @@
       }
     },
     {
-      "key": "routine public.backenly_direct_strip_schema_changes(p_role text, p_owner text)",
+      "key": "routine public.backenly_direct_shared_holds(p_schema text, p_owner text)",
+      "expect": {
+        "result": "TABLE(holder text, item text, fix text, needs text[], step integer)",
+        "kind": "f",
+        "language": "sql",
+        "security_definer": true,
+        "volatility": "s",
+        "strict": false,
+        "leakproof": false,
+        "config": [
+          "search_path=pg_catalog"
+        ],
+        "body_sha256": "QdQWgj39EKirZ4RL1qXTNfRj2KrjQm5sKC3Y25ANzzU="
+      }
+    },
+    {
+      "key": "routine public.backenly_direct_strip_schema_changes(p_role text, p_owner text, p_schema text)",
       "expect": {
         "result": "boolean",
         "kind": "f",
@@ -195,7 +243,7 @@
         "config": [
           "search_path=pg_catalog, public"
         ],
-        "body_sha256": "YQr5uekaW7R0z6g9vdzFeKv/ddLhz8KNd4QXZwIPluU="
+        "body_sha256": "u1diDuZ2rQLgqmaxn90xQ/PVpCM4zeA40xN6xtP8y4A="
       }
     },
     {
@@ -211,7 +259,7 @@
         "config": [
           "search_path=pg_catalog, public"
         ],
-        "body_sha256": "XehN+qCRNjmHY/RzqC5cDCXWF1hK9IQL1iLJuX03kZY="
+        "body_sha256": "hVqMsX5T5TjuXq13M19HKBpLU7jA1YpjuaNJgc5d2u0="
       }
     }
   ]

@@ -38,21 +38,29 @@
 --                                     change the schema; a new one may not, and
 --                                     on a database shared by several projects
 --                                     none may.
---   5c. backenly_direct_shared_database, backenly_direct_schema_change_holds,
---       backenly_direct_strip_schema_changes — whether the database is shared;
---                                     what a read-write login holds that lets it
---                                     change the schema; and taking it away.
+--   5c. backenly_direct_shared_database, backenly_direct_login_holds,
+--       backenly_direct_schema_change_holds, backenly_direct_shared_holds,
+--       backenly_direct_strip_schema_changes,
+--       backenly_direct_end_stripped_sessions — whether the database is
+--                                     shared; what a read-write login, or every
+--                                     login at once, holds that lets it change
+--                                     the schema; taking it away; and ending,
+--                                     once that has committed, the sessions
+--                                     that might still hold it.
 --   6. backenly_capture_ddl/_drop   — event triggers that record every DDL
 --                                     statement executed BY a bkn_% role into
 --                                     public.schema_drift_events (the evidence
 --                                     the autonomy loop adopts or flags).
 --                                     Platform DDL (backenly_user) is ignored.
 --
--- Last, on a shared database every existing read-write login is stripped of
--- any way to change the schema (section 7), and every workspace schema that
--- already exists is brought to what the sync declares for the backup role
--- (section 8), so re-running this file is also how an existing database is
--- converged.
+-- Last, on a shared database every existing read-write login, and what every
+-- login holds at once, is stripped of any way to change the schema (section
+-- 7), the sessions those strips left are ended once they have committed
+-- (section 7b), and every workspace schema that already exists is brought to
+-- what the sync declares for the backup role (section 8), so re-running this
+-- file is also how an existing database is converged. Run it statement by
+-- statement (scripts/install-sql.sh does), not in one transaction: 7b needs
+-- section 7 committed.
 --
 -- Network exposure (listen_addresses / pg_hba / firewall) is applied by
 -- scripts/setup-direct-access.sh — not here — because pg_hba syntax errors can
@@ -153,9 +161,16 @@ BEGIN
     -- app's own pool. ro 3 / rw 2 is ample for psql/BI/migrations at this scale;
     -- raise per-role once the cluster is per-tenant isolated.
     EXECUTE format(
-      'CREATE ROLE %I WITH LOGIN PASSWORD %L NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS CONNECTION LIMIT %s IN ROLE backenly_external',
+      'CREATE ROLE %I WITH LOGIN PASSWORD %L NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS CONNECTION LIMIT %s',
       p_role, p_password, CASE WHEN p_mode = 'READ_ONLY' THEN 3 ELSE 2 END
     );
+    -- The remote-access group: pg_hba matches its members, and the read
+    -- pass-through policy applies to them (INHERIT). Without SET from
+    -- PostgreSQL 16, so a login cannot become the group and give it what it
+    -- owns: every login would then act as that object's owner (section 5c).
+    EXECUTE format(CASE WHEN current_setting('server_version_num')::int >= 160000
+                        THEN 'GRANT backenly_external TO %I WITH INHERIT TRUE, SET FALSE'
+                        ELSE 'GRANT backenly_external TO %I' END, p_role);
     -- A new read-write login changes rows, not the schema, until the project's
     -- admin allows it (section 5b). Re-keying an existing login keeps its setting.
     IF p_mode = 'READ_WRITE' THEN
@@ -351,10 +366,22 @@ BEGIN
   -- setting existed is not a member, and keeps the schema changes it had only
   -- on a database dedicated to one project.
   IF p_rw IS NOT NULL THEN
+    -- Sessions a strip in an earlier transaction left: a session that logged
+    -- in before that strip committed may still hold the owner role (5c).
+    PERFORM public.backenly_direct_end_stripped_sessions(p_rw);
     v_rw_ddl := NOT public.backenly_direct_shared_database() AND NOT EXISTS (
       SELECT 1 FROM pg_auth_members m
        WHERE m.roleid = (SELECT oid FROM pg_roles WHERE rolname = 'backenly_no_schema_changes')
          AND m.member = (SELECT oid FROM pg_roles WHERE rolname = p_rw));
+    -- Owner-role membership, CREATE on any schema or the database, TRIGGER on
+    -- any table, grant options, default privileges and everything the login
+    -- owns, and whatever every login holds at once in this project's schemas:
+    -- taken, and its sessions ended when anything was (section 5c). First, so
+    -- that what the groups owned is the owner role's before it is handed
+    -- anything below. A login holding none of it is left alone.
+    IF NOT v_rw_ddl THEN
+      PERFORM public.backenly_direct_strip_schema_changes(p_rw, p_owner, p_schema);
+    END IF;
   ELSE
     v_rw_ddl := false;
   END IF;
@@ -402,11 +429,8 @@ BEGIN
     IF v_rw_ddl THEN
       EXECUTE format('GRANT USAGE, CREATE ON SCHEMA %I TO %I', p_schema, p_rw);
     ELSE
+      -- Stripped above (section 5c).
       EXECUTE format('GRANT USAGE ON SCHEMA %I TO %I', p_schema, p_rw);
-      -- Owner-role membership, CREATE on any schema or the database, TRIGGER on
-      -- any table, and every object it owns: taken, and its sessions ended
-      -- when anything was (section 5c). A login holding none of it is left alone.
-      PERFORM public.backenly_direct_strip_schema_changes(p_rw, p_owner);
     END IF;
     EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE, REFERENCES ON ALL TABLES IN SCHEMA %I TO %I', p_schema, p_rw);
     EXECUTE format('GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA %I TO %I', p_schema, p_rw);
@@ -587,13 +611,26 @@ REVOKE ALL ON FUNCTION public.backenly_direct_set_schema_changes(text, boolean) 
 --
 -- So on a shared database a read-write login reads and writes rows and does
 -- nothing else. It holds no CREATE on any schema or on the database, no
--- TRIGGER on any table, no membership in any role but backenly_external and
--- backenly_no_schema_changes, and owns nothing: what it created belongs to the
--- project's owner role, like every table the sync hands over. Allowing schema
--- changes is refused (5b), each sync strips the login it names (5), and
--- installing this file strips every login (section 7). Code older logins
--- already planted is found and switched off by
--- scripts/neutralize-planted-objects.ts.
+-- TRIGGER on any table, no grant option on anything, no default privilege that
+-- another role's future objects would give it, no membership in any role but
+-- backenly_external and backenly_no_schema_changes, and owns nothing: what it
+-- created belongs to the project's owner role, like every table the sync hands
+-- over. Nor does any login hold any of that through PUBLIC or through
+-- backenly_external, whose privileges every login has, and which owns nothing
+-- and can be become by no login. Allowing schema changes is refused (5b), each
+-- sync strips the login it names and converges what every login holds in its
+-- project's schemas (5), and installing this file strips every login and
+-- converges every schema (section 7). Code older logins already planted is
+-- found and switched off by scripts/neutralize-planted-objects.ts.
+--
+-- A session keeps a role it took with SET ROLE after the membership is gone,
+-- so a strip ends the login's sessions. A session that logs in while the
+-- strip's transaction is still open sees the membership not yet revoked, and
+-- can take the role then. The strip therefore marks the login (a comment on
+-- the role, which a superuser or the definer holding ADMIN on it may write),
+-- and backenly_direct_end_stripped_sessions, called in a later transaction,
+-- ends whatever sessions it has and clears the mark: by the application right
+-- after each sync, by each sync of that login, and by this file (section 7b).
 --
 -- A database is dedicated to one project only when a superuser says so for
 -- this database and it holds one project's workspace:
@@ -623,74 +660,366 @@ $fn$;
 
 REVOKE ALL ON FUNCTION public.backenly_direct_shared_database() FROM PUBLIC;
 
--- What a read-write login holds in this database that would let it change the
--- schema, one item per line, sorted; empty when it changes rows only. Read by
--- the strip below, before and after it acts, and by the regional verification
--- (tools/managed-db/regional/sql/verify.sql). Grants are found through
--- pg_shdepend, which records every object whose privileges name the login, so
--- no catalog is scanned whole.
-CREATE OR REPLACE FUNCTION public.backenly_direct_schema_change_holds(p_role text) RETURNS text[]
+-- Everything a read-write login holds in this database that would let it
+-- change the schema, one row per thing, with the statement that takes it, the
+-- roles whose privileges that statement needs, and the order to take them in:
+--
+--   1 membership of any role but the two marker groups, an owner role's above all;
+--   2 CREATE on the database or on any schema, and TRIGGER on any table;
+--   3 a grant option on anything, with which it would grant others what it holds;
+--   4 a default privilege another role's future objects would give it;
+--   5 ownership of anything, which passes to the project's owner role.
+--
+-- Grants are found through pg_shdepend, which records every object whose
+-- privileges name the login, so no catalog is scanned whole. A temporary
+-- object is its own session's, reachable from no other and gone when it ends,
+-- so it is not counted. Read by backenly_direct_schema_change_holds and by the
+-- strip below, which takes exactly what this lists.
+CREATE OR REPLACE FUNCTION public.backenly_direct_login_holds(p_role text, p_owner text DEFAULT NULL)
+RETURNS TABLE (item text, fix text, needs text[], step integer)
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog
 AS $fn$
   WITH login AS (SELECT r.oid FROM pg_roles r WHERE r.rolname = p_role),
-       here AS (SELECT d.oid, d.datacl FROM pg_database d WHERE d.datname = current_database()),
-       named AS (
-         SELECT s.classid, s.objid
+       here AS (SELECT d.oid, d.datname::text AS name, d.datacl, pg_get_userbyid(d.datdba)::text AS dba
+                  FROM pg_database d WHERE d.datname = current_database()),
+       v AS (SELECT current_setting('server_version_num')::int >= 160000 AS pg16,
+                    coalesce(p_owner, 'bkn_own_' || right(p_role, 12)) AS owner),
+       dep AS (
+         SELECT s.classid, s.objid, s.objsubid, s.deptype
            FROM pg_shdepend s, login, here
-          WHERE s.refclassid = 'pg_authid'::regclass AND s.refobjid = login.oid
-            AND s.deptype = 'a' AND s.dbid = here.oid)
-  SELECT coalesce(array_agg(held.item ORDER BY held.item), '{}'::text[]) FROM (
-    SELECT 'member of ' || g.rolname AS item
-      FROM pg_auth_members m JOIN pg_roles g ON g.oid = m.roleid, login
-     WHERE m.member = login.oid AND g.rolname NOT IN ('backenly_external', 'backenly_no_schema_changes')
-    UNION
-    SELECT 'CREATE on database ' || current_database()
-      FROM here CROSS JOIN LATERAL aclexplode(here.datacl) a, login
-     WHERE a.grantee = login.oid AND a.privilege_type = 'CREATE'
-    UNION
-    SELECT 'CREATE on schema ' || n.nspname
-      FROM named JOIN pg_namespace n ON named.classid = 'pg_namespace'::regclass AND n.oid = named.objid
-      CROSS JOIN LATERAL aclexplode(n.nspacl) a, login
-     WHERE a.grantee = login.oid AND a.privilege_type = 'CREATE'
-    UNION
-    SELECT 'TRIGGER on ' || c.oid::regclass::text
-      FROM named JOIN pg_class c ON named.classid = 'pg_class'::regclass AND c.oid = named.objid
-      CROSS JOIN LATERAL aclexplode(c.relacl) a, login
-     WHERE a.grantee = login.oid AND a.privilege_type = 'TRIGGER'
-    UNION
-    -- Default privileges the sync sets FOR the login (section 5) are recorded
-    -- as its own, but create nothing and are not objects: left out.
-    SELECT 'owner of ' || count(*) || ' object(s)'
-      FROM pg_shdepend s, login, here
-     WHERE s.refclassid = 'pg_authid'::regclass AND s.refobjid = login.oid
-       AND s.deptype = 'o' AND s.dbid = here.oid
-       AND s.classid <> 'pg_default_acl'::regclass
-    HAVING count(*) > 0
-  ) held
+          WHERE s.refclassid = 'pg_authid'::regclass AND s.refobjid = login.oid AND s.dbid = here.oid),
+       -- Every privilege granted to the login on an object in this database,
+       -- with what GRANT and REVOKE call the object.
+       acl AS (
+         SELECT CASE WHEN c.relkind = 'S' THEN 'SEQUENCE' ELSE 'TABLE' END AS kind,
+                c.oid::regclass::text AS obj, c.oid::regclass::text AS label, NULL::text AS col,
+                pg_get_userbyid(c.relowner)::text AS owner, a.privilege_type AS priv, a.is_grantable AS grantable
+           FROM dep
+           JOIN pg_class c ON dep.classid = 'pg_class'::regclass AND dep.objsubid = 0 AND c.oid = dep.objid
+           CROSS JOIN LATERAL aclexplode(c.relacl) a, login
+          WHERE dep.deptype = 'a' AND a.grantee = login.oid AND c.relpersistence <> 't'
+         UNION ALL
+         SELECT 'TABLE', c.oid::regclass::text, c.oid::regclass::text, quote_ident(at.attname),
+                pg_get_userbyid(c.relowner)::text, a.privilege_type, a.is_grantable
+           FROM dep
+           JOIN pg_attribute at ON dep.classid = 'pg_class'::regclass AND dep.objsubid > 0
+                                AND at.attrelid = dep.objid AND at.attnum = dep.objsubid
+           JOIN pg_class c ON c.oid = at.attrelid
+           CROSS JOIN LATERAL aclexplode(at.attacl) a, login
+          WHERE dep.deptype = 'a' AND a.grantee = login.oid AND c.relpersistence <> 't'
+         UNION ALL
+         SELECT 'SCHEMA', quote_ident(n.nspname), n.nspname::text, NULL,
+                pg_get_userbyid(n.nspowner)::text, a.privilege_type, a.is_grantable
+           FROM dep
+           JOIN pg_namespace n ON dep.classid = 'pg_namespace'::regclass AND n.oid = dep.objid
+           CROSS JOIN LATERAL aclexplode(n.nspacl) a, login
+          WHERE dep.deptype = 'a' AND a.grantee = login.oid
+         UNION ALL
+         SELECT 'ROUTINE', p.oid::regprocedure::text, p.oid::regprocedure::text, NULL,
+                pg_get_userbyid(p.proowner)::text, a.privilege_type, a.is_grantable
+           FROM dep
+           JOIN pg_proc p ON dep.classid = 'pg_proc'::regclass AND p.oid = dep.objid
+           CROSS JOIN LATERAL aclexplode(p.proacl) a, login
+          WHERE dep.deptype = 'a' AND a.grantee = login.oid
+         UNION ALL
+         SELECT CASE WHEN t.typtype = 'd' THEN 'DOMAIN' ELSE 'TYPE' END, t.oid::regtype::text, t.oid::regtype::text, NULL,
+                pg_get_userbyid(t.typowner)::text, a.privilege_type, a.is_grantable
+           FROM dep
+           JOIN pg_type t ON dep.classid = 'pg_type'::regclass AND t.oid = dep.objid
+           CROSS JOIN LATERAL aclexplode(t.typacl) a, login
+          WHERE dep.deptype = 'a' AND a.grantee = login.oid
+         UNION ALL
+         SELECT 'LANGUAGE', quote_ident(l.lanname), l.lanname::text, NULL,
+                pg_get_userbyid(l.lanowner)::text, a.privilege_type, a.is_grantable
+           FROM dep
+           JOIN pg_language l ON dep.classid = 'pg_language'::regclass AND l.oid = dep.objid
+           CROSS JOIN LATERAL aclexplode(l.lanacl) a, login
+          WHERE dep.deptype = 'a' AND a.grantee = login.oid
+         UNION ALL
+         SELECT 'LARGE OBJECT', m.oid::text, m.oid::text, NULL,
+                pg_get_userbyid(m.lomowner)::text, a.privilege_type, a.is_grantable
+           FROM dep
+           JOIN pg_largeobject_metadata m ON dep.classid = 'pg_largeobject'::regclass AND m.oid = dep.objid
+           CROSS JOIN LATERAL aclexplode(m.lomacl) a, login
+          WHERE dep.deptype = 'a' AND a.grantee = login.oid
+         UNION ALL
+         SELECT 'DATABASE', quote_ident(here.name), here.name, NULL, here.dba, a.privilege_type, a.is_grantable
+           FROM here CROSS JOIN LATERAL aclexplode(here.datacl) a, login
+          WHERE a.grantee = login.oid)
+  SELECT 'member of ' || g.rolname,
+         CASE WHEN v.pg16 THEN format('REVOKE %I FROM %I GRANTED BY %I CASCADE', g.rolname, p_role, gr.rolname)
+              ELSE format('REVOKE %I FROM %I CASCADE', g.rolname, p_role) END,
+         CASE WHEN v.pg16 THEN ARRAY[gr.rolname::text] ELSE '{}'::text[] END,
+         1
+    FROM pg_auth_members m
+    JOIN pg_roles g ON g.oid = m.roleid
+    JOIN pg_roles gr ON gr.oid = m.grantor, login, v
+   WHERE m.member = login.oid AND g.rolname NOT IN ('backenly_external', 'backenly_no_schema_changes')
+  UNION ALL
+  SELECT CASE acl.kind WHEN 'DATABASE' THEN 'CREATE on database ' ELSE 'CREATE on schema ' END || acl.label,
+         format('REVOKE CREATE ON %s %s FROM %I CASCADE', acl.kind, acl.obj, p_role),
+         ARRAY[acl.owner], 2
+    FROM acl
+   WHERE acl.kind IN ('DATABASE', 'SCHEMA') AND acl.priv = 'CREATE'
+  UNION ALL
+  SELECT 'TRIGGER on ' || acl.label,
+         format('REVOKE TRIGGER ON TABLE %s FROM %I CASCADE', acl.obj, p_role),
+         ARRAY[acl.owner], 2
+    FROM acl
+   WHERE acl.kind = 'TABLE' AND acl.col IS NULL AND acl.priv = 'TRIGGER'
+  UNION ALL
+  SELECT DISTINCT 'grant option on ' || lower(acl.kind) || ' ' || acl.label || coalesce(' (' || acl.col || ')', ''),
+         format('REVOKE GRANT OPTION FOR ALL PRIVILEGES%s ON %s %s FROM %I CASCADE',
+                coalesce(' (' || acl.col || ')', ''), acl.kind, acl.obj, p_role),
+         ARRAY[acl.owner], 3
+    FROM acl
+   WHERE acl.grantable
+  UNION ALL
+  SELECT 'default privileges of ' || pg_get_userbyid(da.defaclrole)
+           || coalesce(' in schema ' || n.nspname, '') || ' on ' || lower(k.word),
+         format('ALTER DEFAULT PRIVILEGES FOR ROLE %I%s REVOKE ALL ON %s FROM %I CASCADE',
+                pg_get_userbyid(da.defaclrole),
+                CASE WHEN da.defaclnamespace <> 0 THEN format(' IN SCHEMA %I', n.nspname) ELSE '' END,
+                k.word, p_role),
+         ARRAY[pg_get_userbyid(da.defaclrole)::text], 4
+    FROM dep
+    JOIN pg_default_acl da ON dep.classid = 'pg_default_acl'::regclass AND da.oid = dep.objid
+    LEFT JOIN pg_namespace n ON n.oid = da.defaclnamespace
+    CROSS JOIN LATERAL (SELECT CASE da.defaclobjtype WHEN 'r' THEN 'TABLES' WHEN 'S' THEN 'SEQUENCES'
+                                 WHEN 'f' THEN 'FUNCTIONS' WHEN 'T' THEN 'TYPES' WHEN 'n' THEN 'SCHEMAS'
+                                 ELSE 'LARGE OBJECTS' END AS word) k
+   WHERE dep.deptype = 'a'
+  UNION ALL
+  -- Default privileges the sync sets FOR the login (section 5) are recorded as
+  -- its own, but create nothing and are not objects: left out.
+  SELECT 'owner of ' || count(*) || ' object(s)',
+         format('REASSIGN OWNED BY %I TO %I', p_role, min(v.owner)),
+         ARRAY[p_role, min(v.owner)], 5
+    FROM dep CROSS JOIN LATERAL pg_identify_object(dep.classid, dep.objid, dep.objsubid) o, v
+   WHERE dep.deptype = 'o' AND dep.classid <> 'pg_default_acl'::regclass
+     AND coalesce(o.schema, '') !~ '^pg_(toast_)?temp_'
+  HAVING count(*) > 0
+$fn$;
+
+REVOKE ALL ON FUNCTION public.backenly_direct_login_holds(text, text) FROM PUBLIC;
+
+-- What a read-write login holds that would let it change the schema, one item
+-- per line, sorted; empty when it changes rows only. Read by the strip below,
+-- before and after it acts, and by the regional verification
+-- (tools/managed-db/regional/sql/verify.sql).
+CREATE OR REPLACE FUNCTION public.backenly_direct_schema_change_holds(p_role text) RETURNS text[]
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog
+AS $fn$
+  SELECT coalesce(array_agg(DISTINCT h.item ORDER BY h.item), '{}'::text[])
+    FROM public.backenly_direct_login_holds(p_role) h
 $fn$;
 
 REVOKE ALL ON FUNCTION public.backenly_direct_schema_change_holds(text) FROM PUBLIC;
 
--- Take from a read-write login whatever would let it change the schema (5c),
+-- What every login holds at once, one row per thing: through PUBLIC; through
+-- backenly_external, the group each joins, whose privileges each has (the
+-- read pass-through policy applies to it by inheritance) and which therefore
+-- holds nothing and owns nothing; and through backenly_no_schema_changes,
+-- which must hold nothing either. With the statement that takes it (NULL where
+-- nothing here can), the roles whose privileges that statement needs, and the
+-- order to take them in:
+--
+--   1 a membership either group holds, and a login able to SET ROLE to the
+--     group (from PostgreSQL 16, every login joins it without SET);
+--   2 CREATE on a schema or the database, and TRIGGER on a table;
+--   3 a grant option either group holds;
+--   4 a default privilege naming either group, or giving PUBLIC TRIGGER on
+--     tables or CREATE on schemas made later;
+--   5 an object either group owns, which passes to the owner role of the
+--     project whose schema holds it (p_owner, or the role named from the
+--     schema as the sync names it); outside a project's schema, nothing here
+--     can say whose it is.
+--
+-- In p_schema and the schemas named after it (the project's preview branches,
+-- change vaults and set-aside copies) when it is given, which is how the sync
+-- converges one project's; in the whole database when it is not, which is how
+-- installing this file converges every project's (section 7) and how the
+-- regional verification checks them.
+CREATE OR REPLACE FUNCTION public.backenly_direct_shared_holds(p_schema text DEFAULT NULL, p_owner text DEFAULT NULL)
+RETURNS TABLE (holder text, item text, fix text, needs text[], step integer)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog
+AS $fn$
+  WITH grp AS (
+         SELECT 0::oid AS oid, 'PUBLIC'::text AS name, 'PUBLIC'::text AS sql
+         UNION ALL
+         SELECT r.oid, r.rolname::text, quote_ident(r.rolname)
+           FROM pg_roles r WHERE r.rolname IN ('backenly_external', 'backenly_no_schema_changes')),
+       here AS (SELECT d.oid, d.datname::text AS name, d.datacl, pg_get_userbyid(d.datdba)::text AS dba
+                  FROM pg_database d WHERE d.datname = current_database()),
+       v AS (SELECT current_setting('server_version_num')::int >= 160000 AS pg16),
+       scope AS (
+         SELECT n.oid, n.nspname::text AS name, pg_get_userbyid(n.nspowner)::text AS owner, n.nspacl,
+                coalesce(p_owner,
+                  CASE WHEN n.nspname ~ '^workspace_[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
+                       THEN 'bkn_own_' || left(encode(sha256(convert_to(substring(n.nspname FROM 11 FOR 36), 'UTF8')), 'hex'), 12)
+                  END) AS project_owner
+           FROM pg_namespace n
+          WHERE CASE WHEN p_schema IS NULL
+                     THEN n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'
+                     ELSE n.nspname = p_schema OR left(n.nspname, length(p_schema) + 1) = p_schema || '_' END)
+  -- 1. Memberships either group holds (the whole database only: roles are the cluster's).
+  SELECT mm.rolname::text, 'membership of ' || g.rolname,
+         CASE WHEN v.pg16 THEN format('REVOKE %I FROM %I GRANTED BY %I CASCADE', g.rolname, mm.rolname, gr.rolname)
+              ELSE format('REVOKE %I FROM %I CASCADE', g.rolname, mm.rolname) END,
+         CASE WHEN v.pg16 THEN ARRAY[gr.rolname::text] ELSE '{}'::text[] END, 1
+    FROM pg_auth_members m
+    JOIN pg_roles g ON g.oid = m.roleid
+    JOIN pg_roles mm ON mm.oid = m.member
+    JOIN pg_roles gr ON gr.oid = m.grantor, v
+   WHERE p_schema IS NULL AND mm.rolname IN ('backenly_external', 'backenly_no_schema_changes')
+  UNION ALL
+  -- A login that could become the group, and so give it what the login owns.
+  -- set_option exists from PostgreSQL 16 only, hence read through to_jsonb.
+  SELECT l.rolname::text, 'SET on backenly_external',
+         format('REVOKE SET OPTION FOR backenly_external FROM %I GRANTED BY %I', l.rolname, gr.rolname),
+         ARRAY[gr.rolname::text], 1
+    FROM pg_auth_members m
+    JOIN pg_roles g ON g.oid = m.roleid AND g.rolname = 'backenly_external'
+    JOIN pg_roles l ON l.oid = m.member
+    JOIN pg_roles gr ON gr.oid = m.grantor, v
+   WHERE p_schema IS NULL AND v.pg16 AND (to_jsonb(m) ->> 'set_option')::boolean
+     AND l.rolname ~ '^bkn_(ro|rw)_[0-9a-f]{12}$'
+  UNION ALL
+  -- 2. CREATE on a schema or the database, TRIGGER on a table.
+  SELECT g.name, 'CREATE on schema ' || s.name,
+         format('REVOKE CREATE ON SCHEMA %I FROM %s', s.name, g.sql), ARRAY[s.owner], 2
+    FROM scope s CROSS JOIN LATERAL aclexplode(s.nspacl) a JOIN grp g ON g.oid = a.grantee
+   WHERE a.privilege_type = 'CREATE'
+  UNION ALL
+  SELECT g.name, 'CREATE on database ' || here.name,
+         format('REVOKE CREATE ON DATABASE %I FROM %s', here.name, g.sql), ARRAY[here.dba], 2
+    FROM here CROSS JOIN LATERAL aclexplode(here.datacl) a JOIN grp g ON g.oid = a.grantee
+   WHERE p_schema IS NULL AND a.privilege_type = 'CREATE'
+  UNION ALL
+  SELECT g.name, 'TRIGGER on ' || c.oid::regclass::text,
+         format('REVOKE TRIGGER ON TABLE %s FROM %s', c.oid::regclass, g.sql),
+         ARRAY[pg_get_userbyid(c.relowner)::text], 2
+    FROM scope s
+    JOIN pg_class c ON c.relnamespace = s.oid
+    CROSS JOIN LATERAL aclexplode(c.relacl) a JOIN grp g ON g.oid = a.grantee
+   WHERE a.privilege_type = 'TRIGGER'
+  UNION ALL
+  -- 3. Grant options (PUBLIC cannot hold one).
+  SELECT DISTINCT g.name, 'grant option on ' || x.what,
+         format('REVOKE GRANT OPTION FOR ALL PRIVILEGES%s ON %s FROM %s CASCADE', x.cols, x.target, g.sql),
+         ARRAY[x.owner], 3
+    FROM (
+      SELECT a.grantee, a.is_grantable, 'table ' || c.oid::regclass::text AS what, '' AS cols,
+             CASE WHEN c.relkind = 'S' THEN 'SEQUENCE ' ELSE 'TABLE ' END || c.oid::regclass::text AS target,
+             pg_get_userbyid(c.relowner)::text AS owner
+        FROM scope s JOIN pg_class c ON c.relnamespace = s.oid CROSS JOIN LATERAL aclexplode(c.relacl) a
+      UNION ALL
+      SELECT a.grantee, a.is_grantable, 'table ' || c.oid::regclass::text || ' (' || quote_ident(at.attname) || ')',
+             ' (' || quote_ident(at.attname) || ')', 'TABLE ' || c.oid::regclass::text, pg_get_userbyid(c.relowner)::text
+        FROM scope s
+        JOIN pg_class c ON c.relnamespace = s.oid
+        JOIN pg_attribute at ON at.attrelid = c.oid AND at.attnum > 0
+        CROSS JOIN LATERAL aclexplode(at.attacl) a
+      UNION ALL
+      SELECT a.grantee, a.is_grantable, 'schema ' || s.name, '', 'SCHEMA ' || quote_ident(s.name), s.owner
+        FROM scope s CROSS JOIN LATERAL aclexplode(s.nspacl) a
+      UNION ALL
+      SELECT a.grantee, a.is_grantable, 'routine ' || p.oid::regprocedure::text, '',
+             'ROUTINE ' || p.oid::regprocedure::text, pg_get_userbyid(p.proowner)::text
+        FROM scope s JOIN pg_proc p ON p.pronamespace = s.oid CROSS JOIN LATERAL aclexplode(p.proacl) a
+      UNION ALL
+      SELECT a.grantee, a.is_grantable, 'type ' || t.oid::regtype::text, '',
+             CASE WHEN t.typtype = 'd' THEN 'DOMAIN ' ELSE 'TYPE ' END || t.oid::regtype::text, pg_get_userbyid(t.typowner)::text
+        FROM scope s JOIN pg_type t ON t.typnamespace = s.oid CROSS JOIN LATERAL aclexplode(t.typacl) a
+      UNION ALL
+      SELECT a.grantee, a.is_grantable, 'database ' || here.name, '', 'DATABASE ' || quote_ident(here.name), here.dba
+        FROM here CROSS JOIN LATERAL aclexplode(here.datacl) a
+       WHERE p_schema IS NULL
+    ) x
+    JOIN grp g ON g.oid = x.grantee
+   WHERE x.is_grantable AND g.oid <> 0
+  UNION ALL
+  -- 4. Default privileges.
+  SELECT DISTINCT g.name,
+         'default privileges of ' || pg_get_userbyid(da.defaclrole) || coalesce(' in schema ' || n.nspname, '')
+           || ' on ' || lower(k.word) || CASE WHEN g.oid = 0 THEN ': ' || a.privilege_type ELSE '' END,
+         format('ALTER DEFAULT PRIVILEGES FOR ROLE %I%s REVOKE %s ON %s FROM %s%s',
+                pg_get_userbyid(da.defaclrole),
+                CASE WHEN da.defaclnamespace <> 0 THEN format(' IN SCHEMA %I', n.nspname) ELSE '' END,
+                CASE WHEN g.oid = 0 THEN a.privilege_type ELSE 'ALL' END, k.word, g.sql,
+                CASE WHEN g.oid = 0 THEN '' ELSE ' CASCADE' END),
+         ARRAY[pg_get_userbyid(da.defaclrole)::text], 4
+    FROM pg_default_acl da
+    LEFT JOIN pg_namespace n ON n.oid = da.defaclnamespace
+    CROSS JOIN LATERAL aclexplode(da.defaclacl) a
+    JOIN grp g ON g.oid = a.grantee
+    CROSS JOIN LATERAL (SELECT CASE da.defaclobjtype WHEN 'r' THEN 'TABLES' WHEN 'S' THEN 'SEQUENCES'
+                                 WHEN 'f' THEN 'FUNCTIONS' WHEN 'T' THEN 'TYPES' WHEN 'n' THEN 'SCHEMAS'
+                                 ELSE 'LARGE OBJECTS' END AS word) k
+   WHERE (p_schema IS NULL OR da.defaclnamespace IN (SELECT s.oid FROM scope s)
+          OR (da.defaclnamespace = 0 AND pg_get_userbyid(da.defaclrole) = p_owner))
+     AND (g.oid <> 0 OR (da.defaclobjtype = 'r' AND a.privilege_type = 'TRIGGER')
+                     OR (da.defaclobjtype = 'n' AND a.privilege_type = 'CREATE'))
+  UNION ALL
+  -- 5. Objects either group owns.
+  SELECT g.name, 'ownership of ' || o.type || ' ' || o.identity,
+         CASE WHEN s.project_owner IS NOT NULL AND k.word IS NOT NULL
+              THEN format('ALTER %s %s OWNER TO %I', k.word, o.identity, s.project_owner) END,
+         ARRAY[g.name, s.project_owner], 5
+    FROM grp g
+    JOIN here ON true
+    JOIN pg_shdepend d ON d.refclassid = 'pg_authid'::regclass AND d.refobjid = g.oid AND d.deptype = 'o'
+                      AND d.dbid = here.oid AND d.classid <> 'pg_default_acl'::regclass
+    CROSS JOIN LATERAL pg_identify_object(d.classid, d.objid, d.objsubid) o
+    -- pg_identify_object quotes the schema, and the name, where it must.
+    LEFT JOIN scope s ON quote_ident(s.name) = o.schema OR (o.type = 'schema' AND quote_ident(s.name) = o.name)
+    CROSS JOIN LATERAL (SELECT CASE o.type
+             WHEN 'table' THEN 'TABLE' WHEN 'view' THEN 'VIEW' WHEN 'materialized view' THEN 'MATERIALIZED VIEW'
+             WHEN 'sequence' THEN 'SEQUENCE' WHEN 'foreign table' THEN 'FOREIGN TABLE'
+             WHEN 'function' THEN 'FUNCTION' WHEN 'procedure' THEN 'PROCEDURE' WHEN 'aggregate' THEN 'AGGREGATE'
+             WHEN 'type' THEN 'TYPE' WHEN 'composite type' THEN 'TYPE' WHEN 'domain' THEN 'DOMAIN'
+             WHEN 'operator' THEN 'OPERATOR' WHEN 'operator class' THEN 'OPERATOR CLASS'
+             WHEN 'operator family' THEN 'OPERATOR FAMILY' WHEN 'collation' THEN 'COLLATION'
+             WHEN 'conversion' THEN 'CONVERSION' WHEN 'text search configuration' THEN 'TEXT SEARCH CONFIGURATION'
+             WHEN 'text search dictionary' THEN 'TEXT SEARCH DICTIONARY' WHEN 'statistics object' THEN 'STATISTICS'
+             WHEN 'schema' THEN 'SCHEMA' END AS word) k
+   WHERE g.oid <> 0
+     AND coalesce(o.schema, '') !~ '^pg_(toast_)?temp_'
+     AND (p_schema IS NULL OR s.oid IS NOT NULL)
+$fn$;
+
+REVOKE ALL ON FUNCTION public.backenly_direct_shared_holds(text, text) FROM PUBLIC;
+
+-- Take from a read-write login everything backenly_direct_login_holds lists,
 -- mark it refused (5b) so a database made dedicated later still asks its admin
--- first, and end its sessions when anything was taken: a session that took the
--- owner role with SET ROLE keeps it after the membership is gone. Returns
--- whether anything was taken; a login holding nothing is left alone, its
--- sessions included.
+-- first, take its SET on backenly_external, and, given its project's schema,
+-- everything backenly_direct_shared_holds lists there. When the login held
+-- anything, end its sessions now and mark it, so that the sessions that log in
+-- before this transaction commits are ended by
+-- backenly_direct_end_stripped_sessions once it has (see above). Returns
+-- whether anything was taken; a login holding none of it, in a project whose
+-- schemas hold none of it, is left alone, its sessions included.
 --
 -- The definer acts with the privileges of the login (to reassign what it owns
--- and end its sessions), of the project's owner role (to revoke grants made as
--- the owner of its schema and tables, and to hand objects to it: PostgreSQL 16
--- lets a role that is not a superuser give an object only to a role it can SET
--- ROLE to), and of each role that granted the login a membership (REVOKE ...
--- GRANTED BY names it). A definer that is not a superuser holds ADMIN on the
--- roles it created and, on Amazon RDS, nothing more (backenly_direct_drop_role
--- explains), so it grants itself what it lacks and takes it back before it
--- returns. Anything it cannot take is an error naming what is left, never a
--- partial strip reported as done.
+-- and end its sessions), of the project's owner role (to revoke what was
+-- granted as the owner of its schema and tables, and to hand objects to it:
+-- PostgreSQL 16 lets a role that is not a superuser give an object only to a
+-- role it can SET ROLE to), of each role that granted the login a membership
+-- or holds a default privilege naming it (REVOKE ... GRANTED BY names it), and
+-- of backenly_external where it owns something. A definer that is not a
+-- superuser holds ADMIN on the roles it created and, on Amazon RDS, nothing
+-- more (backenly_direct_drop_role explains), so it grants itself what it lacks
+-- and takes it back before it returns. Anything it cannot take is an error
+-- naming what is left, never a partial strip reported as done.
+--
+-- Its signature was (text, text) before it could converge the project's
+-- schemas; that one is dropped, or a call naming only the login would match both.
+DROP FUNCTION IF EXISTS public.backenly_direct_strip_schema_changes(text, text);
+
 CREATE OR REPLACE FUNCTION public.backenly_direct_strip_schema_changes(
-  p_role  text,
-  p_owner text DEFAULT NULL
+  p_role   text,
+  p_owner  text DEFAULT NULL,
+  p_schema text DEFAULT NULL
 ) RETURNS boolean
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public
 AS $fn$
@@ -700,7 +1029,9 @@ DECLARE
   v_role   oid;
   v_marked boolean;
   v_holds  text[];
-  v_owns   boolean;
+  v_shared text[] := '{}';
+  v_become text[] := '{}';
+  v_needs  text[] := '{}';
   v_took   text[] := '{}';
   v_need   text;
   r        record;
@@ -710,6 +1041,9 @@ BEGIN
   END IF;
   IF v_owner !~ '^bkn_own_[0-9a-f]{12}$' THEN
     RAISE EXCEPTION 'backenly_direct_strip_schema_changes: invalid owner role %', v_owner;
+  END IF;
+  IF p_schema IS NOT NULL AND p_schema !~ '^workspace_[0-9a-fA-F][0-9a-fA-F-]{10,60}$' THEN
+    RAISE EXCEPTION 'backenly_direct_strip_schema_changes: invalid schema %', p_schema;
   END IF;
   SELECT oid INTO v_role FROM pg_roles WHERE rolname = p_role;
   IF v_role IS NULL THEN
@@ -723,18 +1057,26 @@ BEGIN
     SELECT 1 FROM pg_auth_members m JOIN pg_roles g ON g.oid = m.roleid
      WHERE m.member = v_role AND g.rolname = 'backenly_no_schema_changes');
   v_holds := public.backenly_direct_schema_change_holds(p_role);
-  IF v_marked AND cardinality(v_holds) = 0 THEN
+  IF p_schema IS NOT NULL THEN
+    SELECT coalesce(array_agg(h.item), '{}') INTO v_shared FROM public.backenly_direct_shared_holds(p_schema, v_owner) h;
+  END IF;
+  IF v_pg16 THEN
+    SELECT coalesce(array_agg(gr.rolname::text), '{}') INTO v_become
+      FROM pg_auth_members m
+      JOIN pg_roles g ON g.oid = m.roleid AND g.rolname = 'backenly_external'
+      JOIN pg_roles gr ON gr.oid = m.grantor
+     WHERE m.member = v_role AND (to_jsonb(m) ->> 'set_option')::boolean;
+  END IF;
+  IF v_marked AND cardinality(v_holds) = 0 AND cardinality(v_shared) = 0 AND cardinality(v_become) = 0 THEN
     RETURN false;
   END IF;
-  v_owns := EXISTS (
-    SELECT 1 FROM pg_shdepend s
-     WHERE s.refclassid = 'pg_authid'::regclass AND s.refobjid = v_role AND s.deptype = 'o'
-       AND s.dbid = (SELECT d.oid FROM pg_database d WHERE d.datname = current_database())
-       AND s.classid <> 'pg_default_acl'::regclass);
 
-  -- The owner role takes what the login owns. Made as the sync makes it, for
-  -- a login whose project somehow has none.
-  IF v_owns AND NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = v_owner) THEN
+  -- The owner role takes what the login and the groups owned. Made as the sync
+  -- makes it, for a login whose project somehow has none.
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = v_owner)
+     AND (EXISTS (SELECT 1 FROM public.backenly_direct_login_holds(p_role, v_owner) h WHERE h.step = 5)
+          OR (p_schema IS NOT NULL
+              AND EXISTS (SELECT 1 FROM public.backenly_direct_shared_holds(p_schema, v_owner) h WHERE h.step = 5))) THEN
     EXECUTE format('CREATE ROLE %I NOLOGIN', v_owner);
     EXECUTE format('GRANT %I TO %I', v_owner, public.backenly_app_role());
   END IF;
@@ -742,23 +1084,25 @@ BEGIN
   -- The privileges the steps below need, granted to itself where it lacks
   -- them. Without ADMIN on a role it cannot; the step that needed it then
   -- fails, and so does this function.
+  SELECT coalesce(array_agg(DISTINCT x.n), '{}') INTO v_needs
+    FROM (SELECT p_role AS n
+          UNION ALL
+          SELECT unnest(h.needs) FROM public.backenly_direct_login_holds(p_role, v_owner) h
+          UNION ALL
+          SELECT unnest(v_become)) x
+   WHERE x.n IS NOT NULL;
+  IF p_schema IS NOT NULL THEN
+    SELECT v_needs || coalesce(array_agg(DISTINCT n), '{}') INTO v_needs
+      FROM public.backenly_direct_shared_holds(p_schema, v_owner) h CROSS JOIN LATERAL unnest(h.needs) AS n
+     WHERE n IS NOT NULL;
+  END IF;
   FOR v_need IN
-    SELECT DISTINCT x.role FROM (
-      SELECT p_role AS role
-      UNION ALL
-      SELECT v_owner WHERE EXISTS (SELECT 1 FROM pg_roles WHERE rolname = v_owner)
-      UNION ALL
-      SELECT gr.rolname::text
-        FROM pg_auth_members m
-        JOIN pg_roles g ON g.oid = m.roleid
-        JOIN pg_roles gr ON gr.oid = m.grantor
-       WHERE m.member = v_role AND g.rolname NOT IN ('backenly_external', 'backenly_no_schema_changes')
-    ) x
+    SELECT DISTINCT n FROM unnest(v_needs) AS n WHERE EXISTS (SELECT 1 FROM pg_roles WHERE rolname = n)
   LOOP
-    IF pg_has_role(current_user, v_need, 'USAGE') THEN
-      -- Handing objects to the owner role also needs SET on it, from PostgreSQL 16.
-      IF NOT (v_pg16 AND v_owns AND v_need = v_owner) THEN CONTINUE; END IF;
-      IF pg_has_role(current_user, v_need, 'SET') THEN CONTINUE; END IF;
+    -- Handing objects to the owner role also needs SET on it, from PostgreSQL 16.
+    IF pg_has_role(current_user, v_need, 'USAGE')
+       AND (NOT v_pg16 OR v_need <> v_owner OR pg_has_role(current_user, v_need, 'SET')) THEN
+      CONTINUE;
     END IF;
     CONTINUE WHEN NOT pg_has_role(current_user, v_need, 'MEMBER WITH ADMIN OPTION');
     EXECUTE format(CASE WHEN v_pg16 THEN 'GRANT %I TO %I WITH INHERIT TRUE, SET TRUE'
@@ -771,63 +1115,35 @@ BEGIN
                         ELSE 'GRANT backenly_no_schema_changes TO %I' END, p_role);
   END IF;
 
-  -- Every membership but the two marker roles: the owner role's above all, and
-  -- any other that could carry CREATE, TRIGGER or ownership. Each is revoked as
-  -- the role that granted it; CASCADE takes whatever the login granted on.
-  FOR r IN
-    SELECT g.rolname::text AS role, gr.rolname::text AS grantor
-      FROM pg_auth_members m
-      JOIN pg_roles g ON g.oid = m.roleid
-      JOIN pg_roles gr ON gr.oid = m.grantor
-     WHERE m.member = v_role AND g.rolname NOT IN ('backenly_external', 'backenly_no_schema_changes')
-  LOOP
-    IF v_pg16 THEN
-      EXECUTE format('REVOKE %I FROM %I GRANTED BY %I CASCADE', r.role, p_role, r.grantor);
-    ELSE
-      EXECUTE format('REVOKE %I FROM %I CASCADE', r.role, p_role);
-    END IF;
+  -- It can no longer become the group it joined.
+  FOREACH v_need IN ARRAY v_become LOOP
+    EXECUTE format('REVOKE SET OPTION FOR backenly_external FROM %I GRANTED BY %I', p_role, v_need);
   END LOOP;
 
-  -- CREATE on the database or on any schema, and TRIGGER on any table, granted
-  -- to the login itself. What PUBLIC or backenly_external hold, every login
-  -- holds: section 7 takes that from them.
-  IF EXISTS (SELECT 1 FROM pg_database d CROSS JOIN LATERAL aclexplode(d.datacl) a
-              WHERE d.datname = current_database() AND a.grantee = v_role AND a.privilege_type = 'CREATE') THEN
-    EXECUTE format('REVOKE CREATE ON DATABASE %I FROM %I CASCADE', current_database(), p_role);
-  END IF;
-  FOR r IN
-    SELECT DISTINCT n.nspname::text AS nsp
-      FROM pg_shdepend s
-      JOIN pg_namespace n ON s.classid = 'pg_namespace'::regclass AND n.oid = s.objid
-      CROSS JOIN LATERAL aclexplode(n.nspacl) a
-     WHERE s.refclassid = 'pg_authid'::regclass AND s.refobjid = v_role AND s.deptype = 'a'
-       AND s.dbid = (SELECT d.oid FROM pg_database d WHERE d.datname = current_database())
-       AND a.grantee = v_role AND a.privilege_type = 'CREATE'
-  LOOP
-    EXECUTE format('REVOKE CREATE ON SCHEMA %I FROM %I CASCADE', r.nsp, p_role);
-  END LOOP;
-  FOR r IN
-    SELECT DISTINCT c.oid::regclass::text AS rel
-      FROM pg_shdepend s
-      JOIN pg_class c ON s.classid = 'pg_class'::regclass AND c.oid = s.objid
-      CROSS JOIN LATERAL aclexplode(c.relacl) a
-     WHERE s.refclassid = 'pg_authid'::regclass AND s.refobjid = v_role AND s.deptype = 'a'
-       AND s.dbid = (SELECT d.oid FROM pg_database d WHERE d.datname = current_database())
-       AND a.grantee = v_role AND a.privilege_type = 'TRIGGER'
-  LOOP
-    EXECUTE format('REVOKE TRIGGER ON TABLE %s FROM %I CASCADE', r.rel, p_role);
-  END LOOP;
-
-  -- What it owns (functions, types, operators, and whatever else the sync does
-  -- not hand over) passes to the project's owner role. No longer a member of
+  -- What the login holds, in order: memberships first (an owner role's above
+  -- all), then CREATE and TRIGGER, grant options, default privileges, and what
+  -- it owns, which passes to the project's owner role. No longer a member of
   -- that role, the login can neither change those objects nor grant anyone the
   -- use of them.
-  IF v_owns THEN
-    EXECUTE format('REASSIGN OWNED BY %I TO %I', p_role, v_owner);
+  FOR r IN SELECT h.fix FROM public.backenly_direct_login_holds(p_role, v_owner) h ORDER BY h.step, h.item LOOP
+    EXECUTE r.fix;
+  END LOOP;
+
+  -- What every login holds in this project's schemas.
+  IF p_schema IS NOT NULL THEN
+    FOR r IN SELECT h.holder, h.item, h.fix FROM public.backenly_direct_shared_holds(p_schema, v_owner) h
+              ORDER BY h.step, h.holder, h.item LOOP
+      IF r.fix IS NULL THEN
+        RAISE EXCEPTION 'backenly_direct_strip_schema_changes: % holds %, which this cannot take', r.holder, r.item;
+      END IF;
+      EXECUTE r.fix;
+    END LOOP;
   END IF;
 
   IF cardinality(v_holds) > 0 THEN
     PERFORM pg_terminate_backend(a.pid) FROM pg_stat_activity a WHERE a.usename = p_role;
+    EXECUTE format('COMMENT ON ROLE %I IS %L', p_role,
+                   'backenly: sessions to end after a strip, from transaction ' || pg_current_xact_id()::text);
   END IF;
 
   FOREACH v_need IN ARRAY v_took LOOP
@@ -838,11 +1154,68 @@ BEGIN
   IF cardinality(v_holds) > 0 THEN
     RAISE EXCEPTION 'backenly_direct_strip_schema_changes: % still holds %', p_role, array_to_string(v_holds, '; ');
   END IF;
+  IF p_schema IS NOT NULL THEN
+    SELECT coalesce(array_agg(h.holder || ' holds ' || h.item), '{}') INTO v_shared
+      FROM public.backenly_direct_shared_holds(p_schema, v_owner) h;
+    IF cardinality(v_shared) > 0 THEN
+      RAISE EXCEPTION 'backenly_direct_strip_schema_changes: in %, %', p_schema, array_to_string(v_shared, '; ');
+    END IF;
+  END IF;
   RETURN true;
 END
 $fn$;
 
-REVOKE ALL ON FUNCTION public.backenly_direct_strip_schema_changes(text, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.backenly_direct_strip_schema_changes(text, text, text) FROM PUBLIC;
+
+-- End the sessions of a read-write login a strip marked (or of every one, with
+-- no argument), and clear the mark; returns how many logins. A mark this
+-- transaction made waits: the sessions it is for are the ones that log in
+-- before this transaction commits. Each session is ended whatever it is doing;
+-- one that logged in after the strip committed cannot have taken what was
+-- taken, and loses one connection. Called by the application right after each
+-- sync, by each sync of the login, and by this file (section 7b).
+CREATE OR REPLACE FUNCTION public.backenly_direct_end_stripped_sessions(p_role text DEFAULT NULL) RETURNS integer
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public
+AS $fn$
+DECLARE
+  v_pg16    constant boolean := current_setting('server_version_num')::int >= 160000;
+  v_mine    text := 'backenly: sessions to end after a strip, from transaction '
+                    || coalesce(pg_current_xact_id_if_assigned()::text, '');
+  v_granted boolean;
+  v_ended   integer := 0;
+  r         record;
+BEGIN
+  IF p_role IS NOT NULL AND p_role !~ '^bkn_rw_[0-9a-f]{12}$' THEN
+    RAISE EXCEPTION 'backenly_direct_end_stripped_sessions: invalid role name %', p_role;
+  END IF;
+  FOR r IN
+    SELECT a.rolname::text AS login, d.description
+      FROM pg_shdescription d JOIN pg_roles a ON a.oid = d.objoid
+     WHERE d.classoid = 'pg_authid'::regclass
+       AND a.rolname ~ '^bkn_rw_[0-9a-f]{12}$' AND (p_role IS NULL OR a.rolname = p_role)
+       AND d.description LIKE 'backenly: sessions to end after a strip%'
+     ORDER BY 1
+  LOOP
+    CONTINUE WHEN r.description = v_mine;
+    -- Ending a role's sessions needs its privileges (backenly_direct_drop_role explains).
+    v_granted := false;
+    IF NOT pg_has_role(current_user, r.login, 'USAGE') THEN
+      EXECUTE format(CASE WHEN v_pg16 THEN 'GRANT %I TO %I WITH INHERIT TRUE, SET FALSE'
+                          ELSE 'GRANT %I TO %I' END, r.login, current_user);
+      v_granted := true;
+    END IF;
+    PERFORM pg_terminate_backend(s.pid) FROM pg_stat_activity s WHERE s.usename = r.login;
+    EXECUTE format('COMMENT ON ROLE %I IS NULL', r.login);
+    IF v_granted THEN
+      EXECUTE format('REVOKE %I FROM %I', r.login, current_user);
+    END IF;
+    v_ended := v_ended + 1;
+  END LOOP;
+  RETURN v_ended;
+END
+$fn$;
+
+REVOKE ALL ON FUNCTION public.backenly_direct_end_stripped_sessions(text) FROM PUBLIC;
 -- ── 6. DDL drift capture — the observed-drift half of the open loop ──────────
 --
 -- Fires on EVERY DDL statement in the cluster, but returns immediately unless
@@ -997,38 +1370,43 @@ BEGIN
     EXECUTE format('GRANT EXECUTE ON FUNCTION public.backenly_direct_set_schema_changes(text, boolean) TO %I', r);
     -- Read by the application to say why schema changes cannot be allowed.
     EXECUTE format('GRANT EXECUTE ON FUNCTION public.backenly_direct_shared_database() TO %I', r);
+    -- Called by the application right after each sync (section 5c).
+    EXECUTE format('GRANT EXECUTE ON FUNCTION public.backenly_direct_end_stripped_sessions(text) TO %I', r);
   END IF;
 END $grant$;
 
--- ── 7. A shared database: no read-write login keeps a way to change the schema ─
+-- ── 7. A shared database: no login keeps a way to change the schema ──────────
 --
--- The sync strips the login it names each time it runs (section 5c). This
--- strips every read-write login there is, so installing this file is how a
--- release reaches them all: the home database's install, and in a region the
--- regional procedure's direct-access step (tools/managed-db/regional/
--- bootstrap.sh), whose verify.sql then fails the run for any login that still
--- holds something.
+-- The sync strips the login it names each time it runs, and converges what
+-- every login holds in that project's schemas (section 5c). This strips every
+-- read-write login there is and converges every schema, so installing this
+-- file is how a release reaches them all: the home database's install, and in
+-- a region the regional procedure's direct-access step (tools/managed-db/
+-- regional/bootstrap.sh), whose verify.sql then fails the run for anything
+-- still held.
 --
--- It also takes what every login holds at once: CREATE on a schema or on the
--- database, and TRIGGER on a table, granted to PUBLIC, to backenly_external
--- (the group every direct-access login joins) or to backenly_no_schema_changes
--- (which must hold nothing). CREATE on the public schema matters most: every
--- session's search path includes it, so a function or operator created there
--- can stand in for a built-in one.
+-- What every login holds at once is backenly_direct_shared_holds: CREATE on a
+-- schema or on the database and TRIGGER on a table granted to PUBLIC, to
+-- backenly_external (the group every direct-access login joins, with its
+-- privileges) or to backenly_no_schema_changes (which must hold nothing); a
+-- grant option, default privilege, membership or object either group holds;
+-- and a login able to become backenly_external. CREATE on the public schema
+-- matters most: every session's search path includes it, so a function or
+-- operator created there can stand in for a built-in one.
 --
 -- A database dedicated to one project (section 5c) is left as it is. One
 -- transaction: every failure is collected and reported together, and any
 -- failure leaves every grant, membership and owner as it was (a session the
--- strip already ended stays ended).
+-- strip already ended stays ended). Run as the installer, which on Amazon RDS
+-- is no superuser: it grants itself, as the strip does, the privileges of the
+-- roles whose objects it changes, and takes them back.
 DO $strip$
 DECLARE
   r        record;
   stripped int := 0;
   failed   text[] := '{}';
-  shared_by oid[] := array_remove(ARRAY[
-    0::oid,
-    (SELECT oid FROM pg_roles WHERE rolname = 'backenly_external'),
-    (SELECT oid FROM pg_roles WHERE rolname = 'backenly_no_schema_changes')], NULL);
+  took     text[] := '{}';
+  v_pg16   constant boolean := current_setting('server_version_num')::int >= 160000;
 BEGIN
   IF NOT public.backenly_direct_shared_database() THEN
     RAISE NOTICE 'direct access: this database is dedicated to one project; its read-write logins keep the schema changes their admin allowed';
@@ -1045,28 +1423,41 @@ BEGIN
     END;
   END LOOP;
 
+  -- The roles the statements below act as, the owner roles objects pass to
+  -- made as the sync makes them.
   FOR r IN
-    SELECT format('REVOKE CREATE ON SCHEMA %I FROM %s', n.nspname,
-                  CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE quote_ident(pg_get_userbyid(a.grantee)) END) AS stmt
-      FROM pg_namespace n CROSS JOIN LATERAL aclexplode(n.nspacl) a
-     WHERE a.privilege_type = 'CREATE' AND a.grantee = ANY (shared_by)
-       AND n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'
-    UNION
-    SELECT format('REVOKE CREATE ON DATABASE %I FROM %s', d.datname,
-                  CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE quote_ident(pg_get_userbyid(a.grantee)) END)
-      FROM pg_database d CROSS JOIN LATERAL aclexplode(d.datacl) a
-     WHERE d.datname = current_database() AND a.privilege_type = 'CREATE' AND a.grantee = ANY (shared_by)
-    UNION
-    SELECT format('REVOKE TRIGGER ON TABLE %s FROM %s', c.oid::regclass,
-                  CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE quote_ident(pg_get_userbyid(a.grantee)) END)
-      FROM pg_class c CROSS JOIN LATERAL aclexplode(c.relacl) a
-     WHERE c.relacl IS NOT NULL AND a.privilege_type = 'TRIGGER' AND a.grantee = ANY (shared_by)
+    SELECT DISTINCT n AS role
+      FROM public.backenly_direct_shared_holds() h CROSS JOIN LATERAL unnest(h.needs) AS n
+     WHERE n IS NOT NULL
   LOOP
+    IF r.role ~ '^bkn_own_[0-9a-f]{12}$' AND NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r.role) THEN
+      EXECUTE format('CREATE ROLE %I NOLOGIN', r.role);
+      EXECUTE format('GRANT %I TO %I', r.role, public.backenly_app_role());
+    END IF;
+    CONTINUE WHEN NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r.role);
+    IF pg_has_role(current_user, r.role, 'USAGE') AND (NOT v_pg16 OR pg_has_role(current_user, r.role, 'SET')) THEN
+      CONTINUE;
+    END IF;
+    CONTINUE WHEN NOT pg_has_role(current_user, r.role, 'MEMBER WITH ADMIN OPTION');
+    EXECUTE format(CASE WHEN v_pg16 THEN 'GRANT %I TO %I WITH INHERIT TRUE, SET TRUE'
+                        ELSE 'GRANT %I TO %I' END, r.role, current_user);
+    took := took || r.role;
+  END LOOP;
+
+  FOR r IN SELECT h.holder, h.item, h.fix FROM public.backenly_direct_shared_holds() h ORDER BY h.step, h.holder, h.item LOOP
+    IF r.fix IS NULL THEN
+      failed := failed || format('%s holds %s, which this cannot take: give it to the role that should own it', r.holder, r.item);
+      CONTINUE;
+    END IF;
     BEGIN
-      EXECUTE r.stmt;
+      EXECUTE r.fix;
     EXCEPTION WHEN OTHERS THEN
-      failed := failed || format('%s: %s', r.stmt, SQLERRM);
+      failed := failed || format('%s: %s', r.fix, SQLERRM);
     END;
+  END LOOP;
+
+  FOR r IN SELECT unnest(took) AS role LOOP
+    EXECUTE format('REVOKE %I FROM %I', r.role, current_user);
   END LOOP;
 
   IF array_length(failed, 1) > 0 THEN
@@ -1075,6 +1466,23 @@ BEGIN
   END IF;
   RAISE NOTICE 'direct access: this database is shared; % read-write login(s) had a way to change the schema taken', stripped;
 END $strip$;
+
+-- ── 7b. The sessions those strips left ───────────────────────────────────────
+--
+-- Each strip above ended its login's sessions as it ran, and marked the login:
+-- a session that logged in before that transaction committed saw the
+-- membership still there, may have taken the owner role, and keeps it. This
+-- statement is the next transaction, so it ends them. Under one transaction
+-- (psql --single-transaction) it waits instead, and the application's next
+-- sync of each login ends them.
+DO $end$
+DECLARE
+  n integer := public.backenly_direct_end_stripped_sessions();
+BEGIN
+  IF n > 0 THEN
+    RAISE NOTICE 'direct access: ended the sessions of % read-write login(s) stripped above', n;
+  END IF;
+END $end$;
 
 -- ── 8. Converge every existing workspace ─────────────────────────────────────
 --

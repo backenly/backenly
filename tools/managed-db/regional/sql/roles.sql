@@ -216,8 +216,8 @@ BEGIN
   -- ── PostgREST, and the direct-access group ────────────────────────────────
   -- postgrest-schema-registry.sql and setup-direct-access.sql create the same
   -- roles the same way. Created here first, by the administrator, so it holds
-  -- ADMIN on each (backenly_direct_create_role puts every login it makes IN ROLE
-  -- backenly_external, and grants a new read-write one backenly_no_schema_changes)
+  -- ADMIN on each (backenly_direct_create_role grants every login it makes
+  -- backenly_external, without SET, and a new read-write one backenly_no_schema_changes)
   -- and the authenticator's password is set in the run that creates it.
   FOREACH rname IN ARRAY ARRAY['anon', 'authenticated', 'service_role', 'backenly_external', 'backenly_no_schema_changes'] LOOP
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = rname) THEN

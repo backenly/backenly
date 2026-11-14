@@ -182,7 +182,7 @@ export async function readDatabaseFacts(db: PgClient): Promise<DatabaseFacts> {
             NULL) AS platform,
             coalesce(has_function_privilege(to_regprocedure('public.backenly_app_role()'), 'EXECUTE'), false) AS has_app_role,
             coalesce(has_function_privilege(to_regprocedure('public.backenly_direct_shared_database()'), 'EXECUTE'), false) AS has_shared,
-            to_regprocedure('public.backenly_direct_strip_schema_changes(text,text)') IS NOT NULL AS has_strip,
+            to_regprocedure('public.backenly_direct_strip_schema_changes(text,text,text)') IS NOT NULL AS has_strip,
             to_regclass('public.schema_drift_events') IS NOT NULL AS has_drift,
             CASE WHEN to_regclass('public.schema_drift_events') IS NOT NULL
                  THEN has_table_privilege(to_regclass('public.schema_drift_events'), 'SELECT') END AS can_read_drift,
