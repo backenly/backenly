@@ -2297,6 +2297,27 @@ export async function forceAdminOnlyTables(
 }
 
 /**
+ * Give the teams tables the teams rules, in `target` (main, or a preview
+ * branch's schema). Stops at the first table that refuses them, which keeps
+ * the rules it had (installPermissionPolicy restores it), and says which.
+ * enable_teams calls it once all three tables exist, and does not report teams
+ * as on unless it succeeds.
+ */
+export async function applyTeamsRules(
+  projectId: string,
+  target: RlsTarget = {},
+  tables: readonly TeamsTable[] = TEAMS_TABLES,
+): Promise<{ success: boolean; message: string; applied: TeamsTable[] }> {
+  const applied: TeamsTable[] = []
+  for (const tableName of tables) {
+    const result = await applyPermissionPolicy(projectId, { tableName, template: 'teams' }, target)
+    if (!result.success) return { success: false, message: `"${tableName}": ${result.message}`, applied }
+    applied.push(tableName)
+  }
+  return { success: true, message: `The teams rules hold on ${applied.join(', ')}.`, applied }
+}
+
+/**
  * List all permission policies for a project.
  */
 export async function listPermissionPolicies(projectId: string) {

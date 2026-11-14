@@ -3279,6 +3279,11 @@ function expectationsFor(action: AIAction): Array<{ action: string; table?: stri
     case 'SET_PERMISSION':
     case 'REMOVE_PERMISSION':
       return table ? [{ action: action.action, table }] : []
+    // Turning teams on sets the teams tables' access rules (TEAMS_TABLES,
+    // lib/services/rls-ownership.ts): run again on tables that already exist,
+    // replacing the rules they had is the request.
+    case 'ENABLE_TEAMS':
+      return ['organizations', 'organization_members', 'organization_invitations'].map((t) => ({ action: 'SET_PERMISSION', table: t }))
     default:
       return []
   }
@@ -14960,7 +14965,12 @@ async function executeEnableVectorSearch(params: any, projectId: string): Promis
 //
 // Plus an `accept-invite` runtime endpoint at
 //   POST /api/v1/{projectId}/orgs/accept-invite { token }
-// that consumes the token, deletes the invitation, and creates the member row.
+// that checks the invitation, creates the member row and marks the invitation
+// accepted, as the service role.
+//
+// The three tables get the teams rules (lib/services/workspace-rls.ts,
+// template "teams") once all three exist: membership decides who reads and
+// changes them, which no owner column of their own can say.
 //
 // Authentication for the workspace `users` table is required up-front: orgs
 // without sign-in have no value. If auth is not yet enabled the executor calls
@@ -15063,19 +15073,41 @@ async function executeEnableTeams(params: any, projectId: string, apiKey?: strin
       }
     }
 
+    // 5. The teams rules. Each table got the rule its own columns imply as it
+    //    was created; membership is what decides access to these rows, so the
+    //    teams rules replace them now that all three exist. Teams are not
+    //    reported on unless the rules hold: without them any signed-in end
+    //    user could add themselves to any organization, with any role.
+    const { applyTeamsRules } = await import('@/lib/services/workspace-rls')
+    const rules = await applyTeamsRules(projectId)
+    if (!rules.success) {
+      return {
+        success: false,
+        message: `The teams tables exist, but their access rules could not be set, so teams are not on. ${rules.message}`,
+        error: rules.message,
+        code: 'RLS_NOT_APPLIED',
+      }
+    }
+
     return {
       success: true,
       message:
         `✅ Team / organization multi-tenancy is now wired up.\n\n` +
         `- **Tables**: organizations, organization_members, organization_invitations\n` +
         `- **REST APIs**: CRUD generated for all three\n` +
-        `- **Invite-accept endpoint**: \`POST /api/v1/${projectId}/orgs/accept-invite { token }\`\n\n` +
+        `- **Invite-accept endpoint**: \`POST /api/v1/${projectId}/orgs/accept-invite { token }\`\n` +
+        `- **Access rules** (row-level security): an organization is read by its owner and members and changed only by ` +
+        `its owner; each user reads their own memberships, may leave them, and adds themselves only to an organization ` +
+        `they own; invitations are read and written by the organization's owner and admins. Member lists and role ` +
+        `changes are your server's (a service-role key).\n\n` +
         `Typical flow:\n` +
         `1. A user signs up via auth.\n` +
-        `2. They POST /organizations to create an org (they become the owner_user_id).\n` +
-        `3. They POST /organization_invitations { email, role } — generate a random token and email the user a link with it.\n` +
-        `4. The invited user signs up, then POSTs /orgs/accept-invite { token } and is added to organization_members.\n\n` +
-        `Scope your other tables by adding an \`organization_id UUID\` column and an RLS policy that filters by the user's org membership.`,
+        `2. They POST /organizations { name, slug, owner_user_id: <their id> }, then POST /organization_members ` +
+        `{ organization_id, user_id: <their id>, role: "owner" }.\n` +
+        `3. An owner or admin POSTs /organization_invitations { organization_id, email, role, token, invited_by_user_id: ` +
+        `<their id> } with a random token, and emails the user a link with it.\n` +
+        `4. The invited user signs up with that email, then POSTs /orgs/accept-invite { token } and is added to organization_members.\n\n` +
+        `Scope your other tables by adding an \`organization_id UUID\` column and the org_members RLS policy.`,
       data: { created, tables: ['organizations', 'organization_members', 'organization_invitations'] },
     }
   } catch (error: any) {
