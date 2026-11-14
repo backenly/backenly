@@ -33,12 +33,19 @@
  * `search_path` is a convenience, never the boundary.
  *
  * The syntactic guards below are defence in depth for clearer errors and to
- * refuse statement smuggling. They are NOT the security boundary, and must
- * never be relied on as one.
+ * refuse statement smuggling. For table data they are NOT the security
+ * boundary, and must never be relied on as one.
+ *
+ * Catalog METADATA is the one exception, because no grant scopes it: the
+ * catalogs are readable by PUBLIC and describe every project in the database
+ * (see CATALOG_REFERENCE below). There the statement is the boundary, so it is
+ * read with PostgreSQL's own parser (lib/mcp/read-query-ast.ts) before anything
+ * runs, never with a pattern alone.
  */
 
 import { Client } from 'pg'
 import { projectDatabaseUrl } from '@/lib/data-plane/regional'
+import { inspectReadQuery, type StatementRefusal } from '@/lib/mcp/read-query-ast'
 import { readOnlyLogin } from '@/lib/services/direct-access'
 import { workspaceSchemaName } from '@/lib/security/workspace-schema'
 
@@ -197,6 +204,80 @@ const READ_VERBS = /^(select|with|explain|show|table|values)\b/i
 const WRITE_VERBS =
   /\b(insert|update|delete|merge|truncate|drop|alter|create|grant|revoke|comment|reindex|vacuum|refresh|call|do|copy|import|lock|listen|notify|prepare|execute|reset|discard|security\s+label)\b/i
 
+/**
+ * What a refused caller is told to do instead, shared by the text checks below
+ * and the parsed-statement check (lib/mcp/read-query-ast.ts), so both layers
+ * send an agent to the same place.
+ */
+const HINTS = {
+  // Name the ADVERTISED doors. This used to say "create_table, add_column"
+  // — real brain tools that the MCP manifest does not list, so an agent
+  // reading this refusal was sent to two tools it could not call, inside the
+  // message explaining what it did wrong. `apply_migration` takes the DDL
+  // the agent already wrote and translates it into those same governed
+  // actions, which is the answer it was looking for.
+  verb: 'To change the SCHEMA, send the same DDL to apply_migration — it translates CREATE TABLE / ALTER TABLE / CREATE INDEX into governed, reversible actions. To change ROWS use db_insert, db_update or db_delete. For anything else, describe it to backend_chat.',
+  write: 'Mutations go through the governed tools so they are reversible and auditable: apply_migration for schema (send the DDL as written), db_insert / db_update / db_delete for rows.',
+  multi: 'Run statements one at a time so each result is attributable.',
+  catalog:
+    'The catalogs are shared by every project on the instance, so a query against ' +
+    'them is not scoped to yours. To inspect YOUR schema use read_backend_state ' +
+    '{section:"tables"} or get_table_schema {tableName} — those answer the same questions ' +
+    'and only ever describe this project. In particular get_table_schema returns the live ' +
+    'RLS policies with their command, ROLES, permissive/restrictive flag and both ' +
+    'predicates, so pg_policies is not needed to audit a policy\'s scope.',
+  schema:
+    'Leave table and function names unqualified: run_query resolves them in this project\'s schema, ' +
+    'the only one it reads. To see what is there use read_backend_state {section:"tables"}.',
+}
+
+/**
+ * A statement longer than any read query an agent writes. The parser's memory
+ * grows with the statement and is not given back, so this bounds it.
+ */
+export const MAX_SQL_LENGTH = 100_000
+
+/**
+ * Everything a statement must pass before it runs, in order:
+ *
+ *   1. PostgreSQL's own parser (lib/mcp/read-query-ast.ts): exactly one
+ *      SELECT / EXPLAIN SELECT / SHOW, nothing in it that names a catalog, a
+ *      schema other than this project's, an OID alias type, or a function that
+ *      runs SQL given as text or reads the catalog by name or id. This is the
+ *      boundary for catalog METADATA, which grants cannot hide.
+ *   2. The text checks (assertReadOnlySql), an independent second layer.
+ *
+ * A statement that does not parse is refused. If the parser cannot be loaded,
+ * nothing runs (SQL_PARSER_UNAVAILABLE, 503). Neither falls back to the text
+ * checks alone.
+ */
+export async function admitReadQuery(sqlRaw: string, projectId: string): Promise<void> {
+  const sql = typeof sqlRaw === 'string' ? sqlRaw.trim() : ''
+  if (!sql) throw new ReadQueryError('Empty query.', 'EMPTY_QUERY')
+  if (sql.length > MAX_SQL_LENGTH) {
+    throw new ReadQueryError(
+      `The statement is ${sql.length} characters long; run_query accepts at most ${MAX_SQL_LENGTH}.`,
+      'QUERY_TOO_LONG',
+    )
+  }
+  const refusal = await inspectReadQuery(sql, workspaceSchemaName(projectId))
+  if (refusal) throw refusalError(refusal)
+  assertReadOnlySql(sql)
+}
+
+function refusalError(refusal: StatementRefusal): ReadQueryError {
+  return new ReadQueryError(
+    refusal.message,
+    refusal.code,
+    refusal.hint ? HINTS[refusal.hint] : undefined,
+    refusal.status ?? 400,
+  )
+}
+
+/**
+ * The text checks: the second layer behind the parser (see admitReadQuery),
+ * and the shape and keyword refusals agents have always been given.
+ */
 export function assertReadOnlySql(sqlRaw: string): void {
   const sql = sqlRaw.trim()
   if (!sql) {
@@ -209,7 +290,7 @@ export function assertReadOnlySql(sqlRaw: string): void {
     throw new ReadQueryError(
       'Only a single statement is allowed. Remove the ";" and send one query per call.',
       'MULTI_STATEMENT',
-      'Run statements one at a time so each result is attributable.',
+      HINTS.multi,
     )
   }
 
@@ -217,13 +298,7 @@ export function assertReadOnlySql(sqlRaw: string): void {
     throw new ReadQueryError(
       `run_query executes read-only SQL. A statement must begin with SELECT, WITH, EXPLAIN, SHOW, TABLE or VALUES.`,
       'NOT_READ_ONLY',
-      // Name the ADVERTISED doors. This used to say "create_table, add_column"
-      // — real brain tools that the MCP manifest does not list, so an agent
-      // reading this refusal was sent to two tools it could not call, inside the
-      // message explaining what it did wrong. `apply_migration` takes the DDL
-      // the agent already wrote and translates it into those same governed
-      // actions, which is the answer it was looking for.
-      'To change the SCHEMA, send the same DDL to apply_migration — it translates CREATE TABLE / ALTER TABLE / CREATE INDEX into governed, reversible actions. To change ROWS use db_insert, db_update or db_delete. For anything else, describe it to backend_chat.',
+      HINTS.verb,
     )
   }
 
@@ -232,7 +307,7 @@ export function assertReadOnlySql(sqlRaw: string): void {
     throw new ReadQueryError(
       `run_query is read-only and rejected the keyword "${write[1].toUpperCase()}".`,
       'NOT_READ_ONLY',
-      'Mutations go through the governed tools so they are reversible and auditable: apply_migration for schema (send the DDL as written), db_insert / db_update / db_delete for rows.',
+      HINTS.write,
     )
   }
 
@@ -255,12 +330,7 @@ export function assertReadOnlySql(sqlRaw: string): void {
     throw new ReadQueryError(
       `run_query does not read the PostgreSQL system catalogs (matched "${catalog[0]}").`,
       'CATALOG_NOT_READABLE',
-      'The catalogs are shared by every project on the instance, so a query against ' +
-      'them is not scoped to yours. To inspect YOUR schema use read_backend_state ' +
-      '{section:"tables"} or get_table_schema {tableName} — those answer the same questions ' +
-      'and only ever describe this project. In particular get_table_schema returns the live ' +
-      'RLS policies with their command, ROLES, permissive/restrictive flag and both ' +
-      'predicates, so pg_policies is not needed to audit a policy\'s scope.',
+      HINTS.catalog,
     )
   }
 }
@@ -288,8 +358,16 @@ export function assertReadOnlySql(sqlRaw: string): void {
  * PUBLIC instance-wide would break `pg_dump` and `\d` for the read-only
  * credentials this platform deliberately hands out (see lib/services/
  * direct-access.ts) — a shipped feature traded away to close a metadata leak.
- * So this boundary IS syntactic, and saying so plainly is part of the fix: the
- * claim in the docs has been corrected to match rather than the other way round.
+ * So this boundary IS the statement, and saying so plainly is part of the fix:
+ * the claim in the docs has been corrected to match rather than the other way
+ * round.
+ *
+ * That boundary is now decided by PostgreSQL's own parser
+ * (lib/mcp/read-query-ast.ts, run first by admitReadQuery), because this
+ * pattern could not decide it: it missed `"pg_proc"` until quoted identifiers
+ * were kept for it, and it still cannot see `U&"\0070g_proc"`, an object id cast
+ * to `regnamespace`, or a query passed to `query_to_xml` as a string. It stays
+ * as a second layer, independent of the first.
  *
  * What the refusal costs is nothing an agent needs: schema introspection is
  * served by read_backend_state and get_table_schema, which read the live catalog
@@ -298,12 +376,13 @@ export function assertReadOnlySql(sqlRaw: string): void {
  *
  * ── Why the rule is a PREFIX and not a list of catalog names ─────────────────
  *
- * PostgreSQL reserves the `pg_` prefix for system use — `CREATE TABLE pg_foo`
- * is refused by the server itself. So "any identifier beginning with pg_" is
- * exhaustive over the catalogs AND cannot collide with a tenant's own table, in
- * this version of Postgres or any later one that adds new catalogs. An
+ * Every catalog schema and every relation in pg_catalog and pg_toast begins
+ * with `pg_`, and PostgreSQL reserves the prefix for schema, tablespace and role
+ * names. So "any identifier beginning with pg_" is exhaustive over the catalogs,
+ * in this version of Postgres or any later one that adds new catalogs. An
  * enumerated list would have to be maintained forever and would be wrong the
- * first time it was not.
+ * first time it was not. The prefix is NOT reserved for tables and columns: a
+ * project may create a table named pg_notes, and run_query refuses it too.
  *
  * Matched after `stripSqlNoise` with quoted identifiers kept, so a row whose
  * TEXT contains "pg_proc" cannot trip it while `"pg_proc"`, an identifier, does;
@@ -352,7 +431,7 @@ export async function runReadQuery(
   sql: string,
   limit: number = DEFAULT_ROWS,
 ): Promise<ReadQueryResult> {
-  assertReadOnlySql(sql)
+  await admitReadQuery(sql, projectId)
   try {
     return await execute(projectId, sql, limit)
   } catch (err) {

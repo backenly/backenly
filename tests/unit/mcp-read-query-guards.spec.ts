@@ -181,9 +181,11 @@ describe('system catalogs are refused', () => {
     refuse('SELECT * FROM pg_settings')
   })
 
-  it('covers catalogs that do not exist yet, via the reserved pg_ prefix', () => {
-    // Postgres refuses `CREATE TABLE pg_foo`, so "starts with pg_" is
-    // exhaustive over the catalogs AND cannot collide with a tenant's table.
+  it('covers catalogs that do not exist yet, via the pg_ prefix', () => {
+    // Every catalog schema and every relation in pg_catalog begins with pg_, so
+    // "starts with pg_" is exhaustive over the catalogs. PostgreSQL reserves the
+    // prefix only for schema, tablespace and role names: a project's own table
+    // named pg_foo is legal, and is refused too.
     refuse('SELECT * FROM pg_some_future_catalog')
   })
 
@@ -220,6 +222,10 @@ describe('system catalogs are refused', () => {
  * check never saw `"pg_proc"`, and `SELECT proname, prosrc FROM "pg_proc"` ran
  * and read every project's function source: the 2026-07-22 leak again, one pair
  * of quotes away. A string literal is data; a quoted identifier is a name.
+ *
+ * The parser in lib/mcp/read-query-ast.ts decides this first now
+ * (tests/unit/mcp-read-query-catalog-parse.spec.ts); these pin the text check,
+ * which stays behind it as an independent second layer.
  */
 describe('the text check sees quoted identifiers', () => {
   const refuse = (sql: string) => rejects(sql, 'CATALOG_NOT_READABLE')
