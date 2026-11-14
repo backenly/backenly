@@ -300,6 +300,18 @@ export const ARCHITECTURE_CHANGE_GROUP = 'evolution:'
  */
 export const ARCHITECTURE_UNDO_SUFFIX = ':undo'
 
+/**
+ * The group of a change Backenly made to switch off code a project planted in
+ * its own schema over a direct database connection: a trigger disabled, a
+ * function no shared role may run (lib/security/planted-objects.ts, run by
+ * scripts/neutralize-planted-objects.ts). On a database shared by several
+ * projects that code ran with access to all of them, and a person who could
+ * restore the change is the person who planted it. So nothing puts one back:
+ * not a restore of it, not a restore to a point before it, and not an automatic
+ * recovery. It is on the History, attributed to Backenly, and stays.
+ */
+export const SECURITY_CHANGE_GROUP = 'security:'
+
 /** The statuses a restore may start from, by mode. */
 function restorableFrom(mode: RecoveryMode): ChangeStatus[] {
   if (mode === 'automatic') return ['verification_failed', 'partially_applied']
@@ -336,6 +348,13 @@ export function availabilityOf(
   }
   if (change.status === 'recovering' || change.status === 'applying' || change.status === 'verifying') {
     return { available: false, code: 'IN_PROGRESS', reason: 'Backenly is still working on this change.' }
+  }
+  if (change.groupId?.startsWith(SECURITY_CHANGE_GROUP)) {
+    return {
+      available: false,
+      code: 'NOT_RESTORABLE',
+      reason: 'Backenly switched off database code here that could reach other projects. History does not switch it back on.',
+    }
   }
   if (mode !== 'automatic' && change.groupId?.startsWith(ARCHITECTURE_CHANGE_GROUP)) {
     return {
