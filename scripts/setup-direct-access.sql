@@ -910,6 +910,13 @@ AS $fn$
   UNION ALL
   -- A login that could become the group, and so give it what the login owns.
   -- set_option exists from PostgreSQL 16 only, hence read through to_jsonb.
+  -- Not one a superuser granted, unless this definer is one: PostgreSQL 16
+  -- records a superuser's grant as made by the bootstrap superuser (rdsadmin on
+  -- Amazon RDS, a protected role), and only a superuser can revoke it. It gives
+  -- nothing once the rest is taken: the login owns nothing and can create
+  -- nothing, and neither the group nor PUBLIC can create anywhere, so there is
+  -- nothing to give the group and the group could not own it (section 7 lists
+  -- such logins).
   SELECT l.rolname::text, 'SET on backenly_external',
          format('REVOKE SET OPTION FOR backenly_external FROM %I GRANTED BY %I', l.rolname, gr.rolname),
          ARRAY[gr.rolname::text], 1
@@ -919,6 +926,7 @@ AS $fn$
     JOIN pg_roles gr ON gr.oid = m.grantor, v
    WHERE p_schema IS NULL AND v.pg16 AND (to_jsonb(m) ->> 'set_option')::boolean
      AND l.rolname ~ '^bkn_(ro|rw)_[0-9a-f]{12}$'
+     AND (NOT gr.rolsuper OR (SELECT me.rolsuper FROM pg_roles me WHERE me.rolname = current_user))
   UNION ALL
   -- 2. CREATE on a schema or the database, TRIGGER on a table.
   SELECT g.name, 'CREATE on schema ' || s.name,
@@ -1104,11 +1112,13 @@ BEGIN
     SELECT coalesce(array_agg(h.item), '{}') INTO v_shared FROM public.backenly_direct_shared_holds(p_schema, v_owner) h;
   END IF;
   IF v_pg16 THEN
+    -- Not a SET a superuser granted, unless the definer is one (see
+    -- backenly_direct_shared_holds): only a superuser can revoke it.
     SELECT coalesce(array_agg(gr.rolname::text), '{}') INTO v_become
       FROM pg_auth_members m
       JOIN pg_roles g ON g.oid = m.roleid AND g.rolname = 'backenly_external'
       JOIN pg_roles gr ON gr.oid = m.grantor
-     WHERE m.member = v_role AND (to_jsonb(m) ->> 'set_option')::boolean;
+     WHERE m.member = v_role AND (to_jsonb(m) ->> 'set_option')::boolean AND (NOT gr.rolsuper OR v_super);
   END IF;
   IF v_marked AND cardinality(v_holds) = 0 AND cardinality(v_shared) = 0 AND cardinality(v_become) = 0 THEN
     RETURN false;
@@ -1172,8 +1182,15 @@ BEGIN
        AND m.grantor = (SELECT oid FROM pg_roles WHERE rolname = current_user);
     v_had := FOUND;
     CONTINUE WHEN v_had AND NOT v_pg16; -- before 16 a grant has no options to change
-    EXECUTE format(CASE WHEN v_pg16 THEN 'GRANT %I TO %I WITH INHERIT TRUE, SET TRUE'
-                        ELSE 'GRANT %I TO %I' END, v_need, current_user);
+    -- A role the server will not let the definer take is left: Amazon RDS
+    -- refuses rdsadmin ("a protected role") though pg_has_role reports the
+    -- definer's ADMIN on it. A step that needed it then fails with its own error.
+    BEGIN
+      EXECUTE format(CASE WHEN v_pg16 THEN 'GRANT %I TO %I WITH INHERIT TRUE, SET TRUE'
+                          ELSE 'GRANT %I TO %I' END, v_need, current_user);
+    EXCEPTION WHEN OTHERS THEN
+      CONTINUE;
+    END;
     IF v_had THEN
       v_back := v_back || v_need;
       v_back_i := v_back_i || coalesce(v_was_i, false);
@@ -1508,6 +1525,23 @@ BEGIN
     END;
   END LOOP;
 
+  -- Named, though left: logins whose SET on backenly_external a superuser
+  -- granted, which only a superuser can take (backenly_direct_shared_holds says
+  -- why it gives them nothing once the rest is taken).
+  IF v_pg16 AND NOT v_super THEN
+    FOR r IN
+      SELECT l.rolname::text AS login, gr.rolname::text AS grantor
+        FROM pg_auth_members m
+        JOIN pg_roles g ON g.oid = m.roleid AND g.rolname = 'backenly_external'
+        JOIN pg_roles l ON l.oid = m.member
+        JOIN pg_roles gr ON gr.oid = m.grantor
+       WHERE gr.rolsuper AND (to_jsonb(m) ->> 'set_option')::boolean AND l.rolname ~ '^bkn_(ro|rw)_[0-9a-f]{12}$'
+       ORDER BY 1
+    LOOP
+      RAISE NOTICE 'direct access: % keeps SET on backenly_external, granted by the superuser %, which only a superuser can take; it owns nothing and can create nothing, and neither can the group', r.login, r.grantor;
+    END LOOP;
+  END IF;
+
   -- The roles the statements below act as, the owner roles objects pass to
   -- made as the sync makes them.
   FOR r IN
@@ -1543,8 +1577,14 @@ BEGIN
        AND m.grantor = (SELECT oid FROM pg_roles WHERE rolname = current_user);
     v_had := FOUND;
     CONTINUE WHEN v_had AND NOT v_pg16;
-    EXECUTE format(CASE WHEN v_pg16 THEN 'GRANT %I TO %I WITH INHERIT TRUE, SET TRUE'
-                        ELSE 'GRANT %I TO %I' END, r.role, current_user);
+    -- As the strip: a role the server will not let the installer take is left,
+    -- and a statement that needed it is reported with the others below.
+    BEGIN
+      EXECUTE format(CASE WHEN v_pg16 THEN 'GRANT %I TO %I WITH INHERIT TRUE, SET TRUE'
+                          ELSE 'GRANT %I TO %I' END, r.role, current_user);
+    EXCEPTION WHEN OTHERS THEN
+      CONTINUE;
+    END;
     IF v_had THEN
       back := back || r.role;
       back_i := back_i || coalesce(v_was_i, false);

@@ -476,11 +476,22 @@ describe('held by a definer that is not a superuser, as on Amazon RDS', () => {
       await q(`GRANT TRIGGER ON "${onRds.schema}".orders TO ${onRds.login}`)
       await q(`CREATE FUNCTION "${onRds.schema}".planted() RETURNS int LANGUAGE sql AS 'SELECT 1'`)
       await q(`ALTER FUNCTION "${onRds.schema}".planted() OWNER TO ${onRds.login}`)
+      // SET on the group from a superuser, as Amazon RDS's older logins hold it: PostgreSQL 16 records a
+      // superuser's grant as made by the bootstrap superuser (rdsadmin there, this connection's role here), and
+      // only a superuser can revoke it. It is not a hold this definer can or need take (it gives nothing once
+      // the rest is taken), so the strip goes on without it instead of failing on it.
+      await q(`GRANT backenly_external TO ${onRds.login} WITH INHERIT TRUE, SET TRUE`)
+      const superSet = `SELECT count(*)::int AS n FROM pg_auth_members m JOIN pg_roles gr ON gr.oid = m.grantor
+                         WHERE m.roleid = 'backenly_external'::regrole AND m.member = $1::regrole AND gr.rolsuper
+                           AND (to_jsonb(m) ->> 'set_option')::boolean`
+      expect(await q(superSet, [onRds.login])).toEqual([{ n: 1 }])
       expect((await holds(onRds.login)).length).toBe(4)
 
       expect(await q(`SELECT public.backenly_direct_strip_schema_changes($1) AS taken`, [onRds.login])).toEqual([{ taken: true }])
 
       expect(await holds(onRds.login)).toEqual([])
+      expect(await q(superSet, [onRds.login])).toEqual([{ n: 1 }])
+      expect(await q(`SELECT count(*)::int AS n FROM public.backenly_direct_shared_holds() WHERE holder = $1`, [onRds.login])).toEqual([{ n: 0 }])
       expect(await isMember(onRds.login, 'backenly_no_schema_changes')).toBe(true)
       expect(await functionOwner(onRds.schema, 'planted')).toBe(onRds.owner)
       // What it granted itself to do this, it took back.

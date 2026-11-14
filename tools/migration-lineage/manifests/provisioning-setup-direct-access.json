@@ -227,7 +227,7 @@
         "config": [
           "search_path=pg_catalog"
         ],
-        "body_sha256": "QdQWgj39EKirZ4RL1qXTNfRj2KrjQm5sKC3Y25ANzzU="
+        "body_sha256": "pOP1ZZk/kkNYIDfpSQbClPInXqU7mTEQt1EQIeQrAOg="
       }
     },
     {
@@ -243,7 +243,7 @@
         "config": [
           "search_path=pg_catalog, public"
         ],
-        "body_sha256": "5Osu0NgnpoN0YjbCJc+819Z8oWHgSe5uzcNjqaIvOUc="
+        "body_sha256": "MlX1OJXmIdJn+gLdIKfzJv80fpQ5v222TLkkAm4YoRM="
       }
     },
     {
