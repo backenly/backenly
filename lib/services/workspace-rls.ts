@@ -39,6 +39,7 @@ import {
   teamsRulesBlockers,
   OWNERSHIP_COLUMN_CANDIDATES,
   TEAMS_TABLES,
+  type OwnershipCatalog,
   type RelatedRowsVia,
   type TeamsTable,
 } from './rls-ownership'
@@ -2409,6 +2410,57 @@ function teamsRuleChosenBy(
   return null
 }
 
+/** A membership that looks like a self-join made under the rules before the teams rules. */
+export interface SuspectMembership {
+  organizationId: string
+  userId: string
+  role: string | null
+  /** When the row was written (created_at, createdAt or joined_at, whichever the table has). */
+  createdAt: Date | null
+}
+
+/**
+ * Memberships that look like the old self-join: the member is not the
+ * organization's owner, and no accepted invitation to that organization was
+ * addressed to the member's email. Any signed-in user could write such a row
+ * before the teams rules, which stop new ones and leave these. Only read, as
+ * the service role (the application role is held to the tables' rules), for a
+ * person to judge: a member a server added with a service-role key looks the
+ * same. Without a users table to read emails from, every member but the owner
+ * is listed.
+ */
+async function suspectMemberships(projectId: string, schema: string, catalog: OwnershipCatalog): Promise<SuspectMembership[]> {
+  const columnsOf = (table: string) => catalog.columns.get(table) ?? []
+  const has = (table: string, columns: string[]) => columns.every((c) => columnsOf(table).includes(c))
+  if (!has('organization_members', ['organization_id', 'user_id']) || !has('organizations', ['id', 'owner_user_id'])) return []
+  const created = ['created_at', 'createdAt', 'joined_at'].find((c) => columnsOf('organization_members').includes(c))
+  const invited =
+    has('organization_invitations', ['organization_id', 'email', 'accepted_at']) && has('users', ['id', 'email'])
+      ? `EXISTS (
+           SELECT 1 FROM "${schema}"."organization_invitations" i
+             JOIN "${schema}"."users" u ON u."id"::text = m."user_id"::text
+            WHERE i."organization_id"::text = m."organization_id"::text
+              AND i."accepted_at" IS NOT NULL
+              AND lower(i."email"::text) = lower(u."email"::text))`
+      : 'false'
+  return executeWithUserContext<SuspectMembership>(
+    projectId,
+    '',
+    true,
+    `SELECT m."organization_id"::text AS "organizationId",
+            m."user_id"::text AS "userId",
+            ${has('organization_members', ['role']) ? 'm."role"::text' : 'NULL::text'} AS "role",
+            ${created ? `m."${created}"` : 'NULL::timestamptz'} AS "createdAt"
+       FROM "${schema}"."organization_members" m
+      WHERE NOT EXISTS (
+              SELECT 1 FROM "${schema}"."organizations" o
+               WHERE o."id"::text = m."organization_id"::text
+                 AND o."owner_user_id"::text = m."user_id"::text)
+        AND NOT ${invited}
+      ORDER BY 1, 2`,
+  )
+}
+
 /** What secureTeamsTables found, or did, in one schema. */
 export interface TeamsTablesRepair {
   schema: string
@@ -2418,6 +2470,8 @@ export interface TeamsTablesRepair {
   kept: Array<{ table: TeamsTable; reason: string }>
   /** Why the teams rules cannot go on in this schema at all. */
   blocked: string[]
+  /** Memberships that look like the old self-join. Listed, never changed. */
+  suspects: SuspectMembership[]
   secured: boolean
 }
 
@@ -2425,8 +2479,9 @@ export interface TeamsTablesRepair {
  * Give a project's existing teams tables the teams rules: production as one
  * governed change attributed to Backenly, and each active preview branch.
  * A table whose rules a person chose is left as it is and reported, as is a
- * schema whose teams tables cannot take the rules. `apply: false` only reports.
- * Used by scripts/secure-teams-tables.ts.
+ * schema whose teams tables cannot take the rules, and so are memberships that
+ * look like the old self-join, which are never changed. `apply: false` only
+ * reports. Used by scripts/secure-teams-tables.ts.
  */
 export async function secureTeamsTables(projectId: string, opts: { apply: boolean }): Promise<TeamsTablesRepair[]> {
   const { resolveWorkspaceSchema } = await import('./workspace-pool')
@@ -2438,9 +2493,10 @@ export async function secureTeamsTables(projectId: string, opts: { apply: boolea
   for (const schema of [main, ...branches.map((b) => b.schemaName)]) {
     const catalog = await loadOwnershipCatalog(projectId, schema)
     if (!TEAMS_TABLES.some((t) => catalog.columns.has(t))) continue
+    const suspects = await suspectMemberships(projectId, schema, catalog)
     const blocked = teamsRulesBlockers(catalog)
     if (blocked.length) {
-      out.push({ schema, tables: [], kept: [], blocked, secured: false })
+      out.push({ schema, tables: [], kept: [], blocked, suspects, secured: false })
       continue
     }
 
@@ -2468,13 +2524,13 @@ export async function secureTeamsTables(projectId: string, opts: { apply: boolea
         )
       }
     }
-    if (tables.length === 0 && kept.length === 0) continue
+    if (tables.length === 0 && kept.length === 0 && suspects.length === 0) continue
     if (loops.length && tables.length) {
-      out.push({ schema, tables: [], kept, blocked: loops, secured: false })
+      out.push({ schema, tables: [], kept, blocked: loops, suspects, secured: false })
       continue
     }
     if (!opts.apply || tables.length === 0) {
-      out.push({ schema, tables, kept, blocked: [], secured: false })
+      out.push({ schema, tables, kept, blocked: [], suspects, secured: false })
       continue
     }
 
@@ -2499,7 +2555,7 @@ export async function secureTeamsTables(projectId: string, opts: { apply: boolea
       const applied = await applyTeamsRules(projectId, { schemaName: schema }, tables)
       if (!applied.success) throw new Error(`${schema}: ${applied.message}`)
     }
-    out.push({ schema, tables, kept, blocked: [], secured: true })
+    out.push({ schema, tables, kept, blocked: [], suspects, secured: true })
   }
   return out
 }

@@ -535,6 +535,9 @@ describe('a project whose teams tables have the rules releases before the fix ga
     expect({ success: chosen.success, message: chosen.message }).toMatchObject({ success: true })
   }, 120_000)
 
+  /** The membership the premise below writes, as the report lists it. */
+  const selfJoin = () => ({ organizationId: orgId, userId: mallory.id, role: 'admin', createdAt: expect.any(Date) })
+
   it('the premise: under those rules a signed-in user joins another owner\'s organization as its admin', async () => {
     expect(await policies('organization_members')).toEqual(OWN_ROWS)
     const joined = await asUser<{ role: string }>(
@@ -543,8 +546,8 @@ describe('a project whose teams tables have the rules releases before the fix ga
       orgId,
       mallory.id,
     )
+    // Left in place: it is the row the report below must find.
     expect(joined).toEqual([{ role: 'admin' }])
-    await ddl(`DELETE FROM ${T('organization_members')} WHERE user_id = $1::uuid`, mallory.id)
   })
 
   it("are found and reported, the person's rule kept, and nothing is changed", async () => {
@@ -555,6 +558,7 @@ describe('a project whose teams tables have the rules releases before the fix ga
         tables: ['organizations', 'organization_members'],
         kept: [{ table: 'organization_invitations', reason: expect.stringContaining('backenly_custom_select') }],
         blocked: [],
+        suspects: [selfJoin()],
         secured: false,
       },
     ])
@@ -570,6 +574,7 @@ describe('a project whose teams tables have the rules releases before the fix ga
         tables: ['organizations', 'organization_members'],
         kept: [{ table: 'organization_invitations', reason: expect.any(String) }],
         blocked: [],
+        suspects: [selfJoin()],
         secured: true,
       },
     ])
@@ -586,6 +591,24 @@ describe('a project whose teams tables have the rules releases before the fix ga
     expect(change).toEqual({ source: 'system', status: 'healthy' })
   }, 120_000)
 
+  it('lists the membership that looks like the old self-join in both modes, and only it, and removes nothing', async () => {
+    // The owner, the admin and the owner the owner invited are members too:
+    // the owner owns the organization, and the other two accepted invitations
+    // to it addressed to their own emails.
+    const members = await prisma.$queryRawUnsafe<Array<{ user: string }>>(
+      `SELECT user_id::text AS "user" FROM ${T('organization_members')} WHERE organization_id = $1::uuid`,
+      orgId,
+    )
+    expect(members.map((m) => m.user).sort()).toEqual([olivia.id, adam.id, otto.id, mallory.id].sort())
+    for (const apply of [false, true]) {
+      const [report] = await secureTeamsTables(projectId, { apply })
+      expect({ apply, suspects: report.suspects }).toEqual({ apply, suspects: [selfJoin()] })
+    }
+    expect(
+      await prisma.$queryRawUnsafe(`SELECT role FROM ${T('organization_members')} WHERE user_id = $1::uuid`, mallory.id),
+    ).toEqual([{ role: 'admin' }])
+  }, 120_000)
+
   it('after which the self-join is refused, and there is nothing left to secure', async () => {
     await expect(
       asUser(
@@ -597,7 +620,14 @@ describe('a project whose teams tables have the rules releases before the fix ga
     ).rejects.toThrow(/row-level security/)
     const again = await secureTeamsTables(projectId, { apply: false })
     expect(again).toEqual([
-      { schema, tables: [], kept: [{ table: 'organization_invitations', reason: expect.any(String) }], blocked: [], secured: false },
+      {
+        schema,
+        tables: [],
+        kept: [{ table: 'organization_invitations', reason: expect.any(String) }],
+        blocked: [],
+        suspects: [selfJoin()],
+        secured: false,
+      },
     ])
   }, 60_000)
 

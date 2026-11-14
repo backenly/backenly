@@ -2075,8 +2075,9 @@ tests/integration/grant-tables-on-every-path.spec.ts
 # an owner: an admin's owner invitation is refused, and accept-invite honours an
 # owner invitation only from the owner. A project with the rules earlier
 # releases gave them is found, secured as one healthy change Backenly made, and
-# a rule a person chose is kept. A provisioned project, the real executor, route
-# and change ledger.
+# a rule a person chose is kept; a membership that looks like the old self-join
+# is listed in both modes and never removed. A provisioned project, the real
+# executor, route and change ledger.
 tests/integration/teams-tables-access.spec.ts
 
 # A rule Backenly guessed from a name, which the request did not ask for, is

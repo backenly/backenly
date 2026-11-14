@@ -23,8 +23,13 @@
  *   npx tsx scripts/secure-teams-tables.ts --apply            # every project
  *   npx tsx scripts/secure-teams-tables.ts --apply --project <uuid>
  *
- * Existing memberships are not changed: a row an end user wrote under the old
- * rules is still there afterwards.
+ * Existing memberships are never changed, in either mode: a row an end user
+ * wrote under the old rules is still there afterwards. The ones that look like
+ * that self-join (a member who is not the organization's owner, with no
+ * accepted invitation to that organization addressed to their email) are
+ * listed, one line each: project, owner's email, schema, organization id,
+ * member user id, role, created_at. A member a server added with a
+ * service-role key looks the same, so each is for a person to judge.
  */
 import { prisma } from '@/lib/db'
 import { secureTeamsTables } from '@/lib/services/workspace-rls'
@@ -42,12 +47,13 @@ async function main(): Promise<void> {
   let tables = 0
   let kept = 0
   let blocked = 0
+  let suspects = 0
   let affected = 0
   let failed = 0
   for (const p of projects) {
     try {
       const found = await secureTeamsTables(p.id, { apply: APPLY })
-      if (found.length) affected++
+      if (found.some((f) => f.tables.length)) affected++
       for (const f of found) {
         const where = `${p.id}\t${p.user?.email ?? '-'}\t${f.schema}`
         if (f.tables.length) {
@@ -62,6 +68,13 @@ async function main(): Promise<void> {
           blocked++
           console.log(`${where}\tcannot take the teams rules: ${f.blocked.join('; ')}`)
         }
+        for (const s of f.suspects) {
+          suspects++
+          console.log(
+            `${where}\tmember without an accepted invitation\torganization ${s.organizationId}\tuser ${s.userId}\t` +
+              `role ${s.role ?? '-'}\tcreated_at ${s.createdAt ? new Date(s.createdAt).toISOString() : '-'}`,
+          )
+        }
       }
     } catch (err) {
       failed++
@@ -70,7 +83,8 @@ async function main(): Promise<void> {
   }
   console.log(
     `${APPLY ? 'Secured' : 'Found'} ${tables} teams table(s) ${APPLY ? '' : 'to secure '}in ${affected} of ${projects.length} project(s); ` +
-      `${kept} kept because a person chose their rules` +
+      `${kept} kept because a person chose their rules; ` +
+      `${suspects} membership(s) without an accepted invitation listed, none changed` +
       (blocked ? `; ${blocked} schema(s) cannot take the teams rules` : '') +
       (failed ? `; ${failed} project(s) failed` : '') +
       (APPLY ? '.' : '. Run with --apply to secure them.'),
