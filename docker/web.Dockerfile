@@ -147,6 +147,19 @@ RUN node -e "const b=require('bcrypt');const h=b.hashSync('x',4);if(!b.compareSy
 # TypeScript the way the function runner does.
 RUN node -e "const e=require('esbuild');const o=e.transformSync('export const n: number = 1',{loader:'ts',format:'cjs'});if(!o.code.includes('exports'))process.exit(1);console.log('esbuild '+e.version+' compiles TypeScript in this image')"
 
+# libpg-query, the PostgreSQL 16 parser every run_query, SQL-tab and CLI
+# console statement is checked with before it runs (lib/mcp/read-query-ast.ts),
+# and @pgsql/types, which it requires. Its loader reads libpg-query.wasm from
+# beside its own file at run time, a path output tracing cannot follow, so the
+# package is copied in whole even though next.config.js also names it. Without
+# it the check fails closed: no read query runs at all.
+COPY --from=build /src/node_modules/libpg-query ./node_modules/libpg-query
+COPY --from=build /src/node_modules/@pgsql/types ./node_modules/@pgsql/types
+
+# Asserted, not assumed: the build fails unless this image loads the
+# WebAssembly and parses SQL with the PostgreSQL 16 grammar the server runs.
+RUN node -e "const q=require('libpg-query');q.parse('SELECT 1').then(function(r){if(!r||!r.stmts||r.stmts.length!==1||Math.floor(r.version/10000)!==16)process.exit(1);console.log('libpg-query '+require('libpg-query/package.json').version+' parses PostgreSQL 16 SQL in this image')}).catch(function(e){console.error(e);process.exit(1)})"
+
 # ── Containment at the boundary that can actually assert it ─────────────────
 #
 # next.config.js bounds ROUTE traces, and that works. It cannot bound
