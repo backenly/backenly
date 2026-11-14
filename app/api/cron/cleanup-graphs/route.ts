@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { isCronRequest } from '@/lib/security/cron-auth'
 import { cleanupAllProjectGraphs } from '@/lib/orchestration/graph-cleanup'
 
 /**
@@ -10,7 +11,7 @@ import { cleanupAllProjectGraphs } from '@/lib/orchestration/graph-cleanup'
  * Security: Verify cron secret to prevent unauthorized access
  */
 function verifyCronAuth(request: NextRequest): boolean {
-  return request.headers.get('authorization') === `Bearer ${process.env.CRON_SECRET}`
+  return isCronRequest(request)
 }
 
 export async function GET(request: NextRequest) {

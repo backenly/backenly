@@ -27,6 +27,7 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server'
+import { isCronRequest } from '@/lib/security/cron-auth'
 import { prisma } from '@/lib/db/prisma'
 import { recordSecurityEvent } from '@/lib/platform-controls'
 import { purgeAccountState } from '@/lib/usage/account'
@@ -40,11 +41,8 @@ const GRACE_DAYS = Number(process.env.ABANDONED_SIGNUP_GRACE_DAYS || 14)
 const MAX_PER_RUN = 200
 
 function verifyCronAuth(request: NextRequest): boolean {
-  const secret = process.env.CRON_SECRET
-  if (!secret) return false
-  if (request.headers.get('authorization') === `Bearer ${secret}`) return true
-  // Same ad-hoc ops header the autonomy cron accepts.
-  return request.headers.get('x-cron-secret') === secret
+  // A bearer token or the x-cron-secret header, as before (lib/security/cron-auth.ts).
+  return isCronRequest(request)
 }
 
 export async function GET(request: NextRequest) {

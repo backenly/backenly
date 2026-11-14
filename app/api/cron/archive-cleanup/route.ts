@@ -9,6 +9,7 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server'
+import { isCronRequest } from '@/lib/security/cron-auth'
 import { prisma } from '@/lib/db'
 import { cleanupOldArchives } from '@/lib/rollback/non-destructive-restore'
 import { purgeExpiredVaults } from '@/lib/changes/retention'
@@ -19,7 +20,7 @@ export const dynamic = 'force-dynamic'
 export const maxDuration = 300 // 5 minutes
 
 function verifyCronAuth(request: NextRequest): boolean {
-  return request.headers.get('authorization') === `Bearer ${process.env.CRON_SECRET}`
+  return isCronRequest(request)
 }
 
 export async function GET(request: NextRequest) {

@@ -101,8 +101,8 @@
   },
   {
     "route": "/api/cron/health",
-    "status": "ACCEPTED",
-    "reason": "Scheduler liveness. Proves itself with a shared secret rather than a session, which is the only credential a scheduler can hold."
+    "status": "SAFE",
+    "reason": "SAFE (fixed here): liveness (mode, start time, leadership) answers anyone by design; what the scheduler ran across projects (the scheduled count, the last job's name and status) answers only a caller with CRON_SECRET (isCronRequest), which refuses when none is configured."
   },
   {
     "route": "/api/database-brain/issues/[issueId]",

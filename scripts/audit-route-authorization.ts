@@ -154,7 +154,7 @@ function classify(file: string): RouteRecord {
     // A scheduled or machine caller proves itself with a shared secret rather
     // than a session. Checked last, so a route that also has a real guard is
     // classified by the stronger one.
-    : /(CRON_SECRET|INTERNAL_API_TOKEN|AI_EXECUTION_TOKEN|x-internal-token|verifySignature|constructEvent)/.test(src)
+    : /(CRON_SECRET|isCronRequest\s*\(|INTERNAL_API_TOKEN|AI_EXECUTION_TOKEN|x-internal-token|verifySignature|constructEvent)/.test(src)
       ? 'sharedSecret'
     : 'none'
 
