@@ -2317,6 +2317,180 @@ export async function applyTeamsRules(
   return { success: true, message: `The teams rules hold on ${applied.join(', ')}.`, applied }
 }
 
+/** A template's four policies, by name, as one comparable string. */
+const ruleNames = (template: string) => RLS_COMMANDS.map((command) => `backenly_${template}_${command}`).sort().join(',')
+
+const TEAMS_RULE = ruleNames('teams')
+
+/** The rules Backenly puts on a teams table by itself, by the names of their policies. */
+const AUTOMATIC_TEAMS_TABLE_RULES = [ruleNames('own_rows'), ruleNames('own_rows_read'), TEAMS_RULE]
+
+/** The records applyPermissionPolicy keeps for those rules, and for a table Backenly closed. */
+const AUTOMATIC_TEAMS_TABLE_RECORDS = new Set(['backenly_own_rows', 'backenly_own_rows_read', 'backenly_teams', 'backenly_admin_only'])
+
+const holdsTeamsRules = (live: LivePolicyRow[]) => live.map((p) => p.policyName).sort().join(',') === TEAMS_RULE
+
+/** What records say about who chose a teams table's rules (main's). */
+interface TeamsRuleChoices {
+  /** PermissionPolicy record names, per table. */
+  records: Map<string, string[]>
+  /** The latest change in effect that set or removed the table's rules for a person or their agent. */
+  changes: Map<string, number>
+}
+
+async function teamsRuleChoices(projectId: string): Promise<TeamsRuleChoices> {
+  const records = new Map<string, string[]>()
+  const rows = await prisma.permissionPolicy.findMany({
+    where: { projectId, tableName: { in: [...TEAMS_TABLES] } },
+    select: { tableName: true, policyName: true },
+  })
+  for (const r of rows) records.set(r.tableName, [...(records.get(r.tableName) ?? []), r.policyName])
+
+  // A change set_rls, add_rls or remove_rls made is titled with its action and
+  // table (describeActionForLedger, lib/ai/minimal-executor.ts). One Backenly
+  // made by itself (system, autonomy) is no one's choice; one a person made in
+  // the console, approved, or had their agent make is theirs.
+  const { IN_EFFECT } = await import('@/lib/changes/types')
+  const changes = new Map<string, number>()
+  const made = await prisma.backendChange.findMany({
+    where: {
+      projectId,
+      kind: 'change',
+      source: { notIn: ['system', 'autonomy'] },
+      status: { in: [...IN_EFFECT] },
+      title: { in: TEAMS_TABLES.flatMap((t) => [`SET_PERMISSION ${t}`, `REMOVE_PERMISSION ${t}`]) },
+    },
+    select: { seq: true, title: true },
+    orderBy: { seq: 'asc' },
+  })
+  for (const c of made) changes.set(c.title.slice(c.title.indexOf(' ') + 1), c.seq)
+  return { records, changes }
+}
+
+/**
+ * Why a teams table's rules are a person's choice, or null when they are a rule
+ * Backenly gave it by itself: its policies are exactly one of the rules the
+ * inference gives these tables (owner's rows, owner-read-only, teams), or none
+ * at all (row-level security off: what releases before the users foreign keys
+ * left organizations and organization_invitations with), or the service-role
+ * rule Backenly closed it with (the closed-by-default mark). Anything else
+ * (set_rls's custom rules, another template, a policy of another name, a
+ * record of all_access, a change a person or their agent made) is theirs.
+ */
+function teamsRuleChosenBy(
+  table: TeamsTable,
+  live: LivePolicyRow[],
+  closedByDefault: boolean,
+  choices: TeamsRuleChoices,
+): string | null {
+  const names = live.map((p) => p.policyName).sort()
+  if (names.length === 1 && names[0] === 'backenly_admin_only') {
+    if (!closedByDefault) return 'it is closed to all but service-role keys by a rule someone chose (admin_only)'
+  } else if (names.length > 0 && !AUTOMATIC_TEAMS_TABLE_RULES.includes(names.join(','))) {
+    return `its policies (${names.join(', ')}) are a rule someone chose, not one Backenly sets by itself`
+  }
+  const chosen = (choices.records.get(table) ?? []).filter((name) => !AUTOMATIC_TEAMS_TABLE_RECORDS.has(name))
+  if (chosen.length) return `a rule was chosen for it (${chosen.join(', ')})`
+  const seq = choices.changes.get(table)
+  if (seq !== undefined) return `its rules were set in change #${seq}, by a person or their agent`
+  return null
+}
+
+/** What secureTeamsTables found, or did, in one schema. */
+export interface TeamsTablesRepair {
+  schema: string
+  /** Tables that get the teams rules (or got them, when `secured`). */
+  tables: TeamsTable[]
+  /** Tables whose rules a person chose, left as they are, and why. */
+  kept: Array<{ table: TeamsTable; reason: string }>
+  /** Why the teams rules cannot go on in this schema at all. */
+  blocked: string[]
+  secured: boolean
+}
+
+/**
+ * Give a project's existing teams tables the teams rules: production as one
+ * governed change attributed to Backenly, and each active preview branch.
+ * A table whose rules a person chose is left as it is and reported, as is a
+ * schema whose teams tables cannot take the rules. `apply: false` only reports.
+ * Used by scripts/secure-teams-tables.ts.
+ */
+export async function secureTeamsTables(projectId: string, opts: { apply: boolean }): Promise<TeamsTablesRepair[]> {
+  const { resolveWorkspaceSchema } = await import('./workspace-pool')
+  const main = await resolveWorkspaceSchema(projectId)
+  const branches = await prisma.workspaceBranch.findMany({ where: { projectId, status: 'active' }, select: { schemaName: true } })
+  const choices = await teamsRuleChoices(projectId)
+  const out: TeamsTablesRepair[] = []
+
+  for (const schema of [main, ...branches.map((b) => b.schemaName)]) {
+    const catalog = await loadOwnershipCatalog(projectId, schema)
+    if (!TEAMS_TABLES.some((t) => catalog.columns.has(t))) continue
+    const blocked = teamsRulesBlockers(catalog)
+    if (blocked.length) {
+      out.push({ schema, tables: [], kept: [], blocked, secured: false })
+      continue
+    }
+
+    const closed = await closedByDefaultTables(projectId, schema).catch(() => new Set<string>())
+    const tables: TeamsTable[] = []
+    const kept: Array<{ table: TeamsTable; reason: string }> = []
+    const loops: string[] = []
+    for (const table of TEAMS_TABLES) {
+      const live = (await readLivePolicies(projectId, schema, table)).filter((p) => !isPlatformKeptPolicy(p))
+      if (holdsTeamsRules(live) && (await readRlsState(projectId, schema, table)).forceRowSecurity) continue
+      const reason = teamsRuleChosenBy(table, live, closed.has(table), choices)
+      if (!reason) {
+        tables.push(table)
+        continue
+      }
+      kept.push({ table, reason })
+      // The teams rules on the other tables read organizations and
+      // organization_members. A rule of someone's own on either that reads
+      // another table can close a loop with them, and PostgreSQL then refuses
+      // every read of the tables in it.
+      if (table !== 'organization_invitations' && live.some((p) => /\bselect\b/i.test(`${p.using ?? ''} ${p.withCheck ?? ''}`))) {
+        loops.push(
+          `"${table}" keeps a rule of its own that reads another table, which the teams rules on the others could ` +
+            `turn into a loop PostgreSQL refuses; its owner should set its rules (or enable_teams) first`,
+        )
+      }
+    }
+    if (tables.length === 0 && kept.length === 0) continue
+    if (loops.length && tables.length) {
+      out.push({ schema, tables: [], kept, blocked: loops, secured: false })
+      continue
+    }
+    if (!opts.apply || tables.length === 0) {
+      out.push({ schema, tables, kept, blocked: [], secured: false })
+      continue
+    }
+
+    if (schema === main) {
+      const { withGovernedChange, expectEffect } = await import('@/lib/changes/ledger')
+      const { withChangeAttribution } = await import('@/lib/changes/attribution')
+      const target: RlsTarget = main === `workspace_${projectId}` ? {} : { schemaName: main }
+      const { change } = await withChangeAttribution({ source: 'system' }, () =>
+        withGovernedChange({ projectId, title: `Set the teams rules on ${namesForTitle(tables)}` }, async () => {
+          const applied = await applyTeamsRules(projectId, target, tables)
+          // Replacing these tables' rules is what this change is for, not a
+          // side effect of it (lib/changes/verify.ts).
+          for (const table of applied.applied) expectEffect(projectId, { action: 'SET_PERMISSION', table })
+          if (!applied.success) throw new Error(applied.message)
+          return applied
+        }),
+      )
+      if (change && change.status !== 'healthy' && change.status !== 'unverified') {
+        throw new Error(`${schema}: the change ended ${change.status}: ${change.summary}`)
+      }
+    } else {
+      const applied = await applyTeamsRules(projectId, { schemaName: schema }, tables)
+      if (!applied.success) throw new Error(`${schema}: ${applied.message}`)
+    }
+    out.push({ schema, tables, kept, blocked: [], secured: true })
+  }
+  return out
+}
+
 /**
  * List all permission policies for a project.
  */
