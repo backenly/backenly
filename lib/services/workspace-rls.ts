@@ -35,10 +35,16 @@ import {
   inferRlsPlan,
   loadOwnershipCatalog,
   inferRlsPlanFromCatalog,
+  isTeamsTable,
+  teamsRulesBlockers,
   OWNERSHIP_COLUMN_CANDIDATES,
+  TEAMS_TABLES,
+  type OwnershipCatalog,
   type RelatedRowsVia,
+  type TeamsTable,
 } from './rls-ownership'
 import type { ExistsContext } from '@/lib/db/sql-expression'
+import type { TableChange } from '@/lib/changes/types'
 
 /**
  * Split a SQL string on semicolons that are NOT inside $$ dollar-quoted blocks,
@@ -103,6 +109,7 @@ export type PolicyTemplate =
   | 'admin_read_all'    // admins see ALL rows; regular users see only their own
   | 'role_based'        // role column controls access (admin bypasses user-scoped filter)
   | 'moderator_access'  // moderators + admins see all rows; users see only their own
+  | 'teams'             // organizations / organization_members / organization_invitations: membership decides
   | 'custom'            // caller-supplied predicate — the escape hatch (see PolicyConfig.using)
 
 /**
@@ -196,6 +203,12 @@ export interface PolicyConfig {
    * fixed a security hole by breaking the feature it protected.
    */
   commands?: Partial<Record<RlsCommand, string | CommandRule>>
+  /**
+   * The template was read off the schema (autoApplyRlsIfNeeded,
+   * reconcileAutoRls) rather than asked for. On a teams table that makes it
+   * Backenly's own choice, so a rule someone chose stays in its place.
+   */
+  inferred?: boolean
 }
 
 /** One command's resolved rule, ready to become a CREATE POLICY statement. */
@@ -496,6 +509,17 @@ export interface RlsTarget {
   schemaName?: string
 }
 
+/** What installing a rule did. */
+export interface PolicyInstallResult {
+  success: boolean
+  message: string
+  /**
+   * Invitations withdrawn because they were written before the teams rules
+   * hashed tokens (installTeamsPolicy). Only on organization_invitations.
+   */
+  withdrawn?: WithdrawnInvitation[]
+}
+
 /**
  * Enable RLS on a workspace table and install the policy.
  */
@@ -503,7 +527,7 @@ export async function applyPermissionPolicy(
   projectId: string,
   config: PolicyConfig,
   target: RlsTarget = {},
-): Promise<{ success: boolean; message: string }> {
+): Promise<PolicyInstallResult> {
   const result = await installPermissionPolicy(projectId, config, target)
   // A rule someone chose replaces the one Backenly closed a table with when it
   // could not tell who owns a row: from here on it is theirs, and the
@@ -519,7 +543,7 @@ async function installPermissionPolicy(
   projectId: string,
   config: PolicyConfig,
   target: RlsTarget,
-): Promise<{ success: boolean; message: string }> {
+): Promise<PolicyInstallResult> {
   const { tableName, roleColumn, role = 'authenticated' } = config
   const branchMode = !!target.schemaName
   const schemaName = target.schemaName ?? `workspace_${projectId}`
@@ -545,6 +569,42 @@ async function installPermissionPolicy(
     if (plan.kind === 'related_rows') via = via ?? plan.via
   } else {
     template = config.template
+  }
+
+  // ── The teams tables keep the teams rules, or the rule a person chose ─────
+  // Membership decides who may read and change these rows. Repairs and build
+  // steps ask for a rule by name (FIX_WORKFLOW's user_data_rls, the auto-fix
+  // engine's apply_rls and the build runtime's permission nodes all send
+  // own_rows), and any rule read from one owner column lets a signed-in user
+  // write the row that makes them a member of any organization. So once all
+  // three tables exist, a template other than teams, custom or admin_only, or
+  // one read off the schema (auto, the auto-RLS paths), never lands on them.
+  // A table whose rule someone chose (in the console, an approval, through
+  // their agent or a merged branch; found as secureTeamsTables finds it) keeps
+  // it, and the request is refused saying why: a repair must not weaken or
+  // undo a person's decision. Any other gets the teams rules, and the result
+  // says so. Asked for by name, teams, custom and admin_only replace whatever
+  // rule the table has: that is a decision about this table.
+  let teamsInsteadOf: PolicyTemplate | null = null
+  const named =
+    !config.inferred && (config.template === 'teams' || config.template === 'custom' || config.template === 'admin_only')
+  if (isTeamsTable(tableName) && !named) {
+    if (teamsRulesBlockers(await loadOwnershipCatalog(projectId, schemaName)).length === 0) {
+      const chosen = await teamsRuleChosenFor(projectId, schemaName, tableName)
+      if (chosen) {
+        return {
+          success: false,
+          message:
+            `Left the rules on "${tableName}" as they are: ${chosen}. "${config.template}" was asked for, and on a ` +
+            `teams table Backenly puts a rule of its own only in place of one it set itself. To replace that rule, ` +
+            `ask for "teams" by name, or set one of your own with set_rls.`,
+        }
+      }
+      if (template !== 'teams') {
+        teamsInsteadOf = template
+        template = 'teams'
+      }
+    }
   }
 
   // ── The custom escape hatch ────────────────────────────────────────────────
@@ -583,6 +643,23 @@ async function installPermissionPolicy(
       return { success: false, message: `No policy was changed on "${tableName}". ${plan.reason}` }
     }
     return installCustomPolicySet(projectId, tableName, schemaName, plan, role)
+  }
+
+  // ── teams: the three tables enable_teams creates, as one model ─────────────
+  // Each table's rule reads the other two, so it is refused before anything is
+  // altered unless all three exist with the columns the rules name.
+  if (template === 'teams') {
+    const blockers = isTeamsTable(tableName)
+      ? teamsRulesBlockers(await loadOwnershipCatalog(projectId, schemaName))
+      : [`"${tableName}" is not one of them`]
+    if (blockers.length) {
+      return {
+        success: false,
+        message:
+          `Cannot apply the "teams" rules to "${tableName}". They are for the tables enable_teams creates ` +
+          `(${TEAMS_TABLES.join(', ')}), all three present with the columns the rules read: ${blockers.join('; ')}.`,
+      }
+    }
   }
 
   // ── Owner detection: the catalog is the source of truth, not a name list ────
@@ -639,7 +716,7 @@ async function installPermissionPolicy(
   // caller names the template explicitly without one, derive it here so the
   // template is usable from the brain/MCP surface too.
   if (template === 'related_rows' && !via) {
-    const plan = await inferRlsPlan(projectId, tableName, schemaName)
+    const plan = await inferRlsPlan(projectId, tableName, schemaName, { teams: false })
     if (plan.kind !== 'related_rows') {
       return {
         success: false,
@@ -686,6 +763,8 @@ async function installPermissionPolicy(
   // Without this, a failed CREATE POLICY after a successful ENABLE/FORCE RLS
   // leaves the table locked-out by default-deny (the 42501 incident).
   const preState = await readRlsState(projectId, schemaName, tableName)
+  /** Invitations the teams rules withdrew on their way onto organization_invitations. */
+  let withdrawn: WithdrawnInvitation[] = []
 
   try {
     // Step 0: Guarantee the claim reader exists in this schema.
@@ -757,6 +836,10 @@ async function installPermissionPolicy(
 
       case 'org_members':
         await installOrgMembersPolicy(projectId, tableName, schemaName)
+        break
+
+      case 'teams':
+        withdrawn = await installTeamsPolicy(projectId, tableName as TeamsTable, schemaName)
         break
 
       case 'all_access':
@@ -838,8 +921,8 @@ async function installPermissionPolicy(
       update: {
         operation: 'ALL',
         role,
-        using: getUsingExpression(template, uidColumn, via, partyColumns),
-        description: getPolicyDescription(template, uidColumn, via, partyColumns),
+        using: getUsingExpression(template, uidColumn, via, partyColumns, tableName),
+        description: getPolicyDescription(template, uidColumn, via, partyColumns, tableName),
         enabled: true,
       },
       create: {
@@ -848,8 +931,8 @@ async function installPermissionPolicy(
         policyName: `backenly_${template}`,
         operation: 'ALL',
         role,
-        using: getUsingExpression(template, uidColumn, via, partyColumns),
-        description: getPolicyDescription(template, uidColumn, via, partyColumns),
+        using: getUsingExpression(template, uidColumn, via, partyColumns, tableName),
+        description: getPolicyDescription(template, uidColumn, via, partyColumns, tableName),
       },
     })
 
@@ -858,15 +941,21 @@ async function installPermissionPolicy(
     // have locked one of them out. Saying so is the difference between a
     // correction and a substitution.
     const message =
-      getPolicyDescription(template, uidColumn, via, partyColumns) +
+      getPolicyDescription(template, uidColumn, via, partyColumns, tableName) +
       (upgradedFromOwnRows
         ? ` (Requested "own_rows", applied "party_rows" instead: "${tableName}" has ${partyColumns!.length} ` +
           `end-user parties (${partyColumns!.join(', ')}), and own_rows would have granted access to only ` +
           `the first of them.)`
-        : '')
+        : '') +
+      (teamsInsteadOf
+        ? ` (Asked for "${teamsInsteadOf}", kept the teams rules: "${tableName}" is one of the teams tables, where ` +
+          `membership decides who may read and change a row, and a rule read from one owner column would let any ` +
+          `signed-in user join any organization. For a rule of your own, use set_rls.)`
+        : '') +
+      (withdrawn.length ? ` ${withdrawalNotice(withdrawn)}` : '')
     console.log(`[RLS] ✅ Applied "${template}" policy on "${tableName}": ${message}`)
 
-    return { success: true, message }
+    return { success: true, message, ...(withdrawn.length ? { withdrawn } : {}) }
   } catch (err: any) {
     console.error(`[RLS] Failed to apply policy on "${tableName}":`, err.message)
     // Best-effort restore — if we just half-applied a policy we don't want
@@ -879,7 +968,13 @@ async function installPermissionPolicy(
         restoreErr?.message,
       )
     }
-    return { success: false, message: err.message }
+    // Invitations withdrawn before the failure stay withdrawn, and are said.
+    const gone: WithdrawnInvitation[] = withdrawn.length ? withdrawn : Array.isArray(err?.withdrawn) ? err.withdrawn : []
+    return {
+      success: false,
+      message: err.message + (gone.length ? ` ${withdrawalNotice(gone)}` : ''),
+      ...(gone.length ? { withdrawn: gone } : {}),
+    }
   }
 }
 
@@ -1864,6 +1959,470 @@ async function installOrgMembersPolicy(
 }
 
 /**
+ * teams: the three tables enable_teams creates, held to one model.
+ *
+ *   organizations             read by its owner and its members; created,
+ *                             changed and deleted by its owner alone, who
+ *                             stays its owner (owner_user_id).
+ *   organization_members      each user reads their own memberships and may
+ *                             leave them (delete), and adds themselves only to
+ *                             an organization they own: how an organization's
+ *                             first, owner membership is made. Every other
+ *                             membership and every role change is the server's:
+ *                             POST /orgs/accept-invite, or a service-role key.
+ *   organization_invitations  read by the organization's owner and its admins
+ *                             (members whose role is owner or admin), who may
+ *                             withdraw (delete) one not yet accepted; written by
+ *                             the owner with any role, and by an admin only to
+ *                             invite a member or an admin, so a place as owner
+ *                             is the owner's alone to give; recorded as made by
+ *                             whoever wrote it (invited_by_user_id). Never
+ *                             changed once written: re-sending is withdrawing
+ *                             and writing a new one, and an accepted invitation
+ *                             is the record of how its member joined.
+ *
+ * The ownership inference cannot say any of this: own rows on
+ * organization_members let any signed-in user write the row that makes them a
+ * member of any organization, with any role, and joining an organization opens
+ * every table the org_members rule scopes to it.
+ *
+ * ── What a row cannot carry ─────────────────────────────────────────────────
+ *
+ * An invitation's token is kept only as its SHA-256 (`sha256:<hex>`). The
+ * owner and the admins read the table, and a token one of them could read
+ * would let them, or anyone they handed it to, join as its invitee at a role
+ * they could not grant themselves. A trigger refuses a token shorter than 32
+ * characters of A-Z, a-z, 0-9, - and _ (16 random bytes in hex, 24 in
+ * base64url), stores its hash, and refuses a hash sent by anyone but the
+ * service role. Whoever writes the invitation keeps the token they sent and
+ * emails it; POST /orgs/accept-invite hashes what it is given. (Supabase's own
+ * links carry a hash of the token for the server to check, {{ .TokenHash }}.)
+ *
+ * An organization's id is the server's: a trigger gives each organization an
+ * end user creates a fresh one, and refuses to change one. An id the caller
+ * chose would let a new organization take a deleted one's id and reach the rows
+ * still scoped to it in tables without a cascading foreign key.
+ *
+ * Both triggers leave the service role alone: a server, an import, a repair.
+ * A restore loads rows before it creates triggers.
+ *
+ * ── What was written before them ───────────────────────────────────────────
+ *
+ * Under the earlier rules any signed-in user could write an invitation to
+ * themselves naming the owner as its inviter, with any role and a token anyone
+ * could read, or one already accepted. Nothing in such a row tells it from an
+ * honest one. So when the token trigger first goes on (installTeamsPolicy), and
+ * when secureTeamsTables puts the rules on an existing project, every
+ * invitation still pending is withdrawn and every accepted one is marked
+ * (withdrawPreRuleInvitations): accept-invite matches only hashes, and the
+ * report counts no marked invitation as a way in.
+ *
+ * ── No policy on organization_members reads organization_members ──────────
+ *
+ * Supabase breaks a membership cycle with a SECURITY DEFINER helper with a
+ * fixed search_path, which reads the membership table "as its owner, so the
+ * second policy never runs" (supabase.com/docs/guides/database/postgres/
+ * row-level-security, "Avoid recursive policies"). That relies on the owner
+ * being exempt from the table's row-level security. Here every workspace table
+ * is FORCEd and the owner, production's application role, does not bypass
+ * row-level security, so a definer helper's read runs the same policies again
+ * (installOrgMembersPolicy says the same of the junction table). These policies
+ * instead only ever read "down":
+ *
+ *   organization_invitations           → organizations, organization_members
+ *   organization_members (INSERT)      → organizations
+ *   organizations                      → organization_members
+ *   organization_members (SELECT)      → nothing
+ *
+ * PostgreSQL refuses a policy that is expanded again while its own subqueries
+ * are being expanded ("infinite recursion detected in policy"), and it makes
+ * that check only for a policy that holds a subquery. organization_members is
+ * expanded twice on an insert into it (its INSERT rule reads organizations,
+ * whose SELECT rule reads organization_members), so its SELECT rule, and its
+ * DELETE rule beside it, hold no subquery of any kind: not even the
+ * `(SELECT claim)` used everywhere else.
+ *
+ * Everywhere else the caller's id is read once per statement, as Supabase's
+ * `(select auth.uid())`: a scalar subquery the planner runs once (an InitPlan)
+ * instead of once per row. Membership is `x IN (<the caller's own rows>)`
+ * rather than a lookup per row, the form Supabase's RLS performance guide
+ * recommends. Ids compare as text, as everywhere in this file.
+ *
+ * No `TO <role>` and no claim of the caller's memberships: like every template
+ * the policies apply to every role, so the application role is held to them
+ * when it reads with an end user's identity (realtime, functions' ctx.db), and
+ * membership is read from the table at query time, never from a token that
+ * outlives a change to it.
+ */
+export function teamsPolicySql(schemaName: string, tableName: TeamsTable): string {
+  return `${teamsPoliciesSql(schemaName, tableName)}\n${teamsTriggerSql(schemaName, tableName)}`
+}
+
+/** The teams rules' policies on one table, without its trigger (teamsTriggerSql). */
+function teamsPoliciesSql(schemaName: string, tableName: TeamsTable): string {
+  const svc = serviceRoleClause(schemaName)
+  const caller = claimExpr(schemaName, SUBJECT_CLAIM)
+  const callerOnce = `(SELECT ${caller})`
+  const t = `"${schemaName}"."${tableName}"`
+  const orgs = `"${schemaName}"."organizations"`
+  const members = `"${schemaName}"."organization_members"`
+  /** Organizations the caller owns. */
+  const owned = `SELECT o."id"::text FROM ${orgs} o WHERE o."owner_user_id"::text = ${callerOnce}`
+  /** Organizations the caller is a member of. */
+  const joined = `SELECT m."organization_id"::text FROM ${members} m WHERE m."user_id"::text = ${callerOnce}`
+  /** Organizations the caller is an owner or admin member of. */
+  const administered = `${joined} AND m."role"::text IN ('owner', 'admin')`
+  /** Invitations the caller may read, and withdraw while they are pending. */
+  const manages = `("organization_id"::text IN (${owned}) OR "organization_id"::text IN (${administered}))`
+  /**
+   * Invitations the caller may write: any in an organization they own, and in
+   * one they administer only an invitation to be a member or an admin. The
+   * roles are listed, not the one refused, so `Owner` or a role the app adds
+   * later is the owner's to hand out too.
+   */
+  const writes =
+    `("organization_id"::text IN (${owned}) OR ` +
+    `("organization_id"::text IN (${administered}) AND "role"::text IN ('member', 'admin')))`
+
+  switch (tableName) {
+    case 'organizations':
+      return `
+        ALTER TABLE ${t} FORCE ROW LEVEL SECURITY;
+
+        CREATE POLICY backenly_teams_select ON ${t}
+          FOR SELECT
+          USING (${svc} OR "owner_user_id"::text = ${callerOnce} OR "id"::text IN (${joined}));
+
+        CREATE POLICY backenly_teams_insert ON ${t}
+          FOR INSERT
+          WITH CHECK (${svc} OR "owner_user_id"::text = ${callerOnce});
+
+        CREATE POLICY backenly_teams_update ON ${t}
+          FOR UPDATE
+          USING (${svc} OR "owner_user_id"::text = ${callerOnce})
+          WITH CHECK (${svc} OR "owner_user_id"::text = ${callerOnce});
+
+        CREATE POLICY backenly_teams_delete ON ${t}
+          FOR DELETE
+          USING (${svc} OR "owner_user_id"::text = ${callerOnce});
+      `
+    case 'organization_members':
+      return `
+        ALTER TABLE ${t} FORCE ROW LEVEL SECURITY;
+
+        CREATE POLICY backenly_teams_select ON ${t}
+          FOR SELECT
+          USING (${svc} OR "user_id"::text = ${caller});
+
+        CREATE POLICY backenly_teams_insert ON ${t}
+          FOR INSERT
+          WITH CHECK (${svc} OR ("user_id"::text = ${callerOnce} AND "organization_id"::text IN (${owned})));
+
+        CREATE POLICY backenly_teams_update ON ${t}
+          FOR UPDATE
+          USING (${svc})
+          WITH CHECK (${svc});
+
+        CREATE POLICY backenly_teams_delete ON ${t}
+          FOR DELETE
+          USING (${svc} OR "user_id"::text = ${caller});
+      `
+    case 'organization_invitations':
+      return `
+        ALTER TABLE ${t} FORCE ROW LEVEL SECURITY;
+
+        CREATE POLICY backenly_teams_select ON ${t}
+          FOR SELECT
+          USING (${svc} OR ${manages});
+
+        CREATE POLICY backenly_teams_insert ON ${t}
+          FOR INSERT
+          WITH CHECK (${svc} OR (${writes} AND "invited_by_user_id"::text = ${callerOnce} AND "accepted_at" IS NULL));
+
+        CREATE POLICY backenly_teams_update ON ${t}
+          FOR UPDATE
+          USING (${svc})
+          WITH CHECK (${svc});
+
+        CREATE POLICY backenly_teams_delete ON ${t}
+          FOR DELETE
+          USING (${svc} OR (${manages} AND "accepted_at" IS NULL));
+      `
+  }
+}
+
+/**
+ * The mark an invitation accepted before its table hashed tokens carries in
+ * place of its token (withdrawPreRuleInvitations): `pre-rule:<id>`. Only the
+ * service role writes it, so a row bearing it was there before the teams rules,
+ * and a row without it, in a schema that holds them, was written under them.
+ */
+export const PRE_RULE_MARK = 'pre-rule:'
+
+/**
+ * The trigger the teams rules put on organizations (ids are the server's) or on
+ * organization_invitations (tokens kept as hashes); organization_members has
+ * none. Separate from the policies so the invitations written before the token
+ * trigger can be withdrawn between the two (installTeamsPolicy).
+ *
+ * A token must be random: the trigger checks its length and its characters,
+ * never whether someone could guess it, so `aaaa…` passes. Generate it with a
+ * cryptographic random generator (crypto.randomBytes(16).toString('hex') in
+ * Node, crypto.getRandomValues in a browser), as enable_teams' flow says. A
+ * guessed token still admits only the address it was sent to.
+ */
+export function teamsTriggerSql(schemaName: string, tableName: TeamsTable): string {
+  const svc = serviceRoleClause(schemaName)
+  const t = `"${schemaName}"."${tableName}"`
+  const fn = (name: string) => `"${schemaName}"."${name}"`
+
+  switch (tableName) {
+    case 'organizations':
+      return `
+        CREATE OR REPLACE FUNCTION ${fn(TEAMS_TRIGGERS.organizations)}() RETURNS trigger
+          LANGUAGE plpgsql
+          SET search_path = pg_catalog
+        AS $teams$
+        BEGIN
+          IF ${svc} THEN
+            RETURN NEW;
+          END IF;
+          IF TG_OP = 'INSERT' THEN
+            NEW."id" := gen_random_uuid();
+          ELSIF NEW."id" IS DISTINCT FROM OLD."id" THEN
+            RAISE EXCEPTION 'an organization''s id is chosen by the server and cannot be changed' USING ERRCODE = '42501';
+          END IF;
+          RETURN NEW;
+        END
+        $teams$;
+
+        DROP TRIGGER IF EXISTS ${TEAMS_TRIGGERS.organizations} ON ${t};
+
+        CREATE TRIGGER ${TEAMS_TRIGGERS.organizations}
+          BEFORE INSERT OR UPDATE OF "id" ON ${t}
+          FOR EACH ROW EXECUTE FUNCTION ${fn(TEAMS_TRIGGERS.organizations)}();
+      `
+    case 'organization_members':
+      return ''
+    case 'organization_invitations':
+      // A hash, or the mark an invitation accepted before these rules carries,
+      // is the service role's alone to write.
+      return `
+        CREATE OR REPLACE FUNCTION ${fn(TEAMS_TRIGGERS.organization_invitations)}() RETURNS trigger
+          LANGUAGE plpgsql
+          SET search_path = pg_catalog
+        AS $teams$
+        BEGIN
+          IF NEW."token" IS NULL THEN
+            RETURN NEW;
+          END IF;
+          IF NEW."token" ~ '^sha256:[0-9a-f]{64}$' OR starts_with(NEW."token", '${PRE_RULE_MARK}') THEN
+            IF ${svc} THEN
+              RETURN NEW;
+            END IF;
+            RAISE EXCEPTION 'send the invitation token itself: only its hash is kept' USING ERRCODE = '22023';
+          END IF;
+          -- PostgreSQL's regular expressions refuse a repetition count above 255, so the length is checked apart.
+          IF length(NEW."token") NOT BETWEEN 32 AND 512 OR NEW."token" !~ '^[A-Za-z0-9_-]+$' THEN
+            RAISE EXCEPTION 'an invitation token is 32 to 512 characters of A-Z, a-z, 0-9, - and _ (16 random bytes in hex, or 24 in base64url)' USING ERRCODE = '22023';
+          END IF;
+          NEW."token" := 'sha256:' || encode(sha256(convert_to(NEW."token", 'UTF8')), 'hex');
+          RETURN NEW;
+        END
+        $teams$;
+
+        DROP TRIGGER IF EXISTS ${TEAMS_TRIGGERS.organization_invitations} ON ${t};
+
+        CREATE TRIGGER ${TEAMS_TRIGGERS.organization_invitations}
+          BEFORE INSERT OR UPDATE OF "token" ON ${t}
+          FOR EACH ROW EXECUTE FUNCTION ${fn(TEAMS_TRIGGERS.organization_invitations)}();
+      `
+  }
+}
+
+/**
+ * The triggers the teams rules put on two of the tables (teamsTriggerSql), by
+ * table: the organization's id, and the invitation's token.
+ */
+export const TEAMS_TRIGGERS = {
+  organizations: 'backenly_teams_organization_id',
+  organization_invitations: 'backenly_teams_invitation_token',
+} as const
+
+/** Whether organization_invitations in `schema` keeps its tokens as hashes (its trigger is on). */
+async function hashesInvitationTokens(projectId: string, schema: string): Promise<boolean> {
+  return (await teamsTriggersIn(projectId, schema)).has(`organization_invitations.${TEAMS_TRIGGERS.organization_invitations}`)
+}
+
+/**
+ * Install the teams rules on one table. The first time organization_invitations
+ * gets its token trigger, every invitation already in it was written before
+ * these rules: under the earlier ones anyone could write one, naming any
+ * inviter and keeping a token anyone could read. Those still pending are
+ * withdrawn, and those accepted are marked (withdrawPreRuleInvitations), once
+ * the policies hold and before the trigger does, so a failure in between leaves
+ * the trigger off and the withdrawal to do again. Returns what was withdrawn.
+ */
+async function installTeamsPolicy(projectId: string, tableName: TeamsTable, schemaName: string): Promise<WithdrawnInvitation[]> {
+  if (tableName !== 'organization_invitations') {
+    await execStatements(projectId, teamsPolicySql(schemaName, tableName))
+    return []
+  }
+  const hashing = await hashesInvitationTokens(projectId, schemaName)
+  await execStatements(projectId, teamsPoliciesSql(schemaName, tableName))
+  const withdrawn = hashing ? [] : await withdrawPreRuleInvitations(projectId, schemaName)
+  try {
+    await execStatements(projectId, teamsTriggerSql(schemaName, tableName))
+  } catch (err: any) {
+    // The withdrawal stands: the caller must still be able to list it.
+    if (withdrawn.length && err && typeof err === 'object') err.withdrawn = withdrawn
+    throw err
+  }
+  return withdrawn
+}
+
+/**
+ * Put the token trigger on an organization_invitations table that keeps rules
+ * of its own (a person's, which secureTeamsTables leaves alone): accept-invite
+ * matches a token only by its hash, so without the trigger no invitation
+ * written there could be accepted. Withdraws what was written before it, as
+ * installTeamsPolicy does. A no-op where the trigger is on.
+ */
+async function hashInvitationTokens(projectId: string, schema: string): Promise<WithdrawnInvitation[]> {
+  if (await hashesInvitationTokens(projectId, schema)) return []
+  const withdrawn = await withdrawPreRuleInvitations(projectId, schema)
+  try {
+    await execStatements(projectId, teamsTriggerSql(schema, 'organization_invitations'))
+  } catch (err: any) {
+    // The withdrawal stands, and is said with the failure.
+    throw new Error(`${err?.message ?? String(err)}${withdrawn.length ? ` ${withdrawalNotice(withdrawn)}` : ''}`)
+  }
+  return withdrawn
+}
+
+/** An invitation withdrawn because it was written before the teams rules, as reports list it. */
+export interface WithdrawnInvitation {
+  organizationId: string
+  /** Its invitee's address, masked (maskAddress): a***@d***.com. */
+  address: string
+  role: string | null
+  /** When it was written, as the row says (created_at or createdAt). */
+  createdAt: Date | null
+}
+
+/**
+ * An address as a report may show it: its first character, then the first
+ * character of its domain and the domain's last label. alice@domain.com is
+ * a***@d***.com.
+ */
+export function maskAddress(address: string | null | undefined): string {
+  if (!address) return '-'
+  const at = address.lastIndexOf('@')
+  const local = at > 0 ? address.slice(0, at) : address
+  const domain = at > 0 ? address.slice(at + 1) : ''
+  const first = (s: string) => Array.from(s)[0] ?? ''
+  const dot = domain.lastIndexOf('.')
+  const label = dot > 0 ? domain.slice(dot) : ''
+  return `${first(local)}***@${domain ? `${first(domain)}***${label}` : '***'}`
+}
+
+/**
+ * The invitations that putting the teams rules on organization_invitations
+ * will withdraw (installTeamsPolicy): every one still pending, while the table
+ * does not hash tokens yet. Empty once it does, or where there is no such
+ * table. enable_teams reads it first, to say what its run withdrew.
+ */
+export async function invitationsToWithdraw(projectId: string, schema = `workspace_${projectId}`): Promise<WithdrawnInvitation[]> {
+  const db = await workspaceRawClient(projectId)
+  const [table] = await db.$queryRawUnsafe<Array<{ present: boolean }>>(
+    `SELECT to_regclass($1) IS NOT NULL AS present`,
+    `"${schema}"."organization_invitations"`,
+  )
+  if (!table?.present || (await hashesInvitationTokens(projectId, schema))) return []
+  return pendingInvitations(projectId, schema)
+}
+
+/** What a result message says of invitations withdrawn. */
+export function withdrawalNotice(withdrawn: WithdrawnInvitation[]): string {
+  const shown = withdrawn.slice(0, 10).map((w) => `${w.address} as ${w.role ?? 'member'}`)
+  const more = withdrawn.length > shown.length ? ` and ${withdrawn.length - shown.length} more` : ''
+  return (
+    `Withdrew ${withdrawn.length} invitation${withdrawn.length === 1 ? '' : 's'} still pending from before these ` +
+    `rules (${shown.join(', ')}${more}): under the earlier rules anyone could write one, naming any inviter, ` +
+    `with a token anyone could read. Invite them again.`
+  )
+}
+
+/** The listing columns of organization_invitations, as SQL over alias `i`, for the columns the table has. */
+async function invitationListing(projectId: string, schema: string): Promise<{ columns: string; id: string }> {
+  const db = await workspaceRawClient(projectId)
+  const rows = await db.$queryRawUnsafe<Array<{ name: string }>>(
+    `SELECT column_name::text AS name FROM information_schema.columns
+      WHERE table_schema = $1 AND table_name = 'organization_invitations'`,
+    schema,
+  )
+  const has = (column: string) => rows.some((r) => r.name === column)
+  const created = ['created_at', 'createdAt'].find(has)
+  return {
+    columns:
+      `i."organization_id"::text AS "organizationId", ` +
+      `${has('email') ? 'i."email"::text' : 'NULL::text'} AS "email", ` +
+      `i."role"::text AS "role", ` +
+      `${created ? `i."${created}"` : 'NULL::timestamptz'} AS "createdAt"`,
+    id: has('id') ? '"id"::text' : 'md5(random()::text || clock_timestamp()::text)',
+  }
+}
+
+type ListedInvitation = { organizationId: string; email: string | null; role: string | null; createdAt: Date | null }
+
+const listed = (rows: ListedInvitation[]): WithdrawnInvitation[] =>
+  rows
+    .map((r) => ({ organizationId: r.organizationId, address: maskAddress(r.email), role: r.role, createdAt: r.createdAt }))
+    .sort((a, b) => a.organizationId.localeCompare(b.organizationId) || (a.createdAt?.getTime() ?? 0) - (b.createdAt?.getTime() ?? 0))
+
+/** The invitations still pending in `schema`: what withdrawPreRuleInvitations would withdraw. Read as the service role. */
+async function pendingInvitations(projectId: string, schema: string): Promise<WithdrawnInvitation[]> {
+  const { columns } = await invitationListing(projectId, schema)
+  return listed(
+    await executeWithUserContext<ListedInvitation>(
+      projectId,
+      '',
+      true,
+      `SELECT ${columns} FROM "${schema}"."organization_invitations" i WHERE i."accepted_at" IS NULL`,
+    ),
+  )
+}
+
+/**
+ * Withdraw every invitation in `schema` still pending, and mark every accepted
+ * one as written before the teams rules (PRE_RULE_MARK in place of its token),
+ * as the service role in one transaction. Called when the rules go on:
+ * whatever is in the table then was written under the earlier ones, where any
+ * signed-in user could write an invitation to themselves naming the owner as
+ * its inviter, or one already accepted, with a token anyone could read. A
+ * pending one could still be accepted; an accepted one proves nothing about
+ * how its member joined (suspectMemberships). Memberships are never touched.
+ */
+async function withdrawPreRuleInvitations(projectId: string, schema: string): Promise<WithdrawnInvitation[]> {
+  const { columns, id } = await invitationListing(projectId, schema)
+  const db = await workspaceRawClient(projectId)
+  const rows = await db.$transaction(async (tx) => {
+    await tx.$executeRawUnsafe(rlsSessionSql(), ...rlsSessionParams({ isServiceRole: true }))
+    const withdrawn = await tx.$queryRawUnsafe<ListedInvitation[]>(
+      `DELETE FROM "${schema}"."organization_invitations" AS i WHERE i."accepted_at" IS NULL RETURNING ${columns}`,
+    )
+    await tx.$executeRawUnsafe(
+      `UPDATE "${schema}"."organization_invitations" SET "token" = '${PRE_RULE_MARK}' || ${id}
+        WHERE "accepted_at" IS NOT NULL AND NOT starts_with(coalesce("token", ''), '${PRE_RULE_MARK}')`,
+    )
+    return withdrawn
+  })
+  const out = listed(rows)
+  if (out.length) console.log(`[RLS] Withdrew ${out.length} invitation(s) written before the teams rules in ${schema}`)
+  return out
+}
+
+/**
  * admin_read_all: Admins (app.user_role = 'admin') see ALL rows.
  * Regular users see only their own rows (via user_id column).
  * Service-role keys bypass everything.
@@ -2126,6 +2685,415 @@ export async function forceAdminOnlyTables(
 }
 
 /**
+ * Give the teams tables the teams rules, in `target` (main, or a preview
+ * branch's schema). Stops at the first table that refuses them, which keeps
+ * the rules it had (installPermissionPolicy restores it), and says which.
+ * enable_teams calls it once all three tables exist, and does not report teams
+ * as on unless it succeeds. `withdrawn`: the invitations written before the
+ * rules that putting them on organization_invitations withdrew (installTeamsPolicy).
+ */
+export async function applyTeamsRules(
+  projectId: string,
+  target: RlsTarget = {},
+  tables: readonly TeamsTable[] = TEAMS_TABLES,
+): Promise<{ success: boolean; message: string; applied: TeamsTable[]; withdrawn: WithdrawnInvitation[] }> {
+  const applied: TeamsTable[] = []
+  const withdrawn: WithdrawnInvitation[] = []
+  for (const tableName of tables) {
+    const result = await applyPermissionPolicy(projectId, { tableName, template: 'teams' }, target)
+    withdrawn.push(...(result.withdrawn ?? []))
+    if (!result.success) return { success: false, message: `"${tableName}": ${result.message}`, applied, withdrawn }
+    applied.push(tableName)
+  }
+  return { success: true, message: `The teams rules hold on ${applied.join(', ')}.`, applied, withdrawn }
+}
+
+/** A template's four policies, by name, as one comparable string. */
+const ruleNames = (template: string) => RLS_COMMANDS.map((command) => `backenly_${template}_${command}`).sort().join(',')
+
+const TEAMS_RULE = ruleNames('teams')
+
+/** The rules Backenly puts on a teams table by itself, by the names of their policies. */
+const AUTOMATIC_TEAMS_TABLE_RULES = [ruleNames('own_rows'), ruleNames('own_rows_read'), TEAMS_RULE]
+
+/** The records applyPermissionPolicy keeps for those rules, and for a table Backenly closed. */
+const AUTOMATIC_TEAMS_TABLE_RECORDS = new Set(['backenly_own_rows', 'backenly_own_rows_read', 'backenly_teams', 'backenly_admin_only'])
+
+const holdsTeamsRules = (live: LivePolicyRow[]) => live.map((p) => p.policyName).sort().join(',') === TEAMS_RULE
+
+/** What records say about who chose a teams table's rules (main's). */
+interface TeamsRuleChoices {
+  /** PermissionPolicy record names, per table. */
+  records: Map<string, string[]>
+  /** The latest change in effect that set or removed the table's rules, and where it came from. */
+  changes: Map<string, { seq: number; source: string }>
+}
+
+/** A footprint line about a table's policies or its row-level security (lib/changes/diff.ts). */
+const RULE_LINE = /\bpolicy\b|row-level security/
+
+/** Changes Backenly made by itself; any other source is a person, their agent or a merge. */
+const BACKENLY_SOURCES: ReadonlySet<string> = new Set(['system', 'autonomy'])
+
+async function teamsRuleChoices(projectId: string): Promise<TeamsRuleChoices> {
+  const records = new Map<string, string[]>()
+  const rows = await prisma.permissionPolicy.findMany({
+    where: { projectId, tableName: { in: [...TEAMS_TABLES] } },
+    select: { tableName: true, policyName: true },
+  })
+  for (const r of rows) records.set(r.tableName, [...(records.get(r.tableName) ?? []), r.policyName])
+
+  // The latest change in effect that set or removed a teams table's rules. Who
+  // made it says whose the rules are: Backenly by itself (system, autonomy), or
+  // a person in the console, an approval, their agent, a preview branch merged.
+  // A later change of Backenly's own (restoring the teams rules, say) makes them
+  // Backenly's again. set_rls, add_rls and remove_rls title theirs with the
+  // action and table (describeActionForLedger, lib/ai/minimal-executor.ts); any
+  // other change, a merge among them, shows it in its footprint, read from the
+  // catalog.
+  const { IN_EFFECT } = await import('@/lib/changes/types')
+  const changes = new Map<string, { seq: number; source: string }>()
+  const made = await prisma.backendChange.findMany({
+    where: { projectId, kind: 'change', status: { in: [...IN_EFFECT] } },
+    select: { seq: true, title: true, source: true, footprint: true },
+    orderBy: { seq: 'asc' },
+  })
+  for (const c of made) {
+    const footprint = Array.isArray(c.footprint) ? (c.footprint as unknown as TableChange[]) : []
+    for (const table of TEAMS_TABLES) {
+      const named = c.title === `SET_PERMISSION ${table}` || c.title === `REMOVE_PERMISSION ${table}`
+      const touched = footprint.some(
+        (f) => !f.object && f.kind === 'modified' && f.after === table && (f.details ?? []).some((d) => RULE_LINE.test(d)),
+      )
+      if (named || touched) changes.set(table, { seq: c.seq, source: c.source })
+    }
+  }
+  return { records, changes }
+}
+
+/**
+ * Why a teams table's rules are a person's choice, or null when they are a rule
+ * Backenly gave it by itself: the teams rules, exactly one of the rules the
+ * inference gave these tables before them (owner's rows, owner-read-only), none
+ * at all (row-level security off: what releases before the users foreign keys
+ * left organizations and organization_invitations with), or the service-role
+ * rule Backenly closed it with (the closed-by-default mark), when no change a
+ * person, their agent or a merge made set them last. Anything else (set_rls's
+ * custom rules, another template, a policy of another name, a record of
+ * all_access, admin_only someone asked for) is theirs.
+ */
+function teamsRuleChosenBy(
+  table: TeamsTable,
+  live: LivePolicyRow[],
+  closedByDefault: boolean,
+  choices: TeamsRuleChoices,
+): string | null {
+  const names = live.map((p) => p.policyName).sort()
+  // The teams rules are Backenly's model for these tables, whoever last set them.
+  if (names.join(',') === TEAMS_RULE) return null
+  if (names.length === 1 && names[0] === 'backenly_admin_only') {
+    if (!closedByDefault) return 'it is closed to all but service-role keys by a rule someone chose (admin_only)'
+  } else if (names.length > 0 && !AUTOMATIC_TEAMS_TABLE_RULES.includes(names.join(','))) {
+    return `its policies (${names.join(', ')}) are a rule someone chose, not one Backenly sets by itself`
+  }
+  const chosen = (choices.records.get(table) ?? []).filter((name) => !AUTOMATIC_TEAMS_TABLE_RECORDS.has(name))
+  if (chosen.length) return `a rule was chosen for it (${chosen.join(', ')})`
+  const change = choices.changes.get(table)
+  if (change && !BACKENLY_SOURCES.has(change.source)) {
+    return `its rules were set in change #${change.seq} (${change.source}), by a person, their agent or a merge`
+  }
+  return null
+}
+
+/** teamsRuleChosenBy for one table as it is now, in `schema`, against main's records. */
+async function teamsRuleChosenFor(projectId: string, schema: string, table: TeamsTable): Promise<string | null> {
+  const live = (await readLivePolicies(projectId, schema, table)).filter((p) => !isPlatformKeptPolicy(p))
+  if (holdsTeamsRules(live)) return null
+  const closed = await closedByDefaultTables(projectId, schema).catch(() => new Set<string>())
+  return teamsRuleChosenBy(table, live, closed.has(table), await teamsRuleChoices(projectId))
+}
+
+/** A membership that looks like a self-join made under the rules before the teams rules. */
+export interface SuspectMembership {
+  organizationId: string
+  userId: string
+  role: string | null
+  /** When the row was written (created_at, createdAt or joined_at, whichever the table has). */
+  createdAt: Date | null
+}
+
+/**
+ * Memberships whose way in is not accounted for. A member is accounted for
+ * when they own the organization, or when an accepted invitation to it,
+ * addressed to their email (compared ASCII-lowercased), was written under the
+ * teams rules by someone else who is themselves accounted for in it and is its
+ * owner or an owner or admin member, granting no less than the role the member
+ * holds (an admin grants member or admin, the owner any role). Every other
+ * member is listed: a row a user wrote under the earlier rules, joining
+ * themselves, inviting themselves, or raising their own role, and anyone let
+ * in by such a member.
+ *
+ * An invitation written before the teams rules proves nothing, whatever it
+ * says: any signed-in user could write one to themselves, already accepted,
+ * naming the owner as its inviter. So one counts only in a schema whose three
+ * tables all hold the rules (`trusted`), and only when its token is a hash,
+ * which only the trigger writes, rather than the mark withdrawPreRuleInvitations
+ * put on every invitation accepted before the trigger. Where the rules do not
+ * hold yet, none counts, and every member but an organization's owner is
+ * listed, for its owner to judge.
+ *
+ * "Is an owner or admin" is asked of the organization as it is now: an inviter
+ * removed since makes the members they let in show here too, for a person to
+ * judge, as does a member a server added with a service-role key. Only read, as
+ * the service role (the application role is held to the tables' rules).
+ * Without a users table to read emails from, every member but the owner is
+ * listed.
+ */
+async function suspectMemberships(
+  projectId: string,
+  schema: string,
+  catalog: OwnershipCatalog,
+  trusted: boolean,
+): Promise<SuspectMembership[]> {
+  const columnsOf = (table: string) => catalog.columns.get(table) ?? []
+  const has = (table: string, columns: string[]) => columns.every((c) => columnsOf(table).includes(c))
+  if (!has('organization_members', ['organization_id', 'user_id']) || !has('organizations', ['id', 'owner_user_id'])) return []
+  const q = (table: string) => `"${schema}"."${table}"`
+  const created = ['created_at', 'createdAt', 'joined_at'].find((c) => columnsOf('organization_members').includes(c))
+  const roleOf = (alias: string, table: string) => (has(table, ['role']) ? `${alias}."role"::text` : 'NULL::text')
+  /** member, admin, owner as 1, 2, 3; any other role above them all. */
+  const rank = (role: string) =>
+    `(CASE lower(coalesce(${role}, 'member')) WHEN 'member' THEN 1 WHEN 'admin' THEN 2 WHEN 'owner' THEN 3 ELSE 4 END)`
+  const ascii = (text: string) => `translate(${text}, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')`
+  const invitations =
+    trusted &&
+    has('organization_invitations', ['organization_id', 'email', 'token', 'accepted_at', 'invited_by_user_id']) &&
+    has('users', ['id', 'email'])
+  const memberRole = roleOf('m', 'organization_members')
+  const invitedRole = roleOf('i', 'organization_invitations')
+  const admitted = invitations
+    ? `
+      UNION
+        SELECT m."organization_id"::text, m."user_id"::text
+          FROM ${q('organization_members')} m
+          JOIN ${q('users')} u ON u."id"::text = m."user_id"::text
+          JOIN ${q('organization_invitations')} i
+            ON i."organization_id"::text = m."organization_id"::text
+           AND i."accepted_at" IS NOT NULL
+           AND i."token" ~ '^sha256:[0-9a-f]{64}$'
+           AND ${ascii('i."email"::text')} = ${ascii('u."email"::text')}
+           AND i."invited_by_user_id" IS NOT NULL
+           AND i."invited_by_user_id"::text <> m."user_id"::text
+           AND ${rank(memberRole)} <= ${rank(invitedRole)}
+          JOIN legit l ON l.org = m."organization_id"::text AND l.usr = i."invited_by_user_id"::text
+         WHERE EXISTS (
+                 SELECT 1 FROM ${q('organizations')} o
+                  WHERE o."id"::text = m."organization_id"::text AND o."owner_user_id"::text = i."invited_by_user_id"::text)
+            OR (${rank(invitedRole)} <= 2 AND EXISTS (
+                 SELECT 1 FROM ${q('organization_members')} im
+                  WHERE im."organization_id"::text = m."organization_id"::text
+                    AND im."user_id"::text = i."invited_by_user_id"::text
+                    AND ${rank(roleOf('im', 'organization_members'))} IN (2, 3)))`
+    : ''
+  return executeWithUserContext<SuspectMembership>(
+    projectId,
+    '',
+    true,
+    `WITH RECURSIVE legit(org, usr) AS (
+         SELECT o."id"::text, o."owner_user_id"::text FROM ${q('organizations')} o WHERE o."owner_user_id" IS NOT NULL
+         ${admitted}
+     )
+     SELECT m."organization_id"::text AS "organizationId",
+            m."user_id"::text AS "userId",
+            ${memberRole} AS "role",
+            ${created ? `m."${created}"` : 'NULL::timestamptz'} AS "createdAt"
+       FROM ${q('organization_members')} m
+      WHERE NOT EXISTS (SELECT 1 FROM legit l WHERE l.org = m."organization_id"::text AND l.usr = m."user_id"::text)
+      ORDER BY 1, 2`,
+  )
+}
+
+/**
+ * Unique indexes on an invitation's email or token that span every
+ * organization: tables made before invitations were unique per organization.
+ * They tell any owner whether an address or token was used elsewhere, and let
+ * one organization hold an address another cannot then invite. Reported, never
+ * changed: rows may depend on them.
+ */
+async function sharedInvitationUniques(projectId: string, schema: string): Promise<string[]> {
+  const db = await workspaceRawClient(projectId)
+  const rows = await db.$queryRawUnsafe<Array<{ index: string; column: string }>>(
+    `SELECT c.relname::text AS "index", a.attname::text AS "column"
+       FROM pg_index x
+       JOIN pg_class c ON c.oid = x.indexrelid
+       JOIN pg_attribute a ON a.attrelid = x.indrelid AND a.attnum = x.indkey[0]
+      WHERE x.indrelid = to_regclass($1)
+        AND x.indisunique
+        AND x.indnkeyatts = 1
+        AND a.attname IN ('email', 'token')
+      ORDER BY 1`,
+    `"${schema}"."organization_invitations"`,
+  )
+  return rows.map((r) => `${r.index} (${r.column})`)
+}
+
+/** The teams rules' triggers present in a schema, as `table.trigger`. */
+async function teamsTriggersIn(projectId: string, schema: string): Promise<Set<string>> {
+  const db = await workspaceRawClient(projectId)
+  const rows = await db.$queryRawUnsafe<Array<{ name: string }>>(
+    `SELECT c.relname || '.' || t.tgname AS name
+       FROM pg_trigger t
+       JOIN pg_class c ON c.oid = t.tgrelid
+       JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = $1 AND NOT t.tgisinternal AND t.tgenabled <> 'D'`,
+    schema,
+  )
+  return new Set(rows.map((r) => r.name))
+}
+
+/** What secureTeamsTables found, or did, in one schema. */
+export interface TeamsTablesRepair {
+  schema: string
+  /** Tables that get the teams rules (or got them, when `secured`). */
+  tables: TeamsTable[]
+  /** Tables whose rules a person chose, left as they are, and why. */
+  kept: Array<{ table: TeamsTable; reason: string }>
+  /** Why the teams rules cannot go on in this schema at all. */
+  blocked: string[]
+  /** Unique indexes on an invitation's email or token across every organization. Listed, never changed. */
+  sharedUniques: string[]
+  /** Memberships whose way in is not accounted for (suspectMemberships). Listed, never changed. */
+  suspects: SuspectMembership[]
+  /**
+   * Invitations still pending from before the teams rules: withdrawn when
+   * `secured`, otherwise the ones applying would withdraw. Listed with masked
+   * addresses so each organization's owner can invite again.
+   */
+  withdrawn: WithdrawnInvitation[]
+  secured: boolean
+}
+
+/**
+ * Give a project's existing teams tables the teams rules: production as one
+ * governed change attributed to Backenly, and each active preview branch.
+ * A table whose rules a person chose is left as it is and reported, as is a
+ * schema whose teams tables cannot take the rules, and so are memberships whose
+ * way in is not accounted for, which are never changed. Putting the rules on
+ * withdraws, inside the same change and as the service role, every invitation
+ * still pending from before them, and marks every one accepted before them
+ * (withdrawPreRuleInvitations); a table keeping a person's rules gets the token
+ * trigger alone, which accept-invite needs. `apply: false` only reports. Used
+ * by scripts/secure-teams-tables.ts.
+ */
+export async function secureTeamsTables(projectId: string, opts: { apply: boolean }): Promise<TeamsTablesRepair[]> {
+  const { resolveWorkspaceSchema } = await import('./workspace-pool')
+  const main = await resolveWorkspaceSchema(projectId)
+  const branches = await prisma.workspaceBranch.findMany({ where: { projectId, status: 'active' }, select: { schemaName: true } })
+  const choices = await teamsRuleChoices(projectId)
+  const out: TeamsTablesRepair[] = []
+
+  for (const schema of [main, ...branches.map((b) => b.schemaName)]) {
+    const catalog = await loadOwnershipCatalog(projectId, schema)
+    if (!TEAMS_TABLES.some((t) => catalog.columns.has(t))) continue
+    const sharedUniques = catalog.columns.has('organization_invitations') ? await sharedInvitationUniques(projectId, schema) : []
+    const blocked = teamsRulesBlockers(catalog)
+    if (blocked.length) {
+      const suspects = await suspectMemberships(projectId, schema, catalog, false)
+      out.push({ schema, tables: [], kept: [], blocked, sharedUniques, suspects, withdrawn: [], secured: false })
+      continue
+    }
+
+    const closed = await closedByDefaultTables(projectId, schema).catch(() => new Set<string>())
+    const triggers = await teamsTriggersIn(projectId, schema)
+    const tables: TeamsTable[] = []
+    const kept: Array<{ table: TeamsTable; reason: string }> = []
+    const loops: string[] = []
+    for (const table of TEAMS_TABLES) {
+      const live = (await readLivePolicies(projectId, schema, table)).filter((p) => !isPlatformKeptPolicy(p))
+      const trigger = (TEAMS_TRIGGERS as Partial<Record<TeamsTable, string>>)[table]
+      const secured =
+        holdsTeamsRules(live) &&
+        (!trigger || triggers.has(`${table}.${trigger}`)) &&
+        (await readRlsState(projectId, schema, table)).forceRowSecurity
+      if (secured) continue
+      const reason = teamsRuleChosenBy(table, live, closed.has(table), choices)
+      if (!reason) {
+        tables.push(table)
+        continue
+      }
+      kept.push({ table, reason })
+      // The teams rules on the other tables read organizations and
+      // organization_members. A rule of someone's own on either that reads
+      // another table can close a loop with them, and PostgreSQL then refuses
+      // every read of the tables in it.
+      if (table !== 'organization_invitations' && live.some((p) => /\bselect\b/i.test(`${p.using ?? ''} ${p.withCheck ?? ''}`))) {
+        loops.push(
+          `"${table}" keeps a rule of its own that reads another table, which the teams rules on the others could ` +
+            `turn into a loop PostgreSQL refuses; its owner should set its rules (or enable_teams) first`,
+        )
+      }
+    }
+    // An invitation is a way in only where all three tables hold the rules.
+    const suspects = await suspectMemberships(projectId, schema, catalog, tables.length === 0 && kept.length === 0)
+    // Applying changes the schema when a table takes the rules, or when
+    // organization_invitations (keeping rules of its own) takes the token
+    // trigger; either way what is pending in it then predates them.
+    const hashing = triggers.has(`organization_invitations.${TEAMS_TRIGGERS.organization_invitations}`)
+    const changes = tables.length > 0 || !hashing
+    const looping = loops.length > 0 && tables.length > 0
+    const pending = changes && !looping ? await pendingInvitations(projectId, schema) : []
+    if (!changes && kept.length === 0 && suspects.length === 0 && sharedUniques.length === 0) continue
+    if (looping) {
+      out.push({ schema, tables: [], kept, blocked: loops, sharedUniques, suspects, withdrawn: [], secured: false })
+      continue
+    }
+    if (!opts.apply || !changes) {
+      out.push({ schema, tables, kept, blocked: [], sharedUniques, suspects, withdrawn: pending, secured: false })
+      continue
+    }
+
+    /** Put the rules on, then withdraw what is still pending and mark what was accepted before them. */
+    const secure = async (target: RlsTarget, expected: (table: TeamsTable) => void): Promise<WithdrawnInvitation[]> => {
+      const gone: WithdrawnInvitation[] = []
+      if (tables.length) {
+        const applied = await applyTeamsRules(projectId, target, tables)
+        gone.push(...applied.withdrawn)
+        for (const table of applied.applied) expected(table)
+        if (!applied.success) throw new Error(applied.message)
+      }
+      if (!tables.includes('organization_invitations')) gone.push(...(await hashInvitationTokens(projectId, schema)))
+      gone.push(...(await withdrawPreRuleInvitations(projectId, schema)))
+      return gone
+    }
+
+    let withdrawn: WithdrawnInvitation[]
+    if (schema === main) {
+      const { withGovernedChange, expectEffect } = await import('@/lib/changes/ledger')
+      const { withChangeAttribution } = await import('@/lib/changes/attribution')
+      const target: RlsTarget = main === `workspace_${projectId}` ? {} : { schemaName: main }
+      const title = tables.length
+        ? `Set the teams rules on ${namesForTitle(tables)}`
+        : 'Kept the tokens of organization_invitations as hashes'
+      const { result, change } = await withChangeAttribution({ source: 'system' }, () =>
+        withGovernedChange({ projectId, title }, () =>
+          // Replacing these tables' rules is what this change is for, not a
+          // side effect of it (lib/changes/verify.ts).
+          secure(target, (table) => expectEffect(projectId, { action: 'SET_PERMISSION', table })),
+        ),
+      )
+      withdrawn = result
+      if (change && change.status !== 'healthy' && change.status !== 'unverified') {
+        throw new Error(`${schema}: the change ended ${change.status}: ${change.summary}`)
+      }
+    } else {
+      withdrawn = await secure({ schemaName: schema }, () => {})
+    }
+    out.push({ schema, tables, kept, blocked: [], sharedUniques, suspects, withdrawn, secured: true })
+  }
+  return out
+}
+
+/**
  * List all permission policies for a project.
  */
 export async function listPermissionPolicies(projectId: string) {
@@ -2373,6 +3341,7 @@ export async function autoApplyRlsIfNeeded(
   const result = await applyPermissionPolicy(projectId, {
     tableName,
     template: plan.template,
+    inferred: true,
     ...(plan.kind === 'own_rows' || plan.kind === 'own_rows_read' ? { userIdColumn: plan.userIdColumn } : {}),
     ...(plan.kind === 'party_rows' ? { partyColumns: plan.partyColumns } : {}),
     ...(plan.kind === 'related_rows' ? { via: plan.via } : {}),
@@ -2518,6 +3487,7 @@ export async function reconcileAutoRls(
     const result = await applyPermissionPolicy(projectId, {
       tableName,
       template: plan.template,
+      inferred: true,
       ...(plan.kind === 'own_rows' || plan.kind === 'own_rows_read' ? { userIdColumn: plan.userIdColumn } : {}),
       ...(plan.kind === 'party_rows' ? { partyColumns: plan.partyColumns } : {}),
       ...(plan.kind === 'related_rows' ? { via: plan.via } : {}),
@@ -2578,7 +3548,9 @@ async function resolveOwnership(
   schemaName?: string,
 ): Promise<{ ownerColumn: string | null; partyColumns: string[] }> {
   try {
-    const plan = await inferRlsPlan(projectId, tableName, schemaName)
+    // Who owns a row, not which rule the table needs: an owner's rule asked for
+    // on a teams table still finds its owner column.
+    const plan = await inferRlsPlan(projectId, tableName, schemaName, { teams: false })
     if (plan.kind === 'own_rows' || plan.kind === 'own_rows_read') return { ownerColumn: plan.userIdColumn, partyColumns: [plan.userIdColumn] }
     if (plan.kind === 'party_rows') return { ownerColumn: plan.partyColumns[0], partyColumns: plan.partyColumns }
     // `related_rows` and `public_read` have no LOCAL owner column, and reporting
@@ -2595,8 +3567,15 @@ function getUsingExpression(
   uidColumn: string,
   via?: RelatedRowsVia,
   partyColumns?: string[],
+  tableName?: string,
 ): string {
   switch (template) {
+    case 'teams':
+      return tableName === 'organization_members'
+        ? `reads, deletes: user_id = current_user_id; inserts: own row, into an organization the user owns; updates: service_role only`
+        : tableName === 'organization_invitations'
+          ? `reads: organization_id IN (organizations the user owns, or is an owner or admin member of); inserts: any role where the user owns it, role IN ('member','admin') where they administer it, invited_by_user_id = current_user_id, not accepted; updates: service_role only; deletes: by those readers, while not accepted; token kept as its SHA-256`
+          : `owner_user_id = current_user_id OR id IN (organizations the user is a member of) (SELECT); owner_user_id = current_user_id (write)`
     case 'own_rows': return `"${uidColumn}"::text = current_user_id`
     case 'own_rows_read': return `reads: "${uidColumn}"::text = current_user_id; writes: service_role only`
     case 'party_rows': return (partyColumns ?? [uidColumn])
@@ -2620,8 +3599,15 @@ function getPolicyDescription(
   uidColumn: string,
   via?: RelatedRowsVia,
   partyColumns?: string[],
+  tableName?: string,
 ): string {
   switch (template) {
+    case 'teams':
+      return tableName === 'organization_members'
+        ? `Teams: each user reads their own memberships and may leave them, and adds themselves only to an organization they own; every other membership and every role change is the server's (accept-invite, or a service-role key)`
+        : tableName === 'organization_invitations'
+          ? `Teams: invitations are read by the organization's owner and admins and withdrawn by them while pending; the owner invites with any role, an admin only as a member or an admin; each records whoever wrote it, never changes once written, and keeps only its token's hash`
+          : `Teams: an organization is read by its owner and its members, created, changed or deleted only by its owner, and given its id by the server`
     case 'own_rows': return `Users can only access rows where "${uidColumn}" matches their user ID`
     case 'own_rows_read': return `Users can read rows where "${uidColumn}" matches their user ID; only service-role API keys can write, because these rows grant access`
     case 'party_rows': {

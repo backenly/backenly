@@ -32,7 +32,7 @@ import type { AddressInfo } from 'net'
 import { mkdtempSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { randomBytes, randomUUID } from 'crypto'
+import { createHash, randomBytes, randomUUID } from 'crypto'
 import jwt from 'jsonwebtoken'
 
 /** The role the project's client runs as; set in beforeAll on a superuser connection. */
@@ -231,7 +231,13 @@ beforeAll(async () => {
     )
   }
   // The teams tables accept-invite reads and writes. They carry no policy here:
-  // what C asserts is the users read, which the platform secures itself.
+  // what C asserts is the users read, which the platform secures itself. An
+  // invitation is honoured only while its inviter owns the organization (or
+  // is an admin of it), so each one names an owner.
+  await prisma.$executeRawUnsafe(
+    `CREATE TABLE "${schemaName}"."organizations" (
+       id UUID PRIMARY KEY DEFAULT gen_random_uuid(), name TEXT NOT NULL, owner_user_id UUID NOT NULL)`,
+  )
   await prisma.$executeRawUnsafe(
     `CREATE TABLE "${schemaName}"."organization_invitations" (
        id UUID PRIMARY KEY DEFAULT gen_random_uuid(), organization_id UUID NOT NULL, email TEXT NOT NULL,
@@ -417,10 +423,19 @@ describe('C: accept-invite resolves its token through the shared check and reads
   const invite = async (email: string) => {
     const token = randomBytes(16).toString('hex')
     const organizationId = randomUUID()
+    // Its owner sent it: accept-invite honours an invitation only from someone
+    // who may still invite to the organization.
+    const owner = randomUUID()
     await prisma.$executeRawUnsafe(
-      `INSERT INTO "${schemaName}"."organization_invitations" (organization_id, email, role, token, expires_at)
-       VALUES ($1::uuid, $2, 'member', $3, NOW() + INTERVAL '1 day')`,
-      organizationId, email, token,
+      `INSERT INTO "${schemaName}"."organizations" (id, name, owner_user_id) VALUES ($1::uuid, 'Org', $2::uuid)`,
+      organizationId, owner,
+    )
+    // The token as the teams rules keep it, its SHA-256: accept-invite matches
+    // nothing else (these tables carry no trigger to hash it).
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO "${schemaName}"."organization_invitations" (organization_id, email, role, token, invited_by_user_id, expires_at)
+       VALUES ($1::uuid, $2, 'member', $3, $4::uuid, NOW() + INTERVAL '1 day')`,
+      organizationId, email, `sha256:${createHash('sha256').update(token, 'utf8').digest('hex')}`, owner,
     )
     return { token, organizationId }
   }

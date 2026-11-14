@@ -50,3 +50,13 @@ Relative to `https://backenly.com/api/v1/{projectId}`, with `x-api-key: <project
 Send the access token as `X-User-Token` on data requests; that is what row-level security reads. `/auth/me` says who is signed in; the signup/signin/refresh responses carry the `user` object too, and the token's claims carry `userId`. `users` is never served through `/db/users`.
 
 OAuth `redirect_to` only redirects to a **connected frontend origin** — connect it first with `connect { "action": "connect_frontend", "url": "…" }`. An unconnected origin never receives a token: the OAuth start refuses with `REDIRECT_NOT_ALLOWED` so the failure is visible on your screen, not after the provider round-trip.
+
+## Teams
+
+`enable_teams` adds organizations, their members and their invitations as tables of the project, held to membership by row-level security. An owner or admin writes an invitation through the data API, with their own id as its inviter and a token they made, and emails the invitee a link carrying the token. Make the token with a cryptographic random generator, `crypto.randomBytes(16).toString('hex')` in Node or `crypto.getRandomValues` in a browser: 32 to 512 characters of A-Z, a-z, 0-9, - and _. It must be random, never a value someone could guess, because the server checks a token's length and characters and cannot check that. Only its SHA-256 is stored, so the link is the one place the token itself exists. The invitee, signed in with the address it was sent to, accepts it:
+
+| Method | Path | Body / notes |
+| --- | --- | --- |
+| POST | `/orgs/accept-invite` | `{ token }`, with the invitee's access token as `X-User-Token`; adds them to the organization with the invitation's role |
+
+An invitation never changes once written: to re-send one, delete it and write a new one. When a project made before these rules gets them, the invitations it still had pending are withdrawn; send those again.
