@@ -15098,8 +15098,8 @@ async function executeEnableTeams(params: any, projectId: string, apiKey?: strin
         `- **Invite-accept endpoint**: \`POST /api/v1/${projectId}/orgs/accept-invite { token }\`\n` +
         `- **Access rules** (row-level security): an organization is read by its owner and members and changed only by ` +
         `its owner; each user reads their own memberships, may leave them, and adds themselves only to an organization ` +
-        `they own; invitations are read and written by the organization's owner and admins. Member lists and role ` +
-        `changes are your server's (a service-role key).\n\n` +
+        `they own; invitations are read by the organization's owner and admins, and the owner invites with any role, ` +
+        `an admin only as "member" or "admin". Member lists and role changes are your server's (a service-role key).\n\n` +
         `Typical flow:\n` +
         `1. A user signs up via auth.\n` +
         `2. They POST /organizations { name, slug, owner_user_id: <their id> }, then POST /organization_members ` +

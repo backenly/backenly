@@ -13,9 +13,12 @@
  * claims, which under the application role found none.
  *
  * Now enable_teams installs the teams rules (lib/services/workspace-rls.ts),
- * accept-invite reads and writes as the service role in one transaction that
- * locks the invitation, and scripts/secure-teams-tables.ts (secureTeamsTables)
- * brings existing projects in line, leaving a rule a person chose alone.
+ * in which only an organization's owner invites someone as owner (an admin
+ * invites members and admins), accept-invite reads and writes as the service
+ * role in one transaction that locks the invitation and honours an owner
+ * invitation only from the owner, and scripts/secure-teams-tables.ts
+ * (secureTeamsTables) brings existing projects in line, leaving a rule a
+ * person chose alone.
  *
  * Reads and writes run as the REST API's own roles, NOSUPERUSER NOBYPASSRLS,
  * with production's grants, so these are the API's answers. The route runs as
@@ -99,6 +102,10 @@ const olivia = { id: crypto.randomUUID(), email: `olivia-${tag}@example.test` }
 const ines = { id: crypto.randomUUID(), email: `ines-${tag}@example.test` }
 /** Belongs to neither, and tries. */
 const mallory = { id: crypto.randomUUID(), email: `mallory-${tag}@example.test` }
+/** Joins as an admin. */
+const adam = { id: crypto.randomUUID(), email: `adam-${tag}@example.test` }
+/** Is invited as an owner. */
+const otto = { id: crypto.randomUUID(), email: `otto-${tag}@example.test` }
 
 const originalEdition = process.env.BACKENLY_EDITION
 const originalEngineMode = process.env.ENGINE_MODE
@@ -113,6 +120,11 @@ let inviteToken = ''
 
 const T = (table: string) => `"${schema}"."${table}"`
 const ddl = (sql: string, ...values: unknown[]) => prisma.$executeRawUnsafe(sql, ...values)
+const randomToken = () => crypto.randomBytes(16).toString('hex')
+/** An invitation: organization, email, role, token, inviter. */
+const inviteSql = () =>
+  `INSERT INTO ${T('organization_invitations')} (organization_id, email, role, token, invited_by_user_id, expires_at)
+   VALUES ($1::uuid, $2, $3, $4, $5::uuid, NOW() + INTERVAL '1 day') RETURNING role`
 
 /** Run as a REST API role, with the claims PostgREST would set. */
 async function as<R>(role: 'anon' | 'authenticated', userId: string | null, sql: string, ...values: unknown[]): Promise<R[]> {
@@ -222,7 +234,7 @@ beforeAll(async () => {
   expect((r as any).change?.status).toBe('healthy')
 
   await grantRestRoles()
-  for (const user of [olivia, ines, mallory]) {
+  for (const user of [olivia, ines, mallory, adam, otto]) {
     await ddl(`INSERT INTO ${T('users')} (id, email, password) VALUES ($1::uuid, $2, 'x')`, user.id, user.email)
   }
 
@@ -427,6 +439,68 @@ describe('a member', () => {
     expect(await asUser(ines.id, `SELECT * FROM ${T('organizations')}`)).toEqual([])
     expect(await asUser(olivia.id, `SELECT role FROM ${T('organization_members')}`)).toEqual([{ role: 'owner' }])
   })
+})
+
+describe('the roles an invitation may carry', () => {
+  it('an owner invites an admin, who joins through accept-invite', async () => {
+    const token = randomToken()
+    expect(await asUser(olivia.id, inviteSql(), orgId, adam.email, 'admin', token, olivia.id)).toEqual([{ role: 'admin' }])
+    const out = await accept(adam, token)
+    expect(out.status).toBe(200)
+    expect(out.body).toMatchObject({ ok: true, organizationId: orgId, role: 'admin' })
+  }, 60_000)
+
+  it('an admin invites a member or an admin', async () => {
+    for (const role of ['member', 'admin']) {
+      expect(await asUser(adam.id, inviteSql(), orgId, `${role}-${tag}@example.test`, role, randomToken(), adam.id)).toEqual([{ role }])
+    }
+  })
+
+  it("an admin's invitation as owner is refused, however it is spelled", async () => {
+    for (const role of ['owner', 'Owner']) {
+      await expect(asUser(adam.id, inviteSql(), orgId, otto.email, role, randomToken(), adam.id)).rejects.toThrow(/row-level security/)
+    }
+  })
+
+  it('an admin cannot turn an invitation into an owner invitation', async () => {
+    await expect(
+      asUser(
+        adam.id,
+        `UPDATE ${T('organization_invitations')} SET role = 'owner' WHERE invited_by_user_id = $1::uuid AND role = 'member' RETURNING id`,
+        adam.id,
+      ),
+    ).rejects.toThrow(/row-level security/)
+  })
+
+  it("an owner's invitation as owner works, the admin cannot change it, and its invitee joins as owner", async () => {
+    const token = randomToken()
+    expect(await asUser(olivia.id, inviteSql(), orgId, otto.email, 'owner', token, olivia.id)).toEqual([{ role: 'owner' }])
+    expect(
+      await asUser(adam.id, `UPDATE ${T('organization_invitations')} SET role = 'admin' WHERE token = $1 RETURNING id`, token),
+    ).toEqual([])
+    const out = await accept(otto, token)
+    expect(out.status).toBe(200)
+    expect(out.body).toMatchObject({ ok: true, organizationId: orgId, role: 'owner' })
+  }, 60_000)
+
+  it("accept-invite honours an owner invitation only when the organization's owner made it", async () => {
+    // Written as the service role, naming the admin as inviter: the shape an
+    // invitation from before the teams rules, or from a server acting for an
+    // admin, can have.
+    const token = randomToken()
+    await ddl(
+      `INSERT INTO ${T('organization_invitations')} (organization_id, email, role, token, invited_by_user_id, expires_at)
+       VALUES ($1::uuid, $2, 'owner', $3, $4::uuid, NOW() + INTERVAL '1 day')`,
+      orgId,
+      mallory.email,
+      token,
+      adam.id,
+    )
+    const out = await accept(mallory, token)
+    expect(out.status).toBe(403)
+    expect(out.body.code).toBe('INVITE_ROLE_NOT_ALLOWED')
+    expect(await asUser(mallory.id, `SELECT * FROM ${T('organizations')}`)).toEqual([])
+  }, 60_000)
 })
 
 describe('a project whose teams tables have the rules releases before the fix gave them', () => {

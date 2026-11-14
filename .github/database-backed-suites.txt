@@ -2071,10 +2071,12 @@ tests/integration/grant-tables-on-every-path.spec.ts
 # its first membership and invites; another signed-in user can neither join it
 # with any role nor write an invitation into it; the publishable key reads none
 # of the three; the invitee joins through accept-invite run as a NOSUPERUSER
-# NOBYPASSRLS member of the owning role; a member leaves. A project with the
-# rules earlier releases gave them is found, secured as one healthy change
-# Backenly made, and a rule a person chose is kept. A provisioned project, the
-# real executor, route and change ledger.
+# NOBYPASSRLS member of the owning role; a member leaves. Only the owner invites
+# an owner: an admin's owner invitation is refused, and accept-invite honours an
+# owner invitation only from the owner. A project with the rules earlier
+# releases gave them is found, secured as one healthy change Backenly made, and
+# a rule a person chose is kept. A provisioned project, the real executor, route
+# and change ledger.
 tests/integration/teams-tables-access.spec.ts
 
 # A rule Backenly guessed from a name, which the request did not ask for, is

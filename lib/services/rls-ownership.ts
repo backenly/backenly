@@ -125,7 +125,7 @@ export type TeamsTable = (typeof TEAMS_TABLES)[number]
 export const TEAMS_COLUMNS: Record<TeamsTable, readonly string[]> = {
   organizations: ['id', 'owner_user_id'],
   organization_members: ['organization_id', 'user_id', 'role'],
-  organization_invitations: ['organization_id', 'invited_by_user_id'],
+  organization_invitations: ['organization_id', 'invited_by_user_id', 'role'],
 }
 
 export function isTeamsTable(tableName: string): tableName is TeamsTable {
@@ -521,8 +521,9 @@ export function inferRlsPlanFromCatalog(
       reason:
         `"${tableName}" is one of the teams tables (${TEAMS_TABLES.join(', ')}). An organization is read by its ` +
         `owner and members and changed by its owner; each user reads and may leave their own memberships and adds ` +
-        `themselves only to an organization they own; invitations are read and written by the organization's owner ` +
-        `and admins. Joining through an invitation is the server's (POST /orgs/accept-invite).`,
+        `themselves only to an organization they own; invitations are read by the organization's owner and admins, ` +
+        `and the owner invites with any role, an admin only as a member or an admin. Joining through an invitation ` +
+        `is the server's (POST /orgs/accept-invite).`,
     }
   }
 

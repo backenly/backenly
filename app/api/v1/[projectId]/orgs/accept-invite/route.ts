@@ -13,7 +13,9 @@ export const maxDuration = 15
  *      project.jwtSecret, this project, not revoked, user not blocked.
  *   2. In one transaction, as the service role: look up and lock
  *      `organization_invitations.token` in the workspace schema.
- *   3. Reject expired, already-accepted, or wrong-email invites.
+ *   3. Reject expired, already-accepted, or wrong-email invites, and one with a
+ *      role other than member or admin that the organization's owner did not
+ *      send.
  *   4. Insert into `organization_members` and stamp `accepted_at`.
  *
  * The invitation is matched on token, then verified against the end-user's
@@ -111,10 +113,12 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
         organization_id: string
         email: string
         role: string | null
+        invited_by_user_id: string | null
         expires_at: Date | null
         accepted_at: Date | null
       }>>(
-        `SELECT id::text AS id, organization_id::text AS organization_id, email, role, expires_at, accepted_at
+        `SELECT id::text AS id, organization_id::text AS organization_id, email, role,
+                invited_by_user_id::text AS invited_by_user_id, expires_at, accepted_at
            FROM "${postgresSchema}"."organization_invitations"
           WHERE token = $1
           LIMIT 1
@@ -162,6 +166,29 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
         }
       }
 
+      // ── Who may hand out this role ───────────────────────────────────────
+      // The teams rules let an admin invite only members and admins: any other
+      // role, owner above all, is the organization's owner's to give. An
+      // invitation written before those rules, or by a server on an admin's
+      // say-so, could still carry one, so such a role is honoured only when the
+      // invitation names the organization's owner as its inviter.
+      const role = invite.role || 'member'
+      if (role !== 'member' && role !== 'admin') {
+        const owners = await tx.$queryRawUnsafe<Array<{ owner: string | null }>>(
+          `SELECT owner_user_id::text AS owner FROM "${postgresSchema}"."organizations" WHERE id::text = $1 LIMIT 1`,
+          invite.organization_id,
+        )
+        if (!invite.invited_by_user_id || owners[0]?.owner !== invite.invited_by_user_id) {
+          return {
+            status: 403,
+            body: {
+              error: `Only the organization's owner can invite you as "${role}", and this invite is not from them. Ask the owner to send it.`,
+              code: 'INVITE_ROLE_NOT_ALLOWED',
+            },
+          }
+        }
+      }
+
       // ── Already a member? Treat as idempotent success ────────────────────
       const existing = await tx.$queryRawUnsafe<Array<{ id: string }>>(
         `SELECT id::text AS id FROM "${postgresSchema}"."organization_members"
@@ -173,7 +200,7 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
           `INSERT INTO "${postgresSchema}"."organization_members"
              (id, organization_id, user_id, role, joined_at)
            VALUES (gen_random_uuid(), $1::uuid, $2::uuid, $3, NOW())`,
-          invite.organization_id, endUser.userId, invite.role || 'member',
+          invite.organization_id, endUser.userId, role,
         )
       }
       // Consumed either way, so it cannot be used again.
@@ -199,7 +226,7 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
               ok: true,
               message: 'Joined the organization.',
               organizationId: invite.organization_id,
-              role: invite.role || 'member',
+              role,
             },
           }
     })

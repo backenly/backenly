@@ -1901,9 +1901,12 @@ async function installOrgMembersPolicy(
  *                             first, owner membership is made. Every other
  *                             membership and every role change is the server's:
  *                             POST /orgs/accept-invite, or a service-role key.
- *   organization_invitations  read and written by the organization's owner
+ *   organization_invitations  read and withdrawn by the organization's owner
  *                             and its admins (members whose role is owner or
- *                             admin), and recorded as made by whoever wrote it
+ *                             admin); written by the owner with any role, and
+ *                             by an admin only to invite a member or an admin,
+ *                             so a place as owner is the owner's alone to give;
+ *                             recorded as made by whoever wrote it
  *                             (invited_by_user_id).
  *
  * The ownership inference cannot say any of this: own rows on
@@ -1961,7 +1964,17 @@ export function teamsPolicySql(schemaName: string, tableName: TeamsTable): strin
   const joined = `SELECT m."organization_id"::text FROM ${members} m WHERE m."user_id"::text = ${callerOnce}`
   /** Organizations the caller is an owner or admin member of. */
   const administered = `${joined} AND m."role"::text IN ('owner', 'admin')`
+  /** Invitations the caller may read and withdraw. */
   const manages = `("organization_id"::text IN (${owned}) OR "organization_id"::text IN (${administered}))`
+  /**
+   * Invitations the caller may create or change: any in an organization they
+   * own, and in one they administer only an invitation to be a member or an
+   * admin. The roles are listed, not the one refused, so `Owner` or a role
+   * the app adds later is the owner's to hand out too.
+   */
+  const writes =
+    `("organization_id"::text IN (${owned}) OR ` +
+    `("organization_id"::text IN (${administered}) AND "role"::text IN ('member', 'admin')))`
 
   switch (tableName) {
     case 'organizations':
@@ -2016,12 +2029,12 @@ export function teamsPolicySql(schemaName: string, tableName: TeamsTable): strin
 
         CREATE POLICY backenly_teams_insert ON ${t}
           FOR INSERT
-          WITH CHECK (${svc} OR (${manages} AND "invited_by_user_id"::text = ${callerOnce}));
+          WITH CHECK (${svc} OR (${writes} AND "invited_by_user_id"::text = ${callerOnce}));
 
         CREATE POLICY backenly_teams_update ON ${t}
           FOR UPDATE
-          USING (${svc} OR ${manages})
-          WITH CHECK (${svc} OR (${manages} AND "invited_by_user_id"::text = ${callerOnce}));
+          USING (${svc} OR ${writes})
+          WITH CHECK (${svc} OR (${writes} AND "invited_by_user_id"::text = ${callerOnce}));
 
         CREATE POLICY backenly_teams_delete ON ${t}
           FOR DELETE
@@ -2970,7 +2983,7 @@ function getUsingExpression(
       return tableName === 'organization_members'
         ? `reads, deletes: user_id = current_user_id; inserts: own row, into an organization the user owns; updates: service_role only`
         : tableName === 'organization_invitations'
-          ? `organization_id IN (organizations the user owns, or is an owner or admin member of); writes record invited_by_user_id = current_user_id`
+          ? `reads, deletes: organization_id IN (organizations the user owns, or is an owner or admin member of); writes: any role where the user owns it, role IN ('member','admin') where they administer it, recording invited_by_user_id = current_user_id`
           : `owner_user_id = current_user_id OR id IN (organizations the user is a member of) (SELECT); owner_user_id = current_user_id (write)`
     case 'own_rows': return `"${uidColumn}"::text = current_user_id`
     case 'own_rows_read': return `reads: "${uidColumn}"::text = current_user_id; writes: service_role only`
@@ -3002,7 +3015,7 @@ function getPolicyDescription(
       return tableName === 'organization_members'
         ? `Teams: each user reads their own memberships and may leave them, and adds themselves only to an organization they own; every other membership and every role change is the server's (accept-invite, or a service-role key)`
         : tableName === 'organization_invitations'
-          ? `Teams: invitations are read and written by the organization's owner and admins, and record whoever wrote them as the inviter`
+          ? `Teams: invitations are read and withdrawn by the organization's owner and admins; the owner invites with any role, an admin only as a member or an admin; each records whoever wrote it as the inviter`
           : `Teams: an organization is read by its owner and its members, and created, changed or deleted only by its owner`
     case 'own_rows': return `Users can only access rows where "${uidColumn}" matches their user ID`
     case 'own_rows_read': return `Users can read rows where "${uidColumn}" matches their user ID; only service-role API keys can write, because these rows grant access`
