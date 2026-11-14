@@ -42,4 +42,6 @@ Storing a key from an agent also builds the first functions for that provider (e
 
 In a sandbox function (any trigger other than http), a connected provider is `ctx.integrations.<id>`, and the key never appears in code or logs. Only the methods `capabilities` lists exist. Most providers also have `request(method, path, body?, headers?)`, a signed call to the provider's own API; the email helper, PostHog and Twilio do not. `ctx.integrations.isConnected(name)` says whether a provider is connected.
 
+A `request` path is relative to the provider's API base, such as `https://api.openai.com/v1`, and a path that repeats the base's version, as the provider's docs write it (`/v1/chat/completions`), is sent once. An object body is sent as JSON, except to Stripe, which takes it form-encoded, and Stability, which takes it as `multipart/form-data` and answers in JSON. A `Content-Type` header of `application/x-www-form-urlencoded` or `multipart/form-data` chooses that encoding for any provider. A multipart file field is `{ base64, filename?, contentType? }`, or `{ data, filename?, contentType? }` with text or bytes as `data`.
+
 Do not write a key into function code: `deploy_code` refuses it, and stored code is readable by anyone who can read the project.

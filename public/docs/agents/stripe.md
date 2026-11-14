@@ -27,6 +27,6 @@ Stripe events arrive at `https://backenly.com/api/v1/{projectId}/webhooks/stripe
 - `cancelSubscription(subscriptionId)` → `{ id, status }`
 - `listCustomers(email?)` → `[{ id, email, name }]`
 - `retrievePaymentIntent(paymentIntentId)` → the payment intent
-- `request(method, path, body?, headers?)`: any other Stripe endpoint. Stripe's API is form-encoded and `request` sends JSON, so prefer the helpers above.
+- `request(method, path, body?, headers?)`: any other Stripe endpoint, such as `request('POST', '/products', { name: 'Pro plan', metadata: { tier: 'pro' } })`. The body is form-encoded, as Stripe takes it: nested objects and lists become `metadata[tier]` and `items[0][price]`. A path is relative to `https://api.stripe.com/v1`, and `/v1/products`, as Stripe's docs write it, works too.
 
 Subscription plans, a payment event log and the rest are built by asking for them.

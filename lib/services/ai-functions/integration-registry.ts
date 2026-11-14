@@ -72,6 +72,12 @@ export interface ProviderSpec {
   auxKeyStoreId?: string
   /** Merge these fields into every request() body (used for app_id-style params). */
   injectBody?: (auxValue: string | null) => Record<string, unknown>
+  /**
+   * How request() sends an object body when the call names no Content-Type:
+   * 'json' (the default), 'form' (application/x-www-form-urlencoded, nested as
+   * metadata[key] and items[0][price]) or 'multipart' (multipart/form-data).
+   */
+  bodyEncoding?: 'json' | 'form' | 'multipart'
   /** True when integration-context.ts attaches hand-written typed helpers for this id. */
   rich?: boolean
   /** Whether to expose the universal .request() helper. Default true when baseUrl is set. */
@@ -82,11 +88,23 @@ export interface ProviderSpec {
   docsUrl?: string
 }
 
+// The example used to be '/v1/x', relative to bases that already end in /v1,
+// so a path written as the example (or as the provider documents it) was sent
+// to /v1/v1/x. request() now sends a repeated version once, and the doc says
+// what a path is relative to: the base renderIntegrationDocs prints beside it.
 const REQUEST_DOC: ProviderMethodDoc = {
   name: 'request',
   signature:
     "request(method, path, body?, headers?) → parsed JSON — signed call to the provider's API. " +
-    "path may be relative ('/v1/x') or absolute. Auth headers are injected automatically; never put the key in code.",
+    "path is relative to the provider's request() base; one that repeats the base's version, as the provider's docs write it, is sent once. " +
+    'An absolute URL must stay on the provider\'s host. An object body is sent as JSON unless headers name ' +
+    "Content-Type 'application/x-www-form-urlencoded' or 'multipart/form-data' (a multipart file field is { base64, filename?, contentType? }). " +
+    'Auth headers are injected automatically; never put the key in code.',
+}
+
+/** REQUEST_DOC with a provider's own note after it. */
+function requestDoc(note: string): ProviderMethodDoc {
+  return { name: 'request', signature: `${REQUEST_DOC.signature} ${note}` }
 }
 
 // ── Registry ────────────────────────────────────────────────────────────────
@@ -101,6 +119,8 @@ export const INTEGRATION_PROVIDERS: Record<string, ProviderSpec> = {
     keyStoreIds: ['stripe'],
     baseUrl: 'https://api.stripe.com/v1',
     buildHeaders: (k) => ({ Authorization: `Bearer ${k}` }),
+    // Stripe's REST API takes form-encoded bodies, never JSON.
+    bodyEncoding: 'form',
     rich: true,
     genericRequest: true,
     keyFormat: 'sk_live_… / sk_test_…',
@@ -113,9 +133,10 @@ export const INTEGRATION_PROVIDERS: Record<string, ProviderSpec> = {
       { name: 'cancelSubscription', signature: 'cancelSubscription(subscriptionId) → { id, status }' },
       { name: 'listCustomers', signature: 'listCustomers(email?) → [{ id, email, name }]' },
       { name: 'retrievePaymentIntent', signature: 'retrievePaymentIntent(paymentIntentId) → object' },
-      // NOTE: Stripe's REST API is form-encoded, not JSON — prefer the typed helpers
-      // above. request() is a raw escape hatch and sends JSON.
-      REQUEST_DOC,
+      requestDoc(
+        'Stripe bodies are form-encoded, as Stripe takes them: nested objects and lists become metadata[key] and items[0][price]. ' +
+          "e.g. request('POST', '/products', { name: 'Pro plan', metadata: { tier: 'pro' } }).",
+      ),
     ],
   },
 
@@ -285,12 +306,22 @@ export const INTEGRATION_PROVIDERS: Record<string, ProviderSpec> = {
     connectedNames: ['stability', 'stability_ai', 'stable_diffusion'],
     keyStoreIds: ['stability', 'stability_ai'],
     baseUrl: 'https://api.stability.ai',
-    buildHeaders: (k) => ({ Authorization: `Bearer ${k}` }),
+    // Its image endpoints take multipart/form-data, and answer with the image's
+    // bytes unless asked for JSON, which request() can hand back (the image as
+    // base64). A call's own headers override either.
+    buildHeaders: (k) => ({ Authorization: `Bearer ${k}`, Accept: 'application/json' }),
+    bodyEncoding: 'multipart',
     genericRequest: true,
     keyFormat: 'sk-…',
     docsUrl: 'https://platform.stability.ai/docs/api-reference',
     methods: [
-      { name: 'request', signature: "request(method, path, body?, headers?) → JSON. e.g. request('POST', '/v2beta/stable-image/generate/core', {...})." },
+      {
+        name: 'request',
+        signature:
+          "request(method, path, body?, headers?) → JSON. Bodies are sent as multipart/form-data and answers come back as JSON, an image as base64. " +
+          "e.g. request('POST', '/v2beta/stable-image/generate/core', { prompt: 'a lighthouse at dusk', output_format: 'png' }) → { image, seed, finish_reason }. " +
+          'A file field, such as an image to edit, is { base64, filename?, contentType? }.',
+      },
     ],
   },
 
@@ -421,7 +452,8 @@ export function renderIntegrationDocs(connectedIds: string[]): string {
 
   const lines: string[] = []
   for (const spec of specs) {
-    lines.push(`• ${spec.displayName} — ctx.integrations.${spec.id}`)
+    const base = spec.genericRequest !== false && spec.baseUrl && spec.buildHeaders ? ` (request() base: ${spec.baseUrl})` : ''
+    lines.push(`• ${spec.displayName} — ctx.integrations.${spec.id}${base}`)
     for (const m of spec.methods) {
       lines.push(`    ctx.integrations.${spec.id}.${m.signature}`)
     }
