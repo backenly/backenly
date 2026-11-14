@@ -99,7 +99,8 @@ async function startSupervisor(
     stdio: ['ignore', 'ignore', 'pipe'],
   })
   child.stderr!.on('data', (chunk) => { log += chunk.toString() })
-  const up = await until(() => existsSync(socket), 20_000)
+  // Its listen line, not its socket file: one restarted in place finds the old file.
+  const up = await until(() => log.includes('function-supervisor: listening on'), 20_000)
   if (!up) throw new Error(`the supervisor did not start:\n${log}`)
   return { socket, child, log: () => log }
 }
@@ -335,6 +336,53 @@ describeAsRoot(`the function supervisor, as root${skipReason ? ` (SKIPPED: ${ski
     } finally {
       env.BACKENLY_FN_SOCKET = socket
       tight.child.kill('SIGKILL')
+    }
+  })
+
+  it("kills what an earlier supervisor's runs left going, and removes their files, before it serves", async () => {
+    const base = BASE + 3000
+    const marker = `/tmp/backenly-fn-restart-${process.pid}-${Date.now()}`
+    const first = await startSupervisor(dir, base, protectedDir)
+    const socket = env.BACKENLY_FN_SOCKET
+    env.BACKENLY_FN_SOCKET = first.socket
+    try {
+      const pending = run(`
+        import { NextResponse } from 'next/server'
+        export async function GET() {
+          const p: any = Object.constructor('return process')()
+          const load = (n: string) => (p.getBuiltinModule ? p.getBuiltinModule(n) : p.mainModule.require(n))
+          load('fs').writeFileSync(${JSON.stringify(marker)}, 'left behind')
+          load('child' + '_process').spawn('sleep', ['600'], { detached: true, stdio: 'ignore' }).unref()
+          await new Promise((r) => setTimeout(r, 8000))
+          return NextResponse.json({ ended: true })
+        }
+      `).then(() => null, (err) => err)
+      // The run and what it started are going when their supervisor dies, and outlive it.
+      expect(await until(() => poolProcesses(base).length >= 2 && existsSync(marker), 10_000)).toBe(true)
+      first.child.kill('SIGKILL')
+      expect(await pending).toBeInstanceOf(FunctionRunnerUnavailableError)
+      expect(poolProcesses(base).length).toBeGreaterThanOrEqual(2)
+
+      // The entrypoint starts another, as it does: it ends all of it before serving.
+      const second = await startSupervisor(dir, base, protectedDir)
+      try {
+        expect(poolProcesses(base)).toEqual([])
+        expect(existsSync(marker)).toBe(false)
+        expect(second.log()).toMatch(/removed what earlier runs left: [1-9]\d* process/)
+      } finally {
+        second.child.kill('SIGKILL')
+      }
+    } finally {
+      env.BACKENLY_FN_SOCKET = socket
+      first.child.kill('SIGKILL')
+      for (const pid of poolProcesses(base)) {
+        try {
+          process.kill(pid, 'SIGKILL')
+        } catch {
+          // gone
+        }
+      }
+      rmSync(marker, { force: true })
     }
   })
 

@@ -74,7 +74,7 @@ describe('the command a run starts with', () => {
     runnerPath: '/opt/backenly-fn/function-runner.cjs',
   }
 
-  it('limits processes, files and core dumps, gives up privileges for good, and only then becomes node', () => {
+  it('limits processes, files, core dumps and CPU time, gives up privileges for good, and only then becomes node', () => {
     const { file, args } = childCommand(config)
     expect(file).toBe('/usr/bin/prlimit')
     expect(args.slice(0, args.indexOf('--'))).toEqual([
@@ -82,6 +82,8 @@ describe('the command a run starts with', () => {
       `--nofile=${config.nofile}`,
       '--core=0',
       `--fsize=${config.fsizeBytes}`,
+      // A backstop for a process its supervisor no longer watches: twice the longest deadline.
+      '--cpu=120:130',
     ])
     const setpriv = args.indexOf('/usr/bin/setpriv')
     expect(args.slice(setpriv, setpriv + 3)).toEqual(['/usr/bin/setpriv', '--no-new-privs', '--'])
