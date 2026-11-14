@@ -67,6 +67,11 @@ const result = await esbuild.build({
     // Native password hashing (lib/auth/password.ts): its binary is chosen at
     // load time from node_modules, which docker/runtime.Dockerfile copies in.
     'bcrypt',
+    // The PostgreSQL parser that checks read-only SQL (lib/mcp/read-query-ast.ts,
+    // which imports it lazily). Its loader reads libpg-query.wasm from beside
+    // its own file, which a chunk in dist-runtime/ would not have; required from
+    // node_modules, which docker/runtime.Dockerfile copies in.
+    'libpg-query',
     // Optional native accelerators pulled in transitively. Absent at runtime,
     // and every require of them is already guarded.
     'bufferutil',

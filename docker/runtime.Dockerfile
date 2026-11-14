@@ -132,6 +132,20 @@ COPY --from=build /src/node_modules/node-gyp-build ./node_modules/node-gyp-build
 # Asserted, not assumed: the build fails unless this image can hash and verify.
 RUN node -e "const b=require('bcrypt');const h=b.hashSync('x',4);if(!b.compareSync('x',h)||b.compareSync('y',h))process.exit(1);console.log('bcrypt hashes in this image')"
 
+# libpg-query, the PostgreSQL 16 parser that checks read-only SQL
+# (lib/mcp/read-query-ast.ts), and @pgsql/types, which it requires. The bundle
+# carries that check (lib/mcp/runtime-db.ts imports read-query.ts, and the
+# approved-call dispatcher reaches the brain's run_query tool), and
+# scripts/build-runtime-bundle.mjs leaves the package external because its
+# loader reads libpg-query.wasm from beside its own file. It is imported only
+# when a read query is checked, so it costs nothing at boot.
+COPY --from=build /src/node_modules/libpg-query ./node_modules/libpg-query
+COPY --from=build /src/node_modules/@pgsql/types ./node_modules/@pgsql/types
+
+# Asserted, not assumed: the build fails unless this image loads the
+# WebAssembly and parses SQL with the PostgreSQL 16 grammar the server runs.
+RUN node -e "const q=require('libpg-query');q.parse('SELECT 1').then(function(r){if(!r||!r.stmts||r.stmts.length!==1||Math.floor(r.version/10000)!==16)process.exit(1);console.log('libpg-query '+require('libpg-query/package.json').version+' parses PostgreSQL 16 SQL in this image')}).catch(function(e){console.error(e);process.exit(1)})"
+
 # overlay-allowlist.json and, when composed, lib/cloud/** — read from disk by
 # the startup edition assertion. Without these a Cloud Runtime refuses to boot.
 COPY --from=build /src/edition-files/ ./

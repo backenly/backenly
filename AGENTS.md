@@ -530,7 +530,7 @@ public-tree credential/host hygiene checks.
 - **Never** add create/generate features outside the Database/AI chat section
 - **Never** expose SQL **writes** or DDL — mutations go through typed actions so they stay planned, verified and reversible. SQL **reads** are supported and first-class (see below); do not "restore" a blanket raw-SQL ban.
 - **Never** run DDL against a production workspace schema outside the change ledger, or destroy data in a schema change without preserving it (`lib/changes/preserve.ts`)
-- **Never** let a SQL parser be the tenant boundary — read-only SQL runs as the project's SELECT-only `bkn_ro_` role so Postgres grants do the enforcing (`lib/mcp/read-query.ts`)
+- **Never** let a SQL parser be the tenant boundary for DATA — read-only SQL runs as the project's SELECT-only `bkn_ro_` role so Postgres grants do the enforcing (`lib/mcp/read-query.ts`). Catalog METADATA is the one exception, because `pg_catalog` and `information_schema` are readable by PUBLIC and describe every project: there the statement is the boundary, checked with PostgreSQL's own parser against allowlists of functions, types and settings (`lib/mcp/read-query-ast.ts`, libpg-query), never with a regex or a deny list alone. Do not remove that check as a breach of this rule, and never let a statement that does not parse, or a parser that does not load, run anyway
 - **Never** mix platform user auth with end-user auth
 - **Never** write directly to `workspace_{projectId}` schemas from platform Prisma — use `lib/services/workspaceDatabase.ts`
 - **Never** skip `npm run db:generate` after editing `schema.prisma`
