@@ -859,8 +859,13 @@ describe('a project whose teams tables have the rules releases before the fix ga
       const [report] = await secureTeamsTables(projectId, { apply })
       expect({ apply, suspects: report.suspects }).toEqual({ apply, suspects: [selfJoin()] })
     }
+    // Mallory also owns an organization of her own (made by the probing test above); the self-join is the row here.
     expect(
-      await prisma.$queryRawUnsafe(`SELECT role FROM ${T('organization_members')} WHERE user_id = $1::uuid`, mallory.id),
+      await prisma.$queryRawUnsafe(
+        `SELECT role FROM ${T('organization_members')} WHERE user_id = $1::uuid AND organization_id = $2::uuid`,
+        mallory.id,
+        orgId,
+      ),
     ).toEqual([{ role: 'admin' }])
   }, 120_000)
 
