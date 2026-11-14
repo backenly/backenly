@@ -2087,6 +2087,14 @@ tests/integration/readiness-counts-open-problems.spec.ts
 # by the production catalog query.
 tests/integration/usage-storage-measured-on-read.spec.ts
 
+# Connecting Resend reads what Resend says about the key: a Sending-access key
+# (401 restricted_api_key) is accepted as one that can send and a deleted key
+# (400 "API key is invalid") is refused, on the console's Continue and Save and
+# the agent's connect, and the agent's re-check and the live health check
+# catch a key deleted later (#608). Real sessions, routes and vault; Resend's
+# answers are stubbed at fetch.
+tests/integration/resend-key-check-reads-resend.spec.ts
+
 # Connecting Resend or SendGrid stores the sender a function's email.send()
 # uses by default (email_from), says when none is set, and writes the
 # auto-wired functions against ctx.integrations.email.send(). A real project,

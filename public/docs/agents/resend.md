@@ -8,7 +8,7 @@ Index: https://backenly.com/llms.txt · Integrations: https://backenly.com/docs/
 integrations { action: "connect", integrationId: "resend", apiKey: "re_…", fromEmail: "noreply@yourdomain.com" }
 ```
 
-The key is checked with Resend before it is stored. SendGrid (`integrationId: "sendgrid"`, key `SG.…`) works the same way and is the fallback when both are connected. `fromEmail` sets the default sender for `ctx.integrations.email.send()`.
+The key is checked with Resend before it is stored. A key with Sending access, Resend's least-privilege option, is all that sending mail needs, and is accepted. A key Resend says does not exist, was deleted, is not active or is suspended is refused, and `integrations` `verify` asks Resend again about a stored key, so one deleted after it was connected shows as rejected. SendGrid (`integrationId: "sendgrid"`, key `SG.…`) works the same way and is the fallback when both are connected. `fromEmail` sets the default sender for `ctx.integrations.email.send()`.
 
 Storing the key from an agent also sends a welcome email on sign-up when end-user auth is on, and a password-reset email when a reset-token table exists.
 
@@ -18,6 +18,6 @@ Sending mail goes through the email helper, which uses Resend when it is connect
 
 - `ctx.integrations.email.send({ to, subject, html, from?, text? })` → `{ id }`
 
-`from` defaults to the sender set at connect time (`fromEmail`); if no default sender was set, `from` is required. Resend's own API (domains, audiences, …) is `ctx.integrations.resend.request(method, path, body?, headers?)`, and SendGrid's is `ctx.integrations.sendgrid.request(…)`. Resend itself has no `send` helper: mail goes through `email`.
+`from` defaults to the sender set at connect time (`fromEmail`); if no default sender was set, `from` is required. Resend's own API (domains, audiences, …) is `ctx.integrations.resend.request(method, path, body?, headers?)`; its endpoints other than sending need a key with Full access. SendGrid's is `ctx.integrations.sendgrid.request(…)`. Resend itself has no `send` helper: mail goes through `email`.
 
 Delivery logs and stored templates are built by asking for them. Auth emails (verification, password reset, magic links) are configured separately, with `auth` `set_smtp` and `set_email_template`.
