@@ -1055,9 +1055,12 @@ tests/integration/scheduler-leader-lock.spec.ts
 tests/integration/direct-access-backup-grants.spec.ts
 
 # A new read-write Postgres login reads and writes rows, and Postgres refuses
-# it any schema change (no CREATE on the schema, no owner-role membership)
-# until its project's admin allows schema changes; a login from before the
-# setting keeps what it had. Real roles, grants and definer functions.
+# it any schema change (no CREATE anywhere, no owner-role membership). On a
+# database shared by several projects its admin cannot allow them, and the sync
+# and installing the SQL strip a login from before, its open session included;
+# on one dedicated to a project they can be allowed until a second project's
+# workspace arrives. Real roles, grants, logins and definer functions, one held
+# as Amazon RDS holds them.
 tests/integration/read-write-logins-refuse-schema-changes.spec.ts
 
 # Both storage drivers apply one per-file rule: the bucket's own limit under the
@@ -2103,3 +2106,13 @@ tests/integration/agent-installs-extensions.spec.ts
 # a missing platform schema behave; nothing sent out carries a channel. Real
 # logins, triggers, routes and the listener hub are the property.
 tests/integration/realtime-channel-per-project.spec.ts
+# Code a project planted in its schema over a direct-access login runs in the
+# platform's own sessions, which reach every project: a planted trigger copies
+# another project's rows when the platform writes the table, even after the
+# session assumed the project's owner role (SET ROLE NONE inside the trigger).
+# lib/security/planted-objects.ts finds it and, as a NOSUPERUSER stand-in for
+# the platform's role, disables the trigger and rule and takes EXECUTE from
+# the functions; the platform's writes then run none of it, and what calls them
+# fails closed. For a project with a record it is one History change Backenly
+# made, which History refuses to restore. Real roles, logins and catalog.
+tests/integration/neutralize-planted-objects.spec.ts
