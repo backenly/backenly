@@ -486,7 +486,9 @@ describe('the roles an invitation may carry', () => {
   it("accept-invite honours an owner invitation only when the organization's owner made it", async () => {
     // Written as the service role, naming the admin as inviter: the shape an
     // invitation from before the teams rules, or from a server acting for an
-    // admin, can have.
+    // admin, can have. An earlier test left an invitation to Mallory's address, and the table holds one per
+    // address, so that one goes first (she joined nothing through it: the last line checks).
+    await ddl(`DELETE FROM ${T('organization_invitations')} WHERE email = $1`, mallory.email)
     const token = randomToken()
     await ddl(
       `INSERT INTO ${T('organization_invitations')} (organization_id, email, role, token, invited_by_user_id, expires_at)
