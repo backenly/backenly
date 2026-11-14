@@ -118,11 +118,6 @@ describe('types: only the listed ones, so no OID alias turns an id into a name',
     ['qualified with pg_catalog', 'SELECT 16400::pg_catalog.regnamespace', TYPE],
     ['quoted', 'SELECT x::"regnamespace" FROM t', TYPE],
     ['a column definition list', "SELECT * FROM json_to_record('{\"a\":16400}') AS r(a regnamespace)", TYPE],
-    [
-      'an XMLTABLE column',
-      "SELECT * FROM XMLTABLE('/r' PASSING xmlparse(document '<r><a>16400</a></r>') COLUMNS a regclass PATH 'a')",
-      TYPE,
-    ],
     ['a pg_ type', 'SELECT x::pg_lsn FROM t', TYPE],
     ['a catalog\'s row type', 'SELECT NULL::pg_proc', TYPE],
     ['aclitem', "SELECT 'x=r/y'::aclitem", TYPE],
@@ -196,11 +191,10 @@ describe('functions: only the listed ones', () => {
     ['pg_get_functiondef', 'SELECT pg_get_functiondef(16400)'],
     ['pg_read_file', "SELECT pg_read_file('postgresql.conf')"],
     ['pg_sleep', 'SELECT pg_sleep(10)'],
-    // Allocators sized by their argument.
-    ['repeat', "SELECT repeat('x', 1000000000)"],
-    ['lpad', "SELECT lpad('x', 1000000000)"],
-    ['rpad', "SELECT rpad('x', 1000000000)"],
+    // An allocator sized by its argument, and calls that pad to any length.
     ['array_fill', 'SELECT array_fill(1, ARRAY[100000000])'],
+    ['bpchar() as a call', "SELECT bpchar('', 10485764, true)"],
+    ['varchar() as a call, which only a qualified name can write', "SELECT pg_catalog.varchar('x', 100, false)"],
     // A function in this project's schema, and TABLESAMPLE methods.
     ['a function in this project\'s schema', `SELECT "${OWN}".leak()`],
     ['a TABLESAMPLE method outside the two built in', 'SELECT * FROM t TABLESAMPLE system_rows(10)'],
@@ -273,6 +267,309 @@ describe('column notation: a call when the FROM item has no such column', () => 
   })
 })
 
+/**
+ * Found by the audit of the allowlist version: a FROM function's alias is its
+ * column only when PostgreSQL makes it one. With a column list the columns are
+ * the list, and a function with an OUT parameter names its column itself
+ * (json_array_elements_text's `value`), so `regnamespace.regnamespace` and
+ * `ts_stat.ts_stat` were calls, and read every project's schema and function
+ * source.
+ */
+describe('column notation follows the columns PostgreSQL gives a FROM function', () => {
+  it.each([
+    ['an alias with a column list', 'SELECT regnamespace.regnamespace::text FROM generate_series(16384, 20000) AS regnamespace(x)'],
+    ['regclass', 'SELECT regclass.regclass::text FROM generate_series(16384, 16390) AS regclass(x)'],
+    ['regprocedure', 'SELECT regprocedure.regprocedure::text FROM generate_series(16384, 16390) AS regprocedure(x)'],
+    ['obj_description', 'SELECT obj_description.obj_description FROM generate_series(16384, 16390) AS obj_description(x)'],
+    ['regrole', 'SELECT regrole.regrole::text FROM generate_series(10, 40000) AS regrole(x)'],
+    [
+      'a function that names its column itself: ts_stat',
+      "SELECT ts_stat.ts_stat::text FROM json_array_elements_text('[\"SELECT 1\"]') AS ts_stat",
+    ],
+    [
+      'current_setting the same way',
+      "SELECT current_setting.current_setting FROM json_array_elements_text('[\"work_mem\"]') AS current_setting",
+    ],
+    ['jsonb_array_elements_text', "SELECT regclass.regclass FROM jsonb_array_elements_text('[\"16384\"]') AS regclass"],
+    ['CAST in FROM', 'SELECT regnamespace.regnamespace::text FROM CAST(16384 AS int8) AS regnamespace(x)'],
+    ['CAST in FROM with no column list', 'SELECT c.regnamespace FROM CAST(16384 AS int8) AS c'],
+    ['ROWS FROM with one function', 'SELECT regclass.regclass FROM ROWS FROM (generate_series(16384, 16390)) AS regclass(x)'],
+    ['ROWS FROM with two', 'SELECT r.regclass FROM ROWS FROM (generate_series(1, 2), generate_series(16384, 16385)) AS r(a, b)'],
+    ['WITH ORDINALITY, renamed', 'SELECT o.regclass FROM generate_series(16384, 16385) WITH ORDINALITY AS o(v, n)'],
+    ['unnest of two arrays', 'SELECT u.regclass FROM unnest(ARRAY[16384], ARRAY[1]) AS u'],
+    ['a column definition list', "SELECT r.regclass FROM jsonb_to_record('{\"a\": 16384}') AS r(a int)"],
+    [
+      'format on a value from FROM, whose width no check can read',
+      "SELECT f.format FROM json_array_elements_text('[\"%1000000s\"]') AS f(x)",
+    ],
+    ['field selection calling format', "SELECT ('%1000000s'::text).format"],
+    // A whole row is a composite value, which these unlisted built-ins take.
+    ['a hash of a table\'s whole row, three-part', `SELECT "${OWN}".notes.hash_record FROM "${OWN}".notes`],
+    ['record_out on a table alias', 'SELECT n.record_out FROM notes n'],
+    ['anyelement_out on a subquery', 'SELECT s.anyelement_out FROM (SELECT 1) s'],
+  ])('refuses %s', async (_label, sql) => {
+    await refusedBoth(sql, FUNCTION)
+  })
+
+  it.each([
+    ['the alias, with no column list', 'SELECT g.g FROM generate_series(1, 3) g'],
+    ['a name from the column list', 'SELECT g.n FROM generate_series(1, 3) AS g(n)'],
+    ['json_array_elements_text\'s own column', "SELECT e.value FROM json_array_elements_text('[\"a\"]') AS e"],
+    ['that column renamed', "SELECT e.item FROM jsonb_array_elements('[1]') AS e(item)"],
+    ['jsonb_each\'s key and value, the first renamed', "SELECT kv.k, kv.value FROM jsonb_each('{\"a\": 1}') AS kv(k)"],
+    ['ROWS FROM\'s columns', 'SELECT r.a, r.b FROM ROWS FROM (generate_series(1, 2), generate_series(3, 4)) AS r(a, b)'],
+    ['unnest of two arrays, by their default names', "SELECT u.unnest FROM unnest(ARRAY[1], ARRAY['a']) AS u"],
+    ['WITH ORDINALITY', 'SELECT o.v, o.n FROM generate_series(5, 6) WITH ORDINALITY AS o(v, n)'],
+    ['CAST in FROM, by its alias', 'SELECT c.c FROM CAST(1 AS int8) AS c'],
+    ['a listed function by column notation', 'SELECT g.abs FROM generate_series(-2, 2) g'],
+    ['a table\'s column', 'SELECT n.body FROM notes n'],
+  ])('admits %s', async (_label, sql) => {
+    expect(await admit(sql)).toBeNull()
+  })
+})
+
+describe('XML is not evaluated: libxml2 does not stop for the statement timeout', () => {
+  it.each([
+    [
+      'XMLTABLE with an XPath that ran past the timeout',
+      "SELECT * FROM XMLTABLE('/r' PASSING XMLPARSE(DOCUMENT '<r><a/></r>') COLUMNS c float8 PATH 'count(//a[count(//a) > 0])')",
+    ],
+    ['an XMLTABLE column of an OID alias type', "SELECT * FROM XMLTABLE('/r' PASSING xmlparse(document '<r/>') COLUMNS a regclass PATH 'a')"],
+    ['XMLPARSE', "SELECT XMLPARSE(CONTENT '<a/>')"],
+    ['XMLELEMENT', "SELECT xmlelement(name a, 'x')"],
+    ['XMLSERIALIZE', "SELECT XMLSERIALIZE(CONTENT 'x' AS text)"],
+    ['IS DOCUMENT', "SELECT 'x' IS DOCUMENT"],
+    ['xmlexists', "SELECT xmlexists('//a' PASSING '<a/>')"],
+  ])('refuses %s', async (_label, sql) => {
+    await refusedBoth(sql, FUNCTION)
+  })
+})
+
+describe('what one statement may allocate', () => {
+  it.each([
+    ['a format width of 100 MB', "SELECT length(format('%100000000s', ''))"],
+    ['a left-aligned width', "SELECT format('%-2000s|', 'x')"],
+    ['a width after an argument position', "SELECT format('%1$5000s', 'x')"],
+    ['a width taken from an argument', "SELECT format('%*s', 100000000, '')"],
+    ['a format string that is not a literal', "SELECT format(f, '') FROM (SELECT '%100000000s' AS f) s"],
+    ['char(10485760)', "SELECT octet_length(''::char(10485760))"],
+    ['varchar(100000)', "SELECT 'x'::varchar(100000)"],
+    ['a char(n) column definition', "SELECT * FROM jsonb_to_record('{\"a\": \"x\"}') AS r(a char(10485760))"],
+    ['repeat a billion times', "SELECT repeat('x', 1000000000)"],
+    ['repeat a value from the data', 'SELECT repeat(body, 2) FROM notes'],
+    ['repeat a count from the data', "SELECT repeat('*', n) FROM t"],
+    ['lpad to a billion', "SELECT lpad('x', 1000000000)"],
+    ['rpad to a length from the data', "SELECT rpad('x', n) FROM t"],
+  ])('refuses %s', async (_label, sql) => {
+    await refusedBoth(sql, 'QUERY_TOO_EXPENSIVE')
+  })
+
+  it.each([
+    ['format with small widths', "SELECT format('%10s|%-5s|%%|%2$s', 'a', 'b')"],
+    ['char and varchar of ordinary sizes', "SELECT 'x'::char(3), 'x'::varchar(255), 'x'::varchar"],
+    ['zero padding', "SELECT lpad(id::text, 6, '0'), rpad(name, 20) FROM people"],
+    ['a short repeat, and one cut to a length from the data', "SELECT repeat('-', 40), left(repeat('*', 50), n) FROM t"],
+  ])('admits %s', async (_label, sql) => {
+    expect(await admit(sql)).toBeNull()
+  })
+})
+
+/**
+ * PostgreSQL runs a function in FROM to its end before anything above it
+ * reads a row, so the row cap's LIMIT does not stop it: two billion rows wrote
+ * a gigabyte of temporary files in six seconds.
+ */
+describe('generate_series in FROM has bounds run_query can count', () => {
+  it.each([
+    ['two billion rows', 'SELECT g FROM generate_series(1, 2000000000) g'],
+    ['one more than the bound', 'SELECT g FROM generate_series(1, 100001) g'],
+    ['a bound from a subquery', 'SELECT g FROM generate_series(1, (SELECT 2000000000)) g'],
+    ['a bound from the data', 'SELECT o.id, n FROM orders o, generate_series(1, o.qty) n'],
+    ['a step from the data', 'SELECT g FROM orders o, generate_series(1, 10, o.step) g'],
+    ['seconds over a decade', "SELECT t FROM generate_series(now() - interval '10 years', now(), interval '1 second') t"],
+    ['an infinite end', "SELECT t FROM generate_series('2026-01-01'::timestamptz, 'infinity', '1 day') t"],
+    ['a tiny step', 'SELECT g FROM generate_series(0, 1, 0.000001) g'],
+    ['inside ROWS FROM', 'SELECT * FROM ROWS FROM (generate_series(1, 3), generate_series(1, 2000000000)) AS r(a, b)'],
+    ['in a subquery', 'SELECT count(*) FROM (SELECT * FROM generate_series(1, 2000000000) g) s'],
+    ['under EXPLAIN', 'EXPLAIN SELECT g FROM generate_series(1, 2000000000) g'],
+  ])('refuses %s', async (_label, sql) => {
+    await refusedBoth(sql, 'QUERY_TOO_EXPENSIVE')
+  })
+
+  it.each([
+    ['numbers', 'SELECT m FROM generate_series(1, 12) AS g(m)'],
+    ['the bound itself', 'SELECT g FROM generate_series(1, 100000) g'],
+    ['a step', 'SELECT g FROM generate_series(0, 100, 10) g'],
+    ['the last 30 days', "SELECT d::date FROM generate_series(current_date - 29, current_date, interval '1 day') AS d"],
+    [
+      'the last twelve months',
+      "SELECT m FROM generate_series(date_trunc('month', now()) - interval '11 months', date_trunc('month', now()), '1 month') AS m",
+    ],
+    ['a year of days from literals', "SELECT d FROM generate_series('2026-01-01'::date, '2026-12-31', '1 day') AS d"],
+    ['hours of the last day', "SELECT h FROM generate_series(now() - interval '24 hours', now(), interval '1 hour') AS h"],
+    ['typed literals', "SELECT d FROM generate_series(timestamp '2026-01-01', timestamp '2026-01-02', interval '15 minutes') AS d"],
+    ['two billion in the select list, where rows stream under the cap', 'SELECT generate_series(1, 2000000000) AS g'],
+    ['a series from the data in the select list', 'SELECT o.id, generate_series(1, o.qty) AS n FROM orders o'],
+  ])('admits %s', async (_label, sql) => {
+    expect(await admit(sql)).toBeNull()
+  })
+
+  it('says to call it in the select list when the bounds come from the data', async () => {
+    expect((await admit('SELECT n FROM orders o, generate_series(1, o.qty) n'))?.message).toMatch(/select list/)
+  })
+})
+
+describe('EXPLAIN shows the plan and nothing about the server', () => {
+  it.each([
+    ['SETTINGS, which printed work_mem and planner costs', 'EXPLAIN (SETTINGS) SELECT 1'],
+    ['VERBOSE', 'EXPLAIN (VERBOSE) SELECT * FROM posts'],
+    ['VERBOSE, the old way', 'EXPLAIN VERBOSE SELECT * FROM posts'],
+    ['BUFFERS', 'EXPLAIN (BUFFERS) SELECT 1'],
+    ['SUMMARY', 'EXPLAIN (SUMMARY) SELECT 1'],
+    ['GENERIC_PLAN', 'EXPLAIN (GENERIC_PLAN) SELECT * FROM posts WHERE id = $1'],
+    ['FORMAT XML', 'EXPLAIN (FORMAT XML) SELECT 1'],
+    ['FORMAT YAML', 'EXPLAIN (FORMAT YAML) SELECT 1'],
+  ])('refuses %s', async (_label, sql) => {
+    await refusedBoth(sql, 'EXPLAIN_OPTION_NOT_ALLOWED')
+  })
+
+  it.each([['EXPLAIN SELECT 1'], ['EXPLAIN (COSTS false) SELECT 1'], ['EXPLAIN (FORMAT JSON) SELECT 1'], ['EXPLAIN (FORMAT TEXT, COSTS off) SELECT 1']])(
+    'admits %s',
+    async (sql) => {
+      expect(await admit(sql)).toBeNull()
+    },
+  )
+})
+
+describe('system columns describe the cluster, not the project', () => {
+  it.each([
+    ['xmin', 'SELECT xmin FROM notes'],
+    ['age(xmin), the cluster\'s transaction counter', 'SELECT age(xmin) FROM notes'],
+    ['qualified', 'SELECT n.xmax FROM notes n'],
+    ['cmin', 'SELECT cmin FROM notes'],
+    ['cmax', 'SELECT cmax FROM notes'],
+    ['ctid', 'SELECT ctid FROM notes'],
+    ['tableoid', 'SELECT tableoid FROM notes'],
+    ['in WHERE', "SELECT id FROM notes WHERE ctid = '(0,1)'"],
+  ])('refuses %s', async (_label, sql) => {
+    await refusedBoth(sql, CATALOG)
+  })
+})
+
+/**
+ * A text search configuration named any other way is looked up, and the
+ * lookup's error told another project's schema ("permission denied for
+ * schema") from a name that is not there; an integer there is an object id.
+ */
+describe('a text search configuration is a literal naming a built-in one', () => {
+  it.each([
+    ['a name in another project\'s schema', `SELECT to_tsvector('${OTHER}.english', 'a')`],
+    ['a name in this project\'s schema', `SELECT to_tsquery('"${OWN}".english', 'a')`],
+    ['an object id', "SELECT to_tsvector(16400, 'a')"],
+    ['a value from the data', 'SELECT plainto_tsquery(lang, q) FROM searches'],
+    ['a cast of an object id', "SELECT websearch_to_tsquery(16400::regconfig, 'a')"],
+    ['a cast of a name in a schema', `SELECT to_tsvector('${OTHER}.english'::regconfig, 'a')`],
+    ['a regconfig cast on its own', `SELECT '${OTHER}.english'::regconfig`],
+    [
+      'ts_headline with three arguments and no configuration first',
+      "SELECT ts_headline(body, q, 'MaxWords=5') FROM posts, to_tsquery('english', 'x') q",
+    ],
+    ['jsonb_to_tsvector', `SELECT jsonb_to_tsvector('${OTHER}.english', '{}'::jsonb, '["string"]')`],
+    ['a configuration that is not built in', "SELECT to_tsvector('my_config', body) FROM posts"],
+  ])('refuses %s', async (_label, sql) => {
+    await refusedBoth(sql, TYPE)
+  })
+
+  it.each([
+    ['by name', "SELECT to_tsvector('english', body) FROM posts"],
+    ['in any case', "SELECT to_tsvector('English', body) FROM posts"],
+    ['cast to regconfig', "SELECT to_tsvector('english'::regconfig, body), 'simple'::regconfig FROM posts"],
+    ['simple', "SELECT websearch_to_tsquery('simple', 'a b')"],
+    ['the default configuration', 'SELECT to_tsvector(body) FROM posts'],
+    [
+      'ts_headline with options after the configuration',
+      "SELECT ts_headline('english', body, q, 'MaxWords=5') FROM posts, to_tsquery('english', 'x') q",
+    ],
+    ['ts_headline with two arguments', "SELECT ts_headline(body, to_tsquery('english', 'x')) FROM posts"],
+    ['jsonb_to_tsvector', "SELECT jsonb_to_tsvector('english', data, '[\"string\"]') FROM profiles"],
+  ])('admits %s', async (_label, sql) => {
+    expect(await admit(sql)).toBeNull()
+  })
+})
+
+describe('operators: PostgreSQL\'s own', () => {
+  it.each([
+    ['one that is not built in', 'SELECT ### 1'],
+    ['a prefix one', 'SELECT @@@@ x FROM t'],
+    ['qualified with this project\'s schema', `SELECT a OPERATOR("${OWN}".+) b FROM t`],
+    ['qualified with pg_catalog but not built in', 'SELECT a OPERATOR(pg_catalog.###) b FROM t'],
+    ['in ORDER BY ... USING', 'SELECT a FROM t ORDER BY a USING ###'],
+    ['in a subquery comparison', 'SELECT a ### ANY (SELECT b FROM u) FROM t'],
+  ])('refuses %s', async (_label, sql) => {
+    await refusedBoth(sql, 'OPERATOR_NOT_ALLOWED')
+  })
+
+  it.each([
+    ['comparisons, != included', 'SELECT * FROM t WHERE a != b AND a <> c AND a >= 1'],
+    ['BETWEEN in its forms', 'SELECT * FROM t WHERE a BETWEEN 1 AND 2 OR a NOT BETWEEN SYMMETRIC 3 AND 4'],
+    ['IS DISTINCT FROM, NOT IN and NULLIF', 'SELECT nullif(a, 0) FROM t WHERE a IS DISTINCT FROM b AND a NOT IN (1, 2)'],
+    [
+      'text, JSON, array, range and network operators',
+      "SELECT a || b, d->>'k', d #>> '{a}', d ? 'k', tags && ARRAY['x'], r @> 3, ip << '10.0.0.0/8'::cidr, name ^@ 'a' FROM t",
+    ],
+    ['pattern matching', "SELECT * FROM t WHERE a ~~ 'x%' OR a ~* 'y' OR a !~ 'z'"],
+    ['ORDER BY ... USING a built-in', 'SELECT a FROM t ORDER BY a USING >'],
+  ])('admits %s', async (_label, sql) => {
+    expect(await admit(sql)).toBeNull()
+  })
+
+  it('reads a built-in qualified with pg_catalog as that built-in (the text check still refuses the name)', async () => {
+    expect(await parsedAlone('SELECT a OPERATOR(pg_catalog.+) b FROM t')).toBeNull()
+  })
+})
+
+describe('kept: these parse their input and read nothing else', () => {
+  it.each([
+    ['a range literal', "SELECT count(*) FROM orders WHERE period && '[2026-01-01,2027-01-01)'::tstzrange"],
+    ['range_agg', 'SELECT range_agg(period), range_intersect_agg(period) FROM orders'],
+    ['multiranges', "SELECT '{[1,3),[5,7)}'::int4multirange @> 2, int4multirange(int4range(1, 3))"],
+    ['inet and cidr', "SELECT '10.0.0.1'::inet << '10.0.0.0/8'::cidr, host(ip), masklen(ip), network(ip) FROM visits"],
+  ])('admits %s', async (_label, sql) => {
+    expect(await admit(sql)).toBeNull()
+  })
+})
+
+describe('still refused, and told what to do instead', () => {
+  it('a cast to the project\'s own enum: compare without it', async () => {
+    const err = await admit("SELECT count(*) FROM orders WHERE status = 'paid'::order_status")
+    expect(err).toMatchObject({ code: TYPE })
+    expect(err?.hint).toMatch(/status = 'paid'/)
+  })
+
+  it('extension types and operators: not in run_query', async () => {
+    for (const sql of ["SELECT * FROM users WHERE email = 'A@B.COM'::citext", "SELECT '[1,2,3]'::vector"]) {
+      const err = await admit(sql)
+      expect(err).toMatchObject({ code: TYPE })
+      expect(err?.hint).toMatch(/public/)
+    }
+    const err = await admit("SELECT id FROM docs ORDER BY embedding <=> '[1,2,3]' LIMIT 5")
+    expect(err).toMatchObject({ code: 'OPERATOR_NOT_ALLOWED' })
+    expect(err?.hint).toMatch(/pgvector/)
+  })
+
+  it('(alias).column: write alias.column', async () => {
+    const err = await admit('SELECT (c).name FROM customers c')
+    expect(err).toMatchObject({ code: FUNCTION })
+    expect(err?.message).toMatch(/alias\.name/)
+  })
+
+  it('pg_typeof: get_table_schema gives the types', async () => {
+    const err = await admit('SELECT pg_typeof(amount) FROM orders')
+    expect(err).toMatchObject({ code: FUNCTION })
+    expect(err?.message).toMatch(/get_table_schema/)
+  })
+})
+
 describe('schemas other than the project\'s own', () => {
   it.each([
     ['the platform\'s public schema', 'SELECT * FROM public.users'],
@@ -308,11 +605,14 @@ describe('SHOW: only listed settings', () => {
     ['a platform setting', 'SHOW "backenly.app_role"'],
     ['a server setting', 'SHOW work_mem'],
     ['a file location', 'SHOW data_directory'],
+    ['the build string, which version() is refused for', 'SHOW server_version'],
+    ['lc_collate, which PostgreSQL 16 does not have', 'SHOW lc_collate'],
+    ['lc_ctype, likewise', 'SHOW lc_ctype'],
   ])('refuses %s', async (_label, sql) => {
     await refusedBoth(sql, 'SETTING_NOT_ALLOWED')
   })
 
-  it.each([['SHOW search_path'], ['SHOW TimeZone'], ['SHOW TIME ZONE'], ['SHOW "DateStyle"'], ['SHOW server_version']])(
+  it.each([['SHOW search_path'], ['SHOW TimeZone'], ['SHOW TIME ZONE'], ['SHOW "DateStyle"'], ['SHOW server_version_num']])(
     'admits %s',
     async (sql) => {
       expect(await admit(sql)).toBeNull()
@@ -376,7 +676,7 @@ describe('what the statement is comes from its parse tree', () => {
   it.each([
     [
       'a SELECT behind a nested comment that once read as SHOW',
-      '/* /* */ show */ SELECT g FROM generate_series(1, 3000000) g',
+      '/* /* */ show */ SELECT g FROM generate_series(1, 5000) g',
       'select',
     ],
     ['VALUES', "VALUES (1, 'a')", 'select'],
@@ -384,8 +684,19 @@ describe('what the statement is comes from its parse tree', () => {
     ['EXPLAIN', 'EXPLAIN SELECT * FROM orders', 'explain'],
     ['SHOW', 'SHOW search_path', 'show'],
   ])('%s', async (_label, sql, kind) => {
-    expect(await checkReadQuery(sql, OWN)).toEqual({ refusal: null, kind })
-    expect(await admitReadQuery(sql, PROJECT)).toBe(kind)
+    expect(await checkReadQuery(sql, OWN)).toMatchObject({ refusal: null, kind })
+    expect((await admitReadQuery(sql, PROJECT)).kind).toBe(kind)
+  })
+
+  it('lists the names the statement leaves to search_path, for the check against the project\'s own schema', async () => {
+    const admitted = await checkReadQuery(
+      "SELECT lower(name), n.total, (t).md5, pg_catalog.upper(x) FROM notes n, people t WHERE a ~~ 'x%'",
+      OWN,
+    )
+    expect(admitted.refusal).toBeNull()
+    expect(admitted.calls).toEqual(expect.arrayContaining(['lower', 'total', 'md5']))
+    expect(admitted.calls).not.toContain('upper') // pg_catalog.upper resolves in pg_catalog alone
+    expect(admitted.operators).toEqual(expect.arrayContaining(['~~', '=', '<>', '<', '<=', '>', '>=']))
   })
 })
 
@@ -516,7 +827,7 @@ describe('reads that must keep working', () => {
     ['VALUES', "VALUES (1, 'a'), (2, 'b')"],
     ['TABLE', 'TABLE orders'],
     ['EXPLAIN', 'EXPLAIN SELECT * FROM posts WHERE id = 1'],
-    ['EXPLAIN with options', 'EXPLAIN (FORMAT JSON, VERBOSE) SELECT * FROM posts'],
+    ['EXPLAIN with options', 'EXPLAIN (FORMAT JSON, COSTS false) SELECT * FROM posts'],
     ['a parameter', 'SELECT * FROM orders WHERE status = $1'],
     [
       'full-text search with a configuration given by name',

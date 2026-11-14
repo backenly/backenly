@@ -45,7 +45,7 @@
 
 import { Client } from 'pg'
 import { projectDatabaseUrl } from '@/lib/data-plane/regional'
-import { checkReadQuery, type StatementKind, type StatementRefusal } from '@/lib/mcp/read-query-ast'
+import { checkReadQuery, type RefusalHint, type StatementKind, type StatementRefusal } from '@/lib/mcp/read-query-ast'
 import { readOnlyLogin } from '@/lib/services/direct-access'
 import { workspaceSchemaName } from '@/lib/security/workspace-schema'
 
@@ -217,7 +217,7 @@ const WRITE_VERBS =
  * and the parsed-statement check (lib/mcp/read-query-ast.ts), so both layers
  * send an agent to the same place.
  */
-const HINTS = {
+const HINTS: Record<RefusalHint, string> = {
   // Name the ADVERTISED doors. This used to say "create_table, add_column"
   // — real brain tools that the MCP manifest does not list, so an agent
   // reading this refusal was sent to two tools it could not call, inside the
@@ -234,6 +234,8 @@ const HINTS = {
     'and only ever describe this project. In particular get_table_schema returns the live ' +
     'RLS policies with their command, ROLES, permissive/restrictive flag and both ' +
     'predicates, so pg_policies is not needed to audit a policy\'s scope.',
+  systemColumn:
+    'Select the table\'s own columns. To see what changed when, use a timestamp column such as updated_at.',
   schema:
     'Leave table and function names unqualified: run_query resolves them in this project\'s schema, ' +
     'the only one it reads. To see what is there use read_backend_state {section:"tables"}.',
@@ -241,12 +243,24 @@ const HINTS = {
     'Rewrite the query with the listed built-ins: count, sum, avg, min, max, string_agg, array_agg, ' +
     'row_number, rank, lag, lead, round, abs, lower, upper, substring, replace, regexp_replace, split_part, ' +
     'concat, date_trunc, extract, now, to_char, generate_series, unnest, jsonb_build_object, jsonb_agg, ' +
-    'jsonb_array_elements, to_tsvector and the like. To learn about the schema use read_backend_state ' +
-    '{section:"tables"} or get_table_schema {tableName}.',
+    'jsonb_array_elements, to_tsvector and the like. lpad, rpad and repeat take literal lengths, format() a ' +
+    'literal format string, and the text search functions a built-in configuration as a literal (\'english\'). ' +
+    'To learn about the schema, column types included, use read_backend_state {section:"tables"} or ' +
+    'get_table_schema {tableName}.',
+  operator:
+    'Use PostgreSQL\'s built-in operators (=, <>, <, ||, ->>, @>, &&, ~~ and the rest). Extension operators ' +
+    'such as pgvector\'s <=> or pg_trgm\'s % live in public, which run_query does not read.',
   type:
-    'Cast to one of the listed types. To compare an id, compare it as text or an integer.',
+    'Cast to one of the listed types. A literal compared with a column needs no cast: status = \'paid\' reads ' +
+    '\'paid\' as the column\'s own type, an enum included. To compare as text, cast the column: status::text. ' +
+    'Extension types such as vector and citext live in public, which run_query does not read; compare a citext ' +
+    'column as lower(email) = lower(\'A@B.COM\').',
   setting:
     'Use SHOW with one of the listed settings, one at a time.',
+  explain: 'Use EXPLAIN, EXPLAIN (COSTS false) or EXPLAIN (FORMAT JSON).',
+  expensive:
+    'Narrow the statement: filter or aggregate earlier, keep widths and lengths small, and give generate_series ' +
+    'in FROM literal bounds, or call it in the select list, where rows stream under the row cap.',
 }
 
 /**
@@ -255,22 +269,31 @@ const HINTS = {
  */
 export const MAX_SQL_LENGTH = 100_000
 
+/** What admitReadQuery answers: the statement's kind, and the names it leaves to search_path. */
+export interface AdmittedStatement {
+  kind: StatementKind
+  calls: string[]
+  operators: string[]
+}
+
 /**
  * Everything a statement must pass before it runs, in order:
  *
  *   1. PostgreSQL's own parser (lib/mcp/read-query-ast.ts): exactly one
- *      SELECT / EXPLAIN SELECT / SHOW, using only allowlisted functions, types
- *      and settings, naming no catalog and no schema but this project's. This
- *      is the boundary for catalog METADATA, which grants cannot hide.
+ *      SELECT / EXPLAIN SELECT / SHOW, using only allowlisted functions,
+ *      operators, types and settings, with the arguments those take, naming no
+ *      catalog, no system column and no schema but this project's. This is the
+ *      boundary for catalog METADATA, which grants cannot hide.
  *   2. The text checks (assertReadOnlySql), an independent second layer.
  *
  * A statement that does not parse is refused. If the parser cannot be loaded,
  * nothing runs (SQL_PARSER_UNAVAILABLE, 503). Neither falls back to the text
  * checks alone.
  *
- * Answers what the statement is, from its parse tree, for the row cap.
+ * Answers what the statement is, from its parse tree, for the row cap, and the
+ * names it leaves to search_path.
  */
-export async function admitReadQuery(sqlRaw: string, projectId: string): Promise<StatementKind> {
+export async function admitReadQuery(sqlRaw: string, projectId: string): Promise<AdmittedStatement> {
   const sql = typeof sqlRaw === 'string' ? sqlRaw.trim() : ''
   if (!sql) throw new ReadQueryError('Empty query.', 'EMPTY_QUERY')
   if (sql.length > MAX_SQL_LENGTH) {
@@ -282,7 +305,7 @@ export async function admitReadQuery(sqlRaw: string, projectId: string): Promise
   const verdict = await checkReadQuery(sql, workspaceSchemaName(projectId))
   if (verdict.refusal) throw refusalError(verdict.refusal)
   assertReadOnlySql(sql)
-  return verdict.kind
+  return { kind: verdict.kind, calls: verdict.calls, operators: verdict.operators }
 }
 
 function refusalError(refusal: StatementRefusal): ReadQueryError {
@@ -451,7 +474,7 @@ export async function runReadQuery(
   sql: string,
   limit: number = DEFAULT_ROWS,
 ): Promise<ReadQueryResult> {
-  const kind = await admitReadQuery(sql, projectId)
+  const { kind } = await admitReadQuery(sql, projectId)
   try {
     return await execute(projectId, sql, limit, kind)
   } catch (err) {
