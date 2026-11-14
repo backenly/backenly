@@ -472,7 +472,7 @@ const { data, error } = await supabase
       {
         label: 'Provision',
         title: 'The organization model as real tables',
-        body: 'enable_teams ensures end-user auth is on, then creates organizations (name, unique slug, owner), organization_members (organization, user, role defaulting to member, joined_at), and organization_invitations (email, role, unique token, inviter, expiry, accepted_at), with CRUD endpoints and the lookup indexes membership checks need. It is idempotent, so re-running it is safe.',
+        body: 'enable_teams ensures end-user auth is on, then creates organizations (name, unique slug, owner), organization_members (organization, user, role defaulting to member, joined_at), and organization_invitations (email, role, a token you generate at random and Backenly keeps only as its hash, inviter, expiry, accepted_at), with CRUD endpoints and the lookup indexes membership checks need. It is idempotent, so re-running it is safe.',
       },
       {
         label: 'Scope',

@@ -15121,8 +15121,10 @@ async function executeEnableTeams(params: any, projectId: string, apiKey?: strin
         `2. They POST /organizations { name, slug, owner_user_id: <their id> } (the server gives it its id), then POST ` +
         `/organization_members { organization_id, user_id: <their id>, role: "owner" }.\n` +
         `3. An owner or admin POSTs /organization_invitations { organization_id, email, role, token, invited_by_user_id: ` +
-        `<their id> } with a token of 32 or more random characters (A-Z, a-z, 0-9, - and _, e.g. 16 random bytes in hex) ` +
-        `and emails the user a link with it.\n` +
+        `<their id> } and emails the user a link with the token. Make the token with a cryptographic random generator, ` +
+        `crypto.randomBytes(16).toString('hex') in Node or crypto.getRandomValues in a browser: 32 to 512 characters of ` +
+        `A-Z, a-z, 0-9, - and _. It must be random, never a value someone could guess: Backenly checks its length and ` +
+        `characters, and cannot check that.\n` +
         `4. The invited user signs up with that email, then POSTs /orgs/accept-invite { token } and is added to organization_members.\n\n` +
         `Scope your other tables by adding an \`organization_id UUID\` column and the org_members RLS policy.`,
       data: { created, tables: ['organizations', 'organization_members', 'organization_invitations'] },
