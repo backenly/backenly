@@ -192,4 +192,3 @@ describe('Issue #614: AWS secret access key false-positive elimination', () => {
     })
   })
 })
-

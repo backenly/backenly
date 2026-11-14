@@ -318,7 +318,7 @@ export class LocalStorageService implements StorageService {
 
     if (effectiveLimit !== undefined) {
       const filesInBucket = await prisma.storageFile.count({
-        where: { 
+        where: {
           bucketId,
           deletedAt: null, // Only count active files
         },
