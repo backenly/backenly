@@ -218,12 +218,15 @@ describe('a repair index is built online', () => {
       return r[0]?.ready === true
     }, 'Phase 3 indisready = true')
 
-    // 5. Cancel the build while it is waiting in Phase 4 for blocker
+    // 5. Cancel the build while it is waiting in Phase 4 for blocker. The
+    // build's error can arrive before the cancel returns, so it is awaited
+    // from before the cancel; otherwise Jest sees an unhandled rejection.
+    const buildCancelled = expect(buildPromise).rejects.toThrow(/canceling statement/)
     await raw(
       `SELECT pg_cancel_backend(pid) FROM pg_stat_activity
         WHERE query LIKE '%"uniq_orders_case"%' AND pid <> pg_backend_pid()`,
     )
-    await expect(buildPromise).rejects.toThrow()
+    await buildCancelled
     await blocker.query('COMMIT')
 
     // 6. Confirm Postgres left the index in the catalog with indisvalid = false AND indisready = true
