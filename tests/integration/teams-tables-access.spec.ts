@@ -581,6 +581,24 @@ describe('a repair or an agent that asks for an owner\'s rule on a teams table',
     expect({ success: r.success, message: r.message }).toMatchObject({ success: true, message: expect.stringContaining('kept the teams rules') })
     expect({ rules: await policies(tableName), forced: await forced(tableName) }).toEqual({ rules: TEAMS_RULES, forced: true })
   }, 120_000)
+
+  it("the build runtime's RLS node counts the teams rules as the tables' protection", async () => {
+    const { executeNode } = await import('@/lib/ai/build-runtime/node-executor')
+    const out = await executeNode(
+      {
+        id: 'permissions.rls',
+        label: 'permissions.rls',
+        type: 'permissions',
+        status: 'pending',
+        phase: 1,
+        dependencies: [],
+        executionParams: { tables: [...TABLES] },
+      } as any,
+      projectId,
+    )
+    expect({ status: out.status, detail: out.detail }).toMatchObject({ status: 'verified' })
+    for (const table of TABLES) expect({ table, rules: await policies(table) }).toEqual({ table, rules: TEAMS_RULES })
+  }, 240_000)
 })
 
 describe('a rule a person chose on a teams table, then a repair', () => {
