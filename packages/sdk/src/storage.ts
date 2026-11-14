@@ -115,12 +115,18 @@ export class StorageModule {
   }
 
   /**
-   * Get the URL for a file by its ID.
-   * Note: for private files this returns a metadata endpoint —
-   * use the `url` returned by `upload()` for direct access.
+   * The address a file is served at, by its ID (returned from upload).
+   *
+   * A public file, in a bucket whose policy lets files be public, is served
+   * there to anyone, so the address works as an `<img src>`. Any other file is
+   * served only to a reader its bucket's policy allows: for one of those, use
+   * the signed `url` that `upload()` returned.
+   *
+   * @example
+   * const { id } = await backend.storage.upload(file, 'me.png', { bucket: 'avatars', isPublic: true })
+   * avatar.src = backend.storage.getUrl(id)
    */
   getUrl(fileId: string): string {
-    const projectId = this.client.getProjectId()
-    return `${this.client.getApiUrl()}/api/v1/${projectId}/storage/files/${fileId}`
+    return `${this.client.getApiUrl()}/api/storage/files/${encodeURIComponent(fileId)}/download`
   }
 }

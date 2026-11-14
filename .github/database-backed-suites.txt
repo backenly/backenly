@@ -1307,6 +1307,14 @@ tests/integration/publish-noop-truth.spec.ts
 # the whole project. Real StorageFile rows past the first page are the
 # property.
 tests/integration/storage-files-pagination.spec.ts
+# The supabase-js shim works on a real stream and the storage routes: a
+# postgres_changes handler written for supabase-js gets each insert and update
+# with the row in `new`, a delete with the row's key in `old`, and never the
+# stream's connected frame, and storage.from(bucket).upload(path, file) stores
+# the file in that bucket under that path, which getPublicUrl() serves to anyone
+# only from a public bucket. Real trigger, notifications, project, key, buckets
+# and file rows, so a real Postgres.
+tests/integration/supabase-compat-realtime-storage.spec.ts
 
 # A new end user's session works from sign-up: the Next sign-up route signs with
 # the resolved (decrypted) project secret every verifier uses, and refresh binds
