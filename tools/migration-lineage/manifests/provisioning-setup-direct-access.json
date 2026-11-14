@@ -4,7 +4,7 @@
   "source": "scripts/setup-direct-access.sql",
   "derivation": "replayed",
   "confidence": "derived",
-  "notes": "Observed by replaying scripts/setup-direct-access.sql into a throwaway cluster (PostgreSQL 16.4, compiled by Visual C++ build 1940, 64-bit) on top of the schema.prisma projection, in the order scripts/postgrest-install.sh applies. Roles, grants and default privileges are cluster or database state rather than schema objects, and are reported in the provisioning inventory instead of here.",
+  "notes": "Observed by replaying scripts/setup-direct-access.sql into a throwaway cluster (PostgreSQL 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1) on x86_64-pc-linux-gnu, compiled by gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0, 64-bit) on top of the schema.prisma projection, in the order scripts/postgrest-install.sh applies. Roles, grants and default privileges are cluster or database state rather than schema objects, and are reported in the provisioning inventory instead of here.",
   "entries": [
     {
       "key": "event_trigger backenly_ddl_watch",
@@ -119,6 +119,22 @@
       }
     },
     {
+      "key": "routine public.backenly_direct_schema_change_holds(p_role text)",
+      "expect": {
+        "result": "text[]",
+        "kind": "f",
+        "language": "sql",
+        "security_definer": true,
+        "volatility": "s",
+        "strict": false,
+        "leakproof": false,
+        "config": [
+          "search_path=pg_catalog"
+        ],
+        "body_sha256": "TjC53+n7r98aoU2AaIWGN1V+8JOeSAsLHGmEvHH+H8w="
+      }
+    },
+    {
       "key": "routine public.backenly_direct_set_password(p_role text, p_password text)",
       "expect": {
         "result": "boolean",
@@ -147,7 +163,39 @@
         "config": [
           "search_path=pg_catalog, public"
         ],
-        "body_sha256": "sD9BSLAZBdyIOtVUCvXmli0xzH8qq/sZl97HX3dj5o4="
+        "body_sha256": "tFOeeKKYWgVF0gTvmle2+XD8bmaVY1LyxOH68tLOJPw="
+      }
+    },
+    {
+      "key": "routine public.backenly_direct_shared_database()",
+      "expect": {
+        "result": "boolean",
+        "kind": "f",
+        "language": "sql",
+        "security_definer": true,
+        "volatility": "s",
+        "strict": false,
+        "leakproof": false,
+        "config": [
+          "search_path=pg_catalog"
+        ],
+        "body_sha256": "EoazBQ1cNLWbdcXg+zCP/Y25avqix35VsE9zm7inoI0="
+      }
+    },
+    {
+      "key": "routine public.backenly_direct_strip_schema_changes(p_role text, p_owner text)",
+      "expect": {
+        "result": "boolean",
+        "kind": "f",
+        "language": "plpgsql",
+        "security_definer": true,
+        "volatility": "v",
+        "strict": false,
+        "leakproof": false,
+        "config": [
+          "search_path=pg_catalog, public"
+        ],
+        "body_sha256": "YQr5uekaW7R0z6g9vdzFeKv/ddLhz8KNd4QXZwIPluU="
       }
     },
     {
@@ -163,7 +211,7 @@
         "config": [
           "search_path=pg_catalog, public"
         ],
-        "body_sha256": "zb4J5o59g5ESgxYyxDZ3d40K06pMbxkugkhMUbB1nDw="
+        "body_sha256": "XehN+qCRNjmHY/RzqC5cDCXWF1hK9IQL1iLJuX03kZY="
       }
     }
   ]
