@@ -497,6 +497,15 @@ __tests__/database/sql-workspace-isolation.test.ts
 # errors still reach the caller. Real bkn_ro_ role, refused with NOLOGIN.
 __tests__/database/read-query-connection.test.ts
 
+# The system catalogs are readable by PUBLIC and describe every project, so for
+# catalog metadata the statement is run_query's boundary, checked with
+# PostgreSQL's own parser. Each route (a double-quoted or unicode-escaped
+# pg_proc, an id cast to regnamespace, query_to_xml, to_regnamespace) is run as
+# the real bkn_ro_ role first to prove it reads another project, then refused
+# through run_query; own-table reads still work; and a role with
+# standard_conforming_strings off cannot turn a checked literal into SQL.
+__tests__/database/run-query-catalog-guard.test.ts
+
 # Function SQL ran on the app's own connection, whose role owns every platform
 # table and workspace schema, so generated function code could read public.users
 # or another tenant's tables; claims filter rows, not schemas. It now logs in as

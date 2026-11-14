@@ -19,8 +19,11 @@
 
 import { describe, test, expect, beforeAll, afterAll } from '@jest/globals'
 import { execFileSync } from 'child_process'
+import { Client } from 'pg'
 import { prisma } from '@/lib/db/prisma'
-import { runReadQuery, ReadQueryError } from '@/lib/mcp/read-query'
+import { projectDatabaseUrl } from '@/lib/data-plane/regional'
+import { runReadQuery, readOnlyConnection, ReadQueryError } from '@/lib/mcp/read-query'
+import { readOnlyLogin } from '@/lib/services/direct-access'
 import { validateConsoleSql } from '@/lib/sql-console/guard'
 
 let userId: string
@@ -143,12 +146,24 @@ describe('the boundary PostgreSQL enforces', () => {
   }, 60_000)
 
   test('another tenant schema is refused by a missing grant', async () => {
-    // The important one. A schema-qualified read of a REAL other workspace,
-    // which a regex would have to recognise to stop. Here it fails because the
-    // bkn_ro_ role was never granted USAGE on that schema.
+    // The important one. A schema-qualified read of a REAL other workspace.
+    // runReadQuery now refuses any schema but the project's own before the
+    // statement runs (lib/mcp/read-query-ast.ts), so that refusal is asserted
+    // first, and then the same statement is sent as the project's bkn_ro_ role
+    // directly, with no check in front: it fails because the role was never
+    // granted USAGE on that schema, which is the claim this suite exists for.
     await expect(
       runReadQuery(projectId, `SELECT body FROM "${otherSchema}".secrets`, 10)
-    ).rejects.toThrow()
+    ).rejects.toMatchObject({ code: 'OUTSIDE_PROJECT_SCHEMA' })
+
+    const client = new Client(readOnlyConnection(await projectDatabaseUrl(projectId), await readOnlyLogin(projectId)))
+    client.on('error', () => {})
+    await client.connect()
+    try {
+      await expect(client.query(`SELECT body FROM "${otherSchema}".secrets`)).rejects.toMatchObject({ code: '42501' })
+    } finally {
+      await client.end().catch(() => {})
+    }
   }, 60_000)
 
   test('the other tenant genuinely holds readable data', async () => {
