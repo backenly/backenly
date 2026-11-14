@@ -2125,7 +2125,8 @@ export function teamsPolicySql(schemaName: string, tableName: TeamsTable): strin
             END IF;
             RAISE EXCEPTION 'send the invitation token itself: only its hash is kept' USING ERRCODE = '22023';
           END IF;
-          IF NEW."token" !~ '^[A-Za-z0-9_-]{32,512}$' THEN
+          -- PostgreSQL's regular expressions refuse a repetition count above 255, so the length is checked apart.
+          IF length(NEW."token") NOT BETWEEN 32 AND 512 OR NEW."token" !~ '^[A-Za-z0-9_-]+$' THEN
             RAISE EXCEPTION 'an invitation token is 32 to 512 characters of A-Z, a-z, 0-9, - and _ (16 random bytes in hex, or 24 in base64url)' USING ERRCODE = '22023';
           END IF;
           NEW."token" := 'sha256:' || encode(sha256(convert_to(NEW."token", 'UTF8')), 'hex');
