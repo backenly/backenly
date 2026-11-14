@@ -210,10 +210,20 @@ function encodeAt(value: unknown, stack: Set<object>, depth: number): unknown {
   }
 }
 
-/** A value the runner sent. Untrusted: nothing here runs code, and `__proto__` stays data. */
+/**
+ * A value the runner sent. Untrusted: nothing here runs code, `__proto__` stays
+ * data, and nesting deeper than MAX_DEPTH is refused with a RangeError rather
+ * than taking this process's stack. (Its size is bounded by the line it came
+ * in, MAX_LINE_BYTES.)
+ */
 export function decodeValue(value: unknown): unknown {
+  return decodeAt(value, 0)
+}
+
+function decodeAt(value: unknown, depth: number): unknown {
   if (value === null || typeof value !== 'object') return value
-  if (Array.isArray(value)) return value.map(decodeValue)
+  if (depth > MAX_DEPTH) throw new RangeError('A value from a function run is nested too deeply')
+  if (Array.isArray(value)) return value.map((item) => decodeAt(item, depth + 1))
   const obj = value as Record<string, any>
   if (Object.prototype.hasOwnProperty.call(obj, TAG) && typeof obj[TAG] === 'string') {
     const v = obj.v
@@ -230,22 +240,22 @@ export function decodeValue(value: unknown): unknown {
       case 'b':
         return Buffer.from(typeof v === 'string' ? v : '', 'base64')
       case 'm':
-        return new Map((Array.isArray(v) ? v : []).map((pair: any) => [decodeValue(pair?.[0]), decodeValue(pair?.[1])]))
+        return new Map((Array.isArray(v) ? v : []).map((pair: any) => [decodeAt(pair?.[0], depth + 1), decodeAt(pair?.[1], depth + 1)]))
       case 's':
-        return new Set((Array.isArray(v) ? v : []).map(decodeValue))
+        return new Set((Array.isArray(v) ? v : []).map((item: unknown) => decodeAt(item, depth + 1)))
       case 'o':
-        return decodePlain(v && typeof v === 'object' ? v : {})
+        return decodePlain(v && typeof v === 'object' ? v : {}, depth)
       default:
         break
     }
   }
-  return decodePlain(obj)
+  return decodePlain(obj, depth)
 }
 
-function decodePlain(obj: Record<string, unknown>): Record<string, unknown> {
+function decodePlain(obj: Record<string, unknown>, depth: number): Record<string, unknown> {
   const out: Record<string, unknown> = {}
   for (const key of Object.keys(obj)) {
-    const item = decodeValue(obj[key])
+    const item = decodeAt(obj[key], depth + 1)
     if (key === '__proto__') Object.defineProperty(out, key, { value: item, enumerable: true, writable: true, configurable: true })
     else out[key] = item
   }
@@ -293,19 +303,35 @@ function isolationMode(): Mode {
 }
 
 /** Split a byte stream into lines, refusing a line too long to be one the protocol sends. */
-function lineReader(onLine: (line: Buffer) => void, onOverflow: () => void): (chunk: Buffer) => void {
+/**
+ * Split a byte stream into lines, refusing a line too long to be one the
+ * protocol sends. The returned function is a stream 'data' handler of this
+ * process, and what it reads is a function's to write: nothing in it may
+ * throw out, so a line that fails to be handled ends that run (onBad) and only
+ * that run.
+ */
+function lineReader(onLine: (line: Buffer) => void, onBad: () => void): (chunk: Buffer) => void {
   let partial = Buffer.alloc(0)
+  let bad = false
   return (chunk) => {
-    let data = partial.length ? Buffer.concat([partial, chunk]) : chunk
-    let nl: number
-    while ((nl = data.indexOf(10)) >= 0) {
-      onLine(data.subarray(0, nl))
-      data = data.subarray(nl + 1)
-    }
-    partial = Buffer.from(data)
-    if (partial.length > MAX_LINE_BYTES) {
+    if (bad) return
+    try {
+      let data = partial.length ? Buffer.concat([partial, chunk]) : chunk
+      let nl: number
+      while ((nl = data.indexOf(10)) >= 0) {
+        onLine(data.subarray(0, nl))
+        data = data.subarray(nl + 1)
+      }
+      partial = Buffer.from(data)
+      if (partial.length > MAX_LINE_BYTES) throw new RangeError('A line from a function run is too long')
+    } catch {
+      bad = true
       partial = Buffer.alloc(0)
-      onOverflow()
+      try {
+        onBad()
+      } catch {
+        // the run is already ending
+      }
     }
   }
 }
@@ -555,37 +581,57 @@ export async function runIsolated(job: IsolatedJob, handlers: CallHandlers = {})
       session.send(line)
     }
 
+    // Every line arrives in a stream event handler of this process, and the
+    // function wrote it: one that cannot be read or handled ends this run as a
+    // failure of the function's, and throws nowhere else.
+    const unreadable = (err: unknown) => {
+      session.abort()
+      settle({
+        result: { ok: false, error: `The function's run sent output that could not be read (${(err as any)?.message ?? err})`, errorKind: 'protocol', logs: [] },
+        killed: null,
+        exitCode: null,
+        signal: null,
+        stderr: '',
+        codeStarted,
+      })
+    }
+
     session.onMessage((msg) => {
-      if (msg?.t === 'started') {
-        codeStarted = true
-        return
-      }
-      if (msg?.t === 'result') {
-        settle({ result: toResult(msg), killed: null, exitCode: null, signal: null, stderr: '', codeStarted })
-        return
-      }
-      if (msg?.t !== 'call') return
-      const id = msg.id
-      const method = typeof msg.method === 'string' ? msg.method : ''
-      if (++calls > MAX_CALLS) return reply(id, false, undefined, 'A function run may make at most 10000 calls')
-      if (inflight >= MAX_INFLIGHT_CALLS) return reply(id, false, undefined, `A function run may have at most ${MAX_INFLIGHT_CALLS} calls in flight`)
-      const handler = Object.prototype.hasOwnProperty.call(handlers, method) ? handlers[method] : undefined
-      if (typeof handler !== 'function') return reply(id, false, undefined, `Unknown method: ${method}`)
-      let args: unknown[]
       try {
-        const decoded = decodeValue(msg.args)
-        args = Array.isArray(decoded) ? decoded : []
-      } catch (err: any) {
-        return reply(id, false, undefined, err?.message ?? String(err))
+        if (msg?.t === 'started') {
+          codeStarted = true
+          return
+        }
+        if (msg?.t === 'result') {
+          settle({ result: toResult(msg), killed: null, exitCode: null, signal: null, stderr: '', codeStarted })
+          return
+        }
+        if (msg?.t !== 'call') return
+        const id = msg.id
+        const method = typeof msg.method === 'string' ? msg.method : ''
+        if (++calls > MAX_CALLS) return reply(id, false, undefined, 'A function run may make at most 10000 calls')
+        if (inflight >= MAX_INFLIGHT_CALLS) return reply(id, false, undefined, `A function run may have at most ${MAX_INFLIGHT_CALLS} calls in flight`)
+        const handler = Object.prototype.hasOwnProperty.call(handlers, method) ? handlers[method] : undefined
+        if (typeof handler !== 'function') return reply(id, false, undefined, `Unknown method: ${method}`)
+        let args: unknown[]
+        try {
+          const decoded = decodeValue(msg.args)
+          args = Array.isArray(decoded) ? decoded : []
+        } catch (err: any) {
+          return reply(id, false, undefined, err?.message ?? String(err))
+        }
+        inflight++
+        Promise.resolve()
+          .then(() => handler(args))
+          .then(
+            (value) => reply(id, true, value ?? null),
+            (err: any) => reply(id, false, undefined, err?.message ?? String(err)),
+          )
+          .catch(() => {})
+          .finally(() => { inflight-- })
+      } catch (err) {
+        unreadable(err)
       }
-      inflight++
-      Promise.resolve()
-        .then(() => handler(args))
-        .then(
-          (value) => reply(id, true, value ?? null),
-          (err: any) => reply(id, false, undefined, err?.message ?? String(err)),
-        )
-        .finally(() => { inflight-- })
     })
 
     session.onEnd((end) => {

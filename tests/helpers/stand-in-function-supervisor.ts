@@ -1,11 +1,12 @@
 /**
- * A stand-in for the function supervisor that turns every run away.
+ * A stand-in for the function supervisor that runs nothing.
  *
  * The real supervisor (lib/services/ai-functions/isolation/function-supervisor.cjs)
  * needs root to start runs under uids of their own, and is exercised as root in
- * tests/unit/function-isolation-root.spec.ts. What a caller does when it is
- * refused needs no root: this listens on a UNIX socket, reads a run's header
- * line, answers with the refusal given, and closes, as the supervisor does.
+ * tests/unit/function-isolation-root.spec.ts. What a caller does when a run is
+ * refused, cannot start, or sends what it should not, needs no root: this
+ * listens on a UNIX socket, reads a run's header line, answers with what it is
+ * given, and closes, as the supervisor does.
  *
  * `use()` points this process's function runs at it (and away from
  * BACKENLY_UNSAFE_LOCAL_FUNCTIONS) until `close()` puts both back. UNIX sockets
@@ -23,21 +24,33 @@ export const BUSY_REFUSAL = {
   reason: 'every function slot on this server (3) was in use and the queue for one (64) was full',
 }
 
+/** A run whose process could not be started, as the supervisor reports one. */
+export const START_FAILURE = { type: 'exit', code: null, signal: null, killed: null, stderr: '', error: 'spawn EAGAIN' }
+
+/**
+ * What the stand-in answers a run: one supervisor line (`s` + JSON), or raw
+ * lines written exactly as given, such as a forged `c` line from a run.
+ */
+export type StandInAnswer = Record<string, unknown> | { lines: string[] }
+
 export interface StandInSupervisor {
   socket: string
   /** The header line of each run it was sent, parsed. */
   headers: unknown[]
-  /** What it answers from now on. */
-  answer(refusal: Record<string, unknown>): void
+  /** What it answers from now on: one answer for every run, or one per run in turn, the last repeated. */
+  answer(next: StandInAnswer | StandInAnswer[]): void
   use(): void
   close(): Promise<void>
 }
 
-export async function startStandInSupervisor(refusal: Record<string, unknown> = BUSY_REFUSAL): Promise<StandInSupervisor> {
+export async function startStandInSupervisor(first: StandInAnswer | StandInAnswer[] = BUSY_REFUSAL): Promise<StandInSupervisor> {
   const dir = mkdtempSync(join(tmpdir(), 'backenly-fn-stand-in-'))
   const socket = join(dir, 'supervisor.sock')
   const headers: unknown[] = []
-  let answer = refusal
+  let answers: StandInAnswer[] = Array.isArray(first) ? [...first] : [first]
+  const nextAnswer = (): StandInAnswer => (answers.length > 1 ? answers.shift()! : answers[0])
+  const written = (a: StandInAnswer) =>
+    'lines' in a && Array.isArray(a.lines) ? a.lines.map((l) => `${l}\n`).join('') : `s${JSON.stringify(a)}\n`
   const server = createServer((conn) => {
     let got = ''
     conn.on('error', () => {})
@@ -51,7 +64,7 @@ export async function startStandInSupervisor(refusal: Record<string, unknown> = 
       } catch {
         headers.push(null)
       }
-      conn.end(`s${JSON.stringify(answer)}\n`)
+      conn.end(written(nextAnswer()))
     })
   })
   await new Promise<void>((resolve, reject) => {
@@ -70,7 +83,7 @@ export async function startStandInSupervisor(refusal: Record<string, unknown> = 
     socket,
     headers,
     answer(next) {
-      answer = next
+      answers = Array.isArray(next) ? [...next] : [next]
     },
     use() {
       saved ??= { flag: env.BACKENLY_UNSAFE_LOCAL_FUNCTIONS, socket: env.BACKENLY_FN_SOCKET }
