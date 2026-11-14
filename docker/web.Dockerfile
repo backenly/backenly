@@ -24,7 +24,8 @@
 #   no secrets are baked in — every value arrives at run time
 #
 # NOT read-only root: Next writes into .next/cache at runtime. The writable
-# surface is that plus the two EFS mounts and /tmp.
+# surface is that, the other app directories created below, the two EFS
+# mounts and /tmp.
 # ============================================================================
 
 # ── Build ───────────────────────────────────────────────────────────────────
@@ -177,9 +178,22 @@ RUN rm -rf ./tests ./docs ./scripts ./__tests__ \
  && echo "excluded-tree files remaining: $REMAIN" \
  && test "$REMAIN" -eq 0
 
-# The EFS mount points. Created here so the image is correct even when nothing
-# is mounted, and owned by the runtime user so the app can write to them.
-RUN mkdir -p /app/workspace /app/backups && chown -R node:node /app/workspace /app/backups
+# Every directory the app writes under /app at run time, owned by the runtime
+# user. /app itself is root:node 0750 (below), so the app can create nothing
+# else in it, and the uids function code runs as cannot reach any of these.
+#   workspace, backups  the EFS mount points (WORKSPACE_DIR, BACKUP_DIR),
+#                       created so the image is correct with nothing mounted
+#   .next/cache         Next's image optimizer and data cache
+#   logs                lib/logger's files (LOG_FILE_PATH, default ./logs); it
+#                       creates the directory when imported and throws where
+#                       it cannot, so every route importing it fails to load
+#   storage             local file storage (STORAGE_DIR, default ./storage)
+#   recovery            deployment recovery bundles (RECOVERY_DIR, default ./recovery)
+#   tmp                 the preflight route's scratch space (./tmp/preflight)
+# .next/server stays root's: it is the server's own code, and a page Next
+# renders on demand and cannot write back is kept in memory instead.
+RUN mkdir -p /app/workspace /app/backups /app/.next/cache /app/logs /app/storage /app/recovery /app/tmp \
+ && chown -R node:node /app/workspace /app/backups /app/.next/cache /app/logs /app/storage /app/recovery /app/tmp
 
 # HOSTNAME=0.0.0.0 is REQUIRED, not cosmetic. Next's standalone server binds to
 # process.env.HOSTNAME, and Docker sets that to the container's own hostname —

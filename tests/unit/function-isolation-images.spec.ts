@@ -91,6 +91,27 @@ describe.each(['web.Dockerfile', 'runtime.Dockerfile'])('%s', (file) => {
   })
 })
 
+describe('docker/web.Dockerfile, where the app writes', () => {
+  // /app is root:node 0750, so the app (node) can create nothing directly in
+  // it: every directory it writes under /app at run time must exist, and be
+  // node's, before /app is locked.
+  const final = instructions(stage('web.Dockerfile'))
+  const made = final.findIndex((i) => /^RUN mkdir -p \/app\/workspace /.test(i))
+  const locked = final.findIndex((i) => /chown root:node \/app && chmod 0750 \/app/.test(i))
+
+  it.each(['/app/workspace', '/app/backups', '/app/.next/cache', '/app/logs', '/app/storage', '/app/recovery', '/app/tmp'])(
+    'makes %s and gives it to node before /app is locked',
+    (dir) => {
+      expect(made).toBeGreaterThan(-1)
+      expect(made).toBeLessThan(locked)
+      const [mkdir, chown] = final[made].split('&&').map((s) => s.trim())
+      expect(mkdir.split(/\s+/)).toContain(dir)
+      expect(chown).toMatch(/^chown -R node:node /)
+      expect(chown.split(/\s+/)).toContain(dir)
+    },
+  )
+})
+
 describe('docker/compose.stack.yml', () => {
   it('sets no user on the services that run functions', () => {
     const compose = read('docker/compose.stack.yml')
