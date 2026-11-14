@@ -32,7 +32,7 @@ import { buildIntegrationContext, IntegrationContext } from './integration-conte
 import { getProviderSpec } from './integration-registry'
 import { generateFixedFunctionCode } from './generator'
 import { isRouteModuleFunction, executeRouteModuleFunction, validateRouteModule } from './route-module-runner'
-import { encodeValue, endedForMemory, FunctionRunnerUnavailableError, runIsolated } from './isolation/client'
+import { encodeValue, endedForMemory, FunctionRunnerBusyError, FunctionRunnerUnavailableError, runIsolated } from './isolation/client'
 import { recordFunctionRun, rowLastError, runTextKeptInRegion, withLastErrors } from './run-records'
 import { isFunctionSwitchedOff, RUNNABLE_FUNCTION_STATUS_FILTER } from './status'
 import { enforceAiFunctionInvocation, trackAiFunctionInvocation } from '@/lib/entitlements/policy'
@@ -78,11 +78,17 @@ export interface FunctionExecutionResult {
   answer?: { status: number; body: unknown; headers: Record<string, string> }
   error?: string
   /**
-   * RUNNER_UNAVAILABLE: the function did not run because function isolation
-   * is missing here (no supervisor, or it refused the run). Not the function's
-   * fault: its state is left alone and nothing rewrites its code.
+   * The function did not run, and it is not the function's fault: its state
+   * is left alone, nothing rewrites its code, and the run is not counted.
+   *   RUNNER_UNAVAILABLE  function isolation is missing here (no supervisor,
+   *                       or it refused the run): recorded in the run log.
+   *   RUNNER_BUSY         every function slot on this server was taken: try
+   *                       again after retryAfterSeconds (a 503). Not in the
+   *                       run log, which would make a busy server look like a
+   *                       failing function.
    */
-  errorCode?: 'PLAN_LIMIT_EXCEEDED' | 'NOT_FOUND' | 'RUNNER_UNAVAILABLE'
+  errorCode?: 'PLAN_LIMIT_EXCEEDED' | 'NOT_FOUND' | 'RUNNER_UNAVAILABLE' | 'RUNNER_BUSY'
+  retryAfterSeconds?: number
   upgradeRequired?: boolean
   requiredPlan?: string
   durationMs: number
@@ -820,10 +826,14 @@ export async function executeAiFunction(
         durationMs: 0,
       }
     }
+  }
+  // The run's count against the plan and its billing record (lib/usage/axes.ts
+  // `fn_runs`): once for every invocation that runs the function, whatever its
+  // outcome, and never for one the function runner turned away, since the code
+  // did not run.
+  const countRun = () => {
+    if (!account) return
     trackAiFunctionInvocation(account).catch(() => {})
-    // The billing record of the run (lib/usage/axes.ts `fn_runs`): counted
-    // here, after the plan check and before execution, so every invocation that
-    // actually runs the function counts once, whatever its outcome.
     recordUsage({ projectId, axis: 'fn_runs', quantity: 1, source: 'executor', billingAccountId: account })
   }
 
@@ -843,6 +853,7 @@ export async function executeAiFunction(
         fn.triggerTable,
         { headers: caller.headers, testRun: caller.testRun }
       )
+      countRun()
       const durationMs = Date.now() - startMs
       // The run's record says what the handler answered. A 4xx is the caller's
       // error and the run still succeeded; a 5xx is the function's own, and the
@@ -879,7 +890,8 @@ export async function executeAiFunction(
       }
     } catch (err: any) {
       const durationMs = Date.now() - startMs
-      if (err instanceof FunctionRunnerUnavailableError) return runnerUnavailable(err, functionId, projectId, durationMs, caller.trigger ?? event.type)
+      if (err instanceof FunctionRunnerUnavailableError) return runnerRefused(err, functionId, projectId, durationMs, caller.trigger ?? event.type)
+      countRun()
       const errorMsg = err?.message || 'Route function error'
       await persistExecutionLog(functionId, projectId, false, [], errorMsg, durationMs, caller.trigger ?? event.type)
       rowLastError(projectId, functionId, errorMsg)
@@ -934,6 +946,7 @@ export async function executeAiFunction(
         caller,
         integrationManifest,
       )
+      countRun()
       const durationMs = Date.now() - startMs
 
       // Persist execution log
@@ -949,7 +962,9 @@ export async function executeAiFunction(
       return { success: true, logs, returnValue, durationMs }
     } catch (err: any) {
       if (err instanceof FunctionRunnerUnavailableError) {
-        return runnerUnavailable(err, functionId, projectId, Date.now() - startMs, caller.trigger ?? event.type)
+        // A retry turned away ends with the failure of the run before it.
+        if (lastError) break
+        return runnerRefused(err, functionId, projectId, Date.now() - startMs, caller.trigger ?? event.type)
       }
       lastError = err instanceof Error ? err : new Error(String(err))
       if (attempt < MAX_RETRIES && isTransientError(err)) continue
@@ -957,6 +972,7 @@ export async function executeAiFunction(
     }
   }
 
+  countRun()
   const durationMs = Date.now() - startMs
   const errorMsg = lastError?.message || 'Unknown error'
   // What the function logged before it failed, which is what an agent reads
@@ -986,18 +1002,26 @@ export async function executeAiFunction(
 }
 
 /**
- * The function did not run: there is nowhere isolated to run it. The run log
- * says why, so the developer sees it; the function's status and last error are
- * left as they were and nothing rewrites its code, because nothing about the
- * code is known to be wrong.
+ * The function did not run: the function runner turned it away. Its status and
+ * last error are left as they were, nothing rewrites its code and the run is
+ * not counted, because nothing about the code is known to be wrong.
+ *
+ * Turned away for capacity, the caller is told to try again (a 503) and the
+ * run log is left alone: the failing-function check reads that log, and a
+ * busy server is not a failing function. Turned away because isolation is
+ * missing here, the run log says why, so whoever runs this deployment sees it.
  */
-async function runnerUnavailable(
+async function runnerRefused(
   err: FunctionRunnerUnavailableError,
   functionId: string,
   projectId: string,
   durationMs: number,
   triggerType: string,
 ): Promise<FunctionExecutionResult> {
+  if (err instanceof FunctionRunnerBusyError) {
+    console.warn(`[AiFn] function ${functionId} of project ${projectId} was not run: ${err.message}`)
+    return { success: false, logs: [], error: err.message, errorCode: 'RUNNER_BUSY', retryAfterSeconds: err.retryAfterSeconds, durationMs }
+  }
   console.error(`[AiFn] ${err.message}`)
   await persistExecutionLog(functionId, projectId, false, [], err.message, durationMs, triggerType)
   return { success: false, logs: [], error: err.message, errorCode: 'RUNNER_UNAVAILABLE', durationMs }

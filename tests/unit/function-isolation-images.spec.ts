@@ -110,6 +110,14 @@ describe('docker/function-isolation/entrypoint.sh', () => {
     expect(names.filter((n) => n !== 'PATH' && !n.startsWith('BACKENLY_FN_'))).toEqual([])
   })
 
+  it('passes on from the task every capacity setting, and the socket the app reads too', () => {
+    const start = script.indexOf('env -i')
+    const block = script.slice(start, script.indexOf('function-supervisor.cjs', start))
+    for (const name of ['MAX_CONCURRENCY', 'MAX_QUEUE', 'QUEUE_WAIT_MS', 'HEAP_MB', 'RSS_MB', 'NPROC', 'NOFILE', 'FSIZE_MB', 'SOCKET']) {
+      expect(block).toMatch(new RegExp(`^\\s+BACKENLY_FN_${name}="\\$\\{BACKENLY_FN_${name}:-\\}" \\\\\\r?$`, 'm'))
+    }
+  })
+
   it('runs the app as node with no_new_privs and a umask that keeps its files from other uids', () => {
     expect(script).toMatch(/^umask 077$/m)
     expect(script).toMatch(/^exec setpriv --reuid="\$app_uid" --regid="\$app_gid" --init-groups --no-new-privs -- "\$@"$/m)

@@ -30,6 +30,11 @@
  * - A run that fails because the function threw is a recorded failure, not
  *   retried: the executor already retries an infrastructure error, and running
  *   customer code again for an error in it would repeat its side effects.
+ * - A run the function supervisor turns away because every slot is taken did
+ *   not happen: its job goes back as it was, without the claim counting as an
+ *   attempt, and the project's runner stops until the next drain starts it.
+ *   One turned away because functions cannot run here at all stays claimed,
+ *   as a stopped process's would, and the runner stops the same way.
  * - Runs start in the order their rows changed; with several at once they can
  *   finish in another order, as with any parallel delivery.
  *
@@ -57,10 +62,15 @@ export const PROJECT_CONCURRENCY = positiveInt(process.env.FUNCTION_RUNS_PER_PRO
 /**
  * Runs one process may have going at once, across every project; only the
  * region's scheduler leader runs them (lib/scheduler/leader.ts), so this is
- * the region's. Each run is a worker thread with a 64 MB heap. Overridden by
- * FUNCTION_RUNS_PER_PROCESS.
+ * the region's. Each run is a process of its own, and the function supervisor
+ * runs at most BACKENLY_FN_MAX_CONCURRENCY at once on this server (4 unless
+ * set), so by default the queue takes one fewer and leaves a slot for the runs
+ * a person or an app is waiting on. Overridden by FUNCTION_RUNS_PER_PROCESS.
  */
-export const PROCESS_CONCURRENCY = positiveInt(process.env.FUNCTION_RUNS_PER_PROCESS, 12)
+export const PROCESS_CONCURRENCY = positiveInt(
+  process.env.FUNCTION_RUNS_PER_PROCESS,
+  Math.max(1, positiveInt(process.env.BACKENLY_FN_MAX_CONCURRENCY, 4) - 1),
+)
 /** A claimed job older than this was left by a process that stopped, and is claimed again. */
 export const RECLAIM_AFTER_SECONDS = 120
 /** Claims a job may take; the next is recorded as a failure and the job dropped. */
@@ -175,6 +185,8 @@ const runners = new Map<string, Promise<RunnerOutcome>>()
 export interface RunnerOutcome {
   ran: number
   abandoned: number
+  /** Jobs put back because the function supervisor had no free slot. */
+  deferred: number
 }
 
 /**
@@ -188,7 +200,7 @@ export function kickFunctionRuns(projectId: string, refill: () => Promise<number
   const runner = workThrough(projectId, refill)
     .catch((err: any) => {
       console.warn(`[functions] queue runner for ${projectId} stopped:`, err?.message ?? err)
-      return { ran: 0, abandoned: 0 }
+      return { ran: 0, abandoned: 0, deferred: 0 }
     })
     .finally(() => runners.delete(projectId))
   runners.set(projectId, runner)
@@ -196,15 +208,18 @@ export function kickFunctionRuns(projectId: string, refill: () => Promise<number
 }
 
 async function workThrough(projectId: string, refill: () => Promise<number>): Promise<RunnerOutcome> {
-  const outcome: RunnerOutcome = { ran: 0, abandoned: 0 }
+  const outcome: RunnerOutcome = { ran: 0, abandoned: 0, deferred: 0 }
   for (;;) {
     let drained = false
+    let turnedAway = false
     await Promise.all(
       Array.from({ length: PROJECT_CONCURRENCY }, async () => {
         for (;;) {
+          if (turnedAway) return
           await processSlots.take()
           let job: ClaimedJob | null = null
           try {
+            if (turnedAway) return
             job = await claimOne(projectId)
             if (!job) {
               drained = true
@@ -217,12 +232,20 @@ async function workThrough(projectId: string, refill: () => Promise<number>): Pr
             })
             if (result === 'abandoned') outcome.abandoned += 1
             else if (result === 'ran') outcome.ran += 1
+            else if (result === 'busy' || result === 'unavailable') {
+              if (result === 'busy') outcome.deferred += 1
+              turnedAway = true
+              return
+            }
           } finally {
             processSlots.give()
           }
         }
       }),
     )
+    // The function runner turned a run away: what is left waits in the queue
+    // for the next drain, rather than being claimed only to be turned away too.
+    if (turnedAway) return outcome
     if (!drained) continue
     // Empty: take in whatever was captured meanwhile, and stop when there is none.
     const moved = await refill().catch(() => 0)
@@ -263,12 +286,23 @@ async function release(projectId: string, jobId: string): Promise<void> {
   await db.$executeRawUnsafe(`DELETE FROM "${schema}"."${FUNCTION_JOBS_TABLE}" WHERE id = $1::bigint`, jobId)
 }
 
+/** Return a job that did not run to the queue as it was before this claim. */
+async function putBack(projectId: string, jobId: string): Promise<void> {
+  const schema = workspaceSchemaName(projectId)
+  const db = await workspaceRawClient(projectId)
+  await db.$executeRawUnsafe(
+    `UPDATE "${schema}"."${FUNCTION_JOBS_TABLE}" SET claimed_at = NULL, attempts = GREATEST(attempts - 1, 0) WHERE id = $1::bigint`,
+    jobId,
+  )
+}
+
 /**
  * Run one claimed job, then delete it. A job claimed more than MAX_ATTEMPTS
  * times was taken by processes that stopped before finishing it: it is
- * recorded as a failed run and dropped instead of run again.
+ * recorded as a failed run and dropped instead of run again. A job the
+ * function supervisor turned away for capacity did not run, and goes back.
  */
-async function runJob(projectId: string, job: ClaimedJob): Promise<'ran' | 'abandoned'> {
+async function runJob(projectId: string, job: ClaimedJob): Promise<'ran' | 'abandoned' | 'busy' | 'unavailable'> {
   if (job.attempts > MAX_ATTEMPTS) {
     const { recordFunctionRun } = await import('./run-records')
     await recordFunctionRun({
@@ -288,7 +322,15 @@ async function runJob(projectId: string, job: ClaimedJob): Promise<'ran' | 'aban
   const { executeAiFunction } = await import('./executor')
   // Recorded by the executor, success or failure; a throw here leaves the job
   // claimed, to be claimed again once RECLAIM_AFTER_SECONDS have passed.
-  await executeAiFunction(job.function_id, projectId, job.event)
+  const result = await executeAiFunction(job.function_id, projectId, job.event)
+  if (result.errorCode === 'RUNNER_BUSY') {
+    await putBack(projectId, job.id)
+    return 'busy'
+  }
+  // Functions cannot run here at all (the executor recorded why): left claimed,
+  // so a supervisor that is restarting gets it again after RECLAIM_AFTER_SECONDS,
+  // and a deployment that cannot run functions drops it after MAX_ATTEMPTS.
+  if (result.errorCode === 'RUNNER_UNAVAILABLE') return 'unavailable'
   await release(projectId, job.id)
   return 'ran'
 }

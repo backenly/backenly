@@ -13,7 +13,10 @@
  *     can read /proc/<pid>/environ, so it is refused when NODE_ENV=production.
  *
  * Without either, a run fails closed with FunctionRunnerUnavailableError; it
- * never falls back to running the code here.
+ * never falls back to running the code here. A supervisor whose slots are all
+ * taken (BACKENLY_FN_MAX_CONCURRENCY runs, BACKENLY_FN_MAX_QUEUE waiting, or no
+ * slot freed within BACKENLY_FN_QUEUE_WAIT_MS) refuses with
+ * FunctionRunnerBusyError: a 503 to try again, never the function's fault.
  *
  * While a run lives this side answers its calls (`handlers`): outbound HTTP
  * through the egress guard, a sandbox body's ctx.db and ctx.integrations, the
@@ -39,24 +42,49 @@ const MAX_LINE_BYTES = 32 * 1024 * 1024
 const MAX_INFLIGHT_CALLS = 64
 const MAX_CALLS = 10_000
 const MAX_LOG_LINES = 2000
+/** The supervisor's own default for BACKENLY_FN_QUEUE_WAIT_MS. */
+const DEFAULT_QUEUE_WAIT_MS = 10_000
+/** What a caller turned away for capacity is told to wait before trying again. */
+export const BUSY_RETRY_AFTER_SECONDS = 5
 
 /**
  * Functions could not run because the isolation they need is missing: no
- * supervisor, a supervisor refusing (its self-check failed, or every slot is
- * busy), or a runner that could not start. Never the function's own fault, so
- * callers neither record it as the function's error nor rewrite its code.
+ * supervisor, a supervisor refusing (its self-check failed), or a runner that
+ * could not start. Never the function's own fault, so callers neither record
+ * it as the function's error nor rewrite its code.
  */
 export class FunctionRunnerUnavailableError extends Error {
-  readonly code = 'FUNCTION_RUNNER_UNAVAILABLE'
-  constructor(detail: string) {
+  readonly code: 'FUNCTION_RUNNER_UNAVAILABLE' | 'FUNCTION_RUNNER_BUSY' = 'FUNCTION_RUNNER_UNAVAILABLE'
+  constructor(detail: string, message?: string) {
     super(
-      `Functions cannot run here: ${detail}. Function code runs only in a separate process under its own user, ` +
-        `started by the function supervisor. The Backenly images start it themselves when they start as root ` +
-        `(do not override the container user); outside a container, run lib/services/ai-functions/isolation/function-supervisor.cjs as root. ` +
-        `For development only, ${UNSAFE_LOCAL_FLAG}=1 runs functions as your own user; it is refused when NODE_ENV=production.`,
+      message ??
+        `Functions cannot run here: ${detail}. Function code runs only in a separate process under its own user, ` +
+          `started by the function supervisor. The Backenly images start it themselves when they start as root ` +
+          `(do not override the container user); outside a container, run lib/services/ai-functions/isolation/function-supervisor.cjs as root. ` +
+          `For development only, ${UNSAFE_LOCAL_FLAG}=1 runs functions as your own user; it is refused when NODE_ENV=production.`,
     )
     this.name = 'FunctionRunnerUnavailableError'
   }
+}
+
+/**
+ * The supervisor turned the run away for capacity: every slot was taken and
+ * the queue was full, or no slot freed in time. The function did not run and
+ * is not at fault; the caller should try again shortly (a 503).
+ */
+export class FunctionRunnerBusyError extends FunctionRunnerUnavailableError {
+  override readonly code = 'FUNCTION_RUNNER_BUSY' as const
+  readonly retryAfterSeconds = BUSY_RETRY_AFTER_SECONDS
+  constructor(detail: string) {
+    super(detail, `Too many functions are running on this server right now (${detail}). Try again in a few seconds.`)
+    this.name = 'FunctionRunnerBusyError'
+  }
+}
+
+/** How long the supervisor may hold a run before it starts (BACKENLY_FN_QUEUE_WAIT_MS, as the supervisor reads it). */
+function supervisorQueueWaitMs(): number {
+  const n = Number.parseInt(process.env.BACKENLY_FN_QUEUE_WAIT_MS ?? '', 10)
+  return Number.isFinite(n) ? Math.max(0, n) : DEFAULT_QUEUE_WAIT_MS
 }
 
 export type IsolatedKind = 'route' | 'route-validate' | 'sandbox' | 'sandbox-validate'
@@ -207,6 +235,8 @@ interface SessionEnd {
   stderr: string
   /** The run never started, or the supervisor refused it: not the function's doing. */
   unavailable?: string
+  /** The supervisor refused it for capacity. */
+  busy?: string
 }
 
 interface Session {
@@ -312,8 +342,11 @@ async function supervisedSession(socketPath: string, timeoutMs: number): Promise
       if (kind === 0x63 /* c */) {
         if (msg) for (const h of messageHandlers) h(msg)
       } else if (kind === 0x73 /* s */ && msg) {
-        if (msg.type === 'refused') end({ killed: null, exitCode: null, signal: null, stderr: '', unavailable: `the function supervisor refused the run (${String(msg.reason)})` })
-        else if (msg.type === 'exit') {
+        if (msg.type === 'refused') {
+          end(msg.busy === true
+            ? { killed: null, exitCode: null, signal: null, stderr: '', busy: String(msg.reason) }
+            : { killed: null, exitCode: null, signal: null, stderr: '', unavailable: `the function supervisor refused the run (${String(msg.reason)})` })
+        } else if (msg.type === 'exit') {
           end({
             killed: typeof msg.killed === 'string' ? (msg.killed as KillReason) : null,
             exitCode: typeof msg.code === 'number' ? msg.code : null,
@@ -468,10 +501,11 @@ export async function runIsolated(job: IsolatedJob, handlers: CallHandlers = {})
     let inflight = 0
     let calls = 0
     // Should neither the runner nor the supervisor ever say how the run ended.
+    // A supervised run may first wait for a slot, which its deadline does not count.
     const backstop = setTimeout(() => {
       session.abort()
       settle({ result: null, killed: 'timeout', exitCode: null, signal: null, stderr: '' })
-    }, job.hardTimeoutMs + 10_000)
+    }, job.hardTimeoutMs + (mode.kind === 'supervisor' ? supervisorQueueWaitMs() : 0) + 10_000)
 
     function settle(outcome: IsolatedOutcome) {
       if (settled) return
@@ -521,10 +555,14 @@ export async function runIsolated(job: IsolatedJob, handlers: CallHandlers = {})
 
     session.onEnd((end) => {
       if (settled) return
-      if (end.unavailable) {
+      const refusal =
+        end.busy !== undefined ? new FunctionRunnerBusyError(end.busy)
+          : end.unavailable ? new FunctionRunnerUnavailableError(end.unavailable)
+            : null
+      if (refusal) {
         settled = true
         clearTimeout(backstop)
-        reject(new FunctionRunnerUnavailableError(end.unavailable))
+        reject(refusal)
         return
       }
       settle({ result: null, killed: end.killed, exitCode: end.exitCode, signal: end.signal, stderr: end.stderr })

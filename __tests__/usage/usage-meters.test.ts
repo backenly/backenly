@@ -12,7 +12,8 @@
  *   db_bytes      the workspace schema AND its branch schemas, not a neighbour
  *   file_bytes    the storage metadata sum of files not deleted
  *   fn_runs       every invocation that executes, success or failure; not a
- *                 call to a function that does not exist
+ *                 call to a function that does not exist, nor a run the
+ *                 function runner turned away for capacity
  */
 
 // The real Request/Response/ReadableStream: egress is measured on real streams,
@@ -28,6 +29,7 @@ import { trackEndUserActive, noteEndUserActivity } from '@/lib/quota/kernel'
 import { measureProjectDbBytes, snapshotProjectDbStorage } from '@/lib/usage/db-storage'
 import { reconcileFileStorage } from '@/lib/usage/file-storage'
 import { executeAiFunction } from '@/lib/services/ai-functions/executor'
+import { startStandInSupervisor } from '../../tests/helpers/stand-in-function-supervisor'
 
 const DB_URL = process.env.TEST_DATABASE_URL ?? ''
 const users: string[] = []
@@ -230,4 +232,34 @@ describe('fn_runs', () => {
 
     expect(await quantity(projectId, 'fn_runs', 'executor')).toBe(BigInt(2))
   }, 60_000)
+
+  // A stand-in supervisor on a UNIX socket; Windows has no supervisor.
+  ;(process.platform === 'win32' ? it.skip : it)(
+    'does not count a run turned away for capacity, nor record it against the function',
+    async () => {
+      const { projectId } = await makeProject()
+      const fn = await prisma.aiFunction.create({
+        data: { projectId, name: 'meter-busy', description: 'meter-busy', generatedCode: 'return { ok: true }', triggerType: 'manual', status: 'active' },
+      })
+      const supervisor = await startStandInSupervisor()
+      supervisor.use()
+      let result: Awaited<ReturnType<typeof executeAiFunction>>
+      try {
+        result = await executeAiFunction(fn.id, projectId, { type: 'manual', data: {} })
+      } finally {
+        await supervisor.close()
+      }
+      expect(result).toMatchObject({ success: false, errorCode: 'RUNNER_BUSY', retryAfterSeconds: 5 })
+      expect(await quantity(projectId, 'fn_runs', 'executor')).toBe(BigInt(0))
+      // Neither failed nor rewritten: its state and its run log are as they were.
+      const after = await prisma.aiFunction.findUniqueOrThrow({ where: { id: fn.id } })
+      expect(after).toMatchObject({ status: 'active', lastError: null, generatedCode: 'return { ok: true }' })
+      expect(await prisma.aiFunctionLog.count({ where: { functionId: fn.id } })).toBe(0)
+
+      // With a slot free, the same call runs and counts.
+      expect((await executeAiFunction(fn.id, projectId, { type: 'manual', data: {} })).success).toBe(true)
+      expect(await quantity(projectId, 'fn_runs', 'executor')).toBe(BigInt(1))
+    },
+    60_000,
+  )
 })

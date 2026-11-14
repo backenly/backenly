@@ -20,7 +20,7 @@ import { canAccessProject, canWriteProject } from '@/lib/edition/guard'
 import { workspaceSchemaName } from '@/lib/security/workspace-schema'
 import { executeAiFunction, validateSandboxFunction } from './executor'
 import { isRouteModuleFunction, usesAsService, validateRouteModule } from './route-module-runner'
-import { FunctionRunnerUnavailableError } from './isolation/client'
+import { FunctionRunnerBusyError, FunctionRunnerUnavailableError } from './isolation/client'
 import { rowLastError, withLastErrors, withRunBodies } from './run-records'
 import { isFunctionSwitchedOff } from './status'
 import { workspaceRawClient } from '@/lib/data-plane/regional'
@@ -172,6 +172,16 @@ export async function invokeFunction(
   const clipped = text.length > MAX_RETURN_CHARS
   const httpStatus = result.httpStatus
 
+  if (result.errorCode === 'RUNNER_BUSY' || result.errorCode === 'RUNNER_UNAVAILABLE') {
+    return {
+      ok: false,
+      code: result.errorCode,
+      summary:
+        `Function ${fn.name} was not run, and nothing is wrong with it: ${result.error ?? 'the function runner turned the run away'} ` +
+        'Its code was not changed and the run was not counted.',
+      data: { functionId: fn.id, success: false, error: result.error ?? null, retryAfterSeconds: result.retryAfterSeconds ?? null },
+    }
+  }
   if (!result.success) {
     return {
       ok: false,
@@ -323,7 +333,7 @@ const invalid = (summary: string): FunctionActionResult => ({ ok: false, code: '
 /** Nothing was deployed because nothing could check the code: not the code's fault. */
 const runnerUnavailable = (err: FunctionRunnerUnavailableError): FunctionActionResult => ({
   ok: false,
-  code: 'RUNNER_UNAVAILABLE',
+  code: err instanceof FunctionRunnerBusyError ? 'RUNNER_BUSY' : 'RUNNER_UNAVAILABLE',
   summary: `The function was not deployed: ${err.message}`,
 })
 

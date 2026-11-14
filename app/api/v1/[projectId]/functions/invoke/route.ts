@@ -56,6 +56,7 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
       trigger: 'http',
     })
 
+    const { logsFor, runnerRefusal } = await import('@/lib/services/ai-functions/reply')
     if (!result.success) {
       if (result.errorCode === 'PLAN_LIMIT_EXCEEDED') {
         return createErrorResponse(
@@ -65,6 +66,13 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
           { upgradeRequired: true, requiredPlan: result.requiredPlan }
         )
       }
+      // Turned away by the function runner: not run, and not the function's 500.
+      const refusal = runnerRefusal(result)
+      if (refusal) {
+        const response = createErrorResponse(refusal.code, refusal.error, refusal.status, refusal.retryAfter ? { retryAfter: refusal.retryAfter } : undefined)
+        if (refusal.retryAfter) response.headers.set('Retry-After', String(refusal.retryAfter))
+        return response
+      }
       const is404 = result.errorCode === 'NOT_FOUND'
       return createErrorResponse(
         is404 ? ErrorCodes.NOT_FOUND : ErrorCodes.INTERNAL_ERROR,
@@ -73,7 +81,6 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
       )
     }
 
-    const { logsFor } = await import('@/lib/services/ai-functions/reply')
     return createSuccessResponse({
       functionId,
       success: result.success,

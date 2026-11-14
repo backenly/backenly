@@ -275,8 +275,10 @@ RUN setpriv --version && prlimit --version && choom --version && tini --version 
     | grep -q '"/app":"EACCES","/app/workspace":"EACCES","/app/backups":"EACCES"' \
  && node -e "for (const p of ['pdfkit','csv-parse/sync','date-fns','qrcode','nodemailer','archiver']) require(require.resolve(p, { paths: ['/opt/backenly-fn'] })); console.log('function isolation verified in this image')"
 
-# Children read the RDS roots from outside /app. Three runs at once in a 1 GB
-# task, each held under the supervisor's heap and resident limits.
+# Children read the RDS roots from outside /app. Three runs at once, each held
+# under the supervisor's heap and resident limits; more wait up to 10 s, then
+# get a 503. Set BACKENLY_FN_MAX_CONCURRENCY, _MAX_QUEUE and _QUEUE_WAIT_MS on
+# the task to size it (.env.example, "Where function code runs").
 ENV BACKENLY_FN_CA_CERTS=/opt/backenly-fn/rds-ca-cloud-regions.pem \
     BACKENLY_FN_MAX_CONCURRENCY=3
 

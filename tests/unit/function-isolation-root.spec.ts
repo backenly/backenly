@@ -21,7 +21,7 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { executeRouteModuleFunction } from '@/lib/services/ai-functions/route-module-runner'
-import { encodeValue, FunctionRunnerUnavailableError, runIsolated } from '@/lib/services/ai-functions/isolation/client'
+import { encodeValue, FunctionRunnerBusyError, FunctionRunnerUnavailableError, runIsolated } from '@/lib/services/ai-functions/isolation/client'
 
 const isRoot = typeof process.getuid === 'function' && process.getuid() === 0
 const utilLinux = ['/usr/bin/setpriv', '/usr/bin/prlimit'].every((p) => existsSync(p))
@@ -70,7 +70,12 @@ async function until(check: () => boolean, ms: number): Promise<boolean> {
 }
 
 /** A supervisor of our own, from a copy any uid can read. */
-async function startSupervisor(dir: string, base: number, protectedPaths: string): Promise<{ socket: string; child: ChildProcess; log: () => string }> {
+async function startSupervisor(
+  dir: string,
+  base: number,
+  protectedPaths: string,
+  settings: Record<string, string> = {},
+): Promise<{ socket: string; child: ChildProcess; log: () => string }> {
   const socket = join(dir, `sock-${base}`, 'supervisor.sock')
   let log = ''
   const child = spawn(join(dir, 'node'), [join(dir, 'function-supervisor.cjs')], {
@@ -89,6 +94,7 @@ async function startSupervisor(dir: string, base: number, protectedPaths: string
       BACKENLY_FN_APP_PID: String(process.pid),
       // Proves the supervisor's own environment never reaches a run.
       PLANTED_SUPERVISOR_SECRET: PLANTED,
+      ...settings,
     },
     stdio: ['ignore', 'ignore', 'pipe'],
   })
@@ -291,6 +297,45 @@ describeAsRoot(`the function supervisor, as root${skipReason ? ` (SKIPPED: ${ski
     expect(pid).toBeGreaterThan(0)
     expect(await until(() => !existsSync(`/proc/${pid}`) && !existsSync(marker), 10_000)).toBe(true)
     expect(poolProcesses()).toEqual([])
+  })
+
+  it('turns a run away as busy, not as the function failing, when the queue is full or no slot comes free in time', async () => {
+    const tight = await startSupervisor(dir, BASE + 2000, protectedDir, {
+      BACKENLY_FN_MAX_CONCURRENCY: '1',
+      BACKENLY_FN_MAX_QUEUE: '1',
+      BACKENLY_FN_QUEUE_WAIT_MS: '600',
+    })
+    const socket = env.BACKENLY_FN_SOCKET
+    env.BACKENLY_FN_SOCKET = tight.socket
+    const answer = (ms: number) => `
+      import { NextResponse } from 'next/server'
+      export async function GET() {
+        await new Promise((r) => setTimeout(r, ${ms}))
+        return NextResponse.json({ ran: true })
+      }
+    `
+    try {
+      // Takes the one slot for 4 s.
+      const holding = run(answer(4000))
+      await new Promise((r) => setTimeout(r, 500))
+      // Waits in the one place in the queue, and no slot comes free within 600 ms.
+      const waiting = run(answer(0)).then(() => null, (err) => err)
+      await new Promise((r) => setTimeout(r, 200))
+      // Finds the queue full and is turned away at once.
+      const startedAt = Date.now()
+      const full = await run(answer(0)).then(() => null, (err) => err)
+      expect(Date.now() - startedAt).toBeLessThan(500)
+      expect(full).toBeInstanceOf(FunctionRunnerBusyError)
+      expect(full.message).toContain('the queue for one (1) was full')
+      const timedOut = await waiting
+      expect(timedOut).toBeInstanceOf(FunctionRunnerBusyError)
+      expect(timedOut.message).toContain('none came free within 600 ms')
+      // The run that had the slot was never disturbed.
+      expect((await holding).returnValue.body).toEqual({ ran: true })
+    } finally {
+      env.BACKENLY_FN_SOCKET = socket
+      tight.child.kill('SIGKILL')
+    }
   })
 
   it('refuses every run, and says why, where a function could read what it must not', async () => {
