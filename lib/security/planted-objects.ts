@@ -1145,3 +1145,35 @@ export async function switchOffProject(opts: {
   if (record) await recordSwitchedOff(projectId, ofProject(report, projectId), result)
   return { actions, result, left, governed }
 }
+
+/**
+ * A snapshot restore replays the schema as the application's role from a dump
+ * that carries no privileges: every planted routine comes back owned by the
+ * platform with EXECUTE for PUBLIC, a definer runs as the platform again, and a
+ * snapshot taken before the switch-off brings its triggers back on. On a
+ * database shared by several projects the switch-off therefore runs again for
+ * the schemas restored. Null where the database is dedicated to one project, or
+ * has helpers too old to say, as scripts/neutralize-planted-objects.ts leaves those.
+ */
+export async function switchOffAfterRestore(
+  projectId: string,
+  region: CloudRegionId,
+  schemas: string[],
+): Promise<(ProjectSwitchOff & { found: number }) | null> {
+  const { regionPool } = await import('@/lib/data-plane/regional')
+  const pool = regionPool(region, 'planted-objects', { max: 2 }) as unknown as PgPool
+  const client = await pool.connect()
+  let facts: DatabaseFacts
+  let report: PlantedReport
+  let live: Array<{ object: Planted; what: string }>
+  try {
+    facts = await readDatabaseFacts(client)
+    if (facts.shared !== true || !facts.stripInstalled) return null
+    report = await findPlanted(client, schemas, facts)
+    live = await stillRunning(client, report.planted, facts)
+  } finally {
+    client.release()
+  }
+  const out = await switchOffProject({ region, projectId, report, live, facts, pool })
+  return { ...out, found: report.planted.length }
+}

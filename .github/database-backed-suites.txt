@@ -2119,3 +2119,7 @@ tests/integration/realtime-channel-per-project.spec.ts
 # sync takes it back. For a project with a record it is one History change
 # Backenly made, which History refuses to restore. Real roles, logins and catalog.
 tests/integration/neutralize-planted-objects.spec.ts
+# A snapshot is replayed without privileges, as the platform: planted code that
+# was switched off comes back on. The restore switches it off again. Real
+# pg_dump and psql.
+tests/integration/restore-switches-planted-code-off.spec.ts
