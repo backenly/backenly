@@ -86,7 +86,9 @@ export class StorageModule {
       // v1 API wraps response in { data: { ... } }
       const data = json.data ?? json
       return {
-        url: data.url,
+        // A deployment storing files on its own disk answers with a path on its
+        // own origin, which a page on any other origin cannot load as it is.
+        url: typeof data.url === 'string' && /^\/(?!\/)/.test(data.url) ? `${this.client.getApiUrl()}${data.url}` : data.url,
         path: data.path,
         size: data.size,
         id: data.id,

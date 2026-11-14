@@ -16,7 +16,7 @@ const backend = createClient({
   apiKey: process.env.BACKENLY_CLIENT_KEY!,
 })
 
-const { data, error } = await backend.from('posts').select().eq('published', true).order('created_at', { ascending: false })
+const { data } = await backend.from('posts').select().eq('published', true).order('created_at', { ascending: false })
 ```
 
 `apiKey` is a client (publishable) key: Settings → API keys → New key → Client
@@ -24,15 +24,18 @@ in the dashboard, or `connect { action: "create_api_key" }` from your coding
 agent. It is safe in browser code and bound by your row-level security. Never
 use your agent's MCP key (`mcp_live_…`) here: the API refuses it.
 
+A request the API refuses throws a `BackenlyError` carrying the API's `code`,
+`status` and message.
+
 ## Auth
 
 End-user accounts (the users of *your* app), not your Backenly login.
 
 ```ts
-const { data } = await backend.auth.signUp({ email, password })
+const { user } = await backend.auth.signUp({ email, password }) // and signed in
 await backend.auth.signIn({ email, password })
-const me = await backend.auth.getUser()
-await backend.auth.signOut()
+const me = await backend.auth.getUser() // null when nobody is signed in
+await backend.auth.logout()
 ```
 
 Every request after `signIn` carries the end-user's JWT automatically. The wire
@@ -44,21 +47,51 @@ two-header scheme is documented there and is not guessable.
 
 ## Realtime
 
+In the browser, a table's inserts, updates and deletes as they happen:
+
 ```ts
-const unsubscribe = backend.realtime.onTableChange('messages', (event) => {
-  console.log(event.type, event.record) // 'insert' | 'update' | 'delete'
+const unsubscribe = backend.realtime.subscribe('messages', (event) => {
+  if (event.type === 'insert' || event.type === 'update') console.log(event.type, event.data)
+  if (event.type === 'delete') console.log('deleted', event.data) // the row's primary key
 })
+
+unsubscribe() // when the view goes away
 ```
 
+`backend.messages.subscribe(callback)` is the same subscription. An event
+carries the row in `data`. The callback also receives the stream's `connected`
+and `error` events, so check `type` first. Inserts and updates reach a stream
+only for rows its signed-in user may read. A table streams nothing until
+realtime is enabled for it: ask your agent (`realtime { action: "enable" }`).
+
 Server-Sent Events over a shared `LISTEN/NOTIFY` hub. Auto-reconnects with
-backoff. No WebSocket dependency.
+backoff. No WebSocket dependency. Outside a browser, `subscribe` does nothing.
 
 ## Storage
 
 ```ts
-const { data } = await backend.storage.from('avatars').upload(`${userId}.png`, file)
-const url = await backend.storage.from('avatars').getSignedUrl(`${userId}.png`, 3600)
+// `avatars` is a bucket whose policy lets files be public.
+const { id } = await backend.storage.upload(file, `${userId}.png`, { bucket: 'avatars', isPublic: true })
+avatar.src = backend.storage.getUrl(id) // the file itself, served to anyone
+
+await backend.storage.delete(id)
 ```
+
+`upload(file, path, options)` resolves with the file's `id`, `path`, `size`,
+`contentType` and `url`. A named bucket must exist already: create one in the
+dashboard or ask your agent. Without `bucket`, the file goes to the project's
+private `default` bucket. `isPublic: true` makes a file public when its
+bucket's policy allows public files (`public_read` or `cdn_cacheable`).
+
+`getUrl(id)` is the address a file is served at. A public file is served there
+to anyone, so the address works as an `<img src>`. Any other file is served
+there only to a reader its bucket's policy allows. For one of those, the `url`
+that `upload()` resolved is a signed link that works for an hour. An
+`owner_only` bucket refuses links: its files are read only by the end user who
+uploaded them.
+
+`delete(id)` removes a file. Only the end user who uploaded it, or a
+service-role key, may.
 
 ## Migrating from supabase-js
 
@@ -100,7 +133,7 @@ import { createTypedClient } from '@backenly/sdk'
 import type { Database } from './backenly.types'
 
 const backend = createTypedClient<Database>({ projectId, apiKey })
-const rows = await backend.from('posts').select() // fully typed
+const posts = await backend.posts.list({ where: { published: true } }) // PostsRow[]
 ```
 
 ## Browser use without an API key

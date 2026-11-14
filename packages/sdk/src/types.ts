@@ -42,7 +42,8 @@ export interface StorageUploadResponse {
   url: string
   path: string
   size: number
-  id?: string
+  /** The file's id, which getUrl() and delete() take. The upload route always returns it. */
+  id: string
   contentType?: string
 }
 

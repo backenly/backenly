@@ -1864,6 +1864,15 @@ tests/integration/postgrest-reload-on-drop.spec.ts
 # a duplicate 409, and a filter neither can apply 400 with no row changed.
 # What PostgreSQL accepts is the property, so it needs a real Postgres.
 tests/integration/sdk-filters-both-servers.spec.ts
+
+# The SDK's storage addresses serve the file: the README's example, run through
+# the upload, file and download routes, gets a public file at getUrl(id) as
+# uploaded, a file that is not public refused there and served at the signed url
+# upload() resolves, and a deleted one 404; the supabase-js shim's getPublicUrl()
+# is the same address. Real project, key, buckets and file rows, so a real
+# Postgres.
+tests/integration/sdk-storage-urls.spec.ts
+
 # The MCP data tools' filters (db_query, db_update, db_delete) build through the
 # same builder: an invalid column name, an unknown operator, an operator object
 # naming nothing or an $in that is not a list is refused with no row changed,
