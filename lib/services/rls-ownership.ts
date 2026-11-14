@@ -26,6 +26,9 @@
  *
  * ── The rules, in priority order ─────────────────────────────────────────────
  *
+ *  0. The teams tables (organizations, organization_members,
+ *     organization_invitations), all three present → teams. Membership, not a
+ *     column, decides who may see or change them.
  *  1. TWO OR MORE columns naming end-users → party_rows over all of them.
  *     Checked FIRST, because a two-party table also satisfies rule 2 — and that
  *     is exactly how it used to be mis-resolved. `connections(requester_id,
@@ -107,7 +110,46 @@ const REFERENCE_TABLE_PATTERNS = [
   'tax_rates', 'coupons', 'promotions', 'banners', 'announcements',
 ]
 
-export type InferredTemplate = 'own_rows' | 'own_rows_read' | 'party_rows' | 'related_rows' | 'public_read' | 'admin_only'
+export type InferredTemplate = 'own_rows' | 'own_rows_read' | 'party_rows' | 'related_rows' | 'public_read' | 'admin_only' | 'teams'
+
+/**
+ * The three tables enable_teams creates (lib/ai/minimal-executor.ts,
+ * executeEnableTeams). Membership decides who may read and change their rows,
+ * which no ownership column can say, so they get the `teams` rules
+ * (lib/services/workspace-rls.ts) instead of an owner's.
+ */
+export const TEAMS_TABLES = ['organizations', 'organization_members', 'organization_invitations'] as const
+export type TeamsTable = (typeof TEAMS_TABLES)[number]
+
+/** The columns the teams rules read, per table. */
+export const TEAMS_COLUMNS: Record<TeamsTable, readonly string[]> = {
+  organizations: ['id', 'owner_user_id'],
+  organization_members: ['organization_id', 'user_id', 'role'],
+  organization_invitations: ['organization_id', 'invited_by_user_id'],
+}
+
+export function isTeamsTable(tableName: string): tableName is TeamsTable {
+  return (TEAMS_TABLES as readonly string[]).includes(tableName)
+}
+
+/**
+ * What keeps the teams rules from being installed in this schema: each rule
+ * reads the other tables, so all three must exist with the columns they name.
+ * Empty when nothing does.
+ */
+export function teamsRulesBlockers(catalog: OwnershipCatalog): string[] {
+  const blockers: string[] = []
+  for (const table of TEAMS_TABLES) {
+    const columns = catalog.columns.get(table)
+    if (!columns) {
+      blockers.push(`"${table}" does not exist`)
+      continue
+    }
+    const missing = TEAMS_COLUMNS[table].filter((c) => !columns.includes(c))
+    if (missing.length) blockers.push(`"${table}" has no ${missing.map((c) => `"${c}"`).join(', ')}`)
+  }
+  return blockers
+}
 
 /**
  * Last words of a table name that say its rows GRANT access: roles,
@@ -233,6 +275,19 @@ export type RlsPlan =
       kind: 'admin_only'
       template: 'admin_only'
       basis: 'grant_table'
+      reason: string
+    }
+  | {
+      /**
+       * One of the three teams tables, with the other two beside it. Each
+       * table's own owner column would say the wrong thing: own rows on
+       * organization_members lets a user write the row that makes them a
+       * member of any organization, with any role, and owner-read-only on it
+       * leaves no way to create an organization's first membership.
+       */
+      kind: 'teams'
+      template: 'teams'
+      basis: 'teams_tables'
       reason: string
     }
   | {
@@ -444,11 +499,33 @@ function allOwnerColumnsOf(catalog: OwnershipCatalog, tableName: string): string
 
 /**
  * Decide the RLS policy shape for one table. Pure — pass a catalog loaded once.
+ *
+ * `teams: false` answers who owns a row of a teams table, for a caller that
+ * was asked for an owner's rule on one, instead of the rule the table needs.
  */
 export function inferRlsPlanFromCatalog(
   catalog: OwnershipCatalog,
   tableName: string,
+  opts: { teams?: boolean } = {},
 ): RlsPlan {
+  // The teams tables, all three present: membership decides access, so the
+  // rule is the teams rule rather than any one column's. While the set is
+  // incomplete (enable_teams creates them one at a time) each table gets what
+  // its own columns imply, and enable_teams installs the teams rules once the
+  // third exists.
+  if (opts.teams !== false && isTeamsTable(tableName) && teamsRulesBlockers(catalog).length === 0) {
+    return {
+      kind: 'teams',
+      template: 'teams',
+      basis: 'teams_tables',
+      reason:
+        `"${tableName}" is one of the teams tables (${TEAMS_TABLES.join(', ')}). An organization is read by its ` +
+        `owner and members and changed by its owner; each user reads and may leave their own memberships and adds ` +
+        `themselves only to an organization they own; invitations are read and written by the organization's owner ` +
+        `and admins. Joining through an invitation is the server's (POST /orgs/accept-invite).`,
+    }
+  }
+
   const plan = inferOwnershipFromCatalog(catalog, tableName)
   if (!isGrantTable(tableName)) return plan
 
@@ -683,9 +760,14 @@ function inferOwnershipFromCatalog(
 }
 
 /** Convenience wrapper for single-table callers. */
-export async function inferRlsPlan(projectId: string, tableName: string, schemaName?: string): Promise<RlsPlan> {
+export async function inferRlsPlan(
+  projectId: string,
+  tableName: string,
+  schemaName?: string,
+  opts: { teams?: boolean } = {},
+): Promise<RlsPlan> {
   const catalog = await loadOwnershipCatalog(projectId, schemaName)
-  return inferRlsPlanFromCatalog(catalog, tableName)
+  return inferRlsPlanFromCatalog(catalog, tableName, opts)
 }
 
 /**
@@ -767,6 +849,12 @@ export function exposureReason(tableName: string, plan: RlsPlan): string {
       return (
         `"${tableName}" is reference data, so open reads are correct — but with RLS disabled its ` +
         `INSERT/UPDATE/DELETE are open too. Any API key can rewrite it.`
+      )
+    case 'teams':
+      return (
+        `Rows in "${tableName}" decide which organization each end-user belongs to, but RLS is disabled: the ` +
+        `publishable key reads every row, invitation tokens included, and any signed-in user can add themselves ` +
+        `to any organization, which opens every table scoped to it.`
       )
     default:
       return (

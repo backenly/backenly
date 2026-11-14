@@ -2410,7 +2410,7 @@ export async function validateAction(
     // ========== PERMISSION ACTIONS ==========
     case 'SET_PERMISSION':
       if (!action.params.tableName) errors.push('tableName is required')
-      if (!action.params.template) errors.push('template is required (auto | own_rows | own_rows_read | party_rows | related_rows | public_read | admin_only | all_access | org_members | admin_read_all | role_based | moderator_access | custom)')
+      if (!action.params.template) errors.push('template is required (auto | own_rows | own_rows_read | party_rows | related_rows | public_read | admin_only | all_access | org_members | admin_read_all | role_based | moderator_access | teams | custom)')
       preview = `Apply "${action.params.template}" policy to "${action.params.tableName}"`
       break
 
@@ -11328,9 +11328,11 @@ async function executeSetPermission(params: any, projectId: string): Promise<Exe
   // OR MORE users (connections, conversations, messages); `related_rows`
   // protects a table owned through a FK to a user-owned parent; `custom` takes
   // the caller's own predicate.
+  // `teams` is the rule the inference gives the three tables enable_teams
+  // creates, so a repair that carries the detector's template can install it.
   const validTemplates = [
     'auto', 'own_rows', 'own_rows_read', 'party_rows', 'related_rows', 'public_read', 'admin_only',
-    'all_access', 'org_members', 'admin_read_all', 'role_based', 'moderator_access', 'custom',
+    'all_access', 'org_members', 'admin_read_all', 'role_based', 'moderator_access', 'teams', 'custom',
   ]
   if (!validTemplates.includes(template)) {
     // A REFUSAL, not a fallback to `auto`. Silently resolving an unrecognised

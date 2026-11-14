@@ -35,8 +35,12 @@ import {
   inferRlsPlan,
   loadOwnershipCatalog,
   inferRlsPlanFromCatalog,
+  isTeamsTable,
+  teamsRulesBlockers,
   OWNERSHIP_COLUMN_CANDIDATES,
+  TEAMS_TABLES,
   type RelatedRowsVia,
+  type TeamsTable,
 } from './rls-ownership'
 import type { ExistsContext } from '@/lib/db/sql-expression'
 
@@ -103,6 +107,7 @@ export type PolicyTemplate =
   | 'admin_read_all'    // admins see ALL rows; regular users see only their own
   | 'role_based'        // role column controls access (admin bypasses user-scoped filter)
   | 'moderator_access'  // moderators + admins see all rows; users see only their own
+  | 'teams'             // organizations / organization_members / organization_invitations: membership decides
   | 'custom'            // caller-supplied predicate — the escape hatch (see PolicyConfig.using)
 
 /**
@@ -585,6 +590,23 @@ async function installPermissionPolicy(
     return installCustomPolicySet(projectId, tableName, schemaName, plan, role)
   }
 
+  // ── teams: the three tables enable_teams creates, as one model ─────────────
+  // Each table's rule reads the other two, so it is refused before anything is
+  // altered unless all three exist with the columns the rules name.
+  if (template === 'teams') {
+    const blockers = isTeamsTable(tableName)
+      ? teamsRulesBlockers(await loadOwnershipCatalog(projectId, schemaName))
+      : [`"${tableName}" is not one of them`]
+    if (blockers.length) {
+      return {
+        success: false,
+        message:
+          `Cannot apply the "teams" rules to "${tableName}". They are for the tables enable_teams creates ` +
+          `(${TEAMS_TABLES.join(', ')}), all three present with the columns the rules read: ${blockers.join('; ')}.`,
+      }
+    }
+  }
+
   // ── Owner detection: the catalog is the source of truth, not a name list ────
   //
   // `detectUserIdColumn` matched a hardcoded list of column NAMES. So on
@@ -639,7 +661,7 @@ async function installPermissionPolicy(
   // caller names the template explicitly without one, derive it here so the
   // template is usable from the brain/MCP surface too.
   if (template === 'related_rows' && !via) {
-    const plan = await inferRlsPlan(projectId, tableName, schemaName)
+    const plan = await inferRlsPlan(projectId, tableName, schemaName, { teams: false })
     if (plan.kind !== 'related_rows') {
       return {
         success: false,
@@ -759,6 +781,10 @@ async function installPermissionPolicy(
         await installOrgMembersPolicy(projectId, tableName, schemaName)
         break
 
+      case 'teams':
+        await installTeamsPolicy(projectId, tableName as TeamsTable, schemaName)
+        break
+
       case 'all_access':
         // Disable RLS restrictions (allow all authenticated)
         await executeInWorkspaceSchema(
@@ -838,8 +864,8 @@ async function installPermissionPolicy(
       update: {
         operation: 'ALL',
         role,
-        using: getUsingExpression(template, uidColumn, via, partyColumns),
-        description: getPolicyDescription(template, uidColumn, via, partyColumns),
+        using: getUsingExpression(template, uidColumn, via, partyColumns, tableName),
+        description: getPolicyDescription(template, uidColumn, via, partyColumns, tableName),
         enabled: true,
       },
       create: {
@@ -848,8 +874,8 @@ async function installPermissionPolicy(
         policyName: `backenly_${template}`,
         operation: 'ALL',
         role,
-        using: getUsingExpression(template, uidColumn, via, partyColumns),
-        description: getPolicyDescription(template, uidColumn, via, partyColumns),
+        using: getUsingExpression(template, uidColumn, via, partyColumns, tableName),
+        description: getPolicyDescription(template, uidColumn, via, partyColumns, tableName),
       },
     })
 
@@ -858,7 +884,7 @@ async function installPermissionPolicy(
     // have locked one of them out. Saying so is the difference between a
     // correction and a substitution.
     const message =
-      getPolicyDescription(template, uidColumn, via, partyColumns) +
+      getPolicyDescription(template, uidColumn, via, partyColumns, tableName) +
       (upgradedFromOwnRows
         ? ` (Requested "own_rows", applied "party_rows" instead: "${tableName}" has ${partyColumns!.length} ` +
           `end-user parties (${partyColumns!.join(', ')}), and own_rows would have granted access to only ` +
@@ -1864,6 +1890,151 @@ async function installOrgMembersPolicy(
 }
 
 /**
+ * teams: the three tables enable_teams creates, held to one model.
+ *
+ *   organizations             read by its owner and its members; created,
+ *                             changed and deleted by its owner alone, who
+ *                             stays its owner (owner_user_id).
+ *   organization_members      each user reads their own memberships and may
+ *                             leave them (delete), and adds themselves only to
+ *                             an organization they own: how an organization's
+ *                             first, owner membership is made. Every other
+ *                             membership and every role change is the server's:
+ *                             POST /orgs/accept-invite, or a service-role key.
+ *   organization_invitations  read and written by the organization's owner
+ *                             and its admins (members whose role is owner or
+ *                             admin), and recorded as made by whoever wrote it
+ *                             (invited_by_user_id).
+ *
+ * The ownership inference cannot say any of this: own rows on
+ * organization_members let any signed-in user write the row that makes them a
+ * member of any organization, with any role, and joining an organization opens
+ * every table the org_members rule scopes to it.
+ *
+ * ── No policy on organization_members reads organization_members ──────────
+ *
+ * Supabase breaks a membership cycle with a SECURITY DEFINER helper with a
+ * fixed search_path, which reads the membership table "as its owner, so the
+ * second policy never runs" (supabase.com/docs/guides/database/postgres/
+ * row-level-security, "Avoid recursive policies"). That relies on the owner
+ * being exempt from the table's row-level security. Here every workspace table
+ * is FORCEd and the owner, production's application role, does not bypass
+ * row-level security, so a definer helper's read runs the same policies again
+ * (installOrgMembersPolicy says the same of the junction table). These policies
+ * instead only ever read "down":
+ *
+ *   organization_invitations           → organizations, organization_members
+ *   organization_members (INSERT)      → organizations
+ *   organizations                      → organization_members
+ *   organization_members (SELECT)      → nothing
+ *
+ * PostgreSQL refuses a policy that is expanded again while its own subqueries
+ * are being expanded ("infinite recursion detected in policy"), and it makes
+ * that check only for a policy that holds a subquery. organization_members is
+ * expanded twice on an insert into it (its INSERT rule reads organizations,
+ * whose SELECT rule reads organization_members), so its SELECT rule, and its
+ * DELETE rule beside it, hold no subquery of any kind: not even the
+ * `(SELECT claim)` used everywhere else.
+ *
+ * Everywhere else the caller's id is read once per statement, as Supabase's
+ * `(select auth.uid())`: a scalar subquery the planner runs once (an InitPlan)
+ * instead of once per row. Membership is `x IN (<the caller's own rows>)`
+ * rather than a lookup per row, the form Supabase's RLS performance guide
+ * recommends. Ids compare as text, as everywhere in this file.
+ *
+ * No `TO <role>` and no claim of the caller's memberships: like every template
+ * the policies apply to every role, so the application role is held to them
+ * when it reads with an end user's identity (realtime, functions' ctx.db), and
+ * membership is read from the table at query time, never from a token that
+ * outlives a change to it.
+ */
+export function teamsPolicySql(schemaName: string, tableName: TeamsTable): string {
+  const svc = serviceRoleClause(schemaName)
+  const caller = claimExpr(schemaName, SUBJECT_CLAIM)
+  const callerOnce = `(SELECT ${caller})`
+  const t = `"${schemaName}"."${tableName}"`
+  const orgs = `"${schemaName}"."organizations"`
+  const members = `"${schemaName}"."organization_members"`
+  /** Organizations the caller owns. */
+  const owned = `SELECT o."id"::text FROM ${orgs} o WHERE o."owner_user_id"::text = ${callerOnce}`
+  /** Organizations the caller is a member of. */
+  const joined = `SELECT m."organization_id"::text FROM ${members} m WHERE m."user_id"::text = ${callerOnce}`
+  /** Organizations the caller is an owner or admin member of. */
+  const administered = `${joined} AND m."role"::text IN ('owner', 'admin')`
+  const manages = `("organization_id"::text IN (${owned}) OR "organization_id"::text IN (${administered}))`
+
+  switch (tableName) {
+    case 'organizations':
+      return `
+        ALTER TABLE ${t} FORCE ROW LEVEL SECURITY;
+
+        CREATE POLICY backenly_teams_select ON ${t}
+          FOR SELECT
+          USING (${svc} OR "owner_user_id"::text = ${callerOnce} OR "id"::text IN (${joined}));
+
+        CREATE POLICY backenly_teams_insert ON ${t}
+          FOR INSERT
+          WITH CHECK (${svc} OR "owner_user_id"::text = ${callerOnce});
+
+        CREATE POLICY backenly_teams_update ON ${t}
+          FOR UPDATE
+          USING (${svc} OR "owner_user_id"::text = ${callerOnce})
+          WITH CHECK (${svc} OR "owner_user_id"::text = ${callerOnce});
+
+        CREATE POLICY backenly_teams_delete ON ${t}
+          FOR DELETE
+          USING (${svc} OR "owner_user_id"::text = ${callerOnce});
+      `
+    case 'organization_members':
+      return `
+        ALTER TABLE ${t} FORCE ROW LEVEL SECURITY;
+
+        CREATE POLICY backenly_teams_select ON ${t}
+          FOR SELECT
+          USING (${svc} OR "user_id"::text = ${caller});
+
+        CREATE POLICY backenly_teams_insert ON ${t}
+          FOR INSERT
+          WITH CHECK (${svc} OR ("user_id"::text = ${callerOnce} AND "organization_id"::text IN (${owned})));
+
+        CREATE POLICY backenly_teams_update ON ${t}
+          FOR UPDATE
+          USING (${svc})
+          WITH CHECK (${svc});
+
+        CREATE POLICY backenly_teams_delete ON ${t}
+          FOR DELETE
+          USING (${svc} OR "user_id"::text = ${caller});
+      `
+    case 'organization_invitations':
+      return `
+        ALTER TABLE ${t} FORCE ROW LEVEL SECURITY;
+
+        CREATE POLICY backenly_teams_select ON ${t}
+          FOR SELECT
+          USING (${svc} OR ${manages});
+
+        CREATE POLICY backenly_teams_insert ON ${t}
+          FOR INSERT
+          WITH CHECK (${svc} OR (${manages} AND "invited_by_user_id"::text = ${callerOnce}));
+
+        CREATE POLICY backenly_teams_update ON ${t}
+          FOR UPDATE
+          USING (${svc} OR ${manages})
+          WITH CHECK (${svc} OR (${manages} AND "invited_by_user_id"::text = ${callerOnce}));
+
+        CREATE POLICY backenly_teams_delete ON ${t}
+          FOR DELETE
+          USING (${svc} OR ${manages});
+      `
+  }
+}
+
+async function installTeamsPolicy(projectId: string, tableName: TeamsTable, schemaName: string) {
+  await execStatements(projectId, teamsPolicySql(schemaName, tableName))
+}
+
+/**
  * admin_read_all: Admins (app.user_role = 'admin') see ALL rows.
  * Regular users see only their own rows (via user_id column).
  * Service-role keys bypass everything.
@@ -2578,7 +2749,9 @@ async function resolveOwnership(
   schemaName?: string,
 ): Promise<{ ownerColumn: string | null; partyColumns: string[] }> {
   try {
-    const plan = await inferRlsPlan(projectId, tableName, schemaName)
+    // Who owns a row, not which rule the table needs: an owner's rule asked for
+    // on a teams table still finds its owner column.
+    const plan = await inferRlsPlan(projectId, tableName, schemaName, { teams: false })
     if (plan.kind === 'own_rows' || plan.kind === 'own_rows_read') return { ownerColumn: plan.userIdColumn, partyColumns: [plan.userIdColumn] }
     if (plan.kind === 'party_rows') return { ownerColumn: plan.partyColumns[0], partyColumns: plan.partyColumns }
     // `related_rows` and `public_read` have no LOCAL owner column, and reporting
@@ -2595,8 +2768,15 @@ function getUsingExpression(
   uidColumn: string,
   via?: RelatedRowsVia,
   partyColumns?: string[],
+  tableName?: string,
 ): string {
   switch (template) {
+    case 'teams':
+      return tableName === 'organization_members'
+        ? `reads, deletes: user_id = current_user_id; inserts: own row, into an organization the user owns; updates: service_role only`
+        : tableName === 'organization_invitations'
+          ? `organization_id IN (organizations the user owns, or is an owner or admin member of); writes record invited_by_user_id = current_user_id`
+          : `owner_user_id = current_user_id OR id IN (organizations the user is a member of) (SELECT); owner_user_id = current_user_id (write)`
     case 'own_rows': return `"${uidColumn}"::text = current_user_id`
     case 'own_rows_read': return `reads: "${uidColumn}"::text = current_user_id; writes: service_role only`
     case 'party_rows': return (partyColumns ?? [uidColumn])
@@ -2620,8 +2800,15 @@ function getPolicyDescription(
   uidColumn: string,
   via?: RelatedRowsVia,
   partyColumns?: string[],
+  tableName?: string,
 ): string {
   switch (template) {
+    case 'teams':
+      return tableName === 'organization_members'
+        ? `Teams: each user reads their own memberships and may leave them, and adds themselves only to an organization they own; every other membership and every role change is the server's (accept-invite, or a service-role key)`
+        : tableName === 'organization_invitations'
+          ? `Teams: invitations are read and written by the organization's owner and admins, and record whoever wrote them as the inviter`
+          : `Teams: an organization is read by its owner and its members, and created, changed or deleted only by its owner`
     case 'own_rows': return `Users can only access rows where "${uidColumn}" matches their user ID`
     case 'own_rows_read': return `Users can read rows where "${uidColumn}" matches their user ID; only service-role API keys can write, because these rows grant access`
     case 'party_rows': {
