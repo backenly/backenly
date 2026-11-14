@@ -37,7 +37,13 @@ import type { PresenceCallback, PresenceEvent } from './presence.js'
 export interface DBChangeEvent<T = Record<string, unknown>> {
   type: 'insert' | 'update' | 'delete'
   table: string
+  /** The changed row. On a delete, only its primary key, unless the client was created with a service-role key. */
   data?: T
+  /**
+   * On an update, the previous row's primary key only, unless the client was
+   * created with a service-role key, which receives the whole previous row. To
+   * act on what changed, compare `data` with the row as you last had it.
+   */
   old?: T
   /**
    * The change was too large to send whole: `data`, and an update's `old`,
