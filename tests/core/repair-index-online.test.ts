@@ -18,7 +18,15 @@ import { Client } from 'pg'
 import { prisma } from '@/lib/db/prisma'
 import { executeAction, type AIAction } from '@/lib/ai/minimal-executor'
 import { buildFixAction } from '@/lib/core/fix-actions'
-import { buildIndexOnline, ONLINE_INDEX_LOCK_NAMESPACE } from '@/lib/execution/online-index'
+import {
+  buildIndexOnline,
+  dropIndexOnline,
+  onlineIndexBounds,
+  ONLINE_BUILD_TIMEOUT_MS,
+  ONLINE_INDEX_LOCK_NAMESPACE,
+  ONLINE_LOCK_TIMEOUT_MS,
+} from '@/lib/execution/online-index'
+import { withSqlCapture } from '@/lib/execution/sql-recorder'
 
 process.env.ENABLE_AUTONOMY_RECONCILER = 'true'
 process.env.ENABLE_AUTONOMY_LIVE_EXECUTION = 'true'
@@ -170,4 +178,192 @@ describe('a repair index is built online', () => {
     expect(out.kind === 'failed' && out.transient).toBe(true)
     expect(await index('idx_orders_kind_busy')).toBeNull()
   }, 30_000)
+
+  test('the indisready = true unique case: invalid unique index enforces uniqueness and is replaced cleanly', async () => {
+    // 1. Builder starts CREATE UNIQUE INDEX CONCURRENTLY on orders(ref_a)
+    const builder = await connect()
+    const buildPromise = builder.query(
+      `CREATE UNIQUE INDEX CONCURRENTLY "uniq_orders_case" ON "${schema}"."orders" ("ref_a")`,
+    )
+
+    // 2. Wait until Phase 1 commits (index catalog entry appears in pg_class)
+    await waitFor(async () => {
+      const r = await prisma.$queryRawUnsafe<Array<{ n: number }>>(
+        `SELECT count(*)::int AS n FROM pg_class c
+           JOIN pg_namespace n ON n.oid = c.relnamespace
+          WHERE n.nspname = $1 AND c.relname = $2`,
+        schema,
+        'uniq_orders_case',
+      )
+      return (r[0]?.n ?? 0) > 0
+    }, 'Phase 1 catalog entry to appear')
+
+    // 3. Blocker holds an open snapshot AFTER Phase 1 committed.
+    // Phase 1 does not wait on blocker, but Phase 4 will wait on it!
+    const blocker = await connect()
+    await blocker.query('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ')
+    await blocker.query('SELECT 1')
+
+    // 4. Wait until Phase 3 commits (indisready = true)
+    await waitFor(async () => {
+      const r = await prisma.$queryRawUnsafe<Array<{ ready: boolean }>>(
+        `SELECT ix.indisready AS ready
+           FROM pg_class i
+           JOIN pg_index ix ON ix.indexrelid = i.oid
+           JOIN pg_namespace n ON n.oid = i.relnamespace
+          WHERE n.nspname = $1 AND i.relname = $2`,
+        schema,
+        'uniq_orders_case',
+      )
+      return r[0]?.ready === true
+    }, 'Phase 3 indisready = true')
+
+    // 5. Cancel the build while it is waiting in Phase 4 for blocker. The
+    // build's error can arrive before the cancel returns, so it is awaited
+    // from before the cancel; otherwise Jest sees an unhandled rejection.
+    const buildCancelled = expect(buildPromise).rejects.toThrow(/canceling statement/)
+    await raw(
+      `SELECT pg_cancel_backend(pid) FROM pg_stat_activity
+        WHERE query LIKE '%"uniq_orders_case"%' AND pid <> pg_backend_pid()`,
+    )
+    await buildCancelled
+    await blocker.query('COMMIT')
+
+    // 6. Confirm Postgres left the index in the catalog with indisvalid = false AND indisready = true
+    const rows = await prisma.$queryRawUnsafe<Array<{ valid: boolean; ready: boolean }>>(
+      `SELECT ix.indisvalid AS valid, ix.indisready AS ready
+         FROM pg_class i
+         JOIN pg_index ix ON ix.indexrelid = i.oid
+         JOIN pg_namespace n ON n.oid = i.relnamespace
+        WHERE n.nspname = $1 AND i.relname = $2`,
+      schema,
+      'uniq_orders_case',
+    )
+    expect(rows[0]).toEqual({ valid: false, ready: true })
+
+    // 7. In Postgres 16, an invalid index with indisready = true enforces uniqueness against writes!
+    const dupWriter = await connect()
+    await expect(
+      dupWriter.query(`INSERT INTO "${schema}"."orders"(ref_a) VALUES ('dup_a_val'), ('dup_a_val')`),
+    ).rejects.toThrow(/duplicate key|unique constraint/i)
+
+    // 8. Rebuild online replaces the invalid unique index with a valid one
+    const res = await run({
+      action: 'CREATE_INDEX',
+      params: { tableName: 'orders', columns: ['ref_a'], unique: true, online: true, indexName: 'uniq_orders_case' },
+    })
+    expect(res.success).toBe(true)
+    expect(await index('uniq_orders_case')).toEqual({ valid: true })
+
+    // Clean up
+    await raw(`DROP INDEX IF EXISTS "${schema}"."uniq_orders_case"`)
+  }, 60_000)
+
+  test("a build that's still running doesn't get dropped", async () => {
+    // Blocker holds an open transaction that wrote to orders
+    const blocker = await connect()
+    await blocker.query('BEGIN')
+    await blocker.query(`INSERT INTO "${schema}"."orders"(ref_a) VALUES ('in_prog_blocker')`)
+
+    // Builder starts CREATE INDEX CONCURRENTLY; it will pause waiting for blocker
+    const builder = await connect()
+    const buildPromise = builder.query(
+      `CREATE INDEX CONCURRENTLY "idx_orders_in_prog" ON "${schema}"."orders" ("ref_a")`,
+    )
+
+    // Wait until it appears in pg_stat_progress_create_index
+    await waitFor(async () => {
+      const r = await prisma.$queryRawUnsafe<Array<{ n: number }>>(
+        `SELECT count(*)::int AS n
+           FROM pg_stat_progress_create_index p
+           JOIN pg_class c ON c.oid = p.index_relid
+           JOIN pg_namespace n ON n.oid = c.relnamespace
+          WHERE n.nspname = $1 AND c.relname = $2`,
+        schema,
+        'idx_orders_in_prog',
+      )
+      return (r[0]?.n ?? 0) > 0
+    }, 'build to appear in pg_stat_progress_create_index')
+
+    // dropIndexOnline must immediately return transient "already being built" without waiting
+    const start = Date.now()
+    const out = await dropIndexOnline(projectId, schema, 'idx_orders_in_prog')
+    expect(Date.now() - start).toBeLessThan(5_000)
+    expect(out.kind).toBe('failed')
+    expect(out.transient).toBe(true)
+    expect(out.code).toBe('ONLINE_INDEX_BUILD_IN_PROGRESS')
+    expect(out.message).toContain('already being built')
+
+    // Finish blocker so builder completes cleanly
+    await blocker.query('COMMIT')
+    await buildPromise
+    expect(await index('idx_orders_in_prog')).toEqual({ valid: true })
+  }, 60_000)
+
+  test('a timeout behind an open writer comes back as leftover', async () => {
+    // An open transaction that wrote to orders
+    const writer = await connect()
+    await writer.query('BEGIN')
+    await writer.query(`INSERT INTO "${schema}"."orders"(ref_a) VALUES ('leftover_writer')`)
+
+    // buildIndexOnline with short timeouts: the build times out waiting for the writer,
+    // and the cleanup DROP INDEX CONCURRENTLY also times out waiting for the same writer!
+    const out = await buildIndexOnline(
+      projectId,
+      schema,
+      'idx_orders_leftover',
+      `CREATE INDEX CONCURRENTLY "idx_orders_leftover" ON "${schema}"."orders" ("ref_a")`,
+      { lockTimeoutMs: 150, buildTimeoutMs: 300 },
+    )
+
+    await writer.query('COMMIT')
+
+    expect(out.kind).toBe('failed')
+    expect(out.kind === 'failed' && out.leftover).toBe(true)
+    expect(out.kind === 'failed' && out.message).toContain('left an unusable copy of the index')
+
+    // Clean up the leftover invalid index
+    await raw(`DROP INDEX IF EXISTS "${schema}"."idx_orders_leftover"`)
+  }, 60_000)
+
+  test('both statements show up in withSqlCapture', async () => {
+    // Leave an invalid index first
+    const blocker = await connect()
+    await blocker.query('BEGIN')
+    await blocker.query(`INSERT INTO "${schema}"."orders"(ref_a) VALUES ('cap_blocker')`)
+    const other = await connect()
+    await other.query(`SET lock_timeout = '200ms'`)
+    await other.query(`SET statement_timeout = '400ms'`)
+    await expect(
+      other.query(`CREATE INDEX CONCURRENTLY "idx_orders_captured" ON "${schema}"."orders" ("ref_a")`),
+    ).rejects.toThrow()
+    await blocker.query('COMMIT')
+    expect(await index('idx_orders_captured')).toEqual({ valid: false })
+
+    // Rebuild online under withSqlCapture: both DROP and CREATE must be captured
+    const { statements } = await withSqlCapture(async () => {
+      return await run({
+        action: 'CREATE_INDEX',
+        params: { tableName: 'orders', columnName: 'ref_a', indexName: 'idx_orders_captured', online: true },
+      })
+    })
+
+    const drops = statements.filter((s) => s.sql.includes('DROP INDEX CONCURRENTLY'))
+    const creates = statements.filter((s) => s.sql.includes('CREATE INDEX CONCURRENTLY'))
+    expect(drops.length).toBeGreaterThanOrEqual(1)
+    expect(creates.length).toBeGreaterThanOrEqual(1)
+    expect(drops[0].sql).toContain('idx_orders_captured')
+    expect(creates[0].sql).toContain('idx_orders_captured')
+  }, 60_000)
+
+  test('a timeout that is not a positive whole number of milliseconds is the default', () => {
+    const defaults = { lockTimeoutMs: ONLINE_LOCK_TIMEOUT_MS, buildTimeoutMs: ONLINE_BUILD_TIMEOUT_MS }
+    expect(onlineIndexBounds()).toEqual(defaults)
+    // 0 would turn the Postgres timeout off.
+    expect(onlineIndexBounds({ lockTimeoutMs: 0, buildTimeoutMs: -1 })).toEqual(defaults)
+    expect(onlineIndexBounds({ lockTimeoutMs: 1.5, buildTimeoutMs: Number.NaN })).toEqual(defaults)
+    // Each value is written into a SET statement.
+    expect(onlineIndexBounds({ lockTimeoutMs: '1; SELECT 1' as unknown as number })).toEqual(defaults)
+    expect(onlineIndexBounds({ lockTimeoutMs: 150, buildTimeoutMs: 300 })).toEqual({ lockTimeoutMs: 150, buildTimeoutMs: 300 })
+  })
 })

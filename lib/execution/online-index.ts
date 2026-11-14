@@ -51,6 +51,25 @@ export const ONLINE_LOCK_TIMEOUT_MS = 60_000
 /** Longest a build may run. Autonomous builds are bounded to tables of 10 GB (lib/authority). */
 export const ONLINE_BUILD_TIMEOUT_MS = 30 * 60_000
 
+/** Shorter bounds, for tests. Positive whole numbers of milliseconds. */
+export interface OnlineIndexTimeouts {
+  lockTimeoutMs?: number
+  buildTimeoutMs?: number
+}
+
+/**
+ * The bounds in force. Each is written into a SET statement, and 0 turns a
+ * Postgres timeout off, so anything but a positive whole number of
+ * milliseconds is the default.
+ */
+export function onlineIndexBounds(t?: OnlineIndexTimeouts): Required<OnlineIndexTimeouts> {
+  const ms = (v: unknown, fallback: number) => (Number.isSafeInteger(v) && (v as number) > 0 ? (v as number) : fallback)
+  return {
+    lockTimeoutMs: ms(t?.lockTimeoutMs, ONLINE_LOCK_TIMEOUT_MS),
+    buildTimeoutMs: ms(t?.buildTimeoutMs, ONLINE_BUILD_TIMEOUT_MS),
+  }
+}
+
 export type OnlineIndexOutcome =
   | { kind: 'done' }
   | {
@@ -94,7 +113,12 @@ export async function indexValidity(
   return r.rows[0] ? { valid: Boolean(r.rows[0].valid) } : null
 }
 
-function failed(err: any, what: 'build' | 'removal', leftover: boolean): OnlineIndexOutcome {
+function failed(
+  err: any,
+  what: 'build' | 'removal',
+  leftover: boolean,
+  { lockTimeoutMs, buildTimeoutMs }: Required<OnlineIndexTimeouts>,
+): OnlineIndexOutcome {
   const code = String(err?.code ?? '')
   const unchanged = 'The table stayed available throughout.'
   const later = 'Backenly will try again later.'
@@ -105,14 +129,14 @@ function failed(err: any, what: 'build' | 'removal', leftover: boolean): OnlineI
         ...base,
         transient: true,
         code: 'ONLINE_INDEX_LOCK_TIMEOUT',
-        message: `The ${what} stopped because older transactions were still running after ${ONLINE_LOCK_TIMEOUT_MS / 1000} seconds. ${unchanged} ${later}`,
+        message: `The ${what} stopped because older transactions were still running after ${lockTimeoutMs / 1000} seconds. ${unchanged} ${later}`,
       }
     case '57014':
       return {
         ...base,
         transient: true,
         code: 'ONLINE_INDEX_TIMEOUT',
-        message: `The ${what} ran past ${ONLINE_BUILD_TIMEOUT_MS / 60_000} minutes and was stopped. ${unchanged} ${later}`,
+        message: `The ${what} ran past ${buildTimeoutMs / 60_000} minutes and was stopped. ${unchanged} ${later}`,
       }
     case '40P01':
       return { ...base, transient: true, code: 'ONLINE_INDEX_DEADLOCK', message: `The ${what} was stopped to resolve a deadlock. ${unchanged} ${later}` }
@@ -130,7 +154,13 @@ function failed(err: any, what: 'build' | 'removal', leftover: boolean): OnlineI
  * `"schema"."indexName"`'s index) online. Leaves nothing behind on failure, or
  * says so.
  */
-export async function buildIndexOnline(projectId: string, schema: string, indexName: string, createSql: string): Promise<OnlineIndexOutcome> {
+export async function buildIndexOnline(
+  projectId: string,
+  schema: string,
+  indexName: string,
+  createSql: string,
+  timeouts?: OnlineIndexTimeouts,
+): Promise<OnlineIndexOutcome> {
   if (!/^\s*CREATE\s+(UNIQUE\s+)?INDEX\s+CONCURRENTLY\b/i.test(createSql)) {
     throw new Error('buildIndexOnline runs CREATE INDEX CONCURRENTLY only')
   }
@@ -146,10 +176,11 @@ export async function buildIndexOnline(projectId: string, schema: string, indexN
         message: 'Another index is being built in this database. Backenly will try again on its next pass.',
       }
     }
+    const bounds = onlineIndexBounds(timeouts)
     const q = (sql: string, params: unknown[]) => c.query(sql, params)
     const before = await indexValidity(q, schema, indexName)
-    await c.query(`SET lock_timeout = ${ONLINE_LOCK_TIMEOUT_MS}`)
-    await c.query(`SET statement_timeout = ${ONLINE_BUILD_TIMEOUT_MS}`)
+    await c.query(`SET lock_timeout = ${bounds.lockTimeoutMs}`)
+    await c.query(`SET statement_timeout = ${bounds.buildTimeoutMs}`)
     noteStatement(createSql)
     try {
       await c.query(createSql)
@@ -167,7 +198,7 @@ export async function buildIndexOnline(projectId: string, schema: string, indexN
           })
         }
       }
-      const out = failed(err, 'build', leftover)
+      const out = failed(err, 'build', leftover, bounds)
       if (leftover && out.kind === 'failed') {
         out.message += ` It left an unusable copy of the index, which could not be removed now; the next build of it removes it first.`
       }
@@ -177,17 +208,49 @@ export async function buildIndexOnline(projectId: string, schema: string, indexN
 }
 
 /** DROP INDEX CONCURRENTLY IF EXISTS, bounded. */
-export async function dropIndexOnline(projectId: string, schema: string, indexName: string): Promise<OnlineIndexOutcome> {
+export async function dropIndexOnline(
+  projectId: string,
+  schema: string,
+  indexName: string,
+  timeouts?: OnlineIndexTimeouts,
+): Promise<OnlineIndexOutcome> {
   return onOwnConnection(projectId, async (c) => {
-    await c.query(`SET lock_timeout = ${ONLINE_LOCK_TIMEOUT_MS}`)
-    await c.query(`SET statement_timeout = ${ONLINE_BUILD_TIMEOUT_MS}`)
+    // A build of this index that is still running is left alone, and said so
+    // at once instead of after lock_timeout. Postgres fills in index_relid only
+    // for sessions of this role (or for pg_read_all_stats), so a build this
+    // cannot see, or a view this cannot read, still ends at the lock timeout.
+    const inProgress = await c.query<{ in_progress: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1
+           FROM pg_stat_progress_create_index p
+           JOIN pg_class c ON c.oid = p.index_relid
+           JOIN pg_namespace n ON n.oid = c.relnamespace
+          WHERE n.nspname = $1 AND c.relname = $2
+       ) AS in_progress`,
+      [schema, indexName],
+    ).catch(() => ({ rows: [{ in_progress: false }] }))
+
+    if (inProgress.rows[0]?.in_progress) {
+      return {
+        kind: 'failed',
+        transient: true,
+        started: false,
+        leftover: false,
+        code: 'ONLINE_INDEX_BUILD_IN_PROGRESS',
+        message: `Index "${indexName}" on "${schema}" is already being built. Backenly will try again later.`,
+      }
+    }
+
+    const bounds = onlineIndexBounds(timeouts)
+    await c.query(`SET lock_timeout = ${bounds.lockTimeoutMs}`)
+    await c.query(`SET statement_timeout = ${bounds.buildTimeoutMs}`)
     const sql = `DROP INDEX CONCURRENTLY IF EXISTS "${schema}"."${indexName}"`
     noteStatement(sql)
     try {
       await c.query(sql)
       return { kind: 'done' }
     } catch (err) {
-      return failed(err, 'removal', false)
+      return failed(err, 'removal', false, bounds)
     }
   })
 }
