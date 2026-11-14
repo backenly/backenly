@@ -315,3 +315,81 @@ describe('STO-13: a file follows its bucket unless the upload says otherwise', (
     expect(row?.isPublic).toBe(false)
   }, 60_000)
 })
+
+describe('STO-14: file count limits answer HTTP 413, never 500 (#592)', () => {
+  it('rejects with HTTP 413 when an explicit bucket file limit is reached', async () => {
+    const bucket = await prisma.storageBucket.create({
+      data: { name: 'limit-test', projectId, isPublic: false, accessPolicy: 'private' },
+    })
+
+    try {
+      // Set an explicit limit of 1 file on the project
+      await prisma.project.update({
+        where: { id: projectId },
+        data: { maxFilesPerBucket: 1 },
+      })
+
+      const { POST } = await import('@/app/api/v1/[projectId]/storage/upload/route')
+      // First upload into fresh bucket succeeds (0 -> 1)
+      const form1 = new FormData()
+      form1.set('file', new File(['first'], 'first.txt', { type: 'text/plain' }))
+      form1.set('bucket', 'limit-test')
+      form1.set('path', 'first.txt')
+      const req1 = new NextRequest(`http://test.local/api/v1/${projectId}/storage/upload`, {
+        method: 'POST', headers: { 'x-api-key': serviceKey }, body: form1,
+      })
+      const res1 = await POST(req1, { params: Promise.resolve({ projectId }) })
+      expect(res1.status).toBe(200)
+
+      // Second upload hits the 1-file limit: must answer 413, NOT 500
+      const form2 = new FormData()
+      form2.set('file', new File(['second'], 'second.txt', { type: 'text/plain' }))
+      form2.set('bucket', 'limit-test')
+      form2.set('path', 'second.txt')
+      const req2 = new NextRequest(`http://test.local/api/v1/${projectId}/storage/upload`, {
+        method: 'POST', headers: { 'x-api-key': serviceKey }, body: form2,
+      })
+      const res2 = await POST(req2, { params: Promise.resolve({ projectId }) })
+      expect(res2.status).toBe(413)
+      const body2 = await res2.json()
+      expect(body2.error?.code).toBe('PLAN_LIMIT_EXCEEDED')
+      expect(body2.error?.message).toMatch(/Bucket has reached maximum file limit/)
+    } finally {
+      // Restore project to default
+      await prisma.project.update({
+        where: { id: projectId },
+        data: { maxFilesPerBucket: 1000 },
+      })
+      await prisma.storageFile.deleteMany({ where: { bucketId: bucket.id } }).catch(() => {})
+      await prisma.storageBucket.delete({ where: { id: bucket.id } }).catch(() => {})
+    }
+  }, 60_000)
+
+  it('does not reject uploads at 1,000 files when maxFilesPerBucket is the legacy default', async () => {
+    const bucket = await prisma.storageBucket.create({
+      data: { name: 'default-unlimited', projectId, isPublic: false, accessPolicy: 'private' },
+    })
+
+    try {
+      const { POST } = await import('@/app/api/v1/[projectId]/storage/upload/route')
+      // Simulate 1,050 active files in the bucket
+      const countSpy = jest.spyOn(prisma.storageFile, 'count').mockResolvedValueOnce(1050)
+      try {
+        const form = new FormData()
+        form.set('file', new File(['beyond-1k'], 'beyond-1k.txt', { type: 'text/plain' }))
+        form.set('bucket', 'default-unlimited')
+        form.set('path', 'beyond-1k.txt')
+        const req = new NextRequest(`http://test.local/api/v1/${projectId}/storage/upload`, {
+          method: 'POST', headers: { 'x-api-key': serviceKey }, body: form,
+        })
+        const res = await POST(req, { params: Promise.resolve({ projectId }) })
+        expect(res.status).toBe(200)
+      } finally {
+        countSpy.mockRestore()
+      }
+    } finally {
+      await prisma.storageFile.deleteMany({ where: { bucketId: bucket.id } }).catch(() => {})
+      await prisma.storageBucket.delete({ where: { id: bucket.id } }).catch(() => {})
+    }
+  }, 60_000)
+})

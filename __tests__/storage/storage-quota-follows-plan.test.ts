@@ -18,6 +18,9 @@
  */
 
 import { randomUUID } from 'crypto'
+
+process.env.STORAGE_SECRET = process.env.STORAGE_SECRET || 'test-storage-secret-must-be-at-least-32-chars-long-for-security-tests'
+
 import { prisma } from '@/lib/db/prisma'
 import { selfHostedEntitlements } from '@/lib/entitlements/self-hosted'
 import type { UserEntitlements } from '@/lib/entitlements/types'
@@ -44,6 +47,8 @@ jest.mock('@/lib/auth/server', () => ({
 
 const { getProjectQuota, assertQuotaAvailable, QuotaExceededError } = require('@/lib/services/storageQuota')
 const { enforceStorageQuota } = require('@/lib/storage/storage-lifecycle')
+const { LocalStorageService } = require('@/lib/services/storage')
+const { UploadRejectedError } = require('@/lib/storage/upload-policy')
 const { PUT: updateProjectRoute } = require('@/app/api/projects/[id]/route')
 
 const GiB = BigInt(1024 * 1024 * 1024)
@@ -63,17 +68,17 @@ function assertSafeTestDatabase(): void {
   if (process.env.DATABASE_URL !== DB_URL) throw new Error('Refusing: DATABASE_URL is not the test database')
 }
 
-async function makeProject(storageUsed = BigInt(0)) {
+async function makeProject(storageUsed = BigInt(0), maxFilesPerBucket = 1000) {
   const user = await prisma.user.create({
     data: { email: `quota-${randomUUID()}@test.invalid`, name: 'Quota Test' },
     select: { id: true },
   })
   createdUserIds.push(user.id)
   const project = await prisma.project.create({
-    data: { name: `quota-${randomUUID().slice(0, 8)}`, userId: user.id, storageUsed },
-    select: { id: true, storageLimit: true },
+    data: { name: `quota-${randomUUID().slice(0, 8)}`, userId: user.id, storageUsed, maxFilesPerBucket },
+    select: { id: true, storageLimit: true, maxFilesPerBucket: true },
   })
-  return { userId: user.id, projectId: project.id, column: project.storageLimit }
+  return { userId: user.id, projectId: project.id, column: project.storageLimit, maxFilesPerBucket: project.maxFilesPerBucket }
 }
 
 beforeAll(() => {
@@ -82,6 +87,10 @@ beforeAll(() => {
 
 afterAll(async () => {
   if (createdUserIds.length) {
+    const projects = await prisma.project.findMany({ where: { userId: { in: createdUserIds } }, select: { id: true } })
+    const projectIds = projects.map(p => p.id)
+    await prisma.storageFile.deleteMany({ where: { projectId: { in: projectIds } } }).catch(() => {})
+    await prisma.storageBucket.deleteMany({ where: { projectId: { in: projectIds } } }).catch(() => {})
     await prisma.project.deleteMany({ where: { userId: { in: createdUserIds } } })
     await prisma.user.deleteMany({ where: { id: { in: createdUserIds } } })
   }
@@ -132,6 +141,115 @@ describe('the S3 upload path', () => {
     const decision = await enforceStorageQuota(projectId, MiB)
     expect(decision.allowed).toBe(false)
     expect(decision.reason).toMatch(/quota exceeded/i)
+  })
+
+  it('allows more than 10,000 files when storage bytes permit (#592)', async () => {
+    fileStorageMb = PRO_MB
+    const { projectId } = await makeProject(GiB)
+
+    // Simulate 12,000 existing active files in the project
+    const countSpy = jest.spyOn(prisma.storageFile, 'count').mockResolvedValueOnce(12_000)
+    try {
+      const decision = await enforceStorageQuota(projectId, MiB)
+      expect(decision.allowed).toBe(true)
+    } finally {
+      countSpy.mockRestore()
+    }
+  })
+
+  it('still blocks when an explicit file count limit is configured and exceeded', async () => {
+    fileStorageMb = PRO_MB
+    const { projectId } = await makeProject(GiB)
+
+    const countSpy = jest.spyOn(prisma.storageFile, 'count').mockResolvedValueOnce(50)
+    try {
+      const decision = await enforceStorageQuota(projectId, MiB, {
+        maxFileSize: MiB * BigInt(100),
+        maxFileCount: 50,
+        maxOrphansAllowed: 100,
+      })
+      expect(decision.allowed).toBe(false)
+      expect(decision.reason).toMatch(/Project file count limit reached \(50 files maximum\)/)
+    } finally {
+      countSpy.mockRestore()
+    }
+  })
+})
+
+describe('the self-host local upload path (#592)', () => {
+  it('does not cap bucket files at the legacy default 1000', async () => {
+    fileStorageMb = PRO_MB
+    const { projectId } = await makeProject()
+    const bucket = await prisma.storageBucket.create({
+      data: { name: `unlimited-${randomUUID().slice(0, 8)}`, projectId, accessPolicy: 'private' },
+    })
+
+    const svc = new LocalStorageService()
+    // Simulate 1500 active files in the bucket (well beyond the legacy 1000 default)
+    const countSpy = jest.spyOn(prisma.storageFile, 'count').mockResolvedValueOnce(1500)
+    try {
+      const stored = await svc.uploadFile(
+        bucket.id,
+        { name: 'file-1501.txt', buffer: Buffer.from('hello'), mimeType: 'text/plain' },
+        { projectId },
+      )
+      expect(stored).toBeDefined()
+      expect(stored.name).toBe('file-1501.txt')
+    } finally {
+      countSpy.mockRestore()
+    }
+  })
+
+  it('rejects with a 413 UploadRejectedError when an explicit bucket limit is reached', async () => {
+    fileStorageMb = PRO_MB
+    const { projectId } = await makeProject(BigInt(0), 5) // explicit custom limit: 5 files
+    const bucket = await prisma.storageBucket.create({
+      data: { name: `limited-${randomUUID().slice(0, 8)}`, projectId, accessPolicy: 'private' },
+    })
+
+    const svc = new LocalStorageService()
+    const countSpy = jest.spyOn(prisma.storageFile, 'count').mockResolvedValueOnce(5)
+    try {
+      await expect(
+        svc.uploadFile(
+          bucket.id,
+          { name: 'file-6.txt', buffer: Buffer.from('hello'), mimeType: 'text/plain' },
+          { projectId },
+        )
+      ).rejects.toMatchObject({
+        name: 'UploadRejectedError',
+        code: 'STORAGE_QUOTA_EXCEEDED',
+        status: 413,
+      })
+    } finally {
+      countSpy.mockRestore()
+    }
+  })
+
+  it('rejects with a 413 UploadRejectedError when options.maxFilesPerBucket is passed and reached', async () => {
+    fileStorageMb = PRO_MB
+    const { projectId } = await makeProject()
+    const bucket = await prisma.storageBucket.create({
+      data: { name: `options-limited-${randomUUID().slice(0, 8)}`, projectId, accessPolicy: 'private' },
+    })
+
+    const svc = new LocalStorageService()
+    const countSpy = jest.spyOn(prisma.storageFile, 'count').mockResolvedValueOnce(3)
+    try {
+      await expect(
+        svc.uploadFile(
+          bucket.id,
+          { name: 'file-4.txt', buffer: Buffer.from('hello'), mimeType: 'text/plain' },
+          { projectId, maxFilesPerBucket: 3 },
+        )
+      ).rejects.toMatchObject({
+        name: 'UploadRejectedError',
+        code: 'STORAGE_QUOTA_EXCEEDED',
+        status: 413,
+      })
+    } finally {
+      countSpy.mockRestore()
+    }
   })
 })
 
