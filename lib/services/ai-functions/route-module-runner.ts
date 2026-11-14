@@ -453,14 +453,29 @@ export async function validateRouteModule(code: string, expectedMethod?: string 
 // ─── Public executor ──────────────────────────────────────────────────────────
 
 /**
- * Thrown when the HANDLER itself failed — distinct from compile errors,
- * timeouts and machinery failures, which stay plain Errors. The smoke test
- * keys off this class to decide between "the function is broken" and "we
- * could not test it".
+ * Thrown when a run fails after the module started running: its top level
+ * threw, it exports no handler, its handler threw, or the handler passed the
+ * time limit. It carries the lines the module logged up to the failure, which
+ * are what explain it; they used to be dropped with everything else, so a
+ * failed HTTP function run was recorded and returned with no log lines (#605).
+ * A compile error comes before anything runs and stays a plain Error.
  */
-export class RouteModuleHandlerError extends Error {
-  constructor(message: string) {
+export class RouteModuleRunError extends Error {
+  constructor(message: string, readonly logs: string[] = []) {
     super(message)
+    this.name = 'RouteModuleRunError'
+  }
+}
+
+/**
+ * Thrown when the HANDLER itself failed — distinct from compile errors,
+ * timeouts and machinery failures, which are not of this class. The smoke
+ * test keys off it to decide between "the function is broken" and "we could
+ * not test it".
+ */
+export class RouteModuleHandlerError extends RouteModuleRunError {
+  constructor(message: string, logs: string[] = []) {
+    super(message, logs)
     this.name = 'RouteModuleHandlerError'
   }
 }
@@ -651,24 +666,28 @@ export async function executeRouteModuleFunction(
   // 4. What it answered, or why it did not.
   const result = outcome.result
   if (!result) {
-    if (outcome.killed === 'timeout') throw new Error(TIMEOUT_MESSAGE)
+    // Stopped before it answered. The runner sends a run's log lines with its
+    // answer, so these carry none.
+    if (outcome.killed === 'timeout') throw new RouteModuleRunError(TIMEOUT_MESSAGE)
     throw new RouteModuleHandlerError(`The function did not answer: ${endedWithoutAnswer(outcome, 'run')}.`)
   }
   if (!result.ok) {
     // The 10s race cannot tell a hung handler from slow infrastructure, so a
-    // timeout stays a plain Error. Everything else thrown by the handler came
-    // out of the HANDLER itself, and the type says so: callers that must
-    // distinguish "the function is broken" from "the machinery failed" check the
-    // class instead of sniffing message text.
+    // timeout is not a RouteModuleHandlerError. Everything else thrown by the
+    // handler came out of the HANDLER itself, and the type says so: callers
+    // that must distinguish "the function is broken" from "the machinery
+    // failed" check the class instead of sniffing message text. Either way the
+    // error carries the lines the module logged up to the failure (#605).
+    const logs = result.logs
     switch (result.errorKind) {
       case 'evaluation':
-        throw new Error(`Route module evaluation error: ${result.error}`)
+        throw new RouteModuleRunError(`Route module evaluation error: ${result.error}`, logs)
       case 'exports':
-        throw new Error('Route module exports no GET/POST/PUT/PATCH/DELETE handler')
+        throw new RouteModuleRunError('Route module exports no GET/POST/PUT/PATCH/DELETE handler', logs)
       case 'timeout':
-        throw new Error(TIMEOUT_MESSAGE)
+        throw new RouteModuleRunError(TIMEOUT_MESSAGE, logs)
       default:
-        throw new RouteModuleHandlerError(result.error || 'Route function error')
+        throw new RouteModuleHandlerError(result.error || 'Route function error', logs)
     }
   }
 

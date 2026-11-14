@@ -1,11 +1,11 @@
 export const dynamic = 'force-dynamic'
 
-import { NextRequest } from 'next/server'
+import { NextRequest, NextResponse } from 'next/server'
 import { v1ApiMiddleware, requirePermission, requireCapability } from '@/lib/api/v1/middleware'
-import { createErrorResponse, createSuccessResponse, handleValidationError, ErrorCodes } from '@/lib/api/v1/errors'
+import { createErrorResponse, handleValidationError, ErrorCodes } from '@/lib/api/v1/errors'
 import { invokeFunctionSchema } from '@/lib/api/v1/schemas'
 import { validateRequestBody } from '@/lib/validation/schemas'
-import { recordedV1 } from '@/lib/traffic/recorded-v1'
+import { markAsWritten, recordedV1 } from '@/lib/traffic/recorded-v1'
 
 /**
  * POST /v1/{projectId}/functions/invoke
@@ -56,7 +56,7 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
       trigger: 'http',
     })
 
-    const { logsFor, runnerRefusal } = await import('@/lib/services/ai-functions/reply')
+    const { logsFor, runnerRefusal, completedRunStatus, statusHasBody } = await import('@/lib/services/ai-functions/reply')
     if (!result.success) {
       if (result.errorCode === 'PLAN_LIMIT_EXCEEDED') {
         return createErrorResponse(
@@ -81,13 +81,19 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
       )
     }
 
-    return createSuccessResponse({
+    // The status line is the handler's own, as at /fn/{name}: a 401 or 503 the
+    // function answered went out as a 200 here (#604). The envelope is kept.
+    const status = completedRunStatus(result.httpStatus)
+    const envelope = {
       functionId,
-      success: result.success,
+      success: status < 400,
       ...logsFor(result.logs, !!context.apiKey.serviceRole),
       returnValue: result.returnValue ?? null,
       durationMs: result.durationMs,
-    })
+    }
+    return markAsWritten(
+      statusHasBody(status) ? NextResponse.json({ data: envelope }, { status }) : new NextResponse(null, { status }),
+    )
   } catch (error: any) {
     console.error('Function invoke error:', error)
     return createErrorResponse(

@@ -549,6 +549,20 @@ async function handleDynamicRequest(req: Request, res: Response) {
         headers: fwdHeaders,
       })
 
+      // A run the plan refused is a 402, as on POST /functions and
+      // /functions/invoke. It was a 500, which tells a client to retry and
+      // monitoring that the app is down; PLAN_LIMIT_EXCEEDED tells it not to
+      // retry in a loop (#604).
+      if (!result.success && result.errorCode === 'PLAN_LIMIT_EXCEEDED') {
+        res.status(402).json({
+          error: result.error || 'Plan limit exceeded',
+          code: 'PLAN_LIMIT_EXCEEDED',
+          upgradeRequired: true,
+          ...(result.requiredPlan ? { requiredPlan: result.requiredPlan } : {}),
+        })
+        return
+      }
+
       // Turned away by the function runner: the function did not run, and
       // the answer is the server's 503, not the function's 500.
       const refusal = runnerRefusal(result)

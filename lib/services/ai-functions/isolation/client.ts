@@ -81,6 +81,18 @@ export class FunctionRunnerBusyError extends FunctionRunnerUnavailableError {
   }
 }
 
+/**
+ * The run's process could not be started: the system refused a new process
+ * (too many open files or processes) or the runner could not be executed.
+ * Nothing ran, so the run may be started again, and a sandbox run is (#606).
+ */
+export class FunctionRunnerStartError extends FunctionRunnerUnavailableError {
+  constructor(readonly detail: string) {
+    super(detail, `The function's runner could not start: ${detail}`)
+    this.name = 'FunctionRunnerStartError'
+  }
+}
+
 /** How long the supervisor may hold a run before it starts (BACKENLY_FN_QUEUE_WAIT_MS, as the supervisor reads it). */
 function supervisorQueueWaitMs(): number {
   const n = Number.parseInt(process.env.BACKENLY_FN_QUEUE_WAIT_MS ?? '', 10)
@@ -116,6 +128,20 @@ export interface IsolatedOutcome {
   exitCode: number | null
   signal: string | null
   stderr: string
+  /**
+   * Whether the runner said a sandbox body's own code had started. A run that
+   * ended without an answer before then did nothing the function does, and may
+   * be started again (#606).
+   */
+  codeStarted?: boolean
+}
+
+/** What a run that ended without answering wrote last about why: its first error line, kept short. */
+export function stderrReason(stderr: string): string | null {
+  const lines = stderr.split('\n').map((l) => l.trim()).filter(Boolean)
+  const line = lines.find((l) => /^[A-Za-z]*Error\b/.test(l)) ?? lines[lines.length - 1]
+  if (!line) return null
+  return line.length > 300 ? `${line.slice(0, 299)}…` : line
 }
 
 /** Whether a run that ended without an answer ended for want of memory. */
@@ -237,6 +263,8 @@ interface SessionEnd {
   unavailable?: string
   /** The supervisor refused it for capacity. */
   busy?: string
+  /** Its process could not be started, so nothing ran: why. */
+  startFailed?: string
 }
 
 interface Session {
@@ -352,7 +380,7 @@ async function supervisedSession(socketPath: string, timeoutMs: number): Promise
             exitCode: typeof msg.code === 'number' ? msg.code : null,
             signal: typeof msg.signal === 'string' ? msg.signal : null,
             stderr: typeof msg.stderr === 'string' ? msg.stderr : '',
-            unavailable: msg.error ? String(msg.error) : undefined,
+            startFailed: msg.error ? String(msg.error) : undefined,
           })
         }
       }
@@ -416,7 +444,7 @@ function localSession(timeoutMs: number): Session {
     })
   } catch (err: any) {
     fs.rmSync(dir, { recursive: true, force: true })
-    throw new FunctionRunnerUnavailableError(`the function runner could not start (${err?.message ?? err})`)
+    throw new FunctionRunnerStartError(String(err?.message ?? err))
   }
   const messageHandlers: Array<(msg: any) => void> = []
   const endHandlers: Array<(end: SessionEnd) => void> = []
@@ -461,7 +489,7 @@ function localSession(timeoutMs: number): Session {
       exitCode: code,
       signal,
       stderr: stderr.toString('utf8'),
-      unavailable: spawnError ? `the function runner could not start (${spawnError})` : undefined,
+      startFailed: spawnError ?? undefined,
     }
     for (const h of endHandlers) h(end)
   })
@@ -502,11 +530,12 @@ export async function runIsolated(job: IsolatedJob, handlers: CallHandlers = {})
     let settled = false
     let inflight = 0
     let calls = 0
+    let codeStarted = false
     // Should neither the runner nor the supervisor ever say how the run ended.
     // A supervised run may first wait for a slot, which its deadline does not count.
     const backstop = setTimeout(() => {
       session.abort()
-      settle({ result: null, killed: 'timeout', exitCode: null, signal: null, stderr: '' })
+      settle({ result: null, killed: 'timeout', exitCode: null, signal: null, stderr: '', codeStarted })
     }, job.hardTimeoutMs + (mode.kind === 'supervisor' ? supervisorQueueWaitMs() : 0) + 10_000)
 
     function settle(outcome: IsolatedOutcome) {
@@ -527,8 +556,12 @@ export async function runIsolated(job: IsolatedJob, handlers: CallHandlers = {})
     }
 
     session.onMessage((msg) => {
+      if (msg?.t === 'started') {
+        codeStarted = true
+        return
+      }
       if (msg?.t === 'result') {
-        settle({ result: toResult(msg), killed: null, exitCode: null, signal: null, stderr: '' })
+        settle({ result: toResult(msg), killed: null, exitCode: null, signal: null, stderr: '', codeStarted })
         return
       }
       if (msg?.t !== 'call') return
@@ -559,15 +592,16 @@ export async function runIsolated(job: IsolatedJob, handlers: CallHandlers = {})
       if (settled) return
       const refusal =
         end.busy !== undefined ? new FunctionRunnerBusyError(end.busy)
-          : end.unavailable ? new FunctionRunnerUnavailableError(end.unavailable)
-            : null
+          : end.startFailed !== undefined ? new FunctionRunnerStartError(end.startFailed)
+            : end.unavailable ? new FunctionRunnerUnavailableError(end.unavailable)
+              : null
       if (refusal) {
         settled = true
         clearTimeout(backstop)
         reject(refusal)
         return
       }
-      settle({ result: null, killed: end.killed, exitCode: end.exitCode, signal: end.signal, stderr: end.stderr })
+      settle({ result: null, killed: end.killed, exitCode: end.exitCode, signal: end.signal, stderr: end.stderr, codeStarted })
     })
 
     try {

@@ -284,7 +284,7 @@ export class S3StorageService implements StorageService {
   async uploadFile(
     bucketId: string,
     file: { name: string; buffer: Buffer; mimeType?: string },
-    options: { isPublic?: boolean; projectId: string; uploadedBy?: string; uploader?: UploaderRecord }
+    options: { isPublic?: boolean; projectId: string; uploadedBy?: string; uploader?: UploaderRecord; maxFilesPerBucket?: number }
   ) {
     if (!options.projectId) {
       throw new Error('Project ID is required for tenant isolation')
@@ -354,6 +354,36 @@ export class S3StorageService implements StorageService {
 
     // The per-file rule both drivers share (lib/storage/upload-policy.ts).
     assertFileSize(fileSize, { bucketMaxBytes: bucket.maxFileSizeBytes })
+
+    // Check files per bucket limit (only count active files, not soft-deleted).
+    // Project.maxFilesPerBucket (default 1000) is NOT consulted when left at its
+    // legacy column default, which nothing sets. Like Project.storageLimit and
+    // Project.maxFileSize before it, file storage is governed by the owner's plan
+    // (byte quota), not an unadvertised file-count ceiling. If an explicit limit
+    // is configured, exceeding it rejects with a limit error (413), never 500 (#592).
+    const effectiveLimit =
+      options.maxFilesPerBucket !== undefined
+        ? options.maxFilesPerBucket
+        : project.maxFilesPerBucket !== 1000
+          ? project.maxFilesPerBucket
+          : undefined
+
+    if (effectiveLimit !== undefined) {
+      const filesInBucket = await prisma.storageFile.count({
+        where: {
+          bucketId,
+          deletedAt: null,
+        },
+      })
+
+      if (filesInBucket >= effectiveLimit) {
+        throw new UploadRejectedError(
+          'STORAGE_QUOTA_EXCEEDED',
+          `Bucket has reached maximum file limit (${effectiveLimit} files). ` +
+          `Please delete unused files or create a new bucket.`
+        )
+      }
+    }
 
     // ============ OVERWRITE STRATEGY HANDLING ============
     // A regional project's rows hold a stand-in for each name, so a name is

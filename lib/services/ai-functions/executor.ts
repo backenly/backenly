@@ -31,8 +31,17 @@ import { prisma } from '@/lib/db'
 import { buildIntegrationContext, IntegrationContext } from './integration-context'
 import { getProviderSpec } from './integration-registry'
 import { generateFixedFunctionCode } from './generator'
-import { isRouteModuleFunction, executeRouteModuleFunction, validateRouteModule } from './route-module-runner'
-import { encodeValue, endedForMemory, FunctionRunnerBusyError, FunctionRunnerUnavailableError, runIsolated } from './isolation/client'
+import { isRouteModuleFunction, executeRouteModuleFunction, validateRouteModule, RouteModuleRunError } from './route-module-runner'
+import {
+  encodeValue,
+  endedForMemory,
+  FunctionRunnerBusyError,
+  FunctionRunnerStartError,
+  FunctionRunnerUnavailableError,
+  runIsolated,
+  stderrReason,
+  type IsolatedOutcome,
+} from './isolation/client'
 import { recordFunctionRun, rowLastError, runTextKeptInRegion, withLastErrors } from './run-records'
 import { isFunctionSwitchedOff, RUNNABLE_FUNCTION_STATUS_FILTER } from './status'
 import { enforceAiFunctionInvocation, trackAiFunctionInvocation } from '@/lib/entitlements/policy'
@@ -132,20 +141,6 @@ export interface FunctionCallerContext {
 const SANDBOX_TIMEOUT_MS = 9_500
 const SANDBOX_HARD_TIMEOUT_MS = 12_000
 const SANDBOX_VALIDATION_HARD_TIMEOUT_MS = 5_000
-
-// ─── Transient error detection ────────────────────────────────────────────────
-
-function isTransientError(err: unknown): boolean {
-  const msg = (err instanceof Error ? err.message : String(err)).toLowerCase()
-  return (
-    msg.includes('connection refused') ||
-    msg.includes('connection reset') ||
-    msg.includes('econnrefused') ||
-    msg.includes('etimedout') ||
-    msg.includes('epipe') ||
-    msg.includes('socket hang up')
-  )
-}
 
 // ─── DB proxy handlers (executed in parent, called from worker) ───────────────
 
@@ -431,7 +426,17 @@ function getConnectedFromContext(integrations: IntegrationContext): string[] {
  * failure.
  */
 export class SandboxRunError extends Error {
-  constructor(message: string, readonly logs: string[]) {
+  constructor(
+    message: string,
+    readonly logs: string[],
+    /**
+     * The sandbox failed before the function's code started: its runner process
+     * could not be made, or it ended before it said the code was starting.
+     * Nothing the function does has happened yet, so this is the one failure a
+     * run is tried again for (#606).
+     */
+    readonly beforeCodeRan = false,
+  ) {
     super(message)
     this.name = 'SandboxRunError'
   }
@@ -451,30 +456,45 @@ async function runInSandbox(
   // through the typed proxy, ctx.http through the egress guard, and
   // ctx.integrations with keys that never leave this process.
   const handlers = { ...buildDbProxy(projectId, caller), ...integrationProxy }
-  const outcome = await runIsolated(
-    {
-      kind: 'sandbox',
-      payload: {
-        code,
-        event: encodeValue(event),
-        connectedIntegrations,
-        envVars,
-        integrationManifest,
-        timeoutMs: SANDBOX_TIMEOUT_MS,
+  let outcome: IsolatedOutcome
+  try {
+    outcome = await runIsolated(
+      {
+        kind: 'sandbox',
+        payload: {
+          code,
+          event: encodeValue(event),
+          connectedIntegrations,
+          envVars,
+          integrationManifest,
+          timeoutMs: SANDBOX_TIMEOUT_MS,
+        },
+        hardTimeoutMs: SANDBOX_HARD_TIMEOUT_MS,
       },
-      hardTimeoutMs: SANDBOX_HARD_TIMEOUT_MS,
-    },
-    handlers,
-  )
+      handlers,
+    )
+  } catch (err) {
+    // Its process could not be made: nothing the function does has happened.
+    if (err instanceof FunctionRunnerStartError) throw new SandboxRunError(`The sandbox could not start: ${err.detail}`, [], true)
+    throw err
+  }
   const result = outcome.result
   if (result?.ok) return { logs: result.logs, returnValue: result.value }
+  // The runner answered with the failure: the code threw, a call it made
+  // through ctx failed, or the code was refused before it ran. Never tried again.
   if (result) throw new SandboxRunError(result.error || 'Function failed', result.logs)
+  // Ended without answering. Before the runner said the function's code was
+  // starting, nothing the function does has happened, so that run may be
+  // tried again (#606); a run stopped at its time limit is not.
+  const beforeCodeRan = !outcome.codeStarted
   if (outcome.killed === 'timeout') throw new SandboxRunError('Function timed out after 10s', [])
-  if (endedForMemory(outcome)) throw new SandboxRunError('Function used more memory than a function may, and was stopped', [])
-  if (outcome.killed === 'output') throw new SandboxRunError('Function wrote more output than a function may, and was stopped', [])
+  if (endedForMemory(outcome)) throw new SandboxRunError('Function used more memory than a function may, and was stopped', [], beforeCodeRan)
+  if (outcome.killed === 'output') throw new SandboxRunError('Function wrote more output than a function may, and was stopped', [], beforeCodeRan)
+  const reason = stderrReason(outcome.stderr)
   throw new SandboxRunError(
-    `Sandbox worker exited with ${outcome.signal ? `signal ${outcome.signal}` : `code ${outcome.exitCode}`} before answering`,
+    `The sandbox exited with ${outcome.signal ? `signal ${outcome.signal}` : `code ${outcome.exitCode}`} before answering${reason ? `: ${reason}` : ''}`,
     [],
+    beforeCodeRan,
   )
 }
 
@@ -893,7 +913,10 @@ export async function executeAiFunction(
       if (err instanceof FunctionRunnerUnavailableError) return runnerRefused(err, functionId, projectId, durationMs, caller.trigger ?? event.type)
       countRun()
       const errorMsg = err?.message || 'Route function error'
-      await persistExecutionLog(functionId, projectId, false, [], errorMsg, durationMs, caller.trigger ?? event.type)
+      // What the module logged before it failed, which is what explains it:
+      // stored with the run and returned with the error, as a sandbox run's are.
+      const logs = err instanceof RouteModuleRunError ? err.logs : []
+      await persistExecutionLog(functionId, projectId, false, logs, errorMsg, durationMs, caller.trigger ?? event.type)
       rowLastError(projectId, functionId, errorMsg)
         // history: how the last run went, not configuration (lib/changes/resources/functions.ts)
         .then((lastError) => prisma.aiFunction.update({
@@ -910,7 +933,7 @@ export async function executeAiFunction(
           functionId, projectId, errorMsg, fn.generatedCode, fn.description, fn.triggerTable
         ).catch(() => {})
       }
-      return { success: false, logs: [], error: errorMsg, durationMs }
+      return { success: false, logs, error: errorMsg, durationMs }
     }
   }
 
@@ -926,13 +949,19 @@ export async function executeAiFunction(
   const connectedIntegrations = getConnectedFromContext(integrations)
   const integrationManifest = buildIntegrationManifest(integrations)
 
+  // A run is tried again only when the sandbox failed before the function's
+  // code started (SandboxRunError.beforeCodeRan). Once the code has started, a
+  // failure is the run's and is recorded once, whatever its message: running
+  // the code again would repeat every write, email and call it made before it
+  // failed. A refused connection from ctx.http used to look "transient" here,
+  // and the whole function ran three times (#606).
   const MAX_RETRIES = 2
   let lastError: Error | null = null
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     if (attempt > 0) {
       await new Promise(r => setTimeout(r, Math.pow(2, attempt - 1) * 500))
-      console.log(`[AiFn] Retry ${attempt}/${MAX_RETRIES} for function ${functionId}`)
+      console.log(`[AiFn] Retry ${attempt}/${MAX_RETRIES} for function ${functionId}: the sandbox failed before its code started (${lastError?.message})`)
     }
 
     try {
@@ -967,7 +996,7 @@ export async function executeAiFunction(
         return runnerRefused(err, functionId, projectId, Date.now() - startMs, caller.trigger ?? event.type)
       }
       lastError = err instanceof Error ? err : new Error(String(err))
-      if (attempt < MAX_RETRIES && isTransientError(err)) continue
+      if (attempt < MAX_RETRIES && err instanceof SandboxRunError && err.beforeCodeRan) continue
       break
     }
   }

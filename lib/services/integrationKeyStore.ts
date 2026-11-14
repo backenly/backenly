@@ -17,6 +17,7 @@ import {
   type VerificationResult,
   type VerificationStatus,
 } from '@/lib/integrations/key-verification'
+import { twilioCredentialProblem } from '@/lib/integrations/twilio-credential'
 
 export interface KeyVaultStatus {
   integrationId: string
@@ -102,6 +103,8 @@ interface KeyFormatSpec {
   hint: string
   /** Returns a warning string when the key is likely a test/sandbox key, null otherwise */
   testModeWarning?: (key: string) => string | null
+  /** What exactly is wrong, when there is more than one way to be wrong; shown instead of the hint. */
+  problem?: (key: string) => string | null
 }
 
 const INTEGRATION_KEY_FORMATS: Record<string, KeyFormatSpec> = {
@@ -138,6 +141,17 @@ const INTEGRATION_KEY_FORMATS: Record<string, KeyFormatSpec> = {
     valid: (k) => k.startsWith('phc_'),
     hint: 'PostHog project API keys start with phc_. Find yours in PostHog → Project Settings → Project API key.',
   },
+  // The runtime builds ctx.integrations.twilio only from all three parts.
+  twilio: {
+    valid: (k) => twilioCredentialProblem(k) === null,
+    hint: 'Twilio is stored as accountSid:authToken:fromNumber.',
+    problem: twilioCredentialProblem,
+  },
+}
+
+function formatProblem(spec: KeyFormatSpec, rawKey: string): string | null {
+  if (spec.problem) return spec.problem(rawKey)
+  return spec.valid(rawKey) ? null : spec.hint
 }
 
 /**
@@ -161,7 +175,8 @@ export function validateIntegrationKeyFormat(
       const warn = exactSpec.testModeWarning(rawKey)
       if (warn) return { ok: true, warning: warn }
     }
-    return exactSpec.valid(rawKey) ? { ok: true } : { ok: false, error: exactSpec.hint }
+    const problem = formatProblem(exactSpec, rawKey)
+    return problem ? { ok: false, error: problem } : { ok: true }
   }
 
   // Fall back to normalized baseId (strip _webhook_secret, _api_key suffixes)
@@ -174,8 +189,14 @@ export function validateIntegrationKeyFormat(
     if (warn) return { ok: true, warning: warn }
   }
 
-  return spec.valid(rawKey) ? { ok: true } : { ok: false, error: spec.hint }
+  const problem = formatProblem(spec, rawKey)
+  return problem ? { ok: false, error: problem } : { ok: true }
 }
+
+/** Why no key is stored under "email". */
+export const EMAIL_IS_NOT_A_KEY =
+  'Email is sent through Resend or SendGrid, and functions read only their keys: store the key as "resend" (re_…) ' +
+  'or "sendgrid" (SG.…). Nothing reads a key stored as "email".'
 
 /** What the checks a key must pass before it is stored said about it. */
 export type IntegrationKeyCheck =
@@ -201,6 +222,13 @@ export async function checkIntegrationKey(
   // One row per credential: a key offered under an env-var name is checked
   // and stored under the vault id every reader looks up, never beside it.
   const vaultId = canonicalVaultId(integrationId)
+
+  // "email" names what ctx.integrations.email does, not a key: the runtime
+  // reads the Resend or SendGrid key for it. A key filed under "email" was
+  // reported connected and read by nothing.
+  if (vaultId.toLowerCase() === 'email') {
+    return { ok: false, vaultId, error: EMAIL_IS_NOT_A_KEY, isFormatError: true }
+  }
 
   // ── Secret scan: block dangerous values before they touch the DB ──────────
   const scan = scanForDangerousSecret(rawKey)

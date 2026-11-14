@@ -144,6 +144,32 @@ describe('a sandbox body that escapes its vm context', () => {
   })
 })
 
+describe('when a sandbox body starts (#606)', () => {
+  const sandbox = (code: string) =>
+    runIsolated({
+      kind: 'sandbox',
+      payload: { code, event: encodeValue({ type: 'manual', data: {} }), connectedIntegrations: [], envVars: {}, integrationManifest: {}, timeoutMs: 9500 },
+      hardTimeoutMs: 12_000,
+    })
+
+  it('is said before its code runs, and never for code refused before it could', async () => {
+    expect(await sandbox('return 1')).toMatchObject({ result: { ok: true, value: 1 }, codeStarted: true })
+    const refused = await sandbox('return (')
+    expect(refused.result?.ok).toBe(false)
+    expect(refused.codeStarted).toBe(false)
+  })
+
+  it('ends its run once with the error of a promise it left failing with nothing waiting for it', async () => {
+    const outcome = await sandbox(`
+      ctx.log('before')
+      Promise.reject(new Error('nobody waited for this'))
+      await new Promise(() => {})
+    `)
+    expect(outcome.result).toMatchObject({ ok: false, error: 'nobody waited for this', logs: ['before'] })
+    expect(outcome.codeStarted).toBe(true)
+  })
+})
+
 describe('a run that does not end on its own', () => {
   it('is stopped at its deadline, and this process keeps serving meanwhile', async () => {
     let ticks = 0

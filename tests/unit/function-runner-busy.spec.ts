@@ -10,7 +10,9 @@
  *  1. A busy refusal rejects with FunctionRunnerBusyError, which is still a
  *     FunctionRunnerUnavailableError, so every caller that leaves a function
  *     alone when functions cannot run leaves it alone when the server is busy.
- *  2. Any other refusal stays FunctionRunnerUnavailableError.
+ *  2. Any other refusal stays FunctionRunnerUnavailableError; a run whose
+ *     process could not be started is FunctionRunnerStartError, which a
+ *     sandbox run is started again for (#606).
  *  3. The HTTP surfaces answer both 503, a busy one with Retry-After.
  *
  * What the executor and the row-event queue do with it, against a real
@@ -21,6 +23,7 @@
 import {
   BUSY_RETRY_AFTER_SECONDS,
   FunctionRunnerBusyError,
+  FunctionRunnerStartError,
   FunctionRunnerUnavailableError,
   runIsolated,
 } from '@/lib/services/ai-functions/isolation/client'
@@ -52,6 +55,16 @@ describeUnix('a run the function supervisor turns away', () => {
     expect(failure.retryAfterSeconds).toBe(BUSY_RETRY_AFTER_SECONDS)
     expect(failure.message).toContain('the queue for one (64) was full')
     expect(supervisor.headers[supervisor.headers.length - 1]).toEqual({ v: 1, op: 'run', timeoutMs: 5000 })
+  })
+
+  it('reports a run whose process could not be started as a start failure, so a sandbox run may be started again', async () => {
+    supervisor.answer({ type: 'exit', code: null, signal: null, killed: null, stderr: '', error: 'spawn EAGAIN' })
+    const failure = await runIsolated(job).then(() => null, (err) => err)
+    expect(failure).toBeInstanceOf(FunctionRunnerStartError)
+    expect(failure).toBeInstanceOf(FunctionRunnerUnavailableError)
+    expect(failure).not.toBeInstanceOf(FunctionRunnerBusyError)
+    expect(failure.detail).toBe('spawn EAGAIN')
+    expect(failure.message).toBe("The function's runner could not start: spawn EAGAIN")
   })
 
   it('keeps any other refusal as functions being unavailable here, not busy', async () => {

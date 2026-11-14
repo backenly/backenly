@@ -14,6 +14,11 @@
  *     timestamp: 1711234567.123
  *   }
  *
+ * That is what the trigger sends, not what a subscriber receives. For any
+ * stream but a service-role one, the realtime routes deliver an insert or
+ * update only if the stream could read the row, with `old` reduced to the
+ * primary key, and a delete as the primary key alone (lib/realtime/visibility.ts).
+ *
  * pg_notify payload limit is 8000 bytes. For large rows the data field
  * is cut down to stay within limits: an update's old row to its primary key
  * first, then the row itself, so a client can still fetch the row by that key

@@ -25,7 +25,7 @@ export interface StorageService {
   uploadFile(
     bucketId: string,
     file: { name: string; buffer: Buffer; mimeType?: string },
-    options: { isPublic?: boolean; projectId: string; uploadedBy?: string; uploader?: UploaderRecord }
+    options: { isPublic?: boolean; projectId: string; uploadedBy?: string; uploader?: UploaderRecord; maxFilesPerBucket?: number }
   ): Promise<{ id: string; name: string; path: string; url: string; size: bigint }>
   listFiles(bucketId: string | undefined, projectId: string, options?: { limit?: number; offset?: number; search?: string }): Promise<Array<{
     id: string
@@ -63,7 +63,7 @@ export interface StorageService {
 }
 
 // Local filesystem implementation
-class LocalStorageService implements StorageService {
+export class LocalStorageService implements StorageService {
   private storageDir: string
 
   constructor() {
@@ -241,7 +241,7 @@ class LocalStorageService implements StorageService {
   async uploadFile(
     bucketId: string,
     file: { name: string; buffer: Buffer; mimeType?: string },
-    options: { isPublic?: boolean; projectId: string; uploadedBy?: string; uploader?: UploaderRecord }
+    options: { isPublic?: boolean; projectId: string; uploadedBy?: string; uploader?: UploaderRecord; maxFilesPerBucket?: number }
   ) {
     if (!options.projectId) {
       throw new Error('Project ID is required for tenant isolation')
@@ -303,19 +303,34 @@ class LocalStorageService implements StorageService {
       )
     }
 
-    // Check files per bucket limit (only count active files, not soft-deleted)
-    const filesInBucket = await prisma.storageFile.count({
-      where: { 
-        bucketId,
-        deletedAt: null, // Only count active files
-      },
-    })
+    // Check files per bucket limit (only count active files, not soft-deleted).
+    // Project.maxFilesPerBucket (default 1000) is NOT consulted when left at its
+    // legacy column default, which nothing sets. Like Project.storageLimit and
+    // Project.maxFileSize before it, file storage is governed by the owner's plan
+    // (byte quota), not an unadvertised file-count ceiling. If an explicit limit
+    // is configured, exceeding it rejects with a limit error (413), never 500 (#592).
+    const effectiveLimit =
+      options.maxFilesPerBucket !== undefined
+        ? options.maxFilesPerBucket
+        : project.maxFilesPerBucket !== 1000
+          ? project.maxFilesPerBucket
+          : undefined
 
-    if (filesInBucket >= project.maxFilesPerBucket) {
-      throw new Error(
-        `Bucket has reached maximum file limit (${project.maxFilesPerBucket} files). ` +
-        `Please delete unused files or create a new bucket.`
-      )
+    if (effectiveLimit !== undefined) {
+      const filesInBucket = await prisma.storageFile.count({
+        where: {
+          bucketId,
+          deletedAt: null, // Only count active files
+        },
+      })
+
+      if (filesInBucket >= effectiveLimit) {
+        throw new UploadRejectedError(
+          'STORAGE_QUOTA_EXCEEDED',
+          `Bucket has reached maximum file limit (${effectiveLimit} files). ` +
+          `Please delete unused files or create a new bucket.`
+        )
+      }
     }
     // ======================================================
 

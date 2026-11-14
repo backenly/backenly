@@ -26,15 +26,14 @@
  * - Audit-compliant safety
  */
 
-import { PrismaClient } from '@prisma/client'
 import { S3Client, ListObjectsV2Command, DeleteObjectCommand, HeadObjectCommand } from '@aws-sdk/client-s3'
 import crypto from 'crypto'
+import { prisma } from '@/lib/db'
 import { getProjectQuota } from '@/lib/services/storageQuota'
 import { MAX_BUFFERED_UPLOAD_BYTES } from '@/lib/storage/upload-policy'
 import { heldInRegionWhere, serviceRegion } from '@/lib/data-plane/serving'
 import type { CloudRegionId } from '@/lib/regions'
 
-const prisma = new PrismaClient()
 
 /**
  * Storage Quota Configuration
@@ -49,7 +48,13 @@ export interface StorageQuota {
    */
   maxProjectSize?: bigint
   maxFileSize: bigint          // Max single file size (bytes)
-  maxFileCount: number         // Max files per project
+  /**
+   * Max files per project. Unset means unlimited (no plan caps file count;
+   * storage is governed by the byte quota). A hardcoded 10,000 used to sit
+   * here, so an app with many small files ran out of file slots long before
+   * running out of storage (#592).
+   */
+  maxFileCount?: number
   maxOrphansAllowed: number    // Max orphaned files before alert
 }
 
@@ -58,7 +63,6 @@ export interface StorageQuota {
  */
 const DEFAULT_QUOTAS: StorageQuota = {
   maxFileSize: MAX_BUFFERED_UPLOAD_BYTES,            // the shared per-upload ceiling (upload-policy.ts)
-  maxFileCount: 10000,                                // 10k files per project
   maxOrphansAllowed: 100,                             // Max 100 orphans before alert
 }
 
@@ -170,8 +174,8 @@ export async function enforceStorageQuota(
     }
   }
   
-  // Check file count limit
-  if (currentFileCount >= quotas.maxFileCount) {
+  // Check file count limit (only when an explicit ceiling is configured)
+  if (quotas.maxFileCount !== undefined && currentFileCount >= quotas.maxFileCount) {
     return {
       allowed: false,
       reason: `Project file count limit reached (${quotas.maxFileCount} files maximum)`,
@@ -544,7 +548,7 @@ export async function getStorageHealth(
     inconsistencies.push('Storage quota exceeded')
   }
   
-  if (fileCount > DEFAULT_QUOTAS.maxFileCount) {
+  if (DEFAULT_QUOTAS.maxFileCount !== undefined && fileCount > DEFAULT_QUOTAS.maxFileCount) {
     inconsistencies.push('File count limit exceeded')
   }
   

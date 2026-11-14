@@ -73,6 +73,12 @@ describe('redactSecretParams', () => {
     expect(params).toEqual(copy)
   })
 
+  it('withholds a Twilio auth token stored through store_integration_key and keeps its account SID', () => {
+    // STORE_INTEGRATION_KEY carries Twilio's credential as authToken; the execution timeline stores these params.
+    const params = { integrationId: 'twilio', accountSid: 'AC' + '0'.repeat(32), authToken: 'f'.repeat(32), fromNumber: '+15550001111' }
+    expect(redactSecretParams(params)).toEqual({ ...params, authToken: '[withheld]' })
+  })
+
   it('leaves non-secret params alone', () => {
     const params = { tableName: 'posts', columns: [{ name: 'title', type: 'text' }] }
     expect(redactSecretParams(params)).toEqual(params)

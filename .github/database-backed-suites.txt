@@ -44,6 +44,14 @@ tests/integration/webhook-delivery.spec.ts
 tests/integration/webhook-trigger-url-required.spec.ts
 tests/integration/state-webhooks-section.spec.ts
 tests/integration/integrations-auto-wiring.spec.ts
+# Stripe's built-in sync applies events to tables made by create_table:
+# subscription status (cancelled as its CHECK spells it), period from the
+# items (API 2025-03-31.basil), past_due and back on invoices found under
+# parent.subscription_details, notifications in body, a checkout's order by
+# stripe_session_id into payment_status, and a payment intent's order, wallet
+# and notice. What a table cannot take is reported in the project's logs, in
+# payment_events and in the reply (#610). Real executor, routes and vault.
+tests/integration/stripe-sync-on-create-table-tables.spec.ts
 tests/integration/end-user-email-verification-opt-in.spec.ts
 tests/integration/signin-enumeration.spec.ts
 tests/integration/account-emails-answer-at-once.spec.ts
@@ -61,6 +69,13 @@ tests/integration/function-create-truthful.spec.ts
 tests/integration/function-selfheal-consent.spec.ts
 tests/integration/function-egress-guard.spec.ts
 tests/integration/function-row-events-data-plane.spec.ts
+
+# Every route a client calls a function by answers with the real status: a run
+# the plan refused is 402 PLAN_LIMIT_EXCEEDED on /fn, /functions and
+# /functions/invoke, and a run that completed answers with the handler's own
+# status (401, 503, 204) on all three, with no Backenly error code added to the
+# function's answer (#604). The real runtime, Next routes and function rows.
+tests/integration/function-routes-answer-real-status.spec.ts
 
 # An on_update function deployed with columns runs only when an update changed
 # one of them (an unknown old row runs it), columns is refused off on_update
@@ -100,6 +115,14 @@ tests/integration/realtime-status-keeps-its-channel-internal.spec.ts
 tests/integration/export-database-rls.spec.ts
 tests/integration/export-portable-policies.spec.ts
 tests/integration/postgres-admin.spec.ts
+
+# A realtime stream's end user comes from a ticket, never from its URL: Next
+# reads no user token from the query string and takes it from X-User-Token, the
+# runtime gives a ?apiKey= stream no end user, and a ticket minted with the
+# user's header speaks for them when redeemed; the agent realtime doc says so,
+# and describes `old` as it is delivered. Real project, users table, key and
+# ticket, so it needs a real Postgres.
+tests/integration/realtime-stream-identity.spec.ts
 
 # Needs a real Postgres AND a git worktree of an older release.
 #
@@ -814,6 +837,12 @@ tests/integration/sandbox-function-logs.spec.ts
 # A sandboxed function has the whole of JSON and Math (they were empty frozen
 # copies), and what one run does to them stays in that run.
 tests/integration/sandbox-json-and-math.spec.ts
+# A function's ctx.integrations.<provider>.request() calls, written as each
+# provider's docs write them, reach the provider as it takes them: the
+# version in a path once, a Stripe body form-encoded, and a Stability body
+# multipart, carrying an image from base64 byte for byte. Real executor,
+# worker, function row and vault keys; only the outbound call is captured.
+tests/integration/integration-request-from-a-function.spec.ts
 tests/integration/apply-migration-existing-table.spec.ts
 
 # Failed migration DDL preserves PostgreSQL data and stops without asking the
@@ -1163,6 +1192,14 @@ tests/integration/integrations-connect-contract.spec.ts
 # rows and the real credentials, keys and build-status routes are the
 # property; PostHog and seeded rows keep CI off provider APIs.
 tests/integration/integration-key-one-row.spec.ts
+# Connect stores only a credential functions can use: Twilio from its Account
+# SID, auth token and sending number, checked and confirmed by Twilio, and sent
+# with; the SID and token alone are refused; a key connected as "email" is
+# stored as resend or sendgrid, or refused, and the unknown-id list leaves
+# "email" out. A Twilio value stored before gives functions a reason, not a
+# TypeError, and a re-check rejects it. Real vault rows, connect action and
+# runtime context; the providers' answers are stood in for.
+tests/integration/connect-checks-what-functions-read.spec.ts
 # Function management names the function it acted on: delete_schedule deletes
 # the exact job, an agent's create of a taken name is refused before any model
 # call, a second function on an event is created with the overlap named, every
@@ -1170,6 +1207,13 @@ tests/integration/integration-key-one-row.spec.ts
 # set_active needs a direction, and only Stripe functions need Stripe. Real
 # function rows; only the LLM code generator is stubbed.
 tests/integration/functions-agent-contract.spec.ts
+# A function's ctx.integrations.anthropic.complete() answers with a current
+# Claude model (claude-3-5-haiku-20241022 is retired and answered 404), takes
+# the model and effort a function names, and says what the API said about a
+# retired one; openai.complete() passes the auto-wired chat's systemPrompt on
+# and takes a model (#607). Real sandbox worker, function rows and vault keys;
+# the providers are stubbed at fetch.
+tests/integration/ai-helpers-call-current-models.spec.ts
 # The typed schema doors agree with apply_migration: create_table of an
 # existing table and add_column on a missing one are refused with nothing
 # changed, and a mistyped name is answered with the closest real table.
@@ -1271,6 +1315,14 @@ tests/integration/publish-noop-truth.spec.ts
 # the whole project. Real StorageFile rows past the first page are the
 # property.
 tests/integration/storage-files-pagination.spec.ts
+# The supabase-js shim works on a real stream and the storage routes: a
+# postgres_changes handler written for supabase-js gets each insert and update
+# with the row in `new`, a delete with the row's key in `old`, and never the
+# stream's connected frame, and storage.from(bucket).upload(path, file) stores
+# the file in that bucket under that path, which getPublicUrl() serves to anyone
+# only from a public bucket. Real trigger, notifications, project, key, buckets
+# and file rows, so a real Postgres.
+tests/integration/supabase-compat-realtime-storage.spec.ts
 
 # A new end user's session works from sign-up: the Next sign-up route signs with
 # the resolved (decrypted) project secret every verifier uses, and refresh binds
@@ -1468,6 +1520,14 @@ tests/integration/brain-chat-follow-up.spec.ts
 # Real function, log and workspace rows are the property, so it needs a real
 # Postgres.
 tests/integration/functions-runtime-honesty.spec.ts
+
+# A function whose code has started and then fails is run once: an order
+# insert, a receipt email and a ctx.http.post to a host that refuses the
+# connection, or drops it, give one order and one receipt, as does an error the
+# code throws itself and a call it never awaited. A sandbox that fails before
+# the code starts is started again, and the code still runs once (#606). Real
+# sandbox worker, function, log and workspace rows, and real connections.
+tests/integration/function-failure-runs-once.spec.ts
 
 # A service-role key is never minted by an agent: create_api_key with
 # serviceRole true is refused on the typed MCP door and the brain's door with
@@ -1762,6 +1822,13 @@ tests/integration/project-creation-order.spec.ts
 # servers are the property, so it needs a real Postgres.
 tests/integration/sdk-data-routes.spec.ts
 
+# presence.join() rejects with the server's code when a presence route refuses
+# it: PRESENCE_TOKEN_REQUIRED before sign-in, PRESENCE_IDENTITY_MISMATCH for a
+# username, an email or any id but the signed-in user's, through the Next route
+# and the runtime; the signed-in user goes online, and a heartbeat refused after
+# sign-out stops. Real project, key and end-user tokens, so a real Postgres.
+tests/integration/sdk-presence-refusals.spec.ts
+
 # Workspace SQL after a table's columns change. Prisma reused a prepared
 # statement per pooled connection, and PostgreSQL refuses to run one whose
 # result columns changed (0A000), so after an ALTER TABLE the v1 query and
@@ -1812,6 +1879,15 @@ tests/integration/postgrest-reload-on-drop.spec.ts
 # a duplicate 409, and a filter neither can apply 400 with no row changed.
 # What PostgreSQL accepts is the property, so it needs a real Postgres.
 tests/integration/sdk-filters-both-servers.spec.ts
+
+# The SDK's storage addresses serve the file: the README's example, run through
+# the upload, file and download routes, gets a public file at getUrl(id) as
+# uploaded, a file that is not public refused there and served at the signed url
+# upload() resolves, and a deleted one 404; the supabase-js shim's getPublicUrl()
+# is the same address. Real project, key, buckets and file rows, so a real
+# Postgres.
+tests/integration/sdk-storage-urls.spec.ts
+
 # The MCP data tools' filters (db_query, db_update, db_delete) build through the
 # same builder: an invalid column name, an unknown operator, an operator object
 # naming nothing or an $in that is not a list is refused with no row changed,
@@ -1884,6 +1960,13 @@ tests/integration/sql-as-written.spec.ts
 # run. A route function reads the project's variables as process.env.KEY, and
 # none replaces a variable Backenly sets.
 tests/integration/function-run-record.spec.ts
+# A failed HTTP function run keeps the lines it logged up to the failure: a
+# handler that throws, a module whose top level throws, one that exports no
+# handler, and a handler that runs past the limit are each stored with their
+# lines and returned with the error, through the executor and the agent's
+# invoke and logs; a failed creation check records them too (#605). Real
+# function and run rows; only the model that writes code is stubbed.
+tests/integration/http-function-failure-keeps-logs.spec.ts
 # The runtime answers a body over its JSON limit 413 PAYLOAD_TOO_LARGE and names
 # the limit (server/app.ts), as the web tier does.
 tests/integration/runtime-body-limit.spec.ts
@@ -1958,6 +2041,14 @@ tests/integration/integration-key-checked-on-continue.spec.ts
 # removing one needs ADMIN, the env-var floors: every console route that
 # writes the key vault, with real sessions, organization roles and database.
 tests/integration/integration-key-role-floors.spec.ts
+
+# The integrations page adds Stripe's webhook signing secret, or OneSignal's
+# App ID, on its own through POST /api/projects/[id]/credentials: stored alone
+# it is kept without switching the provider on, stored beside a key it leaves
+# the provider connected as it was, a malformed secret is refused with its
+# reason, and a provider's own key still connects it (#611). Real sessions,
+# routes and database; no provider is called.
+tests/integration/second-credential-on-its-own.spec.ts
 
 # Connection Health counts a frontend's successful production requests by the
 # origin the request log keeps (localhost included); a bootstrap ping is
@@ -2035,6 +2126,14 @@ tests/integration/readiness-counts-open-problems.spec.ts
 # minutes old and says when it was measured: a real schema with rows measured
 # by the production catalog query.
 tests/integration/usage-storage-measured-on-read.spec.ts
+
+# Connecting Resend reads what Resend says about the key: a Sending-access key
+# (401 restricted_api_key) is accepted as one that can send and a deleted key
+# (400 "API key is invalid") is refused, on the console's Continue and Save and
+# the agent's connect, and the agent's re-check and the live health check
+# catch a key deleted later (#608). Real sessions, routes and vault; Resend's
+# answers are stubbed at fetch.
+tests/integration/resend-key-check-reads-resend.spec.ts
 
 # Connecting Resend or SendGrid stores the sender a function's email.send()
 # uses by default (email_from), says when none is set, and writes the

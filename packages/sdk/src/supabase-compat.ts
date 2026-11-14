@@ -40,13 +40,19 @@
  *   • count: 'exact' uses Prefer: count=exact and reads Content-Range.
  *   • auth.signUp / signInWithPassword / signOut / getUser / getSession map
  *     onto Backenly end-user auth (JWT sessions).
- *   • channel().on('postgres_changes', …) maps onto Backenly realtime.
+ *   • channel().on('postgres_changes', …) maps onto Backenly realtime, with the
+ *     row in `new` (in `old` for a delete), and the stream's errors reported
+ *     to subscribe()'s callback.
+ *   • storage.from(bucket).upload(path, file) stores the file in that bucket
+ *     under that path. Backenly addresses a file by its id, so the `path` it
+ *     resolves is that id, which getPublicUrl() and remove() take.
  *   • rpc() is still refused — Backenly exposes no SQL functions by design —
  *     with the Backenly equivalent named. That is a real platform boundary,
  *     which is exactly why it is the only one left.
  */
 
 import { BackenlyClient } from './client.js'
+import type { ConnectedEvent, DBChangeEvent, StreamErrorEvent } from './realtime.js'
 
 // ── result & error shapes (supabase-js conventions) ───────────────────────────
 
@@ -539,18 +545,55 @@ class CompatAuth {
 }
 
 // ── realtime channels ─────────────────────────────────────────────────────────
+//
+// Backenly realtime sends a change as `{ type, table, data, old }`
+// (lib/services/realtimeTriggers.ts): `data` is the row as the change left it,
+// or as a delete found it, and `old` an update's previous row. A stream that is
+// not a service-role one receives only the primary key of a deleted row and of
+// an update's previous row (lib/realtime/visibility.ts). supabase-js hands a
+// handler `{ eventType, new, old }`, with `{}` for the side a change does not
+// have. This read the row from `row` or `new`, which Backenly never sends, so
+// `new` was always null, and a delete arrived with no row at all.
+//
+// The stream also sends `connected` and `error` frames, which the SDK hands to
+// every table subscriber. They are the channel's state, not changes, and
+// supabase-js reports that to subscribe()'s callback.
 
-type ChangeCallback = (payload: {
+type Row = Record<string, any>
+
+type ChangePayload = {
   eventType: 'INSERT' | 'UPDATE' | 'DELETE'
-  new: Record<string, unknown> | null
-  old: Record<string, unknown> | null
+  new: Row
+  old: Row
   table: string
   schema: string
-}) => void
+}
+
+type ChangeCallback = (payload: ChangePayload) => void
+
+type ChannelStatus = 'SUBSCRIBED' | 'CHANNEL_ERROR'
+
+/** A change as supabase-js hands it over, or null for a frame that is not one. */
+function changePayload(event: DBChangeEvent): ChangePayload | null {
+  const eventType =
+    event.type === 'insert' ? 'INSERT' : event.type === 'update' ? 'UPDATE' : event.type === 'delete' ? 'DELETE' : null
+  if (!eventType) return null
+  // A change too large to send may carry no row (`truncated`).
+  const row: Row = event.data ?? {}
+  return {
+    eventType,
+    new: eventType === 'DELETE' ? {} : row,
+    old: eventType === 'DELETE' ? row : eventType === 'UPDATE' ? event.old ?? {} : {},
+    table: event.table,
+    schema: 'public',
+  }
+}
 
 class CompatChannel {
   private unsubs: Array<() => void> = []
   private pending: Array<{ table: string; event: string; cb: ChangeCallback }> = []
+  /** The stream sent an error and has not connected since. */
+  private failed = false
 
   constructor(private backend: BackenlyClient, private name: string) {}
 
@@ -564,24 +607,40 @@ class CompatChannel {
     return this
   }
 
-  subscribe(statusCallback?: (status: string) => void): this {
-    for (const p of this.pending) {
-      const tableClient: any = (this.backend as any)[p.table]
-      const unsub = tableClient.subscribe((evt: any) => {
-        const eventType = String(evt.event ?? evt.type ?? '').toUpperCase() as 'INSERT' | 'UPDATE' | 'DELETE'
-        if (p.event !== '*' && p.event !== eventType) return
-        p.cb({
-          eventType,
-          new: evt.row ?? evt.new ?? null,
-          old: evt.oldRow ?? evt.old ?? null,
-          table: p.table,
-          schema: 'public',
-        })
+  subscribe(statusCallback?: (status: ChannelStatus, err?: Error) => void): this {
+    this.pending.forEach((p, i) => {
+      const unsub = this.backend.realtime.subscribe(p.table, (event) => {
+        if (event.type === 'connected' || event.type === 'error') {
+          // Every listener on the channel receives the stream's frames: the first reports them.
+          if (i === 0) this.reportStream(event, statusCallback)
+          return
+        }
+        const payload = changePayload(event)
+        if (!payload || (p.event !== '*' && p.event !== payload.eventType)) return
+        p.cb(payload)
       })
       this.unsubs.push(unsub)
-    }
+    })
     statusCallback?.('SUBSCRIBED')
     return this
+  }
+
+  /**
+   * An error frame is CHANNEL_ERROR, with the server's message. Unless the
+   * refusal is final, the SDK reconnects, and the next `connected` frame is
+   * SUBSCRIBED again, as supabase-js reports a channel that has rejoined.
+   */
+  private reportStream(
+    event: ConnectedEvent | StreamErrorEvent,
+    statusCallback?: (status: ChannelStatus, err?: Error) => void,
+  ): void {
+    if (event.type === 'error') {
+      this.failed = true
+      statusCallback?.('CHANNEL_ERROR', new Error(event.message))
+    } else if (this.failed) {
+      this.failed = false
+      statusCallback?.('SUBSCRIBED')
+    }
   }
 
   unsubscribe(): void {
@@ -592,25 +651,34 @@ class CompatChannel {
 }
 
 // ── storage ────────────────────────────────────────────────────────────────────
+//
+// upload() dropped the bucket and the path, so a file went to the `default`
+// bucket under its own name, and a Blob, which has none, under "undefined",
+// which a bucket that lists its extensions refuses. It passes both now, and
+// leaves the file to its bucket's access policy (lib/storage/access-policy.ts
+// clampIsPublic). So, as in Supabase, a file in a public bucket is served to
+// anyone at getPublicUrl(), and one in any other bucket is not.
 
 class CompatStorage {
   constructor(private backend: BackenlyClient) {}
 
-  from(_bucket: string) {
+  from(bucket: string) {
     const backend = this.backend
     return {
-      async upload(_path: string, file: File | Blob) {
+      async upload(path: string, file: File | Blob) {
         try {
-          const res: any = await (backend.storage as any).upload(file)
-          const id = res?.id ?? res?.data?.id ?? null
+          // FormData sends a Blob as it sends a File.
+          const res = await backend.storage.upload(file as File, path, { bucket })
+          const id = res.id ?? null
           return { data: { path: id, id, fullPath: id }, error: null }
         } catch (e) {
           return { data: null, error: fromException(e) }
         }
       },
+      // `path` is the file id upload() resolved as `data.path`. This called a
+      // storage.getFileUrl() the SDK never had, so publicUrl was always null.
       getPublicUrl(path: string) {
-        const url = (backend.storage as any).getFileUrl?.(path) ?? null
-        return { data: { publicUrl: url } }
+        return { data: { publicUrl: backend.storage.getUrl(path) } }
       },
       async remove(paths: string[]) {
         try {

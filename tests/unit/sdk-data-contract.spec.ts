@@ -163,11 +163,13 @@ describe('storage upload', () => {
   const file = () => new File([new Uint8Array([1, 2, 3])], 'avatar.png', { type: 'image/png' })
 
   it('resolves the stored file', async () => {
+    // A server storing files on its own disk answers a path on its own origin;
+    // the client resolves it there, so a page on any other origin can load it.
     serve({
       '/storage/upload': {
         body: {
           data: {
-            id: 'f-1', bucket: 'avatars', path: 'u1/avatar.png', url: `/api/v1/${PROJECT}/storage/files/f-1`,
+            id: 'f-1', bucket: 'avatars', path: 'u1/avatar.png', url: '/api/storage/files/f-1/download?token=1:abc',
             size: 3, contentType: 'image/png', isPublic: false,
           },
         },
@@ -175,8 +177,18 @@ describe('storage upload', () => {
     })
     const stored = await client().storage.upload(file(), 'u1/avatar.png', { bucket: 'avatars' })
     expect(stored).toEqual({
-      id: 'f-1', path: 'u1/avatar.png', url: `/api/v1/${PROJECT}/storage/files/f-1`, size: 3, contentType: 'image/png',
+      id: 'f-1', path: 'u1/avatar.png', url: `${API}/api/storage/files/f-1/download?token=1:abc`, size: 3, contentType: 'image/png',
     })
+  })
+
+  it('keeps an absolute url the server answers, as from object storage or a CDN', async () => {
+    const url = 'https://cdn.example.test/p/avatars/u1/avatar.png'
+    serve({
+      '/storage/upload': {
+        body: { data: { id: 'f-1', bucket: 'avatars', path: 'u1/avatar.png', url, size: 3, contentType: 'image/png', isPublic: true } },
+      },
+    })
+    expect((await client().storage.upload(file(), 'u1/avatar.png', { bucket: 'avatars' })).url).toBe(url)
   })
 
   it("a refusal keeps the API's message, code, status and details", async () => {
