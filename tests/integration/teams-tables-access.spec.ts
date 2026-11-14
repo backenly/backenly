@@ -83,8 +83,9 @@ import { forgetProtection } from '@/lib/branches/protection'
 import { withChangeAttribution } from '@/lib/changes/attribution'
 import { closeChangeLockPool } from '@/lib/changes/lock'
 import { inferRlsPlan } from '@/lib/services/rls-ownership'
-import { applyPermissionPolicy, secureTeamsTables } from '@/lib/services/workspace-rls'
+import { secureTeamsTables } from '@/lib/services/workspace-rls'
 import { jwtClaimsJson } from '@/lib/services/rls-session'
+import { claimExpr, serviceRoleClause, SUBJECT_CLAIM } from '@/lib/postgrest/rls-translation'
 import { installChangeLedgerGuard } from '../helpers/change-ledger-guard'
 
 type Handler = (request: NextRequest, context: { params: Promise<any> }) => Promise<Response>
@@ -125,6 +126,30 @@ const randomToken = () => crypto.randomBytes(16).toString('hex')
 const inviteSql = () =>
   `INSERT INTO ${T('organization_invitations')} (organization_id, email, role, token, invited_by_user_id, expires_at)
    VALUES ($1::uuid, $2, $3, $4, $5::uuid, NOW() + INTERVAL '1 day') RETURNING role`
+
+/**
+ * A table's rule as releases before the teams rules left it: its owner's rows,
+ * read and written, with Backenly's record of it. Written as SQL, since every
+ * door Backenly has now keeps the teams rules on these tables.
+ */
+async function oldOwnRows(table: string, column: string): Promise<void> {
+  const rows = await prisma.$queryRawUnsafe<Array<{ name: string }>>(
+    `SELECT policyname::text AS name FROM pg_policies WHERE schemaname = $1 AND tablename = $2`,
+    schema,
+    table,
+  )
+  for (const r of rows) await ddl(`DROP POLICY IF EXISTS "${r.name}" ON ${T(table)}`)
+  await ddl(`ALTER TABLE ${T(table)} ENABLE ROW LEVEL SECURITY`)
+  await ddl(`ALTER TABLE ${T(table)} FORCE ROW LEVEL SECURITY`)
+  const own = `(${serviceRoleClause(schema)} OR "${column}"::text = ${claimExpr(schema, SUBJECT_CLAIM)})`
+  for (const [command, clause] of [['select', 'USING'], ['insert', 'WITH CHECK'], ['update', 'USING'], ['delete', 'USING']]) {
+    await ddl(`CREATE POLICY backenly_own_rows_${command} ON ${T(table)} FOR ${command.toUpperCase()} ${clause} ${own}`)
+  }
+  await prisma.permissionPolicy.deleteMany({ where: { projectId, tableName: table } })
+  await prisma.permissionPolicy.create({
+    data: { projectId, tableName: table, policyName: 'backenly_own_rows', operation: 'ALL', role: 'authenticated', using: `"${column}"::text = current_user_id` },
+  })
+}
 
 /** Run as a REST API role, with the claims PostgREST would set. */
 async function as<R>(role: 'anon' | 'authenticated', userId: string | null, sql: string, ...values: unknown[]): Promise<R[]> {
@@ -505,6 +530,49 @@ describe('the roles an invitation may carry', () => {
   }, 60_000)
 })
 
+describe('a repair or an agent that asks for an owner\'s rule on a teams table', () => {
+  it("FIX_WORKFLOW's user_data_rls keeps the teams rules on organization_members, and the self-join stays refused", async () => {
+    const r = await executeAction(
+      { action: 'FIX_WORKFLOW', params: { workflow: 'auth', missingComponents: ['user_data_rls'] } },
+      projectId,
+      undefined,
+      0,
+      undefined,
+      false,
+    )
+    expect({ success: r.success, message: r.message }).toMatchObject({ success: true })
+    expect({ rules: await policies('organization_members'), forced: await forced('organization_members') }).toEqual({
+      rules: TEAMS_RULES,
+      forced: true,
+    })
+    await expect(
+      asUser(
+        mallory.id,
+        `INSERT INTO ${T('organization_members')} (organization_id, user_id, role) VALUES ($1::uuid, $2::uuid, 'admin')`,
+        orgId,
+        mallory.id,
+      ),
+    ).rejects.toThrow(/row-level security/)
+  }, 120_000)
+
+  it.each([
+    ['organization_members', 'own_rows'],
+    ['organization_invitations', 'own_rows'],
+    ['organizations', 'all_access'],
+  ])('SET_PERMISSION %s as %s keeps the teams rules, and says so', async (tableName, template) => {
+    const r = await executeAction(
+      { action: 'SET_PERMISSION', params: { tableName, template } },
+      projectId,
+      undefined,
+      0,
+      undefined,
+      false,
+    )
+    expect({ success: r.success, message: r.message }).toMatchObject({ success: true, message: expect.stringContaining('kept the teams rules') })
+    expect({ rules: await policies(tableName), forced: await forced(tableName) }).toEqual({ rules: TEAMS_RULES, forced: true })
+  }, 120_000)
+})
+
 describe('a project whose teams tables have the rules releases before the fix gave them', () => {
   beforeAll(async () => {
     // organizations: row-level security off, as tables made before the users
@@ -514,8 +582,7 @@ describe('a project whose teams tables have the rules releases before the fix ga
     await ddl(`ALTER TABLE ${T('organizations')} NO FORCE ROW LEVEL SECURITY`)
     await ddl(`ALTER TABLE ${T('organizations')} DISABLE ROW LEVEL SECURITY`)
     await prisma.permissionPolicy.deleteMany({ where: { projectId, tableName: 'organizations' } })
-    const own = await applyPermissionPolicy(projectId, { tableName: 'organization_members', template: 'own_rows', userIdColumn: 'user_id' })
-    expect(own).toMatchObject({ success: true })
+    await oldOwnRows('organization_members', 'user_id')
     // organization_invitations: a rule a person chose in the console.
     const chosen = await withChangeAttribution({ source: 'dashboard', actorUserId: ownerId }, () =>
       executeAction(

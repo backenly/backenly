@@ -553,6 +553,23 @@ async function installPermissionPolicy(
     template = config.template
   }
 
+  // ── The teams tables keep the teams rules ─────────────────────────────────
+  // Membership decides who may read and change these rows. Repairs and build
+  // steps ask for a rule by name (FIX_WORKFLOW's user_data_rls, the auto-fix
+  // engine's apply_rls and the build runtime's permission nodes all send
+  // own_rows), and any rule read from one owner column lets a signed-in user
+  // write the row that makes them a member of any organization. So once all
+  // three tables exist, whichever rule is asked for, from whichever path, they
+  // keep the teams rules and the result says so. A rule of one's own stays
+  // possible (set_rls, custom), and admin_only still closes a table.
+  let teamsInsteadOf: PolicyTemplate | null = null
+  if (isTeamsTable(tableName) && template !== 'teams' && template !== 'custom' && template !== 'admin_only') {
+    if (teamsRulesBlockers(await loadOwnershipCatalog(projectId, schemaName)).length === 0) {
+      teamsInsteadOf = template
+      template = 'teams'
+    }
+  }
+
   // ── The custom escape hatch ────────────────────────────────────────────────
   if (template === 'custom') {
     const { validateBooleanExpression } = await import('@/lib/db/sql-expression')
@@ -890,6 +907,11 @@ async function installPermissionPolicy(
         ? ` (Requested "own_rows", applied "party_rows" instead: "${tableName}" has ${partyColumns!.length} ` +
           `end-user parties (${partyColumns!.join(', ')}), and own_rows would have granted access to only ` +
           `the first of them.)`
+        : '') +
+      (teamsInsteadOf
+        ? ` (Asked for "${teamsInsteadOf}", kept the teams rules: "${tableName}" is one of the teams tables, where ` +
+          `membership decides who may read and change a row, and a rule read from one owner column would let any ` +
+          `signed-in user join any organization. For a rule of your own, use set_rls.)`
         : '')
     console.log(`[RLS] ✅ Applied "${template}" policy on "${tableName}": ${message}`)
 
