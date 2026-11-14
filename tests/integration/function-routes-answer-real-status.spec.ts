@@ -39,11 +39,15 @@ import http from 'http'
 import type { AddressInfo } from 'net'
 import { randomBytes, randomUUID } from 'crypto'
 
+import jwt from 'jsonwebtoken'
+
 import app from '@/server/app'
 import { prisma } from '@/lib/db/prisma'
 import { hashApiKey } from '@/server/lib/end-user-identity'
 import { POST as invokeByName } from '@/app/api/v1/[projectId]/functions/route'
 import { POST as invokeById } from '@/app/api/v1/[projectId]/functions/invoke/route'
+import { POST as dashboardRun } from '@/app/api/projects/[id]/ai-functions/[functionId]/run/route'
+import { startStandInSupervisor } from '@/tests/helpers/stand-in-function-supervisor'
 
 let server: http.Server
 let base = ''
@@ -231,4 +235,55 @@ describe("a run that completed answers with the handler's own status", () => {
       body: { data: { functionId: ids['plain-answer'], success: true, returnValue: { ok: true } } },
     })
   }, 60_000)
+})
+
+describe('a run the function runner turns away for capacity', () => {
+  /** The dashboard's Run, by the project's owner, with a real platform session. */
+  async function viaDashboardRun(name: string): Promise<Response> {
+    const token = jwt.sign({ userId: ownerId, email: `${ownerId}@example.test`, role: 'user' }, process.env.JWT_SECRET!, { expiresIn: '10m' })
+    await prisma.session.create({ data: { userId: ownerId, token, expiresAt: new Date(Date.now() + 10 * 60_000) } })
+    const headers = new Headers()
+    headers.set('authorization', `Bearer ${token}`)
+    const request: any = {
+      method: 'POST',
+      url: `http://localhost:3000/api/projects/${projectId}/ai-functions/${ids[name]}/run`,
+      nextUrl: { pathname: `/api/projects/${projectId}/ai-functions/${ids[name]}/run`, searchParams: new URLSearchParams() },
+      headers,
+      cookies: { get: () => undefined },
+      json: async () => ({ event: {} }),
+    }
+    return dashboardRun(request, { params: Promise.resolve({ id: projectId, functionId: ids[name] }) })
+  }
+
+  // A stand-in supervisor on a UNIX socket; Windows has no supervisor.
+  ;(process.platform === 'win32' ? it.skip : it)(
+    "is a 503 FUNCTION_RUNNER_BUSY with Retry-After on /fn, /functions, /functions/invoke and the dashboard's Run",
+    async () => {
+      const supervisor = await startStandInSupervisor()
+      supervisor.use()
+      try {
+        const fn = await fetch(`${base}/api/v1/${projectId}/fn/plain-answer`, {
+          method: 'POST',
+          headers: { 'x-api-key': apiKey, 'content-type': 'application/json' },
+          body: JSON.stringify({}),
+        })
+        const byName = await invokeByName(nextRequest(`/api/v1/${projectId}/functions`, { name: 'plain-answer', data: {} }), {
+          params: Promise.resolve({ projectId }),
+        })
+        const byId = await invokeById(nextRequest(`/api/v1/${projectId}/functions/invoke`, { functionId: ids['plain-answer'], payload: {} }), {
+          params: Promise.resolve({ projectId }),
+        })
+        const run = await viaDashboardRun('plain-answer')
+        for (const res of [fn, byName, byId, run]) {
+          expect(res.status).toBe(503)
+          expect(res.headers.get('retry-after')).toBe('5')
+          expect(await readBody(res)).toMatchObject({ code: 'FUNCTION_RUNNER_BUSY' })
+        }
+      } finally {
+        await supervisor.close()
+        await prisma.session.deleteMany({ where: { userId: ownerId } }).catch(() => {})
+      }
+    },
+    60_000,
+  )
 })

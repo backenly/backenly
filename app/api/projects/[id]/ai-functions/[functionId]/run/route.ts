@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
 import { authenticateRequest } from '@/lib/auth/middleware'
 import { executeAiFunction } from '@/lib/services/ai-functions/executor'
+import { runnerRefusal } from '@/lib/services/ai-functions/reply'
 import { canWriteProject } from '@/lib/edition/guard'
 
 /**
@@ -46,6 +47,19 @@ export async function POST(
       testRun: true,
       serviceRole: true,
     })
+
+    // Turned away by the function runner: the same 503 and code as every
+    // other route a function is called by, with the result kept for the
+    // dashboard to show.
+    const refusal = runnerRefusal(result)
+    if (refusal) {
+      const response = NextResponse.json(
+        { error: refusal.error, code: refusal.code, ...(refusal.retryAfter ? { retryAfter: refusal.retryAfter } : {}), result },
+        { status: refusal.status },
+      )
+      if (refusal.retryAfter) response.headers.set('Retry-After', String(refusal.retryAfter))
+      return response
+    }
 
     return NextResponse.json({ result })
   } catch (error: any) {
