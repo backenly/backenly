@@ -95,8 +95,15 @@ function processTable() {
   const app = apps.length === 1 ? apps[0] : null
   check(`the app (${app ? app.cmdline : '?'}) runs as node, uid 1000`, !!app && app.uid === 1000, listing)
   if (app) {
-    const appEnv = fs.readFileSync(`/proc/${app.pid}/environ`, 'utf8')
-    check('the app holds the planted secrets a run must not see', PLANTED.length >= 3 && PLANTED.every((v) => appEnv.includes(v)), PLANTED.length)
+    // With Docker's default capabilities root has no CAP_SYS_PTRACE, so even
+    // it may not read another uid's environment.
+    let appEnv
+    try {
+      appEnv = fs.readFileSync(`/proc/${app.pid}/environ`, 'utf8').length > 0 ? 'readable' : 'empty'
+    } catch (err) {
+      appEnv = err.code
+    }
+    check("the app's environment is closed even to root here (no CAP_SYS_PTRACE)", appEnv === 'EACCES', appEnv)
   }
   const appDir = fs.statSync('/app')
   check('/app is root:node 0750', appDir.uid === 0 && appDir.gid === 1000 && (appDir.mode & 0o777) === 0o750, [appDir.uid, appDir.gid, (appDir.mode & 0o777).toString(8)])
@@ -204,7 +211,10 @@ function checkEscapes(seen) {
   check("both escapes reached the run's own process", seen.every((s) => s.samePid))
   check('no platform database client was there to borrow', seen.every((s) => s.platformClient === 'undefined'))
   check("/proc/1/environ was unreadable", seen.every((s) => s.pid1 === 'refused:EACCES'), seen[0].pid1)
-  const foreign = seen.flatMap((s) => s.environs.filter((e) => typeof e.text === 'string' && e.uid !== s.uid))
+  // `attempt` answers 'refused:<code>' for what it could not read.
+  const readable = (e) => typeof e.text === 'string' && !e.text.startsWith('refused:')
+  check('a run could read its own environment, so the reads below were real', seen.every((s) => s.environs.some((e) => e.pid === s.pid && readable(e))))
+  const foreign = seen.flatMap((s) => s.environs.filter((e) => readable(e) && e.uid !== s.uid))
   check("no other process's environment (tini's, the supervisor's, the app's) was readable", foreign.length === 0, foreign.map((e) => [e.pid, e.uid]))
   check(`${PROTECTED.join(', ')} were out of reach`, seen.every((s) => s.protectedDirs.every((v) => v === 'refused:EACCES')), seen[0].protectedDirs)
   check('the supervisor socket was out of reach', seen.every((s) => s.socketDir === 'refused:EACCES'), seen[0].socketDir)
@@ -221,6 +231,15 @@ async function poolIdle(ms = 10000) {
 async function runs() {
   check('the supervisor socket exists', fs.existsSync(SOCKET), SOCKET)
   check('planted values are present to look for', PLANTED.length >= 3, PLANTED.length)
+  // This probe runs as node, as the app does, so it may read the app's environment.
+  const app = processes().find((p) => p.ppid === 1)
+  let appEnv = ''
+  try {
+    appEnv = app ? fs.readFileSync(`/proc/${app.pid}/environ`, 'utf8') : ''
+  } catch {
+    // checked below
+  }
+  check('the app holds the planted secrets a run must not see', PLANTED.every((v) => appEnv.includes(v)), app)
 
   // Runs at once, up to the image's concurrency: each under a pool uid of its own.
   const overlap = Math.max(2, Math.min(3, Number(process.env.BACKENLY_FN_MAX_CONCURRENCY) || 2))
