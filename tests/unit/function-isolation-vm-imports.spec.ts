@@ -31,6 +31,7 @@ const SKIP_DIRS = new Set(['node_modules', '.next', '.git', 'coverage', 'dist-ru
 /** The module names, assembled so this file's own text never loads one. */
 const VM = ['v', 'm'].join('')
 const ISOLATED = `isolated-${VM}`
+const CONTEXTIFY = ['context', 'ify'].join('')
 const NAMES = `(?:node:)?${VM}|${ISOLATED}`
 const Q = '[\'"`]'
 
@@ -45,7 +46,7 @@ const LOADS: RegExp[] = [
   // createRequire(…)(…), obj['require'](…).
   new RegExp(`[\\w$\\])]\\s*\\(\\s*${Q}(?:${NAMES})${Q}\\s*\\)`),
   // The binding the module is built on, reached without it.
-  new RegExp(`\\b(?:binding|_linkedBinding|internalBinding)\\s*\\(\\s*${Q}contextify${Q}\\s*\\)`),
+  new RegExp(`\\b(?:binding|_linkedBinding|internalBinding)\\s*\\(\\s*${Q}${CONTEXTIFY}${Q}\\s*\\)`),
 ]
 
 const loads = (text: string) => LOADS.some((re) => re.test(text))
@@ -109,8 +110,8 @@ describe('node:vm', () => {
     [`eval('require')('${VM}')`],
     [`const r = eval('require'); const m = r('node:${VM}')`],
     [`const m = globalThis['require']('${VM}')`],
-    [`process.binding('contextify')`],
-    [`process._linkedBinding("contextify")`],
+    [`process.binding('${CONTEXTIFY}')`],
+    [`process._linkedBinding("${CONTEXTIFY}")`],
   ])('is caught when loaded as: %s', (line) => {
     expect(loads(line)).toBe(true)
   })
