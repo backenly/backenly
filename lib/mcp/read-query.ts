@@ -484,6 +484,14 @@ async function execute(
     await client.query('BEGIN READ ONLY')
     await client.query(`SET LOCAL search_path TO ${quoteIdent(schema)}`)
     await client.query(`SET LOCAL statement_timeout = ${STATEMENT_TIMEOUT_MS}`)
+    // The statement was checked as PostgreSQL parses it with
+    // standard_conforming_strings on, the server default, where a backslash in
+    // '...' is an ordinary character. A role or database that turned it off
+    // would end a literal later than the check did: in
+    // SELECT 'x\' || ' AS c, (SELECT count(*) FROM pg_proc) AS leak --'
+    // the check sees two string literals and the server would run a subquery
+    // on pg_proc. Pinned for this transaction, so both read the same statement.
+    await client.query('SET LOCAL standard_conforming_strings = on')
     const res = await client.query({ text: capped(sql, cap), rowMode: 'array' })
     await client.query('ROLLBACK')
 
