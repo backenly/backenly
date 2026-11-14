@@ -92,15 +92,17 @@ export const READ_CONNECTION_FAILED =
 
 /**
  * Failures of the connection rather than of the statement: SQLSTATE class 08
- * (connection exception), 28 (authorization, where pg_hba refusals land), 53
- * (insufficient resources: too many connections), 57P01–57P05 (the server
- * shutting down, recovering or refusing new sessions), and Node's own socket
- * errors. A statement timeout (57014) is the caller's query and stays theirs.
+ * (connection exception), 28 (authorization, where pg_hba refusals land),
+ * 53300 (too many connections), 57P01–57P05 (the server shutting down,
+ * recovering or refusing new sessions), and Node's own socket errors. A
+ * statement timeout (57014) is the caller's query and stays theirs, and so is
+ * the rest of class 53, the statement running out of disk, memory or
+ * temp_file_limit (resourceRefusal).
  */
 export function isConnectionFailure(err: unknown): boolean {
   const code = (err as { code?: unknown })?.code
   if (typeof code === 'string') {
-    if (/^(08|28|53)[0-9A-Z]{3}$/.test(code) || /^57P0[1-5]$/.test(code)) return true
+    if (/^(08|28)[0-9A-Z]{3}$/.test(code) || code === '53300' || /^57P0[1-5]$/.test(code)) return true
     if (/^E[A-Z]+$/.test(code)) return true // ECONNREFUSED, ETIMEDOUT, ENOTFOUND, …
     if (/CERT|^ERR_(TLS|SSL)/.test(code)) return true // certificate and handshake failures
   }
@@ -217,7 +219,7 @@ const WRITE_VERBS =
  * and the parsed-statement check (lib/mcp/read-query-ast.ts), so both layers
  * send an agent to the same place.
  */
-const HINTS: Record<RefusalHint, string> = {
+const HINTS: Record<RefusalHint | 'ownCode', string> = {
   // Name the ADVERTISED doors. This used to say "create_table, add_column"
   // — real brain tools that the MCP manifest does not list, so an agent
   // reading this refusal was sent to two tools it could not call, inside the
@@ -261,6 +263,9 @@ const HINTS: Record<RefusalHint, string> = {
   expensive:
     'Narrow the statement: filter or aggregate earlier, keep widths and lengths small, and give generate_series ' +
     'in FROM literal bounds, or call it in the select list, where rows stream under the row cap.',
+  ownCode:
+    'run_query runs PostgreSQL\'s built-ins only. Rename or drop the project\'s own function, operator or cast ' +
+    'that shares the name, or write the query without that name.',
 }
 
 /**
@@ -291,7 +296,8 @@ export interface AdmittedStatement {
  * checks alone.
  *
  * Answers what the statement is, from its parse tree, for the row cap, and the
- * names it leaves to search_path.
+ * names it leaves to search_path, which execute() checks against the project's
+ * own schema just before the statement runs (ownCodeRefusal).
  */
 export async function admitReadQuery(sqlRaw: string, projectId: string): Promise<AdmittedStatement> {
   const sql = typeof sqlRaw === 'string' ? sqlRaw.trim() : ''
@@ -474,9 +480,9 @@ export async function runReadQuery(
   sql: string,
   limit: number = DEFAULT_ROWS,
 ): Promise<ReadQueryResult> {
-  const { kind } = await admitReadQuery(sql, projectId)
+  const statement = await admitReadQuery(sql, projectId)
   try {
-    return await execute(projectId, sql, limit, kind)
+    return await execute(projectId, sql, limit, statement)
   } catch (err) {
     // 42501 = insufficient_privilege. A table created outside the governed DDL
     // path has no grant for the read-only role yet, and the agent would see a
@@ -486,15 +492,104 @@ export async function runReadQuery(
     if ((err as { code?: string })?.code !== '42501') throw err
     const { syncDirectAccessGrants } = await import('@/lib/services/direct-access')
     await syncDirectAccessGrants(projectId)
-    return execute(projectId, sql, limit, kind)
+    return execute(projectId, sql, limit, statement)
   }
+}
+
+/**
+ * The functions, operators and casts in the project's own schema, which
+ * search_path puts beside pg_catalog when the statement runs.
+ */
+const OWN_CODE = `
+  SELECT 'function' AS kind, p.proname AS name
+    FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+   WHERE n.nspname = $1
+  UNION ALL
+  SELECT 'operator', o.oprname
+    FROM pg_catalog.pg_operator o JOIN pg_catalog.pg_namespace n ON n.oid = o.oprnamespace
+   WHERE n.nspname = $1
+  UNION ALL
+  SELECT 'cast', p.proname
+    FROM pg_catalog.pg_cast c JOIN pg_catalog.pg_proc p ON p.oid = c.castfunc
+    JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+   WHERE n.nspname = $1`
+
+/**
+ * The project's own code a statement would reach.
+ *
+ * PostgreSQL resolves an unqualified function or operator through search_path,
+ * which holds the project's schema, and picks the best match among pg_catalog's
+ * and that schema's: lower(1) runs a lower(int) defined there, `'a'::text +
+ * 'b'::text` an operator + defined there, and a cast through the schema's own
+ * function runs wherever a value of its type is converted. Such objects come
+ * from a read-write login the project's admin allowed schema changes on
+ * (lib/services/direct-access.ts); apply_migration creates none
+ * (lib/mcp/migration-parser.ts refuses CREATE FUNCTION, TYPE and the rest).
+ * run_query runs PostgreSQL's built-ins only, so a statement that leaves one of
+ * those names to search_path is refused, and while the schema defines such a
+ * cast, every statement is.
+ */
+export function ownCodeRefusal(
+  defined: Array<{ kind: string; name: string }>,
+  statement: { calls: string[]; operators: string[] },
+): ReadQueryError | null {
+  const cast = defined.find((d) => d.kind === 'cast')
+  if (cast) {
+    return new ReadQueryError(
+      `run_query does not run statements in this project while its schema defines a cast through its own ` +
+        `function ${cast.name}(): PostgreSQL may call it wherever a value is converted, and run_query runs only ` +
+        `PostgreSQL's built-ins.`,
+      'FUNCTION_NOT_ALLOWED',
+      HINTS.ownCode,
+    )
+  }
+  const functions = new Set(defined.filter((d) => d.kind === 'function').map((d) => d.name))
+  const call = statement.calls.find((name) => functions.has(name))
+  if (call) {
+    return new ReadQueryError(
+      `run_query does not call ${call}() here: this project's schema defines a function named ${call}, which ` +
+        'PostgreSQL may pick over the built-in one.',
+      'FUNCTION_NOT_ALLOWED',
+      HINTS.ownCode,
+    )
+  }
+  const operators = new Set(defined.filter((d) => d.kind === 'operator').map((d) => d.name))
+  const operator = statement.operators.find((name) => operators.has(name))
+  if (operator) {
+    return new ReadQueryError(
+      `run_query does not apply ${operator} here: this project's schema defines an operator ${operator}, which ` +
+        'PostgreSQL may pick over the built-in one.',
+      'OPERATOR_NOT_ALLOWED',
+      HINTS.ownCode,
+    )
+  }
+  return null
+}
+
+/**
+ * PostgreSQL stopping a statement for what it used: SQLSTATE 53100 (disk
+ * full), 53200 (out of memory) and 53400 (a configured limit, such as
+ * temp_file_limit on temporary files). The statement is the caller's to
+ * narrow, so it is answered as theirs, never as a lost connection: only
+ * 53300, too many connections, is Backenly's (isConnectionFailure).
+ */
+const RESOURCE_LIMITS: { [sqlstate: string]: string } = {
+  '53100': 'PostgreSQL ran out of disk space for the query\'s temporary files and stopped it.',
+  '53200': 'PostgreSQL ran out of memory for the query and stopped it.',
+  '53400': 'The query went past a limit PostgreSQL sets on one statement (temp_file_limit, for temporary files) and was stopped.',
+}
+
+export function resourceRefusal(err: unknown): ReadQueryError | null {
+  const code = (err as { code?: unknown })?.code
+  if (typeof code !== 'string' || !Object.prototype.hasOwnProperty.call(RESOURCE_LIMITS, code)) return null
+  return new ReadQueryError(`${RESOURCE_LIMITS[code]} Nothing was changed.`, 'QUERY_TOO_EXPENSIVE', HINTS.expensive)
 }
 
 async function execute(
   projectId: string,
   sql: string,
   limit: number,
-  kind: StatementKind,
+  statement: AdmittedStatement,
 ): Promise<ReadQueryResult> {
   const cap = Math.min(Math.max(1, Math.floor(limit)), MAX_ROWS)
   const schema = workspaceSchemaName(projectId)
@@ -536,7 +631,12 @@ async function execute(
     // the check sees two string literals and the server would run a subquery
     // on pg_proc. Pinned for this transaction, so both read the same statement.
     await client.query('SET LOCAL standard_conforming_strings = on')
-    const res = await client.query({ text: capped(sql, cap, kind), rowMode: 'array' })
+    // The project's own functions, operators and casts, read in this
+    // transaction as the role the statement runs as, just before it runs.
+    const own = await client.query({ text: OWN_CODE, values: [schema] })
+    const ownCode = ownCodeRefusal(own.rows as Array<{ kind: string; name: string }>, statement)
+    if (ownCode) throw ownCode
+    const res = await client.query({ text: capped(sql, cap, statement.kind), rowMode: 'array' })
     await client.query('ROLLBACK')
 
     const fields = (res.fields ?? []).map((f: any) => ({ name: f.name, dataType: String(f.dataTypeID) }))
@@ -554,8 +654,17 @@ async function execute(
     }
   } catch (err) {
     // The statement's own errors (a typo, a missing column, a timeout) are the
-    // caller's to read. A connection lost part-way is Backenly's, said plainly.
-    if (!(err instanceof ReadQueryError) && isConnectionFailure(err)) throw connectionFailed(projectId, err)
+    // caller's to read, and so is running out of disk, memory or
+    // temp_file_limit, said plainly. A connection lost part-way is Backenly's.
+    if (!(err instanceof ReadQueryError)) {
+      const resource = resourceRefusal(err)
+      if (resource) {
+        const e = err as { code?: unknown; message?: unknown }
+        console.error(`[read-query] project ${projectId}: statement stopped, ${String(e?.code)} ${String(e?.message)}`)
+        throw resource
+      }
+      if (isConnectionFailure(err)) throw connectionFailed(projectId, err)
+    }
     throw err
   } finally {
     await client.end().catch(() => {})
