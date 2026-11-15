@@ -42,6 +42,7 @@ import {
   type AuthEnvironment,
 } from '@/lib/branches/auth-environment'
 import { resolveEndUserFromToken } from '@/server/lib/end-user-identity'
+import { isDeliverableAddress } from '@/lib/email/address'
 import jwt from 'jsonwebtoken'
 import crypto from 'crypto'
 
@@ -818,8 +819,10 @@ export async function requestMagicLink(projectId: string, emailRaw: unknown): Pr
       return err('INTERNAL_ERROR', 'Authentication is not configured for this project.', 503)
     }
 
+    // The plain form sign-up accepts, at most 254 characters: anything else is
+    // refused here, before it is stored or mailed (lib/email/address.ts).
     const email = typeof emailRaw === 'string' ? emailRaw.toLowerCase().trim() : undefined
-    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    if (!email || !isDeliverableAddress(email)) {
       return err('BAD_REQUEST', 'A valid email is required', 400)
     }
 

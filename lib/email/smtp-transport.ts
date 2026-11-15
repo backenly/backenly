@@ -19,8 +19,12 @@
  * self-hosters on infra where 465 is open and 587 happens to be closed).
  *
  * Keep ALL transport construction going through here so that email sending and
- * the integration-health probe always agree on the effective port.
+ * the integration-health probe always agree on the effective port, and so that
+ * every message's addresses are checked before nodemailer parses them
+ * (lib/email/address.ts).
  */
+
+import { plainAddressesOnly } from './address'
 
 /** Effective transport parameters after applying the 465 -> 587 normalization. */
 export interface EffectiveSmtp {
@@ -91,16 +95,18 @@ export function buildSmtpTransport(nodemailer: any, creds: SmtpCredentials | nul
 
   const { port, secure, requireTLS } = resolveSmtpPort(creds.port ?? undefined)
 
-  return nodemailer.createTransport({
+  // nodemailer 10 counts connectionTimeout over the whole session setup (DNS,
+  // TCP, TLS, greeting and STARTTLS), where 9 counted the TCP connect alone.
+  return plainAddressesOnly(nodemailer.createTransport({
     host: creds.host,
     port,
     secure,
     requireTLS,
     auth: { user: creds.user, pass: creds.pass },
-    connectionTimeout: 8_000,
+    connectionTimeout: 16_000,
     greetingTimeout: 8_000,
     socketTimeout: 10_000,
-  })
+  }))
 }
 
 /**
