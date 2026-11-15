@@ -2255,3 +2255,7 @@ tests/integration/restore-switches-planted-code-off.spec.ts
 # users table, never another project's, with the secret kept from the function.
 # Real sign-up and sign-in routes, runner and provisioned project.
 tests/integration/function-create-session.spec.ts
+# Magic links and verification email are sent by the web service, which holds the
+# deployment's email settings, and are limited per requester and per target
+# address. Real SMTP through the sink, real Next routes and database.
+tests/integration/auth-email-routes-on-web.spec.ts
