@@ -2250,3 +2250,8 @@ tests/integration/neutralize-planted-objects.spec.ts
 # was switched off comes back on. The restore switches it off again. Real
 # pg_dump and psql.
 tests/integration/restore-switches-planted-code-off.spec.ts
+# A function signs a user in with createSession, and Backenly signs the session:
+# the token sign-in issues, for an existing, unsuspended user of the project's own
+# users table, never another project's, with the secret kept from the function.
+# Real sign-up and sign-in routes, runner and provisioned project.
+tests/integration/function-create-session.spec.ts
