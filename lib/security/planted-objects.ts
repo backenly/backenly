@@ -111,6 +111,7 @@ import { JWT_CLAIM_FN, jwtClaimFunctionSql, serviceRoleClause } from '@/lib/post
 import { NOTIFY_FUNCTION_NAME, PRESENCE_FUNCTION_NAME } from '@/lib/realtime/channel-sql'
 import { LADDER_OBJECT_PREFIX } from '@/lib/structural-evolution/facts'
 import { projectIdOfWorkspaceSchema, quoteIdent } from '@/lib/security/workspace-schema'
+import { TEAMS_TRIGGERS, teamsTriggerBody, teamsTriggerTable } from '@/lib/security/teams-triggers'
 import type { CloudRegionId } from '@/lib/regions'
 
 /** One connection; a pg Client or PoolClient. Scans run on it in one transaction. */
@@ -140,11 +141,14 @@ const BACKENLY_FUNCTION_PREFIXES = [DUAL_WRITE_PREFIX, DERIVED_PREFIX, LADDER_OB
 
 /**
  * A trigger Backenly installs, by name: the function it runs (the same name for
- * the per-column bkn_dw_ and bkn_sync_ objects), and whether it may carry a
- * WHEN condition. Null for any other name.
+ * the per-column bkn_dw_ and bkn_sync_ objects), whether it may carry a WHEN
+ * condition, and, for the teams rules' triggers, the one table it belongs on.
+ * Null for any other name.
  */
-function backenlyTrigger(name: string): { runs: (fn: string) => boolean; when: boolean } | null {
+function backenlyTrigger(name: string): { runs: (fn: string) => boolean; when: boolean; table?: string } | null {
   if (name.startsWith(UPDATED_AT_TRIGGER_PREFIX)) return { runs: (fn) => fn === UPDATED_AT_FUNCTION, when: false }
+  const teamsTable = teamsTriggerTable(name)
+  if (teamsTable) return { runs: (fn) => fn === name, when: false, table: teamsTable }
   if (name === 'backenly_realtime') return { runs: (fn) => fn === NOTIFY_FUNCTION_NAME, when: false }
   if (name === 'backenly_presence_notify') return { runs: (fn) => fn === PRESENCE_FUNCTION_NAME, when: false }
   if (name === CAPTURE_TRIGGER) return { runs: (fn) => fn === 'backenly_capture_webhook_event', when: false }
@@ -373,8 +377,11 @@ function routineAuthor(r: any, facts: DatabaseFacts): string | null {
   if (OWNER_ROLE.test(owner)) return `owned by the project's owner role ${owner}, which Backenly never makes code as`
   if (!r.owner_super && !facts.platformRoles.includes(owner)) return `owned by ${owner}, which is not one of Backenly's roles`
   const name = r.name as string
+  // A teams rules' function is Backenly's only with exactly the body teamsTriggerSql installs in this schema.
+  const teamsBody = teamsTriggerBody(r.schema as string, name)
   const backenlys =
     (BACKENLY_FUNCTIONS.has(name) && (name !== UPDATED_AT_FUNCTION || r.backenly_body === true)) ||
+    (teamsBody !== null && r.teams_src === teamsBody) ||
     BACKENLY_FUNCTION_PREFIXES.some((p) => name.startsWith(p))
   if (!backenlys) return 'not a function Backenly installs'
   if (facts.createdByLogins.has(r.identity)) return 'created over a direct-access login (drift ledger)'
@@ -392,6 +399,10 @@ function triggerAuthor(t: any, planted: Map<string, Planted>, facts: DatabaseFac
   const sameProject = projectIdOfWorkspaceSchema(t.fn_schema) !== null &&
     projectIdOfWorkspaceSchema(t.fn_schema) === projectIdOfWorkspaceSchema(t.schema)
   if (!ours.runs(t.fn_name) || !sameProject) return `named like one of Backenly's, but runs ${t.fn_schema}.${t.fn_name}`
+  // The teams rules put each of their triggers on one table, running a function in that table's own schema.
+  if (ours.table && (t.table !== ours.table || t.fn_schema !== t.schema)) {
+    return `named like one of Backenly's teams triggers, but on ${t.table} running ${t.fn_schema}.${t.fn_name}`
+  }
   if (t.has_when && !ours.when) return 'carries a WHEN condition, which this trigger of Backenly\'s never has'
   return null
 }
@@ -615,6 +626,7 @@ export async function findPlanted(db: PgClient, schemas: string[], facts: Databa
               p.prosecdef AS definer, pg_get_userbyid(p.proowner)::text AS owner, o.rolsuper AS owner_super,
               p.oid::regprocedure::text AS signature,
               (p.proname = 'set_updated_at' AND p.prosrc LIKE '%updatedAt%') AS backenly_body,
+              CASE WHEN p.proname = ANY ($2::text[]) THEN p.prosrc END AS teams_src,
               coalesce((SELECT array_agg(DISTINCT CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee)::text END)
                           FROM aclexplode(p.proacl) a), '{}'::text[]) AS grantees,
               (pg_identify_object('pg_proc'::regclass, p.oid, 0)).identity AS identity
@@ -625,7 +637,7 @@ export async function findPlanted(db: PgClient, schemas: string[], facts: Databa
           AND NOT EXISTS (SELECT 1 FROM pg_depend d
                            WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e')
         ORDER BY 2, 3`,
-      [schemas],
+      [schemas, Object.values(TEAMS_TRIGGERS)],
     )).rows
     const triggers = (await db.query(
       `SELECT t.oid::text AS oid, n.nspname::text AS schema, c.relname::text AS "table", c.relkind::text AS relkind,
