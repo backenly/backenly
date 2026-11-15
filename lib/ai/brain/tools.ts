@@ -963,7 +963,7 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
   fn('deploy_function_code',
     'Deploy function source you wrote, exactly as written: no model reads or rewrites it. trigger "http" takes a route module ' +
     '(`import { NextResponse } from \'next/server\'`, `export async function POST(req) { … }`) served at /api/v1/{projectId}/fn/{name}. ' +
-    'Every other trigger takes a sandbox body: statements using ctx.db, ctx.http, ctx.log, ctx.integrations.<provider> and ctx.env.KEY, ' +
+    'Every other trigger takes a sandbox body: statements using ctx.db, ctx.http, ctx.log, ctx.integrations.<provider>, ctx.env.KEY and ctx.auth.createSession(userId), ' +
     'receiving `event`, optionally returning a value. The code is checked by the runtime that will run it and refused with the reason if it cannot run; ' +
     'keys written into it are refused. Deploying a name that exists replaces its code (no version history is kept). ' +
     `Source is limited to 64 KB. Test it with invoke_ai_function and read runs with list_ai_function_logs.`,

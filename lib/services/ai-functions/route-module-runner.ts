@@ -62,6 +62,7 @@ import { resolveEndUserFromToken } from '@/server/lib/end-user-identity'
 import { FORWARDABLE_FN_HEADERS } from './forward-headers'
 import { withoutComments } from './integration-use'
 import { encodeValue, endedForMemory, runIsolated, type CallHandlers, type IsolatedOutcome } from './isolation/client'
+import { issueEndUserSession } from '@/lib/auth/end-user-session'
 
 // esbuild is a native binary package — load it lazily through a non-bundled
 // require so Next.js never tries to trace/bundle the binary into the server
@@ -325,7 +326,8 @@ function presentedAdminKey(headers: Record<string, string>, auth: ProjectFnAuth)
 // test token the placeholder replaces passes it too.
 export const SIGN_REFUSED =
   "Functions cannot sign the project's end-user sessions: Backenly no longer gives function code the project's signing secret. " +
-  "Check a caller's token with verifyToken(token) from '@/lib/auth/jwt'."
+  "Sign a user in with createSession(userId) from '@/lib/auth/session', which returns the session Backenly signs, " +
+  "and check a caller's token with verifyToken(token) from '@/lib/auth/jwt'."
 
 // ─── The database a function receives ───────────────────────────────────────
 
@@ -366,6 +368,7 @@ const WITHHELD_READ = [
 export const WITHHELD_READ_REFUSED =
   "function code cannot read process.env.JWT_SECRET, ADMIN_API_KEY or AI_EXECUTION_TOKEN: Backenly does not give functions the project's signing secret or admin key. " +
   "Check an admin request with isAdminRequest(request) and a caller's token with verifyToken(token), both from '@/lib/auth/jwt', " +
+  "sign a user in with createSession(userId) from '@/lib/auth/session', " +
   "and run SQL the caller may not run themselves inside asService(async (db) => { ... }) from '@/lib/db'"
 
 /** The withheld variable the code reads, if any. */
@@ -547,6 +550,11 @@ function routeCallHandlers(projectId: string): CallHandlers {
     async 'stream.notify'([payload]) {
       await sendToProjectStream(projectId, String(payload ?? ''))
       return true
+    },
+    // A session for one of the project's end users, signed here with the
+    // project's secret, which module code never holds (lib/auth/end-user-session.ts).
+    async 'auth.createSession'(args) {
+      return issueEndUserSession(projectId, args[0])
     },
   }
 }

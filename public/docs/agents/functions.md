@@ -46,10 +46,11 @@ export async function POST(request: Request) {
 }
 ```
 
-It may import only `next/server`, `@/lib/db` (a `prisma` whose raw SQL runs in this project's schema, and `asService`), `@/lib/auth/jwt` (`verifyToken`, for this project's end-user tokens, and `isAdminRequest`), `crypto`, `bcryptjs` and `jsonwebtoken`. Its SQL logs in as the project's own database role: it reads and writes this project's tables, row-level security applies to the caller the request carries, and PostgreSQL refuses anything outside the project (Backenly's own tables, other projects). `process.env` holds this project's variables (set with `connect { action: "set_env" }`, read as `process.env.KEY`) and `NODE_ENV`: none of Backenly's own configuration, and never the project's signing secret or admin key. Code that reads `JWT_SECRET`, `ADMIN_API_KEY` or `AI_EXECUTION_TOKEN` is refused. Export one handler per HTTP method; when a module exports several, pass `method`.
+It may import only `next/server`, `@/lib/db` (a `prisma` whose raw SQL runs in this project's schema, and `asService`), `@/lib/auth/jwt` (`verifyToken`, for this project's end-user tokens, and `isAdminRequest`), `@/lib/auth/session` (`createSession`), `crypto`, `bcryptjs` and `jsonwebtoken`. Its SQL logs in as the project's own database role: it reads and writes this project's tables, row-level security applies to the caller the request carries, and PostgreSQL refuses anything outside the project (Backenly's own tables, other projects). `process.env` holds this project's variables (set with `connect { action: "set_env" }`, read as `process.env.KEY`) and `NODE_ENV`: none of Backenly's own configuration, and never the project's signing secret or admin key. Code that reads `JWT_SECRET`, `ADMIN_API_KEY` or `AI_EXECUTION_TOKEN` is refused. Export one handler per HTTP method; when a module exports several, pass `method`.
 
 - An admin-only endpoint checks the project's admin key (Functions page, Copy admin key) without holding it: `if (!isAdminRequest(request)) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })`. The key is sent as `x-admin-key`.
 - Work the caller may not do themselves, such as a checkout that creates the order and takes stock the shopper cannot update, runs in `await asService(async (db) => { … })`: one transaction, as the service role, so row-level security does not apply to its SQL. It still reaches only this project's tables. Check who is calling before you use it; the run's logs record each use.
+- A function that proves who a user is its own way, such as a code sent by SMS or a sign-in from another identity provider, signs them in with `const { token, user } = await createSession(userId)` from `@/lib/auth/session`. Backenly signs the session, the same token password sign-in issues, valid for seven days, for a user who exists in this project's `users` table and is not suspended; the function never holds the signing secret. Whoever reaches that line is signed in as that user, so call it only after the proof succeeds. The run's logs record each session it creates.
 
 **Every other trigger: a sandbox body**, the inside of an async function that receives `event` and `ctx` and may return a value:
 
@@ -71,6 +72,7 @@ What `event` holds depends on the trigger:
 - `ctx.log(...)`: lines recorded with the run.
 - `ctx.integrations.<provider>`: connected providers, with their keys kept server side (`integrations`, and each provider's topic).
 - `ctx.env.KEY`: variables set with `connect { action: "set_env" }`.
+- `ctx.auth.createSession(userId)`: signs an existing user in, returning `{ token, user }`, as `createSession` does for an http function.
 - `ctx.require(name)`: only `pdfkit`, `csv-parse/sync`, `date-fns`, `qrcode`, `nodemailer` and `archiver`.
 
 It runs in an isolated worker with no `process`, no `require`, no dynamic `import`, no `eval`, and a 10-second limit.

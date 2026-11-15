@@ -44,8 +44,11 @@ const ROUTE_MODULE_CONTRACT = `RUNTIME CONTRACT (the code runs in Backenly's rou
 - The second argument is ALWAYS provided; params.projectId is the project id. Query-string values are also merged into params.
 - request supports: request.url, request.method, request.nextUrl.searchParams.get(...), await request.json(), request.headers.get(name), request.cookies.get(name)?.value
 - Respond ONLY with NextResponse.json(body, { status }) from 'next/server'.
-- Imports allowed ONLY from: 'next/server', '@/lib/db' (prisma, asService), '@/lib/auth/jwt' (verifyToken, isAdminRequest), 'crypto', 'bcryptjs', 'jsonwebtoken'. Any other import crashes.
+- Imports allowed ONLY from: 'next/server', '@/lib/db' (prisma, asService), '@/lib/auth/jwt' (verifyToken, isAdminRequest), '@/lib/auth/session' (createSession), 'crypto', 'bcryptjs', 'jsonwebtoken'. Any other import crashes.
 - process.env holds the project's own variables and NODE_ENV only. Never read process.env.JWT_SECRET, ADMIN_API_KEY or AI_EXECUTION_TOKEN: Backenly does not give them to functions, and code that reads them is refused.
+- To SIGN A USER IN once the function has proved who they are its own way (a code sent by SMS, another identity provider), never sign a token yourself:
+    const { token, user } = await createSession(userId)
+  createSession from '@/lib/auth/session' returns the same session password sign-in issues, signed by Backenly, for a user who exists in the project's users table and is not suspended. Call it only after the proof succeeds: whoever reaches that line is signed in as that user.
 - An ADMIN-ONLY endpoint checks the project's admin key without holding it:
     if (!isAdminRequest(request)) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
 - Work the caller may not do themselves (a checkout that creates the order and takes stock the shopper cannot update) runs inside asService, in one transaction, as the service role. Row-level security does not apply to its SQL, so check who is calling first:
