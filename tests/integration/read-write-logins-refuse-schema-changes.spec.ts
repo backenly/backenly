@@ -425,6 +425,54 @@ describe('on a database shared by several projects, as this one is', () => {
     expect(await as(l.owner, `CREATE TABLE "${l.schema}".later_public (id int)`)).toBe('ok')
     expect((await q(`SELECT has_table_privilege('public', $1, 'TRIGGER') AS t`, [`"${l.schema}".later_public`]))[0].t).toBe(false)
   }, 60_000)
+
+  // A session that took the group with SET ROLE keeps it after the option is
+  // gone, so a strip that took only the SET still ends the login's sessions and
+  // marks it, as a strip that took anything else does.
+  it('ends the sessions of a login whose only hold was its SET on the group, and marks it', async () => {
+    const only = `bkn_rw_${randomBytes(6).toString('hex')}`
+    rolesLater.push(only)
+    await q(`SELECT public.backenly_direct_create_role($1, $2, $3, 'READ_WRITE')`, [only, PASSWORD, schema])
+    expect(await holds(only)).toEqual([])
+    await q(`GRANT backenly_external TO ${only} WITH INHERIT TRUE, SET TRUE`)
+    const c = await login(only)
+    expect(await attempt(c, 'SET ROLE backenly_external')).toBe('ok')
+
+    expect((await q(`SELECT public.backenly_direct_strip_schema_changes($1) AS taken`, [only]))[0].taken).toBe(true)
+
+    const set = await q(`SELECT bool_or(m.set_option) AS any FROM pg_auth_members m
+                          WHERE m.roleid = 'backenly_external'::regrole AND m.member = $1::regrole`, [only])
+    expect(set).toEqual([{ any: false }])
+    expect(await sessionsOf(only)).toBe(0)
+    expect(await strippedMark(only)).toMatch(/^backenly: sessions to end after a strip/)
+    await q(`SELECT public.backenly_direct_end_stripped_sessions($1)`, [only])
+    expect(await strippedMark(only)).toBeNull()
+  }, 60_000)
+
+  // lo_create needs no privilege, so a session that became the group before its
+  // SET was taken could leave a large object the group owns. It belongs to no
+  // project's schema: the platform's role takes it, or every later install
+  // would stop on a hold it cannot take.
+  it('hands a large object the group owns to the platform\'s role when the file is installed again', async () => {
+    const [{ oid }] = await q(`SELECT lo_create(0)::text AS oid`)
+    try {
+      await q(`ALTER LARGE OBJECT ${oid} OWNER TO backenly_external`)
+      expect(await q(`SELECT fix FROM public.backenly_direct_shared_holds() WHERE holder = 'backenly_external' AND item = $1`,
+                     [`ownership of large object ${oid}`]))
+        .toEqual([{ fix: `ALTER LARGE OBJECT ${oid} OWNER TO ${app}` }])
+
+      install('scripts/setup-direct-access.sql')
+
+      // The install's own session names the platform's role without this session's setting.
+      const installApp = execFileSync('psql', ['-X', '-q', '-tA', '-c', 'SELECT public.backenly_app_role()', '-d', CONN],
+                                      { encoding: 'utf8' }).trim()
+      expect((await q(`SELECT pg_get_userbyid(lomowner) AS owner FROM pg_largeobject_metadata WHERE oid = $1::oid`, [oid])))
+        .toEqual([{ owner: installApp }])
+      expect(await q(`SELECT 1 FROM public.backenly_direct_shared_holds() WHERE item LIKE 'ownership of large object%'`)).toEqual([])
+    } finally {
+      await q(`SELECT lo_unlink(${oid})`).catch(() => {})
+    }
+  }, 120_000)
 })
 
 describe('held by a definer that is not a superuser, as on Amazon RDS', () => {

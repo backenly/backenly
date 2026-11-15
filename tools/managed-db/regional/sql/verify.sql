@@ -353,8 +353,12 @@ BEGIN
   -- What every direct-access login holds at once: through PUBLIC, through the
   -- group each joins and whose privileges each has, or through the marker
   -- role, which must hold nothing (section 5c, backenly_direct_shared_holds).
+  -- Except what the install itself names and leaves (setup-direct-access.sql,
+  -- section 7): a login's SET on backenly_external that a superuser granted, on
+  -- a server that lets only a superuser take it. Amazon RDS takes it.
   IF to_regprocedure('public.backenly_direct_shared_holds(text,text)') IS NOT NULL THEN
-    FOR r IN SELECT h.holder, h.item FROM public.backenly_direct_shared_holds() h ORDER BY 1, 2 LOOP
+    FOR r IN SELECT h.holder, h.item, h.fix FROM public.backenly_direct_shared_holds() h ORDER BY 1, 2 LOOP
+      CONTINUE WHEN r.item = 'SET on backenly_external' AND r.fix NOT LIKE '% GRANTED BY %';
       problems := problems || format('%s holds %s, and so every direct-access login does', r.holder, r.item);
     END LOOP;
   END IF;

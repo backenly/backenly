@@ -266,6 +266,9 @@ DECLARE
   v_before jsonb;
   v_after  jsonb;
   v_key    text;
+  back_login boolean := false;
+  login_i  boolean;
+  login_s  boolean;
 BEGIN
   IF p_role !~ '^bkn_(ro|rw)_[0-9a-f]{12}$' THEN
     RAISE EXCEPTION 'backenly_direct_drop_role: invalid role name %', p_role;
@@ -276,11 +279,33 @@ BEGIN
 
   -- Before anything that needs them (see above). WITH INHERIT exists from
   -- PostgreSQL 16; before it a membership is inherited by an INHERIT member.
+  -- Whether the grant made a new one or changed one the definer held is read
+  -- from its grants of the role before and after, as for the application's
+  -- role below; that only matters if the login is retired, not dropped.
   IF NOT pg_has_role(current_user, p_role, 'USAGE') THEN
+    SELECT coalesce(jsonb_object_agg(m.grantor::text, jsonb_build_array(to_jsonb(m) -> 'inherit_option', to_jsonb(m) -> 'set_option')), '{}'::jsonb)
+      INTO v_before
+      FROM pg_auth_members m
+     WHERE m.roleid = (SELECT oid FROM pg_roles WHERE rolname = p_role)
+       AND m.member = (SELECT oid FROM pg_roles WHERE rolname = current_user);
     EXECUTE format(CASE WHEN current_setting('server_version_num')::int >= 160000
                         THEN 'GRANT %I TO %I WITH INHERIT TRUE, SET FALSE'
                         ELSE 'GRANT %I TO %I' END, p_role, current_user);
-    granted := true;
+    SELECT coalesce(jsonb_object_agg(m.grantor::text, jsonb_build_array(to_jsonb(m) -> 'inherit_option', to_jsonb(m) -> 'set_option')), '{}'::jsonb)
+      INTO v_after
+      FROM pg_auth_members m
+     WHERE m.roleid = (SELECT oid FROM pg_roles WHERE rolname = p_role)
+       AND m.member = (SELECT oid FROM pg_roles WHERE rolname = current_user);
+    IF EXISTS (SELECT 1 FROM jsonb_object_keys(v_after) k WHERE NOT v_before ? k) THEN
+      granted := true;
+    ELSE
+      SELECT k INTO v_key FROM jsonb_object_keys(v_before) k WHERE v_before -> k IS DISTINCT FROM v_after -> k LIMIT 1;
+      IF FOUND THEN
+        back_login := true;
+        login_i := (v_before -> v_key ->> 0)::boolean;
+        login_s := (v_before -> v_key ->> 1)::boolean;
+      END IF;
+    END IF;
   END IF;
 
   PERFORM pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = p_role;
@@ -355,6 +380,10 @@ BEGIN
     EXECUTE format('ALTER ROLE %I NOLOGIN PASSWORD NULL', p_role);
     IF granted THEN
       EXECUTE format('REVOKE %I FROM %I', p_role, current_user);
+    ELSIF back_login THEN
+      EXECUTE format('GRANT %I TO %I WITH INHERIT %s, SET %s', p_role, current_user,
+                     CASE WHEN coalesce(login_i, false) THEN 'TRUE' ELSE 'FALSE' END,
+                     CASE WHEN coalesce(login_s, false) THEN 'TRUE' ELSE 'FALSE' END);
     END IF;
     RETURN false;
   END IF;
@@ -812,15 +841,20 @@ AS $fn$
          SELECT 'DATABASE', quote_ident(here.name), here.name, NULL, here.dba, a.privilege_type, a.is_grantable
            FROM here CROSS JOIN LATERAL aclexplode(here.datacl) a, login
           WHERE a.grantee = login.oid)
+  -- LEFT JOIN: before PostgreSQL 16 a dropped grantor leaves its oid behind in
+  -- pg_auth_members, and an inner join would drop the membership from the list
+  -- (and from the strip's last check) while the login keeps it. Such a grant
+  -- is revoked without GRANTED BY, as every grant was before 16.
   SELECT 'member of ' || g.rolname,
-         CASE WHEN v.pg16 AND (v.me_super OR NOT gr.rolsuper)
+         CASE WHEN v.pg16 AND gr.oid IS NOT NULL AND (v.me_super OR NOT gr.rolsuper)
               THEN format('REVOKE %I FROM %I GRANTED BY %I CASCADE', g.rolname, p_role, gr.rolname)
               ELSE format('REVOKE %I FROM %I CASCADE', g.rolname, p_role) END,
-         CASE WHEN v.pg16 AND (v.me_super OR NOT gr.rolsuper) THEN ARRAY[gr.rolname::text] ELSE '{}'::text[] END,
+         CASE WHEN v.pg16 AND gr.oid IS NOT NULL AND (v.me_super OR NOT gr.rolsuper) THEN ARRAY[gr.rolname::text] ELSE '{}'::text[] END,
          1
     FROM pg_auth_members m
     JOIN pg_roles g ON g.oid = m.roleid
-    JOIN pg_roles gr ON gr.oid = m.grantor, login, v
+    LEFT JOIN pg_roles gr ON gr.oid = m.grantor
+    CROSS JOIN login CROSS JOIN v
    WHERE m.member = login.oid AND g.rolname NOT IN ('backenly_external', 'backenly_no_schema_changes')
   UNION ALL
   SELECT CASE acl.kind WHEN 'DATABASE' THEN 'CREATE on database ' ELSE 'CREATE on schema ' END || acl.label,
@@ -933,15 +967,17 @@ AS $fn$
   -- 1. Memberships either group holds (the whole database only: roles are the cluster's).
   -- A grant a superuser made is revoked without GRANTED BY by a definer that is
   -- none (backenly_direct_login_holds explains why).
+  -- A LEFT JOIN, as in backenly_direct_login_holds: a dropped grantor before 16.
   SELECT mm.rolname::text, 'membership of ' || g.rolname,
-         CASE WHEN v.pg16 AND (v.me_super OR NOT gr.rolsuper)
+         CASE WHEN v.pg16 AND gr.oid IS NOT NULL AND (v.me_super OR NOT gr.rolsuper)
               THEN format('REVOKE %I FROM %I GRANTED BY %I CASCADE', g.rolname, mm.rolname, gr.rolname)
               ELSE format('REVOKE %I FROM %I CASCADE', g.rolname, mm.rolname) END,
-         CASE WHEN v.pg16 AND (v.me_super OR NOT gr.rolsuper) THEN ARRAY[gr.rolname::text] ELSE '{}'::text[] END, 1
+         CASE WHEN v.pg16 AND gr.oid IS NOT NULL AND (v.me_super OR NOT gr.rolsuper) THEN ARRAY[gr.rolname::text] ELSE '{}'::text[] END, 1
     FROM pg_auth_members m
     JOIN pg_roles g ON g.oid = m.roleid
     JOIN pg_roles mm ON mm.oid = m.member
-    JOIN pg_roles gr ON gr.oid = m.grantor, v
+    LEFT JOIN pg_roles gr ON gr.oid = m.grantor
+    CROSS JOIN v
    WHERE p_schema IS NULL AND mm.rolname IN ('backenly_external', 'backenly_no_schema_changes')
   UNION ALL
   -- A login that could become the group, and so give it what the login owns.
@@ -1040,13 +1076,20 @@ AS $fn$
      AND (g.oid <> 0 OR (da.defaclobjtype = 'r' AND a.privilege_type = 'TRIGGER')
                      OR (da.defaclobjtype = 'n' AND a.privilege_type = 'CREATE'))
   UNION ALL
-  -- 5. Objects either group owns.
+  -- 5. Objects either group owns. A large object belongs to no schema, so to no
+  -- project: the platform's role takes it, as it takes a dropped login's objects
+  -- (backenly_direct_drop_role), and no login reaches it then. A session that
+  -- became the group before its SET was taken could create one (lo_create needs
+  -- no privilege); left without a fix it would stop every later install.
   SELECT g.name, 'ownership of ' || o.type || ' ' || o.identity,
          CASE WHEN s.project_owner IS NOT NULL AND k.word IS NOT NULL
-              THEN format('ALTER %s %s OWNER TO %I', k.word, o.identity, s.project_owner) END,
-         ARRAY[g.name, s.project_owner], 5
+              THEN format('ALTER %s %s OWNER TO %I', k.word, o.identity, s.project_owner)
+              WHEN o.type = 'large object' AND app.role IS NOT NULL
+              THEN format('ALTER LARGE OBJECT %s OWNER TO %I', d.objid, app.role) END,
+         CASE WHEN o.type = 'large object' THEN ARRAY[g.name, app.role] ELSE ARRAY[g.name, s.project_owner] END, 5
     FROM grp g
     JOIN here ON true
+    CROSS JOIN (SELECT public.backenly_app_role() AS role) app
     JOIN pg_shdepend d ON d.refclassid = 'pg_authid'::regclass AND d.refobjid = g.oid AND d.deptype = 'o'
                       AND d.dbid = here.oid AND d.classid <> 'pg_default_acl'::regclass
     CROSS JOIN LATERAL pg_identify_object(d.classid, d.objid, d.objsubid) o
@@ -1161,8 +1204,8 @@ BEGIN
           WHERE m.member = v_role AND gr.rolsuper AND (to_jsonb(m) ->> 'set_option')::boolean) THEN
       BEGIN
         EXECUTE format('REVOKE SET OPTION FOR backenly_external FROM %I', p_role);
-      EXCEPTION WHEN OTHERS THEN
-        NULL; -- left, and named by the install (section 7)
+      EXCEPTION WHEN insufficient_privilege THEN
+        NULL; -- a server that lets only a superuser take it: left, and named by the install (section 7)
       END;
       v_took_su := NOT EXISTS (
          SELECT 1 FROM pg_auth_members m
@@ -1177,8 +1220,12 @@ BEGIN
       JOIN pg_roles gr ON gr.oid = m.grantor
      WHERE m.member = v_role AND (to_jsonb(m) ->> 'set_option')::boolean AND (NOT gr.rolsuper OR v_super);
   END IF;
-  IF v_marked AND cardinality(v_holds) = 0 AND cardinality(v_shared) = 0 AND cardinality(v_become) = 0 THEN
-    RETURN v_took_su;
+  -- A login whose SET was just taken goes on, as one that held anything: a
+  -- session that became the group before keeps it, so its sessions are ended
+  -- and the login marked below.
+  IF v_marked AND cardinality(v_holds) = 0 AND cardinality(v_shared) = 0 AND cardinality(v_become) = 0
+     AND NOT v_took_su THEN
+    RETURN false;
   END IF;
 
   -- The owner role takes what the login and the groups owned. Made as the sync
@@ -1297,7 +1344,9 @@ BEGIN
     END LOOP;
   END IF;
 
-  IF cardinality(v_holds) > 0 THEN
+  -- Also when only its SET on the group was taken: a session that took the group
+  -- with SET ROLE keeps it after the option is gone.
+  IF cardinality(v_holds) > 0 OR cardinality(v_become) > 0 OR v_took_su THEN
     PERFORM pg_terminate_backend(a.pid) FROM pg_stat_activity a WHERE a.usename = p_role;
     EXECUTE format('COMMENT ON ROLE %I IS %L', p_role,
                    'backenly: sessions to end after a strip, from transaction ' || pg_current_xact_id()::text);
@@ -1343,6 +1392,12 @@ DECLARE
   v_mine    text := 'backenly: sessions to end after a strip, from transaction '
                     || coalesce(pg_current_xact_id_if_assigned()::text, '');
   v_granted boolean;
+  v_back    boolean;
+  v_was_i   boolean;
+  v_was_s   boolean;
+  v_before  jsonb;
+  v_after   jsonb;
+  v_key     text;
   v_ended   integer := 0;
   r         record;
 BEGIN
@@ -1358,17 +1413,43 @@ BEGIN
      ORDER BY 1
   LOOP
     CONTINUE WHEN r.description = v_mine;
-    -- Ending a role's sessions needs its privileges (backenly_direct_drop_role explains).
+    -- Ending a role's sessions needs its privileges (backenly_direct_drop_role
+    -- explains). A grant the definer held before is given back as it was, a new
+    -- one revoked, told apart by its grants before and after, as the strip does.
     v_granted := false;
+    v_back := false;
     IF NOT pg_has_role(current_user, r.login, 'USAGE') THEN
+      SELECT coalesce(jsonb_object_agg(m.grantor::text, jsonb_build_array(to_jsonb(m) -> 'inherit_option', to_jsonb(m) -> 'set_option')), '{}'::jsonb)
+        INTO v_before
+        FROM pg_auth_members m
+       WHERE m.roleid = (SELECT oid FROM pg_roles WHERE rolname = r.login)
+         AND m.member = (SELECT oid FROM pg_roles WHERE rolname = current_user);
       EXECUTE format(CASE WHEN v_pg16 THEN 'GRANT %I TO %I WITH INHERIT TRUE, SET FALSE'
                           ELSE 'GRANT %I TO %I' END, r.login, current_user);
-      v_granted := true;
+      SELECT coalesce(jsonb_object_agg(m.grantor::text, jsonb_build_array(to_jsonb(m) -> 'inherit_option', to_jsonb(m) -> 'set_option')), '{}'::jsonb)
+        INTO v_after
+        FROM pg_auth_members m
+       WHERE m.roleid = (SELECT oid FROM pg_roles WHERE rolname = r.login)
+         AND m.member = (SELECT oid FROM pg_roles WHERE rolname = current_user);
+      IF EXISTS (SELECT 1 FROM jsonb_object_keys(v_after) k WHERE NOT v_before ? k) THEN
+        v_granted := true;
+      ELSE
+        SELECT k INTO v_key FROM jsonb_object_keys(v_before) k WHERE v_before -> k IS DISTINCT FROM v_after -> k LIMIT 1;
+        IF FOUND THEN
+          v_back := true;
+          v_was_i := (v_before -> v_key ->> 0)::boolean;
+          v_was_s := (v_before -> v_key ->> 1)::boolean;
+        END IF;
+      END IF;
     END IF;
     PERFORM pg_terminate_backend(s.pid) FROM pg_stat_activity s WHERE s.usename = r.login;
     EXECUTE format('COMMENT ON ROLE %I IS NULL', r.login);
     IF v_granted THEN
       EXECUTE format('REVOKE %I FROM %I', r.login, current_user);
+    ELSIF v_back THEN
+      EXECUTE format('GRANT %I TO %I WITH INHERIT %s, SET %s', r.login, current_user,
+                     CASE WHEN coalesce(v_was_i, false) THEN 'TRUE' ELSE 'FALSE' END,
+                     CASE WHEN coalesce(v_was_s, false) THEN 'TRUE' ELSE 'FALSE' END);
     END IF;
     v_ended := v_ended + 1;
   END LOOP;
@@ -1662,8 +1743,9 @@ BEGIN
       EXECUTE r.fix;
     EXCEPTION WHEN OTHERS THEN
       -- A SET on backenly_external a superuser granted that this server does
-      -- not let the installer take is named below, not failed.
-      IF NOT (r.item = 'SET on backenly_external' AND r.fix NOT LIKE '% GRANTED BY %') THEN
+      -- not let the installer take (a permission error) is named below, not
+      -- failed; any other error fails.
+      IF NOT (SQLSTATE = '42501' AND r.item = 'SET on backenly_external' AND r.fix NOT LIKE '% GRANTED BY %') THEN
         failed := failed || format('%s: %s', r.fix, SQLERRM);
       END IF;
     END;
