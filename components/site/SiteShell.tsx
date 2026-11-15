@@ -129,7 +129,17 @@ function useInstantPageChanges() {
   }, [])
 }
 
-export function SiteShell({ children }: { children: React.ReactNode }) {
+/**
+ * `navOverlay` (opt-in, the landing only): the bar starts clear over the page's
+ * first section and takes its usual frosted fill once the page scrolls. Every
+ * other page renders the bar exactly as before.
+ *
+ * `footerLit` (opt-in, the landing only): the last section's light runs on
+ * behind the footer, so the footer drops its top rule and takes brighter text,
+ * and the page clips that light at its end. Every other page renders the
+ * footer exactly as before.
+ */
+export function SiteShell({ children, navOverlay = false, footerLit = false }: { children: React.ReactNode; navOverlay?: boolean; footerLit?: boolean }) {
   useInstantPageChanges()
   return (
     <div>
@@ -142,7 +152,9 @@ export function SiteShell({ children }: { children: React.ReactNode }) {
         className="bg-[#08090a] text-white antialiased relative min-h-screen overflow-x-clip selection:bg-violet-500/30 selection:text-white font-light flex flex-col items-center"
         style={{ fontFamily: 'var(--font-geist-sans), sans-serif' }}
       >
-        <div className="relative w-full min-h-screen flex flex-col z-20">
+        {/* With footerLit the column carries the page colour too: the closing's grain blends within this layer, and over a clear
+            backdrop it would only grey the footer. */}
+        <div className={`relative w-full min-h-screen flex flex-col z-20 ${footerLit ? 'overflow-y-clip bg-[#08090a]' : ''}`}>
           {/* First tab stop on every marketing page: lets a keyboard or screen
               reader user jump the nav instead of walking it on each page.
               Visually hidden until focused. */}
@@ -156,9 +168,9 @@ export function SiteShell({ children }: { children: React.ReactNode }) {
           >
             Skip to content
           </a>
-          <NavBar />
+          <NavBar overlay={navOverlay} />
           {children}
-          <SiteFooter />
+          <SiteFooter lit={footerLit} />
         </div>
       </div>
     </div>
@@ -168,7 +180,24 @@ export function SiteShell({ children }: { children: React.ReactNode }) {
 /* ─────────────────────────────────────────────────────────────
    Nav
 ───────────────────────────────────────────────────────────── */
-export function NavBar() {
+export function NavBar({ overlay = false }: { overlay?: boolean } = {}) {
+  // Overlay: clear while the page is at its top, the usual fill after. An
+  // observer on an 8px marker at the top of the page answers, so scrolling
+  // never reads layout (reading scrollY forces one when the page is busy).
+  const [scrolled, setScrolled] = useState(false)
+  useEffect(() => {
+    if (!overlay) return
+    const mark = document.createElement('div')
+    mark.setAttribute('aria-hidden', 'true')
+    mark.style.cssText = 'position:absolute;top:0;left:0;width:1px;height:8px;pointer-events:none;visibility:hidden'
+    document.body.prepend(mark)
+    const io = new IntersectionObserver(([e]) => setScrolled(!e.isIntersecting))
+    io.observe(mark)
+    return () => {
+      io.disconnect()
+      mark.remove()
+    }
+  }, [overlay])
   const [mobileOpen, setMobileOpen] = useState(false)
   // The link group and the buttons drop their entrance once it has played. A
   // finished `nav-drop` holds its end state, and Chrome's full-page capture
@@ -210,7 +239,17 @@ export function NavBar() {
     // The entrance is CSS (`nav-drop`, app/globals.css), as on the landing
     // hero: as framer `initial` props the bar was rendered at opacity 0 and
     // stayed blank until React hydrated, on every marketing page.
-    <header className="nav-drop sticky top-0 z-40 w-full border-b border-white/[0.07] bg-[#08090a]/80 backdrop-blur-xl backdrop-saturate-150">
+    <header
+      className={
+        overlay
+          ? `nav-drop sticky top-0 z-40 w-full border-b transition-[background-color,border-color] duration-300 ${
+              scrolled || mobileOpen
+                ? 'border-white/[0.07] bg-[#08090a]/80 backdrop-blur-xl backdrop-saturate-150'
+                : 'border-transparent bg-transparent'
+            }`
+          : 'nav-drop sticky top-0 z-40 w-full border-b border-white/[0.07] bg-[#08090a]/80 backdrop-blur-xl backdrop-saturate-150'
+      }
+    >
       {/* Container tracks the landing's 100rem sections so the logo sits on
           the same left edge as the headline below it. */}
       <div className="mx-auto flex h-[68px] w-full max-w-[100rem] items-center justify-between px-5 sm:px-6">
@@ -445,7 +484,7 @@ function MobileLink({
 /* ─────────────────────────────────────────────────────────────
    Footer
 ───────────────────────────────────────────────────────────── */
-export function SiteFooter() {
+export function SiteFooter({ lit = false }: { lit?: boolean } = {}) {
   const product = [
     { label: 'Features', href: ROUTES.features },
     { label: 'Pricing', href: ROUTES.pricing },
@@ -472,7 +511,7 @@ export function SiteFooter() {
   ]
 
   return (
-    <footer className="relative z-20 mt-auto border-t border-white/[0.07] pb-8 pt-14 sm:pt-16">
+    <footer className={`relative z-20 mt-auto pb-8 pt-14 sm:pt-16 ${lit ? '' : 'border-t border-white/[0.07]'}`}>
       {/* 88rem matches the landing sections, so the footer's left edge lines
           up with the content above it. Subpages run narrower content inside
           the same footer width, which reads fine; a misaligned landing edge
@@ -481,7 +520,7 @@ export function SiteFooter() {
         <div className="mb-12 grid grid-cols-1 gap-10 sm:grid-cols-2 md:mb-14 lg:grid-cols-[1.4fr_1fr_1fr_1fr] lg:gap-8">
           <div className="flex flex-col gap-4 sm:col-span-2 lg:col-span-1">
             <Link href={ROUTES.home} className="flex items-center gap-2.5 text-white">
-              <BrandMark size={26} />
+              <BrandMark size={26} decorative={lit} />
               <span className="text-base font-semibold">Backenly</span>
             </Link>
             {/* Cut from three sentences to one on 2026-09-18. The old blurb
@@ -491,10 +530,10 @@ export function SiteFooter() {
                 here, and the positioning line is already in the bar below.
                 What is left is the one fact a footer should carry: the one a
                 stranger can go and check. */}
-            <p className="max-w-xs text-sm leading-6 text-zinc-400">
+            <p className={`max-w-xs text-sm leading-6 ${lit ? 'text-zinc-300' : 'text-zinc-400'}`}>
               Open source under Apache-2.0.
             </p>
-            <div className="mt-1 flex items-center gap-3 text-zinc-500">
+            <div className={`mt-1 flex items-center gap-3 ${lit ? 'text-zinc-300' : 'text-zinc-500'}`}>
               <a
                 href={ROUTES.github}
                 target="_blank"
@@ -538,23 +577,23 @@ export function SiteFooter() {
             </div>
             <ProductHuntBadge className="mt-2" />
           </div>
-          <FooterCol title="Product" links={product} />
-          <FooterCol title="Developers" links={developers} />
-          <FooterCol title="Company" links={company} />
+          <FooterCol title="Product" links={product} lit={lit} />
+          <FooterCol title="Developers" links={developers} lit={lit} />
+          <FooterCol title="Company" links={company} lit={lit} />
         </div>
 
-        <div className="flex flex-col items-center justify-between gap-4 border-t border-white/[0.08] pt-7 md:flex-row">
-          <p className="text-xs text-zinc-600">
+        <div className={`flex flex-col items-center justify-between gap-4 border-t pt-7 md:flex-row ${lit ? 'border-white/[0.12]' : 'border-white/[0.08]'}`}>
+          <p className={`text-xs ${lit ? 'text-zinc-400' : 'text-zinc-600'}`}>
             &copy; {new Date().getFullYear()} Backenly. All rights reserved.
           </p>
-          <p className="text-xs text-zinc-600">The autonomous backend platform</p>
+          <p className={`text-xs ${lit ? 'text-zinc-400' : 'text-zinc-600'}`}>The autonomous backend platform</p>
         </div>
       </div>
     </footer>
   )
 }
 
-function FooterCol({ title, links }: { title: string; links: { label: string; href: string }[] }) {
+function FooterCol({ title, links, lit = false }: { title: string; links: { label: string; href: string }[]; lit?: boolean }) {
   return (
     <div>
       {/*
@@ -563,10 +602,10 @@ function FooterCol({ title, links }: { title: string; links: { label: string; hr
         produced an h2 → h4 skip on every page on the site. The level is the only
         thing that changed; the type scale is set by the classes, not the tag.
       */}
-      <h2 className="mb-4 text-[14px] font-medium tracking-[-0.006em] text-zinc-200">
+      <h2 className={`mb-4 text-[14px] font-medium tracking-[-0.006em] ${lit ? 'text-white' : 'text-zinc-200'}`}>
         {title}
       </h2>
-      <ul className="space-y-2.5 text-sm text-zinc-400">
+      <ul className={`space-y-2.5 text-sm ${lit ? 'text-zinc-300' : 'text-zinc-400'}`}>
         {links.map((l) => {
           const external = l.href.startsWith('http') || l.href.startsWith('mailto')
           const plainFile = l.href.endsWith('.md') || l.href.endsWith('.txt')

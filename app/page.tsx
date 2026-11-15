@@ -1,5 +1,5 @@
 import type { Metadata } from 'next'
-import { LandingV7 } from '@/components/landing-v7/LandingV7'
+import { LandingV8 } from '@/components/landing-v8/LandingV8'
 import { SiteShell } from '@/components/site/SiteShell'
 import { JsonLd } from '@/components/site/kit'
 import { safeJsonLd } from '@/lib/security/safe-jsonld'
@@ -25,9 +25,9 @@ export const metadata: Metadata = pageMetadata({
 /** The landing page: components/landing-v7, inside the marketing shell. */
 export default function LandingPage() {
   return (
-    <SiteShell>
+    <SiteShell navOverlay footerLit>
       <JsonLd json={safeJsonLd(graph(softwareNode))} />
-      <LandingV7 />
+      <LandingV8 />
     </SiteShell>
   )
 }
