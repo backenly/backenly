@@ -233,16 +233,16 @@ export function CodeBlock({
   // sample on a docs page is visibly the same object as the one on `/`.
   // Sizes are px, because the root font-size is 13px (see tokens.ts).
   return (
-    <div className="group relative min-w-0 overflow-hidden rounded-2xl border border-white/[0.09] bg-[#0b0c0f] shadow-[0_1px_0_0_rgba(255,255,255,0.05)_inset,0_30px_90px_-40px_rgba(0,0,0,0.9)]">
+    <div className="group relative min-w-0 overflow-hidden rounded-[10px] border border-white/[0.10] bg-[#0b0c0f] shadow-[0_1px_0_0_rgba(255,255,255,0.05)_inset,0_30px_90px_-40px_rgba(0,0,0,0.9)]">
       <div className="flex items-center justify-between gap-3 border-b border-white/[0.07] bg-white/[0.015] py-2 pl-5 pr-3">
-        <span className="min-w-0 truncate font-mono text-[12px] text-zinc-500">{label ?? language}</span>
+        <span className="min-w-0 truncate font-mono text-[12px] text-faint">{label ?? language}</span>
         {/* The label swap is the only confirmation a copy gets, so it has to
             be announced: without aria-live the button silently relabels and a
             screen reader user never learns the copy succeeded. */}
         <button
           type="button"
           onClick={copy}
-          className="inline-flex h-8 shrink-0 cursor-pointer items-center gap-1.5 rounded-md border border-white/[0.09] bg-white/[0.03] px-2.5 text-[12px] font-medium text-zinc-400 transition-colors duration-200 hover:border-white/20 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400/60"
+          className="inline-flex h-8 shrink-0 cursor-pointer items-center gap-1.5 rounded-[6px] border border-white/[0.09] bg-white/[0.03] px-2.5 text-[12px] font-medium text-zinc-300 transition-colors duration-200 hover:border-white/20 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70"
           aria-label="Copy code"
           aria-live="polite"
         >
@@ -257,8 +257,11 @@ export function CodeBlock({
           )}
         </button>
       </div>
+      {/* A block that scrolls sideways is a tab stop, so a keyboard can scroll it (WCAG 2.1.1; axe scrollable-region-focusable). */}
       <pre
-        className={`${wrap ? 'whitespace-pre-wrap break-words' : 'overflow-x-auto'} px-5 py-5 text-[13px] leading-[1.75]`}
+        tabIndex={wrap ? undefined : 0}
+        aria-label={wrap ? undefined : `${label ?? language} code`}
+        className={`${wrap ? 'whitespace-pre-wrap break-words' : 'overflow-x-auto focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/70'} px-5 py-5 text-[13px] leading-[1.75]`}
       >
         <code className="font-mono text-[#d4d4d4] [font-variant-ligatures:none]">{rendered}</code>
       </pre>

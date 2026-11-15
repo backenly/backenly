@@ -100,6 +100,11 @@
     "reason": "ACCEPTED: unauthenticated by design; authority comes from the signed token in the link."
   },
   {
+    "route": "/api/contact",
+    "status": "ACCEPTED",
+    "reason": "ACCEPTED: unauthenticated by design - the contact page's message form, anonymous by nature and touching no resource. It mails one fixed inbox (CONTACT_INBOX, else support@backenly.com), never an address the caller typed; the caller's address is only the Reply-To, checked with isDeliverableAddress. Held by Turnstile (verifySignupChallenge), 5 an hour per network and 3 per address, and a honeypot field; Cloud only, 404 elsewhere."
+  },
+  {
     "route": "/api/cron/health",
     "status": "SAFE",
     "reason": "SAFE (fixed here): liveness (mode, start time, leadership) answers anyone by design; what the scheduler ran across projects (the scheduled count, the last job's name and status) answers only a caller with CRON_SECRET (isCronRequest), which refuses when none is configured."

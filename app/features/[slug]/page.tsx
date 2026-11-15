@@ -4,87 +4,110 @@ import { notFound } from 'next/navigation'
 import { safeJsonLd } from '@/lib/security/safe-jsonld'
 import { pageMetadata } from '@/lib/seo/metadata'
 import { SiteShell } from '@/components/site/SiteShell'
-import { CodeBlock } from '@/components/site/CodeBlock'
-import { AuthDiagram, DatabaseDiagram, RestApiDiagram } from '@/components/landing/CapabilityDiagrams'
-import { ChangePath } from '@/components/landing/ChangePath'
+import { Box, BoxHead, Cells, type BoxLight } from '@/components/landing-v8/Box'
+import { AuthDiagram, DatabaseDiagram, RestApiDiagram } from '@/components/landing-v8/diagrams'
+import { RepairChart } from '@/components/landing-v8/autonomy/RepairChart'
+import { RestructurePlan } from '@/components/landing-v8/autonomy/RestructurePlan'
+import { HistoryRecord } from '@/components/landing-v8/autonomy/HistoryRecord'
 import { ButtonLink, HorizonClose, JsonLd, NextLinks, Page, PageHero, Section, SectionHead, withCode } from '@/components/site/kit'
 import { Faq } from '@/components/site/Faq'
-import { SpotlightPanel } from '@/components/site/SpotlightPanel'
 import { StartButton } from '@/components/site/StartButton'
-import { HEADING, TITLE } from '@/components/site/tokens'
+import { TITLE } from '@/components/site/tokens'
 import { FEATURES, FEATURE_SLUGS } from '../data'
 
 const APP_URL = 'https://backenly.com'
 
-/** The drawing that shows each primitive doing its job, where one exists. */
-const HERO_DIAGRAMS: Record<string, ComponentType | undefined> = {
-  'database-setup': DatabaseDiagram,
-  authentication: AuthDiagram,
-  'api-generation': RestApiDiagram,
+/**
+ * The agent page's figure: one real session, set as a conversation rather than
+ * a terminal transcript. It names real tools (read_backend_state,
+ * apply_migration) and the real refusal path.
+ */
+const AGENT_TURNS: { who: 'You' | 'Agent'; tool?: string; text: string }[] = [
+  { who: 'You', text: 'What tables does this project have?' },
+  { who: 'Agent', tool: 'read_backend_state', text: 'users, recipes, follows and favorites, with their columns, types and relations.' },
+  { who: 'You', text: 'Add saved_searches with user_id and query.' },
+  { who: 'Agent', tool: 'apply_migration', text: 'Applied. Served at /db/saved_searches straight away.' },
+  { who: 'You', text: 'Drop the users table.' },
+  { who: 'Agent', text: 'Not available over MCP. Sent to the Review Queue with its 1,284 live rows; approve it in the dashboard.' },
+]
+
+function AgentSession() {
+  return (
+    <figure className="overflow-hidden rounded-[8px] border border-white/[0.07] bg-[#0a0a0d]">
+      <figcaption className="border-b border-white/[0.07] px-[20px] py-[14px] text-[12.5px] text-faint sm:px-[28px]">
+        A session with your coding agent, over MCP
+      </figcaption>
+      <ol className="divide-y divide-white/[0.05]">
+        {AGENT_TURNS.map((turn, i) => (
+          <li key={i} className="grid grid-cols-[52px_minmax(0,1fr)] gap-x-[16px] px-[20px] py-[14px] sm:grid-cols-[64px_minmax(0,1fr)] sm:px-[28px]">
+            <span className={`text-[13px] leading-[22px] ${turn.who === 'You' ? 'text-white' : 'text-violet-200'}`}>{turn.who}</span>
+            <p className="text-[14.5px] leading-[22px] text-zinc-300 [text-wrap:pretty]">
+              {turn.tool && (
+                <span className="mr-[8px] inline-flex h-[20px] items-center rounded-[5px] border border-white/[0.10] bg-white/[0.03] px-[6px] align-[1px] font-mono text-[12px] text-zinc-200">
+                  {turn.tool}
+                </span>
+              )}
+              {turn.text}
+            </p>
+          </li>
+        ))}
+      </ol>
+    </figure>
+  )
 }
 
 /**
- * The agent page shows a session rather than a drawing. It names real tools
- * (read_backend_state, apply_migration) and the real refusal path.
+ * Each page opens with the landing's own figure for its capability (site-wide
+ * pass, 2026-11-15), in a lit box whose cells are the page's "What you get".
+ * The figures' claims are the landing's, checked when it shipped (#776); the
+ * diagrams are components/landing-v8/diagrams.
  */
-const AGENT_SESSION = `You:   What tables does this project have?
-Agent: read_backend_state
-       users, recipes, follows, favorites,
-       with columns, types and relations.
-
-You:   Add saved_searches with user_id
-       and query.
-Agent: apply_migration: applied. Served at
-       /db/saved_searches immediately.
-
-You:   Drop the users table.
-Agent: Not available over MCP. Sent to the
-       Review Queue: 1,284 live rows.
-       Approve it in the dashboard.`
-
-/**
- * The restructuring and undo pages show the same kind of session. Restructuring
- * reads a proposal the way autonomy { action: "evolution" } words it
- * (lib/structural-evolution/words.ts); undo is a change that was verified and
- * still broke the app, undone through the real deploy actions (changes,
- * revert_change). In both, a person approves, never the agent.
- */
-const RESTRUCTURE_SESSION = `You:   Why is Backenly asking about
-       orders?
-Agent: autonomy evolution
-       Move refund data out of orders
-       into its own table. The refund
-       columns are set later in an
-       order's life, and changing them
-       has been locking orders.
-       Rehearsed on a copy. Waiting
-       for your approval.
-You:   (approves it in the dashboard)
-       Later: is it done?
-Agent: autonomy evolution
-       order_refunds is open. Apps that
-       use orders keep working, and undo
-       puts orders back as it was.`
-
-const UNDO_SESSION = `You:   Checkout broke after the last
-       change. Undo it.
-Agent: deploy changes
-       #41 renamed orders.total to
-       amount. Verified.
-Agent: deploy revert_change #41
-       Parked for your approval:
-       amount goes back to total.
-       No data is set aside.
-You:   (approves it in the dashboard)
-Agent: check_approval: executed.
-       Checkout reads total again, and
-       every order since is still there.`
-
-/** The pages that show a session in place of a drawing. */
-const HERO_SESSIONS: Record<string, { code: string; label: string } | undefined> = {
-  'ai-backend-generation': { code: AGENT_SESSION, label: 'Your agent, over MCP' },
-  'self-restructuring-schema': { code: RESTRUCTURE_SESSION, label: 'A restructuring, over MCP' },
-  'undo-and-rollback': { code: UNDO_SESSION, label: 'Undoing a change, over MCP' },
+const FIGURES: Record<string, { title: string; body: string; Visual: ComponentType; light: BoxLight; small?: boolean }> = {
+  'deployment-ready-backends': {
+    title: 'A slow lookup, found and fixed',
+    body: 'Backenly checks every project every minute. Here it adds a missing index at 03:07, then holds your agent’s risky request for a person at 03:12.',
+    Visual: RepairChart,
+    light: { art: 'c' },
+  },
+  'self-restructuring-schema': {
+    title: 'A restructure you approve',
+    body: 'Rehearsed on a copy of the real rows, run in stages while apps keep working, then judged on what it changed.',
+    Visual: RestructurePlan,
+    light: { art: 'a', flip: true },
+  },
+  'undo-and-rollback': {
+    title: 'One project’s day, on the record',
+    body: 'One change is restored, and the change made after it stays.',
+    Visual: HistoryRecord,
+    light: { art: 'b' },
+  },
+  'database-setup': {
+    title: 'One schema per project',
+    body: 'Each project is its own Postgres schema. Isolation is a Postgres grant, not a WHERE clause.',
+    Visual: DatabaseDiagram,
+    light: { art: 'a' },
+    small: true,
+  },
+  'api-generation': {
+    title: 'A table becomes an endpoint',
+    body: 'Every table is served by PostgREST the moment it exists, with filters, related rows and counts.',
+    Visual: RestApiDiagram,
+    light: { art: 'c' },
+    small: true,
+  },
+  authentication: {
+    title: 'A signing secret per project',
+    body: 'Passwords, Google sign-in and magic links, with tokens signed by a secret no other project shares.',
+    Visual: AuthDiagram,
+    light: { art: 'b' },
+    small: true,
+  },
+  'ai-backend-generation': {
+    title: 'Your agent, over MCP',
+    body: 'It reads the backend, changes it with typed tools, and sends anything destructive to a person.',
+    Visual: AgentSession,
+    light: { art: 'a' },
+  },
 }
 
 export function generateStaticParams() {
@@ -101,9 +124,13 @@ export async function generateMetadata(props: { params: Promise<{ slug: string }
 
 /* ─────────────────────────────────────────────────────────────
    One capability in depth (2026-10-15, founders: clean, no jargon, no lots of
-   text, no big banners). A compact header beside the capability's drawing,
-   then what you get as four cells, the change path on the operations page,
-   questions, related capabilities, the close.
+   text, no big banners). 2026-11-15 (site-wide pass, to match the v8
+   landing): a header, then one lit box with the landing's own figure for the
+   capability and "What you get" as its cells, then questions, related
+   capabilities and the close. The terminal transcripts gave way to the
+   landing's figures; the agent page keeps its real session, set as a
+   conversation. The operations page's day-and-night drawing (ChangePath) went
+   with them: its times contradicted the landing's 03:07 / 03:12 story.
 
    The long-form fields in data.ts (what / how / why / inPractice) are no
    longer rendered: they were three essays between the header and the cells.
@@ -135,12 +162,11 @@ export default async function FeatureSlugPage(props: { params: Promise<{ slug: s
   }
 
   const related = f.relatedFeatures.map((slug) => FEATURES[slug]).filter(Boolean)
-  const Diagram = HERO_DIAGRAMS[f.slug]
-  const session = HERO_SESSIONS[f.slug]
-  const isOperationsPage = f.slug === 'deployment-ready-backends'
+  const figure = FIGURES[f.slug]
+  const Icon = f.icon
 
   return (
-    <SiteShell>
+    <SiteShell footerLit>
       <JsonLd json={safeJsonLd(faqSchema)} />
       <JsonLd json={safeJsonLd(breadcrumbSchema)} />
       <Page>
@@ -152,6 +178,7 @@ export default async function FeatureSlugPage(props: { params: Promise<{ slug: s
           ]}
           title={f.headline}
           lede={f.subheadline}
+          rule={false}
           actions={
             <>
               <StartButton />
@@ -160,41 +187,38 @@ export default async function FeatureSlugPage(props: { params: Promise<{ slug: s
               </ButtonLink>
             </>
           }
-          aside={
-            Diagram ? (
-              <SpotlightPanel className="px-6 pb-6">
-                <Diagram />
-              </SpotlightPanel>
-            ) : session ? (
-              <CodeBlock code={session.code} label={session.label} language="text" />
-            ) : undefined
-          }
         />
 
-        <Section flush aria-labelledby="what-you-get">
-          <SectionHead id="what-you-get" size="sm" title="What you get" />
-          <div className="mt-[40px] grid gap-[12px] md:grid-cols-2">
-            {f.details.map((detail) => (
-              <SpotlightPanel key={detail.title} className="p-[24px] md:p-[28px]">
-                <h3 className={`text-[17px] text-white ${HEADING}`}>{detail.title}</h3>
-                <p className="mt-[10px] max-w-[52ch] text-[15px] leading-[1.7] tracking-[-0.004em] text-zinc-400 [text-wrap:pretty]">
-                  {withCode(detail.body)}
-                </p>
-              </SpotlightPanel>
-            ))}
-          </div>
-        </Section>
-
-        {isOperationsPage && (
-          <Section aria-label="One day and night on production">
-            <ChangePath />
-          </Section>
-        )}
+        {/* The landing's figure for this capability, then what you get as the box's cells, as every landing box is built. */}
+        <Box id="what-you-get" light={figure?.light ?? { art: 'a' }} className="!pt-[8px] md:!pt-[16px]">
+          {/* A small drawing sits beside the words in the landing's figure panel; a wide figure takes the box's width under them. */}
+          <BoxHead
+            id="what-you-get"
+            layout={figure?.small ? 'split' : 'stacked'}
+            tag={{ icon: Icon, label: f.name }}
+            title={figure?.title ?? 'What you get'}
+            body={figure?.body ?? f.subheadline}
+            visual={
+              figure &&
+              (figure.small ? (
+                <div className="min-w-0 rounded-[8px] border border-white/[0.07] bg-[#0a0a0d] px-[20px] pb-[16px] pt-[4px] sm:px-[28px]">
+                  <figure.Visual />
+                </div>
+              ) : (
+                <figure.Visual />
+              ))
+            }
+          />
+          <Cells
+            cols={f.details.length === 3 ? 3 : 4}
+            items={f.details.map((detail) => ({ title: detail.title, body: withCode(detail.body) }))}
+          />
+        </Box>
 
         <Section aria-labelledby="feature-faq">
           <div className="grid gap-[40px] lg:grid-cols-[minmax(0,4fr)_minmax(0,7fr)] lg:gap-[64px]">
             <div className="lg:sticky lg:top-[112px] lg:self-start">
-              <SectionHead id="feature-faq" size="sm" title="Questions" />
+              <SectionHead id="feature-faq" title="Questions" />
             </div>
             <Faq items={f.faq} />
           </div>

@@ -305,6 +305,62 @@ export async function sendStartupApplicationCodeEmail(email: string, code: strin
   await sendRequiredEmail('startup_application_code', email, subject, html, text, { Code: code, Company: companyName })
 }
 
+/** A message sent from the contact page (app/api/contact), as the team receives it. */
+export type ContactMessage = {
+  name: string
+  email: string
+  company: string
+  topic: string
+  message: string
+}
+
+/**
+ * The contact page's message, delivered to the team's inbox.
+ *
+ * It goes to one fixed address (CONTACT_INBOX, else support@backenly.com),
+ * never to an address the sender typed, so the form cannot be used to send
+ * mail to anyone else. The sender's address is the Reply-To, so the team
+ * answers from their own mail client. Throws like the code emails when there
+ * is no transport, so the route can say honestly that it was not sent.
+ */
+export async function sendContactMessageEmail(input: ContactMessage): Promise<void> {
+  const from = process.env.SMTP_FROM || 'Backenly <noreply@backenly.com>'
+  const to = process.env.CONTACT_INBOX || 'support@backenly.com'
+  const who = input.name || input.email
+  // One line, whatever was typed: no line breaks can reach a header.
+  const subject = `Contact: ${input.topic} from ${who}`.replace(/[\r\n]+/g, ' ').slice(0, 160)
+  const rows: Array<[string, string]> = [
+    ['Name', input.name || 'Not given'],
+    ['Email', input.email],
+    ['Company', input.company || 'Not given'],
+    ['Topic', input.topic],
+  ]
+  const html = `
+    <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 560px; margin: 0 auto; padding: 24px; color: #111827;">
+      <h1 style="font-size: 18px; font-weight: 600; margin: 0 0 16px;">A message from the contact page</h1>
+      <table style="border-collapse: collapse; margin: 0 0 20px; font-size: 14px;">
+        ${rows
+          .map(
+            ([label, value]) =>
+              `<tr><td style="padding: 4px 16px 4px 0; color: #6b7280;">${label}</td><td style="padding: 4px 0;">${escapeHtml(value)}</td></tr>`,
+          )
+          .join('')}
+      </table>
+      <div style="white-space: pre-wrap; font-size: 15px; line-height: 1.6; border-top: 1px solid #e5e7eb; padding-top: 16px;">${escapeHtml(input.message)}</div>
+      <p style="color: #6b7280; font-size: 13px; margin: 20px 0 0;">Reply to this email to answer ${escapeHtml(input.email)} directly.</p>
+    </div>
+  `
+  const text =
+    rows.map(([label, value]) => `${label}: ${value}`).join('\n') +
+    `\n\n${input.message}\n\nReply to this email to answer ${input.email} directly.`
+  const transporter = getTransporter()
+  if (!transporter) {
+    reportUnconfigured({ kind: 'contact_message', email: to, preview: { From: input.email, Topic: input.topic } })
+    throw new EmailNotConfiguredError()
+  }
+  await observeSend('contact_message', to, () => transporter.sendMail({ from, to, replyTo: input.email, subject, html, text }))
+}
+
 /**
  * Sent instead of a signup code when the address already has an account.
  *

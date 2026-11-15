@@ -1,11 +1,11 @@
 'use client'
 
-import Image from 'next/image'
 import Link from 'next/link'
 import { ArrowRight, CalendarDays } from 'lucide-react'
 import { ROUTES } from '@/components/site/SiteShell'
 import { useUserSession } from '@/lib/hooks/useUserSession'
 import { BTN_PRIMARY, BTN_SECONDARY, WRAP } from './tokens'
+import { ClosingLight } from './ClosingLight'
 
 /* ─────────────────────────────────────────────────────────────
    The closing: v7's violet horizon (the live page's own ending), answering the
@@ -37,17 +37,7 @@ export function CtaV8() {
     <section id="get-started" aria-labelledby="closing-heading" className="relative pb-[260px] pt-[112px] md:pb-[280px] md:pt-[176px]">
       {/* The band is anchored to the section's bottom edge, so the bottom padding sets the room under the buttons: the arc's apex sits
           ~90px under the stacked buttons on a phone and ~110px under the row from md up. */}
-      {/* The dawn: its crest sits 170px above the section's bottom edge (the bottom padding sets the room under the buttons: ~90px on a
-          phone, ~110px from md up), and the painting runs 1240px further down, behind the footer, where the shell clips it. */}
-      <div aria-hidden className="pointer-events-none absolute inset-x-0 top-[calc(100%-430px)] h-[1500px]">
-        <Image src="/media/v8/light/dome.webp" alt="" width={1320} height={900} unoptimized className="absolute left-1/2 top-0 h-[1500px] w-[2200px] max-w-none -translate-x-1/2" />
-        <div className="absolute left-1/2 top-[260px] h-[1400px] w-[2200px] -translate-x-1/2 rounded-[50%] border-t border-violet-100/60" />
-      </div>
-      {/* The grain, beside the light rather than inside its layer (a layer of its own would isolate it, and the grain would only grey the black), faded in from the top. */}
-      <span
-        aria-hidden
-        className="pointer-events-none absolute inset-x-0 top-[calc(100%-430px)] h-[1500px] bg-[url('/media/v8/light/grain.svg')] opacity-[0.28] mix-blend-soft-light [mask-image:linear-gradient(to_bottom,transparent,#000_220px)]"
-      />
+      <ClosingLight />
 
       <div className={`${WRAP} relative text-center`}>
         <h2 id="closing-heading" className="mx-auto max-w-[16ch] text-[38px] font-normal leading-[1.04] tracking-[-0.045em] text-white [text-wrap:balance] sm:text-[52px] md:text-[64px] md:leading-[1.0]">

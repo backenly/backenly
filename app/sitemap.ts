@@ -7,6 +7,7 @@ import { FEATURE_SLUGS } from './features/data'
 import * as safeChangesGuide from './guides/safe-ai-database-changes/content'
 import * as bestBackendGuide from './guides/best-backend-for-claude-code/content'
 import { AGENT_SLUGS, AGENTS_UPDATED } from './agents/data'
+import { CHANGELOG_UPDATED } from './changelog/entries'
 
 /**
  * Every indexable page, and when its content last changed where that is known.
@@ -35,6 +36,7 @@ export default function sitemap(): MetadataRoute.Sitemap {
     page('/terms'),
     page('/privacy', new Date(`${PRIVACY_EFFECTIVE_DATE} UTC`)),
     page('/refund-policy'),
+    page('/changelog', CHANGELOG_UPDATED),
   ]
 
   // ── Features ───────────────────────────────────────────────────────────────

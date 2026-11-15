@@ -36,7 +36,7 @@ export const metadata: Metadata = agentMetadata(page)
 
 export default function CursorPage() {
   return (
-    <SiteShell>
+    <SiteShell footerLit>
       <JsonLd json={safeJsonLd(agentStructuredData(page))} />
       <Page>
         <PageHero
@@ -59,7 +59,7 @@ export default function CursorPage() {
             id="config"
             title={
               <>
-                One block in mcp.json. <span className="text-zinc-500">In your user config.</span>
+                One block in mcp.json. In your user config.
               </>
             }
           />
@@ -83,7 +83,7 @@ export default function CursorPage() {
             id="placement"
             title={
               <>
-                Where the key lives. <span className="text-zinc-500">Out of the repository.</span>
+                Where the key lives. Out of the repository.
               </>
             }
           />
@@ -111,7 +111,7 @@ export default function CursorPage() {
             id="agent-context"
             title={
               <>
-                Teach the agent Backenly. <span className="text-zinc-500">Even before the tools load.</span>
+                Teach the agent Backenly. Even before the tools load.
               </>
             }
           />
@@ -126,7 +126,7 @@ export default function CursorPage() {
               <CellTitle>{page.fallback.title}</CellTitle>
               <CellBody className="[text-wrap:pretty] lg:min-h-[102px]">{withCode(page.fallback.body)}</CellBody>
               <CellCode code={page.fallback.code} />
-              <p className="mt-[16px] text-[14px] leading-[1.6] text-zinc-500 [text-wrap:pretty]">
+              <p className="mt-[16px] text-[14px] leading-[1.6] text-faint [text-wrap:pretty]">
                 {withCode(page.fallback.note)}
               </p>
             </BentoCell>

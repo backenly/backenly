@@ -42,16 +42,27 @@ export type BoxLight = {
   at?: string
   /** How much of the box's top it lights before fading out, in px. */
   reach?: number
+  /** A CSS mask for the light in place of the box-head mask (page heads fade it out at their bottom edge). */
+  mask?: string
+  /**
+   * How strong the light is, from 0 to 1. The landing's boxes use the full
+   * painting (1, the default); a page that asked for less of the violet
+   * (founders, 2026-11-15: Contact, Pricing) passes a fraction.
+   */
+  strength?: number
 }
 
 const HEAD_MASK = 'linear-gradient(to bottom, rgba(0,0,0,0.45) 0px, rgba(0,0,0,0.45) 240px, #000 400px, #000 68%, transparent 100%)'
 
-function Light({ art, flip = false, at = 'center', reach = 820 }: BoxLight) {
-  const area = { height: `min(100%, ${reach}px)`, maskImage: HEAD_MASK, WebkitMaskImage: HEAD_MASK }
+/** The painted light, exported for the site's page heads (components/site/kit.tsx PageHero). */
+export function Light({ art, flip = false, at = 'center', reach = 820, mask = HEAD_MASK, strength = 1 }: BoxLight) {
+  const area = { height: `min(100%, ${reach}px)`, maskImage: mask, WebkitMaskImage: mask }
+  // At full strength the styles are exactly the landing's (no opacity is written at all).
+  const dim = strength < 1
   return (
     <>
       {/* Softer behind the words at the top (body text keeps 4.5:1 over the brightest streak), full around the figure, gone before the cells. */}
-      <div aria-hidden className="pointer-events-none absolute inset-x-0 top-0 -z-10 overflow-hidden" style={area}>
+      <div aria-hidden className="pointer-events-none absolute inset-x-0 top-0 -z-10 overflow-hidden" style={dim ? { ...area, opacity: strength } : area}>
         <Image
           src={`/media/v8/light/light-${art}.webp`}
           alt=""
@@ -63,7 +74,7 @@ function Light({ art, flip = false, at = 'center', reach = 820 }: BoxLight) {
         />
       </div>
       {/* The grain sits beside the light, not inside it: inside an isolated layer it cannot blend with the box and would only grey the black. */}
-      <span aria-hidden className="pointer-events-none absolute inset-x-0 top-0 -z-10 bg-[url('/media/v8/light/grain.svg')] opacity-[0.28] mix-blend-soft-light" style={area} />
+      <span aria-hidden className="pointer-events-none absolute inset-x-0 top-0 -z-10 bg-[url('/media/v8/light/grain.svg')] opacity-[0.28] mix-blend-soft-light" style={dim ? { ...area, opacity: 0.28 * strength } : area} />
     </>
   )
 }
@@ -102,7 +113,8 @@ type Head = {
   body: ReactNode
   /** Anything under the paragraph: facts, a link. */
   extra?: ReactNode
-  visual: ReactNode
+  /** The box's picture; optional, so a box can be words and cells alone. */
+  visual?: ReactNode
   layout?: 'split' | 'stacked'
 }
 
@@ -122,7 +134,7 @@ export function BoxHead({ id, tag, title, body, extra, visual, layout = 'split' 
             {extra}
           </div>
         </div>
-        <div className="mt-[36px] lg:mt-[44px]">{visual}</div>
+        {visual && <div className="mt-[36px] lg:mt-[44px]">{visual}</div>}
       </div>
     )
   }
@@ -141,8 +153,25 @@ export function BoxHead({ id, tag, title, body, extra, visual, layout = 'split' 
   )
 }
 
+/** The link under a box's sentence, set as the landing's Infrastructure box sets its GitHub link. */
+export function BoxLink({ href, children }: { href: string; children: ReactNode }) {
+  const external = href.startsWith('http')
+  return (
+    <Link
+      href={href}
+      {...(external ? { target: '_blank', rel: 'noopener noreferrer' } : {})}
+      className="group mt-[18px] inline-flex items-center gap-[8px] rounded-[3px] text-[15px] font-medium text-zinc-100 transition-colors duration-150 [@media(hover:hover)_and_(pointer:fine)]:hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70"
+    >
+      {children}
+      <ArrowRight aria-hidden className="h-[15px] w-[15px] text-violet-300 transition-transform duration-150 [@media(hover:hover)_and_(pointer:fine)]:group-hover:translate-x-[3px]" />
+      {external && <span className="sr-only"> (opens in a new tab)</span>}
+    </Link>
+  )
+}
+
 export type CellItem = {
-  icon: LucideIcon
+  /** Every landing cell has one; a cell whose title is a question or a long claim may go without. */
+  icon?: LucideIcon
   title: string
   body: ReactNode
   href?: string
@@ -150,6 +179,8 @@ export type CellItem = {
   link?: string
   /** A small figure under the sentence (the platform's line art). */
   figure?: ReactNode
+  /** A short list under the sentence (the features page's inventory). Opt-in; the landing passes none. */
+  list?: ReactNode
   /** A photograph across the top of the cell, edge to edge. */
   photo?: ReactNode
 }
@@ -164,17 +195,18 @@ export function Cells({ items, cols = 4 }: { items: CellItem[]; cols?: 3 | 4 }) 
   )
 }
 
-function Cell({ icon: CellIcon, title, body, href, link = 'Read the docs', figure, photo }: CellItem) {
+function Cell({ icon: CellIcon, title, body, href, link = 'Read the docs', figure, list, photo }: CellItem) {
   const external = href?.startsWith('http')
   return (
     <li className="flex flex-col bg-[#0b0c0f]">
       {photo}
       <div className="flex flex-1 flex-col p-[24px] lg:p-[28px]">
       <div className="flex items-center gap-[10px]">
-        <CellIcon aria-hidden className="h-[17px] w-[17px] shrink-0 text-zinc-300" strokeWidth={1.75} />
-        <h3 className="text-[16px] font-medium tracking-[-0.012em] text-white">{title}</h3>
+        {CellIcon && <CellIcon aria-hidden className="h-[17px] w-[17px] shrink-0 text-zinc-300" strokeWidth={1.75} />}
+        <h3 className="text-[16px] font-medium tracking-[-0.012em] text-white [text-wrap:pretty]">{title}</h3>
       </div>
       <p className="mt-[12px] text-[15px] leading-[1.6] text-zinc-400 [text-wrap:pretty]">{body}</p>
+      {list && <div className="mt-[20px]">{list}</div>}
       {/* Figures share one floor across a row, as in the v7 bento. */}
       {figure && <div className="mt-auto pt-[24px]">{figure}</div>}
       {href && (
@@ -190,5 +222,19 @@ function Cell({ icon: CellIcon, title, body, href, link = 'Read the docs', figur
       )}
       </div>
     </li>
+  )
+}
+
+/** Two halves under a box's head, joined like the cells (a choice between two sides, or two lists). */
+export function Panes({ children }: { children: ReactNode }) {
+  return <div className="grid gap-px border-t border-white/[0.10] bg-white/[0.08] md:grid-cols-2">{children}</div>
+}
+
+export function Pane({ title, children }: { title: ReactNode; children: ReactNode }) {
+  return (
+    <div className="min-w-0 bg-[#0b0c0f] p-[24px] sm:p-[32px] lg:p-[40px]">
+      <h3 className="text-[17px] font-medium tracking-[-0.012em] text-white">{title}</h3>
+      <div className="mt-[20px]">{children}</div>
+    </div>
   )
 }

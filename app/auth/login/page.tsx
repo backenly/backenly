@@ -14,7 +14,6 @@ import {
   AuthCard,
   AuthFooterNote,
   OAuthButton,
-  EmailOptionButton,
   Divider,
   FieldLabel,
   FieldInput,
@@ -60,7 +59,6 @@ function LoginForm() {
   const [needsCode, setNeedsCode] = useState(false)
   const [totpCode, setTotpCode] = useState('')
   const [isSubmitting, setIsSubmitting] = useState(false)
-  const [showEmailForm, setShowEmailForm] = useState(false)
   const [oauthProviders, setOauthProviders] = useState<{ google: boolean; github: boolean } | null>(null)
 
   // The OAuth callbacks redirect here with ?error=... on every refusal. Only
@@ -83,9 +81,7 @@ function LoginForm() {
     if (message) {
       setErrors({ password: message })
       setIsSubmitting(false)
-      // This one sends the person to the email form, so open it: the message
-      // shows under the password field, which the provider view does not have.
-      if (errorParam === 'second_factor_required') setShowEmailForm(true)
+      // The email form is always on screen, so this message (second_factor_required among them) shows under the password field.
     }
   }, [errorParam])
 
@@ -143,7 +139,6 @@ function LoginForm() {
     return (
       <AuthChrome>
         <AuthCard
-          eyebrow="Account"
           title="Already signed in"
           subtitle="Redirecting to your projects..."
         >
@@ -158,14 +153,13 @@ function LoginForm() {
   return (
     <AuthChrome>
       <AuthCard
-        eyebrow="Welcome back"
         title="Sign in to Backenly"
-        subtitle="Pick up exactly where you left off."
+        subtitle="Your projects are where you left them."
       >
-        {!showEmailForm ? (
+        {/* The form is on screen straight away (site-wide pass, 2026-11-15); a provider's button sits above it only when that provider is configured. */}
+        {(oauthProviders?.google || oauthProviders?.github) && (
           <>
-            {(oauthProviders?.google || oauthProviders?.github) && (
-              <div className="flex flex-col gap-3">
+              <div className={`grid gap-3 ${oauthProviders?.google && oauthProviders?.github ? 'grid-cols-2' : 'grid-cols-1'}`}>
                 {oauthProviders?.google && (
                   <OAuthButton
                     onClick={() =>
@@ -174,7 +168,7 @@ function LoginForm() {
                     variant="light"
                   >
                     <GoogleSvg />
-                    Continue with Google
+                    <span className="sr-only">Continue with </span>Google
                   </OAuthButton>
                 )}
                 {oauthProviders?.github && (
@@ -185,20 +179,14 @@ function LoginForm() {
                     variant="dark"
                   >
                     <Icon icon="ri:github-fill" width={18} className="text-zinc-100" />
-                    Continue with GitHub
+                    <span className="sr-only">Continue with </span>GitHub
                   </OAuthButton>
                 )}
               </div>
-            )}
-
-            <Divider label="or sign in with email" />
-
-            <EmailOptionButton onClick={() => setShowEmailForm(true)} icon="solar:bolt-circle-linear">
-              Continue with Email
-            </EmailOptionButton>
+            <Divider label="or" />
           </>
-        ) : (
-          <>
+        )}
+
             <form onSubmit={handleEmailLogin} className="flex flex-col gap-4 mb-5">
               <FieldLabel htmlFor="email">Email address</FieldLabel>
               <FieldInput
@@ -225,7 +213,7 @@ function LoginForm() {
                     <button
                       type="button"
                       onClick={() => setShowPassword((s) => !s)}
-                      className="rounded-sm text-zinc-500 hover:text-zinc-300 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300/60"
+                      className="rounded-sm text-zinc-500 hover:text-zinc-300 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70"
                       aria-label={showPassword ? 'Hide password' : 'Show password'}
                     >
                       <Icon icon={showPassword ? 'ri:eye-off-line' : 'ri:eye-line'} width={16} />
@@ -234,7 +222,7 @@ function LoginForm() {
                 />
                 <Link
                   href="/auth/forgot-password"
-                  className="absolute top-0.5 right-0 text-[11px] text-violet-300 hover:text-violet-200 transition-colors focus-visible:outline-none focus-visible:underline"
+                  className="absolute right-0 top-0 rounded-[3px] text-[13px] text-zinc-300 transition-colors hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70"
                 >
                   Forgot password?
                 </Link>
@@ -263,46 +251,25 @@ function LoginForm() {
               </PrimaryButton>
             </form>
 
-            <button
-              type="button"
-              onClick={() => {
-                setShowEmailForm(false)
-                setErrors({})
-                setEmail('')
-                setPassword('')
-              }}
-              className="w-full text-center text-xs text-zinc-400 hover:text-zinc-200 transition-colors inline-flex items-center justify-center gap-1.5 group"
-            >
-              <Icon
-                icon="solar:alt-arrow-down-linear"
-                width={11}
-                className="rotate-90 group-hover:-translate-x-0.5 transition-transform"
-              />
-              Back to all sign-in options
-            </button>
-          </>
-        )}
-
-        <div className="mt-7 pt-6 border-t border-white/[0.06] text-center">
-          <p className="text-xs text-zinc-400">
+        <div className="mt-[24px] border-t border-white/[0.08] pt-[20px] text-center">
+          <p className="text-[14px] text-zinc-400">
             New to Backenly?{' '}
             <Link
               href={redirectUrl !== '/app' ? `/auth/signup?redirect=${encodeURIComponent(redirectUrl)}` : '/auth/signup'}
-              className="text-violet-300 hover:text-violet-200 transition-colors font-medium inline-flex items-center gap-1"
+              className="rounded-[3px] font-medium text-white underline decoration-white/30 underline-offset-4 transition-colors hover:decoration-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70"
             >
               Create an account
-              <Icon icon="solar:arrow-right-up-linear" width={11} />
             </Link>
           </p>
           {/* Backenly Cloud's enterprise customers sign in with an emailed code
               until they choose a password. The page says the same thing for
               every address, so linking it reveals nothing about who has one. */}
           {CLOUD_CONTROL_PLANE && (
-            <p className="mt-2 text-xs text-zinc-400">
+            <p className="mt-[8px] text-[14px] text-zinc-400 [text-wrap:balance]">
               On Backenly Enterprise?{' '}
               <Link
                 href="/auth/enterprise"
-                className="text-violet-300 hover:text-violet-200 transition-colors font-medium"
+                className="rounded-[3px] font-medium text-white underline decoration-white/30 underline-offset-4 transition-colors hover:decoration-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70"
               >
                 Sign in with an emailed code
               </Link>

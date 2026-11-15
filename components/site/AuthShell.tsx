@@ -3,126 +3,106 @@
 import Link from 'next/link'
 import { Icon } from '@iconify/react'
 import { BrandMark } from '@/components/site/BrandMark'
+import { ClosingLight } from '@/components/landing-v8/ClosingLight'
+import { openCookiePreferences } from '@/lib/consent'
 
 /* ─────────────────────────────────────────────────────────────
    Shared auth-page chrome.
-   Used by app/auth/login/page.tsx and app/auth/signup/page.tsx.
-   Design language is kept in lockstep with the marketing landing
-   page (app/page.tsx): flat controls, a zinc palette, a mono pill
-   eyebrow, and violet reserved for focus/attention. A slim
-   premium-gradient brand panel (logo only) on the left, a wide dark
-   auth column with a clean centered form on the right.
+   Used by app/auth/login, app/auth/signup and app/auth/forgot-password, and
+   by Backenly Cloud's invite and Enterprise sign-in pages.
+
+   2026-11-15, third pass (founders: "everything except the signup and sign
+   in is perfect"). Two split layouts were tried and dropped: a brand panel
+   beside a form lost in a wide empty field, then a form column beside a
+   dense product slide that competed with it. Now the page does one thing,
+   the way Vercel, Linear and Clerk set theirs: one framed form, centred on
+   black, with the landing's own dawn low behind it (the horizon the landing
+   ends on, just before "Start free"), dimmed so it stays a backdrop. The
+   logo sits top left, Terms and Privacy at the foot; fields and buttons are
+   44px with the landing's corners and a white focus ring.
 ───────────────────────────────────────────────────────────── */
+
+const YEAR = new Date().getFullYear()
 
 export function AuthChrome({ children }: { children: React.ReactNode }) {
   return (
     <div
-      className="bg-[#0a0a0c] text-white antialiased relative min-h-screen overflow-x-hidden selection:bg-violet-500/30 selection:text-white flex"
+      className="relative isolate flex min-h-screen flex-col overflow-hidden bg-[#08090a] text-white antialiased selection:bg-violet-500/30 selection:text-white"
       style={{ fontFamily: 'var(--font-geist-sans), sans-serif' }}
     >
-      {/* ── Left: slim premium-gradient brand panel — logo only (lg+) ── */}
-      <AuthBrandPanel />
-
-      {/* ── Right: wide dark auth column with centered form ── */}
-      <div className="relative z-20 ml-auto flex w-full flex-col overflow-hidden bg-[#0a0a0c] px-5 py-8 sm:px-8 lg:w-[70%] lg:px-12 lg:py-10">
-        <div aria-hidden className="pointer-events-none absolute inset-0">
-          <div className="absolute right-[-18%] top-[10%] h-[460px] w-[460px] rounded-full bg-white/[0.04] blur-[130px]" />
-          <div className="absolute bottom-[-22%] left-[26%] h-[360px] w-[360px] rounded-full bg-indigo-400/[0.04] blur-[120px]" />
-          <div className="absolute inset-x-0 top-0 h-px bg-[linear-gradient(to_right,transparent,rgba(255,255,255,0.18),transparent)]" />
+      {/* The landing's closing dawn, held at the foot of the screen and dimmed. */}
+      <div aria-hidden className="pointer-events-none absolute inset-x-0 bottom-0 -z-10 h-[560px] opacity-[0.5]">
+        <div className="relative h-full">
+          <ClosingLight />
         </div>
+      </div>
 
-        {/* Wordmark — only on mobile, where the brand panel is hidden */}
-        <Link href="/" aria-label="Backenly" className="relative z-10 flex items-center gap-2.5 self-start lg:hidden">
-          <BrandMark size={24} />
-          <span className="text-[15px] font-semibold tracking-tighter text-white lowercase">
-            backenly
-          </span>
+      <div className="flex items-center px-5 pt-6 sm:px-8 sm:pt-8 lg:px-12">
+        <Link
+          href="/"
+          className="flex w-fit items-center gap-[10px] rounded-[6px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70"
+        >
+          <BrandMark size={28} decorative />
+          <span className="text-[17px] font-medium tracking-[-0.02em] text-white">Backenly</span>
         </Link>
+      </div>
 
-        <div className="relative z-10 flex flex-1 flex-col items-center justify-center py-10">
-          <div className="flex w-full max-w-[420px] flex-col items-center">{children}</div>
+      {/* The page's one main landmark, so assistive tech can jump straight to the form. */}
+      <main id="main-content" className="flex flex-1 items-center justify-center px-4 py-10 sm:py-14">
+        <div className="w-full max-w-[420px] rounded-[10px] border border-white/[0.10] bg-[#0b0c0f] px-[24px] py-[32px] shadow-[0_1px_0_rgba(255,255,255,0.04)_inset,0_40px_80px_-30px_rgba(0,0,0,0.9)] sm:px-[36px] sm:py-[40px]">
+          {children}
         </div>
-      </div>
-    </div>
-  )
-}
+      </main>
 
-function AuthBrandPanel() {
-  return (
-    <div className="relative z-20 hidden lg:flex lg:w-[30%] items-center justify-center overflow-hidden bg-gradient-to-br from-violet-500 via-violet-700 to-indigo-900">
-      {/* Layered translucent shapes for a premium, dimensional gradient */}
-      <div aria-hidden className="pointer-events-none absolute inset-0">
-        <div className="absolute inset-0 bg-[radial-gradient(circle_at_28%_18%,rgba(255,255,255,0.22),transparent_55%)]" />
-        <div className="absolute -top-32 -right-24 h-[360px] w-[360px] rotate-[24deg] rounded-[80px] bg-white/10 blur-2xl" />
-        <div className="absolute top-1/3 -left-40 h-[520px] w-[520px] rounded-full bg-white/[0.06] blur-[120px]" />
-        <div className="absolute -bottom-40 -right-20 h-[460px] w-[460px] rounded-full bg-fuchsia-500/25 blur-[130px]" />
-      </div>
-
-      {/* Seam highlight */}
-      <div aria-hidden className="pointer-events-none absolute right-0 top-0 h-full w-px bg-white/10" />
-
-      {/* Centered logo + wordmark */}
-      <Link href="/" aria-label="Backenly" className="relative z-10 flex items-center gap-3">
-        <BrandMark size={40} />
-        <span className="text-[28px] font-semibold tracking-tighter text-white lowercase">backenly</span>
-      </Link>
+      <p className="flex items-center justify-center gap-x-[16px] pb-[28px] text-[12.5px] text-zinc-300">
+        <span>© {YEAR} Backenly</span>
+        <Link href="/terms" className="rounded-[3px] transition-colors hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70">
+          Terms
+        </Link>
+        <Link href="/privacy" className="rounded-[3px] transition-colors hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70">
+          Privacy
+        </Link>
+        <button
+          type="button"
+          onClick={openCookiePreferences}
+          className="rounded-[3px] transition-colors hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70"
+        >
+          Cookies
+        </button>
+      </p>
     </div>
   )
 }
 
 export function AuthCard({
-  eyebrow,
   title,
   subtitle,
   children,
 }: {
-  eyebrow?: string
   title: string
   subtitle: string
   children: React.ReactNode
 }) {
   return (
     <div className="w-full">
-      <div className="mb-8 flex flex-col items-center text-center">
-        {eyebrow && (
-          <div className="mb-5 inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.03] px-3.5 py-1.5">
-            <span className="h-1 w-1 rounded-full bg-violet-400" aria-hidden />
-            <span className="font-mono text-[10px] font-medium uppercase tracking-[0.2em] text-zinc-400">
-              {eyebrow}
-            </span>
-          </div>
-        )}
-        <h1 className="text-[30px] font-semibold leading-[1.05] tracking-tight text-white md:text-[34px]">
-          {title}
-        </h1>
-        <p className="mx-auto mt-3 max-w-[340px] text-[15px] leading-6 text-zinc-400">
-          {subtitle}
-        </p>
+      <div className="mb-[28px] text-center">
+        <h1 className="text-[26px] font-normal leading-[1.12] tracking-[-0.03em] text-white [text-wrap:balance] sm:text-[28px]">{title}</h1>
+        <p className="mx-auto mt-[10px] max-w-[40ch] text-[14.5px] leading-[1.6] text-zinc-400 [text-wrap:balance]">{subtitle}</p>
       </div>
       {children}
     </div>
   )
 }
 
+/** Terms and Privacy now sit in the chrome's own footer (AuthChrome); kept so existing pages keep compiling. */
 export function AuthFooterNote() {
-  return (
-    <p className="mt-7 max-w-[360px] text-center text-[11px] text-zinc-500">
-      Secured with industry-standard encryption.{' '}
-      <Link href="/terms" className="text-zinc-300 transition-colors hover:text-white">
-        Terms
-      </Link>
-      {' · '}
-      <Link href="/privacy" className="text-zinc-300 transition-colors hover:text-white">
-        Privacy
-      </Link>
-    </p>
-  )
+  return null
 }
 
 /* Shared control geometry — kept identical across every button so the
    stack reads as one system (matches the landing page CTAs). */
 const CONTROL_BASE =
-  'group inline-flex h-12 w-full items-center justify-center gap-2.5 rounded-lg px-5 text-[15px] font-semibold transition duration-200 active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400/70 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0a0a0c]'
+  'group inline-flex h-[44px] w-full items-center justify-center gap-2.5 rounded-[6px] px-5 text-[15px] font-medium tracking-[-0.01em] transition duration-150 active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0b0c0f]'
 
 export function OAuthButton({
   onClick,
@@ -133,17 +113,9 @@ export function OAuthButton({
   variant: 'light' | 'dark'
   children: React.ReactNode
 }) {
-  if (variant === 'light') {
-    return (
-      <button
-        type="button"
-        onClick={onClick}
-        className={`${CONTROL_BASE} bg-white text-zinc-950 shadow-[0_12px_40px_-16px_rgba(255,255,255,0.35)] hover:bg-zinc-200`}
-      >
-        {children}
-      </button>
-    )
-  }
+  // 'light' was a white Google button; both providers are now outlined, so the
+  // one white button on the page is the form's own action. The prop stays for callers.
+  void variant
   return (
     <button
       type="button"
@@ -183,9 +155,7 @@ export function Divider({ label }: { label: string }) {
         <div className="h-px w-full bg-white/[0.07]" />
       </div>
       <div className="relative flex justify-center">
-        <span className="bg-[#0a0a0c] px-3 font-mono text-[10px] uppercase tracking-[0.18em] text-zinc-500">
-          {label}
-        </span>
+        <span className="bg-[#0b0c0f] px-3 text-[13px] text-faint">{label}</span>
       </div>
     </div>
   )
@@ -195,7 +165,7 @@ export function FieldLabel({ htmlFor, children }: { htmlFor: string; children: R
   return (
     <label
       htmlFor={htmlFor}
-      className="font-mono text-[11px] uppercase tracking-[0.14em] text-zinc-400"
+      className="-mb-1 text-[13.5px] font-medium tracking-[-0.006em] text-zinc-200"
     >
       {children}
     </label>
@@ -237,7 +207,7 @@ export function FieldInput({
   return (
     <div>
       <div
-        className={`flex h-12 items-center gap-2 rounded-lg border bg-[#0c0c0e] px-4 transition-all focus-within:border-violet-400/50 focus-within:bg-[#101013] focus-within:shadow-[0_0_0_3px_rgba(139,92,246,0.16)] ${
+        className={`flex h-[44px] items-center gap-2 rounded-[8px] border bg-white/[0.02] px-[14px] transition-[border-color,box-shadow,background-color] duration-150 focus-within:border-white/30 focus-within:bg-white/[0.035] focus-within:shadow-[0_0_0_3px_rgba(255,255,255,0.08)] ${
           error ? 'border-rose-500/50' : 'border-white/[0.1]'
         }`}
       >
@@ -252,17 +222,17 @@ export function FieldInput({
           autoComplete={autoComplete}
           maxLength={maxLength}
           autoFocus={autoFocus}
-          className={`flex-1 bg-transparent text-[15px] text-zinc-100 placeholder:text-zinc-600 focus:outline-none disabled:opacity-50 ${className ?? ''}`}
+          className={`flex-1 bg-transparent text-[15px] text-zinc-100 placeholder:text-zinc-500 focus:outline-none disabled:opacity-50 ${className ?? ''}`}
         />
         {trailing}
       </div>
       {error ? (
-        <p className="mt-2 flex items-center gap-1.5 text-[11px] text-rose-300">
+        <p className="mt-2 flex items-center gap-1.5 text-[12.5px] text-rose-300">
           <Icon icon="solar:shield-warning-linear" width={12} />
           {error}
         </p>
       ) : helper ? (
-        <p className="mt-1.5 text-[11px] text-zinc-500">{helper}</p>
+        <p className="mt-1.5 text-[12.5px] text-faint [text-wrap:pretty]">{helper}</p>
       ) : null}
     </div>
   )
@@ -286,7 +256,7 @@ export function PrimaryButton({
       type={type || 'button'}
       disabled={disabled}
       onClick={onClick}
-      className={`${CONTROL_BASE} mt-2 bg-white text-zinc-950 shadow-[0_12px_40px_-16px_rgba(255,255,255,0.35)] hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-white`}
+      className={`${CONTROL_BASE} mt-2 bg-white text-zinc-950 hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-white`}
     >
       {loading && (
         <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-zinc-950/25 border-t-zinc-950" />

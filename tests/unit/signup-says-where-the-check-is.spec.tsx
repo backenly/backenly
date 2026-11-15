@@ -27,7 +27,7 @@ beforeEach(() => {
 it('says under the check that it is not done, and leaves a valid email alone', async () => {
   render(<SignupPage />)
   await act(async () => { for (let i = 0; i < 5; i++) await Promise.resolve() })
-  fireEvent.click(screen.getByRole('button', { name: /Continue with Email/ }))
+  // The form is on screen at once; it used to open behind a "Continue with Email" button.
   fireEvent.change(screen.getByLabelText('Email address'), { target: { value: 'ada.lovelace@gmail.com' } })
   fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'a-long-enough-Passw0rd!' } })
   await act(async () => { fireEvent.submit(screen.getByLabelText('Email address').closest('form')!) })

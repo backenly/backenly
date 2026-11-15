@@ -22,9 +22,7 @@ import { registerSiteIcons } from '@/lib/icons/registry'
 import {
   AuthChrome,
   AuthCard,
-  AuthFooterNote,
   OAuthButton,
-  EmailOptionButton,
   Divider,
   FieldLabel,
   FieldInput,
@@ -42,7 +40,7 @@ export default function SignupPage() {
     <Suspense
       fallback={
         <AuthChrome>
-          <AuthCard eyebrow="Get started" title="Create your Backenly account" subtitle="A live backend in under a minute.">
+          <AuthCard title="Create your account" subtitle="One free project, kept permanently. No credit card.">
             <div className="h-24" />
           </AuthCard>
         </AuthChrome>
@@ -73,7 +71,6 @@ function SignupForm() {
   // The installer prints a claim link carrying the token. Read once, at first
   // render, so the form opens already filled in.
   const [claimLinkToken] = useState(() => searchParams.get('setup_token')?.trim() || '')
-  const [showEmailForm, setShowEmailForm] = useState(!!claimLinkToken)
   const [oauthProviders, setOauthProviders] = useState<{ google: boolean; github: boolean } | null>(null)
   const [refCode, setRefCode] = useState<string | null>(null)
   const [turnstileToken, setTurnstileToken] = useState<string | null>(null)
@@ -257,7 +254,6 @@ function SignupForm() {
     return (
       <AuthChrome>
         <AuthCard
-          eyebrow="Account"
           title="Already signed in"
           subtitle="Redirecting to your projects..."
         >
@@ -273,7 +269,6 @@ function SignupForm() {
     return (
       <AuthChrome>
         <AuthCard
-          eyebrow="Check your email"
           title="Enter your code"
           subtitle={`We sent a ${CODE_LENGTH}-digit code to ${pendingEmail}. It expires in 10 minutes.`}
         >
@@ -314,35 +309,30 @@ function SignupForm() {
           </p>
         </AuthCard>
 
-        <AuthFooterNote />
-      </AuthChrome>
+        </AuthChrome>
     )
   }
 
   return (
     <AuthChrome>
-      <AuthCard
-        eyebrow="Get started"
-        title="Create your Backenly account"
-        subtitle="A live backend in under a minute."
-      >
+      <AuthCard title="Create your account" subtitle="One free project, kept permanently. No credit card.">
         {refCode && (
           <div className="mb-5 flex items-center gap-2 rounded-lg border border-white/[0.14] bg-white/[0.05] px-3 py-2.5 text-[12px] text-violet-100">
             <Icon icon="solar:gift-linear" width={16} className="text-violet-300 shrink-0" />
             <span>You were invited — <span className="font-medium text-white">+200 bonus credits</span> land on your first sign-in.</span>
           </div>
         )}
-        {!showEmailForm ? (
+        {/* The form is on screen straight away (site-wide pass, 2026-11-15); a provider's button sits above it only when that provider is configured. */}
+        {(oauthProviders?.google || oauthProviders?.github) && (
           <>
-            {(oauthProviders?.google || oauthProviders?.github) && (
-              <div className="flex flex-col gap-3">
+              <div className={`grid gap-3 ${oauthProviders?.google && oauthProviders?.github ? 'grid-cols-2' : 'grid-cols-1'}`}>
                 {oauthProviders?.google && (
                   <OAuthButton
                     onClick={() => (window.location.href = `/api/auth/platform-google?redirect=${encodeURIComponent(redirectUrl)}`)}
                     variant="light"
                   >
                     <GoogleSvg />
-                    Sign up with Google
+                    <span className="sr-only">Sign up with </span>Google
                   </OAuthButton>
                 )}
                 {oauthProviders?.github && (
@@ -351,20 +341,14 @@ function SignupForm() {
                     variant="dark"
                   >
                     <Icon icon="ri:github-fill" width={18} className="text-zinc-100" />
-                    Sign up with GitHub
+                    <span className="sr-only">Sign up with </span>GitHub
                   </OAuthButton>
                 )}
               </div>
-            )}
-
-            <Divider label="or sign up with email" />
-
-            <EmailOptionButton onClick={() => setShowEmailForm(true)}>
-              Continue with Email
-            </EmailOptionButton>
+            <Divider label="or" />
           </>
-        ) : (
-          <>
+        )}
+
             <form onSubmit={handleSubmit} className="flex flex-col gap-4 mb-5">
               <FieldLabel htmlFor="email">Email address</FieldLabel>
               <FieldInput
@@ -391,7 +375,7 @@ function SignupForm() {
                   <button
                     type="button"
                     onClick={() => setShowPassword((s) => !s)}
-                    className="text-zinc-500 hover:text-zinc-300 transition-colors"
+                    className="rounded-sm text-zinc-400 transition-colors hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70"
                     aria-label={showPassword ? 'Hide password' : 'Show password'}
                   >
                     <Icon icon={showPassword ? 'ri:eye-off-line' : 'ri:eye-line'} width={16} />
@@ -432,54 +416,32 @@ function SignupForm() {
                 {isSubmitting ? 'Creating account…' : 'Create account'}
               </PrimaryButton>
 
-              <p className="text-[11px] text-zinc-500 text-center mt-1 font-light">
+              <p className="mt-1 text-center text-[12.5px] leading-[1.5] text-faint [text-wrap:balance]">
                 By creating an account, you agree to our{' '}
-                <Link href="/terms" className="text-zinc-300 hover:text-white">
+                <Link href="/terms" className="text-zinc-300 underline decoration-white/30 underline-offset-2 hover:text-white hover:decoration-white">
                   Terms
                 </Link>{' '}
                 and{' '}
-                <Link href="/privacy" className="text-zinc-300 hover:text-white">
+                <Link href="/privacy" className="text-zinc-300 underline decoration-white/30 underline-offset-2 hover:text-white hover:decoration-white">
                   Privacy Policy
                 </Link>
                 .
               </p>
             </form>
 
-            <button
-              type="button"
-              onClick={() => {
-                setShowEmailForm(false)
-                setErrors({})
-                setEmail('')
-                setPassword('')
-              }}
-              className="w-full text-center text-xs text-zinc-400 hover:text-zinc-200 transition-colors inline-flex items-center justify-center gap-1.5 group"
-            >
-              <Icon
-                icon="solar:alt-arrow-down-linear"
-                width={11}
-                className="rotate-90 group-hover:-translate-x-0.5 transition-transform"
-              />
-              Back to all sign-up options
-            </button>
-          </>
-        )}
-
-        <div className="mt-7 pt-6 border-t border-white/[0.06] text-center">
-          <p className="text-xs text-zinc-400">
+        <div className="mt-[24px] border-t border-white/[0.08] pt-[20px] text-center">
+          <p className="text-[14px] text-zinc-400">
             Already have an account?{' '}
             <Link
               href={redirectUrl !== '/app' ? `/auth/login?redirect=${encodeURIComponent(redirectUrl)}` : '/auth/login'}
-              className="text-violet-300 hover:text-violet-200 transition-colors font-medium inline-flex items-center gap-1"
+              className="rounded-[3px] font-medium text-white underline decoration-white/30 underline-offset-4 transition-colors hover:decoration-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70"
             >
               Sign in
-              <Icon icon="solar:arrow-right-up-linear" width={11} />
             </Link>
           </p>
         </div>
       </AuthCard>
 
-      <AuthFooterNote />
     </AuthChrome>
   )
 }

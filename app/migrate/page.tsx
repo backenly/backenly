@@ -1,26 +1,25 @@
 import type { Metadata } from 'next'
+import Link from 'next/link'
 import { notFound } from 'next/navigation'
-import { ArrowRight, Import } from 'lucide-react'
+import { ArrowLeftRight, ArrowRight, ArrowUpRight, Bot, Check, Code2, Import, ListChecks, RefreshCw, Route, ShieldCheck } from 'lucide-react'
 import type { ReactNode } from 'react'
 import { safeJsonLd } from '@/lib/security/safe-jsonld'
 import { pageMetadata, SITE_URL } from '@/lib/seo/metadata'
 import { graph, ORGANIZATION_ID } from '@/lib/seo/schema'
 import { SiteShell } from '@/components/site/SiteShell'
-import { ButtonLink, DataTable, JsonLd, Page, Steps } from '@/components/site/kit'
+import { CloseBox, JsonLd, Page, Trail } from '@/components/site/kit'
 import { Faq } from '@/components/site/Faq'
-import {
-  GuideCode as Code,
-  GuideDocument,
-  GuideMetaDivider,
-  GuideRows,
-  GuideSection,
-  GuideSubHeading,
-  GUIDE_TEXT,
-  guideDate,
-} from '@/components/site/guide'
+import { Box, BoxHead, Cells, Light, Tag, type CellItem } from '@/components/landing-v8/Box'
+import { CONTAINER, PRIMARY_CTA, SECONDARY_CTA } from '@/components/site/tokens'
 import { migrationPublished } from '@/components/migrate/flag'
-import { MoveFigure } from '@/components/migrate/MoveFigure'
-import { ConnectPreview } from '@/components/migrate/Welcome'
+import { AcrossList } from '@/components/migrate/AcrossList'
+import { HeroMove } from '@/components/migrate/HeroMove'
+import { MoveLedger } from '@/components/migrate/MoveLedger'
+import { MoveSteps } from '@/components/migrate/MoveSteps'
+import { SourceTabs } from '@/components/migrate/SourceTabs'
+import { ConnectPreview, WhatMoves } from '@/components/migrate/Welcome'
+import { DEMO_PLANS, durationOf, progressAt } from '@/components/migrate/plan'
+import type { SourceId } from '@/components/migrate/sources'
 import {
   ACROSS,
   DESCRIPTION,
@@ -29,27 +28,32 @@ import {
   FIREBASE_NOTES,
   GUIDE_PATH,
   GUIDE_UPDATED,
+  POSTGRES_NEEDS,
   STEPS,
   SUPABASE_NEEDS,
   SUPABASE_NOTES,
   TITLE,
-  TOC,
 } from './content'
 
 /* ─────────────────────────────────────────────────────────────
-   /migrate: the migration guide (2026-11-14).
+   /migrate: moving a project in (2026-11-14; rebuilt 2026-11-15, founders:
+   "make the migration guide more professional, more animated ... use
+   creativity").
 
-   One page for moving a project in, from Supabase, Firebase or any
-   Postgres, set as the site's other guides are (components/site/guide.tsx):
-   the docs header, sections under linkable headings, "On this page" at xl,
-   tables and dot rows. It is reached from the footer ("Migration guide"),
-   the way Easel links its own; the landing page is left as it is. Both the
-   page and the link wait for NEXT_PUBLIC_MIGRATION=published
-   (components/migrate/flag.ts).
+   A product page in the landing's language rather than a guide document:
+   - the hero shows the product's own move screen playing an example
+     project (components/migrate/MoveLedger), in a softly lit frame, with
+     the source to play picked beside it;
+   - "How a move works" walks through Connect, Review and Move beside each
+     step's real screen, by itself while on screen, holding still while read;
+   - the sources are tabs (#supabase, #firebase, #postgres), each with what
+     it needs, its Connect screen and "what comes across" drawn as lines that
+     end in an arrow, an approval gate or a stop;
+   - after the move as the landing's cells; the questions; the closing.
 
-   The pictures are the product's own screens, not drawings: the move as it
-   runs (components/migrate/MoveLedger, playing an example) and, in each
-   source's section, that source's Connect panel from the first-run flow.
+   The words are app/migrate/content.ts, unchanged in substance. The page and
+   its links wait for NEXT_PUBLIC_MIGRATION=published (components/migrate/flag.ts).
+   Violet stays low (founders, 2026-11-15: less of the purple).
 ───────────────────────────────────────────────────────────── */
 
 export const metadata: Metadata = pageMetadata({
@@ -61,9 +65,19 @@ export const metadata: Metadata = pageMetadata({
 })
 
 const URL = `${SITE_URL}${GUIDE_PATH}`
-const READ = GUIDE_TEXT
 const START = '/auth/signup?start=move'
+// Literal, not SiteShell's ROUTES: that object comes from a client module and is undefined in a server page.
 const FOUNDERS_HREF = 'https://calendly.com/adarsh-c-jose/30min'
+
+const SUMMARY =
+  'Backenly moves a project in one click: its tables and rows, its users with their passwords, and its files. Your old project is only read, so your app keeps running there until you switch it over.'
+
+/** Three facts from the guide's own pages, set under the actions. */
+const HERO_FACTS = [
+  'Read access only. Nothing in your old project changes.',
+  'Your users keep the passwords they have.',
+  'Every table is counted on both sides before the move is done.',
+]
 
 const structuredData = graph(
   {
@@ -83,138 +97,264 @@ const structuredData = graph(
   },
 )
 
-function Part({ id, children }: { id: string; children: ReactNode }) {
+function Code({ children }: { children: ReactNode }) {
+  return <code className="rounded-[4px] bg-white/[0.06] px-[5px] py-[1px] font-mono text-[0.88em] text-zinc-200">{children}</code>
+}
+
+function Dots({ items }: { items: string[] }) {
   return (
-    <GuideSection id={id} title={TOC.find((item) => item.id === id)!.label}>
-      {children}
-    </GuideSection>
+    <ul className="grid gap-[12px]">
+      {items.map((item) => (
+        <li key={item} className="flex gap-[12px] text-[15px] leading-[1.6] text-zinc-300 [text-wrap:pretty]">
+          <span aria-hidden className="mt-[10px] h-[4px] w-[4px] shrink-0 rounded-full bg-zinc-500" />
+          <span className="min-w-0">{item}</span>
+        </li>
+      ))}
+    </ul>
   )
 }
 
-/** A product screen set into the reading column, at the size it is used. */
-function Screen({ children }: { children: ReactNode }) {
-  return <div className="my-[4px]">{children}</div>
-}
-
-function Across({ source, from }: { source: 'supabase' | 'firebase' | 'postgres'; from: string }) {
+function SourcePanel({ id, needs, notes }: { id: SourceId; needs: string[]; notes?: string[] }) {
+  const from = id === 'postgres' ? 'Postgres' : id === 'supabase' ? 'Supabase' : 'Firebase'
   return (
-    <DataTable
-      caption={`What moves from ${from} to Backenly`}
-      columns={[`On ${from}`, 'On Backenly']}
-      rows={ACROSS[source].map((row) => [row.have, row.becomes])}
-      minWidth="min-w-[520px]"
-    />
+    <div className="grid gap-[36px] lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)] lg:gap-[48px]">
+      <div className="min-w-0">
+        <h3 className="text-[17px] font-medium tracking-[-0.012em] text-white">What you need</h3>
+        <div className="mt-[16px]">
+          <Dots items={needs} />
+        </div>
+        <div className="mt-[24px]">
+          <ConnectPreview source={id} />
+        </div>
+      </div>
+      <div className="min-w-0">
+        <h3 className="text-[17px] font-medium tracking-[-0.012em] text-white">What comes across</h3>
+        <div className="mt-[16px]">
+          <AcrossList rows={ACROSS[id]} from={from} />
+        </div>
+      </div>
+      {notes && (
+        <div className="border-t border-white/[0.07] pt-[28px] lg:col-span-2">
+          <h3 className="text-[17px] font-medium tracking-[-0.012em] text-white">Good to know</h3>
+          <ul className="mt-[16px] grid gap-x-[40px] gap-y-[12px] md:grid-cols-2">
+            {notes.map((note) => (
+              <li key={note} className="flex gap-[12px] text-[15px] leading-[1.6] text-zinc-300 [text-wrap:pretty]">
+                <span aria-hidden className="mt-[10px] h-[4px] w-[4px] shrink-0 rounded-full bg-zinc-500" />
+                <span className="min-w-0">{note}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
   )
 }
+
+/** A screen of the first-run move flow, under its own title and line, as the product sets it (components/migrate/Welcome.tsx). */
+function StepScreen({ title, lede, children }: { title: string; lede: string; children: ReactNode }) {
+  return (
+    <div>
+      <p className="text-[16px] font-medium tracking-[-0.014em] text-zinc-50">{title}</p>
+      <p className="mt-[4px] max-w-[60ch] text-[13px] leading-[1.5] text-zinc-400 [text-wrap:pretty]">{lede}</p>
+      <div className="mt-[14px]">{children}</div>
+    </div>
+  )
+}
+
+const AFTER: CellItem[] = [
+  {
+    icon: ShieldCheck,
+    title: 'Approve the access rules',
+    body: 'Backenly rewrites row-level security policies and Security Rules as its own access rules and holds them for you. Until you approve them, only your server key can read or write the moved tables, so nothing is open while you check them.',
+  },
+  {
+    icon: Code2,
+    title: 'Point your app at Backenly',
+    body: (
+      <>
+        From Supabase, most supabase-js code keeps working: import <Code>createClient</Code> from <Code>@backenly/sdk/supabase</Code>{' '}
+        instead, and pass it your Backenly project URL and key. Calls to <Code>rpc()</Code> are the exception. From Firebase, the
+        app’s SDK calls change; your coding agent can make that change for you.
+      </>
+    ),
+  },
+  {
+    icon: Bot,
+    title: 'Rebuild what stayed behind',
+    body: 'Connect your agent over MCP and ask it to rebuild your Edge Functions or Cloud Functions as Backenly functions. Each change it makes is planned, checked and can be undone.',
+  },
+  {
+    icon: RefreshCw,
+    title: 'Switch when you are ready',
+    body: 'Your old project keeps running, untouched. Move again right before you switch, so the copy is fresh, then point your app at Backenly.',
+  },
+]
 
 export default function MigrationGuide() {
   if (!migrationPublished()) notFound()
+  const plan = DEMO_PLANS.supabase
   return (
     <SiteShell>
       <JsonLd json={safeJsonLd(structuredData)} />
       <Page>
-        <GuideDocument
-          icon={Import}
-          title={TITLE}
-          crumb="Migration guide"
-          summary="Backenly moves a project in one click: its tables and rows, its users with their passwords, and its files. Your old project is only read, so your app keeps running there until you switch it over."
-          meta={
-            <>
-              <span>Updated {guideDate(GUIDE_UPDATED)}</span>
-              <GuideMetaDivider />
-              <span>Supabase, Firebase and any Postgres</span>
-            </>
-          }
-          toc={TOC}
-          close="Sign up, choose Move an existing project, and connect Supabase or Firebase. Your project keeps its name."
-          closeTitle="Move your project"
-          closeActions={
-            <>
-              <ButtonLink href={START}>
-                Move your project
-                <ArrowRight aria-hidden className="h-4 w-4 transition-transform duration-200 group-hover:translate-x-0.5" />
-              </ButtonLink>
-              <ButtonLink href={FOUNDERS_HREF} variant="secondary">
-                Talk to the founders
-              </ButtonLink>
-            </>
-          }
-        >
-          <Part id="how">
-            <p className={READ}>
-              A move copies a project into a new Backenly project and checks it: every table is counted on the old side and the
-              new, and the move is done only when the two counts match. Start one from the first screen after you sign up.
-            </p>
-            <Screen>
-              <MoveFigure source="supabase" />
-            </Screen>
-            <Steps steps={STEPS} />
-          </Part>
+        {/* The hero: the pitch beside the move itself. */}
+        <section aria-labelledby="migrate-title" className="relative">
+          <div
+            className={`${CONTAINER} grid gap-[44px] pb-[24px] pt-[32px] md:pt-[48px] lg:grid-cols-[minmax(0,0.86fr)_minmax(0,1.14fr)] lg:items-center lg:gap-[56px]`}
+          >
+            <div className="min-w-0">
+              <Trail readable className="hero-enter" items={[{ label: 'Home', href: '/' }, { label: 'Migration guide' }]} />
+              <div className="hero-enter mt-[24px]">
+                <Tag icon={Import}>Migration guide</Tag>
+              </div>
+              <h1
+                id="migrate-title"
+                className="hero-enter hero-enter-1 mt-[20px] max-w-[16ch] text-[42px] font-normal leading-[1.02] tracking-[-0.045em] text-white [text-wrap:balance] sm:text-[52px] lg:text-[60px]"
+              >
+                {TITLE}
+              </h1>
+              <p className="hero-enter hero-enter-2 mt-[20px] max-w-[50ch] text-[17px] leading-[1.6] text-zinc-300 [text-wrap:pretty] md:text-[18px]">{SUMMARY}</p>
+              <div className="hero-enter hero-enter-3 mt-[28px] flex flex-col gap-[12px] sm:flex-row">
+                <Link href={START} className={PRIMARY_CTA}>
+                  Move your project
+                  <ArrowRight aria-hidden className="h-[16px] w-[16px] transition-transform duration-150 group-hover:translate-x-[2px]" />
+                </Link>
+                <a href={FOUNDERS_HREF} target="_blank" rel="noopener noreferrer" className={SECONDARY_CTA}>
+                  Talk to the founders
+                  <ArrowUpRight aria-hidden className="h-[16px] w-[16px]" />
+                  <span className="sr-only"> (opens in a new tab)</span>
+                </a>
+              </div>
+              <ul className="hero-enter hero-enter-3 mt-[32px] grid gap-[10px]">
+                {HERO_FACTS.map((fact) => (
+                  <li key={fact} className="flex items-start gap-[10px] text-[14.5px] leading-[1.55] text-zinc-300">
+                    <Check aria-hidden className="mt-[3px] h-[15px] w-[15px] shrink-0 text-zinc-400" strokeWidth={2} />
+                    {fact}
+                  </li>
+                ))}
+              </ul>
+            </div>
 
-          <Part id="supabase">
-            <GuideSubHeading>What you need</GuideSubHeading>
-            <GuideRows items={SUPABASE_NEEDS} />
-            <Screen>
-              <ConnectPreview source="supabase" />
-            </Screen>
-            <GuideSubHeading>What comes across</GuideSubHeading>
-            <Across source="supabase" from="Supabase" />
-            <GuideSubHeading>Good to know</GuideSubHeading>
-            <GuideRows items={SUPABASE_NOTES} />
-          </Part>
+            <div className="relative isolate min-w-0 overflow-hidden rounded-[12px] border border-white/[0.10] bg-[#0b0c0f] p-[12px] sm:p-[20px]">
+              <Light
+                art="a"
+                reach={760}
+                strength={0.5}
+                mask="linear-gradient(to bottom, rgba(0,0,0,0.85) 0%, rgba(0,0,0,0.6) 55%, rgba(0,0,0,0.3) 100%)"
+              />
+              <HeroMove />
+            </div>
+          </div>
+        </section>
 
-          <Part id="firebase">
-            <GuideSubHeading>What you need</GuideSubHeading>
-            <GuideRows items={FIREBASE_NEEDS} />
-            <Screen>
-              <ConnectPreview source="firebase" />
-            </Screen>
-            <GuideSubHeading>What comes across</GuideSubHeading>
-            <Across source="firebase" from="Firebase" />
-            <GuideSubHeading>Good to know</GuideSubHeading>
-            <GuideRows items={FIREBASE_NOTES} />
-          </Part>
+        <Box id="how" light={{ art: 'c', strength: 0.35 }}>
+          <BoxHead
+            id="how"
+            layout="stacked"
+            tag={{ icon: Route, label: 'How it works' }}
+            title="How a move works"
+            body="A move copies a project into a new Backenly project and checks it: every table is counted on the old side and the new, and the move is done only when the two counts match. Start one from the first screen after you sign up."
+          />
+          <div className="border-t border-white/[0.08] p-[16px] sm:p-[28px] lg:p-[40px]">
+            <MoveSteps
+              steps={STEPS}
+              screens={[
+                <StepScreen key="connect" title="Connect Supabase" lede="Pick the project to move. Backenly gets read access only, and never writes to Supabase.">
+                  <ConnectPreview source="supabase" />
+                </StepScreen>,
+                <StepScreen
+                  key="review"
+                  title="Review the move"
+                  lede={`${plan.project} moves into a new Backenly project. Nothing changes on Supabase, so your app keeps running there until you switch it over.`}
+                >
+                  <WhatMoves plan={plan} />
+                  <dl className="mt-[10px] hidden grid-cols-3 overflow-hidden rounded-[10px] border border-white/[0.08] bg-[#0f1012] sm:grid">
+                    {[
+                      ['Organization', plan.sourceOrg],
+                      ['Project', plan.project],
+                      ['Region', plan.region],
+                    ].map(([label, value], i) => (
+                      <div key={label} className={`min-w-0 px-[16px] py-[10px] ${i > 0 ? 'border-l border-white/[0.06]' : ''}`}>
+                        <dt className="text-[12px] text-faint">{label}</dt>
+                        <dd className="mt-[2px] truncate text-[13px] text-zinc-200">{value}</dd>
+                      </div>
+                    ))}
+                  </dl>
+                </StepScreen>,
+                // The finished move is taller than the frame: it fades out where the frame ends.
+                <div
+                  key="move"
+                  className="[mask-image:linear-gradient(to_bottom,#000_360px,transparent_440px)] sm:[mask-image:linear-gradient(to_bottom,#000_280px,transparent_354px)]"
+                >
+                  <MoveLedger plan={plan} progress={progressAt(plan, durationOf(plan))} />
+                </div>,
+              ]}
+            />
+          </div>
+        </Box>
 
-          <Part id="postgres">
-            <p className={READ}>
-              Paste a connection string from any host Backenly can reach: Neon, RDS, Railway, Render or your own server. Use a direct
-              connection, not a pooler. A read-only user is enough.
-            </p>
-            <Screen>
-              <ConnectPreview source="postgres" />
-            </Screen>
-            <Across source="postgres" from="Postgres" />
-          </Part>
+        <Box id="sources">
+          <BoxHead
+            id="sources"
+            layout="stacked"
+            tag={{ icon: ArrowLeftRight, label: 'Sources' }}
+            title="What moves, and what stays"
+            body="Pick where your project lives now. Backenly only reads it, so your app keeps running there until you switch it over."
+          />
+          <div className="border-t border-white/[0.08] p-[16px] sm:p-[28px] lg:p-[40px]">
+            <SourceTabs
+              panels={{
+                supabase: <SourcePanel id="supabase" needs={SUPABASE_NEEDS} notes={SUPABASE_NOTES} />,
+                firebase: <SourcePanel id="firebase" needs={FIREBASE_NEEDS} notes={FIREBASE_NOTES} />,
+                postgres: <SourcePanel id="postgres" needs={POSTGRES_NEEDS} />,
+              }}
+            />
+          </div>
+        </Box>
 
-          <Part id="after">
-            <GuideSubHeading>Approve the access rules</GuideSubHeading>
-            <p className={READ}>
-              Backenly rewrites row-level security policies and Security Rules as its own access rules and holds them for you. Until
-              you approve them, only your server key can read or write the moved tables, so nothing is open while you check them.
-            </p>
-            <GuideSubHeading>Point your app at Backenly</GuideSubHeading>
-            <p className={READ}>
-              From Supabase, most supabase-js code keeps working: import <Code>createClient</Code> from{' '}
-              <Code>@backenly/sdk/supabase</Code> instead, and pass it your Backenly project URL and key. Calls to{' '}
-              <Code>rpc()</Code> are the exception. From Firebase, the app’s SDK calls change; your coding agent can make that change
-              for you.
-            </p>
-            <GuideSubHeading>Rebuild what stayed behind</GuideSubHeading>
-            <p className={READ}>
-              Connect your agent over MCP and ask it to rebuild your Edge Functions or Cloud Functions as Backenly functions. Each
-              change it makes is planned, checked and can be undone.
-            </p>
-            <GuideSubHeading>Switch when you are ready</GuideSubHeading>
-            <p className={READ}>
-              Your old project keeps running, untouched. Move again right before you switch, so the copy is fresh, then point your
-              app at Backenly.
-            </p>
-          </Part>
+        <Box id="after" light={{ art: 'b', strength: 0.3 }}>
+          <BoxHead
+            id="after"
+            layout="stacked"
+            tag={{ icon: ListChecks, label: 'Next steps' }}
+            title="After the move"
+            body="Your old project keeps running, untouched, until you point your app at Backenly."
+          />
+          <Cells items={AFTER} />
+        </Box>
 
-          <Part id="questions">
+        <section aria-labelledby="questions" className="pt-[96px] md:pt-[128px]">
+          <div className={`${CONTAINER} grid gap-10 lg:grid-cols-[minmax(0,4fr)_minmax(0,7fr)] lg:gap-16`}>
+            <div className="lg:sticky lg:top-28 lg:self-start">
+              <h2 id="questions" className="scroll-mt-[96px] text-[32px] font-normal leading-[1.08] tracking-[-0.035em] text-white sm:text-[40px]">
+                Questions
+              </h2>
+              <p className="mt-[16px] max-w-[36ch] text-[16px] leading-[1.6] text-zinc-400">Anything else about your move? Ask the people who build it.</p>
+              <a
+                href={FOUNDERS_HREF}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="group mt-[20px] inline-flex items-center gap-[8px] rounded-[3px] text-[15px] font-medium text-zinc-100 transition-colors hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70"
+              >
+                Book a call with the founders
+                <ArrowUpRight aria-hidden className="h-[15px] w-[15px] text-zinc-400" />
+                <span className="sr-only"> (opens in a new tab)</span>
+              </a>
+            </div>
             <Faq items={FAQ} defaultOpen={null} />
-          </Part>
-        </GuideDocument>
+          </div>
+        </section>
+
+        <CloseBox title="Move your project" lede="Sign up, choose Move an existing project, and connect Supabase or Firebase. Your project keeps its name.">
+          <Link href={START} className={PRIMARY_CTA}>
+            Move your project
+            <ArrowRight aria-hidden className="h-[16px] w-[16px] transition-transform duration-150 group-hover:translate-x-[2px]" />
+          </Link>
+          <a href={FOUNDERS_HREF} target="_blank" rel="noopener noreferrer" className={SECONDARY_CTA}>
+            Talk to the founders
+            <span className="sr-only"> (opens in a new tab)</span>
+          </a>
+        </CloseBox>
       </Page>
     </SiteShell>
   )
