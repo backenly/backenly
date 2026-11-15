@@ -21,7 +21,7 @@
  *   4. Looks up user email and sends templated email (if emailEnabled).
  */
 
-import nodemailer from 'nodemailer'
+import nodemailer, { type Transporter } from 'nodemailer'
 import { prisma } from '@/lib/db/prisma'
 import { buildNotificationEmail } from './email-templates'
 import { formatAmount, formatLongDate, type PaymentReceipt } from './payment-receipt-email'
@@ -95,7 +95,7 @@ async function getChannelPrefs(
 
 // ─── Email transport ──────────────────────────────────────────────────────────
 
-function getMailTransporter(): nodemailer.Transporter | null {
+function getMailTransporter(): Transporter | null {
   // Shared builder normalizes port 465 -> 587 (STARTTLS) so notifications send
   // on hosts that block implicit-TLS outbound (e.g. Hetzner).
   return buildEnvSmtpTransport(nodemailer)

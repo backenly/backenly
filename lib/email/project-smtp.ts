@@ -39,6 +39,7 @@
 
 import { prisma } from '@/lib/db/prisma'
 import { decryptValue, encryptValue } from '@/lib/security/projectEnvCrypto'
+import { isDeliverableAddress, MAX_DISPLAY_NAME_LENGTH } from './address'
 import {
   buildSmtpTransport,
   readEnvSmtpCredentials,
@@ -183,8 +184,6 @@ export async function buildProjectSmtpTransport(
 
 // ── Mail to a project's own users ────────────────────────────────────────────
 
-const EMAIL_ADDRESS = /^[^\s@]+@[^\s@.]+\.[^\s@]+$/
-
 /** The bare address in "Name <address>" or "address". */
 function addressOf(value: string): string {
   const angle = value.match(/<([^<>]+)>\s*$/)
@@ -228,7 +227,7 @@ export function deploymentEndUserAddress(env: NodeJS.ProcessEnv = process.env): 
   const fallback = addressOf(deploymentFrom(env))
   const configured = env.SMTP_END_USER_FROM?.trim()
   if (!configured) return fallback
-  if (EMAIL_ADDRESS.test(addressOf(configured))) return addressOf(configured)
+  if (isDeliverableAddress(addressOf(configured))) return addressOf(configured)
   console.warn(`[SMTP] SMTP_END_USER_FROM is not an email address; sending from ${fallback} instead.`)
   return fallback
 }
@@ -297,11 +296,17 @@ export function validateSmtpConfig(
     problems.push({ field: 'password', message: 'A password is required the first time.' })
   }
 
+  // The plain form Backenly sends from (lib/email/address.ts); a sender name is
+  // capped so it stays a name, not a payload for the mail library's parser.
   const from = input.fromAddress?.trim() ?? ''
   if (!from) {
     problems.push({ field: 'fromAddress', message: 'A from address is required.' })
-  } else if (!/^[^\s@]+@[^\s@.]+\.[^\s@]+$/.test(from)) {
-    problems.push({ field: 'fromAddress', message: `"${from}" is not an email address.` })
+  } else if (!isDeliverableAddress(from)) {
+    const shown = from.length > 80 ? `${from.slice(0, 80)}...` : from
+    problems.push({ field: 'fromAddress', message: `"${shown}" is not an email address.` })
+  }
+  if (typeof input.fromName === 'string' && input.fromName.trim().length > MAX_DISPLAY_NAME_LENGTH) {
+    problems.push({ field: 'fromName', message: `A sender name can be at most ${MAX_DISPLAY_NAME_LENGTH} characters.` })
   }
 
   // A newline in either field is header injection, which is the one input here
@@ -436,7 +441,7 @@ export async function sendProjectSmtpTest(
 
 /** A recipient a test can be checked at. */
 export function isTestRecipient(to: unknown): to is string {
-  return typeof to === 'string' && /^[^\s@]+@[^\s@.]+\.[^\s@]+$/.test(to.trim())
+  return typeof to === 'string' && isDeliverableAddress(to.trim())
 }
 
 export async function deleteSmtpConfig(projectId: string): Promise<boolean> {
