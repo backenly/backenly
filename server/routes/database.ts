@@ -82,6 +82,49 @@ const deleteSchema = z.object({
   where: z.record(z.any()),
 })
 
+// ── Request size, before validation ────────────────────────────────────────────
+
+/** The most rows one insert may carry; larger loads go in batches. */
+export const MAX_INSERT_ROWS = 1000
+/** The most keys one object in a request may carry: PostgreSQL's limit on a table's columns. */
+export const MAX_OBJECT_KEYS = 1600
+
+/** True when the object has more than `max` keys, counted without building a list of them. */
+function keysOver(value: object, max: number): boolean {
+  let n = 0
+  for (const _key in value) if (++n > max) return true
+  return false
+}
+
+/**
+ * Why a body is too large to validate, or null. Checked before zod sees it:
+ * zod 3 walks every element of an array and every key of a record before it
+ * reports any limit, so a body of very many small rows or keys costs memory out
+ * of all proportion to its size (GHSA-mrhx-c7xc-m3w5 describes the same in
+ * zod 4). Within these limits the body is at most the JSON parser's 10 MB.
+ */
+function oversized(body: unknown): string | null {
+  if (!body || typeof body !== 'object') return null
+  const { data, where, orderBy, include } = body as Record<string, unknown>
+  if (Array.isArray(data) && data.length > MAX_INSERT_ROWS) {
+    return `An insert can carry at most ${MAX_INSERT_ROWS} rows; send larger loads in batches.`
+  }
+  for (const value of [...(Array.isArray(data) ? data : [data]), where, orderBy, include]) {
+    if (value && typeof value === 'object' && !Array.isArray(value) && keysOver(value, MAX_OBJECT_KEYS)) {
+      return `An object in the request can carry at most ${MAX_OBJECT_KEYS} keys.`
+    }
+  }
+  return null
+}
+
+/** Answers 413 for a body over the limits above; true when it did. */
+function refusedAsOversized(req: Request, res: Response): boolean {
+  const reason = oversized(req.body)
+  if (!reason) return false
+  sendError(res, 'PAYLOAD_TOO_LARGE', reason, 413)
+  return true
+}
+
 // ── WHERE clause and refusals ──────────────────────────────────────────────────
 
 /**
@@ -122,6 +165,7 @@ router.post('/:projectId/database/query', asyncRoute(v1AuthMiddleware), asyncRou
     return
   }
 
+  if (refusedAsOversized(req, res)) return
   const parsed = querySchema.safeParse(req.body)
   if (!parsed.success) {
     sendError(res, ErrorCodes.VALIDATION_ERROR, 'Request validation failed', 400, {
@@ -200,6 +244,7 @@ router.post('/:projectId/database/insert', asyncRoute(v1AuthMiddleware), asyncRo
   if (!checkPermission(res, ctx, ['write', 'admin'])) return
   if (!checkCapability(res, ctx, '/database')) return
 
+  if (refusedAsOversized(req, res)) return
   const parsed = insertSchema.safeParse(req.body)
   if (!parsed.success) {
     sendError(res, ErrorCodes.VALIDATION_ERROR, 'Request validation failed', 400, {
@@ -269,6 +314,7 @@ router.post('/:projectId/database/update', asyncRoute(v1AuthMiddleware), asyncRo
   if (!checkPermission(res, ctx, ['write', 'admin'])) return
   if (!checkCapability(res, ctx, '/database')) return
 
+  if (refusedAsOversized(req, res)) return
   const parsed = updateSchema.safeParse(req.body)
   if (!parsed.success) {
     sendError(res, ErrorCodes.VALIDATION_ERROR, 'Request validation failed', 400, {
@@ -345,6 +391,7 @@ router.post('/:projectId/database/delete', asyncRoute(v1AuthMiddleware), asyncRo
   if (!checkPermission(res, ctx, ['write', 'admin'])) return
   if (!checkCapability(res, ctx, '/database')) return
 
+  if (refusedAsOversized(req, res)) return
   const parsed = deleteSchema.safeParse(req.body)
   if (!parsed.success) {
     sendError(res, ErrorCodes.VALIDATION_ERROR, 'Request validation failed', 400, {
