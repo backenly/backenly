@@ -280,6 +280,11 @@
     "reason": "Public by design and idempotent. Invalidates the caller\u2019s own token; holding a token is the authority, and revoking one you already hold grants nothing."
   },
   {
+    "route": "/api/v1/[projectId]/auth/magic-link",
+    "status": "ACCEPTED",
+    "reason": "Public by design, as forgot-password: a person asks for a sign-in link to their own inbox, and proving the inbox is the authentication. Throttled per IP+project AND per target address, so it cannot be used as an email bomb; the target-limit path returns the same 200 body the flow gives for a sent link, so the limit cannot confirm an account exists. The address is checked as a plain email address before it is stored or mailed (lib/email/address.ts)."
+  },
+  {
     "route": "/api/v1/[projectId]/auth/me",
     "status": "ACCEPTED",
     "reason": "Public by design, like signin and refresh-token: authority is the end-user token presented. It is verified for this project and environment the way every data request verifies it (server/lib/end-user-identity.ts resolveEndUserFromToken), so a token revoked by logout or held by a suspended user is refused, and it returns only that token's own user (id, email, name, role). It takes no identifier and is read-only."
@@ -288,6 +293,11 @@
     "route": "/api/v1/[projectId]/auth/refresh-token",
     "status": "ACCEPTED",
     "reason": "Public by design; authority is the refresh token presented, which is what the endpoint exists to exchange."
+  },
+  {
+    "route": "/api/v1/[projectId]/auth/resend-verification",
+    "status": "ACCEPTED",
+    "reason": "Public by design, as forgot-password: it mails the verification link again to an account's own address, and only to an existing, unverified account. Throttled per IP+project AND per target address; every answer, the target-limit one included, is the same 200 body, so it cannot confirm an account exists."
   },
   {
     "route": "/api/v1/[projectId]/auth/reset-password",
