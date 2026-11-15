@@ -180,3 +180,109 @@ describe('what a person reads', () => {
     )
   })
 })
+
+/**
+ * Code that reads a variable Backenly no longer gives functions fails on every
+ * call, which is certain before anyone calls it: a phone sign-in that signs its
+ * own session with process.env.JWT_SECRET is refused the moment it runs. Such
+ * code cannot be deployed any more, so this is code stored before, and its
+ * owner is told from the code itself.
+ */
+describe('a function whose code reads a variable functions no longer get', () => {
+  let withheldProject: string
+  const ids: Record<string, string> = {}
+  const route = (body: string) => `
+    import { NextResponse } from 'next/server'
+    import jwt from 'jsonwebtoken'
+    export async function POST(request) {
+      ${body}
+    }
+  `
+  async function stored(name: string, code: string, status = 'active') {
+    ids[name] = (await prisma.aiFunction.create({
+      data: { projectId: withheldProject, name, description: name, generatedCode: code, codeOrigin: 'agent', triggerType: 'http', status },
+    })).id
+  }
+  const reported = async () =>
+    Object.fromEntries((await detectFailingFunctions(withheldProject)).map((f) => [f.details.functionName, f]))
+
+  beforeAll(async () => {
+    withheldProject = (await prisma.project.create({ data: { name: 'fn-failures-withheld', userId } })).id
+    await stored('phone-verify', route(`
+      const { userId } = await request.json()
+      return NextResponse.json({ token: jwt.sign({ userId }, process.env.JWT_SECRET, { expiresIn: '7d' }) })`))
+    await stored('admin-report', route(`
+      if (request.headers.get('x-admin-key') !== process.env.ADMIN_API_KEY) return NextResponse.json({}, { status: 403 })
+      return NextResponse.json({ ok: true })`))
+    // Names it only in a comment, and signs with a secret of its own.
+    await stored('own-secret', route(`
+      // used to sign with process.env.JWT_SECRET
+      return NextResponse.json({ token: jwt.sign({ a: 1 }, process.env.MY_SIGNING_KEY) })`))
+    await stored('switched-off', route(`return NextResponse.json({ s: process.env.JWT_SECRET })`), 'inactive')
+    // Reads it and has already failed on real calls: reported once, from its runs.
+    await stored('busy-verify', route(`return NextResponse.json({ s: jwt.sign({}, process.env.JWT_SECRET) })`))
+    await runs(ids['busy-verify'], [
+      { ok: false, at: hoursAgo(3), error: "Functions cannot sign the project's end-user sessions" },
+      { ok: false, at: hoursAgo(2), error: "Functions cannot sign the project's end-user sessions" },
+      { ok: false, at: hoursAgo(1), error: "Functions cannot sign the project's end-user sessions" },
+    ], withheldProject)
+  }, 60_000)
+
+  afterAll(async () => {
+    await prisma.aiFunctionLog.deleteMany({ where: { projectId: withheldProject } })
+    await prisma.aiFunction.deleteMany({ where: { projectId: withheldProject } })
+    await prisma.project.delete({ where: { id: withheldProject } })
+  })
+
+  test('is reported before any run, once per function, and only while its code reads the variable', async () => {
+    const byName = await reported()
+    expect(Object.keys(byName).sort()).toEqual(['admin-report', 'busy-verify', 'phone-verify'])
+    expect(byName['phone-verify']).toMatchObject({
+      type: 'function_failing',
+      severity: 'warning',
+      autoFixable: false,
+      details: { functionId: ids['phone-verify'], trigger: 'http', reason: 'reads_withheld_variable', variable: 'JWT_SECRET' },
+    })
+    expect(byName['admin-report'].details).toMatchObject({ reason: 'reads_withheld_variable', variable: 'ADMIN_API_KEY' })
+    // Its runs already show it: one row, from the runs, critical.
+    expect(byName['busy-verify']).toMatchObject({ severity: 'critical', details: { runs: 3, failures: 3 } })
+    expect(byName['busy-verify'].details).not.toHaveProperty('reason')
+  })
+
+  test('clears once its owner deploys code that no longer reads it', async () => {
+    await prisma.aiFunction.update({
+      where: { id: ids['phone-verify'] },
+      data: {
+        generatedCode: `
+          import { NextResponse } from 'next/server'
+          import { createSession } from '@/lib/auth/session'
+          export async function POST(request) {
+            const { userId } = await request.json()
+            return NextResponse.json(await createSession(userId))
+          }
+        `,
+      },
+    })
+    expect(Object.keys(await reported()).sort()).toEqual(['admin-report', 'busy-verify'])
+  })
+
+  test('tells the owner what to use instead', () => {
+    const phone = { functionName: 'phone-verify', trigger: 'http', reason: 'reads_withheld_variable', variable: 'JWT_SECRET' }
+    expect(summariseFinding('function_failing', phone)).toBe(
+      '`phone-verify` reads JWT_SECRET, which functions no longer get, so every call fails',
+    )
+    expect(getManualRemediationHint('function_failing', phone)).toBe(
+      'phone-verify answers HTTP requests, and its code reads process.env.JWT_SECRET, which Backenly no longer gives ' +
+        'function code, so every call to it fails.' +
+        "\n\nTo sign a user in once the function has proved who they are, it calls createSession(userId) from " +
+        "'@/lib/auth/session', which returns the session Backenly signs. To check a caller's session, it calls " +
+        "verifyToken(token) from '@/lib/auth/jwt'." +
+        '\n\nAsk your coding agent to change phone-verify that way and deploy it again. This clears once its code ' +
+        'no longer reads JWT_SECRET.',
+    )
+    const admin = { ...phone, functionName: 'admin-report', variable: 'ADMIN_API_KEY' }
+    expect(getManualRemediationHint('function_failing', admin)).toContain(
+      "To admit only the project's admin key, it calls isAdminRequest(request) from '@/lib/auth/jwt'",
+    )
+  })
+})

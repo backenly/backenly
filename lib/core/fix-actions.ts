@@ -686,6 +686,24 @@ If the column is deliberately different now, tell your coding agent to rebuild i
     // and what to ask for.
     case 'function_failing': {
       const name = typeof details?.functionName === 'string' ? details.functionName : 'This function'
+      // Found in its code before any run (lib/autonomy/function-failures.ts).
+      if (details?.reason === 'reads_withheld_variable') {
+        const variable = typeof details?.variable === 'string' ? details.variable : 'JWT_SECRET'
+        const instead =
+          variable === 'JWT_SECRET'
+            ? `To sign a user in once the function has proved who they are, it calls createSession(userId) from ` +
+              `'@/lib/auth/session', which returns the session Backenly signs. To check a caller's session, it ` +
+              `calls verifyToken(token) from '@/lib/auth/jwt'.`
+            : `To admit only the project's admin key, it calls isAdminRequest(request) from '@/lib/auth/jwt', ` +
+              `which checks the key without the function holding it.`
+        return (
+          `${name} ${triggerPhrase(details?.trigger, details?.tableName)}, and its code reads ` +
+          `process.env.${variable}, which Backenly no longer gives function code, so every call to it fails.` +
+          `\n\n${instead}` +
+          `\n\nAsk your coding agent to change ${name} that way and deploy it again. This clears once its code ` +
+          `no longer reads ${variable}.`
+        )
+      }
       const failures = Number(details?.failures ?? 0)
       const runs = Number(details?.runs ?? 0)
       const hours = Number(details?.windowHours ?? 24)

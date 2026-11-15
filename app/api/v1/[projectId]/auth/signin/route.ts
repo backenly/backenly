@@ -14,10 +14,9 @@ import { executeWithUserContext } from '@/lib/services/workspace-rls'
 import { stampLastLogin } from '@/lib/services/end-user-auth-table'
 import { trackEndUserActive } from '@/lib/quota/kernel'
 import { sanitizeDiagnostic } from '@/lib/errors/diagnostic-sanitize'
-import jwt from 'jsonwebtoken'
-import { resolveJwtSecret } from '@/lib/services/jwtSecretManager'
+import { signEndUserToken } from '@/lib/auth/end-user-session'
 import { recordedV1 } from '@/lib/traffic/recorded-v1'
-import { endUserTokenSecret, endUserTokenClaims, type AuthEnvironment } from '@/lib/branches/auth-environment'
+import { type AuthEnvironment } from '@/lib/branches/auth-environment'
 import { inAuthEnvironment } from '@/lib/branches/next-auth-environment'
 import { authorizingProject } from '@/lib/auth-projection/read'
 
@@ -207,14 +206,8 @@ async function signIn(request: NextRequest, projectId: string, env: AuthEnvironm
       }
     }
 
-    const token = jwt.sign(
-      {
-        userId: user.id, email: user.email, projectId, role: user.role ?? 'user', jti: crypto.randomUUID(),
-        ...endUserTokenClaims(env.branch),
-      },
-      endUserTokenSecret(resolveJwtSecret(project.jwtSecret), env.branch),
-      { expiresIn: '7d' },
-    )
+    // The one end-user session token (lib/auth/end-user-session.ts), as a function's createSession issues it.
+    const token = signEndUserToken(project.jwtSecret, projectId, { id: user.id, email: user.email, role: user.role }, env.branch)
 
     // Count this end-user as active for the month (MAU tracking — never blocks).
     // A preview branch's test users are not the month's active users.
