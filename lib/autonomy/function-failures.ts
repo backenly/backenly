@@ -11,11 +11,15 @@
  * the last FAILING_WINDOW_MS and its most recent run failed too, so one that
  * has been fixed stops being reported with its first good run. A function that
  * is switched off runs nothing and is not reported.
+ *
+ * One kind of failure is certain before any run: code that reads a variable
+ * Backenly no longer gives functions (readingWithheldVariables, below).
  */
 
 import { prisma } from '@/lib/db/prisma'
 import type { RawFinding } from '@/lib/core/types'
 import { isFunctionSwitchedOff } from '@/lib/services/ai-functions/status'
+import { readsWithheldEnv, WITHHELD_ENV_NAMES } from '@/lib/services/ai-functions/route-module-runner'
 
 export const FAILING_WINDOW_MS = 24 * 60 * 60_000
 export const FAILING_MIN_FAILURES = 3
@@ -54,6 +58,14 @@ export async function detectFailingFunctions(projectId: string): Promise<RawFind
   const failing = counts.filter(
     (c) => c.failures >= FAILING_MIN_FAILURES && c.lastFailedAt !== null && c.lastFailedAt.getTime() === c.lastAt.getTime(),
   )
+  const findings = await failingRuns(projectId, failing)
+  // One row per function (workspace-observer keys these on functionId): a
+  // function whose runs already show the failure is reported from its runs.
+  const reported = new Set(findings.map((f) => String(f.details.functionId)))
+  return [...findings, ...(await readingWithheldVariables(projectId, reported))]
+}
+
+async function failingRuns(projectId: string, failing: RunCounts[]): Promise<RawFinding[]> {
   if (failing.length === 0) return []
 
   const functions = await prisma.aiFunction.findMany({
@@ -86,6 +98,48 @@ export async function detectFailingFunctions(projectId: string): Promise<RawFind
         lastFailedAt: c.lastFailedAt!.toISOString(),
         lastError: firstLine(last?.error),
         windowHours: FAILING_WINDOW_MS / 3_600_000,
+      },
+    })
+  }
+  return findings
+}
+
+/**
+ * Functions whose stored code reads a variable Backenly no longer gives
+ * function code: the project's signing secret or its admin key. Every call to
+ * one fails, so it is reported from its code, before anyone calls it.
+ *
+ * Deploying such code is refused (validateRouteModule), and Backenly's own
+ * template code was rewritten when the variables were withheld
+ * (scripts/stop-functions-reading-withheld-env.ts), so what this finds is code
+ * its owner wrote before then. Never repaired here: the code is the owner's.
+ * It clears once the code no longer reads the variable, or the function is
+ * switched off or removed.
+ */
+async function readingWithheldVariables(projectId: string, reported: Set<string>): Promise<RawFinding[]> {
+  const functions = await prisma.aiFunction.findMany({
+    // The names, as a cheap first pass; readsWithheldEnv decides.
+    where: { projectId, OR: WITHHELD_ENV_NAMES.map((name) => ({ generatedCode: { contains: name } })) },
+    select: { id: true, name: true, status: true, triggerType: true, triggerTable: true, generatedCode: true },
+  })
+  const findings: RawFinding[] = []
+  for (const fn of functions) {
+    if (reported.has(fn.id) || isFunctionSwitchedOff(fn.status)) continue
+    const variable = readsWithheldEnv(fn.generatedCode)
+    if (!variable) continue
+    findings.push({
+      type: 'function_failing',
+      // Nothing has run yet to show the damage; a call that fails three times
+      // is reported from its runs instead, as critical when every run failed.
+      severity: 'warning',
+      autoFixable: false,
+      details: {
+        functionId: fn.id,
+        functionName: fn.name,
+        trigger: fn.triggerType,
+        ...(fn.triggerType.startsWith('on_db_') && fn.triggerTable ? { tableName: fn.triggerTable } : {}),
+        reason: 'reads_withheld_variable',
+        variable,
       },
     })
   }
