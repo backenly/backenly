@@ -65,6 +65,8 @@ const publicRoutes = [
   '/privacy',
   '/terms',
   '/refund-policy',
+  '/changelog',     // what changed in Backenly (app/changelog), for anyone
+  '/changelog/rss.xml', // the changelog as RSS (app/changelog/rss.xml)
 ]
 
 // ✅ PUBLIC PATH PREFIXES — marketing/SEO pages with dynamic slugs.
@@ -180,6 +182,8 @@ const publicApiRoutes = [
 // one later is not public by accident.
 const publicApiExactRoutes = [
   '/api/regions',                   // The Cloud regions as served and which are open (app/api/regions); nothing per account
+  '/api/contact',                   // The contact page's message form (app/api/contact): anonymous by nature, gated by
+                                    // Turnstile, hourly limits per network and address, and Cloud only
   '/api/auth/session',              // Who is signed in, if anyone: answers a signed-out browser with { user: null }
                                     // instead of a 401 (app/api/auth/session checks the token itself)
 ]

@@ -113,7 +113,7 @@ function monoList(names: string[]) {
 
 export default function McpPage() {
   return (
-    <SiteShell>
+    <SiteShell footerLit>
       <JsonLd json={safeJsonLd(structuredData)} />
       <Page>
         <PageHero
@@ -137,7 +137,7 @@ export default function McpPage() {
             id="install"
             title={
               <>
-                Connect your agent. <span className="text-zinc-500">One key, one project.</span>
+                Connect your agent. One key, one project.
               </>
             }
             lede="The key comes from your project’s Connect page, under Agents, and you can revoke it there. That page prints each block below with your project id and key filled in."
@@ -145,7 +145,7 @@ export default function McpPage() {
           <div className={`${BODY_GAP} grid gap-3 lg:grid-cols-2`}>
             {INSTALLS.map((install) => (
               <BentoCell key={install.id} className="h-full">
-                <p className="text-[13px] font-medium text-zinc-500">{install.client}</p>
+                <p className="text-[13px] font-medium text-faint">{install.client}</p>
                 <div className="mt-2">
                   <CellTitle>{install.title}</CellTitle>
                 </div>
@@ -169,7 +169,7 @@ export default function McpPage() {
             title={
               <>
                 {ADVERTISED_TOOL_COUNT} tools, grouped by job.{' '}
-                <span className="text-zinc-500">{READ_ONLY_TOOL_COUNT} on a read-only key.</span>
+                {READ_ONLY_TOOL_COUNT} on a read-only key.
               </>
             }
             lede="A read-only key or sign-in keeps the read tools and narrows each section tool to its read actions."
@@ -193,7 +193,7 @@ export default function McpPage() {
             id="approvals"
             title={
               <>
-                What waits for you. <span className="text-zinc-500">Destructive calls are parked, not run.</span>
+                What waits for you. Destructive calls are parked, not run.
               </>
             }
             lede={withCode(
@@ -227,7 +227,7 @@ export default function McpPage() {
             id="boundaries"
             title={
               <>
-                Where it stops. <span className="text-zinc-500">Limits an agent cannot change.</span>
+                Where it stops. Limits an agent cannot change.
               </>
             }
           />

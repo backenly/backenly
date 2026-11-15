@@ -163,7 +163,7 @@ export function RepairBox() {
           { icon: Gauge, title: '27 checks', body: 'Indexes, constraints, policies and errors, checked on every project every minute.', href: '/docs/autonomy' },
           { icon: Wrench, title: 'Fixed, then re-checked', body: 'Safe fixes ship on their own; the check that found the problem runs again.', href: '/docs/autonomy' },
           { icon: ShieldCheck, title: 'Risky changes wait', body: "Destructive, auth and irreversible changes wait for you, including your agent's.", href: '/docs/autonomy' },
-          { icon: SlidersHorizontal, title: 'You set how far', body: 'Autopilot, Review-only or off, for each project.', href: '/docs/autonomy' },
+          { icon: SlidersHorizontal, title: 'You set how far', body: 'Autopilot or Review-only, chosen for each project.', href: '/docs/autonomy' },
         ]}
       />
     </Box>

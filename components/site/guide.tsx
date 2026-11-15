@@ -1,6 +1,7 @@
 import type { LucideIcon } from 'lucide-react'
 import type { ReactNode } from 'react'
-import { ICON_CHIP, READ, ROW_RULE } from '@/components/docs/tokens'
+import { READ, ROW_RULE } from '@/components/docs/tokens'
+import { Light, Tag } from '@/components/landing-v8/Box'
 import { ButtonLink, Trail } from '@/components/site/kit'
 import { ScrollSpy, type SpyItem } from '@/components/site/ScrollSpy'
 import { StartButton } from '@/components/site/StartButton'
@@ -70,16 +71,16 @@ export function GuideDocument({
 }) {
   return (
     <>
-      {/* Key light, as on every page, behind the title. */}
-      <div
-        aria-hidden
-        className="pointer-events-none absolute -top-[260px] left-[-12%] h-[820px] w-[1100px] max-w-none bg-[radial-gradient(closest-side,rgba(255,255,255,0.06),transparent)]"
-      />
+      {/* The landing's painted light, kept low for reading, as on a docs page (site-wide pass, 2026-11-15). */}
+      <div aria-hidden className="pointer-events-none absolute inset-x-0 top-0 isolate h-[520px] overflow-hidden">
+        <Light art="a" reach={520} mask="linear-gradient(to bottom, rgba(0,0,0,0.38) 0%, rgba(0,0,0,0.3) 45%, transparent 100%)" />
+      </div>
 
       <div className={`${CONTAINER} relative pb-[120px] pt-[28px] md:pt-[48px]`}>
         <div className="grid gap-[40px] xl:grid-cols-[minmax(0,760px)_200px] xl:justify-between">
           <article className="min-w-0 max-w-[760px] lg:pt-[4px]">
-            <header className={`hero-enter border-b pb-[36px] ${ROW_RULE}`}>
+            {/* No entrance: a guide is for reading. */}
+            <header className={`border-b pb-[36px] ${ROW_RULE}`}>
               <Trail
                 readable
                 items={[
@@ -89,17 +90,11 @@ export function GuideDocument({
                   { label: crumb },
                 ]}
               />
-              <div className="mt-[28px] flex items-center gap-[14px]">
-                <span className={`h-[44px] w-[44px] rounded-[8px] text-zinc-200 ${ICON_CHIP}`}>
-                  <Icon aria-hidden strokeWidth={1.75} className="h-[20px] w-[20px]" />
-                </span>
-                <h1
-                  className={`min-w-0 bg-gradient-to-b from-white from-40% to-zinc-400 bg-clip-text pb-[4px] text-[34px] text-transparent sm:text-[40px] md:text-[46px] ${DISPLAY}`}
-                >
-                  {title}
-                </h1>
+              <div className="mt-[24px]">
+                <Tag icon={Icon}>Guide</Tag>
               </div>
-              <p className="mt-[20px] max-w-[64ch] text-[17px] leading-[1.65] tracking-[-0.012em] text-zinc-400 [text-wrap:pretty] md:text-[18px]">
+              <h1 className={`mt-[18px] min-w-0 text-[36px] text-white [text-wrap:balance] sm:text-[42px] md:text-[48px] ${DISPLAY}`}>{title}</h1>
+              <p className="mt-[18px] max-w-[64ch] text-[17px] leading-[1.65] tracking-[-0.012em] text-zinc-300 [text-wrap:pretty] md:text-[18px]">
                 {summary}
               </p>
               <p className="mt-[20px] flex flex-wrap items-center gap-x-[12px] gap-y-[4px] text-[13px] text-zinc-400">
@@ -152,7 +147,7 @@ export function GuideSection({ id, title, children }: { id: string; title: strin
   return (
     <section id={id} aria-labelledby={`${id}-heading`} className="scroll-mt-[100px]">
       <h2 id={`${id}-heading`} className={`group text-[23px] text-white md:text-[26px] ${TITLE}`}>
-        <a href={`#${id}`} className="rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300">
+        <a href={`#${id}`} className="rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70">
           {title}
           <span aria-hidden className="ml-[8px] text-zinc-600 opacity-0 transition-opacity duration-200 group-hover:opacity-100">
             #

@@ -36,7 +36,7 @@ export const metadata: Metadata = agentMetadata(page)
 
 export default function ClaudeCodePage() {
   return (
-    <SiteShell>
+    <SiteShell footerLit>
       <JsonLd json={safeJsonLd(agentStructuredData(page))} />
       <Page>
         <PageHero
@@ -59,7 +59,7 @@ export default function ClaudeCodePage() {
             id="install"
             title={
               <>
-                Add it in one command. <span className="text-zinc-500">Then start a new session.</span>
+                Add it in one command. Then start a new session.
               </>
             }
           />
@@ -83,7 +83,7 @@ export default function ClaudeCodePage() {
             id="conversation"
             title={
               <>
-                Tools arrive next session. <span className="text-zinc-500">The CLI works until then.</span>
+                Tools arrive next session. The CLI works until then.
               </>
             }
           />
@@ -93,7 +93,7 @@ export default function ClaudeCodePage() {
               {/* A four-line floor, so the commands and the prompt start on one line. */}
               <CellBody className="[text-wrap:pretty] lg:min-h-[102px]">{withCode(page.session.now.body)}</CellBody>
               <CellCode code={page.session.now.code} />
-              <p className="mt-[16px] text-[14px] leading-[1.6] text-zinc-500 [text-wrap:pretty]">
+              <p className="mt-[16px] text-[14px] leading-[1.6] text-faint [text-wrap:pretty]">
                 {withCode(page.session.now.note)}
               </p>
             </BentoCell>
@@ -112,7 +112,7 @@ export default function ClaudeCodePage() {
             id="context"
             title={
               <>
-                What Claude Code is told. <span className="text-zinc-500">By the server and the repo.</span>
+                What Claude Code is told. By the server and the repo.
               </>
             }
           />
@@ -140,7 +140,7 @@ export default function ClaudeCodePage() {
             id="access"
             title={
               <>
-                What the key reaches. <span className="text-zinc-500">Only what you allow.</span>
+                What the key reaches. Only what you allow.
               </>
             }
           />

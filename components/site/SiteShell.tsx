@@ -1,15 +1,17 @@
 'use client'
 
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { migrationPublished } from '@/components/migrate/flag'
 import { useSettledReducedMotion } from '@/lib/hooks/useSettledReducedMotion'
 import { Icon } from '@iconify/react'
 import { AnimatePresence, motion } from 'framer-motion'
-import { Menu, X } from 'lucide-react'
+import { ArrowRight, BookOpen, ChevronDown, Import, Menu, ScrollText, X, type LucideIcon } from 'lucide-react'
+import { CommandBlock } from '@/components/landing-v8/CommandBlock'
 import { registerSiteIcons } from '@/lib/icons/registry'
 import { BrandMark } from '@/components/site/BrandMark'
+import { openCookiePreferences } from '@/lib/consent'
 import { ProductHuntBadge } from '@/components/site/ProductHuntBadge'
 import { useUserSession } from '@/lib/hooks/useUserSession'
 
@@ -32,8 +34,8 @@ export const ROUTES = {
   comparisons: '/comparisons',
   // The first docs section: the docs have no index page (2026-10-15), and
   // /docs redirects here, so links skip the hop. Keep it equal to the first
-  // section in app/docs/content.ts.
-  docs: '/docs/database',
+  // section of the first group in app/docs/content.ts (Connect, 2026-11-15).
+  docs: '/docs/connect',
   alternatives: '/alternatives',
   privacy: '/privacy',
   terms: '/terms',
@@ -69,6 +71,23 @@ export const ROUTES = {
  * navbar and the mobile menu at once, without hunting through the JSX.
  */
 const SHOW_DISCORD = true
+
+/**
+ * What "Docs" opens (founders, 2026-11-15: the migration guide in the navbar,
+ * "totally 2 things when hover in docs button", plus a changelog). The guide
+ * waits for the same switch as its page and its footer link.
+ */
+type DocsEntry = { label: string; href: string; body: string; icon: LucideIcon }
+function docsMenu(): DocsEntry[] {
+  return [
+    { label: 'Documentation', href: '/docs/connect', body: 'Connect your agent, then build, run and ship.', icon: BookOpen },
+    ...(migrationPublished()
+      ? [{ label: 'Migration guide', href: '/migrate', body: 'Move in from Supabase, Firebase or any Postgres.', icon: Import }]
+      : []),
+    { label: 'Changelog', href: '/changelog', body: 'What changed in Backenly, month by month.', icon: ScrollText },
+  ]
+}
+const DOCS_PATHS = ['/docs', '/migrate', '/changelog']
 
 const NAV_LINKS = [
   { label: 'Product', href: '/#platform', activePath: '/' },
@@ -180,6 +199,8 @@ export function SiteShell({ children, navOverlay = false, footerLit = false }: {
 /* ─────────────────────────────────────────────────────────────
    Nav
 ───────────────────────────────────────────────────────────── */
+let navHasEntered = false
+
 export function NavBar({ overlay = false }: { overlay?: boolean } = {}) {
   // Overlay: clear while the page is at its top, the usual fill after. An
   // observer on an 8px marker at the top of the page answers, so scrolling
@@ -206,7 +227,13 @@ export function NavBar({ overlay = false }: { overlay?: boolean } = {}) {
   // out blank in those captures while the live page was fine. The entrance
   // often ends before React hydrates, so this waits on the animations' own
   // `finished` (already resolved by then) rather than on animationend.
-  const [navEntered, setNavEntered] = useState(false)
+  // Every marketing page wraps itself in SiteShell, so the bar remounts on each
+  // client navigation; it drops in once per page load (module flag: false
+  // again only after a full load, so hydration always matches the server).
+  const [navEntered, setNavEntered] = useState(() => navHasEntered)
+  useEffect(() => {
+    navHasEntered = true
+  }, [])
   const navGroupRef = useRef<HTMLElement>(null)
   const authGroupRef = useRef<HTMLDivElement>(null)
   useEffect(() => {
@@ -277,9 +304,13 @@ export function NavBar({ overlay = false }: { overlay?: boolean } = {}) {
             ref={navGroupRef}
             className={`${navDrop}flex items-center gap-0.5 text-[15px] font-medium tracking-[-0.006em] text-zinc-400 [--enter-delay:80ms] [--nav-drop:-8px]`}
           >
-            {NAV_LINKS.map((link) => (
-              <DesktopNavLink key={link.label} link={link} pathname={pathname} />
-            ))}
+            {NAV_LINKS.map((link) =>
+              link.label === 'Docs' ? (
+                <DocsMenu key={link.label} pathname={pathname} />
+              ) : (
+                <DesktopNavLink key={link.label} link={link} pathname={pathname} />
+              ),
+            )}
           </nav>
 
           {/* Desktop auth buttons */}
@@ -352,6 +383,22 @@ export function NavBar({ overlay = false }: { overlay?: boolean } = {}) {
                   >
                     {link.label}
                   </MobileLink>
+                  {link.label === 'Docs' &&
+                    docsMenu()
+                      .slice(1)
+                      .map((entry) => (
+                        <Link
+                          key={entry.href}
+                          href={entry.href}
+                          onClick={() => setMobileOpen(false)}
+                          className={`flex items-center gap-3 rounded-lg py-3 pl-8 pr-4 text-sm transition-colors ${
+                            isLinkActive(entry.href, pathname) ? 'bg-white/[0.1] text-white' : 'text-zinc-400 hover:bg-white/[0.05] hover:text-white'
+                          }`}
+                        >
+                          <entry.icon aria-hidden className="h-[15px] w-[15px] text-zinc-500" strokeWidth={1.75} />
+                          {entry.label}
+                        </Link>
+                      ))}
                 </motion.div>
               ))}
 
@@ -399,6 +446,168 @@ function isLinkActive(activePath: string | undefined, pathname: string) {
   if (!activePath) return false
   if (activePath === '/') return pathname === '/'
   return pathname === activePath || pathname.startsWith(`${activePath}/`)
+}
+
+/**
+ * "Docs" as a disclosure (WAI-ARIA's navigation-menu pattern): a button that
+ * shows a panel of links. It opens on hover where there is a fine pointer (after
+ * a short pause, so a pointer passing over it does not flash it open), and on
+ * click or Enter anywhere; Escape, a click outside, or moving focus away closes
+ * it.
+ *
+ * The panel (founders, 2026-11-15: "make the docs popup hover more
+ * professional", after Blaxel's) spans the header's own width, so its edges
+ * line up with the logo and the Sign up button: the entries as type in
+ * columns, a quick start with the one command a developer runs, and a line to
+ * start free. The wrapper is not positioned, so the panel is placed by the
+ * sticky header itself.
+ */
+function DocsMenu({ pathname }: { pathname: string }) {
+  // Open on the page it was opened on, so moving to another page closes it without an effect.
+  const [openOn, setOpenOn] = useState<string | null>(null)
+  const open = openOn === pathname
+  const setOpen = (next: boolean | ((was: boolean) => boolean)) =>
+    setOpenOn((was) => ((typeof next === 'function' ? next(was === pathname) : next) ? pathname : null))
+  const panelId = useId()
+  const wrapRef = useRef<HTMLDivElement>(null)
+  const buttonRef = useRef<HTMLButtonElement>(null)
+  const closeTimer = useRef(0)
+  const reduceMotion = useSettledReducedMotion()
+  const entries = docsMenu()
+  const active = DOCS_PATHS.some((path) => isLinkActive(path, pathname))
+  const { isLoggedIn } = useUserSession()
+
+  const finePointer = () => typeof window !== 'undefined' && window.matchMedia('(hover: hover) and (pointer: fine)').matches
+  const show = (delay = 0) => {
+    window.clearTimeout(closeTimer.current)
+    if (delay) closeTimer.current = window.setTimeout(() => setOpen(true), delay)
+    else setOpen(true)
+  }
+  const hideSoon = () => {
+    window.clearTimeout(closeTimer.current)
+    closeTimer.current = window.setTimeout(() => setOpen(false), 160)
+  }
+
+  useEffect(() => () => window.clearTimeout(closeTimer.current), [])
+  useEffect(() => {
+    if (!open) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      setOpenOn(null)
+      buttonRef.current?.focus()
+    }
+    const onPointer = (e: PointerEvent) => {
+      if (!wrapRef.current?.contains(e.target as Node)) setOpenOn(null)
+    }
+    document.addEventListener('keydown', onKey)
+    document.addEventListener('pointerdown', onPointer)
+    return () => {
+      document.removeEventListener('keydown', onKey)
+      document.removeEventListener('pointerdown', onPointer)
+    }
+  }, [open])
+
+  return (
+    <div
+      ref={wrapRef}
+      onMouseEnter={() => finePointer() && show(open ? 0 : 70)}
+      onMouseLeave={() => finePointer() && hideSoon()}
+      onBlur={(e) => {
+        if (!wrapRef.current?.contains(e.relatedTarget as Node | null)) setOpen(false)
+      }}
+    >
+      <button
+        ref={buttonRef}
+        type="button"
+        aria-expanded={open}
+        aria-controls={panelId}
+        onClick={() => setOpen((o) => !o)}
+        className={[
+          'inline-flex items-center gap-[5px] rounded-md px-3 py-2 transition-colors duration-200',
+          active || open ? 'text-white' : 'text-zinc-400 hover:text-white',
+          'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40 focus-visible:ring-offset-2 focus-visible:ring-offset-black',
+        ].join(' ')}
+      >
+        Docs
+        <ChevronDown aria-hidden className={`h-[13px] w-[13px] transition-transform duration-200 ${open ? 'rotate-180' : ''}`} strokeWidth={2} />
+      </button>
+
+      <AnimatePresence>
+        {open && (
+          <motion.div
+            id={panelId}
+            initial={{ opacity: 0, y: -6 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -4, transition: { duration: reduceMotion ? 0 : 0.1 } }}
+            transition={{ duration: reduceMotion ? 0 : 0.18, ease: [0.16, 1, 0.3, 1] }}
+            className="absolute inset-x-0 top-full z-50 pt-[10px]"
+          >
+            <div className="mx-auto w-full max-w-[100rem] px-5 sm:px-6">
+              <div className="overflow-hidden rounded-[10px] border border-white/[0.10] bg-[#0b0c0f] shadow-[0_32px_80px_-28px_rgba(0,0,0,0.95)]">
+                <div className="grid grid-cols-[minmax(0,1fr)_400px]">
+                  <ul className={`grid content-start gap-[4px] p-[10px] ${entries.length > 2 ? 'grid-cols-3' : 'grid-cols-2'}`}>
+                    {entries.map(({ label, href, body, icon: EntryIcon }) => (
+                      <li key={href}>
+                        <Link
+                          href={href}
+                          onClick={() => setOpen(false)}
+                          aria-current={isLinkActive(href, pathname) ? 'page' : undefined}
+                          className="group flex h-full flex-col rounded-[8px] px-[18px] py-[18px] transition-colors duration-150 hover:bg-white/[0.035] focus-visible:bg-white/[0.035] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/50"
+                        >
+                          <EntryIcon aria-hidden className="h-[17px] w-[17px] text-zinc-400 transition-colors duration-150 group-hover:text-white" strokeWidth={1.75} />
+                          <span className="mt-[16px] flex items-center gap-[6px] text-[15px] font-medium tracking-[-0.01em] text-white">
+                            {label}
+                            <ArrowRight
+                              aria-hidden
+                              className="h-[14px] w-[14px] text-zinc-500 transition-[transform,color] duration-150 group-hover:translate-x-[2px] group-hover:text-zinc-200"
+                            />
+                          </span>
+                          <span className="mt-[6px] text-[14px] font-normal leading-[1.55] text-zinc-400">{body}</span>
+                        </Link>
+                      </li>
+                    ))}
+                  </ul>
+
+                  <div className="border-l border-white/[0.08] bg-white/[0.012] px-[24px] py-[26px] xl:px-[28px]">
+                    <p className="text-[13px] font-normal text-faint">Quick start</p>
+                    <p className="mt-[10px] text-[15px] font-medium tracking-[-0.01em] text-white">Connect your agent</p>
+                    <p className="mt-[6px] text-[14px] font-normal leading-[1.55] text-zinc-400">
+                      Run it in your project folder. It asks for your project&rsquo;s MCP key, then prints the setup for your agent.
+                    </p>
+                    <CommandBlock className="mt-[18px] h-[44px] shadow-none" />
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-between gap-6 border-t border-white/[0.08] px-[28px] py-[14px]">
+                  <p className="text-[14px] font-normal text-zinc-400">
+                    {isLoggedIn ? (
+                      <>
+                        <span className="font-medium text-white">Your console</span>
+                        <span className="ml-[10px]">Your projects are where you left them.</span>
+                      </>
+                    ) : (
+                      <>
+                        <span className="font-medium text-white">Get started</span>
+                        <span className="ml-[10px]">One free project, kept permanently. No credit card.</span>
+                      </>
+                    )}
+                  </p>
+                  <Link
+                    href={isLoggedIn ? ROUTES.app : ROUTES.signup}
+                    onClick={() => setOpen(false)}
+                    className="group inline-flex h-[34px] shrink-0 items-center gap-[6px] rounded-[6px] bg-white px-[14px] text-[13.5px] font-medium text-black transition-colors hover:bg-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0b0c0f]"
+                  >
+                    {isLoggedIn ? 'Open console' : 'Start free'}
+                    <ArrowRight aria-hidden className="h-[14px] w-[14px] transition-transform duration-150 group-hover:translate-x-[2px]" />
+                  </Link>
+                </div>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  )
 }
 
 function DesktopNavLink({
@@ -501,6 +710,7 @@ export function SiteFooter({ lit = false }: { lit?: boolean } = {}) {
     { label: 'Documentation', href: ROUTES.docs },
     // The migration guide, once moving a project in is published (components/migrate/flag.ts).
     ...(migrationPublished() ? [{ label: 'Migration guide', href: '/migrate' }] : []),
+    { label: 'Changelog', href: '/changelog' },
   ]
   const company = [
     { label: 'Contact', href: ROUTES.contact },
@@ -583,8 +793,15 @@ export function SiteFooter({ lit = false }: { lit?: boolean } = {}) {
         </div>
 
         <div className={`flex flex-col items-center justify-between gap-4 border-t pt-7 md:flex-row ${lit ? 'border-white/[0.12]' : 'border-white/[0.08]'}`}>
-          <p className={`text-xs ${lit ? 'text-zinc-400' : 'text-zinc-600'}`}>
-            &copy; {new Date().getFullYear()} Backenly. All rights reserved.
+          <p className={`flex flex-wrap items-center justify-center gap-x-[16px] gap-y-1 text-xs ${lit ? 'text-zinc-400' : 'text-zinc-600'}`}>
+            <span>&copy; {new Date().getFullYear()} Backenly. All rights reserved.</span>
+            <button
+              type="button"
+              onClick={openCookiePreferences}
+              className={`rounded-[3px] underline decoration-current/30 underline-offset-[3px] transition-colors hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70 ${lit ? '' : 'text-zinc-500'}`}
+            >
+              Cookie preferences
+            </button>
           </p>
           <p className={`text-xs ${lit ? 'text-zinc-400' : 'text-zinc-600'}`}>The autonomous backend platform</p>
         </div>

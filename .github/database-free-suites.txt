@@ -212,3 +212,8 @@ __tests__/selfhost/env-file.test.ts
 # module-level cache, in-flight request deduplication and the logged-out
 # fallback against a mocked fetch, so it never reaches Prisma. jsdom.
 __tests__/hooks/useUserSession.test.ts
+
+# Cookie consent (lib/consent.ts, components/site/ConsentGate.tsx): jsdom, no database.
+__tests__/consent/consent-gate.test.tsx
+# The contact form route (app/api/contact): a real SMTP sink and the in-memory limiter, no database.
+__tests__/contact/contact-route.test.ts

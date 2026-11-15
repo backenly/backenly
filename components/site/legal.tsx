@@ -1,7 +1,8 @@
 import Link from 'next/link'
 import { ArrowLeft, ArrowRight, ChevronDown, FileText, Mail, Receipt, ShieldCheck, type LucideIcon } from 'lucide-react'
 import type { ReactNode } from 'react'
-import { ICON_CHIP, READ, ROW_RULE } from '@/components/docs/tokens'
+import { READ, ROW_RULE } from '@/components/docs/tokens'
+import { Light, Tag } from '@/components/landing-v8/Box'
 import { ScrollSpy, type SpyItem } from '@/components/site/ScrollSpy'
 import { Trail } from '@/components/site/kit'
 import { CONTAINER, DISPLAY, HEADING, PANEL, SECONDARY_CTA, TITLE } from '@/components/site/tokens'
@@ -68,11 +69,10 @@ export function LegalDocument({
 
   return (
     <>
-      {/* Key light, as on every page, behind the title. */}
-      <div
-        aria-hidden
-        className="pointer-events-none absolute -top-[260px] left-[-12%] h-[820px] w-[1100px] max-w-none bg-[radial-gradient(closest-side,rgba(255,255,255,0.06),transparent)]"
-      />
+      {/* The landing's painted light, kept low for reading, as on a docs page (site-wide pass, 2026-11-15). */}
+      <div aria-hidden className="pointer-events-none absolute inset-x-0 top-0 isolate h-[520px] overflow-hidden">
+        <Light art="c" reach={520} mask="linear-gradient(to bottom, rgba(0,0,0,0.38) 0%, rgba(0,0,0,0.3) 45%, transparent 100%)" />
+      </div>
 
       <div className={`${CONTAINER} relative pb-[120px] pt-[28px] md:pt-[48px]`}>
         <div className="grid gap-[40px] lg:grid-cols-[232px_minmax(0,1fr)] lg:gap-[48px] xl:grid-cols-[232px_minmax(0,1fr)_200px] xl:gap-[64px]">
@@ -85,7 +85,8 @@ export function LegalDocument({
           <article className="min-w-0 max-w-[760px] lg:pt-[4px]">
             <PolicyMenu current={current} />
 
-            <header className={`hero-enter mt-[28px] border-b pb-[36px] lg:mt-0 ${ROW_RULE}`}>
+            {/* No entrance: a document is for reading. Layout and type only; the legal wording is untouched. */}
+            <header className={`mt-[28px] border-b pb-[36px] lg:mt-0 ${ROW_RULE}`}>
               <Trail
                 readable
                 items={[
@@ -95,17 +96,11 @@ export function LegalDocument({
                   { label: doc.title },
                 ]}
               />
-              <div className="mt-[28px] flex items-center gap-[14px]">
-                <span className={`h-[44px] w-[44px] rounded-[8px] text-zinc-200 ${ICON_CHIP}`}>
-                  <Icon aria-hidden strokeWidth={1.75} className="h-[20px] w-[20px]" />
-                </span>
-                <h1
-                  className={`min-w-0 bg-gradient-to-b from-white from-40% to-zinc-400 bg-clip-text pb-[4px] text-[34px] text-transparent sm:text-[40px] md:text-[46px] ${DISPLAY}`}
-                >
-                  {doc.title}
-                </h1>
+              <div className="mt-[24px]">
+                <Tag icon={Icon}>Legal</Tag>
               </div>
-              <p className="mt-[20px] max-w-[64ch] text-[17px] leading-[1.65] tracking-[-0.012em] text-zinc-400 [text-wrap:pretty] md:text-[18px]">
+              <h1 className={`mt-[18px] min-w-0 text-[36px] text-white sm:text-[42px] md:text-[48px] ${DISPLAY}`}>{doc.title}</h1>
+              <p className="mt-[18px] max-w-[64ch] text-[17px] leading-[1.65] tracking-[-0.012em] text-zinc-300 [text-wrap:pretty] md:text-[18px]">
                 {summary}
               </p>
               <p className="mt-[20px] flex flex-wrap items-center gap-x-[12px] gap-y-[4px] text-[13px] text-zinc-400">
@@ -156,8 +151,8 @@ export function LegalSection({
   return (
     <section id={id} aria-labelledby={`${id}-heading`} className="scroll-mt-[100px]">
       <h2 id={`${id}-heading`} className={`group text-[23px] text-white md:text-[26px] ${TITLE}`}>
-        <a href={`#${id}`} className="rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300">
-          {number !== undefined && <span className="mr-[10px] tabular-nums text-zinc-500">{number}.</span>}
+        <a href={`#${id}`} className="rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70">
+          {number !== undefined && <span className="mr-[10px] tabular-nums text-faint">{number}.</span>}
           {title}
           <span aria-hidden className="ml-[8px] text-zinc-600 opacity-0 transition-opacity duration-200 group-hover:opacity-100">
             #
@@ -231,7 +226,7 @@ function PolicyList({ current }: { current: PolicyId }) {
               <Link
                 href={p.href}
                 aria-current={active ? 'page' : undefined}
-                className={`group flex items-center gap-[10px] rounded-[8px] px-[10px] py-[7px] text-[14px] tracking-[-0.006em] transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-violet-300 ${
+                className={`group flex items-center gap-[10px] rounded-[8px] px-[10px] py-[7px] text-[14px] tracking-[-0.006em] transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/70 ${
                   active ? 'bg-white/[0.06] font-normal text-white' : 'text-zinc-400 hover:bg-white/[0.03] hover:text-zinc-100'
                 }`}
               >
@@ -265,7 +260,7 @@ function PolicyMenu({ current }: { current: PolicyId }) {
       key={current}
       className="group rounded-[8px] border border-white/[0.09] bg-[linear-gradient(180deg,rgba(255,255,255,0.028),rgba(255,255,255,0.008))] lg:hidden"
     >
-      <summary className="flex cursor-pointer list-none items-center justify-between gap-[12px] rounded-[8px] px-[14px] py-[12px] text-[14px] text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300 [&::-webkit-details-marker]:hidden">
+      <summary className="flex cursor-pointer list-none items-center justify-between gap-[12px] rounded-[8px] px-[14px] py-[12px] text-[14px] text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70 [&::-webkit-details-marker]:hidden">
         <span className="flex min-w-0 items-center gap-[10px]">
           <Icon aria-hidden strokeWidth={1.75} className="h-[15px] w-[15px] shrink-0 text-zinc-300" />
           <span className="truncate">{doc.title}</span>
@@ -287,7 +282,7 @@ function PolicyPager({ current }: { current: PolicyId }) {
   const index = POLICIES.findIndex((p) => p.id === current)
   const previous = index > 0 ? POLICIES[index - 1] : undefined
   const next = index < POLICIES.length - 1 ? POLICIES[index + 1] : undefined
-  const pager = `group flex min-w-0 flex-col gap-[8px] p-[20px] transition-colors duration-200 hover:border-white/[0.13] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300 ${PANEL}`
+  const pager = `group flex min-w-0 flex-col gap-[8px] p-[20px] transition-colors duration-200 hover:border-white/[0.13] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70 ${PANEL}`
 
   return (
     <nav aria-label="Previous and next document" className="mt-[72px] grid gap-[12px] sm:grid-cols-2">

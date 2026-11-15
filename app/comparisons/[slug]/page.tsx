@@ -1,13 +1,12 @@
 import type { Metadata } from 'next'
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
-import { ArrowRight, ChevronRight } from 'lucide-react'
+import { ArrowRight, ArrowRightLeft, ChevronRight, Signpost } from 'lucide-react'
 import { safeJsonLd } from '@/lib/security/safe-jsonld'
 import { pageMetadata } from '@/lib/seo/metadata'
 import { SiteShell } from '@/components/site/SiteShell'
-import { BentoCell, CellBody, CellTitle } from '@/components/landing-v7/shared'
+import { Box, BoxHead, BoxLink, Pane, Panes } from '@/components/landing-v8/Box'
 import {
-  ArrowLink,
   ButtonLink,
   ComparisonTable,
   GlyphList,
@@ -43,10 +42,13 @@ const APP_URL = 'https://backenly.com'
    landing FAQ's own header (a line and two links under the title), and every
    card under "More comparisons" says what is on the other side of it.
 
-   The bento cells and fact chips are the landing's (components/landing-v7).
-   Plain class strings are restated here rather than imported, because a
-   string exported from that client module would arrive in this server page
-   as a client reference.
+   2026-11-15 (site-wide pass, to match the v8 landing): the three points sit
+   in one joined strip, the choice and the move are the landing's lit boxes,
+   and the table is even-handed (no violet wash on Backenly's column; both
+   sides of the choice are set alike, the other option first). Plain class
+   strings are restated here rather than imported, because a string exported
+   from a client module would arrive in this server page as a client
+   reference.
 ───────────────────────────────────────────────────────────── */
 
 /** The landing bento's fact chip. */
@@ -59,7 +61,7 @@ const CHIP =
  * reference rather than the string. Keep them equal to ROUTES.docs and
  * ROUTES.founder.
  */
-const DOCS_HREF = '/docs/database'
+const DOCS_HREF = '/docs/connect'
 const FOUNDERS_HREF = 'https://calendly.com/adarsh-c-jose/30min'
 
 /** The gap between a section title and its first cell. */
@@ -122,7 +124,7 @@ export default async function ComparisonSlugPage(props: { params: Promise<{ slug
   const others = COMPARISON_LIST.filter((x) => x.slug !== c.slug)
 
   return (
-    <SiteShell>
+    <SiteShell footerLit>
       <JsonLd json={safeJsonLd(faqSchema)} />
       <JsonLd json={safeJsonLd(breadcrumbSchema)} />
       <Page>
@@ -135,6 +137,7 @@ export default async function ComparisonSlugPage(props: { params: Promise<{ slug
           ]}
           title={c.headline}
           lede={c.intro}
+          rule={false}
           actions={
             <>
               <StartButton />
@@ -145,30 +148,23 @@ export default async function ComparisonSlugPage(props: { params: Promise<{ slug
           }
         />
 
-        {/* The difference in three short points, before any detail. */}
+        {/* The difference in three short points, before any detail: one joined strip, set like the landing's cells. */}
         <Section flush aria-labelledby="at-a-glance">
           <h2 id="at-a-glance" className="sr-only">
             At a glance
           </h2>
-          <div className="grid gap-[12px] lg:grid-cols-3">
+          <ul className="grid gap-px overflow-hidden rounded-[10px] border border-white/[0.10] bg-white/[0.08] lg:grid-cols-3">
             {c.architecture.map((point) => (
-              <BentoCell key={point.heading}>
-                <CellTitle>{point.heading}</CellTitle>
-                <CellBody>{point.body}</CellBody>
-              </BentoCell>
+              <li key={point.heading} className="min-w-0 bg-[#0b0c0f] p-[24px] lg:p-[28px]">
+                <h3 className="text-[16px] font-medium tracking-[-0.012em] text-white">{point.heading}</h3>
+                <p className="mt-[12px] text-[15px] leading-[1.6] text-zinc-400 [text-wrap:pretty]">{point.body}</p>
+              </li>
             ))}
-          </div>
+          </ul>
         </Section>
 
         <Section aria-labelledby="side-by-side">
-          <SectionHead
-            id="side-by-side"
-            title={
-              <>
-                Side by side. <span className="text-zinc-500">What changes in practice.</span>
-              </>
-            }
-          />
+          <SectionHead id="side-by-side" title="Side by side" lede="What changes in practice, capability by capability." />
           <div className={BODY_GAP}>
             <ComparisonTable
               caption={`Backenly compared with ${name}, by capability`}
@@ -179,56 +175,48 @@ export default async function ComparisonSlugPage(props: { params: Promise<{ slug
           {c.facts.length > 0 && <Sources competitor={c.competitor} facts={c.facts} />}
         </Section>
 
-        <Section aria-labelledby="which-to-pick">
-          <SectionHead id="which-to-pick" title="Which one to pick" lede={c.summary} />
-          <div className={`${BODY_GAP} grid gap-[12px] md:grid-cols-2`}>
-            <BentoCell>
-              <CellTitle>Choose {name} when</CellTitle>
-              <GlyphList glyph="dash" items={c.chooseCompetitorWhen} className="mt-[20px]" />
-            </BentoCell>
-            <BentoCell bare>
-              <span
-                aria-hidden
-                className="pointer-events-none absolute inset-x-0 top-0 h-px bg-[linear-gradient(to_right,transparent,rgba(196,181,253,0.7),transparent)]"
-              />
-              <div className="p-[20px] md:p-[26px]">
-                <CellTitle>Choose Backenly when</CellTitle>
-                <GlyphList glyph="check" items={c.chooseBackenlyWhen} className="mt-[20px]" />
-              </div>
-            </BentoCell>
-          </div>
-        </Section>
+        {/* The choice, even-handed: the other option first, both sides set alike. */}
+        <Box id="which-to-pick" light={{ art: 'c' }}>
+          <BoxHead id="which-to-pick" layout="stacked" tag={{ icon: Signpost, label: 'Choosing' }} title="Which one to pick" body={c.summary} />
+          <Panes>
+            <Pane title={`Choose ${name} when`}>
+              <GlyphList items={c.chooseCompetitorWhen} />
+            </Pane>
+            <Pane title="Choose Backenly when">
+              <GlyphList items={c.chooseBackenlyWhen} />
+            </Pane>
+          </Panes>
+        </Box>
 
         {/* Moving across. What stays the reader's work is never softened. */}
         {c.migration && (
-          <Section aria-labelledby="moving">
-            <div className="grid gap-[40px] lg:grid-cols-[minmax(0,4fr)_minmax(0,7fr)] lg:gap-[64px]">
-              <div>
-                <SectionHead id="moving" title={c.migration.heading} lede={c.migration.body} />
-                {c.migration.link && (
-                  <ArrowLink href={c.migration.link.href} className="mt-[24px]">
-                    {c.migration.link.label}
-                  </ArrowLink>
-                )}
-              </div>
-              <BentoCell>
-                {c.migration.carries && (
-                  <div className="mb-[28px] border-b border-white/[0.07] pb-[28px]">
-                    <CellTitle>What carries over</CellTitle>
-                    <ul className="mt-[16px] flex flex-wrap gap-[6px]">
-                      {c.migration.carries.map((item) => (
-                        <li key={item} className={CHIP}>
-                          {item}
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
-                <CellTitle>What stays your work</CellTitle>
-                <GlyphList glyph="dash" items={c.migration.limits} className="mt-[16px]" />
-              </BentoCell>
-            </div>
-          </Section>
+          <Box id="moving" light={{ art: 'c', flip: true }}>
+            <BoxHead
+              id="moving"
+              tag={{ icon: ArrowRightLeft, label: 'Moving' }}
+              title={c.migration.heading}
+              body={c.migration.body}
+              extra={c.migration.link && <BoxLink href={c.migration.link.href}>{c.migration.link.label}</BoxLink>}
+              visual={
+                <div className="min-w-0 rounded-[8px] border border-white/[0.07] bg-[#0a0a0d] p-[20px] sm:p-[28px]">
+                  {c.migration.carries && (
+                    <div className="mb-[24px] border-b border-white/[0.07] pb-[24px]">
+                      <h3 className="text-[15px] font-medium text-white">What carries over</h3>
+                      <ul className="mt-[14px] flex flex-wrap gap-[6px]">
+                        {c.migration.carries.map((item) => (
+                          <li key={item} className={CHIP}>
+                            {item}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  <h3 className="text-[15px] font-medium text-white">What stays your work</h3>
+                  <GlyphList glyph="dash" items={c.migration.limits} className="mt-[14px]" />
+                </div>
+              }
+            />
+          </Box>
         )}
 
         <Section aria-labelledby="comparison-faq">
@@ -296,7 +284,7 @@ export default async function ComparisonSlugPage(props: { params: Promise<{ slug
 function Sources({ competitor, facts }: { competitor: string; facts: ExternalFact[] }) {
   return (
     <details className="group/sources mt-[20px]">
-      <summary className="inline-flex cursor-pointer list-none items-center gap-[6px] rounded-sm text-[14px] text-zinc-400 transition-colors duration-200 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300 [&::-webkit-details-marker]:hidden">
+      <summary className="inline-flex cursor-pointer list-none items-center gap-[6px] rounded-sm text-[14px] text-zinc-400 transition-colors duration-200 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70 [&::-webkit-details-marker]:hidden">
         <ChevronRight
           aria-hidden
           className="h-[14px] w-[14px] transition-transform duration-200 group-open/sources:rotate-90"

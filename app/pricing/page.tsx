@@ -8,18 +8,22 @@ import {
   Bot,
   Check,
   Database,
+  Github,
+  HeartPulse,
   KeyRound,
   Layers,
   LifeBuoy,
   Minus,
   Radio,
+  Receipt,
   ShieldCheck,
   UploadCloud,
   Zap,
   type LucideIcon,
 } from 'lucide-react'
 import { ROUTES, SiteShell } from '@/components/site/SiteShell'
-import { HorizonClose, Page, Section, SectionHead } from '@/components/site/kit'
+import { CloseBox, Page, Section, SectionHead } from '@/components/site/kit'
+import { Box, BoxHead, Cells, Light } from '@/components/landing-v8/Box'
 import { Faq } from '@/components/site/Faq'
 import { StartButton } from '@/components/site/StartButton'
 import { CONTAINER, DISPLAY, HEADING, LEDE, PRIMARY_CTA, SECONDARY_CTA, TEXT_LINK } from '@/components/site/tokens'
@@ -46,12 +50,21 @@ import {
    Self-healing is identical on every plan (every minute, no cap, never billed
    to AI credits). It is listed once, on Free, and reaches the other plans
    through "Everything in Free, plus", so it can never read as a reason to
-   upgrade. Violet marks one thing: the recommended plan.
+   upgrade. The recommended plan is marked by a white top edge, a lighter
+   surface and the word "Recommended", never by colour alone.
 
-   The comparison is one table at every width. From md up the plan header
-   sticks under the navbar (68px), which needs no overflow on its ancestors;
-   below md the table scrolls inside its own focusable region with the row
-   labels pinned, so the page itself never scrolls sideways.
+   Less violet (founders, 2026-11-15, with Blaxel's pricing page: "reduce
+   purple gradient colors"): the painted light runs at well under half
+   strength in the head and the billing box, and none sits on a plan; the
+   page ends in a framed closing whose light is held inside the box, with the
+   footer unlit. A light middle section was tried the same day and dropped
+   (founders: "black is better").
+
+   The comparison is one table from md up, its plan header stuck under the
+   navbar (68px), which needs no overflow on its ancestors. A phone shows one
+   plan at a time beside the labels, picked in a bar stuck under the navbar
+   (site-wide pass, 2026-11-15: the sideways-scrolling table hid two of the
+   three plans), so the page never scrolls sideways.
 
    The startup program is not on this page. It has its own page at /startups,
    which Backenly Cloud provides together with the application behind it.
@@ -343,21 +356,15 @@ export default function PricingPage() {
             Columns go 1 -> 3, never 2 + 1. */}
         <section aria-labelledby="pricing-title" className="relative isolate pt-[32px] md:pt-[48px]">
           <div className={CONTAINER}>
-            <div className="overflow-hidden rounded-2xl border border-white/[0.08] bg-white/[0.012]">
-              <header className="relative isolate border-b border-white/[0.07] px-[20px] pb-[40px] pt-[44px] text-center md:pb-[48px] md:pt-[60px]">
-                {/* The site's key light, centred over the title. */}
-                <div
-                  aria-hidden
-                  className="pointer-events-none absolute left-1/2 top-[-200px] -z-10 h-[440px] w-[820px] max-w-none -translate-x-1/2 bg-[radial-gradient(closest-side,rgba(255,255,255,0.07),transparent)]"
-                />
-                <h1
-                  id="pricing-title"
-                  className={`hero-enter bg-gradient-to-b from-white from-40% to-zinc-400 bg-clip-text pb-[4px] text-[40px] text-transparent md:text-[52px] ${DISPLAY}`}
-                >
+            <div className="overflow-hidden rounded-[10px] border border-white/[0.10] bg-[#0b0c0f]">
+              <header className="relative isolate overflow-hidden border-b border-white/[0.08] px-[20px] pb-[40px] pt-[44px] text-center md:pb-[48px] md:pt-[60px]">
+                {/* The landing's painted light, at well under half strength (founders: less violet), faded out before the plans. */}
+                <Light art="b" reach={420} strength={0.4} mask="linear-gradient(to bottom, rgba(0,0,0,0.5) 0%, rgba(0,0,0,0.55) 50%, transparent 100%)" />
+                <h1 id="pricing-title" className={`hero-enter text-[44px] text-white md:text-[56px] ${DISPLAY}`}>
                   Pricing
                 </h1>
-                <p className={`hero-enter hero-enter-1 mx-auto mt-[12px] max-w-[52ch] text-[16px] text-zinc-400 [text-wrap:balance] md:text-[18px] ${LEDE}`}>
-                  Start free. Upgrade when you need more capacity.
+                <p className={`hero-enter hero-enter-1 mx-auto mt-[14px] max-w-[54ch] text-[17px] text-zinc-300 [text-wrap:balance] md:text-[18px] ${LEDE}`}>
+                  Start free. You pay for capacity; self-healing is on every plan and never metered.
                 </p>
                 <div className="hero-enter hero-enter-2 mt-[28px] flex justify-center">
                   <CadenceSwitch value={cadence} onChange={setCadence} />
@@ -381,6 +388,31 @@ export default function PricingPage() {
           </div>
         </section>
 
+        {/* The four billing facts that hold on every plan (checked against this page's own FAQ and lib/pricing/catalog.ts), under a quiet light. */}
+        <Box id="billing-title" light={{ art: 'c', flip: true, strength: 0.4 }}>
+          <BoxHead
+            id="billing-title"
+            layout="stacked"
+            tag={{ icon: Receipt, label: 'Billing' }}
+            title="How billing works"
+            body="What you pay for, and what you never pay for, on every plan."
+          />
+          <Cells
+            items={[
+              { icon: HeartPulse, title: 'Self-healing is never metered', body: 'The same check every minute on every plan, Free included, with no cap and no credits spent.' },
+              {
+                icon: ShieldCheck,
+                title: 'No surprise bills',
+                body: published
+                  ? 'Every quota is a hard cap unless you set a spend limit, paid in advance.'
+                  : 'Every quota is a hard cap. Nothing is billed past what your plan includes.',
+              },
+              { icon: Bot, title: 'Your agent’s tools are free', body: 'The typed MCP tools compile straight to SQL with no model call, so they never use AI credits.' },
+              { icon: Github, title: 'Self-host for free', body: 'Apache-2.0. The same code on your own servers; pg_dump moves your data either way.', href: ROUTES.github, link: 'View on GitHub' },
+            ]}
+          />
+        </Box>
+
         <ComparisonSection published={published} cadence={cadence} onCta={handleCta} />
 
         <Section aria-labelledby="pricing-faq">
@@ -402,12 +434,13 @@ export default function PricingPage() {
           </div>
         </Section>
 
-        <HorizonClose
+        <CloseBox
+          id="pricing-close"
           title="Start with one free project"
           lede="No credit card. Move to Pro when your product needs more capacity."
         >
           <StartButton />
-        </HorizonClose>
+        </CloseBox>
       </Page>
     </SiteShell>
   )
@@ -415,15 +448,33 @@ export default function PricingPage() {
 
 /* ── Plans ───────────────────────────────────────────────────────────────── */
 
-/**
- * The billing period as a segmented control. A radio group with a roving tab
- * stop: Tab reaches the selected option, the arrow keys move between them.
- */
+const CADENCES: { id: Cadence; label: string; note?: string }[] = [
+  { id: 'monthly', label: 'Monthly' },
+  { id: 'yearly', label: 'Yearly', note: '20% off' },
+]
+
 function CadenceSwitch({ value, onChange }: { value: Cadence; onChange: (next: Cadence) => void }) {
-  const options: { id: Cadence; label: string; note?: string }[] = [
-    { id: 'monthly', label: 'Monthly' },
-    { id: 'yearly', label: 'Yearly', note: 'Save 20%' },
-  ]
+  return <Segmented label="Billing period" options={CADENCES} value={value} onChange={onChange} />
+}
+
+/**
+ * A segmented control: a radio group with a roving tab stop. Tab reaches the
+ * selected option, the arrow keys move between them.
+ */
+function Segmented<T extends string>({
+  label,
+  options,
+  value,
+  onChange,
+  full = false,
+}: {
+  label: string
+  options: { id: T; label: string; note?: string }[]
+  value: T
+  onChange: (next: T) => void
+  /** Fill the row, the options sharing it equally (the phone plan picker). */
+  full?: boolean
+}) {
   const refs = useRef<(HTMLButtonElement | null)[]>([])
 
   function onKeyDown(event: KeyboardEvent<HTMLButtonElement>, index: number) {
@@ -439,8 +490,8 @@ function CadenceSwitch({ value, onChange }: { value: Cadence; onChange: (next: C
   return (
     <div
       role="radiogroup"
-      aria-label="Billing period"
-      className="inline-flex shrink-0 rounded-[8px] border border-white/[0.10] bg-white/[0.03] p-[3px]"
+      aria-label={label}
+      className={`${full ? 'flex w-full' : 'inline-flex'} shrink-0 rounded-[8px] border border-white/[0.10] bg-white/[0.03] p-[3px]`}
     >
       {options.map((option, index) => {
         const selected = value === option.id
@@ -456,22 +507,12 @@ function CadenceSwitch({ value, onChange }: { value: Cadence; onChange: (next: C
             tabIndex={selected ? 0 : -1}
             onClick={() => onChange(option.id)}
             onKeyDown={(event) => onKeyDown(event, index)}
-            className={`inline-flex h-[34px] cursor-pointer items-center gap-[8px] rounded-[6px] px-[14px] text-[14px] font-medium tracking-[-0.006em] transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300 ${
-              selected
-                ? 'bg-white/[0.10] text-white shadow-[inset_0_0_0_1px_rgba(255,255,255,0.08)]'
-                : 'text-zinc-400 hover:text-zinc-200'
-            }`}
+            className={`inline-flex h-[34px] cursor-pointer items-center gap-[8px] rounded-[6px] px-[14px] text-[14px] font-medium tracking-[-0.006em] transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70 ${
+              full ? 'flex-1 justify-center' : ''
+            } ${selected ? 'bg-white/[0.10] text-white shadow-[inset_0_0_0_1px_rgba(255,255,255,0.08)]' : 'text-zinc-400 hover:text-zinc-200'}`}
           >
             {option.label}
-            {option.note && (
-              <span
-                className={`rounded-[5px] px-[6px] py-[1px] text-[12px] font-medium ${
-                  selected ? 'bg-white/[0.12] text-zinc-100' : 'bg-white/[0.05] text-zinc-400'
-                }`}
-              >
-                {option.note}
-              </span>
-            )}
+            {option.note && <span className={`text-[13px] font-normal ${selected ? 'text-zinc-300' : 'text-faint'}`}>{option.note}</span>}
           </button>
         )
       })}
@@ -503,36 +544,35 @@ function PlanColumn({
         : 'Annual agreement, invoiced'
 
   const ctaClass = `${plan.highlighted ? PRIMARY_CTA : SECONDARY_CTA} w-full`
+  const quiet = plan.highlighted ? 'text-zinc-300' : 'text-faint'
 
   return (
     <article
       aria-labelledby={`plan-${plan.name}`}
-      className={`flex min-w-0 flex-col p-[24px] sm:p-[28px] md:p-[32px] ${
-        divided ? 'border-t border-white/[0.07] lg:border-l lg:border-t-0' : ''
-      } ${plan.highlighted ? 'bg-white/[0.035] shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]' : ''}`}
+      className={`relative isolate flex min-w-0 flex-col overflow-hidden p-[24px] sm:p-[28px] md:p-[32px] ${
+        divided ? 'border-t border-white/[0.08] lg:border-l lg:border-t-0' : ''
+      } ${plan.highlighted ? 'bg-white/[0.03]' : ''}`}
     >
+      {/* Pro is marked by a white top edge, a lighter surface and the word, never by colour alone, and by no violet light. */}
+      {plan.highlighted && <span aria-hidden className="pointer-events-none absolute inset-x-0 top-0 h-px bg-white/70" />}
       <div className="flex min-h-[26px] items-center justify-between gap-[12px]">
         <h3 id={`plan-${plan.name}`} className={`text-[17px] text-white ${HEADING}`}>
           {plan.name}
         </h3>
-        {plan.highlighted && (
-          <span className="rounded-[6px] border border-violet-300/25 bg-violet-400/[0.08] px-[8px] py-[2px] text-[12px] font-medium text-violet-200">
-            Recommended
-          </span>
-        )}
+        {plan.highlighted && <span className="text-[13px] text-zinc-300">Recommended</span>}
       </div>
 
       <p className="mt-[20px] flex flex-wrap items-baseline gap-x-[8px] gap-y-[4px]">
-        <span className="text-[44px] font-semibold leading-none tracking-[-0.04em] text-white tabular-nums">{price}</span>
+        <span className="text-[44px] font-normal leading-none tracking-[-0.035em] text-white tabular-nums">{price}</span>
         {plan.name === 'Pro' && yearly && (
-          <s className="text-[20px] font-medium tracking-[-0.02em] text-zinc-500 tabular-nums">
+          <s className={`text-[20px] tracking-[-0.02em] tabular-nums ${quiet}`}>
             <span className="sr-only">Month to month: </span>
             {PRO_MONTHLY}
           </s>
         )}
-        {unit && <span className="text-[15px] text-zinc-500">{unit}</span>}
+        {unit && <span className={`text-[15px] ${quiet}`}>{unit}</span>}
       </p>
-      <p className="mt-[10px] text-[13px] text-zinc-500" aria-live="polite">
+      <p className={`mt-[10px] text-[13px] ${quiet}`} aria-live="polite">
         {priceNote}
       </p>
 
@@ -558,10 +598,10 @@ function PlanColumn({
         <ul className="mt-[14px] flex flex-col gap-[11px]">
           {plan.items.map((item) => (
             <li key={item.text} className="flex gap-[10px] text-[14px] leading-[1.55] text-zinc-300">
-              <Check aria-hidden className="mt-[3px] h-[15px] w-[15px] shrink-0 text-zinc-500" strokeWidth={2} />
+              <Check aria-hidden className="mt-[3px] h-[15px] w-[15px] shrink-0 text-zinc-400" strokeWidth={2} />
               <span className="min-w-0 [text-wrap:pretty]">
                 {item.text}
-                {item.note && <span className="mt-[2px] block text-[13px] text-zinc-500">{item.note}</span>}
+                {item.note && <span className="mt-[2px] block text-[13px] text-faint">{item.note}</span>}
               </span>
             </li>
           ))}
@@ -576,10 +616,44 @@ function PlanColumn({
 /** Solid ground for the cells that stick, so rows scrolling under them are hidden. */
 const STUCK = 'bg-[#08090a]'
 
+type PlanName = 'Free' | 'Pro' | 'Enterprise'
+type PlanHead = { name: PlanName; price: string; unit: string; cta: string }
+
+const PLAN_PICKS: { id: PlanName; label: string }[] = [
+  { id: 'Free', label: 'Free' },
+  { id: 'Pro', label: 'Pro' },
+  { id: 'Enterprise', label: 'Enterprise' },
+]
+
+const PLAN_BUTTON =
+  'inline-flex h-[36px] cursor-pointer items-center justify-center rounded-[6px] px-[16px] text-[13px] font-medium transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70'
+const PLAN_BUTTON_QUIET = `${PLAN_BUTTON} border border-white/[0.12] bg-white/[0.03] text-zinc-200 hover:border-white/25 hover:bg-white/[0.07] hover:text-white`
+
+/** A plan's button, the same in the table and on a phone: Enterprise is an email, the others start checkout or sign-up. */
+function PlanCta({ head, onCta, className = '' }: { head: PlanHead; onCta: () => void; className?: string }) {
+  if (head.name === 'Enterprise') {
+    return (
+      <a href={ENTERPRISE_MAIL} className={`${PLAN_BUTTON_QUIET} ${className}`}>
+        {head.cta}
+      </a>
+    )
+  }
+  return (
+    <button
+      type="button"
+      onClick={onCta}
+      className={`${head.name === 'Pro' ? `${PLAN_BUTTON} bg-white text-black hover:bg-zinc-200` : PLAN_BUTTON_QUIET} ${className}`}
+    >
+      {head.cta}
+    </button>
+  )
+}
+
 function ComparisonSection({ published, cadence, onCta }: { published: boolean; cadence: Cadence; onCta: () => void }) {
   const groups = comparisonGroups(published)
+  const [pick, setPick] = useState<PlanName>('Pro')
   const yearly = cadence === 'yearly'
-  const heads = [
+  const heads: PlanHead[] = [
     { name: 'Free', price: '$0', unit: '/month', cta: 'Start free' },
     {
       name: 'Pro',
@@ -589,42 +663,65 @@ function ComparisonSection({ published, cadence, onCta }: { published: boolean; 
     },
     { name: 'Enterprise', price: 'Custom', unit: 'annual', cta: 'Talk to us' },
   ]
-  // The row label column stays in view while a phone scrolls the plans sideways.
-  // Solid only below md: from md up the frame does not clip, so a solid square
-  // cell in the last row would paint over the frame's rounded corner. Written
-  // out in full because Tailwind only generates classes it finds literally.
-  const pinned = 'max-md:sticky max-md:left-0 max-md:z-[1] max-md:bg-[#08090a]'
-  const button =
-    'mt-[14px] inline-flex h-[36px] w-full cursor-pointer items-center justify-center rounded-[8px] text-[13px] font-semibold transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300'
-  const quietButton = `${button} border border-white/[0.12] bg-white/[0.03] text-zinc-200 hover:border-white/25 hover:bg-white/[0.07] hover:text-white`
+  const shown = heads.findIndex((head) => head.name === pick)
+  const shownHead = heads[shown]
 
   return (
     <Section id="compare" aria-labelledby="compare-title" className="scroll-mt-[72px]">
       <SectionHead
         id="compare-title"
-        title={
-          <>
-            Compare the plans.{' '}
-            <span className="text-zinc-500">Every limit, side by side.</span>
-          </>
-        }
+        title="Every limit, side by side"
         lede={
           published
             ? 'Pro’s quotas are shared by every project on your account. Past a quota, nothing is billed unless you set a spend limit and pay it in advance. Usage then continues at the rates shown, never past that limit.'
-            : 'Enterprise adds custom limits, single sign-on, onboarding and migration help, and a 12-hour SLA.'
+            : (
+                <>
+                  Enterprise adds custom limits, single <span className="whitespace-nowrap">sign-on</span>, onboarding and migration
+                  help, and a <span className="whitespace-nowrap">12-hour</span> SLA.
+                </>
+              )
         }
       />
 
-      <div
-        role="region"
-        aria-label="Plan comparison table"
-        tabIndex={0}
-        className="mt-[48px] overflow-x-auto rounded-2xl border border-white/[0.07] focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-300 md:mt-[64px] md:overflow-visible"
-      >
-        <table className="w-full min-w-[600px] table-fixed border-separate border-spacing-0 text-left md:min-w-0">
+      {/* Phones: one plan beside the labels, chosen in a bar that stays under the navbar while the list scrolls. */}
+      <div className="mt-[40px] md:hidden">
+        <div className="sticky top-[68px] z-10 -mx-5 bg-[#08090a] px-5 py-[10px] sm:-mx-6 sm:px-6">
+          <Segmented<PlanName> label="Plan to compare" options={PLAN_PICKS} value={pick} onChange={setPick} full />
+        </div>
+        <div className="mt-[20px] flex items-center justify-between gap-[16px]">
+          <p className="flex min-w-0 flex-wrap items-baseline gap-x-[6px]">
+            <span className="text-[22px] font-medium tracking-[-0.02em] text-white tabular-nums">{shownHead.price}</span>
+            <span className="text-[13px] text-faint">{shownHead.unit}</span>
+          </p>
+          <PlanCta head={shownHead} onCta={onCta} className="shrink-0" />
+        </div>
+        {groups.map((group) => (
+          <div key={group.title} className="mt-[32px]">
+            <h3>
+              <GroupTitle group={group} />
+            </h3>
+            <dl className="mt-[12px]">
+              {group.rows.map((row) => (
+                <div key={row.label} className="grid grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)] gap-x-[16px] border-t border-white/[0.06] py-[14px]">
+                  <dt>
+                    <p className="text-[14px] font-medium leading-[1.5] text-zinc-200">{row.label}</p>
+                    {row.hint && <p className="mt-[4px] text-[13px] leading-[1.5] text-faint">{row.hint}</p>}
+                  </dt>
+                  <dd className="text-[14px] leading-[1.5]">
+                    <CellView cell={row.cells[shown]} />
+                  </dd>
+                </div>
+              ))}
+            </dl>
+          </div>
+        ))}
+      </div>
+
+      <div className="mt-[64px] hidden rounded-[10px] border border-white/[0.10] md:block">
+        <table className="w-full table-fixed border-separate border-spacing-0 text-left">
           <caption className="sr-only">Backenly plans compared, feature by feature</caption>
           <colgroup>
-            <col className="w-[28%] md:w-[31%]" />
+            <col className="w-[31%]" />
             <col />
             <col className="bg-white/[0.022]" />
             <col />
@@ -632,7 +729,7 @@ function ComparisonSection({ published, cadence, onCta }: { published: boolean; 
           <thead>
             <tr>
               <th
-                className={`${STUCK} ${pinned} rounded-tl-2xl border-b border-white/[0.08] px-[20px] py-[20px] align-bottom md:sticky md:top-[68px] md:z-10 md:px-[24px]`}
+                className={`${STUCK} sticky top-[68px] z-10 rounded-tl-[10px] border-b border-white/[0.08] px-[24px] py-[20px] align-bottom`}
               >
                 <span className="sr-only">Feature</span>
               </th>
@@ -640,28 +737,16 @@ function ComparisonSection({ published, cadence, onCta }: { published: boolean; 
                 <th
                   key={head.name}
                   scope="col"
-                  className={`border-b border-white/[0.08] px-[16px] py-[20px] align-top font-normal md:sticky md:top-[68px] md:z-10 md:px-[24px] ${
+                  className={`sticky top-[68px] z-10 border-b border-white/[0.08] px-[16px] py-[20px] align-top font-normal lg:px-[24px] ${
                     head.name === 'Pro' ? 'bg-[#0d0e0f]' : STUCK
-                  } ${i === heads.length - 1 ? 'rounded-tr-2xl' : ''}`}
+                  } ${i === heads.length - 1 ? 'rounded-tr-[10px]' : ''}`}
                 >
-                  <p className="text-[15px] font-semibold text-white">{head.name}</p>
+                  <p className="text-[15px] font-medium text-white">{head.name}</p>
                   <p className="mt-[4px] flex flex-wrap items-baseline gap-x-[6px]">
-                    <span className="text-[20px] font-semibold tracking-[-0.02em] text-white tabular-nums">{head.price}</span>
-                    <span className="text-[13px] text-zinc-500">{head.unit}</span>
+                    <span className="text-[20px] font-medium tracking-[-0.02em] text-white tabular-nums">{head.price}</span>
+                    <span className="text-[13px] text-faint">{head.unit}</span>
                   </p>
-                  {head.name === 'Enterprise' ? (
-                    <a href={ENTERPRISE_MAIL} className={quietButton}>
-                      {head.cta}
-                    </a>
-                  ) : (
-                    <button
-                      type="button"
-                      onClick={onCta}
-                      className={head.name === 'Pro' ? `${button} bg-white text-black hover:bg-zinc-200` : quietButton}
-                    >
-                      {head.cta}
-                    </button>
-                  )}
+                  <PlanCta head={head} onCta={onCta} className="mt-[14px] w-full" />
                 </th>
               ))}
             </tr>
@@ -669,7 +754,7 @@ function ComparisonSection({ published, cadence, onCta }: { published: boolean; 
           {groups.map((group) => (
             <tbody key={group.title}>
               <tr>
-                <th colSpan={4} scope="colgroup" className="px-[20px] pb-[12px] pt-[36px] text-left font-normal md:px-[24px]">
+                <th colSpan={4} scope="colgroup" className="px-[24px] pb-[12px] pt-[36px] text-left font-normal">
                   <GroupTitle group={group} />
                 </th>
               </tr>
@@ -677,13 +762,13 @@ function ComparisonSection({ published, cadence, onCta }: { published: boolean; 
                 <tr key={row.label}>
                   <th
                     scope="row"
-                    className={`${pinned} border-t border-white/[0.06] px-[20px] py-[14px] align-top font-normal md:px-[24px]`}
+                    className="border-t border-white/[0.06] px-[24px] py-[14px] align-top font-normal"
                   >
                     <p className="text-[14px] font-medium leading-[1.5] text-zinc-200">{row.label}</p>
-                    {row.hint && <p className="mt-[4px] text-[13px] leading-[1.5] text-zinc-500">{row.hint}</p>}
+                    {row.hint && <p className="mt-[4px] text-[13px] leading-[1.5] text-faint">{row.hint}</p>}
                   </th>
                   {row.cells.map((cell, i) => (
-                    <td key={heads[i].name} className="border-t border-white/[0.06] px-[16px] py-[14px] align-top text-[14px] leading-[1.5] md:px-[24px]">
+                    <td key={heads[i].name} className="border-t border-white/[0.06] px-[16px] py-[14px] align-top text-[14px] leading-[1.5] lg:px-[24px]">
                       <CellView cell={cell} />
                     </td>
                   ))}
@@ -699,10 +784,9 @@ function ComparisonSection({ published, cadence, onCta }: { published: boolean; 
 
 function GroupTitle({ group }: { group: MatrixGroup }) {
   const GroupIcon = group.icon
-  // Pinned on a phone, so the group's name stays put while the plans scroll.
   return (
-    <span className="flex w-max items-center gap-[10px] max-md:sticky max-md:left-[20px]">
-      <GroupIcon aria-hidden className="h-4 w-4 text-zinc-500" strokeWidth={1.75} />
+    <span className="flex w-max items-center gap-[10px]">
+      <GroupIcon aria-hidden className="h-4 w-4 text-zinc-400" strokeWidth={1.75} />
       <span className={`text-[15px] text-white ${HEADING}`}>{group.title}</span>
     </span>
   )
@@ -720,7 +804,7 @@ function CellView({ cell }: { cell: Cell }): ReactNode {
   if (cell === false) {
     return (
       <span className="inline-flex">
-        <Minus aria-hidden className="h-4 w-4 text-zinc-600" strokeWidth={2} />
+        <Minus aria-hidden className="h-4 w-4 text-zinc-500" strokeWidth={2} />
         <span className="sr-only">Not included</span>
       </span>
     )
@@ -729,7 +813,7 @@ function CellView({ cell }: { cell: Cell }): ReactNode {
   return (
     <div>
       <p className="text-zinc-200">{cell.value}</p>
-      {cell.then && <p className="mt-[4px] text-[13px] leading-[1.5] text-zinc-500">{cell.then}</p>}
+      {cell.then && <p className="mt-[4px] text-[13px] leading-[1.5] text-faint">{cell.then}</p>}
     </div>
   )
 }

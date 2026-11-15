@@ -7,6 +7,11 @@
  * supabase, firebase"), linked from the footer the way Easel links its
  * Migration Guide. The landing page stays as it is.
  *
+ * 2026-11-15 (founders: "more professional, more animated"): the page is now
+ * a product page (app/migrate/page.tsx) rather than a guide document; these
+ * words and facts are unchanged, and each "what comes across" row now says
+ * which of three things happens to it (`kind`), so the page can draw it.
+ *
  * Every line must stay true of the importer as built. Lines marked BUILD
  * describe behaviour the design assumes and the importer does not have yet:
  * lib/import/supabase-importer.ts covers Supabase tables, rows and auth users
@@ -48,36 +53,40 @@ export const STEPS = [
   },
 ]
 
+/** What happens to a row: it moves, it is rewritten and waits for your approval, or it stays behind. */
+export type AcrossKind = 'moves' | 'approve' | 'stays'
+
 export interface Across {
   have: string
   becomes: string
+  kind: AcrossKind
 }
 
 export const ACROSS: Record<SourceId, Across[]> = {
   supabase: [
-    { have: 'Tables and rows', becomes: 'The same tables and rows, counted on both sides before the move is called done.' },
-    { have: 'Users and their passwords', becomes: 'The same users. Supabase keeps bcrypt hashes, so everyone signs in with the password they have.' },
+    { have: 'Tables and rows', becomes: 'The same tables and rows, counted on both sides before the move is called done.', kind: 'moves' },
+    { have: 'Users and their passwords', becomes: 'The same users. Supabase keeps bcrypt hashes, so everyone signs in with the password they have.', kind: 'moves' },
     // BUILD: storage copy.
-    { have: 'Storage buckets and files', becomes: 'The same buckets and files, in Backenly storage.' },
+    { have: 'Storage buckets and files', becomes: 'The same buckets and files, in Backenly storage.', kind: 'moves' },
     // BUILD: the rewrite and the approval gate.
-    { have: 'Row-level security policies', becomes: 'Rewritten as Backenly access rules, for you to approve.' },
-    { have: 'Edge Functions and database functions', becomes: 'Not moved. Your coding agent rebuilds them as Backenly functions.' },
+    { have: 'Row-level security policies', becomes: 'Rewritten as Backenly access rules, for you to approve.', kind: 'approve' },
+    { have: 'Edge Functions and database functions', becomes: 'Not moved. Your coding agent rebuilds them as Backenly functions.', kind: 'stays' },
   ],
   firebase: [
     // BUILD: everything in this list; there is no Firebase importer yet.
-    { have: 'Firestore collections', becomes: 'Tables, one per collection, and one row per document.' },
-    { have: 'Users and their passwords', becomes: 'The same users. Backenly checks Firebase’s password hashes, so nobody resets a password.' },
-    { have: 'Users who sign in with Google or Apple', becomes: 'The same users, once your provider’s client ID is added to Backenly.' },
-    { have: 'Cloud Storage files', becomes: 'The same files, in Backenly storage.' },
-    { have: 'Security Rules', becomes: 'Rewritten as Backenly access rules, for you to approve.' },
-    { have: 'Cloud Functions and Realtime Database', becomes: 'Not moved. Your agent rebuilds the functions; Realtime Database needs its own export.' },
+    { have: 'Firestore collections', becomes: 'Tables, one per collection, and one row per document.', kind: 'moves' },
+    { have: 'Users and their passwords', becomes: 'The same users. Backenly checks Firebase’s password hashes, so nobody resets a password.', kind: 'moves' },
+    { have: 'Users who sign in with Google or Apple', becomes: 'The same users, once your provider’s client ID is added to Backenly.', kind: 'moves' },
+    { have: 'Cloud Storage files', becomes: 'The same files, in Backenly storage.', kind: 'moves' },
+    { have: 'Security Rules', becomes: 'Rewritten as Backenly access rules, for you to approve.', kind: 'approve' },
+    { have: 'Cloud Functions and Realtime Database', becomes: 'Not moved. Your agent rebuilds the functions; Realtime Database needs its own export.', kind: 'stays' },
   ],
   postgres: [
-    { have: 'Tables and rows', becomes: 'The same tables and rows, counted on both sides.' },
-    { have: 'Primary and foreign keys', becomes: 'Kept. A key that is not a UUID stays in a legacy_id column, and the rows pointing at it follow.' },
-    { have: 'Enums, arrays and binary columns', becomes: 'Kept as text and JSON. The review lists every column that changes type.' },
-    { have: 'Row-level security policies', becomes: 'Rewritten as Backenly access rules, for you to approve.' },
-    { have: 'Roles, extensions and server settings', becomes: 'Not moved. Backenly runs the database for you.' },
+    { have: 'Tables and rows', becomes: 'The same tables and rows, counted on both sides.', kind: 'moves' },
+    { have: 'Primary and foreign keys', becomes: 'Kept. A key that is not a UUID stays in a legacy_id column, and the rows pointing at it follow.', kind: 'moves' },
+    { have: 'Enums, arrays and binary columns', becomes: 'Kept as text and JSON. The review lists every column that changes type.', kind: 'moves' },
+    { have: 'Row-level security policies', becomes: 'Rewritten as Backenly access rules, for you to approve.', kind: 'approve' },
+    { have: 'Roles, extensions and server settings', becomes: 'Not moved. Backenly runs the database for you.', kind: 'stays' },
   ],
 }
 
@@ -97,6 +106,11 @@ export const SUPABASE_NOTES = [
 export const FIREBASE_NEEDS = [
   'A service account key for the project: in the Firebase console, open Project settings, then Service accounts, and press Generate new private key.',
   'Backenly reads Firestore, Authentication and Storage with it, uses it for this move only, and then discards it. Delete the key in Firebase afterwards if you like.',
+]
+
+export const POSTGRES_NEEDS = [
+  'A connection string from any host Backenly can reach: Neon, RDS, Railway, Render or your own server.',
+  'A direct connection, not a pooler. A read-only user is enough.',
 ]
 
 export const FIREBASE_NOTES = [

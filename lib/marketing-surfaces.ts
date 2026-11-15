@@ -34,6 +34,7 @@ export const marketingRoutes = [
   '/privacy',
   '/terms',
   '/refund-policy',
+  '/changelog',
 ]
 export const marketingPrefixes = [
   '/alternatives',
