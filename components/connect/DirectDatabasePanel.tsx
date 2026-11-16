@@ -5,11 +5,15 @@
  *
  *   Logins
  *   Read-only                                                                 ⋯
- *   [postgresql://bkn_ro_edc2…:•••@backenly.com:5432/backenly…         ◉ Copy]
+ *   [postgresql://bkn_ro_edc2…:•••@<DIRECT_DB_HOST>:5432/backenly…     ◉ Copy]
  *   bkn_ro_edc2173ce55c   Created Nov 11       Copy psql command  Copy pg_dump command
  *   Read-write                                                    [Create login]
  *   Reads and writes rows. Schema changes are refused unless you allow them.
  *   Each login reaches only this project's schema, over TLS. …
+ *
+ *   Where the region has no developer-facing host (status.available false),
+ *   one sentence says direct connections aren't available there, no login is
+ *   offered, and the logins that exist are listed by name with Revoke.
  *
  *   Backups
  *   [Full backup (.sql)]  Schema only  Data only
