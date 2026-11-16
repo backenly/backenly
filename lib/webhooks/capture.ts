@@ -335,7 +335,12 @@ export async function listCapturedTables(projectId: string): Promise<string[]> {
 // ── Subscription sync ────────────────────────────────────────────────────────
 
 /**
- * Which row events the project's active ROW-EVENT FUNCTIONS need captured.
+ * Which row events each table needs captured, read from the project's active
+ * row subscribers:
+ *
+ *   - a row webhook, on the tables it names, or on every table when it names
+ *     none (Webhook.tables: empty means every table);
+ *   - a row-event function (on_db_insert/update/delete), on its own table.
  *
  * on_insert/on_update/on_delete functions were documented as firing "every
  * time a row is inserted/updated/deleted", but they were only ever fired
@@ -344,47 +349,61 @@ export async function listCapturedTables(projectId: string): Promise<string[]> {
  * through those handlers, so the documented data plane never fired them.
  * The same database-level capture that fixed this for webhooks is the fix
  * here, so "fires for every writer" has one implementation, not two.
+ *
+ * Per table, not for the whole schema: the capture used to go on every table
+ * for every event any subscriber wanted, so one function on orders made every
+ * write to every table also write an outbox row nobody would read (production
+ * QA re-test, 2026-11-16: product_views carried an AFTER UPDATE capture
+ * trigger with no subscriber). Only tables that exist and may be captured are
+ * in the answer; reading them is skipped when nothing subscribes.
  */
-async function functionRowEvents(projectId: string): Promise<RowEventType[]> {
-  const fns = await prisma.aiFunction.findMany({
-    where: { projectId, status: RUNNABLE_FUNCTION_STATUS_FILTER, triggerType: { in: ROW_FUNCTION_TRIGGER_TYPES } },
-    select: { triggerType: true },
-  })
-  return [...new Set(fns.map(f => EVENT_FOR_FUNCTION_TRIGGER[f.triggerType]).filter(Boolean))]
+async function wantedCapture(projectId: string): Promise<Map<string, Set<RowEventType>>> {
+  const want = new Map<string, Set<RowEventType>>()
+  const [webhooks, functions] = await Promise.all([
+    prisma.webhook.findMany({ where: { projectId, active: true }, select: { eventType: true, tables: true } }),
+    prisma.aiFunction.findMany({
+      where: { projectId, status: RUNNABLE_FUNCTION_STATUS_FILTER, triggerType: { in: ROW_FUNCTION_TRIGGER_TYPES } },
+      select: { triggerType: true, triggerTable: true },
+    }),
+  ])
+  const rowWebhooks = webhooks.filter((w): w is { eventType: RowEventType; tables: string[] } =>
+    (ROW_EVENT_TYPES as readonly string[]).includes(w.eventType),
+  )
+  const rowFunctions = functions.filter((f) => !!f.triggerTable && !!EVENT_FOR_FUNCTION_TRIGGER[f.triggerType])
+  if (rowWebhooks.length === 0 && rowFunctions.length === 0) return want
+
+  const eligible = await capturableTables(projectId)
+  const exists = new Set(eligible)
+  const add = (table: string, event: RowEventType) => {
+    if (!exists.has(table)) return
+    const events = want.get(table) ?? new Set<RowEventType>()
+    events.add(event)
+    want.set(table, events)
+  }
+  for (const w of rowWebhooks) for (const table of w.tables.length === 0 ? eligible : w.tables) add(table, w.eventType)
+  for (const f of rowFunctions) add(f.triggerTable!, EVENT_FOR_FUNCTION_TRIGGER[f.triggerType])
+  return want
 }
 
 /**
  * Make the database's triggers match the project's active row-event
- * subscribers: webhooks AND row-event AI functions.
+ * subscribers: webhooks AND row-event AI functions, table by table.
  *
  * Called after every webhook create, edit, enable/disable and delete, after a
  * table is added, and after every function deploy/toggle/delete that touches a
  * row-event trigger — so "which events are captured" is derived from the
  * subscriber rows rather than tracked separately and allowed to drift.
  *
- * With no active row subscriber the triggers come off entirely. That is the
+ * A table no subscriber listens to carries no trigger, and one that is
+ * listened to captures only the events its subscribers want. That is the
  * difference between a feature nobody enabled costing nothing and it costing
- * an extra write on every INSERT in the project forever.
+ * an extra write on every change to every table in the project forever.
  *
  * The outbox TABLE is deliberately left behind when the last subscriber is
  * deleted: it may still hold undelivered events, and dropping it to tidy up
- * would discard them.
+ * would discard them. Rows already captured drain as before: a row nobody
+ * listens to any more reaches no webhook and queues no run.
  */
-async function wantedRowEvents(projectId: string): Promise<RowEventType[]> {
-  const active = await prisma.webhook.findMany({
-    where: { projectId, active: true },
-    select: { eventType: true },
-  })
-  return [
-    ...new Set([
-      ...active
-        .map(w => w.eventType)
-        .filter((e): e is RowEventType => (ROW_EVENT_TYPES as readonly string[]).includes(e)),
-      ...(await functionRowEvents(projectId)),
-    ]),
-  ]
-}
-
 export async function syncWebhookCapture(projectId: string): Promise<{
   events: RowEventType[]
   tables: string[]
@@ -392,11 +411,11 @@ export async function syncWebhookCapture(projectId: string): Promise<{
    *  table whose row events silently never fire until this is surfaced. */
   uncaptured: Array<{ table: string; reason: string }>
 }> {
-  const wanted = await wantedRowEvents(projectId)
+  const want = await wantedCapture(projectId)
 
   const captured = await listCapturedTables(projectId)
 
-  if (wanted.length === 0) {
+  if (want.size === 0) {
     for (const table of captured) {
       await uninstallCaptureTrigger(projectId, table).catch(err =>
         console.warn(`[webhooks] could not drop capture on ${table}:`, err?.message ?? err),
@@ -407,13 +426,12 @@ export async function syncWebhookCapture(projectId: string): Promise<{
 
   await ensureOutbox(projectId)
 
-  const eligible = await capturableTables(projectId)
   const installed: string[] = []
   const uncaptured: Array<{ table: string; reason: string }> = []
 
-  for (const table of eligible) {
+  for (const [table, events] of want) {
     try {
-      await installCaptureTrigger(projectId, table, wanted)
+      await installCaptureTrigger(projectId, table, [...events])
       installed.push(table)
     } catch (err: any) {
       // Kept, not just logged: a swallowed per-table failure meant create and
@@ -423,14 +441,15 @@ export async function syncWebhookCapture(projectId: string): Promise<{
     }
   }
 
-  // A table that lost eligibility (renamed into an underscore, became
-  // auth-managed) keeps its trigger otherwise.
-  const eligibleSet = new Set(eligible)
+  // A table nobody listens to any more, or one that lost eligibility (renamed
+  // into an underscore, became auth-managed), keeps its trigger otherwise.
   for (const table of captured) {
-    if (!eligibleSet.has(table)) await uninstallCaptureTrigger(projectId, table).catch(() => {})
+    if (!want.has(table)) await uninstallCaptureTrigger(projectId, table).catch(() => {})
   }
 
-  return { events: wanted, tables: installed, uncaptured }
+  const events = new Set<RowEventType>()
+  for (const e of want.values()) for (const event of e) events.add(event)
+  return { events: [...events], tables: installed, uncaptured }
 }
 
 /**
@@ -443,11 +462,10 @@ export async function syncWebhookCapture(projectId: string): Promise<{
  * call syncWebhookCapture.
  */
 export async function syncWebhookCaptureIfStale(projectId: string): Promise<void> {
-  const [wanted, captured] = await Promise.all([wantedRowEvents(projectId), listCapturedTables(projectId)])
-  if (wanted.length === 0 && captured.length === 0) return
-  const eligible = wanted.length === 0 ? [] : await capturableTables(projectId)
+  const [want, captured] = await Promise.all([wantedCapture(projectId), listCapturedTables(projectId)])
+  if (want.size === 0 && captured.length === 0) return
   const has = new Set(captured)
-  if (eligible.length === captured.length && eligible.every(t => has.has(t))) return
+  if (want.size === captured.length && [...want.keys()].every(t => has.has(t))) return
   await syncWebhookCapture(projectId)
 }
 
