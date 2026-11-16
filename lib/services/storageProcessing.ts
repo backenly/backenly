@@ -15,7 +15,6 @@
  */
 
 import { prisma } from '@/lib/db/postgres'
-import { uploaderOf } from '@/lib/storage/uploader'
 import path from 'path'
 import fs from 'fs/promises'
 
@@ -42,7 +41,7 @@ export interface ProcessingResult {
   processedAt: string
 }
 
-/**
+/** 
  * Enqueue processing for a newly uploaded file.
  * Non-blocking — call after the upload response has been sent.
  */
@@ -138,35 +137,11 @@ async function processImage(
 
     result.thumbnailPath = thumbPath
 
-    // Store thumbnail as a sibling file in the DB (best-effort)
-    try {
-      const stats = await fs.stat(thumbPath)
-      const originalFile = await prisma.storageFile.findUnique({
-        where: { id: fileId },
-        select: { bucketId: true, projectId: true, uploadedBy: true, metadata: true },
-      })
-      if (originalFile) {
-        // The thumbnail was sent by whoever sent the original.
-        const uploader = uploaderOf(originalFile)
-        await prisma.storageFile.create({
-          data: {
-            bucketId:    originalFile.bucketId,
-            projectId:   originalFile.projectId,
-            name:        thumbName,
-            originalName: thumbName,
-            path:        thumbPath,
-            size:        BigInt(stats.size),
-            mimeType:    'image/webp',
-            isPublic:    false,
-            uploadedBy:  originalFile.uploadedBy,
-            ...(uploader ? { metadata: { uploader: { ...uploader } } } : {}),
-            processingStatus: 'complete',
-          },
-        })
-      }
-    } catch {
-      // Non-fatal — thumbnail was generated but not tracked in DB
-    }
+    // Note (#595): Thumbnails are saved strictly as part of the original file's
+    // processingResult metadata and must NOT be registered as separate StorageFile
+    // records. Creating separate rows causes thumbnails to appear in user file
+    // listings, burn through the 1,000-files-per-bucket quota, and become orphaned
+    // when the original image is deleted.
   }
 
   return result
