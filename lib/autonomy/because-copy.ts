@@ -345,6 +345,58 @@ export function explainAutonomyEvent(details: AutonomyEventDetails | null | unde
       return { what, why, full: `${what} because ${why}`, kind }
     }
 
+    // The repairs the loop makes on its own (fix-classifier.ts AUTO_SAFE) each
+    // say what they did. Without a branch they read "Backenly fixed slow query
+    // missing index on …", the finding type's own name (production QA,
+    // 2026-11-16); tests/unit/auto-repairs-say-what-they-did.spec.ts holds
+    // every automatic type to a branch.
+    case 'slow_query_missing_index': {
+      const what = col
+        ? `Backenly added an index on "${t}.${col}"`
+        : `Backenly added an index on "${t}"`
+      const why =
+        `queries filtering on that column were measured slow, and with no index ` +
+        `PostgreSQL read the whole table to answer each one.`
+      return { what, why, full: `${what} because ${why}`, kind }
+    }
+
+    case 'infra_table_bloat': {
+      const what = `Backenly vacuumed "${t}"`
+      const why =
+        `rows left behind by updates and deletes were taking up space, and every ` +
+        `scan of the table read past them.`
+      return { what, why, full: `${what} because ${why}`, kind }
+    }
+
+    case 'index_bloat': {
+      const what = `Backenly rebuilt an index on "${t}"`
+      const why =
+        `it had become mostly empty space, so lookups through it read more ` +
+        `pages than they needed to.`
+      return { what, why, full: `${what} because ${why}`, kind }
+    }
+
+    case 'rls_expression_invalid': {
+      const what = `Backenly rewrote the row-level-security policy on "${t}"`
+      const why =
+        `its expression did not check which user owns each row, so the table was ` +
+        `not protected the way its policy suggested.`
+      return { what, why, full: `${what} because ${why}`, kind }
+    }
+
+    case 'realtime_gap': {
+      const what = `Backenly reinstalled the realtime trigger on "${t}"`
+      const why = `changes to "${t}" were not reaching the apps subscribed to it.`
+      return { what, why, full: `${what} because ${why}`, kind }
+    }
+
+    case 'orphan_table': {
+      const what = `Backenly registered "${t}" and gave it a REST API`
+      const why =
+        `the table was in the database but nothing served it. Its data was not touched.`
+      return { what, why, full: `${what} because ${why}`, kind }
+    }
+
     default: {
       // Fallback path — never expose SCREAMING_SNAKE_CASE; always a sentence.
       const humanType = kind.replace(/_/g, ' ').trim() || 'a backend issue'
