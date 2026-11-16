@@ -2263,3 +2263,7 @@ tests/integration/auth-email-routes-on-web.spec.ts
 # name suggests and no blueprint columns; every other caller keeps the default.
 # Real provisioned project, real executor and DDL.
 tests/integration/create-table-no-auto-provision.spec.ts
+# Receipts and the runtime API guide say which delete keeps a row: the SDK's
+# delete() sets deleted_at; a DELETE on /db or /api/v2 removes the row (#22).
+# Real provisioned project, real executor, migrations and guide.
+tests/integration/receipts-say-what-delete-does.spec.ts
