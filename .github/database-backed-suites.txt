@@ -2334,3 +2334,10 @@ tests/integration/deleted-projects-are-kept-seven-days.spec.ts
 # kept), refused in the plan's words when the plan is full, 404 to anyone who
 # cannot administer it. Real sessions, projects and serving state.
 tests/integration/deleted-projects-can-be-restored.spec.ts
+# The check of row-event functions proves a row change reaches each function
+# that runs on it, inside a transaction that is always rolled back: QA's orders
+# table (an owner column whose default reads the signed-in user) passes, nothing
+# is left in the table or the capture outbox, a row Backenly cannot build is
+# "couldn't check" rather than a blocking failure, and a change that is not
+# captured fails. Real provisioned project, capture triggers and verifier.
+tests/integration/row-event-check-writes-nothing.spec.ts
