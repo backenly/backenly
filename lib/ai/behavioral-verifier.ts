@@ -19,15 +19,16 @@
  * Design principles:
  *  - Each check is independent; failures in one do not prevent others from running.
  *  - Skipped checks (not applicable) never count as failures.
- *  - Every check that inserts test data cleans up in a finally block, except
- *    3.4, which writes inside a transaction that is always rolled back.
+ *  - The checks that write test rows (3.1 to 3.4) write them inside a
+ *    transaction that is always rolled back, so they leave nothing behind and
+ *    no captured change reaches a function or a webhook. 3.6 goes through the
+ *    live HTTP stack and cleans up after itself.
  *  - Checks run in parallel where there are no data dependencies.
  */
 
 import type { Prisma } from '@prisma/client'
 import { prisma } from '@/lib/db/prisma'
 import { workspaceRawClient } from '@/lib/data-plane/regional'
-import { executeWithUserContext } from '@/lib/services/workspace-rls'
 import { generateToken, verifyToken } from '@/lib/auth/jwt'
 import { hashPassword } from '@/lib/auth/password'
 import { sanitizeDiagnostic } from '@/lib/errors/diagnostic-sanitize'
@@ -389,10 +390,146 @@ function buildInsertSql(
   }
 }
 
+// ─── Test writes are rolled back ──────────────────────────────────────────────
+//
+// The checks that write test rows (3.1 to 3.4) write them inside one
+// transaction each that is always rolled back. They used to commit each write
+// and delete the rows afterwards. Every committed write was a real change in
+// the customer's database: it was captured like any other, so the customer's
+// row-event functions and webhooks ran on Backenly's test rows and counted
+// against the month's function runs, and the customer's own triggers (an audit
+// log, a profile row for each new user) kept what they wrote after the test
+// row was deleted. A row the cleanup missed stayed in the customer's table.
+
+type ProbeTx = Pick<Prisma.TransactionClient, '$queryRawUnsafe' | '$executeRawUnsafe'>
+
+/** Ends a probe's transaction with its result, so the transaction is always rolled back. */
+class RolledBack<T> extends Error {
+  constructor(readonly result: T) {
+    super('rolled back')
+  }
+}
+
+/** Act as `identity` for the rest of the probe's transaction. */
+async function actAs(tx: ProbeTx, identity: RlsIdentity): Promise<void> {
+  await tx.$executeRawUnsafe(rlsSessionSql(), ...rlsSessionParams(identity))
+}
+
+/**
+ * Run `fn` in one transaction on the project's database, as `identity`, and
+ * roll it back whatever happens. Nothing it writes is committed: no row is
+ * left behind, no captured change reaches a function or a webhook, and no
+ * NOTIFY is sent (PostgreSQL delivers those on commit only). A sequence value
+ * it takes is not given back; sequences are never transactional.
+ *
+ * Deferred constraints are checked as each statement runs, as they would be
+ * at the commit this transaction never makes. Where it can, a check reads the
+ * catalog before calling this, so that the transaction's connection is the
+ * only one it holds while the transaction is open.
+ */
+async function inRolledBackTransaction<T>(
+  projectId: string,
+  identity: RlsIdentity,
+  fn: (tx: ProbeTx) => Promise<T>,
+): Promise<T> {
+  const db = await workspaceRawClient(projectId)
+  try {
+    await db.$transaction(
+      async (tx) => {
+        await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = '5s'`)
+        await tx.$executeRawUnsafe(`SET LOCAL lock_timeout = '2s'`)
+        await tx.$executeRawUnsafe(`SET CONSTRAINTS ALL IMMEDIATE`)
+        await actAs(tx, identity)
+        throw new RolledBack(await fn(tx))
+      },
+      { maxWait: 5_000, timeout: 30_000 },
+    )
+  } catch (err) {
+    if (err instanceof RolledBack) return err.result as T
+    throw err
+  }
+  throw new Error('A probe transaction ended without a result.')
+}
+
+/** A parent row a check writes for its test row's foreign keys. */
+interface ParentSeed {
+  table: string
+  /** The test row's columns that reference this parent. */
+  mappings: FkColumnMapping[]
+  sql: string
+  params: any[]
+}
+
+/**
+ * The INSERT for each parent table a test row's foreign keys need, planned
+ * from the catalog before the check's transaction opens. `seedId` is the id
+ * each parent is written with, the value every FK pointing at it gets.
+ */
+async function planParentSeeds(
+  projectId: string,
+  schemaName: string,
+  mappingsByParent: Map<string, FkColumnMapping[]>,
+  seedId: () => string,
+  emailPrefix: string,
+): Promise<ParentSeed[]> {
+  const seeds: ParentSeed[] = []
+  for (const [table, mappings] of mappingsByParent) {
+    const refCols = await loadColumns(projectId, schemaName, table)
+    if (refCols.length === 0) continue
+    const id = seedId()
+    const refCheckOverrides = await loadCheckConstraintValues(projectId, schemaName, table)
+    // buildInsertParts skips 'id', so prepend it: the seeded parent must land
+    // on a known id, which is the value written into every FK pointing at it.
+    const { insertCols, insertVals, colInfoMap } = buildInsertParts(refCols, {
+      ...refCheckOverrides,
+      email: `${emailPrefix}${id.slice(0, 8)}@test.internal`,
+    })
+    const { sql, params } = buildInsertSql(
+      schemaName,
+      table,
+      ['id', ...insertCols],
+      [id, ...insertVals],
+      new Map<string, string>([['id', 'uuid'], ...colInfoMap]),
+    )
+    seeds.push({ table, mappings, sql, params })
+  }
+  return seeds
+}
+
+/**
+ * Write `seeds` in the check's transaction, adding a line to `details` for
+ * each. Returns the value each FK column gets, or the parent that could not be
+ * written; after that the transaction is aborted, so the check must stop.
+ */
+async function writeParentSeeds(
+  tx: ProbeTx,
+  seeds: ParentSeed[],
+  details: string[],
+): Promise<{ overrides: Record<string, string> } | { failed: string; err: unknown }> {
+  const overrides: Record<string, string> = {}
+  for (const seed of seeds) {
+    let rows: any[]
+    try {
+      rows = await tx.$queryRawUnsafe<any[]>(seed.sql, ...seed.params)
+    } catch (err) {
+      return { failed: seed.table, err }
+    }
+    if (!rows[0]) continue
+    const parentId = String(rows[0].id ?? rows[0][Object.keys(rows[0])[0]])
+    for (const m of seed.mappings) overrides[m.column] = parentId
+    details.push(
+      `✓ Seeded "${seed.table}" id=${parentId.slice(0, 8)}… (FK${seed.mappings.length === 1 ? '' : 's'}: ${seed.mappings.map(m => m.column).join(', ')})`,
+    )
+  }
+  return { overrides }
+}
+
 // ─── CHECK 3.1 — CRUD lifecycle ───────────────────────────────────────────────
 
 async function checkCrudLifecycle(projectId: string): Promise<BehavioralCheck> {
-  const db = await workspaceRawClient(projectId)
+  // Resolved first and outside any catch, so an unreachable region fails the
+  // check rather than skipping it.
+  await workspaceRawClient(projectId)
   const base: BehavioralCheck = {
     id: 'crud_lifecycle',
     name: 'CRUD lifecycle (create → read → update → delete → post-delete read returns nothing)',
@@ -461,13 +598,9 @@ async function checkCrudLifecycle(projectId: string): Promise<BehavioralCheck> {
     // schemas. That phrasing turned a KNOWN COVERAGE GAP into what looked like
     // a project with nothing in it.
     //
-    // The gap is closable: checkRlsIsolation already seeds FK parents from
-    // pg_constraint metadata (loadFkColumnMappings → buildInsertParts) and
-    // unwinds them in its `finally`, so the machinery this check calls
-    // impossible at line 382 exists a few hundred lines below. Reusing it here
-    // means this check would start writing to and deleting from customer tables
-    // it currently only reads, so it wants its own pass with cleanup verified
-    // against a scratch project — not a change bolted onto an unrelated one.
+    // FK parents are seeded below (planParentSeeds), so what is left here is a
+    // FK to a parent column other than its id, or FK metadata that could not
+    // be read.
     const skipped = base.details.filter(d => d.startsWith('⏭')).length
     return {
       ...base,
@@ -480,10 +613,6 @@ async function checkCrudLifecycle(projectId: string): Promise<BehavioralCheck> {
   }
 
   const tableName = candidate.name.toLowerCase()
-  let testId: string | null = null
-  // Every row this check creates, newest last. The `finally` unwinds it in
-  // reverse so a child never outlives the parent it references.
-  const seededParentRows: Array<{ table: string; id: string }> = []
 
   // A test user ID to satisfy NOT NULL owner columns and jwt_claim() defaults.
   const dummyUserId = crypto.randomUUID()
@@ -495,164 +624,111 @@ async function checkCrudLifecycle(projectId: string): Promise<BehavioralCheck> {
       return { ...base, skipped: true, skipReason: `Table '${tableName}' has no columns in information_schema` }
     }
 
-    // ── Seed FK parents ───────────────────────────────────────────────────────
+    // ── Plan the FK parents ───────────────────────────────────────────────────
     // Authoritative mapping from pg_constraint, not column-name heuristics:
     // `author_id → users.id` and `parent_comment_id → comments.id` both need the
     // exact target, and guessing is what produced 23503 in the field.
     const fkMappings = await loadFkColumnMappings(projectId, schemaName, tableName)
-    const fkOverrides: Record<string, string> = {}
     const mappingsByParent = new Map<string, FkColumnMapping[]>()
     for (const m of fkMappings) {
       // A self-referencing FK is satisfied by leaving the column null; seeding a
-      // parent in the same table would just create a second row to clean up.
+      // parent in the same table would just create a second row.
       if (m.foreignTable === tableName) continue
       const arr = mappingsByParent.get(m.foreignTable) ?? []
       arr.push(m)
       mappingsByParent.set(m.foreignTable, arr)
     }
-
-    for (const [refTable, mappings] of mappingsByParent) {
-      const refCols = await loadColumns(projectId, schemaName, refTable)
-      if (refCols.length === 0) continue
-
-      const seedId = crypto.randomUUID()
-      const refCheckOverrides = await loadCheckConstraintValues(projectId, schemaName, refTable)
-      // buildInsertParts skips 'id', so prepend it — the seeded parent must land
-      // on a known id, which is the value written into every FK pointing at it.
-      const { insertCols: refInsertCols, insertVals: refInsertVals, colInfoMap: refColInfoMap } =
-        buildInsertParts(refCols, {
-          ...refCheckOverrides,
-          email: `__bv_crud_${seedId.slice(0, 8)}@test.internal`,
-        })
-      const allRefCols = ['id', ...refInsertCols]
-      const allRefVals: any[] = [seedId, ...refInsertVals]
-      const allRefColInfoMap = new Map<string, string>([['id', 'uuid'], ...refColInfoMap])
-      const { sql: refSql, params: refParams } =
-        buildInsertSql(schemaName, refTable, allRefCols, allRefVals, allRefColInfoMap)
-
-      try {
-        const refInserted = await executeWithUserContext<any>(projectId, dummyUserId, true, refSql, refParams)
-        if (!refInserted[0]) continue
-        const parentId = String(refInserted[0].id ?? refInserted[0][Object.keys(refInserted[0])[0]])
-        // Recorded BEFORE anything else can fail, so cleanup can always find it.
-        seededParentRows.push({ table: refTable, id: parentId })
-        for (const m of mappings) fkOverrides[m.column] = parentId
-        base.details.push(
-          `✓ Seeded "${refTable}" id=${parentId.slice(0, 8)}… (FK${mappings.length === 1 ? '' : 's'}: ${mappings.map(m => m.column).join(', ')})`,
-        )
-      } catch (err: any) {
-        // Skip rather than fail: an unseedable parent says nothing about whether
-        // CRUD works, and the `finally` still unwinds whatever did get seeded.
-        return {
-          ...base,
-          skipped: true,
-          skipReason:
-            `CRUD lifecycle skipped — could not seed parent table "${refTable}" required by a FK on ` +
-            `"${tableName}": ${sanitizeDiagnostic(err)}`,
-          details: base.details,
-        }
-      }
-    }
-
-    // ── INSERT ────────────────────────────────────────────────────────────────
+    const seeds = await planParentSeeds(projectId, schemaName, mappingsByParent, () => crypto.randomUUID(), '__bv_crud_')
     const checkOverrides = await loadCheckConstraintValues(projectId, schemaName, tableName)
 
-    // Fill owner and NOT NULL columns that weren't seeded via explicit FKs
-    const ownerOverrides: Record<string, string> = {}
-    for (const c of cols) {
-      if (USER_ID_COLS.has(c.column_name.toLowerCase()) && !fkOverrides[c.column_name]) {
-        ownerOverrides[c.column_name] = dummyUserId
-      }
-    }
+    // Every write below is rolled back with the transaction: nothing to clean up.
+    return await inRolledBackTransaction<BehavioralCheck>(
+      projectId,
+      { userId: dummyUserId, isServiceRole: true },
+      async (tx) => {
+        const seeded = await writeParentSeeds(tx, seeds, base.details)
+        if ('failed' in seeded) {
+          // Skip rather than fail: an unseedable parent says nothing about
+          // whether CRUD works.
+          return {
+            ...base,
+            skipped: true,
+            skipReason:
+              `CRUD lifecycle skipped — could not seed parent table "${seeded.failed}" required by a FK on ` +
+              `"${tableName}": ${sanitizeDiagnostic(seeded.err)}`,
+            details: base.details,
+          }
+        }
+        const fkOverrides = seeded.overrides
 
-    const { insertCols, insertVals, colInfoMap } = buildInsertParts(cols, { ...checkOverrides, ...fkOverrides, ...ownerOverrides })
-    const { sql: insertSql, params: insertParams } = buildInsertSql(schemaName, tableName, insertCols, insertVals, colInfoMap)
+        // ── INSERT ────────────────────────────────────────────────────────────
+        // Fill owner and NOT NULL columns that weren't seeded via explicit FKs
+        const ownerOverrides: Record<string, string> = {}
+        for (const c of cols) {
+          if (USER_ID_COLS.has(c.column_name.toLowerCase()) && !fkOverrides[c.column_name]) {
+            ownerOverrides[c.column_name] = dummyUserId
+          }
+        }
 
-    const inserted = await executeWithUserContext<any>(projectId, dummyUserId, true, insertSql, insertParams)
-    if (!inserted[0]) {
-      return { ...base, error: 'INSERT returned no row', details: [...base.details, '✗ INSERT failed'] }
-    }
-    testId = String(inserted[0].id ?? inserted[0][Object.keys(inserted[0])[0]])
-    base.details.push(`✓ INSERT succeeded (id=${testId})`)
+        const { insertCols, insertVals, colInfoMap } = buildInsertParts(cols, { ...checkOverrides, ...fkOverrides, ...ownerOverrides })
+        const { sql: insertSql, params: insertParams } = buildInsertSql(schemaName, tableName, insertCols, insertVals, colInfoMap)
 
-    // ── READ ──────────────────────────────────────────────────────────────────
-    const readSql = `SELECT * FROM "${schemaName}"."${tableName}" WHERE id = $1::uuid`
-    const readRows = await executeWithUserContext<any>(projectId, dummyUserId, true, readSql, [testId])
-    if (readRows.length === 0) {
-      return { ...base, error: 'READ returned 0 rows after INSERT', details: [...base.details, '✗ READ failed'] }
-    }
-    base.details.push('✓ READ returned inserted row')
+        const inserted = await tx.$queryRawUnsafe<any[]>(insertSql, ...insertParams)
+        if (!inserted[0]) {
+          return { ...base, error: 'INSERT returned no row', details: [...base.details, '✗ INSERT failed'] }
+        }
+        const testId = String(inserted[0].id ?? inserted[0][Object.keys(inserted[0])[0]])
+        base.details.push(`✓ INSERT succeeded (id=${testId})`)
 
-    // ── UPDATE (best-effort — needs a text column) ────────────────────────────
-    const textCol = cols.find(
-      c => c.column_name !== 'id' &&
-           ['text', 'character varying', 'varchar', 'character', 'citext'].includes(c.data_type),
+        // ── READ ──────────────────────────────────────────────────────────────
+        const readSql = `SELECT * FROM "${schemaName}"."${tableName}" WHERE id = $1::uuid`
+        const readRows = await tx.$queryRawUnsafe<any[]>(readSql, testId)
+        if (readRows.length === 0) {
+          return { ...base, error: 'READ returned 0 rows after INSERT', details: [...base.details, '✗ READ failed'] }
+        }
+        base.details.push('✓ READ returned inserted row')
+
+        // ── UPDATE (best-effort — needs a text column) ────────────────────────
+        const textCol = cols.find(
+          c => c.column_name !== 'id' &&
+               ['text', 'character varying', 'varchar', 'character', 'citext'].includes(c.data_type),
+        )
+        if (textCol) {
+          const updateSql = `UPDATE "${schemaName}"."${tableName}" SET "${textCol.column_name}" = $1 WHERE id = $2::uuid RETURNING id`
+          const updated = await tx.$queryRawUnsafe<any[]>(updateSql, '__bv_updated__', testId)
+          if (updated.length > 0) {
+            base.details.push(`✓ UPDATE succeeded on column '${textCol.column_name}'`)
+          } else {
+            base.details.push(`~ UPDATE on '${textCol.column_name}' matched 0 rows (non-fatal)`)
+          }
+        } else {
+          base.details.push('~ UPDATE skipped (no text column available for this table)')
+        }
+
+        // ── DELETE ────────────────────────────────────────────────────────────
+        const deleteSql = `DELETE FROM "${schemaName}"."${tableName}" WHERE id = $1::uuid RETURNING id`
+        const deleted = await tx.$queryRawUnsafe<any[]>(deleteSql, testId)
+        if (deleted.length === 0) {
+          return { ...base, error: 'DELETE matched 0 rows', details: [...base.details, '✗ DELETE failed'] }
+        }
+        base.details.push('✓ DELETE succeeded')
+
+        // ── POST-DELETE READ — must return 0 rows ─────────────────────────────
+        const postDeleteRows = await tx.$queryRawUnsafe<any[]>(readSql, testId)
+        if (postDeleteRows.length > 0) {
+          return {
+            ...base,
+            error: `Row still exists after DELETE (id=${testId})`,
+            details: [...base.details, '✗ Post-delete read returned rows — the DELETE did not remove the row'],
+          }
+        }
+        base.details.push('✓ Post-delete read returns 0 rows')
+
+        return { ...base, passed: true }
+      },
     )
-    if (textCol) {
-      const updateSql = `UPDATE "${schemaName}"."${tableName}" SET "${textCol.column_name}" = $1 WHERE id = $2::uuid RETURNING id`
-      const updated = await executeWithUserContext<any>(projectId, dummyUserId, true, updateSql, ['__bv_updated__', testId])
-      if (updated.length > 0) {
-        base.details.push(`✓ UPDATE succeeded on column '${textCol.column_name}'`)
-      } else {
-        base.details.push(`~ UPDATE on '${textCol.column_name}' matched 0 rows (non-fatal)`)
-      }
-    } else {
-      base.details.push('~ UPDATE skipped (no text column available for this table)')
-    }
-
-    // ── DELETE ────────────────────────────────────────────────────────────────
-    const deleteSql = `DELETE FROM "${schemaName}"."${tableName}" WHERE id = $1::uuid RETURNING id`
-    const deleted = await executeWithUserContext<any>(projectId, dummyUserId, true, deleteSql, [testId])
-    if (deleted.length === 0) {
-      return { ...base, error: 'DELETE matched 0 rows', details: [...base.details, '✗ DELETE failed'] }
-    }
-    const deletedId = testId
-    testId = null  // marked cleaned up — no further cleanup needed
-    base.details.push('✓ DELETE succeeded')
-
-    // ── POST-DELETE READ — must return 0 rows ─────────────────────────────────
-    const postDeleteRows = await executeWithUserContext<any>(projectId, dummyUserId, true, readSql, [deletedId])
-    if (postDeleteRows.length > 0) {
-      return {
-        ...base,
-        error: `Row still exists after DELETE (id=${deletedId})`,
-        details: [...base.details, '✗ Post-delete read returned rows — DELETE did not persist'],
-      }
-    }
-    base.details.push('✓ Post-delete read returns 0 rows')
-
-    return { ...base, passed: true }
   } catch (err: any) {
     return { ...base, error: sanitizeDiagnostic(err), details: base.details }
-  } finally {
-    // ── Unwind everything this check created ──────────────────────────────────
-    //
-    // Order matters and is not cosmetic: the test row references the seeded
-    // parents, so deleting a parent first fails on the FK and strands BOTH rows
-    // in a customer's table. Child first, then parents in reverse seed order.
-    //
-    // Service-role context first in each case. A seeded parent is often a row in
-    // `users`, which is RLS-FORCED — a plain DELETE there matches zero rows and
-    // silently leaks the row rather than erroring.
-    if (testId) {
-      try {
-        await executeWithUserContext(projectId, dummyUserId, true, `DELETE FROM "${schemaName}"."${tableName}" WHERE id = $1::uuid`, [testId])
-      } catch {
-        // Last resort: try without user context
-        try {
-          await db.$executeRawUnsafe(`DELETE FROM "${schemaName}"."${tableName}" WHERE id = $1::uuid`, testId)
-        } catch { /* truly non-fatal at this point */ }
-      }
-    }
-
-    for (const parent of [...seededParentRows].reverse()) {
-      const delSql = `DELETE FROM "${schemaName}"."${parent.table}" WHERE id = $1::uuid`
-      try {
-        await executeWithUserContext(projectId, dummyUserId, true, delSql, [parent.id])
-      } catch {
-        try { await db.$executeRawUnsafe(delSql, parent.id) } catch { /* non-fatal */ }
-      }
-    }
   }
 }
 
@@ -703,7 +779,6 @@ async function checkAuthFlow(projectId: string): Promise<BehavioralCheck> {
   }
 
   const testEmail = `__bv_test_${Date.now()}@backenly.internal`
-  let testUserId: string | null = null
 
   try {
     // ── Signup: dynamic INSERT shaped to the actual table schema ──────────────
@@ -744,99 +819,79 @@ async function checkAuthFlow(projectId: string): Promise<BehavioralCheck> {
     // (own_rows / public_read templates). Real signup also runs as
     // service-role; the verifier must do the same to match production
     // behavior, otherwise PG 42501 surfaces here even though the live
-    // signup route would succeed.
-    const signupResult = await executeWithUserContext<any>(
-      projectId,
-      '',
-      true,
-      `INSERT INTO "${schemaName}"."users" (${colList}) VALUES (${placeholders})
-       ON CONFLICT DO NOTHING
-       RETURNING id, email`,
-      allVals,
-    )
+    // signup route would succeed. The test user is rolled back with the
+    // transaction, so it never exists outside it.
+    return await inRolledBackTransaction<BehavioralCheck>(projectId, { userId: '', isServiceRole: true }, async (tx) => {
+      const signupResult = await tx.$queryRawUnsafe<any[]>(
+        `INSERT INTO "${schemaName}"."users" (${colList}) VALUES (${placeholders})
+         ON CONFLICT DO NOTHING
+         RETURNING id, email`,
+        ...allVals,
+      )
 
-    if (!signupResult[0]?.id) {
-      return { ...base, error: 'Signup: INSERT into workspace users returned no row', details: base.details }
-    }
-    testUserId = String(signupResult[0].id)
-    base.details.push(`✓ Signup: test user created (id=${testUserId.slice(0, 8)}…)`)
-
-    // ── Token issuance ────────────────────────────────────────────────────────
-    const token = generateToken({ userId: testUserId, email: testEmail, projectId })
-    if (!token || typeof token !== 'string' || token.length < 20) {
-      return { ...base, error: 'Token issuance failed — generateToken returned empty or invalid', details: base.details }
-    }
-    base.details.push('✓ Token issuance: JWT generated successfully')
-
-    // ── Token verification ────────────────────────────────────────────────────
-    let decoded: any
-    try {
-      decoded = verifyToken(token)
-    } catch (e: any) {
-      return { ...base, error: `JWT verification threw: ${e.message}`, details: base.details }
-    }
-
-    if (!decoded) {
-      return { ...base, error: 'JWT verification returned null/undefined', details: base.details }
-    }
-
-    // Payload must contain the right userId and projectId
-    const decodedUserId   = decoded.userId   ?? decoded.sub ?? decoded.id
-    const decodedProject  = decoded.projectId ?? decoded.project
-
-    if (String(decodedUserId) !== String(testUserId)) {
-      return {
-        ...base,
-        error: `JWT payload mismatch: userId expected ${testUserId}, got ${decodedUserId}`,
-        details: [...base.details, '✗ verifyToken payload userId mismatch'],
+      if (!signupResult[0]?.id) {
+        return { ...base, error: 'Signup: INSERT into workspace users returned no row', details: base.details }
       }
-    }
-    if (decodedProject && String(decodedProject) !== String(projectId)) {
-      return {
-        ...base,
-        error: `JWT payload mismatch: projectId expected ${projectId}, got ${decodedProject}`,
-        details: [...base.details, '✗ verifyToken payload projectId mismatch'],
+      const testUserId = String(signupResult[0].id)
+      base.details.push(`✓ Signup: test user created (id=${testUserId.slice(0, 8)}…)`)
+
+      // ── Token issuance ──────────────────────────────────────────────────────
+      const token = generateToken({ userId: testUserId, email: testEmail, projectId })
+      if (!token || typeof token !== 'string' || token.length < 20) {
+        return { ...base, error: 'Token issuance failed — generateToken returned empty or invalid', details: base.details }
       }
-    }
-    base.details.push('✓ Token verification: payload matches (userId, projectId)')
+      base.details.push('✓ Token issuance: JWT generated successfully')
 
-    // ── Protected endpoint access simulation ──────────────────────────────────
-    // Simulate what a protected endpoint does: resolve user from the decoded
-    // token. Service-role here mirrors what the platform middleware does —
-    // resolving the user record from JWT claims is a privileged lookup, not
-    // a user-scoped query, so RLS should not gate it.
-    const protectedRead = await executeWithUserContext<any>(
-      projectId,
-      '',
-      true,
-      `SELECT id, email FROM "${schemaName}"."users" WHERE id = $1::uuid`,
-      [testUserId],
-    )
-    if (protectedRead.length === 0) {
-      return { ...base, error: 'Protected resource lookup: user not found by decoded userId', details: base.details }
-    }
-    base.details.push('✓ Protected endpoint access: user resolved from token claims')
+      // ── Token verification ──────────────────────────────────────────────────
+      let decoded: any
+      try {
+        decoded = verifyToken(token)
+      } catch (e: any) {
+        return { ...base, error: `JWT verification threw: ${e.message}`, details: base.details }
+      }
 
-    return { ...base, passed: true }
+      if (!decoded) {
+        return { ...base, error: 'JWT verification returned null/undefined', details: base.details }
+      }
+
+      // Payload must contain the right userId and projectId
+      const decodedUserId   = decoded.userId   ?? decoded.sub ?? decoded.id
+      const decodedProject  = decoded.projectId ?? decoded.project
+
+      if (String(decodedUserId) !== String(testUserId)) {
+        return {
+          ...base,
+          error: `JWT payload mismatch: userId expected ${testUserId}, got ${decodedUserId}`,
+          details: [...base.details, '✗ verifyToken payload userId mismatch'],
+        }
+      }
+      if (decodedProject && String(decodedProject) !== String(projectId)) {
+        return {
+          ...base,
+          error: `JWT payload mismatch: projectId expected ${projectId}, got ${decodedProject}`,
+          details: [...base.details, '✗ verifyToken payload projectId mismatch'],
+        }
+      }
+      base.details.push('✓ Token verification: payload matches (userId, projectId)')
+
+      // ── Protected endpoint access simulation ────────────────────────────────
+      // Simulate what a protected endpoint does: resolve user from the decoded
+      // token. Service-role here mirrors what the platform middleware does —
+      // resolving the user record from JWT claims is a privileged lookup, not
+      // a user-scoped query, so RLS should not gate it.
+      const protectedRead = await tx.$queryRawUnsafe<any[]>(
+        `SELECT id, email FROM "${schemaName}"."users" WHERE id = $1::uuid`,
+        testUserId,
+      )
+      if (protectedRead.length === 0) {
+        return { ...base, error: 'Protected resource lookup: user not found by decoded userId', details: base.details }
+      }
+      base.details.push('✓ Protected endpoint access: user resolved from token claims')
+
+      return { ...base, passed: true }
+    })
   } catch (err: any) {
     return { ...base, error: sanitizeDiagnostic(err), details: base.details }
-  } finally {
-    if (testUserId) {
-      try {
-        // Service-role cleanup — RLS would otherwise hide the row from the
-        // delete and the test user would persist across runs.
-        await executeWithUserContext(
-          projectId,
-          '',
-          true,
-          `DELETE FROM "${schemaName}"."users" WHERE id = $1::uuid`,
-          [testUserId],
-        )
-      } catch {
-        // non-fatal but logged
-        console.warn(`[BehavioralVerifier] Failed to clean up test user ${testUserId}`)
-      }
-    }
   }
 }
 
@@ -887,27 +942,25 @@ async function checkRlsIsolation(projectId: string): Promise<BehavioralCheck> {
   if (!targetTable || !userIdCol) {
     return { ...base, skipped: true, skipReason: 'No RLS-protected table has a user_id-like column' }
   }
+  const table = targetTable
+  const ownerCol = userIdCol
 
   const userAId = crypto.randomUUID()
   const userBId = crypto.randomUUID()
-  let testId: string | null = null
-  // Track seeded parent rows for cleanup
-  const seededParentRows: Array<{ table: string; id: string }> = []
 
   try {
-    const cols = await loadColumns(projectId, schemaName, targetTable)
+    const cols = await loadColumns(projectId, schemaName, table)
     if (cols.length === 0) {
-      return { ...base, skipped: true, skipReason: `Table '${targetTable}' has no columns in information_schema` }
+      return { ...base, skipped: true, skipReason: `Table '${table}' has no columns in information_schema` }
     }
 
-    // ── Seed parent tables for FK columns ────────────────────────────────────
+    // ── Plan parent rows for FK columns ──────────────────────────────────────
     // Use precise FK metadata from pg_constraint so we know the EXACT
     // (column → parent.column) mapping. Heuristics on column names
     // ("does user_id map to users.id?") miss compound cases like
     // `author_id → users.id` or `parent_comment_id → comments.id` and
     // produce the 23503 failure pattern seen in the field.
-    const fkMappings = await loadFkColumnMappings(projectId, schemaName, targetTable)
-    const fkOverrides: Record<string, string> = {}
+    const fkMappings = await loadFkColumnMappings(projectId, schemaName, table)
 
     // Group mappings by parent table so we seed each parent once even when
     // multiple FK columns point at it (e.g. created_by AND updated_by both
@@ -928,95 +981,80 @@ async function checkRlsIsolation(projectId: string): Promise<BehavioralCheck> {
         ...base,
         skipped: true,
         skipReason:
-          `RLS test skipped — table "${targetTable}" has FK(s) referencing non-id parent columns ` +
+          `RLS test skipped — table "${table}" has FK(s) referencing non-id parent columns ` +
           `(${unseedableFks.map(m => `${m.column}→${m.foreignTable}.${m.foreignColumn}`).join(', ')}). ` +
           `Synthetic seeding cannot satisfy these.`,
       }
     }
 
-    for (const [refTable, mappings] of mappingsByParent) {
-      const refCols = await loadColumns(projectId, schemaName, refTable)
-      if (refCols.length === 0) continue
+    // Every parent is written with id=userAId, the value written into every
+    // FK column that targets it.
+    const seeds = await planParentSeeds(projectId, schemaName, mappingsByParent, () => userAId, '__bv_test_')
+    const rlsCheckOverrides = await loadCheckConstraintValues(projectId, schemaName, table)
 
-      const refCheckOverrides = await loadCheckConstraintValues(projectId, schemaName, refTable)
-      // buildInsertParts skips 'id', so we prepend it explicitly. This guarantees
-      // the seeded parent row has id=userAId, which is the value we'll write
-      // into every FK column that targets this parent.
-      const seedId = userAId
-      const { insertCols: refInsertCols, insertVals: refInsertVals, colInfoMap: refColInfoMap } =
-        buildInsertParts(refCols, { ...refCheckOverrides, email: `__bv_test_${seedId.slice(0, 8)}@test.internal` })
-      const allRefCols = ['id', ...refInsertCols]
-      const allRefVals: any[] = [seedId, ...refInsertVals]
-      const allRefColInfoMap = new Map<string, string>([['id', 'uuid'], ...refColInfoMap])
-      const { sql: refSql, params: refParams } =
-        buildInsertSql(schemaName, refTable, allRefCols, allRefVals, allRefColInfoMap)
-
-      try {
-        const refInserted = await executeWithUserContext<any>(projectId, userAId, true, refSql, refParams)
-        if (refInserted[0]) {
-          const parentId = String(refInserted[0].id ?? refInserted[0][Object.keys(refInserted[0])[0]])
-          seededParentRows.push({ table: refTable, id: parentId })
-          // Authoritative FK column overrides — exactly the columns
-          // pg_constraint says reference this parent.
-          for (const m of mappings) {
-            fkOverrides[m.column] = parentId
+    // Each write and read below runs in one transaction that is rolled back,
+    // switching identity between them: nothing to clean up.
+    const failed = await inRolledBackTransaction<BehavioralCheck | null>(
+      projectId,
+      // User A inserts via service role (bypass existing RLS for test setup)
+      { userId: userAId, isServiceRole: true },
+      async (tx) => {
+        const seeded = await writeParentSeeds(tx, seeds, base.details)
+        if ('failed' in seeded) {
+          // Surface the failure clearly. A silent skip here masks the real cause
+          // of downstream 23503 errors — bail with a SKIP so the developer knows.
+          return {
+            ...base,
+            skipped: true,
+            skipReason:
+              `RLS test skipped — could not seed parent table "${seeded.failed}" required by FK on "${table}": ` +
+              sanitizeDiagnostic(seeded.err),
           }
-          base.details.push(
-            `✓ Seeded "${refTable}" id=${parentId} (covers FK${mappings.length === 1 ? '' : 's'}: ${mappings.map(m => m.column).join(', ')})`,
-          )
         }
-      } catch (err: any) {
-        // Surface the failure clearly. A silent skip here masks the real cause
-        // of downstream 23503 errors — bail with a SKIP so the developer knows.
-        return {
-          ...base,
-          skipped: true,
-          skipReason:
-            `RLS test skipped — could not seed parent table "${refTable}" required by FK on "${targetTable}": ` +
-            sanitizeDiagnostic(err),
-        }
-      }
-    }
 
-    // Build insert overriding the userIdCol to belong to user A + any FK overrides
-    const rlsCheckOverrides = await loadCheckConstraintValues(projectId, schemaName, targetTable)
-    const { insertCols, insertVals, colInfoMap: rlsColInfoMap } = buildInsertParts(
-      cols,
-      { ...rlsCheckOverrides, ...fkOverrides, [userIdCol]: userAId },
+        // Build insert overriding the owner column to belong to user A + any FK overrides
+        const { insertCols, insertVals, colInfoMap: rlsColInfoMap } = buildInsertParts(
+          cols,
+          { ...rlsCheckOverrides, ...seeded.overrides, [ownerCol]: userAId },
+        )
+        const { sql: insertSql, params: insertParams } = buildInsertSql(schemaName, table, insertCols, insertVals, rlsColInfoMap)
+
+        const inserted = await tx.$queryRawUnsafe<any[]>(insertSql, ...insertParams)
+        if (!inserted[0]) {
+          return { ...base, error: `RLS test: INSERT as user A into '${table}' failed`, details: base.details }
+        }
+        const testId = String(inserted[0].id ?? inserted[0][Object.keys(inserted[0])[0]])
+        base.details.push(`✓ User A (${userAId.slice(0, 8)}…) inserted row id=${testId}`)
+
+        // User B tries to read user A's row — must be denied by RLS
+        const readSql = `SELECT id FROM "${schemaName}"."${table}" WHERE id = $1::uuid`
+        await actAs(tx, { userId: userBId, isServiceRole: false })
+        const userBRows = await tx.$queryRawUnsafe<any[]>(readSql, testId)
+
+        if (userBRows.length > 0) {
+          return {
+            ...base,
+            error: `RLS isolation failure: user B can read user A's row (table: ${table})`,
+            details: [
+              ...base.details,
+              `✗ User B (${userBId.slice(0, 8)}…) returned ${userBRows.length} row(s) — should be 0`,
+            ],
+          }
+        }
+        base.details.push(`✓ User B (${userBId.slice(0, 8)}…) correctly denied — 0 rows returned`)
+
+        // User A reads their own row — should succeed
+        await actAs(tx, { userId: userAId, isServiceRole: false })
+        const userARows = await tx.$queryRawUnsafe<any[]>(readSql, testId)
+        if (userARows.length > 0) {
+          base.details.push('✓ User A can read their own row (self-access allowed)')
+        } else {
+          base.details.push('~ User A self-read returned 0 rows (own_rows policy may use different column mapping)')
+        }
+        return null
+      },
     )
-    const { sql: insertSql, params: insertParams } = buildInsertSql(schemaName, targetTable, insertCols, insertVals, rlsColInfoMap)
-
-    // User A inserts via service role (bypass existing RLS for test setup)
-    const inserted = await executeWithUserContext<any>(projectId, userAId, true, insertSql, insertParams)
-    if (!inserted[0]) {
-      return { ...base, error: `RLS test: INSERT as user A into '${targetTable}' failed`, details: base.details }
-    }
-    testId = String(inserted[0].id ?? inserted[0][Object.keys(inserted[0])[0]])
-    base.details.push(`✓ User A (${userAId.slice(0, 8)}…) inserted row id=${testId}`)
-
-    // User B tries to read user A's row — must be denied by RLS
-    const readSql = `SELECT id FROM "${schemaName}"."${targetTable}" WHERE id = $1::uuid`
-    const userBRows = await executeWithUserContext<any>(projectId, userBId, false, readSql, [testId])
-
-    if (userBRows.length > 0) {
-      return {
-        ...base,
-        error: `RLS isolation failure: user B can read user A's row (table: ${targetTable})`,
-        details: [
-          ...base.details,
-          `✗ User B (${userBId.slice(0, 8)}…) returned ${userBRows.length} row(s) — should be 0`,
-        ],
-      }
-    }
-    base.details.push(`✓ User B (${userBId.slice(0, 8)}…) correctly denied — 0 rows returned`)
-
-    // User A reads their own row — should succeed
-    const userARows = await executeWithUserContext<any>(projectId, userAId, false, readSql, [testId])
-    if (userARows.length > 0) {
-      base.details.push('✓ User A can read their own row (self-access allowed)')
-    } else {
-      base.details.push('~ User A self-read returned 0 rows (own_rows policy may use different column mapping)')
-    }
+    if (failed) return failed
 
     // ── Issue 16 guard: verify the policy expression references the correct column ──
     // If the `own_rows` policy was applied using a column name that differs from
@@ -1027,7 +1065,7 @@ async function checkRlsIsolation(projectId: string): Promise<BehavioralCheck> {
         `SELECT qual, cmd FROM pg_policies
          WHERE schemaname = $1 AND tablename = $2 AND policyname LIKE 'backenly_%'
          LIMIT 5`,
-        schemaName, targetTable,
+        schemaName, table,
       )
       for (const policy of policyRows) {
         const qual = policy.qual ?? ''
@@ -1042,7 +1080,7 @@ async function checkRlsIsolation(projectId: string): Promise<BehavioralCheck> {
         // name only.
         if (qual && !qual.includes('current_setting')) {
           base.details.push(
-            `⚠ RLS policy on '${targetTable}' (cmd=${policy.cmd}) never reads current_setting, so it ` +
+            `⚠ RLS policy on '${table}' (cmd=${policy.cmd}) never reads current_setting, so it ` +
             `does not depend on the caller identity at all — expression: ${qual.slice(0, 120)}. ` +
             `A policy that ignores the caller either denies everyone or exposes every row.`,
           )
@@ -1055,33 +1093,6 @@ async function checkRlsIsolation(projectId: string): Promise<BehavioralCheck> {
     return { ...base, passed: true }
   } catch (err: any) {
     return { ...base, error: sanitizeDiagnostic(err), details: base.details }
-  } finally {
-    // Clean up test row first (it has FK references to parent rows)
-    if (testId && targetTable) {
-      try {
-        await executeWithUserContext(
-          projectId,
-          '', true,
-          `DELETE FROM "${schemaName}"."${targetTable}" WHERE id = $1::uuid`,
-          [testId],
-        )
-      } catch {
-        try {
-          await db.$executeRawUnsafe(`DELETE FROM "${schemaName}"."${targetTable}" WHERE id = $1::uuid`, testId)
-        } catch { /* non-fatal */ }
-      }
-    }
-    // Then clean up seeded parent rows (in reverse order so FK deps are satisfied).
-    // Service-role first: a seeded parent may be a row in an RLS-forced table
-    // (e.g. `users`), where a plain DELETE matches 0 rows and leaks the row.
-    for (const parent of [...seededParentRows].reverse()) {
-      const delSql = `DELETE FROM "${schemaName}"."${parent.table}" WHERE id = $1::uuid`
-      try {
-        await executeWithUserContext(projectId, '', true, delSql, [parent.id])
-      } catch {
-        try { await db.$executeRawUnsafe(delSql, parent.id) } catch { /* non-fatal */ }
-      }
-    }
   }
 }
 
@@ -1150,45 +1161,6 @@ interface ProbeTable {
 
 /** Why a test row could not be written; reported as "couldn't check", never as a failure. */
 class CannotBuildRow extends Error {}
-
-type ProbeTx = Pick<Prisma.TransactionClient, '$queryRawUnsafe' | '$executeRawUnsafe'>
-
-/** Ends a probe's transaction with its result, so the transaction is always rolled back. */
-class RolledBack<T> extends Error {
-  constructor(readonly result: T) {
-    super('rolled back')
-  }
-}
-
-/**
- * Run `fn` in one transaction on the project's database, as `identity`, and
- * roll it back whatever happens. Nothing it writes is committed: no row is
- * left behind, no captured change reaches a function or a webhook, and no
- * NOTIFY is sent (PostgreSQL delivers those on commit only). A sequence value
- * it takes is not given back; sequences are never transactional.
- */
-async function inRolledBackTransaction<T>(
-  projectId: string,
-  identity: RlsIdentity,
-  fn: (tx: ProbeTx) => Promise<T>,
-): Promise<T> {
-  const db = await workspaceRawClient(projectId)
-  try {
-    await db.$transaction(
-      async (tx) => {
-        await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = '5s'`)
-        await tx.$executeRawUnsafe(`SET LOCAL lock_timeout = '2s'`)
-        await tx.$executeRawUnsafe(rlsSessionSql(), ...rlsSessionParams(identity))
-        throw new RolledBack(await fn(tx))
-      },
-      { maxWait: 5_000, timeout: 30_000 },
-    )
-  } catch (err) {
-    if (err instanceof RolledBack) return err.result as T
-    throw err
-  }
-  throw new Error('A probe transaction ended without a result.')
-}
 
 async function loadProbeTable(projectId: string, schemaName: string, table: string): Promise<ProbeTable | null> {
   const db = await workspaceRawClient(projectId)
