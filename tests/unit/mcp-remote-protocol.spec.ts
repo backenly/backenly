@@ -174,6 +174,14 @@ describe.each<Era>(['legacy', 'modern'])('remote endpoint, %s era', (era) => {
     }
   })
 
+  it('refuses an argument backend_chat does not take, and the brain never runs', async () => {
+    // The brain is sent only the message, so anything else was dropped unread.
+    const result: any = await client.callTool({ name: 'backend_chat', arguments: { message: 'add likes', branchId: 'b1' } })
+    expect(mockCalls).toEqual([])
+    expect(result.isError).toBe(true)
+    expect(result.structuredContent).toMatchObject({ code: 'UNKNOWN_PARAMS', unsupported: ['branchId'], supported: ['message'] })
+  })
+
   it('passes a tool it does not advertise to the handler, which decides', async () => {
     const result: any = await client.callTool({ name: 'no_such_tool', arguments: {} })
     expect(mockCalls).toEqual([{ path: '/api/mcp/tool', body: { tool: 'no_such_tool', args: {} } }])

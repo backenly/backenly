@@ -988,6 +988,7 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
         description: 'For trigger=http only — the HTTP verb of the endpoint. Defaults to the one the module exports.',
       },
       functionId: { type: 'string', description: 'To replace a specific existing function; its name must match.' },
+      description: { type: 'string', description: 'What the function does, as the Functions page shows it. Left out, a replaced function keeps its own.' },
     },
     ['name', 'code', 'trigger']),
   // ── Monitoring: request log ───────────────────────────────────────────────

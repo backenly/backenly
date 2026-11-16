@@ -514,8 +514,10 @@ describe('functions deploy_code', () => {
   it('cannot reach another project\'s function, by its id or by naming the project', async () => {
     const byId = await deploy(RW_KEY, { functionId: otherFunctionId, name: 'theirs', code: 'return 1', trigger: 'manual' })
     expect(byId.body.code).toBe('NOT_FOUND')
+    // projectId is not an argument: the connection decides the project.
     const byProject = await deploy(RW_KEY, { projectId: otherProjectId, name: 'theirs', code: 'return 1', trigger: 'manual' })
-    expect(byProject.body.code).toBe('PROJECT_MISMATCH')
+    expect(byProject.body).toMatchObject({ code: 'UNKNOWN_PARAMS', unsupported: ['projectId'] })
+    expect(byProject.body.hint).toMatch(/its own project only/)
     expect((await prisma.aiFunction.findUnique({ where: { id: otherFunctionId } }))?.generatedCode).toBe(otherCode)
     expect(await prisma.aiFunction.count({ where: { projectId, name: 'theirs' } })).toBe(0)
   }, 60_000)
