@@ -44,6 +44,8 @@ import {
   detectMissingFkIndexes,
   checkAuthIntegrity,
   detectApiCoverageGaps,
+  detectOverPermissiveRls,
+  detectSensitiveColumnsAnyoneCanRead,
 } from '@/lib/core/drift-detector'
 import { checkIntegrationHealth } from '@/lib/core/integration-health'
 import { verifyWorkflows } from '@/lib/core/workflow-verifier'
@@ -487,6 +489,14 @@ async function observeProject(projectId: string, result: ObserverResult): Promis
     // Approval-gated, so the loop never mints a finding for it: this is where
     // it reaches the Review Queue, as a removal a person approves or declines.
     detectGuessedConstraints(projectId),
+    // Columns named like credentials or personal data in a table anyone with
+    // the publishable key can read in full. Notify-only, so recorded here.
+    detectSensitiveColumnsAnyoneCanRead(projectId),
+    // An always-true write policy on a table with no owner column: the loop
+    // probes it (rls_policies_are_not_wide_open) but, being the owner's
+    // question, never mints a finding for it. The ones the loop repairs are
+    // left to the loop.
+    detectOverPermissiveRls(projectId).then((found) => found.filter((f) => !f.autoFixable)),
   ]
 
   const settled = await Promise.allSettled(detectors)
@@ -947,6 +957,10 @@ async function writeFinding(
     // One row per rule: keeping one and removing another are two decisions.
     guessed_constraint: ['tableName', 'constraintName'],
     rls_denies_everything: 'tableName',
+    // One row per table: a policy open to everyone on two tables is two
+    // decisions, and so is a table of sensitive columns anyone can read.
+    rls_expression_invalid: 'tableName',
+    sensitive_columns_exposed: 'tableName',
   }
 
   const discriminator = ([] as string[])

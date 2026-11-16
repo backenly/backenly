@@ -278,6 +278,21 @@ export function classifyFix(
     }
   }
 
+  // ── Sensitive columns anyone can read ──────────────────────────────────────
+  //
+  // notify_only: who may read a table is the owner's decision. Narrowing the
+  // read policy would break an app that reads these rows in the open, and
+  // whether they should be public is something only the owner knows
+  // (lib/core/drift-detector.ts, detectSensitiveColumnsAnyoneCanRead).
+  if (type === 'sensitive_columns_exposed') {
+    return {
+      decision: 'notify_only',
+      reason:
+        'Who may read this table is your decision. Backenly will not narrow a read policy on its own, ' +
+        'because an app that reads these rows in the open would stop working.',
+    }
+  }
+
   // ── Service-role key reaching a browser ────────────────────────────────────
   //
   // notify_only, and deliberately not approval: an approval queue implies there
