@@ -1789,6 +1789,13 @@ tests/integration/change-restore-to.spec.ts
 # written since a change is measured in rows only the service role can see.
 tests/integration/change-restore-forced-rls.spec.ts
 
+# History keeps every value of a dropped or retyped column, and what a new
+# column's non-constant default filled in, under the same NOSUPERUSER
+# NOBYPASSRLS owner: the vault copies read every row of a table only the
+# service role may read (they kept none of them), and restoring puts each
+# value back.
+tests/integration/column-copies-see-every-row.spec.ts
+
 # Restore to a point proves every step, each against the schema the newer steps
 # leave, in one rolled-back transaction before running any: a step that would
 # stop it is named and nothing runs (it used to undo the newer ones and stop
