@@ -409,9 +409,14 @@ export async function runAutoFix(
       }
 
       // PROPOSE_ONLY and DENY: the repair is meaningful, authority is not
-      // sufficient. Surface it for a human rather than mutating.
+      // sufficient. Surface it for a human rather than mutating, with what
+      // held it back: the card said nothing, so a fix the finding itself called
+      // reversible waited with no reason given (production QA, 2026-11-16).
       await prisma.healthFinding
-        .update({ where: { id: finding.id }, data: { status: 'pending_approval' } })
+        .update({
+          where: { id: finding.id },
+          data: { status: 'pending_approval', details: { ...details, heldByAuthority: heldByAuthority(d) } as any },
+        })
         .catch(() => {})
       return {
         findingId,
@@ -467,6 +472,20 @@ export async function runAutoFix(
   }
 
   return _executeAutoFix(finding.id, projectId, type, details, opts)
+}
+
+/**
+ * What held an autonomous repair for a person, kept on the finding: each input
+ * that narrowed the decision, with the authority decision's own sentence for it
+ * (lib/authority/decision.ts). The Review Queue words it for the owner
+ * (lib/autonomy/trust-report.ts, heldBecauseFor).
+ */
+export function heldByAuthority(d: { decision: string; narrowings: Array<{ code: string; reason: string }>; decidedAt?: string }): {
+  decision: string
+  narrowings: Array<{ code: string; reason: string }>
+  at: string
+} {
+  return { decision: d.decision, narrowings: d.narrowings, at: d.decidedAt ?? new Date().toISOString() }
 }
 
 /**
