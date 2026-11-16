@@ -201,7 +201,8 @@ test('deleting an endpoint asks first, and then actually removes it', async ({ p
   await expect(endpointLink(page).first()).toBeVisible({ timeout: 30_000 })
 
   // Delete lives in the row's overflow menu, beside the other rare actions.
-  await page.getByRole('button', { name: new RegExp(`^Actions for ${SHOWN.replace(/[.]/g, '\\.')}`) }).first().click()
+  // The row's menu is named "Actions for <address> (<event>)"; a plain name matches it as a substring.
+  await page.getByRole('button', { name: `Actions for ${SHOWN}` }).first().click()
   await page.getByRole('menuitem', { name: 'Delete endpoint…' }).click()
 
   // Named, not a bare "are you sure?" — the dialog says what stops and what is
