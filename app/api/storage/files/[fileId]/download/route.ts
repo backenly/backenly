@@ -22,6 +22,7 @@ import { projectRestriction, restrictionDetails, restrictionMessage, RESTRICTED_
 import { DOWNLOAD_URL_TTL_SECONDS, signCdnUrl, signedCdnConfig, windowedPublicCdnUrl } from '@/lib/storage/cdn'
 import { servedHere } from '@/lib/data-plane/serving'
 import { refusalForState } from '@/lib/projects/serving-response'
+import { withV1ErrorShape } from '@/lib/traffic/recorded-v1'
 
 /**
  * GET /api/storage/files/{fileId}/download — stream the file bytes.
@@ -54,7 +55,7 @@ import { refusalForState } from '@/lib/projects/serving-response'
  * to the one configuration that serves the most traffic.
  */
 export async function GET(request: NextRequest, props: { params: Promise<{ fileId: string }> }) {
-  const res = await serve(request, props)
+  const res = await servedWithErrorShape(request, props)
   if (!res.headers.has(RESOURCE_POLICY)) res.headers.set(RESOURCE_POLICY, 'same-site')
   return res
 }
@@ -263,6 +264,15 @@ async function serve(request: NextRequest, props: { params: Promise<{ fileId: st
     )
   }
 }
+
+/**
+ * A stored file's public address is a door apps call too: every JSON error it
+ * answers carries a top-level `code` and `message`, as v1's do, beside what it
+ * already says (production QA re-test, 2026-11-16, #16).
+ */
+// Every refusal carries a top-level code and message (lib/traffic/recorded-v1.ts); GET above then sets
+// the resource policy on whatever this answers.
+const servedWithErrorShape = withV1ErrorShape(serve)
 
 /**
  * Work out who is asking.
