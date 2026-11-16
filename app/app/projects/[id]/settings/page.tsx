@@ -26,7 +26,8 @@ import { useCallback, useEffect, useId, useState, type ReactNode } from 'react'
 import Link from 'next/link'
 import { useParams, useRouter } from 'next/navigation'
 import { setCurrentProjectId } from '@/lib/api/client'
-import { deleteProject, forgetProjectReads, getProject, updateProject, type Project } from '@/lib/api/projects'
+import { DeleteRefusedError, deleteProject, forgetProjectReads, getProject, updateProject, type Project, type Reauthentication } from '@/lib/api/projects'
+import { SignInAgain } from '@/components/console/SignInAgain'
 import {
   CopyField,
   KitButton,
@@ -431,15 +432,20 @@ function DeleteProject({ project, role, onDeleted }: { project: Project; role: P
   const [open, setOpen] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // Set when the server asks for a sign-in from the last ten minutes first.
+  const [reauth, setReauth] = useState<Reauthentication | null>(null)
 
   async function confirmDelete() {
     setDeleting(true)
     setError(null)
+    setReauth(null)
     try {
-      await deleteProject(project.id)
+      // The name the person typed; the dialog does not confirm until it matches.
+      await deleteProject(project.id, project.name)
       onDeleted()
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not delete the project. Try again.')
+      if (err instanceof DeleteRefusedError && err.code === 'REAUTH_REQUIRED' && err.reauth) setReauth(err.reauth)
+      else setError(err instanceof Error ? err.message : 'Could not delete the project. Try again.')
       setDeleting(false)
     }
   }
@@ -459,6 +465,7 @@ function DeleteProject({ project, role, onDeleted }: { project: Project; role: P
               variant="danger"
               onClick={() => {
                 setError(null)
+                setReauth(null)
                 setOpen(true)
               }}
             >
@@ -488,6 +495,7 @@ function DeleteProject({ project, role, onDeleted }: { project: Project; role: P
           first if you might need its data.
         </p>
         {error && <RefusedLine className="mt-[10px]">{error}</RefusedLine>}
+        {reauth && <SignInAgain reauth={reauth} onSignedIn={() => void confirmDelete()} />}
       </KitConfirmDialog>
     </Section>
   )

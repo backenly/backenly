@@ -2318,3 +2318,8 @@ tests/integration/key-responses-say-what-the-key-is.spec.ts
 # metrics give the error rate on 5xx with the 4xx as their own number, and the
 # per-endpoint breakdown says 5xx and 4xx apart. Real request log rows.
 tests/integration/client-errors-are-not-failures.spec.ts
+# Deleting a project needs its name in `confirm`, an account its email, and both
+# a session signed in within the last ten minutes (a refreshed one is not); each
+# refusal leaves the project or account in place, and a stranger still gets the
+# same 404. Real sessions, projects and accounts.
+tests/integration/deletion-asks-for-name-and-sign-in.spec.ts
