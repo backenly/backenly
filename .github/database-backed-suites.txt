@@ -2263,3 +2263,8 @@ tests/integration/auth-email-routes-on-web.spec.ts
 # name suggests and no blueprint columns; every other caller keeps the default.
 # Real provisioned project, real executor and DDL.
 tests/integration/create-table-no-auto-provision.spec.ts
+# Every error an app can get carries a top-level code and message, and /api/v2
+# answers in PostgREST's shape: the errors Next writes itself (the body-size
+# limit in middleware.ts, the v2 route's own refusals, a stored file's public
+# address) as well as the runtime's. Real middleware, Next routes and runtime.
+tests/integration/error-envelope-every-door.spec.ts

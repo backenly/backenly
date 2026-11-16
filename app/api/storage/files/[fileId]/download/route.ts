@@ -22,6 +22,7 @@ import { projectRestriction, restrictionDetails, restrictionMessage, RESTRICTED_
 import { DOWNLOAD_URL_TTL_SECONDS, signCdnUrl, signedCdnConfig, windowedPublicCdnUrl } from '@/lib/storage/cdn'
 import { servedHere } from '@/lib/data-plane/serving'
 import { refusalForState } from '@/lib/projects/serving-response'
+import { withV1ErrorShape } from '@/lib/traffic/recorded-v1'
 
 /**
  * GET /api/storage/files/{fileId}/download — stream the file bytes.
@@ -53,7 +54,7 @@ import { refusalForState } from '@/lib/projects/serving-response'
  * honest option, since the alternative is a control that silently does not apply
  * to the one configuration that serves the most traffic.
  */
-export async function GET(request: NextRequest, props: { params: Promise<{ fileId: string }> }) {
+async function handleGET(request: NextRequest, props: { params: Promise<{ fileId: string }> }) {
   const params = await props.params
   try {
     const fileId = params.fileId
@@ -235,6 +236,13 @@ export async function GET(request: NextRequest, props: { params: Promise<{ fileI
     )
   }
 }
+
+/**
+ * A stored file's public address is a door apps call too: every JSON error it
+ * answers carries a top-level `code` and `message`, as v1's do, beside what it
+ * already says (production QA re-test, 2026-11-16, #16).
+ */
+export const GET = withV1ErrorShape(handleGET)
 
 /**
  * Work out who is asking.
