@@ -347,8 +347,16 @@ export async function detectMissingFkIndexes(
     schema,
   ).catch(probeQueryFailed('detectMissingFkIndexes'))
 
-  const hits: Array<{ table_name: string; column_name: string; has_fk: boolean }> =
+  const found: Array<{ table_name: string; column_name: string; has_fk: boolean }> =
     rows?.rows ?? rows ?? []
+
+  // A table declared in SQL is asked about the keys it declares, never about a
+  // column only named like one (session_id, ext_id): it has the indexes its SQL
+  // declares (lib/ai/minimal-executor.ts, executeCreateTable). Unreadable marks
+  // leave every candidate in, as before.
+  const { tablesDeclaredInSql } = await import('@/lib/db/declared-tables')
+  const declared = await tablesDeclaredInSql(projectId).catch(() => new Set<string>())
+  const hits = found.filter((r) => r.has_fk || !declared.has(r.table_name))
 
   return hits.map((r) => ({
     type: 'missing_fk_index' as const,

@@ -35,6 +35,22 @@ async function projectDb(projectId: string) {
   return workspaceRawClient(projectId)
 }
 
+/** The columns, lower-cased, that some index on the table leads with. */
+async function leadingIndexColumns(
+  db: { $queryRawUnsafe<T = unknown>(query: string, ...values: unknown[]): Promise<T> },
+  schema: string,
+  table: string,
+): Promise<string[]> {
+  const rows = await db.$queryRawUnsafe<Array<{ col: string }>>(
+    `SELECT lower(a.attname) AS col
+       FROM pg_index i
+       JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = i.indkey[0]
+      WHERE i.indrelid = to_regclass($1)`,
+    `"${schema}"."${table}"`,
+  ).catch(() => [] as Array<{ col: string }>)
+  return rows.map((r) => r.col)
+}
+
 export interface AIAction {
   /** Optional trace explaining why this action was chosen — aids debugging hallucinations */
   reasoning?: string
@@ -4504,6 +4520,13 @@ async function executeCreateTable(
     // ── Auto-create indexes for FK columns and common filter columns (#93) ────
     // Every FK column (_id suffix), status, type, email, slug, created_at gets
     // an index automatically. This prevents full-table scans at scale.
+    //
+    // Only for a table Backenly designs. A table declared in SQL gets the
+    // indexes its SQL declares and no others: production QA (2026-11-16) found
+    // a 7-column table with 7 guessed btree indexes, one beside its own unique
+    // index on the same column. A foreign key it declares is indexed after the
+    // migration by the relationships_are_indexed guarantee, which then sees a
+    // composite index the same migration declared.
     const INDEX_EXACT_NAMES = new Set([
       // Timestamps (always)
       'createdat', 'updatedat', 'deleted_at', 'deletedat',
@@ -4531,8 +4554,8 @@ async function executeCreateTable(
     ])
 
     // Build list of column names to index
-    const colsToIndex: string[] = ['createdAt', 'updatedAt', 'deleted_at']
-    for (const col of safeColumns) {
+    const colsToIndex: string[] = asWritten ? [] : ['createdAt', 'updatedAt', 'deleted_at']
+    for (const col of asWritten ? [] : safeColumns) {
       if (!col?.name) continue
       const rawLower = col.name.toLowerCase()
       const normalizedLower = rawLower.replace(/_/g, '')
@@ -4549,8 +4572,10 @@ async function executeCreateTable(
       }
     }
 
-    // Deduplicate and create indexes
-    const seenIndexCols = new Set<string>()
+    // Deduplicate and create indexes. A column an index already leads with (the
+    // UNIQUE its email rule made) gets no second one: products.slug and
+    // admins.user_id were each indexed twice.
+    const seenIndexCols = new Set<string>(colsToIndex.length ? await leadingIndexColumns(db, postgresSchema, tableName) : [])
     for (const col of colsToIndex) {
       if (seenIndexCols.has(col.toLowerCase())) continue
       seenIndexCols.add(col.toLowerCase())
@@ -6067,8 +6092,10 @@ async function addColumns(
         }
         throw err
       }
-      // A foreign key is indexed, as addColumnToTable and create_table do.
-      if (referencesSql) {
+      // A foreign key is indexed, as addColumnToTable and create_table do. One
+      // declared in SQL is indexed after the migration by relationships_are_indexed,
+      // which sees any index the migration itself made for it.
+      if (referencesSql && params.asWritten !== true && !(await leadingIndexColumns(db, postgresSchema, tableName)).includes(name.toLowerCase())) {
         const indexName = `idx_${tableName}_${name.toLowerCase()}`.slice(0, 63)
         await db.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS "${indexName}" ON "${postgresSchema}"."${tableName}" ("${name}")`)
       }
@@ -6430,9 +6457,11 @@ async function addColumnToTable(
     // Found by the `relationships_are_indexed` probe: adding `widget_id` via
     // this path made it fire immediately. That probe had never produced a
     // finding before, so this inconsistency had never been visible.
+    // Not for a column declared in SQL, which gets what it declares (see the
+    // index pass in executeCreateTable), nor beside an index that leads with it.
     const lower = column.name.toLowerCase()
     const isFkColumn = (lower.endsWith('_id') || /[a-z]id$/.test(lower)) && lower !== 'id'
-    if (isFkColumn) {
+    if (isFkColumn && !asWritten && !(await leadingIndexColumns(db, postgresSchema, tableName)).includes(lower)) {
       const indexName = `idx_${tableName}_${lower.replace(/[^a-z0-9]/g, '_')}`.slice(0, 63)
       try {
         await db.$executeRawUnsafe(

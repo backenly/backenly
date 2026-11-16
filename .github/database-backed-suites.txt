@@ -1967,6 +1967,13 @@ tests/integration/v1-errors-carry-code-and-message.spec.ts
 # UNIQUE the SQL declares is a real constraint ON CONFLICT can target. A table
 # the brain designs from a description keeps its inference.
 tests/integration/sql-as-written.spec.ts
+
+# A table or column declared in SQL gets the indexes its SQL declares and no
+# guessed ones (a 7-column table got 7, one beside its own unique index); a key
+# it declares is left to relationships_are_indexed, which counts a composite
+# index the migration made and no longer guesses keys from names on such a
+# table. A table the brain designs keeps its guesses, never twice on a column.
+tests/integration/sql-tables-only-declared-indexes.spec.ts
 # A function run is recorded as it happened: a call through /fn as http, the
 # status the function answered at the end of its log, a 5xx answer as a failed
 # run. A route function reads the project's variables as process.env.KEY, and
