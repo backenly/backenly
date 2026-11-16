@@ -847,6 +847,16 @@ export class LocalStorageService implements StorageService {
       // Continue with database deletion even if file is missing
     }
 
+    // Delete associated thumbnail if one was generated (#595)
+    const processingResult = file.processingResult as { thumbnailPath?: string } | null
+    if (processingResult?.thumbnailPath) {
+      try {
+        await fs.unlink(processingResult.thumbnailPath)
+      } catch (error) {
+        // Non-fatal if thumbnail file is missing or already cleaned up
+      }
+    }
+
     // Delete database record (no storage counter update if already soft-deleted)
     await prisma.storageFile.delete({
       where: { id: fileId },
@@ -877,6 +887,7 @@ export class LocalStorageService implements StorageService {
         projectId: true,
         name: true,
         deletedAt: true,
+        processingResult: true,
       },
     })
 
@@ -892,6 +903,16 @@ export class LocalStorageService implements StorageService {
           await fs.unlink(file.path)
         } catch (error) {
           console.warn(`[Storage Cleanup] Physical file already deleted: ${file.path}`)
+        }
+
+        // Delete associated thumbnail if one was generated (#595)
+        const processingResult = file.processingResult as { thumbnailPath?: string } | null
+        if (processingResult?.thumbnailPath) {
+          try {
+            await fs.unlink(processingResult.thumbnailPath)
+          } catch (error) {
+            // Non-fatal if thumbnail is already deleted
+          }
         }
 
         // Delete database record
