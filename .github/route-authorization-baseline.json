@@ -215,6 +215,11 @@
     "status": "SAFE"
   },
   {
+    "route": "/api/projects/[id]/import/supabase",
+    "status": "ACCEPTED",
+    "reason": "ACCEPTED: retired (2026-11-16). The handler answers a flat 404 to everyone before reading the request or any identity, and does nothing else; importing moved to POST /api/import (lib/import/jobs.ts), which takes an organization owner or admin. Kept only because tests/integration/settings-keys-and-floors.spec.ts pins that it stays shut."
+  },
+  {
     "route": "/api/projects/[id]/integrations",
     "reason": "SAFE: withProjectValidation on both verbs; every query and service call uses validated.projectId.",
     "status": "SAFE"

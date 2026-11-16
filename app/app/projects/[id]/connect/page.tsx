@@ -1,88 +1,102 @@
 'use client'
 
 /**
- * Connect — the agent-native hub (IA restructure §6.14 / §9).
- * THE build door: backend change flows through the user's coding agent over
- * MCP (the in-app chat door was removed 2026-07-17).
+ * Connect: everything that reaches this project from outside, and the
+ * credentials it uses, each where it is set up (project console decision 4,
+ * 2026-11-16).
  *
- * Two tabs, each a self-contained surface:
- *   • Agents — the ONE agent-wiring surface: the setup sequence (scoped key →
- *              one install command per agent, §9.1) and what the agent gets,
- *              beside key management and live MCP usage.
- *   • Direct — everything that calls the data plane without MCP: REST
- *              coordinates + TypeScript types / OpenAPI spec, frontend runtime
- *              telemetry + the origin allowlist (FrontendRuntimeCards), and
- *              real Postgres credentials + pg_dump exports
- *              (DirectDatabasePanel). Key MANAGEMENT lives only in Settings →
- *              API keys; this tab links there instead of embedding a second
- *              copy of the manager.
+ *   Connect  ● Last call 12 min ago
+ *   Agents   API   Postgres
  *
- * The "Frontend SDK" tab was removed 2026-07-19 (a duplicate credentials
- * surface for an audience whose agent does the wiring).
+ *   Agents    the agents (keys and browser sign-ins) and their tool calls; with
+ *             no agent yet, the setup itself (components/connect/AgentSetup)
+ *   API       the API URL with types and the OpenAPI spec, API keys (moved
+ *             here from Settings), allowed origins and browser requests
+ *   Postgres  logins, backups, and on Cloud the shared-database note
  *
- * Deep links: `?tab=direct` opens the Direct tab (FrontendConnectionPill's
- * click target). Read from window.location on mount — NOT useSearchParams,
- * which would demand a Suspense boundary at export time — and written back
- * with replaceState when the tab changes.
+ * The fact beside the title is the agent's: live (●) only while it is at work
+ * (a call within the hour), hollow when quiet, "No agent connected" otherwise.
+ * No header sentence and no header button: each section creates its own.
+ *
+ * Deep links: `?tab=api`, `?tab=postgres`; the old `?tab=direct` opens API.
+ * Read from window.location on mount (useSearchParams would need a Suspense
+ * boundary at export time) and written back with replaceState.
  */
 
 import { useEffect, useState } from 'react'
-import { useParams, useRouter } from 'next/navigation'
-import { Bot, KeyRound, TerminalSquare, FileCode2, FileJson, RotateCw } from 'lucide-react'
+import { useParams } from 'next/navigation'
 import { setCurrentProjectId } from '@/lib/api/client'
 import { getProject, type Project } from '@/lib/api/projects'
 import {
   BUTTON_BASE,
+  BUTTON_SIZES,
   BUTTON_VARIANTS,
   CopyField,
-  DetailList,
-  DetailRow,
-  KitButton,
   KitTab,
   KitTabs,
   PageHeader,
-  SettingsCard,
   Skeleton,
-  StatusDot,
+  StatusGlyph,
 } from '@/components/inspector/kit'
-import { lastCallAgo, useAgentConnection } from '@/lib/hooks/useAgentConnection'
+import { Panel, Section } from '@/components/autonomy/rows'
+import { ErrorRow } from '@/components/console/states'
+import { Time } from '@/components/console/Time'
 import { PAGE_GUTTER, PAGE_WIDTH } from '@/components/console/tokens'
-import { AgentInstallGuide, AgentCapabilitiesCard } from '@/components/connect/AgentInstallGuide'
+import { useAgentConnection } from '@/lib/hooks/useAgentConnection'
 import { AgentKeysPanel } from '@/components/connect/AgentKeysPanel'
 import { FrontendRuntimeCards } from '@/components/connect/FrontendRuntimePanel'
 import { DirectDatabasePanel } from '@/components/connect/DirectDatabasePanel'
+import { ClientKeysPanel } from '@/components/hub/ClientKeysPanel'
 
-type Tab = 'agents' | 'direct'
+type Tab = 'agents' | 'api' | 'postgres'
 
-/**
- * The page is "Connect" on both tabs, like every section is its own name, with
- * the agent's state beside the title. It used to read "Connect your coding
- * agent" to someone whose agent had been connected for weeks.
- */
-const DESCRIPTIONS = {
-  setup: 'One scoped key, one command. Your agent reads the real schema and builds through governed, reversible changes.',
-  connected: 'Your agent builds through governed, reversible changes. Add another agent or manage its keys here.',
-  direct: 'REST and Postgres coordinates for anything that doesn’t speak MCP: your frontend, scripts, BI tools, backups.',
-} as const
+const TABS: Array<{ id: Tab; label: string }> = [
+  { id: 'agents', label: 'Agents' },
+  { id: 'api', label: 'API' },
+  { id: 'postgres', label: 'Postgres' },
+]
+
+/** `?tab=` as the page knows it; the old Direct tab's link opens API. */
+function tabFrom(search: string): Tab {
+  const t = new URLSearchParams(search).get('tab')
+  if (t === 'api' || t === 'direct') return 'api'
+  if (t === 'postgres') return 'postgres'
+  return 'agents'
+}
+
+type ProjectLoad = { state: 'loading' } | { state: 'failed' } | { state: 'ready'; project: Project }
 
 export default function ProjectConnectPage() {
   const params = useParams()
   const projectId = params.id as string
   const [tab, setTab] = useState<Tab>('agents')
-  // Bumped when AgentInstallGuide mints a key so the keys list refreshes.
-  const [keysVersion, setKeysVersion] = useState(0)
   const agent = useAgentConnection(projectId)
+  const [load, setLoad] = useState<ProjectLoad>({ state: 'loading' })
+  const [attempt, setAttempt] = useState(0)
 
   if (projectId && typeof window !== 'undefined') setCurrentProjectId(projectId)
   useEffect(() => {
     if (projectId) setCurrentProjectId(projectId)
   }, [projectId])
 
-  // Honor ?tab=direct deep links (sidebar/deploy connection pill).
   useEffect(() => {
-    const t = new URLSearchParams(window.location.search).get('tab')
-    if (t === 'direct') setTab('direct')
+    setTab(tabFrom(window.location.search))
   }, [])
+
+  // The project carries the API URL and the region the Postgres note names.
+  useEffect(() => {
+    let cancelled = false
+    getProject(projectId)
+      .then((p) => {
+        if (!cancelled) setLoad({ state: 'ready', project: p })
+      })
+      .catch(() => {
+        if (!cancelled) setLoad({ state: 'failed' })
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [projectId, attempt])
 
   const selectTab = (next: Tab) => {
     setTab(next)
@@ -92,157 +106,101 @@ export default function ProjectConnectPage() {
     window.history.replaceState(null, '', url.toString())
   }
 
+  const fact =
+    agent.status === 'loading' ? null : agent.connected ? (
+      <span className="inline-flex items-center gap-[7px] text-[13px] leading-[20px] text-faint">
+        {/* Live (●) only while it is at work; a quiet agent is hollow (lib/mcp/agent-connection.ts). */}
+        <StatusGlyph state={agent.active ? 'live' : 'idle'} label={agent.active ? 'Agent at work' : 'Agent connected, quiet'} />
+        {agent.lastSeenAt ? <Time iso={agent.lastSeenAt} prefix="Last call" /> : 'Connected'}
+      </span>
+    ) : (
+      <span className="inline-flex items-center gap-[7px] text-[13px] leading-[20px] text-faint">
+        <StatusGlyph state="idle" label="Not connected" />
+        No agent connected
+      </span>
+    )
+
   return (
     <div className="pb-16">
       <PageHeader
         title="Connect"
-        meta={
-          agent.status === 'loading' ? undefined : agent.connected ? (
-            <StatusDot
-              tone={agent.active ? 'operational' : 'neutral'}
-              label={
-                agent.active || !agent.lastSeenAt
-                  ? agent.client ? `Connected through ${agent.client}` : 'Agent connected'
-                  : `Last call ${lastCallAgo(agent.lastSeenAt)}${agent.client ? `, through ${agent.client}` : ''}`
-              }
-              className="text-[13px]"
-            />
-          ) : (
-            <StatusDot tone="neutral" label="No agent connected" className="text-[13px]" />
-          )
-        }
-        description={tab === 'direct' ? DESCRIPTIONS.direct : agent.connected ? DESCRIPTIONS.connected : DESCRIPTIONS.setup}
+        meta={fact}
         tabs={
           <KitTabs>
-            <KitTab active={tab === 'agents'} onClick={() => selectTab('agents')}>
-              <Bot />
-              Agents
-            </KitTab>
-            <KitTab active={tab === 'direct'} onClick={() => selectTab('direct')}>
-              <TerminalSquare />
-              Direct
-            </KitTab>
+            {TABS.map((t) => (
+              <KitTab key={t.id} active={tab === t.id} onClick={() => selectTab(t.id)}>
+                {t.label}
+              </KitTab>
+            ))}
           </KitTabs>
         }
       />
 
-      <div className={`${PAGE_WIDTH} ${PAGE_GUTTER} pt-7`}>
-        {tab === 'agents' && (
-          // Setup on the left, live state on the right. "What your agent gets"
-          // sits under the setup sequence: it answers the question the pasted
-          // prompt just raised.
-          <div className="grid grid-cols-1 items-start gap-10 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] xl:gap-12">
-            <div className="min-w-0 space-y-10">
-              <AgentInstallGuide projectId={projectId} onKeyMinted={() => setKeysVersion((v) => v + 1)} />
-              <AgentCapabilitiesCard />
-            </div>
-            <AgentKeysPanel projectId={projectId} refreshSignal={keysVersion} />
+      <div className={`${PAGE_WIDTH} ${PAGE_GUTTER} pt-[28px]`}>
+        {tab === 'agents' && <AgentKeysPanel projectId={projectId} />}
+        {tab === 'api' && (
+          <div className="space-y-[36px]">
+            <ApiUrlSection projectId={projectId} load={load} onRetry={() => {
+              setLoad({ state: 'loading' })
+              setAttempt((n) => n + 1)
+            }} />
+            <ClientKeysPanel projectId={projectId} />
+            <FrontendRuntimeCards projectId={projectId} />
           </div>
         )}
-        {tab === 'direct' && <DirectTab projectId={projectId} />}
+        {tab === 'postgres' && (
+          <DirectDatabasePanel projectId={projectId} region={load.state === 'ready' ? load.project.region ?? null : null} />
+        )}
       </div>
     </div>
   )
 }
 
-// ── Direct ────────────────────────────────────────────────────────────────────
-// REST coordinates + typed contracts, frontend runtime telemetry + origin
-// allowlist, then real Postgres credentials + pg_dump. Keys are managed in ONE
-// place (Settings → API keys), so this tab links there.
-
-function DirectTab({ projectId }: { projectId: string }) {
-  const router = useRouter()
-  // A project still loading, or one that could not be loaded, is not a project
-  // without an address. The row used to show "—" for all three, so a slow or
-  // failed request read as the server saying there is no API address.
-  const [load, setLoad] = useState<{ state: 'loading' } | { state: 'failed' } | { state: 'ready'; project: Project }>({ state: 'loading' })
-  const [attempt, setAttempt] = useState(0)
-
-  useEffect(() => {
-    let cancelled = false
-    getProject(projectId)
-      .then((p) => { if (!cancelled) setLoad({ state: 'ready', project: p }) })
-      .catch(() => { if (!cancelled) setLoad({ state: 'failed' }) })
-    return () => { cancelled = true }
-  }, [projectId, attempt])
-
-  const retry = () => {
-    setLoad({ state: 'loading' })
-    setAttempt((n) => n + 1)
-  }
+/**
+ * The address every table is served at, and the contracts generated from the
+ * live schema. A project still loading, or one that could not be loaded, is
+ * not a project without an address: "—" only when the server says so.
+ */
+function ApiUrlSection({ projectId, load, onRetry }: { projectId: string; load: ProjectLoad; onRetry: () => void }) {
   const project = load.state === 'ready' ? load.project : null
-
-  // The live base is {origin}/api/v1/{projectId}, where origin is the API
-  // address of the project's region: this console's own origin for the home
-  // region, the region's API service elsewhere. The server works it out
-  // (apiBaseUrl); this page's origin would be wrong for a project in another
-  // region. The old read keyed off apiUrlProd/Staging/Dev, columns nothing in
-  // the product ever writes (the console creates projects with a name only),
-  // so this row promised a value on first publish, forever, and publishing
-  // never set it either. An operator-supplied override still wins when one of
-  // those columns is actually filled.
-  const apiBaseUrl =
-    project?.apiUrlProd || project?.apiUrlStaging || project?.apiUrlDev || project?.apiBaseUrl || null
-
+  // {origin}/api/v1/{projectId} in the project's region, worked out by the server
+  // (apiBaseUrl). An operator-supplied override still wins when one is filled.
+  const apiBaseUrl = project?.apiUrlProd || project?.apiUrlStaging || project?.apiUrlDev || project?.apiBaseUrl || null
+  const download = (href: string, file: string, label: string) => (
+    <a href={href} download={file} className={`${BUTTON_BASE} ${BUTTON_SIZES.sm} ${BUTTON_VARIANTS.ghost}`}>
+      {label}
+    </a>
+  )
   return (
-    <div className="max-w-[960px] space-y-10">
-      <SettingsCard
-        title="REST API"
-        description="Every table is served as governed REST endpoints. Authenticate with an API key."
-        footer="Generated from the live schema, so they always match what the runtime serves."
-        actions={
-          <>
-            <a
-              href={`/api/projects/${projectId}/types?file=types`}
-              download="backenly.types.d.ts"
-              className={`${BUTTON_BASE} ${BUTTON_VARIANTS.ghost} h-[28px] px-2.5 text-[12px]`}
-            >
-              <FileCode2 className="h-3.5 w-3.5" />
-              TypeScript types
-            </a>
-            <a
-              href={`/api/projects/${projectId}/openapi`}
-              download={`openapi-${projectId}.json`}
-              className={`${BUTTON_BASE} ${BUTTON_VARIANTS.ghost} h-[28px] px-2.5 text-[12px]`}
-            >
-              <FileJson className="h-3.5 w-3.5" />
-              OpenAPI spec
-            </a>
-            <KitButton size="sm" variant="secondary" icon={KeyRound} onClick={() => router.push(`/app/projects/${projectId}/settings?tab=keys`)}>
-              Manage API keys
-            </KitButton>
-          </>
-        }
-      >
-        <DetailList>
-          <DetailRow label="API base URL">
-            {load.state === 'loading' ? (
-              <span aria-busy="true" className="block">
-                <Skeleton className="h-[34px] w-full" />
-                <span className="sr-only">Loading</span>
-              </span>
-            ) : load.state === 'failed' ? (
-              <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
-                <span role="alert" className="text-zinc-400">Couldn’t load the URL.</span>
-                <KitButton size="sm" variant="ghost" icon={RotateCw} onClick={retry}>
-                  Try again
-                </KitButton>
-              </span>
-            ) : apiBaseUrl ? (
-              <CopyField value={apiBaseUrl} />
-            ) : (
-              <span className="text-faint">—</span>
-            )}
-          </DetailRow>
-          <DetailRow label="Project ID">
-            <CopyField value={projectId} />
-          </DetailRow>
-        </DetailList>
-      </SettingsCard>
-
-      <FrontendRuntimeCards projectId={projectId} />
-
-      <DirectDatabasePanel projectId={projectId} />
-    </div>
+    <Section id="api-url" title="API URL">
+      <Panel>
+        {load.state === 'failed' ? (
+          <ErrorRow things="the API URL" onRetry={onRetry} />
+        ) : (
+          <div className="px-[20px] py-[14px]">
+            <dl>
+              <dt className="sr-only">API base URL</dt>
+              <dd>
+                {load.state === 'loading' ? (
+                  <span aria-busy="true" className="block">
+                    <Skeleton className="h-[34px] w-full" />
+                    <span className="sr-only">Loading</span>
+                  </span>
+                ) : apiBaseUrl ? (
+                  <CopyField value={apiBaseUrl} label="Copy API URL" />
+                ) : (
+                  <span className="text-[13px] text-faint">—</span>
+                )}
+              </dd>
+            </dl>
+            <div className="-ml-[10px] mt-[10px] flex flex-wrap items-center gap-[4px]">
+              {download(`/api/projects/${projectId}/types?file=types`, 'backenly.types.d.ts', 'TypeScript types')}
+              {download(`/api/projects/${projectId}/openapi`, `openapi-${projectId}.json`, 'OpenAPI spec')}
+              <span className="ml-[6px] text-[12.5px] leading-[18px] text-faint">Generated from the live schema.</span>
+            </div>
+          </div>
+        )}
+      </Panel>
+    </Section>
   )
 }

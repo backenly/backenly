@@ -126,3 +126,26 @@ describe('scheduleToCron: parse what is understood, refuse the rest', () => {
     }
   })
 })
+
+describe('cronInWords: a schedule said in words, or not at all', () => {
+  // Imported here so the rest of this file stays as it was.
+  const { cronInWords } = jest.requireActual('@/lib/services/cron-expression') as typeof import('@/lib/services/cron-expression')
+  it.each([
+    ['0 2 * * *', 'Daily at 02:00 UTC'],
+    ['30 9 * * 1-5', 'Weekdays at 09:30 UTC'],
+    ['0 8 * * 1', 'Mondays at 08:00 UTC'],
+    ['0 8 * * 1,3', 'Mondays and Wednesdays at 08:00 UTC'],
+    ['0 9 1 * *', 'Monthly on the 1st at 09:00 UTC'],
+    ['0 9,17 * * *', 'Daily at 09:00 and 17:00 UTC'],
+    ['* * * * *', 'Every minute'],
+    ['*/5 * * * *', 'Every 5 minutes'],
+    ['0 * * * *', 'Every hour'],
+    ['15 * * * *', 'Every hour at :15'],
+    ['0 */6 * * *', 'Every 6 hours'],
+  ])('%s reads "%s"', (expr, words) => {
+    expect(cronInWords(expr)).toBe(words)
+  })
+  it.each(['0 2 * 1 *', '0 2 1 * 1', '0 2-4 * * *', 'not a schedule', '', null])('%p is left to the expression', (expr) => {
+    expect(cronInWords(expr as string | null)).toBeNull()
+  })
+})

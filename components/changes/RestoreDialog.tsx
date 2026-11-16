@@ -1,7 +1,7 @@
 'use client'
 
 /**
- * Restore previous state: one question, four checks, one button.
+ * Undo this change (once called "Restore previous state"): one question, four checks, one button.
  *
  * Backenly proves the restore first (POST …/preview, lib/changes/recovery.ts):
  * the restore point is intact, the current state is saved before anything
@@ -146,16 +146,17 @@ export function RestoreDialog({
   const preview = phase.kind === 'ready' || phase.kind === 'running' ? phase.preview : phase.kind === 'error' ? phase.preview : undefined
   const safety = preview?.safety
 
+  // "Undo" is one change; "Restore to …" is a point or a version (decision 8).
   const title =
     phase.kind === 'done'
-      ? (reapply ? 'Change reapplied' : 'Previous state restored')
+      ? (reapply ? 'Change reapplied' : 'Change undone')
       : safety === 'needs_approval'
-        ? 'Restore requires approval'
+        ? `Undo #${change.seq} needs approval`
         : safety === 'blocked' || safety === 'unavailable' || (phase.kind === 'error' && !preview)
-          ? (reapply ? 'Can’t reapply this change' : 'Can’t restore this change')
+          ? (reapply ? 'Can’t reapply this change' : 'Can’t undo this change')
           : reapply
-            ? 'Reapply this change'
-            : 'Restore previous state'
+            ? `Reapply #${change.seq}?`
+            : `Undo #${change.seq}?`
 
   const affected = preview?.impact?.items.filter((i) => i.needsApproval) ?? []
   const keptSince = preview?.impact?.items.filter((i) => !i.needsApproval) ?? []
@@ -168,7 +169,7 @@ export function RestoreDialog({
       <>
         <KitButton variant="ghost" onClick={onClose} disabled={phase.kind === 'running'}>Cancel</KitButton>
         <KitButton variant="primary" onClick={() => void run(phase.preview)} loading={phase.kind === 'running'}>
-          {safety === 'needs_approval' ? 'Approve restore' : reapply ? 'Reapply change' : 'Restore previous state'}
+          {safety === 'needs_approval' ? 'Approve undo' : reapply ? 'Reapply change' : 'Undo change'}
         </KitButton>
       </>
     ) : phase.kind === 'checking' ? (
@@ -182,7 +183,7 @@ export function RestoreDialog({
       open
       onClose={phase.kind === 'running' ? () => {} : onClose}
       title={title}
-      description={<span className="[overflow-wrap:anywhere]">#{change.seq} · {change.summary}</span>}
+      description={<span className="[overflow-wrap:anywhere]">{change.summary}</span>}
       footer={footer}
     >
       {phase.kind === 'done' ? (
@@ -208,8 +209,8 @@ export function RestoreDialog({
                 return (
                   <li key={c.id} className="flex items-start gap-2.5">
                     <span
-                      className={`mt-[2px] flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full ${
-                        c.ok ? 'bg-emerald-400/15 text-emerald-300' : warn ? 'bg-amber-400/15 text-amber-300' : 'bg-rose-400/15 text-rose-300'
+                      className={`mt-[2px] flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full border border-white/[0.08] bg-white/[0.03] ${
+                        c.ok ? 'text-zinc-300' : 'text-zinc-50'
                       }`}
                       aria-hidden
                     >
@@ -279,7 +280,7 @@ export function RestoreDialog({
                       onClick={() => onOpenChange(b.id)}
                       className="text-left text-[12.5px] text-zinc-200 underline decoration-white/20 underline-offset-2 hover:decoration-white/60 [overflow-wrap:anywhere]"
                     >
-                      #{b.seq} · {b.summary}
+                      #{b.seq} {b.summary}
                     </button>
                   </li>
                 ))}

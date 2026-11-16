@@ -220,11 +220,19 @@ export function blockedAddressReason(address: string): string | null {
  * The classification table, the connect-time lookup and the always-blocked
  * link-local rule are shared by both. Only the private-range hatch differs.
  */
-export type EgressScope = 'function' | 'webhook'
+export type EgressScope = 'function' | 'webhook' | 'import'
 
+/**
+ * `import` is the third person who decides: the owner of a database or a
+ * Storage API that someone asked Backenly to read and move into a new project
+ * (lib/import/net.ts). A self-hoster migrating from a Postgres on their own LAN
+ * needs it; Backenly Cloud never sets it, so a connection string cannot point
+ * the importer at the VPC, the loopback admin ports or another tenant.
+ */
 const PRIVATE_EGRESS_ENV: Record<EgressScope, string> = {
   function: 'BACKENLY_FUNCTION_EGRESS_ALLOW_PRIVATE',
   webhook: 'BACKENLY_WEBHOOK_EGRESS_ALLOW_PRIVATE',
+  import: 'BACKENLY_IMPORT_EGRESS_ALLOW_PRIVATE',
 }
 
 /**
@@ -330,6 +338,21 @@ function addressRefusal(address: string, scope: EgressScope): string | null {
   if (hard) return hard
   if (privateEgressAllowed(scope)) return null
   return blockedAddressReason(address)
+}
+
+/**
+ * The same decision, for a caller that opens its own socket rather than going
+ * through `safeFetch`: the importer resolves a database host itself and
+ * connects to the address checked here (lib/import/net.ts), so there is no
+ * second lookup for DNS to answer differently.
+ */
+export function outboundAddressRefusal(address: string, scope: EgressScope): string | null {
+  return addressRefusal(address, scope)
+}
+
+/** Whether `scope`'s private-range hatch is open on this deployment. */
+export function privateEgressAllowedFor(scope: EgressScope): boolean {
+  return privateEgressAllowed(scope)
 }
 
 // ── Connect-time validation ───────────────────────────────────────────────────

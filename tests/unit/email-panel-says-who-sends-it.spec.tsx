@@ -7,7 +7,7 @@
  * through the deployment's SMTP environment variables", which a customer
  * cannot see, set or act on. Backenly sends that mail, as the app.
  */
-import { act, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen } from '@testing-library/react'
 
 let cloud = false
 jest.mock('@cloud/control-plane', () => ({
@@ -59,20 +59,22 @@ beforeEach(() => {
 })
 
 async function renderPanel() {
-  render(<EmailSettingsPanel projectId="p1" />)
+  render(<EmailSettingsPanel projectId="p1" canWrite canAdminister />)
   await act(async () => { for (let i = 0; i < 10; i++) await Promise.resolve() })
+}
+
+/** The SMTP form appears only when someone sets up their own server. */
+function openOwnSmtp() {
+  fireEvent.click(screen.getByRole('button', { name: 'Use your own SMTP' }))
 }
 
 it('on Cloud, says Backenly sends the mail, as the app, and how to send from your own domain', async () => {
   cloud = true
   await renderPanel()
   expect(screen.getByText('Sent by Backenly')).toBeInTheDocument()
-  expect(
-    screen.getByText(
-      'Backenly sends this project’s auth emails as “shopqa” <noreply@backenly.com>. To send from your own domain, add your SMTP settings below.',
-    ),
-  ).toBeInTheDocument()
-  expect(screen.getByText('With these off, Backenly sends the auth emails.')).toBeInTheDocument()
+  expect(screen.getByText('Backenly sends this project’s auth emails as “shopqa” <noreply@backenly.com>.')).toBeInTheDocument()
+  // Sending from your own domain is one button away, and the form says what happens without it.
+  openOwnSmtp()
   expect(screen.getByText('Unchecked, Backenly sends them.')).toBeInTheDocument()
   expect(document.body.textContent).not.toMatch(/environment variables|deployment’s SMTP/)
 })
@@ -84,5 +86,6 @@ it('self-hosted, keeps naming the deployment’s variables, and names the sender
   expect(
     screen.getByText('Mail sends through the deployment’s SMTP environment variables as “shopqa” <noreply@backenly.com>.'),
   ).toBeInTheDocument()
+  openOwnSmtp()
   expect(screen.getByText('Unchecked, auth emails fall back to the deployment’s SMTP.')).toBeInTheDocument()
 })

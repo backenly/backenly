@@ -6,11 +6,12 @@
  * a person actually takes, end to end against the deployment:
  *
  *   a change made in the dashboard shows up as applied and verified;
- *   "Restore previous state" is in the row's ⋯ menu, not a page of its own;
+ *   "Undo this change" (once "Restore previous state") is in the row's ⋯ menu,
+ *     not a page of its own;
  *   the dialog shows four plain checks and one button, with no SQL and nothing
  *     to type;
  *   the result is verified and the row says Restored;
- *   the technical detail is there, behind View details, and not before.
+ *   the technical detail is there, in the change's drawer, and not before.
  *
  * And History is one section for the whole backend, in the sidebar; the
  * Database page no longer keeps a list of its own, and its old link lands here.
@@ -35,11 +36,11 @@ test('a dashboard change is restored from its row, with four checks and nothing 
   await page.goto(`/app/projects/${projectId()}/changes`)
   const row = page.getByRole('button', { name: new RegExp(`Created table ${table}`) }).first()
   await expect(row).toBeVisible({ timeout: 60_000 })
-  await expect(row).toHaveAccessibleName(/Applied · Verified/)
+  await expect(row).toHaveAccessibleName(/\. Verified$/)
   const seq = (await row.getAttribute('aria-label'))!.match(/#(\d+)/)![1]
 
   await page.getByRole('button', { name: `Actions for change #${seq}` }).click()
-  await page.getByRole('menuitem', { name: 'Restore previous state' }).click()
+  await page.getByRole('menuitem', { name: 'Undo this change' }).click()
 
   const dialog = page.getByRole('dialog')
   for (const check of ['Restore point available', 'Current state protected', 'Recovery plan verified', 'No expected data loss']) {
@@ -50,7 +51,7 @@ test('a dashboard change is restored from its row, with four checks and nothing 
   await expect(dialog.getByText(/CREATE TABLE|DROP TABLE|ALTER TABLE/)).toHaveCount(0)
   await expect(dialog.getByText(/rehears/i)).toHaveCount(0)
 
-  await dialog.getByRole('button', { name: 'Restore previous state', exact: true }).click()
+  await dialog.getByRole('button', { name: 'Undo change', exact: true }).click()
   await expect(dialog.getByText(`The state before #${seq} is back, and verified.`)).toBeVisible({ timeout: 60_000 })
   await dialog.getByRole('button', { name: 'Done' }).click()
 
@@ -66,7 +67,7 @@ test('a dashboard change is restored from its row, with four checks and nothing 
   expect(changes.filter((c: any) => /Restored the state before/.test(c.summary))).toHaveLength(0)
 })
 
-test('technical detail is behind View details, and the SQL behind one more click', async ({ page, request }) => {
+test('technical detail is in the change\'s drawer, and the SQL behind one more click', async ({ page, request }) => {
   const table = `e2e_details_${Date.now().toString(36)}`
   const made = await request.post(`/api/database/create-table?projectId=${projectId()}`, {
     data: { tableName: table, columns: [{ name: 'title', type: 'text' }] },
@@ -80,9 +81,9 @@ test('technical detail is behind View details, and the SQL behind one more click
 
   await row.click()
   const dialog = page.getByRole('dialog')
-  await expect(dialog.getByText('What changed')).toBeVisible({ timeout: 30_000 })
-  await expect(dialog.getByText('Checks')).toBeVisible()
-  await expect(dialog.getByText('Timeline')).toBeVisible()
+  await expect(dialog.getByText('What changed', { exact: true })).toBeVisible({ timeout: 30_000 })
+  await expect(dialog.getByText('Checks', { exact: true })).toBeVisible()
+  await expect(dialog.getByText('Timeline', { exact: true })).toBeVisible()
   await expect(dialog.getByText('CREATE TABLE')).toHaveCount(0)
   await dialog.getByRole('button', { name: /statement/ }).click()
   await expect(dialog.getByText(/CREATE TABLE/)).toBeVisible()

@@ -34,14 +34,14 @@ it('says when Backenly last looked', async () => {
   stub({ status: 200, body: { ok: true, requested: 0 } })
   render(<ArchitectureLookNow projectId="p1" onLooked={jest.fn()} />)
   await flush()
-  expect(screen.getByText('Backenly last looked for changes worth making 3h ago. It looks every day.')).toBeInTheDocument()
+  expect(screen.getByText('Architecture review ran 3 h ago.')).toBeInTheDocument()
 })
 
 it('says when it has not looked yet', async () => {
   stub({ status: 200, body: { ok: true, requested: 0 } }, null)
   render(<ArchitectureLookNow projectId="p1" onLooked={jest.fn()} />)
   await flush()
-  expect(screen.getByText(/has not looked for changes worth making yet/)).toBeInTheDocument()
+  expect(screen.getByText('Architecture review has not run yet.')).toBeInTheDocument()
 })
 
 it('asks for a look, and says what it found and where it waits', async () => {

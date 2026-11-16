@@ -112,8 +112,14 @@ describe('DEP-06: a readiness read changes nothing', () => {
 
   it('the Deploy page reads on load and fixes only on an explicit action', () => {
     const page = fs.readFileSync(path.join(ROOT, 'app', 'app', 'projects', '[id]', 'deploy', 'page.tsx'), 'utf8')
-    const load = page.slice(page.indexOf('const fetchAll'), page.indexOf('useEffect(() => { fetchAll() }'))
-    expect(load).toContain('/readiness`')
+    // Everything the page runs on load: its read helper, the readiness read and
+    // fetchAll, up to the effect that calls it (rebuilt 2026-11-16).
+    const start = page.indexOf('const read = useCallback')
+    const end = page.indexOf('useEffect(', page.indexOf('const fetchAll'))
+    expect(start).toBeGreaterThan(-1)
+    expect(end).toBeGreaterThan(start)
+    const load = page.slice(start, end)
+    expect(load).toContain("('/readiness')")
     expect(load).not.toContain("method: 'POST'")
     expect(page).toContain('Apply safe fixes')
     expect(page).toContain("const applySafeFixes")

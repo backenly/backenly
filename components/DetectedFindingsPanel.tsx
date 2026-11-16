@@ -33,22 +33,27 @@
  * queue: the loop writes one finding per affected table, so one bad policy
  * across nine tables is one row, one decision.
  *
- * Visual language: the locked flat inspector kit — #16171d surface, hairline
- * borders, mono numerals, violet for the primary action only. No gradients,
- * no glow.
+ * Rebuilt in place 2026-11-16: a row leads with what happens to it next, ◐
+ * "Fixed on the next pass" when the mode will repair it, ◆ "Needs your agent"
+ * when Backenly has no repair; Copy for agent is a visible button on those;
+ * Dismiss stays in ⋯ (a portal menu now, so no panel clips it); the severity
+ * word appears only for Critical; the affected table links to its page; and a
+ * failed read is an error row, never a silent nothing.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import {
-  RefreshCw, CheckCircle2, Loader2, XCircle, ClipboardCopy, Check, Gauge, ShieldAlert, Activity, Wrench,
-} from 'lucide-react'
-import { IconButton, KitButton, MetaCode, OverflowMenu, StatusDot, TextWithCode } from '@/components/inspector/kit'
-import {
-  groupFindings, CATEGORY_LABEL, severityWord, type FindingCategory, type FindingGroup,
-} from '@/lib/core/finding-groups'
-import { Disclosure, Fact, Facts, Panel, Row, RowList, RowNote, ROW_TITLE, Section } from '@/components/autonomy/rows'
+import Link from 'next/link'
+import { ClipboardCopy, XCircle } from 'lucide-react'
+import { KitButton, OverflowMenu, TextWithCode, type GlyphState } from '@/components/inspector/kit'
+import { groupFindings, CATEGORY_LABEL, type FindingGroup } from '@/lib/core/finding-groups'
+import { Disclosure, Fact, Facts, Panel, Row, RowList, RowSkeleton, ROW_TITLE, Section } from '@/components/autonomy/rows'
 import { hasExecutableFix } from '@/lib/core/fix-actions'
 import { sharedRead } from '@/lib/client/shared-read'
+import { ErrorRow, RefusedLine } from '@/components/console/states'
+import { Time } from '@/components/console/Time'
+import { findingIcon } from '@/components/autonomy/row-icons'
+import { FOCUS } from '@/components/console/tokens'
+import { agentPrompt, CopyForAgent } from '@/components/ReviewQueuePanel'
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -79,55 +84,49 @@ type RowState =
   | { phase: 'dismissing' }
   /** How many of the fixes applied kept a snapshot to restore from. */
   | { phase: 'verified'; applied: number; snapshots: number }
+  | { phase: 'dismissed' }
   | { phase: 'error'; message: string }
 
-function timeAgo(iso: string | null): string {
-  if (!iso) return 'unknown'
-  const s = Math.floor((Date.now() - new Date(iso).getTime()) / 1000)
-  if (s < 5) return 'just now'
-  if (s < 60) return `${s}s ago`
-  if (s < 3600) return `${Math.floor(s / 60)}m ago`
-  if (s < 86400) return `${Math.floor(s / 3600)}h ago`
-  return `${Math.floor(s / 86400)}d ago`
-}
-
 /**
- * What the loop will do with these WITHOUT the user. Mode-dependent, because
- * claiming "Backenly fixes these itself" under Review-only would be a lie —
- * in that mode the next pass raises them for approval instead of applying.
+ * What the loop does with these WITHOUT the user, said once above the rows
+ * only where a row cannot say it for itself. Under Review-only, claiming
+ * "Backenly fixes this itself" on a row would be a lie for every visible
+ * repair: the next pass raises those for approval and applies only the silent
+ * additive ones.
  */
-function dispositionCopy(level: Level | undefined, allRepairable: boolean): string {
+function dispositionCopy(level: Level | undefined): string | null {
   if (level === 'CONSERVATIVE') {
-    return 'On its next pass, Review-only applies the silent additive ones (indexes, API definitions) and asks you about the rest. You can also fix any of them now.'
+    return 'On its next pass, Review-only applies the silent additive ones (indexes, API definitions) and asks you about the rest.'
   }
   if (level === 'OFF') {
     return 'Autonomy is off, so nothing here is applied until you pick a mode or fix it here.'
   }
-  // Only what Backenly has a repair for is queued. A finding with none (a
-  // failed verification, a probe of the live API) was promised a next pass
-  // that never fixed it.
-  if (!allRepairable) {
-    return 'Ones with Fix now are queued for Backenly’s next pass and need no approval. The others have no repair Backenly can run, so hand them to your coding agent.'
-  }
-  return 'Queued for Backenly’s next pass, with no approval needed. Fix now to skip the wait.'
+  return null
+}
+
+/** What happens to a row next, as its lead and its first fact. */
+function nextFor(level: Level | undefined, repairable: boolean): { glyph: GlyphState; word: string } {
+  if (!repairable) return { glyph: 'waiting', word: 'Needs your agent' }
+  if (level === 'AGGRESSIVE' || level === 'BALANCED') return { glyph: 'busy', word: 'Fixed on the next pass' }
+  return { glyph: 'waiting', word: 'Fix now to apply it' }
 }
 
 /** Whether Backenly can run a repair for any member (the same test the Review Queue uses). */
 const repairable = (g: FindingGroup<HealthFinding>) => g.members.some(m => hasExecutableFix(m.type, m.details))
 
-/** The prompt handed to the user's coding agent — same contract as the approval queue. */
-function agentPrompt(g: FindingGroup<HealthFinding>): string {
-  const head = g.members[0]
-  return [
-    `My Backenly backend flagged a ${g.severity} ${CATEGORY_LABEL[g.category]} issue I want addressed in my app:`,
-    ``,
-    `Issue: ${g.title}`,
-    `Type: ${head.type}`,
-    g.subjects.length > 0 ? `Affected: ${g.subjects.join(', ')}` : '',
-    `Context: ${JSON.stringify(head.details ?? {}, null, 2)}`,
-    ``,
-    `If this belongs in the backend (schema, RLS, API, auth), tell me to run it through Backenly so the change stays governed and reversible. If it belongs in my frontend/client code, make the change directly.`,
-  ].filter(Boolean).join('\n')
+/**
+ * Where the affected object lives, so a finding links to it: a table to
+ * Database, a function to Functions, a webhook endpoint to Webhooks. Auth and
+ * provider findings have no single object page.
+ */
+function objectHref(projectId: string, type: string, subject: string | undefined): string | null {
+  if (!subject) return null
+  const base = `/app/projects/${projectId}`
+  if (/webhook/i.test(type)) return `${base}/webhooks?endpoint=${encodeURIComponent(subject)}`
+  if (/function/i.test(type)) return `${base}/functions?fn=${encodeURIComponent(subject)}`
+  if (/auth|oauth|jwt|integration|smtp|deploy|key/i.test(type)) return null
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(subject)) return null
+  return `${base}/database?table=${encodeURIComponent(subject)}`
 }
 
 // ── Panel ────────────────────────────────────────────────────────────────────
@@ -135,15 +134,23 @@ function agentPrompt(g: FindingGroup<HealthFinding>): string {
 export function DetectedFindingsPanel({
   projectId,
   level,
+  refreshKey = 0,
+  canFix = true,
 }: {
   projectId: string
   level?: Level
+  /** Bumped by the page every 30 s and on focus: the panel re-reads quietly. */
+  refreshKey?: number
+  /** Fixing or dismissing takes a developer or above. */
+  canFix?: boolean
 }) {
   const [data, setData] = useState<HealthPayload | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(false)
-  const [refreshing, setRefreshing] = useState(false)
+  const [retrying, setRetrying] = useState(false)
   const [rowState, setRowState] = useState<Record<string, RowState>>({})
+  // Rows settled on this visit stay, with their outcome, until the page is left.
+  const [settled, setSettled] = useState<Record<string, FindingGroup<HealthFinding>>>({})
   const timers = useRef<ReturnType<typeof setTimeout>[]>([])
 
   useEffect(() => () => { timers.current.forEach(clearTimeout) }, [])
@@ -151,25 +158,25 @@ export function DetectedFindingsPanel({
   const setRow = (id: string, s: RowState) =>
     setRowState(prev => ({ ...prev, [id]: s }))
 
-  const fetchHealth = useCallback(async (silent = false) => {
-    if (silent) setRefreshing(true)
-    setError(false)
+  const fetchHealth = useCallback(async (fresh = false) => {
     try {
       // The first load shares the top bar's read; a refresh after an action,
       // or asked for, reads afresh (lib/client/shared-read.ts).
-      const res = await sharedRead(`/api/projects/${projectId}/health`, { fresh: silent })
+      const res = await sharedRead(`/api/projects/${projectId}/health`, { fresh })
       if (!res.ok) throw new Error('fetch failed')
       const j = res.data
       setData(j?.data ?? null)
+      setError(false)
     } catch {
+      // A failed refresh keeps what was shown; a failed first read says so.
       setError(true)
     } finally {
       setLoading(false)
-      setRefreshing(false)
+      setRetrying(false)
     }
   }, [projectId])
 
-  useEffect(() => { fetchHealth() }, [fetchHealth])
+  useEffect(() => { void fetchHealth(refreshKey > 0) }, [fetchHealth, refreshKey])
 
   const openFindings = useMemo(
     () => (data?.findings ?? [])
@@ -182,8 +189,7 @@ export function DetectedFindingsPanel({
 
   /**
    * Uncapped open count. `findings` is a 50-row preview, so measuring it would
-   * silently under-report a project over the cap — the precise mistake that
-   * once capped the Detect node at its preview limit. Both uncapped totals come
+   * silently under-report a project over the cap. Both uncapped totals come
    * from this payload, and open = actionable − held.
    */
   const openTotal = useMemo(() => {
@@ -244,14 +250,8 @@ export function DetectedFindingsPanel({
     }
 
     setRow(g.key, { phase: 'verified', applied, snapshots })
-    const t = setTimeout(async () => {
-      await fetchHealth(true)
-      setRowState(prev => {
-        const { [g.key]: _gone, ...rest } = prev
-        return rest
-      })
-    }, 2400)
-    timers.current.push(t)
+    setSettled(prev => ({ ...prev, [g.key]: g }))
+    void fetchHealth(true)
   }
 
   const dismissGroup = async (g: FindingGroup<HealthFinding>) => {
@@ -269,52 +269,54 @@ export function DetectedFindingsPanel({
           return
         }
       }
-      await fetchHealth(true)
-      setRowState(prev => {
-        const { [g.key]: _gone, ...rest } = prev
-        return rest
-      })
+      setRow(g.key, { phase: 'dismissed' })
+      setSettled(prev => ({ ...prev, [g.key]: g }))
+      void fetchHealth(true)
     } catch {
       setRow(g.key, { phase: 'error', message: 'Network error. Try again.' })
     }
   }
 
+  // A failed first read says so in the panel: an error must never read as
+  // "nothing detected".
+  if (error && !data) {
+    return (
+      <Section id="autonomy-detected" title="Detected">
+        <Panel>
+          <ErrorRow things="findings" onRetry={() => { setRetrying(true); void fetchHealth(true) }} retrying={retrying} />
+        </Panel>
+      </Section>
+    )
+  }
+
+  const settledGroups = Object.values(settled).filter(g => !groups.some(x => x.key === g.key))
   // Nothing detected → render nothing. "Waiting on you" already owns the
-  // all-clear message for this page; a second empty card would just repeat it.
-  // A failed fetch is also silent: the Detect node above is the count of
-  // record, and an error card here would imply findings exist that we cannot
-  // show, which is a scarier claim than the one we can support.
-  if (loading || error || groups.length === 0) return null
+  // all-clear message for this page; a second empty panel would repeat it.
+  if (loading || (groups.length === 0 && settledGroups.length === 0)) return null
 
   return (
     <Section
       id="autonomy-detected"
       title="Detected"
       count={openTotal}
-      description={dispositionCopy(level, groups.every(repairable))}
+      description={dispositionCopy(level)}
       aside={
-        <>
-          {groups.length < openTotal && (
-            <span className="text-[12.5px] tabular-nums text-faint">
-              in {groups.length} {groups.length === 1 ? 'issue' : 'issues'}
-            </span>
-          )}
-          <IconButton
-            icon={RefreshCw}
-            label="Refresh findings"
-            onClick={() => fetchHealth(true)}
-            disabled={refreshing}
-            className={refreshing ? '[&_svg]:animate-spin' : ''}
-          />
-        </>
+        groups.length > 0 && groups.length < openTotal ? (
+          <span className="text-[12.5px] tabular-nums text-faint">
+            in {groups.length} {groups.length === 1 ? 'issue' : 'issues'}
+          </span>
+        ) : undefined
       }
     >
       <Panel>
         <RowList>
-          {groups.map(g => (
+          {[...settledGroups, ...groups].map(g => (
             <DetectedRow
               key={g.key}
+              projectId={projectId}
               group={g}
+              level={level}
+              canFix={canFix}
               state={rowState[g.key] ?? { phase: 'idle' }}
               onFix={repairable(g) ? () => fixGroup(g) : undefined}
               onDismiss={() => dismissGroup(g)}
@@ -338,13 +340,19 @@ export function DetectedFindingsPanel({
 // ── Row ──────────────────────────────────────────────────────────────────────
 
 function DetectedRow({
+  projectId,
   group: g,
+  level,
+  canFix,
   state,
   onFix,
   onDismiss,
   onResetError,
 }: {
+  projectId: string
   group: FindingGroup<HealthFinding>
+  level?: Level
+  canFix: boolean
   state: RowState
   /** Absent when Backenly has no repair to run: approving would only fail. */
   onFix?: () => void
@@ -352,78 +360,98 @@ function DetectedRow({
   onResetError: () => void
 }) {
   const [expanded, setExpanded] = useState(false)
-  const [copied, setCopied] = useState(false)
   const head = g.members[0]
   const many = g.members.length > 1
   const title = <p className={ROW_TITLE}><TextWithCode text={g.title} codeClassName="text-zinc-100" /></p>
+  const next = nextFor(level, !!onFix)
 
-  if (state.phase === 'verified') {
+  if (state.phase === 'verified' || state.phase === 'dismissed') {
+    const fixed = state.phase === 'verified'
     return (
-      <Row icon={CheckCircle2} tone="done" title={title} className="animate-fade-in">
-        <Facts>
-          <Fact>Fixed{many ? ` on ${g.members.length} tables` : ''}</Fact>
-          {/* Said only for what the approve route kept a snapshot of: a fix
-              that takes none (an index, say) returns snapshotId null. */}
-          {state.snapshots > 0 && (
-            <Fact>
-              {state.snapshots === state.applied
-                ? 'Rollback snapshot captured'
-                : `Rollback snapshot captured for ${state.snapshots} of ${state.applied}`}
-            </Fact>
-          )}
-        </Facts>
+      <Row
+        lead="well"
+        icon={findingIcon(g.category)}
+        tone="done"
+        id={`finding-${g.key}`}
+        title={title}
+      >
+        {!fixed && (
+          <Facts>
+            <Fact strong>Dismissed</Fact>
+          </Facts>
+        )}
+        {fixed && (
+          <Facts>
+            <Fact>Fixed{many ? ` on ${g.members.length} tables` : ''}</Fact>
+            {/* Said only for what the approve route kept a snapshot of: a fix
+                that takes none (an index, say) returns snapshotId null. */}
+            {state.snapshots > 0 && (
+              <Fact>
+                {state.snapshots === state.applied
+                  ? 'Rollback snapshot captured'
+                  : `Rollback snapshot captured for ${state.snapshots} of ${state.applied}`}
+              </Fact>
+            )}
+          </Facts>
+        )}
       </Row>
     )
   }
 
   const busy = state.phase === 'applying' || state.phase === 'dismissing'
-
-  const handToAgent = async () => {
-    try {
-      await navigator.clipboard.writeText(agentPrompt(g))
-      setCopied(true)
-      setTimeout(() => setCopied(false), 1800)
-    } catch { /* clipboard blocked — no-op */ }
-  }
+  const subject = !many ? g.subjects[0] : undefined
+  const href = objectHref(projectId, head.type, subject)
 
   return (
     <Row
-      icon={CATEGORY_ICON[g.category] ?? Activity}
-      tone={g.severity === 'critical' ? 'danger' : 'neutral'}
+      lead="well"
+      icon={findingIcon(g.category)}
       busy={state.phase === 'applying'}
-      className={state.phase === 'error' ? 'bg-rose-500/[0.03]' : ''}
+      id={`finding-${g.key}`}
       title={title}
       actions={
         state.phase === 'error' ? (
-          <KitButton variant="primary" onClick={onResetError}>Try again</KitButton>
-        ) : (
+          <KitButton variant="secondary" onClick={onResetError}>Try again</KitButton>
+        ) : canFix ? (
           <>
-            {onFix && (
-              <KitButton variant="secondary" onClick={onFix} disabled={busy}>
-                {state.phase === 'applying'
-                  ? <><Loader2 className="size-3.5 animate-spin" /> {many ? `Fixing ${g.members.length}…` : 'Fixing…'}</>
-                  : <><Wrench className="size-3.5" /> {many ? `Fix all ${g.members.length}` : 'Fix now'}</>}
+            {onFix ? (
+              <KitButton variant="secondary" onClick={onFix} disabled={busy} loading={state.phase === 'applying'}>
+                {state.phase === 'applying' ? (many ? `Fixing ${g.members.length}…` : 'Fixing…') : many ? `Fix all ${g.members.length}` : 'Fix now'}
               </KitButton>
+            ) : (
+              <CopyForAgent prompt={agentPrompt(g)} />
             )}
             <OverflowMenu
               label={`More actions for: ${g.title}`}
               disabled={busy}
               width="w-[230px]"
               items={[
-                { label: 'Hand to my agent', icon: ClipboardCopy, onClick: () => { void handToAgent() } },
+                ...(onFix ? [{ label: 'Copy for agent', icon: ClipboardCopy, onClick: () => { void navigator.clipboard?.writeText(agentPrompt(g)) } }] : []),
                 { label: state.phase === 'dismissing' ? 'Dismissing…' : 'Dismiss', icon: XCircle, onClick: onDismiss },
               ]}
             />
           </>
+        ) : (
+          <CopyForAgent prompt={agentPrompt(g)} />
         )
       }
     >
       <Facts>
-        <StatusDot tone={g.severity === 'critical' ? 'failed' : g.severity === 'warning' ? 'attention' : 'neutral'} label={severityWord(g.severity)} />
+        <Fact strong>{next.word}</Fact>
+        {g.severity === 'critical' && <Fact strong><span className="font-medium text-zinc-50">Critical</span></Fact>}
         <Fact>{CATEGORY_LABEL[g.category]}</Fact>
-        {!many && g.subjects[0] && !head.type.includes(g.subjects[0]) && <Fact><MetaCode>{g.subjects[0]}</MetaCode></Fact>}
-        <Fact><span className="tabular-nums">{timeAgo(head.detectedAt)}</span></Fact>
-        {copied && <Fact icon={Check} strong>Copied for your agent</Fact>}
+        {subject && !head.type.includes(subject) && (
+          <Fact>
+            {href ? (
+              <Link href={href} className={`rounded-[3px] font-mono text-[12px] text-zinc-300 underline decoration-white/20 underline-offset-2 hover:text-zinc-50 ${FOCUS}`}>
+                {subject}
+              </Link>
+            ) : (
+              <code className="font-mono text-[12px] text-zinc-400">{subject}</code>
+            )}
+          </Fact>
+        )}
+        {head.detectedAt && <Fact><Time iso={head.detectedAt} /></Fact>}
       </Facts>
 
       {many && (
@@ -443,16 +471,7 @@ function DetectedRow({
         </>
       )}
 
-      {state.phase === 'error' && (
-        <RowNote tone="danger" icon={XCircle} role="alert">{state.message}</RowNote>
-      )}
+      {state.phase === 'error' && <RefusedLine className="mt-2.5">{state.message}</RefusedLine>}
     </Row>
   )
-}
-
-/** What a finding is about, as the row's tile. */
-const CATEGORY_ICON: Record<FindingCategory, typeof Gauge> = {
-  security: ShieldAlert,
-  performance: Gauge,
-  reliability: Activity,
 }

@@ -1,8 +1,9 @@
 'use client'
 
 /**
- * Toast: a transient confirmation. Raised surface, coloured icon, neutral
- * text, announced politely to assistive technology.
+ * Toast: a transient confirmation. Raised surface, a monochrome icon (grey
+ * for success and info, white for a warning or an error), neutral text,
+ * announced politely to assistive technology.
  *
  * Success and info toasts dismiss themselves after a few seconds; warnings and
  * errors stay until closed, because a message someone has to act on should not
@@ -28,10 +29,10 @@ const ICONS = {
 }
 
 const ICON_TONE = {
-  success: 'text-emerald-400',
-  error: 'text-rose-400',
-  info: 'text-zinc-400',
-  warning: 'text-amber-400',
+  success: 'text-zinc-300',
+  error: 'text-zinc-50',
+  info: 'text-zinc-300',
+  warning: 'text-zinc-50',
 }
 
 export function Toast({ message, type = 'info', isVisible, onClose }: ToastProps) {

@@ -1,17 +1,14 @@
 /**
- * Supabase import — the pure planning core.
+ * Supabase import — the July planning core, kept for `mapPgType`.
  *
- * ⚠ The Supabase IMPORTER is dormant by design (route gated off, ~1–3 months —
- * see app/api/projects/[id]/import/supabase/route.ts). BUT this file is NOT
- * dead: `mapPgType` is also imported by lib/branches/engine.ts to map cloned
- * column types on branch merge. Keep this module intact regardless of the
- * importer's on/off state.
+ * The importer this planned for is retired (2026-11-16): moving a backend in
+ * is now lib/import/jobs.ts with its own planner, lib/import/pg-plan.ts,
+ * which keeps types exactly where the governed kernel can. This file is NOT
+ * dead: `mapPgType` is imported by lib/branches/engine.ts to map cloned column
+ * types on branch merge, and scripts/verify-supabase-import-plan.ts still
+ * checks the whole module. Keep it intact.
  *
- * Everything in this file is deterministic and side-effect free: it turns
- * introspection rows from a source Supabase Postgres into an ImportPlan that
- * the engine (supabase-importer.ts) executes through Backenly's governed
- * mutation path. Pure functions so the whole migration strategy is unit-
- * testable without a database (scripts/verify-supabase-import-plan.ts).
+ * Everything in this file is deterministic and side-effect free.
  *
  * Policy decisions encoded here:
  *   • `users` is platform-managed in Backenly (enable_auth owns it), so a

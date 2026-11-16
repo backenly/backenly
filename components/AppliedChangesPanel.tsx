@@ -1,48 +1,47 @@
 'use client'
 
 /**
- * AppliedChangesPanel — what Backenly changed on its own, and the way back.
+ * AppliedChangesPanel: "Changes Backenly made", the one record of what
+ * Backenly changed on its own, each with its way back.
  *
  * WHY THIS EXISTS
  * ---------------
- * Every autonomy surface in this product has told users that "every autonomous
- * action is snapshotted, reversible, and written to the audit log". The engine
- * side of that was real and had been for months: `capturePreFixState` takes a
- * PRE-fix snapshot before the executor runs, `revertAutoFix` restores it,
- * `DELETE /api/projects/[id]/health/approve` is wired straight to it, and the
- * "rollback snapshot captured" line in the queue was telling the truth.
+ * `capturePreFixState` takes a PRE-fix snapshot before the executor runs,
+ * `revertAutoFix` restores it, and `DELETE /api/projects/[id]/health/approve`
+ * is wired straight to it. For months nothing in the product called it:
+ * `auto_fixed` rows, the changes Backenly made WITHOUT being asked, rendered
+ * nowhere, with no undo. This panel is that half of the queue.
  *
- * Nothing in the product ever called it. The Review Queue is `pending_approval`
- * only; the Detected panel is `open` only; the activity feed renders AuditLog
- * rows, which carry no findingId to revert. So `auto_fixed` — the rows that
- * describe changes Backenly made WITHOUT being asked, the exact set a developer
- * most wants a way out of — rendered nowhere, with no undo, on a page whose
- * footer promised one. This panel is that half of the queue.
+ * ONE RECORD (2026-11-16)
+ * -----------------------
+ * The same fix used to be printed twice on this page, with the same 30-word
+ * "because" sentence: once here and once in an Activity feed below, while the
+ * statement that actually ran sat behind a click. Now each row shows what ran
+ * (its first statement, in mono), whether a re-check confirmed it, and when;
+ * "Why" holds the reason, every statement and Copy. The 30-day scoreboard sits
+ * in the heading, and the old feed, system events included, folds into "Full
+ * log" at the foot of the same panel.
  *
  * THE RULE THIS PANEL FOLLOWS
  * ---------------------------
  * An Undo button is only drawn when the engine will actually honour it.
  * `revertible` comes from `revertEligibility` in the auto-fix engine — the same
- * predicate `revertAutoFix` gates on — so the button's precondition and the
- * engine's precondition are one function. A fix recorded before the undo
- * contract, or one whose pre-fix snapshot capture failed, renders its reason
- * instead of a button that would fail on click. This codebase has already
- * shipped the other version of that mistake once, as a "Fix now" button that
- * returned an error every time it was pressed.
+ * predicate `revertAutoFix` gates on. A fix recorded before the undo contract,
+ * or one whose pre-fix snapshot capture failed, shows its reason instead.
  *
  * Undoing RLS is a protection REMOVAL, so it takes a second explicit
  * confirmation in-row rather than one silent click — the server enforces this
  * independently (409 + requiresConfirmation) and the UI mirrors it.
- *
- * Visual language: the locked flat inspector kit — #16171d surface, hairline
- * borders, mono numerals, no gradients. Undo is `danger` on RLS rows (it removes
- * protection) and `secondary` everywhere else (it restores a prior state).
  */
 
-import { useCallback, useMemo, useState } from 'react'
-import { Undo2, Loader2, XCircle, ShieldAlert, Lock, Wrench, CheckCircle2 } from 'lucide-react'
-import { CopyButton, KitButton, MetaCode, StatusDot } from '@/components/inspector/kit'
-import { CodeBlock, Disclosure, Fact, Facts, Panel, Row, RowList, RowNote, ROW_TEXT, ROW_TITLE, Section } from '@/components/autonomy/rows'
+import { useCallback, useState } from 'react'
+import Link from 'next/link'
+import { CopyButton, KitButton } from '@/components/inspector/kit'
+import { FOCUS, FOCUS_INSET } from '@/components/console/tokens'
+import { RefusedLine } from '@/components/console/states'
+import { Time } from '@/components/console/Time'
+import { CodeBlock, Disclosure, EmptyLine, Fact, Facts, Panel, Row, RowList, ROW_TEXT, ROW_TITLE, Section } from '@/components/autonomy/rows'
+import { FIX_ICON } from '@/components/autonomy/row-icons'
 
 export interface AppliedChange {
   findingId: string
@@ -59,6 +58,23 @@ export interface AppliedChange {
   statements?: Array<{ sql: string; params?: string[] }>
 }
 
+/** The trust report's 30-day tally, said in the section's heading. */
+export interface Scoreboard {
+  windowDays: number
+  autonomousFixes: number
+  rollbacks: number
+  verifiedRate: number | null
+}
+
+/** One line of the activity feed (trust report `recentActivity`). */
+export interface ActivityEntry {
+  at: string
+  action: string
+  kind: string
+  summary: string
+  repeat?: number
+}
+
 type RowState =
   | { phase: 'idle' }
   | { phase: 'confirming'; message: string }
@@ -66,25 +82,29 @@ type RowState =
   | { phase: 'reverted'; message: string }
   | { phase: 'error'; message: string }
 
-
-function timeAgo(iso: string): string {
-  const s = Math.floor((Date.now() - new Date(iso).getTime()) / 1000)
-  if (s < 5) return 'just now'
-  if (s < 60) return `${s}s ago`
-  if (s < 3600) return `${Math.floor(s / 60)}m ago`
-  if (s < 86400) return `${Math.floor(s / 3600)}h ago`
-  return `${Math.floor(s / 86400)}d ago`
-}
+/** A statement that changes the schema: undoing it restores the state before it, which takes an admin. */
+const SCHEMA_SQL = /^\s*(CREATE|ALTER|DROP|COMMENT)\b/i
 
 export function AppliedChangesPanel({
   projectId,
   changes,
   onReverted,
+  scoreboard,
+  activity = [],
+  canUndo = true,
+  canUndoSchema = true,
 }: {
   projectId: string
   changes: AppliedChange[]
   /** Refetch the trust report — the reverted row leaves `auto_fixed`. */
   onReverted: () => void
+  scoreboard?: Scoreboard
+  /** The feed behind "Full log". */
+  activity?: ActivityEntry[]
+  /** Undo takes a developer or above… */
+  canUndo?: boolean
+  /** …and an admin when the fix changed the schema (health/approve's DELETE). */
+  canUndoSchema?: boolean
 }) {
   const [rowState, setRowState] = useState<Record<string, RowState>>({})
 
@@ -136,142 +156,234 @@ export function AppliedChangesPanel({
     }
   }, [projectId, setRow, onReverted])
 
-  const revertibleCount = useMemo(
-    () => changes.filter(c => c.revertible).length,
-    [changes],
-  )
-
-  // Nothing applied yet → render nothing. An empty card here would repeat the
-  // "Nothing yet" the activity feed directly above already says.
-  if (changes.length === 0) return null
-
   return (
-    <Section id="autonomy-applied" title="Changes Backenly made" count={changes.length}>
+    <Section
+      id="autonomy-applied"
+      title="Changes Backenly made"
+      count={changes.length}
+      aside={scoreboard && (scoreboard.autonomousFixes > 0 || scoreboard.rollbacks > 0) ? <Tally s={scoreboard} /> : undefined}
+    >
       <Panel>
-        <RowList>
-          {changes.map(c => (
-            <ChangeRow
-              key={c.findingId}
-              change={c}
-              state={rowState[c.findingId] ?? { phase: 'idle' }}
-              onUndo={() => revert(c, false)}
-              onConfirmUndo={() => revert(c, true)}
-              onCancel={() => setRow(c.findingId, { phase: 'idle' })}
-            />
-          ))}
-        </RowList>
+        {changes.length === 0 ? (
+          <EmptyLine>None yet. Each fix shows here with its statement, its result and Undo.</EmptyLine>
+        ) : (
+          <RowList>
+            {changes.map(c => {
+              const touchesSchema = (c.statements ?? []).some(st => SCHEMA_SQL.test(st.sql))
+              return (
+                <ChangeRow
+                  key={c.findingId}
+                  projectId={projectId}
+                  change={c}
+                  canUndo={canUndo && (!touchesSchema || canUndoSchema)}
+                  state={rowState[c.findingId] ?? { phase: 'idle' }}
+                  onUndo={() => revert(c, false)}
+                  onConfirmUndo={() => revert(c, true)}
+                  onCancel={() => setRow(c.findingId, { phase: 'idle' })}
+                />
+              )
+            })}
+          </RowList>
+        )}
+        {activity.length > 0 && <FullLog activity={activity} />}
       </Panel>
     </Section>
+  )
+}
+
+/** "Last 30 days  2 fixed  0 undone  2 re-checked", each its own fact. */
+function Tally({ s }: { s: Scoreboard }) {
+  const rechecked = s.verifiedRate === null ? null : Math.round(s.verifiedRate * s.autonomousFixes)
+  return (
+    <span className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[12.5px] tabular-nums text-faint">
+      <span>Last {s.windowDays} days</span>
+      <span>{s.autonomousFixes.toLocaleString('en-US')} fixed</span>
+      <span>{s.rollbacks.toLocaleString('en-US')} undone</span>
+      {rechecked !== null && <span>{rechecked.toLocaleString('en-US')} re-checked</span>}
+    </span>
   )
 }
 
 // ── Row ──────────────────────────────────────────────────────────────────────
 
 function ChangeRow({
+  projectId,
   change: c,
+  canUndo,
   state,
   onUndo,
   onConfirmUndo,
   onCancel,
 }: {
+  projectId: string
   change: AppliedChange
+  canUndo: boolean
   state: RowState
   onUndo: () => void
   onConfirmUndo: () => void
   onCancel: () => void
 }) {
-  const [showSql, setShowSql] = useState(false)
+  const [showWhy, setShowWhy] = useState(false)
   const statements = c.statements ?? []
   const { title, reason } = describe(c)
-
-  if (state.phase === 'reverted') {
-    return (
-      <Row icon={CheckCircle2} tone="done" title={<p className={ROW_TITLE}>{title}</p>} className="animate-fade-in">
-        <p className={ROW_TEXT}>{state.message}</p>
-      </Row>
-    )
-  }
-
+  const reverted = state.phase === 'reverted'
   const busy = state.phase === 'reverting'
+  const tableHref = c.resource && /^[A-Za-z_][A-Za-z0-9_]*$/.test(c.resource) ? `/app/projects/${projectId}/database?table=${encodeURIComponent(c.resource)}` : null
 
   return (
     <Row
-      icon={Wrench}
+      lead="well"
+      icon={FIX_ICON}
+      tone={reverted ? 'done' : 'neutral'}
       busy={busy}
-      className={state.phase === 'error' ? 'bg-rose-500/[0.03]' : ''}
+      id={`fix-${c.findingId}`}
       title={<p className={ROW_TITLE}>{title}</p>}
       actions={
-        !c.revertible ? undefined : state.phase === 'confirming' ? (
+        reverted ? (
+          <span className="pt-[2px] text-[12.5px] font-medium text-zinc-300">Undone</span>
+        ) : !c.revertible || !canUndo ? undefined : state.phase === 'confirming' ? (
           <>
             <KitButton variant="secondary" onClick={onCancel} disabled={busy}>
               Keep it
             </KitButton>
             <KitButton variant="danger" onClick={onConfirmUndo} disabled={busy}>
-              <Undo2 className="size-3.5" /> Undo anyway
+              Undo anyway
             </KitButton>
           </>
         ) : state.phase === 'error' ? (
           <KitButton variant="secondary" onClick={onCancel}>Try again</KitButton>
         ) : (
-          <KitButton
-            variant={c.requiresConfirmation ? 'danger' : 'secondary'}
-            onClick={onUndo}
-            disabled={busy}
-          >
-            {busy
-              ? <><Loader2 className="size-3.5 animate-spin" /> Undoing…</>
-              : <><Undo2 className="size-3.5" /> Undo</>}
+          <KitButton variant={c.requiresConfirmation ? 'danger' : 'secondary'} onClick={onUndo} loading={busy}>
+            {busy ? 'Undoing…' : 'Undo'}
           </KitButton>
         )
       }
     >
-      {reason && <p className={ROW_TEXT}>{reason}</p>}
+      {reverted ? (
+        <p role="status" className={`${ROW_TEXT} !text-zinc-300`}>{state.message}</p>
+      ) : (
+        statements.length > 0 && (
+          // What ran, in the row: the first statement, one line; all of them under Why.
+          <p className="mt-1 truncate font-mono text-[12px] leading-[18px] text-zinc-400">{statements[0].sql}</p>
+        )
+      )}
       <Facts>
         {/* Never claim verification the kernel did not perform. Types no
             probe can re-detect are recorded honestly as unchecked. */}
-        <StatusDot
-          tone={c.verified ? 'operational' : 'neutral'}
-          label={c.verified ? 'Re-checked and confirmed' : 'Not independently re-checked'}
-        />
-        {c.resource && <Fact><MetaCode>{c.resource}</MetaCode></Fact>}
-        <Fact><span className="tabular-nums">{timeAgo(c.at)}</span></Fact>
+        <Fact strong>{c.verified ? 'Re-checked: fixed' : 'Not independently re-checked'}</Fact>
+        {c.resource && (
+          <Fact>
+            {tableHref ? (
+              <Link href={tableHref} className={`rounded-[3px] font-mono text-[12px] text-zinc-300 underline decoration-white/20 underline-offset-2 hover:text-zinc-50 ${FOCUS}`}>
+                {c.resource}
+              </Link>
+            ) : (
+              <code className="font-mono text-[12px] text-zinc-400">{c.resource}</code>
+            )}
+          </Fact>
+        )}
+        <Fact><Time iso={c.at} mode="dateTime" /></Fact>
       </Facts>
 
-      {/* The exact statements, on demand. Collapsed by default because the
-          sentence above is what most people want; expanded it is the answer
-          to "what did it actually run". Absent when nothing was captured: a
-          change applied before the recorder existed shows no toggle rather
-          than an empty panel implying it ran nothing. */}
-      {statements.length > 0 && (
+      {(reason || statements.length > 0) && (
         <>
-          <Disclosure open={showSql} onToggle={() => setShowSql(v => !v)}>
-            {statements.length === 1 ? 'Show the statement' : `Show ${statements.length} statements`}
+          <Disclosure open={showWhy} onToggle={() => setShowWhy(v => !v)}>
+            Why
           </Disclosure>
-          {showSql && (
-            <div className="relative">
-              <CodeBlock className="pr-10">
-                {statements.map((st, i) =>
-                  `${st.sql}${st.params && st.params.length > 0 ? `\n-- ${st.params.map((p, j) => `$${j + 1} = ${p}`).join(', ')}` : ''}${i < statements.length - 1 ? '\n\n' : ''}`,
-                ).join('')}
-              </CodeBlock>
-              <div className="absolute right-1.5 top-[16px]">
-                <CopyButton value={statements.map(st => st.sql).join(';\n') + ';'} label="Copy the statements" />
-              </div>
-            </div>
+          {showWhy && (
+            <>
+              {reason && <p className={ROW_TEXT}>{reason}</p>}
+              {/* Absent when nothing was captured: a change applied before the
+                  recorder existed shows no statements rather than an empty well
+                  implying it ran nothing. */}
+              {statements.length > 0 && (
+                <div className="relative">
+                  <CodeBlock className="pr-10">
+                    {statements.map((st, i) =>
+                      `${st.sql}${st.params && st.params.length > 0 ? `\n-- ${st.params.map((p, j) => `$${j + 1} = ${p}`).join(', ')}` : ''}${i < statements.length - 1 ? '\n\n' : ''}`,
+                    ).join('')}
+                  </CodeBlock>
+                  <div className="absolute right-1.5 top-[16px]">
+                    <CopyButton value={statements.map(st => st.sql).join(';\n') + ';'} label={statements.length === 1 ? 'Copy the statement' : 'Copy the statements'} />
+                  </div>
+                </div>
+              )}
+            </>
           )}
         </>
       )}
 
       {state.phase === 'confirming' && (
-        <RowNote tone="danger" icon={ShieldAlert}>{state.message}</RowNote>
+        <p className="mt-2.5 text-[12.5px] leading-[18px] text-rose-300">{state.message}</p>
       )}
-      {state.phase === 'error' && (
-        <RowNote tone="danger" icon={XCircle} role="alert">{state.message}</RowNote>
-      )}
+      {state.phase === 'error' && <RefusedLine className="mt-2.5">{state.message}</RefusedLine>}
       {!c.revertible && c.revertBlockedReason && (
-        <RowNote icon={Lock}>{c.revertBlockedReason}</RowNote>
+        <p className="mt-2.5 text-[12.5px] leading-[18px] text-faint">{c.revertBlockedReason}</p>
       )}
     </Row>
+  )
+}
+
+// ── Full log ─────────────────────────────────────────────────────────────────
+
+/**
+ * What Backenly did lately, every line of it: the feed that used to be a
+ * second panel. The loop's own bookkeeping (a step with no sentence of its
+ * own) folds behind "Show N system events".
+ */
+function FullLog({ activity }: { activity: ActivityEntry[] }) {
+  const [open, setOpen] = useState(false)
+  const [showSystem, setShowSystem] = useState(false)
+  const isBookkeeping = (a: ActivityEntry) =>
+    (a.kind === 'other' || !a.kind) && a.summary.trim().toLowerCase() === a.action.replace(/[_-]+/g, ' ').trim().toLowerCase()
+  const said = activity.filter(a => !isBookkeeping(a))
+  const folded = activity.length - said.length
+  const shown = showSystem ? activity : said
+  return (
+    <div className="border-t border-white/[0.06]">
+      <button
+        type="button"
+        onClick={() => setOpen(v => !v)}
+        aria-expanded={open}
+        className={`flex w-full items-center gap-2 px-[20px] py-[11px] text-left text-[13px] font-medium text-zinc-300 transition-colors hover:text-zinc-50 ${FOCUS_INSET}`}
+      >
+        Full log
+        <span className="font-normal tabular-nums text-faint">{activity.length}</span>
+        <svg aria-hidden viewBox="0 0 16 16" className={`h-3.5 w-3.5 text-zinc-500 transition-transform duration-150 ${open ? 'rotate-180' : ''}`} fill="none">
+          <path d="m4 6 4 4 4-4" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </button>
+      {open && (
+        <>
+          <ul aria-label="What Backenly did" className="divide-y divide-white/[0.06] border-t border-white/[0.06]">
+            {shown.map((a, i) => (
+              <li key={i} className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-6 px-[20px] py-[10px]">
+                <span className="min-w-0 text-[13px] leading-[20px] text-zinc-300 [overflow-wrap:anywhere]">
+                  {a.summary}
+                  {/* An unresolved finding is re-escalated every tick; folded
+                      server-side, and the count keeps the fold honest. */}
+                  {(a.repeat ?? 1) > 1 && <span className="ml-1.5 tabular-nums text-faint">{a.repeat} times</span>}
+                </span>
+                <span className="pt-px text-[12.5px] text-faint">
+                  <Time iso={a.at} />
+                </span>
+              </li>
+            ))}
+            {shown.length === 0 && <li className="px-[20px] py-[10px] text-[13px] text-faint">Only system events so far.</li>}
+          </ul>
+          {folded > 0 && (
+            <button
+              type="button"
+              onClick={() => setShowSystem(v => !v)}
+              aria-expanded={showSystem}
+              className={`block w-full border-t border-white/[0.06] px-[20px] py-[10px] text-left text-[12.5px] text-faint transition-colors hover:text-zinc-200 ${FOCUS_INSET}`}
+            >
+              {showSystem ? 'Hide system events' : `Show ${folded} system ${folded === 1 ? 'event' : 'events'}`}
+            </button>
+          )}
+        </>
+      )}
+    </div>
   )
 }
 

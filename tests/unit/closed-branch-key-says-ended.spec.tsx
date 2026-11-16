@@ -2,7 +2,7 @@
  * @jest-environment jsdom
  */
 /**
- * Settings → API keys: a preview key whose branch was merged or discarded never
+ * API keys (Connect → API since 2026-11-16): a preview key whose branch was merged or discarded never
  * answers again, so it shows that it ended with its branch, not the far-off
  * expiry it was minted with. Production QA (2026-11-09) found five such keys
  * listed as live, "expiring" in February 2027.
@@ -37,7 +37,7 @@ beforeEach(() => {
 it('says a closed branch’s key ended with it, and keeps a live one’s date', async () => {
   render(<ClientKeysPanel />)
   await act(async () => { for (let i = 0; i < 10; i++) await Promise.resolve() })
-  const row = (name: string) => screen.getByText(name).closest('tr') as HTMLElement
+  const row = (name: string) => screen.getByText(name).closest('li') as HTMLElement
   expect(row('scratch key')).toHaveTextContent('Ended with branch')
   expect(row('scratch key')).not.toHaveTextContent('2027')
   expect(row('staging key')).not.toHaveTextContent('Ended with branch')

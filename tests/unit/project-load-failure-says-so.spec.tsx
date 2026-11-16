@@ -5,6 +5,10 @@
  * A project that has not loaded, or could not load, is never shown as a
  * project with nothing in it.
  *
+ * Since the project console rebuild (2026-11-16) the API URL is on Connect →
+ * API (the old `?tab=direct` link opens it), and Settings deletes through a
+ * dialog that asks for the name.
+ *
  * Production QA (2026-11-09): Connect → Direct said "API base URL: —" while
  * Settings showed https://backenly.com/api/v1/<id>. Both read the same field
  * from the same route; Connect showed "—" while the project was still loading,
@@ -17,6 +21,8 @@
 import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import ProjectConnectPage from '@/app/app/projects/[id]/connect/page'
 import ProjectSettingsPage from '@/app/app/projects/[id]/settings/page'
+import { forgetProjectReads } from '@/lib/api/projects'
+import { clearProjectRoleCache } from '@/lib/hooks/useProjectRole'
 
 let projectId = ''
 jest.mock('next/navigation', () => ({
@@ -25,7 +31,6 @@ jest.mock('next/navigation', () => ({
 }))
 // The tabs' other panels load their own data; this file is about the project.
 jest.mock('@/lib/hooks/useAgentConnection', () => ({ useAgentConnection: () => ({ status: 'ready', connected: false }) }))
-jest.mock('@/components/connect/AgentInstallGuide', () => ({ AgentInstallGuide: () => null, AgentCapabilitiesCard: () => null }))
 jest.mock('@/components/connect/AgentKeysPanel', () => ({ AgentKeysPanel: () => null }))
 jest.mock('@/components/connect/FrontendRuntimePanel', () => ({ FrontendRuntimeCards: () => null }))
 jest.mock('@/components/connect/DirectDatabasePanel', () => ({ DirectDatabasePanel: () => null }))
@@ -45,9 +50,16 @@ const project = (apiBaseUrl: string | null) => ({
   apiBaseUrl,
   createdAt: new Date().toISOString(),
   updatedAt: new Date().toISOString(),
+  // The caller's role rides with the project (useProjectRole).
+  role: 'OWNER',
+  canWrite: true,
+  canAdminister: true,
+  organizationId: null,
 })
 
 beforeEach(() => {
+  forgetProjectReads()
+  clearProjectRoleCache()
   answers = []
   projectRequests = 0
   global.fetch = jest.fn((input: RequestInfo | URL) => {
@@ -80,7 +92,7 @@ async function openDirect(id: string) {
   await settle()
 }
 
-describe('Connect → Direct', () => {
+describe('Connect → API (the old Direct link)', () => {
   it('does not say there is no address while the project is still loading', async () => {
     answers = ['pending']
     await openDirect('p-loading')
@@ -93,11 +105,11 @@ describe('Connect → Direct', () => {
     const url = 'https://backenly.com/api/v1/p-failed'
     answers = ['fail', { apiBaseUrl: url }]
     await openDirect('p-failed')
-    const row = baseUrlRow()
-    expect(within(row).queryByText('—')).toBeNull()
-    expect(within(row).getByRole('alert')).toHaveTextContent('Couldn’t load the URL.')
+    expect(screen.queryByText('—')).toBeNull()
+    const alert = screen.getByRole('alert')
+    expect(alert).toHaveTextContent('Could not load the API URL.')
 
-    fireEvent.click(within(row).getByRole('button', { name: 'Try again' }))
+    fireEvent.click(within(alert).getByRole('button', { name: 'Try again' }))
     await settle()
     expect(projectRequests).toBe(2)
     expect(within(baseUrlRow()).getByText(url)).toBeInTheDocument()
@@ -110,7 +122,7 @@ describe('Connect → Direct', () => {
   })
 })
 
-describe('Settings → General', () => {
+describe('Settings', () => {
   it('does not draw an empty project, or offer to delete it, when the project could not be loaded', async () => {
     projectId = 'p-settings'
     window.history.replaceState(null, '', `/app/projects/${projectId}/settings`)
@@ -119,14 +131,18 @@ describe('Settings → General', () => {
     await settle()
 
     expect(screen.queryByRole('button', { name: /Delete project/ })).toBeNull()
-    expect(screen.queryByText('API base URL')).toBeNull()
-    expect(screen.getByRole('alert')).toHaveTextContent('Couldn’t load this project’s settings.')
+    expect(screen.queryByText('Project ID')).toBeNull()
+    expect(screen.getByRole('alert')).toHaveTextContent('Could not load this project’s settings.')
 
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }))
     await settle()
     expect(projectRequests).toBe(2)
-    // Loaded, the danger zone asks for the name again.
-    expect(screen.getByRole('button', { name: /Delete project/ })).toBeDisabled()
-    expect(within(baseUrlRow()).getByText('https://backenly.com/api/v1/p-settings')).toBeInTheDocument()
+    expect(screen.getByText('Project ID')).toBeInTheDocument()
+    // Loaded, deleting still asks for the name: the dialog's button waits for it.
+    fireEvent.click(screen.getByRole('button', { name: 'Delete project' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Delete shopqa?' })
+    expect(within(dialog).getByRole('button', { name: 'Delete project' })).toBeDisabled()
+    fireEvent.change(within(dialog).getByLabelText(/to confirm/), { target: { value: 'shopqa' } })
+    expect(within(dialog).getByRole('button', { name: 'Delete project' })).toBeEnabled()
   })
 })

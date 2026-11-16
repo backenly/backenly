@@ -6,7 +6,8 @@ export const dynamic = 'force-dynamic'
  * Returns all three kinds whether or not they are customised, because the
  * dashboard's job is to show what WILL be sent. A list of only the overrides
  * would leave an operator unable to tell "using the built-in" from "this kind
- * does not exist".
+ * does not exist". Each kind carries its built-in text as `builtIn`, so the
+ * editor starts from the words being sent (lib/email/auth-builtins.ts).
  */
 
 import { NextRequest, NextResponse } from 'next/server'

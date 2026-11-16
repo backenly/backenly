@@ -2259,3 +2259,7 @@ tests/integration/function-create-session.spec.ts
 # deployment's email settings, and are limited per requester and per target
 # address. Real SMTP through the sink, real Next routes and database.
 tests/integration/auth-email-routes-on-web.spec.ts
+# A table moved in by an import (lib/import, noAutoProvision) gets no buckets its
+# name suggests and no blueprint columns; every other caller keeps the default.
+# Real provisioned project, real executor and DDL.
+tests/integration/create-table-no-auto-provision.spec.ts

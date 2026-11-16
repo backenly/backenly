@@ -1,45 +1,42 @@
 'use client'
 
 /**
- * MaintenanceLadderPanel — the one place a person can authorise a schema rewrite
+ * A structural migration waiting on a person: the one place a schema rewrite
+ * is authorised.
  * ==============================================================================
- *
  * A structural ladder is the heaviest thing the autonomy loop can do: it adds a
  * column, constrains it, installs a dual-write trigger, backfills every row,
  * verifies the two columns agree, and repoints the readers. It is gated on a
- * human saying yes, and until this panel existed there was no way to say it.
- * `maintenance_approvals` had a reader and no writer, so the scheduler asked on
- * every pass and the only documented answer was an operator typing an INSERT
+ * human saying yes. `maintenance_approvals` had a reader and no writer until
+ * this existed, so the only documented answer was an operator typing an INSERT
  * into psql.
  *
- * ── What this shows, and why all of it ─────────────────────────────────────
+ * Since 2026-11-16 it is a row of Autonomy's "Waiting on you" (it waits on you,
+ * so it sits with the rest of what does), in the same row anatomy: the steps
+ * behind a disclosure, the column form inline, white focus. It used to be a
+ * card of its own with "tier 2 · …" strings and violet focus.
  *
- * Every rung, its tier, and whether it can be undone. Not a summary. Consent to
- * "consolidate the lifecycle column" without seeing that rung 6 repoints live
- * readers, or that `contract` can never be undone, is not consent anybody could
- * meaningfully give. The irreversible rung is called out separately because it
- * is the one the robot will never run.
+ * ── What it shows, and why all of it ─────────────────────────────────────────
+ * Every step and whether it can be undone, on request. Consent to "consolidate
+ * the lifecycle column" without seeing that a step repoints live readers, or
+ * that one can never be undone, is not consent anybody could give. The
+ * irreversible step is said on the row itself: the robot never runs it.
  *
- * ── Why it asks for columns ────────────────────────────────────────────────
- *
+ * ── Why it asks for columns ──────────────────────────────────────────────────
  * The planner emits abstract params on purpose and never a column name, so
- * somebody has to say which column is being replaced by which. A scheduler that
- * derived that would be guessing which column to migrate. The answers go to the
- * server, which composes the per-rung bindings — the browser does not build
- * them, so the dashboard and an agent posting raw bindings hit one authority.
+ * somebody has to say which column is replaced by which. The answers go to the
+ * server, which composes the per-step bindings, so the dashboard and an agent
+ * posting raw bindings hit one authority.
  *
- * ── Nothing pending renders nothing ────────────────────────────────────────
- *
- * Most projects never see this panel. An empty card explaining a feature that
- * is not happening is the scaffolding this product does not ship.
+ * ── Nothing pending renders nothing ──────────────────────────────────────────
+ * Most projects never see this row.
  */
 
-import { useCallback, useEffect, useState } from 'react'
-import { Loader2, ShieldAlert, Undo2, AlertTriangle, Wrench } from 'lucide-react'
-import { KIT, KitButton } from '@/components/inspector/kit'
-
-const CARD =
-  `relative overflow-hidden ${KIT.radius} border ${KIT.border} ${KIT.surface} ${KIT.inset}`
+import { useCallback, useEffect, useId, useState } from 'react'
+import { KitButton, KitInput } from '@/components/inspector/kit'
+import { RefusedLine } from '@/components/console/states'
+import { Disclosure, Fact, Facts, Row, ROW_TEXT, ROW_TITLE } from '@/components/autonomy/rows'
+import { ARCHITECTURE_ICON } from '@/components/autonomy/row-icons'
 
 interface Rung {
   ordinal: number
@@ -49,7 +46,7 @@ interface Rung {
   rollback: string | null
 }
 
-interface Ladder {
+export interface Ladder {
   findingId: string
   planId: string
   planVersion: string
@@ -66,49 +63,66 @@ interface Ladder {
 /** The diagnosis carries a hypothesis object in some shapes and an id in others. */
 function hypothesisLabel(d: Ladder['diagnosis']): string {
   const h = d?.hypothesis as { id?: string } | string | undefined
-  if (typeof h === 'string') return h
-  if (h && typeof h === 'object' && typeof h.id === 'string') return h.id
-  return 'structural cause'
+  const raw = typeof h === 'string' ? h : h && typeof h === 'object' && typeof h.id === 'string' ? h.id : 'structural cause'
+  return raw.replace(/[_-]+/g, ' ')
 }
 
-const TIER_COPY: Record<number, string> = {
-  0: 'read-only',
-  1: 'additive',
-  2: 'needs your approval',
-  3: 'you do this one, never the robot',
+/** What a step's tier means for whoever approves it. */
+const TIER_WORDS: Record<number, string> = {
+  0: 'Reads only',
+  1: 'Adds, removes nothing',
+  2: 'Needs your approval',
+  3: 'You run this one yourself',
 }
 
-export function MaintenanceLadderPanel({ projectId }: { projectId: string }) {
+const words = (kind: string) => kind.replace(/_/g, ' ')
+
+/**
+ * The pending ladder, if any. `null` is the normal answer: nothing waits. A
+ * failed read is also null (it renders nothing) but is never recorded as an
+ * answer that all is well.
+ */
+export function useMaintenanceLadder(projectId: string, refreshKey = 0) {
   const [ladder, setLadder] = useState<Ladder | null>(null)
   const [loaded, setLoaded] = useState(false)
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-
-  const [sourceColumn, setSourceColumn] = useState('')
-  const [targetColumn, setTargetColumn] = useState('')
-  const [targetType, setTargetType] = useState('text')
-  const [allowedValues, setAllowedValues] = useState('')
-
   const load = useCallback(async () => {
     try {
       const res = await fetch(`/api/projects/${projectId}/maintenance`)
-      const json = await res.json()
-      setLadder(json?.pending ? (json.ladder as Ladder) : null)
+      const json = await res.json().catch(() => null)
+      setLadder(res.ok && json?.pending ? (json.ladder as Ladder) : null)
     } catch {
-      // A failed read is not "nothing is wrong". It renders nothing either way,
-      // but it must not be recorded as a healthy answer.
       setLadder(null)
     } finally {
       setLoaded(true)
     }
   }, [projectId])
-
   useEffect(() => {
     void load()
-  }, [load])
+  }, [load, refreshKey])
+  return { ladder, loaded, reload: load }
+}
 
-  const approve = useCallback(async () => {
-    if (!ladder) return
+export function MaintenanceLadderRow({
+  projectId,
+  ladder,
+  reload,
+  canDecide = true,
+}: {
+  projectId: string
+  ladder: Ladder
+  reload: () => Promise<void>
+  /** Approving a migration takes an owner or admin (the route's floor). */
+  canDecide?: boolean
+}) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [showSteps, setShowSteps] = useState(false)
+  const [sourceColumn, setSourceColumn] = useState('')
+  const [targetColumn, setTargetColumn] = useState('')
+  const [targetType, setTargetType] = useState('text')
+  const [allowedValues, setAllowedValues] = useState('')
+
+  const approve = async () => {
     setBusy(true)
     setError(null)
     try {
@@ -116,9 +130,8 @@ export function MaintenanceLadderPanel({ projectId }: { projectId: string }) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          // The version as it was when this panel drew it. If the plan has
-          // moved since, the server refuses rather than approving a ladder
-          // that no longer exists.
+          // The version as this row drew it. If the plan has moved since, the
+          // server refuses rather than approving a ladder that no longer exists.
           planVersion: ladder.planVersion,
           answers: {
             sourceColumn: sourceColumn.trim(),
@@ -127,197 +140,144 @@ export function MaintenanceLadderPanel({ projectId }: { projectId: string }) {
             transform: { kind: 'identity' },
             allowedValues: allowedValues
               .split(',')
-              .map(v => v.trim())
+              .map((v) => v.trim())
               .filter(Boolean),
           },
         }),
       })
-      const json = await res.json()
+      const json = await res.json().catch(() => ({}))
       if (!res.ok) {
         setError(json?.error ?? 'Could not record the approval.')
-        // A 409 means the world moved. Re-read so the panel stops showing a
-        // version nobody can approve any more.
-        if (res.status === 409) await load()
+        // A 409 means the world moved: re-read so the row stops offering a version nobody can approve.
+        if (res.status === 409) await reload()
         return
       }
-      await load()
+      await reload()
     } catch {
       setError('Could not reach the server.')
     } finally {
       setBusy(false)
     }
-  }, [ladder, projectId, sourceColumn, targetColumn, targetType, allowedValues, load])
+  }
 
-  const withdraw = useCallback(async () => {
-    if (!ladder?.approval) return
+  const withdraw = async () => {
+    if (!ladder.approval) return
     setBusy(true)
     setError(null)
     try {
-      const res = await fetch(
-        `/api/projects/${projectId}/maintenance?approvalId=${encodeURIComponent(ladder.approval.id)}`,
-        { method: 'DELETE' },
-      )
+      const res = await fetch(`/api/projects/${projectId}/maintenance?approvalId=${encodeURIComponent(ladder.approval.id)}`, { method: 'DELETE' })
       if (!res.ok) {
         const json = await res.json().catch(() => ({}))
         setError(json?.error ?? 'Could not withdraw the approval.')
         return
       }
-      await load()
+      await reload()
     } catch {
       setError('Could not reach the server.')
     } finally {
       setBusy(false)
     }
-  }, [ladder, projectId, load])
+  }
 
-  // Nothing pending is the normal state. No card, no placeholder.
-  if (!loaded || !ladder) return null
-
-  const canApprove =
-    ladder.validity === 'executable' && sourceColumn.trim() !== '' && targetColumn.trim() !== ''
+  const executable = ladder.validity === 'executable'
+  const canApprove = executable && sourceColumn.trim() !== '' && targetColumn.trim() !== ''
+  const approved = !!ladder.approval
 
   return (
-    <section className={CARD}>
-      <div className="flex items-center justify-between border-b border-white/[0.06] px-5 py-3.5">
-        <div className="flex items-center gap-2">
-          <Wrench className="size-3.5 text-amber-300" />
-          <h3 className="text-[13px] font-semibold tracking-tight text-zinc-100">
-            Structural maintenance
-          </h3>
-          <span className="text-[12px] tabular-nums text-faint">{ladder.table}</span>
-        </div>
-        <span className="text-[12px] tabular-nums text-faint">
-          {ladder.planId}@{ladder.planVersion}
-        </span>
-      </div>
-
-      <div className="border-b border-white/[0.06] px-5 py-2.5">
-        <p className="text-[12.5px] leading-relaxed text-faint">
-          Backenly found a repeating structural problem in <span className="text-zinc-300">{ladder.table}</span>{' '}
-          ({hypothesisLabel(ladder.diagnosis)}) and prepared a migration for it. It will not run
-          until you approve it, and your approval covers this exact version only.
+    <Row
+      lead="well"
+      icon={ARCHITECTURE_ICON}
+      id={`approval-${ladder.findingId}`}
+      title={
+        <p className={ROW_TITLE}>
+          Migrate <code className="font-mono text-[12.5px] text-zinc-100">{ladder.table}</code> to fix a repeating {hypothesisLabel(ladder.diagnosis)}
         </p>
-      </div>
-
-      {ladder.validity !== 'executable' && (
-        <div className="flex items-start gap-2 border-b border-white/[0.06] bg-amber-500/[0.04] px-5 py-2.5">
-          <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-amber-400" />
-          <p className="text-[12.5px] leading-relaxed text-amber-200/80">
-            This plan is {ladder.validity} and cannot be approved: {ladder.blockedReasons.join('; ')}
-          </p>
-        </div>
-      )}
-
-      <ol className="divide-y divide-white/[0.04]">
-        {ladder.needsBinding.map(r => (
-          <li key={r.ordinal} className="flex items-center justify-between px-5 py-2">
-            <div className="flex items-center gap-2.5">
-              <span className="text-[12px] tabular-nums text-faint">{r.ordinal}</span>
-              <span className="text-[12px] text-zinc-200">{r.kind.replace(/_/g, ' ')}</span>
-            </div>
-            <div className="flex items-center gap-3">
-              <span className="text-[12px] text-faint">
-                tier {r.tier} · {TIER_COPY[r.tier] ?? ''}
-              </span>
-              <span
-                className={`font-mono text-[12px] ${r.rollback && r.rollback !== 'none_required' ? 'text-emerald-400/70' : 'text-faint'}`}
-              >
-                {r.rollback === 'none_required'
-                  ? 'read-only'
-                  : r.rollback
-                    ? `undo: ${r.rollback.replace(/_/g, ' ')}`
-                    : 'no undo'}
-              </span>
-            </div>
-          </li>
-        ))}
-      </ol>
-
-      {ladder.humanOnly.length > 0 && (
-        <div className="flex items-start gap-2 border-t border-white/[0.06] px-5 py-2.5">
-          <ShieldAlert className="mt-0.5 size-3.5 shrink-0 text-zinc-500" />
-          <p className="text-[12.5px] leading-relaxed text-faint">
-            {ladder.humanOnly.map(h => h.kind.replace(/_/g, ' ')).join(', ')} is irreversible and is
-            never run automatically, at any autonomy mode. The ladder stops before it and waits for
-            you to do it yourself.
-          </p>
-        </div>
-      )}
-
-      {ladder.approval ? (
-        <div className="flex items-center justify-between border-t border-white/[0.06] bg-emerald-500/[0.03] px-5 py-3">
-          <p className="text-[12.5px] text-zinc-400">
-            Approved by <span className="text-zinc-200">{ladder.approval.approvedBy}</span>, up to
-            tier {ladder.approval.maxTier}. The loop will run it on its next pass.
-          </p>
-          <KitButton variant="danger" onClick={withdraw} disabled={busy}>
-            {busy ? <Loader2 className="size-3.5 animate-spin" /> : <Undo2 className="size-3.5" />}
+      }
+      actions={
+        canDecide && approved ? (
+          <KitButton variant="secondary" onClick={() => void withdraw()} loading={busy}>
             Withdraw
           </KitButton>
-        </div>
-      ) : (
-        <div className="border-t border-white/[0.06] px-5 py-3.5">
-          {ladder.staleApproval && (
-            <p className="mb-3 text-[12.5px] leading-relaxed text-amber-200/80">
-              You approved version {ladder.staleApproval.planVersion}, but the plan has been rebuilt
-              to {ladder.planVersion}. The schema, the ladder or the executor moved, so the old
-              approval does not carry over.
-            </p>
-          )}
-          <p className="mb-3 text-[12.5px] leading-relaxed text-faint">
-            Name the columns. Backenly deliberately does not guess these: approving
-            &ldquo;consolidate the lifecycle column&rdquo; without saying which column is not an
-            approval anybody could give.
-          </p>
-          <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+        ) : undefined
+      }
+    >
+      <p className={ROW_TEXT}>
+        {approved
+          ? `Approved by ${ladder.approval!.approvedBy}. The loop runs it on its next pass.`
+          : 'Backenly prepared a migration for it. It runs only after you approve this exact version.'}
+      </p>
+      {ladder.humanOnly.length > 0 && (
+        <p className={ROW_TEXT}>
+          {ladder.humanOnly.map((h) => words(h.kind)).join(', ')} can never be undone, so Backenly never runs it. The migration stops before it.
+        </p>
+      )}
+      <Facts>
+        <Fact>
+          {ladder.needsBinding.length} {ladder.needsBinding.length === 1 ? 'step' : 'steps'}
+        </Fact>
+        <Fact>Version {ladder.planVersion}</Fact>
+      </Facts>
+      <Disclosure open={showSteps} onToggle={() => setShowSteps((v) => !v)}>
+        {showSteps ? 'Hide the steps' : 'Show the steps'}
+      </Disclosure>
+      {showSteps && (
+        <ul className="mt-2.5 divide-y divide-white/[0.06] border-y border-white/[0.06]">
+          {ladder.needsBinding.map((r) => (
+            <li key={r.ordinal} className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-0.5 py-[7px] text-[12.5px] leading-[18px]">
+              <span className="text-zinc-200 first-letter:uppercase">{words(r.kind)}</span>
+              <span className="flex flex-wrap gap-x-4 text-faint">
+                <span>{TIER_WORDS[r.tier] ?? ''}</span>
+                <span>
+                  {r.rollback === 'none_required' ? 'Nothing to undo' : r.rollback ? `Undo: ${words(r.rollback)}` : 'No undo'}
+                </span>
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {!executable && (
+        <p className="mt-2.5 text-[12.5px] leading-[18px] text-zinc-50">
+          This version cannot be approved: {ladder.blockedReasons.join('; ')}
+        </p>
+      )}
+      {!approved && ladder.staleApproval && (
+        <p className="mt-2.5 text-[12.5px] leading-[18px] text-zinc-50">
+          You approved version {ladder.staleApproval.planVersion}, but the plan was rebuilt as {ladder.planVersion}. The old approval does not carry over.
+        </p>
+      )}
+
+      {!approved && executable && canDecide && (
+        <div className="mt-3">
+          <p className="text-[12.5px] leading-[18px] text-faint">Name the columns. Backenly does not guess which column replaces which.</p>
+          <div className="mt-2.5 grid max-w-[640px] grid-cols-1 gap-2.5 sm:grid-cols-2">
             <Field label="Existing column" value={sourceColumn} onChange={setSourceColumn} placeholder="status" />
             <Field label="New column" value={targetColumn} onChange={setTargetColumn} placeholder="state" />
             <Field label="New column type" value={targetType} onChange={setTargetType} placeholder="text" />
-            <Field
-              label="Allowed values (comma separated)"
-              value={allowedValues}
-              onChange={setAllowedValues}
-              placeholder="active, expired"
-            />
+            <Field label="Allowed values, comma separated" value={allowedValues} onChange={setAllowedValues} placeholder="active, expired" />
           </div>
-          {error && (
-            <p className="mt-3 text-[12.5px] leading-relaxed text-rose-300/90">{error}</p>
-          )}
-          <div className="mt-3.5 flex items-center gap-3">
-            <KitButton variant="primary" onClick={approve} disabled={busy || !canApprove}>
-              {busy && <Loader2 className="size-3.5 animate-spin" />}
+          <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-2">
+            <KitButton variant="primary" onClick={() => void approve()} loading={busy} disabled={!canApprove}>
               Approve this migration
             </KitButton>
-            <span className="text-[12px] text-faint">
-              Covers tier 2 and below, on version {ladder.planVersion} only.
-            </span>
+            <span className="text-[12px] text-faint">Covers version {ladder.planVersion} only.</span>
           </div>
         </div>
       )}
-    </section>
+      {!canDecide && <p className="mt-2.5 text-[12.5px] leading-[18px] text-faint">Only admins can approve. Ask an owner or admin.</p>}
+      {error && <RefusedLine className="mt-2.5">{error}</RefusedLine>}
+    </Row>
   )
 }
 
-function Field({
-  label,
-  value,
-  onChange,
-  placeholder,
-}: {
-  label: string
-  value: string
-  onChange: (v: string) => void
-  placeholder: string
-}) {
+function Field({ label, value, onChange, placeholder }: { label: string; value: string; onChange: (v: string) => void; placeholder: string }) {
+  const id = useId()
   return (
-    <label className="block">
-      <span className="mb-1 block text-[12px] text-faint">{label}</span>
-      <input
-        value={value}
-        onChange={e => onChange(e.target.value)}
-        placeholder={placeholder}
-        className={`w-full rounded-md border border-white/[0.08] ${KIT.well} px-2.5 py-1.5 font-mono text-[12px] text-zinc-200 placeholder:text-zinc-500 focus:border-violet-400/40 focus:outline-none`}
-      />
-    </label>
+    <div>
+      <label htmlFor={id} className="mb-1 block text-[12px] leading-[16px] text-faint">
+        {label}
+      </label>
+      <KitInput id={id} value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} className="font-mono" />
+    </div>
   )
 }

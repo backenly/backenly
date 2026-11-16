@@ -21,7 +21,8 @@ import { ProjectShell } from '@/components/shell/ProjectShell'
 // Old Control-Hub sections → their real pages (§14).
 const HUB_REDIRECTS: Record<string, string> = {
   'autonomy': '/autonomy',
-  'client-keys': '/settings',
+  // API keys moved from Settings to Connect → API (2026-11-16).
+  'client-keys': '/connect?tab=api',
   'integrations': '/integrations',
   'connect-frontend': '/connect',
   'mcp': '/connect',

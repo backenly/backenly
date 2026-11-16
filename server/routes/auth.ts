@@ -3,7 +3,8 @@ import rateLimit from 'express-rate-limit'
 import { clientIpFromNodeRequest } from '@/lib/security/client-ip'
 import { prisma } from '@/lib/db'
 import { workspaceRawClient } from '@/lib/data-plane/regional'
-import { hashPassword, verifyPassword, verifyPasswordAgainstDecoy } from '@/lib/auth/password'
+import { hashPassword } from '@/lib/auth/password'
+import { checkEndUserPassword, endUserPasswordWriter, replaceImportedPasswordHash, startPasswordCheckTimer } from '@/lib/auth/end-user-password'
 import { executeWithUserContext } from '@/lib/services/workspace-rls'
 import { ensureAuthUsersTable, buildUserInsert, isReservedTestEmail, AuthNotProvisionedError } from '@/lib/services/end-user-auth-table'
 import { sanitizeDiagnostic } from '@/lib/errors/diagnostic-sanitize'
@@ -402,17 +403,28 @@ async function handleSignIn(req: Request, res: Response) {
     // to answer at once while a real one paid for a bcrypt comparison first: the
     // same message, and a measurable difference in time. So an absent user is
     // compared against a decoy hash at the product's cost factor, which cannot
-    // match; only the work is wanted.
-    const isValid = storedHash
-      ? await verifyPassword(password, storedHash)
-      : await verifyPasswordAgainstDecoy(password)
-    if (!isValid) {
+    // match; only the work is wanted. A hash an import brought (Firebase's
+    // scrypt) is accepted here too, once: lib/auth/end-user-password.ts. The
+    // paths still do different work, so every failure is held to the same
+    // moment after the check began, as on the Next route.
+    const checkTimer = startPasswordCheckTimer()
+    const check = await checkEndUserPassword(password, storedHash)
+    if (!check.valid) {
+      await checkTimer.failed()
       sendError(res, ErrorCodes.UNAUTHORIZED, 'Invalid email or password', 401)
       return
     }
 
     // The password is right, so this attempt was not a guess.
     await attempt.credentialsVerified()
+
+    // An imported hash is replaced with Backenly's bcrypt now that the password
+    // is known. A failure leaves the imported hash, which still works next time.
+    if (check.rehash && storedHash) {
+      const passwordColumn = user.password != null ? 'password' : 'password_hash'
+      await replaceImportedPasswordHash(password, storedHash, endUserPasswordWriter(projectId, schemaName, passwordColumn, user.email))
+        .catch((e) => console.warn('[signin] could not replace an imported password hash:', e?.message ?? 'unknown'))
+    }
 
     // Suspension is disclosed only to someone who proved the password. It was
     // checked first, so any address with a junk password answered 403 for a

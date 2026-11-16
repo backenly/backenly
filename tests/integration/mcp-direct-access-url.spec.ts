@@ -26,7 +26,7 @@ describe('direct database access deployment URL', () => {
       NEXT_PUBLIC_URL: alternateUrl,
     })
     const res = await dispatchTool('get_database_credentials', { mode: 'READ_WRITE' }, { projectId })
-    const armUrl = `${origin}/app/projects/${projectId}/connect?tab=direct`
+    const armUrl = `${origin}/app/projects/${projectId}/connect?tab=postgres`
 
     expect(res.ok).toBe(false)
     expect(res.code).toBe('WRITE_ACCESS_NOT_ARMED')

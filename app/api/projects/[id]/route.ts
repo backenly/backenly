@@ -5,7 +5,8 @@ import { prisma } from '@/lib/db'
 import { z } from 'zod'
 import { withAuth } from '@/lib/auth/route-protection'
 import { deleteProjectCompletely } from '@/lib/projects/delete'
-import { canAccessProject, canAdministerProject, canWriteProject } from '@/lib/edition/guard'
+import { canAdministerProject, canWriteProject } from '@/lib/edition/guard'
+import { getProjectResolver, ProjectResolutionError, projectRoleFields, type ProjectRoleFields } from '@/lib/edition'
 import { getProjectQuota } from '@/lib/services/storageQuota'
 import { resolvePublicBaseUrl } from '@/lib/services/public-url'
 import { isRegionError, regionApiOrigin, regionOfRecord } from '@/lib/data-plane/regional'
@@ -106,7 +107,7 @@ async function serializeProject(project: ProjectResponseRow, projectId: string, 
   }
 }
 
-// GET /api/projects/[id] - Get a single project
+// GET /api/projects/[id] - Get a single project, and what the caller may do in it
 export const GET = withAuth(async (
   request: NextRequest,
   { user }
@@ -120,7 +121,18 @@ export const GET = withAuth(async (
     // userId predicate: re-adding one would restore owner-only access after the
     // organization-aware check has already granted it, which is the exact
     // defect this migration exists to remove.
-    if (!(await canAccessProject(user.userId, projectId))) {
+    //
+    // One resolution answers both questions the console asks: may this caller
+    // see the project (canAccessProject is this same call held at VIEWER), and
+    // with what authority. It is the resolver every permission check in
+    // lib/edition/guard.ts consults, so the role the console hides controls by
+    // is the role the server enforces. A refusal stays a 404, as before, so it
+    // never confirms to a stranger that the project exists.
+    let access: ProjectRoleFields
+    try {
+      access = projectRoleFields(await getProjectResolver().resolveForUser(user.userId, projectId))
+    } catch (err) {
+      if (!(err instanceof ProjectResolutionError)) throw err
       return NextResponse.json(
         {
           success: false,
@@ -147,7 +159,10 @@ export const GET = withAuth(async (
 
     return NextResponse.json({
       success: true,
-      data: await serializeProject(project, projectId, resolvePublicBaseUrl(request)),
+      // role, canWrite, canAdminister and organizationId ride with the project
+      // (useProjectRole, lib/hooks/useProjectRole.ts). Only this read carries
+      // them; PUT answers the project alone.
+      data: { ...(await serializeProject(project, projectId, resolvePublicBaseUrl(request))), ...access },
     })
   } catch (error: any) {
     console.error('Error fetching project:', error)

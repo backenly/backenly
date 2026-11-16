@@ -115,7 +115,10 @@ describe('DEP-13 / DEP-14: the deploy cluster answers honestly', () => {
   it('the page only offers Publish when the engine would accept it', () => {
     const page = fs.readFileSync(path.join(ROOT, 'app', 'app', 'projects', '[id]', 'deploy', 'page.tsx'), 'utf8')
     expect(page).toContain('const publishable =')
-    expect(page).toContain("publishable ? publishButton('Publish backend') : undefined")
+    // Rebuilt 2026-11-16: the header's Publish renders only when the person may
+    // write AND there is something the engine would record (a table, an API or auth).
+    expect(page).toContain('const canPublish = role.canWrite && publishable')
+    expect(page).toMatch(/canPublish && !failedRow \?/)
   })
 
   it('connect_frontend no longer demands a deploy the API does not need', () => {

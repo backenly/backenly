@@ -90,7 +90,7 @@ export function VerifyEmailWall({ email, onLogout }: VerifyEmailWallProps) {
             </>
           ) : state === 'sent' ? (
             <>
-              <CheckCircle2 className="w-[15px] h-[15px] text-emerald-400" />
+              <CheckCircle2 className="w-[15px] h-[15px] text-zinc-300" />
               Email sent
             </>
           ) : (
@@ -102,12 +102,12 @@ export function VerifyEmailWall({ email, onLogout }: VerifyEmailWallProps) {
         </button>
 
         {state === 'throttled' && (
-          <p className="mt-3 text-[12.5px] text-amber-400/90 text-center">
+          <p className="mt-3 text-[12.5px] text-zinc-50 text-center">
             Too many requests. Please wait a few minutes before trying again.
           </p>
         )}
         {state === 'error' && (
-          <p className="mt-3 text-[12.5px] text-amber-400/90 text-center">
+          <p className="mt-3 text-[12.5px] text-zinc-50 text-center">
             Could not send just now. Please try again shortly.
           </p>
         )}

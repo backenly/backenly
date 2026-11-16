@@ -12,7 +12,7 @@
  * The real base has been `{origin}/api/v1/{projectId}` since the project's
  * first request. Docs tell users to copy the value from these rows.
  *
- * Source-level pins: the pages show the live base the server works out for the
+ * Source-level pins: Connect → API shows the live base the server works out for the
  * project's region (`apiBaseUrl`; operator-supplied overrides still win), and
  * the false claim is gone. They must not build it from the console's own
  * origin: a project in another region is not served there, and the address
@@ -27,19 +27,29 @@ const pages = {
   settings: fs.readFileSync(path.join(process.cwd(), 'app', 'app', 'projects', '[id]', 'settings', 'page.tsx'), 'utf8'),
 }
 
+// Since the console rebuild (2026-11-16) the address lives in one place,
+// Connect → API; Settings no longer shows it. The address pins apply where it
+// is shown; the false claim must be gone from both pages.
+describe('connect page', () => {
+  it('shows the live base the server gives for the project’s region', () => {
+    expect(pages.connect).toContain('project?.apiBaseUrl')
+    expect(pages.connect).not.toContain('window.location.origin}/api/v1/')
+  })
+
+  it('still honors an operator-supplied override first', () => {
+    expect(pages.connect).toMatch(/apiUrlProd \|\| project\?\.apiUrlStaging \|\| project\?\.apiUrlDev \|\|/)
+  })
+})
+
+describe('settings page', () => {
+  it('does not show a second copy of the address', () => {
+    expect(pages.settings).not.toContain('apiBaseUrl')
+    expect(pages.settings).not.toContain('window.location.origin}/api/v1/')
+  })
+})
+
 for (const [name, src] of Object.entries(pages)) {
-  describe(`${name} page`, () => {
-    it('shows the live base the server gives for the project’s region', () => {
-      expect(src).toContain('project?.apiBaseUrl')
-      expect(src).not.toContain('window.location.origin}/api/v1/')
-    })
-
-    it('still honors an operator-supplied override first', () => {
-      expect(src).toMatch(/apiUrlProd \|\| project\?\.apiUrlStaging \|\| project\?\.apiUrlDev \|\|/)
-    })
-
-    it('no longer claims publishing will set it', () => {
-      expect(src).not.toContain('Set when the project is first published')
-    })
+  it(`${name} page no longer claims publishing will set it`, () => {
+    expect(src).not.toContain('Set when the project is first published')
   })
 }

@@ -23,7 +23,7 @@
  * backend answered, and whose writes survive a reload, is.
  */
 
-import { test, expect } from '@playwright/test'
+import { test, expect, type Page } from '@playwright/test'
 import { readFileSync } from 'fs'
 import { resolve } from 'path'
 
@@ -45,6 +45,11 @@ test.describe.configure({ mode: 'serial' })
 
 /** A destination the guard accepts as a literal, so create succeeds. */
 const PUBLIC_TARGET = 'https://example.com/backenly-hook'
+/** How the list and the endpoint page name it: host and path, no scheme (rebuilt 2026-11-16). */
+const SHOWN = 'example.com/backenly-hook'
+const endpointLink = (page: Page) => page.getByRole('link', { name: SHOWN, exact: true })
+/** An endpoint page with no deliveries says so in one sentence (never invented history). */
+const NEVER_FIRED = 'No deliveries yet. Send a test to see what it answers.'
 
 test.beforeEach(async ({ page }) => {
   await page.goto(`/app/projects/${projectId()}/webhooks`)
@@ -84,15 +89,15 @@ test('an endpoint created in the form survives a reload, and its secret does not
   const dialog = page.getByRole('dialog')
   await expect(page.getByRole('heading', { name: 'Signing secret' })).toBeVisible({ timeout: 30_000 })
 
-  const secret = (await dialog.locator('code').first().innerText()).trim()
+  const secret = (await dialog.getByText(/^[0-9a-f]{64}$/).first().innerText()).trim()
   expect(secret, 'the creation response carried no secret').toMatch(/^[0-9a-f]{64}$/)
   await dialog.getByRole('button', { name: 'Done', exact: true }).click()
 
-  await expect(page.getByText(PUBLIC_TARGET).first()).toBeVisible({ timeout: 30_000 })
+  await expect(endpointLink(page).first()).toBeVisible({ timeout: 30_000 })
 
   // The write reached the database rather than only the component's state.
   await page.reload()
-  await expect(page.getByText(PUBLIC_TARGET).first()).toBeVisible({ timeout: 60_000 })
+  await expect(endpointLink(page).first()).toBeVisible({ timeout: 60_000 })
 
   // And the secret is now genuinely unreadable — not merely hidden behind a
   // toggle. Asserting on the page text is the weak half; the strong half is
@@ -110,8 +115,8 @@ test('a refused destination reports the guard’s real reason, and writes nothin
   // test failed having found nothing wrong with the product. It passed the run
   // it was written in purely on timing, which is the definition of the flake
   // this program refuses to retry away.
-  await expect(page.getByText(PUBLIC_TARGET).first()).toBeVisible({ timeout: 60_000 })
-  const before = await page.getByText(PUBLIC_TARGET).count()
+  await expect(endpointLink(page).first()).toBeVisible({ timeout: 60_000 })
+  const before = await endpointLink(page).count()
 
   await page.getByRole('button', { name: /add endpoint/i }).first().click()
   await page.getByPlaceholder('https://example.com/hooks/backenly').fill(REFUSED_TARGET)
@@ -134,19 +139,20 @@ test('a refused destination reports the guard’s real reason, and writes nothin
   // and nothing was added to the list.
   await page.keyboard.press('Escape')
   await page.reload()
-  await expect(page.getByText(PUBLIC_TARGET).first()).toBeVisible({ timeout: 60_000 })
+  await expect(endpointLink(page).first()).toBeVisible({ timeout: 60_000 })
 
   // The direct claim, and the one that does not depend on a count: the refused
   // address is nowhere in the list. A count comparison alone would also pass if
   // the refusal had somehow replaced an existing row rather than adding one.
-  await expect(page.getByText(REFUSED_TARGET)).toHaveCount(0)
-  expect(await page.getByText(PUBLIC_TARGET).count()).toBe(before)
+  await expect(page.getByText('169.254.169.254')).toHaveCount(0)
+  expect(await endpointLink(page).count()).toBe(before)
 })
 
 test('an endpoint that has never fired says so, rather than showing invented history', async ({ page }) => {
-  const row = page.getByText(PUBLIC_TARGET).first()
+  const row = endpointLink(page).first()
   await expect(row).toBeVisible({ timeout: 30_000 })
 
+  // The endpoint is a page of its own (?endpoint=), which reads its deliveries.
   const logs = page.waitForResponse(r => r.url().includes('/logs'))
   await row.click()
   const res = await logs
@@ -154,13 +160,14 @@ test('an endpoint that has never fired says so, rather than showing invented his
 
   // Honest empty state. The alternative — a seeded "delivered 2 minutes ago" —
   // is the PLACEHOLDER/MOCK class the surface sweep exists to find.
-  await expect(page.getByText('No deliveries recorded. This endpoint has not fired yet.')).toBeVisible({
-    timeout: 30_000,
-  })
+  await expect(page.getByText(NEVER_FIRED)).toBeVisible({ timeout: 30_000 })
 })
 
 test('the test button performs a real delivery attempt and reports its real outcome', async ({ page }) => {
-  await expect(page.getByText(PUBLIC_TARGET).first()).toBeVisible({ timeout: 30_000 })
+  // Send test sits on the endpoint's own page.
+  await expect(endpointLink(page).first()).toBeVisible({ timeout: 30_000 })
+  await endpointLink(page).first().click()
+  await expect(page.getByRole('button', { name: 'Send test', exact: true }).first()).toBeVisible({ timeout: 30_000 })
 
   const attempted = page.waitForResponse(
     r => r.url().includes('/test') && r.request().method() === 'POST',
@@ -184,25 +191,24 @@ test('the test button performs a real delivery attempt and reports its real outc
   }
 
   // And the attempt is now in the durable history, because a test delivery is a
-  // real delivery.
+  // real delivery. The reload stays on the endpoint's page (?endpoint=).
   await page.reload()
-  await page.getByText(PUBLIC_TARGET).first().click()
-  await expect(
-    page.getByText('No deliveries recorded. This endpoint has not fired yet.'),
-  ).toHaveCount(0, { timeout: 30_000 })
+  await expect(page.getByRole('button', { name: 'Send test', exact: true }).first()).toBeVisible({ timeout: 60_000 })
+  await expect(page.getByText(NEVER_FIRED)).toHaveCount(0, { timeout: 30_000 })
 })
 
 test('deleting an endpoint asks first, and then actually removes it', async ({ page }) => {
-  await expect(page.getByText(PUBLIC_TARGET).first()).toBeVisible({ timeout: 30_000 })
+  await expect(endpointLink(page).first()).toBeVisible({ timeout: 30_000 })
 
   // Delete lives in the row's overflow menu, beside the other rare actions.
-  await page.getByRole('button', { name: `More actions for ${PUBLIC_TARGET}` }).first().click()
+  // The row's menu is named "Actions for <address> (<event>)"; a plain name matches it as a substring.
+  await page.getByRole('button', { name: `Actions for ${SHOWN}` }).first().click()
   await page.getByRole('menuitem', { name: 'Delete endpoint…' }).click()
 
   // Named, not a bare "are you sure?" — the dialog says what stops and what is
   // lost with it.
   const confirm = page.getByRole('dialog')
-  await expect(confirm.getByText(/stops receiving events immediately/i)).toBeVisible({
+  await expect(confirm.getByText(/stops receiving .+ now, and retries waiting for it are dropped/i)).toBeVisible({
     timeout: 15_000,
   })
 
@@ -217,5 +223,5 @@ test('deleting an endpoint asks first, and then actually removes it', async ({ p
 
   await page.reload()
   await expect(page.getByRole('heading', { name: 'Webhooks', exact: true, level: 1 })).toBeVisible({ timeout: 60_000 })
-  await expect(page.getByText(PUBLIC_TARGET)).toHaveCount(0, { timeout: 30_000 })
+  await expect(endpointLink(page)).toHaveCount(0, { timeout: 30_000 })
 })

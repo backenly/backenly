@@ -31,6 +31,8 @@ export interface KeyVaultStatus {
    */
   verification: VerificationStatus
   verificationDetail?: string
+  /** When the provider last confirmed it (null once a check did not), for "Checked 2 h ago". */
+  verifiedAt?: string | null
 }
 
 /**
@@ -364,7 +366,7 @@ export async function listKeyVaultStatuses(projectId: string): Promise<KeyVaultS
     where: { projectId },
     select: {
       integrationId: true, maskedKey: true, connectedAt: true,
-      verification: true, verificationDetail: true,
+      verification: true, verificationDetail: true, verifiedAt: true,
     },
     orderBy: { connectedAt: 'asc' },
   })
@@ -375,6 +377,7 @@ export async function listKeyVaultStatuses(projectId: string): Promise<KeyVaultS
     connectedAt: r.connectedAt.toISOString(),
     verification: (r.verification ?? 'unchecked') as VerificationStatus,
     verificationDetail: r.verificationDetail ?? undefined,
+    verifiedAt: r.verifiedAt ? r.verifiedAt.toISOString() : null,
   }))
 }
 
@@ -404,7 +407,7 @@ export async function recheckIntegrationKey(
       verificationDetail: verification.detail,
       verifiedAt: verification.status === 'verified' ? new Date() : null,
     },
-    select: { integrationId: true, maskedKey: true, connectedAt: true },
+    select: { integrationId: true, maskedKey: true, connectedAt: true, verifiedAt: true },
   })
 
   return {
@@ -413,6 +416,7 @@ export async function recheckIntegrationKey(
     connectedAt: record.connectedAt.toISOString(),
     verification: verification.status,
     verificationDetail: verification.detail,
+    verifiedAt: record.verifiedAt ? record.verifiedAt.toISOString() : null,
   }
 }
 

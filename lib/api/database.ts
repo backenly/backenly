@@ -45,6 +45,8 @@ export interface PaginatedResponse<T> {
     limit: number
     totalPages: number
   }
+  /** Columns the server withheld (a password hash), named so a cell can say Hidden rather than look empty. */
+  redactedColumns?: string[]
 }
 
 // Schemas
@@ -416,7 +418,7 @@ export async function getRows(
   })
   const data = await response.json()
   if (!data.success) throw new Error(data.error || 'Failed to fetch rows')
-  return { data: data.data, pagination: data.pagination }
+  return { data: data.data, pagination: data.pagination, redactedColumns: Array.isArray(data.redactedColumns) ? data.redactedColumns : [] }
 }
 
 export async function insertRow(

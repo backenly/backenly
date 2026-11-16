@@ -9,7 +9,11 @@
 import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import { StorageWorkbench } from '@/components/storage/StorageWorkbench'
 
-jest.mock('next/navigation', () => ({ useRouter: () => ({ push: jest.fn(), replace: jest.fn() }) }))
+jest.mock('next/navigation', () => ({
+  useRouter: () => ({ push: jest.fn(), replace: jest.fn() }),
+  // The open bucket and file live in the URL (?bucket=, ?file=).
+  useSearchParams: () => new URLSearchParams(window.location.search),
+}))
 
 const PROJECT = '00000000-0000-4000-8000-000000000001'
 const file = (id: string, name: string, uploader: unknown) => ({

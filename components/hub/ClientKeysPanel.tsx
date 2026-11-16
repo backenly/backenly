@@ -1,34 +1,43 @@
 'use client'
 
 /**
- * API keys: every key for this project (apps, scripts, agents), rendered under
- * Settings → API keys. The page owns the header; this panel is the table, the
- * create dialog and the one-time reveal.
+ * API keys, on Connect → API beside the URL they are used with (project
+ * console decision 4, 2026-11-16: a credential lives where the thing that uses
+ * it is set up). Moved from Settings, which now holds no credentials;
+ * Settings' old `?tab=keys` lands here.
  *
- * The server returns the full plaintext key exactly once, at creation. Every
- * later read is masked by design, so a listed key shows its prefix and "Shown
- * once, at creation" rather than handing out a broken masked string to copy.
+ *   API keys  2                                                       [New key]
+ *   Catalog import (server)   Admin                                           ⋯
+ *   svc_live_••••••••   Bypasses row security   1,000 / 1 h   Last used 3 d ago   Never expires
+ *
+ * The server returns a key's plaintext exactly once, when it is made, so a new
+ * key is shown once in a dialog (SecretOnceDialog) and a listed key shows its
+ * prefix only. New keys default to Client, the one safe in a browser; Admin is
+ * listed last. The radios are white, like every form control.
+ *
+ * Agent keys and browser sign-ins are on Connect → Agents (the list route
+ * leaves scope 'mcp' out). Creating and deleting keys is ADMIN; everyone else
+ * reads the list and one sentence.
  */
 
-import { useState, useEffect } from 'react'
-import Link from 'next/link'
+import { useCallback, useEffect, useState } from 'react'
 import { useParams } from 'next/navigation'
-import { Toast } from '@/components/ui/Toast'
-import { KeyRound, Trash2, Plus, Check, Eye, EyeOff, AlertTriangle, Shield } from 'lucide-react'
 import {
-  CopyButton,
-  EmptyState,
-  GhostPreview,
-  IconButton,
   KitButton,
   KitConfirmDialog,
+  KitField,
   KitInput,
   KitModal,
-  KitNote,
-  Skeleton,
+  KitRadio,
+  OverflowMenu,
   Tag,
 } from '@/components/inspector/kit'
-import { PAGE_GUTTER, PAGE_WIDTH } from '@/components/console/tokens'
+import { EmptyLine, Fact, Facts, Panel, Row, RowList, RowSkeleton, ROW_TITLE, Section } from '@/components/autonomy/rows'
+import { ErrorRow, RefusedLine } from '@/components/console/states'
+import { SecretOnceDialog } from '@/components/console/SecretOnceDialog'
+import { Time, useNow } from '@/components/console/Time'
+import { formatTime } from '@/components/console/format'
+import { useProjectRole } from '@/lib/hooks/useProjectRole'
 import { isSharedKey, sharedKeyWindow, shortWindow } from '@/lib/security/shared-key'
 
 interface ApiKey {
@@ -37,32 +46,20 @@ interface ApiKey {
   key?: string
   keyPrefix: string
   keyType?: 'dashboard' | 'public'
-  role: 'admin' | 'read-only' | 'write' | 'ai-only' | 'client' | 'service'
+  role: 'admin' | 'read-only' | 'write' | 'ai-only' | 'client' | 'service' | 'custom'
   permissions: string[]
   capabilities?: string[]
   serviceRole?: boolean
   /** Set for a preview key: it reaches that branch and nothing else. */
   branch?: { id: string; name: string; status: string } | null
-  projectId?: string | null
   lastUsed?: string | null
   createdAt: string
   expiresAt?: string | null
   rateLimit?: number
   rateLimitWindow?: number
-  requestCount?: number
-  resetAt?: string | null
 }
 
 type NewRole = 'admin' | 'read-only' | 'write' | 'client'
-
-// Elevated keys get the accent so they stand out in the list; the rest stay
-// neutral, so the table does not read as one accent wash.
-const ROLE_TAG: Record<string, 'violet' | 'good' | 'neutral'> = {
-  admin: 'violet',
-  write: 'good',
-  'read-only': 'neutral',
-  client: 'neutral',
-}
 
 const ROLE_LABEL: Record<string, string> = {
   admin: 'Admin',
@@ -71,94 +68,96 @@ const ROLE_LABEL: Record<string, string> = {
   client: 'Client',
   'ai-only': 'AI only',
   service: 'Service',
-  // Agent-created publishable keys carry role 'custom'; rendering the raw
-  // word read as an unknown kind next to a "Full access" subtitle.
+  // Agent-created publishable keys carry role 'custom'; the raw word read as an unknown kind.
   custom: 'Publishable',
 }
 
+/** Safest first: Client is the default, Admin is last. */
 const ROLE_OPTIONS: Array<{ value: NewRole; label: string; body: string }> = [
-  { value: 'admin', label: 'Admin', body: 'Full access, bypasses row security (svc_live_). Server-side only: the runtime refuses it from a browser.' },
-  { value: 'write', label: 'Write', body: 'Read and write data, no administration.' },
+  { value: 'client', label: 'Client', body: 'Safe to put in a web or mobile app. Row security applies.' },
   { value: 'read-only', label: 'Read only', body: 'Reads data, changes nothing.' },
-  { value: 'client', label: 'Client', body: 'Safe to embed in a frontend app.' },
+  { value: 'write', label: 'Write', body: 'Reads and writes data, no administration.' },
+  // The runtime's elevation switch is serviceRole: Admin mints a svc_live_ key it refuses from a browser.
+  { value: 'admin', label: 'Admin', body: 'Bypasses row security. Refused from a browser, so servers only.' },
 ]
 
-export function ClientKeysPanel() {
+/** Under 30 days to go, an expiry is worth noticing. */
+const SOON_MS = 30 * 24 * 60 * 60 * 1000
+
+export function ClientKeysPanel({ projectId: given }: { projectId?: string } = {}) {
   const params = useParams()
-  const projectId = (params.id ?? params.projectId) as string
+  const projectId = given ?? ((params?.id ?? params?.projectId) as string)
+  const role = useProjectRole(projectId)
+  const now = useNow()
 
   const [apiKeys, setApiKeys] = useState<ApiKey[]>([])
-  const [loading, setLoading] = useState(true)
+  const [load, setLoad] = useState<'loading' | 'ready' | 'error'>('loading')
+  const [retrying, setRetrying] = useState(false)
+  const [creatingOpen, setCreatingOpen] = useState(false)
   const [creating, setCreating] = useState(false)
-  const [showCreateModal, setShowCreateModal] = useState(false)
+  const [createError, setCreateError] = useState<string | null>(null)
   const [newKeyName, setNewKeyName] = useState('')
-  const [newKeyRole, setNewKeyRole] = useState<NewRole>('admin')
-  const [createdKey, setCreatedKey] = useState<string | null>(null)
-  const [revealedKeys, setRevealedKeys] = useState<Set<string>>(new Set())
-  const [pendingDelete, setPendingDelete] = useState<{ id: string; name: string } | null>(null)
+  const [newKeyRole, setNewKeyRole] = useState<NewRole>('client')
+  const [created, setCreated] = useState<{ name: string; key: string } | null>(null)
+  const [pendingDelete, setPendingDelete] = useState<ApiKey | null>(null)
   const [deleting, setDeleting] = useState(false)
-  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'info' | 'warning' } | null>(null)
+  const [refusal, setRefusal] = useState<{ id: string; message: string } | null>(null)
 
-  useEffect(() => {
-    if (projectId) loadApiKeys()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectId])
-
-  const loadApiKeys = async () => {
+  const loadApiKeys = useCallback(async () => {
     try {
-      setLoading(true)
       const response = await fetch(`/api/api-keys?projectId=${projectId}`, { credentials: 'include' })
       if (!response.ok) throw new Error('Failed to fetch API keys')
       const data = await response.json()
-      setApiKeys(data.apiKeys || [])
-    } catch (error: any) {
-      setToast({ message: error.message || 'Failed to load API keys', type: 'error' })
+      setApiKeys(Array.isArray(data.apiKeys) ? data.apiKeys : [])
+      setLoad('ready')
+    } catch {
+      setLoad((prev) => (prev === 'ready' ? 'ready' : 'error'))
     } finally {
-      setLoading(false)
+      setRetrying(false)
     }
-  }
+  }, [projectId])
+
+  useEffect(() => {
+    if (projectId) void loadApiKeys()
+  }, [projectId, loadApiKeys])
 
   const resetCreate = () => {
-    setShowCreateModal(false)
+    setCreatingOpen(false)
     setNewKeyName('')
-    setNewKeyRole('admin')
+    setNewKeyRole('client')
+    setCreateError(null)
   }
 
   const handleCreateApiKey = async () => {
-    if (!newKeyName.trim()) {
-      setToast({ message: 'Name the key so you can recognise it later.', type: 'warning' })
-      return
-    }
+    const name = newKeyName.trim()
+    if (!name || creating) return
+    setCreating(true)
+    setCreateError(null)
     try {
-      setCreating(true)
       const response = await fetch(`/api/api-keys?projectId=${projectId}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
         body: JSON.stringify({
-          name: newKeyName,
+          name,
           keyType: 'public',
           role: newKeyRole,
           capabilities: ['database', 'auth', 'storage', 'functions', 'ai'],
           // The runtime's elevation switch is serviceRole, not the role string.
           // The Admin option used to send serviceRole:false, which minted a
-          // publishable proj_live_ key: not full access (RLS still applied, the
-          // data plane demanded an end-user token) and served from browsers —
-          // the exact opposite of this option's copy.
+          // publishable proj_live_ key: not full access, and served from
+          // browsers, the exact opposite of this option's copy.
           serviceRole: newKeyRole === 'admin',
           projectId,
         }),
       })
-      if (!response.ok) {
-        const error = await response.json()
-        throw new Error(error.error || 'Failed to create API key')
-      }
-      const data = await response.json()
-      setCreatedKey(data.apiKey.key)
+      const data = await response.json().catch(() => ({}))
+      if (!response.ok || !data?.apiKey?.key) throw new Error(data?.error || 'Could not create the key. Try again.')
       resetCreate()
+      setCreated({ name, key: data.apiKey.key })
       await loadApiKeys()
-    } catch (error: any) {
-      setToast({ message: error.message || 'Failed to create API key', type: 'error' })
+    } catch (error) {
+      setCreateError(error instanceof Error ? error.message : 'Could not create the key. Try again.')
     } finally {
       setCreating(false)
     }
@@ -166,210 +165,132 @@ export function ClientKeysPanel() {
 
   const confirmDelete = async () => {
     if (!pendingDelete) return
+    const target = pendingDelete
     setDeleting(true)
+    setRefusal(null)
     try {
-      const response = await fetch(`/api/api-keys/${pendingDelete.id}?projectId=${projectId}`, {
+      const response = await fetch(`/api/api-keys/${target.id}?projectId=${projectId}`, {
         method: 'DELETE',
         credentials: 'include',
       })
       if (!response.ok) {
-        const error = await response.json()
-        throw new Error(error.error || 'Failed to delete API key')
+        const error = await response.json().catch(() => ({}))
+        throw new Error(error.error || 'Could not delete the key. Try again.')
       }
-      setToast({ message: `Deleted “${pendingDelete.name}”`, type: 'success' })
       setPendingDelete(null)
       await loadApiKeys()
-    } catch (error: any) {
-      setToast({ message: error.message || 'Failed to delete API key', type: 'error' })
+    } catch (error) {
+      setPendingDelete(null)
+      setRefusal({ id: target.id, message: error instanceof Error ? error.message : 'Could not delete the key. Try again.' })
     } finally {
       setDeleting(false)
     }
   }
 
-  const toggleRevealKey = (keyId: string) => {
-    setRevealedKeys((prev) => {
-      const next = new Set(prev)
-      if (next.has(keyId)) next.delete(keyId)
-      else next.add(keyId)
-      return next
-    })
+  const canChange = role.canAdminister
+  let body
+  if (load === 'loading') {
+    body = <RowSkeleton rows={2} lead="none" />
+  } else if (load === 'error') {
+    body = (
+      <ErrorRow
+        things="API keys"
+        onRetry={() => {
+          setRetrying(true)
+          void loadApiKeys()
+        }}
+        retrying={retrying}
+      />
+    )
+  } else if (apiKeys.length === 0) {
+    body = <EmptyLine>No API keys yet. An app, a script or a server uses one to call the API.</EmptyLine>
+  } else {
+    body = (
+      <RowList>
+        {apiKeys.map((key) => {
+          const ended = key.branch && key.branch.status !== 'active'
+          const soon = now !== null && !!key.expiresAt && new Date(key.expiresAt).getTime() - now < SOON_MS
+          return (
+            <Row
+              key={key.id}
+              lead="none"
+              title={
+                <p className={`flex min-w-0 flex-wrap items-center gap-x-[8px] gap-y-[4px] ${ROW_TITLE}`}>
+                  <span className="min-w-0 [overflow-wrap:anywhere]">{key.name}</span>
+                  <Tag>{ROLE_LABEL[key.role] ?? key.role}</Tag>
+                  {key.branch && (
+                    // A preview key answers only on its branch, and not at all once that branch is merged or discarded.
+                    <Tag tone={key.branch.status === 'active' ? 'warn' : 'neutral'} mono>
+                      Preview: {key.branch.name}
+                    </Tag>
+                  )}
+                </p>
+              }
+              actions={
+                canChange ? (
+                  <OverflowMenu
+                    label={`Actions for ${key.name}`}
+                    items={[{ label: 'Delete key', danger: true, onClick: () => setPendingDelete(key) }]}
+                  />
+                ) : undefined
+              }
+            >
+              <Facts>
+                <Fact>
+                  <code className="font-mono text-[11.5px] text-zinc-400">{key.keyPrefix}••••••••</code>
+                </Fact>
+                {key.serviceRole && <Fact strong>Service role: bypasses row security, servers only</Fact>}
+                <Fact>
+                  {/* Every user of an app sends a shared key, so its limit is each address's (lib/security/shared-key.ts). */}
+                  {isSharedKey(key)
+                    ? `${shortWindow(sharedKeyWindow(key))} per address`
+                    : shortWindow({ limit: key.rateLimit ?? 1000, windowSeconds: key.rateLimitWindow ?? 3600 })}
+                </Fact>
+                <Fact>{key.lastUsed ? <Time iso={key.lastUsed} prefix="Last used" /> : 'Never used'}</Fact>
+                <Fact>Created {formatTime(key.createdAt, 'date')}</Fact>
+                {ended ? (
+                  // Its branch was merged or discarded, and the key with it: no date to wait for.
+                  <Fact>Ended with branch</Fact>
+                ) : key.expiresAt ? (
+                  // The runtime refuses the key past this date; white once it is under 30 days out.
+                  <Fact>
+                    <span className={soon ? 'font-medium text-zinc-50' : ''}>Expires {formatTime(key.expiresAt, 'date')}</span>
+                  </Fact>
+                ) : (
+                  <Fact>Never expires</Fact>
+                )}
+              </Facts>
+              {refusal?.id === key.id && <RefusedLine className="mt-[8px]">{refusal.message}</RefusedLine>}
+            </Row>
+          )
+        })}
+      </RowList>
+    )
   }
 
-  const formatDate = (dateString: string) =>
-    new Date(dateString).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
-
   return (
-    <div className={`${PAGE_WIDTH} ${PAGE_GUTTER} pt-6`}>
-      {toast && <Toast message={toast.message} type={toast.type} isVisible onClose={() => setToast(null)} />}
-
-      <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-        <div>
-          <h2 className="text-[15px] font-semibold leading-[22px] tracking-[-0.012em] text-zinc-100">API keys</h2>
-          <p className="mt-1 max-w-[68ch] text-[13px] leading-[20px] text-zinc-400">
-            Keys for apps, scripts and servers. Client keys are safe to embed; admin keys stay server-side.
-            Your coding agent’s keys and connections are on{' '}
-            <Link href={`/app/projects/${projectId}/connect`} className="text-zinc-200 underline decoration-white/20 underline-offset-2 hover:decoration-white/60">
-              Connect, Agents
-            </Link>
-            .
-          </p>
-        </div>
-        <KitButton variant="primary" icon={Plus} onClick={() => setShowCreateModal(true)} disabled={creating}>
-          New key
-        </KitButton>
-      </div>
-
-      {loading ? (
-        <div className="space-y-2">
-          <Skeleton className="h-[52px] w-full rounded-[10px]" />
-          <Skeleton className="h-[52px] w-full rounded-[10px]" />
-        </div>
-      ) : apiKeys.length === 0 ? (
-        <div className="rounded-[10px] border border-white/[0.08] bg-[#0f1012]">
-          <EmptyState
-            icon={KeyRound}
-            preview={<GhostPreview kind="list" />}
-            title="No API keys yet"
-            description="Create a key to make authenticated requests from your app, a script or a server."
-            action={
-              <KitButton variant="primary" icon={Plus} onClick={() => setShowCreateModal(true)}>
-                Create a key
-              </KitButton>
-            }
-          />
-        </div>
-      ) : (
-        <div className="relative overflow-x-auto rounded-[10px] border border-white/[0.08] bg-[#0f1012]">
-          <table className="w-full min-w-[840px] text-left">
-            <thead>
-              <tr className="border-b border-white/[0.06] text-[12px] text-faint">
-                <th scope="col" className="h-[38px] whitespace-nowrap px-4 font-medium">Name</th>
-                <th scope="col" className="h-[38px] whitespace-nowrap px-4 font-medium">Key</th>
-                <th scope="col" className="h-[38px] whitespace-nowrap px-4 font-medium">Rate limit</th>
-                <th scope="col" className="h-[38px] whitespace-nowrap px-4 font-medium">Created</th>
-                <th scope="col" className="h-[38px] whitespace-nowrap px-4 font-medium">Expires</th>
-                <th scope="col" className="h-[38px] whitespace-nowrap px-4 font-medium">Last used</th>
-                <th scope="col" className="h-[38px] w-[56px] px-4 font-medium"><span className="sr-only">Actions</span></th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-white/[0.05]">
-              {apiKeys.map((key) => {
-                const isRevealed = revealedKeys.has(key.id)
-                // A usable plaintext exists only for a key still held from its
-                // creation; everything else is the masked identifier.
-                const realKey =
-                  key.key && !key.key.includes('…') && !key.key.includes('...') && key.key.length >= 24 ? key.key : null
-                const maskedKey = key.key && !realKey ? key.key : key.keyPrefix + '••••••••'
-                const displayKey = realKey ? (isRevealed ? realKey : key.keyPrefix + '••••••••') : maskedKey
-                return (
-                  <tr key={key.id} className="group transition-colors hover:bg-white/[0.02]">
-                    <td className="px-4 py-3 align-middle">
-                      <div className="flex items-center gap-2">
-                        <span className="max-w-[220px] truncate text-[13px] font-medium text-zinc-100">{key.name}</span>
-                        <Tag tone={ROLE_TAG[key.role] ?? 'neutral'}>{ROLE_LABEL[key.role] ?? key.role}</Tag>
-                        {key.branch && (
-                          // A preview key answers only on its branch, and not at
-                          // all once that branch is merged or discarded.
-                          <Tag tone={key.branch.status === 'active' ? 'warn' : 'neutral'} mono>
-                            {key.branch.status === 'active'
-                              ? `Preview: ${key.branch.name}`
-                              : `Preview: ${key.branch.name} (${key.branch.status})`}
-                          </Tag>
-                        )}
-                      </div>
-                      <p className="mt-0.5 max-w-[260px] truncate text-[12px] text-faint">
-                        {key.serviceRole
-                          ? 'Service role: bypasses row security, server-side only'
-                          : key.capabilities && key.capabilities.length > 0
-                            ? key.capabilities.join(', ')
-                            : key.permissions && key.permissions.length > 0
-                              ? `Row security applies · ${key.permissions.join(', ')}`
-                              : 'Row security applies'}
-                      </p>
-                    </td>
-                    <td className="px-4 py-3 align-middle">
-                      <div className="flex items-center gap-1">
-                        <code className="max-w-[240px] truncate font-mono text-[12px] text-zinc-300">{displayKey}</code>
-                        {realKey ? (
-                          <>
-                            <IconButton
-                              icon={isRevealed ? EyeOff : Eye}
-                              label={isRevealed ? 'Hide key' : 'Reveal key'}
-                              onClick={() => toggleRevealKey(key.id)}
-                            />
-                            <CopyButton value={realKey} label="Copy key" />
-                          </>
-                        ) : (
-                          <span className="ml-1 inline-flex items-center gap-1 whitespace-nowrap text-[12px] text-faint">
-                            <Shield className="h-3 w-3" /> Shown once
-                          </span>
-                        )}
-                      </div>
-                    </td>
-                    <td className="whitespace-nowrap px-4 py-3 align-middle text-[13px] tabular-nums text-zinc-400">
-                      {/* Every user of the app sends a shared key, so its limit is each address's (lib/security/shared-key.ts). */}
-                      {isSharedKey(key) ? (
-                        <>
-                          {shortWindow(sharedKeyWindow(key))}<span className="text-faint"> per address</span>
-                        </>
-                      ) : (
-                        <>
-                          {(key.rateLimit ?? 1000).toLocaleString()} / {Math.max(1, Math.round((key.rateLimitWindow ?? 3600) / 3600))} h
-                        </>
-                      )}
-                    </td>
-                    <td className="whitespace-nowrap px-4 py-3 align-middle text-[13px] tabular-nums text-zinc-400">
-                      {formatDate(key.createdAt)}
-                    </td>
-                    <td className="whitespace-nowrap px-4 py-3 align-middle text-[13px] tabular-nums">
-                      {key.branch && key.branch.status !== 'active' ? (
-                        // Its branch was merged or discarded, and the key with
-                        // it: no date to wait for, it never answers again.
-                        <span className="text-faint">Ended with branch</span>
-                      ) : key.expiresAt ? (
-                        // The runtime refuses the key past this date; a key
-                        // that will die deserves a visible date, not a silent
-                        // birthday. Amber once it is under 30 days out.
-                        <span
-                          className={
-                            new Date(key.expiresAt).getTime() - Date.now() < 30 * 24 * 60 * 60 * 1000
-                              ? 'text-amber-300'
-                              : 'text-zinc-400'
-                          }
-                        >
-                          {formatDate(key.expiresAt)}
-                        </span>
-                      ) : (
-                        <span className="text-faint">Never</span>
-                      )}
-                    </td>
-                    <td className="whitespace-nowrap px-4 py-3 align-middle text-[13px] tabular-nums">
-                      {key.lastUsed ? (
-                        <span className="text-zinc-300">{formatDate(key.lastUsed)}</span>
-                      ) : (
-                        <span className="text-faint">Never</span>
-                      )}
-                    </td>
-                    <td className="px-4 py-3 text-right align-middle">
-                      <IconButton
-                        icon={Trash2}
-                        label={`Delete ${key.name}`}
-                        onClick={() => setPendingDelete({ id: key.id, name: key.name })}
-                        className="hover:!bg-rose-500/10 hover:!text-rose-300 sm:opacity-0 sm:group-hover:opacity-100 sm:focus-visible:opacity-100"
-                      />
-                    </td>
-                  </tr>
-                )
-              })}
-            </tbody>
-          </table>
-        </div>
+    <Section
+      id="api-keys"
+      title="API keys"
+      count={load === 'ready' ? apiKeys.length : null}
+      aside={
+        canChange ? (
+          <KitButton size="sm" onClick={() => setCreatingOpen(true)}>
+            New key
+          </KitButton>
+        ) : undefined
+      }
+    >
+      <Panel>{body}</Panel>
+      {!canChange && !role.loading && (
+        <p className="mt-[10px] text-[12.5px] leading-[18px] text-faint">Only owners and admins can add or revoke keys.</p>
       )}
 
-      {/* ── Create ─────────────────────────────────────────────────────── */}
       <KitModal
-        open={showCreateModal}
-        onClose={resetCreate}
+        open={creatingOpen}
+        onClose={() => {
+          if (!creating) resetCreate()
+        }}
         title="New API key"
         description="The key is shown once, right after you create it."
         width="max-w-[480px]"
@@ -378,21 +299,20 @@ export function ClientKeysPanel() {
             <KitButton variant="ghost" onClick={resetCreate} disabled={creating}>
               Cancel
             </KitButton>
-            <KitButton variant="primary" icon={Plus} loading={creating} onClick={handleCreateApiKey} disabled={!newKeyName.trim()}>
-              {creating ? 'Creating…' : 'Create key'}
+            <KitButton variant="primary" loading={creating} onClick={handleCreateApiKey} disabled={!newKeyName.trim()}>
+              Create key
             </KitButton>
           </>
         }
       >
         <form
-          className="space-y-5"
+          className="space-y-[18px]"
           onSubmit={(e) => {
             e.preventDefault()
-            if (newKeyName.trim()) handleCreateApiKey()
+            void handleCreateApiKey()
           }}
         >
-          <label className="block">
-            <span className="mb-1.5 block text-[12.5px] font-medium text-zinc-300">Name</span>
+          <KitField label="Name">
             <KitInput
               name="key-name"
               autoComplete="off"
@@ -400,80 +320,49 @@ export function ClientKeysPanel() {
               onChange={(e) => setNewKeyName(e.target.value)}
               placeholder="Production mobile app…"
             />
-          </label>
-
+          </KitField>
           <fieldset>
-            <legend className="mb-2 text-[12.5px] font-medium text-zinc-300">Access</legend>
-            <div className="grid gap-2 sm:grid-cols-2">
-              {ROLE_OPTIONS.map((opt) => {
-                const on = newKeyRole === opt.value
-                return (
-                  <label
-                    key={opt.value}
-                    className={`relative flex cursor-pointer flex-col rounded-[8px] border px-3 py-2.5 transition-colors ${
-                      on ? 'border-violet-300/40 bg-violet-400/[0.06]' : 'border-white/[0.08] hover:border-white/[0.14]'
-                    } focus-within:ring-2 focus-within:ring-violet-300/60`}
-                  >
-                    <input
-                      type="radio"
-                      name="key-role"
-                      value={opt.value}
-                      checked={on}
-                      onChange={() => setNewKeyRole(opt.value)}
-                      className="sr-only"
-                    />
-                    <span className="flex items-center justify-between text-[13px] font-medium text-zinc-100">
-                      {opt.label}
-                      {on && <Check className="h-3.5 w-3.5 text-violet-200" strokeWidth={2.25} />}
-                    </span>
-                    <span className="mt-0.5 text-[12px] leading-[17px] text-faint">{opt.body}</span>
-                  </label>
-                )
-              })}
+            <legend className="mb-[8px] text-[12.5px] font-medium leading-[18px] text-zinc-300">Access</legend>
+            <div className="space-y-[10px]">
+              {ROLE_OPTIONS.map((opt) => (
+                <KitRadio
+                  key={opt.value}
+                  name="key-role"
+                  value={opt.value}
+                  checked={newKeyRole === opt.value}
+                  onChange={(v) => setNewKeyRole(v as NewRole)}
+                  label={opt.label}
+                  description={opt.body}
+                />
+              ))}
             </div>
           </fieldset>
+          {createError && <RefusedLine>{createError}</RefusedLine>}
         </form>
       </KitModal>
 
-      {/* ── One-time reveal ────────────────────────────────────────────── */}
-      <KitModal
-        open={!!createdKey}
-        onClose={() => setCreatedKey(null)}
-        title="Key created"
-        description="Copy it now. Backenly stores only a hash, so it can never be shown again."
-        width="max-w-[540px]"
-        footer={
-          <KitButton variant="primary" onClick={() => setCreatedKey(null)}>
-            I’ve saved it
-          </KitButton>
-        }
+      <SecretOnceDialog
+        open={!!created}
+        onClose={() => setCreated(null)}
+        title={created ? `API key for ${created.name}` : 'API key'}
+        value={created?.key ?? ''}
+        copyLabel="Copy key"
+        description="Copy it now. Backenly keeps only a hash, so it can’t be shown again."
       >
-        {createdKey && (
-          <div className="space-y-4">
-            <div className="flex items-start gap-2 rounded-[8px] border border-white/[0.08] bg-[#08090a] p-3">
-              <code className="min-w-0 flex-1 select-all break-all font-mono text-[12.5px] leading-[20px] text-zinc-100">
-                {createdKey}
-              </code>
-              <CopyButton value={createdKey} label="Copy key" showLabel />
-            </div>
-            <KitNote tone="warn" icon={AlertTriangle}>
-              This is your only chance to save this key. Store it in your secrets manager or an environment variable.
-            </KitNote>
-          </div>
-        )}
-      </KitModal>
+        Keep it in your secrets manager or an environment variable.
+      </SecretOnceDialog>
 
-      {/* ── Delete ─────────────────────────────────────────────────────── */}
       <KitConfirmDialog
         open={!!pendingDelete}
         onCancel={() => setPendingDelete(null)}
-        onConfirm={confirmDelete}
+        onConfirm={() => void confirmDelete()}
         danger
         busy={deleting}
-        title={`Delete “${pendingDelete?.name ?? ''}”?`}
-        description="Any app or script using this key stops working immediately. This cannot be undone."
+        title={`Delete ${pendingDelete?.name ?? 'key'}?`}
+        description="Any app or script using it stops working immediately."
+        undoable={false}
         confirmLabel="Delete key"
       />
-    </div>
+    </Section>
   )
 }

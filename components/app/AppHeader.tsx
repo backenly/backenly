@@ -287,7 +287,7 @@ export function AppHeader() {
 
                     <button
                       onClick={handleLogout}
-                      className="w-full flex items-center space-x-3 px-3 py-2 rounded-lg text-sm text-red-500 hover:bg-red-50 transition-colors"
+                      className="w-full flex items-center space-x-3 px-3 py-2 rounded-lg text-sm text-text-secondary hover:text-text-primary hover:bg-bg-base transition-colors"
                     >
                       <LogOut className="w-4 h-4" />
                       <span>Log out</span>

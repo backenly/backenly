@@ -35,6 +35,17 @@ export const PROJECT_LIST_SELECT = {
   // Where the project's data lives (lib/regions.ts). Null is the home region,
   // which is every project on a self-hosted deployment.
   region: true,
+  // When the project was last really used (lib/projects/activity.ts): runtime
+  // traffic, an MCP call, a dashboard write, opening its console. Stamped at
+  // most once an hour, so the console says "within the last hour", never
+  // "12 min ago". The dashboard's "Last used"; updatedAt moves for autonomy and
+  // the daily observer too, so it is not this.
+  lastActivityAt: true,
+  // The team that owns it, so the console's project switcher can list one
+  // team's projects. Always null on a self-hosted deployment.
+  organizationId: true,
+  // Where it was moved in from, when an import made it (lib/import/jobs.ts).
+  importedFrom: true,
   // Counted, never fetched: a listing needs the number of tables, not the tables.
   _count: { select: { tables: true, workspaces: true } },
 } as const

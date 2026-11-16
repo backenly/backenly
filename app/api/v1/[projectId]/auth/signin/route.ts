@@ -9,7 +9,7 @@ import { createErrorResponse, createSuccessResponse, ErrorCodes } from '@/lib/ap
 import { signInSchema } from '@/lib/api/v1/schemas'
 import { validateRequestBody } from '@/lib/validation/schemas'
 import { workspaceRawClient } from '@/lib/data-plane/regional'
-import { verifyPassword, verifyPasswordAgainstDecoy } from '@/lib/auth/password'
+import { checkEndUserPassword, endUserPasswordWriter, replaceImportedPasswordHash, startPasswordCheckTimer } from '@/lib/auth/end-user-password'
 import { executeWithUserContext } from '@/lib/services/workspace-rls'
 import { stampLastLogin } from '@/lib/services/end-user-auth-table'
 import { trackEndUserActive } from '@/lib/quota/kernel'
@@ -163,11 +163,17 @@ async function signIn(request: NextRequest, projectId: string, env: AuthEnvironm
     // So an absent user is compared against a decoy hash generated at the same
     // cost factor the product issues. The comparison cannot succeed and its
     // result is discarded; the only thing wanted is the work.
-    const isValid = storedHash
-      ? await verifyPassword(password, storedHash)
-      : await verifyPasswordAgainstDecoy(password)
+    // A hash an import brought (Firebase's scrypt) is accepted here too, once:
+    // lib/auth/end-user-password.ts.
+    //
+    // The paths still do different work (a Firebase hash costs one scrypt more),
+    // so every failure is held to the same moment after the check began, and a
+    // wrong password never tells which kind of account, or none, it met.
+    const checkTimer = startPasswordCheckTimer()
+    const check = await checkEndUserPassword(password, storedHash)
 
-    if (!isValid) {
+    if (!check.valid) {
+      await checkTimer.failed()
       return createErrorResponse(ErrorCodes.UNAUTHORIZED, 'Invalid email or password', 401)
     }
 
@@ -175,6 +181,13 @@ async function signIn(request: NextRequest, projectId: string, env: AuthEnvironm
     // what it drew from the failure budgets. Before the suspension and
     // verification answers, which refuse someone who knows the password.
     await attempt?.credentialsVerified()
+
+    // An imported hash is replaced with Backenly's bcrypt now that the password
+    // is known. A failure leaves the imported hash, which still works next time.
+    if (check.rehash && storedHash) {
+      await replaceImportedPasswordHash(password, storedHash, endUserPasswordWriter(projectId, schemaName, pwCol, user.email))
+        .catch((e) => console.warn('[signin] could not replace an imported password hash:', e?.message ?? 'unknown'))
+    }
 
     // ── Suspension is disclosed only to someone who proved the password ─────
     //

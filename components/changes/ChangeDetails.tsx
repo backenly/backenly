@@ -1,21 +1,35 @@
 'use client'
 
 /**
- * View details: everything technical about one change, and only here.
+ * One change, opened beside the list: everything technical about it, and only
+ * here (project decision 6: a record from a list you keep scanning opens in a
+ * right drawer, ?change= in the URL, ↑/↓ moves, Esc closes).
  *
  * What it did to each object, the protected checks and what each found, the
  * lifecycle with who requested, authorised and executed each step, the restore
  * point and the data kept, the SQL, and each restore that acted on it with its
- * own checks. The list row stays one line; this is where the evidence lives.
+ * own checks. The list row stays short; this is where the evidence lives. The
+ * drawer's title is the summary; its facts are the status, who, when and #48.
  */
 
 import { useEffect, useState } from 'react'
-import { AlertTriangle, Check, ChevronDown, ChevronRight, HelpCircle, X } from 'lucide-react'
-import { KitButton, KitModal, KitNote, Skeleton, StatusDot } from '@/components/inspector/kit'
+import { AlertTriangle, ChevronDown, ChevronRight } from 'lucide-react'
+import { KitButton, KitNote, StatusGlyph } from '@/components/inspector/kit'
+import { RecordDrawer } from '@/components/console/RecordDrawer'
+import { formatTime } from '@/components/console/format'
+import { Time } from '@/components/console/Time'
+import { ErrorRow } from '@/components/console/states'
+import { Fact, Facts } from '@/components/autonomy/rows'
 import type { ChangeDetail, ChangeSummary } from '@/lib/changes/history'
 import type { PreservedEntry } from '@/lib/changes/types'
 import type { VerificationCheck } from '@/lib/changes/verify'
-import { EVENT, outcomeOf, when } from './present'
+import { ChangeOutcome } from './ChangeRow'
+import { EVENT } from './present'
+
+/** "Nov 16, 2:09:41 AM": a lifecycle step, to the second. */
+function stamp(iso: string): string {
+  return `${formatTime(iso, 'date')}, ${formatTime(iso, 'clockSeconds')}`
+}
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
@@ -27,18 +41,11 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 }
 
 function CheckRow({ check }: { check: VerificationCheck }) {
-  const tone =
-    check.outcome === 'confirmed'
-      ? 'bg-emerald-400/15 text-emerald-300'
-      : check.outcome === 'contradicted'
-        ? 'bg-rose-400/15 text-rose-300'
-        : 'bg-amber-400/15 text-amber-300'
-  const Icon = check.outcome === 'confirmed' ? Check : check.outcome === 'contradicted' ? X : HelpCircle
+  const state = check.outcome === 'confirmed' ? 'done' : check.outcome === 'contradicted' ? 'failed' : 'waiting'
+  const word = check.outcome === 'confirmed' ? 'Confirmed' : check.outcome === 'contradicted' ? 'Contradicted' : 'Could not tell'
   return (
     <li className="flex items-start gap-2.5">
-      <span className={`mt-[2px] flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full ${tone}`} aria-label={check.outcome}>
-        <Icon className="h-[11px] w-[11px]" strokeWidth={2.5} />
-      </span>
+      <StatusGlyph state={state} label={word} className="mt-[4px]" />
       <span className="min-w-0">
         <span className="block text-[13px] text-zinc-200">{check.label}</span>
         {check.detail && <span className="block text-[12px] leading-[18px] text-faint [overflow-wrap:anywhere]">{check.detail}</span>}
@@ -55,7 +62,7 @@ function Disclosure({ label, children }: { label: string; children: React.ReactN
         type="button"
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
-        className="inline-flex items-center gap-1 text-[12.5px] font-medium text-zinc-400 hover:text-zinc-100"
+        className="inline-flex items-center gap-1 rounded-[4px] text-[12.5px] font-medium text-zinc-400 hover:text-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70"
       >
         {open ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
         {label}
@@ -74,7 +81,7 @@ function Sql({ statements, quoted = true }: { statements: Array<{ sql: string }>
     )
   }
   return (
-    <pre className="max-h-[260px] overflow-auto rounded-[8px] border border-white/[0.06] bg-black/30 p-3 font-mono text-[11.5px] leading-[18px] text-zinc-300">
+    <pre tabIndex={0} className="max-h-[260px] overflow-auto rounded-[8px] border border-white/[0.06] bg-black/30 p-3 font-mono text-[11.5px] leading-[18px] text-zinc-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70">
       {statements.map((s) => s.sql.trim()).join(';\n\n')}
     </pre>
   )
@@ -110,7 +117,7 @@ function restoreLine(r: ChangeDetail['recoveries'][number]): string {
 
 function outcomeNote(d: ChangeDetail): { tone: 'success' | 'warn' | 'danger' | 'info'; text: string } | null {
   const by = d.outcome.by ? ` by ${d.outcome.by.label}` : ''
-  const at = d.outcome.at ? `, ${when(d.outcome.at)}` : ''
+  const at = d.outcome.at ? `, ${formatTime(d.outcome.at, 'dateTime')}` : ''
   switch (d.outcome.state) {
     case 'recovered':
       return { tone: 'success', text: `This change failed a check, so Backenly restored the state before it and verified the result${at}. Production is healthy.${d.outcome.note ? ` What failed: ${d.outcome.note}` : ''}` }
@@ -129,22 +136,32 @@ function outcomeNote(d: ChangeDetail): { tone: 'success' | 'warn' | 'danger' | '
   }
 }
 
-export function ChangeDetails({
+export function ChangeDrawer({
   projectId,
   changeId,
+  summary,
   canManage,
   onClose,
   onRestore,
+  onPrev,
+  onNext,
+  position,
 }: {
   projectId: string
   changeId: string
+  /** The list's row for this change, so the title shows while the details load. */
+  summary?: ChangeSummary | null
   canManage: boolean
   onClose: () => void
-  /** Open the restore dialog for this change. */
+  /** Open the Undo (or Reapply) dialog for this change. */
   onRestore: (summary: ChangeSummary) => void
+  onPrev?: (() => void) | null
+  onNext?: (() => void) | null
+  position?: { index: number; total: number }
 }) {
   const [detail, setDetail] = useState<ChangeDetail | null>(null)
-  const [failed, setFailed] = useState<string | null>(null)
+  const [failed, setFailed] = useState<{ id: string; message: string } | null>(null)
+  const [nonce, setNonce] = useState(0)
 
   useEffect(() => {
     let cancelled = false
@@ -152,61 +169,66 @@ export function ChangeDetails({
       .then(async (res) => ({ ok: res.ok, body: await res.json().catch(() => ({})) }))
       .then(({ ok, body }) => {
         if (cancelled) return
-        if (ok && body.change) setDetail(body.change)
-        else setFailed(body.error || 'Could not load this change.')
+        if (ok && body.change) {
+          setDetail(body.change)
+          setFailed(null)
+        } else setFailed({ id: changeId, message: body.error || 'Could not load this change.' })
       })
-      .catch(() => { if (!cancelled) setFailed('Could not reach Backenly.') })
+      .catch(() => { if (!cancelled) setFailed({ id: changeId, message: 'Could not reach Backenly.' }) })
     return () => { cancelled = true }
-  }, [projectId, changeId])
+  }, [projectId, changeId, nonce])
 
   const d = detail && detail.id === changeId ? detail : null
-  const status = d ? outcomeOf(d) : null
+  const head: ChangeSummary | null = d ?? (summary && summary.id === changeId ? summary : null)
   const note = d ? outcomeNote(d) : null
   const restorable = !!d && canManage && !!d.action?.available
+  const error = failed && failed.id === changeId ? failed.message : null
 
   return (
-    <KitModal
+    <RecordDrawer
       open
       onClose={onClose}
-      width="max-w-2xl"
-      title={d ? <span className="[overflow-wrap:anywhere]">#{d.seq} · {d.summary}</span> : 'Change details'}
-      description={
-        d ? (
-          <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
-            <StatusDot tone={status!.tone} label={status!.label} />
-            <span className="text-faint">·</span>
-            <span>{d.actor.label}</span>
-            <span className="text-faint">·</span>
-            <span>{when(d.createdAt)}</span>
-          </span>
+      title={head ? <span className="[overflow-wrap:anywhere]">{head.summary}</span> : 'Change'}
+      label={head ? `#${head.seq} ${head.summary}` : 'Change'}
+      onPrev={onPrev}
+      onNext={onNext}
+      position={position}
+      loading={!d && !error}
+      facts={
+        head ? (
+          <Facts>
+            <Fact strong>
+              <ChangeOutcome c={head} />
+              {head.outcome.state === 'healthy' && <span className="ml-1.5">Verified</span>}
+            </Fact>
+            <Fact>{head.actor.label}</Fact>
+            <Fact><Time iso={head.createdAt} mode="dateTime" /></Fact>
+            <Fact><span className="tabular-nums">#{head.seq}</span></Fact>
+          </Facts>
         ) : undefined
       }
       footer={
-        <>
-          <KitButton variant="ghost" onClick={onClose}>Close</KitButton>
-          {restorable && (
-            <KitButton onClick={() => onRestore(d!)}>
-              {d!.action!.kind === 'reapply' ? 'Reapply this change' : 'Restore previous state'}
-            </KitButton>
-          )}
-        </>
+        restorable ? (
+          <KitButton onClick={() => onRestore(d!)}>
+            {d!.action!.kind === 'reapply' ? 'Reapply this change' : 'Undo this change'}
+          </KitButton>
+        ) : undefined
       }
     >
-      {failed ? (
-        <KitNote tone="danger" icon={AlertTriangle}>{failed}</KitNote>
-      ) : !d ? (
-        <div className="space-y-3" aria-hidden>
-          <Skeleton className="h-[14px] w-2/3" />
-          <Skeleton className="h-[14px] w-1/2" />
-          <Skeleton className="h-[120px] w-full" />
+      {error ? (
+        <div className="-mx-[16px] -my-[16px] sm:-mx-[20px]">
+          <ErrorRow things="this change" onRetry={() => setNonce((n) => n + 1)} />
         </div>
-      ) : (
+      ) : !d ? null : (
         <div className="space-y-6">
-          {note && (
-            <KitNote tone={note.tone} icon={note.tone === 'success' ? Check : AlertTriangle}>
-              <span className="[overflow-wrap:anywhere]">{note.text}</span>
-            </KitNote>
-          )}
+          {note &&
+            (note.tone === 'warn' || note.tone === 'danger' ? (
+              <KitNote tone={note.tone} icon={AlertTriangle}>
+                <span className="[overflow-wrap:anywhere]">{note.text}</span>
+              </KitNote>
+            ) : (
+              <p className="text-[13px] leading-[20px] text-zinc-300 [overflow-wrap:anywhere]">{note.text}</p>
+            ))}
 
           {d.title && d.title !== d.summary && (
             <Section title="Asked for">
@@ -265,7 +287,7 @@ export function ChangeDetails({
               {d.events.map((e, i) => (
                 <li key={i} className="flex items-baseline justify-between gap-3 text-[12.5px]">
                   <span className="text-zinc-300">{EVENT[e.type] ?? e.type}</span>
-                  <span className="flex-shrink-0 tabular-nums text-faint">{when(e.at)}</span>
+                  <span className="flex-shrink-0 tabular-nums text-faint">{stamp(e.at)}</span>
                 </li>
               ))}
             </ol>
@@ -281,7 +303,7 @@ export function ChangeDetails({
               <p className="text-[12.5px] text-faint">{d.action.reason}</p>
             )}
             {d.action?.available && d.action.expiresAt && (
-              <p className="text-[12.5px] text-faint">Can be restored until {new Date(d.action.expiresAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}.</p>
+              <p className="text-[12.5px] text-faint">Can be undone until {formatTime(d.action.expiresAt, 'date')}.</p>
             )}
             {d.preserved && d.preserved.entries.length > 0 && (
               <div className="pt-1">
@@ -297,9 +319,11 @@ export function ChangeDetails({
 
           {d.recoveries.map((r) => (
             <Section key={r.id} title={`Restore #${r.seq}`}>
-              <p className="text-[12.5px] text-zinc-400">
-                {restoreLine(r)} · {r.actor.label} · {when(r.createdAt)}
-              </p>
+              <Facts className="!mt-0">
+                <Fact strong>{restoreLine(r)}</Fact>
+                <Fact>{r.actor.label}</Fact>
+                <Fact><Time iso={r.createdAt} mode="dateTime" /></Fact>
+              </Facts>
               {r.verification && (
                 <ul className="space-y-2">
                   {r.verification.checks.map((c) => <CheckRow key={c.id} check={c} />)}
@@ -326,6 +350,6 @@ export function ChangeDetails({
           </Section>
         </div>
       )}
-    </KitModal>
+    </RecordDrawer>
   )
 }

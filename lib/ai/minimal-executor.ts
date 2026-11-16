@@ -4184,7 +4184,11 @@ async function executeCreateTable(
   const lowerName = tableName.toLowerCase()
   const blueprint = TABLE_COLUMN_BLUEPRINTS[lowerName] ?? inferColumnsForTable(lowerName)
 
-  if (safeColumns.length === 0) {
+  // `noAutoProvision`: create only what was declared (lib/import moves a
+  // source's tables in with it). No columns then means no columns, never a
+  // blueprint; see also the buckets below. Every other caller is unchanged.
+  const noAutoProvision = params.noAutoProvision === true
+  if (safeColumns.length === 0 && !noAutoProvision) {
     if (blueprint.length > 0) {
       safeColumns = blueprint
       // Warn visibly — LLM emitted no columns. If this was triggered by a question
@@ -4650,10 +4654,12 @@ async function executeCreateTable(
     // When a generation_jobs, render_jobs, or similar video/asset table is created,
     // automatically provision the "videos", "thumbnails", and "source-assets" buckets
     // so the developer does not have to ask separately. This prevents Issue 27.
-    const isVideoDomainTable =
+    // Never with `noAutoProvision` (an import): a moved-in table brings no
+    // bucket, and no public access, that its source did not have.
+    const isVideoDomainTable = !noAutoProvision && (
       /_jobs?$/.test(tableName) ||
       /^(generation|render|video|export|import|transcode|encode|clip)_/.test(tableName) ||
-      /^(videos?|assets?|media_files?|uploads?)$/.test(tableName)
+      /^(videos?|assets?|media_files?|uploads?)$/.test(tableName))
 
     if (isVideoDomainTable) {
       const VIDEO_BUCKETS = [

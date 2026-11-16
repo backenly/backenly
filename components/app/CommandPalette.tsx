@@ -35,7 +35,7 @@ import {
   Users,
   CreditCard,
   LifeBuoy,
-  Sparkles,
+  MessageSquare,
   CornerDownLeft,
 } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
@@ -107,7 +107,7 @@ export function CommandPalette() {
 
     const assistant: Command[] = inProject
       ? [
-          { id: 'assistant', label: 'Ask the Assistant', icon: Sparkles, category: 'Help', action: () => toggleAssistant(), keywords: ['help', 'question', 'how', 'docs', 'ai'] },
+          { id: 'assistant', label: 'Ask the Assistant', icon: MessageSquare, category: 'Help', action: () => toggleAssistant(), keywords: ['help', 'question', 'how', 'docs', 'ai'] },
         ]
       : []
 

@@ -11,6 +11,8 @@
 import { act, fireEvent, render, screen } from '@testing-library/react'
 import { ConsoleTour, CONSOLE_TOUR } from '@/components/tour/ConsoleTour'
 import { clearAgentConnectionCache, refreshAgentConnection } from '@/lib/hooks/useAgentConnection'
+import { clearProjectRoleCache, refreshProjectRole } from '@/lib/hooks/useProjectRole'
+import { forgetProjectReads } from '@/lib/api/projects'
 
 const push = jest.fn()
 jest.mock('next/navigation', () => ({ useRouter: () => ({ push }), useParams: () => ({ id: 'p1' }) }))
@@ -64,6 +66,8 @@ beforeEach(() => {
   localStorage.clear()
   document.body.innerHTML = ''
   clearAgentConnectionCache()
+  clearProjectRoleCache()
+  forgetProjectReads()
 })
 
 afterEach(() => {
@@ -185,6 +189,26 @@ describe('ConsoleTour', () => {
     expect(posts()).toHaveLength(1)
   })
 
+  it('does not send someone who cannot create keys to connect an agent', async () => {
+    // The shell's answer, already in when the tour starts: a developer, below
+    // the ADMIN floor of POST /mcp/keys.
+    global.fetch = jest.fn().mockResolvedValue(
+      json(200, { success: true, data: { id: 'p1', role: 'DEVELOPER', canWrite: true, canAdminister: false, organizationId: 'org_1' } }),
+    )
+    await refreshProjectRole('p1')
+    mountTargets()
+    await start({ available: true, seen: [] })
+    expect(screen.getByRole('dialog', { name: 'Everything your agent builds lands here' })).toBeInTheDocument()
+    expect(screen.getByText('1 of 4')).toBeInTheDocument()
+    for (let i = 0; i < 3; i++) act_(() => fireEvent.click(screen.getByRole('button', { name: /Next/ })))
+    expect(screen.queryByRole('button', { name: /Connect your agent/ })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Done' })).toBeInTheDocument()
+  })
+
+  it('points its Connect stop at the sidebar’s Connect item, which is on every page', () => {
+    expect(CONSOLE_TOUR[0].target).toBe('nav-connect')
+  })
+
   it('keeps the Connect stop when the answer has not come back yet', async () => {
     mountTargets()
     await start({ available: true, seen: [] })
@@ -192,7 +216,7 @@ describe('ConsoleTour', () => {
   })
 
   it('drops a step whose target is not on the page instead of pointing at nothing', async () => {
-    mountTargets(['connect-agent', 'nav-database', 'nav-autonomy', 'review-inbox'])
+    mountTargets(['nav-connect', 'nav-database', 'nav-autonomy', 'review-inbox'])
     await start({ available: true, seen: [] })
     expect(screen.getByText('1 of 4')).toBeInTheDocument()
   })

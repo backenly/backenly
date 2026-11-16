@@ -32,7 +32,10 @@ export interface SecondaryCredential {
   /** The field's name, as the credentials route and the key store know it. */
   envVar: string
   placeholder: string
+  /** The field's label: "Webhook signing secret", "App ID". */
   label: string
+  /** What it is called in a sentence, after "the": "Add the webhook secret". */
+  noun: string
   helperText: string
   docsUrl: string
   /**
@@ -61,6 +64,8 @@ export interface CatalogProvider {
   provisions: string[]
   /** The key's field name, as the credentials route and the key store know it. */
   envVar: string
+  /** The key field's label in the connect dialog: "Secret key", "API key". */
+  keyLabel: string
   keyPlaceholder: string
   keyHelperText: string
   keyDocsUrl: string
@@ -102,8 +107,9 @@ const PRESENTATION: Record<string, Presentation> = {
       'Checkout session logic',
     ],
     envVar: 'STRIPE_SECRET_KEY',
+    keyLabel: 'Secret key',
     keyPlaceholder: 'sk_live_…  or  sk_test_…',
-    keyHelperText: 'Find your key in the Stripe Dashboard → Developers → API keys',
+    keyHelperText: 'Find it in the Stripe Dashboard under Developers, API keys.',
     keyDocsUrl: 'https://dashboard.stripe.com/apikeys',
     quickOptions: [
       { label: 'Subscription billing (monthly / annual plans)', intent: 'Add subscription billing with monthly and annual plans, payment management, and billing history' },
@@ -115,12 +121,13 @@ const PRESENTATION: Record<string, Presentation> = {
       vaultId: 'stripe_webhook_secret',
       envVar: 'STRIPE_WEBHOOK_SECRET',
       placeholder: 'whsec_…',
-      label: 'Webhook Secret',
-      helperText: 'Dashboard → Webhooks → your endpoint → Signing secret',
+      label: 'Webhook signing secret',
+      noun: 'webhook secret',
+      helperText: 'Find it in the Stripe Dashboard under Webhooks, on your endpoint’s page.',
       docsUrl: 'https://dashboard.stripe.com/webhooks',
       // app/api/v1/[projectId]/webhooks/[integration]/route.ts answers 401 to
       // every Stripe event until the signing secret is stored.
-      missingMeans: 'Until it is stored, Backenly refuses every event Stripe sends, so no function runs on a Stripe event.',
+      missingMeans: 'Stripe events are refused until it’s stored.',
       endpointPath: 'webhooks/stripe',
     },
   },
@@ -131,8 +138,9 @@ const PRESENTATION: Record<string, Presentation> = {
     brandColor: '#FFFFFF',
     provisions: ['Email service endpoint', 'Welcome email template', 'Delivery event log'],
     envVar: 'RESEND_API_KEY',
+    keyLabel: 'API key',
     keyPlaceholder: 're_…',
-    keyHelperText: 'Find your key in the Resend Dashboard → API Keys',
+    keyHelperText: 'Find it in the Resend dashboard under API Keys.',
     keyDocsUrl: 'https://resend.com/api-keys',
     quickOptions: [
       { label: 'Welcome email on sign-up', intent: 'Send a welcome email when a user signs up' },
@@ -148,8 +156,9 @@ const PRESENTATION: Record<string, Presentation> = {
       'Transactional email sent through your SendGrid account: welcome flows, receipts and alerts, each with a delivery event log. When Resend is also connected, Resend sends first.',
     provisions: ['Email sending from functions and triggers', 'Welcome email template', 'Delivery event log'],
     envVar: 'SENDGRID_API_KEY',
+    keyLabel: 'API key',
     keyPlaceholder: 'SG.…',
-    keyHelperText: 'Find your key in SendGrid → Settings → API Keys',
+    keyHelperText: 'Find it in SendGrid under Settings, API Keys.',
     keyDocsUrl: 'https://app.sendgrid.com/settings/api_keys',
     quickOptions: [
       { label: 'Welcome email on sign-up', intent: 'Send a welcome email through SendGrid when a user signs up' },
@@ -163,6 +172,7 @@ const PRESENTATION: Record<string, Presentation> = {
       'Text messages from your functions and triggers: order updates, alerts and sign-in codes, sent from your Twilio number.',
     provisions: ['SMS sending from functions and triggers', 'Message log table'],
     envVar: 'TWILIO_CREDENTIALS',
+    keyLabel: 'Credentials',
     keyPlaceholder: 'AC…:auth-token:+15550001111',
     keyHelperText:
       'Your Account SID, auth token and sending number, separated by colons. Find them in the Twilio Console.',
@@ -179,8 +189,9 @@ const PRESENTATION: Record<string, Presentation> = {
       'Push notifications to your app’s users through your OneSignal app, sent from functions and triggers. Push works once both the REST API key and the App ID are stored.',
     provisions: ['Device registration endpoint', 'Push sending from functions and triggers', 'Notification log table'],
     envVar: 'ONESIGNAL_REST_API_KEY',
+    keyLabel: 'REST API key',
     keyPlaceholder: 'REST API key',
-    keyHelperText: 'OneSignal → Settings → Keys & IDs → REST API Key',
+    keyHelperText: 'Find it in OneSignal under Settings, Keys & IDs.',
     keyDocsUrl: 'https://dashboard.onesignal.com',
     quickOptions: [
       { label: 'Notify a user when their order ships', intent: 'Send a push notification through OneSignal when a user’s order is marked shipped' },
@@ -192,9 +203,10 @@ const PRESENTATION: Record<string, Presentation> = {
       envVar: 'ONESIGNAL_APP_ID',
       placeholder: '00000000-0000-0000-0000-000000000000',
       label: 'App ID',
-      helperText: 'OneSignal → Settings → Keys & IDs → OneSignal App ID',
+      noun: 'App ID',
+      helperText: 'Find it in OneSignal under Settings, Keys & IDs.',
       docsUrl: 'https://dashboard.onesignal.com',
-      missingMeans: 'Until it is stored, push notifications are not sent.',
+      missingMeans: 'Push notifications aren’t sent until it’s stored.',
     },
   },
   openai: {
@@ -204,8 +216,9 @@ const PRESENTATION: Record<string, Presentation> = {
     brandColor: '#FFFFFF',
     provisions: ['AI completion endpoint', 'Request quota & rate limiting', 'Response storage table'],
     envVar: 'OPENAI_API_KEY',
+    keyLabel: 'API key',
     keyPlaceholder: 'sk-…',
-    keyHelperText: 'Find your key in the OpenAI Platform → API keys',
+    keyHelperText: 'Find it in the OpenAI Platform under API keys.',
     keyDocsUrl: 'https://platform.openai.com/api-keys',
     quickOptions: [
       { label: 'Product description generation', intent: 'Add AI-powered product description generation that creates compelling descriptions from product attributes' },
@@ -223,8 +236,9 @@ const PRESENTATION: Record<string, Presentation> = {
     brandColor: '#D97757',
     provisions: ['AI completion endpoint', 'Request quota & rate limiting', 'Response storage table'],
     envVar: 'ANTHROPIC_API_KEY',
+    keyLabel: 'API key',
     keyPlaceholder: 'sk-ant-api03-…',
-    keyHelperText: 'Find your key in the Anthropic Console → API keys',
+    keyHelperText: 'Find it in the Anthropic Console under API keys.',
     keyDocsUrl: 'https://console.anthropic.com/settings/keys',
     quickOptions: [
       { label: 'Customer support chatbot', intent: 'Add an AI customer support chatbot powered by Claude that answers questions about products, orders, and policies' },
@@ -240,8 +254,9 @@ const PRESENTATION: Record<string, Presentation> = {
       'Image, video and language models hosted on Replicate, run from your functions, with results stored in your backend.',
     provisions: ['Model runs from functions', 'Run status tracking', 'Generated files stored in a bucket'],
     envVar: 'REPLICATE_API_TOKEN',
+    keyLabel: 'API token',
     keyPlaceholder: 'r8_…',
-    keyHelperText: 'Find your token in Replicate → Account settings → API tokens',
+    keyHelperText: 'Find it in Replicate under Account settings, API tokens.',
     keyDocsUrl: 'https://replicate.com/account/api-tokens',
     quickOptions: [
       { label: 'Generate an image from a prompt', intent: 'Generate an image with a Replicate model from a prompt and store it in a bucket' },
@@ -254,8 +269,9 @@ const PRESENTATION: Record<string, Presentation> = {
     description: 'Video generated from images and prompts with Runway, run from your functions and stored in your backend.',
     provisions: ['Video generation from functions', 'Task status tracking', 'Generated videos stored in a bucket'],
     envVar: 'RUNWAYML_API_SECRET',
+    keyLabel: 'API secret',
     keyPlaceholder: 'key_…',
-    keyHelperText: 'Find your key in the Runway developer portal → API keys',
+    keyHelperText: 'Find it in the Runway developer portal under API keys.',
     keyDocsUrl: 'https://dev.runwayml.com',
     quickOptions: [
       { label: 'Turn an image into a short video', intent: 'Generate a short video with Runway from an image a user uploads and store it' },
@@ -266,8 +282,9 @@ const PRESENTATION: Record<string, Presentation> = {
     description: 'Images generated and edited with Stability AI, run from your functions and stored in your backend.',
     provisions: ['Image generation from functions', 'Generated images stored in a bucket'],
     envVar: 'STABILITY_API_KEY',
+    keyLabel: 'API key',
     keyPlaceholder: 'sk-…',
-    keyHelperText: 'Find your key in the Stability AI platform → Account → API keys',
+    keyHelperText: 'Find it on the Stability AI platform under Account, API keys.',
     keyDocsUrl: 'https://platform.stability.ai/account/keys',
     quickOptions: [
       { label: 'Generate an image from a prompt', intent: 'Generate an image with Stability AI from a prompt and store it in a bucket' },
@@ -285,12 +302,13 @@ const PRESENTATION: Record<string, Presentation> = {
       'Analytics event schema (sign-up, purchase, funnel events)',
     ],
     envVar: 'POSTHOG_API_KEY',
+    keyLabel: 'Project API key',
     keyPlaceholder: 'phc_…',
-    keyHelperText: 'PostHog → Project Settings → Project API key (starts with phc_)',
+    keyHelperText: 'Find it in PostHog under Project settings. It starts with phc_.',
     keyDocsUrl: 'https://app.posthog.com/project/settings',
     quickOptions: [
       { label: 'Track user sign-ups and activation events', intent: 'Connect PostHog and track user_signed_up, account_activated, and first_action events with user properties' },
-      { label: 'Track e-commerce funnel (view → cart → purchase)', intent: 'Connect PostHog and track product_viewed, added_to_cart, checkout_started, and order_completed events' },
+      { label: 'Track the shopping funnel: viewed, added to cart, purchased', intent: 'Connect PostHog and track product_viewed, added_to_cart, checkout_started, and order_completed events' },
       { label: 'Track feature usage and engagement', intent: 'Connect PostHog and track feature_used events for key product features to measure engagement and retention' },
       { label: 'Enable feature flags for gradual rollouts', intent: 'Connect PostHog and add feature flag evaluation so I can roll out new features gradually to specific user segments' },
       { label: 'Session replay + custom events', intent: 'Connect PostHog with session replay enabled and set up custom event tracking for my key user flows' },
@@ -305,6 +323,7 @@ function plainPresentation(p: ReturnType<typeof connectableProviders>[number]): 
     description: `Calls to ${p.displayName} from your functions, with the key kept out of code.`,
     provisions: [`Calls to ${p.displayName} from functions and triggers`],
     envVar: `${p.id.toUpperCase()}_API_KEY`,
+    keyLabel: 'API key',
     keyPlaceholder: p.keyFormat ?? 'API key',
     keyHelperText: `Paste your ${p.displayName} API key.`,
     keyDocsUrl: p.docsUrl ?? '',

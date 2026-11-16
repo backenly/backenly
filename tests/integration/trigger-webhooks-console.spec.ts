@@ -148,7 +148,8 @@ describe('WH-F7: the console wiring exists', () => {
     const panel = fs.readFileSync(path.join(ROOT, 'components', 'integrations', 'WebhooksPanel.tsx'), 'utf8')
     expect(panel).toContain('/trigger-webhooks')
     expect(panel).toContain('replayTriggerDelivery')
-    expect(panel).toContain('Trigger webhooks')
+    // Listed as "Agent triggers" since the console rebuild (2026-11-16).
+    expect(panel).toContain('Agent triggers')
   })
 
   it('the routes call the same service functions as the MCP tool', () => {

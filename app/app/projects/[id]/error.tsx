@@ -38,7 +38,7 @@ export default function ProjectWorkspaceError({
           padding: '40px',
           textAlign: 'center'
         }}>
-          <AlertCircle style={{ width: '48px', height: '48px', margin: '0 auto 20px', color: '#fb7185' }} />
+          <AlertCircle style={{ width: '48px', height: '48px', margin: '0 auto 20px', color: '#fafafa' }} />
           <h2 style={{ fontSize: '24px', marginBottom: '15px', fontWeight: 'bold' }}>
             Something went wrong
           </h2>

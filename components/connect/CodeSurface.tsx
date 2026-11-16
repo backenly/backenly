@@ -6,10 +6,10 @@
  *
  * Highlighting is deliberately restrained to fit the flat inspector language:
  * meaning is carried by BRIGHTNESS TIERS (bright anchor → muted flags), not a
- * rainbow. Violet is spent on exactly one token — the scoped key — because that
- * is the only thing on screen the reader must act on. This keeps the surface
- * consistent with "violet only for action" while still reading like a real
- * terminal at a funded-platform level of finish.
+ * rainbow. The scoped key (or its placeholder) is the brightest token, because
+ * it is the one thing on screen the reader must check. It used to be violet;
+ * violet now marks only what Backenly itself does (project console decisions,
+ * 2026-11-16), so the key stands out by brightness and an underline instead.
  */
 
 import type { ClipboardEvent, ReactNode } from 'react'
@@ -24,6 +24,9 @@ function isUuid(t: string): boolean {
 }
 
 const EXECS = new Set(['claude', 'codex', 'cursor', 'npx'])
+
+/** The key, or the place it goes: the brightest token, underlined so it reads without colour. */
+const SECRET = 'text-zinc-50 underline decoration-white/25 underline-offset-[3px]'
 
 /**
  * One block per line, with a hanging indent: a line too long for the panel
@@ -57,7 +60,7 @@ function cliLine(line: string): ReactNode {
     if (EXECS.has(t)) cls = 'text-zinc-100 font-medium'
     else if (t === 'mcp' || t === 'add' || t === 'backenly' || t.startsWith('@backenly')) cls = 'text-zinc-300'
     else if (t === '--' || t === '-y' || t.startsWith('--')) cls = 'text-faint'
-    else if (isSecret(t)) cls = 'text-violet-300'
+    else if (isSecret(t)) cls = SECRET
     else if (isUuid(t)) cls = 'text-zinc-400'
     return (
       <span key={i} className={cls}>
@@ -67,7 +70,7 @@ function cliLine(line: string): ReactNode {
   })
 }
 
-/** Pretty-printed JSON config, tokenized. Keys bright, secret values violet. */
+/** Pretty-printed JSON config, tokenized. Keys bright, the secret brightest. */
 export function JsonText({ text }: { text: string }) {
   return <Lines text={text} render={jsonLine} />
 }
@@ -83,7 +86,7 @@ function jsonLine(line: string): ReactNode {
     if (m[1] !== undefined) {
       const isKey = m[2] !== undefined
       const raw = m[1].slice(1, -1)
-      const cls = isKey ? 'text-zinc-200' : isSecret(raw) ? 'text-violet-300' : 'text-zinc-400'
+      const cls = isKey ? 'text-zinc-200' : isSecret(raw) ? SECRET : 'text-zinc-400'
       nodes.push(
         <span key={k++} className={cls}>
           {m[1]}
@@ -125,11 +128,11 @@ export function CopyButton({
       onClick={onClick}
       disabled={disabled}
       aria-label={copied ? 'Copied' : 'Copy'}
-      className={`inline-flex items-center gap-1.5 rounded-[6px] text-[12px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300/60 disabled:cursor-not-allowed disabled:opacity-40 ${
+      className={`inline-flex items-center gap-1.5 rounded-[6px] text-[12px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70 disabled:cursor-not-allowed disabled:opacity-40 ${
         compact ? 'h-[26px] w-[26px] justify-center' : 'h-[26px] px-2'
       } ${
         copied
-          ? 'text-emerald-300'
+          ? 'text-zinc-300'
           : 'text-zinc-400 hover:bg-white/[0.07] hover:text-zinc-100'
       }`}
       title={copied ? 'Copied' : 'Copy'}

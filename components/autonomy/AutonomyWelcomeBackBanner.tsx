@@ -4,23 +4,35 @@
  * AUTONOMY WELCOME-BACK BANNER
  * ============================
  *
- * On every project page load, ask the server "what did Backenly do since the
- * last time this user was here?". If the answer is non-zero, show one calm
- * banner at the top of the page: "Backenly did 7 things while you were away."
+ * On a project page, ask the server "what did Backenly do since this person
+ * was last here?". If anything, say it in one row at the top of the page:
  *
- * This is what creates the "AI engineer working full-time" feeling — every
- * return visit has receipts. Without it, autonomy reads as a thing that
- * happens only when you're watching.
+ *   ◔ While you were away Backenly made 3 fixes, all verified. Review       ×
  *
- * Storage:
- *   • `last_seen_at` per project in localStorage. We set it when the banner
- *     is dismissed OR when the user has been on the page for >30 s (i.e.
- *     they've seen the events and we shouldn't show them again on refresh).
+ * Every return visit has receipts, which is what makes autonomy read as work
+ * done while you were away rather than a thing that happens only when you
+ * watch.
+ *
+ * Rebuilt 2026-11-16 (project console, shell decisions): one row, no box, no
+ * arrow; "Review" opens Autonomy, where those changes are listed with their
+ * statements and Undo. Hidden on Overview, which lists them itself, and on
+ * Autonomy, which is what "Review" opens.
+ *
+ * The words keep the server's distinction: only a change a re-check confirmed
+ * is a fix. One that ran unconfirmed is "a change it could not confirm", never
+ * a fix, and the server counts each kind apart (since-last-visit/route.ts).
+ *
+ * Storage: `last_seen_at` per project in localStorage, set when the row is
+ * dismissed OR after 30 s on any project page, Overview included (seeing the
+ * list there counts as seeing them), so a refresh does not show it again.
  */
 
 import { useEffect, useState } from 'react'
-import { useParams } from 'next/navigation'
-import { Cpu, X, ArrowRight } from 'lucide-react'
+import Link from 'next/link'
+import { useParams, usePathname } from 'next/navigation'
+import { X } from 'lucide-react'
+import { FOCUS, RULE } from '@/components/console/tokens'
+import { LoopMark } from '@/components/console/LoopMark'
 
 interface BannerData {
   total: number
@@ -29,43 +41,86 @@ interface BannerData {
   /** Changes that ran but could not be confirmed — never shown as fixes. */
   unverifiedChanges: number
   escalations: number
-  headline: string
-  examples: Array<{ id: string; at: string; what: string; why: string; full: string; verified: boolean }>
   shouldShow: boolean
 }
 
 const STORAGE_KEY = (projectId: string) => `backenly:autonomy:lastseen:${projectId}`
 const SETTLE_MS = 30_000 // mark "seen" after 30 s on the page
+/** The server reads at most this many changes; a count at the cap is a floor. */
+const CHANGE_SCAN_LIMIT = 1000
+
+const plural = (n: number, one: string, many: string) => `${n.toLocaleString('en-US')} ${n === 1 ? one : many}`
+
+/**
+ * The row's sentence, or null when there is nothing to say.
+ *
+ *   3 verified                 made 3 fixes, all verified
+ *   1 verified                 made 1 fix, verified
+ *   2 verified, 1 unconfirmed  made 2 fixes it verified and 1 change it could not confirm
+ *   1 unconfirmed              made 1 change it could not confirm
+ *   + 1 escalation             …, and flagged 1 problem for your review
+ */
+export function welcomeBackLine(d: Pick<BannerData, 'autonomousFixes' | 'unverifiedChanges' | 'escalations'>): string | null {
+  const verified = Math.max(0, d.autonomousFixes | 0)
+  const unconfirmed = Math.max(0, d.unverifiedChanges | 0)
+  const escalated = Math.max(0, d.escalations | 0)
+  const atLeast = verified + unconfirmed >= CHANGE_SCAN_LIMIT ? 'at least ' : ''
+  const parts: string[] = []
+  if (verified > 0 && unconfirmed === 0) {
+    parts.push(verified === 1 && !atLeast ? 'made 1 fix, verified' : `made ${atLeast}${plural(verified, 'fix', 'fixes')}, all verified`)
+  } else if (verified > 0) {
+    parts.push(`made ${atLeast}${plural(verified, 'fix', 'fixes')} it verified and ${plural(unconfirmed, 'change', 'changes')} it could not confirm`)
+  } else if (unconfirmed > 0) {
+    parts.push(`made ${atLeast}${plural(unconfirmed, 'change', 'changes')} it could not confirm`)
+  }
+  if (escalated > 0) parts.push(`flagged ${plural(escalated, 'problem', 'problems')} for your review`)
+  if (parts.length === 0) return null
+  return `While you were away Backenly ${parts.join(', and ')}.`
+}
+
+/** Backenly's mark: the one place violet means "Backenly did this". The loop's ring, at rest. */
+function BackenlyMark() {
+  return <LoopMark state="still" size={13} />
+}
 
 export default function AutonomyWelcomeBackBanner() {
   const params = useParams<{ id?: string }>()
+  const pathname = usePathname() ?? ''
   const projectId = params?.id
   const [data, setData] = useState<BannerData | null>(null)
   const [dismissed, setDismissed] = useState(false)
-  const [expanded, setExpanded] = useState(false)
 
   useEffect(() => {
     if (!projectId) return
 
-    const lastSeen = typeof window !== 'undefined'
-      ? window.localStorage.getItem(STORAGE_KEY(projectId))
-      : null
+    let lastSeen: string | null = null
+    try {
+      lastSeen = window.localStorage.getItem(STORAGE_KEY(projectId))
+    } catch {
+      // Blocked storage: ask about the last day, as on a first visit.
+    }
     const since = lastSeen ?? new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
 
     let cancelled = false
     fetch(`/api/projects/${projectId}/autonomy/since-last-visit?since=${encodeURIComponent(since)}`, {
       credentials: 'include',
     })
-      .then(r => r.ok ? r.json() : null)
-      .then(d => { if (!cancelled && d) setData(d as BannerData) })
-      .catch(() => { /* network blip — skip the banner this load */ })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!cancelled && d) setData(d as BannerData)
+      })
+      .catch(() => {
+        /* network blip — skip the row this load */
+      })
 
-    // Settle the cursor after the user has been on the page long enough that
-    // they've effectively "seen" what happened, even if they don't click
-    // dismiss. Without this, every fast page hop reloads the same banner.
+    // Settle the cursor after the person has been on the page long enough to
+    // have seen what happened, even without dismissing. Without this, every
+    // fast page hop reloads the same row.
     const settleTimer = setTimeout(() => {
-      if (typeof window !== 'undefined') {
+      try {
         window.localStorage.setItem(STORAGE_KEY(projectId), new Date().toISOString())
+      } catch {
+        /* non-fatal */
       }
     }, SETTLE_MS)
 
@@ -77,51 +132,44 @@ export default function AutonomyWelcomeBackBanner() {
 
   const onDismiss = () => {
     setDismissed(true)
-    if (projectId && typeof window !== 'undefined') {
+    if (!projectId) return
+    try {
       window.localStorage.setItem(STORAGE_KEY(projectId), new Date().toISOString())
+    } catch {
+      /* non-fatal */
     }
   }
 
   if (!projectId || !data || !data.shouldShow || dismissed) return null
+  const base = `/app/projects/${projectId}`
+  // Overview lists these changes itself, and Autonomy is where "Review" goes.
+  if (pathname === base || pathname === `${base}/` || pathname.startsWith(`${base}/autonomy`)) return null
+  const line = welcomeBackLine(data)
+  if (!line) return null
 
   return (
-    <div className="mx-4 mt-4 rounded-lg border border-violet-500/15 bg-[#0f1012] px-4 py-3 sm:mx-6 lg:mx-8">
-      <div className="flex items-start gap-3">
-        <Cpu className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 text-violet-300/80" />
-        <div className="min-w-0 flex-1">
-          <div className="text-[12.5px] font-medium text-zinc-100">{data.headline}</div>
-          {data.examples.length > 0 && (
-            <>
-              <button
-                type="button"
-                onClick={() => setExpanded(e => !e)}
-                className="mt-1 inline-flex items-center gap-1 text-[12.5px] text-violet-300/90 hover:text-violet-200"
-              >
-                {expanded ? 'Hide details' : `See ${data.examples.length} ${data.examples.length === 1 ? 'item' : 'items'}`}
-                <ArrowRight className={`h-3 w-3 transition ${expanded ? 'rotate-90' : ''}`} />
-              </button>
-              {expanded && (
-                <ul className="mt-3 space-y-2">
-                  {data.examples.map(e => (
-                    <li key={e.id} className="rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2">
-                      <div className="text-[12.5px] font-medium text-zinc-200">{e.what}</div>
-                      <div className="mt-0.5 text-[12.5px] leading-relaxed text-faint">Because {e.why}</div>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </>
-          )}
-        </div>
-        <button
-          type="button"
-          onClick={onDismiss}
-          className="text-zinc-500 transition hover:text-zinc-300"
-          aria-label="Dismiss"
+    // Marks and close sit on the first line when a phone wraps the sentence.
+    <div role="status" className={`flex min-h-[44px] items-start gap-2.5 border-b ${RULE} py-3 pl-4 pr-2 sm:pl-5`}>
+      <span className="mt-[4px] flex">
+        <BackenlyMark />
+      </span>
+      <p className="min-w-0 flex-1 text-[13px] leading-[20px] text-zinc-300">
+        {line}{' '}
+        <Link
+          href={`${base}/autonomy`}
+          className={`whitespace-nowrap rounded-[4px] font-medium text-zinc-50 underline-offset-[3px] transition-colors hover:underline ${FOCUS}`}
         >
-          <X className="h-4 w-4" />
-        </button>
-      </div>
+          Review
+        </Link>
+      </p>
+      <button
+        type="button"
+        onClick={onDismiss}
+        aria-label="Dismiss"
+        className={`-my-1 inline-flex h-[28px] w-[28px] flex-shrink-0 items-center justify-center rounded-[7px] text-zinc-500 transition-colors hover:bg-white/[0.05] hover:text-zinc-200 ${FOCUS}`}
+      >
+        <X aria-hidden className="h-4 w-4" strokeWidth={1.75} />
+      </button>
     </div>
   )
 }

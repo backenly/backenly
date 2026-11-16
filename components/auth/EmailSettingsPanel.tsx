@@ -1,45 +1,42 @@
 'use client'
 
 /**
- * OUTGOING MAIL: WHERE IT SENDS FROM, AND WHAT IT SAYS
- * ===================================================
- *
- * Both halves were PARTIAL in the derived register for the same reason: the
- * thing was real and there was no way to configure it. A transport read
- * SMTP_HOST/SMTP_USER/SMTP_PASS from deployment env, and the subjects and
- * bodies were string literals in TypeScript.
+ * OUTGOING MAIL: WHO SENDS IT, AND WHAT IT SAYS
+ * ============================================
  *
  * ── "Configured" is not "works", and this panel keeps them apart ────────────
  *
  * Every field can be right and the credentials still wrong, the port blocked,
- * the sender unverified with the provider. So the panel never shows a tick for
- * a stored row. It shows what is stored, and separately, the result of the last
- * REAL send. Send test is not a validity check — it is the only evidence.
+ * the sender unverified with the provider. So the sender row never shows a
+ * tick for a stored row. It shows what is stored and, separately, the result
+ * of the last REAL send. Send test is not a validity check: it is the only
+ * evidence.
  *
  * ── The preview is the dangerous surface, not the email ─────────────────────
  *
  * An operator authors raw HTML. A mail client runs none of it; the dashboard
  * would. So the preview renders inside an iframe with an empty `sandbox`
- * attribute — no scripts, no same-origin — and the API refuses a <script> tag
+ * attribute (no scripts, no same-origin), and the API refuses a <script> tag
  * before it ever gets here. Two controls, because the iframe is the one that
  * holds if a future edit relaxes the other.
  *
  * ── The password is write-only ──────────────────────────────────────────────
  *
  * No route returns it. The field is empty on load and blank means "keep the
- * stored one", which is stated next to it rather than left to be inferred.
+ * stored one", which is said next to it.
+ *
+ * The sender is one row; the SMTP form appears only when someone uses their
+ * own server. A template opens on the words being sent today: the override,
+ * or the built-in text (lib/email/auth-builtins.ts), never an empty box.
  */
 
-import { useCallback, useEffect, useState } from 'react'
-import {
-  Send, Save, Trash2, RotateCcw, AlertTriangle, CheckCircle2, Eye,
-} from 'lucide-react'
-import {
-  KitButton, KitNote, KitField, KitInput, KitTextarea, KitModal, KitConfirmDialog, SettingsCard, Spinner, StatusDot,
-} from '@/components/inspector/kit'
-import { formatStamp } from '@/components/console/format'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { RotateCcw, Send, Trash2 } from 'lucide-react'
+import { INPUT_BASE, KitButton, KitCheckbox, KitConfirmDialog, KitField, KitInput, KitModal, OverflowMenu } from '@/components/inspector/kit'
+import { Fact, Facts, Panel, Row, RowList, RowSkeleton, ROW_TEXT, ROW_TITLE, Section } from '@/components/autonomy/rows'
+import { ErrorRow, RefusedLine } from '@/components/console/states'
+import { Time } from '@/components/console/Time'
 import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
-import { ago } from '@/components/changes/present'
 
 interface SmtpView {
   configured: boolean
@@ -68,6 +65,8 @@ interface TemplateRow {
   subject: string | null
   bodyHtml: string | null
   updatedAt: string | null
+  /** What is sent while there is no override, as a template. */
+  builtIn?: { subject: string; bodyHtml: string }
 }
 
 interface FieldProblem {
@@ -76,21 +75,7 @@ interface FieldProblem {
 }
 
 interface PolicyView {
-  appName: string | null
-  appUrl: string | null
-  requireEmailVerification: boolean
-  magicLinksEnabled: boolean
   effectiveAppName: string
-  effectiveAppUrl: string | null
-}
-
-function formFromPolicy(p: PolicyView) {
-  return {
-    appName: p.appName ?? '',
-    appUrl: p.appUrl ?? '',
-    requireEmailVerification: p.requireEmailVerification,
-    magicLinksEnabled: p.magicLinksEnabled,
-  }
 }
 
 // On Backenly Cloud the deployment is Backenly. A customer there has no
@@ -105,119 +90,105 @@ function deploymentSender(smtp: SmtpView, policy: PolicyView | null): string | n
 }
 
 function sourceLabel(source: SmtpView['activeSource']): string {
-  if (source === 'project') return 'This project’s SMTP'
+  if (source === 'project') return 'Your SMTP server'
   if (source === 'deployment') return CLOUD_CONTROL_PLANE ? 'Sent by Backenly' : 'Deployment SMTP'
-  return 'Not configured'
+  return 'Not set up'
 }
 
 function sourceText(smtp: SmtpView, policy: PolicyView | null): string {
-  if (smtp.activeSource === 'project') return 'Mail sends through this project’s own SMTP settings.'
-  if (smtp.activeSource === 'none') {
-    return 'Nothing is configured, so auth emails are only logged to the server console. Password reset and verification will not reach anyone.'
-  }
+  if (smtp.activeSource === 'none') return 'Nothing sends auth emails, so they are only logged. Password reset and verification reach no one.'
   const sender = deploymentSender(smtp, policy)
   const as = sender ? ` as ${sender}` : ''
-  return CLOUD_CONTROL_PLANE
-    ? `Backenly sends this project’s auth emails${as}. To send from your own domain, add your SMTP settings below.`
-    : `Mail sends through the deployment’s SMTP environment variables${as}.`
+  return CLOUD_CONTROL_PLANE ? `Backenly sends this project’s auth emails${as}.` : `Mail sends through the deployment’s SMTP environment variables${as}.`
 }
 
-export function EmailSettingsPanel({ projectId }: { projectId: string }) {
+const EMPTY_FORM = { host: '', port: '587', username: '', password: '', fromAddress: '', fromName: '', enabled: true }
+
+export function EmailSettingsPanel({ projectId, canWrite = false, canAdminister = false }: { projectId: string; canWrite?: boolean; canAdminister?: boolean }) {
   const [smtp, setSmtp] = useState<SmtpView | null>(null)
   const [templates, setTemplates] = useState<TemplateRow[]>([])
   const [variables, setVariables] = useState<string[]>([])
-  const [loading, setLoading] = useState(true)
-  const [loadError, setLoadError] = useState<string | null>(null)
-  const [message, setMessage] = useState<{ tone: 'danger' | 'success' | 'warn'; text: string } | null>(null)
-
-  const [form, setForm] = useState({
-    host: '', port: '587', username: '', password: '', fromAddress: '', fromName: '', enabled: true,
-  })
+  const [policy, setPolicy] = useState<PolicyView | null>(null)
+  const [state, setState] = useState<'loading' | 'ready' | 'failed'>('loading')
+  const [form, setForm] = useState(EMPTY_FORM)
+  const [editingSmtp, setEditingSmtp] = useState(false)
   const [problems, setProblems] = useState<FieldProblem[]>([])
   const [busy, setBusy] = useState<string | null>(null)
+  const [testing, setTesting] = useState(false)
   const [testTo, setTestTo] = useState('')
+  const [senderNote, setSenderNote] = useState<{ tone: 'done' | 'attention' | 'refused'; text: string } | null>(null)
+  const [templateNote, setTemplateNote] = useState<{ kind: string; tone: 'done' | 'refused'; text: string } | null>(null)
   const [confirmRemove, setConfirmRemove] = useState(false)
   const [editing, setEditing] = useState<TemplateRow | null>(null)
-  const [policy, setPolicy] = useState<PolicyView | null>(null)
-  const [policyForm, setPolicyForm] = useState({
-    appName: '', appUrl: '', requireEmailVerification: false, magicLinksEnabled: true,
-  })
-  const [policyProblems, setPolicyProblems] = useState<FieldProblem[]>([])
 
   const load = useCallback(async () => {
-    setLoadError(null)
     try {
       const [smtpRes, tplRes, policyRes] = await Promise.all([
-        fetch(`/api/projects/${projectId}/email/smtp`),
-        fetch(`/api/projects/${projectId}/email/templates`),
-        fetch(`/api/projects/${projectId}/auth-email-settings`),
+        fetch(`/api/projects/${projectId}/email/smtp`, { credentials: 'include' }),
+        fetch(`/api/projects/${projectId}/email/templates`, { credentials: 'include' }),
+        fetch(`/api/projects/${projectId}/auth-email-settings`, { credentials: 'include' }),
       ])
-      const smtpData = await smtpRes.json()
-      const tplData = await tplRes.json()
-      const policyData = await policyRes.json()
-      if (!smtpRes.ok) throw new Error(smtpData.error ?? 'Mail settings could not be loaded.')
-      if (!tplRes.ok) throw new Error(tplData.error ?? 'Templates could not be loaded.')
-      if (!policyRes.ok) throw new Error(policyData.error ?? 'Sign-in email settings could not be loaded.')
-
-      setPolicy(policyData.settings)
-      setPolicyForm(formFromPolicy(policyData.settings))
+      const smtpData = await smtpRes.json().catch(() => ({}))
+      const tplData = await tplRes.json().catch(() => ({}))
+      const policyData = await policyRes.json().catch(() => ({}))
+      if (!smtpRes.ok || !tplRes.ok) throw new Error('Mail settings could not be read.')
       setSmtp(smtpData.smtp)
       setTemplates(tplData.templates ?? [])
       setVariables(tplData.variables ?? [])
-      setForm(f => ({
-        ...f,
+      setPolicy(policyRes.ok ? policyData.settings : null)
+      setForm({
         host: smtpData.smtp.host ?? '',
         port: String(smtpData.smtp.port ?? 587),
         username: smtpData.smtp.username ?? '',
+        // Never filled from the server, because the server never sends it.
+        password: '',
         fromAddress: smtpData.smtp.fromAddress ?? '',
         fromName: smtpData.smtp.fromName ?? '',
         enabled: smtpData.smtp.enabled ?? true,
-        // Never populated from the server, because the server never sends it.
-        password: '',
-      }))
-    } catch (err) {
-      // Reported, not swallowed. Empty fields rendered over a failed request
-      // read as "nothing is configured", which is a different and false claim.
-      setLoadError(err instanceof Error ? err.message : 'Mail settings could not be loaded.')
-    } finally {
-      setLoading(false)
+      })
+      setState('ready')
+    } catch {
+      // Reported, not swallowed: empty fields over a failed read would say "nothing is set up".
+      setState((s) => (s === 'ready' ? s : 'failed'))
     }
   }, [projectId])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => {
+    void load()
+  }, [load])
 
   async function save() {
     setBusy('save')
     setProblems([])
-    setMessage(null)
+    setSenderNote(null)
     try {
       const res = await fetch(`/api/projects/${projectId}/email/smtp`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({
           host: form.host,
           port: Number(form.port),
           username: form.username,
-          // Blank means keep. Sent as undefined rather than '' so the route can
-          // tell "unchanged" from "cleared".
+          // Blank means keep: undefined rather than '' so the route can tell "unchanged" from "cleared".
           password: form.password || undefined,
           fromAddress: form.fromAddress,
           fromName: form.fromName || null,
           enabled: form.enabled,
         }),
       })
-      const data = await res.json()
+      const data = await res.json().catch(() => ({}))
       if (!res.ok) {
-        setProblems(data.problems ?? [{ message: data.error ?? 'These settings could not be saved.' }])
+        setProblems(data.problems ?? [{ message: data.error ?? 'These settings were not saved.' }])
         return
       }
       setSmtp(data.smtp)
-      setForm(f => ({ ...f, password: '' }))
-      // Deliberately not "saved and working". Saving cleared the test result,
-      // and claiming more than that is the failure this panel is built around.
-      setMessage({ tone: 'warn', text: 'Saved. Send a test to confirm these settings actually deliver.' })
+      setForm((f) => ({ ...f, password: '' }))
+      setEditingSmtp(false)
+      // Saving cleared the test result; claiming more than "saved" is the failure this panel exists to avoid.
+      setSenderNote({ tone: 'attention', text: 'Saved. Send a test to confirm these settings deliver.' })
     } catch (err) {
-      setMessage({ tone: 'danger', text: err instanceof Error ? err.message : 'These settings could not be saved.' })
+      setProblems([{ message: err instanceof Error ? err.message : 'These settings were not saved.' }])
     } finally {
       setBusy(null)
     }
@@ -225,25 +196,23 @@ export function EmailSettingsPanel({ projectId }: { projectId: string }) {
 
   async function sendTest() {
     setBusy('test')
-    setMessage(null)
+    setSenderNote(null)
     try {
       const res = await fetch(`/api/projects/${projectId}/email/smtp/test`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({ to: testTo.trim() }),
       })
-      const data = await res.json()
+      const data = await res.json().catch(() => ({}))
       if (data.smtp) setSmtp(data.smtp)
-
+      // The provider's own words: paraphrasing a 535 into "send failed" turns a quick fix into a support thread.
       if (data.success) {
-        setMessage({ tone: 'success', text: `Delivered to ${testTo.trim()} via the ${data.source} settings.` })
-      } else {
-        // The provider's own words. Paraphrasing a 535 into "send failed" is
-        // how a five-second fix becomes a support thread.
-        setMessage({ tone: 'danger', text: data.error ?? 'The test was not delivered.' })
-      }
+        setSenderNote({ tone: 'done', text: `Delivered to ${testTo.trim()}.` })
+        setTesting(false)
+      } else setSenderNote({ tone: 'refused', text: data.error ?? 'The test was not delivered.' })
     } catch (err) {
-      setMessage({ tone: 'danger', text: err instanceof Error ? err.message : 'The test was not delivered.' })
+      setSenderNote({ tone: 'refused', text: err instanceof Error ? err.message : 'The test was not delivered.' })
     } finally {
       setBusy(null)
     }
@@ -252,380 +221,258 @@ export function EmailSettingsPanel({ projectId }: { projectId: string }) {
   async function removeConfig() {
     setBusy('remove')
     try {
-      const res = await fetch(`/api/projects/${projectId}/email/smtp`, { method: 'DELETE' })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error ?? 'The settings could not be removed.')
+      const res = await fetch(`/api/projects/${projectId}/email/smtp`, { method: 'DELETE', credentials: 'include' })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(data.error ?? 'The settings were not removed.')
       setSmtp(data.smtp)
       await load()
-      setMessage({ tone: 'success', text: 'Project SMTP removed.' })
+      setSenderNote({ tone: 'done', text: 'Your SMTP settings are removed.' })
     } catch (err) {
-      setMessage({ tone: 'danger', text: err instanceof Error ? err.message : 'The settings could not be removed.' })
+      setSenderNote({ tone: 'refused', text: err instanceof Error ? err.message : 'The settings were not removed.' })
     } finally {
       setBusy(null)
       setConfirmRemove(false)
     }
   }
 
-  async function savePolicy() {
-    setBusy('policy')
-    setPolicyProblems([])
-    setMessage(null)
+  async function revertTemplate(t: TemplateRow) {
+    setBusy(`revert-${t.kind}`)
+    setTemplateNote(null)
     try {
-      const res = await fetch(`/api/projects/${projectId}/auth-email-settings`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          appName: policyForm.appName.trim() || null,
-          appUrl: policyForm.appUrl.trim() || null,
-          requireEmailVerification: policyForm.requireEmailVerification,
-          magicLinksEnabled: policyForm.magicLinksEnabled,
-        }),
-      })
-      const data = await res.json()
-      if (!res.ok) {
-        // A 400 names each field; a 409 is the no-sender refusal, in the server's words.
-        const details: Record<string, string[] | undefined> = data.details ?? {}
-        const fieldProblems = Object.entries(details).flatMap(([field, msgs]) => (msgs ?? []).map(m => ({ field, message: m })))
-        setPolicyProblems(fieldProblems.length ? fieldProblems : [{ message: data.error ?? 'These settings could not be saved.' }])
-        return
-      }
-      setPolicy(data.settings)
-      setPolicyForm(formFromPolicy(data.settings))
-      setMessage({ tone: 'success', text: 'Sign-in email settings saved.' })
-    } catch (err) {
-      setMessage({ tone: 'danger', text: err instanceof Error ? err.message : 'These settings could not be saved.' })
-    } finally {
-      setBusy(null)
-    }
-  }
-
-  async function revertTemplate(kind: string) {
-    setBusy(`revert-${kind}`)
-    try {
-      const res = await fetch(`/api/projects/${projectId}/email/templates/${kind}`, { method: 'DELETE' })
-      if (!res.ok) throw new Error('The template could not be reverted.')
+      const res = await fetch(`/api/projects/${projectId}/email/templates/${t.kind}`, { method: 'DELETE', credentials: 'include' })
+      if (!res.ok) throw new Error('The template was not reset.')
       await load()
-      setMessage({ tone: 'success', text: 'Reverted to the built-in template.' })
+      setTemplateNote({ kind: t.kind, tone: 'done', text: 'Back to the built-in version.' })
     } catch (err) {
-      setMessage({ tone: 'danger', text: err instanceof Error ? err.message : 'The template could not be reverted.' })
+      setTemplateNote({ kind: t.kind, tone: 'refused', text: err instanceof Error ? err.message : 'The template was not reset.' })
     } finally {
       setBusy(null)
     }
   }
 
-  if (loading) {
-    return (
-      <div className="mx-auto flex w-full max-w-[1200px] items-center gap-2 px-4 py-8 text-[13px] text-faint sm:px-6 lg:px-8">
-        <Spinner />
-        Loading mail settings…
-      </div>
-    )
-  }
-
-  const busyIcon = (key: string, icon: typeof Save) => (busy === key ? undefined : icon)
   const sender = smtp ? deploymentSender(smtp, policy) : null
+  const own = smtp?.activeSource === 'project'
+  const glyph = !smtp ? 'idle' : smtp.activeSource === 'none' ? 'failed' : own ? (smtp.lastTestError ? 'failed' : smtp.lastTestAt ? 'live' : 'waiting') : 'live'
+  const fallbackWords = smtp?.deploymentFallbackAvailable
+    ? CLOUD_CONTROL_PLANE
+      ? 'Unchecked, Backenly sends them.'
+      : 'Unchecked, auth emails fall back to the deployment’s SMTP.'
+    : 'Unchecked, auth emails are only logged.'
 
   return (
-    <div className="mx-auto w-full max-w-[1200px] px-4 py-6 sm:px-6 lg:px-8">
-      <div className="max-w-[880px] space-y-6">
-        {loadError && <KitNote icon={AlertTriangle} tone="danger">{loadError}</KitNote>}
-        {message && (
-          <div aria-live="polite">
-            <KitNote icon={message.tone === 'success' ? CheckCircle2 : AlertTriangle} tone={message.tone}>
-              {message.text}
-            </KitNote>
-          </div>
-        )}
-
-        {/* ── Where mail sends from ───────────────────────────────── */}
-        <SettingsCard
-          title={
-            <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
-              Outgoing mail
-              {smtp && (
-                <StatusDot
-                  tone={smtp.activeSource === 'none' ? 'attention' : 'operational'}
-                  label={<span className="text-[12.5px] font-normal">{sourceLabel(smtp.activeSource)}</span>}
-                />
-              )}
-            </span>
-          }
-          description={smtp ? sourceText(smtp, policy) : undefined}
-          footer={
-            smtp?.deploymentFallbackAvailable
-              ? CLOUD_CONTROL_PLANE
-                ? 'With these off, Backenly sends the auth emails.'
-                : 'Turning these off falls back to the deployment’s SMTP.'
-              : 'Turning these off means auth emails are only logged.'
-          }
-          actions={
-            <>
-              {smtp?.configured && (
-                <KitButton variant="ghost" size="sm" icon={Trash2} disabled={busy !== null} onClick={() => setConfirmRemove(true)}>
-                  Remove
-                </KitButton>
-              )}
-              <KitButton variant="primary" size="sm" icon={busyIcon('save', Save)} loading={busy === 'save'} disabled={busy !== null && busy !== 'save'} onClick={save}>
-                Save settings
-              </KitButton>
-            </>
-          }
-        >
-          {/* Evidence of a real send, kept apart from whether settings exist. */}
-          {smtp?.configured && (
-            <div className="mb-5">
-              {smtp.lastTestAt && !smtp.lastTestError && (
-                <KitNote icon={CheckCircle2} tone="success">
-                  Last test delivered <time dateTime={smtp.lastTestAt} title={formatStamp(smtp.lastTestAt)}>{ago(smtp.lastTestAt)}</time>.
-                </KitNote>
-              )}
-              {smtp.lastTestAt && smtp.lastTestError && (
-                <KitNote icon={AlertTriangle} tone="danger" title="The last test did not deliver">
-                  {smtp.lastTestError}
-                </KitNote>
-              )}
-              {!smtp.lastTestAt && (
-                <KitNote icon={AlertTriangle} tone="warn">
-                  These settings have never been tested, so nothing here says they work yet.
-                </KitNote>
-              )}
-            </div>
-          )}
-
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <KitField label="Host">
-              <KitInput value={form.host} onChange={e => setForm({ ...form, host: e.target.value })} placeholder="smtp.example.com" spellCheck={false} autoComplete="off" />
-            </KitField>
-            <KitField
-              label="Port"
-              hint={
-                smtp?.portNormalised
-                  ? `465 is rewritten to ${smtp.effectivePort}: implicit TLS is blocked outbound on many hosts and every major provider serves STARTTLS on 587.`
-                  : undefined
-              }
-            >
-              <KitInput value={form.port} onChange={e => setForm({ ...form, port: e.target.value })} inputMode="numeric" />
-            </KitField>
-            <KitField label="Username">
-              <KitInput value={form.username} onChange={e => setForm({ ...form, username: e.target.value })} spellCheck={false} autoComplete="off" />
-            </KitField>
-            <KitField
-              label="Password"
-              hint={smtp?.passwordConfigured ? 'Stored. Leave blank to keep it.' : 'Required.'}
-            >
-              <KitInput
-                type="password"
-                value={form.password}
-                onChange={e => setForm({ ...form, password: e.target.value })}
-                placeholder={smtp?.passwordConfigured ? '••••••••' : ''}
-                autoComplete="new-password"
-              />
-            </KitField>
-            <KitField label="From address">
-              <KitInput type="email" value={form.fromAddress} onChange={e => setForm({ ...form, fromAddress: e.target.value })} placeholder="auth@example.com" spellCheck={false} />
-            </KitField>
-            <KitField label="From name" hint="Optional.">
-              <KitInput value={form.fromName} onChange={e => setForm({ ...form, fromName: e.target.value })} placeholder="Example" />
-            </KitField>
-          </div>
-
-          <label className="mt-5 flex cursor-pointer items-start gap-3 rounded-[8px] border border-white/[0.07] bg-white/[0.02] px-3.5 py-3">
-            <input
-              type="checkbox"
-              checked={form.enabled}
-              onChange={e => setForm({ ...form, enabled: e.target.checked })}
-              className="mt-[3px] h-4 w-4 flex-shrink-0 accent-violet-400"
-            />
-            <span className="min-w-0">
-              <span className="block text-[13px] font-medium text-zinc-100">Send with these settings</span>
-              <span className="mt-0.5 block text-[12.5px] leading-[18px] text-faint">
-                {smtp?.deploymentFallbackAvailable
-                  ? CLOUD_CONTROL_PLANE
-                    ? 'Unchecked, Backenly sends them.'
-                    : 'Unchecked, auth emails fall back to the deployment’s SMTP.'
-                  : 'Unchecked, auth emails are only logged to the server console.'}
-              </span>
-            </span>
-          </label>
-
-          {problems.length > 0 && (
-            <div className="mt-4">
-              <KitNote icon={AlertTriangle} tone="danger" title="These settings cannot be used">
-                <ul className="list-disc pl-4">
-                  {problems.map((p, i) => <li key={i}>{p.field ? `${p.field}: ` : ''}{p.message}</li>)}
-                </ul>
-              </KitNote>
-            </div>
-          )}
-        </SettingsCard>
-
-        <SettingsCard
-          title="Send a test"
-          description="A real message through the settings above. A delivered test is the only proof they work."
-        >
-          <form
-            className="flex flex-col gap-2 sm:flex-row"
-            onSubmit={(e) => { e.preventDefault(); if (testTo.trim()) sendTest() }}
-          >
-            <div className="min-w-0 flex-1">
-              <KitInput
-                type="email"
-                aria-label="Send a test to"
-                value={testTo}
-                onChange={e => setTestTo(e.target.value)}
-                placeholder="you@example.com"
-                spellCheck={false}
-              />
-            </div>
-            <KitButton
-              type="submit"
-              variant="secondary"
-              icon={busyIcon('test', Send)}
-              loading={busy === 'test'}
-              disabled={busy !== null || testTo.trim() === ''}
-            >
-              Send test
-            </KitButton>
-          </form>
-        </SettingsCard>
-
-        {/* ── When mail is required, and where its links go ────────── */}
-        {policy && (
-          <SettingsCard
-            title="Sign-in emails"
-            description="The name and address auth emails carry, and whether sign-in waits for them."
-            actions={
-              <KitButton variant="primary" size="sm" icon={busyIcon('policy', Save)} loading={busy === 'policy'} disabled={busy !== null && busy !== 'policy'} onClick={savePolicy}>
-                Save
-              </KitButton>
-            }
-          >
-            {policy.requireEmailVerification && smtp?.activeSource === 'none' && (
-              <div className="mb-5">
-                <KitNote icon={AlertTriangle} tone="danger" title="New users cannot sign in">
-                  Sign-in requires a verified email and nothing is configured to send one. Configure outgoing mail above, or turn verification off.
-                </KitNote>
-              </div>
-            )}
-
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-              <KitField label="App name" hint={`Empty uses “${policy.effectiveAppName}”.`}>
-                <KitInput value={policyForm.appName} onChange={e => setPolicyForm({ ...policyForm, appName: e.target.value })} placeholder={policy.effectiveAppName} />
-              </KitField>
-              <KitField
-                label="App URL"
-                hint={policy.effectiveAppUrl ? 'Password reset and magic links land here.' : 'Not set: reset links open a page Backenly hosts, and magic links cannot sign anyone in.'}
-              >
-                <KitInput type="url" value={policyForm.appUrl} onChange={e => setPolicyForm({ ...policyForm, appUrl: e.target.value })} placeholder={policy.effectiveAppUrl ?? 'https://app.example.com'} spellCheck={false} />
-              </KitField>
-            </div>
-
-            <div className="mt-5 space-y-2">
-              <label className={`flex items-start gap-3 rounded-[8px] border border-white/[0.07] bg-white/[0.02] px-3.5 py-3 ${smtp?.activeSource === 'none' && !policy.requireEmailVerification ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'}`}>
-                <input
-                  type="checkbox"
-                  checked={policyForm.requireEmailVerification}
-                  disabled={smtp?.activeSource === 'none' && !policy.requireEmailVerification}
-                  onChange={e => setPolicyForm({ ...policyForm, requireEmailVerification: e.target.checked })}
-                  className="mt-[3px] h-4 w-4 flex-shrink-0 accent-violet-400"
-                />
-                <span className="min-w-0">
-                  <span className="block text-[13px] font-medium text-zinc-100">Require a verified email to sign in</span>
-                  <span className="mt-0.5 block text-[12.5px] leading-[18px] text-faint">
-                    {smtp?.activeSource === 'none' && !policy.requireEmailVerification
-                      ? 'Configure and test outgoing mail first: without a sender, every new user would wait for an email that never arrives.'
-                      : 'Users who already exist are recorded as verified when this is turned on, so none of them are locked out.'}
-                  </span>
-                </span>
-              </label>
-              <label className="flex cursor-pointer items-start gap-3 rounded-[8px] border border-white/[0.07] bg-white/[0.02] px-3.5 py-3">
-                <input
-                  type="checkbox"
-                  checked={policyForm.magicLinksEnabled}
-                  onChange={e => setPolicyForm({ ...policyForm, magicLinksEnabled: e.target.checked })}
-                  className="mt-[3px] h-4 w-4 flex-shrink-0 accent-violet-400"
-                />
-                <span className="min-w-0">
-                  <span className="block text-[13px] font-medium text-zinc-100">Offer magic-link sign-in</span>
-                  <span className="mt-0.5 block text-[12.5px] leading-[18px] text-faint">
-                    Passwordless sign-in by an emailed link. Off, the magic-link endpoint refuses.
-                  </span>
-                </span>
-              </label>
-            </div>
-
-            {policyProblems.length > 0 && (
-              <div className="mt-4">
-                <KitNote icon={AlertTriangle} tone="danger" title="These settings were not saved">
-                  <ul className="list-disc pl-4">
-                    {policyProblems.map((p, i) => <li key={i}>{p.field ? `${p.field}: ` : ''}{p.message}</li>)}
-                  </ul>
-                </KitNote>
-              </div>
-            )}
-          </SettingsCard>
-        )}
-
-        {/* ── What the mail says ──────────────────────────────────── */}
-        <SettingsCard
-          title="Auth email templates"
-          description={
-            <>
-              Each email has a built-in version that already works. Editing one replaces it for this project;
-              reverting removes the override. Available values:{' '}
-              {variables.map(v => <code key={v} className="mr-1.5 font-mono text-[12px] text-zinc-300">{`{{${v}}}`}</code>)}
-            </>
-          }
-        >
-          <ul className="-mx-5 divide-y divide-white/[0.06] border-t border-white/[0.06] sm:-mx-6">
-            {templates.map(t => (
-              <li key={t.kind} className="flex flex-wrap items-center gap-3 px-5 py-3.5 sm:px-6">
-                <div className="min-w-0 flex-1">
-                  <p className="text-[13px] font-medium text-zinc-100">{t.title}</p>
-                  <p className="mt-0.5 text-[12.5px] leading-[18px] text-faint">{t.sends}</p>
-                </div>
-                <StatusDot tone={t.customised ? 'beta' : 'neutral'} label={t.customised ? 'Customised' : 'Built-in'} />
-                <div className="flex items-center gap-1">
-                  {t.customised && (
-                    <KitButton
-                      variant="ghost"
-                      size="sm"
-                      icon={busyIcon(`revert-${t.kind}`, RotateCcw)}
-                      loading={busy === `revert-${t.kind}`}
-                      disabled={busy !== null}
-                      onClick={() => revertTemplate(t.kind)}
-                    >
-                      Revert
-                    </KitButton>
+    <div className="min-h-0 flex-1 overflow-y-auto">
+      <div className="w-full max-w-[880px] space-y-[32px] px-[16px] py-[24px] sm:px-[24px]">
+        <Section id="email-sender" title="Sender">
+          <Panel>
+            {state === 'failed' ? (
+              <ErrorRow things="the mail settings" onRetry={() => void load()} />
+            ) : state === 'loading' || !smtp ? (
+              <RowSkeleton rows={1} />
+            ) : (
+              <RowList>
+                <Row
+                  lead="glyph"
+                  glyph={glyph}
+                  glyphLabel={glyph === 'failed' ? 'Not delivering' : glyph === 'waiting' ? 'Never tested' : 'Sending'}
+                  title={<span className={ROW_TITLE}>{sourceLabel(smtp.activeSource)}</span>}
+                  actions={
+                    canAdminister ? (
+                      <>
+                        {smtp.activeSource !== 'none' && !testing && (
+                          <KitButton size="sm" variant="ghost" icon={Send} onClick={() => setTesting(true)} disabled={busy !== null}>
+                            Send test
+                          </KitButton>
+                        )}
+                        {!editingSmtp && (
+                          <KitButton size="sm" onClick={() => setEditingSmtp(true)} disabled={busy !== null}>
+                            {own ? 'Edit' : smtp.activeSource === 'none' ? 'Set up SMTP' : 'Use your own SMTP'}
+                          </KitButton>
+                        )}
+                        {smtp.configured && (
+                          <OverflowMenu label="More for the SMTP settings" items={[{ label: 'Remove…', icon: Trash2, danger: true, onClick: () => setConfirmRemove(true) }]} />
+                        )}
+                      </>
+                    ) : undefined
+                  }
+                >
+                  {own ? (
+                    <Facts className="!mt-[4px]">
+                      <Fact>
+                        <code className="font-mono text-[11.5px] text-zinc-400">
+                          {smtp.host}:{smtp.effectivePort ?? smtp.port}
+                        </code>
+                      </Fact>
+                      {smtp.fromAddress && <Fact>{smtp.fromName ? `“${smtp.fromName}” <${smtp.fromAddress}>` : smtp.fromAddress}</Fact>}
+                      {smtp.lastTestError ? (
+                        <span className="font-medium text-zinc-50">Last test failed</span>
+                      ) : smtp.lastTestAt ? (
+                        <Fact>
+                          <Time iso={smtp.lastTestAt} prefix="Last test delivered" />
+                        </Fact>
+                      ) : (
+                        <span className="font-medium text-zinc-50">Never tested</span>
+                      )}
+                    </Facts>
+                  ) : (
+                    <p className={`${ROW_TEXT} !mt-[2px]`}>{sourceText(smtp, policy)}</p>
                   )}
-                  <KitButton variant="secondary" size="sm" disabled={busy !== null} onClick={() => setEditing(t)}>
-                    Edit
-                  </KitButton>
-                </div>
-              </li>
-            ))}
-          </ul>
-        </SettingsCard>
+                  {own && smtp.lastTestError && <RefusedLine className="mt-[6px]">{smtp.lastTestError}</RefusedLine>}
+                  {senderNote &&
+                    (senderNote.tone === 'refused' ? (
+                      <RefusedLine className="mt-[6px]">{senderNote.text}</RefusedLine>
+                    ) : (
+                      <p role="status" className={`mt-[6px] text-[12.5px] leading-[18px] ${senderNote.tone === 'attention' ? 'text-zinc-50' : 'text-zinc-300'}`}>
+                        {senderNote.text}
+                      </p>
+                    ))}
+                </Row>
+
+                {testing && (
+                  <li className="px-[20px] py-[14px]">
+                    <form
+                      className="flex flex-col gap-[8px] sm:flex-row"
+                      onSubmit={(e) => {
+                        e.preventDefault()
+                        if (testTo.trim()) void sendTest()
+                      }}
+                    >
+                      <KitInput type="email" aria-label="Send a test to" value={testTo} onChange={(e) => setTestTo(e.target.value)} placeholder="you@example.com" spellCheck={false} className="sm:max-w-[320px]" />
+                      <div className="flex gap-[8px]">
+                        <KitButton type="submit" loading={busy === 'test'} disabled={busy !== null || testTo.trim() === ''}>
+                          Send
+                        </KitButton>
+                        <KitButton variant="ghost" onClick={() => setTesting(false)} disabled={busy === 'test'}>
+                          Cancel
+                        </KitButton>
+                      </div>
+                    </form>
+                  </li>
+                )}
+
+                {editingSmtp && (
+                  <li className="px-[20px] py-[16px]">
+                    <form
+                      onSubmit={(e) => {
+                        e.preventDefault()
+                        void save()
+                      }}
+                    >
+                      <div className="grid grid-cols-1 gap-[14px] sm:grid-cols-2">
+                        <KitField label="Host">
+                          <KitInput value={form.host} onChange={(e) => setForm({ ...form, host: e.target.value })} placeholder="smtp.example.com" spellCheck={false} autoComplete="off" />
+                        </KitField>
+                        <KitField label="Port" hint={smtp.portNormalised ? `465 is sent as ${smtp.effectivePort}: many hosts block it outbound, and every major provider serves 587.` : undefined}>
+                          <KitInput value={form.port} onChange={(e) => setForm({ ...form, port: e.target.value })} inputMode="numeric" />
+                        </KitField>
+                        <KitField label="Username">
+                          <KitInput value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} spellCheck={false} autoComplete="off" />
+                        </KitField>
+                        <KitField label="Password" hint={smtp.passwordConfigured ? 'Stored. Leave blank to keep it.' : undefined}>
+                          <KitInput type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} placeholder={smtp.passwordConfigured ? '••••••••' : ''} autoComplete="new-password" />
+                        </KitField>
+                        <KitField label="From address">
+                          <KitInput type="email" value={form.fromAddress} onChange={(e) => setForm({ ...form, fromAddress: e.target.value })} placeholder="auth@example.com" spellCheck={false} />
+                        </KitField>
+                        <KitField label={<>From name <span className="font-normal text-faint">Optional</span></>}>
+                          <KitInput value={form.fromName} onChange={(e) => setForm({ ...form, fromName: e.target.value })} placeholder={policy?.effectiveAppName ?? ''} />
+                        </KitField>
+                      </div>
+                      <KitCheckbox className="mt-[16px]" checked={form.enabled} onChange={(v) => setForm({ ...form, enabled: v })} label="Send with these settings" description={fallbackWords} />
+                      {problems.length > 0 && (
+                        <ul className="mt-[12px] space-y-[2px]">
+                          {problems.map((p, i) => (
+                            <li key={i}>
+                              <RefusedLine>
+                                {p.field ? `${p.field}: ` : ''}
+                                {p.message}
+                              </RefusedLine>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                      <div className="mt-[16px] flex justify-end gap-[8px]">
+                        <KitButton variant="ghost" onClick={() => setEditingSmtp(false)} disabled={busy === 'save'}>
+                          Cancel
+                        </KitButton>
+                        <KitButton type="submit" variant="primary" loading={busy === 'save'}>
+                          Save settings
+                        </KitButton>
+                      </div>
+                    </form>
+                  </li>
+                )}
+              </RowList>
+            )}
+          </Panel>
+        </Section>
+
+        <Section id="email-templates" title="Templates">
+          <Panel>
+            {state === 'failed' ? (
+              <ErrorRow things="the templates" onRetry={() => void load()} />
+            ) : state === 'loading' ? (
+              <RowSkeleton rows={3} lead="none" />
+            ) : (
+              <RowList>
+                {templates.map((t) => (
+                  <Row
+                    key={t.kind}
+                    lead="none"
+                    title={<span className={ROW_TITLE}>{t.title}</span>}
+                    actions={
+                      canWrite ? (
+                        <>
+                          <KitButton size="sm" onClick={() => setEditing(t)} disabled={busy !== null}>
+                            Edit
+                          </KitButton>
+                          {t.customised && (
+                            <OverflowMenu
+                              label={`More for ${t.title}`}
+                              items={[{ label: 'Use the built-in version', icon: RotateCcw, onClick: () => void revertTemplate(t) }]}
+                            />
+                          )}
+                        </>
+                      ) : undefined
+                    }
+                  >
+                    <Facts className="!mt-[4px]">
+                      <Fact>{t.customised ? <Time iso={t.updatedAt} mode="date" prefix="Edited" fallback="Edited" /> : 'Built-in'}</Fact>
+                      <Fact>{t.sends}</Fact>
+                    </Facts>
+                    {templateNote?.kind === t.kind &&
+                      (templateNote.tone === 'refused' ? (
+                        <RefusedLine className="mt-[6px]">{templateNote.text}</RefusedLine>
+                      ) : (
+                        <p role="status" className="mt-[6px] text-[12.5px] text-zinc-300">
+                          {templateNote.text}
+                        </p>
+                      ))}
+                  </Row>
+                ))}
+              </RowList>
+            )}
+          </Panel>
+        </Section>
       </div>
 
-      {confirmRemove && (
-        <KitConfirmDialog
-          open
-          danger
-          busy={busy === 'remove'}
-          title="Remove this project’s SMTP settings?"
-          description={
-            smtp?.deploymentFallbackAvailable
-              ? CLOUD_CONTROL_PLANE
-                ? `Backenly will send this project’s auth emails${sender ? `, as ${sender}` : ''}. The stored password is deleted and cannot be recovered.`
-                : 'Auth emails will fall back to the deployment’s SMTP environment variables. The stored password is deleted and cannot be recovered.'
-              : 'There is no deployment fallback configured, so auth emails will only be logged to the server console. Password reset and verification will stop reaching anyone.'
-          }
-          confirmLabel={busy === 'remove' ? 'Removing…' : 'Remove'}
-          onConfirm={removeConfig}
-          onCancel={() => setConfirmRemove(false)}
-        />
-      )}
+      <KitConfirmDialog
+        open={confirmRemove}
+        danger
+        busy={busy === 'remove'}
+        title="Remove your SMTP settings?"
+        description={
+          smtp?.deploymentFallbackAvailable
+            ? CLOUD_CONTROL_PLANE
+              ? `Backenly sends this project’s auth emails${sender ? `, as ${sender}` : ''}.`
+              : 'Auth emails fall back to the deployment’s SMTP environment variables.'
+            : 'Nothing else is set up, so auth emails will only be logged and reset links reach no one.'
+        }
+        undoable={false}
+        lost="The stored password is deleted."
+        confirmLabel="Remove"
+        onConfirm={() => void removeConfig()}
+        onCancel={() => busy !== 'remove' && setConfirmRemove(false)}
+      />
 
       {editing && (
         <TemplateEditor
@@ -633,7 +480,12 @@ export function EmailSettingsPanel({ projectId }: { projectId: string }) {
           template={editing}
           variables={variables}
           onClose={() => setEditing(null)}
-          onSaved={async () => { setEditing(null); await load(); setMessage({ tone: 'success', text: 'Template saved.' }) }}
+          onSaved={async () => {
+            const kind = editing.kind
+            setEditing(null)
+            await load()
+            setTemplateNote({ kind, tone: 'done', text: 'Saved.' })
+          }}
         />
       )}
     </div>
@@ -641,15 +493,16 @@ export function EmailSettingsPanel({ projectId }: { projectId: string }) {
 }
 
 /**
- * Edit one template, with a preview rendered by the server.
- *
- * The preview HTML is put into a sandboxed iframe rather than into the
- * dashboard's own DOM. `sandbox` with no tokens means no scripts and no
- * same-origin access, so even if the API's <script> refusal were relaxed, what
- * an operator types here still cannot run against their session.
+ * One template: the editor on the left and what the email will look like on
+ * the right, rendered by the server a moment after typing stops, in a
+ * sandboxed frame. Opens on the words sent today.
  */
 function TemplateEditor({
-  projectId, template, variables, onClose, onSaved,
+  projectId,
+  template,
+  variables,
+  onClose,
+  onSaved,
 }: {
   projectId: string
   template: TemplateRow
@@ -657,107 +510,152 @@ function TemplateEditor({
   onClose: () => void
   onSaved: () => void
 }) {
-  const [subject, setSubject] = useState(template.subject ?? '')
-  const [bodyHtml, setBodyHtml] = useState(template.bodyHtml ?? '')
+  const start = template.customised
+    ? { subject: template.subject ?? '', bodyHtml: template.bodyHtml ?? '' }
+    : { subject: template.builtIn?.subject ?? '', bodyHtml: dedent(template.builtIn?.bodyHtml ?? '') }
+  const [subject, setSubject] = useState(start.subject)
+  const [bodyHtml, setBodyHtml] = useState(start.bodyHtml)
   const [errors, setErrors] = useState<FieldProblem[]>([])
   const [preview, setPreview] = useState<{ subject: string; bodyHtml: string } | null>(null)
-  const [busy, setBusy] = useState<string | null>(null)
+  const [saving, setSaving] = useState(false)
+  const bodyRef = useRef<HTMLTextAreaElement>(null)
 
-  async function runPreview() {
-    setBusy('preview')
-    setErrors([])
-    try {
-      const res = await fetch(`/api/projects/${projectId}/email/templates/${template.kind}/preview`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ subject, bodyHtml }),
-      })
-      const data = await res.json()
-      if (!res.ok) { setErrors(data.errors ?? [{ message: data.error }]); setPreview(null); return }
-      setPreview(data.preview)
-    } finally {
-      setBusy(null)
+  // The preview follows the text, half a second after typing stops.
+  useEffect(() => {
+    let cancelled = false
+    const t = setTimeout(async () => {
+      try {
+        const res = await fetch(`/api/projects/${projectId}/email/templates/${template.kind}/preview`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({ subject, bodyHtml }),
+        })
+        const data = await res.json().catch(() => ({}))
+        if (cancelled) return
+        if (!res.ok) {
+          setErrors(data.errors ?? [{ message: data.error ?? 'This template cannot be used.' }])
+          return
+        }
+        setErrors([])
+        setPreview(data.preview)
+      } catch {
+        /* the preview is a convenience; Save still says what is wrong */
+      }
+    }, 500)
+    return () => {
+      cancelled = true
+      clearTimeout(t)
     }
+  }, [projectId, template.kind, subject, bodyHtml])
+
+  const insert = (name: string) => {
+    const el = bodyRef.current
+    const token = `{{${name}}}`
+    if (!el) return setBodyHtml((b) => b + token)
+    const from = el.selectionStart ?? bodyHtml.length
+    const to = el.selectionEnd ?? from
+    setBodyHtml(bodyHtml.slice(0, from) + token + bodyHtml.slice(to))
+    requestAnimationFrame(() => {
+      el.focus()
+      el.setSelectionRange(from + token.length, from + token.length)
+    })
   }
 
-  async function save() {
-    setBusy('save')
+  const save = async () => {
+    setSaving(true)
     setErrors([])
     try {
       const res = await fetch(`/api/projects/${projectId}/email/templates/${template.kind}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({ subject, bodyHtml }),
       })
-      const data = await res.json()
-      if (!res.ok) { setErrors(data.errors ?? [{ message: data.error }]); return }
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        setErrors(data.errors ?? [{ message: data.error ?? 'The template was not saved.' }])
+        return
+      }
       onSaved()
     } finally {
-      setBusy(null)
+      setSaving(false)
     }
   }
 
   return (
     <KitModal
       open
-      width="max-w-3xl"
+      width="max-w-[1080px]"
       title={template.title}
-      description={template.sends}
+      description={template.customised ? undefined : 'Starts from the built-in text. Saving it makes it this project’s own.'}
       onClose={onClose}
       footer={
         <>
-          <KitButton variant="ghost" size="sm" onClick={onClose}>Cancel</KitButton>
-          <KitButton variant="secondary" size="sm" icon={Eye} loading={busy === 'preview'} disabled={busy !== null && busy !== 'preview'} onClick={runPreview}>
-            Preview
+          <KitButton variant="ghost" onClick={onClose} disabled={saving}>
+            Cancel
           </KitButton>
-          <KitButton variant="primary" size="sm" icon={Save} loading={busy === 'save'} disabled={busy !== null && busy !== 'save'} onClick={save}>
+          <KitButton variant="primary" onClick={() => void save()} loading={saving}>
             Save template
           </KitButton>
         </>
       }
     >
-      <div className="space-y-4">
-        <KitField label="Subject">
-          <KitInput value={subject} onChange={e => setSubject(e.target.value)} placeholder="Reset your {{appName}} password" />
-        </KitField>
-
-        <KitField
-          label="Body"
-          hint={<>Must contain <code className="font-mono text-zinc-300">{'{{ctaUrl}}'}</code>, or the email has no working link. Available: {variables.map(v => `{{${v}}}`).join(', ')}</>}
-        >
-          <KitTextarea
-            value={bodyHtml}
-            onChange={e => setBodyHtml(e.target.value)}
-            rows={12}
-            className="font-mono text-[12.5px]"
-            placeholder={'<p>Hi {{email}}, <a href="{{ctaUrl}}">reset your password</a>. Expires in {{expiry}}.</p>'}
-          />
-        </KitField>
-
-        {errors.length > 0 && (
-          <KitNote icon={AlertTriangle} tone="danger" title="This template cannot be used">
-            <ul className="list-disc pl-4">
-              {errors.map((e, i) => <li key={i}>{e.message}</li>)}
-            </ul>
-          </KitNote>
-        )}
-
-        {preview && (
-          <div>
-            <p className="mb-2 text-[12.5px] text-faint">
-              Preview. Subject: <span className="text-zinc-200">{preview.subject}</span>
-            </p>
-            {/* Sandboxed with NO tokens: no scripts, no same-origin. Operator
-                HTML renders here and can do nothing to the dashboard. */}
-            <iframe
-              title="Email preview"
-              sandbox=""
-              srcDoc={preview.bodyHtml}
-              className="h-72 w-full rounded-[8px] border border-white/10 bg-white"
+      <div className="grid grid-cols-1 gap-[20px] lg:grid-cols-2">
+        <div className="min-w-0 space-y-[14px]">
+          <KitField label="Subject">
+            <KitInput value={subject} onChange={(e) => setSubject(e.target.value)} spellCheck={false} />
+          </KitField>
+          <KitField label="Body">
+            {/* The kit's textarea takes no ref on React 18; the caret is needed to insert a value where it is. */}
+            <textarea
+              ref={bodyRef}
+              value={bodyHtml}
+              onChange={(e) => setBodyHtml(e.target.value)}
+              rows={14}
+              spellCheck={false}
+              className={`${INPUT_BASE} resize-y px-3 py-2 font-mono leading-[18px] sm:text-[12px]`}
             />
+          </KitField>
+          <div className="flex flex-wrap items-center gap-[6px]" role="group" aria-label="Insert a value">
+            <span className="mr-[2px] text-[12px] text-faint">Insert</span>
+            {variables.map((v) => (
+              <button
+                key={v}
+                type="button"
+                onClick={() => insert(v)}
+                className="inline-flex h-[24px] items-center rounded-[5px] border border-white/[0.10] bg-white/[0.03] px-[7px] font-mono text-[11.5px] text-zinc-200 transition-colors duration-150 hover:border-white/[0.18] hover:bg-white/[0.06] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70"
+              >
+                {`{{${v}}}`}
+              </button>
+            ))}
           </div>
-        )}
+          {errors.length > 0 && (
+            <ul className="space-y-[2px]">
+              {errors.map((e, i) => (
+                <li key={i}>
+                  <RefusedLine>{e.message}</RefusedLine>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+        <div className="min-w-0">
+          <p className="mb-[6px] text-[12.5px] font-medium leading-[18px] text-zinc-300">Preview</p>
+          <p className="mb-[8px] truncate text-[12.5px] text-faint">
+            Subject: <span className="text-zinc-200">{preview?.subject ?? subject}</span>
+          </p>
+          {/* Sandboxed with NO tokens: no scripts, no same-origin. The HTML renders here and can do nothing to the console. */}
+          <iframe title="Email preview" sandbox="" srcDoc={preview?.bodyHtml ?? ''} className="h-[380px] w-full rounded-[8px] border border-white/10 bg-white" />
+        </div>
       </div>
     </KitModal>
   )
+}
+
+/** The built-in HTML without the indentation it carries in its source file. */
+function dedent(html: string): string {
+  const lines = html.replace(/^\n+|\s+$/g, '').split('\n')
+  const indent = Math.min(...lines.filter((l) => l.trim()).map((l) => l.match(/^ */)?.[0].length ?? 0))
+  return lines.map((l) => l.slice(Number.isFinite(indent) ? indent : 0)).join('\n')
 }

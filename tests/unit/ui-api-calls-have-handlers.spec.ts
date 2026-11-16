@@ -31,6 +31,12 @@ const CLOUD_OVERLAY_ROUTES = [
 const DYNAMIC_CALLS: Record<string, string> = {
   // `/api/projects/${projectId}/${route}`, where route is one of several real handlers.
   'components/workspace/WorkspaceHome.tsx': '/api/projects/X/X',
+  // "When someone signs up": read('ai-functions') and read('webhooks').
+  'components/auth/AuthConfiguration.tsx': '/api/projects/X/X',
+  // "When rows change": read('ai-functions'), read('webhooks'), read('realtime-status').
+  'components/database/TableStructure.tsx': '/api/projects/X/X',
+  // Overview's "Your backend": read('dashboard-stats') and read('ai-functions').
+  'components/workspace/BackendStrip.tsx': '/api/projects/X/X',
 }
 
 const norm = (p: string) => p.split(path.sep).join('/')

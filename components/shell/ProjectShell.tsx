@@ -9,11 +9,12 @@
  * the account-level OrgShell.
  *
  * The Assistant (Q&A helper: answers, never builds) mounts HERE, not per
- * page, so a conversation survives navigation between sections. On large
- * screens the canvas makes room for it; below that it overlays.
+ * page, so a conversation survives navigation between sections. From 1536px
+ * the canvas makes room for it; below that it overlays the page rather than
+ * squeezing it.
  *
- * The autonomy toaster and welcome-back banner ride along here so they
- * persist across section navigation.
+ * The autonomy toaster and welcome-back row ride along here so they persist
+ * across section navigation (the row hides itself on Overview and Autonomy).
  */
 
 import { type ReactNode } from 'react'

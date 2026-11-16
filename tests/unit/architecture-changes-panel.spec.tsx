@@ -92,7 +92,7 @@ describe('the Architecture changes card', () => {
     expect(screen.getByText(/Verification passed\. Undo is available\./)).toBeTruthy()
     expect(screen.getByText('It helped: fewer problems found on refund columns.')).toBeTruthy()
     expect(screen.getByText('Done')).toBeTruthy()
-    expect(screen.getByText('3h ago')).toBeTruthy()
+    expect(screen.getByText('3 h ago')).toBeTruthy()
     // Not shown by default: the numbers behind the outcome, the verdict code,
     // the internal state, SQL.
     const text = container.textContent ?? ''

@@ -1,67 +1,85 @@
 'use client'
 
 /**
- * Usage — IA restructure §5.2. Rendered by /app/usage and, on Backenly Cloud,
- * by /app/org/[orgId]/usage for one organization.
+ * Usage: what one organization used this billing cycle, pooled across its
+ * projects, against what its plan includes. Rendered by
+ * /app/org/[orgId]/usage on Backenly Cloud (and /app/usage, which forwards
+ * there); every request names the organization, so the server answers for it
+ * and refuses one the caller is not in.
  *
- * A billing account's usage for the current billing cycle: the caller's own,
- * or the organization named by `orgId`, which every request below passes on so
- * the server answers for that account (and refuses one the caller may not
- * read). The quota meters read
- * /api/usage/account (lib/usage/describe.ts): usage pooled across every project
- * of the account, the most each may reach, and the month-end projection; the
- * same description an agent gets from the MCP usage read. AI credits and API
- * requests still come from /api/billing/usage. Flat kit — solid violet meters,
- * mono numerals, no gradients/glows.
+ * One list, read top to bottom (console team pages, 2026-11-16):
  *
- * Honesty: we render only metrics the endpoint actually returns. "Autonomy runs
- * this cycle" and the per-day chart from the report need data sources that
- * aren't wired yet, so they're intentionally absent rather than faked. The
- * "may take up to an hour to refresh" note is kept as an honesty beat.
+ *   Usage  Resets Dec 1
+ *   Pooled across every project in Northwind Labs.
+ *
+ *   Included in Pro
+ *   Monthly active users   81,900 of 100,000   ━━━━━━━━━━━──   About 104,300 by Nov 30
+ *   …one row per quota, then API requests, which are never capped
+ *
+ *   Past the plan            (Pro, read-only; the limit is changed on Billing)
+ *   Self-healing             (checks this cycle, never metered)
+ *
+ * Only what the routes return is shown. The quotas are /api/usage/account
+ * (lib/usage/describe.ts), the same description an agent reads over MCP; AI
+ * credits and API requests are /api/billing/usage; the spend limit is
+ * /api/billing/spend-limit; the checks are /api/account/autonomy-activity.
+ *
+ * Brightness says one thing per row, never hue: a quota on course to pass its
+ * included amount before the reset, or at 90%, has a brighter bar, and one
+ * past it a white bar, each with the words beside the bar in white. Storage rows carry no month-end projection:
+ * their "projection" is the month's average, not where the month ends.
  */
 
-import { useEffect, useState } from 'react'
-import Link from 'next/link'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { useRouter } from 'next/navigation'
+import { AlertTriangle, RefreshCw } from 'lucide-react'
 import { useOrgHrefs } from '@cloud/org-routing'
 import { planAllowsOverage } from '@/lib/pricing/catalog'
-import { measuredAgo } from '@/components/usage/measured-ago'
-import { Database, HardDrive, Bot, Activity, Users, ArrowUpRight, AlertTriangle, ShieldCheck, Sparkles, Globe, Wallet, Info, RefreshCw } from 'lucide-react'
-import { OrgShell } from '@/components/shell/OrgShell'
-import { EmptyState, INPUT_BASE, KitButton, KitNote, KitCard, KitCardHeader, KitCardBody, PageHeader, Skeleton } from '@/components/inspector/kit'
-import { EDGE, PAGE_GUTTER, PAGE_WIDTH, PLATE, R_PANEL } from '@/components/console/tokens'
 import { planDisplayName } from '@/lib/entitlements/plan-names'
+import { OrgShell } from '@/components/shell/OrgShell'
+import { KitButton, KitButtonLink, KitNote, PageHeader, Skeleton } from '@/components/inspector/kit'
+import { PAGE_GUTTER, PAGE_WIDTH } from '@/components/console/tokens'
+import { Panel, Section } from '@/components/autonomy/rows'
+import { measuredAgo } from '@/components/usage/measured-ago'
+import { fetchSpendLimit, limitLabel, type SpendLimitState } from '@/components/usage/spend-limit'
+import {
+  fmtAgo,
+  fmtBytes,
+  fmtCents,
+  fmtCount,
+  fmtCycleLastDay,
+  fmtDay,
+  getJson,
+  scoped,
+} from '@/components/usage/format'
 
-interface UsageData {
+// ─── What the routes return ──────────────────────────────────────────────────
+
+interface BillingUsage {
   planName: string
   aiCreditsUsed: number
   monthlyAiCredits: number | null
-  aiFunctionInvocationsUsed: number
-  maxAiFunctionInvocationsPerMonth: number | null
   apiRequestsUsed: string
-  monthlyActiveUsersUsed: number
-  maxMonthlyActiveUsers: number | null
-  maxPostgresStorageMb: number | null
-  dbStorageUsedMb: number
-  maxFileStorageMb: number | null
-  fileStorageUsedMb: number
   resetAt: string
+  /** Whether the caller is the owner, who alone changes billing. */
+  canManage?: boolean
 }
 
+type Axis = 'mau' | 'fn_runs' | 'egress_bytes' | 'db_bytes' | 'file_bytes'
+
 interface AxisDescription {
-  axis: 'mau' | 'fn_runs' | 'egress_bytes' | 'db_bytes' | 'file_bytes'
+  axis: Axis
   label: string
   unit: 'users' | 'runs' | 'bytes'
   used: number
   included: number | null
   cap: number | null
+  /** Month-end projection for the counters; the month's average for storage. */
   projected: number
-  /** Usage past the plan can be charged on this axis (egress: not until egress billing is on). */
   billable: boolean
   estimatedCents: number
   projectedCents: number
   grace: { overSince: string; graceEndsAt: string; restricted: boolean } | null
-  /** Database storage only: when the reading was taken (it is measured, not counted). */
   measuredAt?: string | null
 }
 
@@ -70,6 +88,7 @@ interface AccountUsage {
   planName: string
   overage: {
     mode: 'off' | 'shadow' | 'enforce' | null
+    /** The limit in force: the owner's, up to what is prepaid. */
     spendLimitCents: number
     active: boolean
     estimatedCents: number
@@ -83,146 +102,264 @@ interface AutonomyActivity {
   runsThisCycle: number
   perDay: { date: string; count: number }[]
   cycleStart: string
+  /** The newest check this cycle; null when none has run since it began. */
+  lastAt?: string | null
 }
 
-function fmtNum(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1).replace('.0', '')}M`
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1).replace('.0', '')}k`
-  return n.toLocaleString()
-}
-function fmtStorage(mb: number): string {
-  if (mb >= 1_024) return `${(mb / 1_024).toFixed(1).replace('.0', '')} GB`
-  return `${Math.round(mb)} MB`
-}
-function fmtBytes(bytes: number): string {
-  return fmtStorage(bytes / (1024 * 1024))
-}
-function fmtCents(cents: number): string {
-  return `$${(cents / 100).toFixed(2)}`
-}
-function fmtDay(iso: string): string {
-  return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
-}
-function pct(used: number, max: number | null): number {
-  if (max === null) return 0
-  if (max === 0) return 100
-  return Math.min(100, Math.round((used / max) * 100))
+interface PageData {
+  usage: BillingUsage
+  account: AccountUsage
+  /** null when it could not be read: its section says so. */
+  activity: AutonomyActivity | null
+  spend: SpendLimitState | null
+  orgName: string | null
 }
 
-function Meter({
-  icon: Icon,
-  label,
-  used,
-  max,
-  format,
-  resetNote,
-  note,
-}: {
-  icon: React.ElementType
+// ─── The rows ────────────────────────────────────────────────────────────────
+
+/** The order an owner reads them in: who uses the product, then what it runs, stores and sends. */
+const AXIS_ORDER: Axis[] = ['mau', 'fn_runs', 'db_bytes', 'file_bytes', 'egress_bytes']
+
+const AXIS_LABEL: Record<Axis, string> = {
+  mau: 'Monthly active users',
+  fn_runs: 'Function runs',
+  db_bytes: 'Database storage',
+  file_bytes: 'File storage',
+  egress_bytes: 'Data transfer',
+}
+
+type Tone = 'normal' | 'warn' | 'over'
+
+interface Quota {
+  key: string
   label: string
   used: number
-  max: number | null
-  format: (v: number) => string
-  resetNote?: string
-  /** A second line under the meter: the projection, or headroom past the plan. */
-  note?: string
-}) {
-  const p = pct(used, max)
-  const over = max !== null && (used > max || max === 0)
-  const warn = !over && p >= 75
-  const bar = over ? 'bg-rose-400' : warn ? 'bg-amber-400' : 'bg-violet-400'
+  included: number | null
+  format: (n: number) => string
+  tone: Tone
+  /** The one fact on the right, in words. */
+  fact: string | null
+}
 
+/**
+ * One quota as a row: `warn` when the server's projection passes the included
+ * amount before the reset (counters only) or 90% is used, `over` when it is past.
+ */
+function quotaOf(a: AxisDescription, cycleLastDay: string, now: number): Quota {
+  const format = a.unit === 'bytes' ? fmtBytes : fmtCount
+  const storage = a.axis === 'db_bytes' || a.axis === 'file_bytes'
+  const included = a.included
+  let tone: Tone = 'normal'
+  let fact: string | null = null
+
+  if (included !== null) {
+    const share = included > 0 ? a.used / included : a.used > 0 ? Infinity : 0
+    const projectedPast = !storage && a.projected > included
+    if (a.used > included || (included === 0 && a.used > 0)) {
+      tone = 'over'
+      fact = 'Over the plan'
+    } else if (a.used === included && included > 0) {
+      tone = 'over'
+      fact = 'At the plan’s limit'
+    } else if (projectedPast) {
+      tone = 'warn'
+      fact = `About ${format(a.projected)} by ${cycleLastDay}`
+    } else if (share >= 0.9) {
+      tone = 'warn'
+      fact = `${Math.floor(share * 100)}% used`
+    }
+  }
+
+  if (!fact) {
+    if (a.axis === 'db_bytes') {
+      const ago = measuredAgo(a.measuredAt, now)
+      fact = ago ? ago.charAt(0).toUpperCase() + ago.slice(1) : 'Measured just now'
+    } else if (a.axis === 'egress_bytes') {
+      fact = 'Updates hourly'
+    } else if (included === null) {
+      fact = 'Not capped'
+    } else if (!storage && a.projected > a.used) {
+      fact = `About ${format(a.projected)} by ${cycleLastDay}`
+    }
+  }
+
+  return { key: a.axis, label: AXIS_LABEL[a.axis] ?? a.label, used: a.used, included, format, tone, fact }
+}
+
+/**
+ * AI credits, against the plan's monthly amount. Bonus and bought credits are
+ * spent after the plan's (lib/entitlements/policy.ts), so usage past the
+ * plan's amount is not by itself a refusal: the row says only what is known,
+ * that the plan's credits are used up.
+ */
+function aiCreditsQuota(usage: BillingUsage): Quota {
+  const included = usage.monthlyAiCredits
+  const used = usage.aiCreditsUsed
+  let tone: Tone = 'normal'
+  let fact: string | null = included === null ? 'Not capped' : 'Typed MCP tools never use credits'
+  if (included !== null && included > 0) {
+    if (used >= included) {
+      tone = 'over'
+      fact = 'Plan credits used up'
+    } else if (used / included >= 0.9) {
+      tone = 'warn'
+      fact = `${Math.floor((used / included) * 100)}% used`
+    }
+  }
+  return { key: 'ai', label: 'AI credits', used, included, format: fmtCount, tone, fact }
+}
+
+/**
+ * The row grid every list on this page shares, so the columns line up from
+ * the first quota to the self-healing row:
+ *
+ *   xl (a 13-inch laptop)  label | value | bar | fact      one line
+ *   lg                     label  value             fact   bar underneath
+ *   narrower               label                   value  bar, then fact
+ *
+ * Breakpoints follow the viewport, and the sidebar takes 240px from md up, so
+ * the two-line form waits for lg, where the content is wide enough for it. A
+ * value never wraps; the label or the fact gives way first.
+ */
+const ROW =
+  'grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-4 gap-y-2 px-5 py-[13px] lg:grid-cols-[minmax(0,180px)_auto_minmax(0,1fr)] xl:grid-cols-[minmax(0,184px)_minmax(0,184px)_minmax(0,1fr)_minmax(0,232px)] xl:gap-x-6'
+const CELL_LABEL = 'min-w-0 text-[13.5px] leading-[20px] text-zinc-100'
+const CELL_VALUE = 'whitespace-nowrap text-right text-[13.5px] leading-[20px] tabular-nums lg:text-left'
+const CELL_BAR = 'col-span-2 lg:col-span-3 lg:row-start-2 xl:col-span-1 xl:col-start-3 xl:row-start-1'
+/** Where the fact sits from lg up; below it each row says how wide it is. */
+const CELL_FACT = 'min-w-0 text-[12.5px] leading-[18px] lg:col-span-1 lg:col-start-3 lg:row-start-1 lg:text-right xl:col-start-4'
+
+// Monochrome: the words beside the bar carry the meaning, the fill only
+// brightens as the quota fills.
+const FACT_TONE: Record<Tone, string> = {
+  normal: 'text-faint',
+  warn: 'font-medium text-zinc-50',
+  over: 'font-medium text-zinc-50',
+}
+
+const FILL_TONE: Record<Tone, string> = {
+  normal: 'bg-zinc-400',
+  warn: 'bg-zinc-200',
+  over: 'bg-zinc-50',
+}
+
+function Bar({ used, included, tone }: { used: number; included: number; tone: Tone }) {
+  const share = included > 0 ? Math.min(1, used / included) : used > 0 ? 1 : 0
+  // The numbers beside it say the same thing in words, so the bar is not read out.
   return (
-    <div className={`relative ${PLATE} border ${EDGE} ${R_PANEL} px-4 py-3.5`}>
-      <div className="flex items-center justify-between gap-2">
-        <div className="flex min-w-0 items-center gap-2">
-          <Icon className="h-3.5 w-3.5 flex-shrink-0 text-zinc-500" strokeWidth={1.75} />
-          <p className="truncate text-[12.5px] text-zinc-400">{label}</p>
-        </div>
-        {over && <span className="text-[12px] font-medium text-rose-300">Over the limit</span>}
-      </div>
+    <span aria-hidden className="block h-[4px] overflow-hidden rounded-full bg-white/[0.08]">
+      <span
+        className={`block h-full rounded-full ${FILL_TONE[tone]}`}
+        style={{ width: `${share * 100}%`, minWidth: used > 0 ? 4 : 0 }}
+      />
+    </span>
+  )
+}
 
-      <div className="mt-2 flex items-baseline gap-1.5">
-        <span className={`text-[20px] font-semibold leading-[26px] tracking-[-0.02em] tabular-nums ${over ? 'text-rose-300' : warn ? 'text-amber-200' : 'text-zinc-50'}`}>
-          {format(used)}
+function QuotaRow({ q }: { q: Quota }) {
+  return (
+    <li className={ROW}>
+      <span className={CELL_LABEL}>{q.label}</span>
+      <span className={CELL_VALUE}>
+        <span className="text-zinc-100">{q.format(q.used)}</span>
+        {q.included !== null && <span className="text-faint"> of {q.format(q.included)}</span>}
+      </span>
+      {q.included !== null ? (
+        <span className={CELL_BAR}>
+          <Bar used={q.used} included={q.included} tone={q.tone} />
         </span>
-        {max !== null && <span className="text-[12.5px] tabular-nums text-faint">of {format(max)}</span>}
-      </div>
-
-      {/* No bar without a limit: a part-filled bar reads as a ceiling coming up. */}
-      {max === null ? (
-        <p className="mt-2 text-[12px] text-faint">Unlimited</p>
       ) : (
-        <div
-          className="mt-2.5 h-[5px] overflow-hidden rounded-full bg-white/[0.06]"
-          role="meter"
-          aria-label={`${label} used`}
-          aria-valuemin={0}
-          aria-valuemax={100}
-          aria-valuenow={p}
-        >
-          <div className={`h-full rounded-full ${bar} transition-[width] duration-700`} style={{ width: `${Math.max(p, used > 0 ? 2 : 0)}%` }} />
-        </div>
+        <span aria-hidden className="hidden xl:block" />
       )}
-      {note && <p className="mt-2 text-[12px] leading-[17px] text-faint">{note}</p>}
-      {resetNote && <p className="mt-1.5 text-[12px] tabular-nums text-faint">{resetNote}</p>}
+      {q.fact && <span className={`col-span-2 ${CELL_FACT} ${FACT_TONE[q.tone]}`}>{q.fact}</span>}
+    </li>
+  )
+}
+
+/**
+ * A row in the same grid whose third cell is words rather than a bar. On a
+ * phone both facts share the second line. A cell with nothing in it is left
+ * out, so a phone does not stack an empty line.
+ */
+function FactRow({ label, value, middle, fact }: { label: ReactNode; value: ReactNode; middle?: ReactNode; fact?: ReactNode }) {
+  return (
+    <li className={ROW}>
+      <span className={CELL_LABEL}>{label}</span>
+      <span className={CELL_VALUE}>{value}</span>
+      {middle ? (
+        <span className="col-span-1 min-w-0 self-start text-[12.5px] leading-[18px] text-faint lg:col-span-3 lg:row-start-2 lg:self-center xl:col-span-1 xl:col-start-3 xl:row-start-1">
+          {middle}
+        </span>
+      ) : (
+        <span aria-hidden className="hidden xl:block" />
+      )}
+      {fact && (
+        <span className={`${middle ? 'col-span-1 self-start text-right lg:self-center' : 'col-span-2'} ${CELL_FACT} text-faint`}>{fact}</span>
+      )}
+    </li>
+  )
+}
+
+/** Rows the size of the real ones, so nothing moves when the numbers arrive. */
+function SkeletonRows({ count }: { count: number }) {
+  return (
+    <ul aria-hidden className="divide-y divide-white/[0.06]">
+      {Array.from({ length: count }, (_, i) => (
+        <li key={i} className={ROW}>
+          <span className="flex h-[20px] items-center">
+            <Skeleton className="h-[12px] w-[128px]" />
+          </span>
+          <span className="flex h-[20px] items-center justify-end lg:justify-start">
+            <Skeleton className="h-[12px] w-[96px]" />
+          </span>
+          <span className={CELL_BAR}>
+            <Skeleton className="h-[4px] w-full rounded-full" />
+          </span>
+          <span className={`col-span-2 ${CELL_FACT} flex h-[18px] items-center lg:justify-end`}>
+            <Skeleton className="h-[12px] w-[112px]" />
+          </span>
+        </li>
+      ))}
+    </ul>
+  )
+}
+
+/** An error inside the panel it belongs to: what failed, what still works, and Retry. */
+function ErrorRow({ title, hint, onRetry }: { title: string; hint?: string; onRetry: () => void }) {
+  return (
+    <div role="alert" className="flex flex-wrap items-center gap-x-4 gap-y-3 px-5 py-4">
+      <AlertTriangle aria-hidden className="h-4 w-4 flex-shrink-0 text-zinc-50" strokeWidth={1.75} />
+      <div className="min-w-0 flex-[1_1_240px]">
+        <p className="text-[13.5px] leading-[20px] text-zinc-100">{title}</p>
+        {hint && <p className="mt-0.5 text-[12.5px] leading-[18px] text-faint">{hint}</p>}
+      </div>
+      <KitButton icon={RefreshCw} onClick={onRetry}>
+        Retry
+      </KitButton>
     </div>
   )
 }
 
-const AXIS_ICON: Record<AxisDescription['axis'], React.ElementType> = {
-  mau: Users,
-  fn_runs: Bot,
-  egress_bytes: Globe,
-  db_bytes: Database,
-  file_bytes: HardDrive,
-}
+// ─── Sections ────────────────────────────────────────────────────────────────
 
-/** One pooled quota: used against included, with the projection and any headroom past the plan. */
-function AxisMeter({ a, resetNote, planBillsOverage }: { a: AxisDescription; resetNote?: string; planBillsOverage: boolean }) {
-  const format = a.unit === 'bytes' ? fmtBytes : fmtNum
-  const counter = a.axis === 'mau' || a.axis === 'fn_runs' || a.axis === 'egress_bytes'
-  const notes: string[] = []
-  if (a.included !== null && a.projected > a.used) notes.push(`≈ ${format(a.projected)} by month end`)
-  if (a.included !== null && a.cap !== null && a.cap > a.included) {
-    notes.push(`up to ${format(a.cap)} within your spend limit`)
-  }
-  // On a plan that bills other axes, say plainly which one it does not: the
-  // spend limit never buys more of it, and it is never on an invoice.
-  if (planBillsOverage && !a.billable && a.included !== null) notes.push('not billed past the plan')
-  // Storage is measured, not counted: say when, unless it was just now.
-  const measured = measuredAgo(a.measuredAt)
-  if (measured) notes.push(measured)
-  return (
-    <Meter
-      icon={AXIS_ICON[a.axis]}
-      label={a.label}
-      used={a.used}
-      max={a.included}
-      format={format}
-      note={notes.join(' · ') || undefined}
-      resetNote={counter ? resetNote : undefined}
-    />
-  )
-}
-
-/** Grace and restriction, stated with their dates. Only database and egress have one. */
+/** Grace and restriction, with their dates. Only database storage and data transfer have one. */
 function GraceNotices({ axes, graceDays }: { axes: AxisDescription[]; graceDays: number }) {
   const notices = axes.filter((a) => a.grace)
   if (!notices.length) return null
   return (
-    <div className="mt-4 flex flex-col gap-2">
+    <div className="flex flex-col gap-2">
       {notices.map((a) => {
         const g = a.grace!
+        const label = AXIS_LABEL[a.axis] ?? a.label
         const effect =
           a.axis === 'db_bytes'
             ? 'the data API is read-only (reads and deletes still work)'
             : 'files are not served to your end users (API responses are never cut)'
         return (
-          <KitNote key={a.axis} tone="warn" title={`${a.label} is over its limit`}>
+          <KitNote key={a.axis} tone="warn" icon={AlertTriangle} title={`${label} is over the plan`}>
             {g.restricted
-              ? `Over since ${fmtDay(g.overSince)}. The ${graceDays}-day grace period ended on ${fmtDay(g.graceEndsAt)}, so ${effect}. It lifts within minutes of usage coming back under the limit or the limit being raised.`
-              : `Over since ${fmtDay(g.overSince)}. If it is still over on ${fmtDay(g.graceEndsAt)}, ${effect}.`}
+              ? `Over since ${fmtDay(g.overSince, { utc: true })}. The ${graceDays}-day grace period ended on ${fmtDay(g.graceEndsAt, { utc: true })}, so ${effect}. That lifts within minutes of usage coming back under the plan.`
+              : `Over since ${fmtDay(g.overSince, { utc: true })}. If it is still over on ${fmtDay(g.graceEndsAt, { utc: true })}, ${effect}.`}
           </KitNote>
         )
       })}
@@ -230,469 +367,316 @@ function GraceNotices({ axes, graceDays }: { axes: AxisDescription[]; graceDays:
   )
 }
 
-/** The spend limit as the Cloud route reports it: the owner's limit and what pays for it. */
-interface SpendLimitState {
-  limitCents: number
-  /** Paid in advance and not yet drawn. The limit allows usage only up to it. */
-  balanceCents: number
-}
-
-/** Where Stripe Checkout sent the owner back to: ?prepay=success&session_id=… or ?prepay=canceled. */
-interface CheckoutReturn {
-  outcome: 'success' | 'canceled'
-  sessionId: string | null
-}
-
-function readCheckoutReturn(): CheckoutReturn | null {
-  if (typeof window === 'undefined') return null
-  const params = new URLSearchParams(window.location.search)
-  const outcome = params.get('prepay')
-  if (outcome !== 'success' && outcome !== 'canceled') return null
-  return { outcome, sessionId: outcome === 'success' ? params.get('session_id') : null }
-}
-
-const CHECKOUT_CANCELED = 'Payment canceled. Your spend limit and prepaid balance did not change.'
-
-/** `path` scoped to the account in view: `?orgId=` when an organization is named. */
-function scoped(path: string, orgId: string | null | undefined): string {
-  return orgId ? `${path}${path.includes('?') ? '&' : '?'}orgId=${encodeURIComponent(orgId)}` : path
-}
-
-/** A JSON body for the account in view: `orgId` added when an organization is named. */
-function scopedBody(body: Record<string, unknown>, orgId: string | null | undefined): string {
-  return JSON.stringify(orgId ? { ...body, orgId } : body)
-}
-
 /**
- * Usage past the plan this month and the spend limit that bounds it. Shown only
- * where it can apply: Cloud, a plan that allows overage (never Free), and
- * overage not off.
- *
- * The limit is paid for in advance and allows usage only up to the prepaid
- * balance. Lowering it applies at once. Raising it, or saving it again to top
- * the balance back up, sends a code to the owner's email; when the balance does
- * not cover the limit, confirming the code opens Stripe Checkout for the
- * difference, and the limit applies once Stripe reports the payment.
+ * Usage past the plan this cycle: what it has cost, where it is heading, and
+ * the limit and prepaid balance that bound it. Read-only; the limit is changed
+ * on Billing, by the owner.
  */
-function OverageCard({
-  usage,
-  notice,
-  onChanged,
-  orgId,
+function PastThePlan({
+  account,
+  spend,
+  cycleLastDay,
+  changeHref,
+  onRetry,
 }: {
-  usage: AccountUsage
-  notice: string | null
-  onChanged: () => void
-  orgId?: string | null
+  account: AccountUsage
+  spend: SpendLimitState | null
+  cycleLastDay: string
+  /** Billing's spend-limit section, for an owner; null for everyone else. */
+  changeHref: string | null
+  onRetry: () => void
 }) {
-  const [limit, setLimit] = useState<SpendLimitState | null>(null)
-  const [presets, setPresets] = useState<number[]>([0, 5_000, 10_000, 25_000])
-  const [choice, setChoice] = useState<string | null>(null)
-  const [custom, setCustom] = useState('')
-  const [pending, setPending] = useState<{ requestedCents: number; paymentCents: number; sentTo: string } | null>(null)
-  const [code, setCode] = useState('')
-  const [busy, setBusy] = useState(false)
-  const [message, setMessage] = useState<string | null>(null)
-
-  // Read again whenever the account description reloads, so the balance moves
-  // with the meters after a change or a payment.
-  useEffect(() => {
-    let cancelled = false
-    fetch(scoped('/api/billing/spend-limit', orgId), { credentials: 'include' })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d) => {
-        if (cancelled || !d) return
-        setLimit({ limitCents: d.limitCents, balanceCents: d.balanceCents ?? 0 })
-        if (d.presetsCents) setPresets(d.presetsCents)
-      })
-      .catch(() => {})
-    return () => { cancelled = true }
-  }, [usage, orgId])
-
-  const mode = usage.overage.mode
-  if (mode === null || mode === 'off') return null
-
-  const currentCents = limit?.limitCents ?? usage.overage.spendLimitCents
-  const selected = choice ?? String(currentCents)
-  // A custom limit set earlier is listed as itself rather than shown as the first preset.
-  const options = presets.includes(currentCents) ? presets : [...presets, currentCents].sort((a, b) => a - b)
-  const shortCents = limit ? Math.max(0, limit.limitCents - limit.balanceCents) : 0
-
-  const save = async () => {
-    const cents = selected === 'custom' ? Math.round(Number(custom) * 100) : Number(selected)
-    if (!Number.isFinite(cents) || cents < 0 || (selected === 'custom' && !custom)) { setMessage('Enter a whole-dollar amount.'); return }
-    setBusy(true); setMessage(null)
-    try {
-      const res = await fetch('/api/billing/spend-limit', {
-        method: 'PUT',
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-        body: scopedBody({ limitCents: cents }, orgId),
-      })
-      const data = await res.json()
-      if (res.status === 202) setPending({ requestedCents: data.requestedCents, paymentCents: data.paymentCents ?? 0, sentTo: data.sentTo })
-      else if (!res.ok) setMessage(data.error || 'Could not change the limit.')
-      else { setMessage('Spend limit updated.'); onChanged() }
-    } finally { setBusy(false) }
+  if (!spend) {
+    return (
+      <Panel>
+        <ErrorRow title="Could not load your spend limit. Try again." hint="Usage past the plan still stops at your limit." onRetry={onRetry} />
+      </Panel>
+    )
   }
-
-  const confirm = async () => {
-    setBusy(true); setMessage(null)
-    try {
-      const res = await fetch('/api/billing/spend-limit/confirm', {
-        method: 'POST',
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-        body: scopedBody({ code }, orgId),
-      })
-      const data = await res.json()
-      if (!res.ok) { setMessage(data.error || 'That code did not work.'); return }
-      if (data.checkoutUrl) {
-        // The limit changes once Stripe reports the payment, not before.
-        setMessage('Opening Stripe to take the payment…')
-        window.location.assign(data.checkoutUrl)
-        return
-      }
-      setPending(null); setCode(''); setMessage('Spend limit changed.'); onChanged()
-    } finally { setBusy(false) }
+  const { estimatedCents, projectedCents, mode } = account.overage
+  // What can actually run past the plan this month: the limit, up to what is prepaid.
+  const effective = Math.min(spend.limitCents, spend.balanceCents)
+  const shadow = mode === 'shadow'
+  // Where the month is heading, capped by what can run: nothing past a quota runs unpaid.
+  let projectionCents: number | null = null
+  let consequence: string | null = null
+  if (shadow) {
+    if (projectedCents > estimatedCents) projectionCents = projectedCents
+    consequence = 'Estimates only for now. Nothing is drawn from your balance.'
+  } else if (spend.limitCents === 0) {
+    consequence = 'The spend limit is off, so usage stops at each quota.'
+  } else if (spend.balanceCents <= 0) {
+    consequence = 'Nothing is prepaid, so usage stops at each quota.'
+  } else {
+    if (projectedCents > estimatedCents) projectionCents = Math.min(projectedCents, effective)
+    if (projectedCents > effective) consequence = `Usage stops at each quota once ${fmtCents(effective)} is used.`
   }
-
-  const shown = message ?? notice
 
   return (
-    <KitCard className="mt-4">
-      <KitCardHeader
-        title="Usage beyond your plan"
-        description={
-          mode === 'shadow'
-            ? 'Estimated only. Nothing is drawn from your balance yet.'
-            : 'Paid in advance from your prepaid balance, never past your spend limit.'
-        }
-        actions={
-          <span className="inline-flex items-baseline gap-1.5">
-            <span className="text-[20px] font-medium tabular-nums leading-none text-white">{fmtCents(usage.overage.estimatedCents)}</span>
-            <span className="text-[12px] text-faint">so far · ≈ {fmtCents(usage.overage.projectedCents)} by month end</span>
-          </span>
-        }
-      />
-      <KitCardBody>
-        <div className="flex flex-wrap items-center gap-2">
-          <Wallet className="h-3.5 w-3.5 text-zinc-500" />
-          <span className="text-[12.5px] text-zinc-300">Spend limit</span>
-          <select
-            className={`${INPUT_BASE} h-[32px] w-auto px-2.5 tabular-nums`}
-            aria-label="Spend limit"
-            value={selected}
-            onChange={(e) => setChoice(e.target.value)}
-            disabled={busy || !!pending}
-          >
-            {options.map((c) => (
-              <option key={c} value={String(c)}>{c === 0 ? 'Off ($0)' : fmtCents(c)}</option>
-            ))}
-            <option value="custom">Custom…</option>
-          </select>
-          {selected === 'custom' && (
-            <input
-              className={`${INPUT_BASE} h-[32px] w-24 px-2.5 tabular-nums`}
-              aria-label="Custom spend limit in US dollars"
-              placeholder="USD"
-              inputMode="numeric"
-              value={custom}
-              onChange={(e) => setCustom(e.target.value.replace(/[^0-9]/g, ''))}
-              disabled={busy || !!pending}
-            />
-          )}
-          <KitButton variant="secondary" size="sm" onClick={save} disabled={!!pending} loading={busy && !pending}>
-Save
-          </KitButton>
-          <span className="text-[12.5px] text-faint">Current: {currentCents === 0 ? 'Off' : fmtCents(currentCents)}</span>
-        </div>
-        {limit && (
-          <p className="mt-2 text-[12.5px] tabular-nums text-zinc-400">
-            Prepaid balance {fmtCents(limit.balanceCents)}
-            {shortCents > 0 &&
-              `, ${fmtCents(shortCents)} short of your ${fmtCents(limit.limitCents)} limit: usage past the plan stops at ${fmtCents(limit.balanceCents)}. Save the limit to top it up.`}
-          </p>
-        )}
-        {pending && (
-          <div className="mt-3 flex flex-wrap items-center gap-2">
-            <span className="text-[12px] text-zinc-400">
-              We sent a code to {pending.sentTo} to set the limit to {fmtCents(pending.requestedCents)}.
-              {pending.paymentCents > 0 && ` Next, Stripe takes ${fmtCents(pending.paymentCents)} for your prepaid balance.`}
+    <Panel>
+      <div className="flex flex-wrap items-center gap-x-6 gap-y-3 px-5 py-4">
+        <div className="min-w-0 flex-[1_1_320px]">
+          <p className="flex flex-wrap items-baseline gap-x-6 gap-y-1 text-[13.5px] leading-[20px] text-faint">
+            <span>
+              <span className="tabular-nums text-zinc-100">{fmtCents(estimatedCents)}</span> so far
             </span>
-            <input
-              className={`${INPUT_BASE} h-[32px] w-28 px-2.5 font-mono tracking-[0.2em]`}
-              aria-label="Six-digit code from your email"
-              placeholder="000000"
-              inputMode="numeric"
-              maxLength={7}
-              value={code}
-              onChange={(e) => setCode(e.target.value)}
-            />
-            <KitButton variant="primary" size="sm" onClick={confirm} disabled={busy || code.replace(/\D/g, '').length !== 6}>
-              {pending.paymentCents > 0 ? 'Confirm and pay' : 'Confirm'}
-            </KitButton>
-          </div>
-        )}
-        {shown && <p className="mt-2 text-[12.5px] text-zinc-400">{shown}</p>}
-        <p className="mt-3 max-w-[72ch] text-[12.5px] leading-[19px] text-faint">
-          Usage past your plan is paid for in advance. Raising the limit takes a code from your email and, when your balance does
-          not cover it, a card payment through Stripe for the difference. Each month&apos;s usage past the plan is drawn from the
-          balance, never past your limit, and the rest carries over. With the limit off, every quota is a hard cap. Limits are
-          checked every few minutes, so usage can run a little past one. Agents and API keys can read the limit but never change it.
-        </p>
-      </KitCardBody>
-    </KitCard>
+            {projectionCents !== null && (
+              <span>
+                About <span className="tabular-nums text-zinc-100">{fmtCents(projectionCents)}</span> by {cycleLastDay}
+              </span>
+            )}
+            <span>
+              Limit <span className="tabular-nums text-zinc-100">{limitLabel(spend.limitCents)}</span>
+            </span>
+            <span>
+              Prepaid <span className="tabular-nums text-zinc-100">{fmtCents(spend.balanceCents)}</span>
+            </span>
+          </p>
+          {consequence && <p className="mt-1.5 text-[12.5px] leading-[18px] text-zinc-400">{consequence}</p>}
+        </div>
+        {changeHref && <KitButtonLink href={changeHref}>Change limit</KitButtonLink>}
+      </div>
+    </Panel>
   )
 }
+
+/** The self-healing loop's checks this cycle: never metered on any plan. */
+function SelfHealing({ activity, now, onRetry }: { activity: AutonomyActivity | null; now: number; onRetry: () => void }) {
+  if (!activity) {
+    return (
+      <Panel>
+        <ErrorRow title="Could not load self-healing checks. Try again." hint="Checks keep running either way." onRetry={onRetry} />
+      </Panel>
+    )
+  }
+  const ran = activity.runsThisCycle > 0
+  return (
+    <Panel>
+      <ul>
+        <FactRow
+          label={
+            <span className="relative">
+              {/* Violet marks what Backenly itself does. It hangs in the margin so the label lines up with the quotas above. */}
+              <span aria-hidden className="absolute -left-[13px] top-1/2 h-[6px] w-[6px] -translate-y-1/2 rounded-full bg-violet-400" />
+              Self-healing checks
+            </span>
+          }
+          value={
+            ran ? (
+              <>
+                <span className="text-zinc-100">{fmtCount(activity.runsThisCycle)}</span>
+                <span className="text-faint"> this cycle</span>
+              </>
+            ) : (
+              <span className="text-faint">None this cycle</span>
+            )
+          }
+          middle={
+            ran
+              ? activity.lastAt
+                ? `Last check ${fmtAgo(activity.lastAt, now)}`
+                : null
+              : 'Starts once your agent builds something'
+          }
+          fact="Never metered"
+        />
+      </ul>
+    </Panel>
+  )
+}
+
+// ─── The page ────────────────────────────────────────────────────────────────
+
+/** Re-renders every `ms`, so a relative time stays true while the page is open. */
+function useNow(ms: number): number {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), ms)
+    return () => clearInterval(t)
+  }, [ms])
+  return now
+}
+
+type Load = { state: 'loading' } | { state: 'error' } | { state: 'ready'; data: PageData }
 
 export function UsageView({ orgId }: { orgId?: string | null }) {
   const router = useRouter()
   const hrefs = useOrgHrefs()
-  const [usage, setUsage] = useState<UsageData | null>(null)
-  const [account, setAccount] = useState<AccountUsage | null>(null)
-  const [accountVersion, setAccountVersion] = useState(0)
-  const [activity, setActivity] = useState<AutonomyActivity | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
-  // Back from Stripe Checkout. Read once in the browser; nothing it decides is
-  // rendered before the account loads, so the server render never differs.
-  const [checkout] = useState(readCheckoutReturn)
-  const [checkoutNotice, setCheckoutNotice] = useState<string | null>(
-    checkout?.outcome === 'canceled' ? CHECKOUT_CANCELED : null,
-  )
+  const [load, setLoad] = useState<Load>({ state: 'loading' })
+  const [attempt, setAttempt] = useState(0)
+  const now = useNow(15_000)
+  const retry = () => {
+    setLoad({ state: 'loading' })
+    setAttempt((n) => n + 1)
+  }
 
-  // Report a paid Checkout Session so the balance and limit update now rather
-  // than whenever Stripe's webhook arrives. Crediting is keyed on the session,
-  // so this and the webhook together still credit the payment once.
+  // Stripe Checkout used to send owners back here after paying for a spend
+  // limit; the limit lives on Billing now, so a return from a session opened
+  // before that change is passed on with its query, and Billing reports it.
   useEffect(() => {
-    if (!checkout) return
-    window.history.replaceState(null, '', window.location.pathname)
-    if (!checkout.sessionId) return
-    let cancelled = false
-    fetch('/api/billing/spend-limit/prepay', {
-      method: 'POST',
-      credentials: 'include',
-      headers: { 'Content-Type': 'application/json' },
-      body: scopedBody({ sessionId: checkout.sessionId }, orgId),
-    })
-      .then(async (res) => {
-        const data = await res.json().catch(() => ({}))
-        if (cancelled) return
-        if (!res.ok) setCheckoutNotice(data.error || 'Stripe has not confirmed the payment yet. Your balance updates when it does.')
-        else if (data.outcome === 'unpaid') setCheckoutNotice('Stripe is still processing the payment. Your balance updates when it clears.')
-        else setCheckoutNotice(`Payment received. Your prepaid balance is ${fmtCents(data.balanceCents ?? 0)}.`)
-      })
-      .catch(() => {
-        if (!cancelled) setCheckoutNotice('Stripe has not confirmed the payment yet. Your balance updates when it does.')
-      })
-      .finally(() => {
-        if (!cancelled) setAccountVersion((v) => v + 1)
-      })
-    return () => { cancelled = true }
-  }, [checkout, orgId])
+    if (new URLSearchParams(window.location.search).has('prepay')) router.replace(`${hrefs.billing}${window.location.search}`)
+  }, [router, hrefs.billing])
 
+  // The page is keyed by organization, so a new one starts here from 'loading'.
   useEffect(() => {
     let cancelled = false
-    async function load() {
-      setLoading(true); setError(null)
-      try {
-        const res = await fetch(scoped('/api/billing/usage', orgId), { credentials: 'include' })
-        if (res.status === 401) { router.push(`/auth/login?redirect=${encodeURIComponent(window.location.pathname)}`); return }
-        if (!res.ok) throw new Error('Failed to load usage')
-        const data = await res.json()
-        if (!cancelled) setUsage(data)
-      } catch {
-        if (!cancelled) setError('Could not load usage data.')
-      } finally {
-        if (!cancelled) setLoading(false)
+    ;(async () => {
+      // Everything the page shows, in parallel, then rendered once.
+      const [usage, account, activity, spend, orgs] = await Promise.all([
+        getJson<BillingUsage>(scoped('/api/billing/usage', orgId)),
+        getJson<AccountUsage>(scoped('/api/usage/account', orgId)),
+        getJson<AutonomyActivity>(scoped('/api/account/autonomy-activity', orgId)),
+        fetchSpendLimit(orgId),
+        orgId ? getJson<{ orgs?: Array<{ id: string; name: string }> }>('/api/org/list') : Promise.resolve(null),
+      ])
+      if (cancelled) return
+      if (!usage.ok && usage.status === 401) {
+        router.push(`/auth/login?redirect=${encodeURIComponent(window.location.pathname)}`)
+        return
       }
+      if (!usage.ok || !account.ok || !Array.isArray(account.data?.axes)) {
+        setLoad({ state: 'error' })
+        return
+      }
+      const orgName = orgs && orgs.ok ? (orgs.data.orgs?.find((o) => o.id === orgId)?.name ?? null) : null
+      setLoad({
+        state: 'ready',
+        data: {
+          usage: usage.data,
+          account: account.data,
+          activity: activity.ok ? activity.data : null,
+          spend,
+          orgName,
+        },
+      })
+    })()
+    return () => {
+      cancelled = true
     }
-    async function loadActivity() {
-      try {
-        const res = await fetch(scoped('/api/account/autonomy-activity', orgId), { credentials: 'include' })
-        if (res.ok && !cancelled) setActivity(await res.json())
-      } catch { /* non-blocking — the card just stays quiet if it can't load */ }
-    }
-    load()
-    loadActivity()
-    return () => { cancelled = true }
-  }, [router, orgId])
+  }, [orgId, attempt, router])
 
-  // The pooled quotas. If this cannot load, the meters below fall back to the
-  // plan summary rather than showing nothing.
-  useEffect(() => {
-    let cancelled = false
-    fetch(scoped('/api/usage/account', orgId), { credentials: 'include' })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d) => { if (!cancelled) setAccount(d) })
-      .catch(() => {})
-    return () => { cancelled = true }
-  }, [accountVersion, orgId])
+  const data = load.state === 'ready' ? load.data : null
+  const resetAt = data?.usage.resetAt ?? null
+  const cycleLastDay = resetAt ? fmtCycleLastDay(resetAt, now) : ''
 
-  const resetDate = usage
-    ? new Date(usage.resetAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
-    : ''
-  const resetNote = usage ? `Resets ${resetDate}` : undefined
-  const apiReqUsed = usage ? parseInt(usage.apiRequestsUsed, 10) || 0 : 0
+  const quotas = useMemo(() => {
+    if (!data) return []
+    const byAxis = new Map(data.account.axes.map((a) => [a.axis, a]))
+    const known = AXIS_ORDER.flatMap((axis) => (byAxis.has(axis) ? [quotaOf(byAxis.get(axis)!, cycleLastDay, now)] : []))
+    const others = data.account.axes.filter((a) => !AXIS_ORDER.includes(a.axis)).map((a) => quotaOf(a, cycleLastDay, now))
+    return [...known, ...others, aiCreditsQuota(data.usage)]
+  }, [data, cycleLastDay, now])
+
+  const planName = data ? planDisplayName(data.usage.planName) : null
+  const canManage = data?.usage.canManage !== false
+  const overageOn = !!data && planAllowsOverage(data.account.planName) && (data.account.overage.mode === 'enforce' || data.account.overage.mode === 'shadow')
+  const apiRequests = data ? Number.parseInt(data.usage.apiRequestsUsed, 10) || 0 : 0
+
+  const header = (
+    <PageHeader
+      flush
+      title="Usage"
+      meta={
+        load.state === 'loading' ? (
+          <Skeleton className="h-[13px] w-[84px]" />
+        ) : resetAt ? (
+          <span className="text-[13px] tabular-nums text-faint">Resets {fmtDay(resetAt, { utc: true, now })}</span>
+        ) : undefined
+      }
+      description={
+        load.state === 'loading' ? (
+          <Skeleton className="my-[4px] h-[14px] w-[300px] max-w-full" />
+        ) : data ? (
+          orgId ? (
+            `Pooled across every project in ${data.orgName ?? 'this organization'}.`
+          ) : (
+            'Pooled across every project on your account.'
+          )
+        ) : undefined
+      }
+    />
+  )
 
   return (
     <OrgShell>
       <div className={`${PAGE_WIDTH} ${PAGE_GUTTER} pb-16`}>
-        <PageHeader
-          className="!px-0"
-          title="Usage"
-          meta={usage ? <span className="text-[13px] text-faint">{planDisplayName(usage.planName)} plan</span> : undefined}
-          description={
-            orgId
-              ? 'Everything this organization has used in the current billing cycle, pooled across all of its projects.'
-              : 'Everything this account has used in the current billing cycle, pooled across all of its projects.'
-          }
-          actions={
-            <KitButton variant="secondary" iconRight={ArrowUpRight} onClick={() => router.push(hrefs.billing)}>
-              Plans and billing
-            </KitButton>
-          }
-        />
+        {header}
 
-        {loading ? (
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3" aria-hidden>
-            {[0, 1, 2, 3, 4, 5].map((i) => (
-              <Skeleton key={i} className="h-[104px] w-full rounded-[10px]" />
-            ))}
+        {load.state === 'loading' && (
+          <div className="flex flex-col gap-[40px]" aria-busy="true">
+            <div>
+              {/* The heading names the plan, which is not known yet. */}
+              <div className="mb-2.5 flex min-h-[28px] items-center">
+                <Skeleton className="h-[13px] w-[124px]" />
+              </div>
+              <Panel>
+                <SkeletonRows count={7} />
+              </Panel>
+            </div>
+            <Section id="self-healing" title="Self-healing">
+              <Panel>
+                <SkeletonRows count={1} />
+              </Panel>
+            </Section>
           </div>
-        ) : error ? (
-          <div className={`${PLATE} border ${EDGE} ${R_PANEL}`}>
-            <EmptyState
-              icon={AlertTriangle}
-              title="Usage did not load"
-              description="The usage service did not answer. Your quotas and limits are still enforced."
-              action={
-                <KitButton icon={RefreshCw} onClick={() => location.reload()}>
-                  Try again
-                </KitButton>
-              }
-            />
-          </div>
-        ) : usage ? (
-          <>
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-              {/*
-                AI credits are enforced (a spent budget returns 402 on backend_chat
-                and generate_function), so they must be visible here. The page
-                already fetched them and rendered nothing, which meant the first
-                signal a user got was their agent being refused.
-              */}
-              <Meter icon={Sparkles} label="AI credits" used={usage.aiCreditsUsed} max={usage.monthlyAiCredits} format={fmtNum} resetNote={resetNote} />
-              {/* A count, not a quota: API requests are unlimited on every plan. */}
-              <Meter icon={Activity} label="API requests" used={apiReqUsed} max={null} format={fmtNum} />
-              {account ? (
-                account.axes.map((a) => (
-                  <AxisMeter key={a.axis} a={a} resetNote={resetNote} planBillsOverage={account.axes.some((x) => x.billable)} />
-                ))
-              ) : (
-                <>
-                  <Meter icon={Bot} label="Function invocations" used={usage.aiFunctionInvocationsUsed} max={usage.maxAiFunctionInvocationsPerMonth} format={fmtNum} resetNote={resetNote} />
-                  <Meter icon={Database} label="PostgreSQL storage" used={usage.dbStorageUsedMb} max={usage.maxPostgresStorageMb} format={fmtStorage} />
-                  <Meter icon={HardDrive} label="File storage" used={usage.fileStorageUsedMb} max={usage.maxFileStorageMb} format={fmtStorage} />
-                  <Meter icon={Users} label="Monthly active users" used={usage.monthlyActiveUsersUsed} max={usage.maxMonthlyActiveUsers} format={fmtNum} resetNote={resetNote} />
-                </>
-              )}
+        )}
+
+        {load.state === 'error' && (
+          <Section id="included" title="Included in your plan">
+            <Panel>
+              <ErrorRow
+                title="Could not load usage. Try again."
+                hint="Your quotas and limits are still enforced, and nothing you built is affected."
+                onRetry={retry}
+              />
+            </Panel>
+          </Section>
+        )}
+
+        {data && (
+          <div className="flex flex-col gap-[40px]">
+            {data.account.axes.some((a) => a.grace) && <GraceNotices axes={data.account.axes} graceDays={data.account.graceDays} />}
+
+            <div>
+              <Section id="included" title={`Included in ${planName}`}>
+                <Panel>
+                  <ul className="divide-y divide-white/[0.06]">
+                    {quotas.map((q) => (
+                      <QuotaRow key={q.key} q={q} />
+                    ))}
+                    <FactRow
+                      label="API requests"
+                      value={<span className="text-zinc-100">{fmtCount(apiRequests)}</span>}
+                      fact="Not capped"
+                    />
+                  </ul>
+                </Panel>
+              </Section>
+              {planName === 'Free' ? (
+                <p className="mt-3 text-[12.5px] leading-[18px] text-faint">Free has hard limits. Nothing is billed.</p>
+              ) : planAllowsOverage(data.account.planName) && !overageOn ? (
+                <p className="mt-3 text-[12.5px] leading-[18px] text-faint">Every quota is a hard cap. Nothing is billed past the plan.</p>
+              ) : null}
             </div>
 
-            {account && <GraceNotices axes={account.axes} graceDays={account.graceDays} />}
-            {/* Free has no usage past the plan, only hard caps, so there is nothing to set or pay for. */}
-            {account && planAllowsOverage(account.planName) && (
-              <OverageCard usage={account} notice={checkoutNotice} onChanged={() => setAccountVersion((v) => v + 1)} orgId={orgId} />
-            )}
-
-            {activity && (
-              <KitCard className="mt-4">
-                <KitCardHeader
-                  title="Autonomy"
-                  description="Included on every plan. Detection and repair run no model, so it never draws your credits"
-                  actions={
-                    <span className="inline-flex items-baseline gap-1.5">
-                      <span className="text-[20px] font-medium tabular-nums leading-none text-white">{fmtNum(activity.runsThisCycle)}</span>
-                      <span className="text-[12px] text-faint">runs this cycle</span>
-                    </span>
-                  }
+            {overageOn && (
+              <Section id="past-the-plan" title="Past the plan">
+                <PastThePlan
+                  account={data.account}
+                  spend={data.spend}
+                  cycleLastDay={cycleLastDay}
+                  changeHref={canManage ? `${hrefs.billing}#spend-limit` : null}
+                  onRetry={retry}
                 />
-                <KitCardBody>
-                  <AutonomyChart perDay={activity.perDay} />
-                </KitCardBody>
-              </KitCard>
+              </Section>
             )}
 
-            <div className="mt-5">
-              <KitNote tone="info" icon={Info} title="Counters lag a little">
-                Database storage is measured when you open this page, so it is at most a few minutes old. Egress can take
-                up to an hour to show. Autonomy runs never draw from your credits; keeping backends alive is included.
-              </KitNote>
-            </div>
-
-            <p className="mt-4 text-[12.5px] text-faint">
-              Need more headroom?{' '}
-              <Link href={hrefs.billing} className="font-medium text-zinc-200 underline-offset-2 hover:underline">
-                Compare plans
-              </Link>
-              .
-            </p>
-          </>
-        ) : null}
+            <Section id="self-healing" title="Self-healing">
+              <SelfHealing activity={data.activity} now={now} onRetry={retry} />
+            </Section>
+          </div>
+        )}
       </div>
     </OrgShell>
-  )
-}
-
-// ─── Autonomy per-day chart ───────────────────────────────────────────────────
-// Single-series bar chart, one bar per day of the cycle. Violet bars for days
-// the loop ran, hairline ticks for quiet days. Flat kit — no gradients, mono
-// axis labels. Real AuditLog counts; an empty cycle reads honestly empty.
-
-function AutonomyChart({ perDay }: { perDay: { date: string; count: number }[] }) {
-  const total = perDay.reduce((s, d) => s + d.count, 0)
-  const max = Math.max(1, ...perDay.map((d) => d.count))
-
-  if (total === 0) {
-    return (
-      <div className="flex items-center gap-2 py-2">
-        <ShieldCheck className="h-3.5 w-3.5 flex-shrink-0 text-zinc-500" />
-        <p className="text-[12px] text-faint">
-          No autonomy runs recorded yet this cycle. The loop reports here as it works.
-        </p>
-      </div>
-    )
-  }
-
-  const first = perDay[0]?.date
-  const label = first
-    ? new Date(first + 'T00:00:00Z').toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' })
-    : ''
-
-  return (
-    <div>
-      <div className="flex h-16 items-end gap-[3px]" role="img" aria-label={`Autonomy runs per day this cycle: ${total} total`}>
-        {perDay.map((d) => {
-          const h = d.count === 0 ? 2 : Math.max(4, Math.round((d.count / max) * 64))
-          return (
-            <div
-              key={d.date}
-              title={`${d.date}: ${d.count} run${d.count === 1 ? '' : 's'}`}
-              className="flex min-w-[2px] flex-1 items-end"
-            >
-              <div
-                className={`w-full rounded-[2px] ${d.count > 0 ? 'bg-violet-400/80' : 'bg-white/[0.06]'}`}
-                style={{ height: h }}
-              />
-            </div>
-          )
-        })}
-      </div>
-      <div className="mt-2 flex items-center justify-between text-[12px] tabular-nums text-faint">
-        <span>{label}</span>
-        <span>Today</span>
-      </div>
-    </div>
   )
 }

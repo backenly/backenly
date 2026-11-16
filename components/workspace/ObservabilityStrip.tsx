@@ -1,110 +1,136 @@
 'use client'
 
 /**
- * ObservabilityStrip — the honest Overview metrics row
- * (IA restructure §6.2).
+ * Overview's "Last 24 hours": the three numbers Monitoring leads with, under
+ * Monitoring's own labels and definitions, read from the same route
+ * (GET /api/monitoring/stats, ApiRequestLog).
  *
- * Four tiles, one story: the last 24 hours of real runtime traffic
- * (ApiRequestLog via /api/monitoring/stats). Storage and live realtime
- * connections were dropped from the strip — each already has a dedicated
- * panel on this same page showing the same number, and a metric shown twice
- * is a metric trusted half as much. Deliberately NO CPU / Memory / Disk
- * charts — we are multi-tenant on one box, so per-project machine metrics
- * would be fiction.
+ *   Requests          Server errors          Average response
+ *   18,641            11  0.06%              62 ms
  *
- * The failures tile counts SERVER errors (5xx) so it can never contradict
- * the Reliability tile beside it (also 5xx-based). Client 4xx noise lives in
- * Monitoring where it can be explored, not on the headline strip.
- *
- * One strip split by hairlines (kit StatStrip), tabular Geist numerals, zinc by
- * default, amber/rose only for a reading worth noticing.
+ * Full numbers ("18,641", never "19k"), so the Overview and Monitoring print
+ * the same figure. Server errors are 5xx only, as Monitoring counts them, with
+ * their share of requests; white only when the server says the rate
+ * is worth a look. Reliability is gone: it restated the same 5xx count as a
+ * percentage beside it. With no traffic the panel says so in one line.
  */
 
-import { useEffect, useState } from 'react'
-import { Stat, StatStrip } from '@/components/inspector/kit'
+import { useCallback, useEffect, useState } from 'react'
+import { Skeleton } from '@/components/inspector/kit'
+import { Panel } from '@/components/autonomy/rows'
+import { ErrorRow } from '@/components/console/states'
+
+interface Reading {
+  value: number
+  status: string
+}
 
 interface StatsResponse {
-  responseTime: { value: number; status: string }
-  uptime: { value: number; status: string; hasData: boolean }
-  errors: { value: number; status: string }
-  serverErrors?: { value: number; status: string }
-  requests: { value: number; status: string }
+  responseTime: Reading
+  serverErrors?: Reading
+  requests: Reading
 }
 
-interface ObservabilityStripProps {
-  projectId: string
+// Monochrome: a reading that needs a look is white, not amber or red; the number says how bad.
+const TONE: Record<string, string> = {
+  warning: 'text-zinc-50',
+  critical: 'text-zinc-50',
 }
 
-type Tone = 'neutral' | 'good' | 'warn' | 'bad'
-
-// A healthy reading stays neutral: colour is for the reading that needs you.
-const STATUS_TONE: Record<string, Tone> = {
-  healthy: 'neutral',
-  warning: 'warn',
-  critical: 'bad',
+/** "0.06%", "<0.01%", "12%": the server-error share as Monitoring would say it. */
+export function errorShare(errors: number, requests: number): string {
+  if (requests <= 0 || errors <= 0) return '0%'
+  const pct = (errors / requests) * 100
+  if (pct < 0.01) return '<0.01%'
+  if (pct < 10) return `${Number(pct.toFixed(2))}%`
+  return `${Math.round(pct)}%`
 }
 
-export function ObservabilityStrip({ projectId }: ObservabilityStripProps) {
+export function ObservabilityStrip({ projectId, refreshSignal = 0 }: { projectId: string; refreshSignal?: number }) {
   const [stats, setStats] = useState<StatsResponse | null>(null)
-  const [loaded, setLoaded] = useState(false)
+  const [state, setState] = useState<'loading' | 'ready' | 'error'>('loading')
+  const [retrying, setRetrying] = useState(false)
 
-  useEffect(() => {
-    if (!projectId) return
-    let cancelled = false
-    fetch(`/api/monitoring/stats?projectId=${projectId}&timeRange=24h`, { credentials: 'include' })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((j) => { if (!cancelled && j?.data) setStats(j.data) })
-      .catch(() => {})
-      .finally(() => { if (!cancelled) setLoaded(true) })
-    return () => { cancelled = true }
+  const load = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/monitoring/stats?projectId=${projectId}&timeRange=24h`, { credentials: 'include' })
+      const body = res.ok ? await res.json() : null
+      if (!body?.data?.requests) throw new Error('no stats')
+      setStats(body.data)
+      setState('ready')
+    } catch {
+      // A failed refresh keeps the numbers already shown.
+      setState((s) => (s === 'ready' ? 'ready' : 'error'))
+    } finally {
+      setRetrying(false)
+    }
   }, [projectId])
 
-  const hasTraffic = (stats?.requests.value ?? 0) > 0
-  const failed = stats?.serverErrors ?? { value: 0, status: 'healthy' }
+  useEffect(() => {
+    void load()
+  }, [load, refreshSignal])
 
-  const tiles: Array<{ key: string; label: string; value: string; tone: Tone; hint?: string }> = [
+  if (state === 'error') {
+    return (
+      <Panel>
+        <ErrorRow
+          things="traffic"
+          onRetry={() => {
+            setRetrying(true)
+            void load()
+          }}
+          retrying={retrying}
+        />
+      </Panel>
+    )
+  }
+
+  const requests = stats?.requests.value ?? 0
+  if (state === 'ready' && requests === 0) {
+    return (
+      <Panel>
+        <p className="px-[20px] py-[14px] text-[13px] leading-[20px] text-zinc-400">No requests in the last 24 hours.</p>
+      </Panel>
+    )
+  }
+
+  const errors = stats?.serverErrors ?? { value: 0, status: 'healthy' }
+  const cells: Array<{ key: string; label: string; value: string; extra?: string; tone?: string }> = [
+    { key: 'requests', label: 'Requests', value: requests.toLocaleString('en-US') },
     {
-      // The 24h window is stated once by the heading above the strip, so the
-      // readings do not each carry a "24h" suffix.
-      key: 'requests', label: 'Requests',
-      value: fmtCount(stats?.requests.value ?? 0), tone: 'neutral',
+      key: 'errors',
+      label: 'Server errors',
+      value: errors.value.toLocaleString('en-US'),
+      extra: errors.value > 0 ? errorShare(errors.value, requests) : undefined,
+      tone: errors.value > 0 ? TONE[errors.status] : undefined,
     },
     {
-      key: 'reliability', label: 'Reliability',
-      value: stats?.uptime.hasData ? `${stats.uptime.value}%` : '—',
-      tone: stats?.uptime.hasData ? STATUS_TONE[stats.uptime.status] ?? 'neutral' : 'neutral',
-      hint: stats?.uptime.hasData ? undefined : 'No traffic yet',
-    },
-    {
-      key: 'latency', label: 'Average response',
-      value: hasTraffic ? `${stats?.responseTime.value ?? 0} ms` : '—',
-      tone: hasTraffic ? STATUS_TONE[stats?.responseTime.status ?? 'healthy'] ?? 'neutral' : 'neutral',
-    },
-    {
-      key: 'failures', label: 'Server errors',
-      value: fmtCount(failed.value),
-      tone: failed.value > 0 ? STATUS_TONE[failed.status] ?? 'warn' : 'neutral',
+      key: 'latency',
+      label: 'Average response',
+      value: `${(stats?.responseTime.value ?? 0).toLocaleString('en-US')} ms`,
+      tone: TONE[stats?.responseTime.status ?? ''],
     },
   ]
 
   return (
-    <StatStrip>
-      {tiles.map((t) => (
-        <Stat
-          key={t.key}
-          label={t.label}
-          value={t.value}
-          hint={t.hint}
-          tone={t.tone}
-          loading={!loaded}
-        />
-      ))}
-    </StatStrip>
+    <Panel>
+      <dl className="grid grid-cols-1 divide-y divide-white/[0.06] sm:grid-cols-3 sm:divide-x sm:divide-y-0">
+        {cells.map((c) => (
+          <div key={c.key} className="flex min-w-0 items-baseline justify-between gap-[12px] px-[20px] py-[12px] sm:block sm:py-[14px]">
+            <dt className="text-[12.5px] leading-[18px] text-faint">{c.label}</dt>
+            <dd className="flex min-w-0 items-baseline gap-[8px] sm:mt-[4px]">
+              {state === 'loading' ? (
+                <Skeleton className="h-[22px] w-[72px]" />
+              ) : (
+                <>
+                  <span className={`text-[20px] font-medium leading-[26px] tracking-[-0.02em] tabular-nums ${c.tone ?? 'text-white'}`}>{c.value}</span>
+                  {c.extra && <span className="text-[12.5px] tabular-nums text-faint">{c.extra}</span>}
+                </>
+              )}
+            </dd>
+          </div>
+        ))}
+      </dl>
+    </Panel>
   )
-}
-
-function fmtCount(n: number): string {
-  if (n < 1000) return String(n)
-  if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}k`
-  return `${(n / 1_000_000).toFixed(1)}M`
 }

@@ -54,6 +54,8 @@ function AppLayoutContent({ children }: { children: React.ReactNode }) {
 const ORG_SHELL_PREFIXES = [
   '/app/usage', '/app/billing', '/app/members', '/app/referral', '/app/support',
   '/app/org/', '/app/organizations', '/app/new-organization', '/app/welcome',
+  // The console's component gallery (app/app/%5Fkit): development builds only.
+  '/app/_kit',
 ]
 
 function isSelfGuarded(pathname: string | null): boolean {

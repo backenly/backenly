@@ -7,6 +7,7 @@ import { canAccessProject, canWriteProject } from '@/lib/edition/guard'
 import { rowLastError, withLastErrors } from '@/lib/services/ai-functions/run-records'
 import { governedChange, withChangeAttribution } from '@/lib/changes/ledger'
 import { isGeneratedEndpoint, projectGeneratedRoutes } from '@/lib/services/domain-endpoints'
+import { functionCaptureHealth, ROW_EVENT_FUNCTION_TRIGGERS } from '@/lib/webhooks/function-capture'
 
 /**
  * GET /api/projects/[id]/ai-functions
@@ -113,8 +114,18 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
     // `generated`: Backenly made it for a table (lib/services/domain-endpoints.ts).
     // The console counts and groups by this, never by a name's shape.
     const generated = await projectGeneratedRoutes(params.id)
+
+    // Row-event functions fire from the database's capture trigger, as row
+    // webhooks do. Whether it is on is read from the catalog, and only when an
+    // active function needs it, so a project without one asks nothing more.
+    const needsCapture = deduped.some((fn) => fn.status !== 'inactive' && ROW_EVENT_FUNCTION_TRIGGERS.has(fn.triggerType))
+    const capturedTables = needsCapture
+      ? await (await import('@/lib/webhooks/capture')).listCapturedTables(params.id).catch(() => [] as string[])
+      : []
+
     return NextResponse.json({
       functions: deduped.map((fn) => ({ ...fn, generated: isGeneratedEndpoint(fn, generated) })),
+      capture: functionCaptureHealth(deduped, capturedTables),
     })
   } catch (error: any) {
     console.error('[AI Functions] GET error:', error)

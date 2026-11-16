@@ -18,6 +18,8 @@
 
 import { act, fireEvent, render, screen } from '@testing-library/react'
 import { ClientKeysPanel } from '@/components/hub/ClientKeysPanel'
+import { forgetProjectReads } from '@/lib/api/projects'
+import { clearProjectRoleCache } from '@/lib/hooks/useProjectRole'
 
 jest.mock('next/navigation', () => ({
   useRouter: () => ({ push: jest.fn(), replace: jest.fn(), prefetch: jest.fn(), back: jest.fn(), refresh: jest.fn() }),
@@ -33,6 +35,8 @@ function json(status: number, body: unknown) {
 }
 
 beforeEach(() => {
+  forgetProjectReads()
+  clearProjectRoleCache()
   posted.length = 0
   global.fetch = jest.fn(async (url: any, init?: any) => {
     const path = String(url).split('?')[0]
@@ -41,6 +45,7 @@ beforeEach(() => {
       return json(200, { apiKey: { key: 'svc_live_test', id: 'k1', name: 'x' } })
     }
     if (path === '/api/api-keys') return json(200, { apiKeys: [] })
+    if (path === '/api/projects/p1') return json(200, { success: true, data: { id: 'p1', name: 'shop', role: 'OWNER', canWrite: true, canAdminister: true } })
     return json(404, {})
   }) as any
 })
@@ -72,5 +77,13 @@ it('the option copy says what the key actually is', async () => {
   await act(async () => {})
   fireEvent.click(screen.getAllByText('New key')[0])
   expect(screen.getByText(/bypasses row security/i)).toBeTruthy()
-  expect(screen.getByText(/refuses it from a browser/i)).toBeTruthy()
+  expect(screen.getByText(/refused from a browser/i)).toBeTruthy()
+})
+
+it('starts a new key at Client, the one safe in a browser', async () => {
+  render(<ClientKeysPanel />)
+  await act(async () => {})
+  fireEvent.click(screen.getAllByText('New key')[0])
+  expect(screen.getByDisplayValue('client')).toBeChecked()
+  expect(screen.getByDisplayValue('admin')).not.toBeChecked()
 })

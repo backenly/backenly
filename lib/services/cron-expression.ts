@@ -184,3 +184,69 @@ export function scheduleToCron(schedule: string): string | null {
 
   return null
 }
+
+// ── Words ────────────────────────────────────────────────────────────────────
+
+const WEEKDAY_WORDS = ['Sundays', 'Mondays', 'Tuesdays', 'Wednesdays', 'Thursdays', 'Fridays', 'Saturdays']
+
+function ordinal(n: number): string {
+  const tens = n % 100
+  if (tens >= 11 && tens <= 13) return `${n}th`
+  return `${n}${['th', 'st', 'nd', 'rd'][n % 10] ?? 'th'}`
+}
+
+const hhmm = (h: number, m: number) => `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`
+
+/**
+ * A five-field schedule in words, for a person reading a list: "Daily at
+ * 02:00 UTC", "Every 5 minutes", "Weekdays at 09:30 UTC", "Mondays at 08:00
+ * UTC", "Monthly on the 1st at 09:00 UTC". Null for a shape it does not say
+ * plainly (the caller then shows the expression itself), never a guess: the
+ * words have to mean exactly what matchesCronExpression fires on.
+ */
+export function cronInWords(expr: string | null | undefined): string | null {
+  if (!expr || !isValidCronExpression(expr)) return null
+  const [min, hour, dom, month, dow] = expr.trim().split(/\s+/)
+  const num = (s: string) => (/^\d+$/.test(s) ? Number(s) : null)
+  const step = (s: string) => {
+    const m = s.match(/^\*\/(\d+)$/)
+    return m ? Number(m[1]) : null
+  }
+  if (month !== '*') return null
+
+  const everyDay = dom === '*' && dow === '*'
+  // Sub-daily repetition.
+  if (everyDay && hour === '*') {
+    if (min === '*') return 'Every minute'
+    const everyMin = step(min)
+    if (everyMin) return everyMin === 1 ? 'Every minute' : `Every ${everyMin} minutes`
+    const at = num(min)
+    if (at !== null) return at === 0 ? 'Every hour' : `Every hour at :${String(at).padStart(2, '0')}`
+    return null
+  }
+  const everyHours = step(hour)
+  if (everyDay && everyHours && num(min) !== null) {
+    const m = num(min)!
+    return `Every ${everyHours === 1 ? 'hour' : `${everyHours} hours`}${m ? ` at :${String(m).padStart(2, '0')}` : ''}`
+  }
+
+  // Once (or a few times) a day at fixed times.
+  const m = num(min)
+  const hours = hour.split(',').map(num)
+  if (m === null || hours.some((h) => h === null)) return null
+  const times = hours.map((h) => hhmm(h!, m))
+  const at = `at ${times.length > 1 ? `${times.slice(0, -1).join(', ')} and ${times[times.length - 1]}` : times[0]} UTC`
+
+  if (everyDay) return `Daily ${at}`
+  if (dom === '*') {
+    if (dow === '1-5') return `Weekdays ${at}`
+    if (dow === '0,6' || dow === '6,0' || dow === '6,7') return `Weekends ${at}`
+    const days = dow.split(',').map(num)
+    if (days.some((d) => d === null)) return null
+    const words = days.map((d) => WEEKDAY_WORDS[d! % 7])
+    return `${words.length > 1 ? `${words.slice(0, -1).join(', ')} and ${words[words.length - 1]}` : words[0]} ${at}`
+  }
+  const day = num(dom)
+  if (day !== null && dow === '*') return `Monthly on the ${ordinal(day)} ${at}`
+  return null
+}

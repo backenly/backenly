@@ -3,47 +3,53 @@
 /**
  * AutonomyGuardrailsSettings: the Autonomy page.
  *
- * THE one autonomy surface (2026-07-18): what's waiting on you right now
- * (ReviewQueuePanel, folded in from the deleted /review-queue page), the mode,
- * what is always gated, a trust scoreboard, the changes Backenly made with
- * their way back and the recent-activity feed. Restoring the state before any
- * change is History.
+ * Backenly's own loop and nothing else: whether it is checking, what waits on
+ * you, what it found, what it changed (with the result and Undo), and the
+ * mode. Restoring the state before any change is History.
  *
- * Rebuilt 2026-10-02 on the console kit, and again 2026-11-03 so it reads as
- * one product rather than a stack of explained cards: the mode is a switch in
- * the header with its one-sentence meaning as the page's lede, every section
- * carries its heading above its panel, every list uses the same row
- * (components/autonomy/rows.tsx), and the activity feed shows what Backenly
- * did in words, with the loop's own bookkeeping folded away. The upgrade link
- * goes to Billing, which exists only on Cloud.
+ * Approved by the founder on 2026-11-03 ("this is professional use this") and
+ * improved in place on 2026-11-16, keeping that structure (the mode switch in
+ * the header with its one-sentence meaning, headings above panels, one row
+ * anatomy from components/autonomy/rows.tsx):
+ *   - a heartbeat in the header, "◔ Checked 40 s ago" (LoopMark), the page's one violet
+ *     mark, read from what the loop's last pass could check (/health
+ *     `sensors`); and a Checks section with the daily scan's [Scan now] and the
+ *     architecture review's [Look now];
+ *   - every row leads with its state; a decision's result replaces the row's
+ *     buttons instead of a banner;
+ *   - "Changes Backenly made" is the one record of each fix (its statement,
+ *     its result, Why, Undo), with the 30-day tally in its heading; the old
+ *     Activity feed, which printed the same fix again, is its Full log;
+ *   - no success note after a mode change: the sentence under the title
+ *     changes, and is announced;
+ *   - the page re-reads every 30 s and when the window regains focus, instead
+ *     of a refresh icon per section;
+ *   - people who cannot decide read one sentence where the buttons were
+ *     (useProjectRole); rows carry anchors Overview links to.
  */
 
-import { useEffect, useState, useCallback } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import Link from 'next/link'
-import { Activity, AlertTriangle, CheckCircle2, Layers, Lock, RefreshCw, Undo2, Wrench } from 'lucide-react'
-import {
-  EmptyState,
-  KitButton,
-  KitCard,
-  KitNote,
-  PageHeader,
-  Segmented,
-  Skeleton,
-  Spinner,
-  StatusDot,
-  type StatusTone,
-} from '@/components/inspector/kit'
-import { FOCUS, FOCUS_INSET, PAGE_GUTTER, PAGE_WIDTH } from '@/components/console/tokens'
-import { EmptyLine, Panel, Section } from '@/components/autonomy/rows'
+import { AlertTriangle } from 'lucide-react'
+import { KitNote, PageHeader, Segmented, StatusGlyph, Skeleton } from '@/components/inspector/kit'
+import { FOCUS, PAGE_GUTTER, PAGE_WIDTH } from '@/components/console/tokens'
+import { formatTime, fullTime } from '@/components/console/format'
+import { useNow } from '@/components/console/Time'
+import { ErrorRow } from '@/components/console/states'
+import { Panel, RowSkeleton, Section } from '@/components/autonomy/rows'
 import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
 import { ReviewQueuePanel } from '@/components/ReviewQueuePanel'
 import { DetectedFindingsPanel } from '@/components/DetectedFindingsPanel'
-import { AppliedChangesPanel, type AppliedChange } from '@/components/AppliedChangesPanel'
-import { MaintenanceLadderPanel } from '@/components/MaintenanceLadderPanel'
+import { AppliedChangesPanel, type ActivityEntry, type AppliedChange, type Scoreboard } from '@/components/AppliedChangesPanel'
 import { ArchitectureChangesPanel } from '@/components/autonomy/ArchitectureChangesPanel'
-import { ArchitectureLookNow } from '@/components/autonomy/ArchitectureLookNow'
+import { ChecksPanel, type HealthPulse } from '@/components/autonomy/ChecksPanel'
 import { onArchitectureChange } from '@/components/autonomy/architecture-decisions'
+import { useHashTarget } from '@/components/autonomy/useHashTarget'
+import { sharedRead } from '@/lib/client/shared-read'
+import { useProjectRole } from '@/lib/hooks/useProjectRole'
+import { useWaitingCount } from '@/lib/hooks/useWaitingCount'
 import type { ArchitectureChangeView } from '@/lib/evolution-engine/views'
+import { LoopMark } from '@/components/console/LoopMark'
 
 type Level = 'OFF' | 'CONSERVATIVE' | 'BALANCED' | 'AGGRESSIVE'
 
@@ -52,15 +58,10 @@ interface TrustReport {
   cap: Level
   /** User-facing plan label (Free / Pro / Enterprise) — the cap can't tell Pro from Enterprise. */
   plan: string
-  scoreboard: {
-    windowDays: number
-    autonomousFixes: number
-    rollbacks: number
-    verifiedRate: number | null
-  }
-  recentActivity: Array<{ at: string; action: string; kind: string; summary: string; repeat?: number }>
+  scoreboard: Scoreboard
+  recentActivity: ActivityEntry[]
   pendingApprovals: Array<{ id: string }>
-  /** Optional on the wire so a response predating the field renders no panel
+  /** Optional on the wire so a response predating the field renders no rows
    *  rather than crashing the page. */
   appliedChanges?: AppliedChange[]
   /** Approved architecture changes and what became of them. Optional for the
@@ -86,16 +87,28 @@ interface TrustReport {
 // safe fixes itself, or hold everything for you? Persisted values
 // (OFF/CONSERVATIVE/BALANCED/AGGRESSIVE) stay valid across the DB, billing
 // caps, and breaker logic in lib/autonomy/autonomy-level.ts — legacy BALANCED
-// rows render as Autopilot; a legacy OFF row lights neither card and shows
+// rows render as Autopilot; a legacy OFF row lights neither option and says
 // "Off" in the header until the owner picks a mode.
-const LEVELS: { id: Level; label: string; blurb: string }[] = [
-  { id: 'CONSERVATIVE', label: 'Review-only', blurb: 'Visible changes wait for your one-click approval. Silent additive repairs (indexes, API definitions) still apply.' },
+//
+// `sentence` is the mode's meaning under the title; `blurb` is the option's
+// tooltip. Review-only never promises that every change waits: silent
+// additive repairs still apply (maxAutoTier(CONSERVATIVE) is 0).
+const LEVELS: { id: Level; label: string; sentence: string; blurb: string }[] = [
+  {
+    id: 'CONSERVATIVE',
+    label: 'Review-only',
+    sentence: 'Every visible fix waits for you. Indexes and API definitions still apply.',
+    blurb: 'Visible changes wait for your one-click approval. Silent additive repairs (indexes, API definitions) still apply.',
+  },
   {
     id: 'AGGRESSIVE',
     label: 'Autopilot',
+    sentence: 'Backenly ships safe fixes on its own. Auth and destructive changes wait for you.',
     blurb: 'Backenly applies every safe fix on its own. Auth and destructive changes still wait for you.',
   },
 ]
+
+const OFF_SENTENCE = 'Off. Backenly finds problems but fixes nothing until you pick a mode.'
 
 const LEVEL_RANK: Record<Level, number> = { OFF: 0, CONSERVATIVE: 1, BALANCED: 2, AGGRESSIVE: 3 }
 
@@ -112,8 +125,8 @@ function labelFor(level: Level): string {
 
 // The upgrade target for a locked mode. Since 2026-07-18 every plan seeds the
 // full dial, so no mode is plan-locked anymore. Kept as defence in depth: if a
-// future plan re-caps the dial, the lock UI degrades to a Pro upsell instead
-// of a dead button.
+// future plan re-caps the dial, the lock degrades to a Pro pointer instead of
+// a dead button.
 function nextPlanFor(level: Level): { name: string; cadence: string } | null {
   if (level === 'BALANCED' || level === 'AGGRESSIVE') {
     return { name: 'Pro', cadence: 'every-minute scans' }
@@ -121,54 +134,86 @@ function nextPlanFor(level: Level): { name: string; cadence: string } | null {
   return null
 }
 
-function timeAgo(iso: string): string {
-  const s = Math.floor((Date.now() - new Date(iso).getTime()) / 1000)
-  if (s < 5) return 'just now'
-  if (s < 60) return `${s}s ago`
-  if (s < 3600) return `${Math.floor(s / 60)}m ago`
-  if (s < 86400) return `${Math.floor(s / 3600)}h ago`
-  return `${Math.floor(s / 86400)}d ago`
+/** How often the page re-reads what it shows. */
+const POLL_MS = 30_000
+
+/**
+ * A number that goes up every 30 s and whenever the window comes back into
+ * view: each panel re-reads quietly when it changes.
+ */
+function useRefreshTick(): number {
+  const [tick, setTick] = useState(0)
+  useEffect(() => {
+    const bump = () => setTick((t) => t + 1)
+    const timer = setInterval(() => {
+      if (!document.hidden) bump()
+    }, POLL_MS)
+    const onVisible = () => {
+      if (!document.hidden) bump()
+    }
+    window.addEventListener('focus', bump)
+    document.addEventListener('visibilitychange', onVisible)
+    return () => {
+      clearInterval(timer)
+      window.removeEventListener('focus', bump)
+      document.removeEventListener('visibilitychange', onVisible)
+    }
+  }, [])
+  return tick
 }
 
-// ── Shell ─────────────────────────────────────────────────────────────────────
+/** What the loop's last pass could check, from GET /health (shared with the inbox's read). */
+function useHealthPulse(projectId: string, tick: number): [HealthPulse | null, () => void] {
+  const [pulse, setPulse] = useState<HealthPulse | null>(null)
+  const [own, setOwn] = useState(0)
+  useEffect(() => {
+    let cancelled = false
+    void sharedRead<{ data?: HealthPulse }>(`/api/projects/${projectId}/health`, { fresh: tick + own > 0 })
+      .then((res) => {
+        if (!cancelled && res.ok) setPulse(res.data?.data ?? {})
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [projectId, tick, own])
+  return [pulse, () => setOwn((n) => n + 1)]
+}
 
-function Shell({
-  level,
-  shadow,
-  description = 'Choose what Backenly may fix on its own and what waits for your approval. Auth, destructive and irreversible changes always wait, in every mode.',
-  actions,
-  children,
-}: {
-  level?: Level
-  shadow?: boolean
-  /** The mode's meaning in one sentence, once the mode is known. */
-  description?: string
-  /** The mode switch. */
-  actions?: React.ReactNode
-  children: React.ReactNode
-}) {
+/** The header's one fact: when Backenly last checked, or why it is not repairing. */
+function Heartbeat({ shadow, level, pulse }: { shadow: boolean; level: Level | null; pulse: HealthPulse | null }) {
+  const now = useNow()
   // Shadow wins over the dial. The dial is what the owner ASKED for; the mode
   // is what the deployment is doing, and rendering the ask as though it were
   // the outcome is what let a backend read "Autopilot" while the loop could
   // not apply a single fix.
-  const badge: { label: string; tone: StatusTone } | undefined = shadow
-    ? { label: 'Shadow', tone: 'attention' }
+  const badge = shadow
+    ? { label: 'Watching only', glyph: 'paused' as const }
     : level === 'OFF'
-      // The mode switch in the header says which mode is on; a badge says so
-      // only for a legacy OFF row, which lights neither option.
-      ? { label: labelFor(level), tone: 'paused' }
-      : undefined
+      ? { label: 'Off', glyph: 'paused' as const }
+      : null
+  if (badge) {
+    return (
+      <span className="inline-flex items-center gap-[6px] text-[13px] text-zinc-300">
+        <StatusGlyph state={badge.glyph} label="" />
+        {badge.label}
+      </span>
+    )
+  }
+  if (!pulse) return <Skeleton className="h-[12px] w-[112px]" />
+  const at = pulse.sensors?.at ?? pulse.lastReconciledAt ?? null
   return (
-    <div className={`${PAGE_WIDTH} ${PAGE_GUTTER} pb-16`}>
-      <PageHeader
-        className="!px-0"
-        title="Autonomy"
-        meta={badge ? <StatusDot tone={badge.tone} label={badge.label} /> : undefined}
-        description={description}
-        actions={actions}
-      />
-      {children}
-    </div>
+    <span className="inline-flex items-center gap-[6px] text-[13px] text-zinc-300">
+      {/* The page's one violet mark: the loop's ring, filling toward its next pass. */}
+      <LoopMark lastPassAt={at} state={at ? 'running' : 'still'} />
+      {at ? (
+        <time dateTime={at} title={fullTime(at)} className="tabular-nums">
+          Checked {formatTime(at, 'ago', { now: now ?? Date.now() })}
+        </time>
+      ) : (
+        'Not checked yet'
+      )}
+    </span>
   )
 }
 
@@ -176,42 +221,47 @@ export function AutonomyGuardrailsSettings({ projectId }: { projectId: string })
   const [data, setData] = useState<TrustReport | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(false)
+  const [retrying, setRetrying] = useState(false)
   const [saving, setSaving] = useState<Level | null>(null)
-  const [banner, setBanner] = useState<{ tone: 'ok' | 'gate'; text: string } | null>(null)
-  const [showAll, setShowAll] = useState(false)
+  const [gate, setGate] = useState<string | null>(null)
+  const [readAt, setReadAt] = useState<string | null>(null)
+  const role = useProjectRole(projectId)
+  const waiting = useWaitingCount(projectId)
+  const tick = useRefreshTick()
+  const [pulse, rereadPulse] = useHealthPulse(projectId, tick)
 
   const fetchReport = useCallback(async () => {
-    setError(false)
     try {
       const res = await fetch(`/api/projects/${projectId}/autonomy`, { credentials: 'include' })
       if (!res.ok) throw new Error('fetch failed')
       setData(await res.json())
+      setError(false)
+      setReadAt(new Date().toISOString())
     } catch {
+      // A failed re-read keeps what is on screen; a failed first read says so.
       setError(true)
     } finally {
       setLoading(false)
+      setRetrying(false)
     }
   }, [projectId])
 
   useEffect(() => {
-    fetchReport()
-  }, [fetchReport])
+    void fetchReport()
+  }, [fetchReport, tick])
   // An architecture change decided in the queue moves onto the card below.
   useEffect(() => onArchitectureChange('card', () => { void fetchReport() }), [fetchReport])
+
+  useHashTarget(!!data && !role.loading)
 
   const setLevel = async (level: Level) => {
     if (!data || level === data.level || saving) return
     if (LEVEL_RANK[level] > LEVEL_RANK[data.cap]) {
       const next = nextPlanFor(level)
-      setBanner({
-        tone: 'gate',
-        text: next
-          ? `${labelFor(level)} is included in ${next.name} (${next.cadence}).`
-          : `Your plan's ceiling is ${labelFor(data.cap)}.`,
-      })
-      setTimeout(() => setBanner(null), 6000)
+      setGate(next ? `${labelFor(level)} is included in ${next.name} (${next.cadence}).` : `Your plan's ceiling is ${labelFor(data.cap)}.`)
       return
     }
+    setGate(null)
     setSaving(level)
     try {
       const res = await fetch(`/api/projects/${projectId}/autonomy`, {
@@ -220,119 +270,119 @@ export function AutonomyGuardrailsSettings({ projectId }: { projectId: string })
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ level }),
       })
-      if (res.ok) {
-        await fetchReport()
-        setBanner({ tone: 'ok', text: `Autonomy mode set to ${labelFor(level)}.` })
+      // No success note: the sentence under the title changes, and is announced.
+      if (res.ok) await fetchReport()
+      else {
+        const j = await res.json().catch(() => ({}))
+        setGate(j?.error || 'The mode did not change. Try again in a moment.')
       }
     } finally {
       setSaving(null)
-      setTimeout(() => setBanner(null), 5000)
     }
   }
 
-  if (loading) {
-    return (
-      <Shell>
-        <div className="space-y-4" aria-hidden>
-          <Skeleton className="h-[120px] w-full rounded-[10px]" />
-          <Skeleton className="h-[180px] w-full rounded-[10px]" />
-          <Skeleton className="h-[88px] w-full rounded-[10px]" />
-        </div>
-      </Shell>
-    )
-  }
+  const shadow = data?.executionMode?.mode === 'shadow'
+  const current = data ? displayLevel(data.level) : null
+  const sentence = current === 'OFF' ? OFF_SENTENCE : LEVELS.find((l) => l.id === current)?.sentence
 
-  if (error || !data) {
-    return (
-      <Shell>
-        <KitCard>
-          <EmptyState
-            icon={AlertTriangle}
-            title="Autonomy settings are unavailable"
-            description="The autonomy service did not answer. Nothing has changed, and your guardrails are still enforced."
-            action={
-              <KitButton
-                icon={RefreshCw}
-                onClick={() => {
-                  setLoading(true)
-                  fetchReport()
-                }}
-              >
-                Try again
-              </KitButton>
+  const modeControl = data ? (
+    role.canWrite ? (
+      <div className="flex flex-wrap items-center gap-2.5">
+        <span className="text-[12.5px] text-faint">Mode</span>
+        <Segmented<Level>
+          label="Autonomy mode"
+          value={current as Level}
+          onChange={(l) => void setLevel(l)}
+          options={LEVELS.map((l) => {
+            const locked = LEVEL_RANK[l.id] > LEVEL_RANK[data.cap]
+            const next = locked ? nextPlanFor(l.id) : null
+            return {
+              value: l.id,
+              title: locked && next ? `${l.label} is included in ${next.name} (${next.cadence}).` : l.blurb,
+              label: saving === l.id ? `${l.label}…` : l.label,
             }
-          />
-        </KitCard>
-      </Shell>
+          })}
+        />
+      </div>
+    ) : (
+      // People who cannot change the mode read it.
+      <p className="text-[12.5px] text-faint">
+        Mode <span className="ml-1.5 text-zinc-200">{labelFor(data.level)}</span>
+      </p>
     )
-  }
+  ) : undefined
 
-  const verified = data.scoreboard.verifiedRate
-  const capLabel = labelFor(data.cap)
-  const upgradeHref = '/app/billing'
-  const current = displayLevel(data.level)
-  const blurb = LEVELS.find((l) => l.id === current)?.blurb
-
-  const modeSwitch = (
-    <div className="flex flex-wrap items-center gap-2.5">
-      <span id="autonomy-mode" className="text-[12.5px] text-faint">Mode</span>
-      <Segmented<Level>
-        label="Autonomy mode"
-        value={current}
-        onChange={(l) => void setLevel(l)}
-        options={LEVELS.map((l) => {
-          const locked = LEVEL_RANK[l.id] > LEVEL_RANK[data.cap]
-          const next = locked ? nextPlanFor(l.id) : null
-          return {
-            value: l.id,
-            icon: locked ? Lock : undefined,
-            title: locked && next ? `${l.label} is included in ${next.name} (${next.cadence}).` : l.blurb,
-            label: saving === l.id ? <><Spinner className="h-3 w-3" /> {l.label}</> : l.label,
-          }
-        })}
-      />
-    </div>
+  const header = (
+    <PageHeader
+      flush
+      title="Autonomy"
+      meta={data || pulse ? <Heartbeat shadow={shadow} level={data?.level ?? null} pulse={pulse} /> : undefined}
+      description={
+        sentence ? (
+          <span aria-live="polite">{sentence}</span>
+        ) : undefined
+      }
+      actions={modeControl}
+    />
   )
 
-  // The loop's own bookkeeping ("autonomy investigation", written by a step
-  // with no sentence of its own) is folded away by default; what Backenly did,
-  // in words, is the feed.
-  const isBookkeeping = (a: TrustReport['recentActivity'][number]) =>
-    (a.kind === 'other' || !a.kind) && a.summary.trim().toLowerCase() === a.action.replace(/[_-]+/g, ' ').trim().toLowerCase()
-  const said = data.recentActivity.filter((a) => !isBookkeeping(a))
-  const folded = data.recentActivity.length - said.length
-  const activity = showAll ? data.recentActivity : said
-  const stats = [
-    { label: 'Fixed on its own', value: data.scoreboard.autonomousFixes.toLocaleString() },
-    { label: 'Rolled back', value: data.scoreboard.rollbacks.toLocaleString() },
-    { label: 'Verified after the fix', value: verified === null ? '—' : `${Math.round(verified * 100)}%` },
-  ]
-  const anyStats = data.scoreboard.autonomousFixes > 0 || data.scoreboard.rollbacks > 0 || verified !== null
+  if (loading || role.loading) {
+    return (
+      <div className={`${PAGE_WIDTH} ${PAGE_GUTTER} pb-16`}>
+        {header}
+        <div className="space-y-9">
+          {['Waiting on you', 'Changes Backenly made'].map((t) => (
+            <Section key={t} id={`autonomy-skeleton-${t}`} title={t}>
+              <Panel>
+                <RowSkeleton rows={2} />
+              </Panel>
+            </Section>
+          ))}
+        </div>
+      </div>
+    )
+  }
+
+  if (!data) {
+    return (
+      <div className={`${PAGE_WIDTH} ${PAGE_GUTTER} pb-16`}>
+        {header}
+        <Panel>
+          <ErrorRow
+            things="Autonomy"
+            stillWorks="Your guardrails still apply."
+            retrying={retrying}
+            onRetry={() => {
+              setRetrying(true)
+              void fetchReport()
+            }}
+          />
+        </Panel>
+      </div>
+    )
+  }
+
+  const reread = () => {
+    void fetchReport()
+    rereadPulse()
+  }
 
   return (
-    <Shell
-      level={data.level}
-      shadow={data.executionMode?.mode === 'shadow'}
-      description={blurb ? `${blurb}${current === 'CONSERVATIVE' ? ' Auth, destructive and irreversible changes always wait.' : ''}` : undefined}
-      actions={modeSwitch}
-    >
+    <div className={`${PAGE_WIDTH} ${PAGE_GUTTER} pb-16`}>
+      {header}
       <div className="space-y-9">
-        {banner && (
-          <div role="status" aria-live="polite">
-            <KitNote
-              tone={banner.tone === 'ok' ? 'success' : 'info'}
-              icon={banner.tone === 'ok' ? CheckCircle2 : Lock}
-              actions={
-                banner.tone === 'gate' && CLOUD_CONTROL_PLANE ? (
-                  <Link href={upgradeHref} className={`text-[12.5px] font-medium text-zinc-100 hover:underline ${FOCUS}`}>
-                    Compare plans
-                  </Link>
-                ) : undefined
-              }
-            >
-              {banner.text}
-            </KitNote>
-          </div>
+        {gate && (
+          <p role="status" className="-mt-4 text-[12.5px] leading-[18px] text-faint">
+            {gate}{' '}
+            {CLOUD_CONTROL_PLANE && (
+              <Link href="/app/billing" className={`rounded-[3px] font-medium text-zinc-200 underline decoration-white/25 underline-offset-2 hover:text-white ${FOCUS}`}>
+                Compare plans
+              </Link>
+            )}
+          </p>
+        )}
+        {error && readAt && (
+          <ErrorRow things="Autonomy" staleAt={readAt} onRetry={() => void fetchReport()} className="-mt-4 !border-b-0 !px-0" />
         )}
 
         {/* ── Shadow is stated, not implied ────────────────────────────
@@ -347,103 +397,32 @@ export function AutonomyGuardrailsSettings({ projectId }: { projectId: string })
           </KitNote>
         )}
 
-        {/* ── The one queue, in two halves: held for you, and detected ── */}
-        <ReviewQueuePanel projectId={projectId} />
-        <DetectedFindingsPanel projectId={projectId} level={data.level} />
+        <ReviewQueuePanel projectId={projectId} refreshKey={tick} canDecideAgent={role.canAdminister} canFix={role.canWrite} />
+        <DetectedFindingsPanel projectId={projectId} level={data.level} refreshKey={tick} canFix={role.canWrite} />
 
-        {/* A structural ladder renders nothing unless one is actually waiting. */}
-        <MaintenanceLadderPanel projectId={projectId} />
-
-        {/* ── Changes Backenly made, each with its way back ─────────── */}
-        <AppliedChangesPanel projectId={projectId} changes={data.appliedChanges ?? []} onReverted={fetchReport} />
-
-        {/* Renders nothing until a person has approved an architecture change. */}
-        <ArchitectureChangesPanel
+        <AppliedChangesPanel
           projectId={projectId}
-          changes={data.architectureChanges ?? []}
-          onChanged={fetchReport}
+          changes={data.appliedChanges ?? []}
+          scoreboard={data.scoreboard}
+          activity={data.recentActivity}
+          onReverted={reread}
+          canUndo={role.canWrite}
+          canUndoSchema={role.canAdminister}
         />
 
-        {/* When Backenly last looked for architecture changes, and a look now. */}
-        <ArchitectureLookNow projectId={projectId} onLooked={fetchReport} />
+        {/* Renders nothing until a person has approved an architecture change. */}
+        <ArchitectureChangesPanel projectId={projectId} changes={data.architectureChanges ?? []} onChanged={reread} />
 
-        {/* ── Activity: what Backenly did lately, and its track record ── */}
-        <Section
-          id="autonomy-activity"
-          title="Activity"
-          aside={<span className="text-[12.5px] tabular-nums text-faint">Last {data.scoreboard.windowDays} days</span>}
-        >
-          <Panel>
-            {anyStats && (
-              <dl className="grid grid-cols-3 divide-x divide-white/[0.06] border-b border-white/[0.06]">
-                {stats.map((st) => (
-                  <div key={st.label} className="px-5 py-3.5">
-                    <dt className="text-[12px] leading-[16px] text-faint">{st.label}</dt>
-                    <dd className="mt-1 text-[18px] font-semibold leading-[24px] tabular-nums tracking-[-0.01em] text-zinc-50">{st.value}</dd>
-                  </div>
-                ))}
-              </dl>
-            )}
-            {activity.length === 0 ? (
-              <EmptyLine icon={Activity}>Nothing yet. Backenly has not needed to act.</EmptyLine>
-            ) : (
-              <ul
-                tabIndex={0}
-                aria-label="Recent guardrail actions"
-                className={`max-h-[420px] divide-y divide-white/[0.06] overflow-y-auto ${FOCUS_INSET}`}
-              >
-                {activity.map((a, i) => {
-                  const Icon = KIND_ICON[a.kind] ?? Activity
-                  return (
-                    <li key={i} className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-6 px-5 py-3">
-                      <span className="flex min-w-0 items-start gap-3">
-                        <Icon className="mt-[3px] h-3.5 w-3.5 flex-shrink-0 text-zinc-500" strokeWidth={1.75} aria-hidden />
-                        <span className="min-w-0 text-[13px] leading-[20px] text-zinc-300 [overflow-wrap:anywhere]">
-                          {a.summary}
-                          {/* An unresolved finding is re-escalated every tick, so
-                              one decision you haven't made writes one row a
-                              minute. Folded server-side; the count keeps the
-                              fold honest rather than a truncation. */}
-                          {(a.repeat ?? 1) > 1 && <span className="ml-1.5 tabular-nums text-faint">{a.repeat} times</span>}
-                        </span>
-                      </span>
-                      <span className="pt-px text-[12.5px] tabular-nums text-faint">{timeAgo(a.at)}</span>
-                    </li>
-                  )
-                })}
-              </ul>
-            )}
-            {folded > 0 && (
-              <button
-                type="button"
-                onClick={() => setShowAll((v) => !v)}
-                aria-expanded={showAll}
-                className={`block w-full border-t border-white/[0.06] px-5 py-2.5 text-left text-[12.5px] text-faint transition-colors hover:text-zinc-200 ${FOCUS_INSET}`}
-              >
-                {showAll ? 'Hide system events' : `Show ${folded} system ${folded === 1 ? 'event' : 'events'}`}
-              </button>
-            )}
-          </Panel>
-          {data.cap !== 'AGGRESSIVE' && CLOUD_CONTROL_PLANE && (
-            <p className="mt-3 text-[12.5px] text-faint">
-              Your plan goes up to {capLabel}.{' '}
-              <Link href={upgradeHref} className="font-medium text-zinc-300 underline-offset-2 hover:underline">
-                Compare plans
-              </Link>
-            </p>
-          )}
-        </Section>
+        <ChecksPanel
+          projectId={projectId}
+          health={pulse}
+          waiting={waiting.total}
+          canScan={role.canWrite}
+          canLook={role.canAdminister}
+          onScanned={reread}
+          onLooked={reread}
+        />
       </div>
-    </Shell>
+    </div>
   )
-}
-
-/** An activity row's mark: what kind of thing Backenly did. */
-const KIND_ICON: Record<string, typeof Activity> = {
-  rollback: Undo2,
-  architecture: Layers,
-  auto_fix: Wrench,
-  fix: Wrench,
-  repair: Wrench,
-  escalation: AlertTriangle,
 }

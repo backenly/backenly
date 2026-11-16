@@ -2,7 +2,7 @@
  * What a move carries, and where each part of it stands at a moment.
  *
  * `MovePlan` is the shape the importer's report already has
- * (lib/import/supabase-importer.ts: tables with source and copied rows, auth
+ * (lib/import/jobs.ts progress: tables with source and copied rows, auth
  * users, policies), plus files. `progressAt(plan, t)` turns a plan into the
  * state of every row at `t` seconds, as a pure function, so the console can
  * play a real move from the importer's events and the landing page can loop

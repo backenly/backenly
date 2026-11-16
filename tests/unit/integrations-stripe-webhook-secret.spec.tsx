@@ -21,22 +21,28 @@
  */
 import { act, fireEvent, render, screen, within } from '@testing-library/react'
 
+// The connector page is a URL (?connector=stripe); the tests set it here.
+let mockSearch = new URLSearchParams()
 jest.mock('next/navigation', () => ({
   useRouter: () => ({ push: jest.fn(), replace: jest.fn(), prefetch: jest.fn(), back: jest.fn(), refresh: jest.fn() }),
   useParams: () => ({ id: 'p1' }),
   usePathname: () => '/app/projects/p1/integrations',
-  useSearchParams: () => new URLSearchParams(),
+  useSearchParams: () => mockSearch,
 }))
 const mockProject = {
   apiBaseUrl: 'https://api.backenly.test/api/v1/p1' as string | null,
   apiUrlProd: null as string | null,
+  // The role the page reads (useProjectRole): a developer connects providers.
+  role: 'DEVELOPER',
+  canWrite: true,
+  canAdminister: false,
+  organizationId: 'org_1',
 }
-jest.mock('@/lib/api/projects', () => ({ getProject: jest.fn(async () => mockProject) }))
+jest.mock('@/lib/api/projects', () => ({ getProject: jest.fn(async () => mockProject), forgetProjectReads: jest.fn() }))
 
 import { IntegrationsPanel } from '@/components/hub/IntegrationsPanel'
-import { connectableProviders } from '@/lib/services/ai-functions/integration-registry'
-
-const PROVIDERS = connectableProviders().length
+import { forgetProjectReads } from '@/lib/api/projects'
+import { clearProjectRoleCache } from '@/lib/hooks/useProjectRole'
 const ENDPOINT = 'https://api.backenly.test/api/v1/p1/webhooks/stripe'
 const SECRET = `whsec_${'a1b2c3d4'.repeat(4)}`
 
@@ -68,19 +74,23 @@ function stub() {
     if (path === '/api/projects/p1/credentials/verify') {
       return Promise.resolve({ ok: true, status: 200, json: async () => ({ ok: true, checks: [] }) } as unknown as Response)
     }
-    const body = path === '/api/projects/p1/integrations' ? state : {}
+    const body =
+      path === '/api/projects/p1/integrations' ? state
+      : path === '/api/projects/p1' ? { success: true, data: { id: 'p1', name: 'shop', organizationId: 'org_1', role: 'DEVELOPER', canWrite: true, canAdminister: false } }
+      : {}
     return Promise.resolve({ ok: true, status: 200, json: async () => body } as unknown as Response)
   }) as unknown as typeof fetch
 }
 
 const flush = () => act(async () => { for (let i = 0; i < 20; i++) await Promise.resolve() })
 const input = (name: string) => document.querySelector(`input[name="${name}"]`) as HTMLInputElement | null
-/** A connector's card. Its accessible name starts with its status once connected, so it is found by its heading. */
-const card = (name: string) => screen.getByRole('heading', { level: 3, name }).closest('button') as HTMLElement
-/** A filter chip, named by its label and count. */
-const chip = (label: string) => screen.getByRole('radio', { name: (name) => name.startsWith(label) })
+/** A connected provider's row in the Connected section, found by its name's link. */
+const connectedRow = (name: string) => within(screen.getByRole('region', { name: 'Connected' })).getByRole('link', { name }).closest('li') as HTMLElement
 
 beforeEach(() => {
+  mockSearch = new URLSearchParams()
+  forgetProjectReads()
+  clearProjectRoleCache()
   mockProject.apiBaseUrl = 'https://api.backenly.test/api/v1/p1'
   mockProject.apiUrlProd = null
   credentialsAnswer = { status: 200, body: { success: true, stored: ['STRIPE_WEBHOOK_SECRET'] } }
@@ -90,28 +100,20 @@ beforeEach(() => {
 })
 
 async function openStripe() {
+  mockSearch = new URLSearchParams('connector=stripe')
   render(<IntegrationsPanel />)
-  await flush()
-  fireEvent.click(card('Stripe'))
   await flush()
 }
 
-describe('the Stripe card', () => {
+describe('the Stripe row', () => {
   it('does not count Stripe as connected without its signing secret, and says which credential is missing', async () => {
     render(<IntegrationsPanel />)
     await flush()
 
-    expect(screen.getByText(`0 of ${PROVIDERS} connected · 1 needs setup`)).toBeInTheDocument()
-    expect(within(card('Stripe')).getByText('Webhook Secret missing')).toBeInTheDocument()
-    expect(within(card('Stripe')).queryByText('Connected · key confirmed')).toBeNull()
-    expect(chip('Connected')).toHaveTextContent(/^Connected0$/)
-    expect(chip('Needs setup')).toHaveTextContent(/^Needs setup1$/)
-
-    fireEvent.click(chip('Needs setup'))
-    await flush()
-    expect(chip('Needs setup')).toHaveAttribute('aria-checked', 'true')
-    expect(card('Stripe')).toBeInTheDocument()
-    expect(screen.queryByRole('heading', { level: 3, name: 'Resend' })).toBeNull()
+    expect(screen.getByText('None connected')).toBeInTheDocument()
+    expect(within(connectedRow('Stripe')).getByText('Add the webhook secret')).toBeInTheDocument()
+    // Its state is the missing secret, never the healthy "Connected" (its date fact aside).
+    expect(within(connectedRow('Stripe')).queryByText('Connected')).toBeNull()
   })
 
   it('counts Stripe as connected once both are stored', async () => {
@@ -119,9 +121,8 @@ describe('the Stripe card', () => {
     render(<IntegrationsPanel />)
     await flush()
 
-    expect(screen.getByText(`1 of ${PROVIDERS} connected`)).toBeInTheDocument()
-    expect(within(card('Stripe')).getByText('Connected · key confirmed')).toBeInTheDocument()
-    expect(screen.queryByRole('radio', { name: /^Needs setup/ })).toBeNull()
+    expect(screen.getByText('1 connected')).toBeInTheDocument()
+    expect(within(connectedRow('Stripe')).queryByText('Add the webhook secret')).toBeNull()
   })
 
   it('says the same of OneSignal without its App ID, which push needs', async () => {
@@ -132,8 +133,8 @@ describe('the Stripe card', () => {
     render(<IntegrationsPanel />)
     await flush()
 
-    expect(screen.getByText(`0 of ${PROVIDERS} connected · 1 needs setup`)).toBeInTheDocument()
-    expect(within(card('OneSignal')).getByText('App ID missing')).toBeInTheDocument()
+    expect(screen.getByText('None connected')).toBeInTheDocument()
+    expect(within(connectedRow('OneSignal')).getByText('Add the App ID')).toBeInTheDocument()
   })
 })
 
@@ -141,9 +142,9 @@ describe("Stripe's page", () => {
   it('shows the endpoint URL to add in Stripe, from the project’s own API address', async () => {
     await openStripe()
 
-    expect(screen.getByText('Receiving events')).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Stripe sends events to' })).toBeInTheDocument()
     expect(screen.getByText(ENDPOINT)).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Copy endpoint URL' })).toBeInTheDocument()
+    expect(screen.getAllByRole('button', { name: 'Copy endpoint URL' }).length).toBeGreaterThan(0)
   })
 
   it('uses an operator’s API address for the project when one is set, as the Connect page does', async () => {
@@ -166,32 +167,29 @@ describe("Stripe's page", () => {
     await openStripe()
 
     expect(screen.getByText('STRIPE_WEBHOOK_SECRET')).toBeInTheDocument()
-    expect(
-      screen.getByText('Not stored. Until it is stored, Backenly refuses every event Stripe sends, so no function runs on a Stripe event.'),
-    ).toBeInTheDocument()
-    expect(screen.getAllByText('Webhook Secret missing').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('Not stored').length).toBeGreaterThan(0)
+    expect(screen.getByText('Stripe events are refused until it’s stored.')).toBeInTheDocument()
   })
 
   it('adds the signing secret on its own: no secret key again, nothing to pick', async () => {
     await openStripe()
-    fireEvent.click(screen.getByRole('button', { name: 'Add Webhook Secret' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Add webhook secret' }))
     await flush()
 
     const dialog = screen.getByRole('dialog')
-    expect(within(dialog).getByText('Add the Stripe Webhook Secret')).toBeInTheDocument()
+    expect(within(dialog).getByText('Add the Stripe webhook secret')).toBeInTheDocument()
     expect(within(dialog).getByText(ENDPOINT)).toBeInTheDocument()
     expect(input('STRIPE_SECRET_KEY')).toBeNull()
     expect(within(dialog).queryByText(/What should Stripe do/)).toBeNull()
 
     fireEvent.change(input('STRIPE_WEBHOOK_SECRET')!, { target: { value: SECRET } })
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Save Webhook Secret' }))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }))
     await flush()
 
     expect(posted).toEqual([{ integrationId: 'stripe', values: { STRIPE_WEBHOOK_SECRET: SECRET } }])
     expect(screen.queryByRole('dialog')).toBeNull()
-    // Loaded again: both stored, Stripe connected, the secret shown like the key.
-    expect(screen.getAllByText('Connected · key confirmed').length).toBeGreaterThan(0)
-    expect(screen.getByText(STRIPE_SECRET.maskedKey)).toBeInTheDocument()
+    // Read again: both stored, the secret shown like the key, and it can be replaced.
+    expect(screen.getByText(/whsec_a/)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Replace' })).toBeInTheDocument()
   })
 
@@ -201,10 +199,10 @@ describe("Stripe's page", () => {
       'Stripe webhook signing secrets must start with whsec_. Find yours in the Stripe Dashboard → Webhooks → your endpoint → Signing secret.'
     credentialsAnswer = { status: 422, body: { error: refusal } }
     await openStripe()
-    fireEvent.click(screen.getByRole('button', { name: 'Add Webhook Secret' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Add webhook secret' }))
     await flush()
     fireEvent.change(input('STRIPE_WEBHOOK_SECRET')!, { target: { value: 'not-a-signing-secret' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Save Webhook Secret' }))
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Save' }))
     await flush()
 
     expect(screen.getByRole('alert')).toHaveTextContent(refusal)
@@ -216,12 +214,12 @@ describe('the connect dialog', () => {
   it('no longer calls the signing secret optional: it says what it is for, beside the endpoint URL', async () => {
     state = { integrations: {}, keyVault: {} }
     await openStripe()
-    fireEvent.click(screen.getAllByRole('button', { name: 'Connect Stripe' })[0])
+    fireEvent.click(screen.getAllByRole('button', { name: /^Connect/ })[0])
     await flush()
 
     const dialog = screen.getByRole('dialog')
     expect(within(dialog).queryByText('Optional, add after deploying')).toBeNull()
-    expect(within(dialog).getByText('Until it is stored, Backenly refuses every event Stripe sends, so no function runs on a Stripe event.')).toBeInTheDocument()
+    expect(within(dialog).getByText(/Stripe events are refused until it’s stored\./)).toBeInTheDocument()
     expect(within(dialog).getByText(ENDPOINT)).toBeInTheDocument()
     expect(input('STRIPE_SECRET_KEY')).not.toBeNull()
     expect(input('STRIPE_WEBHOOK_SECRET')).not.toBeNull()

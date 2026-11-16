@@ -140,10 +140,12 @@ describe('SET-09: set_key_permissions is gated, validated and cannot escalate', 
 })
 
 describe('the console and docs say the same thing', () => {
-  it('the keys panel labels agent keys and shows an Expires column', () => {
+  // The keys moved to Connect → API on 2026-11-16 as rows; each row still says when it expires.
+  it('the keys panel labels agent keys and says when each key expires', () => {
     const panel = fs.readFileSync(path.join(ROOT, 'components', 'hub', 'ClientKeysPanel.tsx'), 'utf8')
     expect(panel).toContain("custom: 'Publishable'")
-    expect(panel).toContain('>Expires</th>')
+    expect(panel).toContain(">Expires {formatTime(key.expiresAt, 'date')}<")
+    expect(panel).toContain('Never expires')
     expect(panel).not.toContain(": 'Full access'")
     expect(panel).toContain('Service role: bypasses row security')
   })

@@ -1,100 +1,22 @@
 export const dynamic = 'force-dynamic'
-export const maxDuration = 300
 
 /**
- * POST /api/projects/[id]/import/supabase — the graduation door.
+ * POST /api/projects/[id]/import/supabase — RETIRED (2026-11-16). Always 404.
  *
- * ┌─────────────────────────────────────────────────────────────────────────┐
- * │ HIDDEN / DISABLED BY DESIGN (2026-07-17, planned dormant ~1–3 months).   │
- * │                                                                          │
- * │ Product decision: "migrate from Supabase" must NOT be the reason people  │
- * │ come to Backenly. The draw is the autonomous, governed backend + the     │
- * │ agent lane (CLI / MCP / skill) — not being a migration target. Leading   │
- * │ with an importer frames Backenly as "Supabase but you move", which is    │
- * │ exactly the wrong first impression while positioning is still being      │
- * │ established. So this endpoint is gated OFF and returns 404 (genuinely     │
- * │ undiscoverable — a probe can't tell it exists) until we deliberately      │
- * │ choose to surface migration as a funnel, likely once graduated-prototype │
- * │ demand is proven.                                                        │
- * │                                                                          │
- * │ NOTHING IS DELETED. The engine (lib/import/supabase-importer.ts) and the │
- * │ pure planner (lib/import/supabase-map.ts) stay intact and unit-tested    │
- * │ (scripts/verify-supabase-import-plan.ts). NOTE: supabase-map's mapPgType │
- * │ is ALSO used by lib/branches/engine.ts — do not delete it.               │
- * │                                                                          │
- * │ TO RE-ENABLE: set env SUPABASE_IMPORT_ENABLED=true (and, when surfacing  │
- * │ it in the UI, build the first-run import card). No code change needed.    │
- * └─────────────────────────────────────────────────────────────────────────┘
+ * This was the July importer's door: switched off by SUPABASE_IMPORT_ENABLED
+ * and, when on, it filled an EXISTING project from a Supabase connection
+ * string. Moving a backend in is now its own flow, into a NEW project only,
+ * from Supabase, Firebase or any Postgres: POST /api/import (lib/import/jobs.ts),
+ * which an organization's owners and admins start and the console follows.
  *
- * When enabled — Body: {
- *   connectionString: string   // postgresql://postgres:…@db.xyz.supabase.co:5432/postgres
- *   options?: { maxRowsPerTable?: number; skipAuth?: boolean }
- * }
- * Imports a Supabase project (schema, data, auth identities, RLS report) into
- * THIS Backenly project through the governed mutation kernel. Clean-slate only.
- * Auth: platform JWT + project ownership. Connection string never persisted.
+ * The answer stays a flat 404 for everyone, before any auth, whatever the old
+ * flag says, so a probe cannot tell a door was ever here. Kept rather than
+ * deleted only because tests/integration/settings-keys-and-floors.spec.ts pins
+ * that it stays shut.
  */
 
-import { NextRequest, NextResponse } from 'next/server'
-import { withProjectAccess } from '@/lib/auth/route-protection'
-import { runSupabaseImport } from '@/lib/import/supabase-importer'
+import { NextResponse } from 'next/server'
 
-// Feature flag — OFF unless explicitly enabled. Kept as a module constant so
-// the gate reads identically at the top of the handler.
-const SUPABASE_IMPORT_ENABLED = process.env.SUPABASE_IMPORT_ENABLED === 'true'
-
-const runImport = withProjectAccess(async (req: NextRequest, { user, projectId }) => {
-  // The importer WRITES the workspace (tables, rows, auth users). Writes are
-  // DEVELOPER-floor everywhere else; withProjectAccess alone admitted a VIEWER.
-  const { canWriteProject } = await import('@/lib/edition/guard')
-  if (!(await canWriteProject(user.userId, projectId))) {
-    return NextResponse.json({ success: false, error: 'Your role in this project does not allow imports' }, { status: 403 })
-  }
-  let body: { connectionString?: string; options?: { maxRowsPerTable?: number; skipAuth?: boolean } }
-  try {
-    body = await req.json()
-  } catch {
-    return NextResponse.json({ success: false, error: 'Invalid JSON body' }, { status: 400 })
-  }
-
-  const cs = body.connectionString?.trim()
-  if (!cs || !/^postgres(ql)?:\/\//i.test(cs)) {
-    return NextResponse.json(
-      {
-        success: false,
-        error:
-          'connectionString must be a postgresql:// URL. In Supabase: Project Settings → Database → ' +
-          'Connection string (URI). Use the direct connection (port 5432), not the pooler.',
-      },
-      { status: 400 },
-    )
-  }
-
-  const report = await runSupabaseImport({
-    projectId,
-    userId: user.userId,
-    connectionString: cs,
-    options: {
-      maxRowsPerTable: body.options?.maxRowsPerTable,
-      skipAuth: body.options?.skipAuth,
-    },
-  })
-
-  return NextResponse.json(
-    { success: report.ok && !report.error, report },
-    { status: report.error ? 422 : 200 },
-  )
-})
-
-/**
- * Public entry point. The feature gate runs BEFORE auth so a disabled importer
- * is a flat 404 for everyone — an unauthenticated probe can't even tell the
- * route needs a login, let alone that an importer lives here. Only when
- * SUPABASE_IMPORT_ENABLED=true does the real auth-gated handler run.
- */
-export async function POST(request: NextRequest) {
-  if (!SUPABASE_IMPORT_ENABLED) {
-    return NextResponse.json({ error: 'Not found' }, { status: 404 })
-  }
-  return runImport(request)
+export async function POST() {
+  return NextResponse.json({ error: 'Not found' }, { status: 404 })
 }

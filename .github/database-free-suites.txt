@@ -217,3 +217,48 @@ __tests__/hooks/useUserSession.test.ts
 __tests__/consent/consent-gate.test.tsx
 # The contact form route (app/api/contact): a real SMTP sink and the in-memory limiter, no database.
 __tests__/contact/contact-route.test.ts
+
+# The Usage page's self-healing count (app/api/account/autonomy-activity): one
+# grouped count of AUTONOMY_TICK per UTC day, bounded to the cycle, instead of
+# reading 10,000 rows and counting them. The query is recorded and answered by
+# the test, so no database.
+__tests__/usage/autonomy-activity-count.test.ts
+
+# The projects list's live state (lib/projects/live-status.ts, behind GET
+# /api/projects/status): four grouped queries for every listed project, never
+# one per project, and the words its times are said in. Prisma is mocked: the
+# subject is which queries are asked and how their rows become the answer.
+__tests__/projects/live-status.test.ts
+# The project console's shared components (components/console): the exact
+# words a moment is said in (decision 13) and the undo sentence (decision 8),
+# pure functions; and, under jsdom, the record drawer's keys and focus
+# (decision 6) and the empty, error and confirm templates (decisions 8, 12).
+__tests__/console/format-time.test.ts
+__tests__/console/record-drawer.test.tsx
+__tests__/console/templates.test.tsx
+# Moving a backend in (lib/import): the planner, the access-rule translation,
+# the source-address guard and connection-string parsing, credential
+# redaction, the job's progress merge and the request bodies. Pure functions
+# and refusals before any socket opens; checked against the unroutable
+# placeholder URL as the header asks: 68 tests, all passing, none skipped.
+# storage-listing walks a local stand-in for Supabase Storage (127.0.0.1, no database).
+__tests__/import/pg-plan.test.ts
+__tests__/import/rules.test.ts
+__tests__/import/net.test.ts
+__tests__/import/redact.test.ts
+__tests__/import/progress-and-validation.test.ts
+__tests__/import/storage-listing.test.ts
+# The Firebase importer (lib/import/drivers/firebase*.ts, lib/import/google-*.ts)
+# and the sign-in check that accepts a Firebase password hash once, then
+# replaces it with bcrypt (lib/auth/end-user-password.ts). Google is faked at
+# the HTTP layer (tests/helpers/fake-google.ts: Firestore, Identity Toolkit,
+# Cloud Storage, the Rules API and an OAuth endpoint that verifies each RS256
+# assertion), the new project is held in memory, and the scrypt vector is
+# Firebase's own (github.com/firebase/scrypt README). No database.
+__tests__/auth/firebase-password-hash.test.ts
+__tests__/import/google-auth.test.ts
+__tests__/import/firebase-schema.test.ts
+__tests__/import/firebase-firestore.test.ts
+__tests__/import/firebase-users.test.ts
+__tests__/import/firebase-storage.test.ts
+__tests__/import/firebase-driver.test.ts

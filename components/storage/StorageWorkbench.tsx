@@ -1,1155 +1,677 @@
 'use client'
 
 /**
- * Storage workbench — the object browser as an instrument surface.
+ * Storage: the project's buckets and the files in them, as an instrument.
  *
- * Storage is a file browser, not a document: the objects ARE the page, and a
- * reader arriving here wants to find one and act on it. So this drops the 22px
- * hero for a command bar and takes the whole viewport, the same trade the
- * Tables inspector makes (see app/app/projects/[id]/database/page.tsx and the
- * surface rule in components/inspector/InspectorPageHeader.tsx).
+ *   Storage  312.4 MB of 1 GB ━━──                                    [Upload]
+ *   All files  274 │ posters  240 files  288 MB  Read access: Public  ⋯  [Search files] ⟳
+ *   posters    240 │ ☐  sinners.jpg                  1.6 MB   Console          25 min ago  ⋯
+ *   avatars     30 │ ☐  old-cut.jpg   Private        1.2 MB   —                3 d ago     ⋯
+ *   exports      4 │ 200 of 240                                                [Load more]
  *
- * Three panes, left to right:
- *   buckets rail (248px) · object grid (flex) · object detail (320px)
+ * One bar (project decision 2): the title, the quota as its fact, and Upload.
+ * The rail lists the buckets with their server counts; the pane shows one
+ * bucket's files, read from the SERVER for that bucket and that search; a file
+ * opens in a drawer beside the list (decision 6). The bucket's actions sit
+ * behind its ⋯, never in icons that appear on hover.
  *
- * The rail and the detail pane are flush full-height columns, so they use the
- * dense-surface rungs from the kit (KIT.rail / KIT.gridHead) rather than the
- * panel ladder — stacked opaque planes with no gap between them.
+ * What a person may do follows their role (decision 9): viewers read, and
+ * nothing that would be refused is offered; deleting a bucket is for admins.
  *
- * The workbench's inner layer is absolutely positioned: without it a wide grid's
- * intrinsic width propagates up through the app shell's flex chain and scrolls
- * the whole page sideways.
+ * The inner layer is absolutely positioned: without it a wide grid's intrinsic
+ * width propagates up through the app shell's flex chain and scrolls the
+ * whole page sideways.
  */
 
-import { useState, useRef, useCallback, useEffect } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from 'react'
 import { useRouter } from 'next/navigation'
+import { Upload } from 'lucide-react'
 import {
-  Upload, Download, Trash2, Copy, Search, Folder, File, Lock,
-  Image as ImageIcon, FileText, AlertTriangle, Check,
-  HardDrive, RefreshCw, Plus, X, CheckSquare, Square,
-  ChevronLeft,
-} from 'lucide-react'
-import { Tooltip } from '@/components/ui/Tooltip'
-import {
-  getBuckets, getFiles, uploadFile, deleteFile, deleteFiles,
-  getStorageStats, deleteBucket,
-  type StorageBucket, type StorageFile, type StorageStats,
-  getBucketsWithCaveat, updateBucketPolicy,
+  deleteBucket,
+  deleteFile,
+  deleteFiles,
+  getBucketsWithCaveat,
+  getFiles,
+  getStorageStats,
+  updateBucketPolicy,
+  uploadFile,
+  type StorageBucket,
+  type StorageFile,
+  type StorageStats,
 } from '@/lib/api/storage'
 import { getCurrentProjectId } from '@/lib/api/client'
-import { getProject, type Project } from '@/lib/api/projects'
-import {
-  CommandBar, EmptyState, IconButton, INPUT_BASE, KIT, KitButton, KitConfirmDialog, KitField,
-  KitInput, KitModal, KitNote, Skeleton,
-} from '@/components/inspector/kit'
-import { AgentEmptyState } from '@/components/inspector/AgentEmptyState'
-import { FOCUS, FOCUS_INSET } from '@/components/console/tokens'
-import { formatStamp } from '@/components/console/format'
-import { POLICY_LABELS, type AccessPolicy } from '@/lib/storage/access-policy'
-import { BucketPolicyDialog } from '@/components/storage/BucketPolicyDialog'
+import { getProject } from '@/lib/api/projects'
+import { useProjectRole } from '@/lib/hooks/useProjectRole'
+import { useAgentConnection } from '@/lib/hooks/useAgentConnection'
+import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
+import { KIT, KitConfirmDialog, KitModal } from '@/components/inspector/kit'
+import { InstrumentBar, type BarFact } from '@/components/console/InstrumentBar'
+import { recordNav, useRecordParam } from '@/components/console/RecordDrawer'
+import { EmptyPanel, ErrorRow } from '@/components/console/states'
+import { FOCUS_INSET, RULE } from '@/components/console/tokens'
+import { BucketPolicyDialog } from './BucketPolicyDialog'
+import { BucketsRail } from './BucketsRail'
+import { FileDrawer } from './FileDrawer'
+import { FilesPane } from './FilesPane'
+import { QuotaFact, quotaOf } from './parts'
+import { filesWord, isPublicPolicy, toNum } from './format'
 
-const ALL_BUCKETS = '__all__'
-/** Rows fetched per page — the route clamps at 500. */
+/** Files read per page; the route clamps at 500. */
 const FILE_PAGE_SIZE = 200
+/** The most a refresh re-reads at once, so a list grown by Load more keeps its length. */
+const FILE_PAGE_MAX = 500
 
-const TH_BASE = 'h-[36px] whitespace-nowrap border-b border-white/[0.06] px-3 text-[12px] font-medium text-faint'
-const TH = `${TH_BASE} text-left`
-const TD = 'h-[40px] whitespace-nowrap border-b border-white/[0.04] px-3'
-
-const toNum = (v: number | string | bigint | null | undefined): number => {
-  if (v === null || v === undefined) return 0
-  const n = typeof v === 'number' ? v : Number(v)
-  return Number.isFinite(n) ? n : 0
+/** The files on screen, and which bucket and search they were read for. */
+interface FilesView {
+  key: string
+  files: StorageFile[]
+  total: number
+  at: number
 }
 
-const formatFileSize = (bytes: number): string => {
-  if (bytes < 1024) return bytes + ' B'
-  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB'
-  if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB'
-  return (bytes / (1024 * 1024 * 1024)).toFixed(1) + ' GB'
-}
-
-/** The type icon as an element, so no component identity is created during render. */
-function FileTypeIcon({ mimeType, className, strokeWidth = 1.75 }: { mimeType: string | null; className?: string; strokeWidth?: number }) {
-  if (mimeType?.startsWith('image/')) return <ImageIcon className={className} strokeWidth={strokeWidth} />
-  if (mimeType && (mimeType.includes('pdf') || mimeType.includes('document'))) return <FileText className={className} strokeWidth={strokeWidth} />
-  return <File className={className} strokeWidth={strokeWidth} />
-}
-
-/** Short type label for the grid — "image/jpeg" reads as "jpeg" in a column. */
-const shortType = (mimeType: string | null): string => {
-  if (!mimeType) return 'file'
-  const sub = mimeType.split('/')[1]
-  return (sub || mimeType).split(';')[0]
-}
-
-/**
- * Who sent a file, in the table and the detail pane. An anonymous upload is
- * marked like a public file: it came from anyone holding the public key.
- */
-const UPLOADER_TITLE: Record<NonNullable<StorageFile['uploader']>['kind'], string> = {
-  end_user: 'A signed-in user of your app',
-  anonymous: 'Sent with the public key, by no signed-in user',
-  server_key: 'Sent by a server with a service key',
-  console: 'Uploaded from the console',
-}
-const uploaderLabel = (file: StorageFile): string => file.uploader?.label ?? '—'
-const uploaderTitle = (file: StorageFile): string =>
-  file.uploader ? UPLOADER_TITLE[file.uploader.kind] : 'Not recorded for this file'
-
-function timeAgo(iso?: string | Date | null): string {
-  if (!iso) return ''
-  const t = new Date(iso).getTime()
-  if (isNaN(t)) return ''
-  const s = Math.floor((Date.now() - t) / 1000)
-  if (s < 45) return 'just now'
-  const m = Math.floor(s / 60)
-  if (m < 60) return `${m}m ago`
-  const h = Math.floor(m / 60)
-  if (h < 24) return `${h}h ago`
-  const d = Math.floor(h / 24)
-  if (d < 7) return `${d}d ago`
-  return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
-}
+const errorText = (err: unknown, fallback: string) => (err instanceof Error && err.message ? err.message : fallback)
 
 export function StorageWorkbench({ projectId: projectIdProp }: { projectId?: string }) {
   const router = useRouter()
-
-  const [selectedBucket, setSelectedBucket] = useState<string>(ALL_BUCKETS)
-  const [selectedBucketId, setSelectedBucketId] = useState<string | null>(null)
-  const [selectedFileId, setSelectedFileId] = useState<string | null>(null)
-  const [searchQuery, setSearchQuery] = useState('')
-  const [bucketFilter, setBucketFilter] = useState('')
-  const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set())
-  const [isDragging, setIsDragging] = useState(false)
-  const [uploadProgress, setUploadProgress] = useState<Record<string, number>>({})
-  const [mobilePane, setMobilePane] = useState<'buckets' | 'objects'>('buckets')
-  const fileInputRef = useRef<HTMLInputElement>(null)
-
-  const [buckets, setBuckets] = useState<StorageBucket[]>([])
-  const [files, setFiles] = useState<StorageFile[]>([])
-  // What the SERVER holds vs what is loaded. The old fetch took the route's
-  // first page (100 rows) and every count, "Select all" and delete-bucket
-  // confirmation treated it as the whole project.
-  const [serverTotal, setServerTotal] = useState(0)
-  const [loadingMore, setLoadingMore] = useState(false)
-  const [stats, setStats] = useState<StorageStats | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [uploading, setUploading] = useState(false)
   const [projectId, setProjectId] = useState<string | null>(projectIdProp ?? null)
-  const [project, setProject] = useState<Project | null>(null)
+  useEffect(() => {
+    if (projectIdProp) {
+      setProjectId(projectIdProp)
+      return
+    }
+    let cancelled = false
+    getCurrentProjectId()
+      .then((pid) => {
+        if (cancelled) return
+        if (pid) setProjectId(pid)
+        else router.push('/app')
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [projectIdProp, router])
+
+  const role = useProjectRole(projectId)
+  const agent = useAgentConnection(projectId)
+  const canWrite = role.canWrite
+  const canAdminister = role.canAdminister
+
+  // ── Where you are: the bucket and the open file live in the URL ────────────
+  const [bucketParam, openBucketParam, closeBucketParam] = useRecordParam('bucket')
+  const [fileParam, openFile, closeFile] = useRecordParam('file')
+  // Phones show one pane at a time: the buckets first, unless a link named a bucket or a file.
+  const [pane, setPane] = useState<'buckets' | 'files'>(() => (bucketParam || fileParam ? 'files' : 'buckets'))
+
+  // ── Buckets, their server counts, and the project's limit ──────────────────
+  const [buckets, setBuckets] = useState<StorageBucket[] | null>(null)
+  const [cdnServesPublicObjects, setCdnServesPublicObjects] = useState(false)
+  const [stats, setStats] = useState<StorageStats | null>(null)
+  const [limit, setLimit] = useState<number | null>(null)
+  const [metaFailed, setMetaFailed] = useState(false)
+  const [metaAt, setMetaAt] = useState<number | null>(null)
+
+  const loadMeta = useCallback(async (pid: string): Promise<boolean> => {
+    const [b, s] = await Promise.allSettled([getBucketsWithCaveat(pid), getStorageStats(pid)])
+    if (s.status === 'fulfilled') setStats(s.value)
+    if (b.status === 'fulfilled') {
+      setBuckets(b.value.buckets)
+      setCdnServesPublicObjects(b.value.cdnServesPublicObjects)
+      setMetaFailed(false)
+      setMetaAt(Date.now())
+      return true
+    }
+    setMetaFailed(true)
+    return false
+  }, [])
+
+  useEffect(() => {
+    if (!projectId) return
+    void loadMeta(projectId)
+    getProject(projectId)
+      .then((p) => setLimit(p.storageLimit ? toNum(p.storageLimit) : null))
+      .catch(() => setLimit(null))
+  }, [projectId, loadMeta])
+
+  // Bucket counts come from the SERVER's per-bucket stats, never from the
+  // loaded page: counting the loaded array under-reported every bucket past
+  // the first page, including the delete-bucket confirmation.
+  const countFor = useCallback(
+    (bucketName: string) =>
+      toNum(buckets?.find((b) => b.name === bucketName)?.fileCount ?? stats?.buckets.find((b) => b.name === bucketName)?.fileCount),
+    [buckets, stats],
+  )
+  const sizeFor = useCallback(
+    (bucketName: string) =>
+      toNum(buckets?.find((b) => b.name === bucketName)?.totalSize ?? stats?.buckets.find((b) => b.name === bucketName)?.totalSize),
+    [buckets, stats],
+  )
+  const policyFor = useCallback((bucketName: string) => buckets?.find((b) => b.name === bucketName)?.accessPolicy, [buckets])
+  const totalFiles = stats?.totalFiles ?? (buckets ?? []).reduce((s, b) => s + toNum(b.fileCount), 0)
+  const usedBytes = stats ? toNum(stats.totalSize) : buckets ? buckets.reduce((s, b) => s + toNum(b.totalSize), 0) : null
+
+  const bucket = bucketParam && buckets ? buckets.find((b) => b.name === bucketParam) ?? null : null
+  // A bucket named in the URL that the project no longer has: All files.
+  useEffect(() => {
+    if (bucketParam && buckets && !buckets.some((b) => b.name === bucketParam)) closeBucketParam()
+  }, [bucketParam, buckets, closeBucketParam])
+
+  // ── The files of this bucket and this search, from the server ──────────────
+  const [search, setSearch] = useState('')
+  const [committedSearch, setCommittedSearch] = useState('')
+  useEffect(() => {
+    const term = search.trim()
+    const t = setTimeout(() => setCommittedSearch(term), term ? 300 : 0)
+    return () => clearTimeout(t)
+  }, [search])
+
+  const scopeBucketId = bucket?.id ?? null
+  const scopeKey = `${scopeBucketId ?? '*'}\u0000${committedSearch}`
+  // A bucket in the URL needs its id before its files can be asked for.
+  const scopeReady = !!projectId && (!bucketParam || buckets !== null)
+
+  const [view, setView] = useState<FilesView | null>(null)
+  const [filesLoading, setFilesLoading] = useState(true)
+  const [filesFailedKey, setFilesFailedKey] = useState<string | null>(null)
+  const [loadingMore, setLoadingMore] = useState(false)
+  // Each read is numbered; an answer that a newer read overtook is dropped.
+  const seq = useRef(0)
+
+  const loadFiles = useCallback(
+    async (pid: string, bucketId: string | null, term: string, key: string, size = FILE_PAGE_SIZE): Promise<boolean> => {
+      const mine = ++seq.current
+      setFilesLoading(true)
+      try {
+        const page = await getFiles({ projectId: pid, bucketId: bucketId ?? undefined, search: term || undefined, limit: size })
+        if (mine !== seq.current) return true
+        setView({ key, files: page.files, total: page.total, at: Date.now() })
+        setFilesFailedKey(null)
+        return true
+      } catch {
+        if (mine !== seq.current) return true
+        setFilesFailedKey(key)
+        return false
+      } finally {
+        if (mine === seq.current) setFilesLoading(false)
+      }
+    },
+    [],
+  )
+
+  useEffect(() => {
+    if (!scopeReady || !projectId) return
+    void loadFiles(projectId, scopeBucketId, committedSearch, scopeKey)
+  }, [scopeReady, projectId, scopeBucketId, committedSearch, scopeKey, loadFiles])
+
+  const files = view && view.key === scopeKey ? view.files : null
+  const filesTotal = view && view.key === scopeKey ? view.total : 0
 
   const [actionError, setActionError] = useState<string | null>(null)
-  const [copiedUrl, setCopiedUrl] = useState<string | null>(null)
-  const [fileToDelete, setFileToDelete] = useState<StorageFile | null>(null)
-  const [deletingFile, setDeletingFile] = useState(false)
-  const [bucketToDelete, setBucketToDelete] = useState<{ id: string; name: string; fileCount: number } | null>(null)
-  /**
-   * The bucket whose read policy is being changed.
-   *
-   * Policy is the control that decides who may read this bucket's objects, and
-   * the dashboard previously could not show it, let alone change it: the list
-   * response carried `isPublic` only.
-   */
-  const [bucketPolicyTarget, setBucketPolicyTarget] = useState<StorageBucket | null>(null)
-  /** Deployment-level, reported by the server. See BucketPolicyDialog. */
-  const [cdnServesPublicObjects, setCdnServesPublicObjects] = useState(false)
-  const [deletingBucket, setDeletingBucket] = useState(false)
-  const [pendingUpload, setPendingUpload] = useState<File[] | null>(null)
-
-  useEffect(() => {
-    const init = async () => {
-      try {
-        const pid = projectIdProp || (await getCurrentProjectId())
-        if (!pid) {
-          router.push('/app')
-          return
-        }
-        setProjectId(pid)
-        const [projectData] = await Promise.all([getProject(pid), fetchData(pid)])
-        setProject(projectData)
-      } catch (error) {
-        console.error('Failed to initialize storage page:', error)
-        setLoading(false)
-      }
-    }
-    init()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectIdProp])
-
-  useEffect(() => {
-    const onStorageChanged = () => { fetchData() }
-    window.addEventListener('backenly:storage-changed', onStorageChanged)
-    return () => window.removeEventListener('backenly:storage-changed', onStorageChanged)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectId])
-
-  const fetchData = async (pid?: string) => {
-    const activePid = pid || projectId
-    if (!activePid) return
-    try {
-      setLoading(true)
-      const [bucketsResult, filesPage, statsData] = await Promise.all([
-        getBucketsWithCaveat(activePid),
-        getFiles({ projectId: activePid, limit: FILE_PAGE_SIZE }),
-        getStorageStats(activePid),
-      ])
-      const bucketsData = bucketsResult.buckets
-      setCdnServesPublicObjects(bucketsResult.cdnServesPublicObjects)
-      setBuckets(bucketsData)
-      setFiles(filesPage.files)
-      setServerTotal(filesPage.total)
-      setStats(statsData)
-    } catch (error) {
-      console.error('Failed to fetch storage data:', error)
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  // ── Derived ────────────────────────────────────────────────────────────────
-
-  const visibleBuckets = bucketFilter.trim()
-    ? buckets.filter((b) => b.name.toLowerCase().includes(bucketFilter.trim().toLowerCase()))
-    : buckets
-
-  const bucketFiles = selectedBucket === ALL_BUCKETS
-    ? files
-    : files.filter((f) => f.bucket === selectedBucket)
-
-  const filteredFiles = searchQuery.trim()
-    ? bucketFiles.filter((f) => f.name.toLowerCase().includes(searchQuery.trim().toLowerCase()))
-    : bucketFiles
-
-  const selectedFile = selectedFileId ? files.find((f) => f.id === selectedFileId) ?? null : null
-
-  const totalStorage = toNum(stats?.totalSize) || files.reduce((sum, f) => sum + toNum(f.size), 0)
-  const totalFiles = stats?.totalFiles ?? serverTotal
-  const totalBuckets = buckets.length
-  /** Loaded, and the project has no bucket yet: the first-run state. */
-  const noBuckets = !loading && totalBuckets === 0
-
-  const maxStorage = project?.storageLimit ? toNum(project.storageLimit) : 1 * 1024 * 1024 * 1024
-  // lib/services/storageQuota.ts reports "no cap" (self-hosted, or a plan
-  // lookup that failed open) as 2^63-1 bytes. Drawn as a quota, that read
-  // "0 B / 8589934592.0 GB" and a meter that can never move. Anything beyond
-  // exact integer range is not a real limit, so it is shown as none.
-  const unlimitedStorage = maxStorage > Number.MAX_SAFE_INTEGER
-  const storagePercentage = !unlimitedStorage && maxStorage > 0 ? (totalStorage / maxStorage) * 100 : 0
-  const isStorageWarning = storagePercentage >= 80
-  const isStorageCritical = storagePercentage >= 95
 
   const loadMoreFiles = async () => {
-    if (!projectId || loadingMore || files.length >= serverTotal) return
+    if (!projectId || !view || view.key !== scopeKey || loadingMore || view.files.length >= view.total) return
+    const mine = seq.current
     setLoadingMore(true)
     try {
-      const page = await getFiles({ projectId, limit: FILE_PAGE_SIZE, offset: files.length })
-      setFiles((prev) => [...prev, ...page.files])
-      setServerTotal(page.total)
-    } catch (error) {
-      console.error('Failed to load more files:', error)
+      const page = await getFiles({
+        projectId,
+        bucketId: scopeBucketId ?? undefined,
+        search: committedSearch || undefined,
+        limit: FILE_PAGE_SIZE,
+        offset: view.files.length,
+      })
+      if (mine !== seq.current) return
+      setView((v) => {
+        if (!v || v.key !== scopeKey) return v
+        const have = new Set(v.files.map((f) => f.id))
+        return { ...v, files: [...v.files, ...page.files.filter((f) => !have.has(f.id))], total: page.total }
+      })
+    } catch (err) {
+      setActionError(`Could not load more files. ${errorText(err, '')}`.trim())
     } finally {
       setLoadingMore(false)
     }
   }
 
-  // Bucket counts come from the SERVER's per-bucket stats, never from the
-  // loaded page: counting the truncated array under-reported every bucket
-  // past the first page, including the delete-bucket confirmation.
-  const countFor = (bucketName: string) =>
-    buckets.find((b) => b.name === bucketName)?.fileCount
-      ?? files.filter((f) => f.bucket === bucketName).length
-  const sizeFor = (bucketName: string) =>
-    stats?.buckets.find((b) => b.name === bucketName)?.totalSize
-      ?? files.filter((f) => f.bucket === bucketName).reduce((s, f) => s + toNum(f.size), 0)
+  // ── Refresh: the bar's data and the list, together ─────────────────────────
+  const [refreshing, setRefreshing] = useState(false)
+  const [metaStaleAt, setMetaStaleAt] = useState<number | null>(null)
+  const refresh = useCallback(async () => {
+    if (!projectId) return
+    setRefreshing(true)
+    const keep = view && view.key === scopeKey ? Math.min(FILE_PAGE_MAX, Math.max(FILE_PAGE_SIZE, view.files.length)) : FILE_PAGE_SIZE
+    const [metaOk] = await Promise.all([
+      loadMeta(projectId),
+      scopeReady ? loadFiles(projectId, scopeBucketId, committedSearch, scopeKey, keep) : Promise.resolve(true),
+    ])
+    setMetaStaleAt(metaOk ? null : metaAt)
+    setRefreshing(false)
+  }, [projectId, view, scopeKey, loadMeta, scopeReady, loadFiles, scopeBucketId, committedSearch, metaAt])
 
-  // ── Actions ────────────────────────────────────────────────────────────────
+  // Agents and functions write files too; the console's own writes announce themselves here.
+  useEffect(() => {
+    const onChanged = () => void refresh()
+    window.addEventListener('backenly:storage-changed', onChanged)
+    return () => window.removeEventListener('backenly:storage-changed', onChanged)
+  }, [refresh])
 
-  const handleFileSelect = (fileId: string) => {
-    const next = new Set(selectedFiles)
-    if (next.has(fileId)) next.delete(fileId)
-    else next.add(fileId)
-    setSelectedFiles(next)
+  // ── Selection, kept with the list it was made in ───────────────────────────
+  const [picked, setPicked] = useState<{ key: string; ids: Set<string> }>({ key: '', ids: new Set() })
+  const selection = useMemo(() => (picked.key === scopeKey ? picked.ids : new Set<string>()), [picked, scopeKey])
+  const toggle = (id: string) => {
+    const next = new Set(selection)
+    if (next.has(id)) next.delete(id)
+    else next.add(id)
+    setPicked({ key: scopeKey, ids: next })
+  }
+  const toggleAll = () => {
+    if (!files) return
+    const all = files.length > 0 && files.every((f) => selection.has(f.id))
+    setPicked({ key: scopeKey, ids: all ? new Set() : new Set(files.map((f) => f.id)) })
+  }
+  const clearSelection = () => setPicked({ key: scopeKey, ids: new Set() })
+
+  // ── Moving around ──────────────────────────────────────────────────────────
+  const selectBucket = (name: string | null) => {
+    if (name === null) closeBucketParam()
+    else openBucketParam(name)
+    closeFile()
+    setSearch('')
+    setCommittedSearch('')
+    setActionError(null)
+    setPane('files')
   }
 
-  const handleSelectAll = () => {
-    if (selectedFiles.size === filteredFiles.length) setSelectedFiles(new Set())
-    else setSelectedFiles(new Set(filteredFiles.map((f) => f.id)))
-  }
+  const nav = recordNav(files ?? [], (f) => f.id, fileParam, openFile)
 
-  const handleBulkDelete = async () => {
-    if (selectedFiles.size === 0) return
+  // ── Deleting ───────────────────────────────────────────────────────────────
+  const [toDelete, setToDelete] = useState<StorageFile[] | null>(null)
+  const [deletingFiles, setDeletingFiles] = useState(false)
+  const confirmDeleteFiles = async () => {
+    if (!toDelete || toDelete.length === 0) return
+    setDeletingFiles(true)
+    setActionError(null)
+    const ids = toDelete.map((f) => f.id)
     try {
-      await deleteFiles(Array.from(selectedFiles))
-      if (selectedFileId && selectedFiles.has(selectedFileId)) setSelectedFileId(null)
-      setSelectedFiles(new Set())
-      await fetchData()
-    } catch (error) {
-      console.error('Failed to delete files:', error)
-      setActionError('Failed to delete the selected files. Try again.')
+      if (ids.length === 1) await deleteFile(ids[0])
+      else await deleteFiles(ids)
+      if (fileParam && ids.includes(fileParam)) closeFile()
+      setPicked({ key: scopeKey, ids: new Set([...selection].filter((id) => !ids.includes(id))) })
+      setToDelete(null)
+      await refresh()
+    } catch (err) {
+      setToDelete(null)
+      setActionError(errorText(err, ids.length === 1 ? 'The file was not deleted.' : 'The files were not deleted.'))
+    } finally {
+      setDeletingFiles(false)
     }
   }
 
-  const handleCopyLink = (url: string) => {
-    navigator.clipboard.writeText(url)
-    setCopiedUrl(url)
-    setTimeout(() => setCopiedUrl((cur) => (cur === url ? null : cur)), 1400)
+  const [bucketToDelete, setBucketToDelete] = useState<StorageBucket | null>(null)
+  const [deletingBucket, setDeletingBucket] = useState(false)
+  const confirmDeleteBucket = async () => {
+    if (!bucketToDelete) return
+    setDeletingBucket(true)
+    setActionError(null)
+    try {
+      await deleteBucket(bucketToDelete.id)
+      if (bucketParam === bucketToDelete.name) {
+        closeBucketParam()
+        closeFile()
+      }
+      setBucketToDelete(null)
+      await refresh()
+    } catch (err) {
+      setBucketToDelete(null)
+      setActionError(errorText(err, 'The bucket was not deleted.'))
+    } finally {
+      setDeletingBucket(false)
+    }
   }
 
-  const handleDragOver = useCallback((e: React.DragEvent) => {
-    e.preventDefault()
-    setIsDragging(true)
-  }, [])
+  // ── Who can read a bucket ──────────────────────────────────────────────────
+  const [policyTarget, setPolicyTarget] = useState<StorageBucket | null>(null)
 
-  const handleDragLeave = useCallback((e: React.DragEvent) => {
-    e.preventDefault()
-    setIsDragging(false)
-  }, [])
+  // ── Uploading ──────────────────────────────────────────────────────────────
+  const quota = quotaOf(usedBytes ?? 0, limit)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  const [uploading, setUploading] = useState(false)
+  const [progress, setProgress] = useState<Record<string, number>>({})
+  const [pendingUpload, setPendingUpload] = useState<File[] | null>(null)
+  const [dragging, setDragging] = useState(false)
+  const hasBuckets = !!buckets && buckets.length > 0
+  const canUpload = canWrite && hasBuckets
 
-  const performUpload = async (filesToUpload: File[], bucketId: string) => {
+  const performUpload = async (list: File[], target: StorageBucket) => {
     setUploading(true)
+    setActionError(null)
     try {
-      for (const file of filesToUpload) {
-        const uploadId = `${Date.now()}-${file.name}`
-        await uploadFile({ file, bucketId, isPublic: false }, (progress) => {
-          setUploadProgress((prev) => ({ ...prev, [uploadId]: progress }))
+      for (const file of list) {
+        const id = `${Date.now()}-${file.name}`
+        await uploadFile({ file, bucketId: target.id }, (p) => setProgress((prev) => ({ ...prev, [id]: p })))
+        setProgress((prev) => {
+          const next = { ...prev }
+          delete next[id]
+          return next
         })
-        setTimeout(() => {
-          setUploadProgress((prev) => {
-            const next = { ...prev }
-            delete next[uploadId]
-            return next
-          })
-        }, 1000)
       }
-      await fetchData()
-    } catch (error) {
-      console.error('Failed to upload files:', error)
-      setActionError('Failed to upload files. Try again.')
+    } catch (err) {
+      // The server's words: a blocked type, a file over the bucket's limit, a full quota.
+      setActionError(errorText(err, 'The upload did not finish.'))
+      setProgress({})
     } finally {
       setUploading(false)
+      await refresh()
     }
   }
 
-  const handleFileUpload = async (filesToUpload: File[]) => {
-    if (filesToUpload.length === 0) return
-    setActionError(null)
-    let bucketId = selectedBucketId
-    if (!bucketId || selectedBucket === ALL_BUCKETS) {
-      if (buckets.length === 0) {
-        setActionError('Create a bucket first. Describe what your app stores and Backenly sets one up.')
-        return
-      }
-      if (buckets.length === 1) {
-        bucketId = buckets[0].id
-      } else {
-        setPendingUpload(filesToUpload)
-        return
-      }
+  const handleUpload = (list: File[]) => {
+    if (list.length === 0 || !canUpload || !buckets) return
+    if (quota.full) {
+      setActionError('Storage is full, so uploads are blocked. Delete files to make room.')
+      return
     }
-    await performUpload(filesToUpload, bucketId)
+    const target = bucket ?? (buckets.length === 1 ? buckets[0] : null)
+    if (!target) {
+      setPendingUpload(list)
+      return
+    }
+    void performUpload(list, target)
   }
 
-  const handleDrop = useCallback((e: React.DragEvent) => {
-    e.preventDefault()
-    setIsDragging(false)
-    handleFileUpload(Array.from(e.dataTransfer.files))
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedBucketId, selectedBucket, buckets])
+  const carriesFiles = (e: DragEvent) => Array.from(e.dataTransfer?.types ?? []).includes('Files')
+  const dropHandlers = canUpload
+    ? {
+        onDragOver: (e: DragEvent) => {
+          if (!carriesFiles(e)) return
+          e.preventDefault()
+          if (!dragging) setDragging(true)
+        },
+        onDrop: (e: DragEvent) => {
+          if (!carriesFiles(e)) return
+          e.preventDefault()
+          setDragging(false)
+          handleUpload(Array.from(e.dataTransfer.files))
+        },
+      }
+    : {}
 
-  const handleFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files) handleFileUpload(Array.from(e.target.files))
-    e.target.value = ''
+  // ── What the bar says ──────────────────────────────────────────────────────
+  const free = useFreePlan(role.organizationId, quota.warning)
+  const upgradeHref = free ? (role.organizationId ? `/app/org/${role.organizationId}/billing` : '/app/billing') : null
+  const facts: Array<BarFact | null> = [
+    usedBytes !== null ? { text: <QuotaFact quota={quota} upgradeHref={upgradeHref} />, tone: quota.full ? 'danger' : quota.warning ? 'attention' : 'neutral' } : null,
+    role.role !== null && !canWrite ? { text: 'Read only' } : null,
+  ]
+
+  const firstLoad = buckets === null && !metaFailed
+  const metaError = buckets === null && metaFailed
+  const noBuckets = !!buckets && buckets.length === 0
+
+  const retryAll = () => {
+    if (!projectId) return
+    void loadMeta(projectId)
+    if (scopeReady) void loadFiles(projectId, scopeBucketId, committedSearch, scopeKey)
   }
 
-  const activeUploads = Object.entries(uploadProgress)
+  const filesStale =
+    filesFailedKey === scopeKey && files ? { things: 'files', at: view!.at } : metaStaleAt !== null ? { things: 'buckets', at: metaStaleAt } : null
 
-  // ── Render ─────────────────────────────────────────────────────────────────
+  const uploads = Object.values(progress)
+  const deleteTitle = (list: StorageFile[]) => {
+    if (list.length === 1) return `Delete ${list[0].name}?`
+    const from = new Set(list.map((f) => f.bucket))
+    return from.size === 1 ? `Delete ${filesWord(list.length)} from ${[...from][0]}?` : `Delete ${filesWord(list.length)}?`
+  }
+  const bucketFiles = bucketToDelete ? countFor(bucketToDelete.name) : 0
 
   return (
-    <div
-      className={`console-fill flex flex-col overflow-hidden ${KIT.bg}`}
-      onDragOver={handleDragOver}
-      onDragLeave={handleDragLeave}
-      onDrop={handleDrop}
-    >
-      <input ref={fileInputRef} type="file" multiple onChange={handleFileInputChange} className="hidden" />
+    <div className={`console-fill flex flex-col overflow-hidden ${KIT.bg}`} {...dropHandlers}>
+      <input ref={fileInputRef} type="file" multiple tabIndex={-1} aria-hidden className="hidden" onChange={(e) => {
+        if (e.target.files) handleUpload(Array.from(e.target.files))
+        e.target.value = ''
+      }} />
 
-      {/* ── Command bar ─────────────────────────────────────────
-          Identity, the live quota, and the one primary action. A browser
-          needs vertical room more than a 22px title and a description. */}
-      <CommandBar
+      <InstrumentBar
         title="Storage"
-        context={
-          totalFiles > 0 ? (
-            <span className="tabular-nums">
-              {totalFiles.toLocaleString()} {totalFiles === 1 ? 'object' : 'objects'}
-            </span>
-          ) : undefined
+        loading={firstLoad}
+        facts={facts}
+        create={
+          canUpload
+            ? {
+                label: uploading ? 'Uploading…' : 'Upload',
+                icon: Upload,
+                primary: true,
+                disabled: uploading || quota.full,
+                onClick: () => fileInputRef.current?.click(),
+              }
+            : undefined
         }
-      >
-        {/* Quota — a meter, not a panel. */}
-        <div className="hidden items-center gap-2.5 sm:flex" title={unlimitedStorage ? 'This deployment sets no storage limit' : undefined}>
-          <span className="text-[12.5px] tabular-nums text-zinc-400">
-            {formatFileSize(totalStorage)}
-            <span className="text-faint">{unlimitedStorage ? ' used, no limit' : ` of ${formatFileSize(maxStorage)}`}</span>
-          </span>
-          {!unlimitedStorage && (
-            <>
-              <div
-                className="h-[4px] w-24 overflow-hidden rounded-full bg-white/[0.07]"
-                role="meter"
-                aria-label="Storage used"
-                aria-valuemin={0}
-                aria-valuemax={100}
-                aria-valuenow={Math.round(storagePercentage)}
-              >
-                <div
-                  className={`h-full rounded-full transition-[width] duration-500 ${
-                    isStorageCritical ? 'bg-rose-400' : isStorageWarning ? 'bg-amber-400' : 'bg-zinc-300'
-                  }`}
-                  style={{ width: `${Math.max(Math.min(storagePercentage, 100), totalStorage > 0 ? 2 : 0)}%` }}
-                />
-              </div>
-              <span
-                className={`text-[12.5px] tabular-nums ${
-                  isStorageCritical ? 'text-rose-300' : isStorageWarning ? 'text-amber-200' : 'text-faint'
-                }`}
-              >
-                {storagePercentage.toFixed(storagePercentage < 10 ? 1 : 0)}%
-              </span>
-            </>
-          )}
-        </div>
-        {/* Buckets come from the agent, never from this page, so before the
-            first one exists Upload has nowhere to put a file and is left out
-            rather than shown dead with "Create a bucket first". */}
-        {!noBuckets && (
-          <KitButton
-            variant="primary"
-            size="sm"
-            icon={Upload}
-            loading={uploading}
-            onClick={() => fileInputRef.current?.click()}
-            disabled={isStorageCritical || totalBuckets === 0}
-            title={isStorageCritical ? 'Storage is full: free space to upload' : 'Upload files'}
-          >
-            {uploading ? 'Uploading…' : 'Upload'}
-          </KitButton>
-        )}
-      </CommandBar>
+      />
 
-      {/* Quota + action notices — flush strips, never floating cards. */}
-      {actionError && (
-        <div className="flex-shrink-0 border-b border-white/[0.06] px-4 py-2.5">
-          <KitNote
-            tone="danger"
-            icon={AlertTriangle}
-            actions={
-              <button
-                onClick={() => setActionError(null)}
-                className={`rounded-[5px] text-[12px] font-medium text-faint transition-colors hover:text-zinc-200 ${FOCUS}`}
-              >
-                Dismiss
-              </button>
-            }
-          >
-            {actionError}
-          </KitNote>
-        </div>
-      )}
-
-      {isStorageWarning && (
-        <div className="flex-shrink-0 border-b border-white/[0.06] px-4 py-2.5">
-          <KitNote
-            tone={isStorageCritical ? 'danger' : 'warn'}
-            icon={AlertTriangle}
-            title={isStorageCritical ? 'Storage quota critical' : 'Storage quota warning'}
-          >
-            {formatFileSize(totalStorage)} of {formatFileSize(maxStorage)} used ({storagePercentage.toFixed(1)}%)
-            {isStorageCritical && '. Uploads are blocked until you free space.'}
-          </KitNote>
-        </div>
-      )}
-
-      {/* ── Workbench ───────────────────────────────────────── */}
       <div className="relative min-h-0 flex-1">
         <div className="absolute inset-0 flex">
-
-          {/* ── Buckets rail (responsive drill-down on mobile) ──
-              A project with no buckets has no rail at any width: the pane
-              carries the empty state with its request and Connect, and the
-              rail only repeated "No buckets yet" (on a phone, instead of them). */}
-          <div
-            className={`w-full md:w-[248px] flex-shrink-0 flex-col border-r border-white/[0.06] ${KIT.rail} ${
-              noBuckets ? 'hidden' : mobilePane !== 'buckets' ? 'hidden md:flex' : 'flex'
-            }`}
-          >
-            <div className="flex h-[44px] flex-shrink-0 items-center justify-between gap-2 border-b border-white/[0.06] pl-4 pr-2">
-              <span className="text-[13px] font-medium text-zinc-200">Buckets</span>
-              <div className="flex flex-shrink-0 items-center gap-0.5">
-                <IconButton icon={RefreshCw} label="Refresh" onClick={() => fetchData()} className={loading ? '[&_svg]:animate-spin' : ''} />
-              </div>
+          {metaError ? (
+            <div className="min-w-0 flex-1">
+              <ErrorRow things="buckets" onRetry={retryAll} />
             </div>
-
-            {buckets.length > 0 && (
-              <div className="flex-shrink-0 border-b border-white/[0.06] p-2">
-                <div className="relative">
-                  <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-600" />
-                  <input
-                    type="search"
-                    aria-label="Search buckets"
-                    placeholder="Search buckets…"
-                    value={bucketFilter}
-                    onChange={(e) => setBucketFilter(e.target.value)}
-                    className={`${INPUT_BASE} h-[30px] pl-8 pr-2.5`}
-                  />
-                </div>
-              </div>
-            )}
-
-            <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden py-1.5">
-              {loading && buckets.length === 0 ? (
-                <div className="space-y-1.5 px-3 py-2" aria-hidden>
-                  {[0, 1, 2].map((i) => (
-                    <Skeleton key={i} className="h-[24px] w-full" />
-                  ))}
-                </div>
-              ) : buckets.length === 0 ? null : (
-                <div className="space-y-px px-2">
-                  {/* All buckets */}
-                  <button
-                    type="button"
-                    aria-current={selectedBucket === ALL_BUCKETS ? 'true' : undefined}
-                    onClick={() => { setSelectedBucket(ALL_BUCKETS); setSelectedBucketId(null); setMobilePane('objects') }}
-                    className={`group relative flex h-[32px] w-full items-center gap-2.5 rounded-[7px] px-2.5 text-left transition-colors ${FOCUS_INSET} ${
-                      selectedBucket === ALL_BUCKETS
-                        ? 'bg-white/[0.07] text-zinc-50'
-                        : 'text-zinc-400 hover:bg-white/[0.04] hover:text-zinc-100'
-                    }`}
-                  >
-                    <Folder className="h-3.5 w-3.5 flex-shrink-0 text-zinc-500" strokeWidth={1.75} />
-                    <span className="flex-1 truncate text-[13px] font-medium">All buckets</span>
-                    <span className="flex-shrink-0 text-[12px] tabular-nums text-faint">{totalFiles}</span>
-                  </button>
-
-                  {visibleBuckets.length === 0 ? (
-                    <p className="px-2.5 py-6 text-center text-[12.5px] leading-relaxed text-faint">
-                      No bucket matches “{bucketFilter}”.
-                    </p>
-                  ) : (
-                    visibleBuckets.map((bucket) => {
-                      const active = selectedBucket === bucket.name
-                      return (
-                        // Select with the row's own button; policy and delete are
-                        // siblings, not controls nested inside a role="button" row.
-                        <div
-                          key={bucket.id}
-                          className={`group relative flex h-[32px] items-center rounded-[7px] transition-colors ${
-                            active ? 'bg-white/[0.07] text-zinc-50' : 'text-zinc-400 hover:bg-white/[0.04] hover:text-zinc-100'
-                          }`}
-                        >
-                          <button
-                            type="button"
-                            aria-current={active ? 'true' : undefined}
-                            onClick={() => { setSelectedBucket(bucket.name); setSelectedBucketId(bucket.id); setMobilePane('objects') }}
-                            className={`flex h-full min-w-0 flex-1 items-center gap-2.5 rounded-[7px] px-2.5 text-left ${FOCUS_INSET}`}
-                          >
-                            <Folder className={`h-3.5 w-3.5 flex-shrink-0 ${active ? 'text-zinc-300' : 'text-zinc-600'}`} strokeWidth={1.75} />
-                            <span className={`flex-1 truncate font-mono text-[12.5px] ${active ? 'text-zinc-50' : ''}`}>
-                              {bucket.name}
-                            </span>
-                            {/* The POLICY, not a derived boolean. `public` next to a
-                                bucket whose policy is `owner_only` would be telling
-                                the operator the opposite of what is enforced. */}
-                            <span
-                              className={`flex-shrink-0 text-[11.5px] group-hover:opacity-0 group-focus-within:opacity-0 ${
-                                bucket.accessPolicy === 'public_read' || bucket.accessPolicy === 'cdn_cacheable'
-                                  ? 'text-amber-200/80'
-                                  : 'text-faint'
-                              }`}
-                            >
-                              {POLICY_LABELS[(bucket.accessPolicy ?? 'private') as AccessPolicy]?.title ?? bucket.accessPolicy}
-                            </span>
-                            <span
-                              className={`flex-shrink-0 text-[12px] tabular-nums transition-opacity group-hover:opacity-0 group-focus-within:opacity-0 ${
-                                active ? 'text-zinc-400' : 'text-faint'
-                              }`}
-                            >
-                              {countFor(bucket.name)}
-                            </span>
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setBucketPolicyTarget(bucket)}
-                            className={`absolute right-8 rounded-[5px] p-1 opacity-0 transition-[opacity,background-color] hover:bg-white/[0.08] focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100 ${FOCUS_INSET}`}
-                            title="Who may read this bucket"
-                            aria-label={`Read access for ${bucket.name}`}
-                          >
-                            <Lock className="h-3.5 w-3.5 text-zinc-400" />
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setBucketToDelete({ id: bucket.id, name: bucket.name, fileCount: countFor(bucket.name) })}
-                            className={`absolute right-2 rounded-[5px] p-1 opacity-0 transition-[opacity,background-color] hover:bg-rose-500/15 focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100 ${FOCUS_INSET}`}
-                            title="Delete bucket"
-                            aria-label={`Delete ${bucket.name}`}
-                          >
-                            <Trash2 className="h-3.5 w-3.5 text-rose-300/70" />
-                          </button>
-                        </div>
-                      )
-                    })
-                  )}
-                </div>
-              )}
-            </div>
-
-            {buckets.length > 0 && (
-              <div className="flex h-[36px] flex-shrink-0 items-center border-t border-white/[0.06] px-4 text-[12px] tabular-nums text-faint">
-                {bucketFilter.trim()
-                  ? `${visibleBuckets.length} of ${buckets.length}`
-                  : `${buckets.length} bucket${buckets.length === 1 ? '' : 's'}`}
-              </div>
-            )}
-          </div>
-
-          {/* ── Object grid ────────────────────────────────── */}
-          <div className={`min-w-0 flex-1 flex-col ${noBuckets || mobilePane === 'objects' ? 'flex' : 'hidden md:flex'}`}>
-            {/* Toolbar: there is nothing to name, count or search until a
-                bucket exists, so a new project's pane is the empty state alone. */}
-            {!noBuckets && (
-            <div className="flex h-[44px] flex-shrink-0 items-center justify-between gap-2 border-b border-white/[0.06] px-3 sm:px-4 md:gap-3">
-              <div className="flex min-w-0 items-center gap-2">
-                <button
-                  onClick={() => setMobilePane('buckets')}
-                  className="-ml-1 flex items-center gap-1 rounded-[7px] bg-white/[0.04] px-2 py-1.5 text-[12.5px] font-medium text-zinc-200 transition-colors hover:bg-white/[0.07] md:hidden"
-                  aria-label="Back to buckets"
-                >
-                  <ChevronLeft className="h-3.5 w-3.5" />
-                  <span>Buckets</span>
-                </button>
-                <div className="flex min-w-0 items-baseline gap-2">
-                  <h2 className={`truncate text-[13px] font-medium text-zinc-100 ${selectedBucket === ALL_BUCKETS ? '' : 'font-mono'}`}>
-                    {selectedBucket === ALL_BUCKETS ? 'All buckets' : selectedBucket}
-                  </h2>
-                  <span className="whitespace-nowrap text-[12px] tabular-nums text-faint">
-                    {files.length < serverTotal
-                      ? `${filteredFiles.length.toLocaleString()} of ${(selectedBucket === ALL_BUCKETS ? serverTotal : countFor(selectedBucket)).toLocaleString()} loaded`
-                      : `${filteredFiles.length.toLocaleString()} ${filteredFiles.length === 1 ? 'object' : 'objects'}`}
-                  </span>
-                  {files.length < serverTotal && (
-                    <button
-                      onClick={loadMoreFiles}
-                      disabled={loadingMore}
-                      className="whitespace-nowrap text-[12px] font-medium text-violet-300/90 underline underline-offset-2 transition-colors hover:text-violet-200 disabled:opacity-50"
-                    >
-                      {loadingMore ? 'Loading…' : 'Load more'}
-                    </button>
-                  )}
-                  {selectedBucket !== ALL_BUCKETS && (
-                    <span className="hidden sm:inline whitespace-nowrap text-[12px] tabular-nums text-faint">
-                      {formatFileSize(toNum(sizeFor(selectedBucket)))}
-                    </span>
-                  )}
-                </div>
-              </div>
-
-              <div className="flex flex-shrink-0 items-center gap-2">
-                {selectedFiles.size > 0 && (
-                  <>
-                    <span className="hidden sm:inline text-[12px] font-medium tabular-nums text-zinc-400">
-                      {selectedFiles.size} selected
-                    </span>
-                    <KitButton variant="danger" size="sm" icon={Trash2} onClick={handleBulkDelete}>
-                      <span className="hidden sm:inline">Delete</span>
-                    </KitButton>
-                    <span className="h-3 w-px bg-white/10" />
-                  </>
-                )}
-                <div className="relative">
-                  <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-600" />
-                  <input
-                    type="search"
-                    aria-label="Search objects"
-                    placeholder="Search objects…"
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    className={`${INPUT_BASE} h-[30px] w-32 pl-8 pr-2.5 sm:w-56`}
-                  />
-                </div>
-              </div>
-            </div>
-            )}
-
-            {/* Grid */}
-            <div className="min-h-0 flex-1 overflow-auto">
-              {loading && files.length === 0 ? (
-                <div className="space-y-px p-3" aria-busy="true" aria-label="Loading files">
-                  {[0, 1, 2, 3, 4, 5].map((i) => (
-                    <Skeleton key={i} className="h-[34px] w-full rounded-[6px]" />
-                  ))}
-                </div>
-              ) : filteredFiles.length === 0 ? (
-                <div className="flex h-full flex-col items-center justify-center px-8">
-                  {searchQuery ? (
-                    <EmptyState
-                      icon={Search}
-                      title="No matching objects"
-                      description={`No object name here contains “${searchQuery.trim()}”.`}
-                    />
-                  ) : totalBuckets === 0 ? (
-                    <AgentEmptyState
-                      projectId={projectId}
-                      icon={HardDrive}
-                      title="No buckets yet"
-                      description="Buckets hold your app’s files, each with its own read rule. Ask your agent for uploads and it creates the bucket."
-                      prompt="Add profile photo uploads: a private bucket, and only the owner can read their files."
-                      docs="storage"
-                      preview="files"
-                    />
-                  ) : (
-                    <EmptyState
-                      icon={File}
-                      title={selectedBucket === ALL_BUCKETS ? 'No files yet' : 'This bucket is empty'}
-                      description="Drop files anywhere on this page, or use Upload."
-                    />
-                  )}
-                </div>
-              ) : (
-                <div className="min-w-full overflow-x-auto">
-                  {/* With the detail pane open the grid gives up Type and
-                      Uploaded, both of which the pane shows, rather than
-                      wrapping sizes and bucket names onto two lines. */}
-                  <table className="w-full min-w-[540px] border-collapse md:min-w-full">
-                    <thead className="sticky top-0 z-10">
-                      <tr className={KIT.gridHead}>
-                        <th className={`sticky left-0 z-20 w-10 border-b border-r border-white/[0.06] ${KIT.gridHead} px-2 text-center`}>
-                          <button
-                            type="button"
-                            role="checkbox"
-                            aria-checked={selectedFiles.size === filteredFiles.length && filteredFiles.length > 0}
-                            aria-label={selectedFiles.size === filteredFiles.length ? 'Deselect all objects' : 'Select all objects'}
-                            onClick={handleSelectAll}
-                            className={`rounded-[4px] text-zinc-500 transition-colors hover:text-zinc-300 ${FOCUS_INSET}`}
-                          >
-                            {selectedFiles.size === filteredFiles.length && filteredFiles.length > 0 ? (
-                              <CheckSquare className="h-3.5 w-3.5 text-violet-300" />
-                            ) : (
-                              <Square className="h-3.5 w-3.5" />
-                            )}
-                          </button>
-                        </th>
-                        <th className={TH}>Name</th>
-                        {selectedBucket === ALL_BUCKETS && <th className={TH}>Bucket</th>}
-                        {!selectedFile && <th className={`${TH} hidden xl:table-cell`}>Type</th>}
-                        <th className={`${TH_BASE} text-right`}>Size</th>
-                        <th className={TH}>Access</th>
-                        {!selectedFile && <th className={`${TH} hidden xl:table-cell`}>Uploaded by</th>}
-                        {!selectedFile && <th className={`${TH} hidden lg:table-cell`}>Uploaded</th>}
-                        <th className={`${TH} w-20`}>
-                          <span className="sr-only">Actions</span>
-                        </th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {filteredFiles.map((file) => {
-                        const isChecked = selectedFiles.has(file.id)
-                        const isActive = selectedFileId === file.id
-                        return (
-                          <tr
-                            key={file.id}
-                            onClick={() => setSelectedFileId(file.id)}
-                            aria-selected={isActive}
-                            className={`group/row cursor-pointer transition-colors ${
-                              isActive ? 'bg-white/[0.05]' : KIT.rowHoverOn
-                            }`}
-                          >
-                            <td
-                              className={`sticky left-0 z-10 border-b border-r border-white/[0.04] px-2 text-center transition-colors ${
-                                isActive ? 'bg-[#141518]' : `${KIT.bg} ${KIT.rowHoverGroup}`
-                              }`}
-                            >
-                              <button
-                                type="button"
-                                role="checkbox"
-                                aria-checked={isChecked}
-                                aria-label={`Select ${file.name}`}
-                                onClick={(e) => { e.stopPropagation(); handleFileSelect(file.id) }}
-                                className={`rounded-[4px] text-zinc-700 transition-colors hover:text-zinc-300 ${FOCUS_INSET}`}
-                              >
-                                {isChecked ? (
-                                  <CheckSquare className="h-3.5 w-3.5 text-violet-300" />
-                                ) : (
-                                  <Square className="h-3.5 w-3.5" />
-                                )}
-                              </button>
-                            </td>
-                            <td className={`${TD} max-w-0 w-full`}>
-                              {/* The name is the row's keyboard target; the row itself is a mouse convenience. */}
-                              <button
-                                type="button"
-                                onClick={(e) => { e.stopPropagation(); setSelectedFileId(file.id) }}
-                                className={`flex min-w-0 max-w-full items-center gap-2.5 rounded-[5px] text-left ${FOCUS_INSET}`}
-                              >
-                                <FileTypeIcon mimeType={file.mimeType} className="h-3.5 w-3.5 flex-shrink-0 text-zinc-600" />
-                                <span className={`truncate font-mono text-[12.5px] ${isActive ? 'text-zinc-50' : 'text-zinc-200'}`} title={file.name}>
-                                  {file.name}
-                                </span>
-                              </button>
-                            </td>
-                            {selectedBucket === ALL_BUCKETS && (
-                              <td className={`${TD} font-mono text-[12px] text-faint`}>{file.bucket}</td>
-                            )}
-                            {!selectedFile && (
-                              <td className={`${TD} hidden font-mono text-[12px] text-faint xl:table-cell`}>
-                                {shortType(file.mimeType)}
-                              </td>
-                            )}
-                            <td className={`${TD} text-right text-[12.5px] tabular-nums text-zinc-300`}>
-                              {formatFileSize(toNum(file.size))}
-                            </td>
-                            <td className={TD}>
-                              <span className={`text-[12.5px] ${file.isPublic ? 'text-amber-200/90' : 'text-faint'}`}>
-                                {file.isPublic ? 'Public' : 'Private'}
-                              </span>
-                            </td>
-                            {!selectedFile && (
-                              <td className={`${TD} hidden max-w-[200px] xl:table-cell`}>
-                                <span
-                                  className={`block truncate text-[12.5px] ${file.uploader?.kind === 'anonymous' ? 'text-amber-200/90' : 'text-faint'}`}
-                                  title={`${uploaderLabel(file)}: ${uploaderTitle(file)}`}
-                                >
-                                  {uploaderLabel(file)}
-                                </span>
-                              </td>
-                            )}
-                            {!selectedFile && (
-                              <td className={`${TD} hidden text-[12.5px] tabular-nums text-faint lg:table-cell`}>
-                                <time dateTime={new Date(file.createdAt).toISOString()} title={new Date(file.createdAt).toLocaleString()}>
-                                  {timeAgo(file.createdAt)}
-                                </time>
-                              </td>
-                            )}
-                            <td className={`${TD} pr-2`}>
-                              <div className="flex items-center justify-end gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover/row:opacity-100">
-                                <Tooltip content={copiedUrl === file.url ? 'Copied' : 'Copy URL'}>
-                                  <button
-                                    type="button"
-                                    aria-label={`Copy URL for ${file.name}`}
-                                    onClick={(e) => { e.stopPropagation(); handleCopyLink(file.url) }}
-                                    className={`rounded-[6px] p-1.5 text-zinc-500 transition-colors hover:bg-white/[0.06] hover:text-zinc-100 ${FOCUS_INSET}`}
-                                  >
-                                    {copiedUrl === file.url ? (
-                                      <Check className="h-3.5 w-3.5 text-emerald-300" />
-                                    ) : (
-                                      <Copy className="h-3.5 w-3.5" />
-                                    )}
-                                  </button>
-                                </Tooltip>
-                                <Tooltip content="Delete">
-                                  <button
-                                    type="button"
-                                    aria-label={`Delete ${file.name}`}
-                                    onClick={(e) => { e.stopPropagation(); setFileToDelete(file) }}
-                                    className={`rounded-[6px] p-1.5 text-zinc-500 transition-colors hover:bg-rose-500/[0.10] hover:text-rose-300 ${FOCUS_INSET}`}
-                                  >
-                                    <Trash2 className="h-3.5 w-3.5" />
-                                  </button>
-                                </Tooltip>
-                              </div>
-                            </td>
-                          </tr>
-                        )
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </div>
-
-            {/* Grid footer: counts, and live upload progress in the same strip. */}
-            {!noBuckets && (
-            <div className="flex h-[36px] flex-shrink-0 items-center justify-between gap-4 border-t border-white/[0.06] px-4">
-              <span className="text-[12px] tabular-nums text-faint">
-                {searchQuery.trim() && bucketFiles.length !== filteredFiles.length
-                  ? `${filteredFiles.length.toLocaleString()} of ${bucketFiles.length.toLocaleString()} objects match`
-                  : `${filteredFiles.length.toLocaleString()} ${filteredFiles.length === 1 ? 'object' : 'objects'}`}
-              </span>
-
-              {activeUploads.length > 0 && (
-                <div className="flex min-w-0 flex-1 items-center justify-end gap-3">
-                  <span className="truncate font-mono text-[12px] text-faint">
-                    Uploading {activeUploads.length} file{activeUploads.length === 1 ? '' : 's'}
-                  </span>
-                  <div className="h-[3px] w-32 overflow-hidden rounded-full bg-white/[0.06]">
-                    <div
-                      className="h-full rounded-full bg-violet-400/60 transition-[width] duration-200"
-                      style={{
-                        width: `${activeUploads.reduce((s, [, p]) => s + p, 0) / activeUploads.length}%`,
-                      }}
-                    />
-                  </div>
-                </div>
-              )}
-            </div>
-            )}
-          </div>
-
-          {/* ── Object detail ──────────────────────────────── */}
-          {selectedFile && (
-            <>
-              {/* Mobile Backdrop Overlay */}
-              <div
-                className="fixed inset-0 z-40 bg-black/60 backdrop-blur-sm md:hidden"
-                onClick={() => setSelectedFileId(null)}
+          ) : noBuckets ? (
+            <div className="min-w-0 flex-1 overflow-y-auto">
+              <EmptyPanel
+                title="No buckets yet"
+                sentence="Your agent creates a bucket when your app needs to store files."
+                requests={['Add profile photo uploads: a private bucket, and only the owner can read their files.']}
+                agent={role.loading ? null : { status: agent.status, client: agent.client }}
+                canConnect={canAdminister}
+                docs={{ label: 'Storage docs', slug: 'storage' }}
+                headingLevel={2}
               />
-
-              {/* Responsive Drawer / Right Rail */}
-              <div className={`fixed inset-x-0 bottom-0 z-50 max-h-[85vh] rounded-t-2xl border-t border-white/10 md:static md:inset-auto md:z-auto md:flex md:w-[320px] md:max-h-none md:rounded-none md:border-t-0 md:border-l md:border-white/[0.06] flex-shrink-0 flex-col ${KIT.rail} shadow-2xl md:shadow-none pb-[max(1rem,env(safe-area-inset-bottom))] md:pb-0`}>
-                {/* Mobile Drag Handle */}
-                <div className="flex md:hidden pt-2.5 pb-1 justify-center">
-                  <div className="w-10 h-1 rounded-full bg-white/20" />
-                </div>
-
-                <div className="flex h-[44px] flex-shrink-0 items-center justify-between gap-2 border-b border-white/[0.06] pl-4 pr-2">
-                  <span className="text-[13px] font-medium text-zinc-200">Details</span>
-                  <IconButton icon={X} label="Close details" onClick={() => setSelectedFileId(null)} />
-                </div>
-
-                <div className="min-h-0 flex-1 overflow-y-auto">
-                  {/* Preview */}
-                  <div className="border-b border-white/[0.06] p-3">
-                    <ObjectPreview key={selectedFile.id} file={selectedFile} />
-                    <p className="mt-2.5 break-all font-mono text-[12.5px] text-zinc-100">{selectedFile.name}</p>
-                  </div>
-
-                  {/* Metadata */}
-                  <dl className="divide-y divide-white/[0.04]">
-                    {[
-                      ['Size', formatFileSize(toNum(selectedFile.size))],
-                      ['Type', selectedFile.mimeType || 'Unknown'],
-                      ['Bucket', selectedFile.bucket],
-                      ['Access', selectedFile.isPublic ? 'Public' : 'Private'],
-                      ['Uploaded', formatStamp(selectedFile.createdAt)],
-                      ['Uploaded by', uploaderLabel(selectedFile)],
-                    ].map(([label, value]) => (
-                      <div key={label} className="flex items-baseline justify-between gap-3 px-4 py-2.5">
-                        <dt className="flex-shrink-0 text-[12px] font-medium text-faint">
-                          {label}
-                        </dt>
-                        <dd
-                          className={`min-w-0 truncate text-right text-[12.5px] tabular-nums ${
-                            (label === 'Access' && selectedFile.isPublic) ||
-                            (label === 'Uploaded by' && selectedFile.uploader?.kind === 'anonymous')
-                              ? 'text-amber-200/90'
-                              : 'text-zinc-300'
-                          }`}
-                          title={label === 'Uploaded by' ? `${value}: ${uploaderTitle(selectedFile)}` : String(value)}
-                        >
-                          {value}
-                        </dd>
-                      </div>
-                    ))}
-                  </dl>
-
-                  {/* URL */}
-                  <div className="border-t border-white/[0.06] p-3">
-                    <p className="mb-1.5 text-[12px] font-medium text-faint">URL</p>
-                    <div className="flex items-center gap-1.5">
-                      <code className="min-w-0 flex-1 truncate rounded-md border border-white/[0.06] bg-[#08090a] px-2 py-1.5 font-mono text-[12px] text-zinc-400">
-                        {selectedFile.url}
-                      </code>
-                      <button
-                        onClick={() => handleCopyLink(selectedFile.url)}
-                        className="flex-shrink-0 rounded-md p-1.5 text-zinc-500 transition-colors hover:bg-white/[0.04] hover:text-zinc-100"
-                        title="Copy URL"
-                      >
-                        {copiedUrl === selectedFile.url ? (
-                          <Check className="h-3.5 w-3.5 text-emerald-300" />
-                        ) : (
-                          <Copy className="h-3.5 w-3.5" />
-                        )}
-                      </button>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Actions */}
-                <div className="flex flex-shrink-0 items-center gap-2 border-t border-white/[0.06] p-3">
-                  <a
-                    href={selectedFile.url}
-                    download={selectedFile.name}
-                    className="inline-flex h-8 flex-1 items-center justify-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.04] px-2.5 text-[12.5px] font-medium text-zinc-200 transition-colors hover:border-white/20 hover:bg-white/[0.08]"
-                  >
-                    <Download className="h-3.5 w-3.5" />
-                    Download
-                  </a>
-                  <button
-                    onClick={() => setFileToDelete(selectedFile)}
-                    className="inline-flex h-8 items-center justify-center gap-1.5 rounded-lg border border-rose-500/25 bg-rose-500/[0.08] px-2.5 text-[12.5px] font-medium text-rose-300 transition-colors hover:border-rose-500/35 hover:bg-rose-500/[0.14]"
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                    Delete
-                  </button>
-                </div>
-              </div>
+            </div>
+          ) : (
+            <>
+              <BucketsRail
+                buckets={buckets ?? []}
+                loading={firstLoad}
+                selected={bucket?.name ?? (firstLoad ? bucketParam : null)}
+                totalFiles={totalFiles}
+                countFor={countFor}
+                onSelect={selectBucket}
+                className={`w-full flex-shrink-0 md:w-[248px] ${KIT.rail} ${pane === 'files' ? 'hidden md:flex' : 'flex'}`}
+              />
+              <section
+                aria-label={bucket ? `Files in ${bucket.name}` : 'All files'}
+                className={`min-w-0 flex-1 flex-col ${pane === 'buckets' ? 'hidden md:flex' : 'flex'}`}
+              >
+                <FilesPane
+                  bucket={bucket}
+                  scopeCount={bucket ? countFor(bucket.name) : totalFiles}
+                  scopeSize={bucket ? sizeFor(bucket.name) : null}
+                  policyFor={policyFor}
+                  files={files}
+                  total={filesTotal}
+                  loading={filesLoading}
+                  failed={filesFailedKey === scopeKey}
+                  staleAt={filesStale?.at ?? null}
+                  staleThings={filesStale?.things}
+                  onRetry={() => void refresh()}
+                  onLoadMore={() => void loadMoreFiles()}
+                  loadingMore={loadingMore}
+                  onRefresh={() => void refresh()}
+                  refreshing={refreshing}
+                  search={search}
+                  onSearch={setSearch}
+                  committedSearch={committedSearch}
+                  selection={selection}
+                  onToggle={toggle}
+                  onToggleAll={toggleAll}
+                  onClearSelection={clearSelection}
+                  canWrite={canWrite}
+                  canAdminister={canAdminister}
+                  openFileId={nav.item?.id ?? null}
+                  onOpen={openFile}
+                  onDeleteFiles={(list) => setToDelete(list)}
+                  onDeleteBucket={() => bucket && setBucketToDelete(bucket)}
+                  onEditPolicy={() => bucket && setPolicyTarget(bucket)}
+                  onBack={() => setPane('buckets')}
+                  actionError={actionError}
+                  onDismissError={() => setActionError(null)}
+                  uploads={uploads}
+                />
+              </section>
             </>
           )}
         </div>
       </div>
 
-      {/* Drag overlay */}
-      {isDragging && (
+      <FileDrawer
+        file={nav.item}
+        bucketPolicy={nav.item ? policyFor(nav.item.bucket) : null}
+        onClose={closeFile}
+        onPrev={nav.onPrev}
+        onNext={nav.onNext}
+        position={nav.position}
+        canWrite={canWrite}
+        onDelete={(f) => setToDelete([f])}
+      />
+
+      {/* Drop anywhere: the files go to the bucket in view, or you choose one. */}
+      {dragging && canUpload && (
         <div
-          onDragOver={handleDragOver}
-          onDragLeave={handleDragLeave}
-          onDrop={handleDrop}
-          className="fixed inset-0 z-50 flex items-center justify-center bg-[#09090b]/90"
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-[#08090a]/85 p-[24px]"
+          onDragOver={(e) => {
+            e.preventDefault()
+          }}
+          onDragLeave={(e) => {
+            if (e.currentTarget === e.target) setDragging(false)
+          }}
+          onDrop={(e) => {
+            e.preventDefault()
+            setDragging(false)
+            handleUpload(Array.from(e.dataTransfer.files))
+          }}
         >
-          <div className="rounded-xl border border-dashed border-violet-400/30 bg-[#0f1012] px-14 py-12 text-center">
-            <Upload className="mx-auto mb-3 h-4 w-4 text-violet-300" />
-            <p className="mb-1 text-[14px] font-semibold tracking-[-0.01em] text-zinc-50">Drop to upload</p>
-            <p className="text-[12px] text-faint">
-              {selectedBucket === ALL_BUCKETS ? 'Release to choose a bucket.' : `Release to upload to ${selectedBucket}.`}
+          <div className="pointer-events-none rounded-[14px] border border-dashed border-white/25 bg-[#0f1012] px-[48px] py-[36px] text-center">
+            <p className="text-[15px] font-medium text-white">Drop to upload</p>
+            <p className="mt-[4px] text-[13px] text-zinc-400">
+              {bucket ? (
+                <>
+                  To <span className="font-mono text-[12.5px] text-zinc-200">{bucket.name}</span>
+                </>
+              ) : buckets && buckets.length === 1 ? (
+                <>
+                  To <span className="font-mono text-[12.5px] text-zinc-200">{buckets[0].name}</span>
+                </>
+              ) : (
+                'You choose the bucket next.'
+              )}
             </p>
           </div>
         </div>
       )}
 
-      {/* Delete file */}
+      {/* Files: deleted for good, so the confirm says so (decision 8). */}
       <KitConfirmDialog
-        open={!!fileToDelete}
-        onCancel={() => setFileToDelete(null)}
-        onConfirm={async () => {
-          if (!fileToDelete) return
-          setDeletingFile(true)
-          try {
-            await deleteFile(fileToDelete.id)
-            if (selectedFileId === fileToDelete.id) setSelectedFileId(null)
-            setFileToDelete(null)
-            await fetchData()
-          } catch (error) {
-            console.error('Failed to delete file:', error)
-            setFileToDelete(null)
-            setActionError('Failed to delete the file. Try again.')
-          } finally {
-            setDeletingFile(false)
-          }
-        }}
-        title="Delete file?"
-        description={fileToDelete ? `Permanently delete ${fileToDelete.name}. This cannot be undone.` : undefined}
-        confirmLabel="Delete file"
+        open={!!toDelete}
+        onCancel={() => !deletingFiles && setToDelete(null)}
+        onConfirm={confirmDeleteFiles}
+        title={toDelete ? deleteTitle(toDelete) : ''}
+        undoable={false}
+        confirmLabel={toDelete && toDelete.length > 1 ? `Delete ${filesWord(toDelete.length)}` : 'Delete file'}
         danger
-        busy={deletingFile}
+        busy={deletingFiles}
       />
 
-      {/* Delete bucket */}
+      {/* A bucket: an empty one comes back from History; one with files does not
+          (lib/changes/resources/storage.ts), because its files went with it. */}
       <KitConfirmDialog
         open={!!bucketToDelete}
-        onCancel={() => setBucketToDelete(null)}
-        onConfirm={async () => {
-          if (!bucketToDelete) return
-          setDeletingBucket(true)
-          try {
-            await deleteBucket(bucketToDelete.id)
-            if (selectedBucket === bucketToDelete.name) {
-              setSelectedBucket(ALL_BUCKETS)
-              setSelectedBucketId(null)
-            }
-            setBucketToDelete(null)
-            await fetchData()
-          } catch (error: any) {
-            setBucketToDelete(null)
-            setActionError(error?.message || 'Failed to delete the bucket. Try again.')
-          } finally {
-            setDeletingBucket(false)
-          }
-        }}
-        title={`Delete bucket ${bucketToDelete?.name ?? ''}?`}
+        onCancel={() => !deletingBucket && setBucketToDelete(null)}
+        onConfirm={confirmDeleteBucket}
+        title={
+          bucketToDelete ? (
+            <>
+              Delete bucket <span className="font-mono text-[14px]">{bucketToDelete.name}</span>?
+            </>
+          ) : (
+            ''
+          )
+        }
+        // History brings the bucket back, but only empty: its files went with it.
+        undoable={bucketFiles > 0 ? undefined : true}
         description={
-          bucketToDelete && bucketToDelete.fileCount > 0
-            ? `This bucket contains ${bucketToDelete.fileCount} file${bucketToDelete.fileCount === 1 ? '' : 's'}. All of them will be permanently deleted. This cannot be undone.`
-            : 'The empty bucket will be removed. This cannot be undone.'
+          bucketFiles > 0 ? `Its ${filesWord(bucketFiles)} are deleted for good. Undo in History brings back only the empty bucket.` : 'It holds no files.'
         }
         confirmLabel="Delete bucket"
         danger
         busy={deletingBucket}
       />
 
-      {/* Who may read a bucket */}
-      {bucketPolicyTarget && (
+      {policyTarget && (
         <BucketPolicyDialog
-          bucketName={bucketPolicyTarget.name}
-          current={bucketPolicyTarget.accessPolicy ?? 'private'}
-          // Read from the server's own view of its storage configuration, not
-          // guessed in the browser: whether a CDN serves public objects decides
-          // whether this policy can be revoked at all.
+          bucketName={policyTarget.name}
+          current={policyTarget.accessPolicy ?? 'private'}
+          // The server's own view of its storage: whether a CDN serves public
+          // files decides whether this rule can be revoked at all.
           cdnCaveat={cdnServesPublicObjects}
-          onClose={() => setBucketPolicyTarget(null)}
+          onClose={() => setPolicyTarget(null)}
           onSave={async (policy) => {
-            await updateBucketPolicy(bucketPolicyTarget.id, policy)
-            setBucketPolicyTarget(null)
-            await fetchData()
+            await updateBucketPolicy(policyTarget.id, policy)
+            setPolicyTarget(null)
+            await refresh()
           }}
         />
       )}
 
-      {/* Bucket picker — when an upload lands with no bucket selected */}
+      {/* An upload with no bucket in view, in a project with several: where to. */}
       <KitModal
         open={!!pendingUpload}
         onClose={() => setPendingUpload(null)}
         title="Choose a bucket"
-        description={
-          pendingUpload
-            ? `Where should ${pendingUpload.length} file${pendingUpload.length === 1 ? '' : 's'} go?`
-            : undefined
-        }
+        description={pendingUpload ? `Where should ${pendingUpload.length === 1 ? 'this file' : `these ${pendingUpload.length} files`} go?` : undefined}
       >
-        <div className={`-m-4 divide-y ${KIT.divide}`}>
-          {buckets.map((b) => (
-            <button
-              key={b.id}
-              onClick={() => {
-                const filesToSend = pendingUpload
-                setPendingUpload(null)
-                if (filesToSend) performUpload(filesToSend, b.id)
-              }}
-              className="flex w-full items-center gap-3 px-4 py-[11px] text-left transition-colors hover:bg-white/[0.025] focus:outline-none"
-            >
-              <Folder className="h-3.5 w-3.5 flex-shrink-0 text-zinc-600" />
-              <span className="flex-1 truncate font-mono text-[12.5px] text-zinc-200">{b.name}</span>
-              <span className="text-[12px] tabular-nums text-faint">{countFor(b.name)} files</span>
-            </button>
+        <ul className={`-mx-[20px] divide-y divide-white/[0.06] border-y ${RULE}`}>
+          {(buckets ?? []).map((b) => (
+            <li key={b.id}>
+              <button
+                type="button"
+                onClick={() => {
+                  const list = pendingUpload
+                  setPendingUpload(null)
+                  if (list) void performUpload(list, b)
+                }}
+                className={`flex w-full items-center gap-[12px] px-[20px] py-[11px] text-left transition-colors duration-150 hover:bg-white/[0.035] ${FOCUS_INSET}`}
+              >
+                <span className="min-w-0 flex-1 truncate font-mono text-[12.5px] text-zinc-100">{b.name}</span>
+                {isPublicPolicy(b.accessPolicy) && <span className="text-[12px] text-faint">Public</span>}
+                <span className="text-[12px] tabular-nums text-faint">{filesWord(countFor(b.name))}</span>
+              </button>
+            </li>
           ))}
-        </div>
+        </ul>
       </KitModal>
     </div>
   )
 }
 
 /**
- * The object preview. An image renders itself; anything else, and any image
- * the browser cannot decode or is not allowed to fetch, shows its type icon
- * rather than a broken-image glyph.
+ * Whether the project's team is on Free, asked only when it matters (the
+ * quota is nearly full) and only on Cloud, where plans exist. False until
+ * known, so the upgrade link appears only when it is true.
  */
-function ObjectPreview({ file }: { file: StorageFile }) {
-  const [failed, setFailed] = useState(false)
-  if (file.mimeType?.startsWith('image/') && !failed) {
-    return (
-      // eslint-disable-next-line @next/next/no-img-element
-      <img
-        src={file.url}
-        alt=""
-        onError={() => setFailed(true)}
-        className="max-h-56 w-full rounded-[8px] border border-white/[0.06] bg-[#08090a] object-contain"
-      />
-    )
-  }
-  return (
-    <div className="flex h-28 flex-col items-center justify-center gap-2 rounded-[8px] border border-white/[0.06] bg-[#08090a]">
-      <FileTypeIcon mimeType={file.mimeType} className="h-5 w-5 text-zinc-600" strokeWidth={1.5} />
-      <span className="text-[12px] text-faint">{failed ? 'No preview available' : shortType(file.mimeType)}</span>
-    </div>
-  )
+function useFreePlan(orgId: string | null, needed: boolean): boolean {
+  const [free, setFree] = useState(false)
+  useEffect(() => {
+    if (!needed || !CLOUD_CONTROL_PLANE) return
+    let cancelled = false
+    fetch(orgId ? `/api/billing/current?orgId=${encodeURIComponent(orgId)}` : '/api/billing/current', { credentials: 'include' })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!cancelled) setFree(d?.displayName === 'Free')
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [orgId, needed])
+  return free
 }

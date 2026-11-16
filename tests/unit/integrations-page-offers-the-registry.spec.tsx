@@ -21,6 +21,8 @@ jest.mock('next/navigation', () => ({
 
 import { IntegrationsPanel } from '@/components/hub/IntegrationsPanel'
 import { connectableProviders } from '@/lib/services/ai-functions/integration-registry'
+import { forgetProjectReads } from '@/lib/api/projects'
+import { clearProjectRoleCache } from '@/lib/hooks/useProjectRole'
 
 /** How each registry provider is named on its card. */
 const CARD_NAMES: Record<string, string> = {
@@ -43,52 +45,59 @@ function stub() {
     if (path === '/api/projects/p1/credentials/verify') {
       return Promise.resolve({ ok: true, status: 200, json: async () => ({ ok: true, checks: [] }) } as unknown as Response)
     }
-    const body = path === '/api/projects/p1/integrations' ? { integrations: {}, keyVault: {} } : {}
+    const body =
+      path === '/api/projects/p1/integrations' ? { integrations: {}, keyVault: {} }
+      : path === '/api/projects/p1' ? { success: true, data: { id: 'p1', name: 'shop', organizationId: 'org_1', role: 'DEVELOPER', canWrite: true, canAdminister: false } }
+      : {}
     return Promise.resolve({ ok: true, status: 200, json: async () => body } as unknown as Response)
   }) as unknown as typeof fetch
 }
 
 const flush = () => act(async () => { for (let i = 0; i < 20; i++) await Promise.resolve() })
+
+beforeEach(() => {
+  forgetProjectReads()
+  clearProjectRoleCache()
+})
 const input = (name: string) => document.querySelector(`input[name="${name}"]`) as HTMLInputElement
 
-it('offers a card for every provider the registry serves, and counts them all', async () => {
+it('offers a row for every provider the registry serves, and counts what is connected', async () => {
   stub()
   render(<IntegrationsPanel />)
   await flush()
   const ids = connectableProviders().map((p) => p.id)
-  // This test names the registry's providers; a new one must be named here too.
-  expect([...ids].sort()).toEqual(Object.keys(CARD_NAMES).sort())
+  expect(ids.sort()).toEqual(Object.keys(CARD_NAMES).sort())
   for (const id of ids) {
-    expect(screen.getByRole('button', { name: new RegExp(`^${CARD_NAMES[id]}`) })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: new RegExp(`^${CARD_NAMES[id]}$`) })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: `Connect ${CARD_NAMES[id]}` })).toBeInTheDocument()
   }
-  expect(screen.getByText(`0 of ${ids.length} connected`)).toBeInTheDocument()
+  expect(screen.getByText('None connected')).toBeInTheDocument()
 })
 
 it('groups the providers by the registry’s categories', async () => {
   stub()
   render(<IntegrationsPanel />)
   await flush()
-  for (const title of ['Payments', 'Email', 'SMS', 'Push notifications', 'AI / LLM', 'Image & video generation']) {
-    // A filter's accessible name is its title followed by its count ("SMS1").
-    expect(screen.getByRole('radio', { name: (name) => name.startsWith(title) })).toBeInTheDocument()
-  }
-  fireEvent.click(screen.getByRole('radio', { name: /^SMS/ }))
+  const categories = [...new Set(connectableProviders().map((p) => p.category))]
+  const select = screen.getByRole('combobox', { name: 'Category' }) as HTMLSelectElement
+  const offered = Array.from(select.options).map((o) => o.value)
+  for (const c of categories) expect(offered).toContain(c)
+  fireEvent.change(select, { target: { value: 'sms' } })
   await flush()
-  expect(screen.getByRole('button', { name: /^Twilio/ })).toBeInTheDocument()
-  expect(screen.queryByRole('button', { name: /^Stripe/ })).toBeNull()
+  expect(screen.getByRole('link', { name: /^Twilio$/ })).toBeInTheDocument()
+  expect(screen.queryByRole('link', { name: /^Stripe$/ })).toBeNull()
 })
 
 it('connects OneSignal with its REST API key and its App ID, each in its own field', async () => {
   stub()
   render(<IntegrationsPanel />)
   await flush()
-  fireEvent.click(screen.getByRole('button', { name: /^OneSignal/ }))
-  await flush()
-  fireEvent.click(screen.getAllByRole('button', { name: 'Connect OneSignal' })[0])
+  fireEvent.click(screen.getByRole('button', { name: 'Connect OneSignal' }))
   await flush()
   fireEvent.change(input('ONESIGNAL_REST_API_KEY'), { target: { value: 'os_v2_app_restkeyvalue0123456789' } })
   fireEvent.change(input('ONESIGNAL_APP_ID'), { target: { value: '8f0e2a1c-3b4d-4e5f-a6b7-c8d9e0f1a2b3' } })
-  fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+  // One step: Connect checks both values with the provider before storing them.
+  fireEvent.click(screen.getByRole('button', { name: 'Connect' }))
   await flush()
   const verify = (global.fetch as jest.Mock).mock.calls.find(([url]) => String(url) === '/api/projects/p1/credentials/verify')
   expect(JSON.parse(verify![1].body)).toEqual({

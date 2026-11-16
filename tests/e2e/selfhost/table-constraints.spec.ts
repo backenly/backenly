@@ -12,7 +12,7 @@
  * real executor runs, and the assertion is on what the page then shows.
  */
 
-import { test, expect } from '@playwright/test'
+import { test, expect, type Page } from '@playwright/test'
 import { readFileSync } from 'fs'
 import { resolve } from 'path'
 
@@ -73,27 +73,28 @@ test.beforeEach(async ({ page }) => {
   })
 })
 
+/** The Add column dialog (rebuilt 2026-11-16: Name, Type, Nullable, Unique, References, Check). */
+const addColumn = (page: Page) => page.getByRole('dialog', { name: 'Add column' })
+const nameField = (page: Page) => addColumn(page).getByPlaceholder('price_cents', { exact: true })
+
 test('the add-column modal offers constraints, not just name and type', async ({ page }) => {
   // The gap this tranche closed: the backend accepted unique, check and
   // foreign_key, and the modal sent only {name, type, nullable}.
   await page.getByRole('button', { name: /add column/i }).first().click()
+  const dialog = addColumn(page)
+  await expect(dialog).toBeVisible()
 
-  // Scoped to the form controls, not to the words.
-  //
-  // The structure view behind the modal already has a "Constraints" column
-  // header, so getByText matched two elements and failed on strict mode. The
-  // controls are what the operator actually uses and what only the modal has.
-  await expect(page.locator('label').filter({ hasText: /^Constraints$/ })).toBeVisible()
-
+  // Scoped to the dialog's own controls, not to words the structure behind it
+  // may also show.
   // The foreign-key picker, listing the deployment's other tables.
-  const references = page.locator('select').filter({ hasText: /no foreign key/i }).first()
+  const references = dialog.locator('select').filter({ hasText: /no foreign key/i }).first()
   await expect(references).toBeVisible()
 
   // The check expression field, identified by its own placeholder.
-  await expect(page.getByPlaceholder('e.g. price > 0')).toBeVisible()
+  await expect(dialog.getByPlaceholder('price_cents > 0')).toBeVisible()
 
   // The unique toggle: a checkbox, reachable through its own label.
-  await expect(page.locator('label').filter({ hasText: /^Unique$/ }).locator('input[type="checkbox"]')).toBeVisible()
+  await expect(dialog.getByRole('checkbox', { name: /^Unique/ })).toBeVisible()
 })
 
 test('a foreign key on a badly named column is blocked before it is submitted', async ({ page }) => {
@@ -102,9 +103,9 @@ test('a foreign key on a badly named column is blocked before it is submitted', 
   // still free to change. This asserts the guard, not the refusal.
   await page.getByRole('button', { name: /add column/i }).first().click()
 
-  await page.getByPlaceholder(/e\.g\. email, price, is_active/i).fill('description')
+  await nameField(page).fill('description')
 
-  const references = page.locator('select').filter({ hasText: /no foreign key/i }).first()
+  const references = addColumn(page).locator('select').filter({ hasText: /no foreign key/i }).first()
   const options = await references.locator('option').allTextContents()
   // Needs a second table to reference. A single-table deployment cannot
   // exercise this, and silently passing would be worse than skipping.
@@ -112,41 +113,42 @@ test('a foreign key on a badly named column is blocked before it is submitted', 
 
   await references.selectOption({ index: 1 })
 
-  await expect(page.getByText(/foreign key needs a column named like/i)).toBeVisible()
-  await expect(page.getByRole('button', { name: /^add column$/i }).last()).toBeDisabled()
+  await expect(addColumn(page).getByText(/foreign key needs a column named like/i)).toBeVisible()
+  await expect(addColumn(page).getByRole('button', { name: /^add column$/i })).toBeDisabled()
 })
 
 test('renaming the column to the suggested shape unblocks it', async ({ page }) => {
   await page.getByRole('button', { name: /add column/i }).first().click()
 
-  const references = page.locator('select').filter({ hasText: /no foreign key/i }).first()
+  const references = addColumn(page).locator('select').filter({ hasText: /no foreign key/i }).first()
   const options = await references.locator('option').allTextContents()
   test.skip(options.length < 2, 'deployment has no second table to reference')
 
-  await page.getByPlaceholder(/e\.g\. email, price, is_active/i).fill('description')
+  await nameField(page).fill('description')
   await references.selectOption({ index: 1 })
-  await expect(page.getByRole('button', { name: /^add column$/i }).last()).toBeDisabled()
+  await expect(addColumn(page).getByRole('button', { name: /^add column$/i })).toBeDisabled()
 
   // The hint names a column the rule accepts. Following it must actually work,
-  // or the guidance is worse than none.
-  const hint = await page.getByText(/foreign key needs a column named like/i).textContent()
-  const suggested = hint?.match(/like\s+(\S+?)\./)?.[1] ?? 'thing_id'
+  // or the guidance is worse than none. ("…named like book_id, or it is refused.")
+  const hint = await addColumn(page).getByText(/foreign key needs a column named like/i).textContent()
+  const suggested = hint?.match(/like\s+([A-Za-z0-9_]+)/)?.[1] ?? 'thing_id'
 
-  await page.getByPlaceholder(/e\.g\. email, price, is_active/i).fill(suggested)
-  await expect(page.getByRole('button', { name: /^add column$/i }).last()).toBeEnabled()
+  await nameField(page).fill(suggested)
+  await expect(addColumn(page).getByRole('button', { name: /^add column$/i })).toBeEnabled()
 })
 
 test('cancelling clears the form, so a reopened modal carries no stale constraint', async ({ page }) => {
   // A modal that keeps its previous state silently applies a constraint the
   // operator chose for a different column.
   await page.getByRole('button', { name: /add column/i }).first().click()
-  await page.getByPlaceholder(/e\.g\. email, price, is_active/i).fill('leftover_col')
-  await page.getByText('Unique', { exact: true }).click()
+  await nameField(page).fill('leftover_col')
+  await addColumn(page).getByRole('checkbox', { name: /^Unique/ }).check()
 
-  await page.getByRole('button', { name: /cancel/i }).click()
+  await addColumn(page).getByRole('button', { name: /cancel/i }).click()
   await page.getByRole('button', { name: /add column/i }).first().click()
 
-  await expect(page.getByPlaceholder(/e\.g\. email, price, is_active/i)).toHaveValue('')
-  const references = page.locator('select').filter({ hasText: /no foreign key/i }).first()
+  await expect(nameField(page)).toHaveValue('')
+  await expect(addColumn(page).getByRole('checkbox', { name: /^Unique/ })).not.toBeChecked()
+  const references = addColumn(page).locator('select').filter({ hasText: /no foreign key/i }).first()
   await expect(references).toHaveValue('')
 })

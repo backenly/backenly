@@ -1,7 +1,10 @@
 /**
  * GET /api/projects/:id/ai-functions/logs
  * Returns execution logs for all AI functions in a project.
- * Supports ?functionId=xxx to filter to a single function.
+ * Supports ?functionId=xxx to filter to a single function, and ?success=false
+ * (or true) to filter by outcome on the server: the route returns at most 200
+ * runs, so a busy endpoint's failures from yesterday would otherwise fall out
+ * of the window the console filters.
  * Returns last 50 logs by default, up to 200 with ?limit=200.
  */
 
@@ -19,12 +22,16 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
     const { searchParams } = request.nextUrl
     const functionId = searchParams.get('functionId') || undefined
     const limit = Math.min(parseInt(searchParams.get('limit') || '50'), 200)
+    // Anything but 'true' or 'false' leaves the outcome unfiltered.
+    const outcome = searchParams.get('success')
+    const success = outcome === 'false' ? false : outcome === 'true' ? true : undefined
 
     // A regional project's run logs and errors are read from its region.
     const logs = await withRunBodies(projectId, await prisma.aiFunctionLog.findMany({
       where: {
         projectId,
         ...(functionId ? { functionId } : {}),
+        ...(success !== undefined ? { success } : {}),
       },
       orderBy: { createdAt: 'desc' },
       take: limit,
