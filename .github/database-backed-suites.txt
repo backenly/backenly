@@ -1789,6 +1789,13 @@ tests/integration/change-restore-to.spec.ts
 # written since a change is measured in rows only the service role can see.
 tests/integration/change-restore-forced-rls.spec.ts
 
+# Backenly's own whole-table work as production runs it, under the same
+# NOSUPERUSER NOBYPASSRLS owner: a merge's checks against production's rows, a
+# merge card's row counts, an approved or declared foreign key and a validation
+# see every row (users read as empty, so a valid key failed with 23503 and a
+# merge was refused), and a key a row really breaks is refused in plain words.
+tests/integration/platform-checks-see-every-row.spec.ts
+
 # Restore to a point proves every step, each against the schema the newer steps
 # leave, in one rolled-back transaction before running any: a step that would
 # stop it is named and nothing runs (it used to undo the newer ones and stop

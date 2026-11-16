@@ -527,6 +527,8 @@ export async function executeApprovedFix(
   regressionCheck?: FixOutcome['regressionCheck']
   /** Nothing ran because the project's region, which keeps what it replays, could not be reached. */
   regionUnavailable?: boolean
+  /** Nothing changed because rows already in the table break the rule (lib/db/existing-rows.ts). */
+  refusedByRows?: boolean
 }> {
   const finding = await prisma.healthFinding.findUnique({ where: { id: findingId } })
   if (!finding) return { success: false, message: 'Finding not found.' }
@@ -736,6 +738,12 @@ export async function executeApprovedFix(
   }
 
   if (!result.success) {
+    // Rows already in the table refused the rule: the data's answer, said in
+    // the executor's sentence, which names the rows and what to do with them.
+    const { EXISTING_ROWS_CODES } = await import('@/lib/db/existing-rows')
+    if (result.code && EXISTING_ROWS_CODES.has(result.code)) {
+      return { success: false, message: result.message, refusedByRows: true }
+    }
     return { success: false, message: result.error ?? result.message }
   }
 

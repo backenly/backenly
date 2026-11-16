@@ -167,7 +167,12 @@ export const POST = withProjectAccess(async (req: NextRequest, { user, project, 
       lower.includes('needs your action')
 
     // 503: the project's region, which keeps what a held action replays, could
-    // not be reached, so nothing ran.
+    // not be reached, so nothing ran. 409 with EXISTING_ROWS: rows already in
+    // the table break the rule (23503, 23505, 23514), nothing changed, and only
+    // a change to those rows can help, so the page must not retry it.
+    if (result.refusedByRows) {
+      return NextResponse.json({ success: false, error: result.message, code: 'EXISTING_ROWS' }, { status: 409 })
+    }
     const statusCode = result.regionUnavailable ? 503 : isLockContention ? 409 : needsUserAction ? 422 : 500
     return NextResponse.json({ success: false, error: result.message }, { status: statusCode })
   }

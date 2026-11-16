@@ -298,7 +298,9 @@ export function ReviewQueuePanel({
       // 409 = lock contention (a scan/auto-fix holds the project lock). The
       // server already waits ~30s per attempt, so each retry here rides a
       // fresh server-side wait — three of them outlasts any normal scan.
-      if (res.status === 409 && retriesLeft > 0) {
+      // EXISTING_ROWS: rows already in the table break the rule; asking again
+      // changes nothing, so the reason is shown at once.
+      if (res.status === 409 && j?.code !== 'EXISTING_ROWS' && retriesLeft > 0) {
         await new Promise(r => { timers.current.push(setTimeout(r, 2500)) })
         return approveOne(findingId, retriesLeft - 1)
       }
