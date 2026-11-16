@@ -4606,7 +4606,7 @@ async function executeCreateTable(
 
     console.log(`✅ [AI Executor] Table metadata saved`)
 
-    // ── Realtime: follow the project, never opt it in ─────────────────────────
+    // ── Realtime: a new table streams only when it is named ───────────────────
     //
     // This used to install a NOTIFY trigger on EVERY table it created,
     // unconditionally. The intent was "so .subscribe() works immediately"; the
@@ -4619,25 +4619,23 @@ async function executeCreateTable(
     // was scoped correctly the whole time; table creation was the one adding
     // them.
     //
-    // The rule now: a NEW table inherits whatever the project already decided.
-    // If realtime is on, a new table joins it (otherwise new tables silently
-    // never stream, which is its own trap). If realtime was never enabled,
-    // nothing is installed and the write path stays clean.
+    // The next rule had a new table join realtime whenever any table streamed.
+    // A merge replays create_table on production, so a merged table started
+    // streaming that nobody had named: History said only "Created table", and
+    // turning realtime on for it afterwards changed nothing and was recorded
+    // nowhere (production QA, 2026-11-16). Realtime is per table, as
+    // enable_realtime says: a new table streams once realtime is turned on for
+    // it by name. So that a quiet new table is noticed, the result names the
+    // tables that stream and the call that adds this one.
+    let realtimeNote: string | null = null
     try {
-      const { installRealtimeTrigger, listTablesWithRealtimeTriggers } =
-        await import('@/lib/services/realtimeTriggers')
-      const alreadyStreaming = await listTablesWithRealtimeTriggers(projectId).catch(() => [])
-      if (alreadyStreaming.length > 0) {
-        await installRealtimeTrigger(projectId, tableName)
-        console.log(`⚡ [AI Executor] Realtime is on for this project — trigger installed on "${tableName}"`)
-      } else {
-        console.log(`[AI Executor] Realtime not enabled for this project — no trigger on "${tableName}" (enable_realtime turns it on)`)
-      }
+      const { realtimeForNewTables } = await import('@/lib/services/realtimeTriggers')
+      realtimeNote = (await realtimeForNewTables(projectId, [tableName]))?.note ?? null
     } catch (rtErr: any) {
-      console.warn(`[AI Executor] Realtime trigger install failed (non-fatal):`, rtErr?.message)
+      console.warn(`[AI Executor] Could not read which tables stream (non-fatal):`, rtErr?.message)
     }
 
-    // ── Webhook row-capture follows the project, like realtime above ─────────
+    // ── Webhook row-capture follows the project ───────────────────────────────
     // syncWebhookCapture's contract says it runs "after a table is added", but
     // nothing on the creation path ever called it, so a webhook saved on
     // Monday never saw rows written to a table created on Tuesday — while the
@@ -4992,7 +4990,8 @@ async function executeCreateTable(
           ? `✅ Created table "${tableName}" as written: ${safeColumns.length} declared column(s), and the four every ` +
             `table gets: id (uuid primary key), "createdAt", "updatedAt" and "deleted_at" (a client DELETE sets it).`
           : `✅ Created table "${tableName}" with ${safeColumns.length + 3} columns (including id, createdAt, updatedAt)`) +
-        (rlsNotice ? `\n\n${rlsNotice}` : ''),
+        (rlsNotice ? `\n\n${rlsNotice}` : '') +
+        (realtimeNote ? `\n\n${realtimeNote}` : ''),
       ...(rlsNotice ? { rlsNotice } : {}),
       data: {
         tableName,
@@ -7734,7 +7733,7 @@ async function executeEnableRealtime(params: Record<string, any>, projectId: str
             data: { enabled: false, table: tableName, reason: result.reason },
           }
         }
-        installedTables.push(tableName)
+        if (!result.alreadyStreaming) installedTables.push(tableName)
       } catch (err: any) {
         console.warn(`[enableRealtime] Failed to install trigger on ${tableName}:`, err?.message)
         return {
@@ -7775,6 +7774,16 @@ async function executeEnableRealtime(params: Record<string, any>, projectId: str
 
     // ── Verify which tables actually have NOTIFY triggers ──────────────────
     const verifiedTables = await listTablesWithRealtimeTriggers(projectId).catch(() => installedTables)
+
+    // Already streaming: its trigger was left as it was, so nothing changed and
+    // History records nothing. Saying "Enabled by this call" here was false.
+    if (tableName && installedTables.length === 0 && verifiedTables.includes(tableName)) {
+      return {
+        success: true,
+        message: `Realtime is already on for \`${tableName}\`; this call changed nothing.`,
+        data: { enabled: true, table: tableName, enabledNow: [], alreadyEnabled: verifiedTables, watchedTables: verifiedTables },
+      }
+    }
 
     // ── Optionally persist to BackendGraph if one exists ──────────────────
     try {
@@ -13828,11 +13837,23 @@ async function executeFixTable(params: any, projectId: string): Promise<Executio
         fixes.push(rlsNotSetNotice(tableName, rlsErr?.message ?? String(rlsErr)))
       }
 
-      // Reinstall realtime trigger
+      // Realtime as the table had it. Installing the trigger on every table this
+      // re-created turned realtime on for tables nobody had named; a table
+      // streams again only if it streamed when it was last recorded.
       try {
-        const { installRealtimeTrigger } = await import('@/lib/services/realtimeTriggers')
-        await installRealtimeTrigger(projectId, tableName)
-        fixes.push(`Reinstalled realtime NOTIFY trigger on \`${tableName}\``)
+        const { streamedWhenLastRecorded } = await import('@/lib/services/workspace-schema-snapshot')
+        const streamed = await streamedWhenLastRecorded(projectId, tableName)
+        if (streamed === true) {
+          const { installRealtimeTrigger } = await import('@/lib/services/realtimeTriggers')
+          if ((await installRealtimeTrigger(projectId, tableName)).installed) {
+            fixes.push(`Reinstalled the realtime trigger on \`${tableName}\`: it streamed when last recorded.`)
+          }
+        } else if (streamed === null) {
+          fixes.push(
+            `Realtime was not turned on for \`${tableName}\`: no record shows whether it streamed. ` +
+            `To stream it: realtime { "action": "enable", "tableName": "${tableName}" }.`,
+          )
+        }
       } catch { /* non-fatal */ }
     } else {
       // ── 2. Identify missing columns and add them ──────────────────────────
@@ -14553,11 +14574,14 @@ async function executeRegisterTable(params: any, projectId: string): Promise<Exe
       rlsApplied = !!pol
     } catch { /* non-fatal */ }
 
-    // 5. Make it a first-class realtime table. Non-fatal.
+    // 5. Realtime is not turned on: a table streams once it is named
+    //    (realtimeForNewTables). Registering used to install the trigger, so
+    //    adopting a table started streaming every write to it.
+    let realtimeNote: string | null = null
     try {
-      const { installRealtimeTrigger } = await import('@/lib/services/realtimeTriggers')
-      await installRealtimeTrigger(projectId, tableName)
-    } catch { /* non-fatal */ }
+      const { realtimeForNewTables } = await import('@/lib/services/realtimeTriggers')
+      realtimeNote = (await realtimeForNewTables(projectId, [tableName]))?.note ?? null
+    } catch { /* the note is advice; the table is registered either way */ }
 
     return {
       success: apiRes.success,
@@ -14567,6 +14591,7 @@ async function executeRegisterTable(params: any, projectId: string): Promise<Exe
         apiRes.success ? '- REST API generated (list / get / create / update / delete)' : '- API generation needs a retry — the table is now registered',
         rlsApplied ? '- Row-level security applied (users see only their own rows)' : null,
         '- Now visible and managed in the Database section',
+        realtimeNote ? `- ${realtimeNote}` : null,
       ].filter(Boolean).join('\n'),
       data: { tableName, apiGenerated: apiRes.success, rlsApplied },
     }
@@ -14581,7 +14606,7 @@ async function executeRegisterTable(params: any, projectId: string): Promise<Exe
 //
 // The open-loop counterpart of REGISTER_TABLE: instead of adopting one named
 // table, it adopts EVERYTHING the drift watch recorded — registers new live
-// tables (API + RLS + realtime via executeRegisterTable), refreshes metadata
+// tables (API + RLS via executeRegisterTable), refreshes metadata
 // for altered ones, prunes metadata for externally dropped ones, re-baselines
 // the schema snapshot, and re-syncs direct-access grants. Bookkeeping only;
 // this action never executes DDL, which is why the classifier rates it AUTO.
@@ -14607,7 +14632,7 @@ async function executeAdoptExternalSchema(projectId: string): Promise<ExecutionR
     const lines = [
       `✅ **Adopted ${result.adoptedEvents} external schema change${result.adoptedEvents === 1 ? '' : 's'} into the contract.**`,
       '',
-      result.registeredTables.length > 0 ? `- Registered new table${result.registeredTables.length === 1 ? '' : 's'}: ${result.registeredTables.map(t => `\`${t}\``).join(', ')} (API + RLS + realtime)` : null,
+      result.registeredTables.length > 0 ? `- Registered new table${result.registeredTables.length === 1 ? '' : 's'}: ${result.registeredTables.map(t => `\`${t}\``).join(', ')} (API + RLS)` : null,
       result.refreshedTables.length > 0 ? `- Refreshed metadata for: ${result.refreshedTables.map(t => `\`${t}\``).join(', ')}` : null,
       result.prunedTables.length > 0 ? `- Removed metadata for dropped table${result.prunedTables.length === 1 ? '' : 's'}: ${result.prunedTables.map(t => `\`${t}\``).join(', ')}` : null,
       '- Snapshot baseline and direct-access grants re-synced',

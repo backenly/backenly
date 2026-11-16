@@ -1301,6 +1301,14 @@ tests/integration/storage-policy-action.spec.ts
 # project-wide disable stops. Real workspace tables and NOTIFY triggers are
 # the property.
 tests/integration/realtime-scope-truth.spec.ts
+# A new table streams only once realtime is turned on for it: one made by a
+# migration, by create_table or by a merge gets no trigger while other tables
+# stream, and the result names them and the call that adds it; enabling it is
+# one History change, enabling it again re-creates nothing; FIX_TABLE puts a
+# trigger back only on a table that streamed when last recorded, and
+# REGISTER_TABLE adds none. Real provisioned project, branch, triggers, change
+# records and schema snapshots.
+tests/integration/new-tables-stream-only-when-asked.spec.ts
 # A large realtime change still says which row changed: an update that fits
 # without its old row keeps the new row and reduces the old one to its key, one
 # too large either way carries the primary key and reaches only streams that
