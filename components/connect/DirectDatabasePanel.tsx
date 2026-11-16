@@ -5,11 +5,15 @@
  *
  *   Logins
  *   Read-only                                                                 ⋯
- *   [postgresql://bkn_ro_edc2…:•••@backenly.com:5432/backenly…         ◉ Copy]
+ *   [postgresql://bkn_ro_edc2…:•••@<DIRECT_DB_HOST>:5432/backenly…     ◉ Copy]
  *   bkn_ro_edc2173ce55c   Created Nov 11       Copy psql command  Copy pg_dump command
  *   Read-write                                                    [Create login]
  *   Reads and writes rows. Schema changes are refused unless you allow them.
  *   Each login reaches only this project's schema, over TLS. …
+ *
+ *   Where the region has no developer-facing host (status.available false),
+ *   one sentence says direct connections aren't available there, no login is
+ *   offered, and the logins that exist are listed by name with Revoke.
  *
  *   Backups
  *   [Full backup (.sql)]  Schema only  Data only
@@ -67,7 +71,12 @@ interface Credential {
 
 interface Status {
   schema: string
+  /** False where nothing outside Backenly can reach this project's database. */
+  available?: boolean
+  unavailable?: string
   credentials: Credential[]
+  /** Where connections cannot be made: the logins that exist, by name, for revoking. */
+  logins?: Array<{ mode: Mode; roleName: string; createdAt: string; rotatedAt: string | null }>
   pendingDriftEvents: number
 }
 
@@ -256,6 +265,31 @@ export function DirectDatabasePanel({ projectId, region }: { projectId: string; 
 
   const byMode = (mode: Mode) => status?.credentials.find((c) => c.mode === mode) ?? null
 
+  /**
+   * A login nothing outside Backenly can connect with: its name, and Revoke.
+   * No connection string, password or command is shown for it (production QA
+   * re-test, 2026-11-16, N4: they named backenly.com:5432, where nothing
+   * listens).
+   */
+  const unreachableLoginRow = (login: NonNullable<Status['logins']>[number]) => (
+    <Row
+      key={login.mode}
+      lead="none"
+      title={<p className={ROW_TITLE}>{LOGIN_NAME[login.mode]}</p>}
+      actions={
+        <KitButton size="sm" variant="ghost" loading={busy === `revoke_${login.mode}`} disabled={busy !== null} onClick={() => setConfirm({ kind: 'revoke', mode: login.mode })}>
+          Revoke
+        </KitButton>
+      }
+    >
+      <span className="!mt-[4px] flex flex-wrap items-center gap-x-[16px] gap-y-[4px] text-[12px] leading-[16px] text-faint">
+        <code className="font-mono text-[11.5px] text-zinc-400">{login.roleName}</code>
+        <span>{login.rotatedAt ? `Rotated ${formatTime(login.rotatedAt, 'date')}` : `Created ${formatTime(login.createdAt, 'date')}`}</span>
+      </span>
+      {note && note.mode === login.mode && note.refused && <RefusedLine className="mt-[8px]">{note.text}</RefusedLine>}
+    </Row>
+  )
+
   const loginRow = (mode: Mode) => {
     const c = byMode(mode)
     const rw = mode === 'READ_WRITE' ? c : null
@@ -402,14 +436,27 @@ export function DirectDatabasePanel({ projectId, region }: { projectId: string; 
               }}
               retrying={retrying}
             />
+          ) : status?.available === false ? (
+            <RowList>
+              <li className="px-[20px] py-[14px]">
+                <p className="text-[13px] leading-[20px] text-zinc-400">
+                  Direct Postgres connections aren&apos;t available in this project&apos;s region yet: nothing outside Backenly can
+                  reach its database. Read and change data in the Database section or through the REST API, and download a backup
+                  below.
+                </p>
+              </li>
+              {(status.logins ?? []).map(unreachableLoginRow)}
+            </RowList>
           ) : (
             <RowList>{(['READ_ONLY', 'READ_WRITE'] as const).map(loginRow)}</RowList>
           )}
         </Panel>
-        <p className="mt-[10px] text-[12.5px] leading-[18px] text-faint">
-          Each login reaches only this project&apos;s schema, over TLS. Every change to a login is recorded; rotate at once if a
-          connection string leaks.
-        </p>
+        {status?.available !== false && (
+          <p className="mt-[10px] text-[12.5px] leading-[18px] text-faint">
+            Each login reaches only this project&apos;s schema, over TLS. Every change to a login is recorded; rotate at once if a
+            connection string leaks.
+          </p>
+        )}
       </Section>
 
       <Section id="postgres-backups" title="Backups">
