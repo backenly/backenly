@@ -156,6 +156,26 @@ export async function queuedFunctionRuns(projectId: string): Promise<Map<string,
   return new Map(rows.map((r) => [r.function_id, r.n]))
 }
 
+/**
+ * Drop every run queued for one function, and say how many: called when the
+ * function is switched off. They would not run anyway (the executor refuses a
+ * switched-off function), but they would wait in the queue, be counted in its
+ * backlog and run if it were switched on again, acting on rows as they were
+ * then. Switching back on starts from new row changes, as a paused project's
+ * resume does (discardOutbox). A run already going finishes.
+ */
+export async function discardQueuedRuns(projectId: string, functionId: string): Promise<number> {
+  const schema = workspaceSchemaName(projectId)
+  const db = await workspaceRawClient(projectId)
+  return db
+    .$executeRawUnsafe(`DELETE FROM "${schema}"."${FUNCTION_JOBS_TABLE}" WHERE function_id = $1 AND claimed_at IS NULL`, functionId)
+    .catch((err: any) => {
+      // A project whose queue was never created has nothing queued.
+      if (/does not exist/.test(String(err?.message ?? ''))) return 0
+      throw err
+    })
+}
+
 // ── Pacing ───────────────────────────────────────────────────────────────────
 
 /** A counting semaphore: at most `size` holders, released in arrival order. */

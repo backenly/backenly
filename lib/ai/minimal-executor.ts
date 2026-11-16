@@ -12150,14 +12150,13 @@ async function executeCreateAiFunction(params: any, projectId: string): Promise<
           if (!fixedCode || fixedCode === code) return
           const recheckSyntax = validateFunctionSyntax(fixedCode)
           // Backenly rewrote the code, so the history says Backenly did.
-          await withChangeAttribution({ source: 'autonomy' }, () => governedChange(projectId, `Fix the syntax of function ${fn.name}`, () => prisma.aiFunction.update({
-            where: { id: fn.id },
-            data: {
-              generatedCode: fixedCode,
-              status: recheckSyntax.valid ? 'active' : 'error',
-              lastError: recheckSyntax.valid ? null : `Syntax error: ${recheckSyntax.error}`,
-            },
-          })))
+          // Never back on if someone switched it off meanwhile (lib/services/ai-functions/run-state.ts).
+          const { recordRunState } = await import('@/lib/services/ai-functions/run-state')
+          await withChangeAttribution({ source: 'autonomy' }, () => governedChange(projectId, `Fix the syntax of function ${fn.name}`, () => recordRunState(
+            fn.id,
+            { generatedCode: fixedCode, lastError: recheckSyntax.valid ? null : `Syntax error: ${recheckSyntax.error}` },
+            recheckSyntax.valid ? 'active' : 'error',
+          )))
         })
         .catch(() => {/* non-fatal */ })
     }
@@ -12279,14 +12278,14 @@ async function executeFixAiFunction(params: any, projectId: string): Promise<Exe
     const syntaxCheck = validateFunctionSyntax(fixedCode)
 
     const { governedChange } = await import('@/lib/changes/ledger')
-    await governedChange(projectId, `Rewrite function ${fn.name} to fix an error`, () => prisma.aiFunction.update({
-      where: { id: fn.id },
-      data: {
-        generatedCode: fixedCode,
-        status: syntaxCheck.valid ? 'active' : 'error',
-        lastError: syntaxCheck.valid ? null : `Syntax error: ${syntaxCheck.error}`,
-      },
-    }))
+    // A function switched off stays off: the rewrite is its code, not the switch
+    // (lib/services/ai-functions/run-state.ts).
+    const { recordRunState } = await import('@/lib/services/ai-functions/run-state')
+    await governedChange(projectId, `Rewrite function ${fn.name} to fix an error`, () => recordRunState(
+      fn.id,
+      { generatedCode: fixedCode, lastError: syntaxCheck.valid ? null : `Syntax error: ${syntaxCheck.error}` },
+      syntaxCheck.valid ? 'active' : 'error',
+    ))
     // The runtime error the fix answered is no longer the last one, in the
     // project's region either (a syntax error names the code, not the data).
     if (fn.lastError !== null) {
@@ -12556,6 +12555,11 @@ async function findAiFunctionForAction(
   return found.fn
 }
 
+/** "18,512 queued runs from row changes were dropped and will not run." */
+function droppedRunsSentence(n: number): string {
+  return `${n.toLocaleString('en-US')} queued ${n === 1 ? 'run' : 'runs'} from row changes ${n === 1 ? 'was' : 'were'} dropped and will not run.`
+}
+
 async function executeToggleAiFunction(params: any, projectId: string): Promise<ExecutionResult> {
   const { functionId, name, active } = params
 
@@ -12579,6 +12583,18 @@ async function executeToggleAiFunction(params: any, projectId: string): Promise<
     // history: GOVERNED_ACTIONS (TOGGLE_AI_FUNCTION)
     await prisma.aiFunction.update({ where: { id: fn.id }, data: { status: newStatus } })
 
+    // Switched off, it stops at once: the runs queued for it from row changes
+    // are dropped, after the switch, so the drain queues no more of them.
+    const { discardQueuedRuns } = await import('@/lib/services/ai-functions/run-queue')
+    // Should that fail, they still never run: the executor refuses a function
+    // that is off, and the runner drops each one it reaches.
+    const dropped = active
+      ? 0
+      : await discardQueuedRuns(projectId, fn.id).catch((err: any) => {
+          console.warn(`[functions] queued runs of ${fn.id} were not dropped:`, err?.message ?? err)
+          return 0
+        })
+
     // A row-event function going on or off changes what the database-level
     // capture must record; the sync derives the answer from the rows.
     const { syncCaptureForFunctionChange } = await import('@/lib/webhooks/capture')
@@ -12586,8 +12602,10 @@ async function executeToggleAiFunction(params: any, projectId: string): Promise<
 
     return {
       success: true,
-      message: `✅ Function \`${fn.name}\` is now **${newStatus}**.`,
-      data: { functionId: fn.id, name: fn.name, status: newStatus },
+      message:
+        `✅ Function \`${fn.name}\` is now **${newStatus}**.` +
+        (dropped > 0 ? ` ${droppedRunsSentence(dropped)}` : ''),
+      data: { functionId: fn.id, name: fn.name, status: newStatus, ...(active ? {} : { droppedQueuedRuns: dropped }) },
     }
   } catch (error: any) {
     return { success: false, message: `Failed to switch the function: ${error.message}`, error: error.message }

@@ -90,6 +90,11 @@ tests/integration/row-functions-watch-columns.spec.ts
 # run log says what is queued, and pausing discards the queue. Real capture
 # trigger, outbox, queue, sandbox executor and run log.
 tests/integration/function-runs-queued.spec.ts
+
+# A function switched off stays off while its last runs finish, drops the runs
+# queued for it, and says how many (production QA re-test, 2026-11-16, N7).
+# Real capture, queue, sandbox executor and run log.
+tests/integration/switched-off-functions-stay-off.spec.ts
 tests/integration/project-route-response-shape.spec.ts
 tests/integration/realtime-sse-slot-release.spec.ts
 
