@@ -244,16 +244,44 @@ export function answerLine(
 // ─── Verifying ───────────────────────────────────────────────────────────────
 
 /**
- * How a receiver checks a delivery: exactly what lib/webhooks/index.ts signs,
- * 'sha256=' + the hex HMAC-SHA256 of the raw body under the endpoint's secret.
+ * How a receiver checks a delivery: exactly what lib/webhooks/index.ts signs.
+ *
+ * X-Webhook-Signature-V2 is 'sha256=' + the hex HMAC-SHA256, under the
+ * endpoint's secret, of "<X-Webhook-Timestamp>.<X-Webhook-Delivery>.<raw body>"
+ * (generateTimestampedSignature), signed again for every attempt. Checking it
+ * and the timestamp's age, 5 minutes as the platform's own verifier allows
+ * (WEBHOOK_TIMESTAMP_TOLERANCE_SECONDS), is what stops a captured delivery
+ * being sent again later. The console used to teach X-Webhook-Signature, over
+ * the body alone, which a replay passes forever (production QA re-test,
+ * 2026-11-16, #101). Compared in constant time, as Stripe and Svix tell their
+ * receivers to.
  */
 export const VERIFY_SNIPPET = `import crypto from 'node:crypto'
 
+// Backenly signs each attempt when it sends it: refuse one more than 5 minutes old.
+const TOLERANCE_SECONDS = 300
+
 // rawBody: the exact bytes received, before any JSON parsing.
-export function isFromBackenly(rawBody, signatureHeader, secret) {
+// headers: the request's headers, a Headers object (fetch, Next.js) or
+// Node's req.headers.
+export function isFromBackenly(rawBody, headers, secret) {
+  const get = (name) =>
+    (typeof headers.get === 'function' ? headers.get(name) : headers[name]) ?? ''
+  const timestamp = get('x-webhook-timestamp')
+  const deliveryId = get('x-webhook-delivery')
+  const signature = get('x-webhook-signature-v2')
+
+  const age = Math.abs(Date.now() / 1000 - Number(timestamp))
+  if (!deliveryId || !(age <= TOLERANCE_SECONDS)) return false
+
   const expected =
-    'sha256=' + crypto.createHmac('sha256', secret).update(rawBody).digest('hex')
+    'sha256=' +
+    crypto
+      .createHmac('sha256', secret)
+      .update(\`\${timestamp}.\${deliveryId}.\`)
+      .update(rawBody)
+      .digest('hex')
   const a = Buffer.from(expected)
-  const b = Buffer.from(signatureHeader ?? '')
+  const b = Buffer.from(signature)
   return a.length === b.length && crypto.timingSafeEqual(a, b)
 }`
