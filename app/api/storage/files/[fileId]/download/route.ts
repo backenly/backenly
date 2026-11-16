@@ -54,6 +54,27 @@ import { refusalForState } from '@/lib/projects/serving-response'
  * to the one configuration that serves the most traffic.
  */
 export async function GET(request: NextRequest, props: { params: Promise<{ fileId: string }> }) {
+  const res = await serve(request, props)
+  if (!res.headers.has(RESOURCE_POLICY)) res.headers.set(RESOURCE_POLICY, 'same-site')
+  return res
+}
+
+/**
+ * Cross-Origin-Resource-Policy: which sites may embed the answer.
+ *
+ * A file anyone may read, or one a signed link grants, is made to be shown in
+ * the apps that use it: an <img> on the store's own domain, on localhost while
+ * it is built, anywhere. Those answers are `cross-origin`; Chromium refused
+ * them on every other site while the whole domain answered `same-site`
+ * (ERR_BLOCKED_BY_RESPONSE.NotSameSite; production QA re-test, 2026-11-16,
+ * N3). Every other answer, a file read on the caller's own identity and every
+ * refusal, stays `same-site`, as the rest of the site does. next.config.js
+ * leaves this route's header to this route: a header it sets wins over one a
+ * route handler sets.
+ */
+const RESOURCE_POLICY = 'Cross-Origin-Resource-Policy'
+
+async function serve(request: NextRequest, props: { params: Promise<{ fileId: string }> }): Promise<NextResponse> {
   const params = await props.params
   try {
     const fileId = params.fileId
@@ -173,19 +194,25 @@ export async function GET(request: NextRequest, props: { params: Promise<{ fileI
       (process.env.STORAGE_DRIVER ?? '').toLowerCase() === 's3' && (await servedHere(record.projectId))
         ? signedCdnConfig()
         : null
+    // Embeddable on any site: a file anyone may read, or one a signed link grants.
+    const readableByAnyone = cacheControlFor(record.bucket?.accessPolicy, record.isPublic).startsWith('public')
+    const resourcePolicy = readableByAnyone || reader.kind === 'signed' ? 'cross-origin' : 'same-site'
+
     if (cdn) {
       // A file anyone may read is handed the same URL for a whole window, with
       // a redirect the browser keeps until it ends, so a page that shows the
       // same image again reuses it instead of coming back here (cdn.ts). One
       // that is not public gets a fresh URL and a redirect nobody keeps.
-      if (cacheControlFor(record.bucket?.accessPolicy, record.isPublic).startsWith('public')) {
+      if (readableByAnyone) {
         const { url, maxAge } = windowedPublicCdnUrl(record.path, cdn)
         const res = NextResponse.redirect(url, 302)
         res.headers.set('Cache-Control', `private, max-age=${maxAge}`)
+        res.headers.set(RESOURCE_POLICY, resourcePolicy)
         return res
       }
       const res = NextResponse.redirect(signCdnUrl(record.path, DOWNLOAD_URL_TTL_SECONDS, cdn), 302)
       res.headers.set('Cache-Control', 'private, no-store')
+      res.headers.set(RESOURCE_POLICY, resourcePolicy)
       return res
     }
 
@@ -215,6 +242,7 @@ export async function GET(request: NextRequest, props: { params: Promise<{ fileI
         // access on the file column, which let a private bucket answer with
         // `public, max-age=31536000`.
         'Cache-Control': cacheControlFor(record.bucket?.accessPolicy, record.isPublic),
+        [RESOURCE_POLICY]: resourcePolicy,
       },
     })
   } catch (error: any) {

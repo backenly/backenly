@@ -57,6 +57,12 @@ tests/integration/signin-enumeration.spec.ts
 tests/integration/account-emails-answer-at-once.spec.ts
 tests/integration/project-smtp-and-templates.spec.ts
 tests/integration/storage-bucket-policy.spec.ts
+
+# A stored file anyone may read, or one a signed link grants, loads in an <img>
+# on any site; one read on the caller's own identity, and every refusal, stays
+# same-site (production QA re-test, 2026-11-16, N3). The real route, through
+# the signed CDN and through the app's own bytes.
+tests/integration/stored-files-load-on-other-sites.spec.ts
 tests/integration/storage-runtime-policy.spec.ts
 tests/integration/storage-writes-need-a-user.spec.ts
 tests/integration/function-off-switch.spec.ts
