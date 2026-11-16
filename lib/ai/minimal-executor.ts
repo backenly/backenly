@@ -8619,16 +8619,23 @@ async function executeGetMetrics(params: any, projectId: string): Promise<Execut
     const range = windowMinutes <= 60 ? '1h' : windowMinutes <= 24 * 60 ? '24h' : windowMinutes <= 7 * 24 * 60 ? '7d' : '30d'
     const endpoints = await getPerformanceBreakdown(range, 'api', projectId).catch(() => [])
 
+    // An error is a 5xx (lib/services/metrics.ts). A 4xx is the backend
+    // refusing or not finding what a client asked for, often a stranger's wrong
+    // key, and is said as its own number.
     const top = endpoints
       .slice(0, 10)
-      .map((e) => `📈 **${e.id}** — ${e.requests} req · avg ${Math.round(e.avgResponseTime)}ms · p95 ${Math.round(e.p95)}ms · ${e.errorRate.toFixed(1)}% errors`)
+      .map((e) =>
+        `📈 **${e.id}** — ${e.requests} req · avg ${Math.round(e.avgResponseTime)}ms · p95 ${Math.round(e.p95)}ms · ${e.errorRate.toFixed(1)}% 5xx` +
+        (e.clientErrorRate > 0 ? ` · ${e.clientErrorRate.toFixed(1)}% 4xx` : ''),
+      )
       .join('\n')
 
     return {
       success: true,
       message:
         `📊 **API Metrics (last ${windowMinutes >= 60 ? `${Math.round(windowMinutes / 60)}h` : `${windowMinutes}m`}):**\n\n` +
-        `${stats.count} requests · error rate ${stats.errorRatePct.toFixed(1)}% (${stats.serverErrorCount} × 5xx)\n` +
+        `${stats.count} requests · error rate ${stats.errorRatePct.toFixed(1)}% (${stats.serverErrorCount} × 5xx) · ` +
+        `${stats.clientErrorCount} × 4xx (refused keys, bad requests, rows not found; not counted as errors)\n` +
         `latency p50 ${Math.round(stats.p50)}ms · p95 ${Math.round(stats.p95)}ms · p99 ${Math.round(stats.p99)}ms` +
         (top ? `\n\n**Top endpoints (${range}):**\n${top}` : ''),
       data: { windowMinutes, stats, endpoints },

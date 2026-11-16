@@ -39,6 +39,15 @@ function statusTone(status: number): string {
   return 'text-zinc-400'
 }
 
+/**
+ * A 401 had no valid credentials: a wrong or revoked key, often the project's
+ * own app holding one, or an end user's missing or expired sign-in. The log
+ * keeps it as the project's traffic (a request that sent no credential at all
+ * is not recorded, lib/traffic/request-recorder.ts) and says what it was. It is
+ * a client error, never counted as the backend failing (lib/services/metrics.ts).
+ */
+const REFUSED = 'no valid key or sign-in'
+
 export function RequestsPane({
   projectId,
   rows,
@@ -145,7 +154,11 @@ export function RequestsPane({
                     }
                     mono
                     columns={{ what: 440, result: 48 }}
-                    result={<span className={statusTone(r.status)}>{r.status}</span>}
+                    result={
+                      <span className={statusTone(r.status)} title={r.status === 401 ? `401: ${REFUSED}` : undefined}>
+                        {r.status}
+                      </span>
+                    }
                     line={<span className={r.latency > SLOW_MS ? 'text-zinc-50' : 'text-zinc-400'}>{duration(r.latency)}</span>}
                     expanded={open === r.id}
                     onToggle={() => setOpen((o) => (o === r.id ? null : r.id))}
@@ -153,7 +166,7 @@ export function RequestsPane({
                     <CodeWell label="Request" copy={`${r.method} ${r.path} ${r.status} ${duration(r.latency)} ${r.timestamp}`}>
                       {[
                         `${r.method} ${r.path}`,
-                        `Status    ${r.status}`,
+                        `Status    ${r.status === 401 ? `401, ${REFUSED}` : r.status}`,
                         `Took      ${duration(r.latency)}`,
                         `At        ${formatTime(r.timestamp, 'date')}, ${formatTime(r.timestamp, 'clockSeconds')}`,
                         `Request   ${r.id}`,

@@ -8,13 +8,15 @@
  *   12 AM  6 AM  12 PM  6 PM │ 12 AM  6 AM  12 PM  6 PM │ 12 AM  6 AM  12 PM  6 PM
  *   ────────────────────────────────────────────────────────────────────────────
  *   Endpoints  21
- *   Route                     Requests      Avg      p95   Error rate
- *   GET /db/movies               5,144    59 ms   153 ms        0.06%
+ *   Route                     Requests      Avg      p95   Client errors   Server errors
+ *   GET /db/movies               5,144    59 ms   153 ms           1.2%           0.06%
  *
  * The totals sit in their charts' headings (there is no separate metric strip).
  * Publishes are zinc markers and Backenly's own fixes violet ones, on all three
  * charts, so a fix can be read against the latency after it. "Server errors"
- * means 5xx everywhere (Overview's Last 24 hours uses the same words).
+ * means 5xx everywhere (Overview's Last 24 hours uses the same words). A 4xx,
+ * a client's wrong key or a row that is not there, is a client error, shown
+ * on its own and never as the backend failing.
  */
 
 import { useMemo, useState } from 'react'
@@ -327,6 +329,7 @@ function OverviewSkeleton() {
             <Skeleton className="ml-auto h-[11px] w-[48px]" />
             <Skeleton className="hidden h-[11px] w-[40px] sm:block" />
             <Skeleton className="hidden h-[11px] w-[40px] sm:block" />
+            <Skeleton className="hidden h-[11px] w-[40px] sm:block" />
             <Skeleton className="h-[11px] w-[40px]" />
           </div>
         ))}
@@ -337,13 +340,20 @@ function OverviewSkeleton() {
 
 // ─── Endpoints ───────────────────────────────────────────────────────────────
 
-type SortKey = 'route' | 'requests' | 'avg' | 'p95' | 'errors'
+type SortKey = 'route' | 'requests' | 'avg' | 'p95' | 'clientErrors' | 'errors'
 const COLUMNS: Array<{ key: SortKey; label: string; title?: string; right: boolean; wide?: boolean }> = [
   { key: 'route', label: 'Route', right: false },
   { key: 'requests', label: 'Requests', right: true },
   { key: 'avg', label: 'Avg', title: 'Average response', right: true, wide: true },
   { key: 'p95', label: 'p95', title: '95 of every 100 requests were faster than this', right: true, wide: true },
-  { key: 'errors', label: 'Error rate', title: 'Share answered with a 4xx or 5xx status', right: true },
+  {
+    key: 'clientErrors',
+    label: 'Client errors',
+    title: 'Share answered with a 4xx status: a refused key, a bad request, a row that is not there. Not a failure.',
+    right: true,
+    wide: true,
+  },
+  { key: 'errors', label: 'Server errors', title: 'Share answered with a 5xx status', right: true },
 ]
 
 const sortValue: Record<SortKey, (e: Endpoint) => number | string> = {
@@ -351,6 +361,7 @@ const sortValue: Record<SortKey, (e: Endpoint) => number | string> = {
   requests: (e) => e.requests,
   avg: (e) => e.avgResponseTime,
   p95: (e) => e.p95,
+  clientErrors: (e) => e.clientErrorRate,
   errors: (e) => e.errorRate,
 }
 
@@ -382,7 +393,8 @@ function Endpoints({ projectId, endpoints, range }: { projectId: string; endpoin
             <col className="w-[84px] sm:w-[104px]" />
             <col className="hidden w-[88px] sm:table-column" />
             <col className="hidden w-[88px] sm:table-column" />
-            <col className="w-[84px] sm:w-[104px]" />
+            <col className="hidden w-[120px] sm:table-column" />
+            <col className="w-[112px] sm:w-[120px]" />
           </colgroup>
           <thead>
             <tr className={`border-y ${RULE} bg-[#0e0f11]`}>
@@ -443,6 +455,13 @@ function Endpoints({ projectId, endpoints, range }: { projectId: string; endpoin
                   </td>
                   <td className="hidden px-[12px] py-[9px] text-right align-top text-[12.5px] leading-[18px] tabular-nums text-zinc-300 sm:table-cell">
                     {duration(e.p95)}
+                  </td>
+                  <td
+                    className={`hidden px-[12px] py-[9px] text-right align-top text-[12.5px] leading-[18px] tabular-nums sm:table-cell ${
+                      e.clientErrorRate > 0 ? 'text-zinc-300' : 'text-faint'
+                    }`}
+                  >
+                    {errorRateText(e.clientErrorRate)}
                   </td>
                   <td
                     className={`py-[9px] pl-[12px] pr-[16px] text-right align-top text-[12.5px] leading-[18px] tabular-nums sm:pr-[20px] ${

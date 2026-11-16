@@ -2263,3 +2263,8 @@ tests/integration/auth-email-routes-on-web.spec.ts
 # name suggests and no blueprint columns; every other caller keeps the default.
 # Real provisioned project, real executor and DDL.
 tests/integration/create-table-no-auto-provision.spec.ts
+# A 4xx is not the backend failing: a burst of wrong-key 401s or 429s after a
+# reader switch is not a regression (404s and 5xx still are), the agent's
+# metrics give the error rate on 5xx with the 4xx as their own number, and the
+# per-endpoint breakdown says 5xx and 4xx apart. Real request log rows.
+tests/integration/client-errors-are-not-failures.spec.ts
