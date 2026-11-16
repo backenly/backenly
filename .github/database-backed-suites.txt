@@ -2263,3 +2263,9 @@ tests/integration/auth-email-routes-on-web.spec.ts
 # name suggests and no blueprint columns; every other caller keeps the default.
 # Real provisioned project, real executor and DDL.
 tests/integration/create-table-no-auto-provision.spec.ts
+# A function self-heal is the platform's own work: run under a metered tool
+# call, it holds none of the customer's credits, adds nothing to the call's
+# charge, still heals when their credits are used up, and is booked against the
+# platform's budget; a repair the customer asks for is still theirs. Real
+# gateway spend rules, fixers, function runner and database.
+tests/integration/function-self-heal-is-platform-paid.spec.ts
