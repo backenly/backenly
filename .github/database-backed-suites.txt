@@ -2263,3 +2263,8 @@ tests/integration/auth-email-routes-on-web.spec.ts
 # name suggests and no blueprint columns; every other caller keeps the default.
 # Real provisioned project, real executor and DDL.
 tests/integration/create-table-no-auto-provision.spec.ts
+# Deleting a project needs its name in `confirm`, an account its email, and both
+# a session signed in within the last ten minutes (a refreshed one is not); each
+# refusal leaves the project or account in place, and a stranger still gets the
+# same 404. Real sessions, projects and accounts.
+tests/integration/deletion-asks-for-name-and-sign-in.spec.ts

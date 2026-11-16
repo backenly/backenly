@@ -5,6 +5,7 @@ import { prisma } from '@/lib/db'
 import { z } from 'zod'
 import { withAuth } from '@/lib/auth/route-protection'
 import { deleteProjectCompletely } from '@/lib/projects/delete'
+import { CONFIRMATION_REQUIRED, confirmationOf, reauthRefusal, signedInRecently } from '@/lib/auth/recent-sign-in'
 import { canAdministerProject, canWriteProject } from '@/lib/edition/guard'
 import { getProjectResolver, ProjectResolutionError, projectRoleFields, type ProjectRoleFields } from '@/lib/edition'
 import { getProjectQuota } from '@/lib/services/storageQuota'
@@ -285,6 +286,24 @@ export const DELETE = withAuth(async (
         },
         { status: 404 }
       )
+    }
+
+    // Nothing here can be undone, so the caller says which project it means,
+    // by name, and has signed in within the last ten minutes
+    // (lib/auth/recent-sign-in.ts). Both are checked after access, so neither
+    // answer tells a stranger the project exists.
+    if ((await confirmationOf(request)) !== project.name) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: `Deleting a project needs its name as confirmation. Send {"confirm": ${JSON.stringify(project.name)}} in the request body.`,
+          code: CONFIRMATION_REQUIRED,
+        },
+        { status: 400 }
+      )
+    }
+    if (!signedInRecently(user.signedInAt)) {
+      return reauthRefusal('this project', user.user)
     }
 
     // Drops every schema this project owns and deletes its rows in one
