@@ -108,6 +108,28 @@ describe('investigating an escalated finding', () => {
     expect(d.diagnosis.validation.problems).toContain('names table "customers", which does not exist')
   }, 60_000)
 
+  // Production QA (2026-11-16): the card for a guessed rule recommended
+  // "Approve the pending finding" while its buttons were "Keep it" and
+  // "Remove it", and quoted the rule's code name.
+  it('tells the investigator the card’s buttons, and the rule in words', async () => {
+    await prisma.$executeRawUnsafe(`CREATE TABLE IF NOT EXISTS "${schema}"."reviews" (id serial PRIMARY KEY, name text UNIQUE)`)
+    await prisma.healthFinding.create({
+      data: {
+        projectId,
+        type: 'guessed_constraint',
+        severity: 'warning',
+        status: 'pending_approval',
+        details: { tableName: 'reviews', columnName: 'name', constraintName: 'reviews_name_key', rule: 'unique_by_name', evidence: 'unrecorded', definition: 'UNIQUE (name)' },
+      },
+    })
+    const provider = scriptedProvider([answer({ evidenceRefs: ['finding'], namedTables: ['reviews'], namedColumns: ['reviews.name'] })])
+    setProviderForTests(provider)
+    await diagnoseEscalatedFindings(projectId)
+    const brief = JSON.stringify(provider.calls[0].params.messages[0])
+    expect(brief).toContain('buttons: \\"Remove it\\" or \\"Keep it\\"')
+    expect(brief).not.toContain('unique_by_name')
+  }, 60_000)
+
   it('backs off after a failed attempt instead of retrying every tick', async () => {
     const f = await finding()
     const provider = scriptedProvider([new AiError('timeout', 'slow', { consumption: 'unknown' })])

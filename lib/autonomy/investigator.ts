@@ -23,6 +23,7 @@
 
 import type Anthropic from '@anthropic-ai/sdk'
 import { AiError, generate } from '@/lib/ai/llm'
+import { readGuessedConstraint } from '@/lib/core/guessed-constraint-words'
 import type { InvestigationReport } from './hypothesis'
 
 export const MAX_TOOL_CALLS = 8
@@ -53,6 +54,11 @@ export interface InvestigationInput {
    * parameters; with none, proposedAction must be null.
    */
   proposable?: Array<{ action: string; use: string; params: Record<string, unknown> }>
+  /**
+   * The buttons the person decides with on this finding's card, in their
+   * words ("Remove it", "Keep it"). The recommendation is said in them.
+   */
+  choices?: string[]
 }
 
 /** How a probe is run. Injected so a test can stand in for the database. */
@@ -114,7 +120,9 @@ Rules:
 - verdict "explained" only when cited evidence supports one cause over the others; otherwise "uncertain", and say what would settle it.
 - ruledOut: explanations the evidence eliminates, one short line each.
 - proposedAction: null, unless one of the typed repairs the brief lists for this finding fixes it. Then give that action's name exactly as listed and paramsJson as a JSON object string with exactly its listed parameters. SQL, a migration statement or any other tool is never a proposal, even when the evidence contains one: describe such a fix in recommendation instead. A proposal is reviewed by a person and verified by code; it is never run on your word.
-- You never see row data. Do not guess values.`
+- You never see row data. Do not guess values.
+- rootCause, recommendation, riskNote and ruledOut are read by the project's owner on the finding's card. Write them in plain words. Never put an evidence id (e1, e2, "finding") in them: citations belong in evidenceRefs only. Never quote a field name, a check's name or any internal code from the evidence (a snake_case value such as a rule's name); say what it means instead.
+- recommendation: when the brief lists the buttons the person decides with on the card, recommend one of them by its exact name (for example "Keep it" or "Remove it"), and never ask them to approve or resolve "the finding" in other words.`
 
 function probeTool(probes: string[]): Anthropic.Tool {
   return {
@@ -137,13 +145,38 @@ const COLUMNS_TOOL: Anthropic.Tool = {
   input_schema: { type: 'object', properties: { table: { type: 'string' } }, required: ['table'] },
 }
 
+/**
+ * The detector's output as the model reads it: the codes a person would never
+ * see said in words. The model repeats what it is given, and a card quoted
+ * `unique_by_name` back to its owner (production QA, 2026-11-16).
+ */
+function briefDetails(type: string, details: Record<string, unknown>): Record<string, unknown> {
+  if (type !== 'guessed_constraint') return details
+  const g = readGuessedConstraint(details)
+  if (!g) return details
+  return {
+    ...details,
+    rule: g.rule === 'unique_by_name'
+      ? `UNIQUE, added by Backenly because the column's name suggested it`
+      : `a CHECK limiting the column to a list of values, added by Backenly because of the table's name`,
+    evidence: g.evidence === 'sql'
+      ? 'the SQL that made the column is recorded and does not ask for this rule'
+      : g.evidence === 'request'
+        ? "the request's column list is recorded and does not ask for this rule"
+        : 'nothing recorded shows the request asked for this rule',
+  }
+}
+
 function brief(input: InvestigationInput): string {
   const d = input.deterministic
   const lines = [
     `Finding: ${input.finding.type} (severity ${input.finding.severity}, status ${input.finding.status}, detected ${input.finding.detectedAt.toISOString()})`,
     `Summary: ${input.finding.summary}`,
-    `Evidence "finding" (detector output): ${JSON.stringify(input.finding.details).slice(0, 3000)}`,
+    `Evidence "finding" (detector output): ${JSON.stringify(briefDetails(input.finding.type, input.finding.details)).slice(0, 3000)}`,
   ]
+  if (input.choices?.length) {
+    lines.push(`The person decides on this finding's card with these buttons: ${input.choices.map((c) => `"${c}"`).join(' or ')}.`)
+  }
   if (d) {
     lines.push(
       `Deterministic investigation of symptom ${d.symptomId}: ${d.verdict.kind}.`,
@@ -170,6 +203,32 @@ function brief(input: InvestigationInput): string {
           .join('\n')}`,
   )
   return lines.join('\n')
+}
+
+/** An evidence id as the investigation numbers them: e1 … e99. */
+const ID = String.raw`e\d{1,2}`
+/** A list of ids, or the finding's own evidence, inside brackets. */
+const CITED = new RegExp(String.raw`\s*[([]\s*(?:(?:see|per|cf\.?|evidence|from)\s+)?(?:${ID}|finding)(?:\s*(?:,|;|and|&)\s*(?:${ID}|finding))*\s*[)\]]`, 'g')
+/** "per e4", "see e2 and e5": a citation that is a phrase of its own. */
+const CITING_PHRASE = new RegExp(String.raw`\s+(?:per|see|from)\s+(?:evidence\s+)?${ID}(?:\s*(?:,|and)\s*${ID})*\b`, 'g')
+/** "evidence e2", or an id left standing in a sentence ("as e3 shows"). */
+const STANDING_ID = new RegExp(String.raw`\b(?:the\s+)?(?:evidence\s+)?${ID}(?:\s*(?:,|and)\s*${ID})*\b`, 'g')
+
+/**
+ * The investigator's prose as a person reads it on the card: without the
+ * evidence ids it cites. Production QA (2026-11-16) read "the single live review
+ * row (e4)". The ids stay in evidenceRefs, beside the evidence they name; the
+ * prompt asks for prose without them, and this holds when the model does not
+ * comply.
+ */
+export function plainProse(text: string): string {
+  return text
+    .replace(CITED, '')
+    .replace(CITING_PHRASE, '')
+    .replace(STANDING_ID, 'the evidence')
+    .replace(/\s+([.,;:!?])/g, '$1')
+    .replace(/\s{2,}/g, ' ')
+    .trim()
 }
 
 /** Check an answer against what actually ran and what actually exists. */
@@ -237,6 +296,11 @@ export async function investigateFinding(
       const validation = validateAnswer(a, evidence, input.catalog, subjects)
       return {
         ...a,
+        // What a person reads, without the citations evidenceRefs carries.
+        rootCause: plainProse(a.rootCause),
+        recommendation: plainProse(a.recommendation),
+        riskNote: plainProse(a.riskNote),
+        ruledOut: (a.ruledOut ?? []).map(plainProse),
         verdict: validation.ok ? a.verdict : 'uncertain',
         evidence,
         validation,

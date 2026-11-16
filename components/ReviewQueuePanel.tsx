@@ -178,10 +178,16 @@ function heldKindLabel(p: PendingApproval): string | null {
   }
 }
 
-/** Diagnosis written by the escalation pass, when one exists. */
+/**
+ * Diagnosis written by the escalation pass, when one exists. A hypothesis that
+ * failed the investigator's own checks (it cited evidence that never ran, or
+ * named a column that does not exist) is not shown: the card says what it says
+ * without one.
+ */
 function diagnosisOf(p: PendingApproval): FindingDiagnosis | null {
   const d = (p.details as Record<string, any> | null)?.diagnosis
   if (!d || typeof d !== 'object') return null
+  if (d.validation && typeof d.validation === 'object' && d.validation.ok === false) return null
   const rootCause = typeof d.rootCause === 'string' ? d.rootCause : undefined
   const recommendation = typeof d.recommendation === 'string' ? d.recommendation : undefined
   if (!rootCause && !recommendation) return null
