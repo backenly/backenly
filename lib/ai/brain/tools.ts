@@ -3651,6 +3651,19 @@ export async function dispatchTool(
       const mode = args.mode === 'READ_WRITE' ? 'READ_WRITE' as const : 'READ_ONLY' as const
       const da = await import('@/lib/services/direct-access')
       const status = await da.getDirectAccessStatus(ctx.projectId)
+      // Nothing outside Backenly can reach this region's database yet, so no
+      // string is issued, and the answer says what does work instead.
+      if (!status.available) {
+        return finalize({
+          ok: false,
+          code: 'DIRECT_ACCESS_UNAVAILABLE',
+          summary:
+            `${status.unavailable ?? da.DIRECT_ACCESS_UNAVAILABLE_MESSAGE} Read with run_query (SQL, read-only, ` +
+            'nothing to install), change rows through the REST API, change the schema with apply_migration, and take a ' +
+            'full pg_dump file from Connect → Postgres → Backups.',
+          data: { available: false },
+        })
+      }
       const existing = status.credentials.find((c) => c.mode === mode)
 
       const describe = (c: typeof status.credentials[number], provisioned: boolean) => ({

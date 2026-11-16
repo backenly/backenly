@@ -909,7 +909,7 @@ describe('direct database access and agents’ read-only SQL use the project’s
     process.env[REGION_VARIABLE] = regionalUrl
     delete process.env[HOST_VARIABLE]
     await expect(provisionDirectAccess(regionalProject, 'READ_ONLY')).rejects.toMatchObject({
-      code: 'REGION_NOT_CONFIGURED',
+      code: 'DIRECT_ACCESS_UNAVAILABLE',
       variable: HOST_VARIABLE,
     })
     expect(await calls()).toEqual([])

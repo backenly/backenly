@@ -39,6 +39,12 @@ tests/build-runs/hydration.test.ts
 tests/integration/mcp-oauth-flow.spec.ts
 tests/integration/mcp-oauth-consent.spec.ts
 tests/integration/mcp-direct-access-url.spec.ts
+
+# A region with no developer-facing Postgres host issues no login and shows no
+# connection string, in the console's routes and over MCP, and says so; logins
+# that exist stay listed by name to be revoked (production QA re-test,
+# 2026-11-16, N4).
+tests/integration/direct-postgres-only-where-reachable.spec.ts
 tests/integration/mcp-transport-hygiene.spec.ts
 tests/integration/webhook-delivery.spec.ts
 tests/integration/webhook-trigger-url-required.spec.ts
