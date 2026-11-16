@@ -2270,3 +2270,9 @@ tests/integration/create-table-no-auto-provision.spec.ts
 # "couldn't check" rather than a blocking failure, and a change that is not
 # captured fails. Real provisioned project, capture triggers and verifier.
 tests/integration/row-event-check-writes-nothing.spec.ts
+# The CRUD, auth-flow and RLS checks write their test rows in a transaction
+# that is always rolled back: after a verification there is no test row or
+# user, no captured change, and nothing the customer's own triggers wrote for
+# them (an audit row, a profile). Real provisioned project, users table,
+# capture triggers, customer triggers and verifier.
+tests/integration/verifier-database-checks-write-nothing.spec.ts
