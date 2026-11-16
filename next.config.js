@@ -344,6 +344,9 @@ const nextConfig = {
           { key: 'Access-Control-Allow-Methods', value: 'GET, OPTIONS' },
           { key: 'Access-Control-Allow-Headers', value: 'Content-Type' },
           { key: 'Cache-Control', value: 'public, max-age=3600, stale-while-revalidate=86400' },
+          // <script src> without crossorigin is a no-cors request, which the
+          // site-wide same-site policy below refused on every other site.
+          { key: 'Cross-Origin-Resource-Policy', value: 'cross-origin' },
         ],
       },
       {
@@ -353,6 +356,7 @@ const nextConfig = {
           { key: 'Access-Control-Allow-Methods', value: 'GET, OPTIONS' },
           { key: 'Access-Control-Allow-Headers', value: 'Content-Type' },
           { key: 'Cache-Control', value: 'public, max-age=3600, stale-while-revalidate=86400' },
+          { key: 'Cross-Origin-Resource-Policy', value: 'cross-origin' },
         ],
       },
       {
@@ -439,8 +443,19 @@ const nextConfig = {
           },
           { key: 'Permissions-Policy', value: 'camera=(), microphone=(), geolocation=(), interest-cohort=()' },
           { key: 'Cross-Origin-Opener-Policy', value: 'same-origin' },
-          { key: 'Cross-Origin-Resource-Policy', value: 'same-site' },
         ],
+      },
+      {
+        // Same-site for everything but what other sites are meant to embed: a
+        // stored file's download URL, whose route answers by who may read the
+        // file (public files and signed links load anywhere), and the two SDK
+        // bundles above. With same-site here, Chromium refused a store's own
+        // product photos in an <img> on its own domain or on localhost
+        // (ERR_BLOCKED_BY_RESPONSE.NotSameSite; production QA re-test,
+        // 2026-11-16, N3). Excluded here, not overridden in the route: a header
+        // this file sets wins over the one a route handler sets.
+        source: '/:path((?!api/storage/files/[^/]+/download$|backenly-sdk\\.js$|backenly-sdk\\.esm\\.js$).*)',
+        headers: [{ key: 'Cross-Origin-Resource-Policy', value: 'same-site' }],
       },
     ]
   },
