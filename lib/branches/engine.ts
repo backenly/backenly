@@ -24,7 +24,7 @@
  * and one created before logging merges the older additive way.
  */
 
-import { projectPool } from '@/lib/data-plane/regional'
+import { projectPool, projectRegion, workspaceRawClient } from '@/lib/data-plane/regional'
 import { prisma } from '@/lib/db/prisma'
 import { executeAction } from '@/lib/ai/minimal-executor'
 import { readWorkspaceSchema } from '@/lib/typegen/schema-reader'
@@ -364,19 +364,23 @@ export async function diffBranch(projectId: string, branchId: string): Promise<
 }
 
 /**
- * Drop a branch's schema, unregistering it from PostgREST first. A registered
- * schema that no longer exists fails PostgREST's whole schema-cache rebuild,
- * which 503s every tenant on the box, so the order is not optional.
+ * Remove a branch's schema. While PostgREST serves it, it is unregistered now
+ * and dropped at least two minutes later (lib/postgrest/retire-schema.ts): a
+ * cache rebuild that read the list before the unregister, and queried after
+ * the drop, failed and answered 503 for every request until it was retried.
+ * A schema nothing serves is dropped at once.
  */
 async function dropBranchSchema(projectId: string, schemaName: string): Promise<void> {
   if (!schemaName.startsWith(`workspace_${projectId}_br_`)) {
     throw new Error('Refusing to drop a non-branch schema')
   }
-  try {
-    const { unregisterSchema } = await import('@/lib/postgrest/registration')
-    await unregisterSchema(schemaName)
-  } catch (e: any) {
-    console.warn(`[Branch] PostgREST unregister failed for ${schemaName}:`, e?.message)
+  const { servedAmong, unregisterSchemaOn } = await import('@/lib/postgrest/registration')
+  const db = await workspaceRawClient(projectId)
+  if ((await servedAmong(db, [schemaName])).length > 0) {
+    const { scheduleSchemaDrop } = await import('@/lib/postgrest/retire-schema')
+    await unregisterSchemaOn(db, schemaName)
+    await scheduleSchemaDrop(prisma, { projectId, region: await projectRegion(projectId), schemas: [schemaName] })
+    return
   }
   const pool = await branchPool(projectId)
   await pool.query(`DROP SCHEMA IF EXISTS "${schemaName}" CASCADE`)

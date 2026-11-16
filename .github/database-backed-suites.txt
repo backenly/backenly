@@ -1884,6 +1884,15 @@ tests/integration/project-deletion-change-ledger.spec.ts
 # triggers and notifications are the property, so it needs a real Postgres.
 tests/integration/postgrest-reload-on-drop.spec.ts
 
+# A schema PostgREST serves stops being served at once and is dropped at least
+# two minutes later by the regional pass (a merge's, a discard's and a project
+# deletion's), never while it is served again: dropped at once, a cache rebuild
+# still reading it answered 503 for every request. The registration seam stands
+# in for the registry here; the second suite holds the step to the real one in
+# a database of its own.
+tests/integration/served-schemas-dropped-later.spec.ts
+tests/integration/retired-schemas-registry.spec.ts
+
 # The SDK's filters mean the same on both servers that answer the data routes:
 # isNull, isNotNull, eq, neq, gt and in on uuid, timestamp, integer and boolean
 # columns, get, update and delete by a uuid id, an update or delete through
