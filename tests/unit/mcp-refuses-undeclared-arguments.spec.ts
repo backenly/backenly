@@ -155,6 +155,29 @@ describe('a call carrying only what its tool takes', () => {
   })
 })
 
+describe('a projectId argument', () => {
+  // The connection decides the project; agents name it as well.
+  it('is accepted when it names the connection’s own project, and dropped before the tool runs', async () => {
+    const r = await call('get_table_schema', { tableName: 'orders', projectId: 'p1' })
+    expect(r.status).toBe(200)
+    expect(mockDispatched).toEqual([{ name: 'get_table_schema', args: { tableName: 'orders' } }])
+  })
+
+  it('is accepted on a section action as well', async () => {
+    const r = await call('functions', { action: 'list', projectId: 'p1' })
+    expect(r.status).toBe(200)
+    expect(mockDispatched).toEqual([{ name: 'list_ai_functions', args: {} }])
+  })
+
+  it('naming another project is refused with PROJECT_MISMATCH, and nothing runs', async () => {
+    const r = await call('get_table_schema', { tableName: 'orders', projectId: 'p2' })
+    expect(r.status).toBe(400)
+    expect(r.body).toMatchObject({ ok: false, code: 'PROJECT_MISMATCH' })
+    expect(r.body.hint).toMatch(/connect with a key for the other project/)
+    expect(mockDispatched).toEqual([])
+  })
+})
+
 describe('what other checks answer first', () => {
   it('a read-only key is refused the write before it learns the write’s arguments', async () => {
     mockReadOnly = true

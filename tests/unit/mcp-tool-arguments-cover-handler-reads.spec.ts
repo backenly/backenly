@@ -50,7 +50,7 @@ const INTERNAL: Record<string, Record<string, string>> = {
     columnType: 'an older spelling of column.type, as above',
   },
   deploy_function_code: {
-    projectId: 'read only to refuse another project: the tool deploys to its connection’s project',
+    projectId: 'read only to refuse another project. Over MCP the route answers it first: the connection’s own id is dropped and any other refused (refuseOtherProject)',
   },
   send_push: {
     '(whole)': 'handed whole to the SEND_PUSH executor, which reads title, message, externalUserIds, playerIds, broadcast and data, all declared',

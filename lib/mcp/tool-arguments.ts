@@ -127,12 +127,38 @@ export function refuseUnknownArguments(
     unsupported,
     supported: accepted.supported,
     // A branch id this tool cannot use is the costly case: sent again without
-    // it, the call acts on production. A project id is the common habit: the
-    // connection already decides the project, and naming another never moved it.
+    // it, the call acts on production.
     hint: unsupported.includes('branchId')
       ? 'This call has no preview-branch form: without branchId it acts on production. Send it without branchId only if production is what you mean.'
-      : unsupported.includes('projectId')
-        ? 'This connection acts on its own project only. Leave projectId out, or connect with a key for the other project.'
-        : 'Send it again with only the arguments in `supported`.',
+      : 'Send it again with only the arguments in `supported`.',
+  }
+}
+
+export interface ProjectMismatchRefusal {
+  ok: false
+  code: 'PROJECT_MISMATCH'
+  error: string
+  hint: string
+}
+
+/**
+ * A projectId argument. The connection decides the project, and agents often
+ * name it as well. Their own project's id is accepted, and the caller drops it
+ * before anything reads the arguments. Any other id is refused, as
+ * deploy_code's handler always refused it, so a call never runs on one project
+ * while naming another.
+ */
+export function refuseOtherProject(
+  args: Record<string, unknown>,
+  projectId: string,
+): ProjectMismatchRefusal | null {
+  const named = args.projectId
+  if (named === undefined || named === null) return null
+  if (typeof named === 'string' && named.trim() === projectId) return null
+  return {
+    ok: false,
+    code: 'PROJECT_MISMATCH',
+    error: 'This connection acts on its own project only, and projectId names another. Nothing ran.',
+    hint: 'Leave projectId out, or connect with a key for the other project.',
   }
 }

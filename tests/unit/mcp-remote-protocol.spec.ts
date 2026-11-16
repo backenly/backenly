@@ -182,6 +182,18 @@ describe.each<Era>(['legacy', 'modern'])('remote endpoint, %s era', (era) => {
     expect(result.structuredContent).toMatchObject({ code: 'UNKNOWN_PARAMS', unsupported: ['branchId'], supported: ['message'] })
   })
 
+  it('takes the connection’s own projectId on backend_chat, and refuses another project’s', async () => {
+    const own: any = await client.callTool({ name: 'backend_chat', arguments: { message: 'drop posts', projectId: 'p1' } })
+    expect(own.isError).toBe(false)
+    expect(mockCalls).toEqual([{ path: '/api/mcp/chat', body: { message: 'drop posts' } }])
+
+    mockCalls.length = 0
+    const other: any = await client.callTool({ name: 'backend_chat', arguments: { message: 'drop posts', projectId: 'p2' } })
+    expect(other.isError).toBe(true)
+    expect(other.structuredContent).toMatchObject({ code: 'PROJECT_MISMATCH' })
+    expect(mockCalls).toEqual([])
+  })
+
   it('passes a tool it does not advertise to the handler, which decides', async () => {
     const result: any = await client.callTool({ name: 'no_such_tool', arguments: {} })
     expect(mockCalls).toEqual([{ path: '/api/mcp/tool', body: { tool: 'no_such_tool', args: {} } }])

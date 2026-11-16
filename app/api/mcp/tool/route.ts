@@ -44,7 +44,7 @@ import { DOCS_MAX_CHARS } from '@/lib/mcp/docs-limit'
 import { AGENT_DOCS_URL, AGENT_DOC_TOPICS, agentDocPublicPath, resolveDocTopic } from '@/lib/mcp/agent-docs'
 import { readPublicDoc as readPublicFile } from '@/lib/mcp/public-docs'
 import { approvalNeededFor, readOnlyView, resolveDomainAction, type DomainResolution } from '@/lib/mcp/domains'
-import { refuseUnknownArguments } from '@/lib/mcp/tool-arguments'
+import { refuseOtherProject, refuseUnknownArguments } from '@/lib/mcp/tool-arguments'
 import { withChangeAttribution } from '@/lib/changes/ledger'
 
 /**
@@ -123,6 +123,19 @@ async function handleCall(request: NextRequest, auth: McpGuardAuth, startedAt: n
   }
 
   const { tool, args } = parsed
+
+  // ── A projectId argument ──────────────────────────────────────────────────
+  //
+  // The connection decides the project, and agents often name it as well. The
+  // connection's own project is accepted and dropped here, before anything
+  // reads the arguments; any other is refused, so a call never runs on one
+  // project while naming another (lib/mcp/tool-arguments.ts).
+  const otherProject = refuseOtherProject(args, auth.projectId)
+  if (otherProject) {
+    recordMcpCall({ ...auth, endpoint: ENDPOINT, startedAt }, { statusCode: 400, tool, error: 'PROJECT_MISMATCH' })
+    return withCors(NextResponse.json(otherProject, { status: 400 }))
+  }
+  delete args.projectId
 
   // ── Domain tools: resolve the action before anything reads `tool` ─────────
   //

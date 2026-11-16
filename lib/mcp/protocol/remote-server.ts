@@ -19,7 +19,7 @@ import { ResourceNotFoundError, Server } from '@modelcontextprotocol/server'
 import type { AuthInfo, Tool } from '@modelcontextprotocol/server'
 import { buildCatalog } from '@/lib/mcp/catalog'
 import { forwardedCredentialHeaders } from '@/lib/mcp/forward-credential'
-import { refuseUnknownArguments } from '@/lib/mcp/tool-arguments'
+import { refuseOtherProject, refuseUnknownArguments } from '@/lib/mcp/tool-arguments'
 import { POST as toolCall } from '@/app/api/mcp/tool/route'
 import { POST as chatCall } from '@/app/api/mcp/chat/route'
 import { buildMcpInstructions, MCP_RESOURCES, publicResources, shapeToolResult } from './shared'
@@ -60,13 +60,14 @@ function delegatedRequest(original: Request, path: string, body: unknown): NextR
 }
 
 /** Run one tool through the handler every other path uses, and shape the result. */
-async function callTool(name: string, args: Record<string, unknown>, original: Request) {
+async function callTool(name: string, args: Record<string, unknown>, original: Request, projectId: string) {
   const isChat = name === 'backend_chat'
-  // /api/mcp/tool refuses an argument a tool does not take; backend_chat is
-  // sent only its message, so anything else it was given is refused here
-  // rather than dropped (lib/mcp/tool-arguments.ts).
+  // /api/mcp/tool refuses an argument a tool does not take, and a projectId
+  // naming another project; backend_chat is sent only its message, so the same
+  // rules are applied here rather than dropping the rest (lib/mcp/tool-arguments.ts).
   if (isChat) {
-    const refusal = refuseUnknownArguments(name, args)
+    const { projectId: _ownProject, ...rest } = args
+    const refusal = refuseOtherProject(args, projectId) ?? refuseUnknownArguments(name, rest)
     if (refusal) return shapeToolResult(refusal, false)
   }
   const request = isChat
@@ -104,7 +105,7 @@ export function buildRemoteServer({ authInfo, requestInfo }: { authInfo?: AuthIn
   server.setRequestHandler('tools/list', async () => ({ tools }))
 
   server.setRequestHandler('tools/call', async (req) => {
-    const result = await callTool(req.params.name, (req.params.arguments ?? {}) as Record<string, unknown>, requestInfo)
+    const result = await callTool(req.params.name, (req.params.arguments ?? {}) as Record<string, unknown>, requestInfo, caller.projectId)
     return server.projectCallToolResult(result, undefined)
   })
 
@@ -115,7 +116,7 @@ export function buildRemoteServer({ authInfo, requestInfo }: { authInfo?: AuthIn
     if (!resource) {
       throw new ResourceNotFoundError(req.params.uri, `Unknown resource: ${req.params.uri}. Available: ${MCP_RESOURCES.map((r) => r.uri).join(', ')}`)
     }
-    const result = await callTool(resource.tool, {}, requestInfo)
+    const result = await callTool(resource.tool, {}, requestInfo, caller.projectId)
     if (result.isError) {
       throw new Error(String(result.structuredContent.error ?? `Could not read ${resource.uri}`))
     }
