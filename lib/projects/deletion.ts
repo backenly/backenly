@@ -13,6 +13,9 @@
  *             columns every runtime door already refuses on, in its own region
  *             too (they are in the authorization projection). Its webhooks
  *             stop. Nothing is dropped.
+ *   restored  until then, an admin restores it from the Projects page
+ *             (restoreDeletedProject): both dates cleared, the deletion pause
+ *             lifted, back in the list and serving, if the plan has room for it.
  *   purged    the daily purge (instrumentation.ts) runs the full deletion,
  *             deleteProjectCompletely, for every project past `purgeAfter`.
  *
@@ -27,6 +30,7 @@
 import { prisma } from '@/lib/db/prisma'
 import { discardOutbox } from '@/lib/webhooks/capture'
 import { confirmPropagation, type Propagation } from '@/lib/auth-projection/confirm'
+import { ensureSchemaRegistered } from '@/lib/postgrest/registration'
 import { cancelPendingDeliveries, withProjectLifecycleLock, type LifecycleActor } from './pause-lifecycle'
 import { DELETED_PAUSE_REASON, invalidateProjectServingState } from './serving-state'
 import { deleteProjectCompletely } from './delete'
@@ -87,6 +91,53 @@ export async function requestProjectDeletion(projectId: string, actor: Lifecycle
     },
   })
   return { ...marked, propagation }
+}
+
+/**
+ * Undo a deletion that has not been carried out yet: clear `deletedAt` and
+ * `purgeAfter`, and lift the deletion pause. A project that was paused for
+ * inactivity before it was deleted stays paused, as it was. Restoring counts as
+ * use, like resuming. Idempotent: a project not deleted is left as it is.
+ *
+ * The caller checks the plan's project limit first (the restore route asks
+ * projectCreationVerdict, which no longer counts this project while deleted).
+ */
+export async function restoreDeletedProject(projectId: string, actor: LifecycleActor, now: Date = new Date()): Promise<{ restored: boolean }> {
+  const restored = await withProjectLifecycleLock(projectId, async (tx) => {
+    const row = await tx.project.findUnique({ where: { id: projectId }, select: { deletedAt: true, pauseReason: true } })
+    if (!row?.deletedAt) return false
+    await tx.project.update({
+      where: { id: projectId },
+      data: {
+        deletedAt: null,
+        purgeAfter: null,
+        ...(row.pauseReason === DELETED_PAUSE_REASON
+          ? { pausedAt: null, pauseReason: null, pauseWarnedAt: null, lastActivityAt: now }
+          : {}),
+      },
+    })
+    return true
+  })
+  if (!restored) return { restored: false }
+
+  // As after a resume: this process's gates serve it now, the runtime within its
+  // cache's bound, its region once the region has the change. Registration was
+  // never removed; ensuring it repairs anything that drifted meanwhile.
+  invalidateProjectServingState(projectId)
+  const propagation = await confirmPropagation({ entity: 'project', entityId: projectId })
+  await ensureSchemaRegistered(projectId)
+  await prisma.auditLog.create({
+    data: {
+      action: 'PROJECT_RESTORED',
+      type: 'project',
+      projectId,
+      userId: actor.kind === 'user' ? actor.userId : null,
+      userEmail: actor.kind === 'user' ? actor.email ?? null : null,
+      details: 'Project restored',
+      metadata: { propagation, actor: actor.kind === 'system' ? `system:${actor.label}` : 'user' } as object,
+    },
+  })
+  return { restored: true }
 }
 
 /**

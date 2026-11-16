@@ -239,7 +239,8 @@ export const PAUSED_MESSAGE =
  */
 export const DELETED_PAUSE_REASON = 'deleted'
 
-export const DELETED_MESSAGE = 'This project was deleted. It is removed for good 7 days after it was deleted.'
+export const DELETED_MESSAGE =
+  'This project was deleted. Its owner can restore it from the dashboard until it is removed for good, 7 days after it was deleted.'
 
 /** The message for a paused project, by why it is paused. */
 export function pausedMessage(reason: string | null | undefined): string {
@@ -271,7 +272,8 @@ export function pausedDetails(
     // into a console banner, so a developer sees why every call is failing and
     // where to fix it without opening the network tab.
     hint: deleted
-      ? 'This project was deleted, so every API call is refused. It is removed for good 7 days after it was deleted.'
+      ? 'This project was deleted, so every API call is refused. Its owner can restore it from the Projects page of the ' +
+        'Backenly dashboard until it is removed for good, 7 days after it was deleted.'
       : 'This project is paused, so every API call is refused until it is resumed. ' +
         'Its owner can resume it from the Backenly dashboard.',
     fixUrl: resumeUrl,
