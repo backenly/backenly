@@ -378,6 +378,8 @@ describe('the tool route', () => {
     const body = await res.json()
     expect(res.status).toBe(402)
     expect(body.code).toBe('AI_CREDITS_EXHAUSTED')
+    // The plans as they are sold, beside their codes (QA re-test 2026-11-16, #111).
+    expect(body).toMatchObject({ currentPlan: 'SANDBOX', requiredPlan: 'BUILDER', currentPlanName: 'Free', requiredPlanName: 'Pro' })
     expect(mockDispatched).toEqual([])
     // Gated on the project's billing account, not on the caller.
     const { enforceAiCredits } = jest.requireMock('@/lib/entitlements/policy')

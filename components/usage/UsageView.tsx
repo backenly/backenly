@@ -85,7 +85,10 @@ interface AxisDescription {
 
 interface AccountUsage {
   period: string
+  /** The plan as it is sold ("Pro"). */
   planName: string
+  /** The plan's code (BUILDER): what overage is decided on. */
+  planCode: string
   overage: {
     mode: 'off' | 'shadow' | 'enforce' | null
     /** The limit in force: the owner's, up to what is prepaid. */
@@ -569,7 +572,7 @@ export function UsageView({ orgId }: { orgId?: string | null }) {
 
   const planName = data ? planDisplayName(data.usage.planName) : null
   const canManage = data?.usage.canManage !== false
-  const overageOn = !!data && planAllowsOverage(data.account.planName) && (data.account.overage.mode === 'enforce' || data.account.overage.mode === 'shadow')
+  const overageOn = !!data && planAllowsOverage(data.account.planCode) && (data.account.overage.mode === 'enforce' || data.account.overage.mode === 'shadow')
   const apiRequests = data ? Number.parseInt(data.usage.apiRequestsUsed, 10) || 0 : 0
 
   const header = (
@@ -654,7 +657,7 @@ export function UsageView({ orgId }: { orgId?: string | null }) {
               </Section>
               {planName === 'Free' ? (
                 <p className="mt-3 text-[12.5px] leading-[18px] text-faint">Free has hard limits. Nothing is billed.</p>
-              ) : planAllowsOverage(data.account.planName) && !overageOn ? (
+              ) : planAllowsOverage(data.account.planCode) && !overageOn ? (
                 <p className="mt-3 text-[12.5px] leading-[18px] text-faint">Every quota is a hard cap. Nothing is billed past the plan.</p>
               ) : null}
             </div>

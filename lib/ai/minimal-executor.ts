@@ -8756,7 +8756,7 @@ async function executeGetUsage(projectId: string): Promise<ExecutionResult> {
     return {
       success: true,
       message: [
-        `Usage for ${usage.period} on the ${planDisplayName(usage.planName)} plan, across every project of this account:`,
+        `Usage for ${usage.period} on the ${planDisplayName(usage.planCode)} plan, across every project of this account:`,
         ...lines,
         overage,
         'Projections assume the last seven days continue. Only the account owner can raise the spend limit.',
