@@ -541,20 +541,6 @@ export function getManualRemediationHint(
     // decision about the data model and Backenly cannot make it.
     // No repair exists for a spike: it may be a launch as easily as a runaway.
     // The hint hands over where the traffic went and what to check.
-    // A run of failed sign-ins (workspace-observer.ts detectAuthSpike). Nothing
-    // to repair; the hint says what tells the two usual causes apart.
-    case 'auth_spike': {
-      const failed = Number(details?.failedSignIns ?? details?.errorCount) || 0
-      const ok = Number(details?.successfulSignIns) || 0
-      const counts = failed > 0 ? `${failed} password sign-ins failed and ${ok} succeeded in the last 10 minutes. ` : ''
-      return (
-        `${counts}Backenly already refuses an address or an account after repeated failures, so no ` +
-        'setting needs changing. If one of your clients keeps sending a password that has since ' +
-        'changed, fix that client. If your users do not sign in at this rate, someone is trying ' +
-        'passwords; magic-link sign-in (Auth settings) leaves no password to guess. Dismiss this once you know which.'
-      )
-    }
-
     case 'usage_anomaly': {
       const axis = String(details?.axis ?? '')
       const paths = Array.isArray(details?.topPaths)
@@ -802,6 +788,20 @@ If the column is deliberately different now, tell your coding agent to rebuild i
         `anyone who views your site's source, and it still works from curl or any server. ` +
         `Three steps: swap the browser code to a client key (Project → API keys), move this key ` +
         `to a server route or a Backenly function, then revoke and reissue it.`
+      )
+    }
+
+    // A run of failed sign-ins (workspace-observer.ts detectAuthSpike). Nothing
+    // to repair; the hint says what tells the two usual causes apart.
+    case 'auth_spike': {
+      const failed = Number(details?.failedSignIns ?? details?.errorCount) || 0
+      const ok = Number(details?.successfulSignIns) || 0
+      const counts = failed > 0 ? `${failed} password sign-ins failed and ${ok} succeeded in the last 10 minutes. ` : ''
+      return (
+        `${counts}Backenly already refuses an address or an account after repeated failures, so no ` +
+        'setting needs changing. If one of your clients keeps sending a password that has since ' +
+        'changed, fix that client. If your users do not sign in at this rate, someone is trying ' +
+        'passwords; magic-link sign-in (Auth settings) leaves no password to guess. Dismiss this once you know which.'
       )
     }
 
