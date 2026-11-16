@@ -1,8 +1,8 @@
 export const dynamic = 'force-dynamic'
 
 import { NextRequest } from 'next/server'
-import { v1ApiMiddleware, requirePermission, requireStorageWriter, requireUploadRule } from '@/lib/api/v1/middleware'
-import { AUTO_CREATED_BUCKET_UPLOADS } from '@/lib/storage/upload-access'
+import { v1ApiMiddleware, requirePermission, requireStorageWriter, requireUploadRule, requireBucketCreator } from '@/lib/api/v1/middleware'
+import { uploadsForCreatedBucket } from '@/lib/storage/upload-access'
 import { createErrorResponse, createSuccessResponse, ErrorCodes } from '@/lib/api/v1/errors'
 import { prisma } from '@/lib/db'
 import { assertQuotaAvailable, QuotaExceededError } from '@/lib/services/storageQuota'
@@ -51,7 +51,8 @@ const SIGNED_URL_TTL_SECONDS = parseInt(
  *   filename: string,        // e.g. "clip_001.mp4"
  *   contentType: string,     // MIME type, e.g. "video/mp4"
  *   contentLength: number,   // file size in bytes
- *   bucket?: string,         // default: "videos"
+ *   bucket?: string,         // default: "videos". It must exist, unless the call
+ *                            // comes from a service-role key, which creates it.
  *   path?: string,           // optional path prefix inside bucket
  *   isPublic?: boolean,      // default: the bucket's access policy
  * }
@@ -135,6 +136,10 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
       where: { projectId: context.projectId, name: bucketName },
     })
     if (!bucketRecord) {
+      // Only the app's server creates a bucket by uploading into it; anyone
+      // else is told to create it first (lib/storage/upload-access.ts).
+      const creatorCheck = requireBucketCreator(context, bucketName)
+      if (creatorCheck) return creatorCheck
       // history: provisioned by the first upload, on the data plane, which never waits for the change lock
       // An upload never opens a bucket: one it creates is private until its
       // owner sets the access policy. Labelling it public from one file's flag
@@ -144,9 +149,9 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
           name: bucketName,
           projectId: context.projectId,
           isPublic: false,
-          // It takes uploads from signed-in users, as a bucket the first upload
-          // creates does (lib/storage/upload-access.ts): this upload made it.
-          uploadPolicy: AUTO_CREATED_BUCKET_UPLOADS,
+          // Who may upload into it: the server alone, as for any bucket made
+          // without saying, except the SDK's `default`.
+          uploadPolicy: uploadsForCreatedBucket(bucketName),
         },
       })
     }

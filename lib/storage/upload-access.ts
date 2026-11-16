@@ -24,11 +24,18 @@
  * stores start closed the same way: Supabase Storage takes no upload until a
  * policy allows it, Firebase Storage's production rules refuse writes, and an
  * Appwrite bucket needs a create permission. An import asks for `signed_in`,
- * so the app it moves in keeps uploading as it did. A bucket an upload creates
- * (the SDK uploads to `default`, which the first upload creates) takes
- * `signed_in`, or the upload that created it would be refused. Every bucket
- * from before buckets said this took uploads from signed-in users, and the
- * migration that added the column kept that for each of them.
+ * so the app it moves in keeps uploading as it did. Every bucket from before
+ * buckets said this took uploads from signed-in users, and the migration that
+ * added the column kept that for each of them.
+ *
+ * ── A bucket an upload names that does not exist ────────────────────────────
+ *
+ * The SDK uploads to `default` when the app names no bucket, and the first
+ * upload creates it, for any writer, taking `signed_in`: that is the SDK's
+ * zero-config path. A signed or multipart upload creates any other bucket it
+ * names only for a service-role key, which only the app's server holds, and
+ * that bucket takes `server_only` like any other made without saying. Anyone
+ * else is told to create the bucket first, and nothing is made.
  *
  * The rule is read when each upload arrives, as the read rule is when each read
  * does, so a change applies from the next upload, including the next step of
@@ -45,8 +52,24 @@ export function isUploadRule(value: unknown): value is UploadRule {
 /** What a bucket made on purpose takes, unless whoever makes it asks for signed_in. */
 export const NEW_BUCKET_UPLOADS: UploadRule = 'server_only'
 
-/** What a bucket an upload creates takes, so that upload, and the app's next ones, go in. */
-export const AUTO_CREATED_BUCKET_UPLOADS: UploadRule = 'signed_in'
+/** The bucket the SDK uploads to when the app names none; the first upload creates it. */
+export const DEFAULT_BUCKET = 'default'
+
+/**
+ * Who may upload into a bucket an upload creates: signed-in users for
+ * `default`, so the SDK's uploads go in, and the server alone for any other.
+ */
+export function uploadsForCreatedBucket(bucketName: string): UploadRule {
+  return bucketName === DEFAULT_BUCKET ? 'signed_in' : NEW_BUCKET_UPLOADS
+}
+
+/**
+ * May this caller create a bucket by uploading into a name that does not exist
+ * (a signed or multipart upload)? Only a service-role key may.
+ */
+export function mayCreateByUploading(caller: { serviceRole?: boolean | null }): boolean {
+  return caller.serviceRole === true
+}
 
 /**
  * A stored rule, read safely. Anything unrecognised takes uploads from the
@@ -80,6 +103,15 @@ export function whoMayUpload(bucketName: string, rule: unknown): string {
     ? `Any signed-in user of your app can upload into ${bucketName}; each changes only their own files.`
     : `Only your app's server can upload into ${bucketName}, with a service-role key. ` +
         `If your users upload files here (profile photos, attachments), let them: ${letSignedInUsersCall(bucketName)}.`
+}
+
+/** What an upload into a bucket that does not exist, which it may not create, is answered with. */
+export function missingBucketRefusal(bucketName: string): string {
+  return (
+    `Bucket "${bucketName}" does not exist. Create it first, with storage { action: "create_bucket", ` +
+    `bucketName: ${JSON.stringify(bucketName)}, uploads: "signed_in" } if your users upload into it, or upload ` +
+    `from your server with a service-role key, which creates it.`
+  )
 }
 
 /** What an end user's upload into a server_only bucket is answered with: what happened, and what to do. */

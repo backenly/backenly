@@ -3,7 +3,7 @@ export const dynamic = 'force-dynamic'
 import { NextRequest } from 'next/server'
 import { clampIsPublic } from '@/lib/storage/access-policy'
 import { v1ApiMiddleware, requirePermission, requireCapability, requireStorageWriter, requireUploadRule } from '@/lib/api/v1/middleware'
-import { AUTO_CREATED_BUCKET_UPLOADS } from '@/lib/storage/upload-access'
+import { uploadsForCreatedBucket } from '@/lib/storage/upload-access'
 import { createErrorResponse, createSuccessResponse, ErrorCodes } from '@/lib/api/v1/errors'
 import { storageService } from '@/lib/services/storage'
 import { prisma } from '@/lib/db'
@@ -150,7 +150,7 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
         // and the app's next ones, go in (lib/storage/upload-access.ts).
         // history: provisioned by the first upload, on the data plane, which never waits for the change lock
         bucketRecord = await prisma.storageBucket.create({
-          data: { name: 'default', projectId: context.projectId, isPublic: false, uploadPolicy: AUTO_CREATED_BUCKET_UPLOADS },
+          data: { name: 'default', projectId: context.projectId, isPublic: false, uploadPolicy: uploadsForCreatedBucket('default') },
         })
       } else {
         return createErrorResponse(

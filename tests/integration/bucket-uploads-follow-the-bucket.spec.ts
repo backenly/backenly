@@ -12,8 +12,11 @@
  *   every way an end user uploads is held to it: the form upload, a signed
  *   upload, a multipart upload (each of its steps) and confirming a signed one
  *   a service-role key always uploads
- *   a bucket an upload creates (the SDK's `default`) takes signed_in, and so
- *   does every bucket from before buckets said this
+ *   the SDK's `default` bucket, which the first upload creates for any writer,
+ *   takes signed_in, and so does every bucket from before buckets said this
+ *   a signed or multipart upload creates any other bucket it names only for a
+ *   service-role key, and that bucket takes server_only; an end user's is
+ *   answered 404, told to create the bucket first, and nothing is made
  *   changing it is one entry in History, and restoring the entry puts the old
  *   rule back; the console changes it too
  *
@@ -329,11 +332,40 @@ describe('a bucket an upload creates', () => {
     expect((await upload(publishableKey, { userToken: tokenFor(randomUUID()) })).status).toBe(200)
   })
 
-  it('takes signed-in users when a signed upload or a multipart upload creates it', async () => {
-    expect((await signedUpload(publishableKey, 'clips', signedIn())).status).toBe(200)
-    expect((await bucket('clips'))?.uploadPolicy).toBe('signed_in')
-    expect((await startMultipart(publishableKey, 'recordings', signedIn())).status).toBe(200)
-    expect((await bucket('recordings'))?.uploadPolicy).toBe('signed_in')
+})
+
+describe('a bucket a signed or multipart upload names that does not exist', () => {
+  it('is not created by an end user’s upload, which is told to create it first', async () => {
+    const rowsBefore = await prisma.storageFile.count({ where: { projectId } })
+    const signed = await signedUpload(publishableKey, 'clips', signedIn())
+    expect(signed.status).toBe(404)
+    expect(codeOf(signed.body)).toBe('NOT_FOUND')
+    expect(signed.body.error.message).toContain('Bucket "clips" does not exist. Create it first')
+    expect(signed.body.error.message).toContain('storage { action: "create_bucket", bucketName: "clips", uploads: "signed_in" }')
+    expect(signed.body.error.message).toContain('or upload from your server with a service-role key, which creates it')
+    expect(await bucket('clips')).toBeNull()
+
+    const multipart = await startMultipart(publishableKey, 'recordings', signedIn())
+    expect(multipart.status).toBe(404)
+    expect(codeOf(multipart.body)).toBe('NOT_FOUND')
+    expect(await bucket('recordings')).toBeNull()
+    expect(await prisma.storageFile.count({ where: { projectId } })).toBe(rowsBefore)
+  })
+
+  it('is created by the app’s server, and takes uploads only from the server', async () => {
+    expect((await signedUpload(serviceKey, 'clips')).status).toBe(200)
+    expect(await bucket('clips')).toMatchObject({ uploadPolicy: 'server_only', accessPolicy: 'private' })
+    expect((await startMultipart(serviceKey, 'recordings')).status).toBe(200)
+    expect(await bucket('recordings')).toMatchObject({ uploadPolicy: 'server_only', accessPolicy: 'private' })
+    const theirs = await signedUpload(publishableKey, 'clips', signedIn())
+    expect(theirs.status).toBe(403)
+    expect(codeOf(theirs.body)).toBe('UPLOADS_SERVER_ONLY')
+  })
+
+  it('takes signed-in users when it is the default bucket, whichever upload creates it', async () => {
+    await prisma.storageBucket.deleteMany({ where: { projectId, name: 'default' } })
+    expect((await startMultipart(serviceKey, 'default')).status).toBe(200)
+    expect((await bucket('default'))?.uploadPolicy).toBe('signed_in')
   })
 })
 

@@ -30,7 +30,7 @@ import { endUserBearerToken } from '@/lib/security/end-user-bearer'
 
 import { INTERNAL_DOMAINS, isInternalOrigin } from '@/lib/security/internal-origin'
 import { answersFromCopy, authorizingProject } from '@/lib/auth-projection/read'
-import { mayUpload, serverOnlyRefusal } from '@/lib/storage/upload-access'
+import { mayCreateByUploading, mayUpload, missingBucketRefusal, serverOnlyRefusal } from '@/lib/storage/upload-access'
 
 // Re-exported for existing importers; canonical home is lib/security/internal-origin.ts
 // (framework-free so the Express runtime can share it).
@@ -731,6 +731,20 @@ export function requireUploadRule(
     bucket: bucket.name,
     uploads: 'server_only',
   })
+}
+
+/**
+ * Whether this caller may create the bucket a signed or multipart upload names
+ * when it does not exist (lib/storage/upload-access.ts): only a service-role
+ * key may. Anyone else is answered 404, told to create the bucket first, and
+ * nothing is made. The form upload's `default` bucket is not asked about here.
+ */
+export function requireBucketCreator(
+  context: { apiKey: { serviceRole?: boolean | null } },
+  bucketName: string,
+): NextResponse | null {
+  if (mayCreateByUploading(context.apiKey)) return null
+  return createErrorResponse(ErrorCodes.NOT_FOUND, missingBucketRefusal(bucketName), 404, { bucket: bucketName })
 }
 
 /**

@@ -1,8 +1,8 @@
 export const dynamic = 'force-dynamic'
 
 import { NextRequest } from 'next/server'
-import { v1ApiMiddleware, requirePermission, requireStorageWriter, requireUploadRule } from '@/lib/api/v1/middleware'
-import { AUTO_CREATED_BUCKET_UPLOADS } from '@/lib/storage/upload-access'
+import { v1ApiMiddleware, requirePermission, requireStorageWriter, requireUploadRule, requireBucketCreator } from '@/lib/api/v1/middleware'
+import { uploadsForCreatedBucket } from '@/lib/storage/upload-access'
 import { createErrorResponse, createSuccessResponse, ErrorCodes } from '@/lib/api/v1/errors'
 import { prisma } from '@/lib/db'
 import { assertQuotaAvailable, incrementStorageUsed, QuotaExceededError } from '@/lib/services/storageQuota'
@@ -118,14 +118,18 @@ async function handleInitiate(request: NextRequest, context: { projectId: string
     where: { projectId: context.projectId, name: bucketName },
   })
   if (!bucketRecord) {
+    // Only the app's server creates a bucket by uploading into it; anyone else
+    // is told to create it first (lib/storage/upload-access.ts).
+    const creatorCheck = requireBucketCreator(context, bucketName)
+    if (creatorCheck) return creatorCheck
     // history: provisioned by the first upload, on the data plane, which never waits for the change lock
     // An upload never opens a bucket: one it creates is private until its owner
-    // sets the access policy. It takes uploads from signed-in users, as a bucket
-    // the first upload creates does (lib/storage/upload-access.ts).
+    // sets the access policy. The server alone uploads into it, as into any
+    // bucket made without saying, except the SDK's `default`.
     bucketRecord = await prisma.storageBucket.create({
       data: {
         name: bucketName, projectId: context.projectId, isPublic: false, maxFileSizeBytes: BigInt(MAX_ASSEMBLED_BYTES),
-        uploadPolicy: AUTO_CREATED_BUCKET_UPLOADS,
+        uploadPolicy: uploadsForCreatedBucket(bucketName),
       },
     })
   }
