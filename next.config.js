@@ -420,27 +420,15 @@ const nextConfig = {
               !isDevelopment ? "upgrade-insecure-requests" : null,
             ].filter(Boolean).join('; '),
           },
-          {
-            // Report-only strict CSP — does NOT block anything. Browsers send
-            // violation reports to Sentry/console so we can see what a future
-            // nonce-based enforcement would break, without breaking the page
-            // today. When violations are clean, we can promote this policy to
-            // the main Content-Security-Policy header above.
-            key: 'Content-Security-Policy-Report-Only',
-            value: [
-              "default-src 'self'",
-              "script-src 'self' 'strict-dynamic' https://cdn.jsdelivr.net https://js.sentry-cdn.com https://cdn.paddle.com https://sandbox-cdn.paddle.com https://challenges.cloudflare.com",
-              "style-src 'self' https://fonts.googleapis.com https://cdn.paddle.com https://sandbox-cdn.paddle.com",
-              "font-src 'self' https://fonts.gstatic.com",
-              "img-src 'self' data: https: blob:",
-              "connect-src 'self' https://api.backenly.com https://*.backenly.com https://*.ingest.sentry.io https://*.sentry.io https://api.paddle.com https://sandbox-api.paddle.com https://buy.paddle.com https://sandbox-buy.paddle.com https://api.openai.com https://*.amplitude.com wss://*.backenly.com https://challenges.cloudflare.com",
-              "frame-src 'self' https://buy.paddle.com https://sandbox-buy.paddle.com https://app.supademo.com https://challenges.cloudflare.com",
-              "frame-ancestors 'self'",
-              "base-uri 'self'",
-              "form-action 'self'",
-              "object-src 'none'",
-            ].join('; '),
-          },
+          // No Content-Security-Policy-Report-Only header. One was sent here, a
+          // nonce-less 'strict-dynamic' policy that every Next page breaks,
+          // with no report-to or report-uri: browsers had nowhere to send the
+          // reports, so all it did was log a "[Report Only] Refused to …"
+          // error to the console for every script, inline script and style
+          // attribute on every page (production QA re-test 2026-11-16, N13:
+          // about 13 on the MCP consent page). A report-only policy belongs
+          // with an endpoint that collects its reports, and with the
+          // nonce-based policy it is meant to try out.
           { key: 'Permissions-Policy', value: 'camera=(), microphone=(), geolocation=(), interest-cohort=()' },
           { key: 'Cross-Origin-Opener-Policy', value: 'same-origin' },
         ],
