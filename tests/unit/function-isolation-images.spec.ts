@@ -12,8 +12,9 @@
  * failing anything else.
  */
 
-import { execFileSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { execFileSync, spawn } from 'node:child_process'
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 const ROOT = join(__dirname, '..', '..')
@@ -159,4 +160,62 @@ describe('docker/function-isolation/entrypoint.sh', () => {
     })
     expect(out.trim()).toBe(`app-ran-as-${process.getuid!()}`)
   })
+
+  // setpriv changes the uid and keeps the environment it was given, which is
+  // root's. With HOME=/root, a directory node cannot enter, every pg_dump and
+  // psql the app started failed its TLS connection: libpq gives up on a client
+  // certificate path it cannot look at (production QA re-test, 2026-11-16, N5).
+  ;(process.platform === 'win32' ? it.skip : it)(
+    "started as root, runs the app with node's own HOME, USER and LOGNAME, not root's",
+    async () => {
+      // The root path without root: `id` answers uid 0, `getent` answers for
+      // node, and `setpriv` runs only what follows `--`. The supervisor loop
+      // beside the app stops at `env`, and the whole process group is ended
+      // once the app has answered.
+      const bin = mkdtempSync(join(tmpdir(), 'entrypoint-shims-'))
+      const shim = (name: string, body: string) => {
+        writeFileSync(join(bin, name), `#!/bin/sh\n${body}\n`)
+        chmodSync(join(bin, name), 0o755)
+      }
+      shim('id', 'case "$*" in "-u") echo 0 ;; "-u node"|"-g node") echo 1000 ;; *) exit 1 ;; esac')
+      shim('getent', '[ "$*" = "passwd node" ] && echo "node:x:1000:1000::/home/node:/bin/sh"')
+      shim('setpriv', 'while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done\nshift\nexec "$@"')
+      shim('env', 'exit 0')
+      try {
+        const answer = await new Promise<string>((resolve, reject) => {
+          const child = spawn(
+            '/bin/sh',
+            [join(ROOT, 'docker/function-isolation/entrypoint.sh'), '/bin/sh', '-c', 'printf "%s|%s|%s\\n" "$HOME" "${USER-}" "${LOGNAME-}"'],
+            { env: { PATH: `${bin}:/usr/bin:/bin`, HOME: '/root' }, detached: true, stdio: ['ignore', 'pipe', 'ignore'] },
+          )
+          const end = () => {
+            try {
+              process.kill(-child.pid!, 'SIGKILL')
+            } catch {
+              /* already gone */
+            }
+          }
+          let out = ''
+          const timer = setTimeout(() => {
+            end()
+            reject(new Error(`the app answered nothing within 10 s: ${out}`))
+          }, 10_000)
+          child.stdout!.on('data', (d) => {
+            out += d
+            if (!out.includes('\n')) return
+            clearTimeout(timer)
+            end()
+            resolve(out.trim())
+          })
+          child.on('error', (err) => {
+            clearTimeout(timer)
+            reject(err)
+          })
+        })
+        expect(answer).toBe('/home/node|node|node')
+      } finally {
+        rmSync(bin, { recursive: true, force: true })
+      }
+    },
+  )
 })
