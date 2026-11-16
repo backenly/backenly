@@ -479,7 +479,10 @@ export const BRAIN_TOOLS: BrainToolSchema[] = [
     {}),
   fn('get_table_schema',
     'ONE table from the live catalog: columns (type, nullable, default, key, max length), primary and foreign keys (with ON DELETE), indexes, CHECK constraints with their ACTUAL allowed values, triggers, RLS / FORCE RLS, the policies (command, ROLES, permissive or restrictive, USING and WITH CHECK) and the exact row count. A `USING (true)` policy granted only to an internal role is not open access: read `roles` before calling a table exposed. To edit a policy with set_rls, send back its `editableUsing` / `editableCheck`, never the raw `using` / `withCheck`, which are refused. Call it before writing a query, insert or migration against a table, and ALWAYS before changing one command of a policy. Side-effect free.',
-    { tableName: { type: 'string', description: 'The table to describe (snake_case).' } },
+    {
+      tableName: { type: 'string', description: 'The table to describe (snake_case).' },
+      branchId: { type: 'string', description: 'A preview branch id (branch action "list"): describe the table on that branch instead of production.' },
+    },
     ['tableName']),
   fn('create_table',
     'Create a new database table with columns. Columns: {name, type (text|int|bigint|boolean|timestamp|uuid|jsonb|numeric, or an array of any of them such as text[]), nullable?, unique?, fkTo? (other table name), default?}. `id`, `createdAt` and `updatedAt` are provisioned automatically — do not declare them. CHECK constraints are not part of this contract: create the table, then add them with add_constraint (or send the whole thing as SQL to apply_migration, which does both). RLS is applied automatically from the schema and the chosen policy is reported in the result — read it, because a two-party table gets `participants` rather than owner-only access.',
@@ -2576,9 +2579,30 @@ export async function dispatchTool(
     if (name === 'get_table_schema') {
       const table = String(args.tableName ?? '').trim()
       if (!table) return finalize({ ok: false, summary: 'get_table_schema needs a `tableName`.' })
+      // With a branchId, the branch's own copy of the table, found the way
+      // read_backend_state finds it: on this project and only while active.
+      // An id that names no such branch is refused, never answered for
+      // production, which is what an agent working on its branch would
+      // otherwise read without knowing (production QA re-test, 2026-11-16).
+      const branchId = args.branchId == null ? '' : String(args.branchId).trim()
+      let branch: { name: string; schemaName: string } | null = null
+      if (branchId) {
+        const { prisma } = await import('@/lib/db/prisma')
+        branch = await prisma.workspaceBranch.findFirst({
+          where: { id: branchId, projectId: ctx.projectId, status: 'active' },
+          select: { name: true, schemaName: true },
+        })
+        if (!branch) {
+          return finalize({
+            ok: false,
+            code: 'BRANCH_NOT_FOUND',
+            summary: 'No active preview branch with that id on this project. branch { action: "list" } shows the ids.',
+          })
+        }
+      }
       const { getTableSchema } = await import('@/lib/mcp/schema-introspection')
       try {
-        const s = await getTableSchema(ctx.projectId, table)
+        const s = await getTableSchema(ctx.projectId, table, { branchSchema: branch?.schemaName })
         const cols = s.columns
           .map((c) => `  • ${c.name} ${c.type}${c.primaryKey ? ' PK' : ''}${c.nullable ? '' : ' NOT NULL'}${c.default ? ` default ${c.default}` : ''}`)
           .join('\n')
@@ -2591,9 +2615,10 @@ export async function dispatchTool(
         const rls = s.rlsEnabled
           ? `\n**RLS:** enabled${s.forceRls ? ' (FORCE)' : ''} · ${s.policies.length} policies`
           : '\n**RLS:** disabled'
+        const where = branch ? ` on preview branch "${branch.name}"` : ''
         const summary =
-          `**${s.table}** — ${s.recordCount} rows\n\n**Columns:**\n${cols}${fks}${checks}${rls}`
-        return finalize({ ok: true, summary: clip(summary), data: s })
+          `**${s.table}**${where} — ${s.recordCount} rows\n\n**Columns:**\n${cols}${fks}${checks}${rls}`
+        return finalize({ ok: true, summary: clip(summary), data: branch ? { branch: branch.name, ...s } : s })
       } catch (e: any) {
         return finalize({ ok: false, summary: e?.message ?? `Could not read schema for "${table}".` })
       }
