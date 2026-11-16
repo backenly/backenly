@@ -2263,3 +2263,10 @@ tests/integration/auth-email-routes-on-web.spec.ts
 # name suggests and no blueprint columns; every other caller keeps the default.
 # Real provisioned project, real executor and DDL.
 tests/integration/create-table-no-auto-provision.spec.ts
+# The check of row-event functions proves a row change reaches each function
+# that runs on it, inside a transaction that is always rolled back: QA's orders
+# table (an owner column whose default reads the signed-in user) passes, nothing
+# is left in the table or the capture outbox, a row Backenly cannot build is
+# "couldn't check" rather than a blocking failure, and a change that is not
+# captured fails. Real provisioned project, capture triggers and verifier.
+tests/integration/row-event-check-writes-nothing.spec.ts
