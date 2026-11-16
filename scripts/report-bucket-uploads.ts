@@ -15,8 +15,8 @@
  *   npx tsx scripts/report-bucket-uploads.ts --created-since <ISO time>
  *
  * --created-since lists every bucket made since then, whichever rule it has:
- * after a release, give it the time the migration ran, to see the buckets an
- * older release made in between (they took the new default, server_only).
+ * the buckets made since a release, say, for their owners to be told who may
+ * upload into them.
  *
  * Prints one line per bucket: project, owner's email, bucket, uploads, read
  * policy, created, then its files by who sent them: end users, servers and the

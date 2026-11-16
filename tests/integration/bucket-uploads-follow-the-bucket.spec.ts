@@ -292,7 +292,7 @@ describe('a bucket that takes uploads from signed-in users, as every bucket did 
     expect(r.status).toBe(200)
   })
 
-  it('is what the migration gives every existing bucket, while buckets made after it start at server_only', async () => {
+  it('is what the migration gives every existing bucket, and every bucket made without naming the column, as the release before this one makes them', async () => {
     const sql = fs.readFileSync(path.join(process.cwd(), MIGRATION), 'utf8')
     const scratch = `upload_rule_${randomBytes(4).toString('hex')}`
     const client = new Client({ connectionString: process.env.DATABASE_URL })
@@ -304,11 +304,14 @@ describe('a bucket that takes uploads from signed-in users, as every bucket did 
       await client.query('CREATE TABLE storage_buckets (id text PRIMARY KEY, name text NOT NULL)')
       await client.query(`INSERT INTO storage_buckets (id, name) VALUES ('existing', 'photos')`)
       await client.query(sql)
+      // While a release that predates the column still runs, the buckets it
+      // creates keep taking the uploads they would have. This release states
+      // the value on every bucket it makes (the other cases here).
       await client.query(`INSERT INTO storage_buckets (id, name) VALUES ('later', 'documents')`)
       const { rows } = await client.query('SELECT id, "uploadPolicy" FROM storage_buckets ORDER BY id')
       expect(rows).toEqual([
         { id: 'existing', uploadPolicy: 'signed_in' },
-        { id: 'later', uploadPolicy: 'server_only' },
+        { id: 'later', uploadPolicy: 'signed_in' },
       ])
     } finally {
       await client.query('ROLLBACK').catch(() => {})

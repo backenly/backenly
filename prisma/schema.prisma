@@ -1202,9 +1202,11 @@ model StorageBucket {
   overwriteStrategy String            @default("auto_rename")
   // Who may upload into it (lib/storage/upload-access.ts): "signed_in" (any
   // signed-in end user of the project) | "server_only" (service-role keys, and
-  // the project's team from the console). Buckets from before this column take
-  // "signed_in"; a bucket an upload creates states "signed_in" itself.
-  uploadPolicy      String            @default("server_only")
+  // the project's team from the console). The default is what every bucket did
+  // before this column, so a release that does not know it keeps creating such
+  // buckets; the application states the value on every bucket it creates. A
+  // later release, once none older runs, makes the default "server_only".
+  uploadPolicy      String            @default("signed_in")
   project           Project           @relation(fields: [projectId], references: [id], onDelete: Cascade)
   files             StorageFile[]
   multipartUploads  MultipartUpload[]

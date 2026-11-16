@@ -8,17 +8,17 @@
 -- or "server_only" (service-role keys, and the project's team from the
 -- console).
 --
--- Additive. The column is added with "signed_in", which is what every
--- existing bucket does today, so each keeps taking the uploads it takes now.
--- Then the default becomes "server_only", for buckets made from here on. The
--- application also states the value on every bucket it creates
--- (lib/storage/upload-access.ts): a bucket an upload creates, such as the
--- SDK's "default", takes "signed_in"; one made on purpose takes "server_only"
--- unless whoever makes it asks for "signed_in". The release that predates this
--- migration never reads the column, so it runs unchanged against it.
+-- Additive, and only additive. The column is added with "signed_in", which is
+-- what every existing bucket does today, so each keeps taking the uploads it
+-- takes now. Its default stays "signed_in" in this release: the migration runs
+-- before the new release reaches every region, and until it does, the release
+-- that predates this migration keeps creating buckets without naming the
+-- column, and each must keep taking the uploads it would have. This release
+-- states the value on every bucket it creates (lib/storage/upload-access.ts):
+-- one made on purpose takes "server_only" unless whoever makes it asks for
+-- "signed_in", and the SDK's "default" bucket takes "signed_in". A later
+-- release, once every region runs this one, changes the column's default to
+-- "server_only".
 
 -- AlterTable
 ALTER TABLE "storage_buckets" ADD COLUMN     "uploadPolicy" TEXT NOT NULL DEFAULT 'signed_in';
-
--- AlterTable
-ALTER TABLE "storage_buckets" ALTER COLUMN "uploadPolicy" SET DEFAULT 'server_only';
