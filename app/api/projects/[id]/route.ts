@@ -6,6 +6,8 @@ import { z } from 'zod'
 import { withAuth } from '@/lib/auth/route-protection'
 import { deleteProjectCompletely } from '@/lib/projects/delete'
 import { CONFIRMATION_REQUIRED, confirmationOf, reauthRefusal, signedInRecently } from '@/lib/auth/recent-sign-in'
+import { isUnfinishedImport, requestProjectDeletion } from '@/lib/projects/deletion'
+import { LifecycleBusyError } from '@/lib/projects/pause-lifecycle'
 import { canAdministerProject, canWriteProject } from '@/lib/edition/guard'
 import { getProjectResolver, ProjectResolutionError, projectRoleFields, type ProjectRoleFields } from '@/lib/edition'
 import { getProjectQuota } from '@/lib/services/storageQuota'
@@ -143,16 +145,30 @@ export const GET = withAuth(async (
       )
     }
 
-    const project = await prisma.project.findUnique({
+    const found = await prisma.project.findUnique({
       where: { id: projectId },
-      select: PROJECT_RESPONSE_SELECT,
+      select: { ...PROJECT_RESPONSE_SELECT, deletedAt: true, purgeAfter: true },
     })
 
-    if (!project) {
+    if (!found) {
       return NextResponse.json(
         {
           success: false,
           error: 'Project not found or access denied',
+        },
+        { status: 404 }
+      )
+    }
+
+    // Asked to be deleted (lib/projects/deletion.ts): gone from the console
+    // until it is restored, said to those who may see it.
+    const { deletedAt, purgeAfter, ...project } = found
+    if (deletedAt) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: `This project was deleted. It is removed for good on ${(purgeAfter ?? deletedAt).toISOString().slice(0, 10)}.`,
+          code: 'PROJECT_DELETED',
         },
         { status: 404 }
       )
@@ -306,17 +322,30 @@ export const DELETE = withAuth(async (
       return reauthRefusal('this project', user.user)
     }
 
-    // Drops every schema this project owns and deletes its rows in one
-    // transaction, then removes its backups and storage objects. Previously
-    // this was a bare `prisma.project.delete`, which left workspace_<id> and
-    // every branch schema resident with nothing pointing at them.
-    await deleteProjectCompletely(projectId)
+    // A project an import made and never finished goes at once, as it always
+    // did: deleteProjectCompletely drops every schema it owns and its rows in
+    // one transaction, then its backups and storage objects.
+    if (await isUnfinishedImport(projectId)) {
+      await deleteProjectCompletely(projectId)
+      return NextResponse.json({ success: true, message: 'Project deleted' })
+    }
 
+    // Any other is kept for seven days (lib/projects/deletion.ts): hidden,
+    // refused at every door, its webhooks stopped, and removed for good by the
+    // daily purge at `purgeAfter`.
+    const deletion = await requestProjectDeletion(projectId, { kind: 'user', userId: user.userId, email: user.email })
     return NextResponse.json({
       success: true,
-      message: 'Project deleted successfully',
+      message: `Project deleted. It is removed for good on ${deletion.purgeAfter.toISOString().slice(0, 10)}.`,
+      purgeAfter: deletion.purgeAfter.toISOString(),
     })
   } catch (error: any) {
+    if (error instanceof LifecycleBusyError) {
+      return NextResponse.json(
+        { success: false, error: 'The project is being paused or resumed right now. Try again in a moment.', code: error.code },
+        { status: 409 }
+      )
+    }
     console.error('Error deleting project:', error)
     return NextResponse.json(
       {

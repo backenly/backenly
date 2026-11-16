@@ -457,7 +457,7 @@ function DeleteProject({ project, role, onDeleted }: { project: Project; role: P
         <div className="flex flex-wrap items-center justify-between gap-x-[16px] gap-y-[10px] px-[20px] py-[14px]">
           <p className="min-w-0 flex-[1_1_320px] text-[13px] leading-[20px] text-zinc-400">
             {role.canAdminister
-              ? 'Deletes the database, users, files and history. You can’t undo this.'
+              ? 'Stops its API at once, and removes the database, users, files and history for good after 7 days.'
               : 'Only an owner or admin can delete this project.'}
           </p>
           {role.canAdminister && (
@@ -483,7 +483,7 @@ function DeleteProject({ project, role, onDeleted }: { project: Project; role: P
         busy={deleting}
         danger
         title={`Delete ${project.name}?`}
-        description="Its database, users, files, functions and keys are deleted at once, and apps using its API stop working."
+        description="Apps using its API stop working at once. Its database, users, files, functions and keys are removed for good after 7 days."
         undoable={false}
         requireText={project.name}
         confirmLabel="Delete project"

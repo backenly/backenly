@@ -213,7 +213,8 @@ export async function afterResumeCommitted(projectId: string, actor: LifecycleAc
 
 // ── Internals ────────────────────────────────────────────────────────────────
 
-async function cancelPendingDeliveries(
+/** Cancel a project's webhook deliveries still waiting to go out; a deletion stops them too. */
+export async function cancelPendingDeliveries(
   client: Pick<LifecycleTx, 'webhookLog'>,
   projectId: string,
 ): Promise<number> {

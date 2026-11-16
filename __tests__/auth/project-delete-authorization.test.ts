@@ -99,8 +99,9 @@ function req(projectId: string, confirm?: string): any {
   }
 }
 
+/** Still there and not asked to be deleted (deleting keeps it seven days: lib/projects/deletion.ts). */
 const stillExists = async (id: string) =>
-  (await prisma.project.findUnique({ where: { id }, select: { id: true } })) !== null
+  (await prisma.project.count({ where: { id, deletedAt: null } })) === 1
 
 beforeAll(() => {
   assertSafeTestDatabase()

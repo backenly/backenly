@@ -13,7 +13,7 @@ import { isStorageUnavailable } from '@/lib/storage/errors'
 import {
   getProjectServingState,
   PAUSED_CODE,
-  PAUSED_MESSAGE,
+  pausedMessage,
   pausedDetails,
 } from '@/lib/projects/serving-state'
 import { INTERNAL_TRAFFIC_HEADER, isInternalTraffic } from '@/lib/traffic/request-recorder'
@@ -139,7 +139,7 @@ async function serve(request: NextRequest, props: { params: Promise<{ fileId: st
       if (serving.kind === 'paused') {
         return NextResponse.json(
           {
-            error: { code: PAUSED_CODE, message: PAUSED_MESSAGE, details: pausedDetails(record.projectId, serving) },
+            error: { code: PAUSED_CODE, message: pausedMessage(serving.reason), details: pausedDetails(record.projectId, serving) },
           },
           { status: 503 },
         )

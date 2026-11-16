@@ -698,7 +698,7 @@ export function ProjectsHome({
         }}
         onConfirm={confirmDelete}
         title={`Delete ${deleteTarget?.name ?? 'this project'}?`}
-        description="Its database, tables, end users, files and change history are removed. This cannot be undone."
+        description="Its API stops answering at once. Its database, tables, end users, files and change history are removed for good after 7 days."
         confirmLabel="Delete project"
         danger
         busy={deleteBusy}
