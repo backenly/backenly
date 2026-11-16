@@ -84,7 +84,7 @@ describe('an index keeps the operator class written after a column', () => {
     const [step] = parseMigration('create index products_name_trgm on products using gin (name gin_trgm_ops)')
     expect(step.args).toEqual({
       tableName: 'products', columns: ['name'], operatorClasses: { name: 'gin_trgm_ops' }, unique: false,
-      method: 'gin', indexName: 'products_name_trgm',
+      method: 'gin', indexName: 'products_name_trgm', asWritten: true,
     })
   })
 
@@ -109,7 +109,7 @@ describe('an index keeps the operator class written after a column', () => {
 
   it('leaves an index without one exactly as before', () => {
     const [step] = parseMigration('CREATE INDEX ON posts (author_id, created_at DESC)')
-    expect(step.args).toEqual({ tableName: 'posts', columns: ['author_id', 'created_at'], unique: false })
+    expect(step.args).toEqual({ tableName: 'posts', columns: ['author_id', 'created_at'], unique: false, asWritten: true })
   })
 
   it('refuses a class in a schema extensions are not installed in, and says how to write it', () => {

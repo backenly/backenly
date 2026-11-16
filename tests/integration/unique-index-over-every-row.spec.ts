@@ -15,6 +15,12 @@
  * same scoped index answered INDEX_CONFLICT, and nothing could tell a scoped
  * index from one over every row.
  *
+ * A UNIQUE INDEX declared in SQL was scoped the same way, so
+ * `CREATE UNIQUE INDEX qa_probe_ext_uq ON qa_probe (ext_id)` came out
+ * `WHERE (deleted_at IS NULL)` and an upsert on ext_id was refused (found in
+ * the triage of the production QA re-test, 2026-11-16). It is created as
+ * written; a typed create_index keeps the scope.
+ *
  * Pinned here on a real provisioned project, through apply_migration and the
  * executor as the dashboard and agents call them.
  */
@@ -42,6 +48,7 @@ import { applyMigrationToMain } from '@/lib/mcp/apply-migration'
 import { closeChangeLockPool } from '@/lib/changes/lock'
 import { forgetProtection } from '@/lib/branches/protection'
 import { executeAction } from '@/lib/ai/minimal-executor'
+import { BuildBranch } from '@/lib/branches/build-branch'
 import { installChangeLedgerGuard } from '../helpers/change-ledger-guard'
 
 let ownerId: string
@@ -94,6 +101,8 @@ beforeAll(async () => {
 }, 180_000)
 
 afterAll(async () => {
+  const branches = await prisma.workspaceBranch.findMany({ where: { projectId }, select: { schemaName: true } }).catch(() => [])
+  for (const b of branches) await prisma.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${b.schemaName}" CASCADE`).catch(() => {})
   const vaults = await prisma.$queryRawUnsafe<Array<{ nspname: string }>>(
     `SELECT nspname FROM pg_namespace WHERE nspname LIKE 'workspace_${projectId}_r%'`,
   ).catch(() => [])
@@ -164,5 +173,63 @@ describe('a unique index scoped to live rows', () => {
     expect(await indexdef('uniq_cart_items_user_id_quantity_2')).not.toMatch(/WHERE/i)
     // The scoped index is left as it was.
     expect(await indexdef('uniq_cart_items_user_id_quantity')).toMatch(/WHERE \(deleted_at IS NULL\)$/)
+  }, 120_000)
+})
+
+describe('a unique index declared in SQL', () => {
+  it('is created as written, over every row, and an upsert can target it', async () => {
+    const out: any = await migrate('ALTER TABLE cart_items ADD COLUMN code text; CREATE UNIQUE INDEX cart_items_code_key ON cart_items (code)')
+    expect(out).toMatchObject({ ok: true })
+    expect(await indexdef('cart_items_code_key')).toMatch(/^CREATE UNIQUE INDEX cart_items_code_key ON .*\(code\)$/)
+
+    const code = `c-${crypto.randomBytes(4).toString('hex')}`
+    const upsert = () =>
+      prisma.$executeRawUnsafe(
+        `INSERT INTO "${schema}"."cart_items" (user_id, product_id, code) VALUES ($1::uuid, $2::uuid, $3)
+         ON CONFLICT (code) DO UPDATE SET quantity = "cart_items".quantity + 1`,
+        crypto.randomUUID(),
+        crypto.randomUUID(),
+        code,
+      )
+    await upsert()
+    await upsert()
+    const rows = await prisma.$queryRawUnsafe<Array<{ quantity: number }>>(
+      `SELECT quantity FROM "${schema}"."cart_items" WHERE code = $1`,
+      code,
+    )
+    expect(rows).toEqual([{ quantity: 2 }])
+
+    // What soft delete means for it, and how to get the other kind.
+    expect(out.summary).toContain(
+      'It covers every row, soft-deleted ones too: a client DELETE on cart_items sets "deleted_at" and keeps the row, ' +
+      'so its value stays taken. An upsert (ON CONFLICT, or on_conflict on the REST API) can target it.',
+    )
+  }, 120_000)
+
+  it('keeps a WHERE it declares', async () => {
+    const out = await migrate('CREATE UNIQUE INDEX cart_items_code_live ON cart_items (code, quantity) WHERE deleted_at IS NULL')
+    expect(out).toMatchObject({ ok: true })
+    expect(await indexdef('cart_items_code_live')).toMatch(/\(code, quantity\) WHERE \(deleted_at IS NULL\)$/)
+  }, 120_000)
+})
+
+describe('a unique index backend_chat asks for on a branch', () => {
+  it('keeps the live-rows scope create_index gives it, written out in the statement the merge replays', async () => {
+    const build = new BuildBranch(projectId, ownerId, 'likes')
+    const table = await build.apply('create_table', {
+      tableName: 'likes',
+      columns: [{ name: 'user_id', type: 'uuid' }, { name: 'post_id', type: 'uuid' }],
+    })
+    expect(table.ok).toBe(true)
+
+    const index = await build.apply('create_index', { tableName: 'likes', columns: ['user_id', 'post_id'], unique: true })
+
+    expect(index.ok).toBe(true)
+    expect(build.statements).toContain('CREATE UNIQUE INDEX ON "likes" ("user_id", "post_id") WHERE deleted_at IS NULL')
+    const rows = await prisma.$queryRawUnsafe<Array<{ indexdef: string }>>(
+      `SELECT indexdef FROM pg_indexes WHERE schemaname = $1 AND tablename = 'likes' AND indexdef LIKE 'CREATE UNIQUE INDEX uniq_%'`,
+      build.current!.schemaName,
+    )
+    expect(rows.map((r) => r.indexdef)).toEqual([expect.stringMatching(/\(user_id, post_id\) WHERE \(deleted_at IS NULL\)$/)])
   }, 120_000)
 })

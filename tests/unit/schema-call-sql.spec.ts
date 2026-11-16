@@ -69,6 +69,22 @@ describe('a typed schema call, written as SQL', () => {
     ])
   })
 
+  // A CREATE UNIQUE INDEX is made as written, over every row. On a table with
+  // soft delete, create_index makes a typed unique index count live rows only,
+  // so the statement for such a call has to carry that scope.
+  it('writes out the live-rows scope of a typed unique index on a table with soft delete', () => {
+    const args = { tableName: 'likes', columns: ['user_id', 'post_id'], unique: true }
+    const written = schemaCallSql('create_index', args, { liveRowsOnly: true })
+    if ('error' in written) throw new Error(written.error)
+    expect(written.sql).toBe('CREATE UNIQUE INDEX ON "likes" ("user_id", "post_id") WHERE deleted_at IS NULL')
+    const plan = planMigration(written.sql) as { ok: boolean; planned?: Array<{ tool: string; args: Record<string, unknown> }> }
+    expect(plan.planned?.[0].args).toMatchObject({ columns: ['user_id', 'post_id'], unique: true, where: 'deleted_at IS NULL' })
+    // A WHERE of the call's own is kept as it is.
+    expect(schemaCallSql('create_index', { ...args, where: 'true' }, { liveRowsOnly: true })).toEqual({
+      sql: 'CREATE UNIQUE INDEX ON "likes" ("user_id", "post_id") WHERE true',
+    })
+  })
+
   it('quotes every identifier, so a name cannot become SQL', () => {
     const { sql, planned } = readBack('create_table', { tableName: 'odd"name', columns: [{ name: 'a"b', type: 'text' }] })
     expect(sql).toBe('CREATE TABLE "odd""name" ("a""b" text)')
