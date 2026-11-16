@@ -29,9 +29,19 @@ function extractRowId(request: NextRequest): string | null {
   }
 }
 
-// Reject any attempt to target a workspace schema that isn't this project's.
-function assertSchemaOwnership(schema: string | undefined, projectId: string): NextResponse | null {
-  if (schema?.startsWith('workspace_') && schema !== `workspace_${projectId}`) {
+// Only this project's own rows: its workspace schema, exactly. Any other schema
+// (none, public, another project's) is refused before anything is looked up,
+// since the connection that edits rows is the platform's own. MongoDB documents
+// are not edited here: this path reached the platform's database, never the
+// project's own.
+function assertOwnRows(type: string, schema: string | undefined, projectId: string): NextResponse | null {
+  if (type !== 'postgresql') {
+    return NextResponse.json(
+      { success: false, error: 'Only PostgreSQL rows can be edited here' },
+      { status: 400 }
+    )
+  }
+  if (schema !== `workspace_${projectId}`) {
     return NextResponse.json(
       { success: false, error: 'Invalid workspace schema for this project' },
       { status: 403 }
@@ -68,7 +78,7 @@ export const PUT = withProjectAccess(async (
       )
     }
 
-    const ownershipError = assertSchemaOwnership(schema, projectId)
+    const ownershipError = assertOwnRows(type, schema, projectId)
     if (ownershipError) return ownershipError
 
     const result = await HybridDatabase.updateRow(projectId, type, schema, table, rowId, body.data)
@@ -114,7 +124,7 @@ export const DELETE = withProjectAccess(async (
       )
     }
 
-    const ownershipError = assertSchemaOwnership(schema, projectId)
+    const ownershipError = assertOwnRows(type, schema, projectId)
     if (ownershipError) return ownershipError
 
     const success = await HybridDatabase.deleteRow(projectId, type, schema, table, rowId)
