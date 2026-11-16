@@ -26,7 +26,7 @@ import { v1ApiMiddleware } from '@/lib/api/v1/middleware'
 import { listenerHub } from '@/lib/realtime/listener-hub'
 import { redeemRealtimeTicketParam } from '@/lib/realtime/ticket-auth'
 import { createVisibleEventQueue, type RealtimeChange, type RealtimeSubscriber } from '@/lib/realtime/visibility'
-import { getProjectServingState, PAUSED_CODE, PAUSED_MESSAGE } from '@/lib/projects/serving-state'
+import { getProjectServingState, PAUSED_CODE, pausedMessage } from '@/lib/projects/serving-state'
 import { LOCKED_MESSAGE } from '@/lib/projects/serving-response'
 
 import { recordedV1 } from '@/lib/traffic/recorded-v1'
@@ -152,7 +152,7 @@ async function handleGET(request: NextRequest, props: { params: Promise<{ projec
                 send({
                   type: 'error',
                   code: state.kind === 'paused' ? PAUSED_CODE : 'PROJECT_LOCKED',
-                  message: state.kind === 'paused' ? PAUSED_MESSAGE : LOCKED_MESSAGE,
+                  message: state.kind === 'paused' ? pausedMessage(state.reason) : LOCKED_MESSAGE,
                 })
                 cleanup()
                 return

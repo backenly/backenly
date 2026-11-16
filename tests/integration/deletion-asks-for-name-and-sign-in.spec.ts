@@ -84,7 +84,10 @@ async function deleteAccount(body?: unknown) {
   return { status: res.status as number, body: await res.json() }
 }
 
-const projectExists = async (id: string) => (await prisma.project.count({ where: { id } })) === 1
+/** Still there and not asked to be deleted. */
+const projectExists = async (id: string) => (await prisma.project.count({ where: { id, deletedAt: null } })) === 1
+/** Asked to be deleted: kept for seven days, then removed (lib/projects/deletion.ts). */
+const projectDeleted = async (id: string) => (await prisma.project.count({ where: { id, deletedAt: { not: null } } })) === 1
 const accountExists = async (id: string) => (await prisma.user.count({ where: { id } })) === 1
 
 beforeAll(() => {
@@ -151,7 +154,7 @@ describe('deleting a project', () => {
     const r = await deleteProject(p.id, { confirm: p.name })
 
     expect(r.status).toBe(200)
-    expect(await projectExists(p.id)).toBe(false)
+    expect(await projectDeleted(p.id)).toBe(true)
   })
 
   it("answers a stranger as before, without saying the project exists", async () => {

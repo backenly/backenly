@@ -2268,3 +2268,9 @@ tests/integration/create-table-no-auto-provision.spec.ts
 # refusal leaves the project or account in place, and a stranger still gets the
 # same 404. Real sessions, projects and accounts.
 tests/integration/deletion-asks-for-name-and-sign-in.spec.ts
+# Deleting a project keeps it for seven days: deletedAt and purgeAfter set,
+# refused at every door as deleted, left out of the list, the console, the plan's
+# project limit and background passes; the daily purge removes it once its date
+# has passed and never before; an unfinished import's project goes at once.
+# Real sessions, projects, jobs and serving state.
+tests/integration/deleted-projects-are-kept-seven-days.spec.ts

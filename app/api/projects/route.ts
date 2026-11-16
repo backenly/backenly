@@ -83,7 +83,10 @@ function serializeProject(project: ProjectListEntry, user: { id: string; email: 
 export const GET = withAuth(async (request: NextRequest, { user }) => {
   try {
     const organizationId = request.nextUrl?.searchParams.get('orgId') || null
-    const projects = await getProjectLifecycle().list(user.userId, { organizationId })
+    const listed = await getProjectLifecycle().list(user.userId, { organizationId })
+    // A project asked to be deleted is not listed (lib/projects/deletion.ts).
+    // Left out here, after either edition's listing, so both leave it out.
+    const projects = listed.filter((project) => !project.deletedAt)
 
     // Use the authenticated user rather than refetching: auth already loaded it.
     const identity = { id: user.userId, email: user.email, name: (user as any).name || null }

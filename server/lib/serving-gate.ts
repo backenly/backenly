@@ -15,7 +15,7 @@ import type { NextFunction, Request, Response } from 'express'
 import {
   getProjectServingState,
   PAUSED_CODE,
-  PAUSED_MESSAGE,
+  pausedMessage,
   pausedDetails,
 } from '@/lib/projects/serving-state'
 import { ErrorCodes, sendError } from './response'
@@ -62,7 +62,7 @@ export async function refuseUnlessServing(res: Response, projectId: string): Pro
     case 'paused':
       // No Retry-After: nothing changes until the owner resumes it, and a
       // client that backs off and retries would only keep asking.
-      sendError(res, PAUSED_CODE, PAUSED_MESSAGE, 503, pausedDetails(projectId, state))
+      sendError(res, PAUSED_CODE, pausedMessage(state.reason), 503, pausedDetails(projectId, state))
       return true
 
     case 'unavailable':
