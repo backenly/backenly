@@ -20,6 +20,7 @@ import { ErrorRow } from '@/components/console/states'
 import { GridFooter, count } from '@/components/console/InstrumentBar'
 import { duration, groupByDay } from '@/components/console/format'
 import { runLine, runOutput, type AiFunctionLog } from './model'
+import { NOT_RUN, NOTICE } from '@/lib/services/ai-functions/record-kinds'
 
 const PAGE = 50
 /** The logs route's cap (app/api/projects/[id]/ai-functions/logs). */
@@ -130,12 +131,13 @@ export function RunsList({
                     <EventRow
                       key={run.id}
                       id={`run-${run.id}`}
-                      glyph={run.success ? 'done' : 'failed'}
-                      glyphLabel={run.success ? 'Succeeded' : 'Failed'}
+                      glyph={run.triggerType === NOT_RUN ? 'paused' : run.triggerType === NOTICE ? 'idle' : run.success ? 'done' : 'failed'}
+                      glyphLabel={run.triggerType === NOT_RUN ? 'Not run' : run.triggerType === NOTICE ? 'Notice' : run.success ? 'Succeeded' : 'Failed'}
+                      word={run.triggerType === NOT_RUN ? 'Not run' : run.triggerType === NOTICE ? 'Notice' : undefined}
                       time={run.createdAt}
                       what={showName ? run.function?.name ?? 'Deleted function' : undefined}
                       mono
-                      result={duration(run.durationMs)}
+                      result={run.triggerType === NOT_RUN || run.triggerType === NOTICE ? undefined : duration(run.durationMs)}
                       line={line || undefined}
                       lineMono
                       expanded={open.has(run.id)}
