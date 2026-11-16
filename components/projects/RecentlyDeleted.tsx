@@ -44,8 +44,8 @@ export function RecentlyDeleted({
 
   const load = useCallback(async () => {
     try {
-      const q = orgId ? `?deleted=1&orgId=${encodeURIComponent(orgId)}` : '?deleted=1'
-      const res = await fetch(`/api/projects${q}`, { credentials: 'include', cache: 'no-store' })
+      const org = orgId ? `&orgId=${encodeURIComponent(orgId)}` : ''
+      const res = await fetch(`/api/projects?deleted=1${org}`, { credentials: 'include', cache: 'no-store' })
       const body = await res.json().catch(() => null)
       if (res.ok && body?.success && Array.isArray(body.data)) setDeleted(body.data)
     } catch {
