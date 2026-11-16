@@ -76,12 +76,10 @@ describe('a call carrying an argument its tool does not take', () => {
   it('is refused with UNKNOWN_PARAMS, naming it and what the tool takes, and nothing runs', async () => {
     const r = await call('get_table_schema', { tableName: 'orders', bogus: 1 })
     expect(r.status).toBe(400)
-    expect(r.body).toMatchObject({
-      ok: false,
-      code: 'UNKNOWN_PARAMS',
-      unsupported: ['bogus'],
-      supported: ['tableName'],
-    })
+    expect(r.body).toMatchObject({ ok: false, code: 'UNKNOWN_PARAMS', unsupported: ['bogus'] })
+    // What the tool takes, read from its schema, so a new argument does not break this.
+    expect(r.body.supported).toContain('tableName')
+    expect(r.body.supported).not.toContain('bogus')
     expect(r.body.error).toBe('get_table_schema does not take bogus. Nothing ran.')
     expect(mockDispatched).toEqual([])
   })
