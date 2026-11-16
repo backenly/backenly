@@ -127,6 +127,12 @@ describe('the agent docs describe the real MCP surface', () => {
     const accessPolicies = new Set<string>(
       ((setBucketPolicy?.function?.parameters as any)?.properties?.policy?.enum ?? []) as string[],
     )
+    // Who may upload into a bucket (signed_in, server_only), from the set_bucket_uploads enum.
+    const setBucketUploads = BRAIN_TOOLS.find((t) => t.function?.name === 'set_bucket_uploads')
+    const uploadRules = new Set<string>(
+      ((setBucketUploads?.function?.parameters as any)?.properties?.uploads?.enum ?? []) as string[],
+    )
+    expect([...uploadRules].sort()).toEqual(['server_only', 'signed_in'])
     const suspicious = [...mentionedTools()].filter(
       (name) =>
         name.includes('_') &&
@@ -134,6 +140,7 @@ describe('the agent docs describe the real MCP surface', () => {
         !KNOWN_NON_TOOLS.has(name) &&
         !rlsTemplates.has(name) &&
         !accessPolicies.has(name) &&
+        !uploadRules.has(name) &&
         !DOMAIN_ACTIONS.has(name),
     )
     expect(suspicious).toEqual([])

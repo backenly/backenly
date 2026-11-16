@@ -162,7 +162,11 @@ export async function createBuckets(projectId: string, buckets: SupabaseBucket[]
   const out = new Map<string, { id: string; maxBytes: number }>()
   for (const b of buckets) {
     const existing = await prisma.storageBucket.findFirst({ where: { projectId, name: b.name }, select: { id: true } })
-    const id = existing?.id ?? (await storageService.createBucket(b.name, projectId, b.public)).id
+    // Signed-in users may upload into it, as a Supabase app's users upload
+    // from the client under the policies on storage.objects, which are not
+    // carried over: so the app keeps working once moved. The owner can make
+    // it server_only (lib/storage/upload-access.ts).
+    const id = existing?.id ?? (await storageService.createBucket(b.name, projectId, b.public, 'signed_in')).id
     const maxBytes = Math.min(ceiling, b.fileSizeLimit && b.fileSizeLimit > 0 ? b.fileSizeLimit : ceiling)
     await governedChange(projectId, `Set the rules of bucket ${b.name}`, () =>
       prisma.storageBucket.update({

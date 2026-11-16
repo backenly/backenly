@@ -2263,3 +2263,11 @@ tests/integration/auth-email-routes-on-web.spec.ts
 # name suggests and no blueprint columns; every other caller keeps the default.
 # Real provisioned project, real executor and DDL.
 tests/integration/create-table-no-auto-provision.spec.ts
+# A bucket says who may upload into it: signed_in (any signed-in end user of the
+# app) or server_only (a service-role key, and the project's team from the
+# console). A bucket made on purpose starts server_only unless asked for
+# signed_in; one an upload creates (the SDK's default) and every bucket from
+# before take signed_in. Every end-user upload path follows it, changing it is
+# one History entry, and the console changes it too. Real routes, executor,
+# History and migration SQL; local storage driver.
+tests/integration/bucket-uploads-follow-the-bucket.spec.ts

@@ -2,7 +2,8 @@ export const dynamic = 'force-dynamic'
 
 import { NextRequest } from 'next/server'
 import { clampIsPublic } from '@/lib/storage/access-policy'
-import { v1ApiMiddleware, requirePermission, requireCapability, requireStorageWriter } from '@/lib/api/v1/middleware'
+import { v1ApiMiddleware, requirePermission, requireCapability, requireStorageWriter, requireUploadRule } from '@/lib/api/v1/middleware'
+import { AUTO_CREATED_BUCKET_UPLOADS } from '@/lib/storage/upload-access'
 import { createErrorResponse, createSuccessResponse, ErrorCodes } from '@/lib/api/v1/errors'
 import { storageService } from '@/lib/services/storage'
 import { prisma } from '@/lib/db'
@@ -143,10 +144,13 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
 
     if (!bucketRecord) {
       if (bucketName === 'default') {
-        // Auto-create a 'default' bucket so SDK users never hit a 404
+        // Auto-create a 'default' bucket so SDK users never hit a 404. It is
+        // private, and it takes uploads from signed-in users: the SDK uploads
+        // here when the app names no bucket, so the upload that creates it,
+        // and the app's next ones, go in (lib/storage/upload-access.ts).
         // history: provisioned by the first upload, on the data plane, which never waits for the change lock
         bucketRecord = await prisma.storageBucket.create({
-          data: { name: 'default', projectId: context.projectId, isPublic: false },
+          data: { name: 'default', projectId: context.projectId, isPublic: false, uploadPolicy: AUTO_CREATED_BUCKET_UPLOADS },
         })
       } else {
         return createErrorResponse(
@@ -156,6 +160,12 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
         )
       }
     }
+
+    // The bucket says who may upload into it: a signed-in end user only where
+    // its uploads are signed_in, a service-role key anywhere. Asked before the
+    // file is read, so a refused upload reads and stores nothing.
+    const uploadRuleCheck = requireUploadRule(context, bucketRecord)
+    if (uploadRuleCheck) return uploadRuleCheck
 
     // ── Read file into buffer ─────────────────────────────────────────────
     const arrayBuffer = await file.arrayBuffer()

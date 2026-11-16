@@ -30,6 +30,7 @@ import { endUserBearerToken } from '@/lib/security/end-user-bearer'
 
 import { INTERNAL_DOMAINS, isInternalOrigin } from '@/lib/security/internal-origin'
 import { answersFromCopy, authorizingProject } from '@/lib/auth-projection/read'
+import { mayUpload, serverOnlyRefusal } from '@/lib/storage/upload-access'
 
 // Re-exported for existing importers; canonical home is lib/security/internal-origin.ts
 // (framework-free so the Express runtime can share it).
@@ -712,6 +713,24 @@ export function requireStorageWriter(context: V1ApiContext): NextResponse | null
       'or make the call from your server with a service-role key.',
     401,
   )
+}
+
+/**
+ * Whether the bucket takes this upload (lib/storage/upload-access.ts): a
+ * service-role key may upload into any bucket, a signed-in end user only into
+ * one whose uploads are signed_in. Asked after requireStorageWriter, once the
+ * bucket is known, and again at every later step of an upload, so the
+ * bucket's rule as it is now decides.
+ */
+export function requireUploadRule(
+  context: { apiKey: { serviceRole?: boolean | null } },
+  bucket: { name: string; uploadPolicy?: string | null },
+): NextResponse | null {
+  if (mayUpload(bucket.uploadPolicy, context.apiKey)) return null
+  return createErrorResponse('UPLOADS_SERVER_ONLY', serverOnlyRefusal(bucket.name), 403, {
+    bucket: bucket.name,
+    uploads: 'server_only',
+  })
 }
 
 /**

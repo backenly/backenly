@@ -205,6 +205,12 @@ export const TOOL_CAPABILITIES: Capability[] = [
     tool: 'set_bucket_policy',
   },
   {
+    id: 'set_bucket_uploads',
+    name: 'Set who may upload into a bucket',
+    what: 'Set who may upload into a bucket: signed_in (any signed-in end-user of the app, each changing only their own files) or server_only (only the app\'s server, with a service-role key). A new bucket is server_only unless created with uploads signed_in.',
+    tool: 'set_bucket_uploads',
+  },
+  {
     id: 'list_buckets',
     name: 'List buckets (read)',
     what: 'List storage buckets with name, public/private, and file count.',

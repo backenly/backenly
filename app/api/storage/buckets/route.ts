@@ -38,6 +38,8 @@ export async function GET(request: NextRequest) {
             isPublic: bucket.isPublic,
             // What actually governs who may read this bucket's objects.
             accessPolicy: bucket.accessPolicy,
+            // Who may upload into it: 'signed_in' or 'server_only'.
+            uploads: bucket.uploads,
             fileCount: bucket.fileCount,
             totalSize: bucket.totalSize.toString(), // BigInt to string
             // PHASE 3: Include provisioning status

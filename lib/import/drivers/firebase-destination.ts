@@ -333,7 +333,11 @@ export function backenlyDestination(input: { projectId: string; userId: string }
       await governed('Create the files bucket for Firebase Storage', async () => {
         let bucket = await prisma.storageBucket.findFirst({ where: { projectId, name: 'files' }, select: { id: true } })
         if (!bucket) {
-          await act('CREATE_BUCKET', { bucketName: 'files', isPublic: false })
+          // Signed-in users may upload into it, as a Firebase app's clients do
+          // (Storage rules such as `allow write: if request.auth != null`), so
+          // the app keeps working once moved. The rules themselves are not
+          // carried over; the owner can make it server_only.
+          await act('CREATE_BUCKET', { bucketName: 'files', isPublic: false, uploads: 'signed_in' })
           bucket = await prisma.storageBucket.findFirst({ where: { projectId, name: 'files' }, select: { id: true } })
         }
         if (!bucket) throw new Error('Backenly could not create the files bucket.')

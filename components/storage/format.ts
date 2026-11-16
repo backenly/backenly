@@ -1,11 +1,13 @@
 /**
  * How Storage says its values: sizes, file types, who sent a file, and what a
- * bucket's read rule means. Plain functions, shared by the bar, the rail, the
- * grid, the file drawer and the policy dialog, so each says it the same way.
+ * bucket's read and upload rules mean. Plain functions, shared by the bar, the
+ * rail, the grid, the file drawer and the bucket dialogs, so each says it the
+ * same way.
  */
 
 import type { StorageFile } from '@/lib/api/storage'
 import { ACCESS_POLICIES, type AccessPolicy } from '@/lib/storage/access-policy'
+import { uploadRuleOf, type UploadRule } from '@/lib/storage/upload-access'
 
 /** A number from the API: sizes arrive as BigInt strings from the files route. */
 export function toNum(v: number | string | bigint | null | undefined): number {
@@ -94,6 +96,27 @@ export function isPublicPolicy(value: string | null | undefined): boolean {
  */
 export function narrowerAccess(file: StorageFile, bucketPolicy: string | null | undefined): 'Private' | null {
   return isPublicPolicy(bucketPolicy) && !file.isPublic ? 'Private' : null
+}
+
+// ── Upload rules ────────────────────────────────────────────────────────────
+
+/** Who may upload into a bucket, in plain words (the upload dialog's options, and the pane's fact). */
+export const UPLOAD_WORDS: Record<UploadRule, { title: string; short: string; means: string }> = {
+  signed_in: {
+    title: 'Signed-in users of your app',
+    short: 'Signed-in users',
+    means: 'Anyone signed in to your app. Each person can change only their own files.',
+  },
+  server_only: {
+    title: 'Only your server',
+    short: 'Your server',
+    means: 'Uploads need a service-role key, which only your server holds. Your team can still upload here.',
+  },
+}
+
+/** A bucket's upload rule as stored, read safely: anything unknown is server-only (the server's own fallback). */
+export function uploadsOf(value: string | null | undefined): UploadRule {
+  return uploadRuleOf(value)
 }
 
 // ── Links ───────────────────────────────────────────────────────────────────

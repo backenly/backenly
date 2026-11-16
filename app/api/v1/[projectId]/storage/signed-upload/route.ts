@@ -1,7 +1,8 @@
 export const dynamic = 'force-dynamic'
 
 import { NextRequest } from 'next/server'
-import { v1ApiMiddleware, requirePermission, requireStorageWriter } from '@/lib/api/v1/middleware'
+import { v1ApiMiddleware, requirePermission, requireStorageWriter, requireUploadRule } from '@/lib/api/v1/middleware'
+import { AUTO_CREATED_BUCKET_UPLOADS } from '@/lib/storage/upload-access'
 import { createErrorResponse, createSuccessResponse, ErrorCodes } from '@/lib/api/v1/errors'
 import { prisma } from '@/lib/db'
 import { assertQuotaAvailable, QuotaExceededError } from '@/lib/services/storageQuota'
@@ -143,9 +144,15 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
           name: bucketName,
           projectId: context.projectId,
           isPublic: false,
+          // It takes uploads from signed-in users, as a bucket the first upload
+          // creates does (lib/storage/upload-access.ts): this upload made it.
+          uploadPolicy: AUTO_CREATED_BUCKET_UPLOADS,
         },
       })
     }
+    // The bucket says who may upload into it, before anything is signed.
+    const uploadRuleCheck = requireUploadRule(context, bucketRecord)
+    if (uploadRuleCheck) return uploadRuleCheck
     // The file follows its bucket unless the upload says otherwise, and never
     // past it (lib/storage/access-policy.ts).
     const isPublic = clampIsPublic(requestedPublic, bucketRecord.accessPolicy)

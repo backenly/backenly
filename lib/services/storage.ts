@@ -10,14 +10,20 @@ import { StorageUnavailableError } from '@/lib/storage/errors'
 import { signExportToken } from '@/lib/storage/export-token'
 import { getProjectQuota } from '@/lib/services/storageQuota'
 import { UploadRejectedError, assertFileAllowed, assertFileSize } from '@/lib/storage/upload-policy'
+import { NEW_BUCKET_UPLOADS, uploadRuleOf, type UploadRule } from '@/lib/storage/upload-access'
 
 /** Bucket writes are governed changes (lib/changes/ledger.ts); one made inside another change joins it. */
 const governed = async <T>(projectId: string, title: string, fn: () => Promise<T>) => (await import('@/lib/changes/ledger')).governedChange(projectId, title, fn)
 
 export interface StorageService {
   // Bucket operations
-  createBucket(name: string, projectId: string, isPublic?: boolean): Promise<{ id: string; name: string; isPublic: boolean }>
-  listBuckets(projectId: string): Promise<Array<{ id: string; name: string; isPublic: boolean; accessPolicy: string; fileCount: number; totalSize: bigint }>>
+  /**
+   * A bucket made on purpose. `uploads` says who may upload into it
+   * (lib/storage/upload-access.ts): only a service-role key unless asked for
+   * signed_in.
+   */
+  createBucket(name: string, projectId: string, isPublic?: boolean, uploads?: UploadRule): Promise<{ id: string; name: string; isPublic: boolean; uploads: UploadRule }>
+  listBuckets(projectId: string): Promise<Array<{ id: string; name: string; isPublic: boolean; accessPolicy: string; uploads: UploadRule; fileCount: number; totalSize: bigint }>>
   deleteBucket(bucketId: string, projectId: string): Promise<void>
   getBucket(bucketId: string, projectId: string): Promise<{ id: string; name: string; isPublic: boolean } | null>
 
@@ -98,11 +104,11 @@ export class LocalStorageService implements StorageService {
   }
 
   /** One change in the project's history, whoever asks (lib/changes/resources/storage.ts). */
-  async createBucket(name: string, projectId: string, isPublic: boolean = false) {
-    return governed(projectId, `Create bucket ${name}`, () => this.createBucketNow(name, projectId, isPublic))
+  async createBucket(name: string, projectId: string, isPublic: boolean = false, uploads: UploadRule = NEW_BUCKET_UPLOADS) {
+    return governed(projectId, `Create bucket ${name}`, () => this.createBucketNow(name, projectId, isPublic, uploads))
   }
 
-  private async createBucketNow(name: string, projectId: string, isPublic: boolean) {
+  private async createBucketNow(name: string, projectId: string, isPublic: boolean, uploads: UploadRule) {
     if (!projectId) {
       throw new Error('Project ID is required for tenant isolation')
     }
@@ -125,6 +131,8 @@ export class LocalStorageService implements StorageService {
         // console all read accessPolicy; isPublic alone is a label. Deriving
         // it here keeps the two in agreement from birth.
         accessPolicy: isPublic ? 'public_read' : 'private',
+        // Who may upload into it, stated rather than left to the column's default.
+        uploadPolicy: uploads,
       },
     })
 
@@ -135,6 +143,7 @@ export class LocalStorageService implements StorageService {
       id: bucket.id,
       name: bucket.name,
       isPublic: bucket.isPublic,
+      uploads: uploadRuleOf(bucket.uploadPolicy),
     }
   }
 
@@ -165,6 +174,8 @@ export class LocalStorageService implements StorageService {
       // The enforced visibility. isPublic is a label; readers deciding what to
       // DISPLAY or PROMISE must use this.
       accessPolicy: bucket.accessPolicy,
+      // Who may upload into it (lib/storage/upload-access.ts).
+      uploads: uploadRuleOf(bucket.uploadPolicy),
       fileCount: bucket.files.length,
       totalSize: bucket.files.reduce((sum, file) => sum + file.size, BigInt(0)), // Keep as BigInt
     }))

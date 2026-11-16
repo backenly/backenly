@@ -1,7 +1,8 @@
 export const dynamic = 'force-dynamic'
 
 import { NextRequest } from 'next/server'
-import { v1ApiMiddleware, requirePermission, requireStorageWriter } from '@/lib/api/v1/middleware'
+import { v1ApiMiddleware, requirePermission, requireStorageWriter, requireUploadRule } from '@/lib/api/v1/middleware'
+import { AUTO_CREATED_BUCKET_UPLOADS } from '@/lib/storage/upload-access'
 import { createErrorResponse, createSuccessResponse, ErrorCodes } from '@/lib/api/v1/errors'
 import { prisma } from '@/lib/db'
 import { assertQuotaAvailable, incrementStorageUsed, QuotaExceededError } from '@/lib/services/storageQuota'
@@ -119,11 +120,18 @@ async function handleInitiate(request: NextRequest, context: { projectId: string
   if (!bucketRecord) {
     // history: provisioned by the first upload, on the data plane, which never waits for the change lock
     // An upload never opens a bucket: one it creates is private until its owner
-    // sets the access policy.
+    // sets the access policy. It takes uploads from signed-in users, as a bucket
+    // the first upload creates does (lib/storage/upload-access.ts).
     bucketRecord = await prisma.storageBucket.create({
-      data: { name: bucketName, projectId: context.projectId, isPublic: false, maxFileSizeBytes: BigInt(MAX_ASSEMBLED_BYTES) },
+      data: {
+        name: bucketName, projectId: context.projectId, isPublic: false, maxFileSizeBytes: BigInt(MAX_ASSEMBLED_BYTES),
+        uploadPolicy: AUTO_CREATED_BUCKET_UPLOADS,
+      },
     })
   }
+  // The bucket says who may upload into it, before anything is started.
+  const uploadRuleCheck = requireUploadRule(context, bucketRecord)
+  if (uploadRuleCheck) return uploadRuleCheck
   // The file follows its bucket unless the upload says otherwise, and never past
   // it (lib/storage/access-policy.ts).
   const isPublic = clampIsPublic(requestedPublic, bucketRecord.accessPolicy)
@@ -245,12 +253,17 @@ async function handleUploadChunk(request: NextRequest, uploadId: string, partNum
   // valid API key can't write into another tenant's session.
   const fileRecord = await prisma.storageFile.findFirst({
     where: { projectId, metadata: { path: ['uploadId'], equals: uploadId } },
+    include: { bucket: { select: { name: true, uploadPolicy: true } } },
   }).catch(() => null)
   if (!fileRecord) {
     return createErrorResponse(ErrorCodes.NOT_FOUND, 'Upload session not found', 404)
   }
   const notYours = notTheUploader(fileRecord, caller, 'add a part to')
   if (notYours) return notYours
+  // The bucket's rule as it is now: one changed to server_only since the
+  // upload started takes no more parts from an end user.
+  const uploadRuleCheck = requireUploadRule(caller, fileRecord.bucket)
+  if (uploadRuleCheck) return uploadRuleCheck
 
   const chunkBuffer = Buffer.from(await request.arrayBuffer())
   if (chunkBuffer.length > MAX_CHUNK_BYTES) {
@@ -306,6 +319,7 @@ async function handleComplete(request: NextRequest, uploadId: string, totalParts
 
   const fileRecord = await prisma.storageFile.findFirst({
     where: { projectId, metadata: { path: ['uploadId'], equals: uploadId } },
+    include: { bucket: { select: { name: true, uploadPolicy: true } } },
   }).catch(() => null)
 
   if (!fileRecord) {
@@ -313,6 +327,10 @@ async function handleComplete(request: NextRequest, uploadId: string, totalParts
   }
   const notYours = notTheUploader(fileRecord, caller, 'complete')
   if (notYours) return notYours
+  // Completing puts the file in its bucket, so the bucket's rule as it is now
+  // decides, as it did for each part.
+  const uploadRuleCheck = requireUploadRule(caller, fileRecord.bucket)
+  if (uploadRuleCheck) return uploadRuleCheck
 
   const meta: any = fileRecord.metadata || {}
 

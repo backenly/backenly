@@ -169,8 +169,9 @@ beforeAll(async () => {
     ['invoices', 'private'],
     ['assets', 'public_read'],
   ] as const) {
+    // Buckets the app's signed-in users upload into (lib/storage/upload-access.ts).
     await prisma.storageBucket.create({
-      data: { name, projectId, isPublic: accessPolicy === 'public_read', accessPolicy },
+      data: { name, projectId, isPublic: accessPolicy === 'public_read', accessPolicy, uploadPolicy: 'signed_in' },
     })
   }
 

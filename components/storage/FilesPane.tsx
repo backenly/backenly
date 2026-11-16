@@ -11,7 +11,7 @@
  */
 
 import { useEffect, useRef, useState } from 'react'
-import { ChevronLeft, Copy, Download, KeyRound, Trash2 } from 'lucide-react'
+import { ChevronLeft, Copy, Download, KeyRound, Trash2, Upload } from 'lucide-react'
 import { GridFooter, PaneToolbar, type MenuItems } from '@/components/console/InstrumentBar'
 import { ErrorRow, RefusedLine } from '@/components/console/states'
 import { Time } from '@/components/console/Time'
@@ -21,6 +21,7 @@ import type { StorageBucket, StorageFile } from '@/lib/api/storage'
 import { FileTypeIcon } from './parts'
 import {
   POLICY_WORDS,
+  UPLOAD_WORDS,
   absoluteUrl,
   downloadFile,
   filesWord,
@@ -29,6 +30,7 @@ import {
   policyOf,
   uploaderLabel,
   uploaderTitle,
+  uploadsOf,
 } from './format'
 
 export interface FilesPaneProps {
@@ -75,6 +77,8 @@ export interface FilesPaneProps {
   onDeleteFiles: (files: StorageFile[]) => void
   onDeleteBucket: () => void
   onEditPolicy: () => void
+  /** Who may upload into the bucket in view. */
+  onEditUploads: () => void
 
   /** Phone: back to the buckets list. */
   onBack: () => void
@@ -116,6 +120,7 @@ export function FilesPane(props: FilesPaneProps) {
     onDeleteFiles,
     onDeleteBucket,
     onEditPolicy,
+    onEditUploads,
     onBack,
     actionError,
     onDismissError,
@@ -140,12 +145,18 @@ export function FilesPane(props: FilesPaneProps) {
   const selected = files ? files.filter((f) => selection.has(f.id)) : []
   const selecting = canWrite && selected.length > 0
   const policy = bucket ? policyOf(bucket.accessPolicy) : null
+  const uploadRule = bucket ? uploadsOf(bucket.uploads) : null
 
   const bucketMenu: MenuItems | undefined =
     bucket && !selecting
       ? [
           { label: 'Copy name', icon: Copy, onClick: () => void navigator.clipboard?.writeText(bucket.name).catch(() => {}) },
-          ...(canWrite ? [{ label: 'Read access…', icon: KeyRound, onClick: onEditPolicy }] : []),
+          ...(canWrite
+            ? [
+                { label: 'Read access…', icon: KeyRound, onClick: onEditPolicy },
+                { label: 'Upload access…', icon: Upload, onClick: onEditUploads },
+              ]
+            : []),
           ...(canAdminister ? [{ separator: true } as const, { label: 'Delete bucket…', icon: Trash2, danger: true, onClick: onDeleteBucket }] : []),
         ]
       : undefined
@@ -169,6 +180,21 @@ export function FilesPane(props: FilesPaneProps) {
             </button>
           ) : (
             <>Read access: {POLICY_WORDS[policy].title}</>
+          )}
+        </span>
+      )}
+      {bucket && uploadRule && (
+        <span className="ml-[12px] hidden lg:inline">
+          {canWrite ? (
+            <button
+              type="button"
+              onClick={onEditUploads}
+              className={`rounded-[4px] text-zinc-300 underline decoration-white/20 underline-offset-[3px] transition-colors duration-150 hover:text-white hover:decoration-white/50 ${FOCUS}`}
+            >
+              Upload access: {UPLOAD_WORDS[uploadRule].short}
+            </button>
+          ) : (
+            <>Upload access: {UPLOAD_WORDS[uploadRule].short}</>
           )}
         </span>
       )}
