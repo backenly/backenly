@@ -77,6 +77,12 @@ tests/integration/function-row-events-data-plane.spec.ts
 # function's answer (#604). The real runtime, Next routes and function rows.
 tests/integration/function-routes-answer-real-status.spec.ts
 
+# Row-event runs past the month's allowance are not queued; a burst larger than
+# what is left leaves one notice, and the first refusal drops the function's
+# queue with one record (production QA re-test, 2026-11-16, #40). Real capture,
+# queue, sandbox executor and run log; only the plan's size is stood in for.
+tests/integration/function-runs-within-the-allowance.spec.ts
+
 # An on_update function deployed with columns runs only when an update changed
 # one of them (an unknown old row runs it), columns is refused off on_update
 # and for a column the table lacks, and a redeploy without columns is restored
@@ -90,12 +96,6 @@ tests/integration/row-functions-watch-columns.spec.ts
 # run log says what is queued, and pausing discards the queue. Real capture
 # trigger, outbox, queue, sandbox executor and run log.
 tests/integration/function-runs-queued.spec.ts
-
-# Row-event runs past the month's allowance are not queued; a burst larger than
-# what is left leaves one notice, and the first refusal drops the function's
-# queue with one record (production QA re-test, 2026-11-16, #40). Real capture,
-# queue, sandbox executor and run log; only the plan's size is stood in for.
-tests/integration/function-runs-within-the-allowance.spec.ts
 tests/integration/project-route-response-shape.spec.ts
 tests/integration/realtime-sse-slot-release.spec.ts
 
