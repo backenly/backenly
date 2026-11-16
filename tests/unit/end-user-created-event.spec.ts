@@ -36,11 +36,16 @@ beforeEach(() => {
 })
 
 describe('emitEndUserCreated', () => {
-  it('never emits webhooks or fires AI functions for the contract sweep’s synthetic account', async () => {
-    await emitEndUserCreated('p1', { id: 'u1', email: '__cv_m1a2b3@backenly.internal' })
-    await emitEndUserCreated('p1', { id: 'u2', email: 'probe@backenly-selftest.com' })
+  it('never emits webhooks or fires functions for an account the signed probe created', async () => {
+    await emitEndUserCreated('p1', { id: 'u1', email: '__cv_m1a2b3@backenly.internal' }, { platformProbe: true })
     expect(triggerWebhooks).not.toHaveBeenCalled()
     expect(fireAiFunctionsOnSignup).not.toHaveBeenCalled()
+  })
+
+  it('emits for a person whose address is on a .internal domain', async () => {
+    await emitEndUserCreated('p1', { id: 'u2', email: 'ana@corp.internal' })
+    expect(triggerWebhooks).toHaveBeenCalledTimes(1)
+    expect(fireAiFunctionsOnSignup).toHaveBeenCalledTimes(1)
   })
 
   it('emits for a real sign-up, with exactly the fixed fields and fires on_signup AI functions', async () => {
@@ -93,7 +98,8 @@ describe('emitEndUserCreated', () => {
 describe('both signup servers', () => {
   it.each([NEXT_ROUTE, RUNTIME_ROUTE])('%s emits through the shared emitter only', (rel) => {
     const src = readFileSync(join(ROOT, rel), 'utf8')
-    expect(src).toMatch(/emitEndUserCreated\(projectId, user\)/)
+    // With whether the request is the platform's signed probe, which only the route can tell.
+    expect(src).toMatch(/emitEndUserCreated\(projectId, user, \{ platformProbe: probe \}\)/)
     expect(src).not.toMatch(/'auth\.user\.created'/)
     expect(src).not.toContain('fireAiFunctionsOnSignup')
   })

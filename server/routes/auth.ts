@@ -6,7 +6,8 @@ import { workspaceRawClient } from '@/lib/data-plane/regional'
 import { hashPassword } from '@/lib/auth/password'
 import { checkEndUserPassword, endUserPasswordWriter, replaceImportedPasswordHash, startPasswordCheckTimer } from '@/lib/auth/end-user-password'
 import { executeWithUserContext } from '@/lib/services/workspace-rls'
-import { ensureAuthUsersTable, buildUserInsert, isReservedTestEmail, AuthNotProvisionedError } from '@/lib/services/end-user-auth-table'
+import { ensureAuthUsersTable, buildUserInsert, AuthNotProvisionedError } from '@/lib/services/end-user-auth-table'
+import { isCheckAccountAddress } from '@/lib/services/check-accounts'
 import { sanitizeDiagnostic } from '@/lib/errors/diagnostic-sanitize'
 import { sendError, sendSuccess, ErrorCodes } from '../lib/response'
 import {
@@ -41,7 +42,7 @@ import {
 import { ENVIRONMENT_HEADER, environmentHeaderValue } from '@/lib/branches/key-scope'
 import { admitSigninAttempt, admitSigninRequest } from '@/lib/security/end-user-signin-limit'
 import { admitExistenceCheck, admitSignupRequest } from '@/lib/security/end-user-signup-limit'
-import { isPlatformProbe } from '@/lib/security/platform-probe'
+import { carriesInternalToken, isPlatformProbe } from '@/lib/security/platform-probe'
 import { throttleDecision } from '@/lib/security/rate-limit-decision'
 import { AUTH_LIMITS, consume, type RateLimitResult } from '@/lib/security/auth-rate-limit'
 import { platformLimiterStore } from '@/lib/security/shared-key-rate'
@@ -54,6 +55,9 @@ import {
 } from '@/lib/services/end-user-reset-page'
 
 const router = Router()
+
+/** The answer to a sign-up with the address of one of Backenly's own check accounts. */
+const RESERVED_ADDRESS = 'This email address is reserved. Sign up with another one.'
 
 /**
  * A throttled sign-in, answered exactly as the Next route answers it: 429 for
@@ -135,13 +139,15 @@ async function handleSignUp(req: Request, res: Response) {
 
   // Every attempt counts against the address's cap, before any DB lookup.
   // Backenly's own contract probe is not counted, exactly as on the Next route:
-  // it needs the signed internal-traffic token AND a reserved address
-  // (lib/security/platform-probe.ts). A reserved address alone is counted like
-  // any customer's; it used to get a bucket of its own here, and nowhere else.
+  // it needs the signed internal-traffic token AND the address of one of
+  // Backenly's own check accounts (lib/security/platform-probe.ts).
   const ip = ipFrom(req)
   const bodyEmail = (req.body as { email?: unknown })?.email
-  const isInternalTest = isReservedTestEmail(bodyEmail as string | undefined)
   const probe = isPlatformProbe({ headers: { get: (name: string) => req.get(name) ?? null } }, bodyEmail)
+  // The probe's sign-ups are Backenly's own checks: they do not use the
+  // project's monthly active users or trip its cap, and need no verified
+  // address. Every other sign-up does, whatever its address.
+  const isInternalTest = probe
   if (!probe) {
     const limit = await admitSignupRequest(projectId, ip)
     if (!limit.allowed) {
@@ -184,6 +190,13 @@ async function handleSignUp(req: Request, res: Response) {
     }
 
     const { email, password, name } = parsed.data
+
+    // The addresses of Backenly's own check accounts are signed up by its
+    // signed probe only (lib/services/check-accounts.ts).
+    if (isCheckAccountAddress(email) && !probe) {
+      sendError(res, ErrorCodes.VALIDATION_ERROR, RESERVED_ADDRESS, 400, { fields: { email: [RESERVED_ADDRESS] } })
+      return
+    }
 
     // Guarantee the users table satisfies the auth contract before we touch
     // it — creates it when missing, self-heals a drifted one (e.g. an
@@ -275,11 +288,11 @@ async function handleSignUp(req: Request, res: Response) {
       // A new end user is active this month (MAU; never blocks). The Next.js
       // signup route always did this; this one, which serves single-box
       // installs, did not.
-      trackEndUserActive(projectId, String(user.id), user.email).catch(() => {})
+      trackEndUserActive(projectId, String(user.id), user.email, { platformProbe: probe }).catch(() => {})
 
-      // auth.user.created and on_signup AI functions (#599), through the emitter
-      // the Next route also uses. Reserved test accounts are skipped inside.
-      void emitEndUserCreated(projectId, user)
+      // auth.user.created and on_signup functions (#599), through the emitter
+      // the Next route also uses. The probe's own accounts are skipped there.
+      void emitEndUserCreated(projectId, user, { platformProbe: probe })
     }
 
     // Non-blocking: the branded verification email (24h token), only where the
@@ -468,7 +481,10 @@ async function handleSignIn(req: Request, res: Response) {
     // Only a SUCCESSFUL sign-in counts: failed attempts are not use, and
     // counting them would let a credential-stuffing bot keep a project awake.
     void touchProjectActivity(projectId)
-    if (!env.branch) trackEndUserActive(projectId, String(user.id), user.email).catch(() => {})
+    if (!env.branch) {
+      const probe = isPlatformProbe({ headers: { get: (name: string) => req.get(name) ?? null } }, user.email)
+      trackEndUserActive(projectId, String(user.id), user.email, { platformProbe: probe }).catch(() => {})
+    }
     sendSuccess(res, { user: { id: user.id, email: user.email, name: user.name }, token })
   } catch (error: any) {
     console.error('Signin error:', error?.message ?? 'unknown')
@@ -511,7 +527,9 @@ async function handleRefreshToken(req: Request, res: Response) {
 async function handleLogout(req: Request, res: Response) {
   const env = await authEnvironment(req, res)
   if (!env) return
-  const result = await logoutEndUser(req.params.projectId, tokenFrom(req), env)
+  const result = await logoutEndUser(req.params.projectId, tokenFrom(req), env, {
+    carriesProbeToken: carriesInternalToken({ headers: { get: (name: string) => req.get(name) ?? null } }),
+  })
   res.status(result.status).json(result.body)
 }
 

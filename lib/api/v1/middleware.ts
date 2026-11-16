@@ -12,6 +12,7 @@ import crypto from 'crypto'
 import { markFrontendConnected, markExternalUsage } from '@/lib/projects/milestones'
 import { recordUsageMetrics } from '@/lib/platform-signals'
 import { noteEndUserActivity } from '@/lib/quota/kernel'
+import { isPlatformProbe } from '@/lib/security/platform-probe'
 import { getPlatformControls, recordSecurityEvent } from '@/lib/platform-controls'
 import { PAUSED_CODE, PAUSED_MESSAGE, pausedDetails } from '@/lib/projects/serving-state'
 import { touchProjectActivity } from '@/lib/projects/activity'
@@ -559,7 +560,8 @@ export async function v1ApiMiddleware(
           endUserRole = (payload as any).role ?? 'user'
           // An authenticated data request is use: count the end user active
           // this month (throttled to one write a day, never blocks).
-          noteEndUserActivity(projectId, endUserId, typeof payload.email === 'string' ? payload.email : null)
+          const email = typeof payload.email === 'string' ? payload.email : null
+          noteEndUserActivity(projectId, endUserId, email, { platformProbe: isPlatformProbe(request, email) })
         } else {
           return {
             context: {} as V1ApiContext,

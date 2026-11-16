@@ -28,7 +28,8 @@ import { NextRequest, NextResponse } from 'next/server'
 import { withProjectValidation } from '@/lib/middleware/projectValidation'
 import { prisma } from '@/lib/db/prisma'
 import { listTableStats, type TableStat as KernelTableStat } from '@/lib/services/workspace-table-stats'
-import { introspectAuthUsersTable, SYNTHETIC_USER_SQL } from '@/lib/services/end-user-auth-table'
+import { introspectAuthUsersTable } from '@/lib/services/end-user-auth-table'
+import { CHECK_ACCOUNT_SQL } from '@/lib/services/check-accounts'
 import { executeWithUserContext } from '@/lib/services/workspace-rls'
 
 interface TableStat    { name: string; rowCount: number; estimated: boolean }
@@ -100,7 +101,7 @@ async function countEndUsers(projectId: string): Promise<number | null> {
   const schema = await introspectAuthUsersTable(projectId)
   if (schema.columns.size === 0) return null
 
-  const where = [`NOT ${SYNTHETIC_USER_SQL}`]
+  const where = [`NOT ${CHECK_ACCOUNT_SQL}`]
   if (schema.columns.has('deleted_at')) where.push(`"deleted_at" IS NULL`)
 
   // Service-role: the users table is RLS-FORCED with a service-role-only

@@ -192,6 +192,7 @@ export async function logoutEndUser(
   projectId: string,
   rawToken: string | null,
   env: AuthEnvironment = mainAuthEnvironment(projectId),
+  caller: { carriesProbeToken?: boolean } = {},
 ): Promise<AuthFlowResult> {
   try {
     const project = await authorizingProject(projectId)
@@ -211,10 +212,12 @@ export async function logoutEndUser(
         // Malformed token — treat as already invalidated, still return 200
       }
 
-      // Skip blacklisting synthetic verifier sessions (…@*.internal): the token
-      // is throwaway and the user row is deleted immediately after, so a
-      // blacklist entry would just orphan in the developer's `_token_blacklist`.
-      if (payload?.jti && payload?.projectId === projectId && !isReservedTestEmail(payload.email)) {
+      // The platform's signed probe signing its own check account out keeps no
+      // revocation row: the account is deleted moments later, and the row would
+      // be left in the developer's `_token_blacklist`. Every other session is
+      // revoked, whatever its address (lib/security/platform-probe.ts).
+      const probeAccount = caller.carriesProbeToken === true && isReservedTestEmail(payload?.email)
+      if (payload?.jti && payload?.projectId === projectId && !probeAccount) {
         const schemaName = env.schemaName
         const expiresAt = payload.exp
           ? new Date(payload.exp * 1000)

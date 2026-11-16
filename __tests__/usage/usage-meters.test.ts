@@ -148,10 +148,16 @@ describe('mau', () => {
     expect(await quantity(projectId, 'mau', 'auth')).toBe(BigInt(1))
   })
 
-  it('never counts a verifier account', async () => {
+  it("never counts the signed probe's own check account", async () => {
     const { projectId } = await makeProject()
-    await trackEndUserActive(projectId, randomUUID(), 'probe-123@backenly.internal')
+    await trackEndUserActive(projectId, randomUUID(), '__cv_probe123@backenly.internal', { platformProbe: true })
     expect(await quantity(projectId, 'mau', 'auth')).toBe(BigInt(0))
+  })
+
+  it('counts a person whose address is on a .internal domain', async () => {
+    const { projectId } = await makeProject()
+    await trackEndUserActive(projectId, randomUUID(), 'ana@corp.internal')
+    expect(await quantity(projectId, 'mau', 'auth')).toBe(BigInt(1))
   })
 })
 

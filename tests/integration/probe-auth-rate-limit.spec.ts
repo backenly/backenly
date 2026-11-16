@@ -182,8 +182,8 @@ describe('sign-up', () => {
     expect(await signups(12, () => `__cv_${tag}p@backenly.internal`, token())).toEqual([201, ...Array(11).fill(409)])
   }, 180_000)
 
-  it('throttles a reserved address without the token', async () => {
-    expect(await signups(12, () => `__cv_${tag}n@backenly.internal`)).toEqual(ONE_THEN_TEN_CONFLICTS_THEN_429)
+  it('refuses a check-account address without the token', async () => {
+    expect(await signups(12, () => `__cv_${tag}n@backenly.internal`)).toEqual(Array(12).fill(400))
   }, 180_000)
 
   it('throttles the token on a customer address', async () => {

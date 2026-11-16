@@ -4,6 +4,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { logoutEndUser } from '@/lib/services/end-user-auth-flows'
 import { recordedV1 } from '@/lib/traffic/recorded-v1'
 import { inAuthEnvironment } from '@/lib/branches/next-auth-environment'
+import { carriesInternalToken } from '@/lib/security/platform-probe'
 
 /**
  * POST /v1/{projectId}/auth/logout
@@ -32,7 +33,7 @@ async function handlePOST(request: NextRequest, props: { params: Promise<{ proje
   // A preview branch's key revokes in that branch's blacklist, the one its
   // data plane reads.
   return inAuthEnvironment(request, params.projectId, async (env) => {
-    const result = await logoutEndUser(params.projectId, rawToken, env)
+    const result = await logoutEndUser(params.projectId, rawToken, env, { carriesProbeToken: carriesInternalToken(request) })
     return NextResponse.json(result.body, { status: result.status })
   })
 }

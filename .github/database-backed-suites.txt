@@ -2263,3 +2263,9 @@ tests/integration/auth-email-routes-on-web.spec.ts
 # name suggests and no blueprint columns; every other caller keeps the default.
 # Real provisioned project, real executor and DDL.
 tests/integration/create-table-no-auto-provision.spec.ts
+# A person whose address is on a .internal domain is an ordinary end user:
+# counted as active, listed under Auth, announced to auth.user.created and
+# on_signup, and signed out for good. Backenly's own check-account addresses are
+# signed up only by its signed probe. Real Next sign-up, logout and Auth list
+# routes and database.
+tests/integration/end-users-on-internal-domains.spec.ts

@@ -120,9 +120,9 @@ it('counts a request made with their token, for a user who only ever signed up',
   expect(await eventually(() => lastLogin(projects.next, email))).toBeInstanceOf(Date)
 })
 
-it('CONTROL: leaves a verifier account unstamped, as it is never counted as a user', async () => {
-  const email = `probe-${tag}@contract.backenly.internal`
+it('CONTROL: leaves the signed probe\'s own check account unstamped, as it is never counted as a user', async () => {
+  const email = `__cv_${tag}@backenly.internal`
   const id = await addUser(projects.next, email)
-  await trackEndUserActive(projects.next, id, email)
+  await trackEndUserActive(projects.next, id, email, { platformProbe: true })
   expect(await lastLogin(projects.next, email)).toBeNull()
 })

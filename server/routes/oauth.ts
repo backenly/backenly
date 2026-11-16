@@ -11,9 +11,9 @@ import {
   introspectAuthUsersTable,
   buildUserInsert,
   stampLastLogin,
-  isReservedTestEmail,
   userIdCast,
 } from '@/lib/services/end-user-auth-table'
+import { isCheckAccountAddress } from '@/lib/services/check-accounts'
 import { canAcceptNewEndUser, trackEndUserActive } from '@/lib/quota/kernel'
 import { emitEndUserCreated } from '@/lib/services/end-user-auth-events'
 import { sanitizeDiagnostic } from '@/lib/errors/diagnostic-sanitize'
@@ -468,6 +468,13 @@ async function handleOAuthCallback(req: Request, res: Response) {
     // 2. Fetch the provider profile.
     const providerUser = await fetchProviderUser(provider, tokenData.access_token)
 
+    // The addresses of Backenly's own check accounts are signed up by its
+    // signed probe only, which never signs in with a provider
+    // (lib/services/check-accounts.ts).
+    if (isCheckAccountAddress(providerUser.email)) {
+      return jsonError(res, 400, 'This email address is reserved. Sign in with another account.', 'VALIDATION_ERROR')
+    }
+
     // 3. Bring the users table to the auth contract, then add OAuth columns.
     const baseSchema = await ensureAuthUsersTable(projectId, { email: providerUser.email })
     const schemaName = baseSchema.schemaName
@@ -520,13 +527,10 @@ async function handleOAuthCallback(req: Request, res: Response) {
         [provider, providerUser.id, providerUser.avatarUrl || null, userId],
       )
     } else {
-      // New OAuth end-user → subject to the project's MAU cap (never for
-      // reserved internal test identities, which don't exist for real OAuth).
-      if (!isReservedTestEmail(providerUser.email)) {
-        const mau = await canAcceptNewEndUser(projectId)
-        if (!mau.allowed) {
-          return jsonError(res, 403, mau.message ?? 'Sign-ups are temporarily unavailable for this app.', 'FORBIDDEN')
-        }
+      // New OAuth end-user → subject to the project's MAU cap.
+      const mau = await canAcceptNewEndUser(projectId)
+      if (!mau.allowed) {
+        return jsonError(res, 403, mau.message ?? 'Sign-ups are temporarily unavailable for this app.', 'FORBIDDEN')
       }
       const plan = await buildUserInsert(schema, {
         id: crypto.randomUUID(),

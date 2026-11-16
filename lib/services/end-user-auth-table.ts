@@ -36,6 +36,7 @@
  */
 
 import { prisma } from '@/lib/db'
+import { isCheckAccountAddress } from '@/lib/services/check-accounts'
 import { workspaceRawClient, type WorkspaceRawClient } from '@/lib/data-plane/regional'
 
 /** One row of `information_schema.columns` for the users table. */
@@ -100,14 +101,14 @@ export const SYNTHETIC_USER_SQL =
   `(email ILIKE '%@%.internal' OR email ILIKE '%@backenly-selftest.com')`
 
 /**
- * True when an email belongs to the reserved internal test space (a `.internal`
- * domain). Used by the auth runtime to keep behavioral-verifier signups from
- * counting toward a project's monthly-active-user quota or its dashboard.
+ * True for the exact address of one of Backenly's own check accounts
+ * (lib/services/check-accounts.ts). Not for every `.internal` address: people
+ * have those. What such an account is spared (quota, sign-up hooks, logout
+ * revocation) is decided per request by isPlatformProbe
+ * (lib/security/platform-probe.ts), which also needs the platform's token.
  */
 export function isReservedTestEmail(email: string | null | undefined): boolean {
-  if (typeof email !== 'string') return false
-  const e = email.trim()
-  return /@[^@]+\.internal$/i.test(e) || /@backenly-selftest\.com$/i.test(e)
+  return isCheckAccountAddress(email)
 }
 
 /**

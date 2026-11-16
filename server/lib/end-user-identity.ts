@@ -9,6 +9,7 @@
  */
 
 import crypto from 'crypto'
+import { isCheckAccountAddress } from '@/lib/services/check-accounts'
 import { verify } from 'jsonwebtoken'
 import { workspaceRawClient } from '@/lib/data-plane/regional'
 import { authorizingProject } from '@/lib/auth-projection/read'
@@ -47,6 +48,7 @@ export async function resolveEndUserFromToken(
   projectId: string,
   rawTokenInput: string | undefined,
   branch: EndUserBranch | null = null,
+  caller: { carriesProbeToken?: boolean } = {},
 ): Promise<EndUserIdentity | 'blocked' | null> {
   if (!rawTokenInput) return null
   const rawToken = bareToken(rawTokenInput)
@@ -129,7 +131,12 @@ export async function resolveEndUserFromToken(
   // (throttled to one write a day, never blocks). A preview branch's test users
   // are not the month's active users.
   if (!branch) {
-    noteEndUserActivity(projectId, String(payload.userId), typeof payload.email === 'string' ? payload.email : null)
+    const email = typeof payload.email === 'string' ? payload.email : null
+    // Backenly's signed probe using its own check account is not the month's
+    // active user (lib/security/platform-probe.ts); everyone else is.
+    noteEndUserActivity(projectId, String(payload.userId), email, {
+      platformProbe: caller.carriesProbeToken === true && isCheckAccountAddress(email),
+    })
   }
   return { userId: String(payload.userId), role: payload.role ?? 'user' }
 }
