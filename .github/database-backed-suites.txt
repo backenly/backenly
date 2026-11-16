@@ -2263,3 +2263,8 @@ tests/integration/auth-email-routes-on-web.spec.ts
 # name suggests and no blueprint columns; every other caller keeps the default.
 # Real provisioned project, real executor and DDL.
 tests/integration/create-table-no-auto-provision.spec.ts
+# The AI credits Usage and MCP show are the ones the credit gate counts: the
+# plan's plus bonus and bought credits, with what is left, and the gate agrees
+# with the number shown. Real account_ai_usage rows, description, gate and MCP
+# usage summary; the Cloud provider's plan and balances are stood in.
+tests/integration/ai-credits-allowance.spec.ts

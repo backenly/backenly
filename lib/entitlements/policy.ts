@@ -238,6 +238,46 @@ export async function aiCreditCap(billingAccountId: string): Promise<number | nu
   return max + (await bonusCredits(billingAccountId)) + (await purchasedCredits(billingAccountId))
 }
 
+/** An account's AI credits this month, by source, and what it has used. */
+export interface AiCreditAllowance {
+  /** Credits charged this month. */
+  used: number
+  /** The plan's monthly credits. */
+  plan: number
+  /** Granted credits (referral, promotion, an admin's grant). */
+  bonus: number
+  /** Bought credits. */
+  purchased: number
+  /** What the credit gate allows this month: plan + bonus + purchased, as aiCreditCap counts it. */
+  cap: number
+  /** cap - used, never below zero. */
+  left: number
+}
+
+/**
+ * The credits the gate counts (enforceAiCredits, aiCreditCap), with their
+ * parts, for the pages and tools that show them. The Usage and Billing meters
+ * read the plan's allowance alone, so an account with bonus or bought credits
+ * read "575 of 200" while the gate, rightly, still let calls through
+ * (production QA re-test, 2026-11-16, #98). Null where nothing is enforced
+ * (no entitlements, or unlimited); throws when they cannot be read, and the
+ * caller decides what to show.
+ */
+export async function aiCreditAllowance(billingAccountId: string): Promise<AiCreditAllowance | null> {
+  const ent = await getAccountEntitlements(billingAccountId)
+  if (!ent) return null
+  const plan = ent.monthlyAiCredits
+  if (plan === null || plan === undefined) return null
+  const [bonus, purchased, usage] = await Promise.all([
+    bonusCredits(billingAccountId),
+    purchasedCredits(billingAccountId),
+    getMonthlyUsage(billingAccountId),
+  ])
+  const cap = plan + bonus + purchased
+  const used = creditsFromTokens(usage.aiTokensUsed)
+  return { used, plan, bonus, purchased, cap, left: Math.max(0, cap - used) }
+}
+
 /**
  * Charge a completed AI turn's actual token usage.
  *

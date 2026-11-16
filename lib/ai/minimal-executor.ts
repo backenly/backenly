@@ -8747,6 +8747,20 @@ async function executeGetUsage(projectId: string): Promise<ExecutionResult> {
       const measured = a.measuredAt ? `, measured ${a.measuredAt}` : ''
       return `- ${a.label}: ${fmt(a.used, a.unit)} (${of}${measured}); projected ${fmt(a.projected, a.unit)}${grace}`
     })
+    // AI credits with every part the gate counts, so "of 200" never stands for
+    // an allowance that also has bonus or bought credits in it.
+    const credits = usage.aiCredits
+    if (credits) {
+      const parts = [
+        `${credits.plan.toLocaleString('en-US')} plan`,
+        credits.bonus > 0 ? `${credits.bonus.toLocaleString('en-US')} bonus` : null,
+        credits.purchased > 0 ? `${credits.purchased.toLocaleString('en-US')} bought` : null,
+      ].filter(Boolean)
+      lines.push(
+        `- AI credits: ${credits.used.toLocaleString('en-US')} used of ${credits.cap.toLocaleString('en-US')} this month ` +
+          `(${parts.join(' + ')}); ${credits.left.toLocaleString('en-US')} left`,
+      )
+    }
     const overage =
       usage.overage.mode === null
         ? 'Usage past a quota is never charged on this deployment.'

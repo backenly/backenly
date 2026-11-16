@@ -12,6 +12,7 @@
  * JSON-safe throughout (numbers and strings, no BigInt).
  */
 import { getOveragePolicy } from '@/lib/entitlements'
+import { aiCreditAllowance, type AiCreditAllowance } from '@/lib/entitlements/policy'
 import { OVERAGE_AXES, overageCents, type OverageAxis } from '@/lib/pricing/catalog'
 import { accountLimits } from './overage'
 import { forecastAccount } from './forecast'
@@ -69,6 +70,12 @@ export interface AxisDescription {
 export interface AccountUsageDescription {
   period: string
   planName: string
+  /**
+   * AI credits this month, with every part the credit gate counts: the plan's,
+   * bonus and bought (lib/entitlements/policy.ts aiCreditAllowance). Null where
+   * they are not capped, or could not be read.
+   */
+  aiCredits: AiCreditAllowance | null
   overage: {
     /** off | shadow | enforce, or null where usage can never be charged. */
     mode: 'off' | 'shadow' | 'enforce' | null
@@ -124,9 +131,11 @@ export async function describeAccountUsage(
   }
 
   const projectedCents = axes.reduce((s, a) => s + a.projectedCents, 0)
+  const aiCredits = await aiCreditAllowance(billingAccountId).catch(() => null)
   return {
     period: limits.period,
     planName: limits.planName,
+    aiCredits,
     overage: {
       mode: policy?.mode ?? null,
       spendLimitCents: policy?.spendLimitCents ?? 0,
