@@ -263,6 +263,12 @@ DECLARE
   had_app  boolean := false;
   was_i    boolean;
   was_s    boolean;
+  v_before jsonb;
+  v_after  jsonb;
+  v_key    text;
+  back_login boolean := false;
+  login_i  boolean;
+  login_s  boolean;
 BEGIN
   IF p_role !~ '^bkn_(ro|rw)_[0-9a-f]{12}$' THEN
     RAISE EXCEPTION 'backenly_direct_drop_role: invalid role name %', p_role;
@@ -273,11 +279,33 @@ BEGIN
 
   -- Before anything that needs them (see above). WITH INHERIT exists from
   -- PostgreSQL 16; before it a membership is inherited by an INHERIT member.
+  -- Whether the grant made a new one or changed one the definer held is read
+  -- from its grants of the role before and after, as for the application's
+  -- role below; that only matters if the login is retired, not dropped.
   IF NOT pg_has_role(current_user, p_role, 'USAGE') THEN
+    SELECT coalesce(jsonb_object_agg(m.grantor::text, jsonb_build_array(to_jsonb(m) -> 'inherit_option', to_jsonb(m) -> 'set_option')), '{}'::jsonb)
+      INTO v_before
+      FROM pg_auth_members m
+     WHERE m.roleid = (SELECT oid FROM pg_roles WHERE rolname = p_role)
+       AND m.member = (SELECT oid FROM pg_roles WHERE rolname = current_user);
     EXECUTE format(CASE WHEN current_setting('server_version_num')::int >= 160000
                         THEN 'GRANT %I TO %I WITH INHERIT TRUE, SET FALSE'
                         ELSE 'GRANT %I TO %I' END, p_role, current_user);
-    granted := true;
+    SELECT coalesce(jsonb_object_agg(m.grantor::text, jsonb_build_array(to_jsonb(m) -> 'inherit_option', to_jsonb(m) -> 'set_option')), '{}'::jsonb)
+      INTO v_after
+      FROM pg_auth_members m
+     WHERE m.roleid = (SELECT oid FROM pg_roles WHERE rolname = p_role)
+       AND m.member = (SELECT oid FROM pg_roles WHERE rolname = current_user);
+    IF EXISTS (SELECT 1 FROM jsonb_object_keys(v_after) k WHERE NOT v_before ? k) THEN
+      granted := true;
+    ELSE
+      SELECT k INTO v_key FROM jsonb_object_keys(v_before) k WHERE v_before -> k IS DISTINCT FROM v_after -> k LIMIT 1;
+      IF FOUND THEN
+        back_login := true;
+        login_i := (v_before -> v_key ->> 0)::boolean;
+        login_s := (v_before -> v_key ->> 1)::boolean;
+      END IF;
+    END IF;
   END IF;
 
   PERFORM pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = p_role;
@@ -296,22 +324,38 @@ BEGIN
   -- checks what ALTER ... OWNER TO checks, CVE-2026-120146). On Amazon RDS the
   -- definer holds ADMIN on the application's role and nothing more, so it
   -- grants itself both for this call and takes them back below; a grant it
-  -- already made itself (the regional procedure gives it INHERIT) is changed
-  -- for the call and given back as it was, never revoked.
+  -- held before (the regional procedure gives it INHERIT) is changed for the
+  -- call and given back as it was, never revoked. Which of the two the grant
+  -- did is read from the definer's grants of the role before and after, never
+  -- from the grantor: Amazon RDS records every grant its master makes as
+  -- rdsadmin's, so a grant the master made itself does not name it.
   IF current_setting('server_version_num')::int >= 160000
      AND v_app <> current_user
      AND NOT coalesce((SELECT rolsuper FROM pg_roles WHERE rolname = current_user), false)
      AND NOT (pg_has_role(current_user, v_app, 'USAGE') AND pg_has_role(current_user, v_app, 'SET'))
      AND pg_has_role(current_user, v_app, 'MEMBER WITH ADMIN OPTION') THEN
-    SELECT (to_jsonb(m) ->> 'inherit_option')::boolean, (to_jsonb(m) ->> 'set_option')::boolean
-      INTO was_i, was_s
+    SELECT coalesce(jsonb_object_agg(m.grantor::text, jsonb_build_array(to_jsonb(m) -> 'inherit_option', to_jsonb(m) -> 'set_option')), '{}'::jsonb)
+      INTO v_before
       FROM pg_auth_members m
      WHERE m.roleid = (SELECT oid FROM pg_roles WHERE rolname = v_app)
-       AND m.member = (SELECT oid FROM pg_roles WHERE rolname = current_user)
-       AND m.grantor = (SELECT oid FROM pg_roles WHERE rolname = current_user);
-    had_app := FOUND;
+       AND m.member = (SELECT oid FROM pg_roles WHERE rolname = current_user);
     EXECUTE format('GRANT %I TO %I WITH INHERIT TRUE, SET TRUE', v_app, current_user);
-    took_app := true;
+    SELECT coalesce(jsonb_object_agg(m.grantor::text, jsonb_build_array(to_jsonb(m) -> 'inherit_option', to_jsonb(m) -> 'set_option')), '{}'::jsonb)
+      INTO v_after
+      FROM pg_auth_members m
+     WHERE m.roleid = (SELECT oid FROM pg_roles WHERE rolname = v_app)
+       AND m.member = (SELECT oid FROM pg_roles WHERE rolname = current_user);
+    IF EXISTS (SELECT 1 FROM jsonb_object_keys(v_after) k WHERE NOT v_before ? k) THEN
+      took_app := true;
+    ELSE
+      SELECT k INTO v_key FROM jsonb_object_keys(v_before) k WHERE v_before -> k IS DISTINCT FROM v_after -> k LIMIT 1;
+      IF FOUND THEN
+        took_app := true;
+        had_app := true;
+        was_i := (v_before -> v_key ->> 0)::boolean;
+        was_s := (v_before -> v_key ->> 1)::boolean;
+      END IF;
+    END IF;
   END IF;
 
   -- Tables a READ_WRITE role created belong to it — hand them to the platform
@@ -336,6 +380,10 @@ BEGIN
     EXECUTE format('ALTER ROLE %I NOLOGIN PASSWORD NULL', p_role);
     IF granted THEN
       EXECUTE format('REVOKE %I FROM %I', p_role, current_user);
+    ELSIF back_login THEN
+      EXECUTE format('GRANT %I TO %I WITH INHERIT %s, SET %s', p_role, current_user,
+                     CASE WHEN coalesce(login_i, false) THEN 'TRUE' ELSE 'FALSE' END,
+                     CASE WHEN coalesce(login_s, false) THEN 'TRUE' ELSE 'FALSE' END);
     END IF;
     RETURN false;
   END IF;
@@ -710,6 +758,17 @@ REVOKE ALL ON FUNCTION public.backenly_direct_shared_database() FROM PUBLIC;
 -- object is its own session's, reachable from no other and gone when it ends,
 -- so it is not counted. Read by backenly_direct_schema_change_holds and by the
 -- strip below, which takes exactly what this lists.
+--
+-- From PostgreSQL 16 a membership is revoked GRANTED BY the role that granted
+-- it, whose privileges the definer then needs; except where a superuser granted
+-- it and the definer is none. PostgreSQL 16 records a superuser's grant as the
+-- bootstrap superuser's, and Amazon RDS records every grant its master makes
+-- the same way, as rdsadmin's, a role nobody can take (measured on staging,
+-- 16.13): REVOKE ... GRANTED BY rdsadmin is refused there, while the same
+-- REVOKE without GRANTED BY is not, because the server then picks the grantor
+-- itself as it did for the GRANT. On a server that picks the definer instead,
+-- such a REVOKE takes nothing, and the strip's last check names the membership
+-- as still held rather than reporting it taken.
 CREATE OR REPLACE FUNCTION public.backenly_direct_login_holds(p_role text, p_owner text DEFAULT NULL)
 RETURNS TABLE (item text, fix text, needs text[], step integer)
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog
@@ -718,7 +777,8 @@ AS $fn$
        here AS (SELECT d.oid, d.datname::text AS name, d.datacl, pg_get_userbyid(d.datdba)::text AS dba
                   FROM pg_database d WHERE d.datname = current_database()),
        v AS (SELECT current_setting('server_version_num')::int >= 160000 AS pg16,
-                    coalesce(p_owner, 'bkn_own_' || right(p_role, 12)) AS owner),
+                    coalesce(p_owner, 'bkn_own_' || right(p_role, 12)) AS owner,
+                    coalesce((SELECT me.rolsuper FROM pg_roles me WHERE me.rolname = current_user), false) AS me_super),
        dep AS (
          SELECT s.classid, s.objid, s.objsubid, s.deptype
            FROM pg_shdepend s, login, here
@@ -781,14 +841,20 @@ AS $fn$
          SELECT 'DATABASE', quote_ident(here.name), here.name, NULL, here.dba, a.privilege_type, a.is_grantable
            FROM here CROSS JOIN LATERAL aclexplode(here.datacl) a, login
           WHERE a.grantee = login.oid)
+  -- LEFT JOIN: before PostgreSQL 16 a dropped grantor leaves its oid behind in
+  -- pg_auth_members, and an inner join would drop the membership from the list
+  -- (and from the strip's last check) while the login keeps it. Such a grant
+  -- is revoked without GRANTED BY, as every grant was before 16.
   SELECT 'member of ' || g.rolname,
-         CASE WHEN v.pg16 THEN format('REVOKE %I FROM %I GRANTED BY %I CASCADE', g.rolname, p_role, gr.rolname)
+         CASE WHEN v.pg16 AND gr.oid IS NOT NULL AND (v.me_super OR NOT gr.rolsuper)
+              THEN format('REVOKE %I FROM %I GRANTED BY %I CASCADE', g.rolname, p_role, gr.rolname)
               ELSE format('REVOKE %I FROM %I CASCADE', g.rolname, p_role) END,
-         CASE WHEN v.pg16 THEN ARRAY[gr.rolname::text] ELSE '{}'::text[] END,
+         CASE WHEN v.pg16 AND gr.oid IS NOT NULL AND (v.me_super OR NOT gr.rolsuper) THEN ARRAY[gr.rolname::text] ELSE '{}'::text[] END,
          1
     FROM pg_auth_members m
     JOIN pg_roles g ON g.oid = m.roleid
-    JOIN pg_roles gr ON gr.oid = m.grantor, login, v
+    LEFT JOIN pg_roles gr ON gr.oid = m.grantor
+    CROSS JOIN login CROSS JOIN v
    WHERE m.member = login.oid AND g.rolname NOT IN ('backenly_external', 'backenly_no_schema_changes')
   UNION ALL
   SELECT CASE acl.kind WHEN 'DATABASE' THEN 'CREATE on database ' ELSE 'CREATE on schema ' END || acl.label,
@@ -886,7 +952,8 @@ AS $fn$
            FROM pg_roles r WHERE r.rolname IN ('backenly_external', 'backenly_no_schema_changes')),
        here AS (SELECT d.oid, d.datname::text AS name, d.datacl, pg_get_userbyid(d.datdba)::text AS dba
                   FROM pg_database d WHERE d.datname = current_database()),
-       v AS (SELECT current_setting('server_version_num')::int >= 160000 AS pg16),
+       v AS (SELECT current_setting('server_version_num')::int >= 160000 AS pg16,
+                    coalesce((SELECT me.rolsuper FROM pg_roles me WHERE me.rolname = current_user), false) AS me_super),
        scope AS (
          SELECT n.oid, n.nspname::text AS name, pg_get_userbyid(n.nspowner)::text AS owner, n.nspacl,
                 coalesce(p_owner,
@@ -898,35 +965,40 @@ AS $fn$
                      THEN n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'
                      ELSE n.nspname = p_schema OR left(n.nspname, length(p_schema) + 1) = p_schema || '_' END)
   -- 1. Memberships either group holds (the whole database only: roles are the cluster's).
+  -- A grant a superuser made is revoked without GRANTED BY by a definer that is
+  -- none (backenly_direct_login_holds explains why).
+  -- A LEFT JOIN, as in backenly_direct_login_holds: a dropped grantor before 16.
   SELECT mm.rolname::text, 'membership of ' || g.rolname,
-         CASE WHEN v.pg16 THEN format('REVOKE %I FROM %I GRANTED BY %I CASCADE', g.rolname, mm.rolname, gr.rolname)
+         CASE WHEN v.pg16 AND gr.oid IS NOT NULL AND (v.me_super OR NOT gr.rolsuper)
+              THEN format('REVOKE %I FROM %I GRANTED BY %I CASCADE', g.rolname, mm.rolname, gr.rolname)
               ELSE format('REVOKE %I FROM %I CASCADE', g.rolname, mm.rolname) END,
-         CASE WHEN v.pg16 THEN ARRAY[gr.rolname::text] ELSE '{}'::text[] END, 1
+         CASE WHEN v.pg16 AND gr.oid IS NOT NULL AND (v.me_super OR NOT gr.rolsuper) THEN ARRAY[gr.rolname::text] ELSE '{}'::text[] END, 1
     FROM pg_auth_members m
     JOIN pg_roles g ON g.oid = m.roleid
     JOIN pg_roles mm ON mm.oid = m.member
-    JOIN pg_roles gr ON gr.oid = m.grantor, v
+    LEFT JOIN pg_roles gr ON gr.oid = m.grantor
+    CROSS JOIN v
    WHERE p_schema IS NULL AND mm.rolname IN ('backenly_external', 'backenly_no_schema_changes')
   UNION ALL
   -- A login that could become the group, and so give it what the login owns.
   -- set_option exists from PostgreSQL 16 only, hence read through to_jsonb.
-  -- Not one a superuser granted, unless this definer is one: PostgreSQL 16
-  -- records a superuser's grant as made by the bootstrap superuser (rdsadmin on
-  -- Amazon RDS, a protected role), and only a superuser can revoke it. It gives
-  -- nothing once the rest is taken: the login owns nothing and can create
-  -- nothing, and neither the group nor PUBLIC can create anywhere, so there is
-  -- nothing to give the group and the group could not own it (section 7 lists
-  -- such logins).
+  -- One a superuser granted is revoked without GRANTED BY by a definer that is
+  -- none, as above: Amazon RDS takes it so. A server that does not leaves it,
+  -- and section 7 names it; it then gives nothing once the rest is taken, since
+  -- the login owns nothing and can create nothing, and neither the group nor
+  -- PUBLIC can create anywhere, so there is nothing to give the group and the
+  -- group could not own it.
   SELECT l.rolname::text, 'SET on backenly_external',
-         format('REVOKE SET OPTION FOR backenly_external FROM %I GRANTED BY %I', l.rolname, gr.rolname),
-         ARRAY[gr.rolname::text], 1
+         CASE WHEN v.me_super OR NOT gr.rolsuper
+              THEN format('REVOKE SET OPTION FOR backenly_external FROM %I GRANTED BY %I', l.rolname, gr.rolname)
+              ELSE format('REVOKE SET OPTION FOR backenly_external FROM %I', l.rolname) END,
+         CASE WHEN v.me_super OR NOT gr.rolsuper THEN ARRAY[gr.rolname::text] ELSE '{}'::text[] END, 1
     FROM pg_auth_members m
     JOIN pg_roles g ON g.oid = m.roleid AND g.rolname = 'backenly_external'
     JOIN pg_roles l ON l.oid = m.member
     JOIN pg_roles gr ON gr.oid = m.grantor, v
    WHERE p_schema IS NULL AND v.pg16 AND (to_jsonb(m) ->> 'set_option')::boolean
      AND l.rolname ~ '^bkn_(ro|rw)_[0-9a-f]{12}$'
-     AND (NOT gr.rolsuper OR (SELECT me.rolsuper FROM pg_roles me WHERE me.rolname = current_user))
   UNION ALL
   -- 2. CREATE on a schema or the database, TRIGGER on a table.
   SELECT g.name, 'CREATE on schema ' || s.name,
@@ -1004,13 +1076,20 @@ AS $fn$
      AND (g.oid <> 0 OR (da.defaclobjtype = 'r' AND a.privilege_type = 'TRIGGER')
                      OR (da.defaclobjtype = 'n' AND a.privilege_type = 'CREATE'))
   UNION ALL
-  -- 5. Objects either group owns.
+  -- 5. Objects either group owns. A large object belongs to no schema, so to no
+  -- project: the platform's role takes it, as it takes a dropped login's objects
+  -- (backenly_direct_drop_role), and no login reaches it then. A session that
+  -- became the group before its SET was taken could create one (lo_create needs
+  -- no privilege); left without a fix it would stop every later install.
   SELECT g.name, 'ownership of ' || o.type || ' ' || o.identity,
          CASE WHEN s.project_owner IS NOT NULL AND k.word IS NOT NULL
-              THEN format('ALTER %s %s OWNER TO %I', k.word, o.identity, s.project_owner) END,
-         ARRAY[g.name, s.project_owner], 5
+              THEN format('ALTER %s %s OWNER TO %I', k.word, o.identity, s.project_owner)
+              WHEN o.type = 'large object' AND app.role IS NOT NULL
+              THEN format('ALTER LARGE OBJECT %s OWNER TO %I', d.objid, app.role) END,
+         CASE WHEN o.type = 'large object' THEN ARRAY[g.name, app.role] ELSE ARRAY[g.name, s.project_owner] END, 5
     FROM grp g
     JOIN here ON true
+    CROSS JOIN (SELECT public.backenly_app_role() AS role) app
     JOIN pg_shdepend d ON d.refclassid = 'pg_authid'::regclass AND d.refobjid = g.oid AND d.deptype = 'o'
                       AND d.dbid = here.oid AND d.classid <> 'pg_default_acl'::regclass
     CROSS JOIN LATERAL pg_identify_object(d.classid, d.objid, d.objsubid) o
@@ -1081,9 +1160,10 @@ DECLARE
   v_back   text[] := '{}';
   v_back_i boolean[] := '{}';
   v_back_s boolean[] := '{}';
-  v_had    boolean;
-  v_was_i  boolean;
-  v_was_s  boolean;
+  v_before jsonb;
+  v_after  jsonb;
+  v_key    text;
+  v_took_su boolean := false;
   v_need   text;
   r        record;
 BEGIN
@@ -1112,15 +1192,39 @@ BEGIN
     SELECT coalesce(array_agg(h.item), '{}') INTO v_shared FROM public.backenly_direct_shared_holds(p_schema, v_owner) h;
   END IF;
   IF v_pg16 THEN
-    -- Not a SET a superuser granted, unless the definer is one (see
-    -- backenly_direct_shared_holds): only a superuser can revoke it.
+    -- A SET on backenly_external a superuser granted, taken without GRANTED BY
+    -- by a definer that is none (backenly_direct_login_holds explains why), and
+    -- needing nothing more: Amazon RDS takes it so. A server that picks the
+    -- definer as the grantor leaves it, and the install names it (section 7);
+    -- it gives nothing once the rest is taken (backenly_direct_shared_holds).
+    IF NOT v_super AND EXISTS (
+         SELECT 1 FROM pg_auth_members m
+           JOIN pg_roles g ON g.oid = m.roleid AND g.rolname = 'backenly_external'
+           JOIN pg_roles gr ON gr.oid = m.grantor
+          WHERE m.member = v_role AND gr.rolsuper AND (to_jsonb(m) ->> 'set_option')::boolean) THEN
+      BEGIN
+        EXECUTE format('REVOKE SET OPTION FOR backenly_external FROM %I', p_role);
+      EXCEPTION WHEN insufficient_privilege THEN
+        NULL; -- a server that lets only a superuser take it: left, and named by the install (section 7)
+      END;
+      v_took_su := NOT EXISTS (
+         SELECT 1 FROM pg_auth_members m
+           JOIN pg_roles g ON g.oid = m.roleid AND g.rolname = 'backenly_external'
+           JOIN pg_roles gr ON gr.oid = m.grantor
+          WHERE m.member = v_role AND gr.rolsuper AND (to_jsonb(m) ->> 'set_option')::boolean);
+    END IF;
+    -- Every other SET on it, revoked GRANTED BY the role that granted it.
     SELECT coalesce(array_agg(gr.rolname::text), '{}') INTO v_become
       FROM pg_auth_members m
       JOIN pg_roles g ON g.oid = m.roleid AND g.rolname = 'backenly_external'
       JOIN pg_roles gr ON gr.oid = m.grantor
      WHERE m.member = v_role AND (to_jsonb(m) ->> 'set_option')::boolean AND (NOT gr.rolsuper OR v_super);
   END IF;
-  IF v_marked AND cardinality(v_holds) = 0 AND cardinality(v_shared) = 0 AND cardinality(v_become) = 0 THEN
+  -- A login whose SET was just taken goes on, as one that held anything: a
+  -- session that became the group before keeps it, so its sessions are ended
+  -- and the login marked below.
+  IF v_marked AND cardinality(v_holds) = 0 AND cardinality(v_shared) = 0 AND cardinality(v_become) = 0
+     AND NOT v_took_su THEN
     RETURN false;
   END IF;
 
@@ -1170,18 +1274,20 @@ BEGIN
       CONTINUE;
     END IF;
     CONTINUE WHEN NOT pg_has_role(current_user, v_need, 'MEMBER WITH ADMIN OPTION');
-    -- A grant the definer already made itself, with other options, is changed
-    -- for this call and given back as it was below, never revoked: revoking it
-    -- would take a membership the definer held before (on RDS, its INHERIT on
-    -- the application's role).
-    SELECT (to_jsonb(m) ->> 'inherit_option')::boolean, (to_jsonb(m) ->> 'set_option')::boolean
-      INTO v_was_i, v_was_s
+    -- The grant below is recorded under the grantor the server picks: the
+    -- definer itself, or on Amazon RDS rdsadmin, for every grant the master
+    -- makes. So whether it changed a grant the definer held before or made a
+    -- new one is read from the definer's grants of the role before and after,
+    -- never from the grantor. A changed one is given back as it was below and a
+    -- new one revoked, each without GRANTED BY, so that the server picks the
+    -- same grantor again: revoking a changed one would take a membership the
+    -- definer held before (on RDS, its INHERIT on the application's role).
+    SELECT coalesce(jsonb_object_agg(m.grantor::text, jsonb_build_array(to_jsonb(m) -> 'inherit_option', to_jsonb(m) -> 'set_option')), '{}'::jsonb)
+      INTO v_before
       FROM pg_auth_members m
      WHERE m.roleid = (SELECT oid FROM pg_roles WHERE rolname = v_need)
-       AND m.member = (SELECT oid FROM pg_roles WHERE rolname = current_user)
-       AND m.grantor = (SELECT oid FROM pg_roles WHERE rolname = current_user);
-    v_had := FOUND;
-    CONTINUE WHEN v_had AND NOT v_pg16; -- before 16 a grant has no options to change
+       AND m.member = (SELECT oid FROM pg_roles WHERE rolname = current_user);
+    CONTINUE WHEN v_before <> '{}'::jsonb AND NOT v_pg16; -- before 16 a grant has no options to change
     -- A role the server will not let the definer take is left: Amazon RDS
     -- refuses rdsadmin ("a protected role") though pg_has_role reports the
     -- definer's ADMIN on it. A step that needed it then fails with its own error.
@@ -1191,12 +1297,20 @@ BEGIN
     EXCEPTION WHEN OTHERS THEN
       CONTINUE;
     END;
-    IF v_had THEN
-      v_back := v_back || v_need;
-      v_back_i := v_back_i || coalesce(v_was_i, false);
-      v_back_s := v_back_s || coalesce(v_was_s, false);
-    ELSE
+    SELECT coalesce(jsonb_object_agg(m.grantor::text, jsonb_build_array(to_jsonb(m) -> 'inherit_option', to_jsonb(m) -> 'set_option')), '{}'::jsonb)
+      INTO v_after
+      FROM pg_auth_members m
+     WHERE m.roleid = (SELECT oid FROM pg_roles WHERE rolname = v_need)
+       AND m.member = (SELECT oid FROM pg_roles WHERE rolname = current_user);
+    IF EXISTS (SELECT 1 FROM jsonb_object_keys(v_after) k WHERE NOT v_before ? k) THEN
       v_took := v_took || v_need;
+    ELSE
+      SELECT k INTO v_key FROM jsonb_object_keys(v_before) k WHERE v_before -> k IS DISTINCT FROM v_after -> k LIMIT 1;
+      IF FOUND THEN
+        v_back := v_back || v_need;
+        v_back_i := v_back_i || coalesce((v_before -> v_key ->> 0)::boolean, false);
+        v_back_s := v_back_s || coalesce((v_before -> v_key ->> 1)::boolean, false);
+      END IF;
     END IF;
   END LOOP;
 
@@ -1230,7 +1344,9 @@ BEGIN
     END LOOP;
   END IF;
 
-  IF cardinality(v_holds) > 0 THEN
+  -- Also when only its SET on the group was taken: a session that took the group
+  -- with SET ROLE keeps it after the option is gone.
+  IF cardinality(v_holds) > 0 OR cardinality(v_become) > 0 OR v_took_su THEN
     PERFORM pg_terminate_backend(a.pid) FROM pg_stat_activity a WHERE a.usename = p_role;
     EXECUTE format('COMMENT ON ROLE %I IS %L', p_role,
                    'backenly: sessions to end after a strip, from transaction ' || pg_current_xact_id()::text);
@@ -1276,6 +1392,12 @@ DECLARE
   v_mine    text := 'backenly: sessions to end after a strip, from transaction '
                     || coalesce(pg_current_xact_id_if_assigned()::text, '');
   v_granted boolean;
+  v_back    boolean;
+  v_was_i   boolean;
+  v_was_s   boolean;
+  v_before  jsonb;
+  v_after   jsonb;
+  v_key     text;
   v_ended   integer := 0;
   r         record;
 BEGIN
@@ -1291,17 +1413,43 @@ BEGIN
      ORDER BY 1
   LOOP
     CONTINUE WHEN r.description = v_mine;
-    -- Ending a role's sessions needs its privileges (backenly_direct_drop_role explains).
+    -- Ending a role's sessions needs its privileges (backenly_direct_drop_role
+    -- explains). A grant the definer held before is given back as it was, a new
+    -- one revoked, told apart by its grants before and after, as the strip does.
     v_granted := false;
+    v_back := false;
     IF NOT pg_has_role(current_user, r.login, 'USAGE') THEN
+      SELECT coalesce(jsonb_object_agg(m.grantor::text, jsonb_build_array(to_jsonb(m) -> 'inherit_option', to_jsonb(m) -> 'set_option')), '{}'::jsonb)
+        INTO v_before
+        FROM pg_auth_members m
+       WHERE m.roleid = (SELECT oid FROM pg_roles WHERE rolname = r.login)
+         AND m.member = (SELECT oid FROM pg_roles WHERE rolname = current_user);
       EXECUTE format(CASE WHEN v_pg16 THEN 'GRANT %I TO %I WITH INHERIT TRUE, SET FALSE'
                           ELSE 'GRANT %I TO %I' END, r.login, current_user);
-      v_granted := true;
+      SELECT coalesce(jsonb_object_agg(m.grantor::text, jsonb_build_array(to_jsonb(m) -> 'inherit_option', to_jsonb(m) -> 'set_option')), '{}'::jsonb)
+        INTO v_after
+        FROM pg_auth_members m
+       WHERE m.roleid = (SELECT oid FROM pg_roles WHERE rolname = r.login)
+         AND m.member = (SELECT oid FROM pg_roles WHERE rolname = current_user);
+      IF EXISTS (SELECT 1 FROM jsonb_object_keys(v_after) k WHERE NOT v_before ? k) THEN
+        v_granted := true;
+      ELSE
+        SELECT k INTO v_key FROM jsonb_object_keys(v_before) k WHERE v_before -> k IS DISTINCT FROM v_after -> k LIMIT 1;
+        IF FOUND THEN
+          v_back := true;
+          v_was_i := (v_before -> v_key ->> 0)::boolean;
+          v_was_s := (v_before -> v_key ->> 1)::boolean;
+        END IF;
+      END IF;
     END IF;
     PERFORM pg_terminate_backend(s.pid) FROM pg_stat_activity s WHERE s.usename = r.login;
     EXECUTE format('COMMENT ON ROLE %I IS NULL', r.login);
     IF v_granted THEN
       EXECUTE format('REVOKE %I FROM %I', r.login, current_user);
+    ELSIF v_back THEN
+      EXECUTE format('GRANT %I TO %I WITH INHERIT %s, SET %s', r.login, current_user,
+                     CASE WHEN coalesce(v_was_i, false) THEN 'TRUE' ELSE 'FALSE' END,
+                     CASE WHEN coalesce(v_was_s, false) THEN 'TRUE' ELSE 'FALSE' END);
     END IF;
     v_ended := v_ended + 1;
   END LOOP;
@@ -1506,9 +1654,9 @@ DECLARE
   back     text[] := '{}';
   back_i   boolean[] := '{}';
   back_s   boolean[] := '{}';
-  v_had    boolean;
-  v_was_i  boolean;
-  v_was_s  boolean;
+  v_before jsonb;
+  v_after  jsonb;
+  v_key    text;
 BEGIN
   IF NOT public.backenly_direct_shared_database() THEN
     RAISE NOTICE 'direct access: this database is dedicated to one project; its read-write logins keep the schema changes their admin allowed';
@@ -1524,23 +1672,6 @@ BEGIN
       failed := failed || format('%s: %s', r.login, SQLERRM);
     END;
   END LOOP;
-
-  -- Named, though left: logins whose SET on backenly_external a superuser
-  -- granted, which only a superuser can take (backenly_direct_shared_holds says
-  -- why it gives them nothing once the rest is taken).
-  IF v_pg16 AND NOT v_super THEN
-    FOR r IN
-      SELECT l.rolname::text AS login, gr.rolname::text AS grantor
-        FROM pg_auth_members m
-        JOIN pg_roles g ON g.oid = m.roleid AND g.rolname = 'backenly_external'
-        JOIN pg_roles l ON l.oid = m.member
-        JOIN pg_roles gr ON gr.oid = m.grantor
-       WHERE gr.rolsuper AND (to_jsonb(m) ->> 'set_option')::boolean AND l.rolname ~ '^bkn_(ro|rw)_[0-9a-f]{12}$'
-       ORDER BY 1
-    LOOP
-      RAISE NOTICE 'direct access: % keeps SET on backenly_external, granted by the superuser %, which only a superuser can take; it owns nothing and can create nothing, and neither can the group', r.login, r.grantor;
-    END LOOP;
-  END IF;
 
   -- The roles the statements below act as, the owner roles objects pass to
   -- made as the sync makes them.
@@ -1567,16 +1698,17 @@ BEGIN
       CONTINUE;
     END IF;
     CONTINUE WHEN NOT pg_has_role(current_user, r.role, 'MEMBER WITH ADMIN OPTION');
-    -- A grant the installer already made itself is changed for this run and
-    -- given back as it was below, never revoked (as the strip does).
-    SELECT (to_jsonb(m) ->> 'inherit_option')::boolean, (to_jsonb(m) ->> 'set_option')::boolean
-      INTO v_was_i, v_was_s
+    -- As the strip: whether the grant below changed one the installer held
+    -- before or made a new one is read from its grants of the role before and
+    -- after, never from the grantor (Amazon RDS records every grant its master
+    -- makes as rdsadmin's); a changed one is given back as it was below, a new
+    -- one revoked.
+    SELECT coalesce(jsonb_object_agg(m.grantor::text, jsonb_build_array(to_jsonb(m) -> 'inherit_option', to_jsonb(m) -> 'set_option')), '{}'::jsonb)
+      INTO v_before
       FROM pg_auth_members m
      WHERE m.roleid = (SELECT oid FROM pg_roles WHERE rolname = r.role)
-       AND m.member = (SELECT oid FROM pg_roles WHERE rolname = current_user)
-       AND m.grantor = (SELECT oid FROM pg_roles WHERE rolname = current_user);
-    v_had := FOUND;
-    CONTINUE WHEN v_had AND NOT v_pg16;
+       AND m.member = (SELECT oid FROM pg_roles WHERE rolname = current_user);
+    CONTINUE WHEN v_before <> '{}'::jsonb AND NOT v_pg16;
     -- As the strip: a role the server will not let the installer take is left,
     -- and a statement that needed it is reported with the others below.
     BEGIN
@@ -1585,12 +1717,20 @@ BEGIN
     EXCEPTION WHEN OTHERS THEN
       CONTINUE;
     END;
-    IF v_had THEN
-      back := back || r.role;
-      back_i := back_i || coalesce(v_was_i, false);
-      back_s := back_s || coalesce(v_was_s, false);
-    ELSE
+    SELECT coalesce(jsonb_object_agg(m.grantor::text, jsonb_build_array(to_jsonb(m) -> 'inherit_option', to_jsonb(m) -> 'set_option')), '{}'::jsonb)
+      INTO v_after
+      FROM pg_auth_members m
+     WHERE m.roleid = (SELECT oid FROM pg_roles WHERE rolname = r.role)
+       AND m.member = (SELECT oid FROM pg_roles WHERE rolname = current_user);
+    IF EXISTS (SELECT 1 FROM jsonb_object_keys(v_after) k WHERE NOT v_before ? k) THEN
       took := took || r.role;
+    ELSE
+      SELECT k INTO v_key FROM jsonb_object_keys(v_before) k WHERE v_before -> k IS DISTINCT FROM v_after -> k LIMIT 1;
+      IF FOUND THEN
+        back := back || r.role;
+        back_i := back_i || coalesce((v_before -> v_key ->> 0)::boolean, false);
+        back_s := back_s || coalesce((v_before -> v_key ->> 1)::boolean, false);
+      END IF;
     END IF;
   END LOOP;
 
@@ -1602,9 +1742,29 @@ BEGIN
     BEGIN
       EXECUTE r.fix;
     EXCEPTION WHEN OTHERS THEN
-      failed := failed || format('%s: %s', r.fix, SQLERRM);
+      -- A SET on backenly_external a superuser granted that this server does
+      -- not let the installer take (a permission error) is named below, not
+      -- failed; any other error fails.
+      IF NOT (SQLSTATE = '42501' AND r.item = 'SET on backenly_external' AND r.fix NOT LIKE '% GRANTED BY %') THEN
+        failed := failed || format('%s: %s', r.fix, SQLERRM);
+      END IF;
     END;
   END LOOP;
+
+  -- Read again, since a revoke without GRANTED BY (backenly_direct_login_holds
+  -- explains when) takes nothing on a server that picks the installer as the
+  -- grantor: what is left is reported with the failures, except a SET on
+  -- backenly_external a superuser granted, which is named and left (it gives
+  -- nothing once the rest is taken; backenly_direct_shared_holds says why).
+  IF coalesce(array_length(failed, 1), 0) = 0 THEN
+    FOR r IN SELECT h.holder, h.item, h.fix FROM public.backenly_direct_shared_holds() h ORDER BY h.step, h.holder, h.item LOOP
+      IF r.item = 'SET on backenly_external' AND r.fix NOT LIKE '% GRANTED BY %' THEN
+        RAISE NOTICE 'direct access: % keeps SET on backenly_external, granted by a superuser, which this server lets only a superuser take; it owns nothing and can create nothing, and neither can the group', r.holder;
+      ELSE
+        failed := failed || format('%s still holds %s', r.holder, r.item);
+      END IF;
+    END LOOP;
+  END IF;
 
   FOR r IN SELECT unnest(took) AS role LOOP
     EXECUTE format('REVOKE %I FROM %I', r.role, current_user);

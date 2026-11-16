@@ -104,7 +104,19 @@ export const DOC_HEADINGS = [
 
 export const DOCS_UPDATED = { iso: '2026-10-12', display: 'October 12, 2026' } as const
 
+/**
+ * The console sidebar's groups, Connect first (site-wide pass, 2026-11-15): the
+ * docs are read in the order of first use, and connecting your agent comes
+ * before anything it builds. /docs and ROUTES.docs open the first section of
+ * the first group, and the previous / next links follow this order.
+ */
 export const DOC_GROUPS: DocGroup[] = [
+  {
+    id: 'connect',
+    label: 'Connect',
+    blurb: 'How your coding agent, your app and your other services reach the backend.',
+    inConsole: true,
+  },
   {
     id: 'build',
     label: 'Build',
@@ -115,12 +127,6 @@ export const DOC_GROUPS: DocGroup[] = [
     id: 'operate',
     label: 'Operate',
     blurb: 'What keeps the backend healthy after launch, and how a change reaches production.',
-    inConsole: true,
-  },
-  {
-    id: 'connect',
-    label: 'Connect',
-    blurb: 'How your coding agent, your app and your other services reach the backend.',
     inConsole: true,
   },
   {

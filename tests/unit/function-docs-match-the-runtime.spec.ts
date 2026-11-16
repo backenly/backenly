@@ -40,6 +40,28 @@ describe('the functions docs match the runtime', () => {
     expect(docs).toContain('a schedule: `{ type: "cron", data: { scheduledAt, timestamp } }`')
   })
 
+  it('name exactly the modules the runner gives an http function, as does the prompt that writes them', () => {
+    // A module named in one place and missing from another is code the model
+    // writes that crashes, or a helper nobody learns exists.
+    const runner = read('lib/services/ai-functions/isolation/function-runner.cjs')
+    const loader = runner.slice(runner.indexOf('function buildRequire('))
+    const served = [...loader.slice(0, loader.indexOf('default:')).matchAll(/case '([^']+)':/g)]
+      .map((m) => m[1])
+      .filter((id) => !id.startsWith('node:'))
+    expect(served).toContain('@/lib/auth/session')
+
+    const refusal = loader.match(/Allowed: ([^`]*)\.`/)
+    expect(refusal?.[1].split(', ')).toEqual(served)
+
+    const contract = read('lib/ai/function-generator.ts')
+    const promptLine = contract.slice(contract.indexOf('- Imports allowed ONLY from:')).split('\n')[0]
+    const docsLine = docs.slice(docs.indexOf('It may import only')).split('\n')[0]
+    for (const id of served) {
+      expect(promptLine).toContain(`'${id}'`)
+      expect(docsLine).toContain(`\`${id}\``)
+    }
+  })
+
   it('say an http function reads the project’s variables from process.env', () => {
     // A route module's process.env is built in its runner process.
     const runner = read('lib/services/ai-functions/isolation/function-runner.cjs')

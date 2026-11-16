@@ -425,6 +425,54 @@ describe('on a database shared by several projects, as this one is', () => {
     expect(await as(l.owner, `CREATE TABLE "${l.schema}".later_public (id int)`)).toBe('ok')
     expect((await q(`SELECT has_table_privilege('public', $1, 'TRIGGER') AS t`, [`"${l.schema}".later_public`]))[0].t).toBe(false)
   }, 60_000)
+
+  // A session that took the group with SET ROLE keeps it after the option is
+  // gone, so a strip that took only the SET still ends the login's sessions and
+  // marks it, as a strip that took anything else does.
+  it('ends the sessions of a login whose only hold was its SET on the group, and marks it', async () => {
+    const only = `bkn_rw_${randomBytes(6).toString('hex')}`
+    rolesLater.push(only)
+    await q(`SELECT public.backenly_direct_create_role($1, $2, $3, 'READ_WRITE')`, [only, PASSWORD, schema])
+    expect(await holds(only)).toEqual([])
+    await q(`GRANT backenly_external TO ${only} WITH INHERIT TRUE, SET TRUE`)
+    const c = await login(only)
+    expect(await attempt(c, 'SET ROLE backenly_external')).toBe('ok')
+
+    expect((await q(`SELECT public.backenly_direct_strip_schema_changes($1) AS taken`, [only]))[0].taken).toBe(true)
+
+    const set = await q(`SELECT bool_or(m.set_option) AS any FROM pg_auth_members m
+                          WHERE m.roleid = 'backenly_external'::regrole AND m.member = $1::regrole`, [only])
+    expect(set).toEqual([{ any: false }])
+    expect(await sessionsOf(only)).toBe(0)
+    expect(await strippedMark(only)).toMatch(/^backenly: sessions to end after a strip/)
+    await q(`SELECT public.backenly_direct_end_stripped_sessions($1)`, [only])
+    expect(await strippedMark(only)).toBeNull()
+  }, 60_000)
+
+  // lo_create needs no privilege, so a session that became the group before its
+  // SET was taken could leave a large object the group owns. It belongs to no
+  // project's schema: the platform's role takes it, or every later install
+  // would stop on a hold it cannot take.
+  it('hands a large object the group owns to the platform\'s role when the file is installed again', async () => {
+    const [{ oid }] = await q(`SELECT lo_create(0)::text AS oid`)
+    try {
+      await q(`ALTER LARGE OBJECT ${oid} OWNER TO backenly_external`)
+      expect(await q(`SELECT fix FROM public.backenly_direct_shared_holds() WHERE holder = 'backenly_external' AND item = $1`,
+                     [`ownership of large object ${oid}`]))
+        .toEqual([{ fix: `ALTER LARGE OBJECT ${oid} OWNER TO ${app}` }])
+
+      install('scripts/setup-direct-access.sql')
+
+      // The install's own session names the platform's role without this session's setting.
+      const installApp = execFileSync('psql', ['-X', '-q', '-tA', '-c', 'SELECT public.backenly_app_role()', '-d', CONN],
+                                      { encoding: 'utf8' }).trim()
+      expect((await q(`SELECT pg_get_userbyid(lomowner) AS owner FROM pg_largeobject_metadata WHERE oid = $1::oid`, [oid])))
+        .toEqual([{ owner: installApp }])
+      expect(await q(`SELECT 1 FROM public.backenly_direct_shared_holds() WHERE item LIKE 'ownership of large object%'`)).toEqual([])
+    } finally {
+      await q(`SELECT lo_unlink(${oid})`).catch(() => {})
+    }
+  }, 120_000)
 })
 
 describe('held by a definer that is not a superuser, as on Amazon RDS', () => {
@@ -476,10 +524,12 @@ describe('held by a definer that is not a superuser, as on Amazon RDS', () => {
       await q(`GRANT TRIGGER ON "${onRds.schema}".orders TO ${onRds.login}`)
       await q(`CREATE FUNCTION "${onRds.schema}".planted() RETURNS int LANGUAGE sql AS 'SELECT 1'`)
       await q(`ALTER FUNCTION "${onRds.schema}".planted() OWNER TO ${onRds.login}`)
-      // SET on the group from a superuser, as Amazon RDS's older logins hold it: PostgreSQL 16 records a
-      // superuser's grant as made by the bootstrap superuser (rdsadmin there, this connection's role here), and
-      // only a superuser can revoke it. It is not a hold this definer can or need take (it gives nothing once
-      // the rest is taken), so the strip goes on without it instead of failing on it.
+      // SET on the group from a superuser: PostgreSQL 16 records a superuser's grant as the bootstrap
+      // superuser's (this connection's role here), and Amazon RDS records every grant its master makes so, as
+      // rdsadmin's. A definer that is no superuser revokes it without GRANTED BY, which RDS resolves to rdsadmin
+      // and takes (measured on staging); this server resolves it to the definer and takes nothing, so here it
+      // is left, and listed with that statement and needing no role. The strip goes on without it (it gives
+      // nothing once the rest is taken).
       await q(`GRANT backenly_external TO ${onRds.login} WITH INHERIT TRUE, SET TRUE`)
       const superSet = `SELECT count(*)::int AS n FROM pg_auth_members m JOIN pg_roles gr ON gr.oid = m.grantor
                          WHERE m.roleid = 'backenly_external'::regrole AND m.member = $1::regrole AND gr.rolsuper
@@ -491,13 +541,58 @@ describe('held by a definer that is not a superuser, as on Amazon RDS', () => {
 
       expect(await holds(onRds.login)).toEqual([])
       expect(await q(superSet, [onRds.login])).toEqual([{ n: 1 }])
-      expect(await q(`SELECT count(*)::int AS n FROM public.backenly_direct_shared_holds() WHERE holder = $1`, [onRds.login])).toEqual([{ n: 0 }])
+      expect(await q(`SELECT item, fix, needs FROM public.backenly_direct_shared_holds() WHERE holder = $1`, [onRds.login])).toEqual([
+        { item: 'SET on backenly_external', fix: `REVOKE SET OPTION FOR backenly_external FROM ${onRds.login}`, needs: [] },
+      ])
       expect(await isMember(onRds.login, 'backenly_no_schema_changes')).toBe(true)
       expect(await functionOwner(onRds.schema, 'planted')).toBe(onRds.owner)
       // What it granted itself to do this, it took back.
       for (const role of [onRds.login, onRds.owner, fresh]) {
         expect({ role, held: (await q(`SELECT pg_has_role($1, $2, 'USAGE') AS p`, [definer, role]))[0].p }).toEqual({ role, held: false })
       }
+    } finally {
+      await q('ROLLBACK')
+    }
+  }, 60_000)
+
+  // A membership in its owner role that a superuser granted, as every older
+  // login on Amazon RDS holds it (RDS records the master's grants as rdsadmin's):
+  // the strip revokes it without GRANTED BY and takes no role for it, since
+  // rdsadmin cannot be taken. RDS then takes it (measured on staging). This
+  // server resolves the grantor to the definer and takes nothing, and the strip
+  // must then fail naming it, never report it taken.
+  it('revokes an owner-role membership a superuser granted without GRANTED BY, and fails naming it where the server leaves it', async () => {
+    const definer = `bkn_test_sudefiner_${hex}`
+    const login = `bkn_rw_${randomBytes(6).toString('hex')}`
+    const owner = `bkn_own_${login.slice(-12)}`
+    await q('BEGIN')
+    try {
+      await q(`CREATE ROLE ${definer} NOLOGIN NOSUPERUSER CREATEROLE`)
+      for (const { rolname } of await q(`SELECT rolname FROM pg_roles WHERE rolname IN ('backenly_external', 'backenly_no_schema_changes')`)) {
+        await q(`GRANT ${rolname} TO ${definer} WITH ADMIN TRUE, INHERIT FALSE, SET FALSE`)
+      }
+      for (const fn of [
+        'backenly_direct_create_role(text, text, text, text)',
+        'backenly_direct_login_holds(text, text)',
+        'backenly_direct_schema_change_holds(text)',
+        'backenly_direct_shared_holds(text, text)',
+        'backenly_direct_strip_schema_changes(text, text, text)',
+      ]) {
+        await q(`ALTER FUNCTION public.${fn} OWNER TO ${definer}`)
+      }
+      await q(`SELECT public.backenly_direct_create_role($1, $2, $3, 'READ_WRITE')`, [login, PASSWORD, schema])
+      await q(`CREATE ROLE ${owner} NOLOGIN`)
+      await q(`GRANT ${owner} TO ${definer} WITH ADMIN TRUE, INHERIT FALSE, SET FALSE`)
+      await q(`GRANT ${owner} TO ${login} WITH INHERIT TRUE, SET TRUE`) // as this connection: a superuser
+
+      expect(await q(`SELECT item, fix, needs FROM public.backenly_direct_login_holds($1) WHERE item = $2`, [login, `member of ${owner}`]))
+        .toEqual([{ item: `member of ${owner}`, fix: `REVOKE ${owner} FROM ${login} CASCADE`, needs: [] }])
+
+      await q('SAVEPOINT strip')
+      await expect(q(`SELECT public.backenly_direct_strip_schema_changes($1)`, [login]))
+        .rejects.toThrow(new RegExp(`${login} still holds member of ${owner}`))
+      await q('ROLLBACK TO SAVEPOINT strip')
+      expect(await isMember(login, owner)).toBe(true)
     } finally {
       await q('ROLLBACK')
     }

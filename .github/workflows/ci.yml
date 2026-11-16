@@ -449,7 +449,10 @@ jobs:
   integration:
     name: integration suites
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    # Runs on main took 21 to 25 minutes by 2026-11-15, and one was cancelled at
+    # the old 25-minute limit with every suite passing. A limit is there to stop
+    # a hung run, not to fail a slow green one.
+    timeout-minutes: 40
     services:
       postgres:
         image: postgres:16

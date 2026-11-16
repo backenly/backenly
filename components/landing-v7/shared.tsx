@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef, useState, type PointerEvent, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { HEADING } from '@/components/site/tokens'
 
 /* ─────────────────────────────────────────────────────────────
@@ -89,39 +89,21 @@ export const FIG = {
  * starts one. The spotlight still fades, as an opacity the compositor runs.
  */
 export function BentoCell({ children, className = '', bare = false }: { children: ReactNode; className?: string; bare?: boolean }) {
-  const ref = useRef<HTMLElement>(null)
-
-  function onMove(event: PointerEvent<HTMLElement>) {
-    const el = ref.current
-    if (!el) return
-    const rect = el.getBoundingClientRect()
-    el.style.setProperty('--x', `${event.clientX - rect.left}px`)
-    el.style.setProperty('--y', `${event.clientY - rect.top}px`)
-  }
-
+  // The v8 landing's cell surface (site-wide pass, 2026-11-15): 10px corners, its ink and hairline, no pointer light.
+  // Only the MCP and agent pages still use this card; the landing itself no longer does.
   return (
     <article
-      ref={ref}
-      onPointerMove={onMove}
-      className={`group relative flex min-w-0 flex-col overflow-hidden rounded-2xl border border-white/[0.07] bg-[linear-gradient(180deg,rgba(255,255,255,0.028),rgba(255,255,255,0.008))] hover:border-white/[0.13] ${
+      className={`group relative flex min-w-0 flex-col overflow-hidden rounded-[10px] border border-white/[0.10] bg-[#0b0c0f] transition-colors duration-150 hover:border-white/[0.16] ${
         bare ? '' : 'p-6 md:p-8'
       } ${className}`}
     >
-      <div
-        aria-hidden
-        className="pointer-events-none absolute inset-0 opacity-0 transition-opacity duration-300 group-hover:opacity-100"
-        style={{
-          background:
-            'radial-gradient(420px circle at var(--x, 50%) var(--y, 0%), rgba(167,139,250,0.08), transparent 60%)',
-        }}
-      />
       <div className="relative flex h-full flex-col">{children}</div>
     </article>
   )
 }
 
 export function CellTitle({ children }: { children: ReactNode }) {
-  return <h3 className={`text-[19px] text-white ${HEADING}`}>{children}</h3>
+  return <h3 className="text-[17px] font-medium tracking-[-0.012em] text-white">{children}</h3>
 }
 
 export function CellBody({ children, className = '' }: { children: ReactNode; className?: string }) {

@@ -1,22 +1,31 @@
 import type { Metadata } from 'next'
-import type { ComponentType } from 'react'
+import {
+  Activity,
+  Bot,
+  Braces,
+  Code2,
+  Database,
+  FlaskConical,
+  FolderOpen,
+  History,
+  KeyRound,
+  Layers,
+  LineChart,
+  Radio,
+  Ruler,
+  Server,
+  Split,
+  Zap,
+} from 'lucide-react'
 import { safeJsonLd } from '@/lib/security/safe-jsonld'
 import { pageMetadata } from '@/lib/seo/metadata'
 import { graph, softwareNode } from '@/lib/seo/schema'
 import { SiteShell } from '@/components/site/SiteShell'
-import {
-  AuthDiagram,
-  DatabaseDiagram,
-  FunctionsDiagram,
-  RealtimeDiagram,
-  RestApiDiagram,
-  StorageDiagram,
-} from '@/components/landing/CapabilityDiagrams'
-import { BentoCell } from '@/components/landing-v7/shared'
-import { ArrowLink, ButtonLink, HorizonClose, JsonLd, Page, PageHero, Section } from '@/components/site/kit'
+import { Box, BoxHead, BoxLink, Cells, type CellItem } from '@/components/landing-v8/Box'
+import { CommandBlock } from '@/components/landing-v8/CommandBlock'
+import { ButtonLink, HorizonClose, JsonLd, Page, PageHero } from '@/components/site/kit'
 import { StartButton } from '@/components/site/StartButton'
-import { HEADING } from '@/components/site/tokens'
-import { ATLAS, type AtlasGroup, type AtlasVisual } from './data'
+import { ATLAS, type AtlasGroup, type Capability } from './data'
 
 export const metadata: Metadata = pageMetadata({
   title: 'Features: Postgres, APIs, auth, storage, realtime',
@@ -31,61 +40,187 @@ export const metadata: Metadata = pageMetadata({
 })
 
 /* ─────────────────────────────────────────────────────────────
-   /features (2026-10-15, founders: "clean and professional, no jargon, no
-   lots of text, no big banners").
+   /features, in the landing's grammar (site-wide pass, 2026-11-15: "our
+   landing page is now world class but remaining pages are not matching").
 
-   The whole product as one bento in the landing's system and rhythm
-   (2+1 / 1+1+1 / 1+1+1 / 2+1): each capability is a cell with its title, one
-   plain sentence, its parts as chips, and the landing's own drawing where the
-   capability has one. Chips name what is there; a plan tag says what a part
-   needs, so nobody reads a Pro feature as a Free one. The longer explanations
-   are on the deep-dive pages and in the docs.
+   The whole catalog in four lit boxes, in the order of the page's one
+   sentence: built by your coding agent (Agents), everything your backend
+   needs (Platform), kept running by Backenly (Autonomy), then Teams and
+   hosting. Each part of the backend is a cell with its sentence, the list of
+   what is in it, and a link to the page that explains it. Every name and
+   sentence comes from ATLAS (./data.ts) or from the landing's own boxes;
+   a plan tag says what a part needs, so nobody reads a Pro feature as Free.
 ───────────────────────────────────────────────────────────── */
 
-const VISUALS: Record<AtlasVisual, ComponentType> = {
-  database: DatabaseDiagram,
-  rest: RestApiDiagram,
-  auth: AuthDiagram,
-  storage: StorageDiagram,
-  realtime: RealtimeDiagram,
-  functions: FunctionsDiagram,
-}
-
-/** Cells that take two columns from lg up. */
-const WIDE = new Set(['database', 'autonomy'])
-
-/** The bento's order, by group id. */
-const ORDER = ['database', 'agents', 'apis', 'auth', 'storage', 'realtime', 'functions', 'governance', 'autonomy', 'platform']
-
-// The home page's product node (same @id), with this page's full catalog as
-// its feature list.
+// The home page's product node (same @id), with this page's full catalog as its feature list.
 const softwareSchema = graph({
   ...softwareNode,
   featureList: ATLAS.flatMap((group) => group.items.map((item) => item.name)),
 })
 
+/** Literal for the reason app/alternatives gives (SiteShell's ROUTES is a client reference here): keep it equal to ROUTES.github. */
+const GITHUB = 'https://github.com/backenly/backenly'
+
+function group(id: string): AtlasGroup {
+  const found = ATLAS.find((g) => g.id === id)
+  if (!found) throw new Error(`features: no catalog group "${id}"`)
+  return found
+}
+
+/** What is in a part of the backend, as a plain list; a plan tag where a part needs one. */
+function Parts({ items, className = '' }: { items: Capability[]; className?: string }) {
+  return (
+    <ul className={`grid gap-[10px] ${className}`}>
+      {items.map((item) => {
+        const ItemIcon = item.icon
+        return (
+          <li key={item.name} className="flex items-start gap-[10px] text-[14px] leading-[1.45] text-zinc-300">
+            <ItemIcon aria-hidden className="mt-[2px] h-[15px] w-[15px] shrink-0 text-zinc-400" strokeWidth={1.75} />
+            <span className="min-w-0">
+              {item.name}
+              {item.plan && (
+                <span className="ml-[8px] inline-flex h-[18px] items-center rounded-[4px] border border-white/[0.12] px-[5px] align-[1px] text-[11.5px] font-medium text-zinc-300">
+                  <span className="sr-only">(</span>
+                  {item.plan}
+                  <span className="sr-only"> plan)</span>
+                </span>
+              )}
+            </span>
+          </li>
+        )
+      })}
+    </ul>
+  )
+}
+
+/** A box's inventory beside its words: the landing's figure panel. */
+function Panel({ children }: { children: React.ReactNode }) {
+  // min-w-0: the command's one unbreakable line would otherwise set the column's width and push the box past a phone's edge.
+  return <div className="min-w-0 rounded-[8px] border border-white/[0.07] bg-[#0a0a0d] p-[20px] sm:p-[28px]">{children}</div>
+}
+
+/** A cell for one part of the backend: its sentence, what is in it, and where it is explained. */
+function partCell(id: string, icon: CellItem['icon'], fallback: { href: string; link: string }): CellItem {
+  const g = group(id)
+  return {
+    icon,
+    title: g.title,
+    body: g.lede,
+    list: <Parts items={g.items} />,
+    ...(g.deepDive ? { href: `/features/${g.deepDive.slug}`, link: 'How it works' } : fallback),
+  }
+}
+
 export default function FeaturesPage() {
-  const groups = ORDER.map((id) => ATLAS.find((g) => g.id === id)).filter((g): g is AtlasGroup => Boolean(g))
+  const agents = group('agents')
+  const autonomy = group('autonomy')
+  const hosting = group('platform')
+  const docs = (slug: string) => ({ href: `/docs/${slug}`, link: 'Read the docs' })
 
   return (
-    <SiteShell>
+    <SiteShell footerLit>
       <JsonLd json={safeJsonLd(softwareSchema)} />
       <Page>
         <PageHero
           trail={[{ label: 'Home', href: '/' }, { label: 'Features' }]}
           title="Features"
           lede="Everything your backend needs, built by your coding agent and kept running by Backenly."
+          rule={false}
         />
 
-        <Section flush aria-label="Capabilities">
-          <ul className="grid gap-[12px] md:grid-cols-2 lg:grid-cols-3">
-            {groups.map((group) => (
-              <li key={group.id} className={`min-w-0 ${WIDE.has(group.id) ? 'md:col-span-2' : ''}`}>
-                <FeatureCell group={group} wide={WIDE.has(group.id)} />
-              </li>
-            ))}
-          </ul>
-        </Section>
+        <Box id="agents-title" light={{ art: 'a' }} className="!pt-[8px] md:!pt-[16px]">
+          <BoxHead
+            id="agents-title"
+            tag={{ icon: Bot, label: 'Agents' }}
+            title="Built by your coding agent"
+            body={agents.lede}
+            extra={agents.deepDive && <BoxLink href={`/features/${agents.deepDive.slug}`}>How it works</BoxLink>}
+            visual={
+              <Panel>
+                <CommandBlock />
+                <p className="mt-[12px] text-[13px] leading-[1.5] text-faint">Asks for your project&apos;s MCP key, then prints the setup for Claude Code, Codex, Cursor or Cline.</p>
+                <Parts items={agents.items} className="mt-[24px] border-t border-white/[0.07] pt-[24px] sm:grid-cols-2 sm:gap-x-[24px]" />
+              </Panel>
+            }
+          />
+        </Box>
+
+        <Box id="platform-title" light={{ art: 'c' }}>
+          <BoxHead
+            id="platform-title"
+            layout="stacked"
+            tag={{ icon: Layers, label: 'Platform' }}
+            title="Every part of the backend"
+            body="Standard PostgreSQL with REST APIs, auth, storage, realtime and functions, in a schema of your own."
+          />
+          <Cells
+            cols={3}
+            items={[
+              partCell('database', Database, docs('database')),
+              partCell('apis', Braces, docs('database')),
+              partCell('auth', KeyRound, docs('auth')),
+              partCell('storage', FolderOpen, docs('storage')),
+              partCell('realtime', Radio, docs('realtime')),
+              partCell('functions', Zap, docs('functions')),
+            ]}
+          />
+        </Box>
+
+        <Box id="autonomy-title" light={{ art: 'a', flip: true }}>
+          <BoxHead
+            id="autonomy-title"
+            layout="stacked"
+            tag={{ icon: Activity, label: 'Autonomy' }}
+            title="Kept running after launch"
+            body="Backenly checks every project every minute, fixes what is safe on its own and holds risky changes for you."
+          />
+          <Cells
+            cols={3}
+            items={[
+              {
+                icon: Activity,
+                title: 'Self-healing',
+                body: autonomy.lede,
+                list: <Parts items={autonomy.items.filter((item) => !item.name.startsWith('Restructuring'))} />,
+                href: autonomy.deepDive ? `/features/${autonomy.deepDive.slug}` : '/docs/autonomy',
+                link: 'How it works',
+              },
+              {
+                icon: Split,
+                title: 'Restructuring',
+                body: 'When a table starts doing two jobs, Backenly separates them once you approve.',
+                list: (
+                  <Parts
+                    items={[
+                      { icon: Ruler, name: 'Measured first' },
+                      { icon: FlaskConical, name: 'Rehearsed on a copy' },
+                      { icon: Code2, name: 'Apps keep working' },
+                      { icon: LineChart, name: 'Judged afterwards' },
+                    ]}
+                  />
+                ),
+                href: '/features/self-restructuring-schema',
+                link: 'How it works',
+              },
+              partCell('governance', History, docs('autonomy')),
+            ]}
+          />
+        </Box>
+
+        <Box id="hosting-title" light={{ art: 'b' }}>
+          <BoxHead
+            id="hosting-title"
+            tag={{ icon: Server, label: 'Teams and hosting' }}
+            title="Your team, your servers"
+            body={hosting.lede}
+            extra={<BoxLink href={GITHUB}>View on GitHub</BoxLink>}
+            visual={
+              <Panel>
+                <Parts items={hosting.items} className="sm:grid-cols-2 sm:gap-x-[24px]" />
+              </Panel>
+            }
+          />
+        </Box>
 
         <HorizonClose title="The whole backend, free to start" lede="One live project, no credit card.">
           <StartButton />
@@ -95,77 +230,5 @@ export default function FeaturesPage() {
         </HorizonClose>
       </Page>
     </SiteShell>
-  )
-}
-
-function FeatureCell({ group, wide }: { group: AtlasGroup; wide: boolean }) {
-  const Visual = group.visual ? VISUALS[group.visual] : undefined
-  const titleId = `${group.id}-title`
-
-  const head = (
-    <div className="min-w-0">
-      <h2 id={titleId} className={`text-[19px] text-white ${HEADING}`}>
-        {group.title}
-      </h2>
-      <p className="mt-[10px] max-w-[46ch] text-[15px] leading-[1.7] tracking-[-0.004em] text-zinc-400 [text-wrap:pretty]">
-        {group.lede}
-      </p>
-    </div>
-  )
-
-  const chips = (
-    <ul className="flex flex-wrap gap-[6px]" aria-label={`${group.title}: what is included`}>
-      {group.items.map((item) => {
-        const ItemIcon = item.icon
-        return (
-          <li
-            key={item.name}
-            className="inline-flex items-center gap-[7px] rounded-[6px] border border-white/[0.08] bg-white/[0.03] px-[10px] py-[5px] text-[13px] text-zinc-300"
-          >
-            <ItemIcon aria-hidden className="h-[13px] w-[13px] shrink-0 text-zinc-500" strokeWidth={1.75} />
-            {item.name}
-            {item.plan && (
-              <span className="rounded-[4px] border border-white/[0.10] px-[5px] text-[10.5px] font-medium leading-[16px] text-zinc-400">
-                {item.plan}
-              </span>
-            )}
-          </li>
-        )
-      })}
-    </ul>
-  )
-
-  const more = group.deepDive && (
-    <ArrowLink href={`/features/${group.deepDive.slug}`}>
-      {group.deepDive.label}
-    </ArrowLink>
-  )
-
-  return (
-    <section id={group.id} aria-labelledby={titleId} className="h-full scroll-mt-[100px]">
-      <BentoCell className="h-full">
-        {wide ? (
-          <div className={`grid h-full gap-[32px] ${Visual ? 'lg:grid-cols-[minmax(0,1fr)_minmax(0,1.05fr)] lg:items-end' : 'lg:grid-cols-2'}`}>
-            <div className="flex h-full min-w-0 flex-col">
-              {head}
-              <div className="mt-[24px]">{Visual ? chips : more}</div>
-              {Visual && more && <div className="mt-auto pt-[24px]">{more}</div>}
-            </div>
-            {Visual ? <Visual /> : <div className="min-w-0 lg:self-center">{chips}</div>}
-          </div>
-        ) : (
-          <div className="flex h-full flex-col">
-            {head}
-            <div className="mt-[20px]">{chips}</div>
-            {Visual && (
-              <div className="mt-auto">
-                <Visual />
-              </div>
-            )}
-            {more && <div className={Visual ? 'pt-[24px]' : 'mt-auto pt-[24px]'}>{more}</div>}
-          </div>
-        )}
-      </BentoCell>
-    </section>
   )
 }

@@ -75,9 +75,14 @@ function recordApiCalls(page: Page): Array<{ url: string; status: number }> {
   return calls
 }
 
-/** Next.js renders this when a page throws. It is never a legitimate state. */
+/**
+ * Next.js renders this when a page throws. It is never a legitimate state.
+ * "500" only as a word: pages print the project's id (the realtime channel, the
+ * base URL, the MCP command, a function's endpoint), and a random id such as
+ * c07a53ce-2a14-4c48-a500-… otherwise read as an error page.
+ */
 async function assertNoErrorBoundary(page: Page, where: string): Promise<void> {
-  const boundary = page.getByText(/something went wrong|application error|unhandled|500/i)
+  const boundary = page.getByText(/something went wrong|application error|unhandled|\b500\b/i)
   await expect(boundary, `${where} rendered an error boundary`).toHaveCount(0)
 }
 

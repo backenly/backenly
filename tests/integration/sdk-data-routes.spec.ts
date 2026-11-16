@@ -33,6 +33,7 @@ import { prisma } from '@/lib/db'
 import { closeAllWorkspacePools } from '@/lib/services/workspace-pool'
 import { flushRecordedRequests } from '@/lib/traffic/request-recorder'
 import { hashApiKey } from '@/server/lib/end-user-identity'
+import { MAX_INSERT_ROWS, MAX_OBJECT_KEYS } from '@/server/routes/database'
 
 interface Note {
   id: string
@@ -243,5 +244,49 @@ describe('through the runtime (server/routes/database.ts)', () => {
   it('list() reads the rows back', async () => {
     const titles = (await sdk(runtime).notes.list({ limit: 100 })).map((n) => n.title)
     expect(titles).toEqual(expect.arrayContaining(['runtime one', 'runtime two', 'runtime four', 'runtime six']))
+  })
+})
+
+/**
+ * A body too large to validate is refused before zod sees it: zod 3 walks every
+ * element and key before it reports a limit, so very many small rows or keys
+ * cost memory out of all proportion to the body's size.
+ */
+describe('the runtime refuses a body too large to validate (server/routes/database.ts)', () => {
+  const post = (path: string, body: unknown) =>
+    realFetch(`${runtime}/api/v1/${projectId}/database/${path}`, {
+      method: 'POST',
+      headers: { 'x-api-key': key, 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+  const written = async (prefix: string) =>
+    (await prisma.$queryRawUnsafe<Array<{ n: number }>>(
+      `SELECT count(*)::int AS n FROM "${schema()}".${TABLE} WHERE title LIKE $1`, `${prefix}%`,
+    ))[0].n
+  const keys = (n: number) => Object.fromEntries(Array.from({ length: n }, (_, i) => [`k${i}`, i]))
+
+  it('refuses an insert of more rows than one request may carry, and writes none of them', async () => {
+    const res = await insert(runtime, Array.from({ length: MAX_INSERT_ROWS + 1 }, (_, i) => ({ title: `too many ${i}` })))
+    expect(res.status).toBe(413)
+    expect((await res.json()).error).toEqual({
+      code: 'PAYLOAD_TOO_LARGE',
+      message: `An insert can carry at most ${MAX_INSERT_ROWS} rows; send larger loads in batches.`,
+    })
+    expect(await written('too many ')).toBe(0)
+  })
+
+  it('takes the most rows one request may carry', async () => {
+    const res = await insert(runtime, Array.from({ length: MAX_INSERT_ROWS }, (_, i) => ({ title: `batch ${i}` })))
+    expect(res.status).toBe(200)
+    expect(await written('batch ')).toBe(MAX_INSERT_ROWS)
+  }, 120_000)
+
+  it('refuses a row, and a where, with more keys than a table can have columns', async () => {
+    const row = await insert(runtime, { title: 'wide', ...keys(MAX_OBJECT_KEYS) })
+    expect(row.status).toBe(413)
+    expect((await row.json()).error.code).toBe('PAYLOAD_TOO_LARGE')
+    const where = await post('query', { table: TABLE, where: keys(MAX_OBJECT_KEYS + 1) })
+    expect(where.status).toBe(413)
+    expect((await where.json()).error.code).toBe('PAYLOAD_TOO_LARGE')
   })
 })

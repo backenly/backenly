@@ -8,6 +8,9 @@ import { CommandPalette } from '@/components/app/CommandPalette'
 // Cloud-only component directly; the alias is what makes one file work in
 // both editions. See lib/edition/oss/analytics-mount.tsx.
 import { CloudAnalyticsMount } from '@cloud/analytics-mount'
+import { CLOUD_CONTROL_PLANE } from '@cloud/control-plane'
+import { ConsentGate } from '@/components/site/ConsentGate'
+import { CookieConsent } from '@/components/site/CookieConsent'
 import { ErrorBoundaryWrapper } from './error-boundary-wrapper'
 import { safeJsonLd } from '@/lib/security/safe-jsonld'
 import { OG_IMAGE, SITE_NAME, SITE_URL, X_HANDLE } from '@/lib/seo/metadata'
@@ -107,7 +110,12 @@ export default function RootLayout({
         />
       </head>
       <body className="overflow-x-hidden bg-black antialiased">
-        <CloudAnalyticsMount />
+        {/* Analytics load only after a visitor allows them (lib/consent.ts); the card and
+            the preferences dialog exist only where analytics do, on Backenly Cloud. */}
+        <ConsentGate>
+          <CloudAnalyticsMount />
+        </ConsentGate>
+        {CLOUD_CONTROL_PLANE && <CookieConsent />}
         <ErrorBoundaryWrapper>
           {children}
           <CommandPalette />

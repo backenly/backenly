@@ -133,7 +133,7 @@ const nextConfig = {
       // temporary redirect so the first section can change without browsers
       // caching the old one. The /resources rules point at the same page
       // directly, so none of them chains through /docs.
-      { source: '/docs', destination: '/docs/database', permanent: false },
+      { source: '/docs', destination: '/docs/connect', permanent: false },
       { source: '/resources', destination: '/docs/database', permanent: true },
       { source: '/resources/connect-your-coding-agent', destination: '/docs/connect', permanent: true },
       { source: '/resources/your-first-backend', destination: '/docs/database', permanent: true },

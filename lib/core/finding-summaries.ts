@@ -210,6 +210,9 @@ function summariseFindingText(type: string, details: Record<string, unknown>): s
     // ── Functions ─────────────────────────────────────────────────────────
     case 'function_failing': {
       const name = str(d.functionName) ?? 'A function'
+      if (d.reason === 'reads_withheld_variable') {
+        return `\`${name}\` reads ${str(d.variable) ?? 'a secret'}, which functions no longer get, so every call fails`
+      }
       const failures = Number(d.failures ?? 0)
       const runs = Number(d.runs ?? 0)
       return failures > 0 && runs > 0

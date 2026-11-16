@@ -11,12 +11,13 @@ import { CodeBlock } from '@/components/site/CodeBlock'
 import { JsonLd, Page, Steps, Trail } from '@/components/site/kit'
 import { ScrollSpy } from '@/components/site/ScrollSpy'
 import { CONTAINER, DISPLAY, HEADING, PANEL, TITLE } from '@/components/site/tokens'
+import { Light, Tag } from '@/components/landing-v8/Box'
 import { DOC_ICONS } from '@/components/docs/DocIcon'
 import { DocsMobileNav, DocsSidebar, DocTag } from '@/components/docs/DocsNav'
 import { DocVideo } from '@/components/docs/DocVideo'
-import { ICON_CHIP, READ, ROW_RULE } from '@/components/docs/tokens'
+import { READ, ROW_RULE } from '@/components/docs/tokens'
 import { rich } from '@/components/docs/rich'
-import { consolePath, DOC_HEADINGS, DOC_SECTIONS, DOCS_BY_SLUG, DOCS_UPDATED, type DocSection } from '../content'
+import { consolePath, DOC_GROUPS, DOC_HEADINGS, DOC_SECTIONS, DOCS_BY_SLUG, DOCS_UPDATED, docsInGroup, type DocSection } from '../content'
 import { DOC_VIDEOS } from '../videos'
 
 const APP_URL = 'https://backenly.com'
@@ -58,7 +59,7 @@ function DocBlock({ id, label, children }: { id: string; label: string; children
       <h2 id={`${id}-heading`} className={`group text-[23px] text-white md:text-[26px] ${TITLE}`}>
         <a
           href={`#${id}`}
-          className="rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300"
+          className="rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70"
         >
           {label}
           <span aria-hidden className="ml-[8px] text-zinc-600 opacity-0 transition-opacity duration-200 group-hover:opacity-100">
@@ -84,10 +85,11 @@ function DocBlock({ id, label, children }: { id: string; label: string; children
    right, following the scroll. At lg the right column folds away, and below lg
    the section list moves into a menu at the top of the page.
 
-   The landing's system (components/landing-v7/shared.tsx): bento surfaces for
-   the examples and the previous/next cards, the ink chip for the icon, hairline
-   rows for the notes. Violet marks one thing, the section you are reading in
-   the "On this page" rail.
+   2026-11-15 (site-wide pass, to match the v8 landing): the landing's tag over
+   a plain white title, its painted light kept low behind the header, no
+   entrance, the page's four headings under the header below xl, and Connect
+   first in the sidebar and in previous / next. Violet marks the tag and the
+   section you are reading in the "On this page" rail.
 ───────────────────────────────────────────────────────────── */
 
 export default async function DocPage(props: { params: Promise<{ slug: string }> }) {
@@ -99,9 +101,12 @@ export default async function DocPage(props: { params: Promise<{ slug: string }>
   const video = DOC_VIDEOS[doc.slug]
   const url = `${APP_URL}/docs/${doc.slug}`
 
-  const order = DOC_SECTIONS.findIndex((d) => d.slug === doc.slug)
-  const previous = order > 0 ? DOC_SECTIONS[order - 1] : undefined
-  const next = order < DOC_SECTIONS.length - 1 ? DOC_SECTIONS[order + 1] : undefined
+  // Previous and next follow the sidebar's reading order (Connect first), not the order the sections are written in.
+  const reading = DOC_GROUPS.flatMap((group) => docsInGroup(group.id))
+  const order = reading.findIndex((d) => d.slug === doc.slug)
+  const previous = order > 0 ? reading[order - 1] : undefined
+  const next = order < reading.length - 1 ? reading[order + 1] : undefined
+  const groupLabel = DOC_GROUPS.find((group) => group.id === doc.group)?.label ?? 'Docs'
 
   const hasTry = doc.prompts.length > 0 || Boolean(doc.code)
   const toc = DOC_HEADINGS.filter((h) => h.id !== 'try' || hasTry).map((h) => ({ id: h.id, label: h.label }))
@@ -129,30 +134,32 @@ export default async function DocPage(props: { params: Promise<{ slug: string }>
     ],
   }
 
-  const pager = `group flex min-w-0 flex-col gap-[8px] p-[20px] transition-colors duration-200 hover:border-white/[0.13] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300 ${PANEL}`
+  const pager = `group flex min-w-0 flex-col gap-[8px] p-[20px] transition-colors duration-200 hover:border-white/[0.16] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70 ${PANEL}`
 
   return (
     <SiteShell>
       <JsonLd json={safeJsonLd(articleSchema)} />
       <JsonLd json={safeJsonLd(breadcrumbSchema)} />
       <Page>
-        {/* Key light, as on every page, behind the title. */}
-        <div
-          aria-hidden
-          className="pointer-events-none absolute -top-[260px] left-[-12%] h-[820px] w-[1100px] max-w-none bg-[radial-gradient(closest-side,rgba(255,255,255,0.06),transparent)]"
-        />
+        {/* The landing's painted light, kept low for reading and gone before the first section; still, like every light on the site. */}
+        <div aria-hidden className="pointer-events-none absolute inset-x-0 top-0 isolate h-[520px] overflow-hidden">
+          <Light art="b" reach={520} mask="linear-gradient(to bottom, rgba(0,0,0,0.38) 0%, rgba(0,0,0,0.3) 45%, transparent 100%)" />
+        </div>
 
         <div className={`${CONTAINER} relative pb-[120px] pt-[28px] md:pt-[48px]`}>
           <div className="grid gap-[40px] lg:grid-cols-[232px_minmax(0,1fr)] lg:gap-[48px] xl:grid-cols-[232px_minmax(0,1fr)_200px] xl:gap-[64px]">
-            <aside className="hidden border-r border-white/[0.06] pr-[20px] lg:block">
+            {/* Plain containers: the navs inside them are the landmarks (two unlabeled asides failed axe landmark-unique). */}
+            <div className="hidden border-r border-white/[0.06] pr-[20px] lg:block">
               <DocsSidebar current={doc.slug} />
-            </aside>
+            </div>
 
             <article className="min-w-0 max-w-[760px] lg:pt-[4px]">
               <DocsMobileNav current={doc.slug} />
 
-              <header className={`hero-enter mt-[28px] border-b pb-[36px] lg:mt-0 ${ROW_RULE}`}>
+              {/* No entrance: a reader is here to read (site-wide pass, 2026-11-15). */}
+              <header className={`mt-[28px] border-b pb-[36px] lg:mt-0 ${ROW_RULE}`}>
                 <Trail
+                  readable
                   items={[
                     { label: 'Home', href: '/' },
                     // Not a link: there is no docs index page; the sidebar is the map.
@@ -160,21 +167,21 @@ export default async function DocPage(props: { params: Promise<{ slug: string }>
                     { label: doc.title },
                   ]}
                 />
-                <div className="mt-[28px] flex items-center gap-[14px]">
-                  <span className={`h-[44px] w-[44px] rounded-[8px] text-zinc-200 ${ICON_CHIP}`}>
-                    <Icon aria-hidden strokeWidth={1.75} className="h-[20px] w-[20px]" />
-                  </span>
-                  <h1
-                    className={`min-w-0 bg-gradient-to-b from-white from-40% to-zinc-400 bg-clip-text pb-[4px] text-[34px] text-transparent sm:text-[40px] md:text-[46px] ${DISPLAY}`}
-                  >
-                    {doc.title}
-                  </h1>
-                  {doc.tag && <DocTag className="mt-[6px]">{doc.tag}</DocTag>}
+                {/* The landing's tag names the part of the console; the title is the section, in plain white. */}
+                {/* Not where the group and the section share a name (Connect), so the tag never repeats the title. */}
+                {groupLabel !== doc.title && (
+                  <div className="mt-[24px]">
+                    <Tag icon={Icon}>{groupLabel}</Tag>
+                  </div>
+                )}
+                <div className={`${groupLabel !== doc.title ? 'mt-[18px]' : 'mt-[24px]'} flex flex-wrap items-center gap-x-[14px] gap-y-[8px]`}>
+                  <h1 className={`min-w-0 text-[36px] text-white sm:text-[42px] md:text-[48px] ${DISPLAY}`}>{doc.title}</h1>
+                  {doc.tag && <DocTag className="mt-[8px]">{doc.tag}</DocTag>}
                 </div>
-                <p className="mt-[20px] max-w-[64ch] text-[17px] leading-[1.65] tracking-[-0.012em] text-zinc-400 [text-wrap:pretty] md:text-[18px]">
+                <p className="mt-[18px] max-w-[64ch] text-[17px] leading-[1.65] tracking-[-0.012em] text-zinc-300 [text-wrap:pretty] md:text-[18px]">
                   {rich(doc.summary)}
                 </p>
-                <p className="mt-[20px] flex flex-wrap items-center gap-x-[12px] gap-y-[4px] text-[13px] text-zinc-500">
+                <p className="mt-[20px] flex flex-wrap items-center gap-x-[12px] gap-y-[4px] text-[13px] text-faint">
                   <span>
                     In the console: <span className="text-zinc-300">{consolePath(doc)}</span>
                   </span>
@@ -182,6 +189,19 @@ export default async function DocPage(props: { params: Promise<{ slug: string }>
                   <span>Updated {DOCS_UPDATED.display}</span>
                 </p>
               </header>
+
+              {/* Below xl the rail is gone, so the page's four headings sit under the header instead. */}
+              <nav aria-label="On this page" className="mt-[20px] xl:hidden">
+                <ul className="flex flex-wrap gap-x-[20px] gap-y-[8px] text-[14px]">
+                  {toc.map((item) => (
+                    <li key={item.id}>
+                      <a href={`#${item.id}`} className="rounded-[3px] text-zinc-300 transition-colors duration-150 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70">
+                        {item.label}
+                      </a>
+                    </li>
+                  ))}
+                </ul>
+              </nav>
 
               {video && (
                 <div className="mt-[40px]">
@@ -245,7 +265,7 @@ export default async function DocPage(props: { params: Promise<{ slug: string }>
               <nav aria-label="Previous and next section" className="mt-[72px] grid gap-[12px] sm:grid-cols-2">
                 {previous ? (
                   <Link href={`/docs/${previous.slug}`} className={pager}>
-                    <span className="inline-flex items-center gap-[6px] text-[13px] text-zinc-500">
+                    <span className="inline-flex items-center gap-[6px] text-[13px] text-faint">
                       <ArrowLeft aria-hidden className="h-[14px] w-[14px] transition-transform duration-200 group-hover:-translate-x-0.5" />
                       Previous
                     </span>
@@ -256,7 +276,7 @@ export default async function DocPage(props: { params: Promise<{ slug: string }>
                 )}
                 {next && (
                   <Link href={`/docs/${next.slug}`} className={`${pager} items-end text-right`}>
-                    <span className="inline-flex items-center gap-[6px] text-[13px] text-zinc-500">
+                    <span className="inline-flex items-center gap-[6px] text-[13px] text-faint">
                       Next
                       <ArrowRight aria-hidden className="h-[14px] w-[14px] transition-transform duration-200 group-hover:translate-x-0.5" />
                     </span>
@@ -266,12 +286,12 @@ export default async function DocPage(props: { params: Promise<{ slug: string }>
               </nav>
             </article>
 
-            <aside className="hidden xl:block">
+            <div className="hidden xl:block">
               <div className="sticky top-[100px] pt-[4px]">
-                <p className="mb-[12px] text-[13px] font-medium text-zinc-500">On this page</p>
-                <ScrollSpy label="On this page" items={toc} />
+                <p className="mb-[12px] text-[13px] font-medium text-faint">On this page</p>
+                <ScrollSpy label="On this page" items={toc} readable />
               </div>
-            </aside>
+            </div>
           </div>
         </div>
       </Page>

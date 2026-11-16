@@ -32,12 +32,15 @@
  *    ended up with a 42px font on a 32px line, its two lines overlapping.
  */
 
-/** Hero headline. Pair with the page's own responsive size steps. */
-export const DISPLAY =
-  'font-semibold leading-[1.03] tracking-[-0.042em] sm:leading-[1.02] md:leading-[1.01] xl:leading-[1.0]'
+/**
+ * Hero headline. Pair with the page's own responsive size steps. Regular
+ * weight, as the landing sets its titles (site-wide pass, 2026-11-15: the
+ * subpages' semibold gradient titles read as a different site).
+ */
+export const DISPLAY = 'font-normal leading-[1.04] tracking-[-0.038em]'
 
-/** Section headline. */
-export const TITLE = 'font-semibold leading-[1.1] tracking-[-0.032em] md:leading-[1.06]'
+/** Section headline: the landing's box title type (components/landing-v8/Box.tsx BOX_TITLE). */
+export const TITLE = 'font-normal leading-[1.08] tracking-[-0.035em] md:leading-[1.04]'
 
 /** Card and row headings. */
 export const HEADING = 'font-semibold leading-[1.35] tracking-[-0.018em]'
@@ -112,14 +115,13 @@ export const CONTAINER = 'mx-auto w-full max-w-[100rem] px-5 sm:px-6'
  */
 export const SECTION_TOP = 'relative pt-[88px] md:pt-[128px]'
 
-/* ── Actions, identical to the landing page's ────────────────────────────── */
+/* ── Actions: the landing's own, so the two can never drift ───────────────── */
 
 const FOCUS =
-  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300 focus-visible:ring-offset-2 focus-visible:ring-offset-[#08090a]'
+  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70 focus-visible:ring-offset-2 focus-visible:ring-offset-[#08090a]'
 
-export const PRIMARY_CTA = `group inline-flex h-[46px] cursor-pointer items-center justify-center gap-2 whitespace-nowrap rounded-lg bg-white px-5 text-[15px] font-semibold tracking-[-0.01em] text-black shadow-[0_0_0_1px_rgba(255,255,255,0.1),0_8px_30px_-8px_rgba(255,255,255,0.35)] transition-[background-color,transform,box-shadow] duration-200 hover:bg-zinc-200 hover:shadow-[0_0_0_1px_rgba(255,255,255,0.14),0_10px_40px_-8px_rgba(255,255,255,0.45)] active:scale-[0.98] ${FOCUS}`
-
-export const SECONDARY_CTA = `group inline-flex h-[46px] cursor-pointer items-center justify-center gap-2 whitespace-nowrap rounded-lg border border-white/[0.12] bg-white/[0.03] px-5 text-[15px] font-medium tracking-[-0.01em] text-zinc-200 transition-[background-color,border-color,color,transform] duration-200 hover:border-white/25 hover:bg-white/[0.07] hover:text-white active:scale-[0.98] ${FOCUS}`
+/** The landing's buttons (6px corners, medium weight, no glow), re-exported. */
+export { BTN_PRIMARY as PRIMARY_CTA, BTN_SECONDARY as SECONDARY_CTA } from '@/components/landing-v8/tokens'
 
 export const TEXT_LINK = `group inline-flex items-center gap-1.5 text-[15px] font-medium tracking-[-0.006em] text-zinc-300 transition-colors duration-200 hover:text-white ${FOCUS} rounded-sm`
 
@@ -132,11 +134,11 @@ export const FOCUS_RING = FOCUS
 /* ── Surfaces ────────────────────────────────────────────────────────────── */
 
 /**
- * A raised panel: the landing bento's surface. One radius for panels (16px),
- * one for controls (8px), one for chips (6px). Nothing else.
+ * A raised panel: the landing's box frame (components/landing-v8/Box.tsx).
+ * Radii: 10px for a box, 8px for a picture or field inside one, 6px for a
+ * button. Nothing else.
  */
-export const PANEL =
-  'rounded-2xl border border-white/[0.07] bg-[linear-gradient(180deg,rgba(255,255,255,0.028),rgba(255,255,255,0.008))]'
+export const PANEL = 'rounded-[10px] border border-white/[0.10] bg-[#0b0c0f]'
 
 /** Solid ink for anything that must occlude what is behind it. */
 export const INK = 'bg-[#0a0b0d]'

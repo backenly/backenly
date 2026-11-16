@@ -49,6 +49,7 @@ import { recordUsage } from '@/lib/usage/ledger'
 import { accountOf } from '@/lib/usage/account'
 import { executeWithUserContext } from '@/lib/services/workspace-rls'
 import { safeFetch } from '@/lib/security/outbound-guard'
+import { issueEndUserSession } from '@/lib/auth/end-user-session'
 import { isReservedTestEmail } from '@/lib/services/end-user-auth-table'
 // One cast table for the whole codebase. Duplicating it is how the MCP path and
 // this one would drift, and a drifted cast table is invisible until 42804.
@@ -453,9 +454,17 @@ async function runInSandbox(
   integrationManifest: Record<string, string[]> = {}
 ): Promise<{ logs: string[]; returnValue?: any }> {
   // Every call the run makes is answered here, for this project only: ctx.db
-  // through the typed proxy, ctx.http through the egress guard, and
-  // ctx.integrations with keys that never leave this process.
-  const handlers = { ...buildDbProxy(projectId, caller), ...integrationProxy }
+  // through the typed proxy, ctx.http through the egress guard,
+  // ctx.integrations with keys that never leave this process, and
+  // ctx.auth.createSession with the project's secret, which never does either
+  // (lib/auth/end-user-session.ts).
+  const handlers = {
+    ...buildDbProxy(projectId, caller),
+    ...integrationProxy,
+    async 'auth.createSession'(args: unknown[]) {
+      return issueEndUserSession(projectId, args[0])
+    },
+  }
   let outcome: IsolatedOutcome
   try {
     outcome = await runIsolated(

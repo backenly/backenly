@@ -98,7 +98,7 @@ export default function NotFound() {
                 Pricing
               </Link>
               <Link
-                href="/docs/database"
+                href="/docs/connect"
                 style={{ color: '#6b6b88', fontSize: '0.9rem', textDecoration: 'none' }}
               >
                 Docs

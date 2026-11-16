@@ -55,13 +55,11 @@ setup('sign up the first operator', async ({ page, request, baseURL }) => {
     expect(token, 'BACKENLY_SETUP_TOKEN is not exported, so nothing can claim the deployment').toBeTruthy()
 
     // Entry one: the plain signup page asks for the token while unclaimed.
-    // The email form opens on click, and a click before hydration is
-    // swallowed, so retry until the form is there.
+    // The email form is on screen as soon as the page has hydrated; it used to
+    // open behind a "Continue with Email" button, which the 2026-11-15 auth
+    // redesign removed.
     await page.goto('/auth/signup')
-    await expect(async () => {
-      await page.getByText('Continue with Email').click()
-      await expect(page.locator('#email')).toBeVisible({ timeout: 1_000 })
-    }).toPass({ timeout: 60_000 })
+    await expect(page.locator('#email')).toBeVisible({ timeout: 60_000 })
     await expect(
       page.locator('#setupToken'),
       'the signup page shows no setup-token field on an unclaimed deployment'

@@ -1,3 +1,6 @@
+import { Light, Tag, type BoxLight } from '@/components/landing-v8/Box'
+import { BoxDawn, ClosingLight } from '@/components/landing-v8/ClosingLight'
+import type { LucideIcon } from 'lucide-react'
 import Link from 'next/link'
 import { ArrowRight, ArrowUpRight, Check, Minus } from 'lucide-react'
 import type { HTMLAttributes, ReactNode } from 'react'
@@ -93,7 +96,7 @@ export function Trail({
     <nav aria-label="Breadcrumb" className={className}>
       <ol
         className={`flex flex-wrap items-center gap-x-2 gap-y-1 text-[14px] tracking-[-0.006em] ${
-          readable ? 'text-zinc-400' : 'text-zinc-500'
+          readable ? 'text-zinc-400' : 'text-faint'
         }`}
       >
         {items.map((item, index) => {
@@ -105,7 +108,7 @@ export function Trail({
                   href={item.href}
                   className={`rounded-sm transition-colors duration-200 ${
                     readable ? 'hover:text-white' : 'hover:text-zinc-200'
-                  } focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300`}
+                  } focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70`}
                 >
                   {item.label}
                 </Link>
@@ -140,6 +143,7 @@ export function Trail({
  */
 export function PageHero({
   trail,
+  tag,
   title,
   lede,
   actions,
@@ -147,8 +151,12 @@ export function PageHero({
   children,
   size = 'default',
   readableTrail = false,
+  light,
+  rule = true,
 }: {
   trail?: Crumb[]
+  /** The landing's tag above the title: the product area, with its icon. */
+  tag?: { icon: LucideIcon; label: string }
   title: ReactNode
   lede?: ReactNode
   actions?: ReactNode
@@ -158,6 +166,14 @@ export function PageHero({
   size?: 'default' | 'compact'
   /** Passes `readable` to the trail (see Trail). */
   readableTrail?: boolean
+  /**
+   * The landing's painted light behind the head (site-wide pass, 2026-11-15).
+   * Marketing heads get one by default; documents (`compact`) do not. Pass a
+   * BoxLight to choose the painting, or false for none.
+   */
+  light?: BoxLight | false
+  /** The hairline under the head. Off where a lit box follows, whose own frame is the edge (the landing has no rule either). */
+  rule?: boolean
 }) {
   // A page header, not a banner (founders, 2026-10-15: "no big banners").
   // The title is a label for the page at the size of a landing section title,
@@ -165,36 +181,41 @@ export function PageHero({
   // than wrapping to a third line.
   const headline =
     size === 'compact'
-      ? 'max-w-[26ch] text-[30px] sm:text-[34px] md:text-[38px]'
+      ? 'max-w-[26ch] text-[32px] sm:text-[36px] md:text-[40px]'
       : aside
-        ? 'max-w-[20ch] text-[32px] sm:text-[38px] md:text-[42px]'
-        : 'max-w-[24ch] text-[34px] sm:text-[40px] md:text-[46px]'
+        ? 'max-w-[20ch] text-[36px] sm:text-[42px] md:text-[48px]'
+        : 'max-w-[22ch] text-[40px] sm:text-[48px] md:text-[56px]'
+  // Softer behind the words and gone before the head's bottom edge, so a subpage head never reads as a banner.
+  const HEAD_FADE = 'linear-gradient(to bottom, rgba(0,0,0,0.45) 0%, rgba(0,0,0,0.6) 45%, rgba(0,0,0,0.25) 78%, transparent 100%)'
+  const painting: BoxLight | false =
+    light === undefined ? (size === 'compact' ? false : { art: 'b', reach: 640, mask: HEAD_FADE }) : light && { mask: HEAD_FADE, ...light }
 
   return (
-    <section className="relative isolate">
-      {/* Key light, top left, behind the headline: the landing's own. */}
-      <div
-        aria-hidden
-        className="pointer-events-none absolute -top-[260px] left-[-12%] -z-10 h-[820px] w-[1100px] max-w-none bg-[radial-gradient(closest-side,rgba(255,255,255,0.07),transparent)]"
-      />
+    <section className="relative isolate overflow-hidden">
+      {/* The landing's painted light, softened behind the words (Light's head mask keeps body text at 4.5:1). */}
+      {painting && <Light {...painting} />}
       <div
         className={`${CONTAINER} pb-[40px] pt-[32px] md:pb-[56px] md:pt-[48px] ${
           aside ? 'grid gap-12 lg:grid-cols-[minmax(0,1fr)_minmax(0,440px)] lg:items-end lg:gap-16' : ''
         }`}
       >
         <div className="min-w-0">
-          {trail && <Trail items={trail} readable={readableTrail} className="hero-enter" />}
+          {/* Over the painted light the quieter crumbs fall under 4.5:1, so a lit head always takes the readable ones. */}
+          {trail && <Trail items={trail} readable={readableTrail || painting !== false} className="hero-enter" />}
+          {tag && (
+            <div className={`hero-enter ${trail ? 'mt-[20px]' : ''}`}>
+              <Tag icon={tag.icon}>{tag.label}</Tag>
+            </div>
+          )}
           <h1
-            // One vertical falloff across the whole headline, white to a cool
-            // grey, the way a lit object reads. Never a second colour on one
-            // phrase: that is the most common tell of a generated hero.
-            className={`hero-enter hero-enter-1 ${trail ? 'mt-[20px]' : ''} bg-gradient-to-b from-white from-40% to-zinc-400 bg-clip-text pb-[4px] text-transparent [text-wrap:balance] ${headline} ${DISPLAY}`}
+            // Plain white at the landing's regular weight (it was a white-to-grey gradient in semibold).
+            className={`hero-enter hero-enter-1 ${trail || tag ? 'mt-[20px]' : ''} text-white [text-wrap:balance] ${headline} ${DISPLAY}`}
           >
             {title}
           </h1>
           {lede && (
             <p
-              className={`hero-enter hero-enter-2 mt-[14px] max-w-[60ch] text-[16px] text-zinc-400 [text-wrap:pretty] md:text-[17px] ${LEDE}`}
+              className={`hero-enter hero-enter-2 mt-[16px] max-w-[60ch] text-[17px] text-zinc-300 [text-wrap:pretty] md:text-[18px] ${LEDE}`}
             >
               {lede}
             </p>
@@ -208,7 +229,7 @@ export function PageHero({
         </div>
         {aside && <div className="hero-enter hero-enter-4 min-w-0">{aside}</div>}
       </div>
-      <Horizon />
+      {rule && <Horizon />}
     </section>
   )
 }
@@ -278,11 +299,11 @@ export function SectionHead({
   const centered = align === 'center'
   // The default is the landing's section-title type (components/landing-v7/
   // shared.tsx TITLE_TYPE), so a subpage section reads like a landing section.
-  // A title may carry its own grey continuation: <span className="text-zinc-500">.
+  // One colour per title (site-wide pass, 2026-11-15): no grey continuation.
   const heading =
     size === 'sm'
       ? 'max-w-[26ch] text-[26px] md:text-[34px]'
-      : 'max-w-[28ch] text-[30px] sm:text-[36px] md:text-[42px]'
+      : 'max-w-[28ch] text-[32px] sm:text-[40px] md:text-[48px]'
 
   return (
     <div className={`${centered ? 'mx-auto flex flex-col items-center text-center' : ''} ${className}`}>
@@ -442,7 +463,7 @@ export function GlyphList({
         <li key={index} className="flex gap-3 text-[15px] leading-[1.65] text-zinc-300">
           <Icon
             aria-hidden
-            className={`mt-[4px] h-4 w-4 shrink-0 ${glyph === 'check' ? 'text-violet-300' : 'text-zinc-500'}`}
+            className={`mt-[4px] h-4 w-4 shrink-0 ${glyph === 'check' ? 'text-violet-300' : 'text-faint'}`}
             strokeWidth={2}
           />
           <span className="min-w-0 [text-wrap:pretty]">{item}</span>
@@ -483,10 +504,10 @@ export function NextLinks({
           <li key={item.href} className="min-w-0">
             <SmartLink
               href={item.href}
-              className={`group flex h-full flex-col justify-between gap-6 p-6 transition-[border-color,background-color] duration-200 hover:border-white/[0.16] hover:bg-white/[0.035] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300 ${PANEL}`}
+              className={`group flex h-full flex-col justify-between gap-6 p-6 transition-[border-color,background-color] duration-200 hover:border-white/[0.16] hover:bg-white/[0.035] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70 ${PANEL}`}
             >
               <span className="min-w-0">
-                {item.meta && <span className="mb-3 block text-[13px] text-zinc-500">{item.meta}</span>}
+                {item.meta && <span className="mb-3 block text-[13px] text-faint">{item.meta}</span>}
                 <span className={`block text-[17px] text-white ${HEADING}`}>{item.title}</span>
                 {item.body && (
                   <span className="mt-2 block text-[14px] leading-[1.6] text-zinc-400 [text-wrap:pretty]">
@@ -496,7 +517,7 @@ export function NextLinks({
               </span>
               <Icon
                 aria-hidden
-                className="h-4 w-4 text-zinc-500 transition-[color,transform] duration-200 group-hover:translate-x-0.5 group-hover:text-white"
+                className="h-4 w-4 text-faint transition-[color,transform] duration-200 group-hover:translate-x-0.5 group-hover:text-white"
               />
             </SmartLink>
           </li>
@@ -559,26 +580,57 @@ export function HorizonClose({
   lede?: ReactNode
   children: ReactNode
 }) {
+  // The landing's closing (components/landing-v8/CtaV8.tsx): the same dawn,
+  // type and spacing, so every page ends the way the landing does. The page
+  // sets SiteShell `footerLit` so the light runs on behind its footer.
   return (
-    <section className="relative overflow-hidden pb-[220px] pt-[112px] md:pb-[280px] md:pt-[168px]">
-      <div aria-hidden className="pointer-events-none absolute inset-x-0 bottom-0 h-[420px] overflow-hidden">
-        <div className="absolute left-1/2 top-[140px] h-[1400px] w-[2400px] -translate-x-1/2 rounded-[50%] bg-[radial-gradient(closest-side,rgba(139,92,246,0.26),rgba(139,92,246,0.06)_55%,transparent)]" />
-        <div className="absolute left-1/2 top-[250px] h-[1400px] w-[1800px] -translate-x-1/2 rounded-[50%] border-t border-violet-200/50 bg-[#08090a] shadow-[0_-40px_140px_-30px_rgba(167,139,250,0.55),inset_0_1px_40px_-10px_rgba(196,181,253,0.25)] md:w-[2200px]" />
-      </div>
+    <section className="relative pb-[260px] pt-[112px] md:pb-[280px] md:pt-[176px]">
+      <ClosingLight />
       <div className={`${CONTAINER} relative text-center`}>
-        <h2
-          className={`mx-auto max-w-[18ch] text-[36px] text-white [text-wrap:balance] md:text-[60px] ${DISPLAY}`}
-        >
+        <h2 className="mx-auto max-w-[16ch] text-[38px] font-normal leading-[1.04] tracking-[-0.045em] text-white [text-wrap:balance] sm:text-[52px] md:text-[64px] md:leading-[1.0]">
           {title}
         </h2>
-        {lede && (
-          <p
-            className={`mx-auto mt-6 max-w-[52ch] text-[17px] text-zinc-400 [text-wrap:pretty] md:text-[18px] ${LEDE}`}
+        {lede && <p className="mx-auto mt-[24px] max-w-[52ch] text-[17px] leading-[1.6] text-zinc-400 [text-wrap:pretty] md:text-[18px]">{lede}</p>}
+        <div className="mx-auto mt-[36px] flex max-w-[400px] flex-col gap-[12px] sm:max-w-none sm:flex-row sm:items-center sm:justify-center">{children}</div>
+      </div>
+    </section>
+  )
+}
+
+/**
+ * A closing in a framed box (founders, 2026-11-15: Contact and Pricing "like
+ * Blaxel", with less of the violet). The landing's dawn is held inside the box
+ * and dimmed (BoxDawn), so the page ends on one quiet light instead of the full
+ * horizon, and the page leaves SiteShell's footer unlit.
+ */
+export function CloseBox({
+  id,
+  title,
+  lede,
+  children,
+  narrow = false,
+}: {
+  id?: string
+  title: ReactNode
+  lede?: ReactNode
+  children: ReactNode
+  /** The 1120px measure of a framed page body (Contact), so both frames share their edges. */
+  narrow?: boolean
+}) {
+  return (
+    <section aria-labelledby={id} className="pb-[96px] pt-[96px] md:pb-[128px] md:pt-[120px]">
+      <div className={CONTAINER}>
+        <div className={`relative isolate overflow-hidden rounded-[10px] border border-white/[0.10] bg-[#0b0c0f] px-[24px] pb-[104px] pt-[64px] text-center sm:px-[48px] max-sm:pb-[132px] md:pb-[136px] md:pt-[88px] ${narrow ? 'mx-auto max-w-[1120px]' : ''}`}>
+          <BoxDawn />
+          <h2
+            id={id}
+            className="mx-auto max-w-[18ch] text-[34px] font-normal leading-[1.06] tracking-[-0.04em] text-white [text-wrap:balance] sm:text-[44px] md:text-[52px] md:leading-[1.02]"
           >
-            {lede}
-          </p>
-        )}
-        <div className="mt-10 flex flex-col items-center justify-center gap-3 sm:flex-row">{children}</div>
+            {title}
+          </h2>
+          {lede && <p className="mx-auto mt-[20px] max-w-[54ch] text-[16px] leading-[1.6] text-zinc-300 [text-wrap:pretty] md:text-[17px]">{lede}</p>}
+          <div className="mx-auto mt-[32px] flex max-w-[400px] flex-col gap-[12px] sm:max-w-none sm:flex-row sm:items-center sm:justify-center">{children}</div>
+        </div>
       </div>
     </section>
   )
@@ -609,7 +661,7 @@ export function DataTable({
       role="region"
       aria-label={caption}
       tabIndex={0}
-      className={`overflow-x-auto focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-300 ${PANEL}`}
+      className={`overflow-x-auto focus:outline-none focus-visible:ring-2 focus-visible:ring-white/70 ${PANEL}`}
     >
       <table className={`w-full ${minWidth} border-collapse text-left`}>
         <caption className="sr-only">{caption}</caption>
@@ -688,14 +740,15 @@ export function ComparisonTable({
         role="region"
         aria-label={caption}
         tabIndex={0}
-        className={`hidden md:block overflow-x-auto focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-300 ${PANEL}`}
+        className={`hidden md:block overflow-x-auto focus:outline-none focus-visible:ring-2 focus-visible:ring-white/70 ${PANEL}`}
       >
         <table className="w-full min-w-[860px] table-fixed border-collapse text-left">
           <caption className="sr-only">{caption}</caption>
           <colgroup>
             <col className="w-[17%]" />
             <col className="w-[27%]" />
-            <col className="w-[28%] bg-[linear-gradient(180deg,rgba(139,92,246,0.07),rgba(139,92,246,0.015))]" />
+            {/* Backenly's column is set apart by a faint lift, not a violet wash: the table stays even-handed (site-wide pass, 2026-11-15). */}
+            <col className="w-[28%] bg-white/[0.025]" />
             <col className="w-[28%]" />
           </colgroup>
           <thead>
@@ -704,9 +757,7 @@ export function ComparisonTable({
                 <th
                   key={i}
                   scope="col"
-                  className={`px-5 py-5 text-[14px] font-semibold tracking-[-0.01em] ${
-                    i === 2 ? 'text-violet-200' : 'text-zinc-300'
-                  }`}
+                  className={`px-5 py-5 text-[14px] font-medium tracking-[-0.01em] ${i === 2 ? 'text-white' : 'text-zinc-300'}`}
                 >
                   {h || <span className="sr-only">Aspect</span>}
                 </th>
@@ -734,15 +785,15 @@ export function ComparisonTable({
             <dt className={`text-[16px] text-white ${HEADING}`}>{row.aspect}</dt>
             <dd className="mt-4 flex flex-col gap-4">
               <div>
-                <p className="text-[13px] font-medium text-zinc-500">{competitor}</p>
+                <p className="text-[13px] font-medium text-zinc-200">{competitor}</p>
                 <p className="mt-1 text-[14px] leading-[1.65] text-zinc-400">{row.competitor}</p>
               </div>
               <div>
-                <p className="text-[13px] font-medium text-violet-300">Backenly</p>
+                <p className="text-[13px] font-medium text-zinc-200">Backenly</p>
                 <p className="mt-1 text-[14px] leading-[1.65] text-zinc-300">{row.backenly}</p>
               </div>
               <div className="border-t border-white/[0.07] pt-4">
-                <p className="text-[13px] font-medium text-zinc-500">In practice</p>
+                <p className="text-[13px] font-medium text-faint">In practice</p>
                 <p className="mt-1 text-[14px] leading-[1.65] text-zinc-400">{row.practical}</p>
               </div>
             </dd>

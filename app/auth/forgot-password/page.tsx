@@ -143,12 +143,12 @@ function ForgotPasswordForm() {
   }
 
   const backToSignIn = (
-    <div className="mt-7 pt-6 border-t border-white/[0.06] text-center">
+    <div className="mt-[28px]">
       <Link
         href="/auth/login"
-        className="text-xs text-zinc-400 hover:text-zinc-200 transition-colors font-medium inline-flex items-center gap-1"
+        className="inline-flex items-center gap-[6px] rounded-[3px] text-[14px] font-medium text-zinc-300 transition-colors hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70"
       >
-        <Icon icon="solar:alt-arrow-down-linear" width={12} className="rotate-90 text-zinc-500" />
+        <Icon icon="solar:alt-arrow-down-linear" width={13} className="rotate-90" />
         Back to sign in
       </Link>
     </div>
@@ -158,7 +158,6 @@ function ForgotPasswordForm() {
     return (
       <AuthChrome>
         <AuthCard
-          eyebrow="Account recovery"
           title="Email can't be sent"
           subtitle="No reset code was sent, so there is nothing to wait for."
         >
@@ -180,7 +179,6 @@ function ForgotPasswordForm() {
     return (
       <AuthChrome>
         <AuthCard
-          eyebrow="Success"
           title="Password updated"
           subtitle="Every device that was signed in has been signed out. Sign in with your new password."
         >
@@ -201,7 +199,6 @@ function ForgotPasswordForm() {
     return (
       <AuthChrome>
         <AuthCard
-          eyebrow="Check your email"
           title="Set a new password"
           subtitle={`If ${email} has a Backenly account, we sent it a ${CODE_LENGTH}-digit code. It expires in 10 minutes.`}
         >
@@ -276,7 +273,6 @@ function ForgotPasswordForm() {
   return (
     <AuthChrome>
       <AuthCard
-        eyebrow="Account recovery"
         title="Reset your password"
         subtitle="Enter your account's email and we'll send you a code to choose a new password."
       >
@@ -301,15 +297,11 @@ function ForgotPasswordForm() {
           </PrimaryButton>
         </form>
 
-        <div className="mt-7 pt-6 border-t border-white/[0.06] text-center">
-          <p className="text-xs text-zinc-400">
+        <div className="mt-[28px]">
+          <p className="text-[14px] text-zinc-400">
             Remember your password?{' '}
-            <Link
-              href="/auth/login"
-              className="text-violet-300 hover:text-violet-200 transition-colors font-medium inline-flex items-center gap-1"
-            >
+            <Link href="/auth/login" className="rounded-[3px] font-medium text-white underline decoration-white/30 underline-offset-4 transition-colors hover:decoration-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70">
               Sign in
-              <Icon icon="solar:arrow-right-up-linear" width={11} />
             </Link>
           </p>
         </div>

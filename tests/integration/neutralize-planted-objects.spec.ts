@@ -44,6 +44,7 @@ import { previewRecovery } from '@/lib/changes/recovery'
 import { planRestoreTo } from '@/lib/changes/range'
 import { closeChangeLockPool } from '@/lib/changes/lock'
 import { directAccessRoleNames } from '@/lib/services/direct-access'
+import { teamsTriggerSql, TEAMS_TRIGGERS } from '@/lib/security/teams-triggers'
 import {
   PLANTED_CHANGE_GROUP,
   actionsFor,
@@ -619,4 +620,70 @@ describe('a function a login gave to the group every login joins', () => {
     expect(tried[1]).toMatch(/permission denied to set role/)
     expect((await q(`SELECT has_function_privilege('public', to_regprocedure($1), 'EXECUTE') AS e`, [persist]))[0].e).toBe(false)
   }, 60_000)
+})
+
+// The teams rules (GHSA-rr6p, lib/services/workspace-rls.ts) put two triggers of
+// Backenly's on a project's teams tables. Production's first report after they
+// were secured (2026-11-14) named exactly those as planted, which --apply would
+// have switched off, and the restore path with it. They are Backenly's when the
+// function has exactly the body teamsTriggerSql installs in that schema, and
+// the trigger is on its own table, running that function.
+describe('the teams rules\' triggers', () => {
+  const T = `workspace_${randomUUID()}`
+  const ownT = `bkn_own_${randomBytes(6).toString('hex')}`
+  const fake = `workspace_${randomUUID()}`
+  const ownF = `bkn_own_${randomBytes(6).toString('hex')}`
+
+  beforeAll(async () => {
+    for (const [schema, owner] of [[T, ownT], [fake, ownF]]) {
+      await q(`CREATE ROLE ${owner} NOLOGIN`)
+      await q(`GRANT ${owner} TO ${PLATFORM}`)
+      await q(`CREATE SCHEMA "${schema}" AUTHORIZATION ${owner}`)
+      await q(`CREATE TABLE ${t(schema, 'organizations')} (id uuid PRIMARY KEY, name text)`)
+      await q(`CREATE TABLE ${t(schema, 'organization_invitations')} (id uuid PRIMARY KEY, token text)`)
+      await q(`CREATE TABLE ${t(schema, 'organization_members')} (id uuid PRIMARY KEY)`)
+      for (const table of ['organizations', 'organization_invitations', 'organization_members']) {
+        await q(`ALTER TABLE ${t(schema, table)} OWNER TO ${owner}`)
+      }
+    }
+    // As Backenly installs them: the platform's role runs teamsTriggerSql in the project's schema.
+    await platform.query(teamsTriggerSql(T, 'organizations'))
+    await platform.query(teamsTriggerSql(T, 'organization_invitations'))
+    // Named like them in another project: one with another body, and Backenly's own on the wrong table.
+    await platform.query(`CREATE FUNCTION "${fake}".${TEAMS_TRIGGERS.organizations}() RETURNS trigger LANGUAGE plpgsql
+                            SET search_path = pg_catalog AS $x$ BEGIN RETURN NEW; END $x$`)
+    await platform.query(`CREATE TRIGGER ${TEAMS_TRIGGERS.organizations} BEFORE INSERT ON ${t(fake, 'organizations')}
+                            FOR EACH ROW EXECUTE FUNCTION "${fake}".${TEAMS_TRIGGERS.organizations}()`)
+    await platform.query(teamsTriggerSql(fake, 'organization_invitations'))
+    await platform.query(`CREATE TRIGGER ${TEAMS_TRIGGERS.organization_invitations} BEFORE INSERT ON ${t(fake, 'organization_members')}
+                            FOR EACH ROW EXECUTE FUNCTION "${fake}".${TEAMS_TRIGGERS.organization_invitations}()`)
+  })
+
+  afterAll(async () => {
+    for (const s of [T, fake]) await q(`DROP SCHEMA IF EXISTS "${s}" CASCADE`).catch(() => {})
+    for (const role of [ownT, ownF]) {
+      await q(`DROP OWNED BY ${role}`).catch(() => {})
+      await q(`DROP ROLE IF EXISTS ${role}`).catch(() => {})
+    }
+  })
+
+  it('are Backenly\'s where the teams rules installed them, and nothing in that schema is reported', async () => {
+    const facts = await readDatabaseFacts(platform)
+    const report = await findPlanted(platform, [T], facts)
+    expect(report.planted).toEqual([])
+    expect(report.callers).toEqual([])
+  })
+
+  it('are still reported when a function only shares the name, or Backenly\'s function is on another table', async () => {
+    const facts = await readDatabaseFacts(platform)
+    const report = await findPlanted(platform, [fake], facts)
+    const found = report.planted.map((p) => `${p.kind} ${p.signature ?? p.objectName}: ${p.why}`).sort()
+    const impostor = `"${fake}".${TEAMS_TRIGGERS.organizations}()`
+    expect(found).toEqual([
+      `function ${impostor}: not a function Backenly installs`,
+      `trigger ${TEAMS_TRIGGERS.organization_invitations}: named like one of Backenly's teams triggers, but on ` +
+        `organization_members running ${fake}.${TEAMS_TRIGGERS.organization_invitations}`,
+      `trigger ${TEAMS_TRIGGERS.organizations}: runs ${impostor}, which the project made`,
+    ])
+  })
 })
