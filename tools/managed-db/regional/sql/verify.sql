@@ -105,6 +105,10 @@ BEGIN
     IF NOT has_database_privilege('backenly_app', current_database(), 'CONNECT, CREATE, TEMPORARY') THEN
       problems := problems || 'backenly_app needs CONNECT, CREATE and TEMPORARY on the database'::text;
     END IF;
+    -- The text of statements PostgREST's roles ran (roles.sql).
+    IF NOT pg_has_role('backenly_app', 'pg_read_all_stats', 'USAGE') THEN
+      problems := problems || 'backenly_app needs the privileges of pg_read_all_stats to read the statements PostgREST runs'::text;
+    END IF;
   END IF;
   FOREACH rname IN ARRAY ARRAY['backenly_backup', 'backenly_authenticator'] LOOP
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = rname) THEN

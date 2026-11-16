@@ -36,7 +36,9 @@
  *   backenly_app           the application credential. NOSUPERUSER NOBYPASSRLS.
  *                          Owns the platform tables and the workspace schemas,
  *                          so Backenly's governed typed actions keep the DDL
- *                          rights they need — but RLS applies to it.
+ *                          rights they need — but RLS applies to it. Holds the
+ *                          privileges of pg_read_all_stats, so its slow-query
+ *                          checks can read the statements PostgREST runs.
  *
  *   backenly_authenticator the PostgREST login role. Unchanged: NOINHERIT, can
  *                          only switch into anon / authenticated / service_role.
@@ -212,6 +214,14 @@ async function main(): Promise<void> {
     await client.query(`GRANT CONNECT, CREATE, TEMPORARY ON DATABASE ${quoteIdent(db)} TO ${ident}`)
     await client.query(`GRANT USAGE, CREATE ON SCHEMA public TO ${ident}`)
     console.log(`  granted CONNECT, CREATE on ${db} and on schema public`)
+
+    // Statement statistics. PostgREST runs every REST request as anon,
+    // authenticated or service_role, and PostgreSQL shows the text of a
+    // statement another role ran only to a role holding the privileges of
+    // pg_read_all_stats; without them the slow-query checks never see a REST
+    // read. The role already reaches every workspace, so this adds no data.
+    await client.query(`GRANT pg_read_all_stats TO ${ident}`)
+    console.log(`  granted pg_read_all_stats (statement statistics of every role)`)
 
     // The seam. Every ownership and grant decision in the privileged SQL reads
     // this, so one setting moves the whole system to the new role.

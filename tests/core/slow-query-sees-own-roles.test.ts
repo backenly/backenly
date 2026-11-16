@@ -9,17 +9,24 @@
  * nothing). The roles are the project's alone, so another project's statements
  * are never attributed to this one.
  *
- * Real roles, real connections, real pg_stat_statements rows.
+ * Real roles, real connections, real pg_stat_statements rows, read as a
+ * NOSUPERUSER role holding pg_read_all_stats, as the procedures leave the
+ * application role: PostgreSQL shows another role's statement text only to a
+ * role with those privileges.
  */
 import { describe, test, expect, beforeAll, afterAll } from '@jest/globals'
+import { randomBytes } from 'crypto'
 import { Client, Pool } from 'pg'
 import { prisma } from '@/lib/db/prisma'
 import { detectSlowQueryMissingIndexes } from '@/lib/autonomy/slow-query-index'
 import { functionRoleName } from '@/lib/services/ai-functions/function-db-role'
 import { directAccessRoleNames } from '@/lib/services/direct-access'
+import { closeAllWorkspacePools } from '@/lib/services/workspace-pool'
 
 const CALLS = 25
 const PASSWORD = 'slow_query_roles_pw'
+const READER = `slowq_app_${randomBytes(4).toString('hex')}`
+const SUPER_URL = process.env.DATABASE_URL!
 
 let userId: string
 let projectId: string
@@ -82,9 +89,25 @@ beforeAll(async () => {
   await runAs(rw, schema, `SELECT * FROM product_views WHERE campaign = $1`)
   // Another project's function, against its own schema's table of the same name.
   await runAs(otherFn, otherSchema, `SELECT * FROM product_views WHERE referrer = $1`)
+
+  // From here the sensor reads as the application role does in production.
+  await pool.query(`CREATE ROLE ${READER} LOGIN NOSUPERUSER NOBYPASSRLS PASSWORD '${PASSWORD}'`)
+  await pool.query(`GRANT pg_read_all_stats TO ${READER}`)
+  roles.push(READER)
+  await closeAllWorkspacePools()
+  process.env.DATABASE_URL = readerUrl()
 }, 180_000)
 
+function readerUrl(): string {
+  const u = new URL(SUPER_URL)
+  u.username = READER
+  u.password = PASSWORD
+  return u.toString()
+}
+
 afterAll(async () => {
+  await closeAllWorkspacePools()
+  process.env.DATABASE_URL = SUPER_URL
   for (const s of [schema, otherSchema]) if (s) await pool?.query(`DROP SCHEMA IF EXISTS "${s}" CASCADE`).catch(() => {})
   for (const r of roles) {
     await pool?.query(`DROP OWNED BY "${r}"`).catch(() => {})
