@@ -19,6 +19,14 @@
  * same table with duration 0) is excluded from every query via `RUNTIME_ONLY`,
  * because monitoring is about the *end-user's* backend runtime — not our own
  * internal AI calls. Runtime resource paths never start with `/api/`.
+ *
+ * An error is a 5xx: the backend failed. A 4xx is the backend answering a
+ * client it refused or could not serve (a wrong key, a bad request, a row that
+ * is not there) and is counted on its own, never against a rate. Wrong-key
+ * requests are recorded as the project's traffic on purpose
+ * (lib/traffic/request-recorder.ts), so a stranger's burst of them must not read
+ * as the backend failing. Google's SRE Workbook: "5XX responses count against
+ * SLO, while all other requests are considered successful."
  */
 
 import { prisma } from '@/lib/db/postgres'
@@ -57,18 +65,22 @@ export interface MetricStats {
  */
 export interface RuntimeWindowStats {
   count: number            // total runtime requests in window
-  errorCount: number       // status >= 400 (client + server errors)
+  errorCount: number       // status >= 500: requests the backend failed (the same as serverErrorCount)
   serverErrorCount: number // status >= 500 (backend failures only)
+  clientErrorCount: number // status 400-499: refused, invalid or not found; not failures
   avgDuration: number      // mean latency, ms
   minDuration: number
   maxDuration: number
   p50: number
   p95: number
   p99: number
-  errorRatePct: number     // errorCount / count * 100
+  errorRatePct: number     // errorCount / count * 100: 5xx only
   /** % of requests the backend served without a 5xx. 100 when there is no traffic. */
   reliabilityPct: number
-  /** % of requests that fully succeeded (< 400). 100 when there is no traffic. */
+  /**
+   * The same as reliabilityPct. It counted a 4xx as unsuccessful; kept for
+   * readers of the field (the MCP metrics read returns these stats whole).
+   */
   stabilityPct: number
 }
 
@@ -134,7 +146,7 @@ export async function getRuntimeWindowStats(
 ): Promise<RuntimeWindowStats> {
   const rows = await prisma.$queryRaw<Array<{
     count: number
-    error_count: number
+    client_error_count: number
     server_error_count: number
     avg_duration: number
     min_duration: number
@@ -145,7 +157,7 @@ export async function getRuntimeWindowStats(
   }>>(Prisma.sql`
     SELECT
       COUNT(*)::int                                                                      AS count,
-      COUNT(*) FILTER (WHERE "statusCode" >= 400)::int                                    AS error_count,
+      COUNT(*) FILTER (WHERE "statusCode" >= 400 AND "statusCode" < 500)::int             AS client_error_count,
       COUNT(*) FILTER (WHERE "statusCode" >= 500)::int                                    AS server_error_count,
       COALESCE(AVG("duration"), 0)::float                                                 AS avg_duration,
       COALESCE(MIN("duration"), 0)::float                                                 AS min_duration,
@@ -162,24 +174,26 @@ export async function getRuntimeWindowStats(
 
   const r = rows[0]
   const count = Number(r?.count ?? 0)
-  const errorCount = Number(r?.error_count ?? 0)
   const serverErrorCount = Number(r?.server_error_count ?? 0)
+  const clientErrorCount = Number(r?.client_error_count ?? 0)
+  const reliabilityPct = count > 0 ? ((count - serverErrorCount) / count) * 100 : 100
 
   return {
     count,
-    errorCount,
+    errorCount: serverErrorCount,
     serverErrorCount,
+    clientErrorCount,
     avgDuration: Number(r?.avg_duration ?? 0),
     minDuration: Number(r?.min_duration ?? 0),
     maxDuration: Number(r?.max_duration ?? 0),
     p50: Number(r?.p50 ?? 0),
     p95: Number(r?.p95 ?? 0),
     p99: Number(r?.p99 ?? 0),
-    errorRatePct: count > 0 ? (errorCount / count) * 100 : 0,
+    errorRatePct: count > 0 ? (serverErrorCount / count) * 100 : 0,
     // No traffic ⇒ nothing has failed. Report a calm 100% rather than a
     // misleading 0% (the old bug that made brand-new projects look broken).
-    reliabilityPct: count > 0 ? ((count - serverErrorCount) / count) * 100 : 100,
-    stabilityPct: count > 0 ? ((count - errorCount) / count) * 100 : 100,
+    reliabilityPct,
+    stabilityPct: reliabilityPct,
   }
 }
 
@@ -209,7 +223,7 @@ export async function recordMetric(data: MetricData): Promise<void> {
  *
  *   responseTime → latency distribution (avg/min/max/p50/p95/p99), count = requests
  *   requestVolume → avg = total requests in window, count = total requests
- *   errorRate     → avg = error-rate %, count = number of error requests
+ *   errorRate     → avg = error-rate % (5xx), count = number of 5xx requests
  *   uptime        → avg = reliability %, count = total requests
  */
 function projectStats(type: MetricType, w: RuntimeWindowStats): MetricStats {
@@ -279,7 +293,7 @@ export async function getMetricStatsBetween(
  * Bucketed time series for charts, derived from runtime traffic.
  *   responseTime → avg latency per bucket
  *   requestVolume → request count per bucket
- *   errorRate     → error count per bucket
+ *   errorRate     → 5xx count per bucket
  *   uptime        → reliability % per bucket
  */
 export async function getMetrics(
@@ -298,14 +312,12 @@ export async function getMetrics(
     bucket: number
     count: number
     avg_duration: number
-    error_count: number
     server_error_count: number
   }>>(Prisma.sql`
     SELECT
       (floor(extract(epoch FROM "timestamp") / ${bucketSec}) * ${bucketSec})::bigint       AS bucket,
       COUNT(*)::int                                                                         AS count,
       COALESCE(AVG("duration"), 0)::float                                                    AS avg_duration,
-      COUNT(*) FILTER (WHERE "statusCode" >= 400)::int                                       AS error_count,
       COUNT(*) FILTER (WHERE "statusCode" >= 500)::int                                       AS server_error_count
     FROM "api_request_logs"
     WHERE "projectId" = ${projectId}
@@ -322,7 +334,7 @@ export async function getMetrics(
     switch (type) {
       case 'responseTime':  value = Math.round(Number(r.avg_duration)); break
       case 'requestVolume': value = count; break
-      case 'errorRate':     value = Number(r.error_count); break
+      case 'errorRate':     value = serverErrors; break
       case 'uptime':        value = count > 0 ? Number((((count - serverErrors) / count) * 100).toFixed(1)) : 100; break
     }
     return { timestamp: Number(r.bucket) * 1000, value }
@@ -345,7 +357,10 @@ export async function getPerformanceBreakdown(
   id: string
   requests: number
   avgResponseTime: number
+  /** Percent answered with a 5xx. */
   errorRate: number
+  /** Percent answered with a 4xx: refused, invalid or not found. Not failures. */
+  clientErrorRate: number
   p95: number
   p99: number
 }>> {
@@ -358,7 +373,8 @@ export async function getPerformanceBreakdown(
   const rows = await prisma.$queryRaw<Array<{
     endpoint: string
     requests: number
-    error_count: number
+    server_error_count: number
+    client_error_count: number
     avg_duration: number
     p95: number
     p99: number
@@ -369,7 +385,8 @@ export async function getPerformanceBreakdown(
         '/[0-9]+', '/:id', 'g'
       )                                                                              AS endpoint,
       COUNT(*)::int                                                                  AS requests,
-      COUNT(*) FILTER (WHERE "statusCode" >= 400)::int                               AS error_count,
+      COUNT(*) FILTER (WHERE "statusCode" >= 500)::int                               AS server_error_count,
+      COUNT(*) FILTER (WHERE "statusCode" >= 400 AND "statusCode" < 500)::int        AS client_error_count,
       COALESCE(AVG("duration"), 0)::float                                            AS avg_duration,
       COALESCE(percentile_cont(0.95) WITHIN GROUP (ORDER BY "duration"), 0)::float    AS p95,
       COALESCE(percentile_cont(0.99) WITHIN GROUP (ORDER BY "duration"), 0)::float    AS p99
@@ -381,14 +398,15 @@ export async function getPerformanceBreakdown(
     ORDER BY requests DESC
   `)
 
+  const pct = (n: number, of: number) => (of > 0 ? Number(((n / of) * 100).toFixed(2)) : 0)
   return rows.map((r) => {
     const requests = Number(r.requests)
-    const errorCount = Number(r.error_count)
     return {
       id: r.endpoint,
       requests,
       avgResponseTime: Math.round(Number(r.avg_duration)),
-      errorRate: requests > 0 ? Number(((errorCount / requests) * 100).toFixed(2)) : 0,
+      errorRate: pct(Number(r.server_error_count), requests),
+      clientErrorRate: pct(Number(r.client_error_count), requests),
       p95: Math.round(Number(r.p95)),
       p99: Math.round(Number(r.p99)),
     }

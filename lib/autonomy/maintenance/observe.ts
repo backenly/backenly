@@ -21,9 +21,13 @@
  *
  * ── Two signals, both of which a switch can plausibly break ─────────────────
  *
- *   errors   `ApiRequestLog.statusCode >= 400`, and `AiFunctionLog.success`
- *            false. A function reading a column that is not what it expects
- *            fails here first.
+ *   errors   requests a switch can break (`countsAgainstSwitch`: a 5xx, or a
+ *            400, 403, 404, 409 or 422), and `AiFunctionLog.success` false. A
+ *            function reading a column that is not what it expects fails here
+ *            first. A refused credential (401) and a rate limit (429) are the
+ *            caller's: wrong-key requests are recorded as the project's traffic
+ *            on purpose (lib/traffic/request-recorder.ts), and a burst of them
+ *            from strangers after a switch is not the switch.
  *   latency  p95 of `ApiRequestLog.duration`. A switch that moved reads onto an
  *            unindexed column shows up here and nowhere else.
  *
@@ -44,6 +48,19 @@ export const LATENCY_TOLERANCE = 0.25
 export const MIN_SAMPLE = 20
 
 export type ObservationOutcome = 'improved' | 'neutral' | 'regressed' | 'insufficient_sample'
+
+/**
+ * The client errors a reader switch can cause: a request the new reader cannot
+ * parse (400), a row or table it can no longer see (403, 404), a write it now
+ * conflicts with (409) or refuses (422). Not 401 (the credential sent was
+ * refused) or 429 (the caller sent too many): those say nothing about the switch.
+ */
+const SWITCH_CAUSED_CLIENT_ERRORS: ReadonlySet<number> = new Set([400, 403, 404, 409, 422])
+
+/** Whether a response counts as an error when judging a switch. */
+export function countsAgainstSwitch(statusCode: number): boolean {
+  return statusCode >= 500 || SWITCH_CAUSED_CLIENT_ERRORS.has(statusCode)
+}
 
 export interface TrafficWindow {
   requests: number
@@ -94,7 +111,7 @@ export async function measureWindow(
     })
     .catch(() => [] as Array<{ success: boolean }>)
 
-  const errors = requests.filter(r => r.statusCode >= 400).length
+  const errors = requests.filter(r => countsAgainstSwitch(r.statusCode)).length
   return {
     requests: requests.length,
     errors,
