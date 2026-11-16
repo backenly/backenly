@@ -22,6 +22,7 @@
 import { AiError, generate, type AiErrorKind, type AiPurpose } from './llm'
 import { createTokenScope, runInTokenScope } from './token-meter'
 import { enforceAiCredits } from '@/lib/entitlements/policy'
+import { planNamesOf } from '@/lib/entitlements/plan-names'
 import { closeCreditTurn } from '@/lib/entitlements/credit-holds'
 import { creditAccountOf } from '@/lib/usage/account'
 
@@ -90,7 +91,7 @@ export async function generateForProject(input: {
       code: 'AI_CREDITS_EXHAUSTED',
       message: credits.message,
       status: 402,
-      details: { currentPlan: credits.currentPlan, requiredPlan: credits.requiredPlan },
+      details: { currentPlan: credits.currentPlan, requiredPlan: credits.requiredPlan, ...planNamesOf(credits) },
     }
   }
 

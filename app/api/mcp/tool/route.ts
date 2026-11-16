@@ -194,6 +194,7 @@ async function handleCall(request: NextRequest, auth: McpGuardAuth, startedAt: n
   // tool missing from the set is still never free.
   if (MODEL_BACKED_TOOLS.has(effectiveTool)) {
     const { enforceAiCredits } = await import('@/lib/entitlements/policy')
+    const { planNamesOf } = await import('@/lib/entitlements/plan-names')
     const { creditAccountOf } = await import('@/lib/usage/account')
     // The project's billing account's credits, not the caller's own. An
     // account that cannot be read is not blocked: the gate is fail-open.
@@ -211,6 +212,8 @@ async function handleCall(request: NextRequest, auth: McpGuardAuth, startedAt: n
           code: 'AI_CREDITS_EXHAUSTED',
           currentPlan: credits.currentPlan,
           requiredPlan: credits.requiredPlan,
+          // The plans as they are sold ("Free", "Pro"), for the agent to say to its human.
+          ...planNamesOf(credits),
           upgradeRequired: true,
           remedy:
             `\`${callLabel}\` uses Backenly's model budget and this month's credits are spent. ` +

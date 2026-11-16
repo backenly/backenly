@@ -138,7 +138,7 @@ describe('the account description', () => {
 
     const d = await describeAccountUsage(userId)
 
-    expect(d.planName).toBe('BUILDER')
+    expect(d).toMatchObject({ planName: 'Pro', planCode: 'BUILDER' })
     expect(d.overage).toMatchObject({ mode: 'enforce', spendLimitCents: 1_000, active: true })
     const files = d.axes.find((a: any) => a.axis === 'file_bytes')
     expect(files).toMatchObject({ unit: 'bytes', used: 2 * GiB, included: GiB })
@@ -199,5 +199,33 @@ describe('the two readers', () => {
     const brain: string[] = BRAIN_TOOLS.map((t: any) => t.name ?? t.function?.name).filter(Boolean)
     expect(mcp.filter((n) => writes.test(n))).toEqual([])
     expect(brain.filter((n) => writes.test(n))).toEqual([])
+  })
+})
+
+describe('the plan, by name', () => {
+  // Production QA re-test (2026-11-16, #111): the agent's usage answer said
+  // "SANDBOX" where Billing and Pricing say "Free". The name is what is read;
+  // the code stays beside it for decisions such as overage.
+  it("names a Free account's plan as it is sold, to a person and to an agent", async () => {
+    const { userId, projectId } = await account()
+    ent = pro({ planName: 'SANDBOX' })
+    currentUserId = userId
+
+    const d = await describeAccountUsage(userId)
+    expect(d).toMatchObject({ planName: 'Free', planCode: 'SANDBOX' })
+
+    const res = await accountUsageRoute({ nextUrl: new URL('http://x/api/usage/account') }, {})
+    expect(await res.json()).toMatchObject({ planName: 'Free', planCode: 'SANDBOX' })
+
+    const result = await executeAction({ action: 'GET_USAGE', params: {} }, projectId)
+    expect(result.data).toMatchObject({ planName: 'Free', planCode: 'SANDBOX' })
+    expect(result.message).toMatch(/^Usage for \d{4}-\d{2} on the Free plan/)
+  })
+
+  it('names a self-hosted install\'s plan in words too', async () => {
+    const { userId } = await account()
+    ent = { ...selfHostedEntitlements() }
+    const d = await describeAccountUsage(userId)
+    expect(d).toMatchObject({ planName: 'Self-hosted', planCode: 'SELF_HOSTED' })
   })
 })
